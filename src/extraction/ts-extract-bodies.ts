@@ -61,7 +61,7 @@ import {
  * carries type annotations — skips silently when either is absent.
  */
 function captureBodyTypeAnnotations(ext: TreeSitterExtractor, node: SyntaxNode): void {
-  const enclosingId = ext.nodeStack[ext.nodeStack.length - 1];
+  const enclosingId = ext.nodeStack.at(-1);
   if (!enclosingId) return;
 
   if (node.type === 'variable_declarator') {
@@ -143,7 +143,7 @@ function captureBodyCallsAndRefs(ext: TreeSitterExtractor, node: SyntaxNode): vo
   if (!lang.extractBareCall) return;
   const calleeName = lang.extractBareCall(node, ext.source);
   if (!calleeName || ext.nodeStack.length === 0) return;
-  const callerId = ext.nodeStack[ext.nodeStack.length - 1];
+  const callerId = ext.nodeStack.at(-1);
   if (!callerId) return;
   ext.unresolvedReferences.push({
     fromNodeId: callerId,
@@ -383,7 +383,7 @@ function captureBodyFieldAccess(ext: TreeSitterExtractor, node: SyntaxNode): voi
   const name = getNodeText(prop, ext.source);
   if (!name) return;
 
-  const enclosingId = ext.nodeStack[ext.nodeStack.length - 1];
+  const enclosingId = ext.nodeStack.at(-1);
   if (!enclosingId) return;
 
   ext.unresolvedReferences.push({
@@ -645,7 +645,7 @@ function captureBodyConstantReads(ext: TreeSitterExtractor, node: SyntaxNode): v
   if (!parent) return;
   if (isNonReadConstantPosition({ node, parent, isGo })) return;
 
-  const enclosingId = ext.nodeStack[ext.nodeStack.length - 1];
+  const enclosingId = ext.nodeStack.at(-1);
   if (!enclosingId) return;
   ext.unresolvedReferences.push({
     fromNodeId: enclosingId,
@@ -758,7 +758,7 @@ const JSX_USE_ELEMENT_TYPES: ReadonlySet<string> = new Set(['jsx_opening_element
 function captureBodyJsxReferences(ext: TreeSitterExtractor, node: SyntaxNode): void {
   if (!isJsFamily(ext.language)) return;
   if (!JSX_USE_ELEMENT_TYPES.has(node.type)) return;
-  const enclosingId = ext.nodeStack[ext.nodeStack.length - 1];
+  const enclosingId = ext.nodeStack.at(-1);
   if (!enclosingId) return;
   const nameNode = getChildByField(node, 'name') ?? node.namedChild(0);
   if (!nameNode) return;

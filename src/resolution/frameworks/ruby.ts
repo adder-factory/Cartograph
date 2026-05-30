@@ -14,7 +14,7 @@ export const railsResolver: FrameworkResolver = {
   detect(context: ResolutionContext): boolean {
     // Check for Gemfile with rails
     const gemfile = context.readFile('Gemfile');
-    if (gemfile && gemfile.includes("'rails'")) {
+    if (gemfile?.includes("'rails'")) {
       return true;
     }
 

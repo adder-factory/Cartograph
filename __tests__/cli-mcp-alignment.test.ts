@@ -252,7 +252,7 @@ describe('CLI ↔ MCP surface alignment', () => {
       if (id.includes(':')) {
         const [family, sub] = id.split(':');
         const fam = familyEnums.get(family!);
-        if (fam && fam.values.map(cliToMcpName).includes(sub!)) continue;
+        if (fam?.values.map(cliToMcpName).includes(sub!)) continue;
       }
       orphanedCli.push(id);
     }

@@ -80,7 +80,7 @@ export const MIGRATION: MigrationModule = {
     const row = db
       .prepare(`SELECT name, sql FROM sqlite_master WHERE type='table' AND name='role_assignments'`)
       .get() as ObjectRow | undefined;
-    if (!row || !row.sql) return;
+    if (!row?.sql) return;
 
     // Always run the orphan reap — cheap DELETE, independent of FK
     // shape. CASCADE only sweeps orphans created by parent-DELETEs

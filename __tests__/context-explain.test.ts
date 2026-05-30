@@ -69,7 +69,7 @@ describe('context explain mode — score trace', () => {
     // final score equals the score after its last recorded pass.
     for (const c of trace.candidates) {
       if (c.passes.length === 0) continue; // import-resolution swap-in
-      expect(c.finalScore).toBe(c.passes[c.passes.length - 1]!.score);
+      expect(c.finalScore).toBe(c.passes.at(-1)!.score);
     }
   });
 

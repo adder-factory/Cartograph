@@ -279,7 +279,7 @@ function readStringLiteralValue(node: SyntaxNode, source: string): string | null
   const raw = source.substring(node.startIndex, node.endIndex);
   if (raw.length < 2) return null;
   const first = raw.charAt(0);
-  const last = raw.charAt(raw.length - 1);
+  const last = raw.at(-1);
   if ((first === '"' && last === '"') || (first === "'" && last === "'") || (first === '`' && last === '`')) {
     return raw.substring(1, raw.length - 1);
   }
@@ -545,7 +545,7 @@ function recordPrecedingSiblingDecorators(args: DecoratorRecordArgs, declNode: S
  */
 export function tsExtractCall(ext: TreeSitterExtractor, node: SyntaxNode): void {
   if (ext.nodeStack.length === 0) return;
-  const callerId = ext.nodeStack[ext.nodeStack.length - 1];
+  const callerId = ext.nodeStack.at(-1);
   if (!callerId) return;
 
   const calleeName = tsResolveCalleeName(ext, node);
@@ -804,7 +804,7 @@ function tsTryEmitDynamicImport(ext: TreeSitterExtractor, node: SyntaxNode, call
 
   // callerId is the top of the scope stack — same value the caller computed,
   // re-read here so this function stays at ≤3 declared parameters.
-  const callerId = ext.nodeStack[ext.nodeStack.length - 1];
+  const callerId = ext.nodeStack.at(-1);
   if (!callerId) return;
 
   ext.createNode({
@@ -840,7 +840,7 @@ function tsTryEmitDynamicImport(ext: TreeSitterExtractor, node: SyntaxNode, call
  */
 export function tsExtractInstantiation(ext: TreeSitterExtractor, node: SyntaxNode): void {
   if (ext.nodeStack.length === 0) return;
-  const fromId = ext.nodeStack[ext.nodeStack.length - 1];
+  const fromId = ext.nodeStack.at(-1);
   if (!fromId) return;
 
   const ctor =

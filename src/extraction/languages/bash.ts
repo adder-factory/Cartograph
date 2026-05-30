@@ -178,7 +178,7 @@ function readBashLiteralString(stringNode: SyntaxNode, source: string): string |
 function unquoteBashLiteral(text: string): string {
   if (text.length < 2) return text;
   const first = text[0];
-  const last = text[text.length - 1];
+  const last = text.at(-1);
   if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
     return text.slice(1, -1);
   }

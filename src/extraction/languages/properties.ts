@@ -159,7 +159,7 @@ function propertiesExtract(filePath: string, source: string): ExtractionResult {
     startLine: 1,
     endLine: Math.max(1, lines.length),
     startColumn: 0,
-    endColumn: lines[lines.length - 1]?.length ?? 0,
+    endColumn: lines.at(-1)?.length ?? 0,
     updatedAt: now,
   });
 

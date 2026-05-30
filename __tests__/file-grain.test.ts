@@ -770,7 +770,7 @@ describe('file-grain.embedFilesAggregated', () => {
     // At least one progress call should have been made
     expect(progressCalls.length).toBeGreaterThan(0);
     // Final progress call should have done === total
-    const last = progressCalls[progressCalls.length - 1]!;
+    const last = progressCalls.at(-1)!;
     expect(last.done).toBe(last.total);
   });
 

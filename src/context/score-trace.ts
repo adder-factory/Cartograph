@@ -92,7 +92,7 @@ export class ScoreTrace {
         kind: row.node.kind,
         filePath: row.node.filePath,
         line: row.node.startLine,
-        finalScore: passes.length > 0 ? passes[passes.length - 1]!.score : 0,
+        finalScore: passes.length > 0 ? passes.at(-1)!.score : 0,
         survived: survivorIds.has(id),
         passes,
       });

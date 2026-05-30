@@ -146,7 +146,7 @@ export function extractDeclaration(diffLine: string): { name: string; sign: '+' 
   if (diffLine.startsWith('+++') || diffLine.startsWith('---')) return null;
   for (const re of DECL_PATTERNS) {
     const m = re.exec(diffLine);
-    if (m && m[1] && !SKIP_NAMES.has(m[1])) {
+    if (m?.[1] && !SKIP_NAMES.has(m[1])) {
       return { name: m[1], sign: diffLine[0] as '+' | '-' };
     }
   }
@@ -170,7 +170,7 @@ function extractContextDeclaration(diffLine: string): string | null {
     // again with that prefix swapped.
     const swapped = '+' + diffLine.slice(1);
     const m = re.exec(swapped);
-    if (m && m[1] && !SKIP_NAMES.has(m[1])) return m[1];
+    if (m?.[1] && !SKIP_NAMES.has(m[1])) return m[1];
   }
   return null;
 }
@@ -187,7 +187,7 @@ function extractContextDeclaration(diffLine: string): string | null {
  *  chain doesn't sit 4-deep under the for-of. */
 function recordHunkContextSymbol(line: string, sets: FileDiffSets): void {
   const m = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@\s*(.*)$/);
-  if (!m || !m[1]) return;
+  if (!m?.[1]) return;
   const sym = extractSymbolFromContext(m[1]);
   if (sym) sets.modCtx.add(sym);
 }

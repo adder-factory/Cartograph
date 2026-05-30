@@ -69,7 +69,7 @@ export const MIGRATION: MigrationModule = {
     const row = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'nodes'`).get() as
       | { sql: string | null }
       | undefined;
-    if (!row || !row.sql) return;
+    if (!row?.sql) return;
 
     const originalSql = row.sql;
 

@@ -469,7 +469,7 @@ function isPreservedByNonStructural(ctx: PhaseCtx, symId: string): boolean {
 function isStructuralCacheHit(ctx: PhaseCtx, symId: string, hash: string): boolean {
   const { queries, tally, total, onProgress } = ctx;
   const existing = getSymbolSummary(queries, symId);
-  if (existing && existing.model.startsWith('structural:') && existing.contentHash === hash) {
+  if (existing?.model.startsWith('structural:') && existing.contentHash === hash) {
     tally.skipped++;
     tally.done++;
     onProgress?.(tally.done, total);

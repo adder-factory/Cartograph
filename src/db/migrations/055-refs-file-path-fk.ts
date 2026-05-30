@@ -71,7 +71,7 @@ export const MIGRATION: MigrationModule = {
       const row = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type='table' AND name=?`).get(tableName) as
         | ObjectRow
         | undefined;
-      if (!row || !row.sql) continue;
+      if (!row?.sql) continue;
       // Skip if FK is already declared in the stored CREATE statement
       // (fresh DBs whose schema.sql already has it replay as a no-op).
       if (/FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(row.sql)) continue;

@@ -84,7 +84,7 @@ describe('renderSlowFilesSummary (B13)', () => {
   it('footer points the user at `.cartograph/config.json` "exclude"', () => {
     const { log, lines } = collect();
     renderSlowFilesSummary([{ filePath: 'huge.ts', startMs: 0, status: 'done', elapsedMs: 35_000 }], log);
-    const footer = lines[lines.length - 1]!;
+    const footer = lines.at(-1)!;
     expect(footer).toContain('config.json');
     expect(footer).toContain('exclude');
   });

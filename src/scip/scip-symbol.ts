@@ -254,5 +254,5 @@ export function descriptorsToQualifiedName(descriptors: readonly Descriptor[]): 
   }
   const tail = descriptors.slice(start);
   if (tail.length > 0) return tail.map((d) => d.name).join('::');
-  return descriptors.length > 0 ? descriptors[descriptors.length - 1]!.name : '';
+  return descriptors.length > 0 ? descriptors.at(-1)!.name : '';
 }

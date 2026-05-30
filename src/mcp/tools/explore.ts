@@ -491,7 +491,7 @@ function appendRelationshipMap(
     if (seenRelKeys.has(key)) continue;
     seenRelKeys.add(key);
     allKeys.push(key);
-    const isNew = !priorKeys || !priorKeys.has(key);
+    const isNew = !priorKeys?.has(key);
     const group = byKind.get(edge.kind) ?? [];
     group.push({ source: sourceNode.name, target: targetNode.name, key, isNew });
     byKind.set(edge.kind, group);
@@ -652,7 +652,7 @@ function collectRangeRefs(args: CollectRangeRefsArgs): RangeRef[] {
       // synthetic node), skip this edge rather than printing the EdgeKind
       // value as if it were a symbol name (FRICTION-9).
       const targetNode = subgraph.nodes.get(edge.target) ?? cg.queries.getNodeById(edge.target);
-      if (!targetNode || !targetNode.name) continue;
+      if (!targetNode?.name) continue;
       ranges.push({ start: edge.line, end: edge.line, name: targetNode.name, kind: edge.kind });
     }
   }

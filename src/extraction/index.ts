@@ -496,7 +496,7 @@ function parseOctalEscape(body: string, i: number): [number, number] {
  * a path contains spaces, control chars, or non-ASCII bytes.
  */
 function unquoteGitPath(raw: string): string {
-  if (raw.length < 2 || raw[0] !== '"' || raw[raw.length - 1] !== '"') {
+  if (raw.length < 2 || raw[0] !== '"' || raw.at(-1) !== '"') {
     return raw;
   }
   const body = raw.slice(1, -1);

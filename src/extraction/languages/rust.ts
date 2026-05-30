@@ -56,7 +56,7 @@ const rustExtractor: LanguageExtractor = {
         const typeIdents = children.filter((c: SyntaxNode) => c.type === 'type_identifier');
         if (typeIdents.length > 0) {
           // Last type_identifier is always the implementing type
-          const typeNode = typeIdents[typeIdents.length - 1]!;
+          const typeNode = typeIdents.at(-1)!;
           return source.substring(typeNode.startIndex, typeNode.endIndex);
         }
         // Handle generic types: impl<T> MyStruct<T> { ... }

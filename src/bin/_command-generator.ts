@@ -615,8 +615,8 @@ interface ActionHandlerSpec {
  */
 function buildActionHandler(handler: ActionHandlerSpec): (...actionArgs: unknown[]) => Promise<void> {
   return async (...actionArgs: unknown[]) => {
-    const options = (actionArgs[actionArgs.length - 2] ?? {}) as Record<string, unknown>;
-    const command = actionArgs[actionArgs.length - 1] as Command;
+    const options = (actionArgs.at(-2) ?? {}) as Record<string, unknown>;
+    const command = actionArgs.at(-1) as Command;
     const projectPath = readProjectPath(handler, options);
     const raw = collectForwardedRawArgs(handler, options, command);
     const parsed = handler.coercionSchema.safeParse(raw);

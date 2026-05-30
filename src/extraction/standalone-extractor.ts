@@ -74,7 +74,7 @@ export abstract class StandaloneExtractor {
       startLine: 1,
       endLine: lines.length,
       startColumn: 0,
-      endColumn: lines[lines.length - 1]?.length ?? 0,
+      endColumn: lines.at(-1)?.length ?? 0,
       updatedAt: Date.now(),
     };
     this.nodes.push(fileNode);

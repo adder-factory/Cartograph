@@ -89,7 +89,7 @@ export class DfmExtractor extends StandaloneExtractor {
         updatedAt: Date.now(),
       }),
     );
-    this.edges.push({ source: stack[stack.length - 1]!, target: nodeId, kind: 'contains' });
+    this.edges.push({ source: stack.at(-1)!, target: nodeId, kind: 'contains' });
     stack.push(nodeId);
   }
 
@@ -97,7 +97,7 @@ export class DfmExtractor extends StandaloneExtractor {
   private emitEventHandler(eventMatch: RegExpMatchArray, lineNum: number, stack: string[]): void {
     const [, , methodName] = eventMatch;
     this.unresolvedReferences.push({
-      fromNodeId: stack[stack.length - 1]!,
+      fromNodeId: stack.at(-1)!,
       referenceName: methodName!,
       referenceKind: 'references',
       line: lineNum,

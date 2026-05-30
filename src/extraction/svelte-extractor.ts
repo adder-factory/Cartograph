@@ -194,7 +194,7 @@ export class SvelteExtractor {
       startLine: 1,
       endLine: lines.length,
       startColumn: 0,
-      endColumn: lines[lines.length - 1]?.length || 0,
+      endColumn: lines.at(-1)?.length || 0,
       isExported: true, // Svelte components are always importable
       updatedAt: Date.now(),
     };

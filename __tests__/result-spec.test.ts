@@ -1144,7 +1144,7 @@ describe('migrated-tool wording alignment (#32)', () => {
     });
     expect(spec.title).toBe('Added (25)');
     expect(spec.rows).toHaveLength(21);
-    const lastRow = spec.rows[spec.rows.length - 1]!;
+    const lastRow = spec.rows.at(-1)!;
     expect(lastRow).toMatch(/^- _… \+5 more not shown/);
     expect(lastRow).toMatch(/Pass a more recent `since`/);
   });

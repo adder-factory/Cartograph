@@ -323,7 +323,7 @@ describe('Schema v2 Migration', () => {
     // filenames (see src/db/migrations/index.ts) — no separate
     // hand-maintained constant to keep in sync with new migrations.
     const { CURRENT_SCHEMA_VERSION, ALL_MIGRATIONS } = await import('../src/db/migrations.js');
-    const expected = ALL_MIGRATIONS[ALL_MIGRATIONS.length - 1]!.version;
+    const expected = ALL_MIGRATIONS.at(-1)!.version;
     expect(CURRENT_SCHEMA_VERSION).toBe(expected);
     expect(CURRENT_SCHEMA_VERSION).toBeGreaterThanOrEqual(50);
   });

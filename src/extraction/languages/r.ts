@@ -257,7 +257,7 @@ function unquoteStringNode(node: SyntaxNode, source: string): string {
   // Fallback: strip surrounding `"..."` or `'...'`.
   if (text.length >= 2) {
     const first = text[0];
-    const last = text[text.length - 1];
+    const last = text.at(-1);
     if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
       return text.slice(1, -1);
     }

@@ -21,7 +21,7 @@ import { ALL_MIGRATIONS } from './migrations/index.js';
  * (last entry by version) so adding a migration requires no
  * hand-maintained constant.
  */
-export const CURRENT_SCHEMA_VERSION: number = ALL_MIGRATIONS[ALL_MIGRATIONS.length - 1]!.version;
+export const CURRENT_SCHEMA_VERSION: number = ALL_MIGRATIONS.at(-1)!.version;
 
 /**
  * Get the current schema version from the database

@@ -324,7 +324,7 @@ export function appendCallIdFooter(rendered: string, newCallId: string, delta?: 
       `> ⚠ Delta requested vs \`${delta.sinceUid}\` but that call id is no longer cached ` +
         `(MCP server restart or eviction). Returning full results below.`,
     );
-  } else if (delta && delta.sinceUid) {
+  } else if (delta?.sinceUid) {
     const noun = delta.newCount === 1 ? 'new row' : 'new rows';
     parts.push(`> **Delta vs \`${delta.sinceUid}\`** — ${delta.newCount} ${noun} of ${delta.totalBefore} total.`);
   }

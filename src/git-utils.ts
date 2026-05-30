@@ -604,7 +604,7 @@ export function getFileFollowEarliestTs(rootDir: string, relPath: string): strin
       .split('\n')
       .map((l) => l.trim())
       .filter(Boolean);
-    return lines[lines.length - 1] ?? null;
+    return lines.at(-1) ?? null;
   } catch {
     return null;
   }

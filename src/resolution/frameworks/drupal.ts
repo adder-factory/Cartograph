@@ -89,7 +89,7 @@ function lastFqcnSegment(fqcn: string): string | null {
   const clean = fqcn.replace(/^\\+/, '').trim();
   if (!clean.includes('\\')) return null;
   const parts = clean.split('\\');
-  return parts[parts.length - 1] ?? null;
+  return parts.at(-1) ?? null;
 }
 
 interface YamlNode {
@@ -106,7 +106,7 @@ function readYamlScalar(node: YamlNode): string {
   const raw = node.text;
   if (raw.length >= 2) {
     const first = raw.charAt(0);
-    const last = raw.charAt(raw.length - 1);
+    const last = raw.at(-1);
     if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
       return raw.substring(1, raw.length - 1);
     }
@@ -554,7 +554,7 @@ function readTaggedArg(node: YamlNode): string | null {
     ? node
     : (node.namedChildren.find((c) => c.type === 'flow_node') ?? node);
   const tagChild = host.namedChildren.find((c) => c.type === 'tag');
-  if (!tagChild || !tagChild.text.startsWith('!tagged')) return null;
+  if (!tagChild?.text.startsWith('!tagged')) return null;
   const rest = host.namedChildren.find((c) => c.type !== 'tag');
   if (!rest) return null;
   // Verbose form carries a `tag:` key; scalar form is the tag name itself.

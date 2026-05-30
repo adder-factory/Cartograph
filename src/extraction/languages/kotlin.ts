@@ -67,7 +67,7 @@ const kotlinExtractor: LanguageExtractor = {
       const isInClass =
         ctx.nodeStack.length > 0 &&
         (() => {
-          const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
+          const parentId = ctx.nodeStack.at(-1);
           const parentNode = ctx.nodes.find((n) => n.id === parentId);
           return (
             parentNode != null &&

@@ -57,7 +57,7 @@ const phpExtractor: LanguageExtractor = {
     // Creates unresolved references that will be resolved to 'implements' edges
     if (node.type === 'use_declaration') {
       const names = node.namedChildren.filter((c: SyntaxNode) => c.type === 'name' || c.type === 'qualified_name');
-      const parentId = ctx.nodeStack.length > 0 ? ctx.nodeStack[ctx.nodeStack.length - 1] : undefined;
+      const parentId = ctx.nodeStack.length > 0 ? ctx.nodeStack.at(-1) : undefined;
       if (parentId) {
         for (const nameNode of names) {
           const traitName = getNodeText(nameNode, ctx.source);

@@ -252,7 +252,7 @@ function extractPascalUses(extractor: TreeSitterExtractor, node: SyntaxNode): vo
  *  4-deep around the push. */
 function pushPascalUsesImportRef(extractor: TreeSitterExtractor, child: SyntaxNode, unitName: string): void {
   if (extractor.nodeStack.length === 0) return;
-  const parentId = extractor.nodeStack[extractor.nodeStack.length - 1];
+  const parentId = extractor.nodeStack.at(-1);
   if (!parentId) return;
   extractor.unresolvedReferences.push({
     fromNodeId: parentId,
@@ -305,9 +305,7 @@ function extractPascalDefProc(extractor: TreeSitterExtractor, node: SyntaxNode):
 
   const methodIndex = getOrBuildMethodIndex(extractor);
   const parentId =
-    methodIndex.get(fullName.toLowerCase()) ||
-    methodIndex.get(shortName.toLowerCase()) ||
-    extractor.nodeStack[extractor.nodeStack.length - 1];
+    methodIndex.get(fullName.toLowerCase()) || methodIndex.get(shortName.toLowerCase()) || extractor.nodeStack.at(-1);
   if (!parentId) return;
 
   const block = node.namedChildren.find((c: SyntaxNode) => c.type === 'block');
@@ -356,7 +354,7 @@ function indexQualifiedSuffixes(methodIndex: Map<string, string>, n: Node): void
 /** Extract function calls from a Pascal expression. */
 function extractPascalCall(extractor: TreeSitterExtractor, node: SyntaxNode): void {
   if (extractor.nodeStack.length === 0) return;
-  const callerId = extractor.nodeStack[extractor.nodeStack.length - 1];
+  const callerId = extractor.nodeStack.at(-1);
   if (!callerId) return;
 
   const firstChild = node.namedChild(0);

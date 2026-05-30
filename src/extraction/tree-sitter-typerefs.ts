@@ -320,7 +320,7 @@ function handleCSharpPhpNamedType(ctx: TypeRefCtx): void {
       otherChildren.push(child);
     }
   }
-  const lastIdChild = idChildren[idChildren.length - 1] ?? null;
+  const lastIdChild = idChildren.at(-1) ?? null;
   const firstIdChild = idChildren[0] ?? null;
   const emitNode = isQualified ? lastIdChild : firstIdChild;
   if (emitNode) {

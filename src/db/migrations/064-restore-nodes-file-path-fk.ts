@@ -67,7 +67,7 @@ export const MIGRATION: MigrationModule = {
     const row = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name='nodes'").get() as
       | ObjectRow
       | undefined;
-    if (!row || !row.sql) return;
+    if (!row?.sql) return;
 
     const fkAlready = /FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(row.sql);
     if (fkAlready) return; // already correct (fresh DB, or a re-run) — true no-op

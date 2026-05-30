@@ -668,7 +668,7 @@ function tryExtractImportViaHook(extractor: TreeSitterExtractor, node: SyntaxNod
   extractor.createNode({ kind: 'import', name: info.moduleName, node, extra: { signature: info.signature } });
 
   if (!info.handledRefs && info.moduleName && extractor.nodeStack.length > 0) {
-    const parentId = extractor.nodeStack[extractor.nodeStack.length - 1];
+    const parentId = extractor.nodeStack.at(-1);
     if (parentId) {
       extractor.unresolvedReferences.push({
         fromNodeId: parentId,
@@ -727,7 +727,7 @@ function emitPythonImportFromChild(args: PythonImportChildArgs): void {
 
 /** Go single (`import "x"`) and grouped (`import ( "x"; "y" )`) — one import node per spec. */
 function extractGoImports(extractor: TreeSitterExtractor, node: SyntaxNode): void {
-  const parentId = extractor.nodeStack.length > 0 ? extractor.nodeStack[extractor.nodeStack.length - 1] : null;
+  const parentId = extractor.nodeStack.length > 0 ? extractor.nodeStack.at(-1) : null;
   const extractFromSpec = (spec: SyntaxNode): void => {
     const stringLiteral = spec.namedChildren.find((c) => c.type === 'interpreted_string_literal');
     if (!stringLiteral) return;
@@ -845,7 +845,7 @@ function tryExtractPhpGroupedImports(extractor: TreeSitterExtractor, node: Synta
  */
 function emitNamedImportRefsFromFile(extractor: TreeSitterExtractor, importNode: SyntaxNode): void {
   if (extractor.nodeStack.length === 0) return;
-  const parentId = extractor.nodeStack[extractor.nodeStack.length - 1];
+  const parentId = extractor.nodeStack.at(-1);
   if (!parentId) return;
   const importClause = importNode.namedChildren.find((c) => c.type === 'import_clause');
   if (!importClause) return;

@@ -101,7 +101,7 @@ function suffixToNodeKind(suffix: DescriptorSuffix): NodeKind {
 function resolveNodeKind(scipKind: number, parsed: ParsedSymbol | null): NodeKind {
   const mapped = SCIP_KIND_TO_NODE_KIND[scipKind];
   if (mapped) return mapped;
-  const leaf = parsed && parsed.descriptors.length > 0 ? parsed.descriptors[parsed.descriptors.length - 1] : undefined;
+  const leaf = parsed && parsed.descriptors.length > 0 ? parsed.descriptors.at(-1) : undefined;
   return leaf ? suffixToNodeKind(leaf.suffix) : 'variable';
 }
 
@@ -284,8 +284,7 @@ function buildDocNodes(doc: ScipIndex['documents'][number], { now, symbolToNodeI
       fileSymbols.push(si.symbol);
       continue;
     }
-    const leafName =
-      parsed && parsed.descriptors.length > 0 ? parsed.descriptors[parsed.descriptors.length - 1]!.name : '';
+    const leafName = parsed && parsed.descriptors.length > 0 ? parsed.descriptors.at(-1)!.name : '';
     const name = si.displayName || leafName || '(anonymous)';
     const span = definitionSpan(defOccBySymbol.get(si.symbol));
     const id = mintNodeId(kind, si.symbol);

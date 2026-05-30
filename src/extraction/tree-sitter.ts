@@ -393,7 +393,7 @@ export class TreeSitterExtractor {
 
     // Add containment edge from parent
     if (this.nodeStack.length > 0) {
-      const parentId = this.nodeStack[this.nodeStack.length - 1];
+      const parentId = this.nodeStack.at(-1);
       if (parentId) {
         this.edges.push({
           source: parentId,
@@ -542,7 +542,7 @@ function tsCollectSyntaxErrors(root: SyntaxNode, filePath: string): ExtractionEr
     }
     // Descend only where the error actually lives.
     for (const child of node.children) {
-      if (child && child.hasError) stack.push(child);
+      if (child?.hasError) stack.push(child);
     }
   }
   if (truncated) {
@@ -695,7 +695,7 @@ function tsBuildQualifiedName(ext: TreeSitterExtractor, name: string): string {
  */
 export function tsIsInsideClassLikeNode(ext: TreeSitterExtractor): boolean {
   if (ext.nodeStack.length === 0) return false;
-  const parentId = ext.nodeStack[ext.nodeStack.length - 1];
+  const parentId = ext.nodeStack.at(-1);
   if (!parentId) return false;
   const parentNode = ext.nodes.find((n) => n.id === parentId);
   if (!parentNode) return false;
@@ -971,7 +971,7 @@ function determineEagerNestedFnMode(ext: TreeSitterExtractor, root: SyntaxNode):
  */
 function tryEmitTypeReExportRefs(ext: TreeSitterExtractor, exportNode: SyntaxNode): void {
   if (ext.nodeStack.length === 0) return;
-  const parentId = ext.nodeStack[ext.nodeStack.length - 1];
+  const parentId = ext.nodeStack.at(-1);
   if (!parentId) return;
 
   // Look for named_exports in the export_statement's children (indicates a re-export)

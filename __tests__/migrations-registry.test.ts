@@ -38,7 +38,7 @@ describe('migration registry — structural invariants', () => {
   });
 
   it('CURRENT_SCHEMA_VERSION matches the highest registered version', () => {
-    const max = ALL_MIGRATIONS[ALL_MIGRATIONS.length - 1]!.version;
+    const max = ALL_MIGRATIONS.at(-1)!.version;
     expect(CURRENT_SCHEMA_VERSION).toBe(max);
   });
 

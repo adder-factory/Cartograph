@@ -495,7 +495,7 @@ describe('NeighborPropagator', () => {
 
       expect(progressCalls.length).toBeGreaterThan(0);
       // Last call should be (total, total) indicating completion.
-      const last = progressCalls[progressCalls.length - 1];
+      const last = progressCalls.at(-1);
       expect(last[0]).toBe(last[1]);
     });
   });

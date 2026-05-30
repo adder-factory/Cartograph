@@ -15,17 +15,17 @@ export const djangoResolver: FrameworkResolver = {
   detect(context: ResolutionContext): boolean {
     // Check for Django in requirements.txt or setup.py
     const requirements = context.readFile('requirements.txt');
-    if (requirements && requirements.includes('django')) {
+    if (requirements?.includes('django')) {
       return true;
     }
 
     const setup = context.readFile('setup.py');
-    if (setup && setup.includes('django')) {
+    if (setup?.includes('django')) {
       return true;
     }
 
     const pyproject = context.readFile('pyproject.toml');
-    if (pyproject && pyproject.includes('django')) {
+    if (pyproject?.includes('django')) {
       return true;
     }
 
@@ -142,7 +142,7 @@ export const flaskResolver: FrameworkResolver = {
     }
 
     const pyproject = context.readFile('pyproject.toml');
-    if (pyproject && pyproject.includes('flask')) {
+    if (pyproject?.includes('flask')) {
       return true;
     }
 
@@ -150,7 +150,7 @@ export const flaskResolver: FrameworkResolver = {
     const appFiles = ['app.py', 'application.py', 'main.py', '__init__.py'];
     for (const file of appFiles) {
       const content = context.readFile(file);
-      if (content && content.includes('Flask(__name__)')) {
+      if (content?.includes('Flask(__name__)')) {
         return true;
       }
     }
@@ -221,12 +221,12 @@ export const fastapiResolver: FrameworkResolver = {
 
   detect(context: ResolutionContext): boolean {
     const requirements = context.readFile('requirements.txt');
-    if (requirements && requirements.includes('fastapi')) {
+    if (requirements?.includes('fastapi')) {
       return true;
     }
 
     const pyproject = context.readFile('pyproject.toml');
-    if (pyproject && pyproject.includes('fastapi')) {
+    if (pyproject?.includes('fastapi')) {
       return true;
     }
 
@@ -234,7 +234,7 @@ export const fastapiResolver: FrameworkResolver = {
     const appFiles = ['app.py', 'main.py', 'api.py'];
     for (const file of appFiles) {
       const content = context.readFile(file);
-      if (content && content.includes('FastAPI()')) {
+      if (content?.includes('FastAPI()')) {
         return true;
       }
     }

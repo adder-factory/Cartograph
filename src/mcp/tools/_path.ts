@@ -100,7 +100,7 @@ export async function handlePath(ctx: ToolCtx, args: PathArgs): Promise<ToolOutc
 function renderPath(path: PathHop[], edgeKind: string | undefined): string {
   const hops = path.length - 1;
   const from = path[0]!.node.name;
-  const to = path[path.length - 1]!.node.name;
+  const to = path.at(-1)!.node.name;
   const kinds = path.slice(1).map((h) => h.edge?.kind ?? '?');
   const lines: string[] = [
     `## Path: \`${from}\` → \`${to}\``,

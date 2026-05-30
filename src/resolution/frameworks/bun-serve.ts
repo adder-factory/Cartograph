@@ -78,7 +78,7 @@ export const bunServeResolver: FrameworkResolver = {
     for (const file of context.getAllFiles()) {
       if (!/\.(?:tsx?|jsx?|mts|cts|mjs|cjs)$/.test(file)) continue;
       const content = context.readFile(file);
-      if (content && content.includes('Bun.serve')) return true;
+      if (content?.includes('Bun.serve')) return true;
     }
     return false;
   },

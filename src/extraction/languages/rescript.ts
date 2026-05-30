@@ -351,7 +351,7 @@ function extractExternal(node: SyntaxNode, ctx: ExtractorContext): void {
 }
 
 function extractPipeCall(node: SyntaxNode, ctx: ExtractorContext): void {
-  const callerId = ctx.nodeStack[ctx.nodeStack.length - 1];
+  const callerId = ctx.nodeStack.at(-1);
   if (callerId) emitPipeCallReference(node, ctx, callerId);
   visitPipeChildren(node, ctx);
 }

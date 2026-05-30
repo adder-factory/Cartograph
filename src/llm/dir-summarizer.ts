@@ -160,7 +160,7 @@ export function truncateAtBoundary(text: string, max: number): string {
 export function tidyLlmEnding(text: string): string {
   const trimmed = text.trim();
   if (trimmed.length === 0) return trimmed;
-  const last = trimmed[trimmed.length - 1];
+  const last = trimmed.at(-1);
   if (last === '.' || last === '!' || last === '?' || last === '…') return trimmed;
   // Look for the most recent sentence terminator within a generous
   // trailing window (300 chars covers a paragraph's worth of context).

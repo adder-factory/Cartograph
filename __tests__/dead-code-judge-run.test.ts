@@ -236,7 +236,7 @@ describe('judgeDeadCode — DeadCodeJudgeRun.run / worker orchestration', () => 
 
     // applyBatchVerdicts calls onProgress for each of the six entries.
     expect(events).toHaveLength(6);
-    expect(events[events.length - 1]!.done).toBe(6);
+    expect(events.at(-1)!.done).toBe(6);
     expect(events.every((e) => e.total === result.candidates)).toBe(true);
   });
 });

@@ -296,7 +296,7 @@ function inferJavaFieldReceiverType(
   // collapses to `Foo` since the simple name is what the rest of
   // the resolver looks up).
   const segments = typeExpr.split(/[<\[\s]/, 1)[0]!.split('.');
-  return segments[segments.length - 1] ?? null;
+  return segments.at(-1) ?? null;
 }
 
 function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map<string, string> {
@@ -599,7 +599,7 @@ function matchByQualifiedName(ref: UnresolvedRef, context: ResolutionContext): R
 
   // Try partial qualified name match
   const parts = ref.referenceName.split(/[:.]/);
-  const lastName = parts[parts.length - 1];
+  const lastName = parts.at(-1);
   if (lastName) {
     const partialCandidates = context.getNodesByName(lastName);
     for (const candidate of partialCandidates) {

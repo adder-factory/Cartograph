@@ -398,7 +398,7 @@ async function mcpHandleToolsCall(
     _meta?: { progressToken?: string | number };
   };
 
-  if (!params || !params.name) {
+  if (!params?.name) {
     transport.sendError(request.id, { code: ErrorCodes.InvalidParams, message: 'Missing tool name' });
     return;
   }

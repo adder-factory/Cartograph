@@ -224,7 +224,7 @@ const PLURAL_RULES: ReadonlyArray<StemRule> = [
  * variant alongside the literal-stripped form so FTS catches both.
  */
 function doubledTailVariants(base: string, variants: string[]): string[] {
-  if (base.length >= 2 && base[base.length - 1] === base[base.length - 2]) {
+  if (base.length >= 2 && base.at(-1) === base.at(-2)) {
     return [...variants, base.slice(0, -1)];
   }
   return variants;

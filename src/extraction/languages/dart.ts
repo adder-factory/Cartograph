@@ -40,7 +40,7 @@ const dartExtractor: LanguageExtractor = {
     const isInClass =
       ctx.nodeStack.length > 0 &&
       (() => {
-        const parentId = ctx.nodeStack[ctx.nodeStack.length - 1];
+        const parentId = ctx.nodeStack.at(-1);
         const parentNode = ctx.nodes.find((n) => n.id === parentId);
         return (
           parentNode != null &&
@@ -120,7 +120,7 @@ const dartExtractor: LanguageExtractor = {
     } else {
       nameNode = node.childForFieldName('name');
     }
-    if (nameNode && nameNode.text.startsWith('_')) return 'private';
+    if (nameNode?.text.startsWith('_')) return 'private';
     return 'public';
   },
   isAsync: (node) => {

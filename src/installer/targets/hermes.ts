@@ -157,7 +157,7 @@ function splitLines(content: string): string[] {
 }
 
 function joinLines(lines: string[]): string {
-  while (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  while (lines.length > 0 && lines.at(-1) === '') lines.pop();
   return lines.join('\n') + '\n';
 }
 
@@ -281,7 +281,7 @@ function upsertCartographMcpServer(content: string): string {
   const replacement = renderCartographMcpChild();
 
   if (!parent) {
-    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length > 0 && lines.at(-1) === '') lines.pop();
     if (lines.length > 0) lines.push('');
     lines.push(...renderCartographMcpBlock());
     return joinLines(lines);
@@ -315,7 +315,7 @@ function upsertCartographToolset(content: string): string {
   const cli = parent ? listChildBlock(lines, parent, 'cli') : null;
 
   if (!parent) {
-    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.length > 0 && lines.at(-1) === '') lines.pop();
     if (lines.length > 0) lines.push('');
     lines.push('platform_toolsets:', '  cli:', '    - hermes-cli', '    - mcp-cartograph');
     return joinLines(lines);

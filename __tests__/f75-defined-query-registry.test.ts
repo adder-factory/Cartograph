@@ -39,7 +39,7 @@ describe('F#75 defineQuery registry', () => {
     });
     const after = getDefinedQueryRegistry();
     expect(after.length).toBe(before + 1);
-    expect(after[after.length - 1]!.sql).toBe('SELECT 1 AS one');
+    expect(after.at(-1)!.sql).toBe('SELECT 1 AS one');
   });
 
   it('captures the caller source as `src/...:<line>` when invoked from /src/', () => {
@@ -76,8 +76,8 @@ describe('F#75 defineQuery registry', () => {
     });
     const after = getDefinedQueryRegistry();
     expect(after.length).toBe(before + 2);
-    expect(after[after.length - 2]!.sql).toBe('SELECT 3 AS three');
-    expect(after[after.length - 1]!.sql).toBe('SELECT 4 AS four');
+    expect(after.at(-2)!.sql).toBe('SELECT 3 AS three');
+    expect(after.at(-1)!.sql).toBe('SELECT 4 AS four');
   });
 
   it('captures multi-line SQL template literals verbatim', () => {

@@ -316,7 +316,7 @@ function formatSummary(r: ChangedReport, sinceArg: unknown): string {
  *  Returns null when there's nothing to surface (non-git project, no
  *  index metadata, or fully in sync with no drift to explain). */
 function formatFreshnessHeader(freshness: ReturnType<Cartograph['stats']['getFreshness']> | null): string | null {
-  if (!freshness || !freshness.indexedSha) return null;
+  if (!freshness?.indexedSha) return null;
   const sha = shortSha(freshness.indexedSha);
   if (!freshness.isStale) {
     return `**Indexed HEAD:** \`${sha}\` (current HEAD matches — drift below is uncommitted-on-disk only).`;

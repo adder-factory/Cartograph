@@ -61,7 +61,7 @@ export const MIGRATION: MigrationModule = {
     const row = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name='nodes'").get() as
       | ObjectRow
       | undefined;
-    if (!row || !row.sql) return;
+    if (!row?.sql) return;
     if (/FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(row.sql)) return;
 
     try {

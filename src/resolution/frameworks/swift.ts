@@ -18,7 +18,7 @@ export const swiftUIResolver: FrameworkResolver = {
     for (const file of allFiles) {
       if (file.endsWith('.swift')) {
         const content = context.readFile(file);
-        if (content && content.includes('import SwiftUI')) {
+        if (content?.includes('import SwiftUI')) {
           return true;
         }
       }
@@ -311,7 +311,7 @@ export const vaporResolver: FrameworkResolver = {
   detect(context: ResolutionContext): boolean {
     // Check for Package.swift with Vapor dependency
     const packageSwift = context.readFile('Package.swift');
-    if (packageSwift && packageSwift.includes('vapor')) {
+    if (packageSwift?.includes('vapor')) {
       return true;
     }
 
@@ -320,7 +320,7 @@ export const vaporResolver: FrameworkResolver = {
     for (const file of allFiles) {
       if (file.endsWith('.swift')) {
         const content = context.readFile(file);
-        if (content && content.includes('import Vapor')) {
+        if (content?.includes('import Vapor')) {
           return true;
         }
       }

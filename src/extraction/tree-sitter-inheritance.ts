@@ -136,7 +136,7 @@ export function extractInheritance(extractor: TreeSitterExtractor, node: SyntaxN
       });
     }
     const paramArgs = node.namedChildren.filter((c: SyntaxNode) => c.type === 'parameterized_arguments');
-    const protocols = paramArgs[paramArgs.length - 1];
+    const protocols = paramArgs.at(-1);
     if (protocols) {
       extractObjcProtocolList(extractor, protocols, classId);
     }
@@ -500,7 +500,7 @@ export function extractRustImplItem(extractor: TreeSitterExtractor, node: Syntax
   if (typeIdents.length < 2) return;
 
   const traitNode = typeIdents[0]!;
-  const typeNode = typeIdents[typeIdents.length - 1]!;
+  const typeNode = typeIdents.at(-1)!;
 
   // Trait name (handles scoped paths like std::fmt::Display).
   const traitName =

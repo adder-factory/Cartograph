@@ -62,7 +62,7 @@ describe('buildEmbedText', () => {
   it('summary is the last field so it anchors the richer description', () => {
     const t = buildEmbedText({ name: 'f', signature: 'sig', docstring: 'doc', summary: 'sum' });
     const parts = t.split('\n');
-    expect(parts[parts.length - 1]).toBe('sum');
+    expect(parts.at(-1)).toBe('sum');
   });
 
   it('truncates oversized input below MAX_EMBED_INPUT_CHARS (6000 chars)', () => {

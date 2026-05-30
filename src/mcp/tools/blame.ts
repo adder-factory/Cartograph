@@ -235,7 +235,7 @@ function buildBlameResult(args: {
     endLine: node.endLine,
     fetchedCommits: history.length,
     truncated: history.length >= fetchCap,
-    earliest: allRows[allRows.length - 1] ?? null,
+    earliest: allRows.at(-1) ?? null,
     mostRecent: allRows[0] ?? null,
     commits: allRows.slice(0, limit),
     authors: buildAuthorRollup(allRows),
@@ -280,7 +280,7 @@ async function handleBlame(ctx: ToolCtx, args: BlameToolArgs): Promise<ToolOutco
   // ISO timestamp against the rename-aware git log --follow history.
   // If --follow goes further back, the line-range log was truncated
   // at a rename — surface a warning. Silently no-ops on git failure.
-  const timelineEarliestIso = history[history.length - 1]?.dateIso ?? null;
+  const timelineEarliestIso = history.at(-1)?.dateIso ?? null;
   const renameWarning = detectRenameWarning(cg.projectRoot, node.filePath, timelineEarliestIso);
 
   return ok(

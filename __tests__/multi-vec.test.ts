@@ -198,7 +198,7 @@ describe('chunkSymbol — boundary cases', () => {
       body: makeBody(lineCount),
     };
     const chunks = chunkSymbol(input);
-    expect(chunks[chunks.length - 1]?.endLine).toBe(symbolEnd);
+    expect(chunks.at(-1)?.endLine).toBe(symbolEnd);
   });
 });
 
@@ -262,7 +262,7 @@ describe('chunkSymbol — 800-line symbol overlap math', () => {
   });
 
   it('last chunk spans up to endLine (may be < CHUNK_LOC)', () => {
-    const last = chunks[chunks.length - 1]!;
+    const last = chunks.at(-1)!;
     expect(last.endLine).toBe(800);
     expect(last.endLine - last.startLine + 1).toBeLessThanOrEqual(CHUNK_LOC);
   });
@@ -311,7 +311,7 @@ describe('chunkSymbol — 1000-line symbol', () => {
   });
 
   it('last chunk endLine = 1000', () => {
-    expect(chunks[chunks.length - 1]?.endLine).toBe(1000);
+    expect(chunks.at(-1)?.endLine).toBe(1000);
   });
 
   it('chunk_idx values run 1..7', () => {

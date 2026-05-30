@@ -254,7 +254,7 @@ describe('classifier worker — branch coverage', () => {
     // At least one progress event should fire for the candidates we have.
     // (Some may be drained structurally — those also emit onProgress.)
     if (progressEvents.length > 0) {
-      const last = progressEvents[progressEvents.length - 1]!;
+      const last = progressEvents.at(-1)!;
       expect(last.done).toBeGreaterThan(0);
       expect(last.total).toBeGreaterThanOrEqual(last.done);
     }
