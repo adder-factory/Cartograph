@@ -85,7 +85,7 @@ describe('FRICTION-9 — explore references: must not contain EdgeKind phantom s
         '',
         '/** Normalise a raw path string. */',
         'export function normalizePath(p: string): string {',
-        '  return p.replace(/\\\\/g, "/");',
+        '  return p.replaceAll(/\\\\/g, "/");',
         '}',
         '',
         '/** Main class wiring everything together. */',

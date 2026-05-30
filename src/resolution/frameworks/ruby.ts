@@ -192,7 +192,7 @@ export const railsResolver: FrameworkResolver = {
 function resolveModel(name: string, context: ResolutionContext): string | null {
   // Try direct file path lookup first (Rails convention: CamelCase -> snake_case.rb)
   const snakeName = name
-    .replace(/([A-Z])/g, '_$1')
+    .replaceAll(/([A-Z])/g, '_$1')
     .toLowerCase()
     .slice(1);
   const possiblePaths = [`app/models/${snakeName}.rb`, `app/models/concerns/${snakeName}.rb`];
@@ -218,7 +218,7 @@ function resolveModel(name: string, context: ResolutionContext): string | null {
 function resolveController(name: string, context: ResolutionContext): string | null {
   // Try direct file path lookup first
   const snakeName = name
-    .replace(/([A-Z])/g, '_$1')
+    .replaceAll(/([A-Z])/g, '_$1')
     .toLowerCase()
     .slice(1);
   const possiblePaths = [
@@ -247,7 +247,7 @@ function resolveController(name: string, context: ResolutionContext): string | n
 
 function resolveHelper(name: string, context: ResolutionContext): string | null {
   const snakeName = name
-    .replace(/([A-Z])/g, '_$1')
+    .replaceAll(/([A-Z])/g, '_$1')
     .toLowerCase()
     .slice(1);
   const helperPath = `app/helpers/${snakeName}.rb`;
@@ -265,7 +265,7 @@ function resolveHelper(name: string, context: ResolutionContext): string | null 
 
 function resolveService(name: string, context: ResolutionContext): string | null {
   const snakeName = name
-    .replace(/([A-Z])/g, '_$1')
+    .replaceAll(/([A-Z])/g, '_$1')
     .toLowerCase()
     .slice(1);
   const possiblePaths = [`app/services/${snakeName}.rb`, `app/jobs/${snakeName}.rb`, `app/workers/${snakeName}.rb`];

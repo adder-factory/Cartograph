@@ -799,7 +799,7 @@ function tsTryEmitDynamicImport(ext: TreeSitterExtractor, node: SyntaxNode, call
   }
   if (!firstStringArg) return;
 
-  const moduleName = getNodeText(firstStringArg, ext.source).replace(/^['"`]|['"`]$/g, '');
+  const moduleName = getNodeText(firstStringArg, ext.source).replaceAll(/^['"`]|['"`]$/g, '');
   if (!moduleName) return;
 
   // callerId is the top of the scope stack — same value the caller computed,

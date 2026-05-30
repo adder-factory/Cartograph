@@ -59,8 +59,8 @@ const BROAD_PATTERN_HIT_THRESHOLD = 5000;
  */
 function stripAnchorsAndQuantifiers(pattern: string): string {
   return pattern
-    .replace(/\^|\$|\\b/g, '')
-    .replace(/[*+?]/g, '')
+    .replaceAll(/\^|\$|\\b/g, '')
+    .replaceAll(/[*+?]/g, '')
     .trim();
 }
 

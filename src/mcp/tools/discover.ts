@@ -110,7 +110,7 @@ function readContextStats(
       const tsRow = db.prepare(`SELECT value AS v FROM project_metadata WHERE key = 'index_timestamp'`).get() as
         | { v: string }
         | undefined;
-      const tsMs = tsRow?.v ? Number(tsRow.v) : NaN;
+      const tsMs = tsRow?.v ? Number(tsRow.v) : Number.NaN;
       if (Number.isFinite(tsMs)) indexedAt = new Date(tsMs).toISOString();
     } catch {
       // project_metadata absent on pre-migration-002 DBs — leave indexedAt null
@@ -153,7 +153,7 @@ function readActiveContextStats(
       const tsRow = activeCg.queries.db
         .prepare(`SELECT value AS v FROM project_metadata WHERE key = 'index_timestamp'`)
         .get() as { v: string } | undefined;
-      const tsMs = tsRow?.v ? Number(tsRow.v) : NaN;
+      const tsMs = tsRow?.v ? Number(tsRow.v) : Number.NaN;
       if (Number.isFinite(tsMs)) indexedAt = new Date(tsMs).toISOString();
     } catch {
       // pre-migration-002 — leave indexedAt null

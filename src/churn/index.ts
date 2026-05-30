@@ -263,7 +263,7 @@ function parseChurnTokens(raw: string, indexedFiles: Set<string>): Map<string, F
         flushChurnPaths({ deltas, curPaths, curTs, indexedFiles });
         curPaths = [];
       }
-      curTs = parseInt(m[2]!, 10);
+      curTs = Number.parseInt(m[2]!, 10);
       curActive = true;
     } else if (curActive) {
       // File path in current commit

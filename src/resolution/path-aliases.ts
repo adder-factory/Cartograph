@@ -125,7 +125,7 @@ function stripJsonc(src: string): string {
 
   // Trailing commas before } or ] — outside strings, so safe to
   // run on the comment-stripped output.
-  return out.replace(/,(\s*[}\]])/g, '$1');
+  return out.replaceAll(/,(\s*[}\]])/g, '$1');
 }
 
 interface RawTsconfig {
@@ -263,7 +263,7 @@ export function applyAliases(importPath: string, aliases: AliasMap, projectRoot:
       // Skip if the rewrite escapes the project root (unsafe + can't
       // be looked up via the file index anyway).
       if (relative.startsWith('..')) continue;
-      out.push(relative.replace(/\\/g, '/'));
+      out.push(relative.replaceAll(/\\/g, '/'));
     }
     return out;
   }

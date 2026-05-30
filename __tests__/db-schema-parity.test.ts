@@ -49,7 +49,7 @@ const KNOWN_HISTORICAL_DRIFT = new Set<string>();
  *  inline `//` comments on code lines are kept (the regex won't match
  *  them anyway — no realistic code line carries the full SQL DDL). */
 function stripJsComments(text: string): string {
-  return text.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+  return text.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/^\s*\/\/.*$/gm, '');
 }
 
 function captureGroup1(source: string, re: RegExp): Set<string> {

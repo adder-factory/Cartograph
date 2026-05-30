@@ -224,7 +224,7 @@ describe('buildPrompt — anchor wiring', () => {
     const prompt = buildPrompt(group, '## Project Overview\n\nGrounding text.');
     // The warning may wrap across multiple lines in the prompt — normalize
     // whitespace before matching so the assertion is robust to formatting.
-    const flat = prompt.replace(/\s+/g, ' ');
+    const flat = prompt.replaceAll(/\s+/g, ' ');
     expect(flat).toMatch(/do not invent functionality/i);
   });
 
@@ -294,7 +294,7 @@ describe('buildPrompt — full fixture project (regression for 2026-05-14)', () 
     // from inventing "AI-powered tool for generating agent instructions".
     // The CLAUDE.md fixture hard-wraps the overview across lines, so
     // normalize whitespace before matching.
-    const flat = prompt.replace(/\s+/g, ' ');
+    const flat = prompt.replaceAll(/\s+/g, ' ');
     expect(flat).toContain('local-first code intelligence system');
     expect(flat).toContain('structural understanding of code relationships');
     // Build section must NOT leak into the prompt — heading boundary respected.

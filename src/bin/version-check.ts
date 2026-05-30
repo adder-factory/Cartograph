@@ -18,7 +18,7 @@
 const MIN_NODE: readonly [number, number, number] = [22, 5, 0];
 
 function isNodeTooOld(): boolean {
-  const cur = process.versions.node.split('.').map((n) => parseInt(n, 10));
+  const cur = process.versions.node.split('.').map((n) => Number.parseInt(n, 10));
   for (let i = 0; i < MIN_NODE.length; i++) {
     const part = cur[i] ?? 0;
     if (part > MIN_NODE[i]!) return false; // newer at a higher-order part — OK

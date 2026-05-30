@@ -93,7 +93,7 @@ const NamingJudgeSchema = z
 function parseResponse(text: string, examples: string[]): NamingCheckResult {
   const cleaned = text
     .trim()
-    .replace(/```(?:json)?/g, '')
+    .replaceAll(/```(?:json)?/g, '')
     .trim();
   let raw: unknown;
   try {

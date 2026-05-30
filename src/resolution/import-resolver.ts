@@ -184,7 +184,7 @@ function resolveRelativeImport(ctx: RelativeImportCtx): string | null {
 
   // Try the path as-is first
   const basePath = path.resolve(fromDir, importPath);
-  const relativePath = path.relative(projectRoot, basePath).replace(/\\/g, '/');
+  const relativePath = path.relative(projectRoot, basePath).replaceAll(/\\/g, '/');
 
   // Try each extension
   for (const ext of extensions) {
@@ -497,7 +497,7 @@ function extractPythonImports(content: string): ImportMapping[] {
  * crosses newlines and therefore can't stop at `#` at match time).
  */
 function pushPythonFromImportNames(mappings: ImportMapping[], source: string, importsList: string): void {
-  const cleaned = importsList.replace(/#[^\n]*/g, '');
+  const cleaned = importsList.replaceAll(/#[^\n]*/g, '');
   const names = cleaned.split(',').map((s) => s.trim());
   for (const name of names) {
     const aliasMatch = name.match(/(\w+)\s+as\s+(\w+)/);

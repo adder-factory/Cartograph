@@ -42,7 +42,7 @@ export function swiftBaseNamesForObjcSelector(selector: string): string[] {
   if (!selector) return [];
 
   // Strip trailing colons and split into keywords.
-  const keywords = selector.replace(/:+$/g, '').split(':');
+  const keywords = selector.replaceAll(/:+$/g, '').split(':');
   const firstKeyword = keywords[0];
   if (!firstKeyword) return [];
 

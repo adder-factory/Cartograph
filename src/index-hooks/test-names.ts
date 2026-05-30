@@ -63,7 +63,7 @@ function mineFile(rootDir: string, relPath: string): TestNameRow[] {
     const description = m[2];
     if (!description || description.length === 0) continue;
     if (description.length > 500) continue;
-    const decoded = description.replace(/\\(['"`\\])/g, '$1');
+    const decoded = description.replaceAll(/\\(['"`\\])/g, '$1');
     out.push({ filePath: relPath, line: lineOf(text, m.index), description: decoded });
   }
   return out;

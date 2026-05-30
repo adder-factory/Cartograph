@@ -146,7 +146,7 @@ export const typescriptExtractor: LanguageExtractor = {
   extractImport: (node, source) => {
     const sourceField = node.childForFieldName('source');
     if (sourceField) {
-      const moduleName = source.substring(sourceField.startIndex, sourceField.endIndex).replace(/['"]/g, '');
+      const moduleName = source.substring(sourceField.startIndex, sourceField.endIndex).replaceAll(/['"]/g, '');
       if (moduleName) {
         return { moduleName, signature: source.substring(node.startIndex, node.endIndex).trim() };
       }

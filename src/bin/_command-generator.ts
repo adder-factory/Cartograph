@@ -368,7 +368,7 @@ function registerAliasFlags(ctx: GenContext, layout: PositionalLayout): AliasFla
       );
     }
     const aliasLongFlag = `--${aliasFlag}`;
-    const aliasKey = aliasFlag.replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+    const aliasKey = aliasFlag.replaceAll(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
     const positionalIndex = layout.leadingPositionals.findIndex((p) => p.name === fieldName);
     const placeholder = field.kind === 'string-list' ? '<values...>' : '<value>';
     const desc = `Alias for the \`${fieldName}\` positional (mirrors MCP arg name)`;
@@ -578,7 +578,7 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
  * it under the schema field name `opt.name`.
  */
 function commanderKey(opt: CliOptionSpec): string {
-  return opt.flag.replace(/^--/, '').replace(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+  return opt.flag.replace(/^--/, '').replaceAll(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
 
 /** Everything {@link buildActionHandler} needs to build the
@@ -745,12 +745,12 @@ function positionalToken(opt: CliOptionSpec, forceOptional = false): string {
 
 /** `cartograph_dead_code` → `dead-code`. */
 function defaultCommandName(toolName: string): string {
-  return toolName.replace(/^cartograph_/, '').replace(/_/g, '-');
+  return toolName.replace(/^cartograph_/, '').replaceAll(/_/g, '-');
 }
 
 /** camelCase → kebab-case for an error-message flag reference. */
 function kebab(name: string): string {
-  return name.replace(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
+  return name.replaceAll(/([a-z0-9])([A-Z])/g, '$1-$2').toLowerCase();
 }
 
 /**

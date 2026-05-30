@@ -61,13 +61,13 @@ const SIMPLE_IDENTIFIER = /^[A-Za-z0-9_+$-]+$/;
  */
 export function escapeDescriptorName(name: string): string {
   if (name.length > 0 && SIMPLE_IDENTIFIER.test(name)) return name;
-  return '`' + name.replace(/`/g, '``') + '`';
+  return '`' + name.replaceAll(/`/g, '``') + '`';
 }
 
 /** Escape a package-triple / scheme part — only spaces are reserved. */
 function escapePackagePart(part: string): string {
   const trimmed = part.length > 0 ? part : '.';
-  return trimmed.replace(/ /g, '  ');
+  return trimmed.replaceAll(/ /g, '  ');
 }
 
 /** Render one descriptor to its symbol-string fragment. */

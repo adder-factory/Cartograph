@@ -260,7 +260,7 @@ function inferJavaFieldReceiverType(
   // Find the smallest enclosing class for ref.line — handles nested
   // classes by preferring the inner-most match.
   let enclosing: Node | null = null;
-  let bestSpan = Infinity;
+  let bestSpan = Number.POSITIVE_INFINITY;
   for (const n of fileNodes) {
     if (n.kind !== 'class' && n.kind !== 'interface') continue;
     if (ref.line < n.startLine || ref.line > n.endLine) continue;
@@ -324,8 +324,8 @@ function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map
  * separators are normalised so a Windows path doesn't false-miss.
  */
 function fqnMatchesFilePath(filePath: string, fqn: string): boolean {
-  const dotsToSlashes = fqn.replace(/\./g, '/');
-  const fp = filePath.replace(/\\/g, '/');
+  const dotsToSlashes = fqn.replaceAll(/\./g, '/');
+  const fp = filePath.replaceAll(/\\/g, '/');
   // Require either a path-segment boundary before the FQN suffix
   // (`/com/example/Foo.java`) or the file IS exactly the FQN path
   // (root-level layout). A bare `endsWith(dotsToSlashes + ext)` would

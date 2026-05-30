@@ -81,7 +81,7 @@ const cExtractor: LanguageExtractor = {
     // C includes: #include <stdio.h>, #include "myheader.h"
     const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
     if (systemLib) {
-      return { moduleName: getNodeText(systemLib, source).replace(/^<|>$/g, ''), signature: importText };
+      return { moduleName: getNodeText(systemLib, source).replaceAll(/^<|>$/g, ''), signature: importText };
     }
     const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
     if (stringLiteral) {
@@ -342,7 +342,7 @@ const cppExtractor: LanguageExtractor = {
     // C++ includes: #include <iostream>, #include "myheader.h"
     const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
     if (systemLib) {
-      return { moduleName: getNodeText(systemLib, source).replace(/^<|>$/g, ''), signature: importText };
+      return { moduleName: getNodeText(systemLib, source).replaceAll(/^<|>$/g, ''), signature: importText };
     }
     const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
     if (stringLiteral) {

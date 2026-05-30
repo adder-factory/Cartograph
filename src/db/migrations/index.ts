@@ -212,7 +212,7 @@ function validateRegistered(refs: readonly ModuleRef[]): readonly Migration[] {
           `expected pattern NNN-kebab-name.ts (3-digit prefix, lowercase kebab-case body)`,
       );
     }
-    const version = parseInt(m[1]!, 10);
+    const version = Number.parseInt(m[1]!, 10);
     return {
       version,
       filename: r.filename,

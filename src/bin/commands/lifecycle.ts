@@ -229,7 +229,7 @@ program
     const { startViewerServer, openInBrowser } = await import('../../viewer/server.js');
     let port: number | undefined;
     if (options.port !== undefined) {
-      port = parseInt(options.port, 10);
+      port = Number.parseInt(options.port, 10);
       if (!Number.isFinite(port)) {
         error(`Invalid value for --port: "${options.port}" is not a number`);
         process.exitCode = 1;

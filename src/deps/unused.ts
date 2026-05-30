@@ -510,7 +510,7 @@ function collectUsedFromScriptFiles(args: CollectUsedFromScriptFilesArgs): void 
   // `tree-sitter`) matches literally.
   const binRegexes: Array<{ bin: string; pkg: string; re: RegExp }> = [];
   for (const [bin, pkg] of binToPackage) {
-    const escaped = bin.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = bin.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // (?:^|[^A-Za-z0-9_./-]) and lookahead mirror — keeps the bin
     // name as a standalone shell token (preceded / followed by
     // whitespace, line boundary, or a shell metacharacter).
@@ -1007,7 +1007,7 @@ function extractTypesUpstream(typesPackage: string): string {
 
   const name = typesPackage.slice(7); // Remove "@types/"
   // Replace __ with / for scoped packages
-  const result = name.replace(/__/g, '/');
+  const result = name.replaceAll(/__/g, '/');
   // If result contains /, it was a scoped package; prepend @
   if (result.includes('/')) {
     return `@${result}`;

@@ -127,7 +127,7 @@ export function defaultChatHandler(messages: ChatMessage[]): string {
   if (userText.includes('Module summary:')) return 'Coordinates a small module that does test things.';
 
   // Default: echo a short deterministic summary based on message tail.
-  const last = userText.slice(-200).replace(/\s+/g, ' ').slice(0, 80);
+  const last = userText.slice(-200).replaceAll(/\s+/g, ' ').slice(0, 80);
   return 'Summary of: ' + last;
 }
 

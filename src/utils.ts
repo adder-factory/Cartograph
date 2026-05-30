@@ -266,7 +266,7 @@ export function clampInt(value: number, min: number, max: number): number {
  * Fixes Windows backslash paths so glob matching works consistently.
  */
 export function normalizePath(filePath: string): string {
-  return filePath.replace(/\\/g, '/');
+  return filePath.replaceAll(/\\/g, '/');
 }
 
 /**
@@ -323,7 +323,7 @@ export function stripReasoningTokens(text: string): string {
 }
 
 function blankPreservingNewlines(text: string): string {
-  return text.replace(/[^\n]/g, ' ');
+  return text.replaceAll(/[^\n]/g, ' ');
 }
 
 const BLOCK_COMMENT_LANGUAGES = new Set([
@@ -452,14 +452,14 @@ export function stripCommentsForRegex(
   let out = content;
 
   if (BLOCK_COMMENT_LANGUAGES.has(language)) {
-    out = out.replace(/\/\*[\s\S]*?\*\//g, blankPreservingNewlines);
+    out = out.replaceAll(/\/\*[\s\S]*?\*\//g, blankPreservingNewlines);
   }
   if (language === 'python') {
-    out = out.replace(/"""[\s\S]*?"""/g, blankPreservingNewlines);
-    out = out.replace(/'''[\s\S]*?'''/g, blankPreservingNewlines);
+    out = out.replaceAll(/"""[\s\S]*?"""/g, blankPreservingNewlines);
+    out = out.replaceAll(/'''[\s\S]*?'''/g, blankPreservingNewlines);
   }
   if (language === 'ruby') {
-    out = out.replace(/^=begin\b[\s\S]*?^=end\b[^\n]*/gm, blankPreservingNewlines);
+    out = out.replaceAll(/^=begin\b[\s\S]*?^=end\b[^\n]*/gm, blankPreservingNewlines);
   }
 
   if (stripInline) {
@@ -595,7 +595,7 @@ export function globToSafeRegex(glob: string): string | null {
  * includes `*`, which some older hand-rolled copies omitted.
  */
 export function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 /**
@@ -623,8 +623,8 @@ export function identifierBoundaryRegex(name: string, flags = ''): RegExp {
  */
 export function splitIdentifierTokens(name: string): string[] {
   return name
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replaceAll(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .split(/[\s_\-.\/:\\]+/)
     .map((t) => t.toLowerCase())
     .filter((t) => t.length > 0);

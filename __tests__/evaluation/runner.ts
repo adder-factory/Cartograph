@@ -221,7 +221,7 @@ async function run() {
 
   const resultsDir = path.join(import.meta.dirname, 'results');
   fs.mkdirSync(resultsDir, { recursive: true });
-  const reportFile = path.join(resultsDir, `${new Date().toISOString().replace(/[:.]/g, '-')}.json`);
+  const reportFile = path.join(resultsDir, `${new Date().toISOString().replaceAll(/[:.]/g, '-')}.json`);
   fs.writeFileSync(reportFile, JSON.stringify(report, null, 2));
   console.log(`\nReport saved: ${reportFile}`);
 

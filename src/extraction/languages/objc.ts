@@ -129,7 +129,7 @@ const objcExtractor: LanguageExtractor = {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
     const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
     if (systemLib) {
-      return { moduleName: getNodeText(systemLib, source).replace(/^<|>$/g, ''), signature: importText };
+      return { moduleName: getNodeText(systemLib, source).replaceAll(/^<|>$/g, ''), signature: importText };
     }
     const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
     if (stringLiteral) {

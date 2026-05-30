@@ -84,9 +84,9 @@ export function parseUnifiedDiff(diff: string): DiffRange[] {
       const hunkMatch = HUNK_HEADER.exec(line);
       if (!hunkMatch) continue; // malformed — skip
 
-      const newStart = parseInt(hunkMatch[1]!, 10);
+      const newStart = Number.parseInt(hunkMatch[1]!, 10);
       // newLen is absent when exactly one line; defaults to 1 per the unified diff spec
-      const newLen = hunkMatch[2] !== undefined ? parseInt(hunkMatch[2]!, 10) : 1;
+      const newLen = hunkMatch[2] !== undefined ? Number.parseInt(hunkMatch[2]!, 10) : 1;
 
       // Pure deletion hunks: no post-image lines to query
       if (newLen === 0) continue;

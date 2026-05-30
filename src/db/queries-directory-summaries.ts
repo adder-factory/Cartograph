@@ -78,7 +78,7 @@ export function getAllDirectorySummaries(qb: QueryBuilder): Array<{ dirPath: str
  */
 export function getDirToolExportConstantCount(qb: QueryBuilder, dirPath: string): number {
   const normDir = dirPath.replace(/\/+$/, '');
-  const escaped = normDir.replace(/[\\%_]/g, (ch) => '\\' + ch);
+  const escaped = normDir.replaceAll(/[\\%_]/g, (ch) => '\\' + ch);
   // `LIKE dir/%` keeps the subtree; `NOT LIKE dir/%/%` drops nested
   // sub-directories so only files immediately inside `dirPath` count —
   // matching how `groupByDir` buckets by the immediate parent dir.
@@ -122,7 +122,7 @@ export function upsertDirectorySummary(args: UpsertDirectorySummaryArgs): void {
  * contributes ONLY its immediate parent directory (no ancestor
  * walk). Paths are normalised to posix forward slashes to match
  * how `dir-summarizer.ts:groupByDir` constructs `dir_path`
- * (`path.posix.dirname(filePath.replace(/\\/g, '/'))`). Walking
+ * (`path.posix.dirname(filePath.replaceAll(/\\/g, '/'))`). Walking
  * ancestors here would let stale intermediate-dir summaries survive
  * — e.g. a `src` summary written when files lived directly in
  * `src/` but have all since moved into `src/core/` etc.
@@ -145,7 +145,7 @@ export function pruneOrphanDirectorySummaries(qb: QueryBuilder): { directorySumm
     // but have since all moved into `src/core/` etc.
     const liveDirs = new Set<string>();
     for (const fp of filePaths) {
-      const d = path.posix.dirname(fp.replace(/\\/g, '/'));
+      const d = path.posix.dirname(fp.replaceAll(/\\/g, '/'));
       if (d !== '.' && d !== '/' && d !== '') {
         liveDirs.add(d);
       }

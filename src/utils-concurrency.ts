@@ -63,7 +63,7 @@ interface LockMetadata {
 function readLockMetadata(lockPath: string): LockMetadata | null {
   try {
     const content = fs.readFileSync(lockPath, 'utf-8').trim();
-    const pid = parseInt(content, 10);
+    const pid = Number.parseInt(content, 10);
     // Reject non-positive PIDs: `parseInt` returning 0 (e.g. corrupt
     // lock containing literal "0" or non-numeric junk before the
     // first digit) would otherwise pass `Number.isFinite` and reach
@@ -175,7 +175,7 @@ export class FileLock {
     try {
       // Only remove if we still own it (check PID)
       const content = fs.readFileSync(this.lockPath, 'utf-8').trim();
-      if (parseInt(content, 10) === process.pid) {
+      if (Number.parseInt(content, 10) === process.pid) {
         fs.unlinkSync(this.lockPath);
       }
     } catch {

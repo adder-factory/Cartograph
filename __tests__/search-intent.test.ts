@@ -16,8 +16,8 @@ import { ToolHandler } from '../src/mcp/tools.js';
 function sanitizeQueryForFts5(query: string): [string, boolean] {
   const original = query;
   const sanitized = query
-    .replace(/[-^*():"]/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replaceAll(/[-^*():"]/g, ' ')
+    .replaceAll(/\s+/g, ' ')
     .trim();
   return [sanitized, original !== sanitized];
 }

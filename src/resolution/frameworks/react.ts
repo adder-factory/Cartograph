@@ -252,7 +252,7 @@ function filePathToRoute(filePath: string): string | null {
       .replace(/^.*pages\//, '/')
       .replace(/\/index\.(tsx?|jsx?)$/, '')
       .replace(/\.(tsx?|jsx?)$/, '')
-      .replace(/\[([^\]]+)\]/g, ':$1');
+      .replaceAll(/\[([^\]]+)\]/g, ':$1');
 
     if (route === '') route = '/';
     return route;
@@ -267,7 +267,7 @@ function filePathToRoute(filePath: string): string | null {
     let route = filePath
       .replace(/^.*app\//, '/')
       .replace(/\/page\.(tsx?|jsx?)$/, '')
-      .replace(/\[([^\]]+)\]/g, ':$1');
+      .replaceAll(/\[([^\]]+)\]/g, ':$1');
 
     if (route === '') route = '/';
     return route;

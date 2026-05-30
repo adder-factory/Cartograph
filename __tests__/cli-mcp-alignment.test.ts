@@ -95,7 +95,7 @@ function stripPrefix(toolName: string): string {
 /** Normalise CLI command name (`dead-code`) to underscore form
  *  (`dead_code`) so MCP and CLI sets share a single vocabulary. */
 function cliToMcpName(cliName: string): string {
-  return cliName.replace(/-/g, '_');
+  return cliName.replaceAll(/-/g, '_');
 }
 
 /** Walk the commander tree and return every leaf-or-family
@@ -465,7 +465,7 @@ describe('CLI ↔ MCP argument-shape parity (#cat3)', () => {
   /** kebab→camel and `-`/`_` normalisation so a CLI long flag
    *  (`--max-depth`) and a schema property (`maxDepth`) compare equal. */
   function normalizeArgName(name: string): string {
-    return name.replace(/^--/, '').replace(/[-_]/g, '').toLowerCase();
+    return name.replace(/^--/, '').replaceAll(/[-_]/g, '').toLowerCase();
   }
 
   /**

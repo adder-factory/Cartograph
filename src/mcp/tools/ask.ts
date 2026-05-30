@@ -315,8 +315,8 @@ function pickBestCandidate(
   // Prefer higher centrality among pool members; fall back to first.
   let best = pool[0]!;
   for (const candidate of pool) {
-    const bc = best.node.centrality ?? -Infinity;
-    const cc = candidate.node.centrality ?? -Infinity;
+    const bc = best.node.centrality ?? Number.NEGATIVE_INFINITY;
+    const cc = candidate.node.centrality ?? Number.NEGATIVE_INFINITY;
     if (cc > bc) best = candidate;
   }
 

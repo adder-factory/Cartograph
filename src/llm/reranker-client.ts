@@ -103,7 +103,7 @@ export class RerankerClient {
    */
   async scoreOne(query: string, candidate: string, opts: { signal?: AbortSignal } = {}): Promise<number> {
     const [score] = await this.rerank(query, [candidate], opts);
-    return score ?? NaN;
+    return score ?? Number.NaN;
   }
 
   /**

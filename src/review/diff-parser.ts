@@ -207,10 +207,10 @@ function dpAppendHunk(st: DiffParserState, hunkMatch: RegExpExecArray): void {
   }
   const [, oldStartRaw, oldCountRaw, newStartRaw, newCountRaw] = hunkMatch;
   const hunk: Hunk = {
-    oldStart: parseInt(oldStartRaw ?? '0', RADIX_DECIMAL),
-    oldCount: oldCountRaw !== undefined ? parseInt(oldCountRaw, RADIX_DECIMAL) : DEFAULT_HUNK_COUNT,
-    newStart: parseInt(newStartRaw ?? '0', RADIX_DECIMAL),
-    newCount: newCountRaw !== undefined ? parseInt(newCountRaw, RADIX_DECIMAL) : DEFAULT_HUNK_COUNT,
+    oldStart: Number.parseInt(oldStartRaw ?? '0', RADIX_DECIMAL),
+    oldCount: oldCountRaw !== undefined ? Number.parseInt(oldCountRaw, RADIX_DECIMAL) : DEFAULT_HUNK_COUNT,
+    newStart: Number.parseInt(newStartRaw ?? '0', RADIX_DECIMAL),
+    newCount: newCountRaw !== undefined ? Number.parseInt(newCountRaw, RADIX_DECIMAL) : DEFAULT_HUNK_COUNT,
     addedLines: 0,
     removedLines: 0,
   };

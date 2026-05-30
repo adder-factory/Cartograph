@@ -160,7 +160,7 @@ function validateFileWithinRoot(projectRoot: string, filePath: string): string |
 /** Format the signature cell — escape pipe characters or show dash when absent. */
 function formatSigCell(n: NodeAtRange): string {
   const hasSignature = n.signature !== undefined && n.signature !== null && n.signature.length > 0;
-  return hasSignature ? `\`${n.signature!.replace(/\|/g, '\\|')}\`` : '—';
+  return hasSignature ? `\`${n.signature!.replaceAll(/\|/g, '\\|')}\`` : '—';
 }
 
 /** Format the line-range cell — single number when start === end. */
@@ -595,7 +595,7 @@ function classifyEmptyDiff(diff: string): {
     if (!m) continue;
     hunkCount++;
     // newLen absent → exactly one line per the unified-diff spec.
-    const newLen = m[1] !== undefined ? parseInt(m[1], 10) : 1;
+    const newLen = m[1] !== undefined ? Number.parseInt(m[1], 10) : 1;
     if (newLen === 0) pureDeletionCount++;
   }
   return { hunkCount, pureDeletionCount, hasFileHeader };

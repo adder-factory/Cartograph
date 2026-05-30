@@ -284,7 +284,7 @@ function probeNestedFunctionManifestCulprit(
  *   2. Some nodes have centrality but none met the threshold → suggest relaxing the threshold
  */
 function probeCentralityFilterCulprit(cg: import('../../index.js').default, query: string): string | null {
-  const stripped = query.replace(/\bcentrality:\S+\s*/gi, '').trim();
+  const stripped = query.replaceAll(/\bcentrality:\S+\s*/gi, '').trim();
   if (stripped === query) return null;
   const without = searchNodes(cg.queries, stripped, { limit: MAX_SUGGESTIONS });
   if (without.length === 0) return null;
@@ -360,7 +360,7 @@ function probeKindFilterCulprit(
   query: string,
   effectiveKind: string,
 ): string | null {
-  const probeQuery = query.replace(/\bkind:\S+\s*/gi, '').trim();
+  const probeQuery = query.replaceAll(/\bkind:\S+\s*/gi, '').trim();
   const without = searchNodes(cg.queries, probeQuery, { limit: MAX_SUGGESTIONS });
   if (without.length === 0) return null;
   const kinds = [...new Set(without.map((r) => r.node.kind))].slice(0, MAX_HINT_KINDS).join(', ');
@@ -784,8 +784,8 @@ export function detectMultiNameQuery(query: string): string[] | null {
  */
 function stripBooleanOperators(query: string): string {
   return query
-    .replace(/\b(AND|OR|NOT|NEAR)\b/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replaceAll(/\b(AND|OR|NOT|NEAR)\b/g, ' ')
+    .replaceAll(/\s+/g, ' ')
     .trim();
 }
 

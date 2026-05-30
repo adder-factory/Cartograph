@@ -375,7 +375,7 @@ export function stripPreamble(s: string): string {
     if (m[1] && /constructor/i.test(m[0])) {
       const conn = (m[0].match(/(with|using|that|for)\s+$/i) ?? [undefined, ''])[1]!;
       const rest = s.slice(m[0].length);
-      return `Constructs ${m[1]} ${conn} ${rest}`.replace(/\s+/g, ' ').trim();
+      return `Constructs ${m[1]} ${conn} ${rest}`.replaceAll(/\s+/g, ' ').trim();
     }
     const rest = s.slice(m[0].length);
     if (!rest) return s;
@@ -817,7 +817,7 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
  */
 function resolveEagerBudget(rawLimit: number | undefined): number {
   if (rawLimit === undefined) return DEFAULT_EAGER_SUMMARY_LIMIT;
-  if (rawLimit < 0 || !Number.isFinite(rawLimit)) return Infinity;
+  if (rawLimit < 0 || !Number.isFinite(rawLimit)) return Number.POSITIVE_INFINITY;
   return rawLimit;
 }
 

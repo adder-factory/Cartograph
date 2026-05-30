@@ -157,7 +157,7 @@ const dartExtractor: LanguageExtractor = {
           if (uri) {
             const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
             if (stringLiteral) {
-              moduleName = getNodeText(stringLiteral, source).replace(/['"]/g, '');
+              moduleName = getNodeText(stringLiteral, source).replaceAll(/['"]/g, '');
             }
           }
         }
@@ -174,7 +174,7 @@ const dartExtractor: LanguageExtractor = {
           if (uri) {
             const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
             if (stringLiteral) {
-              moduleName = getNodeText(stringLiteral, source).replace(/['"]/g, '');
+              moduleName = getNodeText(stringLiteral, source).replaceAll(/['"]/g, '');
             }
           }
         }

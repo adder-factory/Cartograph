@@ -153,7 +153,7 @@ function ensureTrailingNewline(text: string): string {
 }
 
 function splitLines(content: string): string[] {
-  return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  return content.replaceAll(/\r\n/g, '\n').replaceAll(/\r/g, '\n').split('\n');
 }
 
 function joinLines(lines: string[]): string {

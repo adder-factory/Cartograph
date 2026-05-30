@@ -643,7 +643,7 @@ function resolverReadFileCached(caches: ResolverCaches, projectRoot: string, fil
 /** Existence check — checks the pre-built `knownFiles` set first, falls back to fs.existsSync. */
 function resolverFileExistsCached(caches: ResolverCaches, projectRoot: string, filePath: string): boolean {
   if (caches.knownFiles) {
-    const normalized = filePath.replace(/\\/g, '/');
+    const normalized = filePath.replaceAll(/\\/g, '/');
     if (caches.knownFiles.has(filePath) || caches.knownFiles.has(normalized)) return true;
   }
   const fullPath = path.join(projectRoot, filePath);

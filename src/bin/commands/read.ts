@@ -147,7 +147,7 @@ program
             error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
             process.exit(1);
           }
-          ranges.push({ file: m[1]!, startLine: parseInt(m[2]!, 10), endLine: parseInt(m[3]!, 10) });
+          ranges.push({ file: m[1]!, startLine: Number.parseInt(m[2]!, 10), endLine: Number.parseInt(m[3]!, 10) });
         }
         if (ranges.length === 0) {
           error('--ranges had no valid `file:startLine-endLine` specs.');
@@ -160,8 +160,8 @@ program
           process.exit(1);
         }
         args['file'] = file;
-        const startNum = parseInt(startLine, 10);
-        const endNum = parseInt(endLine, 10);
+        const startNum = Number.parseInt(startLine, 10);
+        const endNum = Number.parseInt(endLine, 10);
         if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
           error('startLine and endLine must be numbers.');
           process.exitCode = 1;
@@ -989,7 +989,7 @@ program
         }
         let maxDepth: number | undefined;
         if (options.maxDepth) {
-          maxDepth = parseInt(options.maxDepth, 10);
+          maxDepth = Number.parseInt(options.maxDepth, 10);
           if (!Number.isFinite(maxDepth)) {
             error(`Invalid value for --max-depth: "${options.maxDepth}" is not a number`);
             cg.destroy();
@@ -1278,7 +1278,7 @@ program
 
         const { default: Cartograph } = await loadCartograph();
         const cg = await Cartograph.open(projectPath);
-        const maxDepth = parseInt(options.depth || String(DEFAULT_DEPTH), 10);
+        const maxDepth = Number.parseInt(options.depth || String(DEFAULT_DEPTH), 10);
         if (!Number.isFinite(maxDepth)) {
           error(`Invalid value for --depth: "${options.depth}" is not a number`);
           cg.destroy();

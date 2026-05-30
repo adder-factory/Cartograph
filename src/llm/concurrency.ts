@@ -18,7 +18,7 @@ export const LLM_CONCURRENCY_BOUNDS = { min: 1, max: 16, default: 2 } as const;
  * non-numeric / absent input falls back to `LLM_CONCURRENCY_BOUNDS.default`.
  */
 export function parseConcurrency(raw: unknown): number {
-  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? parseInt(raw, 10) : Number.NaN;
+  const n = typeof raw === 'number' ? raw : typeof raw === 'string' ? Number.parseInt(raw, 10) : Number.NaN;
   if (!Number.isFinite(n)) return LLM_CONCURRENCY_BOUNDS.default;
   return Math.min(LLM_CONCURRENCY_BOUNDS.max, Math.max(LLM_CONCURRENCY_BOUNDS.min, Math.floor(n)));
 }

@@ -213,7 +213,7 @@ function stripXmlComments(source: string): string {
   // last `-->`. The `s` flag isn't used to stay ABI-stable across
   // tree-sitter / web-tree-sitter / node 18 vintage builds, and
   // `[\s\S]` is the canonical workaround.
-  return source.replace(/<!--[\s\S]*?-->/g, (match) => {
+  return source.replaceAll(/<!--[\s\S]*?-->/g, (match) => {
     let out = '';
     for (let i = 0; i < match.length; i++) {
       const ch = match.charCodeAt(i);

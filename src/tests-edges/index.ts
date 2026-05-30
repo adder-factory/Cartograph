@@ -176,9 +176,9 @@ function addSubjectMatchesIn(args: AddSubjectMatchesArgs): void {
  */
 function mirroredSourceRoots(dir: string): readonly string[] {
   const mirrored = dir
-    .replace(/__tests__\/?/g, '')
+    .replaceAll(/__tests__\/?/g, '')
     .replace(/^(?:tests?|spec)(\/|$)/, '')
-    .replace(/\/(?:tests?|spec)(\/|$)/g, '/')
+    .replaceAll(/\/(?:tests?|spec)(\/|$)/g, '/')
     .replace(/\/+$/, '');
   return mirrored ? [mirrored] : ['.', 'src', 'lib', 'app', 'packages'];
 }

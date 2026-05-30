@@ -163,7 +163,7 @@ function strictlyContains(dn: SyntaxNode, target: SyntaxNode): boolean {
 /** Innermost def whose range strictly contains `target`, or null. */
 function innermostDefAround(defs: DefRecord[], target: SyntaxNode): DefRecord | null {
   let best: DefRecord | null = null;
-  let bestSpan = Infinity;
+  let bestSpan = Number.POSITIVE_INFINITY;
   for (const d of defs) {
     if (!strictlyContains(d.defNode, target)) continue;
     const span = d.defNode.endIndex - d.defNode.startIndex;

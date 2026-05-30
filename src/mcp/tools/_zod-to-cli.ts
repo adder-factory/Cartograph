@@ -147,10 +147,10 @@ export function toKebabCase(name: string): string {
   return (
     name
       // Boundary between a lower/digit and an upper: insert a hyphen.
-      .replace(/([a-z0-9])([A-Z])/g, '$1-$2')
+      .replaceAll(/([a-z0-9])([A-Z])/g, '$1-$2')
       // Boundary inside an acronym run followed by a normal word
       // (`HTTPServer` → `HTTP-Server`).
-      .replace(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
+      .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1-$2')
       .toLowerCase()
   );
 }

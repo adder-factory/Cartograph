@@ -731,7 +731,7 @@ function extractGoImports(extractor: TreeSitterExtractor, node: SyntaxNode): voi
   const extractFromSpec = (spec: SyntaxNode): void => {
     const stringLiteral = spec.namedChildren.find((c) => c.type === 'interpreted_string_literal');
     if (!stringLiteral) return;
-    const importPath = getNodeText(stringLiteral, extractor.source).replace(/['"]/g, '');
+    const importPath = getNodeText(stringLiteral, extractor.source).replaceAll(/['"]/g, '');
     if (!importPath) return;
     // cgo pseudo-import: `import "C"` binds the cgo bridge for the file.
     // The bare `"C"` spec is opaque on its own — enrich the signature so

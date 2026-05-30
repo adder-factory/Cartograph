@@ -179,7 +179,7 @@ adminCmd
       // silently ignored.
       let parseWorkers: number | undefined;
       if (options.parseWorkers !== undefined) {
-        const n = parseInt(options.parseWorkers, 10);
+        const n = Number.parseInt(options.parseWorkers, 10);
         if (!Number.isInteger(n) || n < 1) {
           error(`--parse-workers must be a positive integer (got "${options.parseWorkers}")`);
           process.exit(1);
@@ -963,7 +963,7 @@ adminCmd
         '../../db/queries-summaries.js'
       );
       const raw = (opts as Record<string, string>)['maxAgeDays'];
-      const maxAgeDays = raw === undefined ? PRUNE_STORE_DEFAULT_DAYS : parseFloat(raw);
+      const maxAgeDays = raw === undefined ? PRUNE_STORE_DEFAULT_DAYS : Number.parseFloat(raw);
       if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
         error(`--max-age-days must be a non-negative number. Got '${raw}'.`);
         process.exit(1);

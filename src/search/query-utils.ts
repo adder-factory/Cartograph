@@ -312,9 +312,9 @@ export function extractSearchTerms(query: string, options?: { stems?: boolean })
   // Then replace underscores/dots with spaces (snake_case, dot.notation)
   // and split on any non-alphanumeric character.
   const normalised = query
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .replace(/[_.]+/g, ' ');
+    .replaceAll(/([a-z])([A-Z])/g, '$1 $2')
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replaceAll(/[_.]+/g, ' ');
   const words = normalised.split(/[^a-zA-Z0-9]+/).filter(Boolean);
 
   for (const word of words) {
@@ -535,7 +535,7 @@ export function nameMatchBonus(nodeName: string, query: string): number {
 
   // Split query into word-level terms (handles "CacheBuilder build" → ["cache","builder","build"])
   const rawTerms = query
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
+    .replaceAll(/([a-z])([A-Z])/g, '$1 $2')
     .split(/[\s_.\-]+/)
     .map((t) => t.toLowerCase())
     .filter((t) => t.length >= 2);
@@ -547,7 +547,7 @@ export function nameMatchBonus(nodeName: string, query: string): number {
     .filter((t) => t.length >= 2);
 
   // Full query as a single token (for compound identifiers like "CacheBuilder")
-  const queryLower = query.replace(/[\s]+/g, '').toLowerCase();
+  const queryLower = query.replaceAll(/[\s]+/g, '').toLowerCase();
 
   if (nameLower === queryLower) return NAME_BONUS_EXACT_MATCH;
 

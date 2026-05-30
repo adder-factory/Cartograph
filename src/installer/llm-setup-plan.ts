@@ -235,7 +235,7 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
 }
 
 function buildUseDetectedPreset(b: DetectedBackend): SetupPreset {
-  const id: SetupPresetId = `use-detected-${b.kind}-${b.endpoint.replace(/[^a-z0-9]/gi, '-')}`;
+  const id: SetupPresetId = `use-detected-${b.kind}-${b.endpoint.replaceAll(/[^a-z0-9]/gi, '-')}`;
   const isOllama = b.kind === 'ollama';
   const summary = `All tiers → ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'} loaded)`;
   const nextSteps: string[] = [];

@@ -214,7 +214,7 @@ function collectAddedFiles(args: CollectAddedFilesArgs): void {
   const { projectRoot, indexed, indexedSet, report } = args;
   const knownExts = new Set(indexed.map((f) => path.extname(f.path)).filter(Boolean));
   for (const fullPath of walkProjectFiles(projectRoot, MAX_PER_BUCKET * 2)) {
-    const rel = path.relative(projectRoot, fullPath).replace(/\\/g, '/');
+    const rel = path.relative(projectRoot, fullPath).replaceAll(/\\/g, '/');
     if (indexedSet.has(rel)) continue;
     if (knownExts.size > 0 && !knownExts.has(path.extname(rel))) continue;
     if (report.added.length >= MAX_PER_BUCKET) {

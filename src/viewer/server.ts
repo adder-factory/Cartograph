@@ -867,7 +867,7 @@ function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
  */
 function clampInt(v: string | null, bound: IntBound): number {
   if (!v) return bound.default;
-  const n = parseInt(v, 10);
+  const n = Number.parseInt(v, 10);
   if (!Number.isFinite(n)) return bound.default;
   return Math.max(bound.min, Math.min(bound.max, n));
 }

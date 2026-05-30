@@ -104,7 +104,7 @@ export function getChildByField(node: SyntaxNode, fieldName: string): SyntaxNode
 const DECORATIVE_RULE_RE = /^[-=*_~#/+<>·•─━┄┅╌╍═]{3,}$/;
 
 function isDecorativeRuleLine(line: string): boolean {
-  return DECORATIVE_RULE_RE.test(line.replace(/\s+/g, ''));
+  return DECORATIVE_RULE_RE.test(line.replaceAll(/\s+/g, ''));
 }
 
 /**
@@ -153,9 +153,9 @@ export function getPrecedingDocstring(node: SyntaxNode, source: string): string 
   const cleaned = comments
     .map((c) =>
       c
-        .replace(/^\/\*\*?|\*\/$/g, '')
-        .replace(/^\/\/\s?/gm, '')
-        .replace(/^\s*\*\s?/gm, '')
+        .replaceAll(/^\/\*\*?|\*\/$/g, '')
+        .replaceAll(/^\/\/\s?/gm, '')
+        .replaceAll(/^\s*\*\s?/gm, '')
         .trim(),
     )
     .join('\n')

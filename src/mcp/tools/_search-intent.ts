@@ -72,8 +72,8 @@ function sanitizeQueryForFts5(query: string): [string, boolean] {
   const original = query;
   // Replace all FTS5-reserved characters with spaces, then collapse whitespace
   const sanitized = query
-    .replace(/[-^*():"]/g, ' ')
-    .replace(/\s+/g, ' ')
+    .replaceAll(/[-^*():"]/g, ' ')
+    .replaceAll(/\s+/g, ' ')
     .trim();
 
   return [sanitized, original !== sanitized];
@@ -164,7 +164,7 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
  * Helper to escape LIKE special characters.
  */
 function escapeLike(s: string): string {
-  return s.replace(/\\/g, '\\\\').replace(/_/g, '\\_').replace(/%/g, '\\%');
+  return s.replaceAll(/\\/g, '\\\\').replaceAll(/_/g, '\\_').replaceAll(/%/g, '\\%');
 }
 
 /**

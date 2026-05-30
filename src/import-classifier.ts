@@ -334,7 +334,7 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
  * this is safe for the documented surface.
  */
 function stripJsonComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  return src.replaceAll(/\/\*[\s\S]*?\*\//g, '').replaceAll(/(^|[^:])\/\/[^\n]*/g, '$1');
 }
 
 /**

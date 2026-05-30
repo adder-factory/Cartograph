@@ -659,8 +659,8 @@ function applyCentralityFilter(
  */
 function sortByCentrality(results: SearchResult[]): SearchResult[] {
   return [...results].sort((a, b) => {
-    const ca = a.node.centrality ?? -Infinity;
-    const cb = b.node.centrality ?? -Infinity;
+    const ca = a.node.centrality ?? Number.NEGATIVE_INFINITY;
+    const cb = b.node.centrality ?? Number.NEGATIVE_INFINITY;
     if (ca === cb) return 0;
     return cb - ca;
   });
@@ -1481,7 +1481,7 @@ function fetchFuzzyNameRows(ctx: FuzzyFetchCtx, c: { name: string; dist: number 
  */
 function buildFtsPrefixQuery(query: string): string {
   const rawTerms = query
-    .replace(/['"*():^]/g, '')
+    .replaceAll(/['"*():^]/g, '')
     .split(/\s+/)
     .filter((term) => term.length > 0)
     .filter((term) => !/^(AND|OR|NOT|NEAR)$/i.test(term));

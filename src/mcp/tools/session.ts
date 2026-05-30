@@ -292,7 +292,7 @@ function substituteOne(v: unknown, positional: unknown[]): unknown {
       const replacement = positional[Number(wholeMatch[1])];
       return replacement === undefined ? v : replacement;
     }
-    return v.replace(/\$\{(\d+)\}/g, (_m, idx) => {
+    return v.replaceAll(/\$\{(\d+)\}/g, (_m, idx) => {
       const replacement = positional[Number(idx)];
       return replacement === undefined ? `\${${idx}}` : String(replacement);
     });

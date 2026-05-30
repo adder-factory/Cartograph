@@ -160,7 +160,7 @@ export interface BuildGraphOptions {
  * (an un-normalised path would round-trip into a duplicate row).
  */
 function normalizeScipPath(p: string): string {
-  return path.posix.normalize(p.replace(/\\/g, '/'));
+  return path.posix.normalize(p.replaceAll(/\\/g, '/'));
 }
 
 /** A path is safe to import if it is relative and has no `.`/`..`/empty
@@ -444,7 +444,7 @@ function buildReferenceEdges({ db, fileNodeId, defs, symbolToNodeId, pushEdge }:
     }
     const refLine = occ.range[0] ?? 0;
     let source = fileNodeId;
-    let bestSpan = Infinity;
+    let bestSpan = Number.POSITIVE_INFINITY;
     for (const d of defs) {
       if (d.startLine <= refLine && refLine <= d.endLine && d.span < bestSpan) {
         bestSpan = d.span;

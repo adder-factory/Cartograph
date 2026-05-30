@@ -252,7 +252,7 @@ function getSvelteKitRouteInfo(fileName: string): string | null {
  */
 function filePathToSvelteKitRoute(filePath: string): string | null {
   // Normalize to forward slashes
-  const normalized = filePath.replace(/\\/g, '/');
+  const normalized = filePath.replaceAll(/\\/g, '/');
 
   // Find the routes directory
   const routesIndex = normalized.indexOf('/routes/');
@@ -269,9 +269,9 @@ function filePathToSvelteKitRoute(filePath: string): string | null {
   const route =
     '/' +
     dirPath
-      .replace(/\[\.\.\.([^\]]+)\]/g, '*$1') // [...rest] -> *rest
-      .replace(/\[{2}([^\]]+)\]{2}/g, ':$1?') // [[optional]] -> :optional?
-      .replace(/\[([^\]]+)\]/g, ':$1'); // [param] -> :param
+      .replaceAll(/\[\.\.\.([^\]]+)\]/g, '*$1') // [...rest] -> *rest
+      .replaceAll(/\[{2}([^\]]+)\]{2}/g, ':$1?') // [[optional]] -> :optional?
+      .replaceAll(/\[([^\]]+)\]/g, ':$1'); // [param] -> :param
 
   if (route === '/') return '/';
   // Remove trailing slash

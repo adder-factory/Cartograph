@@ -488,7 +488,7 @@ function parseOctalEscape(body: string, i: number): [number, number] {
     j++;
     peek = body[j];
   }
-  return [octal.length - 1, parseInt(octal, OCTAL_BASE)];
+  return [octal.length - 1, Number.parseInt(octal, OCTAL_BASE)];
 }
 
 /**

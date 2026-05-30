@@ -1095,7 +1095,7 @@ const GO_MAGIC_NUMBER_ALLOWLIST: ReadonlySet<string> = new Set(['60', '24', '7',
  * undefined case fall through to the universal rule only.
  */
 function isMagicNumber(text: string, language?: Language): boolean {
-  const trimmed = text.replace(/_/g, '').toLowerCase();
+  const trimmed = text.replaceAll(/_/g, '').toLowerCase();
   // Must begin with a digit, a sign + digit, a leading-dot float
   // (`.5`), or a `0x`/`0b`/`0o` prefix — anything else is the
   // kind-overload case (the type identifier `number`) and isn't a

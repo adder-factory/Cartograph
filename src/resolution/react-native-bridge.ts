@@ -154,7 +154,7 @@ export interface TurboModuleSpec {
 export function parseTurboModuleSpec(source: string): TurboModuleSpec | null {
   // Normalize CRLF → LF so the patterns below behave identically on
   // Windows-authored spec files.
-  const src = source.replace(/\r\n/g, '\n');
+  const src = source.replaceAll(/\r\n/g, '\n');
 
   const regMatch = src.match(/TurboModuleRegistry\.(?:getEnforcing|get)\s*<[^>]*>\s*\(\s*['"]([^'"]+)['"]\s*\)/);
   if (!regMatch?.[1]) return null;

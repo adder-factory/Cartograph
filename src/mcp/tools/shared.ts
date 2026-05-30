@@ -160,7 +160,7 @@ export function displayModelName(model: string): string {
   if (!model.includes('/') && !model.includes('\\')) return model;
   // path.basename handles both separators on the host platform; the
   // explicit backslash split covers a Windows path seen on a POSIX host.
-  const base = path.basename(model.replace(/\\/g, '/'));
+  const base = path.basename(model.replaceAll(/\\/g, '/'));
   return base.length > 0 ? base : model;
 }
 

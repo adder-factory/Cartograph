@@ -141,7 +141,7 @@ export async function mineIssueCommits(rootDir: string, sinceSha: string | null)
     let match: RegExpExecArray | null;
     ISSUE_REGEX.lastIndex = 0;
     while ((match = ISSUE_REGEX.exec(messageBody)) !== null) {
-      const n = parseInt(match[1]!, 10);
+      const n = Number.parseInt(match[1]!, 10);
       if (Number.isFinite(n) && n > 0) issues.add(n);
     }
     if (issues.size > 0) commits.push({ sha, issues: [...issues] });

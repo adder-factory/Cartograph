@@ -79,7 +79,7 @@ export function computeAlgoHash(callerUrl: string, siblingBasenames: readonly st
     } catch (err) {
       throw new Error(`computeAlgoHash: cannot read ${abs} (caller=${callerPath}): ${String(err)}`);
     }
-    const lf = content.replace(/\r\n/g, '\n');
+    const lf = content.replaceAll(/\r\n/g, '\n');
     // Comment stripping is what makes refactor-PRs that only touch
     // block comments (`/* … */`, JSDoc) or comment-anchored lines
     // (lines starting with `//`) NOT invalidate the cache. Trailing
@@ -88,7 +88,7 @@ export function computeAlgoHash(callerUrl: string, siblingBasenames: readonly st
     // leading-only strip, so an inline-tail edit still shifts the
     // hash. Whitespace normalisation handles reformatting.
     const stripped = stripCommentsForRegex(lf, 'typescript', { stripInlineComments: false });
-    const normalised = stripped.replace(/\s+/g, ' ').trim();
+    const normalised = stripped.replaceAll(/\s+/g, ' ').trim();
     hasher.update(stem);
     hasher.update('\0');
     hasher.update(normalised);

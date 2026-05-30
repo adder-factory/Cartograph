@@ -276,7 +276,7 @@ function findDispatchTestFiles(cg: Cartograph, toolName: string): string[] {
  * MATCH expression. Mirrors the helper in `queries-summaries.ts`.
  */
 function escapeFts5Phrase(raw: string): string {
-  return '"' + raw.replace(/"/g, '""') + '"';
+  return '"' + raw.replaceAll(/"/g, '""') + '"';
 }
 
 /**

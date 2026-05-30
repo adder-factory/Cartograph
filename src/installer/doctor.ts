@@ -71,8 +71,8 @@ const SEMVER_COMPONENT_COUNT = 3;
 const SEMVER_RADIX = 10;
 
 function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map((n) => parseInt(n, SEMVER_RADIX));
-  const pb = b.split('.').map((n) => parseInt(n, SEMVER_RADIX));
+  const pa = a.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
+  const pb = b.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
   for (let i = 0; i < SEMVER_COMPONENT_COUNT; i++) {
     const ai = pa[i] ?? 0;
     const bi = pb[i] ?? 0;
