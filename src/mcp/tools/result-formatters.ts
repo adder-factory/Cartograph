@@ -211,7 +211,7 @@ function formatNodeListCompact(args: FormatNodeListArgs): string {
   // chained tools always see the same column shape.
   const defaultFields = roles ? ['name', 'kind', 'path', 'line', 'role', 'id'] : ['name', 'kind', 'path', 'line', 'id'];
   const hasExplicitFields = Array.isArray(fields) && fields.length > 0;
-  const fieldSet = hasExplicitFields ? new Set<string>(fields!) : new Set(defaultFields);
+  const fieldSet = hasExplicitFields ? new Set<string>(fields) : new Set(defaultFields);
   for (const node of nodes) {
     const cols: string[] = [];
     if (fieldSet.has('name')) cols.push(node.name);
@@ -230,7 +230,7 @@ function formatNodeListCompact(args: FormatNodeListArgs): string {
       if (role) cols.push(`role:${role}`);
     }
     const hasIdField = fieldSet.has('id') && refIds !== undefined;
-    if (hasIdField) cols.push(`id:${refIds!.mint(node.id)}`);
+    if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
     lines.push(cols.join('|'));
   }
   return lines.join('\n');

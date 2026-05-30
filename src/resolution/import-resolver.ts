@@ -344,7 +344,7 @@ function pushNamedImports(args: PushNamedImportsArgs): void {
   for (const raw of namesList.split(',')) {
     const name = raw.trim();
     if (!name) continue;
-    const alias = name.match(aliasRegex);
+    const alias = aliasRegex.exec(name);
     if (alias) {
       out.push({
         localName: alias[2]!,
@@ -855,7 +855,7 @@ function pushNamedReExportsFromBrace(out: ReExport[], source: string, inner: str
     // so the alias / bare-identifier patterns below match either form.
     const item = raw.trim().replace(/^type\s+/, '');
     if (!item) continue;
-    const aliasMatch = item.match(/^(\w+)\s+as\s+(\w+)$/);
+    const aliasMatch = /^(\w+)\s+as\s+(\w+)$/.exec(item);
     if (aliasMatch) {
       out.push({ kind: 'named', exportedName: aliasMatch[2]!, originalName: aliasMatch[1]!, source });
       continue;

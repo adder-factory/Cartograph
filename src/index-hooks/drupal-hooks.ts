@@ -80,7 +80,7 @@ const DOCBLOCK_IMPLEMENTS_RE = /(?:^|\W)@?Implements\s+(hook_\w+)\s*\(\)/;
 /** Derive the Drupal module name from a hook file path.
  *  `web/modules/custom/my_module/my_module.module` → `my_module`. */
 function moduleNameFromHookPath(filePath: string): string | null {
-  const match = filePath.match(/\/([^/]+)\.[^./]+$/);
+  const match = /\/([^/]+)\.[^./]+$/.exec(filePath);
   return match ? (match[1] ?? null) : null;
 }
 

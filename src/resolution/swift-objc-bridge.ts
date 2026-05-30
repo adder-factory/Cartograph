@@ -62,7 +62,7 @@ export function swiftBaseNamesForObjcSelector(selector: string): string[] {
   // selectors that use other prepositions natively (`objectForKey:`,
   // `stringWithFormat:`, `imageNamed:inBundle:`). Recover the Swift base
   // name a caller would use (`object`, `string`, `image`).
-  const prepositionMatch = firstKeyword.match(/^([a-z][a-zA-Z0-9]*?)(?:With|For|By|In|On|At|From|To|Of|As)[A-Z]/);
+  const prepositionMatch = /^([a-z][a-zA-Z0-9]*?)(?:With|For|By|In|On|At|From|To|Of|As)[A-Z]/.exec(firstKeyword);
   if (prepositionMatch?.[1]) {
     candidates.add(prepositionMatch[1]);
   }

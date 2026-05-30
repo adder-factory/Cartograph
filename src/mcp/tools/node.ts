@@ -718,7 +718,7 @@ function mergeCallerEntries(
   }
 
   // Fetch type-usage edges first — they win on dedup.
-  const typeUsageRows = getIncomingEdges(cg.queries, node.id, TYPE_USAGE_EDGE_KINDS as Edge['kind'][]);
+  const typeUsageRows = getIncomingEdges(cg.queries, node.id, TYPE_USAGE_EDGE_KINDS);
   const typeRowsRaw: Array<{ node: Node; edgeKind: Edge['kind'] }> = [];
   for (const e of typeUsageRows) {
     const src = cg.queries.getNodeById(e.source);

@@ -62,7 +62,7 @@ const goExtractor: LanguageExtractor = {
     // Find the type identifier inside the receiver
     const text = getNodeText(receiver, source);
     // Extract type name from patterns like "(sl *Type)", "(sl Type)", "(*Type)", "(Type)"
-    const match = text.match(/\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/);
+    const match = /\*?\s*([A-Za-z_][A-Za-z0-9_]*)\s*\)/.exec(text);
     return match?.[1];
   },
 };

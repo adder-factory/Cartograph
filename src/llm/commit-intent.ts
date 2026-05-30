@@ -143,7 +143,7 @@ export function classifyCommitMessage(message: string): CommitClassification {
   // Rule 1 — Conventional Commits prefix
   for (const rule of PREFIX_RULES) {
     if (rule.pattern.test(subject)) {
-      const prefixMatch = subject.match(/^[a-z]+/i)?.[0] ?? subject;
+      const prefixMatch = /^[a-z]+/i.exec(subject)?.[0] ?? subject;
       return {
         intent: rule.intent,
         score: PREFIX_SCORE,
@@ -155,7 +155,7 @@ export function classifyCommitMessage(message: string): CommitClassification {
   // Rule 2 — Keyword cues in subject
   for (const rule of KEYWORD_RULES) {
     if (rule.pattern.test(subject)) {
-      const keyword = subject.match(rule.pattern)?.[0] ?? subject.slice(0, 30);
+      const keyword = rule.pattern.exec(subject)?.[0] ?? subject.slice(0, 30);
       return {
         intent: rule.intent,
         score: rule.score,
@@ -166,7 +166,7 @@ export function classifyCommitMessage(message: string): CommitClassification {
 
   // Rule 3 — Body / footer cues (only when subject is ambiguous)
   for (const rule of FOOTER_RULES) {
-    const footerMatch = trimmed.match(rule.pattern);
+    const footerMatch = rule.pattern.exec(trimmed);
     if (footerMatch) {
       return {
         intent: rule.intent,

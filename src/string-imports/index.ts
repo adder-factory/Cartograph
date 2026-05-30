@@ -299,7 +299,7 @@ class StringImportScanner {
             filePath: this.filePath,
             line: seg.line + newlinesBefore,
             moduleName: m[1]!,
-            raw: m[0]!,
+            raw: m[0],
             containerKind,
           });
         }

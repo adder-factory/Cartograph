@@ -67,7 +67,7 @@ function readSimilarFromEdges({ cg, nodeId, k, minScore }: ReadSimilarFromEdgesA
 
   const scored: Array<{ targetId: string; score: number }> = [];
   for (const e of edges) {
-    const meta = e.metadata as Record<string, unknown> | undefined;
+    const meta = e.metadata;
     const raw = meta?.['score'];
     // `metadata.score` is a cosine similarity in [-1, 1] (see
     // similar-edges.ts). Defend against stale rows written by a

@@ -229,7 +229,7 @@ function listChildBlock(
   for (let i = start + 1; i < parent.end; i++) {
     const line = lines[i] ?? '';
     if (line.trim() === '') continue;
-    const indentMatch = line.match(/^( *)/);
+    const indentMatch = /^( *)/.exec(line);
     const indent = indentMatch?.[1]?.length ?? 0;
     if (indent >= 4) continue;
     if (indent === 2 && /^ {2}- /.test(line)) continue;
@@ -242,7 +242,7 @@ function listChildBlock(
 
   let itemIndent = '    ';
   for (let i = start + 1; i < end; i++) {
-    const m = (lines[i] ?? '').match(/^( +)- /);
+    const m = /^( +)- /.exec(lines[i] ?? '');
     if (m?.[1]) {
       itemIndent = m[1];
       break;

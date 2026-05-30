@@ -140,12 +140,12 @@ function parseDestructureNames(inner: string): string[] {
     // (before `as` / `:`) is what lives in the target file.
     const item = raw.trim().replace(/^type\s+/, '');
     if (!item) continue;
-    const colonMatch = item.match(/^(\w+)\s*:/);
+    const colonMatch = /^(\w+)\s*:/.exec(item);
     if (colonMatch) {
       out.push(colonMatch[1]!);
       continue;
     }
-    const asMatch = item.match(/^(\w+)\s+as\s+\w+$/);
+    const asMatch = /^(\w+)\s+as\s+\w+$/.exec(item);
     if (asMatch) {
       out.push(asMatch[1]!);
       continue;

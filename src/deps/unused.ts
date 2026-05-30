@@ -597,7 +597,7 @@ const RUNTIME_SHIMMED_SPECIFIERS: Array<{
       // commonly only put `bun test` in the leaf packages, not the root.
       for (const m of manifests) {
         const scripts = m.packageJson['scripts'] ?? {};
-        const testScript = typeof scripts['test'] === 'string' ? (scripts['test'] as string) : '';
+        const testScript = typeof scripts['test'] === 'string' ? scripts['test'] : '';
         if (/\bbun\s+test\b/.test(testScript)) return true;
       }
       // Signal B: a bunfig.toml at the project root — bun-native project.

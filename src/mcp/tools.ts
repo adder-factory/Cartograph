@@ -640,7 +640,7 @@ export class ToolHandler {
 
     // preFlightCheck returns either an error ToolResult or the gate + cg pair
     if ('isError' in preflight) {
-      return preflight as ToolResult;
+      return preflight;
     }
     const { cg, gate } = preflight as { cg: Cartograph | null; gate: FreshnessGateOutcome };
 

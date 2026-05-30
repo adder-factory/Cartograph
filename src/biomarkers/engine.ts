@@ -1683,7 +1683,7 @@ function evaluateRecentlyGrew(ctx: RuleContext): Finding | null {
 export function evaluateRules(ctx: RuleContext): Finding[] {
   const out: Finding[] = [];
   for (const rule of SIMPLE_RULES) {
-    const value = ctx.metrics[rule.metric] as number;
+    const value = ctx.metrics[rule.metric];
     const sev = severityFor(value, rule.thresholds);
     if (!sev) continue;
     out.push({ nodeId: ctx.nodeId, biomarker: rule.biomarker, severity: sev, metric: value });

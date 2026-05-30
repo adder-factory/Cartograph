@@ -65,7 +65,7 @@ function specToResolvedRel(importerAbs: string, spec: string, projectRootAbs: st
  * path on a match, or `null`.
  */
 function resolveJsToTs(resolvedRel: string, indexedRelSet: ReadonlySet<string>): string | null {
-  const jsExtMatch = resolvedRel.match(/\.(js|jsx|mjs|cjs)$/);
+  const jsExtMatch = /\.(js|jsx|mjs|cjs)$/.exec(resolvedRel);
   if (!jsExtMatch) return null;
   const stemRel = resolvedRel.slice(0, -jsExtMatch[0].length);
   for (const tsExt of ['.ts', '.tsx', '.d.ts']) {

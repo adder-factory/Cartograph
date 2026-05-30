@@ -265,7 +265,7 @@ function malformedGlobReason(glob: string): string | null {
 function parseFilterGlob(raw: unknown): { ok: true; value: RegExp | null } | { ok: false; error: string } {
   const hasFilterGlob = typeof raw === 'string' && raw.length > 0;
   if (!hasFilterGlob) return { ok: true, value: null };
-  const glob = raw as string;
+  const glob = raw;
   const malformed = malformedGlobReason(glob);
   if (malformed !== null) return { ok: false, error: `invalid filter glob: ${glob} (${malformed})` };
   const regexBody = globToSafeRegex(glob);

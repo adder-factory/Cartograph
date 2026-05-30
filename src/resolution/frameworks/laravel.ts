@@ -47,7 +47,7 @@ export const laravelResolver: FrameworkResolver = {
 
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
     // Pattern 1: Model::method() - Eloquent static calls
-    const modelMatch = ref.referenceName.match(/^([A-Z][a-zA-Z]+)::(\w+)$/);
+    const modelMatch = /^([A-Z][a-zA-Z]+)::(\w+)$/.exec(ref.referenceName);
     if (modelMatch) {
       const [, className, methodName] = modelMatch;
       const result = resolveModelCall(className!, methodName!, context);
@@ -62,8 +62,8 @@ export const laravelResolver: FrameworkResolver = {
     }
 
     // Pattern 2: Facade calls - Auth::user(), Cache::get()
-    const facadeMatch = ref.referenceName.match(
-      /^(Auth|Cache|DB|Log|Mail|Queue|Session|Storage|Validator|Route|Request|Response)::(\w+)$/,
+    const facadeMatch = /^(Auth|Cache|DB|Log|Mail|Queue|Session|Storage|Validator|Route|Request|Response)::(\w+)$/.exec(
+      ref.referenceName,
     );
     if (facadeMatch) {
       // Facades typically resolve to external Laravel code
@@ -94,7 +94,7 @@ export const laravelResolver: FrameworkResolver = {
     }
 
     // Pattern 4: Controller method references
-    const controllerMatch = ref.referenceName.match(/^([A-Z][a-zA-Z]+Controller)@(\w+)$/);
+    const controllerMatch = /^([A-Z][a-zA-Z]+Controller)@(\w+)$/.exec(ref.referenceName);
     if (controllerMatch) {
       const [, controller, method] = controllerMatch;
       const result = resolveControllerMethod(controller!, method!, context);

@@ -61,7 +61,7 @@ export function defaultObjcModuleName(className: string): string {
  * (`@implementation Foo (Bar)`) capture as `Foo`.
  */
 export function findObjcClassName(source: string): string | null {
-  const m = source.match(/@implementation\s+([A-Za-z_][A-Za-z0-9_]*)/);
+  const m = /@implementation\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(source);
   return m?.[1] ?? null;
 }
 
@@ -103,8 +103,8 @@ export function parseObjcRNExports(source: string, className: string | null): Ob
 
   // Module name — RCT_EXPORT_MODULE (optional arg → class name) OR
   // RCT_EXTERN[_REMAP]_MODULE (first arg = JS module name). One per file.
-  const exportModuleMatch = source.match(/RCT_EXPORT_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)/);
-  const externModuleMatch = source.match(/RCT_EXTERN(?:_REMAP)?_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/);
+  const exportModuleMatch = /RCT_EXPORT_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)/.exec(source);
+  const externModuleMatch = /RCT_EXTERN(?:_REMAP)?_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(source);
   const moduleName =
     exportModuleMatch?.[1] ?? externModuleMatch?.[1] ?? (className ? defaultObjcModuleName(className) : null);
   if (!moduleName) return results;
@@ -156,7 +156,7 @@ export function parseTurboModuleSpec(source: string): TurboModuleSpec | null {
   // Windows-authored spec files.
   const src = source.replaceAll('\r\n', '\n');
 
-  const regMatch = src.match(/TurboModuleRegistry\.(?:getEnforcing|get)\s*<[^>]*>\s*\(\s*['"]([^'"]+)['"]\s*\)/);
+  const regMatch = /TurboModuleRegistry\.(?:getEnforcing|get)\s*<[^>]*>\s*\(\s*['"]([^'"]+)['"]\s*\)/.exec(src);
   if (!regMatch?.[1]) return null;
 
   const iface = extractInterfaceBody(src, 'Spec');

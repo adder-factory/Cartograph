@@ -228,7 +228,7 @@ export class OpenAiSdkEmbeddingClient {
         // The SDK types `embedding` as `number[]`. Convert to
         // Float32Array to match the in-process `LocalEmbeddingClient`
         // surface (so downstream code doesn't branch on backend).
-        const arr = entry.embedding as number[];
+        const arr = entry.embedding;
         const f32 = new Float32Array(arr.length);
         for (let j = 0; j < arr.length; j++) f32[j] = arr[j]!;
         return f32;

@@ -126,13 +126,13 @@ export function extractSymbolFromContext(ctx: string): string | null {
   if (!trimmed) return null;
   // Order of patterns matters: anchor on keyword first, then on
   // identifier-followed-by-paren.
-  const m1 = trimmed.match(/(?:function|class|interface|type|enum|def|func|fn)\s+([A-Za-z_$][\w$]*)/);
+  const m1 = /(?:function|class|interface|type|enum|def|func|fn)\s+([A-Za-z_$][\w$]*)/.exec(trimmed);
   if (m1 && !SKIP_NAMES.has(m1[1]!)) return m1[1]!;
-  const m2 = trimmed.match(/^([A-Za-z_$][\w$]*)\s*\(/);
+  const m2 = /^([A-Za-z_$][\w$]*)\s*\(/.exec(trimmed);
   if (m2 && !SKIP_NAMES.has(m2[1]!)) return m2[1]!;
   // Methods: `  async foo(` after some indentation, with possibly a
   // visibility modifier we already skipped above.
-  const m3 = trimmed.match(/(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/);
+  const m3 = /(?:async\s+)?([A-Za-z_$][\w$]*)\s*\(/.exec(trimmed);
   if (m3 && !SKIP_NAMES.has(m3[1]!)) return m3[1]!;
   return null;
 }
@@ -147,7 +147,7 @@ export function extractDeclaration(diffLine: string): { name: string; sign: '+' 
   for (const re of DECL_PATTERNS) {
     const m = re.exec(diffLine);
     if (m?.[1] && !SKIP_NAMES.has(m[1])) {
-      return { name: m[1], sign: diffLine[0] as '+' | '-' };
+      return { name: m[1], sign: diffLine[0] };
     }
   }
   return null;
@@ -186,7 +186,7 @@ function extractContextDeclaration(diffLine: string): string | null {
  *  the diff line loop so the `if-startsWith / if-match / if-sym`
  *  chain doesn't sit 4-deep under the for-of. */
 function recordHunkContextSymbol(line: string, sets: FileDiffSets): void {
-  const m = line.match(/^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@\s*(.*)$/);
+  const m = /^@@\s+-\d+(?:,\d+)?\s+\+\d+(?:,\d+)?\s+@@\s*(.*)$/.exec(line);
   if (!m?.[1]) return;
   const sym = extractSymbolFromContext(m[1]);
   if (sym) sets.modCtx.add(sym);
@@ -197,7 +197,7 @@ function recordHunkContextSymbol(line: string, sets: FileDiffSets): void {
  *  the line doesn't match the expected shape). Idempotent on the
  *  perFile map — registers a fresh entry only when none exists. */
 function startNewDiffFile(line: string, perFile: Map<string, FileDiffSets>): string | null {
-  const m = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+  const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
   if (!m) return null;
   const newPath = m[2]!;
   if (SKIP_PATH_RE.test(newPath)) return null;

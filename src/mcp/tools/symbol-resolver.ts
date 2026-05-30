@@ -688,8 +688,8 @@ function resolveSymbolViaSearch(cg: Cartograph, symbol: string): { node: Node; n
   // → `SUGGEST_SUBSTR_GATE`). Accepting it makes `node zzznotreal`
   // confidently print a wrong symbol's full details. When the top-1
   // fails the gate, fall through to a clean "not found + suggestions".
-  if (!fuzzyCandidatePassesGate(cg, symbol, results[0]!.node)) return null;
-  return fuzzyFallbackResult(cg, symbol, results[0]!.node);
+  if (!fuzzyCandidatePassesGate(cg, symbol, results[0].node)) return null;
+  return fuzzyFallbackResult(cg, symbol, results[0].node);
 }
 
 export function findSymbol(

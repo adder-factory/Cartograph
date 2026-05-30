@@ -52,13 +52,13 @@ export class DfmExtractor extends StandaloneExtractor {
 
       if (advanceMultiLineState(line, multiLineState)) continue;
 
-      const objMatch = line.match(objectPattern);
+      const objMatch = objectPattern.exec(line);
       if (objMatch) {
         this.emitComponent({ objMatch, lineNum, line, stack });
         continue;
       }
 
-      const eventMatch = line.match(eventPattern);
+      const eventMatch = eventPattern.exec(line);
       if (eventMatch) {
         this.emitEventHandler(eventMatch, lineNum, stack);
         continue;

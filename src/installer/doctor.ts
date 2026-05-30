@@ -235,7 +235,7 @@ function checkEmbeddingReachability(
 ): CheckResult | null {
   if (!embeddingLlm || typeof embeddingLlm !== 'object') return null;
   if (embeddingLlm['provider'] !== 'openai-compat') return null;
-  const endpoint = typeof embeddingLlm['endpoint'] === 'string' ? (embeddingLlm['endpoint'] as string) : null;
+  const endpoint = typeof embeddingLlm['endpoint'] === 'string' ? embeddingLlm['endpoint'] : null;
   if (!endpoint) {
     return {
       name: 'Embedding endpoint',
@@ -447,8 +447,7 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   // configured-endpoint reachability check. Scanner is async and
   // probes 5+ ports in parallel with a 1s per-port timeout, so this
   // adds ~1s to the doctor run worst-case.
-  const configuredEndpoint =
-    typeof embeddingLlm?.['endpoint'] === 'string' ? (embeddingLlm['endpoint'] as string) : undefined;
+  const configuredEndpoint = typeof embeddingLlm?.['endpoint'] === 'string' ? embeddingLlm['endpoint'] : undefined;
   const detected = await detectBackends(configuredEndpoint);
   checks.push(detectedBackendsCheck(detected));
   const reachability = checkEmbeddingReachability(embeddingLlm, detected);

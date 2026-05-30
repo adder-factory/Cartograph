@@ -338,7 +338,7 @@ async function llmClientInstantiateBackend(cfg: ChatProviderConfig): Promise<Cha
       return new OpenAiSdkChatBackend(cfg);
     }
     default: {
-      const p = (cfg as ChatProviderConfig).provider;
+      const p = cfg.provider;
       throw new LlmEndpointError(
         `unsupported chat provider "${p}" — supported: openai-compat (HTTP), claude-bridge, anthropic-api`,
       );

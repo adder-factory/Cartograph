@@ -25,7 +25,7 @@ export interface InterfaceBody {
  *  when the interface is absent or unbalanced. `interfaceName` is regex-escaped
  *  before interpolation, so a name with metacharacters is matched literally. */
 export function extractInterfaceBody(source: string, interfaceName: string): InterfaceBody | null {
-  const head = source.match(new RegExp(`export\\s+interface\\s+${escapeRegExp(interfaceName)}\\b[^{]*\\{`));
+  const head = new RegExp(`export\\s+interface\\s+${escapeRegExp(interfaceName)}\\b[^{]*\\{`).exec(source);
   if (head?.index === undefined) return null;
   const open = head.index + head[0].length - 1; // offset of the opening `{`
   let depth = 0;

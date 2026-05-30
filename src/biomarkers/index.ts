@@ -597,7 +597,7 @@ async function preloadBiomarkerGrammars(queries: QueryBuilder, targetFiles: Read
   const supportedLanguages = new Set<Language>();
   for (const file of targetFiles.slice(0, 200)) {
     const nodes = queries.getNodesByFile(file);
-    if (nodes.length > 0) supportedLanguages.add(nodes[0]!.language as Language);
+    if (nodes.length > 0) supportedLanguages.add(nodes[0]!.language);
   }
   if (supportedLanguages.size === 0) return;
   try {
@@ -747,7 +747,7 @@ async function loadAnalysableSource(
     stats.filesScanned++;
     return null;
   }
-  const language = analysable[0]!.language as Language;
+  const language = analysable[0]!.language;
   if (!getLangMap(language)) {
     stats.unsupportedLanguages++;
     if (currentHash) ctx.nextCache[relPath] = currentHash;

@@ -197,7 +197,7 @@ async function preloadGrammarsForBatch(
   // loading inside parseSource covers the tail.
   for (const item of batch.slice(0, 200)) {
     const nodes = queries.getNodesByFile(item.relPath);
-    if (nodes.length > 0) supported.add(nodes[0]!.language as Language);
+    if (nodes.length > 0) supported.add(nodes[0]!.language);
   }
   if (supported.size === 0) return;
   try {
@@ -328,7 +328,7 @@ async function prepareFileAnalysis(
   const allNodes = args.queries.getNodesByFile(args.relPath);
   const analysable = allNodes.filter((n) => ANALYSABLE_KINDS.has(n.kind));
   if (analysable.length === 0) return { kind: 'early-return', outcome: 'no-analysable' };
-  const language = analysable[0]!.language as Language;
+  const language = analysable[0]!.language;
   if (!args.getLangMap(language)) {
     stats.unsupportedLanguages++;
     return { kind: 'early-return', outcome: 'unsupported-language' };

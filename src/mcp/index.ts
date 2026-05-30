@@ -321,12 +321,12 @@ async function mcpHandleMessage(
   const isRequest = 'id' in message;
   const handler = REQUEST_HANDLERS[message.method];
   if (handler) {
-    if (isRequest) await handler(server, transport, message as JsonRpcRequest);
+    if (isRequest) await handler(server, transport, message);
     return;
   }
   // Unknown method: return MethodNotFound for requests; silently drop notifications.
   if (isRequest) {
-    transport.sendError((message as JsonRpcRequest).id, {
+    transport.sendError(message.id, {
       code: ErrorCodes.MethodNotFound,
       message: `Method not found: ${message.method}`,
     });

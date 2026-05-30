@@ -571,14 +571,14 @@ export function getHotspots(
       | 'hotspotsWithRecencyCentrality'
       | 'hotspotsWithRecencyChurn';
     qb.queries[regKey] ??= hotspotsWithRecencyQueries[sortBy](qb.db);
-    return qb.queries[regKey]!.all({ minCommits, minCentrality, recencyCutoff, limit });
+    return qb.queries[regKey].all({ minCommits, minCentrality, recencyCutoff, limit });
   }
   const regKey = `hotspotsAll${sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}` as
     | 'hotspotsAllRisk'
     | 'hotspotsAllCentrality'
     | 'hotspotsAllChurn';
   qb.queries[regKey] ??= hotspotsAllQueries[sortBy](qb.db);
-  return qb.queries[regKey]!.all({ minCommits, minCentrality, limit });
+  return qb.queries[regKey].all({ minCommits, minCentrality, limit });
 }
 
 /** A single row returned by the hotspot family of queries. */

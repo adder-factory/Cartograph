@@ -211,7 +211,7 @@ const KOTLIN_IMPORT_ALIAS_RE = /\bas\s+(\w+)\s*;?\s*$/;
 
 function extractKotlinAlias(signature: string | undefined): string | undefined {
   if (!signature) return undefined;
-  const m = signature.match(KOTLIN_IMPORT_ALIAS_RE);
+  const m = KOTLIN_IMPORT_ALIAS_RE.exec(signature);
   return m?.[1];
 }
 
@@ -633,7 +633,7 @@ const INSTANCE_RECEIVER_CONFIDENCE = 0.8;
  */
 function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
   // Parse method call patterns: `obj.method` (dotted) or `Class::method` (scoped).
-  const match = ref.referenceName.match(/^(\w+)\.(\w+)$/) ?? ref.referenceName.match(/^(\w+)::(\w+)$/);
+  const match = /^(\w+)\.(\w+)$/.exec(ref.referenceName) ?? /^(\w+)::(\w+)$/.exec(ref.referenceName);
   if (!match) return null;
   const [, objectOrClass, methodName] = match;
   if (!objectOrClass || !methodName) return null;

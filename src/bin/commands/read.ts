@@ -142,7 +142,7 @@ program
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean)) {
-          const m = spec.match(/^(.+):(\d+)-(\d+)$/);
+          const m = /^(.+):(\d+)-(\d+)$/.exec(spec);
           if (!m) {
             error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
             process.exit(1);

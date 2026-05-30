@@ -485,7 +485,7 @@ function appendDefaultProjectSection(lines: string[], ctx: ToolCtx, queriedRoot:
   if (ctx.defaultCg) {
     const defaultRoot = (() => {
       try {
-        return ctx.defaultCg!.projectRoot;
+        return ctx.defaultCg.projectRoot;
       } catch {
         return null;
       }

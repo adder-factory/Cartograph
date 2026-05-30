@@ -204,10 +204,10 @@ export const aspnetResolver: FrameworkResolver = {
             // HttpGet style without path
             const [, , method] = match;
             nodes.push({
-              id: `route:${filePath}:${method!.toUpperCase()}:${line}`,
+              id: `route:${filePath}:${method.toUpperCase()}:${line}`,
               kind: 'route',
-              name: `${method!.toUpperCase()}`,
-              qualifiedName: `${filePath}::${method!.toUpperCase()}`,
+              name: `${method.toUpperCase()}`,
+              qualifiedName: `${filePath}::${method.toUpperCase()}`,
               filePath,
               startLine: line,
               endLine: line,

@@ -248,7 +248,7 @@ function unquoteStringNode(node: SyntaxNode, source: string): string {
   // Raw-string form: optional `r`/`R`, opening quote, dashes*, opening
   // delimiter ((|[|{), body, matching closing delimiter, same dashes,
   // closing quote.
-  const m = text.match(/^[rR]"(-*)([([{])([\s\S]*)([)\]}])\1"$/);
+  const m = /^[rR]"(-*)([([{])([\s\S]*)([)\]}])\1"$/.exec(text);
   if (m) {
     const [, , open, body, close] = m;
     const ok = (open === '(' && close === ')') || (open === '[' && close === ']') || (open === '{' && close === '}');

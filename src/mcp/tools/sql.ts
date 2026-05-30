@@ -168,7 +168,7 @@ export function isReadOnlySql(sql: string): boolean {
     return true;
   }
   if (/^EXPLAIN\s/.test(upper)) return true;
-  const pragmaMatch = trimmed.match(/^PRAGMA\s+(\w+)/i);
+  const pragmaMatch = /^PRAGMA\s+(\w+)/i.exec(trimmed);
   if (pragmaMatch) {
     if (!READONLY_PRAGMAS.has(pragmaMatch[1]!.toLowerCase())) return false;
     // The name allowlist is necessary but not sufficient: several
@@ -579,7 +579,7 @@ function executeQuery(args: ExecuteQueryArgs): {
   // materialises before yielding the first row) — node:sqlite has no
   // interrupt API. The cap is best-effort defense-in-depth, not a hard
   // resource fence.
-  for (const row of stmt.iterate() as IterableIterator<Record<string, unknown>>) {
+  for (const row of stmt.iterate()) {
     if (rows.length >= limit) {
       truncated = true;
       break;

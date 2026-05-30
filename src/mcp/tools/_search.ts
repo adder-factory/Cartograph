@@ -127,7 +127,7 @@ function formatSearchResultsCompact(args: FormatSearchResultsCompactArgs): strin
     ? ['name', 'kind', 'path', 'line', 'signature', 'id']
     : ['name', 'kind', 'path', 'line', 'signature'];
   const hasExplicitFields = Array.isArray(fields) && fields.length > 0;
-  const fieldSet = hasExplicitFields ? new Set<string>(fields!) : new Set<string>(defaultFields);
+  const fieldSet = hasExplicitFields ? new Set<string>(fields) : new Set<string>(defaultFields);
 
   for (const r of results) {
     const { node } = r;
@@ -145,7 +145,7 @@ function formatSearchResultsCompact(args: FormatSearchResultsCompactArgs): strin
     else if (hasLineField) cols.push(String(node.startLine));
     if (fieldSet.has('signature') && node.signature) cols.push(`sig:${node.signature}`);
     const hasIdField = fieldSet.has('id') && refIds !== undefined;
-    if (hasIdField) cols.push(`id:${refIds!.mint(node.id)}`);
+    if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
     lines.push(cols.join('|'));
   }
   return lines.join('\n');

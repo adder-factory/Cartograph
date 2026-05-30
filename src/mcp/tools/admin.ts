@@ -792,7 +792,7 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
  * the configured endpoints to actually serve traffic.
  */
 async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
-  const projectPath = typeof args['projectPath'] === 'string' ? (args['projectPath'] as string) : null;
+  const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : null;
   const preset = typeof args['preset'] === 'string' ? (args['preset'] as string) : '';
   if (!projectPath) {
     return err(
@@ -864,9 +864,9 @@ const LLM_TIER_TO_CONFIG_KEY: Record<LlmTier, LlmTierConfigKey> = {
 };
 
 async function handleLlmTune(_ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
-  const projectPath = typeof args['projectPath'] === 'string' ? (args['projectPath'] as string) : process.cwd();
-  const tier = typeof args['tier'] === 'string' ? (args['tier'] as string) : null;
-  const concurrency = typeof args['concurrency'] === 'number' ? (args['concurrency'] as number) : null;
+  const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : process.cwd();
+  const tier = typeof args['tier'] === 'string' ? args['tier'] : null;
+  const concurrency = typeof args['concurrency'] === 'number' ? args['concurrency'] : null;
   const { describeHardware, recommendedTuning } = await import('../../installer/hardware-tuning.js');
   const tuning = recommendedTuning();
   if (tier !== null) {
@@ -995,7 +995,7 @@ async function readCurrentOverrides(projectPath: string): Promise<Record<string,
     const llm = (parsed['llm'] as Record<string, unknown> | undefined) ?? {};
     const readConc = (k: string): number | null => {
       const block = llm[k] as Record<string, unknown> | null | undefined;
-      return typeof block?.['concurrency'] === 'number' ? (block['concurrency'] as number) : null;
+      return typeof block?.['concurrency'] === 'number' ? block['concurrency'] : null;
     };
     return {
       embed: readConc('embeddingLlm'),

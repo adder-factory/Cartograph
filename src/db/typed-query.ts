@@ -117,7 +117,7 @@ function captureCallerSource(): string {
   const lines = stack.split('\n');
   for (let i = 3; i < lines.length; i++) {
     const line = lines[i]!;
-    const match = line.match(/[(\s](\/[^():]+\.ts):(\d+)(?::\d+)?\)?$/);
+    const match = /[(\s](\/[^():]+\.ts):(\d+)(?::\d+)?\)?$/.exec(line);
     if (match) {
       const [, filePath, lineNum] = match;
       // Trim the absolute prefix down to `src/db/queries-x.ts` style

@@ -188,7 +188,7 @@ export const springResolver: FrameworkResolver = {
     }
 
     // Extract class-level @RequestMapping for base path
-    const baseMappingMatch = content.match(/@RequestMapping\s*\(\s*["']([^"']+)["']\s*\)/);
+    const baseMappingMatch = /@RequestMapping\s*\(\s*["']([^"']+)["']\s*\)/.exec(content);
     if (baseMappingMatch) {
       const [, basePath] = baseMappingMatch;
       // `String.prototype.match` is typed as returning `index?: number`

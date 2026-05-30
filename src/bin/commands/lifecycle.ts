@@ -125,7 +125,7 @@ program
           error(`Unknown target "${opts.printConfig}". Known: ${known}.`);
           process.exit(1);
         }
-        const loc = (opts.location === 'local' ? 'local' : 'global') as 'global' | 'local';
+        const loc = opts.location === 'local' ? 'local' : 'global';
         process.stdout.write(target.printConfig(loc));
         return;
       }

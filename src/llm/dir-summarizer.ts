@@ -251,7 +251,7 @@ export function extractClaudeMdAnchor(content: string): string | null {
   // Find every `## ` heading and the line index it sits on.
   const headingIndexes: Array<{ line: number; title: string }> = [];
   for (let i = 0; i < lines.length; i++) {
-    const m = lines[i]!.match(/^##\s+(.+?)\s*$/);
+    const m = /^##\s+(.+?)\s*$/.exec(lines[i]!);
     if (m) headingIndexes.push({ line: i, title: m[1]! });
   }
   if (headingIndexes.length === 0) return null;

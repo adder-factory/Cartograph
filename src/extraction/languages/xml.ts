@@ -407,7 +407,7 @@ function emitMapperStatements(args: MapperEmitArgs): void {
     const tag = m[1]!.toLowerCase();
     const id = m[2]!;
     const openingStart = m.index;
-    const openingEnd = openingStart + m[0]!.length;
+    const openingEnd = openingStart + m[0].length;
     const startLine = lineNumberAt(source, openingStart);
     const ordinal = ordinalById.get(id) ?? 0;
     ordinalById.set(id, ordinal + 1);
@@ -437,7 +437,7 @@ function emitMapperStatements(args: MapperEmitArgs): void {
       id,
       startLine,
       openingEnd,
-      openingText: m[0]!,
+      openingText: m[0],
       unresolvedReferences,
     });
   }

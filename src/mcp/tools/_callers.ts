@@ -187,11 +187,7 @@ function expandTestFileCallerCore(
   // tail — we've already fanned the rows out, one per site.
   const perSiteMeta =
     edge.metadata && typeof edge.metadata === 'object'
-      ? Object.fromEntries(
-          Object.entries(edge.metadata as Record<string, unknown>).filter(
-            ([k]) => k !== 'siteCount' && k !== 'extraLines',
-          ),
-        )
+      ? Object.fromEntries(Object.entries(edge.metadata).filter(([k]) => k !== 'siteCount' && k !== 'extraLines'))
       : undefined;
   for (const callLine of siteLines) {
     const test = getEnclosingTestName(queries, { filePath: node.filePath, line: callLine });

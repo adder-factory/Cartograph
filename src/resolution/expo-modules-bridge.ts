@@ -72,7 +72,7 @@ export function isExpoModuleSource(source: string): boolean {
  */
 export function parseExpoModule(source: string): ExpoModule | null {
   if (!isExpoModuleSource(source)) return null;
-  const moduleName = source.match(EXPO_MODULE_NAME_RE)?.[1] ?? source.match(EXPO_CLASS_RE)?.[1] ?? 'ExpoModule';
+  const moduleName = EXPO_MODULE_NAME_RE.exec(source)?.[1] ?? EXPO_CLASS_RE.exec(source)?.[1] ?? 'ExpoModule';
   const members: ExpoMember[] = [];
   const declRe = new RegExp(EXPO_DECL_SRC, 'g');
   let m: RegExpExecArray | null;

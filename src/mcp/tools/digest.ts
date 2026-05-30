@@ -81,8 +81,8 @@ async function handleDigest(ctx: ToolCtx, args: DigestArgs): Promise<ToolOutcome
 /** "typescript 365 · javascript 9 · ..." — top 3 languages by file count. */
 function formatLangMix(stats: ReturnType<Cartograph['stats']['getStats']>): string {
   const langs = Object.entries(stats.filesByLanguage ?? {})
-    .filter(([, n]) => (n as number) > 0)
-    .sort(([, a], [, b]) => (b as number) - (a as number))
+    .filter(([, n]) => n > 0)
+    .sort(([, a], [, b]) => b - a)
     .slice(0, 3);
   if (langs.length === 0) return '(none)';
   return langs.map(([lang, n]) => `${lang} ${n}`).join(' · ');

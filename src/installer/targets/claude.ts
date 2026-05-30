@@ -195,11 +195,11 @@ export function writeInstructionsEntry(loc: Location): WriteResult['files'][numb
   if (fs.existsSync(file)) {
     const content = fs.readFileSync(file, 'utf-8');
     if (!content.includes(CARTOGRAPH_SECTION_START)) {
-      const headerMatch = content.match(/\n## Cartograph\n/);
+      const headerMatch = /\n## Cartograph\n/.exec(content);
       if (headerMatch && headerMatch.index !== undefined) {
         const sectionStart = headerMatch.index;
         const after = content.substring(sectionStart + 1);
-        const nextHeader = after.match(/\n## (?!#)/);
+        const nextHeader = /\n## (?!#)/.exec(after);
         const sectionEnd = computeSectionEnd(content, sectionStart, nextHeader);
         const merged =
           content.substring(0, sectionStart) + '\n' + INSTRUCTIONS_TEMPLATE + content.substring(sectionEnd);

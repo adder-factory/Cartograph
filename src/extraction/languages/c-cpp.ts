@@ -174,7 +174,7 @@ function macroClassFromErrorChild(node: SyntaxNode, child: SyntaxNode, i: number
  */
 function macroClassFromNestedError(qc: SyntaxNode): MacroClassInfo | null {
   if (qc.type !== 'ERROR') return null;
-  const kwMatch = qc.text.trim().match(/^(class|struct)\s/);
+  const kwMatch = /^(class|struct)\s/.exec(qc.text.trim());
   if (kwMatch) {
     const found = findClassNameInSubtree(qc);
     if (found) return { name: found, kind: macroClassKind(kwMatch[1]!) };

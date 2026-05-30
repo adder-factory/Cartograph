@@ -42,7 +42,7 @@ function fillEditRow(ctx: EditRowCtx, i: number): number {
   const { a, b, prev, cur } = ctx;
   const bl = b.length;
   cur[0] = i;
-  let rowMin = cur[0]!;
+  let rowMin = cur[0];
   for (let j = 1; j <= bl; j++) {
     const cost = a[i - 1] === b[j - 1] ? 0 : 1;
     const insertion = cur[j - 1]! + 1;

@@ -373,7 +373,7 @@ export function stripPreamble(s: string): string {
     // (with|using|that|for) …" — preserves the semantic content the
     // model produced instead of dropping the whole stem.
     if (m[1] && /constructor/i.test(m[0])) {
-      const conn = (m[0].match(/(with|using|that|for)\s+$/i) ?? [undefined, ''])[1]!;
+      const conn = (/(with|using|that|for)\s+$/i.exec(m[0]) ?? [undefined, ''])[1];
       const rest = s.slice(m[0].length);
       return `Constructs ${m[1]} ${conn} ${rest}`.replaceAll(/\s+/g, ' ').trim();
     }

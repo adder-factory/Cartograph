@@ -56,7 +56,7 @@ export const expressResolver: FrameworkResolver = {
     }
 
     // Pattern 2: Controller method references
-    const controllerMatch = ref.referenceName.match(/^(\w+)Controller\.(\w+)$/);
+    const controllerMatch = /^(\w+)Controller\.(\w+)$/.exec(ref.referenceName);
     if (controllerMatch) {
       const [, controller, method] = controllerMatch;
       const result = resolveControllerMethod(controller!, method!, context);

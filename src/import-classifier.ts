@@ -118,7 +118,7 @@ function resolveDirectFileHit(resolvedBase: string, extMissing: boolean): Import
  */
 function resolveEsmRewrite(resolvedBase: string, extMissing: boolean): ImportClassification | undefined {
   for (const [pattern, exts] of JS_TO_TS_REWRITES) {
-    const m = resolvedBase.match(pattern);
+    const m = pattern.exec(resolvedBase);
     if (!m) continue;
     const stem = resolvedBase.slice(0, -m[0].length);
     for (const ext of exts) {
@@ -411,7 +411,7 @@ export function readGoModuleAlias(projectRootAbs: string): string | null {
     if (!fs.existsSync(goModPath)) return null;
     const content = fs.readFileSync(goModPath, 'utf8');
     // First non-comment `module <path>` line.
-    const match = content.match(/^\s*module\s+(\S+)/m);
+    const match = /^\s*module\s+(\S+)/m.exec(content);
     return match?.[1] ?? null;
   } catch {
     return null;

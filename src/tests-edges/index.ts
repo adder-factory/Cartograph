@@ -56,27 +56,27 @@ export function testSubjectBasename(filePath: string): string | null {
   const base = path.basename(filePath);
 
   // foo.test.ts / foo.spec.ts (JS/TS family)
-  let m = base.match(/^(.+?)\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/);
+  let m = /^(.+?)\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs)$/.exec(base);
   if (m) return m[1]!;
 
   // test_foo.py / test_foo.rs
-  m = base.match(/^test_(.+?)\.(py|rs)$/);
+  m = /^test_(.+?)\.(py|rs)$/.exec(base);
   if (m) return m[1]!;
 
   // foo_test.go / foo_test.py / foo_test.rs
-  m = base.match(/^(.+?)_test\.(go|py|rs)$/);
+  m = /^(.+?)_test\.(go|py|rs)$/.exec(base);
   if (m) return m[1]!;
 
   // foo_spec.rb / foo_test.rb
-  m = base.match(/^(.+?)_(spec|test)\.rb$/);
+  m = /^(.+?)_(spec|test)\.rb$/.exec(base);
   if (m) return m[1]!;
 
   // FooTest.java / FooTests.java (xUnit-style; trailing s optional)
-  m = base.match(/^(.+?)Tests?\.(java|kt|cs|swift)$/);
+  m = /^(.+?)Tests?\.(java|kt|cs|swift)$/.exec(base);
   if (m) return m[1]!;
 
   // FooSpec.swift / FooSpec.kt (Quick / Spek)
-  m = base.match(/^(.+?)Spec\.(swift|kt)$/);
+  m = /^(.+?)Spec\.(swift|kt)$/.exec(base);
   if (m) return m[1]!;
 
   return null;
@@ -252,7 +252,7 @@ const RUST_CARGO_INTEGRATION_PATH_RE = /^(.*\/)?tests\/[^/]+\.rs$/;
  * resolution in a follow-up.
  */
 export function cargoIntegrationCrateRoot(filePath: string): string | null {
-  const m = filePath.match(RUST_CARGO_INTEGRATION_PATH_RE);
+  const m = RUST_CARGO_INTEGRATION_PATH_RE.exec(filePath);
   return m ? (m[1] ?? '') : null;
 }
 

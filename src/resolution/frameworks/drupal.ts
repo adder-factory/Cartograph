@@ -456,7 +456,7 @@ function collectFactoryRef(factoryPair: YamlNode | null): { id: string; line: nu
  *  optional-service `@?svc` both reference service `svc`; anything else
  *  (a `%param%`, a plain scalar) is not a service ref → null. */
 function serviceRefId(arg: string): string | null {
-  const m = arg.match(/^@\??(.+)$/);
+  const m = /^@\??(.+)$/.exec(arg);
   if (!m) return null;
   const id = m[1]!.trim();
   // `@@literal` escapes a leading @ — not a service ref.
@@ -672,7 +672,7 @@ export const drupalResolver: FrameworkResolver = {
     const name = ref.referenceName;
 
     // `_controller: '\Drupal\…\ClassName::methodName'`
-    const controllerMatch = name.match(/^\\?(?:Drupal\\[^:]+\\)?([^\\:]+)::(\w+)$/);
+    const controllerMatch = /^\\?(?:Drupal\\[^:]+\\)?([^\\:]+)::(\w+)$/.exec(name);
     if (controllerMatch) {
       const className = controllerMatch[1];
       const methodName = controllerMatch[2];

@@ -151,8 +151,8 @@ function collectCallSites(cg: import('../../index.js').default, matches: readonl
     }
   }
   callSites.sort((a, b) => {
-    const ca = CONF_RANK[(a.edge.confidence ?? 'EXTRACTED') as keyof typeof CONF_RANK];
-    const cb = CONF_RANK[(b.edge.confidence ?? 'EXTRACTED') as keyof typeof CONF_RANK];
+    const ca = CONF_RANK[a.edge.confidence ?? 'EXTRACTED'];
+    const cb = CONF_RANK[b.edge.confidence ?? 'EXTRACTED'];
     if (ca !== cb) return cb - ca;
     return a.callerNode.filePath.localeCompare(b.callerNode.filePath);
   });
