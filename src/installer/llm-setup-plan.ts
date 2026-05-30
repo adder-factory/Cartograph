@@ -208,15 +208,12 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
 
   // Install paths — always available; pushed below detected when
   // anything's running.
-  presets.push(buildInstallOllamaPreset());
-  presets.push(buildInstallLlamaCppPreset(localGgufPresence));
-  presets.push(buildInstallMlxPreset());
+  presets.push(buildInstallOllamaPreset(), buildInstallLlamaCppPreset(localGgufPresence), buildInstallMlxPreset());
 
   // Cloud presets — always available. Most accessible when local
   // hardware can't host the recommended model sizes (limited
   // VRAM/RAM, slow disk, no GPU).
-  presets.push(buildCloudOpenAiPreset());
-  presets.push(buildCloudOpenAiCompatPreset());
+  presets.push(buildCloudOpenAiPreset(), buildCloudOpenAiCompatPreset());
 
   // Hybrid: cloud Claude for ask. Only when cloud auth is present.
   if (claudeBin !== null) presets.push(buildHybridPreset('hybrid-claude-bridge', claudeBin));

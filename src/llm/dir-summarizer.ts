@@ -530,26 +530,28 @@ export function buildStructuralDirectorySummary(
 export function buildPrompt(group: DirGroup, anchorText: string): string {
   const lines: string[] = [];
   if (anchorText.length > 0) {
-    lines.push('## Project Overview (for grounding only — do not paraphrase verbatim)');
-    lines.push(anchorText);
-    lines.push('');
+    lines.push('## Project Overview (for grounding only — do not paraphrase verbatim)', anchorText, '');
   }
-  lines.push(`You are documenting the module \`${group.dir}\` of the project described above.`);
-  lines.push('');
-  lines.push(`Below are one-line descriptions of every meaningful symbol in this directory.`);
-  lines.push(`Write a SHORT paragraph (max ${MAX_SUMMARY_CHARS} chars) describing what this`);
-  lines.push(`module does as a whole — its responsibility, the main types/functions it`);
-  lines.push(`exposes, and how a caller would use it. Ground the description in the`);
-  lines.push(`Project Overview above and in the symbol summaries below; do not invent`);
-  lines.push(`functionality that is not present in the symbol summaries.`);
+  lines.push(
+    `You are documenting the module \`${group.dir}\` of the project described above.`,
+    '',
+    `Below are one-line descriptions of every meaningful symbol in this directory.`,
+    `Write a SHORT paragraph (max ${MAX_SUMMARY_CHARS} chars) describing what this`,
+    `module does as a whole — its responsibility, the main types/functions it`,
+    `exposes, and how a caller would use it. Ground the description in the`,
+    `Project Overview above and in the symbol summaries below; do not invent`,
+    `functionality that is not present in the symbol summaries.`,
+  );
   // Handoff #9: dir-summary prose hallucinated acronym expansions for
   // directory names (e.g. "mcp" → "Microcontroller Platform" /
   // "Minecraft Code Platform"). Same guidance as file-summarizer.ts.
-  lines.push(`When the directory path contains an acronym (e.g. "mcp", "hnsw"), use it`);
-  lines.push(`VERBATIM unless the Project Overview above explicitly defines its`);
-  lines.push(`expansion. Never guess at acronym meanings from training data.`);
-  lines.push(`No bullet lists. No headers. Just prose.`);
-  lines.push('');
+  lines.push(
+    `When the directory path contains an acronym (e.g. "mcp", "hnsw"), use it`,
+    `VERBATIM unless the Project Overview above explicitly defines its`,
+    `expansion. Never guess at acronym meanings from training data.`,
+    `No bullet lists. No headers. Just prose.`,
+    '',
+  );
   lines.push('## Symbols in this module');
   const items = group.items.slice(0, MAX_SYMBOLS_IN_PROMPT);
   for (const it of items) {

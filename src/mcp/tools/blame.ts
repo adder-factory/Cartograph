@@ -295,8 +295,7 @@ async function handleBlame(ctx: ToolCtx, args: BlameToolArgs): Promise<ToolOutco
 function fmtRow(row: BlameRow): string[] {
   const lines: string[] = [];
   const date = row.commit.dateIso.slice(0, 10);
-  lines.push(`- \`${row.commit.shortSha}\` ${date} — ${row.commit.author}`);
-  lines.push(`    ${row.commit.subject}`);
+  lines.push(`- \`${row.commit.shortSha}\` ${date} — ${row.commit.author}`, `    ${row.commit.subject}`);
   if (row.coTouched.length > 0) {
     const peers = row.coTouched.map((p) => `\`${p.name}\` (${p.kind})`).join(', ');
     const extra = row.coTouchedTotal - row.coTouched.length;

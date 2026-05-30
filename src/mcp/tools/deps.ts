@@ -57,8 +57,7 @@ function formatUnusedSections(r: ReturnType<typeof analyzeUnusedDeps>): string[]
     lines.push(renderMarkdownBulletList(buildDepsUnusedSpec('optional', r.unusedOptional)));
   }
   if (r.unusedRuntime.length === 0 && r.unusedDev.length === 0 && r.unusedOptional.length === 0) {
-    lines.push(DEPS_ALL_CLEAN_NOTE);
-    lines.push('');
+    lines.push(DEPS_ALL_CLEAN_NOTE, '');
   }
   return lines;
 }

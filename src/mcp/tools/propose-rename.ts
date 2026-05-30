@@ -466,8 +466,9 @@ function formatReport(opts: FormatReportOpts): string {
   appendDocHitsSection(lines, docHits, docLimit);
 
   // Suggested workflow footer.
-  lines.push('---', '');
   lines.push(
+    '---',
+    '',
     `> **Suggested workflow:** apply EXTRACTED edits mechanically (Edit tool with replace_all=false ` +
       `per file or sed for bulk), review INFERRED / AMBIGUOUS edits per-line, then read each textual ` +
       `mention to confirm it's the same symbol before renaming. Re-run \`cartograph_propose_rename\` ` +

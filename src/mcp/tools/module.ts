@@ -436,14 +436,16 @@ export function buildModuleReportSpec(input: ModuleReportInput): MarkdownKeyValu
   if (input.langCounts.size > 0) {
     rows.push({ label: 'Languages', value: formatLanguages(input.langCounts) });
   }
-  rows.push({
-    label: 'Symbols',
-    value: `${input.totalSymbols} summarisable (${input.summarisedHere} have LLM summaries)`,
-  });
-  rows.push({
-    label: 'Coupling',
-    value: `${input.intraDirEdges} intra-dir, ${input.inboundEdges} inbound, ${input.outboundEdges} outbound`,
-  });
+  rows.push(
+    {
+      label: 'Symbols',
+      value: `${input.totalSymbols} summarisable (${input.summarisedHere} have LLM summaries)`,
+    },
+    {
+      label: 'Coupling',
+      value: `${input.intraDirEdges} intra-dir, ${input.inboundEdges} inbound, ${input.outboundEdges} outbound`,
+    },
+  );
   if (input.roleCounts.size > 0) {
     rows.push({ label: 'Role mix', value: formatRoleMix(input.roleCounts) });
   }

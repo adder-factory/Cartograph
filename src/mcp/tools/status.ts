@@ -231,8 +231,7 @@ export function appendInlineHotspots(lines: string[], cg: Cartograph, topN: numb
     return;
   }
   if (rows.length === 0) return;
-  lines.push('');
-  lines.push(renderMarkdownBulletList(buildStatusInlineHotspotsSpec(rows, topN)));
+  lines.push('', renderMarkdownBulletList(buildStatusInlineHotspotsSpec(rows, topN)));
   // F#51 (2026-05-26): when the rollup renders entirely from a shallow
   // clone, every row shows `commits: 0` and `risk: 0.0000` — looks
   // identical to a "no churn" project. Surface the cause so the agent
@@ -240,8 +239,7 @@ export function appendInlineHotspots(lines: string[], cg: Cartograph, topN: numb
   // banner the dedicated `cartograph_hotspots` tool emits.
   const banner = statusShallowCloneBanner(cg.projectRoot, rows);
   if (banner) {
-    lines.push('');
-    lines.push(banner);
+    lines.push('', banner);
   }
 }
 
@@ -358,12 +356,14 @@ export function appendInlineBiomarkers(lines: string[], cg: Cartograph, topN: nu
     // suppressing the rollup. Matches the predicate's own catch-block
     // contract.
     const pending = totalFindings === 0 && (safeBoolean(() => areBiomarkersPending(cg)) ?? false);
-    lines.push('');
-    lines.push(renderMarkdownBulletList(buildStatusInlineBiomarkersSpec({ rows: [], totalFindings, topN, pending })));
+    lines.push(
+      '',
+      renderMarkdownBulletList(buildStatusInlineBiomarkersSpec({ rows: [], totalFindings, topN, pending })),
+    );
     return;
   }
-  lines.push('');
   lines.push(
+    '',
     renderMarkdownBulletList(buildStatusInlineBiomarkersSpec({ rows, totalFindings: -1, topN, pending: false })),
   );
 }
@@ -924,9 +924,9 @@ async function appendToolRegistryDrift(lines: string[]): Promise<void> {
     return; // registry unavailable (e.g. CLI context with no live server) — skip the drift check.
   }
   if (onDisk <= loaded) return; // Equal or "loaded > on-disk" both mean "in sync"; the latter shouldn't happen but is harmless.
-  lines.push('');
-  lines.push('### ⚠ Tool registry drift');
   lines.push(
+    '',
+    '### ⚠ Tool registry drift',
     `- ${onDisk - loaded} tool file${onDisk - loaded === 1 ? '' : 's'} on disk are NOT loaded ` +
       `into this MCP server's registry (${loaded} loaded vs ${onDisk} on disk). New tools added ` +
       `since startup require a server restart to become callable.`,

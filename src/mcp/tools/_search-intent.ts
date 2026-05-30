@@ -584,8 +584,7 @@ function renderIntentResults(args: RenderIntentResultsArgs): string {
     lines.push('### Symbol matches');
     for (const row of symbolMerged) {
       const loc = row.start_line ? `:${row.start_line}` : '';
-      lines.push(`- **${row.name}** (${row.kind}) — via ${row.source}`);
-      lines.push(`  ${row.file_path}${loc}`);
+      lines.push(`- **${row.name}** (${row.kind}) — via ${row.source}`, `  ${row.file_path}${loc}`);
       const textExceedsSnippetLimit = row.text.length > INTENT_SNIPPET_MAX_LENGTH;
       const snippet = textExceedsSnippetLimit ? `${row.text.slice(0, INTENT_SNIPPET_MAX_LENGTH)}...` : row.text;
       lines.push(`  > ${snippet}`);
@@ -594,8 +593,8 @@ function renderIntentResults(args: RenderIntentResultsArgs): string {
   }
 
   if (testNameHits.length > 0) {
-    lines.push('### Test-description matches');
     lines.push(
+      '### Test-description matches',
       "_Each line is a test assertion. Use `cartograph_graph({direction: 'callees'})` on the test file to find the subject symbol it exercises._",
     );
     for (const row of testNameHits) {
@@ -606,8 +605,8 @@ function renderIntentResults(args: RenderIntentResultsArgs): string {
 
   // Add sanitization notice if query was modified
   if (wasSanitized) {
-    lines.push('---');
     lines.push(
+      '---',
       `_Note: FTS5-reserved characters (hyphens, quotes, operators) were stripped from your query. ` +
         `Original: "${originalQuery}" → Sanitized: "${query}". ` +
         `For advanced FTS5 operators, use \`cartograph_find by='name' mode='exact'\` with the rich query language._`,

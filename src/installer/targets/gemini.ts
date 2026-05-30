@@ -62,8 +62,7 @@ class GeminiTarget implements AgentTarget {
 
   install(loc: Location, _opts: InstallOptions): WriteResult {
     const files: WriteResult['files'] = [];
-    files.push(writeMcpEntry(loc));
-    files.push(writeInstructionsEntry(loc));
+    files.push(writeMcpEntry(loc), writeInstructionsEntry(loc));
     return { files };
   }
 

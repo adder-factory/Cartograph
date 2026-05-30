@@ -426,8 +426,7 @@ function isAutoFixable(name: string, status: CheckStatus): boolean {
  *  added. */
 async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   const checks: CheckResult[] = [];
-  checks.push(checkBunRuntime());
-  checks.push(await checkModels());
+  checks.push(checkBunRuntime(), await checkModels());
 
   // Read the project's embeddingLlm.endpoint (if any) so the scanner
   // can also probe a non-default port the user has configured.
@@ -593,8 +592,7 @@ const OVERALL_STATUS_BLURB: Record<DoctorResult['overallStatus'], string> = {
 export function formatDoctorReport(result: DoctorResultWithFix): string {
   const lines: string[] = ['## cartograph doctor', ''];
   appendCheckLines(lines, result.checks);
-  lines.push('');
-  lines.push(OVERALL_STATUS_BLURB[result.overallStatus]);
+  lines.push('', OVERALL_STATUS_BLURB[result.overallStatus]);
   if (result.remediations !== undefined) appendFixOutcome(lines, result);
   return lines.join('\n');
 }

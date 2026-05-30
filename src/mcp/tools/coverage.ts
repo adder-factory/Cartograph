@@ -288,8 +288,7 @@ function handleCoverageSymbol(cg: Cartograph, args: CoverageArgs, refIds: RefIdC
     const bpct = (cov.coveredBranches ?? 0) / cov.totalBranches;
     lines.push(`- **Branches:** ${fmtPct(bpct)} (${cov.coveredBranches}/${cov.totalBranches})`);
   }
-  lines.push(`- **Source:** ${cov.source}`);
-  lines.push(`- **Ingested:** ${fmtAge(cov.ingestedAt)}`);
+  lines.push(`- **Source:** ${cov.source}`, `- **Ingested:** ${fmtAge(cov.ingestedAt)}`);
   return ok(textResult(lines.join('\n')));
 }
 

@@ -289,11 +289,9 @@ adminCmd
             const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PERCENT_SCALE) : 0;
             return `  ${label.padEnd(LABEL_WIDTH)} ${formatDuration(ms).padStart(DURATION_WIDTH)}  (${pct.toString().padStart(PERCENT_WIDTH)}%)`;
           };
-          lines.push(fmt('scan', p.scanMs));
-          lines.push(fmt('parse+store', p.parseStoreMs));
+          lines.push(fmt('scan', p.scanMs), fmt('parse+store', p.parseStoreMs));
           if (p.retryMs && p.retryMs > 0) lines.push(fmt('retry', p.retryMs));
-          lines.push(fmt('resolve', p.resolveMs));
-          lines.push(fmt('postHooks', p.postHooksMs));
+          lines.push(fmt('resolve', p.resolveMs), fmt('postHooks', p.postHooksMs));
           // Per-hook breakdown when postHooks is non-trivial. Sorted
           // descending so the dominant sub-hook is at the top.
           if (p.postHooksByHook && p.postHooksMs && p.postHooksMs > 0) {

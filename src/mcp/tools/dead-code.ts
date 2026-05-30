@@ -296,8 +296,7 @@ function appendUncertainTop(lines: string[], results: DeadCodeCandidate[]): void
   if (uncertainTop.length === 0) return;
   // Leading blank preserves the pre-migration `lines.push('')` gap
   // between the prior "Judged X/Y candidates" line and the H3 section.
-  lines.push('');
-  lines.push(renderMarkdownBulletList(buildDeadCodeUncertainTopSpec(uncertainTop)));
+  lines.push('', renderMarkdownBulletList(buildDeadCodeUncertainTopSpec(uncertainTop)));
 }
 
 /**

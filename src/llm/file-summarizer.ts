@@ -153,13 +153,9 @@ function hashFileContent(group: FileGroup, anchorText: string): string {
 export function buildFileSummaryUserPrompt(group: FileGroup, anchorText: string): string {
   const lines: string[] = [];
   if (anchorText.length > 0) {
-    lines.push('## Project Overview (for grounding only — do not paraphrase verbatim)');
-    lines.push(anchorText);
-    lines.push('');
+    lines.push('## Project Overview (for grounding only — do not paraphrase verbatim)', anchorText, '');
   }
-  lines.push(`File: ${group.filePath}`);
-  lines.push('');
-  lines.push('Symbols defined in this file:');
+  lines.push(`File: ${group.filePath}`, '', 'Symbols defined in this file:');
   const items = group.items.slice(0, MAX_SYMBOLS_IN_PROMPT);
   for (const it of items) {
     lines.push(`- ${it.name} (${it.kind}): ${it.summary}`);
@@ -167,8 +163,7 @@ export function buildFileSummaryUserPrompt(group: FileGroup, anchorText: string)
   if (group.items.length > items.length) {
     lines.push(`- ... and ${group.items.length - items.length} more`);
   }
-  lines.push('');
-  lines.push('File summary:');
+  lines.push('', 'File summary:');
   return lines.join('\n');
 }
 

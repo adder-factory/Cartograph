@@ -425,9 +425,7 @@ export function renderMarkdownCardList<TRow>(spec: MarkdownCardListSpec<TRow>): 
     out.push(...spec.preamble, '');
   }
   for (const r of spec.rows) {
-    out.push(`${rowMark} ${spec.rowHeading(r)}`);
-    out.push(...spec.rowBody(r));
-    out.push('');
+    out.push(`${rowMark} ${spec.rowHeading(r)}`, ...spec.rowBody(r), '');
   }
   if (spec.footers && spec.footers.length > 0) {
     out.push(...spec.footers, '');

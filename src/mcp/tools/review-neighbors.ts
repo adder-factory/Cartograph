@@ -441,11 +441,13 @@ export function buildReviewNeighborsLookalikesSpec(args: {
 function formatReviewNeighborsOutput(args: FormatOutputArgs): string {
   const { embeddingModel, changedNodes, embeddedCount, ranked, byId, trivialFiltered } = args;
   const lines: string[] = [];
-  lines.push('# Review neighbors — semantic lookalikes for changed symbols');
-  lines.push('');
-  lines.push(`Embedding model: \`${embeddingModel}\``);
-  lines.push(`Changed symbols with embeddings: ${embeddedCount} / ${changedNodes.length}`);
-  lines.push('');
+  lines.push(
+    '# Review neighbors — semantic lookalikes for changed symbols',
+    '',
+    `Embedding model: \`${embeddingModel}\``,
+    `Changed symbols with embeddings: ${embeddedCount} / ${changedNodes.length}`,
+    '',
+  );
 
   lines.push(renderMarkdownBulletList(buildReviewNeighborsChangedSymbolsSpec({ changedNodes })));
 

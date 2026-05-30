@@ -184,8 +184,8 @@ function appendDeadCodeLens(out: string[], cg: Cartograph, topN: number): void {
     for (const d of dead) {
       out.push(`- \`${d.name}\` (${d.kind}) — ${d.filePath}:${d.startLine}`);
     }
-    out.push('');
     out.push(
+      '',
       `_For LLM-judged verdicts (separates dead from framework hooks / dynamic dispatch / public API), call \`cartograph_dead_code\`._`,
     );
   }

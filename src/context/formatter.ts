@@ -52,9 +52,7 @@ function formatCodeBlocksSection(codeBlocks: TaskContext['codeBlocks']): string[
   for (const block of codeBlocks) {
     const nodeName = block.node?.name ?? 'Unknown';
     lines.push(`#### ${nodeName} (${block.filePath}:${block.startLine})\n`);
-    lines.push('```' + block.language);
-    lines.push(block.content);
-    lines.push('```\n');
+    lines.push('```' + block.language, block.content, '```\n');
   }
   return lines;
 }

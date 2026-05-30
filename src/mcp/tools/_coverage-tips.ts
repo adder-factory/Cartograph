@@ -133,8 +133,12 @@ export function buildCoverageTips(ctx: TipsCtx): string {
     lines.push('', '### No coverage data ingested');
     const runner = detectFromArgs({ projectRoot: ctx.projectRoot });
     if (runner) {
-      lines.push('', `This looks like a **${runner.name}** project. To populate coverage:`);
-      lines.push('', testCoverageHint(runner));
+      lines.push(
+        '',
+        `This looks like a **${runner.name}** project. To populate coverage:`,
+        '',
+        testCoverageHint(runner),
+      );
     } else {
       lines.push(
         '',

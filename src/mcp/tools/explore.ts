@@ -846,10 +846,7 @@ function pushFileBlock(args: PushFileBlockArgs): void {
   if (references.length > 0) lines.push(formatFileHeaderLine('references', references, cap));
   lines.push('');
   if (body === null) return;
-  lines.push('```' + lang);
-  lines.push(body);
-  lines.push('```');
-  lines.push('');
+  lines.push('```' + lang, body, '```', '');
 }
 
 /**
@@ -900,8 +897,7 @@ interface AppendCompletenessAndBudgetArgs {
 function appendCompletenessAndBudget(args: AppendCompletenessAndBudgetArgs): void {
   const { lines, cg, filesIncluded, summary } = args;
   const fileWord = filesIncluded === 1 ? 'file' : 'files';
-  lines.push('');
-  lines.push('---');
+  lines.push('', '---');
   if (summary) {
     lines.push(
       `> **Summary mode: per-file headers only for ${filesIncluded} ${fileWord}.** Source-code blocks are suppressed; ` +
@@ -916,8 +912,8 @@ function appendCompletenessAndBudget(args: AppendCompletenessAndBudgetArgs): voi
   try {
     const stats = cg.stats.getStats();
     const budget = getExploreBudget(stats.fileCount);
-    lines.push('');
     lines.push(
+      '',
       `> **Explore budget: ${budget} calls max for this project (${stats.fileCount.toLocaleString()} files indexed).** Stop exploring and synthesize your answer once you've used ${budget} calls — do NOT make additional explore calls beyond this budget.`,
     );
   } catch {

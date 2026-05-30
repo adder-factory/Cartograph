@@ -344,8 +344,7 @@ function appendImpactPerFileDetail(args: AppendImpactPerFileDetailArgs): void {
     lines.push(`**${file}:**`);
     const nodeList = shown.map((n) => `${n.name}:${n.startLine}`).join(', ');
     const tail = overflow > 0 ? `, … (+${overflow} more)` : '';
-    lines.push(nodeList + tail);
-    lines.push('');
+    lines.push(nodeList + tail, '');
   }
   if (elidedFiles > 0) {
     const elidedSymbols = rollup.slice(IMPACT_DETAIL_FILES_CAP).reduce((sum, r) => sum + r.count, 0);

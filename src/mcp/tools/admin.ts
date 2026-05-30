@@ -421,8 +421,7 @@ async function handleBuildSimilarityEdges(ctx: ToolCtx, args: Record<string, unk
     const result = await buildSimilarToEdges(cg, { k, minScore });
 
     const lines: string[] = ['## Built similarity edges'];
-    lines.push(`- Written: ${result.written}`);
-    lines.push(`- Nodes processed: ${result.processed}`);
+    lines.push(`- Written: ${result.written}`, `- Nodes processed: ${result.processed}`);
     if (result.reason) {
       lines.push(`- Note: ${result.reason}`);
     }
@@ -463,12 +462,14 @@ async function handlePruneStore(ctx: ToolCtx, args: Record<string, unknown>): Pr
     const sizeAfter = cg.db.getSize();
 
     const lines: string[] = ['## Pruned cold orphan store rows'];
-    lines.push(`- Threshold: ${maxAgeDays} day(s) (cutoff = ${new Date(result.cutoffMs).toISOString()})`);
-    lines.push(`- summary_store rows pruned: ${result.summariesPruned}`);
-    lines.push(`- embedding_store rows pruned: ${result.embeddingsPruned}`);
+    lines.push(
+      `- Threshold: ${maxAgeDays} day(s) (cutoff = ${new Date(result.cutoffMs).toISOString()})`,
+      `- summary_store rows pruned: ${result.summariesPruned}`,
+      `- embedding_store rows pruned: ${result.embeddingsPruned}`,
+    );
     if (result.summariesPruned === 0 && result.embeddingsPruned === 0) {
-      lines.push('');
       lines.push(
+        '',
         'No cold orphans matched. Either every store row has a live ref, or every orphan was bumped within the threshold (revert/rename reuse pool).',
       );
     } else {
@@ -493,11 +494,13 @@ async function handleScipExport(ctx: ToolCtx, args: Record<string, unknown>): Pr
     const out = typeof args['out'] === 'string' && args['out'] ? args['out'] : path.join(root, 'index.scip');
     const result = writeScipExport(cg.queries, root, out);
     const lines: string[] = ['## Exported SCIP index'];
-    lines.push(`- File: \`${result.outPath}\``);
-    lines.push(`- Documents: ${result.stats.documents}`);
-    lines.push(`- Symbols: ${result.stats.symbols}`);
-    lines.push(`- Occurrences: ${result.stats.occurrences}`);
-    lines.push(`- Size: ${result.stats.bytes} bytes`);
+    lines.push(
+      `- File: \`${result.outPath}\``,
+      `- Documents: ${result.stats.documents}`,
+      `- Symbols: ${result.stats.symbols}`,
+      `- Occurrences: ${result.stats.occurrences}`,
+      `- Size: ${result.stats.bytes} bytes`,
+    );
     if (result.stats.disambiguated > 0) {
       lines.push(`- Disambiguated: ${result.stats.disambiguated} symbol(s) had name collisions`);
     }
@@ -525,11 +528,13 @@ async function handleScipImport(ctx: ToolCtx, args: Record<string, unknown>): Pr
     const { writeScipImport } = await import('../../scip/index.js');
     const result = writeScipImport(cg.queries, root, await fsp.readFile(inPath));
     const lines: string[] = ['## Imported SCIP index'];
-    lines.push(`- Source: \`${inPath}\``);
-    lines.push(`- Documents: ${result.stats.documents}`);
-    lines.push(`- Files replaced: ${result.stats.files}`);
-    lines.push(`- Nodes: ${result.stats.nodes}`);
-    lines.push(`- Edges: ${result.stats.edges}`);
+    lines.push(
+      `- Source: \`${inPath}\``,
+      `- Documents: ${result.stats.documents}`,
+      `- Files replaced: ${result.stats.files}`,
+      `- Nodes: ${result.stats.nodes}`,
+      `- Edges: ${result.stats.edges}`,
+    );
     if (result.stats.skippedDocuments > 0) {
       lines.push(`- Skipped: ${result.stats.skippedDocuments} document(s) with an unsafe path`);
     }
@@ -763,12 +768,9 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
     if (plan.cloudChatAvailable.anthropicApiKey) {
       lines.push('**Cloud chat available:** ANTHROPIC_API_KEY set');
     }
-    lines.push('', `**Recommended preset:** \`${plan.recommendedPresetId}\``);
-    lines.push('', '**Available presets:**');
+    lines.push('', `**Recommended preset:** \`${plan.recommendedPresetId}\``, '', '**Available presets:**');
     for (const p of plan.presets) {
-      lines.push(`- \`${p.id}\` — **${p.label}**`);
-      lines.push(`  - ${p.description}`);
-      lines.push(`  - Summary: ${p.summary}`);
+      lines.push(`- \`${p.id}\` — **${p.label}**`, `  - ${p.description}`, `  - Summary: ${p.summary}`);
       if (p.nextSteps.length > 0) {
         lines.push('  - Next steps:');
         for (const step of p.nextSteps) lines.push(`    - \`${step}\``);

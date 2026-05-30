@@ -119,8 +119,7 @@ export async function handleAgentAuditReview(ctx: ToolCtx, args: Record<string, 
   }
 
   if (detectorsWithFindings.length === 0) {
-    lines.push(`✓ No agent-prone findings at min-severity \`${minSeverity}\`.`);
-    lines.push('');
+    lines.push(`✓ No agent-prone findings at min-severity \`${minSeverity}\`.`, '');
   }
 
   lines.push('---');

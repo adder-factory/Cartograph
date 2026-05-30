@@ -613,8 +613,8 @@ function buildQueryOutput(args: BuildQueryOutputArgs): string {
     formatRows(rows),
   ];
   if (timedOut) {
-    lines.push('');
     lines.push(
+      '',
       `> ⚠ _Aborted after \`timeoutMs=${timeoutMs}\` — query was returning rows but exceeded the wall-clock cap. Tighten the WHERE clause or raise \`timeoutMs\` (max ${MAX_TIMEOUT_MS}ms)._`,
     );
   } else if (truncated) {

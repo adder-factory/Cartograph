@@ -149,21 +149,23 @@ function buildOptions(env: LlmEnvironment): Array<{ value: SetupChoice; label: s
   // something's already running.
   if (env.detectedBackends.length === 0) {
     // Nothing running — install-guide mode is the headline.
-    options.push({
-      value: { kind: 'install-ollama' },
-      label: '🦙 Install Ollama (simplest — auto-manages models)',
-      hint: 'One process serves every tier. Models auto-load on demand. Recommended for new users.',
-    });
-    options.push({
-      value: { kind: 'install-llama-cpp' },
-      label: '⚡ Install llama-cpp + download GGUFs (recommended for cartograph)',
-      hint: `Downloads ~${totalDownloadMb(env)} MB of GGUFs. One llama-server per tier (4 processes). Closest model quality to the curated GGUF set.`,
-    });
-    options.push({
-      value: { kind: 'install-mlx' },
-      label: '🍎 Install Apple MLX (Apple Silicon only)',
-      hint: 'Native Metal-optimised. mlx_lm.server provides the OpenAI-compat surface.',
-    });
+    options.push(
+      {
+        value: { kind: 'install-ollama' },
+        label: '🦙 Install Ollama (simplest — auto-manages models)',
+        hint: 'One process serves every tier. Models auto-load on demand. Recommended for new users.',
+      },
+      {
+        value: { kind: 'install-llama-cpp' },
+        label: '⚡ Install llama-cpp + download GGUFs (recommended for cartograph)',
+        hint: `Downloads ~${totalDownloadMb(env)} MB of GGUFs. One llama-server per tier (4 processes). Closest model quality to the curated GGUF set.`,
+      },
+      {
+        value: { kind: 'install-mlx' },
+        label: '🍎 Install Apple MLX (Apple Silicon only)',
+        hint: 'Native Metal-optimised. mlx_lm.server provides the OpenAI-compat surface.',
+      },
+    );
   } else {
     // Detected backends present, but offer install-other-backend as alternatives.
     options.push({

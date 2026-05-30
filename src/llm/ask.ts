@@ -282,14 +282,10 @@ function buildPrompt(
     parts.push(`### ${node.name} (${node.kind}) — ${node.filePath}:${node.startLine}`);
     if (summary) parts.push(`*Summary*: ${summary}`);
     if (node.signature) parts.push(`*Signature*: \`${node.signature}\``);
-    parts.push('```' + (node.language || ''));
-    parts.push(body);
-    parts.push('```');
-    parts.push('');
+    parts.push('```' + (node.language || ''), body, '```', '');
   }
   if (list.length > 0) {
-    parts.push('## Other relevant symbols (names + summaries only)');
-    parts.push('');
+    parts.push('## Other relevant symbols (names + summaries only)', '');
     for (const { node, summary } of list) {
       parts.push(
         `- **${node.name}** (${node.kind}) — ${node.filePath}:${node.startLine}` + (summary ? ` — ${summary}` : ''),

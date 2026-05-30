@@ -379,8 +379,8 @@ function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: st
   const sourceLabel = derivedFromGit ? ' (from `git diff HEAD`)' : '';
   lines.push(
     `## Affected test files (${sorted.length}) — ${files.length} input file${files.length === 1 ? '' : 's'}${sourceLabel}`,
+    '',
   );
-  lines.push('');
   // Friction-Y: when the set came from git, show the agent which
   // files cartograph treated as changed so it can spot drift between
   // "what I think I edited" and "what git sees as changed."

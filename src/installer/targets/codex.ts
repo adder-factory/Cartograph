@@ -75,8 +75,7 @@ class CodexTarget implements AgentTarget {
     }
     const files: WriteResult['files'] = [];
 
-    files.push(writeMcpEntry());
-    files.push(writeInstructionsEntry());
+    files.push(writeMcpEntry(), writeInstructionsEntry());
 
     return { files };
   }

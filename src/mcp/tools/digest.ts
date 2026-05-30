@@ -407,9 +407,11 @@ function appendSuggestedQueriesSection(lines: string[], cg: Cartograph): void {
       suggestions.push(`\`cartograph_biomarkers biomarker=${worstBiomarker}\` — drill into the most-frequent finding`);
     }
   }
-  suggestions.push('`cartograph_entry_points` — full top-of-stack breakdown');
-  suggestions.push('`cartograph_context "<task>"` — task-driven context for any specific area');
-  suggestions.push('`cartograph_find by=name <name>` — locate a specific symbol');
+  suggestions.push(
+    '`cartograph_entry_points` — full top-of-stack breakdown',
+    '`cartograph_context "<task>"` — task-driven context for any specific area',
+    '`cartograph_find by=name <name>` — locate a specific symbol',
+  );
 
   lines.push(renderMarkdownBulletList(buildDigestSuggestedQueriesSpec(suggestions)));
 }

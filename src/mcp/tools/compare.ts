@@ -161,8 +161,7 @@ function fmtFileSection(f: FileDelta): string[] {
 function renderResult(result: CompareResult, findingsDeltaRequested = false): string {
   if (result.error) return `Error: ${result.error}`;
   const lines: string[] = [];
-  lines.push(`## Structural delta vs \`${result.ref}\``);
-  lines.push('');
+  lines.push(`## Structural delta vs \`${result.ref}\``, '');
   if (result.filesScanned === 0) {
     if (result.pathFilter && result.pathFilter.changedBeforeFilter > 0) {
       lines.push(
@@ -249,8 +248,8 @@ function appendCompareFindingsTotals(
  */
 function appendCompareSkippedFiles(lines: string[], result: CompareResult): void {
   if (result.filesSkipped === 0) return;
-  lines.push('');
   lines.push(
+    '',
     `> ${result.filesSkipped} file(s) skipped (non-indexed or non-TS): structural diff not available for these paths.`,
   );
   const skipped = result.files.filter((f) => f.skipReason);
@@ -280,8 +279,8 @@ function appendCompareBodyOnlyFiles(lines: string[], result: CompareResult): voi
   const bodyOnly = result.files.filter((f) => !f.skipReason && !shouldRenderCompareFile(f));
   if (bodyOnly.length === 0) return;
   const n = bodyOnly.length;
-  lines.push('');
   lines.push(
+    '',
     `> ${n} file(s) changed with body-only edits (no symbol add/remove/signature change) — ` +
       `use \`cartograph_review\` or \`git diff\` for line-level review.`,
   );

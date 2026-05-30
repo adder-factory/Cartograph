@@ -717,9 +717,7 @@ export function buildAskOutput(result: AskResult, cited: CitedIdentifier[], askM
   }
 
   const report = buildCitationReport(cited);
-  lines.push(...report.sections);
-
-  lines.push('## Retrieval sources (top hybrid hits passed to the model)', '');
+  lines.push(...report.sections, '## Retrieval sources (top hybrid hits passed to the model)', '');
   for (const c of result.citations) {
     const loc = c.node.startLine ? `:${c.node.startLine}` : '';
     lines.push(`- **${c.node.name}** (${c.node.kind}) — ${c.node.filePath}${loc}`);

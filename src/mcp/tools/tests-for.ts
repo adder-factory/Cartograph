@@ -814,15 +814,16 @@ function formatReport(args: FormatTestReportArgs): string {
   if (transitive.length > 0) lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('transitive', transitive)));
   if (hasSameFileTests) {
     lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('sameFile', sameFileTests)));
-    lines.push(buildTestsForSameFileExplainer(node));
-    lines.push('');
+    lines.push(buildTestsForSameFileExplainer(node), '');
   }
   if (hasDispatchTests && mcpToolName) {
     lines.push(renderMarkdownBulletList(buildTestsForDispatchSpec(mcpToolName, dispatchTests)));
   }
   if (hasDescribeNameTests) {
-    lines.push(renderMarkdownBulletList(buildTestsForDescribeNameSpec(describeNameTests)));
-    lines.push(buildTestsForDescribeNameExplainer(node));
+    lines.push(
+      renderMarkdownBulletList(buildTestsForDescribeNameSpec(describeNameTests)),
+      buildTestsForDescribeNameExplainer(node),
+    );
   }
   return lines.join('\n');
 }

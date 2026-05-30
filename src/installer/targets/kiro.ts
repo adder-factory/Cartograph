@@ -63,8 +63,7 @@ class KiroTarget implements AgentTarget {
   install(_loc: Location, _opts: InstallOptions): WriteResult {
     const loc = _loc;
     const files: WriteResult['files'] = [];
-    files.push(writeMcpEntry(loc));
-    files.push(writeSteeringEntry(loc));
+    files.push(writeMcpEntry(loc), writeSteeringEntry(loc));
     return {
       files,
       notes: ['Restart Kiro for MCP changes to take effect.'],

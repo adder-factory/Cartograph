@@ -88,8 +88,7 @@ function formatSearchResults(opts: FormatSearchResultsOpts): string {
     const { node } = result;
     const location = node.startLine ? `:${node.startLine}` : '';
     const kindSuffix = kindFilter ? '' : ` (${node.kind})`;
-    lines.push(`### ${node.name}${kindSuffix}`);
-    lines.push(`${node.filePath}${location}`);
+    lines.push(`### ${node.name}${kindSuffix}`, `${node.filePath}${location}`);
     if (node.signature) lines.push(`\`${node.signature}\``);
     lines.push('');
   }
@@ -905,8 +904,7 @@ function gatherMultiNameGroups(
 function renderMultiNameGroupMarkdown(group: MultiNameGroup): string {
   const lines: string[] = [`### ${group.token} (${group.nodes.length} hit${group.nodes.length === 1 ? '' : 's'})`];
   if (group.nodes.length === 0) {
-    lines.push('_no exact match — try mode:fuzzy_');
-    lines.push('');
+    lines.push('_no exact match — try mode:fuzzy_', '');
     return lines.join('\n');
   }
   for (const node of group.nodes) {

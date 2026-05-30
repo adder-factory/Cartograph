@@ -269,9 +269,11 @@ function formatImportsResponse(hits: Hit[], filtered: Hit[], params: ImportRende
   const slice = filtered.slice(0, limit);
 
   const lines: string[] = [];
-  lines.push(buildImportsTitle(source, filters));
-  lines.push('');
-  lines.push(`**Matched:** ${filtered.length}${truncated ? ` (showing first ${limit})` : ''} / ${hits.length} total`);
+  lines.push(
+    buildImportsTitle(source, filters),
+    '',
+    `**Matched:** ${filtered.length}${truncated ? ` (showing first ${limit})` : ''} / ${hits.length} total`,
+  );
 
   appendFixtureExclusionNote({ lines, hits, filters });
   appendLiteralExclusionNote({ lines, hits, source, filters });

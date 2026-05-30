@@ -231,11 +231,9 @@ function renderGetRoleOfBlock({ cg, nodeId, label, via, fuzzyBanner }: RenderGet
 
   if (desc) {
     const preview = desc.text.length > 80 ? desc.text.slice(0, 80) + '...' : desc.text;
-    lines.push(`- **Source:** ${desc.source}`);
-    lines.push(`- **Input:** "${preview}"`);
+    lines.push(`- **Source:** ${desc.source}`, `- **Input:** "${preview}"`);
   } else {
-    lines.push(`- **Source:** NONE`);
-    lines.push(`- **Input:** NONE — no summary, no docstring, no test coverage`);
+    lines.push(`- **Source:** NONE`, `- **Input:** NONE — no summary, no docstring, no test coverage`);
   }
 
   if (displayRole === 'unknown' || role === null) {
