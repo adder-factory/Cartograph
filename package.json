@@ -83,5 +83,9 @@
   },
   "engines": {
     "bun": ">=1.3.0"
-  }
+  },
+  "trustedDependencies": [
+    "@parcel/watcher",
+    "usearch"
+  ]
 }
