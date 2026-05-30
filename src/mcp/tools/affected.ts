@@ -374,7 +374,7 @@ interface FormatResultArgs {
  */
 function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: string[] } {
   const { files, result, missingInputs, derivedFromGit } = fmtArgs;
-  const sorted = Array.from(result.affectedTests).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const sorted = Array.from(result.affectedTests).sort((a, b) => Number(a > b) - Number(a < b));
   const lines: string[] = [];
   const sourceLabel = derivedFromGit ? ' (from `git diff HEAD`)' : '';
   lines.push(

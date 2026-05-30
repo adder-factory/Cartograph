@@ -39,7 +39,7 @@ export class CallIdCache {
     // Sort for hash stability — call sites may vary order across
     // re-rendered queries (filter pass, re-rank). Sorted hash means
     // same set of rows always produces same UID.
-    const sorted = [...rowKeys].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const sorted = [...rowKeys].sort((a, b) => Number(a > b) - Number(a < b));
     const material = `${toolName}\n${sorted.join('\n')}`;
     const uid = PREFIX + crypto.createHash('sha256').update(material).digest('hex').slice(0, SHORT_LEN);
     if (this.forward.has(uid)) {

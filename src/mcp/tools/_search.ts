@@ -326,7 +326,7 @@ function probeCentralityFilterCulprit(cg: import('../../index.js').default, quer
 function probeBooleanOperatorCulprit(query: string): string | null {
   const operators = [...query.matchAll(/\b(AND|OR|NOT|NEAR)\b/g)].map((m) => m[1]!);
   if (operators.length === 0) return null;
-  const unique = [...new Set(operators)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const unique = [...new Set(operators)].sort((a, b) => Number(a > b) - Number(a < b));
   return (
     `Detected boolean operator${unique.length === 1 ? '' : 's'} (${unique.join(', ')}) in the query — ` +
     "cartograph_find (by='name') does NOT parse FTS5 boolean syntax; these tokens are stripped before matching. " +
@@ -814,7 +814,7 @@ export function detectMultiNameQueryWithOperatorStrip(query: string): MultiNameW
   const stripped = stripBooleanOperators(query);
   const recovered = detectMultiNameQuery(stripped);
   if (recovered === null) return null;
-  return { tokens: recovered, strippedOperators: [...new Set(ops)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)) };
+  return { tokens: recovered, strippedOperators: [...new Set(ops)].sort((a, b) => Number(a > b) - Number(a < b)) };
 }
 
 /** One group of exact-name hits keyed by the input token. */

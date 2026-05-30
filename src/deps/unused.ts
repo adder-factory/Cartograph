@@ -136,9 +136,9 @@ function extractDeclaredDeps(args: ExtractDeclaredDepsArgs): {
     for (const k of Object.keys(m.packageJson['optionalDependencies'] ?? {})) optional.add(k);
   }
   return {
-    declaredRuntime: Array.from(runtime).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
-    declaredDev: Array.from(dev).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
-    declaredOptional: Array.from(optional).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    declaredRuntime: Array.from(runtime).sort((a, b) => Number(a > b) - Number(a < b)),
+    declaredDev: Array.from(dev).sort((a, b) => Number(a > b) - Number(a < b)),
+    declaredOptional: Array.from(optional).sort((a, b) => Number(a > b) - Number(a < b)),
   };
 }
 
@@ -898,7 +898,7 @@ function computeDepAnalysis(args: ComputeDepAnalysisArgs): {
     rule.apply(ctx);
   }
 
-  const used = Array.from(usedSet).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const used = Array.from(usedSet).sort((a, b) => Number(a > b) - Number(a < b));
   const { unusedRuntime, unusedDev, unusedOptional } = computeUnusedSets({
     declaredRuntime,
     declaredDev,
@@ -948,7 +948,7 @@ function discoverNestedManifests(projectRoot: string): string[] {
     if (match.split('/').length > 5) continue;
     out.push(match);
   }
-  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  return out.sort((a, b) => Number(a > b) - Number(a < b));
 }
 
 export function analyzeUnusedDeps(qb: QueryBuilder, projectRoot: string): UnusedDepsResult {

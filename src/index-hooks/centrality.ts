@@ -46,7 +46,7 @@ const FINGERPRINT_KEY = 'last_centrality_fingerprint';
  * reordered.
  */
 function centralityAlgoTag(): string {
-  const kinds = [...PR_EDGE_KINDS].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)).join(',');
+  const kinds = [...PR_EDGE_KINDS].sort((a, b) => Number(a > b) - Number(a < b)).join(',');
   return `algo:d=${PR_DAMPING}|i=${PR_ITERATIONS}|k=${kinds}`;
 }
 

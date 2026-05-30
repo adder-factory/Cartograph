@@ -117,7 +117,7 @@ function collectTagGroups(ctx: IndexHookContext, serviceIndex: Map<string, strin
 
 /** Build the hub node + provider/consumer edges for one tag. */
 function buildTagGraph(tagName: string, group: TagGroup, now: number): { node: Node; edges: Edge[] } {
-  const anchor = [...group.files].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0]!;
+  const anchor = [...group.files].sort((a, b) => Number(a > b) - Number(a < b))[0]!;
   const id = generateNodeId({
     filePath: anchor,
     kind: 'resource' as NodeKind,
