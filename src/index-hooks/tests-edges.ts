@@ -119,7 +119,7 @@ function resolvePackagePathImportToIndexedFile(importPath: string, basenameIdx: 
   if (!symbol) return null;
   const candidates = basenameIdx.get(symbol);
   if (!candidates) return null;
-  const asPath = importPath.replaceAll(/\./g, '/');
+  const asPath = importPath.replaceAll('.', '/');
   for (const ext of PACKAGE_PATH_EXTS) {
     const suffix = '/' + asPath + ext;
     for (const fp of candidates) {
@@ -172,7 +172,7 @@ function resolveRelativeImportToIndexedFile(
   const fromDir = path.posix.dirname(fromFile);
   // Posix-style join handles `..` segments correctly. The `replace` rewinds
   // any accidental `\\` from upstream platform-specific paths.
-  const joined = path.posix.normalize(path.posix.join(fromDir, importPath)).replaceAll(/\\/g, '/');
+  const joined = path.posix.normalize(path.posix.join(fromDir, importPath)).replaceAll('\\', '/');
   // 1. Exact match (the import already includes the extension).
   if (allFilePaths.has(joined)) return joined;
   // 2. Try each candidate extension on the bare path.

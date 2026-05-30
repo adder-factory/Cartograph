@@ -184,7 +184,7 @@ function resolveRelativeImport(ctx: RelativeImportCtx): string | null {
 
   // Try the path as-is first
   const basePath = path.resolve(fromDir, importPath);
-  const relativePath = path.relative(projectRoot, basePath).replaceAll(/\\/g, '/');
+  const relativePath = path.relative(projectRoot, basePath).replaceAll('\\', '/');
 
   // Try each extension
   for (const ext of extensions) {

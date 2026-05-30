@@ -745,7 +745,7 @@ function positionalToken(opt: CliOptionSpec, forceOptional = false): string {
 
 /** `cartograph_dead_code` → `dead-code`. */
 function defaultCommandName(toolName: string): string {
-  return toolName.replace(/^cartograph_/, '').replaceAll(/_/g, '-');
+  return toolName.replace(/^cartograph_/, '').replaceAll('_', '-');
 }
 
 /** camelCase → kebab-case for an error-message flag reference. */

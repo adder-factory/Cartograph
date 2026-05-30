@@ -92,7 +92,7 @@ function groupByDir(
 ): DirGroup[] {
   const groups = new Map<string, DirGroup>();
   for (const row of rows) {
-    const posixPath = row.filePath.replaceAll(/\\/g, '/');
+    const posixPath = row.filePath.replaceAll('\\', '/');
     const dir = path.posix.dirname(posixPath);
     if (dir === '.' || dir === '') continue;
     let g = groups.get(dir);

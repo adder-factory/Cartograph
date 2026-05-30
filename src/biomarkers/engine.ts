@@ -1095,7 +1095,7 @@ const GO_MAGIC_NUMBER_ALLOWLIST: ReadonlySet<string> = new Set(['60', '24', '7',
  * undefined case fall through to the universal rule only.
  */
 function isMagicNumber(text: string, language?: Language): boolean {
-  const trimmed = text.replaceAll(/_/g, '').toLowerCase();
+  const trimmed = text.replaceAll('_', '').toLowerCase();
   // Must begin with a digit, a sign + digit, a leading-dot float
   // (`.5`), or a `0x`/`0b`/`0o` prefix — anything else is the
   // kind-overload case (the type identifier `number`) and isn't a
@@ -1846,7 +1846,7 @@ function extractNumbersFromText(text: string): Set<string> {
   // friction #67. Real value claims in parens (`(default: N)`,
   // `(was N before)`) lack the signal token and are preserved.
   const APPROX_PAREN_RE = /\([^()]*(?:~|e\.g\.|for example|\bapproximately\b|\baround\b|\blike\b)[^()]*\)/gi;
-  const cleaned = text.replace(ISO_DATE_RE, '').replace(APPROX_PAREN_RE, '');
+  const cleaned = text.replaceAll(ISO_DATE_RE, '').replaceAll(APPROX_PAREN_RE, '');
 
   // Trailing lookahead `(?![\w%-])` keeps `50%`, `1.5x`, AND
   // compound-noun-modifier numbers (`1000-name list`, `5-element

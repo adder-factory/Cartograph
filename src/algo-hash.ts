@@ -79,7 +79,7 @@ export function computeAlgoHash(callerUrl: string, siblingBasenames: readonly st
     } catch (err) {
       throw new Error(`computeAlgoHash: cannot read ${abs} (caller=${callerPath}): ${String(err)}`);
     }
-    const lf = content.replaceAll(/\r\n/g, '\n');
+    const lf = content.replaceAll('\r\n', '\n');
     // Comment stripping is what makes refactor-PRs that only touch
     // block comments (`/* … */`, JSDoc) or comment-anchored lines
     // (lines starting with `//`) NOT invalidate the cache. Trailing

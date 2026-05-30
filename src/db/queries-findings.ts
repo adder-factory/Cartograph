@@ -507,7 +507,7 @@ const getFindingsRankedQuery = defineDynamicQuery({
       // Literal prefix exclusion via LIKE with explicit ESCAPE — paths
       // can contain `_` so we escape `_`/`%`/`\`. GLOB has no escape
       // syntax for its `*`/`?` metachars.
-      const escaped = p.excludeFile.replaceAll(/\\/g, '\\\\').replaceAll(/_/g, '\\_').replaceAll(/%/g, '\\%');
+      const escaped = p.excludeFile.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
       where.push("n.file_path NOT LIKE @excludeLike ESCAPE '\\'");
       bindings['excludeLike'] = escaped + '%';
     }

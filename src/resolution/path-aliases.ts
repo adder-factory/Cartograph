@@ -263,7 +263,7 @@ export function applyAliases(importPath: string, aliases: AliasMap, projectRoot:
       // Skip if the rewrite escapes the project root (unsafe + can't
       // be looked up via the file index anyway).
       if (relative.startsWith('..')) continue;
-      out.push(relative.replaceAll(/\\/g, '/'));
+      out.push(relative.replaceAll('\\', '/'));
     }
     return out;
   }

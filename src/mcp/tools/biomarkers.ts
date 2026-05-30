@@ -575,7 +575,7 @@ function probeLowestCentralityForFilters(
     params['maxMetric'] = args.maxMetric;
   }
   if (args.excludeFile !== undefined && args.excludeFile.length > 0) {
-    const escaped = args.excludeFile.replaceAll(/\\/g, '\\\\').replaceAll(/_/g, '\\_').replaceAll(/%/g, '\\%');
+    const escaped = args.excludeFile.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
     where.push("n.file_path NOT LIKE @excludeLike ESCAPE '\\'");
     params['excludeLike'] = escaped + '%';
   }

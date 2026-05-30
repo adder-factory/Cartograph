@@ -266,7 +266,7 @@ export function clampInt(value: number, min: number, max: number): number {
  * Fixes Windows backslash paths so glob matching works consistently.
  */
 export function normalizePath(filePath: string): string {
-  return filePath.replaceAll(/\\/g, '/');
+  return filePath.replaceAll('\\', '/');
 }
 
 /**
@@ -309,14 +309,14 @@ export function stripReasoningTokens(text: string): string {
   const open = '<\\s*think(?:ing)?(?:\\s[^>]*)?>';
   const close = '<\\s*\\/\\s*think(?:ing)?\\s*>';
   // Closed reasoning blocks (handles arbitrary content + nested newlines).
-  let out = text.replace(new RegExp(`${open}[\\s\\S]*?${close}`, 'gi'), '');
+  let out = text.replaceAll(new RegExp(`${open}[\\s\\S]*?${close}`, 'gi'), '');
   // Unclosed trailing opener — drop everything from it onward. Negative
   // lookbehind on a backtick so a literal mention like `<think>` inside
   // backticks (e.g. when summarising the strip-reasoning function itself)
   // doesn't get eaten as CoT.
   out = out.replace(new RegExp(`(?<!\`)${open}[\\s\\S]*$`, 'i'), '');
   // Stray closer with no opener.
-  out = out.replace(new RegExp(close, 'gi'), '');
+  out = out.replaceAll(new RegExp(close, 'gi'), '');
   // Collapse leading blank lines created by the strip.
   out = out.replace(/^[\s\n]+/, '');
   return out;

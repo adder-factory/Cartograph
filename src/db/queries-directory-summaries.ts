@@ -145,7 +145,7 @@ export function pruneOrphanDirectorySummaries(qb: QueryBuilder): { directorySumm
     // but have since all moved into `src/core/` etc.
     const liveDirs = new Set<string>();
     for (const fp of filePaths) {
-      const d = path.posix.dirname(fp.replaceAll(/\\/g, '/'));
+      const d = path.posix.dirname(fp.replaceAll('\\', '/'));
       if (d !== '.' && d !== '/' && d !== '') {
         liveDirs.add(d);
       }

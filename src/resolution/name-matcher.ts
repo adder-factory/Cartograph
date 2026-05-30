@@ -324,8 +324,8 @@ function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map
  * separators are normalised so a Windows path doesn't false-miss.
  */
 function fqnMatchesFilePath(filePath: string, fqn: string): boolean {
-  const dotsToSlashes = fqn.replaceAll(/\./g, '/');
-  const fp = filePath.replaceAll(/\\/g, '/');
+  const dotsToSlashes = fqn.replaceAll('.', '/');
+  const fp = filePath.replaceAll('\\', '/');
   // Require either a path-segment boundary before the FQN suffix
   // (`/com/example/Foo.java`) or the file IS exactly the FQN path
   // (root-level layout). A bare `endsWith(dotsToSlashes + ext)` would

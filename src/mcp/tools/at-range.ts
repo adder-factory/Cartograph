@@ -160,7 +160,7 @@ function validateFileWithinRoot(projectRoot: string, filePath: string): string |
 /** Format the signature cell — escape pipe characters or show dash when absent. */
 function formatSigCell(n: NodeAtRange): string {
   const hasSignature = n.signature !== undefined && n.signature !== null && n.signature.length > 0;
-  return hasSignature ? `\`${n.signature!.replaceAll(/\|/g, '\\|')}\`` : '—';
+  return hasSignature ? `\`${n.signature!.replaceAll('|', '\\|')}\`` : '—';
 }
 
 /** Format the line-range cell — single number when start === end. */

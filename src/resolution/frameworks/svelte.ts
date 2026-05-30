@@ -252,7 +252,7 @@ function getSvelteKitRouteInfo(fileName: string): string | null {
  */
 function filePathToSvelteKitRoute(filePath: string): string | null {
   // Normalize to forward slashes
-  const normalized = filePath.replaceAll(/\\/g, '/');
+  const normalized = filePath.replaceAll('\\', '/');
 
   // Find the routes directory
   const routesIndex = normalized.indexOf('/routes/');

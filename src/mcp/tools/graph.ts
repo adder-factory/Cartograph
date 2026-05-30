@@ -443,7 +443,7 @@ const BFS_RAW_ID_RE = /id:([a-z_]+:[0-9a-f]{32})/g;
  * resolves on a follow-up call. (FRICTION — BFS/one-hop UID mismatch.)
  */
 function normaliseBfsRowIds(text: string, refIds: RefIdCache): string {
-  return text.replace(BFS_RAW_ID_RE, (_match, rawId: string) => `id:${refIds.mint(rawId)}`);
+  return text.replaceAll(BFS_RAW_ID_RE, (_match, rawId: string) => `id:${refIds.mint(rawId)}`);
 }
 
 /**

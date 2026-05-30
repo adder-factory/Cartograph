@@ -160,7 +160,7 @@ export interface BuildGraphOptions {
  * (an un-normalised path would round-trip into a duplicate row).
  */
 function normalizeScipPath(p: string): string {
-  return path.posix.normalize(p.replaceAll(/\\/g, '/'));
+  return path.posix.normalize(p.replaceAll('\\', '/'));
 }
 
 /** A path is safe to import if it is relative and has no `.`/`..`/empty

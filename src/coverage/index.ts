@@ -231,7 +231,7 @@ function refreshLowCoverageFindings(queries: QueryBuilder): void {
 }
 
 function normalisePath(p: string): string {
-  return p.replaceAll(/\\/g, '/');
+  return p.replaceAll('\\', '/');
 }
 
 /**

@@ -1007,7 +1007,7 @@ function extractTypesUpstream(typesPackage: string): string {
 
   const name = typesPackage.slice(7); // Remove "@types/"
   // Replace __ with / for scoped packages
-  const result = name.replaceAll(/__/g, '/');
+  const result = name.replaceAll('__', '/');
   // If result contains /, it was a scoped package; prepend @
   if (result.includes('/')) {
     return `@${result}`;

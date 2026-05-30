@@ -164,7 +164,7 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
  * Helper to escape LIKE special characters.
  */
 function escapeLike(s: string): string {
-  return s.replaceAll(/\\/g, '\\\\').replaceAll(/_/g, '\\_').replaceAll(/%/g, '\\%');
+  return s.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
 }
 
 /**

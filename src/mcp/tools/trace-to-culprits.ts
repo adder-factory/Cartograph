@@ -139,7 +139,7 @@ export function parseTrace(trace: string): ParsedFrame[] {
     for (const re of PATTERNS) {
       const m = re.exec(text);
       if (!m) continue;
-      const file = m[1]!.replaceAll(/\\/g, '/'); // normalise Windows separators
+      const file = m[1]!.replaceAll('\\', '/'); // normalise Windows separators
       const line = Number(m[2]);
       if (!Number.isFinite(line) || line <= 0) break;
       const key = `${file}:${line}`;
@@ -162,7 +162,7 @@ export function parseTrace(trace: string): ParsedFrame[] {
  * Returns null when no indexed file is a tail of the trace path.
  */
 function resolveTraceFile(allFiles: readonly FileRecord[], tracePath: string): string | null {
-  const norm = tracePath.replaceAll(/\\/g, '/');
+  const norm = tracePath.replaceAll('\\', '/');
   let best: string | null = null;
   let bestLen = 0;
   for (const f of allFiles) {

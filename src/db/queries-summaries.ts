@@ -786,7 +786,7 @@ function processTestDerivedChunk(qb: QueryBuilder, chunk: readonly string[], out
 function escapeFts5Phrase(raw: string): string {
   // Double any existing double-quotes, then wrap in double-quotes
   // to form an FTS5 phrase token.
-  return '"' + raw.replaceAll(/"/g, '""') + '"';
+  return '"' + raw.replaceAll('"', '""') + '"';
 }
 
 /**
