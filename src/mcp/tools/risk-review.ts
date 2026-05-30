@@ -1,13 +1,12 @@
 import type { ToolResult } from '../tool-types.js';
 import type Cartograph from '../../index.js';
 import { findGraphCandidates } from '../../llm/dead-code.js';
-import { isFixturePath } from './shared.js';
+import { isFixturePath, textResult, truncateOutput } from './shared.js';
 import { getCoverageRanked } from '../../db/queries-coverage.js';
 import { getTopBetweennessNodes } from '../../db/queries-centrality.js';
 import { getFindingsRanked } from '../../db/queries-findings.js';
 import { getHotspots } from '../../db/queries-history.js';
 import { clampInt, numArg } from '../../utils.js';
-import { textResult, truncateOutput } from './shared.js';
 import type { ToolCtx } from './types.js';
 
 /** Default per-lens row cap when caller doesn't pass `topN`. */

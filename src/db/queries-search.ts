@@ -494,15 +494,15 @@ function resolveSearchQuery(qb: QueryBuilder, query: string, options: SearchOpti
     calleesOf: parsed.calleesOf,
     dependsOn: parsed.dependsOn,
     callersSet: () => {
-      if (cachedCallersSet === null) cachedCallersSet = nodesCallingAny(qb, parsed.callersOf);
+      cachedCallersSet ??= nodesCallingAny(qb, parsed.callersOf);
       return cachedCallersSet;
     },
     calleesSet: () => {
-      if (cachedCalleesSet === null) cachedCalleesSet = nodesCalledByAny(qb, parsed.calleesOf);
+      cachedCalleesSet ??= nodesCalledByAny(qb, parsed.calleesOf);
       return cachedCalleesSet;
     },
     dependsOnSet: () => {
-      if (cachedDependsOnSet === null) cachedDependsOnSet = nodesDependingOnAny(qb, parsed.dependsOn);
+      cachedDependsOnSet ??= nodesDependingOnAny(qb, parsed.dependsOn);
       return cachedDependsOnSet;
     },
     ...(parsed.centralityFilter ? { centralityFilter: parsed.centralityFilter } : {}),

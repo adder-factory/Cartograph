@@ -372,7 +372,7 @@ function handleFindByRole(cg: import('../../index.js').default, role: string, li
   // mistakes a capped count for the complete set (friction audit-4 #2,
   // mirroring the `session list` treatment).
   const roleCount = getRoleCounts(cg.queries).get(role);
-  const total = roleCount === undefined ? nodes.length : roleCount;
+  const total = roleCount ?? nodes.length;
   const descriptions = getSymbolDescriptions(
     cg.queries,
     nodes.map((n) => n.id),

@@ -13,8 +13,7 @@
  * the metadata-vs-source split (`cartograph_node` / `cartograph_explore` fetch
  * the hop bodies on demand).
  */
-import type { Edge, Node } from '../../types.js';
-import type { EdgeKind } from '../../types.js';
+import type { Edge, Node, EdgeKind } from '../../types.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { renderToolResponse } from './_response.js';
 import { validateStringOutcome } from './shared.js';

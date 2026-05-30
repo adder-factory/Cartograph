@@ -29,9 +29,8 @@
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import type Cartograph from '../../index.js';
-import type { Node, NodeKind } from '../../types.js';
+import type { Node, NodeKind, FileRecord } from '../../types.js';
 import { getAllFiles, getFileByPath } from '../../db/queries-files.js';
-import type { FileRecord } from '../../types.js';
 import { getFindingsForNode } from '../../db/queries-findings.js';
 import { textResult } from './shared.js';
 import { renderToolResponse } from './_response.js';

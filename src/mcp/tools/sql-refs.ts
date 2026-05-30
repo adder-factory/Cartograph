@@ -5,8 +5,7 @@
  */
 import type { ToolResult } from '../tool-types.js';
 import { getSqlRefsByTable, getSqlTables } from '../../db/queries-refs.js';
-import { clamp } from '../../utils.js';
-import { isTestPath } from '../../utils.js';
+import { clamp, isTestPath } from '../../utils.js';
 import { textResult, truncateOutput, countByTestPath, formatRefSiteLine } from './shared.js';
 import { renderMarkdownTable, type MarkdownTableSpec } from './_result-spec.js';
 import type { ToolCtx } from './types.js';

@@ -92,7 +92,7 @@ function dedupeReferences(refs: UnresolvedReference[]): UnresolvedReference[] {
       continue;
     }
     head.siteCount = (head.siteCount ?? 1) + 1;
-    if (!head.extraLines) head.extraLines = [];
+    head.extraLines ??= [];
     // Sample stays distinct: re-pushing line=5 because the same symbol
     // is referenced twice on line 5 (e.g. `foo(foo())`) would render
     // "(4 sites: 3, 5, 5, 7)" — misleading. Skip duplicates of either

@@ -19,9 +19,8 @@
  */
 import type { ToolResult } from '../tool-types.js';
 import type Cartograph from '../../index.js';
-import { isFixturePath } from './shared.js';
+import { isFixturePath, textResult, truncateOutput } from './shared.js';
 import { getFindingsRanked } from '../../db/queries-findings.js';
-import { textResult, truncateOutput } from './shared.js';
 import type { ToolCtx } from './types.js';
 import type { BiomarkerName } from '../../biomarkers/types.js';
 

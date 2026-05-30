@@ -24,7 +24,7 @@ import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import Cartograph from '../index.js';
 import { DatabaseConnection, getDatabasePath } from '../db/index.js';
-import { QueryBuilder } from '../db/queries.js';
+import { QueryBuilder, getStats as qbGetStats, getNodesByKind } from '../db/queries.js';
 import { GraphTraverser } from '../graph/traversal.js';
 import { getNodesByName, getNodesByLowerName } from '../db/queries-search.js';
 import { getFindingsForNode, getFindingsStats, getFindingsRanked } from '../db/queries-findings.js';
@@ -37,7 +37,6 @@ import { getMetadata } from '../db/queries-metadata.js';
 import { recentSessions, callsForSession } from '../db/queries-trace.js';
 import type { Node, NodeKind } from '../types.js';
 import { logDebug, errMsg } from '../errors.js';
-import { getStats as qbGetStats, getNodesByKind } from '../db/queries.js';
 
 export interface ViewerHandle {
   url: string;

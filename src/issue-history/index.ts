@@ -66,7 +66,7 @@ const MAX_FILES_PER_COMMIT = 50;
  * past-tense variants), case-insensitive, allowing `:` or `-`
  * between verb and `#`. Captures the issue number.
  */
-export const ISSUE_REGEX = /\b(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s*[:\-]?\s*#(\d+)/gi;
+export const ISSUE_REGEX = /\b(?:fix|fixes|fixed|close|closes|closed|resolve|resolves|resolved)\s*[:-]?\s*#(\d+)/gi;
 
 const MAX_GIT_BUFFER = 200 * 1024 * 1024;
 const GIT_TIMEOUT_MS = 60_000;
