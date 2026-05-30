@@ -112,14 +112,16 @@ function buildTrie(root: AhoCorasickNode, patterns: readonly string[]): void {
     if (existing === undefined) firstIndexByPattern.set(pat, i);
 
     let node = root;
-    for (let j = 0; j < pat.length; j++) {
-      const code = pat.charCodeAt(j);
-      let next = node.children.get(code);
+    for (let j = 0; j < pat.length; ) {
+      const codePoint = pat.codePointAt(j)!;
+      let next = node.children.get(codePoint);
       if (!next) {
         next = createNode(root);
-        node.children.set(code, next);
+        node.children.set(codePoint, next);
       }
       node = next;
+      // Advance by UTF-16 code units (1 for BMP, 2 for astral).
+      j += codePoint > 0xffff ? 2 : 1;
     }
     // Avoid emitting duplicate output indices for repeated patterns.
     if (!node.outputs.includes(patternIdx)) node.outputs.push(patternIdx);
@@ -194,39 +196,46 @@ export function buildAhoCorasick(patterns: readonly string[]): AhoCorasickAutoma
     findAll(text: string): AhoCorasickMatch[] {
       const matches: AhoCorasickMatch[] = [];
       let node = root;
-      for (let i = 0; i < text.length; i++) {
-        const code = text.charCodeAt(i);
-        // Follow fail links until we find a node with the matching
-        // child, or land back at root. Reassigning `node` to the walk
-        // landing leaves it at root after a miss, matching the inlined
-        // loop this replaced.
-        node = walkFailLinks(root, node, code);
-        const next = node.children.get(code);
+      // Track both code-unit offset (for tree-sitter compat) and code-point index.
+      for (let codeUnitPos = 0; codeUnitPos < text.length; ) {
+        const codePoint = text.codePointAt(codeUnitPos)!;
+        // Follow fail links until we find a node with the matching child,
+        // or land back at root. Uses code-point key instead of UTF-16 code unit.
+        node = walkFailLinks(root, node, codePoint);
+        const next = node.children.get(codePoint);
         if (next) {
           node = next;
           // Emit every pattern whose match ends here.
           for (const outputIdx of node.outputs) {
-            const len = patterns[outputIdx]!.length;
+            const pattern = patterns[outputIdx]!;
+            // Pattern length is in code units (JavaScript's .length).
+            const patternLen = pattern.length;
+            // Match start in code units: current position - pattern length + 1.
+            const matchStart = codeUnitPos - patternLen + 1;
             matches.push({
               patternIndex: outputIdx,
-              start: i - len + 1,
-              length: len,
+              start: matchStart,
+              length: patternLen,
             });
           }
         }
+        // Advance by UTF-16 code units (1 for BMP, 2 for astral).
+        codeUnitPos += codePoint > 0xffff ? 2 : 1;
       }
       return matches;
     },
     hasAny(text: string): boolean {
       let node = root;
-      for (let i = 0; i < text.length; i++) {
-        const code = text.charCodeAt(i);
-        node = walkFailLinks(root, node, code);
-        const next = node.children.get(code);
+      for (let codeUnitPos = 0; codeUnitPos < text.length; ) {
+        const codePoint = text.codePointAt(codeUnitPos)!;
+        node = walkFailLinks(root, node, codePoint);
+        const next = node.children.get(codePoint);
         if (next) {
           node = next;
           if (node.outputs.length > 0) return true;
         }
+        // Advance by UTF-16 code units (1 for BMP, 2 for astral).
+        codeUnitPos += codePoint > 0xffff ? 2 : 1;
       }
       return false;
     },

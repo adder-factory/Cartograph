@@ -43,8 +43,11 @@ const TEST_CALL_RE =
 
 function lineOf(text: string, offset: number): number {
   let line = 1;
-  for (let i = 0; i < offset && i < text.length; i++) {
-    if (text.charCodeAt(i) === 10) line++;
+  let codeUnitPos = 0;
+  for (const char of text) {
+    if (codeUnitPos >= offset) break;
+    if (char === '\n') line++;
+    codeUnitPos += char.length; // UTF-16 code units per char
   }
   return line;
 }

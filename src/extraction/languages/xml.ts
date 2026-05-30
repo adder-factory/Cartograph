@@ -215,9 +215,10 @@ function stripXmlComments(source: string): string {
   // `[\s\S]` is the canonical workaround.
   return source.replaceAll(/<!--[\s\S]*?-->/g, (match) => {
     let out = '';
-    for (let i = 0; i < match.length; i++) {
-      const ch = match.charCodeAt(i);
-      out += ch === 10 ? '\n' : ' ';
+    for (const ch of match) {
+      // Replace each comment code point with a same-code-unit-width blank
+      // (newline kept as-is) so byte offsets downstream stay aligned.
+      out += ch === '\n' ? '\n' : ' '.repeat(ch.length);
     }
     return out;
   });
@@ -226,9 +227,11 @@ function stripXmlComments(source: string): string {
 /** Map a byte offset in the source back to a 1-indexed line number. */
 function lineNumberAt(source: string, offset: number): number {
   let line = 1;
-  const cap = Math.min(offset, source.length);
-  for (let i = 0; i < cap; i++) {
-    if (source.charCodeAt(i) === 10) line++;
+  let codeUnitPos = 0;
+  for (const ch of source) {
+    if (codeUnitPos >= offset) break;
+    if (ch.codePointAt(0) === 10) line++;
+    codeUnitPos += ch.length;
   }
   return line;
 }

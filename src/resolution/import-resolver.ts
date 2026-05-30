@@ -317,12 +317,16 @@ const CJS_ALIAS_RE = /(\w+)\s*:\s*(\w+)/;
  * `aliasRegex` differs between ES6 (`as`) and CJS (`:`); the rest of
  * the shape is identical.
  */
-/** Count newlines in `content` up to (exclusive) byte offset `idx`,
- *  returning the 1-indexed line number that contains `idx`. */
+/** Count newlines in `content` up to (exclusive) code-unit offset `idx`,
+ *  returning the 1-indexed line number that contains `idx`.
+ *  Iterates Unicode code points while tracking code-unit position. */
 function lineOfOffset(content: string, idx: number): number {
   let line = 1;
-  for (let i = 0; i < idx; i++) {
-    if (content.charCodeAt(i) === 0x0a /* \n */) line++;
+  let codeUnitPos = 0;
+  for (const char of content) {
+    if (codeUnitPos >= idx) break;
+    if (char === '\n') line++;
+    codeUnitPos += char.length;
   }
   return line;
 }

@@ -273,7 +273,7 @@ export function normalizePath(filePath: string): string {
  * Strip a leading UTF-8 BOM (U+FEFF) if present.
  */
 export function stripBom(content: string): string {
-  return content.charCodeAt(0) === 0xfeff ? content.slice(1) : content;
+  return content.codePointAt(0) === 0xfeff ? content.slice(1) : content;
 }
 
 /**
@@ -511,8 +511,10 @@ export function stripCommentsForRegex(
  */
 export function makeLineIndex(content: string): (offset: number) => number {
   const newlines: number[] = [];
-  for (let i = 0; i < content.length; i++) {
-    if (content.charCodeAt(i) === 0x0a) newlines.push(i);
+  let codeUnitPos = 0;
+  for (const char of content) {
+    if (char.codePointAt(0) === 0x0a) newlines.push(codeUnitPos);
+    codeUnitPos += char.length; // UTF-16: 1 or 2 code units per char
   }
   return (offset: number): number => {
     // Binary search for the smallest i such that newlines[i] >= offset.

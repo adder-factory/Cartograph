@@ -504,7 +504,7 @@ function unquoteGitPath(raw: string): string {
   for (let i = 0; i < body.length; i++) {
     const ch = body[i];
     if (ch !== '\\') {
-      bytes.push(body.charCodeAt(i));
+      bytes.push(body.codePointAt(i) ?? 0);
       continue;
     }
     const next = body[++i];
@@ -514,7 +514,7 @@ function unquoteGitPath(raw: string): string {
       bytes.push(codePoint);
       i += consumed;
     } else {
-      bytes.push(C_ESCAPE_BYTE_MAP[next] ?? next.charCodeAt(0));
+      bytes.push(C_ESCAPE_BYTE_MAP[next] ?? next.codePointAt(0) ?? 0);
     }
   }
   return Buffer.from(bytes).toString('utf-8');

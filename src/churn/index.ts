@@ -125,9 +125,9 @@ export function readFileLoc(rootDir: string, relPath: string): number {
     const content = fs.readFileSync(abs, 'utf8');
     if (content.length === 0) return 0;
     let lines = 0;
-    for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
+    for (const char of content) if (char === '\n') lines++;
     // Trailing chunk without final newline still counts as a line.
-    if (content.charCodeAt(content.length - 1) !== 10) lines++;
+    if (!content.endsWith('\n')) lines++;
     return lines;
   } catch {
     return 0;

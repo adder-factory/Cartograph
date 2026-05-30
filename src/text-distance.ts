@@ -17,8 +17,8 @@
  */
 
 interface EditRowCtx {
-  a: string;
-  b: string;
+  a: string[];
+  b: string[];
   prev: number[];
   cur: number[];
 }
@@ -44,7 +44,7 @@ function fillEditRow(ctx: EditRowCtx, i: number): number {
   cur[0] = i;
   let rowMin = cur[0]!;
   for (let j = 1; j <= bl; j++) {
-    const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+    const cost = a[i - 1] === b[j - 1] ? 0 : 1;
     const insertion = cur[j - 1]! + 1;
     const deletion = prev[j]! + 1;
     const substitution = prev[j - 1]! + cost;
@@ -67,12 +67,14 @@ function fillEditRow(ctx: EditRowCtx, i: number): number {
 export function boundedEditDistance(a: string, b: string, maxDist: number): number {
   const shortcut = tryEditDistanceShortcut(a, b, maxDist);
   if (shortcut !== null) return shortcut;
-  const al = a.length;
-  const bl = b.length;
+  const aCodePoints = Array.from(a);
+  const bCodePoints = Array.from(b);
+  const al = aCodePoints.length;
+  const bl = bCodePoints.length;
 
   const ctx: EditRowCtx = {
-    a,
-    b,
+    a: aCodePoints,
+    b: bCodePoints,
     prev: new Array<number>(bl + 1),
     cur: new Array<number>(bl + 1),
   };

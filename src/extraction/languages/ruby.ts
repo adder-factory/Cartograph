@@ -182,7 +182,8 @@ const rubyExtractor: LanguageExtractor = {
     if (SKIP.has(name)) return undefined;
 
     // Skip constants (uppercase start) — these are class/module refs, not calls
-    if (name.length > 0 && name.charCodeAt(0) >= 65 && name.charCodeAt(0) <= 90) return undefined;
+    const firstCodePoint = name.codePointAt(0) ?? 0;
+    if (firstCodePoint >= 65 && firstCodePoint <= 90) return undefined;
 
     return name;
   },

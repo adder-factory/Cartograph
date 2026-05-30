@@ -544,8 +544,8 @@ export function isMinifiedJsFamily(language: string, content: string): boolean {
   // Count `\n` directly — avoids the allocation of `content.split('\n')`
   // and is monomorphic in V8.
   let newlines = 0;
-  for (let i = 0; i < content.length; i++) {
-    if (content.charCodeAt(i) === 10) newlines++;
+  for (const char of content) {
+    if (char === '\n') newlines++;
   }
   // +1 because N newlines split content into N+1 lines.
   const avgLineLen = content.length / (newlines + 1);

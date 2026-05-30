@@ -326,11 +326,13 @@ export function parseQuery(raw: string): ParsedQuery {
 export function isSubsequence(q: string, s: string): boolean {
   if (q.length === 0) return true;
   if (q.length > s.length) return false;
+  const qCodes = [...q];
+  const sCodes = [...s];
   let qi = 0;
-  for (let si = 0; si < s.length && qi < q.length; si++) {
-    if (q.charCodeAt(qi) === s.charCodeAt(si)) qi++;
+  for (let si = 0; si < sCodes.length && qi < qCodes.length; si++) {
+    if (qCodes[qi] === sCodes[si]) qi++;
   }
-  return qi === q.length;
+  return qi === qCodes.length;
 }
 
 /**
@@ -345,8 +347,10 @@ export function isSubsequence(q: string, s: string): boolean {
  * 10k-name sweep on real codebases.
  */
 export function longestCommonSubstring(a: string, b: string): number {
-  const al = a.length;
-  const bl = b.length;
+  const aCodes = [...a];
+  const bCodes = [...b];
+  const al = aCodes.length;
+  const bl = bCodes.length;
   if (al === 0 || bl === 0) return 0;
 
   let prev = new Array<number>(bl + 1).fill(0);
@@ -356,7 +360,7 @@ export function longestCommonSubstring(a: string, b: string): number {
     for (let j = 1; j <= bl; j++) {
       // Invert the match check + use Math.max instead of a nested if-update
       // so the inner loop stays at depth 3 instead of 4.
-      if (a.charCodeAt(i - 1) !== b.charCodeAt(j - 1)) {
+      if (aCodes[i - 1] !== bCodes[j - 1]) {
         cur[j] = 0;
         continue;
       }
