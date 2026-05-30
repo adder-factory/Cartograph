@@ -53,7 +53,7 @@ export const MIGRATION: MigrationModule = {
     const existing = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_embeddings'").get() as
       | { type: string }
       | undefined;
-    if (existing && existing.type === 'view') return;
+    if (existing?.type === 'view') return;
 
     // --- 1. Rebuild symbol_embeddings with FK to nodes(id) --------
     db.exec(`

@@ -9,7 +9,7 @@ import { compact } from '../../utils.js';
 function isInterfaceUserType(node: SyntaxNode): boolean {
   if (node.type !== 'user_type') return false;
   const typeId = node.namedChildren.find((c: SyntaxNode) => c.type === 'type_identifier');
-  return !!(typeId && typeId.text === 'interface');
+  return !!(typeId?.text === 'interface');
 }
 
 /** Pattern 2b: a `fun interface` misparse where the `user_type("interface")`
@@ -119,7 +119,7 @@ const kotlinExtractor: LanguageExtractor = {
     // Skip lambda_literal bodies that were already consumed by a fun interface ERROR node
     if (node.type === 'lambda_literal') {
       const prev = node.previousSibling;
-      if (prev && prev.type === 'ERROR' && isFunInterfaceNode(prev)) return true;
+      if (prev?.type === 'ERROR' && isFunInterfaceNode(prev)) return true;
       return false;
     }
 
@@ -130,7 +130,7 @@ const kotlinExtractor: LanguageExtractor = {
     // resolveBody; handling the ERROR here would consume the whole body.
     if (node.type === 'ERROR') {
       const firstChild = node.child(0);
-      if (firstChild && firstChild.type === '{') return false;
+      if (firstChild?.type === '{') return false;
     }
 
     if (!isFunInterfaceNode(node)) return false;
@@ -141,9 +141,9 @@ const kotlinExtractor: LanguageExtractor = {
     let nameText: string | null = null;
     if (node.type === 'function_declaration') {
       for (const child of node.children) {
-        if (child && child.type === 'ERROR') {
+        if (child?.type === 'ERROR') {
           for (const gc of child.children) {
-            if (gc && gc.type === 'simple_identifier') {
+            if (gc?.type === 'simple_identifier') {
               nameText = gc.text;
               break;
             }
@@ -155,7 +155,7 @@ const kotlinExtractor: LanguageExtractor = {
     // Fallback: direct simple_identifier child (Pattern 1: ERROR node at top level)
     if (!nameText) {
       for (const child of node.children) {
-        if (child && child.type === 'simple_identifier') {
+        if (child?.type === 'simple_identifier') {
           nameText = child.text;
           break;
         }
@@ -172,9 +172,9 @@ const kotlinExtractor: LanguageExtractor = {
     if (node.type === 'ERROR') {
       // Pattern 1: body is in the next sibling lambda_literal
       const nextSibling = node.nextSibling;
-      if (nextSibling && nextSibling.type === 'lambda_literal') {
+      if (nextSibling?.type === 'lambda_literal') {
         for (const child of nextSibling.namedChildren) {
-          if (child && child.type === 'statements') {
+          if (child?.type === 'statements') {
             for (const stmt of child.namedChildren) {
               if (stmt) ctx.visitNode(stmt);
             }
@@ -201,9 +201,9 @@ const kotlinExtractor: LanguageExtractor = {
     // a class_body sibling for the nested interface's body. Prefer the ERROR body
     // so the parent's methods are extracted.
     for (const child of node.namedChildren) {
-      if (child && child.type === 'ERROR') {
+      if (child?.type === 'ERROR') {
         const firstChild = child.child(0);
-        if (firstChild && firstChild.type === '{') {
+        if (firstChild?.type === '{') {
           return child;
         }
       }

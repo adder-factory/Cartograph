@@ -218,7 +218,7 @@ export function isUnresolvedUid(
 ): boolean {
   if (!RefIdCache.isUid(symbol)) return false;
   // No cache at all, or the cache has no entry for this UID.
-  return !refIds || refIds.resolve(symbol) === null;
+  return !refIds || refIds?.resolve(symbol) === null;
 }
 
 /**
@@ -474,7 +474,7 @@ export function prependDisambiguationBanner<R extends { content?: ReadonlyArray<
 ): R {
   if (!note || !result.content || result.content.length === 0) return result;
   const first = result.content[0];
-  if (!first || first.type !== 'text') return result;
+  if (!first || first?.type !== 'text') return result;
   const composed = withDisambiguationBanner(note, first.text ?? '');
   return { ...result, content: [{ ...first, text: composed }] } as R;
 }

@@ -196,7 +196,7 @@ export function writeInstructionsEntry(loc: Location): WriteResult['files'][numb
     const content = fs.readFileSync(file, 'utf-8');
     if (!content.includes(CARTOGRAPH_SECTION_START)) {
       const headerMatch = /\n## Cartograph\n/.exec(content);
-      if (headerMatch && headerMatch.index !== undefined) {
+      if (headerMatch?.index !== undefined) {
         const sectionStart = headerMatch.index;
         const after = content.substring(sectionStart + 1);
         const nextHeader = /\n## (?!#)/.exec(after);

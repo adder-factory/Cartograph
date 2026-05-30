@@ -43,7 +43,7 @@ export const MIGRATION: MigrationModule = {
     const embEntity = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_embeddings'").get() as
       | { type: string }
       | undefined;
-    if ((!embEntity || embEntity.type !== 'view') && !hasColumn('symbol_embeddings', 'source_content_hash')) {
+    if (embEntity?.type !== 'view' && !hasColumn('symbol_embeddings', 'source_content_hash')) {
       db.exec(`
         ALTER TABLE symbol_embeddings
           ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT '';

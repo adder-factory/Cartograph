@@ -28,9 +28,9 @@
 
 /** `class X: Module` (Swift) / `class X : Module` (Kotlin) — the Expo module
  *  class declaration. Also the module-name fallback when no `Name("…")` given. */
-const EXPO_CLASS_RE = /\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*Module\b/;
+const EXPO_CLASS_RE = /\bclass\s+([A-Za-z_]\w*)\s*:\s*Module\b/;
 /** `Name("X")` — the JS-visible module name. */
-const EXPO_MODULE_NAME_RE = /\bName\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/;
+const EXPO_MODULE_NAME_RE = /\bName\s*\(\s*["']([A-Za-z_]\w*)["']/;
 /**
  * Member-declaration pattern source. Captures the JS-visible name from
  * `Function("name")` / `AsyncFunction("name")` / `Property("name")` /
@@ -39,7 +39,7 @@ const EXPO_MODULE_NAME_RE = /\bName\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']/;
  * `RegExp` is built per parse because the `g` flag is stateful — a shared
  * instance would skip matches across files via a leaked `lastIndex`.
  */
-const EXPO_DECL_SRC = String.raw`\b(?:Function|AsyncFunction|Property|Constants)\s*\(\s*["']([A-Za-z_][A-Za-z0-9_]*)["']`;
+const EXPO_DECL_SRC = String.raw`\b(?:Function|AsyncFunction|Property|Constants)\s*\(\s*["']([A-Za-z_]\w*)["']`;
 
 /** One JS-exposed member parsed out of an Expo module DSL. */
 export interface ExpoMember {

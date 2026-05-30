@@ -216,11 +216,11 @@ function tryEmitLuaGlobalFunctionAssign(node: SyntaxNode, ctx: ExtractorContext)
   // skip those; they'll be covered when we have field/table tracking.
   if (nameList.namedChildCount !== 1) return false;
   const ident = nameList.namedChild(0);
-  if (!ident || ident.type !== 'identifier') return false;
+  if (ident?.type !== 'identifier') return false;
   // Only handle function_definition RHS (single value).
   if (valueList.namedChildCount !== 1) return false;
   const funcDef = valueList.namedChild(0);
-  if (!funcDef || funcDef.type !== 'function_definition') return false;
+  if (funcDef?.type !== 'function_definition') return false;
 
   const name = getNodeText(ident, ctx.source).trim();
   if (!name) return false;

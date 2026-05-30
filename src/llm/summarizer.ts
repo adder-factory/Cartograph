@@ -594,7 +594,7 @@ interface SummarizerWorkerState {
 function summaryTryServeFromCache(ctx: SummarizerCallContext, sym: Node, hash: string): boolean {
   const { counters, queries, modelLabel, total, options } = ctx;
   const existing = getSymbolSummary(queries, sym.id);
-  if (existing && existing.contentHash === hash && existing.model === modelLabel) {
+  if (existing?.contentHash === hash && existing?.model === modelLabel) {
     counters.cacheHits++;
     counters.done++;
     options.onProgress?.(counters.done, total);

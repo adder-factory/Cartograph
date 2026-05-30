@@ -9,7 +9,7 @@ export const MIGRATION: MigrationModule = {
     const existing = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_summaries'").get() as
       | { type: string }
       | undefined;
-    if (existing && existing.type === 'view') return;
+    if (existing?.type === 'view') return;
     const cols = db.prepare(`PRAGMA table_info(symbol_summaries);`).all() as Array<{ name: string }>;
     if (!cols.some((c) => c.name === 'embedding')) {
       db.exec(`ALTER TABLE symbol_summaries ADD COLUMN embedding BLOB;`);

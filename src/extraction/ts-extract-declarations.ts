@@ -555,7 +555,7 @@ function emitJavaAnnotatedParameters(ext: TreeSitterExtractor, methodNode: Node,
   const paramsNode = methodSyntaxNode.namedChildren.find((c) => c?.type === 'formal_parameters');
   if (!paramsNode) return;
   for (const fp of paramsNode.namedChildren) {
-    if (!fp || fp.type !== 'formal_parameter') continue;
+    if (fp?.type !== 'formal_parameter') continue;
     // Cheap pre-gate: skip when no annotation is present anywhere in
     // the formal_parameter's modifiers. Avoids creating throwaway
     // parameter nodes for the bulk of un-annotated Java params.

@@ -289,7 +289,7 @@ function extractGoVariables(extractor: TreeSitterExtractor, node: SyntaxNode, do
   const declKind: NodeKind = node.type === 'const_declaration' ? 'constant' : 'variable';
   for (const spec of specs) {
     const nameNode = spec.namedChild(0);
-    if (!nameNode || nameNode.type !== 'identifier') continue;
+    if (!nameNode?.type || nameNode.type !== 'identifier') continue;
     const valueNode = spec.namedChildCount > 1 ? spec.namedChild(spec.namedChildCount - 1) : null;
     const name = getNodeText(nameNode, extractor.source);
     extractor.createNode({
@@ -577,7 +577,7 @@ function extractGoInterfaceMethods(
   interfaceName: string,
 ): void {
   for (const child of interfaceBody.namedChildren) {
-    if (!child || child.type !== 'method_elem') continue;
+    if (!child?.type || child.type !== 'method_elem') continue;
     const nameNode = child.namedChildren.find((c) => c?.type === 'field_identifier');
     if (!nameNode) continue;
     const name = getNodeText(nameNode, extractor.source);

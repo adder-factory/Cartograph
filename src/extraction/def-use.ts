@@ -31,9 +31,9 @@ interface LocalDef {
 function collectLocals(declNode: SyntaxNode): LocalDef[] {
   const defs: LocalDef[] = [];
   for (const child of declNode.namedChildren) {
-    if (!child || child.type !== 'variable_declarator') continue;
+    if (!child?.type || child.type !== 'variable_declarator') continue;
     const nameNode = child.childForFieldName('name');
-    if (!nameNode || nameNode.type !== 'identifier') continue;
+    if (!nameNode?.type || nameNode.type !== 'identifier') continue;
     defs.push({
       name: nameNode.text,
       defLine: nameNode.startPosition.row + 1,

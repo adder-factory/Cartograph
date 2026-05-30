@@ -490,7 +490,7 @@ export function scorePathRelevance(filePath: string, query: string): number {
  * Returns the split, or null if the query isn't dot-qualified.
  */
 export function parseDotQualified(query: string): { lhs: string; rhs: string } | null {
-  if (!/^_?[a-z][a-z0-9_]*\.[A-Za-z][A-Za-z0-9_]*$/.test(query.trim())) return null;
+  if (!/^_?[a-z]\w*\.[A-Za-z]\w*$/.test(query.trim())) return null;
   const i = query.indexOf('.');
   return { lhs: query.slice(0, i), rhs: query.slice(i + 1) };
 }

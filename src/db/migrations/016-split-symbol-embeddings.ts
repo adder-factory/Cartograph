@@ -42,10 +42,7 @@ export const MIGRATION: MigrationModule = {
     const embeddingsEntity = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_embeddings'").get() as
       | { type: string }
       | undefined;
-    if (
-      (summariesEntity && summariesEntity.type === 'view') ||
-      (embeddingsEntity && embeddingsEntity.type === 'view')
-    ) {
+    if (summariesEntity?.type === 'view' || embeddingsEntity?.type === 'view') {
       return;
     }
     db.exec(`

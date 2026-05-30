@@ -122,7 +122,7 @@ function parseSchemaSqlObjects(): { tables: ReadonlySet<string>; views: Readonly
   const src = fs.readFileSync(schemaPath, 'utf-8');
   const tables = new Set<string>();
   const views = new Set<string>();
-  const re = /CREATE\s+(VIRTUAL\s+TABLE|TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_]*)/gi;
+  const re = /CREATE\s+(VIRTUAL\s+TABLE|TABLE|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_][\w]*)/gi;
   for (;;) {
     const m = re.exec(src);
     if (!m) break;

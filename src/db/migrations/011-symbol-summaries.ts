@@ -13,7 +13,7 @@ export const MIGRATION: MigrationModule = {
     const existing = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_summaries'").get() as
       | { type: string }
       | undefined;
-    if (existing && existing.type === 'view') return;
+    if (existing?.type === 'view') return;
     db.exec(`
       CREATE TABLE IF NOT EXISTS symbol_summaries (
         node_id TEXT PRIMARY KEY,

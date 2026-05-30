@@ -246,7 +246,7 @@ export class GraphQueryManager {
     // Resolve each specifier back to the project-relative file it imports.
     for (const edge of getOutgoingEdges(this.queries, fileNode.id, ['imports'])) {
       const importNode = this.queries.getNodeById(edge.target);
-      if (!importNode || importNode.kind !== 'import') continue;
+      if (!importNode || importNode?.kind !== 'import') continue;
       const resolved = resolveRelativeSpec(filePath, importNode.name, fileSet);
       if (resolved && resolved !== filePath) dependencies.add(resolved);
     }

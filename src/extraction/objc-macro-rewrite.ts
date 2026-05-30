@@ -57,7 +57,7 @@ const RN_MACROS: readonly RnMacroSpec[] = [
   { name: 'RCT_EXPORT_METHOD', skeleton: '- (void)', leadingArgs: 0 },
 ];
 
-const IDENT_CHAR = /[A-Za-z0-9_]/;
+const IDENT_CHAR = /\w/;
 function isIdentChar(ch: string): boolean {
   return ch !== '' && IDENT_CHAR.test(ch);
 }

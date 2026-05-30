@@ -26,7 +26,7 @@ export const MIGRATION: MigrationModule = {
     const existing = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_embeddings'").get() as
       | { type: string }
       | undefined;
-    if (existing && existing.type === 'view') return;
+    if (existing?.type === 'view') return;
     const hasChunkIdx =
       (
         db.prepare(`SELECT COUNT(*) AS c FROM pragma_table_info('symbol_embeddings') WHERE name='chunk_idx'`).get() as {

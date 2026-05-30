@@ -730,7 +730,7 @@ function shouldUseCentralityFastPath(parsed: ReturnType<typeof parseQuery>): boo
  * generics) is a sign the agent intended one richer query, not many
  * bare symbol names.
  */
-const MULTI_NAME_TOKEN_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const MULTI_NAME_TOKEN_RE = /^[A-Za-z_]\w*$/;
 
 /**
  * Tokens that signal field-qualified FTS / boolean syntax. If ANY of

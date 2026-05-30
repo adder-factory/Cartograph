@@ -288,7 +288,7 @@ async function summariseOneFile(args: SummariseOneFileArgs): Promise<FileSummari
   const { queries, client, modelLabel, group, anchorText, signal } = args;
   const hash = hashFileContent(group, anchorText);
   const existing = getFileSummary(queries, group.filePath);
-  if (existing && existing.contentHash === hash && existing.model === modelLabel) {
+  if (existing?.contentHash === hash && existing?.model === modelLabel) {
     return 'cached';
   }
   const result = await client.chat(

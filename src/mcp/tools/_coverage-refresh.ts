@@ -64,7 +64,7 @@ function renderConsidered(candidates: readonly Candidate[], picked: Candidate | 
     let mark = '  - ❌';
     let suffix = '';
     if (present) {
-      const isPicked = picked != null && picked.absPath === present.absPath;
+      const isPicked = picked?.absPath === present.absPath;
       mark = isPicked ? '  - ✅' : '  - ☑️';
       suffix = isPicked ? ' (chosen — freshest)' : '';
     }

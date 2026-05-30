@@ -85,7 +85,7 @@ function findZodCall(value: SyntaxNode | null, method: string): SyntaxNode | nul
       if (fn && fn.type === 'member_expression') {
         const obj = fn.childForFieldName('object');
         const prop = fn.childForFieldName('property');
-        if (obj && obj.type === 'identifier' && obj.text === 'z' && prop && prop.text === method) {
+        if (obj?.type === 'identifier' && obj.text === 'z' && prop?.text === method) {
           return n;
         }
         n = obj; // a chain — `z.object({...}).strict()` — descend the receiver
@@ -122,7 +122,7 @@ function zodLeafType(value: SyntaxNode | null): string | null {
       if (fn && fn.type === 'member_expression') {
         const obj = fn.childForFieldName('object');
         const prop = fn.childForFieldName('property');
-        if (obj && obj.type === 'identifier' && obj.text === 'z') {
+        if (obj?.type === 'identifier' && obj.text === 'z') {
           return prop ? prop.text : null;
         }
         n = obj;
@@ -160,11 +160,11 @@ interface ExtractEnumMembersArgs {
 function extractEnumMembers(args: ExtractEnumMembersArgs): SchemaRecognizerResult {
   const { fieldValue, fieldId, fieldQualifiedName, ctx, now } = args;
   const arr = firstArg(findZodCall(fieldValue, 'enum'));
-  if (!arr || arr.type !== 'array') return EMPTY_RESULT;
+  if (!arr || arr?.type !== 'array') return EMPTY_RESULT;
   const nodes: Node[] = [];
   const edges: Edge[] = [];
   for (const el of arr.namedChildren) {
-    if (!el || el.type !== 'string') continue;
+    if (!el || el?.type !== 'string') continue;
     const member = unquote(el.text);
     const id = ctx.idFactory.next('enum_member', member);
     nodes.push(
@@ -296,7 +296,7 @@ function emitObjectFields(args: EmitObjectFieldsArgs): ObjectFieldsResult {
     }
     if (leaf === 'object' && depth < MAX_NEST_DEPTH) {
       const innerObj = firstArg(findZodCall(fieldValue, 'object'));
-      if (innerObj && innerObj.type === 'object') {
+      if (innerObj?.type === 'object') {
         consumed.add(innerObj.id);
         const nestedId = ctx.idFactory.next('struct', fieldName);
         nodes.push(
@@ -353,10 +353,10 @@ function extractSchema(args: ExtractSchemaArgs): ExtractSchemaResult {
   const { decl, ctx, now, consumed } = args;
   const nameNode = decl.childForFieldName('name');
   const valueNode = decl.childForFieldName('value');
-  if (!nameNode || nameNode.type !== 'identifier' || !valueNode) return EMPTY_SCHEMA_RESULT;
+  if (!nameNode || nameNode?.type !== 'identifier' || !valueNode) return EMPTY_SCHEMA_RESULT;
 
   const objArg = firstArg(findZodCall(valueNode, 'object'));
-  if (!objArg || objArg.type !== 'object') return EMPTY_SCHEMA_RESULT;
+  if (!objArg || objArg?.type !== 'object') return EMPTY_SCHEMA_RESULT;
   consumed.add(objArg.id);
 
   const schemaName = nameNode.text;
@@ -395,7 +395,7 @@ function extractSchema(args: ExtractSchemaArgs): ExtractSchemaResult {
 /** Is `call` a direct `z.object(...)` call (not a chain method)? */
 function isZodObjectCall(call: SyntaxNode): boolean {
   const fn = call.childForFieldName('function');
-  if (!fn || fn.type !== 'member_expression') return false;
+  if (!fn || fn?.type !== 'member_expression') return false;
   const obj = fn.childForFieldName('object');
   const prop = fn.childForFieldName('property');
   return !!obj && obj.type === 'identifier' && obj.text === 'z' && !!prop && prop.text === 'object';
@@ -450,7 +450,7 @@ function extractInlineSchemas(
   walkTree(ctx.rootNode, (n) => {
     if (n.type !== 'call_expression' || !isZodObjectCall(n)) return;
     const objArg = firstArg(n);
-    if (!objArg || objArg.type !== 'object' || consumed.has(objArg.id)) return;
+    if (!objArg || objArg?.type !== 'object' || consumed.has(objArg.id)) return;
     const name = inlineSchemaName(n);
     if (!name) return;
     consumed.add(objArg.id);
@@ -509,7 +509,7 @@ function enclosingNodeId(site: SyntaxNode, ctx: SchemaRecognizerContext): string
 function typeofArgName(genericType: SyntaxNode): string | null {
   let typeArgs: SyntaxNode | null = null;
   for (const c of genericType.namedChildren) {
-    if (c && c.type === 'type_arguments') {
+    if (c?.type === 'type_arguments') {
       typeArgs = c;
       break;
     }
@@ -520,7 +520,7 @@ function typeofArgName(genericType: SyntaxNode): string | null {
     if (found) return;
     if (n.type === 'type_query') {
       for (const c of n.namedChildren) {
-        if (c && c.type === 'identifier') {
+        if (c?.type === 'identifier') {
           found = c.text;
           return;
         }
@@ -537,10 +537,10 @@ function typeofArgName(genericType: SyntaxNode): string | null {
 function shapeFieldRef(member: SyntaxNode): { schema: string; field: string } | null {
   const property = member.childForFieldName('property');
   const object = member.childForFieldName('object');
-  if (!property || !object || object.type !== 'member_expression') return null;
+  if (!property || !object || object?.type !== 'member_expression') return null;
   const innerObj = object.childForFieldName('object');
   const innerProp = object.childForFieldName('property');
-  if (!innerObj || innerObj.type !== 'identifier' || !innerProp || innerProp.text !== 'shape') {
+  if (!innerObj || innerObj?.type !== 'identifier' || !innerProp || innerProp?.text !== 'shape') {
     return null;
   }
   return { schema: innerObj.text, field: property.text };
@@ -552,13 +552,13 @@ function shapeFieldRef(member: SyntaxNode): { schema: string; field: string } | 
  */
 function pickOmitRefs(call: SyntaxNode): { schema: string; fields: string[] } | null {
   const fn = call.childForFieldName('function');
-  if (!fn || fn.type !== 'member_expression') return null;
+  if (!fn || fn?.type !== 'member_expression') return null;
   const obj = fn.childForFieldName('object');
   const prop = fn.childForFieldName('property');
-  if (!obj || obj.type !== 'identifier' || !prop) return null;
+  if (!obj || obj?.type !== 'identifier' || !prop) return null;
   if (prop.text !== 'pick' && prop.text !== 'omit') return null;
   const arg = firstArg(call);
-  if (!arg || arg.type !== 'object') return null;
+  if (!arg || arg?.type !== 'object') return null;
   const fields: string[] = [];
   for (const pair of arg.namedChildren) {
     if (!pair || pair.type !== 'pair') continue;
@@ -588,7 +588,7 @@ function extractConsumers(ctx: SchemaRecognizerContext, schemas: ReadonlyMap<str
     // (a) `z.infer<typeof X>` annotation → `type_of` edge to struct X.
     if (n.type === 'generic_type') {
       const nameNode = n.namedChild(0);
-      if (nameNode && nameNode.text === 'z.infer') {
+      if (nameNode?.text === 'z.infer') {
         const targetName = typeofArgName(n);
         const schema = targetName ? schemas.get(targetName) : undefined;
         if (schema)

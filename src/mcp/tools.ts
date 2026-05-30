@@ -262,7 +262,7 @@ function computeStalenessBanner(cg: Cartograph | null, result: ToolResult): stri
   if (pending.length === 0) return null;
 
   const first = result.content[0];
-  if (!first || first.type !== 'text') return null;
+  if (first?.type !== 'text') return null;
   const text = first.text;
 
   const referenced: PendingFile[] = [];
@@ -735,7 +735,7 @@ function prependBanner(result: ToolResult, banner: string): ToolResult {
     return result;
   }
   const first = result.content[0];
-  if (!first || first.type !== 'text') return result;
+  if (first?.type !== 'text') return result;
   return {
     ...result,
     content: [{ type: 'text', text: `${banner}\n\n${first.text}` }, ...result.content.slice(1)],
@@ -757,7 +757,7 @@ function prependTextToResult(result: ToolResult, banner: string): ToolResult {
     return { ...result, content: [{ type: 'text', text: prefix }] };
   }
   const first = result.content[0];
-  if (!first || first.type !== 'text') {
+  if (first?.type !== 'text') {
     // First block is not text (e.g. image) — insert a new text block before it.
     return { ...result, content: [{ type: 'text', text: prefix }, ...result.content] };
   }

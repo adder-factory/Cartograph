@@ -841,7 +841,7 @@ function pushAstChildren(stack: Array<{ node: TsNode; depth: number }>, node: Ts
  */
 function isGoNilComparisonIfStatement(ifNode: TsNode): boolean {
   const firstChild = ifNode.namedChildren[0] ?? null;
-  if (!firstChild || firstChild.type !== 'binary_expression') return false;
+  if (firstChild?.type !== 'binary_expression') return false;
   // B18 (2026-05-23) — bulk `namedChildren` over indexed `namedChild(i)`.
   for (const c of firstChild.namedChildren) {
     if (c?.type === 'nil') return true;

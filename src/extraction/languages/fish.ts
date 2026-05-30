@@ -92,7 +92,7 @@ function handleFishFunction(node: SyntaxNode, ctx: ExtractorContext): void {
   // (until the first non-word/string child) followed by the body statements.
   if (node.namedChildCount === 0) return;
   const nameNode = node.namedChild(0);
-  if (!nameNode || nameNode.type !== 'word') return;
+  if (nameNode?.type !== 'word') return;
   const name = getNodeText(nameNode, ctx.source).trim();
   if (!name) return;
 

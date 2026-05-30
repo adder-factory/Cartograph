@@ -695,7 +695,7 @@ async function summariseOneDir(args: SummariseOneDirArgs): Promise<DirSummariseO
   const toolExportCount = getDirToolExportConstantCount(queries, group.dir);
   const pattern = detectDirectoryPattern(group.items, { toolExportCount });
   if (pattern !== null) {
-    if (existing && existing.contentHash === hash && existing.model === STRUCTURAL_DIR_MODEL) {
+    if (existing?.contentHash === hash && existing?.model === STRUCTURAL_DIR_MODEL) {
       return 'cached';
     }
     const structuralSummary = buildStructuralDirectorySummary(group.dir, pattern, group.items);
@@ -713,7 +713,7 @@ async function summariseOneDir(args: SummariseOneDirArgs): Promise<DirSummariseO
     return 'generated';
   }
 
-  if (existing && existing.contentHash === hash && existing.model === modelLabel) {
+  if (existing?.contentHash === hash && existing?.model === modelLabel) {
     return 'cached';
   }
   const result = await client.chat(

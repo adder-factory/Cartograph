@@ -857,7 +857,7 @@ function largeFunctionThresholdEnvValue(threshold: number): string {
  */
 function isPureLineRangeOnly(sym: SymbolDelta): boolean {
   const r = sym.modifiedReasons;
-  return r !== undefined && r.length === 1 && r[0] === 'line range changed';
+  return r?.length === 1 && r?.[0] === 'line range changed';
 }
 
 /**

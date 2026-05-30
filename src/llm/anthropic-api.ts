@@ -56,7 +56,7 @@ function extractAnthropicText(
 ): string {
   if (viaTool) {
     const toolUse = content.find((b) => b.type === 'tool_use');
-    return toolUse && toolUse.input !== undefined ? JSON.stringify(toolUse.input) : '';
+    return toolUse?.input !== undefined ? JSON.stringify(toolUse?.input) : '';
   }
   return content
     .filter((b) => b.type === 'text')

@@ -92,7 +92,7 @@ function literalMembers(typeNode: SyntaxNode): string[] {
 /** The `assignment` node of a class-body statement, or `null`. */
 function fieldAssignment(stmt: SyntaxNode): SyntaxNode | null {
   const inner = stmt.type === 'expression_statement' ? stmt.namedChild(0) : stmt;
-  return inner && inner.type === 'assignment' ? inner : null;
+  return inner?.type === 'assignment' ? inner : null;
 }
 
 /** Synthesize the `struct` + `field` (+ `enum_member`) nodes for one
@@ -127,7 +127,7 @@ function extractModel(classDef: SyntaxNode, ctx: SchemaRecognizerContext, now: n
     const left = assignment.childForFieldName('left');
     const typeNode = assignment.childForFieldName('type');
     // A Pydantic field is a typed attribute — an annotation is required.
-    if (!left || left.type !== 'identifier' || !typeNode) continue;
+    if (!left || left?.type !== 'identifier' || !typeNode) continue;
     const signature = typeNode.text;
     // `ClassVar[...]` is a class variable, not a Pydantic field.
     if (signature.startsWith('ClassVar')) continue;

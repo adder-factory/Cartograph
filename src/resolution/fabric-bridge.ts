@@ -66,7 +66,7 @@ function extractNativeProps(source: string): FabricMember[] {
   // `e` property node — rare in real NativeProps (function types are usually
   // single-line); these are name-discoverability nodes, so the over-capture is
   // low-harm and not worth paren-depth tracking.
-  const re = /^[ \t]*([A-Za-z_][A-Za-z0-9_]*)\??\s*:/gm;
+  const re = /^[ \t]*([A-Za-z_][\w]*)\??\s*:/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(iface.body)) !== null) {
     const name = m[1];

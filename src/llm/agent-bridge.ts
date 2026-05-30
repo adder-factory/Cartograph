@@ -147,7 +147,7 @@ function tryBuildPendingItem(
   // cached summary from THIS model (effectively a cache hit) —
   // that would waste agent tokens.
   const existing = getSymbolSummary(ctx.queries, node.id);
-  if (existing && existing.contentHash === hash && existing.model === ctx.modelHint) return null;
+  if (existing?.contentHash === hash && existing?.model === ctx.modelHint) return null;
 
   return {
     nodeId: node.id,

@@ -130,7 +130,7 @@ if (!send) {
 }
 
 process.on('message', async (msg: RunHooksMessage) => {
-  if (!msg || msg.type !== 'run-hooks') return;
+  if (msg?.type !== 'run-hooks') return;
   let db: DatabaseConnection | null = null;
   try {
     // `autoMigrate: false` — see the file header. A schema-behind DB

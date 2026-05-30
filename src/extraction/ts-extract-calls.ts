@@ -406,7 +406,7 @@ function collectPhpAttributeArg(argNode: SyntaxNode, source: string, out: Decora
   const nameField = getChildByField(argNode, 'name');
   // Value = first named child that isn't the `name:` field (compare by
   // span — web-tree-sitter hands out fresh wrappers, so `===` is unreliable).
-  const valueNode = argNode.namedChildren.find((c) => c && (!nameField || c.startIndex !== nameField.startIndex));
+  const valueNode = argNode.namedChildren.find((c) => c && (!nameField || c.startIndex !== nameField?.startIndex));
   if (!valueNode) return;
   const strVal =
     valueNode.type === 'string' || valueNode.type === 'string_literal'
@@ -600,8 +600,8 @@ function buildObjcMessageSelector(node: SyntaxNode, source: string): string {
   const receiverField = getChildByField(node, 'receiver');
   const keywords: string[] = [];
   for (const child of node.namedChildren) {
-    if (!child || child.type !== 'identifier') continue;
-    if (receiverField && child.startIndex === receiverField.startIndex) continue;
+    if (child?.type !== 'identifier') continue;
+    if (child.startIndex === receiverField?.startIndex) continue;
     if (source.charAt(child.endIndex) === ':') keywords.push(getNodeText(child, source));
   }
   if (keywords.length > 0) return keywords.map((k) => `${k}:`).join('');

@@ -191,7 +191,7 @@ export function getFreshnessInfo(queries: QueryBuilder, rootDir: string): Freshn
   if (!Number.isFinite(indexedAt)) return null;
 
   const indexedShaRaw = getMetadata(queries, 'index_head_sha');
-  const indexedSha = indexedShaRaw && indexedShaRaw.length === 40 ? indexedShaRaw : null;
+  const indexedSha = indexedShaRaw?.length === 40 ? indexedShaRaw : null;
 
   // Non-git project (or pre-freshness index) — surface nothing.
   // We can't compute drift without a sha to compare against.

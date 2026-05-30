@@ -633,7 +633,7 @@ export class EmbeddingCache {
    */
   get(fetcher: EmbeddingFetcher, model: string): CachedEmbeddings {
     const dbCount = fetcher.getEmbeddingsCount?.(model);
-    if (this.cached && this.cached.model === model) {
+    if (this.cached?.model === model) {
       // When the fetcher can't tell us the row count, fall back to
       // the legacy "trust the cache until invalidate()" behaviour.
       const fresh = dbCount === undefined || this.cached.dbCount === dbCount;

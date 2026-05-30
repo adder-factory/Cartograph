@@ -273,7 +273,7 @@ function sqlScanForeignKeys(st: SqlState, root: SyntaxNode, fromNodeId: string):
 /** When a `keyword_references` child is followed by an `object_reference`,
  *  push a `references` unresolved-ref. */
 function sqlRecordForeignKeyTarget(st: SqlState, target: SyntaxNode | null, fromNodeId: string): void {
-  if (!target || target.type !== 'object_reference') return;
+  if (target?.type !== 'object_reference') return;
   const targetName = sqlQualifiedName(st, target);
   if (!targetName) return;
   st.unresolvedReferences.push({

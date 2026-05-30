@@ -373,7 +373,7 @@ function neighborKindMatches(args: NeighborKindMatchesArgs): boolean {
   const { qb, neighborId, candidateKind, sameKindOnly } = args;
   if (!sameKindOnly) return true;
   const row = qb.db.prepare('SELECT kind FROM nodes WHERE id = ?').get(neighborId) as { kind: string } | undefined;
-  return row !== undefined && row.kind === candidateKind;
+  return row?.kind === candidateKind;
 }
 
 /**

@@ -87,7 +87,7 @@ export const MIGRATION: MigrationModule = {
     //     doesn't false-match
     const inList = `(${ROLE_LABELS.map((v) => `'${v}'`).join(', ')})`;
     const checkClause = `CHECK (role IS NULL OR role IN ${inList})`;
-    const injectionRegex = /(?<![_a-zA-Z0-9])role\s+TEXT(?!\s+CHECK)\b/i;
+    const injectionRegex = /(?<!\w)role\s+TEXT(?!\s+CHECK)\b/i;
     if (!injectionRegex.test(originalSql)) {
       throw new Error(
         `[migration 067] could not locate \`role TEXT\` in nodes CREATE statement: ${originalSql.slice(0, 200)}…`,

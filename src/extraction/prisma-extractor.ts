@@ -160,7 +160,7 @@ export class PrismaExtractor extends StandaloneExtractor {
     const block = decl.namedChildren.find((c: SyntaxNode | null) => c?.type === 'statement_block');
     if (!block) return;
     for (const col of block.namedChildren) {
-      if (col && col.type === 'column_declaration') this.emitField(col, name, structId);
+      if (col?.type === 'column_declaration') this.emitField(col, name, structId);
     }
   }
 

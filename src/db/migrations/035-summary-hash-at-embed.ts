@@ -37,7 +37,7 @@ export const MIGRATION: MigrationModule = {
     const existing = db.prepare("SELECT type FROM sqlite_master WHERE name='symbol_embeddings'").get() as
       | { type: string }
       | undefined;
-    if (existing && existing.type === 'view') return;
+    if (existing?.type === 'view') return;
     db.exec(`
       ALTER TABLE symbol_embeddings
         ADD COLUMN summary_hash_at_embed TEXT NOT NULL DEFAULT '';

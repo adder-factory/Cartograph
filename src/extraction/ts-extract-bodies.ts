@@ -493,7 +493,7 @@ function isRustDeclBindingPosition(node: SyntaxNode): boolean {
  */
 function isScopedCalleeDescendant(node: SyntaxNode): boolean {
   let cur: SyntaxNode | null = node.parent;
-  while (cur && cur.type === 'scoped_identifier') {
+  while (cur?.type === 'scoped_identifier') {
     const parent: SyntaxNode | null = cur.parent;
     if (!parent) return false;
     if (parent.type === 'call_expression' || parent.type === 'new_expression') {
@@ -667,7 +667,7 @@ function captureBodyConstantReads(ext: TreeSitterExtractor, node: SyntaxNode): v
  * (`T`, `K`) ARE matched — those are rare in read positions for Go
  * (generic type params live in DEFINITION positions, filtered out).
  */
-const GO_PASCAL_NAME_RE = /^[A-Z][a-zA-Z0-9_]*$/;
+const GO_PASCAL_NAME_RE = /^[A-Z]\w*$/;
 
 /** Go declaration kinds → the tree-sitter field name holding the
  *  binding identifier (the symbol being declared, not a read).

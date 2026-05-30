@@ -216,7 +216,7 @@ export class OpenAiSdkEmbeddingClient {
         },
         signal ? { signal } : undefined,
       );
-      if (!res.data || res.data.length !== batch.length) {
+      if (res.data?.length !== batch.length) {
         throw new LlmEndpointError(
           `embedding endpoint returned ${res.data?.length ?? 'no'} vectors for ${batch.length} inputs`,
         );

@@ -18,7 +18,7 @@ const PREPROC_VALUE_SIGNATURE_MAX = 100;
 function extractCPreprocDefConstant(node: SyntaxNode, ctx: ExtractorContext): boolean {
   if (node.type !== 'preproc_def') return false;
   const nameNode = node.childForFieldName('name');
-  if (!nameNode || nameNode.type !== 'identifier') return false;
+  if (nameNode?.type !== 'identifier') return false;
   const name = getNodeText(nameNode, ctx.source);
   if (!name) return false;
   const valueNode = node.childForFieldName('value');
@@ -200,7 +200,7 @@ function macroClassFromNestedError(qc: SyntaxNode): MacroClassInfo | null {
 function macroClassFromQualifiedChild(child: SyntaxNode): MacroClassInfo | null {
   if (child.type !== 'qualified_identifier') return null;
   const ns = child.namedChild(0);
-  if (!ns || ns.type !== 'namespace_identifier') return null;
+  if (ns?.type !== 'namespace_identifier') return null;
   if (CLASS_KEYWORDS.has(ns.text)) {
     const found = findClassNameInSubtree(child);
     if (found) return { name: found, kind: macroClassKind(ns.text) };
@@ -241,7 +241,7 @@ function macroClassFromBareKeyword(node: SyntaxNode, child: SyntaxNode, i: numbe
 function extractMacroObscuredClassInfo(node: SyntaxNode): MacroClassInfo | null {
   if (node.type !== 'function_definition' || !node.hasError) return null;
   const firstChild = node.namedChild(0);
-  if (!firstChild || firstChild.type !== 'type_identifier') return null;
+  if (firstChild?.type !== 'type_identifier') return null;
   if (!/^[A-Z][A-Z0-9_]*$/.test(firstChild.text)) return null;
 
   // B15: skipped — index `i` is passed to sibling helpers (macroClassFromErrorChild / macroClassFromBareKeyword
