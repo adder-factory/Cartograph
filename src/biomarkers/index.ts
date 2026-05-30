@@ -1419,7 +1419,7 @@ async function runCrossFileBiomarkers(args: RunCrossFileBiomarkersArgs): Promise
       queries,
       kind: result.ruleKind,
       passKind,
-      outcome: result.error !== undefined ? { ok: false, error: result.error } : { ok: true, raw: result.findings },
+      outcome: result.error === undefined ? { ok: true, raw: result.findings } : { ok: false, error: result.error },
       source: 'worker',
     });
     stats.findingsEmitted += findingsEmitted;

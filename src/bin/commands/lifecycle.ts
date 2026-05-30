@@ -237,7 +237,7 @@ program
       }
     }
     try {
-      const handle = await startViewerServer(projectPath, port !== undefined ? { port } : {});
+      const handle = await startViewerServer(projectPath, port === undefined ? {} : { port });
       info(`Viewer running at ${handle.url}`);
       info(`  project: ${projectPath}`);
       info(`  press Ctrl+C to stop`);
@@ -330,12 +330,12 @@ program
     const { existsSync } = await import('node:fs');
     const { join } = await import('node:path');
     const cgDir = join(projectPath, '.cartograph');
-    if (!existsSync(cgDir)) {
+    if (existsSync(cgDir)) {
+      info(`Step 1/3: ${cgDir} already exists — skipping init`);
+    } else {
       info(`Step 1/3: initialising .cartograph/ at ${projectPath}`);
       const { createDirectory } = await import('../../directory.js');
       createDirectory(projectPath);
-    } else {
-      info(`Step 1/3: ${cgDir} already exists — skipping init`);
     }
 
     // ─── Step 2: install-models ─────────────────────────────────────

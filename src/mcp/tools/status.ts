@@ -111,7 +111,7 @@ async function handleStatus(ctx: ToolCtx, args: StatusArgs): Promise<ToolOutcome
   const stats = cg.stats.getStats();
   const projectRoot = cg.projectRoot;
   const sourceLabel =
-    args.projectPath !== undefined ? '(from `projectPath` argument)' : '(default — server CWD at startup)';
+    args.projectPath === undefined ? '(default — server CWD at startup)' : '(from `projectPath` argument)';
 
   // `verbose: true` is the one-call onboarding shortcut — it
   // pre-fills the three composite-rollup flags with sensible
@@ -446,7 +446,7 @@ export function buildStatusInlineBiomarkersSpec(
     headingLevel: 3,
     rows,
     formatRow: (r) => {
-      const cent = r.centrality != null ? `, centrality: ${r.centrality.toFixed(ROLLUP_SCORE_DECIMALS)}` : '';
+      const cent = r.centrality == null ? '' : `, centrality: ${r.centrality.toFixed(ROLLUP_SCORE_DECIMALS)}`;
       return `- \`${r.name}\` (${r.kind}) — ${r.biomarker} ${r.severity} (metric: ${r.metric}${cent}) — \`${r.filePath}\``;
     },
     emptyState: '### 🩺 Biomarker findings',
@@ -608,9 +608,9 @@ function formatStaleLine(freshness: NonNullable<ReturnType<Cartograph['stats']['
       ? `${freshness.commitsAhead} commit${freshness.commitsAhead === 1 ? '' : 's'} ahead of indexed HEAD`
       : 'commits landed since index';
   const filesSeg =
-    freshness.filesChanged != null
-      ? ` (${freshness.filesChanged} file${freshness.filesChanged === 1 ? '' : 's'} touched per \`git diff\`)`
-      : '';
+    freshness.filesChanged == null
+      ? ''
+      : ` (${freshness.filesChanged} file${freshness.filesChanged === 1 ? '' : 's'} touched per \`git diff\`)`;
   return `**Status:** ${icon} stale — ${commitsSeg}${filesSeg} (severity: \`${sev}\`) — run \`cartograph admin sync\``;
 }
 

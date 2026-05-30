@@ -225,7 +225,7 @@ export function buildHotspotsAllRiskSpec(
       // convention (the category=all path previously emitted the
       // literal string `'null'` via the legacy `formatRiskRow`
       // template; the migration retires that behavior).
-      { header: 'LOC', align: 'right', cell: (r) => (r.loc != null ? String(r.loc) : '—') },
+      { header: 'LOC', align: 'right', cell: (r) => (r.loc == null ? '—' : String(r.loc)) },
       { header: 'Last touched', cell: (r) => formatAge(r.lastTouchedTs, nowSec) },
       { header: 'Risk', align: 'right', cell: (r) => r.riskScore.toFixed(SCORE_DECIMALS) },
     ],
@@ -275,7 +275,7 @@ export function buildHotspotsAllCategorySpec(
       // Null LOC → `'—'`, matching the standalone category spec
       // (the category=all path previously emitted `'null'` via
       // `formatBasicRow`'s template — retired).
-      { header: 'LOC', align: 'right', cell: (r) => (r.loc != null ? String(r.loc) : '—') },
+      { header: 'LOC', align: 'right', cell: (r) => (r.loc == null ? '—' : String(r.loc)) },
       { header: 'Last touched', cell: (r) => formatAge(r.lastTouchedTs, nowSec) },
     ],
     rows: rows.map((r, i) => ({ ...r, i })),
@@ -361,7 +361,7 @@ export function buildHotspotsCategorySpec(
       { header: 'Commits', align: 'right', cell: (r) => String(r.commitCount) },
       // Null LOC → `'—'`, matching the risk-spec convention. See
       // `HotspotsRiskTableRow.loc` for the rationale.
-      { header: 'LOC', align: 'right', cell: (r) => (r.loc != null ? String(r.loc) : '—') },
+      { header: 'LOC', align: 'right', cell: (r) => (r.loc == null ? '—' : String(r.loc)) },
       { header: 'Last touched', cell: (r) => formatAge(r.lastTouchedTs, nowSec) },
     ],
     rows: rows.map((r, i) => ({ ...r, i })),
@@ -432,7 +432,7 @@ export function buildHotspotsRiskSpec(
         // backfill or carries a binary path. `'—'` reads as "no
         // value", aligned with how every other numeric-null column in
         // the codebase renders.
-        cell: (r) => (r.loc != null ? String(r.loc) : '—'),
+        cell: (r) => (r.loc == null ? '—' : String(r.loc)),
       },
       { header: 'Last touched', cell: (r) => formatAge(r.lastTouchedTs, nowSec) },
       { header: 'Risk', align: 'right', cell: (r) => r.riskScore.toFixed(SCORE_DECIMALS) },

@@ -107,7 +107,9 @@ class ClaudeCodeTarget implements AgentTarget {
       settings['permissions'].allow = settings['permissions'].allow.filter(
         (p: string) => !p.startsWith('mcp__cartograph__'),
       );
-      if (settings['permissions'].allow.length !== before) {
+      if (settings['permissions'].allow.length === before) {
+        files.push({ path: settingsPath, action: 'not-found' });
+      } else {
         if (settings['permissions'].allow.length === 0) {
           delete settings['permissions'].allow;
         }
@@ -116,8 +118,6 @@ class ClaudeCodeTarget implements AgentTarget {
         }
         writeJsonFile(settingsPath, settings);
         files.push({ path: settingsPath, action: 'removed' });
-      } else {
-        files.push({ path: settingsPath, action: 'not-found' });
       }
     } else {
       files.push({ path: settingsPath, action: 'not-found' });

@@ -586,13 +586,13 @@ export async function summarizeAllDirectories(args: SummarizeAllDirectoriesArgs)
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
 
   const anchor: ProjectAnchor = projectRoot ? getProjectAnchor(projectRoot) : { text: '', source: 'none' };
-  if (!projectRoot) {
-    logDebug('DirSummarizer: projectRoot not provided — skipping project-identity anchor');
-  } else {
+  if (projectRoot) {
     logDebug('DirSummarizer: project-identity anchor', {
       source: anchor.source,
       chars: anchor.text.length,
     });
+  } else {
+    logDebug('DirSummarizer: projectRoot not provided — skipping project-identity anchor');
   }
 
   const summarisedSymbols = getSummarisedSymbolsByDir(queries);

@@ -1074,9 +1074,9 @@ export interface ExtractionOrchestratorState {
  * Extraction orchestrator
  */
 export class ExtractionOrchestrator {
-  private rootDir: string;
-  private config: CartographConfig;
-  private queries: QueryBuilder;
+  private readonly rootDir: string;
+  private readonly config: CartographConfig;
+  private readonly queries: QueryBuilder;
   /** Mutable ref object shared with the `ExtractionOrchestratorState` returned
    *  by `state()`. Module-scope helpers increment `cacheHits.count` directly;
    *  `resetParseCacheHits` / `getParseCacheHits` read/write the same object. */

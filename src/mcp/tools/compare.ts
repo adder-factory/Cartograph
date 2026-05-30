@@ -79,7 +79,7 @@ function fmtEdgeEndpoint(name: string | undefined, rawId: string): string {
 }
 
 function fmtEdge(e: EdgeEntry): string {
-  const lineNote = e.line !== undefined ? ` @L${e.line}` : '';
+  const lineNote = e.line === undefined ? '' : ` @L${e.line}`;
   const src = fmtEdgeEndpoint(e.sourceName, e.source);
   const tgt = fmtEdgeEndpoint(e.targetName, e.target);
   return `  - \`${e.kind}\` \`${src}\` → \`${tgt}\`${lineNote}`;
@@ -366,9 +366,9 @@ async function handleCompareToRef(ctx: ToolCtx, args: CompareToRefToolArgs): Pro
   // — real modifications in the same file still surface individually.
   const suppressLineRangeOnly = args.suppressLineRangeOnly !== false;
   const result = await compareToRef(cg, {
-    ...(ref !== undefined ? { ref } : {}),
-    ...(head !== undefined ? { head } : {}),
-    ...(pathFilter !== undefined ? { pathFilter } : {}),
+    ...(ref === undefined ? {} : { ref }),
+    ...(head === undefined ? {} : { head }),
+    ...(pathFilter === undefined ? {} : { pathFilter }),
     includeBiomarkers,
     findingsDelta,
     includeEdges,

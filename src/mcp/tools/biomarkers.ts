@@ -693,7 +693,7 @@ function renderRankedFindingsTable(
   rows.forEach((r, i) => {
     const biomarkerCell = biomarker ? '' : ` ${r.biomarker} |`;
     lines.push(
-      `| ${i + 1} | \`${r.name}\` | ${r.kind} | \`${r.filePath}\` |${biomarkerCell} ${fmtSev(r.severity)} | ${r.metric} | ${r.centrality != null ? r.centrality.toFixed(centralityDp) : '—'} | ${r.surfaceReason} |`,
+      `| ${i + 1} | \`${r.name}\` | ${r.kind} | \`${r.filePath}\` |${biomarkerCell} ${fmtSev(r.severity)} | ${r.metric} | ${r.centrality == null ? '—' : r.centrality.toFixed(centralityDp)} | ${r.surfaceReason} |`,
     );
   });
   return lines;

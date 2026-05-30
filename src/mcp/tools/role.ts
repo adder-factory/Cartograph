@@ -155,15 +155,15 @@ export function signatureLooksLikeHandler(signature: string | null | undefined):
  */
 function renderUnknownDiagnostic({ desc, signature }: RenderUnknownDiagnosticArgs): string[] {
   const lines: string[] = ['', '**Why unknown:**'];
-  if (!desc) {
-    lines.push(
-      '  The classifier had no input — this symbol has no LLM summary, no docstring, and no test coverage. ' +
-        'Run `cartograph summarize` to generate a summary, then re-run `cartograph classify`.',
-    );
-  } else {
+  if (desc) {
     lines.push(
       `  The classifier had a ${desc.source} but still returned unknown — the text may be too short, ` +
         'too generic, or the model was low-confidence. Review the input above and consider adding a docstring.',
+    );
+  } else {
+    lines.push(
+      '  The classifier had no input — this symbol has no LLM summary, no docstring, and no test coverage. ' +
+        'Run `cartograph summarize` to generate a summary, then re-run `cartograph classify`.',
     );
   }
   if (signatureLooksLikeHandler(signature)) {
@@ -291,9 +291,7 @@ function handleGetRoleOf(args: HandleGetRoleOfArgs): ToolOutcome {
   let fuzzyCount = 0;
   for (const sym of symbols) {
     const resolved = resolveSymbolToNode(cg, sym, refIds);
-    if (!resolved) {
-      blocks.push(`## Role for ${sym}`, '', `_no symbol matched "${sym}"_`, '');
-    } else {
+    if (resolved) {
       if (resolved.fuzzyBanner) fuzzyCount++;
       blocks.push(
         ...renderGetRoleOfBlock({
@@ -305,6 +303,8 @@ function handleGetRoleOf(args: HandleGetRoleOfArgs): ToolOutcome {
         }),
         '',
       );
+    } else {
+      blocks.push(`## Role for ${sym}`, '', `_no symbol matched "${sym}"_`, '');
     }
   }
   const headerSuffix = fuzzyCount > 0 ? `, ${fuzzyCount} resolved via fuzzy fallback` : '';

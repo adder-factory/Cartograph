@@ -119,9 +119,9 @@ async function handleSemanticConcept(args: HandleSemanticConceptArgs): Promise<T
   if (results.length === 0) {
     const llmConfig = await cg.llm.getEffectiveLlmConfig();
     const embModel = getEmbeddingModel(llmConfig);
-    const reason = !embModel
-      ? 'No embedding model configured. Set config.llm.embeddingLlm (legacy config.llm.embeddings or flat config.llm.embeddingModel also accepted).'
-      : `No symbols matched the concept "${query}". Either no embeddings have been generated yet (run \`cartograph_admin({action: 'summarize'})\` to populate them) or the corpus genuinely has no peers for that concept.`;
+    const reason = embModel
+      ? `No symbols matched the concept "${query}". Either no embeddings have been generated yet (run \`cartograph_admin({action: 'summarize'})\` to populate them) or the corpus genuinely has no peers for that concept.`
+      : 'No embedding model configured. Set config.llm.embeddingLlm (legacy config.llm.embeddings or flat config.llm.embeddingModel also accepted).';
     return textResult(reason);
   }
   return textResult(truncateOutput(renderMarkdownCardList(buildSearchSemanticConceptSpec(query, results)).trimEnd()));

@@ -838,15 +838,15 @@ function registerOption(cmd: Command, opt: CliOptionSpec, short?: string): void 
   }
   // A scalar default is stringified so commander stores it as the CLI
   // would have received it; the coercion schema parses it back.
-  const def = opt.defaultValue !== undefined ? String(opt.defaultValue) : undefined;
+  const def = opt.defaultValue === undefined ? undefined : String(opt.defaultValue);
   // Scalar value option. `<value>` for required, `[value]` is avoided
   // — commander treats `[value]` as an OPTIONAL-ARGUMENT option which
   // changes parse semantics; an unset optional field simply isn't
   // forwarded, so `<value>` is correct for both required and optional.
-  if (def !== undefined) {
-    cmd.option(flagSpec(opt, short, '<value>'), opt.description, def);
-  } else {
+  if (def === undefined) {
     cmd.option(flagSpec(opt, short, '<value>'), opt.description);
+  } else {
+    cmd.option(flagSpec(opt, short, '<value>'), opt.description, def);
   }
 }
 

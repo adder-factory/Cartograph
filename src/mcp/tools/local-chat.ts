@@ -88,7 +88,7 @@ async function handleLocalChat(ctx: ToolCtx, args: LocalChatArgs): Promise<ToolO
     const result = await llmLocalChat(cg.llm, {
       prompt,
       ...(system ? { system } : {}),
-      ...(maxTokens !== undefined ? { maxTokens } : {}),
+      ...(maxTokens === undefined ? {} : { maxTokens }),
     });
     // displayModelName collapses an absolute GGUF path to its basename
     // so the trailer doesn't leak the operator's home directory (#42).

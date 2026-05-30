@@ -35,12 +35,12 @@ export function scoreSearchNodes(
   let bestRank = 0;
   for (let i = 0; i < expectedLower.length; i++) {
     const idx = resultNames.indexOf(expectedLower[i]);
-    if (idx !== -1) {
+    if (idx === -1) {
+      missed.push(expectedSymbols[i]);
+    } else {
       found.push(expectedSymbols[i]);
       const rank = idx + 1;
       if (bestRank === 0 || rank < bestRank) bestRank = rank;
-    } else {
-      missed.push(expectedSymbols[i]);
     }
   }
 

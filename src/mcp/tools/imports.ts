@@ -305,7 +305,7 @@ function formatImportsResponse(hits: Hit[], filtered: Hit[], params: ImportRende
     groups,
     filters,
     source,
-    ...(matchedGroupCounts !== undefined ? { matchedGroupCounts } : {}),
+    ...(matchedGroupCounts === undefined ? {} : { matchedGroupCounts }),
   });
   return lines.join('\n').trimEnd();
 }

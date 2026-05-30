@@ -786,10 +786,10 @@ export class QueryBuilder {
     const misses: string[] = [];
     for (const id of ids) {
       const cached = this.nodeCache.get(id); // NodeLruCache.get performs LRU touch
-      if (cached !== undefined) {
-        out.set(id, cached);
-      } else {
+      if (cached === undefined) {
         misses.push(id);
+      } else {
+        out.set(id, cached);
       }
     }
     if (misses.length === 0) return out;

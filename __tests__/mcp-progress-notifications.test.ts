@@ -64,8 +64,8 @@ describe('MCP notifications/progress (B13)', () => {
         onProgress: (current, total, message) => {
           events.push({
             current,
-            ...(total !== undefined ? { total } : {}),
-            ...(message !== undefined ? { message } : {}),
+            ...(total === undefined ? {} : { total }),
+            ...(message === undefined ? {} : { message }),
           });
         },
       },
@@ -86,7 +86,7 @@ describe('MCP notifications/progress (B13)', () => {
       { action: 'index', force: true },
       {
         onProgress: (current, _total, message) => {
-          events.push({ current, ...(message !== undefined ? { message } : {}) });
+          events.push({ current, ...(message === undefined ? {} : { message }) });
         },
       },
     );
@@ -119,8 +119,8 @@ describe('MCP notifications/progress (B13)', () => {
         onProgress: (current, total, message) => {
           events.push({
             current,
-            ...(total !== undefined ? { total } : {}),
-            ...(message !== undefined ? { message } : {}),
+            ...(total === undefined ? {} : { total }),
+            ...(message === undefined ? {} : { message }),
           });
         },
       },

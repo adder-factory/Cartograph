@@ -554,8 +554,8 @@ interface AppendFileSectionsArgs {
 
 function appendFileSections(args: AppendFileSectionsArgs): RenderedFiles {
   const { lines, sortedFiles, projectRoot, cg, subgraph, maxFiles, summary } = args;
-  if (!summary) lines.push('### Source Code', '');
-  else lines.push('### Files', '');
+  if (summary) lines.push('### Files', '');
+  else lines.push('### Source Code', '');
   let totalChars = lines.join('\n').length;
   let filesIncluded = 0;
   const rendered = new Set<string>();

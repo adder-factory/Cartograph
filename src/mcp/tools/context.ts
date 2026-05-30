@@ -375,7 +375,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
         nodes: Array.from(context.subgraph.nodes.values()),
         edges: context.subgraph.edges,
         roots: context.subgraph.roots,
-        ...(context.subgraph.scoreTrace !== undefined ? { scoreTrace: context.subgraph.scoreTrace } : {}),
+        ...(context.subgraph.scoreTrace === undefined ? {} : { scoreTrace: context.subgraph.scoreTrace }),
       },
       codeBlocks: context.codeBlocks,
       relatedFiles: context.relatedFiles,

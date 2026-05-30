@@ -396,7 +396,7 @@ function coerceHops(hopsRaw: unknown): number {
  * @internal — exported for unit tests; not part of the public surface.
  */
 export function effectiveImpactDepth(args: { hops?: unknown }): number {
-  return args.hops !== undefined ? coerceHops(args.hops) : IMPACT_DEFAULT_DEPTH;
+  return args.hops === undefined ? IMPACT_DEFAULT_DEPTH : coerceHops(args.hops);
 }
 
 /**

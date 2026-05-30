@@ -134,11 +134,11 @@ function appendBiomarkersSection(lines: string[], cg: Cartograph): void {
     // post-hook is still in flight after a re-index, so don't render a
     // misleading "clean" verdict.
     const indexedAt = safe(() => getMetadata(cg.queries, 'index_timestamp'));
-    const state: BiomarkerSectionState = !indexedAt
-      ? 'never-ran'
-      : (safe(() => areBiomarkersPending(cg)) ?? false)
+    const state: BiomarkerSectionState = indexedAt
+      ? (safe(() => areBiomarkersPending(cg)) ?? false)
         ? 'pending'
-        : 'clean';
+        : 'clean'
+      : 'never-ran';
     lines.push(renderMarkdownBulletList(buildDigestBiomarkersSpec({ findings: [], stats: null, state })));
     return;
   }

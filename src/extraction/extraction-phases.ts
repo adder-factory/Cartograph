@@ -237,7 +237,7 @@ export function renderSlowFilesSummary(
   const top = ranked.slice(0, 10);
   log(`Slow files (≥${SLOW_PARSE_WARN_MS}ms parse): ${slowFiles.length} total — top ${top.length}:`);
   for (const r of top) {
-    const ms = r.elapsedMs != null ? `${r.elapsedMs}ms` : `${r.status}`;
+    const ms = r.elapsedMs == null ? `${r.status}` : `${r.elapsedMs}ms`;
     log(`  ${ms.padStart(10)}  ${r.filePath}`);
   }
   log(`  Add slow generated/fixture files to \`.cartograph/config.json\` "exclude" to skip them.`);

@@ -166,7 +166,7 @@ async function run() {
     const status = r.skipped ? '\x1b[33mSKIP\x1b[0m' : r.pass ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m';
     const id = r.caseId.padEnd(maxIdLen);
     const recall = `recall=${r.recall.toFixed(2)}`;
-    const extra = r.edgeDensity !== undefined ? `density=${r.edgeDensity.toFixed(2)}` : `mrr=${r.mrr.toFixed(2)}`;
+    const extra = r.edgeDensity === undefined ? `mrr=${r.mrr.toFixed(2)}` : `density=${r.edgeDensity.toFixed(2)}`;
     const latency = `${Math.round(r.latencyMs)}ms`;
     const skipNote = r.skipped ? `  (${r.skipped})` : '';
     // Latency-budget warning: look up the case definition's api so

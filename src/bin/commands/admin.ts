@@ -592,7 +592,7 @@ adminCmd
 
         // Conditional spread — `exactOptionalPropertyTypes` rejects an
         // explicit `eagerLimit: undefined` (let the service default it).
-        const eagerLimitOpt = eagerLimit !== undefined ? { eagerLimit } : {};
+        const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
 
         if (options.quiet) {
           await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });

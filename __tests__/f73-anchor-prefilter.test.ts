@@ -21,7 +21,7 @@ import type { FrameworkResolver } from '../src/resolution/types.js';
 function makeStubResolver(name: string, anchors: readonly string[] | undefined): FrameworkResolver {
   return {
     name,
-    ...(anchors !== undefined ? { anchors } : {}),
+    ...(anchors === undefined ? {} : { anchors }),
     detect: () => true,
     resolve: () => null,
   };

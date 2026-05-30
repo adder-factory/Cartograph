@@ -61,11 +61,11 @@ function dbApplyPragmas(db: SqliteDatabase): void {
   // bench-only scaffolding for re-running the sweep; production
   // callers should not set it.
   const walAutocheckpointRaw = process.env['CARTOGRAPH_WAL_AUTOCHECKPOINT'];
-  if (walAutocheckpointRaw !== undefined) {
+  if (walAutocheckpointRaw === undefined) {
+    db.pragma('wal_autocheckpoint = 20000');
+  } else {
     const n = Number(walAutocheckpointRaw);
     if (Number.isFinite(n) && n >= 0) db.pragma(`wal_autocheckpoint = ${Math.floor(n)}`);
-  } else {
-    db.pragma('wal_autocheckpoint = 20000');
   }
 }
 

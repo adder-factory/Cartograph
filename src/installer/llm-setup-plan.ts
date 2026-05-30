@@ -485,7 +485,7 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
         // config works, but omit the backend-install / model-download
         // lines that no longer apply.
         const doctorStep = nextSteps.find((s) => s.startsWith('cartograph doctor'));
-        nextSteps = doctorStep !== undefined ? [doctorStep] : [];
+        nextSteps = doctorStep === undefined ? [] : [doctorStep];
       } else {
         notes.push(
           'The chosen preset assumes the backend is not yet running. Follow the `nextSteps` lines before re-running doctor.',

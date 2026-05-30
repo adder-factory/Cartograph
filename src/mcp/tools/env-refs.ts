@@ -58,7 +58,7 @@ function renderEnvKeysTable(
   args: Record<string, unknown>,
   includeTests: boolean,
 ): ToolResult {
-  const limit = args['limit'] != null ? clamp(args['limit'] as number, 1, ENV_REFS_LIMIT_MAX) : ENV_REFS_LIMIT_DEFAULT;
+  const limit = args['limit'] == null ? ENV_REFS_LIMIT_DEFAULT : clamp(args['limit'] as number, 1, ENV_REFS_LIMIT_MAX);
   // Pull a wider candidate set so post-filtering by test/prod still
   // produces `limit` rows for prod-heavy keys.
   const rows = getConfigKeys(cg.queries, {
@@ -156,7 +156,7 @@ function renderEnvKeySites(opts: RenderEnvKeySitesArgs): ToolResult {
       `No prod reads found for env var "${key}" — ${hiddenTestCount} test-only site${hiddenTestCount === 1 ? '' : 's'} hidden (pass \`includeTests: true\` to see them).`,
     );
   }
-  const limit = rawLimitArg != null ? clamp(rawLimitArg as number, 1, ENV_REFS_LIMIT_MAX) : ENV_REFS_LIMIT_DEFAULT;
+  const limit = rawLimitArg == null ? ENV_REFS_LIMIT_DEFAULT : clamp(rawLimitArg as number, 1, ENV_REFS_LIMIT_MAX);
   const shown = sites.slice(0, limit);
   const { prod: prodCount, test: testCount } = countByTestPath(sites, isFixtureOrTest);
   const truncated = sites.length > shown.length;

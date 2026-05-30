@@ -210,7 +210,11 @@ function parseArgs(ctx: ToolCtx, args: Record<string, unknown>): ParsedArgs | To
     return err('Cannot specify both `symbol` and `symbols`.');
   }
   let symbols: string[];
-  if (multi !== undefined) {
+  if (multi === undefined) {
+    const s = validateStringOutcome({ value: single, name: 'symbol' });
+    if (typeof s !== 'string') return s;
+    symbols = [s];
+  } else {
     if (!Array.isArray(multi) || multi.length === 0) {
       return err('`symbols` must be a non-empty array of strings.');
     }
@@ -226,10 +230,6 @@ function parseArgs(ctx: ToolCtx, args: Record<string, unknown>): ParsedArgs | To
       validated.push(v);
     }
     symbols = validated;
-  } else {
-    const s = validateStringOutcome({ value: single, name: 'symbol' });
-    if (typeof s !== 'string') return s;
-    symbols = [s];
   }
 
   const k = clamp(numArg(args['k'], DEFAULT_K), 1, MAX_K);

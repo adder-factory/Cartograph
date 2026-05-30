@@ -114,10 +114,10 @@ export class VirtualClock implements Clock {
       this.currentMs = earliest.at;
       // Eagerly reschedule intervals BEFORE firing so a same-tick
       // cancel inside the callback can override.
-      if (earliest.intervalMs !== null) {
-        earliest.at = earliest.at + earliest.intervalMs;
-      } else {
+      if (earliest.intervalMs === null) {
         earliest.cancelled = true;
+      } else {
+        earliest.at = earliest.at + earliest.intervalMs;
       }
       earliest.fn();
     }

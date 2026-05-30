@@ -388,10 +388,10 @@ export function defineTool<S extends ToolZodSchema>(spec: DefineToolSpec<S>): Zo
     definition,
     handle,
     [ZOD_SCHEMA_KEY]: spec.schema,
-    ...(spec.bypassFreshnessGate !== undefined ? { bypassFreshnessGate: spec.bypassFreshnessGate } : {}),
-    ...(spec.isWriteTool !== undefined ? { isWriteTool: spec.isWriteTool } : {}),
-    ...(spec.readOnlyActions !== undefined ? { readOnlyActions: spec.readOnlyActions } : {}),
-    ...(spec.bypassSchemaGuard !== undefined ? { bypassSchemaGuard: spec.bypassSchemaGuard } : {}),
+    ...(spec.bypassFreshnessGate === undefined ? {} : { bypassFreshnessGate: spec.bypassFreshnessGate }),
+    ...(spec.isWriteTool === undefined ? {} : { isWriteTool: spec.isWriteTool }),
+    ...(spec.readOnlyActions === undefined ? {} : { readOnlyActions: spec.readOnlyActions }),
+    ...(spec.bypassSchemaGuard === undefined ? {} : { bypassSchemaGuard: spec.bypassSchemaGuard }),
   };
   // Make the marker non-enumerable AFTER construction so the object
   // literal above can still set it. `registry.ts`'s `withAllowStale`

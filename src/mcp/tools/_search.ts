@@ -233,7 +233,7 @@ function renderNestedMatchesSection(query: string, rows: ReadonlyArray<NestedFnL
     // graduated to a first-class node. Rows where promoted_node_id is
     // set render with a ✓ marker — `deep:true` on those now routes
     // through the normal node-card pipeline.
-    const promoted = r.promotedNodeId !== null ? `  ✓ promoted` : '';
+    const promoted = r.promotedNodeId === null ? '' : `  ✓ promoted`;
     const hitTrail = r.hitCount > 0 ? `  hit ${r.hitCount}` : '';
     return `- \`${r.name}\`${parent}\n  ${r.filePath}:${r.startLine}${hitTrail}${promoted}`;
   });
@@ -299,17 +299,17 @@ function probeCentralityFilterCulprit(cg: import('../../index.js').default, quer
 
   const baseMessage = `No results for "${query}". Without the centrality filter, ${without.length} result${without.length === 1 ? '' : 's'} match. `;
 
-  if (!hasCentralityData) {
-    // Centrality hook hasn't run — all nodes have NULL centrality.
-    return (
-      baseMessage +
-      "If the centrality hook hasn't run yet (fresh index, --force pending), every node has NULL centrality and `>` / `>=` filters drop them all. Drop the centrality filter or run `cartograph index`."
-    );
-  } else {
+  if (hasCentralityData) {
     // Some nodes have centrality, but the filter was too strict.
     return (
       baseMessage +
       'All nodes meeting the centrality threshold were dropped by other filters. Try `centrality:>0` or drop the filter to relax the constraint.'
+    );
+  } else {
+    // Centrality hook hasn't run — all nodes have NULL centrality.
+    return (
+      baseMessage +
+      "If the centrality hook hasn't run yet (fresh index, --force pending), every node has NULL centrality and `>` / `>=` filters drop them all. Drop the centrality filter or run `cartograph index`."
     );
   }
 }

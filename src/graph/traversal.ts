@@ -400,7 +400,7 @@ function traverserExpandPathFrontier(args: TraverserExpandPathFrontierArgs): voi
  * Graph traverser for BFS and DFS traversal
  */
 export class GraphTraverser {
-  private queries: QueryBuilder;
+  private readonly queries: QueryBuilder;
 
   constructor(queries: QueryBuilder) {
     this.queries = queries;

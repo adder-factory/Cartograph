@@ -142,8 +142,8 @@ export class OpenAiSdkChatBackend implements ChatBackend {
     const params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
       model: this.cfg.model,
       messages: mapMessages(messages),
-      ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
-      ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+      ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+      ...(options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens }),
       ...(options.responseSchema ? { response_format: buildResponseFormat(options.responseSchema) } : {}),
     };
 

@@ -143,7 +143,7 @@ function refresh(ctx: IndexHookContext): void {
       endLine: row.endLine,
       startColumn: row.startCol,
       endColumn: row.endCol,
-      ...(row.signature !== null ? { signature: row.signature } : {}),
+      ...(row.signature === null ? {} : { signature: row.signature }),
       bodyHash: row.bodyHash,
       updatedAt: Date.now(),
     };

@@ -100,7 +100,7 @@ export interface MdReviewContext {
 
 /** Render a `name (path:line)` reference; line is omitted when absent. */
 function fmtRef(r: MdSymbolRef): string {
-  const loc = r.line != null ? `:${r.line}` : '';
+  const loc = r.line == null ? '' : `:${r.line}`;
   return `\`${r.name}\` (${r.filePath}${loc})`;
 }
 
@@ -171,7 +171,7 @@ export function buildReviewContextCoChangeWarningsSpec(
     preamble: [REVIEW_CONTEXT_COCHANGE_PREAMBLE],
     rows: warnings,
     formatRow: (w) => {
-      const anchor = w.anchorRatio != null ? `, anchor-ratio ${w.anchorRatio.toFixed(2)}` : '';
+      const anchor = w.anchorRatio == null ? '' : `, anchor-ratio ${w.anchorRatio.toFixed(2)}`;
       const bullet =
         `- \`${w.expectedToChange}\` — co-changes with \`${w.changedFile}\` ` +
         `(jaccard ${w.jaccard.toFixed(2)}${anchor}, ${w.historicalCount} shared commit${w.historicalCount === 1 ? '' : 's'})`;
@@ -294,21 +294,21 @@ export async function handleReviewContext(ctx: ToolCtx, args: Record<string, unk
     { queries: cg.queries, traverser: cg.internals.traverser },
     compact({
       maxCallersPerSymbol:
-        args['maxCallersPerSymbol'] != null
-          ? clamp(Number(args['maxCallersPerSymbol']), 0, MAX_CALLERS_CALLEES_PER_SYMBOL)
-          : undefined,
+        args['maxCallersPerSymbol'] == null
+          ? undefined
+          : clamp(Number(args['maxCallersPerSymbol']), 0, MAX_CALLERS_CALLEES_PER_SYMBOL),
       maxCalleesPerSymbol:
-        args['maxCalleesPerSymbol'] != null
-          ? clamp(Number(args['maxCalleesPerSymbol']), 0, MAX_CALLERS_CALLEES_PER_SYMBOL)
-          : undefined,
+        args['maxCalleesPerSymbol'] == null
+          ? undefined
+          : clamp(Number(args['maxCalleesPerSymbol']), 0, MAX_CALLERS_CALLEES_PER_SYMBOL),
       maxCoChangeWarnings:
-        args['maxCoChangeWarnings'] != null
-          ? clamp(Number(args['maxCoChangeWarnings']), 0, MAX_COCHANGE_WARNINGS)
-          : undefined,
+        args['maxCoChangeWarnings'] == null
+          ? undefined
+          : clamp(Number(args['maxCoChangeWarnings']), 0, MAX_COCHANGE_WARNINGS),
       minCoChangeJaccard:
-        args['minCoChangeJaccard'] != null ? clamp(Number(args['minCoChangeJaccard']), 0, 1) : undefined,
+        args['minCoChangeJaccard'] == null ? undefined : clamp(Number(args['minCoChangeJaccard']), 0, 1),
       minDiffMagnitude:
-        args['minDiffMagnitude'] != null ? clamp(Number(args['minDiffMagnitude']), 0, MAX_DIFF_MAGNITUDE) : undefined,
+        args['minDiffMagnitude'] == null ? undefined : clamp(Number(args['minDiffMagnitude']), 0, MAX_DIFF_MAGNITUDE),
     }),
   );
 

@@ -573,7 +573,7 @@ function matchByExactName(ref: UnresolvedRef, context: ResolutionContext): Resol
     targetNodeId: bestMatch.id,
     confidence,
     resolvedBy: 'exact-match',
-    ...(tieMargin !== undefined ? { tieMargin } : {}),
+    ...(tieMargin === undefined ? {} : { tieMargin }),
   };
 }
 

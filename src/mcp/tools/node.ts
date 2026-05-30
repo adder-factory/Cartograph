@@ -1034,7 +1034,9 @@ function renderManifestRows(args: RenderManifestRowsArgs): string {
 
   if (includeCode) {
     const body = readManifestBodyOrNull(cg.projectRoot, primary);
-    if (body !== null) {
+    if (body === null) {
+      parts.push(`_(body unavailable — could not read \`${primary.filePath}\`)_`);
+    } else {
       const lang = inferFenceLanguage(primary.filePath);
       const { code, truncated, total } =
         detail === 'full' ? { code: body, truncated: false, total: body.split('\n').length } : previewCode(body);
@@ -1045,8 +1047,6 @@ function renderManifestRows(args: RenderManifestRowsArgs): string {
             `Pass \`detail: 'full'\` for the complete body.`,
         );
       }
-    } else {
-      parts.push(`_(body unavailable — could not read \`${primary.filePath}\`)_`);
     }
   }
 

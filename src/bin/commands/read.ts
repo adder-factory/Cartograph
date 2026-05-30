@@ -132,7 +132,22 @@ program
           }
         }
         args['diff'] = diffText;
-      } else if (options.ranges !== undefined) {
+      } else if (options.ranges === undefined) {
+        if (file === undefined || startLine === undefined || endLine === undefined) {
+          error('Pass <file> <startLine> <endLine> positionally OR use --diff <pathOrText|-> OR --ranges <list>.');
+          process.exit(1);
+        }
+        args['file'] = file;
+        const startNum = Number.parseInt(startLine, 10);
+        const endNum = Number.parseInt(endLine, 10);
+        if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
+          error('startLine and endLine must be numbers.');
+          process.exitCode = 1;
+          return;
+        }
+        args['startLine'] = startNum;
+        args['endLine'] = endNum;
+      } else {
         if (file !== undefined || startLine !== undefined || endLine !== undefined) {
           error('--ranges is mutually exclusive with positional file/startLine/endLine.');
           process.exit(1);
@@ -154,21 +169,6 @@ program
           process.exit(1);
         }
         args['ranges'] = ranges;
-      } else {
-        if (file === undefined || startLine === undefined || endLine === undefined) {
-          error('Pass <file> <startLine> <endLine> positionally OR use --diff <pathOrText|-> OR --ranges <list>.');
-          process.exit(1);
-        }
-        args['file'] = file;
-        const startNum = Number.parseInt(startLine, 10);
-        const endNum = Number.parseInt(endLine, 10);
-        if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
-          error('startLine and endLine must be numbers.');
-          process.exitCode = 1;
-          return;
-        }
-        args['startLine'] = startNum;
-        args['endLine'] = endNum;
       }
       await runViaMCP('cartograph_at_range', args, options.projectPath);
     },
@@ -546,11 +546,7 @@ program
         // LLM enrichment status — auto-detected or configured.
         console.log(chalk.bold('LLM Enrichment:'));
         const llmConfig = await cg.llm.getEffectiveLlmConfig();
-        if (!llmConfig) {
-          console.log(
-            '  No LLM configured. Run `cartograph admin install-models --write-config` for the recommended stack (llama-server HTTP — embed :8080 / chat :8081 / ask :8082 / reranker :8083), or set config.llm in .cartograph/config.json.',
-          );
-        } else {
+        if (llmConfig) {
           const { getAskModel, getChatModel, getEmbeddingModel, getDisplayEndpoint } = await import(
             '../../llm/provider.js'
           );
@@ -581,9 +577,9 @@ program
             // hasn't been computed yet.
             const weighted = getWeightedSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
             const weightedSuffix =
-              weighted.weightedRatio !== null
-                ? ` — centrality-weighted ${Math.round(weighted.weightedRatio * 100)}%`
-                : '';
+              weighted.weightedRatio === null
+                ? ''
+                : ` — centrality-weighted ${Math.round(weighted.weightedRatio * 100)}%`;
             // Labelled "Summaries" (not "Coverage") so it doesn't read as
             // the separate test-coverage feature — matches the MCP `status`
             // surface and the background-pass line below.
@@ -599,6 +595,10 @@ program
           if (bg.running) {
             console.log(`  Summaries: background pass running (pid ${bg.pid}) — coverage is still climbing`);
           }
+        } else {
+          console.log(
+            '  No LLM configured. Run `cartograph admin install-models --write-config` for the recommended stack (llama-server HTTP — embed :8080 / chat :8081 / ask :8082 / reranker :8083), or set config.llm in .cartograph/config.json.',
+          );
         }
         console.log();
 
@@ -952,7 +952,7 @@ program
         // nothing" so the degenerate input can't fall through unfiltered.
         if (options.pattern) {
           const regexBody = globToSafeRegex(options.pattern);
-          const regex = regexBody !== null ? new RegExp(regexBody) : /(?!)/;
+          const regex = regexBody === null ? /(?!)/ : new RegExp(regexBody);
           files = files.filter((f) => regex.test(f.path));
         }
 

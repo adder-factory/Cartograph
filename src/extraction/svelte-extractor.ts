@@ -121,12 +121,12 @@ function svelteRecordTemplateCallsInExpression(
 // ---------------------------------------------------------------------------
 
 export class SvelteExtractor {
-  private filePath: string;
-  private source: string;
-  private nodes: Node[] = [];
-  private edges: Edge[] = [];
+  private readonly filePath: string;
+  private readonly source: string;
+  private readonly nodes: Node[] = [];
+  private readonly edges: Edge[] = [];
   private unresolvedReferences: UnresolvedReference[] = [];
-  private errors: ExtractionError[] = [];
+  private readonly errors: ExtractionError[] = [];
 
   constructor(filePath: string, source: string) {
     this.filePath = filePath;

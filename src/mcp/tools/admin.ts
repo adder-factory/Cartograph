@@ -586,7 +586,7 @@ async function handleSummarizePhase(ctx: ToolCtx, args: Record<string, unknown>)
       concurrency,
       // Conditional spread — `exactOptionalPropertyTypes` rejects an
       // explicit `eagerLimit: undefined`.
-      ...(summarizeLimit !== undefined ? { eagerLimit: summarizeLimit } : {}),
+      ...(summarizeLimit === undefined ? {} : { eagerLimit: summarizeLimit }),
       ...progressOpts,
     });
     const lines: string[] = [

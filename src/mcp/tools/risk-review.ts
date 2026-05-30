@@ -78,7 +78,7 @@ function appendBiomarkerLens(args: AppendBiomarkerLensArgs): void {
     out.push(`_No biomarker findings above the threshold._`);
   } else {
     for (const f of findings) {
-      const cent = f.centrality !== null ? `, centrality ${f.centrality.toFixed(SCORE_DECIMALS)}` : '';
+      const cent = f.centrality === null ? '' : `, centrality ${f.centrality.toFixed(SCORE_DECIMALS)}`;
       out.push(`- ${severityEmoji(f.severity)} \`${f.name}\` (${f.kind}) — ${f.biomarker} in ${f.filePath}${cent}`);
     }
   }
@@ -135,7 +135,7 @@ function appendCoverageGapLens(args: AppendCoverageGapLensArgs): void {
   } else {
     for (const c of lowCov) {
       const pct = (c.pct * PCT_MULTIPLIER).toFixed(COVERAGE_PCT_DECIMALS);
-      const cent = c.centrality !== null ? `, centrality ${c.centrality.toFixed(SCORE_DECIMALS)}` : '';
+      const cent = c.centrality === null ? '' : `, centrality ${c.centrality.toFixed(SCORE_DECIMALS)}`;
       out.push(
         `- \`${c.name}\` (${c.kind}) — ${pct}% (${c.coveredLines}/${c.totalLines} lines) in ${c.filePath}${cent}`,
       );

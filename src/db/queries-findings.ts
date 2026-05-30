@@ -238,7 +238,7 @@ export function appendFindings(
         biomarker: f.biomarker,
         severity: f.severity,
         metric: f.metric,
-        detail: f.detail !== undefined ? JSON.stringify(f.detail) : null,
+        detail: f.detail === undefined ? null : JSON.stringify(f.detail),
         detectedAt: now,
         sourceContentHash: resolveHash(f.nodeId),
         passKind,
@@ -330,7 +330,7 @@ export function replaceFindingsForFile({
           biomarker: f.biomarker,
           severity: f.severity,
           metric: f.metric,
-          detail: f.detail !== undefined ? JSON.stringify(f.detail) : null,
+          detail: f.detail === undefined ? null : JSON.stringify(f.detail),
           detectedAt: now,
           sourceContentHash: sourceHash,
           passKind,
@@ -438,7 +438,7 @@ export function getFindingsForNode(
     // Defensive JSON.parse — DB column contents are trusted but a
     // schema migration glitch or external edit could leave malformed
     // JSON. Falling back to null is safer than throwing on read.
-    detail: r.detail !== null ? safeParseDetailJson(r.detail) : null,
+    detail: r.detail === null ? null : safeParseDetailJson(r.detail),
     detectedAt: r.detected_at,
     surfaceReason: normalisePassKind(r.pass_kind),
   }));
@@ -559,7 +559,7 @@ function mapFindingsRow(r: {
     severity: r.severity,
     metric: r.metric,
     centrality: r.centrality,
-    detail: r.detail !== null ? safeParseDetailJson(r.detail) : null,
+    detail: r.detail === null ? null : safeParseDetailJson(r.detail),
     // `pass_kind` is the stored column; `surfaceReason` is the agent-
     // facing field name (more intuitive in tool output than the
     // implementation term).

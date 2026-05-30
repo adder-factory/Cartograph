@@ -1786,9 +1786,9 @@ function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQu
  * comprehensive context for tasks.
  */
 export class ContextBuilder {
-  private projectRoot: string;
-  private queries: QueryBuilder;
-  private traverser: GraphTraverser;
+  private readonly projectRoot: string;
+  private readonly queries: QueryBuilder;
+  private readonly traverser: GraphTraverser;
 
   constructor(projectRoot: string, queries: QueryBuilder, traverser: GraphTraverser) {
     this.projectRoot = projectRoot;

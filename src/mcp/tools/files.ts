@@ -477,7 +477,7 @@ async function handleFiles(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> 
   // nothing" so the degenerate input can't fall through unfiltered.
   if (pattern) {
     const regexBody = globToSafeRegex(pattern);
-    const regex = regexBody !== null ? new RegExp(regexBody) : /(?!)/;
+    const regex = regexBody === null ? /(?!)/ : new RegExp(regexBody);
     files = files.filter((f) => regex.test(f.path));
   }
 

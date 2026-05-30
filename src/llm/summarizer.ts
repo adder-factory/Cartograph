@@ -941,7 +941,7 @@ class SummarizerRun {
   // Read in `run()` via `const { workerState } = this` destructure; biome's
   // noUnusedPrivateClassMembers analysis doesn't follow that pattern, so suppress.
   // biome-ignore lint/correctness/noUnusedPrivateClassMembers: see comment above
-  private workerState!: SummarizerWorkerState;
+  private readonly workerState!: SummarizerWorkerState;
 
   constructor(inputs: SummarizerInputs) {
     const options = inputs.options ?? {};

@@ -931,11 +931,11 @@ function resolverGetLanguageFromNodeId(queries: QueryBuilder, nodeId: string): U
  * Orchestrates reference resolution using multiple strategies.
  */
 export class ReferenceResolver {
-  private queries: QueryBuilder;
-  private context: ResolutionContext;
+  private readonly queries: QueryBuilder;
+  private readonly context: ResolutionContext;
   private frameworks: FrameworkResolver[] = [];
   /** All mutable cache state in one bundle (reduces field count). */
-  private caches: ResolverCaches;
+  private readonly caches: ResolverCaches;
 
   constructor(projectRoot: string, queries: QueryBuilder) {
     this.queries = queries;

@@ -138,9 +138,9 @@ export async function runSummaryPhase(ctx: PhaseContext, chatConcurrency: number
       // limit; omitting it lets the summarizer apply its default.
       // Conditional spread — `exactOptionalPropertyTypes` rejects an
       // explicit `eagerLimit: undefined`.
-      ...(svc.cg.config.llm?.summarizeEagerLimit !== undefined
-        ? { eagerLimit: svc.cg.config.llm.summarizeEagerLimit }
-        : {}),
+      ...(svc.cg.config.llm?.summarizeEagerLimit === undefined
+        ? {}
+        : { eagerLimit: svc.cg.config.llm.summarizeEagerLimit }),
       onProgress: makePhaseProgress(svc, 'summarise'),
     },
   });

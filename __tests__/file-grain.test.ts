@@ -183,7 +183,7 @@ function insertSymbolNode(
       opts.filePath,
       opts.startLine ?? 1,
       (opts.startLine ?? 1) + 10,
-      opts.centrality !== undefined ? opts.centrality : null,
+      opts.centrality === undefined ? null : opts.centrality,
       opts.signature ?? null,
     );
   return id;

@@ -19,7 +19,7 @@ function makeReport(results: Partial<EvalResult>[]): EvalReport {
     foundSymbols: r.foundSymbols ?? [],
     missedSymbols: r.missedSymbols ?? [],
     latencyMs: r.latencyMs ?? 1,
-    ...(r.payloadBytes !== undefined ? { payloadBytes: r.payloadBytes } : {}),
+    ...(r.payloadBytes === undefined ? {} : { payloadBytes: r.payloadBytes }),
   }));
   const total = filled.length;
   const passed = filled.filter((r) => r.pass).length;

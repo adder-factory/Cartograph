@@ -84,8 +84,8 @@ describe('resolveLlmProviders', () => {
       expect(r?.summarizeLlm?.provider).toBe('anthropic-api');
       expect(r?.summarizeLlm?.apiKey).toBe('sk-from-env');
     } finally {
-      if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
-      else delete process.env.ANTHROPIC_API_KEY;
+      if (saved === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = saved;
     }
   });
 

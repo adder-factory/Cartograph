@@ -205,7 +205,7 @@ function jsonPropToCliOption(name: string, prop: JsonProp, required: boolean): C
     flag: `--${toKebabCase(name)}`,
     description: prop.description ?? '',
     required,
-    ...(prop.default !== undefined ? { defaultValue: prop.default } : {}),
+    ...(prop.default === undefined ? {} : { defaultValue: prop.default }),
     ...resolveKind(name, prop),
   };
 }

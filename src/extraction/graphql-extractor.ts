@@ -323,7 +323,7 @@ function gqlEmitTypeWithFields(args: EmitTypeWithFieldsArgs): string | null {
     node,
     parentNodeId: fileNodeId,
     signature: `${signaturePrefix} ${name}`,
-    ...(description !== undefined ? { docstring: description } : {}),
+    ...(description === undefined ? {} : { docstring: description }),
   });
   if (!id) return null;
   if (isExtension) gqlPushExtendsRef({ st, extensionId: id, baseTypeName: name, node });

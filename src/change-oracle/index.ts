@@ -133,7 +133,7 @@ export function whatChanged(rootDir: string, queries: QueryBuilder, query: Chang
   if (facets.has('gitDiff')) {
     const ref = query.gitRef ?? 'HEAD';
     const list = listChangedFilesSince(rootDir, ref);
-    gitDiff = list !== null ? { ref, paths: new Set(list) } : null;
+    gitDiff = list === null ? null : { ref, paths: new Set(list) };
   }
 
   const contentDrift: ReadonlySet<string> = facets.has('contentDrift')

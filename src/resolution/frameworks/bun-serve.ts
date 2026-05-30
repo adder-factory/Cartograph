@@ -224,8 +224,8 @@ interface BuildRouteNodeArgs {
 
 function buildRouteNode(args: BuildRouteNodeArgs): Node {
   const { filePath, path, method, line, baseColumn, language, now } = args;
-  const name = method !== null ? `${method} ${path}` : path;
-  const idMethod = method !== null ? method : 'BUN';
+  const name = method === null ? path : `${method} ${path}`;
+  const idMethod = method === null ? 'BUN' : method;
   return {
     id: `route:${filePath}:${idMethod}:${path}:${line}`,
     kind: 'route',

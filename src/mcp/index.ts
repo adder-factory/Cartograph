@@ -164,7 +164,7 @@ function mcpStartWatching(st: McpServerState): void {
   if (debounceMs !== undefined) startOpts.debounceMs = debounceMs;
   const started = st.cg.watcher.start(startOpts);
   if (started) {
-    const debounceLabel = debounceMs !== undefined ? ` (debounceMs=${debounceMs})` : '';
+    const debounceLabel = debounceMs === undefined ? '' : ` (debounceMs=${debounceMs})`;
     process.stderr.write(`[Cartograph MCP] File watcher active — graph will auto-sync on changes${debounceLabel}\n`);
   }
 }
@@ -287,8 +287,8 @@ function mcpMakeProgressForwarder(
     transport.notify('notifications/progress', {
       progressToken,
       progress: current,
-      ...(total !== undefined ? { total } : {}),
-      ...(message !== undefined ? { message } : {}),
+      ...(total === undefined ? {} : { total }),
+      ...(message === undefined ? {} : { message }),
     });
   };
 }

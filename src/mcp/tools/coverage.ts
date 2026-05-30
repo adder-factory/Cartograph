@@ -319,7 +319,7 @@ function handleCoverageRanked(cg: Cartograph, args: CoverageArgs): ToolOutcome {
       // filter). Use a wording that implies "ingest" not "filter".
       const tips = buildCoverageTips({ projectRoot: cg.projectRoot, newestIngestedAt: null });
       const head =
-        source !== undefined ? `No coverage data ingested for source "${source}".` : 'No coverage data ingested yet.';
+        source === undefined ? 'No coverage data ingested yet.' : `No coverage data ingested for source "${source}".`;
       return ok(renderToolResponse({ body: '', empty: { message: head + tips } }));
     }
     // Coverage IS ingested — the filter excluded everything. Skip the
@@ -385,7 +385,7 @@ export function buildCoverageRankedSpec(
       {
         header: 'PR centrality',
         align: 'right',
-        cell: (r) => (r.centrality != null ? r.centrality.toFixed(CENTRALITY_DECIMALS) : '—'),
+        cell: (r) => (r.centrality == null ? '—' : r.centrality.toFixed(CENTRALITY_DECIMALS)),
       },
     ],
     rows: shown.map((r, i) => ({ ...r, i })),

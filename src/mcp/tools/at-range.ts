@@ -595,7 +595,7 @@ function classifyEmptyDiff(diff: string): {
     if (!m) continue;
     hunkCount++;
     // newLen absent → exactly one line per the unified-diff spec.
-    const newLen = m[1] !== undefined ? Number.parseInt(m[1], 10) : 1;
+    const newLen = m[1] === undefined ? 1 : Number.parseInt(m[1], 10);
     if (newLen === 0) pureDeletionCount++;
   }
   return { hunkCount, pureDeletionCount, hasFileHeader };

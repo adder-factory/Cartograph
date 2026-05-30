@@ -197,8 +197,8 @@ function gqmAppendInternalOutgoingEdgesInto(args: GqmAppendInternalOutgoingEdges
  * Graph query manager for complex queries
  */
 export class GraphQueryManager {
-  private queries: QueryBuilder;
-  private traverser: GraphTraverser;
+  private readonly queries: QueryBuilder;
+  private readonly traverser: GraphTraverser;
 
   constructor(queries: QueryBuilder) {
     this.queries = queries;

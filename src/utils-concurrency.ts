@@ -114,7 +114,7 @@ function forceUnlinkLock(lockPath: string): void {
  * writing to the same database simultaneously.
  */
 export class FileLock {
-  private lockPath: string;
+  private readonly lockPath: string;
   private held = false;
 
   constructor(lockPath: string) {
@@ -251,7 +251,7 @@ export async function processInBatches<T, R>(args: ProcessInBatchesArgs<T, R>): 
 /** Simple mutex lock for preventing concurrent operations. */
 export class Mutex {
   private locked = false;
-  private waitQueue: Array<() => void> = [];
+  private readonly waitQueue: Array<() => void> = [];
 
   /**
    * Acquire the lock.
@@ -384,8 +384,8 @@ const BYTES_PER_MB = 1024 * 1024;
 export class MemoryMonitor {
   private checkInterval: ReturnType<typeof setInterval> | null = null;
   private peakUsage = 0;
-  private threshold: number;
-  private onThresholdExceeded?: ((usage: number) => void) | undefined;
+  private readonly threshold: number;
+  private readonly onThresholdExceeded?: ((usage: number) => void) | undefined;
 
   constructor(thresholdMB: number = DEFAULT_MEMORY_THRESHOLD_MB, onThresholdExceeded?: (usage: number) => void) {
     this.threshold = thresholdMB * BYTES_PER_MB;

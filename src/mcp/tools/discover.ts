@@ -316,8 +316,8 @@ export function buildDiscoverContextsSpec(
       // an absolute path. `c.path` is already absolute (the traversal
       // roots at `pathMod.resolve(pathArg)`).
       { header: 'Path', cell: (r) => `\`${r.path}\`` },
-      { header: 'Files', align: 'right', cell: (r) => (r.fileCount != null ? String(r.fileCount) : '—') },
-      { header: 'Nodes', align: 'right', cell: (r) => (r.nodeCount != null ? String(r.nodeCount) : '—') },
+      { header: 'Files', align: 'right', cell: (r) => (r.fileCount == null ? '—' : String(r.fileCount)) },
+      { header: 'Nodes', align: 'right', cell: (r) => (r.nodeCount == null ? '—' : String(r.nodeCount)) },
       { header: 'Indexed at', cell: (r) => r.indexedAt ?? '—' },
     ],
     rows: contexts,

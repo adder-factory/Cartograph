@@ -151,7 +151,7 @@ interface BunSqliteHandle {
 }
 
 export class BunSqliteAdapter implements SqliteDatabase {
-  private _db: BunSqliteHandle;
+  private readonly _db: BunSqliteHandle;
   private _open: boolean;
 
   constructor(dbPath: string) {

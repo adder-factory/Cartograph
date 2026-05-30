@@ -380,10 +380,10 @@ function edgeToEdgeDelta(e: Edge, idx: Map<string, { qn: string; kind: NodeKind 
   return {
     source: e.source,
     target: e.target,
-    ...(sourceName !== undefined ? { sourceName } : {}),
-    ...(targetName !== undefined ? { targetName } : {}),
+    ...(sourceName === undefined ? {} : { sourceName }),
+    ...(targetName === undefined ? {} : { targetName }),
     kind: e.kind,
-    ...(e.line !== undefined ? { line: e.line } : {}),
+    ...(e.line === undefined ? {} : { line: e.line }),
   };
 }
 
@@ -472,7 +472,7 @@ interface FileDeltaForOnePathArgs {
 
 function fileDeltaForOnePath(args: FileDeltaForOnePathArgs): FileDelta {
   const { rootDir, ref, relPath, withFindingsDelta, withEdgesDelta, head } = args;
-  const currentSource = head !== undefined ? getFileAtRef(rootDir, head, relPath) : readCurrentSource(rootDir, relPath);
+  const currentSource = head === undefined ? readCurrentSource(rootDir, relPath) : getFileAtRef(rootDir, head, relPath);
   const baselineSource = getFileAtRef(rootDir, ref, relPath);
   const language = detectLanguage(relPath, currentSource ?? baselineSource ?? undefined);
   const base: FileDelta = {
@@ -732,7 +732,7 @@ function buildFileDeltas(args: BuildFileDeltasArgs): FileDelta[] {
       relPath: p,
       withFindingsDelta: options.findingsDelta === true,
       withEdgesDelta: options.includeEdges === true,
-      ...(options.head !== undefined ? { head: options.head } : {}),
+      ...(options.head === undefined ? {} : { head: options.head }),
     }),
   );
 }
@@ -817,7 +817,7 @@ function buildPathFilterContext(
  * replaces — extracted to keep compareToRef's conditional load low.
  */
 function listChangedPaths(root: string, ref: string, head: string | undefined): string[] | null {
-  return head !== undefined ? listChangedFilesBetween(root, ref, head) : listChangedFilesSince(root, ref);
+  return head === undefined ? listChangedFilesSince(root, ref) : listChangedFilesBetween(root, ref, head);
 }
 
 /**
@@ -836,9 +836,9 @@ function formatRefLabel(ref: string, head: string | undefined): string {
  * ref-to-ref mode, just `ref` in working-tree mode.
  */
 function gitFailureError(ref: string, head: string | undefined): string {
-  return head !== undefined
-    ? `git unavailable or one of "${ref}", "${head}" not found`
-    : `git unavailable or ref "${ref}" not found`;
+  return head === undefined
+    ? `git unavailable or ref "${ref}" not found`
+    : `git unavailable or one of "${ref}", "${head}" not found`;
 }
 
 /**

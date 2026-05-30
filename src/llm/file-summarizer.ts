@@ -197,13 +197,13 @@ export async function summarizeAllFiles(args: SummarizeAllFilesArgs): Promise<Fi
   const concurrency = Math.max(1, options.concurrency ?? DEFAULT_CONCURRENCY);
 
   const anchor: ProjectAnchor = projectRoot ? getProjectAnchor(projectRoot) : { text: '', source: 'none' };
-  if (!projectRoot) {
-    logDebug('FileSummarizer: projectRoot not provided — skipping project-identity anchor');
-  } else {
+  if (projectRoot) {
     logDebug('FileSummarizer: project-identity anchor', {
       source: anchor.source,
       textLen: anchor.text.length,
     });
+  } else {
+    logDebug('FileSummarizer: projectRoot not provided — skipping project-identity anchor');
   }
 
   const summarisedSymbols = getSummarisedSymbolsByDir(queries);

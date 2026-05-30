@@ -320,7 +320,7 @@ describe('countPendingSummarizable', () => {
       startColumn: 0,
       endColumn: 1,
       updatedAt: Date.now(),
-      ...(opts.docstring !== undefined ? { docstring: opts.docstring } : {}),
+      ...(opts.docstring === undefined ? {} : { docstring: opts.docstring }),
     });
   }
 

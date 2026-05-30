@@ -714,16 +714,16 @@ export function getCategorizedHotspots(
   // Fetch all qualifying rows — no LIMIT because categorization requires
   // the full dataset to compute data-driven percentile thresholds.
   let all: HotspotRow[];
-  if (recencyCutoff !== null) {
+  if (recencyCutoff === null) {
+    qb.queries.categorizedHotspotsAll ??= categorizedHotspotsAllQuery(qb.db);
+    all = qb.queries.categorizedHotspotsAll.all({ minCommits, minCentrality });
+  } else {
     qb.queries.categorizedHotspotsWithRecency ??= categorizedHotspotsWithRecencyQuery(qb.db);
     all = qb.queries.categorizedHotspotsWithRecency.all({
       minCommits,
       minCentrality,
       recencyCutoff,
     });
-  } else {
-    qb.queries.categorizedHotspotsAll ??= categorizedHotspotsAllQuery(qb.db);
-    all = qb.queries.categorizedHotspotsAll.all({ minCommits, minCentrality });
   }
   if (all.length === 0) return { risk: [], maintenance: [], brittle: [] };
 

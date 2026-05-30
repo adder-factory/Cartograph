@@ -380,7 +380,7 @@ export class CartographLlmService {
       modelLabel: resolved.summarizeLlm!.model,
       // Conditional spread — `exactOptionalPropertyTypes` rejects an
       // explicit `eagerLimit: undefined`.
-      options: { ...options, summaryBatchSize, ...(eagerLimit !== undefined ? { eagerLimit } : {}) },
+      options: { ...options, summaryBatchSize, ...(eagerLimit === undefined ? {} : { eagerLimit }) },
     });
     const embedResult =
       resolved.embeddingLlm && !options.signal?.aborted
@@ -472,7 +472,7 @@ export class CartographLlmService {
       modelLabel: resolved.summarizeLlm!.model,
       options: {
         ...(options.signal ? { signal: options.signal } : {}),
-        ...(options.concurrency !== undefined ? { concurrency: options.concurrency } : {}),
+        ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
         ...(options.onProgress ? { onProgress: options.onProgress } : {}),
       },
     });
@@ -629,7 +629,7 @@ export async function llmLocalChat(
   // single-provider configs (chat-only) keep working unchanged.
   const result = await client.chat(messages, {
     useLocalChat: true,
-    ...(args.maxTokens !== undefined ? { maxTokens: args.maxTokens } : {}),
+    ...(args.maxTokens === undefined ? {} : { maxTokens: args.maxTokens }),
     ...(args.signal ? { signal: args.signal } : {}),
   });
   // Report the model that ACTUALLY served the call so the response

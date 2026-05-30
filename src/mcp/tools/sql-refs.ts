@@ -52,7 +52,7 @@ function renderSqlTableList(
 ): ToolResult {
   const rawLimit = args['limit'];
   const clampedLimit = clamp(rawLimit as number, 1, SQL_REFS_LIMIT_MAX);
-  const limit = rawLimit != null ? clampedLimit : SQL_REFS_LIMIT_DEFAULT;
+  const limit = rawLimit == null ? SQL_REFS_LIMIT_DEFAULT : clampedLimit;
   const rows = getSqlTables(cg.queries, { limit: limit * SQL_REFS_OVERFETCH_MULTIPLIER });
   const enriched = rows.map((r) => enrichSqlTable(cg, r));
   const filtered = includeTests ? enriched : enriched.filter((e) => e.prodTotal > 0);
@@ -142,7 +142,7 @@ function renderSqlTableSites(opts: RenderSqlTableSitesArgs): ToolResult {
       `No prod refs found for table "${table}"${opSuffix} — ${hiddenTestCount} test-only site${pluralS(hiddenTestCount)} hidden (pass \`includeTests: true\` to see them).`,
     );
   }
-  const limit = rawLimitArg != null ? clamp(rawLimitArg as number, 1, SQL_REFS_LIMIT_MAX) : SQL_REFS_LIMIT_DEFAULT;
+  const limit = rawLimitArg == null ? SQL_REFS_LIMIT_DEFAULT : clamp(rawLimitArg as number, 1, SQL_REFS_LIMIT_MAX);
   const shown = sites.slice(0, limit);
   const { prod: prodCount, test: testCount } = countByTestPath(sites);
   const truncated = sites.length > shown.length;
