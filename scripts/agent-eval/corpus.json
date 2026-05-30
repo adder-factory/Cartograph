@@ -1,0 +1,111 @@
+{
+  "corpusRoot": "~/.cache/cartograph/training-corpus",
+  "note": "All 15 repos are pre-indexed (.cartograph present). Questions are flow/how-does-X-work prompts that exercise cartograph's trace/graph/context tools versus raw Read/Grep. The `publish` set spans 7 languages for the README benchmark table.",
+  "corpora": [
+    {
+      "name": "spring-petclinic",
+      "language": "Java",
+      "tier": "small",
+      "publish": true,
+      "question": "How does a request to view an owner and their pets flow from the controller through the service/repository layer to the database?"
+    },
+    {
+      "name": "gin",
+      "language": "Go",
+      "tier": "small",
+      "publish": true,
+      "question": "How does Gin route an incoming HTTP request to the matching handler, and how is middleware applied along the way?"
+    },
+    {
+      "name": "cobra",
+      "language": "Go",
+      "tier": "small",
+      "publish": false,
+      "question": "How does Cobra parse command-line flags and dispatch to the correct subcommand's Run function?"
+    },
+    {
+      "name": "express",
+      "language": "JavaScript",
+      "tier": "small",
+      "publish": false,
+      "question": "How does Express match an incoming request to middleware and route handlers, and how does next() advance the chain?"
+    },
+    {
+      "name": "sinatra",
+      "language": "Ruby",
+      "tier": "small",
+      "publish": false,
+      "question": "How does Sinatra match an HTTP verb and path to the correct route block and execute it?"
+    },
+    {
+      "name": "flask",
+      "language": "Python",
+      "tier": "small",
+      "publish": false,
+      "question": "How does Flask dispatch a request URL to the registered view function, from WSGI entry through to the response?"
+    },
+    {
+      "name": "serde",
+      "language": "Rust",
+      "tier": "small",
+      "publish": false,
+      "question": "How does serde's derive macro generate a Serialize implementation, and what call sequence runs when serializing a struct?"
+    },
+    {
+      "name": "axum",
+      "language": "Rust",
+      "tier": "medium",
+      "publish": true,
+      "question": "How does Axum extract typed data from a request and route it to the matching handler?"
+    },
+    {
+      "name": "json",
+      "language": "C++",
+      "tier": "medium",
+      "publish": false,
+      "question": "How does nlohmann::json parse a JSON string into its internal value representation?"
+    },
+    {
+      "name": "fastapi",
+      "language": "Python",
+      "tier": "medium",
+      "publish": true,
+      "question": "How does FastAPI resolve a path operation's dependencies and invoke the endpoint function?"
+    },
+    {
+      "name": "nest",
+      "language": "TypeScript",
+      "tier": "medium",
+      "publish": true,
+      "question": "How does a NestJS HTTP request flow from a controller's route decorator through guards and pipes to the provider method?"
+    },
+    {
+      "name": "kit",
+      "language": "Svelte",
+      "tier": "medium",
+      "publish": false,
+      "question": "How does SvelteKit route a request to the matching +page/+server file and produce a rendered response?"
+    },
+    {
+      "name": "eShop",
+      "language": "C#",
+      "tier": "medium",
+      "publish": false,
+      "question": "How does the ordering flow process a new order from the API endpoint through to persistence?"
+    },
+    {
+      "name": "ktor",
+      "language": "Kotlin",
+      "tier": "large",
+      "publish": true,
+      "question": "How does Ktor route a request through its application pipeline to the matching route handler?"
+    },
+    {
+      "name": "framework",
+      "language": "PHP",
+      "tier": "large",
+      "publish": true,
+      "question": "How does Laravel route an HTTP request through the middleware stack to a controller action and back to a response?"
+    }
+  ]
+}

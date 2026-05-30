@@ -1,0 +1,31 @@
+# Drupal-shape routing.yml fixture for the F#62 yaml language def.
+#
+# The yaml extractor is INTENTIONALLY zero-emit (`yamlExtractor` has
+# empty `*Types` lists in src/extraction/languages/yaml.ts). YAML
+# files don't have functions / classes / etc. that match this fork's
+# `NodeKind` set; the language was added in F#62 so the Drupal
+# framework resolver has something to dispatch on AND so the
+# tree-sitter-yaml grammar is pre-loaded for the resolver's
+# routing.yml walks.
+#
+# Consequently this fixture exists for grammar-load coverage, NOT
+# for the parity-guard's symbol-emission floor — yaml is exempt from
+# that assertion (`KNOWN_ZERO_SYMBOL_LANGUAGES` in
+# __tests__/language-coverage.test.ts). The fixture's job is: prove
+# tree-sitter-yaml parses a real-world Drupal routing.yml shape
+# without throwing.
+example.list:
+  path: '/example'
+  defaults:
+    _controller: '\Drupal\example\Controller\ExampleController::list'
+    _title: 'Example list'
+  requirements:
+    _permission: 'access content'
+
+example.view:
+  path: '/example/{id}'
+  defaults:
+    _controller: '\Drupal\example\Controller\ExampleController::view'
+  requirements:
+    _permission: 'access content'
+    id: \d+

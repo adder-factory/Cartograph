@@ -1,0 +1,205 @@
+/**
+ * MCP server-level configuration: disable write tools, disable named
+ * tools, default `allowStale`. Covers the surface added so server
+ * operators can scope what an agent is allowed to do.
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as os from 'os';
+import { execFileSync } from 'child_process';
+import { Cartograph } from '../src/index.js';
+import { ToolHandler } from '../src/mcp/tools.js';
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+
+describe('MCP server-level options', () => {
+  let testDir: string;
+  let cg: Cartograph;
+
+  beforeEach(async () => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-opts-'));
+    fs.mkdirSync(path.join(testDir, 'src'));
+    fs.writeFileSync(path.join(testDir, 'src', 'a.ts'), `export function alpha(){return 1;}\n`);
+    fs.writeFileSync(path.join(testDir, '.gitignore'), '.cartograph/\n');
+    git(testDir, 'init', '-q');
+    git(testDir, 'config', 'user.email', 't@t');
+    git(testDir, 'config', 'user.name', 't');
+    git(testDir, 'config', 'commit.gpgsign', 'false');
+    git(testDir, 'add', '.');
+    git(testDir, 'commit', '-q', '-m', 'init');
+    cg = await Cartograph.init(testDir, { config: {} });
+    await cg.indexAll({ summarize: false });
+  });
+
+  afterEach(() => {
+    if (cg) cg.close();
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  describe('disableWriteTools', () => {
+    it('hides pure write tools from tools/list', () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const names = handler.getTools().map((t) => t.name);
+      // cartograph_summaries is a write surface (its 'save' action
+      // persists LLM-generated summaries) — must be hidden.
+      expect(names).not.toContain('cartograph_summaries');
+      // cartograph_note (write action — persists user notes).
+      expect(names).not.toContain('cartograph_note');
+      // Read-class tools still listed.
+      expect(names).toContain('cartograph_find');
+      expect(names).toContain('cartograph_status');
+      handler.closeAll();
+    });
+
+    it('hides cartograph_admin under --no-write-tools (every action mutates state)', () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const names = handler.getTools().map((t) => t.name);
+      // cartograph_admin has no readOnlyActions carve-out — every action
+      // mutates state, so the whole tool is hidden under --no-write-tools.
+      // (The carve-out infrastructure remains in place for future tools
+      // that mix read- and write-only actions; cartograph_admin used to
+      // expose pool-recommend / pool-status as read-only carve-outs.)
+      expect(names).not.toContain('cartograph_admin');
+      handler.closeAll();
+    });
+
+    it('rejects all admin actions with a clean error under --no-write-tools', async () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const result = await handler.execute('cartograph_admin', { action: 'sync' });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toMatch(/disabled by this MCP server/);
+      handler.closeAll();
+    });
+
+    it('leaves read-tool calls untouched', async () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const result = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
+      const text = result.content[0]?.text ?? '';
+      expect(text).not.toMatch(/disabled by this MCP server/);
+      handler.closeAll();
+    });
+  });
+
+  describe('disabledTools (per-name)', () => {
+    it('disables a specific named tool', async () => {
+      const handler = new ToolHandler(cg, {
+        disabledTools: new Set(['cartograph_dead_code']),
+      });
+      expect(handler.getTools().map((t) => t.name)).not.toContain('cartograph_dead_code');
+      // Other tools unaffected.
+      expect(handler.getTools().map((t) => t.name)).toContain('cartograph_find');
+      const result = await handler.execute('cartograph_dead_code', {});
+      expect(result.content[0]?.text ?? '').toMatch(/disabled by this MCP server/);
+      handler.closeAll();
+    });
+
+    it('composes cleanly when disabledTools also covers an admin-style tool', async () => {
+      // Edge case: disabledTools and disableWriteTools both block
+      // cartograph_admin. The carve-out advertisement would be misleading
+      // (no action is actually reachable), so the gate falls back to the
+      // plain "disabled by this MCP server" message.
+      const handler = new ToolHandler(cg, {
+        disableWriteTools: true,
+        disabledTools: new Set(['cartograph_admin']),
+      });
+      const result = await handler.execute('cartograph_admin', { action: 'sync' });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toMatch(/disabled by this MCP server/);
+      expect(text).not.toMatch(/Read-only actions still reachable/);
+      handler.closeAll();
+    });
+
+    it('composes with disableWriteTools (either rule disables)', () => {
+      const handler = new ToolHandler(cg, {
+        disableWriteTools: true,
+        disabledTools: new Set(['cartograph_explore']),
+      });
+      const names = handler.getTools().map((t) => t.name);
+      // cartograph_summaries has no per-action carve-outs, so the category
+      // rule hides it. cartograph_admin survives because it declares
+      // readOnlyActions — covered by the dedicated test above.
+      expect(names).not.toContain('cartograph_summaries'); // disabled by category
+      expect(names).not.toContain('cartograph_explore'); // disabled by name
+      expect(names).toContain('cartograph_find'); // neither rule applies
+      handler.closeAll();
+    });
+  });
+
+  describe('Server config section in status', () => {
+    it('omits the section when no server options are set', async () => {
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_status', {});
+      expect(result.content[0]?.text ?? '').not.toMatch(/### Server config/);
+      handler.closeAll();
+    });
+
+    it('shows write-tools-disabled when disableWriteTools is set', async () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/Write tools.*disabled|no-write-tools/);
+      handler.closeAll();
+    });
+
+    it('lists disabled tools when disabledTools is non-empty', async () => {
+      const handler = new ToolHandler(cg, {
+        disabledTools: new Set(['cartograph_dead_code', 'cartograph_explore']),
+      });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/cartograph_dead_code/);
+      expect(text).toMatch(/cartograph_explore/);
+      handler.closeAll();
+    });
+
+    it('shows allowStale default when set', async () => {
+      const handler = new ToolHandler(cg, { allowStaleDefault: true });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/allowStale.*true/);
+      handler.closeAll();
+    });
+
+    it('shows startup-sync-disabled when disableStartupSync is set', async () => {
+      const handler = new ToolHandler(cg, { disableStartupSync: true });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/Startup sync.*disabled|no-startup-sync/);
+      handler.closeAll();
+    });
+  });
+
+  describe('allowStaleDefault', () => {
+    it('lets calls through heavy drift when caller omits allowStale', async () => {
+      // Induce heavy drift first so the gate would block a default call.
+      for (let i = 0; i < 250; i++) {
+        fs.writeFileSync(path.join(testDir, 'src', `g${i}.ts`), `export const v${i}=${i};\n`);
+      }
+      git(testDir, 'add', '.');
+      git(testDir, 'commit', '-q', '-m', 'drift');
+
+      const handler = new ToolHandler(cg, { allowStaleDefault: true });
+      const result = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
+      expect(result.content[0]?.text ?? '').not.toMatch(/too stale to safely query/i);
+      handler.closeAll();
+    });
+
+    it('still blocks when caller explicitly passes allowStale: false', async () => {
+      // Same heavy-drift setup as above.
+      for (let i = 0; i < 250; i++) {
+        fs.writeFileSync(path.join(testDir, 'src', `h${i}.ts`), `export const w${i}=${i};\n`);
+      }
+      git(testDir, 'add', '.');
+      git(testDir, 'commit', '-q', '-m', 'drift');
+
+      const handler = new ToolHandler(cg, { allowStaleDefault: true });
+      // Explicit false overrides the server default.
+      const result = await handler.execute('cartograph_find', { by: 'name', query: 'alpha', allowStale: false });
+      expect(result.content[0]?.text ?? '').toMatch(/too stale to safely query/i);
+      handler.closeAll();
+    });
+  });
+});

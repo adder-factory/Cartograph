@@ -1,0 +1,339 @@
+/**
+ * Cross-file biomarker graph queries — the three SQL-based detectors
+ * that compute findings from the global node + edge graph rather
+ * than from a single file's AST.
+ *
+ * Extracted from `QueryBuilder` so the SQL repository doesn't carry
+ * the per-domain biomarker scanners as direct members. The functions
+ * read the `nodes` + `edges` tables via the `@internal`-tagged `db`
+ * field on the parent `QueryBuilder`. Note: this module covers the
+ * graph-derived biomarker SCANNERS only; finding STORAGE
+ * (appendFindings, etc.) lives in `queries-findings.ts`.
+ *
+ * MIGRATED TO TYPED QUERIES (2026-05-20) — all three module-level
+ * static SQL strings are declared via {@link defineQuery}; Zod
+ * schemas validate params + rows. Lazy-cached on `qb.queries.X`.
+ */
+
+import { z } from 'zod';
+import type { QueryBuilder } from './queries.js';
+import { defineQuery, type TypedQuery } from './typed-query.js';
+
+/**
+ * Find class-like nodes whose `contains` subtree has at least
+ * `minMembers` method/function/property/field children AND carries
+ * at least one method/function child. Backs the `god_class`
+ * biomarker — a class with dozens of members is almost always a
+ * candidate for splitting. Sorted by memberCount desc so the worst
+ * offenders surface first.
+ *
+ * The method-presence requirement excludes pure data shapes: a
+ * `struct` / `interface` with many fields and zero methods — e.g. a
+ * Zod `z.object({...})` schema, which the extractor records as a
+ * struct with one `field` child per property — is a data record,
+ * not a god class. "God class" is a behavior smell (Weighted Methods
+ * per Class); a container with no methods cannot exhibit it, so
+ * counting its fields toward the WMC band is a misclassification.
+ *
+ * Includes interfaces and structs (Go's `interface`/`struct`
+ * with attached methods can grow just as unwieldy as a Java class).
+ */
+const GodClassRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  filePath: z.string(),
+  memberCount: z.number(),
+});
+type GodClassRow = z.infer<typeof GodClassRowSchema>;
+
+const findGodClassesQuery = defineQuery({
+  sql: `
+    SELECT n.id, n.name, n.file_path AS filePath, COUNT(child.id) AS memberCount
+    FROM nodes n
+    JOIN edges e ON e.source = n.id AND e.kind = 'contains'
+    JOIN nodes child ON e.target = child.id
+    WHERE n.kind IN ('class', 'struct', 'interface', 'trait', 'protocol')
+      AND child.kind IN ('method', 'function', 'property', 'field')
+    GROUP BY n.id, n.name, n.file_path
+    HAVING memberCount >= @minMembers
+       AND SUM(CASE WHEN child.kind IN ('method', 'function') THEN 1 ELSE 0 END) > 0
+    ORDER BY memberCount DESC
+  `,
+  params: z.object({ minMembers: z.number() }),
+  row: GodClassRowSchema,
+});
+
+export function findGodClasses(qb: QueryBuilder, minMembers: number): GodClassRow[] {
+  qb.queries.findGodClasses ??= findGodClassesQuery(qb.db);
+  return qb.queries.findGodClasses.all({ minMembers });
+}
+
+/**
+ * Find methods showing "feature envy" via Lanza & Marinescu's
+ * ATFD / LAA / FDP detection scheme — a method that reads many
+ * fields off ANOTHER class while barely touching its own data.
+ * That's the canonical OO smell: the method belongs on the class
+ * whose data it's pestering.
+ *
+ * Definitions (Lanza & Marinescu, "Object-Oriented Metrics in
+ * Practice"):
+ *   - ATFD (Access to Foreign Data): distinct foreign field/property
+ *     nodes the method emits `field_access` edges to. "Foreign" =
+ *     not a `contains`-child of the method's own enclosing class.
+ *   - LAA (Locality of Attribute Accesses): own-class accesses /
+ *     total accesses. Below 1/3 means the method's data interest
+ *     is concentrated outside its own class.
+ *   - FDP (Foreign Data Providers): distinct foreign classes whose
+ *     fields are accessed. Small FDP (≤ 2) means the envy is
+ *     focused — the method belongs on a specific other class —
+ *     versus diffuse reach across many classes (which is just
+ *     normal coordination, not envy).
+ *
+ * Detection fires when ALL three hold:
+ *   ATFD > minATFD  AND  FDP ≤ maxFDP  AND  LAA < maxLAA
+ *
+ * Why this beats the prior call-edge metric:
+ *   - The old proxy ("calls into other files more than this file")
+ *     conflated normal cross-module work with envy. ATFD/LAA
+ *     specifically targets DATA dependencies, the actual smell.
+ *   - The infrastructure-exclusion lists the old metric needed
+ *     (src/utils.ts, src/db/, etc.) drop out: free functions don't
+ *     have an enclosing class, so they're naturally skipped, and
+ *     calls don't enter the metric at all.
+ *
+ * Scope notes:
+ *   - Only fires on methods on `class | struct | trait`. Free
+ *     functions have no "own class" — LAA is undefined, the smell
+ *     doesn't apply.
+ *   - Field/property targets must themselves be `contains`-members
+ *     of a class for foreign-class attribution to work. Fields on
+ *     interfaces are typically declarations only (no body access)
+ *     so this rarely matters in practice.
+ *   - Counts DISTINCT field nodes for ATFD/FDP (the edges table
+ *     dedupes on insert) but SUMs raw access counts for LAA — a
+ *     method reading `this.size` once and `other.size` once should
+ *     have LAA = 0.5, not 0.
+ *   - Per-language `field_access` edge emission depends on the
+ *     extractor having an entry in `FIELD_ACCESS_SHAPE_BY_LANGUAGE`
+ *     (`src/extraction/ts-extract-bodies.ts`) — that map is the
+ *     authoritative list of languages this biomarker can evaluate.
+ *     Languages without an entry won't be considered until their
+ *     extractors land the edge kind.
+ */
+interface FindFeatureEnvyArgs {
+  qb: QueryBuilder;
+  /** ATFD threshold — strict greater-than. L/M textbook value: 5 (FEW). */
+  minATFD: number;
+  /** FDP threshold — less-than-or-equal. L/M textbook value: 2 (FEW). */
+  maxFDP: number;
+  /** LAA threshold — strict less-than. L/M textbook value: 1/3. */
+  maxLAA: number;
+}
+
+const FeatureEnvyRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  filePath: z.string(),
+  atfd: z.number(),
+  fdp: z.number(),
+  laa: z.number(),
+  ownAccesses: z.number(),
+  foreignAccesses: z.number(),
+});
+type FeatureEnvyRow = z.infer<typeof FeatureEnvyRowSchema>;
+
+const FeatureEnvyParamsSchema = z.object({
+  minATFD: z.number(),
+  maxFDP: z.number(),
+  maxLAA: z.number(),
+});
+type FeatureEnvyParams = z.infer<typeof FeatureEnvyParamsSchema>;
+
+/**
+ * ATFD/LAA/FDP SQL — extracted to module scope so {@link findFeatureEnvy}
+ * stays a thin wrapper around the prepared statement. The CTE chain:
+ *
+ *   1. source_class:        each method's immediate parent class
+ *   2. field_target_class:  each class member's enclosing class
+ *   3. accesses:            field_access edges joined to the above
+ *
+ * field_target_class includes kind=method because accessing a foreign
+ * method-as-value (callback passing, .bind(), function reference) is
+ * a real data coupling that the field_access extractor emits the same
+ * shape of edge for. Method calls are excluded per-language by
+ * `captureBodyFieldAccess` — see `FIELD_ACCESS_SHAPE_BY_LANGUAGE` in
+ * `src/extraction/ts-extract-bodies.ts` for the authoritative per-grammar
+ * dispatch table (one entry per language carries the AST node kind +
+ * field-child name + parent-types-to-skip).
+ *
+ * The HAVING placeholders bind to (@minATFD, @maxFDP, @maxLAA).
+ */
+const findFeatureEnvyQuery = defineQuery({
+  sql: `
+  WITH source_class AS (
+    SELECT n.id AS srcId, n.name AS srcName, n.file_path AS srcFile,
+           c.id AS srcClassId
+    FROM nodes n
+    JOIN edges ce ON ce.target = n.id AND ce.kind = 'contains'
+    JOIN nodes c  ON c.id = ce.source
+    WHERE n.kind = 'method'
+      AND c.kind IN ('class', 'struct', 'trait')
+  ),
+  field_target_class AS (
+    SELECT f.id AS fieldId, fc.id AS fieldClassId
+    FROM nodes f
+    JOIN edges fe ON fe.target = f.id AND fe.kind = 'contains'
+    JOIN nodes fc ON fc.id = fe.source
+    WHERE f.kind IN ('field', 'property', 'method')
+      AND fc.kind IN ('class', 'struct', 'trait', 'interface')
+  ),
+  accesses AS (
+    SELECT sc.srcId, sc.srcName, sc.srcFile, sc.srcClassId,
+           ftc.fieldId, ftc.fieldClassId
+    FROM edges e
+    JOIN source_class sc       ON sc.srcId = e.source
+    JOIN field_target_class ftc ON ftc.fieldId = e.target
+    WHERE e.kind = 'field_access'
+  )
+  SELECT
+    srcId AS id, srcName AS name, srcFile AS filePath,
+    COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldId      END) AS atfd,
+    COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldClassId END) AS fdp,
+    SUM(CASE WHEN fieldClassId  = srcClassId THEN 1 ELSE 0 END) AS ownAccesses,
+    SUM(CASE WHEN fieldClassId != srcClassId THEN 1 ELSE 0 END) AS foreignAccesses,
+    CAST(SUM(CASE WHEN fieldClassId = srcClassId THEN 1 ELSE 0 END) AS REAL) /
+      NULLIF(COUNT(*), 0) AS laa
+  FROM accesses
+  GROUP BY srcId, srcName, srcFile, srcClassId
+  HAVING atfd > @minATFD AND fdp <= @maxFDP AND laa < @maxLAA
+  ORDER BY atfd DESC, foreignAccesses DESC
+  `,
+  params: FeatureEnvyParamsSchema,
+  row: FeatureEnvyRowSchema,
+});
+
+export function findFeatureEnvy(args: FindFeatureEnvyArgs): FeatureEnvyRow[] {
+  const { qb, minATFD, maxFDP, maxLAA } = args;
+  qb.queries.findFeatureEnvy ??= findFeatureEnvyQuery(qb.db);
+  return qb.queries.findFeatureEnvy.all({ minATFD, maxFDP, maxLAA });
+}
+
+/**
+ * Find exported nodes that have no incoming graph edge from outside
+ * their own file. Used by the `unused_export` biomarker to flag
+ * dead public API after refactors.
+ *
+ * Excluded as "not real use":
+ *   - `contains`: structural; every method is contained by its class
+ *   - `exports`:  re-export barrels (`export { foo } from './a'`)
+ *                 forward the symbol but don't consume it. Without
+ *                 excluding this kind a re-export chain would mark
+ *                 every dead-but-re-exported symbol as "used".
+ *   - `imports`:  the import statement itself isn't a use; it just
+ *                 brings the name into scope. Real use shows up as
+ *                 `calls`/`references`/`instantiates`/`extends`/etc.
+ *   - `tests`:    convention-derived test→subject edges aren't a
+ *                 semantic call into the symbol's API.
+ *
+ * Also excludes node kinds that are never meaningful targets of the
+ * rule: file/import/parameter/enum_member/field.
+ */
+/**
+ * Package main-entry source files. Symbols defined here are public API
+ * by definition — external consumers import from the compiled main
+ * entry, which has no cross-file caller anywhere in the source tree.
+ * Excluded so the rule doesn't flag every public-API definition.
+ */
+const PACKAGE_MAIN_ENTRY_FILES = ['src/index.ts'];
+
+/**
+ * SQL for `findUnusedExports`. The EXISTS sub-query excludes
+ * `contains` (structural), `exports` (re-export forwarding, not use),
+ * `imports` (statement alone isn't use), and `tests` (convention edge,
+ * not symbol-level use). `*.d.ts` ambient declarations are excluded
+ * up front — they declare for declaration-merging and have no call
+ * sites by design. Symbols in PACKAGE_MAIN_ENTRY_FILES are also
+ * excluded — they're the public API surface, used externally.
+ *
+ * The main-entry path list is bound via a single JSON-encoded
+ * `@mainEntries` parameter consumed by `json_each` — keeps the SQL
+ * fully static (a precondition of {@link defineQuery}) regardless of
+ * how many paths the list grows to in the future.
+ *
+ * Known FP class: cross-file uses the resolver failed to produce
+ * a `calls` edge for. The biomarker output should be treated as
+ * CANDIDATES for review, not a delete list — see
+ * `feedback_cartograph_unused_export_false_positives.md` in user
+ * memory for the verification workflow.
+ */
+// Edge kinds that DO count as "this export is being used" — anything
+// not in the NOT IN list. The exclusions:
+//   - 'contains' / 'exports' / 'imports': structural plumbing, not
+//     runtime use. A barrel re-exporting Foo doesn't prove anyone
+//     consumes it; same for the file→symbol contains edge or the
+//     import-statement edge that binds a name into scope.
+//   - 'tests': convention-derived `tests` edge maps a test file to
+//     its subject file. Counting it as "the subject is used" is
+//     circular — every exported symbol in a test-covered file would
+//     pass the check whether or not the test actually consumes it.
+//     Real test consumption shows up as 'calls' / 'type_of' /
+//     'references' edges from inside test bodies, which DO count.
+// "Use" includes any non-structural edge to the symbol — from any
+// source, any file. The original rule required cross-file consumption
+// but produced two large FP classes:
+//   - Args-bundle interfaces: `export interface Args {} export function
+//     f(a: Args) {}` — `f → Args` via type_of, same file.
+//   - Field-type references: `export interface Outer { x: Inner }` —
+//     the type_of edge sources from the field node, not the exported
+//     interface, so the rule didn't propagate exportedness up.
+//   - Type-derivation patterns: `export const N = [...] as const;
+//     export type T = (typeof N)[number]` — N has only same-file
+//     references but is genuinely live.
+//
+// Practical posture: TS types are erased at runtime, so a "dead"
+// classification only really makes sense when NOTHING in the codebase
+// references the symbol. Any non-structural edge is enough signal.
+// `interface` / `type_alias` exports kept in the rule so genuinely-
+// dead types still surface.
+const UnusedExportRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  filePath: z.string(),
+  kind: z.string(),
+});
+type UnusedExportRow = z.infer<typeof UnusedExportRowSchema>;
+
+const findUnusedExportsQuery = defineQuery({
+  sql: `
+    SELECT n.id, n.name, n.file_path AS filePath, n.kind
+    FROM nodes n
+    WHERE n.is_exported = 1
+      AND n.kind NOT IN ('file', 'import', 'parameter', 'enum_member', 'field')
+      AND n.file_path NOT LIKE '%.d.ts'
+      AND n.file_path NOT IN (SELECT value FROM json_each(@mainEntries))
+      AND NOT EXISTS (
+        SELECT 1 FROM edges e
+        WHERE e.target = n.id
+          AND e.kind NOT IN ('contains', 'exports', 'imports', 'tests')
+      )
+  `,
+  params: z.object({ mainEntries: z.string() }),
+  row: UnusedExportRowSchema,
+});
+
+export function findUnusedExports(qb: QueryBuilder): UnusedExportRow[] {
+  qb.queries.findUnusedExports ??= findUnusedExportsQuery(qb.db);
+  return qb.queries.findUnusedExports.all({
+    mainEntries: JSON.stringify(PACKAGE_MAIN_ENTRY_FILES),
+  });
+}
+
+// ─── Module augmentation: register typed entries on QueryRegistry ─────────
+
+declare module './queries.js' {
+  interface QueryRegistry {
+    findGodClasses?: TypedQuery<{ minMembers: number }, GodClassRow>;
+    findFeatureEnvy?: TypedQuery<FeatureEnvyParams, FeatureEnvyRow>;
+    findUnusedExports?: TypedQuery<{ mainEntries: string }, UnusedExportRow>;
+  }
+}

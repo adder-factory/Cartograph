@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- MyBatis mapper — language-coverage parity fixture.
+     Exercises the xml extractor's v1.1 surface:
+       - <mapper namespace="..."> root-marker gate
+       - <select|insert|update|delete|sql id="..."> → method nodes
+       - <resultMap id="X" type="Y"> → type_alias node with declared type
+       - <include refid="local"/> → unresolved reference into the
+         enclosing statement; the standard resolver's qualifiedName
+         path binds it to the <sql id="local"> fragment. -->
+<mapper namespace="com.example.UserMapper">
+
+  <resultMap id="userResult" type="com.example.User">
+    <id     column="id"   property="id"/>
+    <result column="name" property="name"/>
+  </resultMap>
+
+  <sql id="commonColumns">id, name, created_at</sql>
+
+  <select id="findById" parameterType="long" resultMap="userResult">
+    SELECT <include refid="commonColumns"/> FROM users WHERE id = #{id}
+  </select>
+
+  <insert id="insert" parameterType="com.example.User">
+    INSERT INTO users (name) VALUES (#{name})
+  </insert>
+
+  <update id="updateName">
+    UPDATE users SET name = #{name} WHERE id = #{id}
+  </update>
+
+  <delete id="deleteById">
+    DELETE FROM users WHERE id = #{id}
+  </delete>
+
+</mapper>

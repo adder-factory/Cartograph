@@ -1,0 +1,264 @@
+{
+  "label": "publish-final",
+  "corpora": 7,
+  "overall": {
+    "cost": 7,
+    "tokens": 3,
+    "time": 24,
+    "toolCalls": 54
+  },
+  "rows": [
+    {
+      "corpus": "axum",
+      "language": "Rust",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.40794505000000003,
+        "tokens": 56067,
+        "timeMs": 102469,
+        "toolCalls": 22,
+        "cgCalls": 10.5,
+        "reads": 11.5,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.5224200250000001,
+        "tokens": 61639,
+        "timeMs": 150007,
+        "toolCalls": 52,
+        "cgCalls": 0,
+        "reads": 28.5,
+        "greps": 3.5,
+        "taskSpawns": 2,
+        "exploreSpawns": 2
+      },
+      "savings": {
+        "cost": 22,
+        "tokens": 9,
+        "time": 32,
+        "toolCalls": 58
+      }
+    },
+    {
+      "corpus": "fastapi",
+      "language": "Python",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.277067775,
+        "tokens": 57010.5,
+        "timeMs": 92451,
+        "toolCalls": 6,
+        "cgCalls": 3,
+        "reads": 0.5,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.34101585,
+        "tokens": 57834.5,
+        "timeMs": 136506.5,
+        "toolCalls": 23,
+        "cgCalls": 0,
+        "reads": 13,
+        "greps": 2,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": 19,
+        "tokens": 1,
+        "time": 32,
+        "toolCalls": 74
+      }
+    },
+    {
+      "corpus": "framework",
+      "language": "PHP",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.37133452499999997,
+        "tokens": 56878,
+        "timeMs": 110967.5,
+        "toolCalls": 15,
+        "cgCalls": 7.5,
+        "reads": 3.5,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.40765025,
+        "tokens": 57394.5,
+        "timeMs": 159835,
+        "toolCalls": 36.5,
+        "cgCalls": 0,
+        "reads": 16.5,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": 9,
+        "tokens": 1,
+        "time": 31,
+        "toolCalls": 59
+      }
+    },
+    {
+      "corpus": "gin",
+      "language": "Go",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.279327275,
+        "tokens": 57706,
+        "timeMs": 97650,
+        "toolCalls": 5.5,
+        "cgCalls": 3.5,
+        "reads": 0,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.29367014999999996,
+        "tokens": 57678,
+        "timeMs": 116899,
+        "toolCalls": 13,
+        "cgCalls": 0,
+        "reads": 6.5,
+        "greps": 1,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": 5,
+        "tokens": 0,
+        "time": 16,
+        "toolCalls": 58
+      }
+    },
+    {
+      "corpus": "ktor",
+      "language": "Kotlin",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.437388575,
+        "tokens": 61883.5,
+        "timeMs": 117335.5,
+        "toolCalls": 15.5,
+        "cgCalls": 6,
+        "reads": 5,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.4450827750000001,
+        "tokens": 63069,
+        "timeMs": 165153,
+        "toolCalls": 35.5,
+        "cgCalls": 0,
+        "reads": 17,
+        "greps": 1.5,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": 2,
+        "tokens": 2,
+        "time": 29,
+        "toolCalls": 56
+      }
+    },
+    {
+      "corpus": "nest",
+      "language": "TypeScript",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.292494875,
+        "tokens": 54850,
+        "timeMs": 92687.5,
+        "toolCalls": 6.5,
+        "cgCalls": 5.5,
+        "reads": 0,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.34499660000000004,
+        "tokens": 58346.5,
+        "timeMs": 120659.5,
+        "toolCalls": 19,
+        "cgCalls": 0,
+        "reads": 14,
+        "greps": 0,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": 15,
+        "tokens": 6,
+        "time": 23,
+        "toolCalls": 66
+      }
+    },
+    {
+      "corpus": "spring-petclinic",
+      "language": "Java",
+      "with": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.24828019999999995,
+        "tokens": 54275,
+        "timeMs": 79239,
+        "toolCalls": 16.5,
+        "cgCalls": 4,
+        "reads": 9.5,
+        "greps": 1,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "without": {
+        "n": 4,
+        "dropped": 0,
+        "cost": 0.20603145,
+        "tokens": 53737.5,
+        "timeMs": 81953.5,
+        "toolCalls": 17.5,
+        "cgCalls": 0,
+        "reads": 9,
+        "greps": 2.5,
+        "taskSpawns": 1,
+        "exploreSpawns": 1
+      },
+      "savings": {
+        "cost": -21,
+        "tokens": -1,
+        "time": 3,
+        "toolCalls": 6
+      }
+    }
+  ]
+}

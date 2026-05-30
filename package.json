@@ -1,0 +1,87 @@
+{
+  "name": "@adder-factory/cartograph",
+  "version": "0.7.2",
+  "description": "Semantic code intelligence for AI coding agents — 45% fewer tool calls, 17% faster exploration, 100% local.",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "bin": {
+    "cartograph": "./src/bin/cartograph.ts"
+  },
+  "files": [
+    "src",
+    "scripts",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "scripts": {
+    "build": "tsc && npm run copy-assets",
+    "preuninstall": "bun src/bin/uninstall.ts",
+    "copy-assets": "node scripts/copy-assets.mjs",
+    "dev": "tsc --watch",
+    "typecheck": "tsgo --noEmit",
+    "typecheck:tsc": "tsc --noEmit",
+    "cli": "bun src/bin/cartograph.ts",
+    "cli:dev": "bun src/bin/cartograph.ts",
+    "test": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bun test --timeout 30000 __tests__/*.test.ts",
+    "test:watch": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bun test --watch --timeout 30000 __tests__/*.test.ts",
+    "test:fast": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bash scripts/test-parallel.sh",
+    "test:eval": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bun test --timeout 60000 __tests__/evaluation/",
+    "test:stress": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 STRESS=1 bun test --timeout 120000 __tests__/freshness-stress.test.ts __tests__/freshness-v2-stress.test.ts",
+    "test:coverage": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 COVERAGE=1 bun test --coverage --timeout 30000 __tests__/language-coverage.test.ts",
+    "eval": "npm run build && bun __tests__/evaluation/runner.ts",
+    "eval:self": "bun __tests__/evaluation/runner.ts . --cases self",
+    "eval:large": "bun __tests__/evaluation/gen-large-fixture.ts && bun __tests__/evaluation/runner.ts __tests__/evaluation/fixtures/large --cases large",
+    "lint": "biome lint",
+    "format": "biome format --write",
+    "format:check": "biome format",
+    "check": "biome check",
+    "check:fix": "biome check --write",
+    "check:biomarkers": "bun scripts/check-biomarkers.mjs",
+    "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\""
+  },
+  "keywords": [
+    "code-intelligence",
+    "knowledge-graph",
+    "static-analysis"
+  ],
+  "author": "Adder Factory",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adder-factory/Cartograph.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adder-factory/Cartograph/issues"
+  },
+  "homepage": "https://github.com/adder-factory/Cartograph#readme",
+  "dependencies": {
+    "@clack/prompts": "^1.4.0",
+    "@parcel/watcher": "^2.5.6",
+    "commander": "^14.0.3",
+    "openai": "^6.39.0",
+    "re2-wasm": "^1.0.2",
+    "web-tree-sitter": "^0.26.8",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.4.15",
+    "@types/bun": "^1.3.14",
+    "@typescript/native-preview": "^7.0.0-dev.20260517.1",
+    "tree-sitter-cli": "^0.26.8",
+    "typescript": "^5.9.3"
+  },
+  "optionalDependencies": {
+    "sqlite-vec": "^0.1.9",
+    "usearch": "^2.25.1"
+  },
+  "engines": {
+    "bun": ">=1.3.0"
+  }
+}

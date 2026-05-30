@@ -1,0 +1,33 @@
+// Prisma test bed — exercises the PrismaExtractor end to end:
+// datasource + generator config blocks, an enum, and models with
+// scalar fields, a relation, and a list relation.
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  ADMIN
+  EDITOR
+  VIEWER
+}
+
+model User {
+  id    Int    @id @default(autoincrement())
+  email String @unique
+  name  String
+  role  Role   @default(VIEWER)
+  posts Post[]
+}
+
+model Post {
+  id       Int    @id @default(autoincrement())
+  title    String
+  author   User   @relation(fields: [authorId], references: [id])
+  authorId Int
+}

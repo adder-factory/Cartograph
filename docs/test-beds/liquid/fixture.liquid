@@ -1,0 +1,16 @@
+{% comment %} Liquid test bed {% endcomment %}
+{% include "helper" %}
+
+{% assign foo = 42 %}
+
+{% capture box %}
+  <span>{{ value }}</span>
+{% endcapture %}
+
+{% for item in items %}
+  <li>{{ item.name }}</li>
+{% endfor %}
+
+{% if foo > 10 %}
+  <p>{{ box }}</p>
+{% endif %}

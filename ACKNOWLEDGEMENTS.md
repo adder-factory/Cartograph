@@ -1,0 +1,96 @@
+# Acknowledgements
+
+Cartograph stands on a great deal of other people's work. This file credits the projects and authors whose code, grammars, and libraries make it possible. Cartograph is released under the MIT License; the licenses of the components below are noted alongside each.
+
+## Origin project
+
+Cartograph is a fork of **[codegraph](https://github.com/colbymchenry/codegraph)** by **Colby Mchenry**, used under the MIT License (Copyright (c) 2026 Colby Mchenry). Cartograph has diverged substantially from upstream but derives from that codebase, and we gratefully acknowledge it as the foundation.
+
+## tree-sitter
+
+Code parsing is built entirely on **[tree-sitter](https://tree-sitter.github.io/tree-sitter/)** by **Max Brunsfeld** and contributors (MIT). Specifically:
+
+- **[web-tree-sitter](https://github.com/tree-sitter/tree-sitter)** (MIT) — the WebAssembly build of the tree-sitter runtime that loads and runs every grammar below.
+- **[tree-sitter-cli](https://github.com/tree-sitter/tree-sitter)** (MIT) — used to compile the bundled `.wasm` grammars.
+
+## Bundled tree-sitter grammars
+
+Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`, each built from an upstream tree-sitter grammar. We thank every grammar's authors and maintainers:
+
+| Grammar (.wasm) | Upstream project | License |
+|---|---|---|
+| typescript, tsx | [tree-sitter/tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript) | MIT |
+| javascript (also serves jsx) | [tree-sitter/tree-sitter-javascript](https://github.com/tree-sitter/tree-sitter-javascript) | MIT |
+| python | [tree-sitter/tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) | MIT |
+| go | [tree-sitter/tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) | MIT |
+| rust | [tree-sitter/tree-sitter-rust](https://github.com/tree-sitter/tree-sitter-rust) | MIT |
+| java | [tree-sitter/tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | MIT |
+| c | [tree-sitter/tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | MIT |
+| cpp | [tree-sitter/tree-sitter-cpp](https://github.com/tree-sitter/tree-sitter-cpp) | MIT |
+| c_sharp | [tree-sitter/tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | MIT |
+| ruby | [tree-sitter/tree-sitter-ruby](https://github.com/tree-sitter/tree-sitter-ruby) | MIT |
+| bash (also serves zsh) | [tree-sitter/tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) | MIT |
+| php | [tree-sitter/tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | MIT |
+| kotlin | [fwcd/tree-sitter-kotlin](https://github.com/fwcd/tree-sitter-kotlin) | MIT |
+| scala | [tree-sitter/tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | MIT |
+| swift | [alex-pinkus/tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | MIT |
+| objc | [jiyee/tree-sitter-objc](https://github.com/jiyee/tree-sitter-objc) | MIT |
+| hcl | [tree-sitter-grammars/tree-sitter-hcl](https://github.com/tree-sitter-grammars/tree-sitter-hcl) | Apache-2.0 |
+| lua | [tree-sitter-grammars/tree-sitter-lua](https://github.com/tree-sitter-grammars/tree-sitter-lua) | MIT |
+| sql | [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql) | MIT |
+| r | [r-lib/tree-sitter-r](https://github.com/r-lib/tree-sitter-r) | MIT |
+| prisma | [victorhqc/tree-sitter-prisma](https://github.com/victorhqc/tree-sitter-prisma) | MIT |
+| dart | [UserNobody14/tree-sitter-dart](https://github.com/UserNobody14/tree-sitter-dart) | MIT |
+| fish | [esdmr/tree-sitter-fish](https://github.com/esdmr/tree-sitter-fish) | MIT |
+| graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
+| pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |
+| rescript | [rescript-lang/tree-sitter-rescript](https://github.com/rescript-lang/tree-sitter-rescript) | MIT |
+| elixir | [elixir-lang/tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) | Apache-2.0 |
+| yaml | [tree-sitter-grammars/tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT |
+
+Each compiled `.wasm` carries the license of its originating grammar (MIT except `hcl` and `elixir`, which are Apache-2.0). Grammar attributions are derived from `scripts/build-grammar-wasm.ts`; if a project has moved or a license has changed, please open an issue and we'll correct the credit.
+
+Additionally, `src/extraction/tags/elixir.scm` is vendored verbatim from **tree-sitter-elixir**'s `queries/tags.scm` (Apache-2.0).
+
+## Runtime dependencies
+
+| Package | Author / Org | License | Used for |
+|---|---|---|---|
+| [zod](https://github.com/colinhacks/zod) | Colin McDonnell | MIT | Runtime validation at every external boundary (MCP tool input, config, LLM output, SQL I/O, CLI args). |
+| [commander](https://github.com/tj/commander.js) | TJ Holowaychuk & contributors | MIT | CLI argument parsing and command tree. |
+| [@clack/prompts](https://github.com/bombshell-dev/clack) | Nate Moore | MIT | Interactive terminal prompts for the installer wizard. |
+| [@parcel/watcher](https://github.com/parcel-bundler/watcher) | Devon Govett / Parcel | MIT | Native filesystem watcher for incremental re-indexing. |
+| [openai](https://github.com/openai/openai-node) | OpenAI | Apache-2.0 | SDK for OpenAI-compatible local LLM backends (chat / embed / summarize tiers). |
+| [re2-wasm](https://github.com/uwx/re2-wasm) | Google (RE2), WASM packaging by contributors | BSD-3-Clause | Linear-time RE2 regex engine (no catastrophic backtracking). |
+| [web-tree-sitter](https://github.com/tree-sitter/tree-sitter) | tree-sitter project | MIT | WASM tree-sitter runtime (see above). |
+
+**Optional dependencies** (vector search; loaded when present):
+
+| Package | Author / Org | License | Used for |
+|---|---|---|---|
+| [sqlite-vec](https://github.com/asg017/sqlite-vec) | Alex Garcia | MIT / Apache-2.0 | SQLite vec0 vector-search extension for embedding KNN. |
+| [usearch](https://github.com/unum-cloud/usearch) | Ash Vardanian / Unum | Apache-2.0 | HNSW vector index (NAPI prebuilt) for similarity queries. |
+
+## Runtime platform
+
+- **[Bun](https://bun.sh)** by **Oven** (Jarred Sumner & contributors), MIT — the required runtime (Bun >= 1.3). Cartograph uses Bun's built-in `bun:sqlite` database engine and `bun:ffi`.
+
+## Build & development tools
+
+| Tool | Author / Org | License | Used for |
+|---|---|---|---|
+| [TypeScript](https://github.com/microsoft/TypeScript) | Microsoft | Apache-2.0 | Type system and production build compiler. |
+| [@typescript/native-preview (tsgo)](https://github.com/microsoft/typescript-go) | Microsoft | Apache-2.0 | Fast typechecking in the inner dev loop. |
+| [Biome](https://github.com/biomejs/biome) | Biome contributors | MIT / Apache-2.0 | Linting and formatting (CI gate). |
+| [tree-sitter-cli](https://github.com/tree-sitter/tree-sitter) | tree-sitter project | MIT | Compiling the bundled grammar `.wasm` files. |
+
+## Optional viewer
+
+The optional graph viewer (`src/viewer/static/index.html`) loads the following browser libraries from the unpkg CDN at runtime (they are not bundled in this repository):
+
+- [Cytoscape.js](https://github.com/cytoscape/cytoscape.js), [cytoscape-fcose](https://github.com/iVis-at-Bilkent/cytoscape.js-fcose), [cose-base](https://github.com/iVis-at-Bilkent/cose-base), [layout-base](https://github.com/iVis-at-Bilkent/layout-base) — Max Franz / i-Vis Lab, MIT — graph rendering and layout.
+- [Prism.js](https://github.com/PrismJS/prism) — Lea Verou & contributors, MIT — source-code syntax highlighting.
+
+---
+
+This list is maintained on a best-effort basis. If your work is used by Cartograph and is missing, miscredited, or mislicensed here, please open an issue or pull request — we want to credit you correctly.

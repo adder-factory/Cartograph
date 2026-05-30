@@ -1,0 +1,54 @@
+"""GraphQL test bed — covers definitions and federation-style extensions."""
+
+scalar DateTime
+
+type User {
+  id: ID!
+  email: String!
+}
+
+extend type User {
+  posts: [Post!]!
+  createdAt: DateTime
+}
+
+interface Node {
+  id: ID!
+}
+
+extend interface Node {
+  lastSeen: DateTime
+}
+
+input CreateUserInput {
+  email: String!
+}
+
+extend input CreateUserInput {
+  name: String
+}
+
+enum Role {
+  ADMIN
+  MEMBER
+}
+
+extend enum Role {
+  OBSERVER
+}
+
+union Animal = Dog | Cat
+
+extend union Animal = Bird
+
+type Post implements Node {
+  id: ID!
+  body: String!
+  author: User!
+}
+
+type Dog { name: String }
+type Cat { name: String }
+type Bird { species: String }
+
+directive @deprecated(reason: String) on FIELD_DEFINITION
