@@ -51,7 +51,7 @@ export function getMcpServerConfig(): { type: string; command: string; args: str
  */
 export function getCartographPermissions(): string[] {
   return [
-    'mcp__cartograph__cartograph_search',
+    'mcp__cartograph__cartograph_find',
     'mcp__cartograph__cartograph_context',
     'mcp__cartograph__cartograph_graph',
     'mcp__cartograph__cartograph_node',

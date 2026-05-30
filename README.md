@@ -4,7 +4,7 @@
 
 ### Supercharge Claude Code with Semantic Code Intelligence
 
-**45% fewer tool calls · 17% faster exploration · 100% local**
+**Fewer tool calls · Faster exploration · 100% local**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
@@ -63,49 +63,6 @@ When Claude Code explores a codebase, it spawns **Explore agents** that scan fil
 
 **Cartograph gives those agents a pre-indexed knowledge graph** — symbol relationships, call graphs, and code structure. Agents query the graph instantly instead of scanning files.
 
-### Benchmark Results
-
-Tested across 7 real-world OSS codebases, comparing a headless `claude -p` agent **with** and **without** Cartograph's MCP — cartograph is the only variable.
-
-> **Average: 5% cheaper · 0% fewer tokens · 17% faster · 45% fewer tool calls**
-
-| Codebase | Language | Cost | Tokens | Time | Tool calls |
-|---|---|---|---|---|---|
-| **axum** | Rust | **38% cheaper** | **10% fewer** | **37% faster** | **53% fewer** |
-| **fastapi** | Python | **14% cheaper** | 3% more | **24% faster** | **65% fewer** |
-| **framework** | PHP | **6% cheaper** | **0% fewer** | **25% faster** | **65% fewer** |
-| **gin** | Go | 22% pricier | 2% more | **10% faster** | **19% fewer** |
-| **ktor** | Kotlin | **2% cheaper** | **1% fewer** | **9% faster** | **46% fewer** |
-| **nest** | TypeScript | **8% cheaper** | 2% more | **18% faster** | **80% fewer** |
-| **spring-petclinic** | Java | 11% pricier | 1% more | 6% slower | 11% more |
-
-The headline win is **fewer tool calls and faster exploration** — cartograph replaces the agent's glob/grep/find discovery hunting with targeted graph queries. Cost savings are real but small and token use is roughly flat — and on a couple of repos cartograph costs slightly more: `spring-petclinic` (a 76-file toy app) is the one repo that's both pricier and slower, where cartograph's fixed handshake overhead isn't offset; `gin` is 22% pricier but still 10% faster. `cartograph_explore` returns large rich context that trades against the file-read savings.
-
-<details>
-<summary><strong>Full benchmark details</strong></summary>
-
-_Measured 2026-05-29 on `wip`, Claude Opus (claude 2.1.157) via `claude -p`. Cartograph LLM backend: local llama-server (jina-embeddings-v2-base-code :8080, Qwen2.5-Coder-3B :8081). Median of 4 runs per arm; 0 dropped._
-
-Methodology: each arm is `claude -p` (Claude Opus) run headlessly with `--strict-mcp-config`. **With** = Cartograph MCP enabled; **without** = empty MCP config; built-in Read/Grep/Bash available to both — so Cartograph is the only variable. Same question per repo, median of 4 runs per arm, natural agent behavior — no eval-specific steering prompt, though both arms inherit the user's standard global config (which recommends cartograph when a `.cartograph` index is present, as a real install has). Cost = `total_cost_usd` (API-equivalent — on a Max subscription this is accounting, not billing); Tokens = input incl. cached + output; Time = wall-clock. **Tool calls** is the true total — it includes every call the agent's Explore sub-agent makes: `claude -p --verbose` inlines a delegated sub-agent's tool calls into the main transcript (same tool_use ids), so the count is already complete (the harness de-duplicates by id to avoid double-counting). **Tokens**, by contrast, are main-thread-only: `claude`'s `result.usage` excludes a delegated sub-agent's token use, so when the agent delegates the token figure is a conservative lower bound. The clearest, lowest-variance win is tool-call reduction (fewer discovery round-trips); cost/tokens are closer because `cartograph_explore` returns large rich context that offsets the file-read savings.
-
-With cartograph available, the agent engaged it in **28 of 28** `with`-arm runs. A run that ignores an available cartograph measures tool-choice variance, not cartograph's value; such runs are flagged and kept in the medians (never dropped — dropping would bias the result toward cartograph).
-
-**Raw medians — WITH → WITHOUT:**
-
-| Codebase | Cost | Tokens | Time | Tool calls |
-|---|---|---|---|---|
-| axum | $0.39 → $0.62 | 56k → 62k | 1m 51s → 2m 56s | 20 → 42.5 |
-| fastapi | $0.28 → $0.33 | 57k → 55k | 1m 37s → 2m 7s | 9.5 → 27 |
-| framework | $0.34 → $0.37 | 57k → 57k | 1m 45s → 2m 21s | 11 → 31.5 |
-| gin | $0.36 → $0.29 | 57k → 56k | 1m 43s → 1m 54s | 11 → 13.5 |
-| ktor | $0.39 → $0.40 | 64k → 64k | 2m 9s → 2m 22s | 15 → 28 |
-| nest | $0.29 → $0.32 | 58k → 57k | 1m 43s → 2m 6s | 5 → 25 |
-| spring-petclinic | $0.24 → $0.21 | 53k → 53k | 1m 21s → 1m 17s | 19.5 → 17.5 |
-
-Reproduce: `node scripts/agent-eval/run-sweep.mjs --publish --runs 4` — the harness, the 7 corpora, and their per-repo queries all live in [`scripts/agent-eval/`](./scripts/agent-eval/) (corpora are pre-indexed locally; results land in `scripts/agent-eval/results/`).
-
-</details>
-
 ---
 
 ## Key Features
@@ -116,7 +73,7 @@ Reproduce: `node scripts/agent-eval/run-sweep.mjs --publish --runs 4` — the ha
 | **Full-Text + Intent Search** | Find code by name (FTS5) OR by behavior — `mode='intent'` runs FTS5 over LLM-generated summaries so you can locate "the function that verifies JWT signatures" even when its name is `processBatch` |
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
-| **31 Languages** | TypeScript, Python, Go, Rust, Java, C/C++, C#, Swift, Kotlin, Scala, Ruby, PHP, Dart, Lua, R, ReScript, Elixir, shells (Bash/Zsh/Fish), HCL, SQL, GraphQL, Prisma, and more — see [Supported Languages](#supported-languages) |
+| **31 Languages** | TypeScript, Python, Go, Rust, Java, C/C++, C#, Objective-C, Swift, Kotlin, Scala, Ruby, PHP, Dart, Vue, Svelte, Lua, R, ReScript, Elixir, shells (Bash/Zsh/Fish), HCL, SQL, GraphQL, Prisma, and more — see [Supported Languages](#supported-languages) |
 | **100% Local** | No data leaves your machine. No API keys. No external services. SQLite database only |
 
 ---
@@ -161,7 +118,7 @@ Restart your agent (Claude Code / Cursor / Codex CLI / opencode) for the MCP ser
 
 ```bash
 cd your-project
-cartograph init -i
+cartograph admin init -i
 ```
 
 That's it! Claude Code will use Cartograph tools automatically when a `.cartograph/` directory exists.
@@ -192,14 +149,12 @@ git clone https://github.com/adder-factory/Cartograph.git && cd Cartograph && bu
 {
   "permissions": {
     "allow": [
-      "mcp__cartograph__cartograph_search",
+      "mcp__cartograph__cartograph_find",
       "mcp__cartograph__cartograph_context",
-      "mcp__cartograph__cartograph_callers",
-      "mcp__cartograph__cartograph_callees",
-      "mcp__cartograph__cartograph_impact",
+      "mcp__cartograph__cartograph_graph",
       "mcp__cartograph__cartograph_node",
-      "mcp__cartograph__cartograph_status",
-      "mcp__cartograph__cartograph_files"
+      "mcp__cartograph__cartograph_at_range",
+      "mcp__cartograph__cartograph_status"
     ]
   }
 }
@@ -219,7 +174,9 @@ Cartograph builds a semantic knowledge graph of codebases for faster, smarter co
 
 ### If `.cartograph/` exists in the project
 
-**NEVER call `cartograph_explore` or `cartograph_context` directly in the main session.** These tools return large amounts of source code that fills up main session context. Instead, ALWAYS spawn an Explore agent for any exploration question (e.g., "how does X work?", "explain the Y system", "where is Z implemented?").
+The dividing line for WHERE to call a tool is **output source-volume** — does the call return full source bodies into your context?
+
+**Source-dumping tools — `cartograph_explore`, `cartograph_context`, `cartograph_node({code: true})` — return large source sections. Don't call them directly in the main session; spawn an Explore agent** for any exploration question (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns.
 
 **When spawning Explore agents**, include this instruction in the prompt:
 
@@ -230,21 +187,22 @@ Cartograph builds a semantic knowledge graph of codebases for faster, smarter co
 > 2. Do NOT re-read files that cartograph_explore already returned source code for. The source sections are complete and authoritative.
 > 3. Only fall back to grep/glob/read for files listed under "Additional relevant files" if you need more detail, or if cartograph returned no results.
 
-**The main session may only use these lightweight tools directly** (for targeted lookups before making edits, not for exploration):
+**The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
 | Tool | Use For |
-|------|---------|
-| `cartograph_search` | Find symbols by name (modes: `exact` / `fuzzy` / `semantic` / `intent`) |
-| `cartograph_callers` / `cartograph_callees` | Trace call flow |
-| `cartograph_impact` | Check what's affected before editing |
-| `cartograph_node` | Get a single symbol's details — or up to 20 in one call via `symbols`; optional `includeCallers` / `includeCallees` / `includeBiomarkers` / `includeTests` fold the answer of those tools into the same response |
-| `cartograph_at_range` | Symbols overlapping a file:line span (PR-review hunks); pass `ranges: [...]` to query multiple hunks in one call |
+|------|----------|
+| `cartograph_find` | Find symbols by name / regex / env-var / SQL ref (`by:` slice + `mode:`) |
+| `cartograph_graph({direction: 'callers'\|'callees'})` | Trace call flow |
+| `cartograph_graph({direction: 'impact'})` | Check what's affected before editing |
+| `cartograph_node` | A single symbol's details (omit `code: true` to stay metadata-only) |
+| `cartograph_at_range` | Symbols overlapping a file:line span (PR-review hunks) |
+| `cartograph_biomarkers` / `cartograph_status` | Risk findings per symbol / index health |
 
 ### If `.cartograph/` does NOT exist
 
 At the start of a session, ask the user if they'd like to initialize Cartograph:
 
-"I notice this project doesn't have Cartograph initialized. Would you like me to run `cartograph init -i` to build a code knowledge graph?"
+"I notice this project doesn't have Cartograph initialized. Would you like me to run `cartograph admin init -i` to build a code knowledge graph?"
 ```
 
 </details>
@@ -300,13 +258,17 @@ At the start of a session, ask the user if they'd like to initialize Cartograph:
 ```bash
 cartograph                         # Run interactive installer
 cartograph install                 # Run installer (explicit)
-cartograph init [path]             # Initialize in a project (--index to also index)
-cartograph uninit [path]           # Remove Cartograph from a project (--force to skip prompt)
-cartograph index [path]            # Full index (--force to re-index, --quiet for less output)
-cartograph sync [path]             # Incremental update
-cartograph status [path]           # Show statistics
-cartograph query <search>          # Search symbols (--kind, --limit, --json)
-cartograph files [path]            # Show file structure (--format, --filter, --max-depth, --json)
+cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor
+cartograph doctor [path]           # Diagnose install state (--fix to auto-apply remediations)
+cartograph admin init [path]       # Initialize in a project (-i / --index to also index)
+cartograph admin uninit [path]     # Remove Cartograph from a project (--force to skip prompt)
+cartograph admin index [path]      # Full (re)index of the project
+cartograph admin sync [path]       # Incremental update
+cartograph status [path]           # Show index status and statistics
+cartograph find [query]            # Find symbols by name / regex / env-var / SQL ref (--by, --mode, --kind, --limit)
+cartograph ask <question> [path]   # Ask a natural-language question about the codebase (needs an LLM)
+cartograph digest                  # "Land in a new repo" overview — hotspots, health, entry points
+cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
 cartograph context <task>          # Build context for AI (--format, --max-nodes)
 cartograph affected [files...]     # Find test files affected by changes (see below)
 cartograph serve --mcp             # Start MCP server
@@ -351,14 +313,14 @@ When running as an MCP server, Cartograph exposes these tools to any MCP-compati
 
 | Tool | Purpose |
 |------|---------|
-| `cartograph_search` | Find symbols by name (`exact`/`fuzzy`) or by behavior (`semantic`/`intent` over LLM summaries) |
+| `cartograph_find` | Find symbols by name (`exact`/`fuzzy`/`semantic`/`intent`), by regex content, or by env-var / SQL table refs (`by:` slice + `mode:`) |
 | `cartograph_context` | Build relevant code context for a task |
-| `cartograph_callers` | Find what calls a function |
-| `cartograph_callees` | Find what a function calls |
-| `cartograph_impact` | Analyze what code is affected by changing a symbol |
+| `cartograph_graph` | Navigate the call/dependency graph — callers, callees, blast radius, shortest path, or multi-hop BFS (`direction: 'callers'\|'callees'\|'impact'\|'path'\|'similar'`) |
 | `cartograph_node` | Get details about one symbol (or up to 20 via `symbols`), optionally with source code, callers, callees, biomarkers, or tests folded inline |
 | `cartograph_files` | Get indexed file structure (faster than filesystem scanning) |
 | `cartograph_status` | Check index health and statistics; pass `topHotspots: N` / `topBiomarkers: N` to fold those tools' rollups into the same response (onboarding "what's interesting?" in one call) |
+
+This is the core subset. The server exposes **30+ tools** in total — including `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_history`, `cartograph_blame`, `cartograph_tests_for`, and `cartograph_at_range`. Call `cartograph_playbook` for the full catalog.
 
 ---
 
@@ -371,7 +333,7 @@ The MCP server runs over **stdio** and works with any MCP-compatible client — 
 ```bash
 # install Cartograph from source first (see Get Started) so `cartograph` is on PATH
 cd your-project
-cartograph init -i                           # initialize + index this project
+cartograph admin init -i                     # initialize + index this project
 ```
 
 Then point your MCP client at `cartograph serve --mcp` using whatever config shape it expects:
@@ -471,20 +433,26 @@ cartograph serve --mcp --path /absolute/path/to/project
 ```typescript
 import Cartograph from '@adder-factory/cartograph';
 
+// Initialize a fresh index, or open an existing one:
 const cg = await Cartograph.init('/path/to/project');
-// Or: const cg = await Cartograph.open('/path/to/project');
+// const cg = await Cartograph.open('/path/to/project');
 
 await cg.indexAll({
-  onProgress: (p) => console.log(`${p.phase}: ${p.current}/${p.total}`)
+  onProgress: (p) => console.log(`${p.phase}: ${p.current}/${p.total}`),
 });
 
-const results = cg.searchNodes('UserService');
-const callers = cg.getCallers(results[0].node.id);
-const context = await cg.buildContext('fix login bug', { maxNodes: 20, includeCode: true, format: 'markdown' });
-const impact = cg.getImpactRadius(results[0].node.id, 2);
+// Look up symbols, then traverse the graph via the typed accessors:
+const [node] = cg.queries.getNodesByFile('src/auth/login.ts');
+const callers = cg.internals.traverser.getCallers(node.id);
+const impact = cg.internals.traverser.getImpactRadius(node.id, 2);
+const context = await cg.internals.contextBuilder.buildContext('fix login bug', {
+  maxNodes: 20,
+  includeCode: true,
+});
 
-cg.watch();   // auto-sync on file changes
-cg.unwatch(); // stop watching
+await cg.sync();      // incremental update
+cg.watcher.start();   // auto-sync on file changes
+cg.watcher.stop();    // stop watching
 cg.close();
 ```
 
@@ -500,7 +468,7 @@ The `.cartograph/config.json` file controls indexing:
   "languages": ["typescript", "javascript"],
   "exclude": ["node_modules/**", "dist/**", "build/**", "*.min.js"],
   "frameworks": [],
-  "maxFileSize": 1048576,
+  "maxFileSize": 5242880,
   "extractDocstrings": true,
   "trackCallSites": true
 }
@@ -511,7 +479,7 @@ The `.cartograph/config.json` file controls indexing:
 | `languages` | Languages to index (auto-detected if empty) | `[]` |
 | `exclude` | Glob patterns to ignore | `["node_modules/**", ...]` |
 | `frameworks` | Framework hints for better resolution | `[]` |
-| `maxFileSize` | Skip files larger than this (bytes) | `1048576` (1MB) |
+| `maxFileSize` | Skip files larger than this (bytes) | `5242880` (5MB) |
 | `extractDocstrings` | Extract docstrings from code | `true` |
 | `trackCallSites` | Track call site locations | `true` |
 
@@ -530,10 +498,12 @@ The `.cartograph/config.json` file controls indexing:
 | Ruby | `.rb` | Full support |
 | C | `.c`, `.h` | Full support |
 | C++ | `.cpp`, `.hpp`, `.cc` | Full support |
+| Objective-C | `.m`, `.mm` | Full support (multi-keyword selector reconstruction, React-Native/Expo bridging) |
 | Swift | `.swift` | Full support |
 | Kotlin | `.kt`, `.kts` | Full support |
 | Dart | `.dart` | Full support |
 | Svelte | `.svelte` | Full support (script extraction, Svelte 5 runes, SvelteKit routes) |
+| Vue | `.vue` | Full support (Single-File Components — `<script>` / `<script setup>` extraction) |
 | Liquid | `.liquid` | Full support |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr` | Full support (classes, records, interfaces, enums, DFM/FMX form files) |
 | Scala | `.scala`, `.sc` | Full support |
@@ -555,37 +525,18 @@ Want to add another language? See [`docs/ADDING-A-LANGUAGE.md`](docs/ADDING-A-LA
 
 ## Troubleshooting
 
-**"Cartograph not initialized"** — Run `cartograph init` in your project directory first.
+**"Cartograph not initialized"** — Run `cartograph admin init` in your project directory first.
 
-**Indexing is slow** — Check that `node_modules` and other large directories are excluded. Use `--quiet` to reduce output overhead.
+**Indexing is slow** — Check that `node_modules` and other large directories are excluded. Large generated files can also dominate a run; lower `maxFileSize` in `.cartograph/config.json` to skip them.
 
-**Indexing is slow / WASM fallback active** — `cartograph` ships with a WASM SQLite fallback for environments where `better-sqlite3` (a native module, declared as `optionalDependencies`) can't install. The fallback is 5-10x slower than the native backend. Run `cartograph status` and look at the `Backend:` line:
+**Vector search is slow / `⚠ no sqlite-vec`** — The storage backend is Bun's built-in `bun:sqlite`. Vector similarity (semantic/intent search and `similar`) is accelerated by the optional [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension. Run `cartograph status` and look at the `Backend:` line:
 
-- `Backend: native (better-sqlite3)` — you're on the fast path, nothing to do.
-- `Backend: ⚠ wasm` — you're on the slow fallback. Common causes: missing C build tools, prebuilt binary unavailable for your Node version, or your Node version changed after install. Fix:
-
-  ```bash
-  # macOS
-  xcode-select --install                                  # installs the C compiler
-
-  # Linux (Debian / Ubuntu)
-  sudo apt install build-essential python3 make
-
-  # Linux (RHEL / Fedora)
-  sudo yum groupinstall "Development Tools"
-
-  # Then rebuild on any platform:
-  npm rebuild better-sqlite3
-
-  # Or force-include as a hard dep:
-  npm install better-sqlite3 --save
-  ```
-
-  After the fix, `cartograph status` should show `Backend: native`.
+- `Backend: bun:sqlite + sqlite-vec` — the accelerated path, nothing to do.
+- `Backend: bun:sqlite ⚠ no sqlite-vec` — the extension didn't load, so vector search falls back to a slower in-memory brute-force scan. `sqlite-vec` ships prebuilt binaries for darwin/linux (x64 + arm64) and windows-x64; on other platforms the brute-force path is expected. A clean `bun install` usually re-fetches the prebuilt for your platform.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `cartograph serve --mcp` works from the command line.
 
-**Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `cartograph sync` manually if needed. Check that the file's language is supported and isn't excluded by config patterns.
+**Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `cartograph admin sync` manually if needed. Check that the file's language is supported and isn't excluded by config patterns.
 
 ## License
 
