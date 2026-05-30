@@ -29,9 +29,9 @@
  *    sync — the deliberate trade. The next `runPhase` respawns.
  */
 
-import { fork, type ChildProcess } from 'child_process';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { fork, type ChildProcess } from 'node:child_process';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { logDebug, logWarn, errMsg } from '../errors.js';
 import { HOOK_TIMEOUT_MS } from './registry.js';
 import type { IndexHookOutcome } from './types.js';

@@ -17,7 +17,7 @@
  *
  * Run: `bun __tests__/evaluation/toon-measure.ts`
  */
-import * as path from 'path';
+import * as path from 'node:path';
 import { Cartograph } from '../../src/index.js';
 import { searchNodes, suggestSymbolNames } from '../../src/db/queries-search.js';
 import { getIncomingEdges } from '../../src/db/queries-edges.js';

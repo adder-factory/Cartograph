@@ -25,9 +25,9 @@
  * compute). So this spawns exactly one, guarded by the pidfile.
  */
 
-import { spawn } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
+import { spawn } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { isProcessAlive } from '../utils-concurrency.js';
 
 /** Pidfile + log basenames under the project's `.cartograph/` dir. */

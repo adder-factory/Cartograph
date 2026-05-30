@@ -19,7 +19,7 @@
  * isn't a goal of this token-saving shortcut, mirroring `_id-cache.ts`).
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 
 const MAX_ENTRIES = 256;
 const SHORT_LEN = 8;

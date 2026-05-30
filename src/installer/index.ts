@@ -11,11 +11,11 @@
  * `--print-config` CLI flags.
  */
 
-import { execFile } from 'child_process';
-import * as path from 'path';
-import { promisify } from 'util';
-import * as fs from 'fs';
-import { homedir } from 'os';
+import { execFile } from 'node:child_process';
+import * as path from 'node:path';
+import { promisify } from 'node:util';
+import * as fs from 'node:fs';
+import { homedir } from 'node:os';
 import { ALL_TARGETS, detectAll, getTarget, resolveTargetFlag } from './targets/registry.js';
 import type { AgentTarget, Location } from './targets/types.js';
 import { errMsg } from '../errors.js';

@@ -12,8 +12,8 @@
  * genuine content drift from pure heal pressure ONCE so both status
  * surfaces agree. (Backlog H4 / FRICTION-A 2026-05-14.)
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type Cartograph from './index.js';
 import { getFilesNeedingReextract, getFileByPath } from './db/queries-files.js';
 import { hashContent } from './extraction/index.js';

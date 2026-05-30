@@ -13,10 +13,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { mineCoChanges, MAX_FILES_PER_COMMIT, MIN_COCHANGE_COUNT, LAST_MINED_HEAD_KEY } from '../src/cochange/index.js';
 import { getCurrentHeadSha as getGitHead } from '../src/git-utils.js';
 import { DatabaseConnection } from '../src/db/index.js';

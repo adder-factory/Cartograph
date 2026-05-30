@@ -10,9 +10,9 @@
  * budget so the review lens reported a false "no orphaned symbols".
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { findGraphCandidates } from '../src/llm/dead-code.js';
 import { isFixturePath } from '../src/mcp/tools/shared.js';

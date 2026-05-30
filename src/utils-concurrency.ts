@@ -18,7 +18,7 @@
  * directly when convenient.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 
 /** Locks older than this are considered stale regardless of PID status. */
 const LOCK_STALE_TIMEOUT_MS = 2 * 60 * 1000;
@@ -300,7 +300,7 @@ export async function* readFileInChunks(
   filePath: string,
   chunkSize: number = 64 * 1024,
 ): AsyncGenerator<string, void, undefined> {
-  const fsmod = await import('fs');
+  const fsmod = await import('node:fs');
 
   const fd = fsmod.openSync(filePath, 'r');
   const buffer = Buffer.alloc(chunkSize);

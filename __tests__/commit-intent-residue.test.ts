@@ -7,10 +7,10 @@
  * is integration-covered via the background LLM pass.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { recordCommitIntents, getUnknownCommitShas } from '../src/db/queries-commit-intents.js';

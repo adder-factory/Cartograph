@@ -37,7 +37,7 @@ async function handleInit(_ctx: ToolCtx, args: Record<string, unknown>): Promise
     return err('action=init: `path` must be a non-empty absolute project path.');
   }
   try {
-    const fsMod = await import('fs');
+    const fsMod = await import('node:fs');
     const ensureErr = ensureProjectDirExists(fsMod, projectPath);
     if (ensureErr) return err(ensureErr);
     // Dynamic import: the static path tools.ts → tools/registry.ts →
@@ -84,7 +84,7 @@ async function handleUninit(ctx: ToolCtx, args: Record<string, unknown>): Promis
     );
   }
   try {
-    const { default: pathMod } = await import('path');
+    const { default: pathMod } = await import('node:path');
     const fsp = await import('node:fs/promises');
     const dir = pathMod.join(projectPath, '.cartograph');
     const exists = await fsp
@@ -113,7 +113,7 @@ async function handleUnlock(ctx: ToolCtx, args: Record<string, unknown>): Promis
     return err(`Unlock failed: ${errMsg(caught)}`);
   }
   try {
-    const { default: pathMod } = await import('path');
+    const { default: pathMod } = await import('node:path');
     const fsp = await import('node:fs/promises');
     const lockPath = pathMod.join(resolvedRoot, '.cartograph', 'cartograph.lock');
     const exists = await fsp

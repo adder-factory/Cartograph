@@ -15,7 +15,7 @@
  * `rustFileHasInlineTests`) from `src/tests-edges/index.ts`.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { IndexHook, IndexHookContext } from './registry.js';
 import type { SyncResult } from '../extraction/index.js';
 import type { Edge } from '../types.js';

@@ -10,7 +10,7 @@
  */
 
 import { z } from 'zod';
-import { Buffer } from 'buffer';
+import { Buffer } from 'node:buffer';
 import { mirrorEmbeddingToVec } from './vec-helpers.js';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';

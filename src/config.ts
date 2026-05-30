@@ -4,8 +4,8 @@
  * Load, save, and validate Cartograph configuration.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { matchesGlob } from './glob.js';
 import { isSafeRegex } from './regex.js';
 import { z } from 'zod';

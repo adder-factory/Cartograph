@@ -13,8 +13,8 @@
  * same-kind requirement.
  */
 
-import type { Buffer } from 'buffer';
-import * as fs from 'fs';
+import type { Buffer } from 'node:buffer';
+import * as fs from 'node:fs';
 import { getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';
 import { getEmbeddingForNode, getAllEmbeddings } from '../db/queries-embeddings.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';

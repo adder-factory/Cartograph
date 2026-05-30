@@ -7,9 +7,9 @@
  * "already running → don't spawn a second" guard.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { getDetachedSummarizeState, spawnDetachedSummarize } from '../src/llm/detached-summarize.js';
 
 describe('detached-summarize — pidfile state', () => {

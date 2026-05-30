@@ -5,7 +5,7 @@
  * knowledge graph from any codebase.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { CartographConfig } from './types.js';
 import { DatabaseConnection, getDatabasePath, dbRunMaintenance } from './db/index.js';
 import { QueryBuilder, clearAll, clearStructural, getStats } from './db/queries.js';

@@ -27,7 +27,7 @@
  * `upsertFile` SCHEMA includes churn-managed columns the SQL omits).
  */
 
-import { createRequire } from 'module';
+import { createRequire } from 'node:module';
 import { errMsg } from '../errors.js';
 
 // `createRequire` lets ESM modules synchronously load `bun:sqlite` +

@@ -23,8 +23,8 @@
  *     vs bge-reranker-base. ~10ms/pair on Apple Silicon Q4.
  */
 
-import * as path from 'path';
-import * as os from 'os';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
 /** Filesystem dir cartograph reads / writes recommended GGUFs to.
  *  Override via env var `CARTOGRAPH_MODELS_DIR` for shared mounts. */

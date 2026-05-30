@@ -16,8 +16,8 @@
  * native solution used by VS Code, Parcel, and Vite.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { subscribe as parcelSubscribe, type AsyncSubscription } from '@parcel/watcher';
 import type { CartographConfig } from '../types.js';
 import { shouldIncludeFile } from '../extraction/index.js';

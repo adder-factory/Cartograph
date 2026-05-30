@@ -20,7 +20,7 @@
  * silent miss.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 
 const MAX_ENTRIES = 4096;
 const SHORT_LEN = 8;

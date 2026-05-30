@@ -32,7 +32,7 @@
  * containing dotted paths don't match — we want signal, not noise.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { logDebug, errMsg, logWarn } from '../errors.js';
 import { validatePathWithinRootReal } from '../utils.js';
 import { computeAlgoHash } from '../algo-hash.js';

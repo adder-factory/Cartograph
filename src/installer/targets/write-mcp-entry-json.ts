@@ -12,7 +12,7 @@
  * location argument. See `codex.ts` for that implementation.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import type { Location, WriteResult } from './types.js';
 import { getMcpServerConfig, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
 

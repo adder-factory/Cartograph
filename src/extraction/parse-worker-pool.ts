@@ -24,7 +24,7 @@
  */
 
 import type { ExtractionResult } from '../types.js';
-import type { Worker as NodeWorker } from 'worker_threads';
+import type { Worker as NodeWorker } from 'node:worker_threads';
 import { mergeProfileEntries, type ProfileEntry } from './profile.js';
 
 /** Race ceiling on a `worker.terminate()` Promise so we don't hang on a stuck WASM. */

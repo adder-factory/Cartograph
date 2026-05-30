@@ -5,7 +5,7 @@
  * stays unblocked and the UI animation renders smoothly.
  */
 
-import { parentPort } from 'worker_threads';
+import { parentPort } from 'node:worker_threads';
 import { extractFromSource } from './tree-sitter.js';
 import { detectLanguage, loadGrammarsForLanguages, resetParser } from './grammars.js';
 import type { Language, ExtractionResult } from '../types.js';

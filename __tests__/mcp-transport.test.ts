@@ -19,7 +19,7 @@
  * one's `drain` to resolve.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { EventEmitter } from 'events';
+import { EventEmitter } from 'node:events';
 import { StdioTransport } from '../src/mcp/transport.js';
 
 interface MockStdout extends EventEmitter {

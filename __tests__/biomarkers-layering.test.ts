@@ -6,9 +6,9 @@
  * edges — same harness as `biomarkers.test.ts`.
  */
 import { describe, it, expect, beforeAll, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import { getFindingsRanked } from '../src/db/queries-findings.js';

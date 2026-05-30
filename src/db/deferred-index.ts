@@ -33,8 +33,8 @@
  * plain reopen alone would not heal it.)
  */
 
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import type { SqliteDatabase } from './sqlite-adapter.js';
 import { logWarn } from '../errors.js';
 

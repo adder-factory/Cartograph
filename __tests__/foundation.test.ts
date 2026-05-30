@@ -14,9 +14,9 @@ import {
 } from '../src/db/queries-files.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 import { dbOptimize } from '../src/db/index.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { DEFAULT_CONFIG, Node, Edge } from '../src/types.js';
 import { loadConfig, saveConfig } from '../src/config.js';

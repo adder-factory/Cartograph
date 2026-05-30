@@ -17,9 +17,9 @@ import { compact } from '../utils.js';
  * delimiter protocol; deferred until measured.
  */
 
-import { spawn } from 'child_process';
-import * as path from 'path';
-import * as fs from 'fs';
+import { spawn } from 'node:child_process';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { errMsg } from '../errors.js';
 import {
   type ChatBackend,

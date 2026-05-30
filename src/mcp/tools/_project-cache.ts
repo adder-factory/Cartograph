@@ -25,8 +25,8 @@
  * touches this cache — the default cg is held directly by ToolHandler.
  */
 
-import { resolve as resolvePath, join as joinPath } from 'path';
-import { statSync } from 'fs';
+import { resolve as resolvePath, join as joinPath } from 'node:path';
+import { statSync } from 'node:fs';
 import Cartograph, { findNearestCartographRoot } from '../../index.js';
 import { checkSchemaCompat, formatSchemaMismatch } from '../schema-guard.js';
 import { errMsg } from '../../errors.js';

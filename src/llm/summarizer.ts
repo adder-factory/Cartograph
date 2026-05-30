@@ -20,7 +20,7 @@
  * Pure data layer + driver — the LLM HTTP work lives in `LlmClient`.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { z } from 'zod';
 import type { Node } from '../types.js';
 import { symbolBodyHash, sliceSymbolBody } from '../extraction/symbol-body-hash.js';

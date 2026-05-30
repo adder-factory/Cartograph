@@ -14,9 +14,9 @@
  *   - Deleting a `nodes` row CASCADEs the dependent role_assignment.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import { MIGRATION as MIG_062 } from '../src/db/migrations/062-role-assignments-fk-cascade.js';
 

@@ -19,8 +19,8 @@
  * the difference.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 

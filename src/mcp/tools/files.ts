@@ -1,4 +1,4 @@
-import * as path from 'path';
+import * as path from 'node:path';
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { globToSafeRegex } from '../../utils.js';

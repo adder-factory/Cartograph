@@ -1,6 +1,6 @@
-import * as fs from 'fs';
-import * as path from 'path';
-import * as crypto from 'crypto';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
 import type { QueryBuilder } from './db/queries.js';
 import { getMetadata } from './db/queries-metadata.js';
 import { getAllFiles } from './db/queries-files.js';

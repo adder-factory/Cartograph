@@ -21,7 +21,7 @@
  * available). This moves semantic search recall from ~19% to ~100%.
  */
 
-import { Buffer } from 'buffer';
+import { Buffer } from 'node:buffer';
 import { LlmEndpointError } from './client.js';
 import type { EmbeddingProvider } from './embedding-client.js';
 import type { QueryBuilder } from '../db/queries.js';

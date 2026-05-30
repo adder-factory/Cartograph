@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { projectPathField, nonEmptyString } from './_common-fields.js';
 import { getOutgoingEdges } from '../../db/queries-edges.js';
-import { existsSync, readFileSync } from 'fs';
+import { existsSync, readFileSync } from 'node:fs';
 import type { Node } from '../../types.js';
 import { validatePathWithinRootReal, stripCommentsForRegex } from '../../utils.js';
 import type Cartograph from '../../index.js';

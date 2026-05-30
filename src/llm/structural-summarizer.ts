@@ -19,8 +19,8 @@
  * the same cache-invalidation logic the LLM pass uses.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { Node } from '../types.js';
 import { type QueryBuilder, type NodeRow, rowToNode } from '../db/queries.js';
 import { getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';

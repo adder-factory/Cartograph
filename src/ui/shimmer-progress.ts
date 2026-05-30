@@ -1,6 +1,6 @@
-import { Worker } from 'worker_threads';
-import * as fs from 'fs';
-import * as path from 'path';
+import { Worker } from 'node:worker_threads';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 const PHASE_NAMES: Record<string, string> = {
   scanning: 'Scanning files',

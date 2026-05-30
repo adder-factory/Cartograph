@@ -5,9 +5,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { FileWatcher } from '../src/sync/watcher.js';
 import { searchNodes } from '../src/db/queries-search.js';
 import type { CartographConfig } from '../src/types.js';

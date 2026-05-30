@@ -3,7 +3,7 @@ import { projectPathField } from './_common-fields.js';
 import type { ToolResult } from '../tool-types.js';
 import { getStringImports } from '../../db/queries-string-imports.js';
 import { getImportNodes } from '../../db/queries.js';
-import { join } from 'path';
+import { join } from 'node:path';
 import {
   classifyImport,
   readGoModuleAlias,

@@ -12,7 +12,7 @@
  * fit the cache without bloating the row key.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 
 /** Minimum shape every summarisable item shares (file-grain symbols and dir-grain entries both satisfy this). */
 export interface HashableSummaryItem {

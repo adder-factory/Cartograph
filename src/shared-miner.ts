@@ -16,7 +16,7 @@
  * this neutral location, not from each other.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { logDebug, errMsg, logWarn } from './errors.js';
 import { validatePathWithinRootReal, stripCommentsForRegex } from './utils.js';
 

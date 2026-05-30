@@ -7,7 +7,7 @@
  * path filtering are handled by the caller via `runCrossFileRule`.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { compileGlob } from '../glob.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getAllFilePaths } from '../db/queries-files.js';

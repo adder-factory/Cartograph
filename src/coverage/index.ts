@@ -13,7 +13,7 @@
  */
 
 import { readFile } from 'node:fs/promises';
-import * as path from 'path';
+import * as path from 'node:path';
 import type { QueryBuilder } from '../db/queries.js';
 import { qbTransaction } from '../db/queries.js';
 import { clearCoverageSource, upsertNodeCoverage } from '../db/queries-coverage.js';

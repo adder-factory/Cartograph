@@ -3,9 +3,9 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { getSqlRefsByTable, getSqlTables, getSqlTablesForNode } from '../src/db/queries-refs.js';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { extractSqlRefs, SQL_REFS_ALGO_VERSION, LAST_MINED_SQL_REFS_ALGO_VERSION_KEY } from '../src/sql-refs/index.js';
 import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 import Cartograph from '../src/index.js';

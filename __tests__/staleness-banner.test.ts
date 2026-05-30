@@ -18,9 +18,9 @@
  * tests for the env var parser.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { parseDebounceEnv } from '../src/mcp/index.js';

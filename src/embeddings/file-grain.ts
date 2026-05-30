@@ -20,7 +20,7 @@
  *   3. The embedding model changed.
  */
 
-import type { Buffer } from 'buffer';
+import type { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 
 import type { EmbeddingProvider } from '../llm/embedding-client.js';

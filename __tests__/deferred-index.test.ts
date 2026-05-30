@@ -5,9 +5,9 @@
  * and recreating the triggers once at the end.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import type { SqliteDatabase } from '../src/db/sqlite-adapter.js';
 import { deferNodeDerivedIndexes, finalizeDeferredNodeIndexes } from '../src/db/deferred-index.js';

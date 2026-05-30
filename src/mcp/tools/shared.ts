@@ -14,8 +14,8 @@
  * — it moved to the dispatch-only `_error-result.ts` in the P6 wave.)
  */
 
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type Cartograph from '../../index.js';
 import { getStaleFiles } from '../../freshness.js';
 import { hasUncommittedChanges } from '../../git-utils.js';

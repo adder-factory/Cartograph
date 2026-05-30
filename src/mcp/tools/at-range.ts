@@ -32,7 +32,7 @@ import { type ToolOutcome, ok, err } from './_outcome.js';
 import { getNodesAtRange, type NodeAtRange } from '../../db/queries-rtree.js';
 import { getFileByPath } from '../../db/queries-files.js';
 import { parseUnifiedDiff } from '../../compare/diff-parser.js';
-import * as path from 'path';
+import * as path from 'node:path';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;

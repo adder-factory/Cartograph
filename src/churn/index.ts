@@ -29,9 +29,9 @@
  * `commitCount` in types.ts.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
-import * as fs from 'fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import * as fs from 'node:fs';
 import { logDebug, errMsg } from '../errors.js';
 import { validatePathWithinRootReal } from '../utils.js';
 import { computeAlgoHash } from '../algo-hash.js';

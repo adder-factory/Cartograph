@@ -21,7 +21,7 @@
  * so both paths produce comparable cache entries.
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import type { Node } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getSummarizableNodes, getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';

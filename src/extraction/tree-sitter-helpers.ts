@@ -6,7 +6,7 @@
  */
 
 import type { Node as SyntaxNode } from 'web-tree-sitter';
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 import type { NodeKind } from '../types.js';
 
 /**

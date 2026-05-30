@@ -17,8 +17,8 @@
  * so the rest of the block is unchanged.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { CartographConfig } from '../types.js';
 import {
   RECOMMENDED_CHAT_SUMMARIZE,

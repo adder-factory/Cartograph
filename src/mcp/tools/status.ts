@@ -1,6 +1,6 @@
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { readdir } from 'node:fs/promises';
-import * as path from 'path';
+import * as path from 'node:path';
 import { getCoverageStats } from '../../db/queries-coverage.js';
 import { getEmbeddingsTotal } from '../../db/queries-embeddings.js';
 import { isHnswAvailable } from '../../embeddings/hnsw-index.js';

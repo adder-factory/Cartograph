@@ -4,12 +4,12 @@
  * Coordinates file scanning, parsing, and database storage.
  */
 
-import * as fs from 'fs';
-import * as fsp from 'fs/promises';
-import * as os from 'os';
-import * as path from 'path';
-import * as crypto from 'crypto';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import * as crypto from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import type { Language, ExtractionResult, ExtractionError, CartographConfig } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getFilesNeedingReextract } from '../db/queries-files.js';

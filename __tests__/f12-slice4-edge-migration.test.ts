@@ -8,9 +8,9 @@
  * fn surface from the right source.
  */
 import { describe, it, expect, afterEach, beforeEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { lookupNestedFnsByName } from '../src/db/queries-nested-functions.js';

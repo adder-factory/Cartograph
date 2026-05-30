@@ -26,7 +26,7 @@
  * marker alone).
  */
 
-import * as crypto from 'crypto';
+import * as crypto from 'node:crypto';
 
 /** Body-text size cap (chars). Mirrors summarizer.ts's old constant. */
 export const MAX_BODY_CHARS = 4000;

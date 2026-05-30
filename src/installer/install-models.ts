@@ -13,10 +13,10 @@
  * is enough here.
  */
 
-import * as fs from 'fs';
-import * as fsp from 'fs/promises';
-import * as path from 'path';
-import * as https from 'https';
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
+import * as https from 'node:https';
 import { RECOMMENDED_MODELS, MODELS_DIR_DEFAULT, type RecommendedModel } from '../llm/recommended-models.js';
 
 export interface InstallModelsOptions {

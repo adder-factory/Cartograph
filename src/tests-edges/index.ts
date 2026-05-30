@@ -12,7 +12,7 @@
  * are honestly left without edges rather than guessed at.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 
 /**
  * Source file extensions we treat as plausible test subjects.

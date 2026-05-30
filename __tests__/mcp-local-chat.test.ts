@@ -8,9 +8,9 @@
  * a real backend (nllc GGUF / claude CLI / Anthropic HTTPS).
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { LlmClient } from '../src/llm/client.js';

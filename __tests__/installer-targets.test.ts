@@ -15,9 +15,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 

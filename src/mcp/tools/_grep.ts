@@ -483,7 +483,7 @@ function compileGrepRegex(pattern: string, caseSensitive: boolean): CompiledRege
  *  reusable {@link GrepEnvironment}. Defensive default: a fresh
  *  enclosingCache per invocation so cross-call state can't leak. */
 async function buildGrepEnvironment(cg: import('../../index.js').default): Promise<GrepEnvironment> {
-  const fsMod = await import('fs');
+  const fsMod = await import('node:fs');
   const { findEnclosingNode, sortScopesBySpan } = await import('../../index-hooks/enclosing.js');
   return {
     cg,

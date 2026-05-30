@@ -10,9 +10,9 @@
  * Uses vi.spyOn on LlmClient so no real GGUF backend is needed.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { LlmClient } from '../src/llm/client.js';
 import { defaultChatHandler } from './helpers/fake-chat-client.js';

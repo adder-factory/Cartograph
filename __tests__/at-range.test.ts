@@ -15,9 +15,9 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { getNodesAtRange } from '../src/db/queries-rtree.js';
@@ -329,15 +329,15 @@ describe('handleAtRange — bulk ranges form', () => {
   });
 
   it('multiple ranges across multiple files in a single response', async () => {
-    const { execFileSync } = await import('child_process');
+    const { execFileSync } = await import('node:child_process');
 
     function git(cwd: string, ...args: string[]): string {
       return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     }
 
     // Set up two source files with functions.
-    const fsModule = await import('fs');
-    const pathModule = await import('path');
+    const fsModule = await import('node:fs');
+    const pathModule = await import('node:path');
     fsModule.mkdirSync(pathModule.join(testDir, 'src'));
 
     fsModule.writeFileSync(
@@ -500,15 +500,15 @@ describe('handleAtRange — bulk ranges form', () => {
   });
 
   it('bulk form with some empty ranges renders empty-range subsections', async () => {
-    const { execFileSync } = await import('child_process');
+    const { execFileSync } = await import('node:child_process');
 
     function git(cwd: string, ...args: string[]): string {
       return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     }
 
     // Set up one source file with a function.
-    const fsModule = await import('fs');
-    const pathModule = await import('path');
+    const fsModule = await import('node:fs');
+    const pathModule = await import('node:path');
     fsModule.mkdirSync(pathModule.join(testDir, 'src'));
 
     fsModule.writeFileSync(pathModule.join(testDir, 'src', 'a.ts'), 'export function funcA1() {\n  return 1;\n}\n');
@@ -568,12 +568,12 @@ describe('handleAtRange — compact + fields', () => {
   });
 
   async function setupSingleFileProject(): Promise<{ cg: any; handler: any }> {
-    const { execFileSync } = await import('child_process');
+    const { execFileSync } = await import('node:child_process');
     function git(cwd: string, ...args: string[]): string {
       return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     }
-    const fsModule = await import('fs');
-    const pathModule = await import('path');
+    const fsModule = await import('node:fs');
+    const pathModule = await import('node:path');
     fsModule.mkdirSync(pathModule.join(testDir, 'src'));
     fsModule.writeFileSync(
       pathModule.join(testDir, 'src', 'a.ts'),
@@ -720,12 +720,12 @@ describe('handleAtRange — diff-form fuzz fallback for tight hunks', () => {
   });
 
   async function setupProject(): Promise<{ cg: any; handler: any }> {
-    const { execFileSync } = await import('child_process');
+    const { execFileSync } = await import('node:child_process');
     function git(cwd: string, ...args: string[]): string {
       return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     }
-    const fsModule = await import('fs');
-    const pathModule = await import('path');
+    const fsModule = await import('node:fs');
+    const pathModule = await import('node:path');
     fsModule.mkdirSync(pathModule.join(testDir, 'src'));
     // A file where `targetFn` is defined well below line 1 — a tight hunk
     // a few lines above its def line must still resolve to it via fuzz.

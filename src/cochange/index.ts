@@ -16,8 +16,8 @@
  * that SHA so sync stays fast even on a large history.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { normalizePath } from '../utils.js';
 import { logDebug } from '../errors.js';
 import { getCurrentHeadSha, isShaReachable } from '../git-utils.js';

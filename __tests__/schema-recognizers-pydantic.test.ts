@@ -5,8 +5,8 @@
  * class-body attributes the base Python extractor doesn't surface.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { extractFromSource } from '../src/extraction/index.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import type { Node, Edge } from '../src/types.js';

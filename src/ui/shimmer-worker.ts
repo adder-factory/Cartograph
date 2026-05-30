@@ -1,5 +1,5 @@
-import { parentPort, workerData } from 'worker_threads';
-import { writeSync } from 'fs';
+import { parentPort, workerData } from 'node:worker_threads';
+import { writeSync } from 'node:fs';
 import type { ShimmerWorkerMessage } from './types.js';
 
 // Write directly to fd 1 (stdout) instead of writeStdout().

@@ -1,5 +1,5 @@
-import fs from 'fs';
-import path from 'path';
+import fs from 'node:fs';
+import path from 'node:path';
 import { z } from 'zod';
 import { projectPathField, batchedSymbols, BATCHED_SYMBOLS_MAX } from './_common-fields.js';
 import { getFileByPath } from '../../db/queries-files.js';

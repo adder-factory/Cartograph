@@ -5,8 +5,8 @@
  */
 
 import { type SqliteDatabase, type SqliteBackend, createDatabase } from './sqlite-adapter.js';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import type { SchemaVersion } from '../types.js';
 import { runMigrations, getCurrentVersion, verifySchemaIntegrity, CURRENT_SCHEMA_VERSION } from './migrations.js';
 import { bootstrapVecTables } from './vec-helpers.js';

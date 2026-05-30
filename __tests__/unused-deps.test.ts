@@ -2,9 +2,9 @@ import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { Cartograph } from '../src/index.js';
 import { analyzeUnusedDeps } from '../src/deps/unused.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 
 beforeAll(async () => {
   await initGrammars();

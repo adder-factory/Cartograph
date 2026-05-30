@@ -3,7 +3,7 @@
  * extracted from the bin/cartograph.ts decomposition; side-effecting
  * module: importing it registers the commands.
  */
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { errMsg } from '../../errors.js';
 import {
   program,

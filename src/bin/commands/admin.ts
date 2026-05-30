@@ -3,8 +3,8 @@
  * bin/cartograph.ts decomposition; this is a side-effecting module:
  * importing it registers the commands on `adminCmd`.
  */
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { getCartographDir, isInitialized } from '../../directory.js';
 import { createShimmerProgress } from '../../ui/shimmer-progress.js';
 import { formatBytes } from '../../utils.js';
@@ -111,7 +111,7 @@ adminCmd
 
       if (!options.force) {
         // Confirm with user
-        const readline = await import('readline');
+        const readline = await import('node:readline');
         const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
         const answer = await new Promise<string>((resolve) => {
           rl.question(chalk.yellow('⚠ This will permanently delete all Cartograph data. Continue? (y/N) '), resolve);

@@ -1,7 +1,7 @@
 import type { QueryBuilder } from '../db/queries.js';
-import { readFileSync, existsSync, readdirSync, statSync } from 'fs';
-import { join, extname } from 'path';
-import { builtinModules } from 'module';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { join, extname } from 'node:path';
+import { builtinModules } from 'node:module';
 import { loadConfig } from '../config.js';
 import { stripJsComments } from '../resolution/import-resolver.js';
 

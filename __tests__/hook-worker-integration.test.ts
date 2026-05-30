@@ -18,11 +18,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { spawnSync } from 'child_process';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { fileURLToPath } from 'url';
+import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 /** Resolve `bun` on PATH, or null when it is unavailable. */
 function resolveBun(): string | null {

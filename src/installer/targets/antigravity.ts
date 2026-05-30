@@ -29,9 +29,9 @@
  * has no project-scoped config concept as of 2026-05.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import { execSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
 

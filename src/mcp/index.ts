@@ -19,8 +19,8 @@
  * ```
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import Cartograph, { findNearestCartographRoot } from '../index.js';
 import { StdioTransport, type JsonRpcRequest, type JsonRpcNotification, ErrorCodes } from './transport.js';
 import { ToolHandler } from './tools.js';

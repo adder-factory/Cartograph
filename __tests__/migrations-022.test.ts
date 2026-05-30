@@ -15,9 +15,9 @@
  *    toggle works.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { createDatabase } from '../src/db/sqlite-adapter.js';
 import { runMigrations, getCurrentVersion } from '../src/db/migrations.js';
 import { DatabaseConnection } from '../src/db/index.js';

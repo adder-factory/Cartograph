@@ -11,7 +11,7 @@
  */
 
 import { z } from 'zod';
-import { Buffer } from 'buffer';
+import { Buffer } from 'node:buffer';
 import type { QueryBuilder } from './queries.js';
 import { mirrorChunkEmbeddingToVec } from './vec-helpers.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';

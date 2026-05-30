@@ -13,8 +13,8 @@
  * "memory access out of bounds" crashes before this).
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { streamingDispatch } from '../concurrency.js';
 import { type QueryBuilder, qbTransaction } from '../db/queries.js';
 import {

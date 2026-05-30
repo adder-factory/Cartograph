@@ -20,8 +20,8 @@
  */
 import { Command } from 'commander';
 import { z } from 'zod';
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { isInitialized } from '../directory.js';
 import { compact } from '../utils.js';
 import { errMsg } from '../errors.js';

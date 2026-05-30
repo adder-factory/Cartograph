@@ -32,9 +32,9 @@
  * re-calibrate.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../../src/index.js';
 import { searchNodes } from '../../src/db/queries-search.js';
 import { RANKING_FIXTURE_FILES } from './fixtures/ranking-corpus.js';

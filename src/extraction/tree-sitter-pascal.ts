@@ -23,7 +23,7 @@
  * is the only place they're entered.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText, getChildByField } from './tree-sitter-helpers.js';
 import { compact } from '../utils.js';

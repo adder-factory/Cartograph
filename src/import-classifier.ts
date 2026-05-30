@@ -22,8 +22,8 @@
  * surface; for ~1000 import nodes it runs in well under a second.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { fileExists } from './utils.js';
 
 type ResolutionKind = 'file' | 'directory' | 'bare' | 'unresolvable';

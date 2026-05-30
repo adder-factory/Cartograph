@@ -41,10 +41,10 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { execFileSync } from 'child_process';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import type { Command } from 'commander';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';

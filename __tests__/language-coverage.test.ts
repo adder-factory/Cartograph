@@ -23,8 +23,8 @@
  * by the `schema-recognizers-*.test.ts` suites — not here.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { extractFromSource } from '../src/extraction/tree-sitter.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import type { ExtractionResult } from '../src/types.js';

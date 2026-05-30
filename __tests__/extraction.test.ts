@@ -6,9 +6,9 @@
 
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { extractFromSource, scanDirectory, shouldIncludeFile } from '../src/extraction/index.js';
 import {

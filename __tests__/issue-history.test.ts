@@ -5,10 +5,10 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { getIssuesForNode } from '../src/db/queries-history.js';
 import { setMetadata } from '../src/db/queries-metadata.js';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { extractSymbolFromContext, extractDeclaration } from '../src/issue-history/parse-diff.js';
 import {
   mineIssueCommits,

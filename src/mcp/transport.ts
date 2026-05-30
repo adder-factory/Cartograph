@@ -4,7 +4,7 @@
  * Handles JSON-RPC 2.0 communication over stdin/stdout for MCP protocol.
  */
 
-import * as readline from 'readline';
+import * as readline from 'node:readline';
 import { errMsg } from '../errors.js';
 
 /**

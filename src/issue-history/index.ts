@@ -30,8 +30,8 @@
  *     Detection would require message-block parsing; out of scope for v1.
  */
 
-import { execFile } from 'child_process';
-import { promisify } from 'util';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { logDebug, errMsg } from '../errors.js';
 import { parseCommitDiff } from './parse-diff.js';
 import { getCurrentHeadSha, isShaReachable } from '../git-utils.js';

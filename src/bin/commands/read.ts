@@ -4,7 +4,7 @@
  * decomposition; side-effecting module: importing it registers the
  * commands on `program`.
  */
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
@@ -119,7 +119,7 @@ program
           // Looks like inline diff text, not a path — pass it through verbatim.
           diffText = options.diff;
         } else {
-          const fs = await import('fs');
+          const fs = await import('node:fs');
           // A single-line value that is not an existing file is treated as
           // inline diff text too (so `--diff "@@ ..."` works either way).
           if (fs.existsSync(options.diff)) {

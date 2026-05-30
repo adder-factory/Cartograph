@@ -18,9 +18,9 @@
  * same machinery, different ref pair.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import type Cartograph from '../index.js';
 import type { Edge, EdgeKind, Language, Node, NodeKind } from '../types.js';
 import { extractFromSource } from '../extraction/tree-sitter.js';

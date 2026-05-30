@@ -4,7 +4,7 @@
  * Shared module for search term extraction and scoring.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { Node } from '../types.js';
 import { isDiagnosticPath } from '../path-class.js';
 

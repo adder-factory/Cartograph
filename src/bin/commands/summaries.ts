@@ -4,7 +4,7 @@
  * registers the commands on `summariesCmd`.
  */
 import { summariesCmd, error, assignIntArg, runViaMCP, installFamilyActionAlias } from '../_cli-core.js';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { errMsg } from '../../errors.js';
 
 /**

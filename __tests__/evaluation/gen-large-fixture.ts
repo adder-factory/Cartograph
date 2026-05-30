@@ -14,8 +14,8 @@
  * representative of real codebases but they're enough to stress-
  * test the ranking + traversal pipelines).
  */
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { Cartograph } from '../../src/index.js';
 
 const FIXTURE_DIR = path.join(import.meta.dirname, 'fixtures', 'large');

@@ -4,7 +4,7 @@
  * Defines the tools exposed by the Cartograph MCP server.
  */
 
-import { resolve as resolvePath } from 'path';
+import { resolve as resolvePath } from 'node:path';
 import type Cartograph from '../index.js';
 import { cgRefreshConfigFromDisk } from '../index.js';
 import type { ToolDefinition, ToolResult } from './tool-types.js';

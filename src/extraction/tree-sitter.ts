@@ -13,7 +13,7 @@
  */
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
-import * as path from 'path';
+import * as path from 'node:path';
 import type {
   Language,
   Node,

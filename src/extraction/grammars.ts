@@ -24,7 +24,7 @@
  * to `dist/extraction/wasm/` by `scripts/copy-assets.mjs` at build time.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import type { Language } from '../types.js';

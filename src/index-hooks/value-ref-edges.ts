@@ -50,7 +50,7 @@
  *     SQL cost for a corner-case correctness win.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { IndexHook, IndexHookContext } from './types.js';
 import { readFileSafe } from '../utils.js';
 import type { SyncResult } from '../extraction/index.js';

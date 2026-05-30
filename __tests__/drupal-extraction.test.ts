@@ -15,9 +15,9 @@
  *   - YAML language registration
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';

@@ -8,10 +8,10 @@
  *  - section caps respected
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 
@@ -231,7 +231,7 @@ describe('cartograph_digest (#12)', () => {
     // truePublicFn has no in-tree callers at all — must appear in both.
     fs.writeFileSync(path.join(refDir, 'src', 'public.ts'), 'export function truePublicFn() { return 2; }\n');
     fs.writeFileSync(path.join(refDir, '.gitignore'), '.cartograph/\n');
-    const { execFileSync } = await import('child_process');
+    const { execFileSync } = await import('node:child_process');
     function git2(cwd: string, ...args: string[]): string {
       return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     }

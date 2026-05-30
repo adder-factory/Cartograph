@@ -18,8 +18,8 @@
  * 2026-05-24c — see `project_llm_pivot_to_llama_server` in auto-memory.
  */
 
-import * as path from 'path';
-import * as fs from 'fs';
+import * as path from 'node:path';
+import * as fs from 'node:fs';
 import { errMsg } from '../errors.js';
 import type { CartographConfig } from '../types.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';

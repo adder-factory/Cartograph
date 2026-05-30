@@ -8,10 +8,10 @@
  * shape — same affordance, scoped to our `.cartograph/` directory
  * convention.
  */
-import * as fsMod from 'fs';
+import * as fsMod from 'node:fs';
 import * as fsp from 'node:fs/promises';
-import * as pathMod from 'path';
-import { createRequire } from 'module';
+import * as pathMod from 'node:path';
+import { createRequire } from 'node:module';
 import { z } from 'zod';
 import { errMsg } from '../../errors.js';
 import { textResult } from './shared.js';

@@ -1,4 +1,4 @@
-import { execFileSync } from 'child_process';
+import { execFileSync } from 'node:child_process';
 import { clamp, compact } from '../../utils.js';
 import { textResult, truncateOutput, validateStringOutcome } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';

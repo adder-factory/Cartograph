@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import path from 'path';
-import fs from 'fs';
+import path from 'node:path';
+import fs from 'node:fs';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import {

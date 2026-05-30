@@ -5,8 +5,8 @@
  * the Tier 2 gaps closed in feat/freshness-v2.
  */
 import { describe, it, expect, beforeAll } from 'vitest';
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { extractFromSource } from '../src/extraction/tree-sitter.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 

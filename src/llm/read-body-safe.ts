@@ -1,4 +1,4 @@
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import type { Node } from '../types.js';
 import { validatePathWithinRootReal } from '../utils.js';
 

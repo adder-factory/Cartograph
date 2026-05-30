@@ -22,9 +22,9 @@
  * regression introduced by the god-module split.
  */
 
-import * as fs from 'fs';
-import * as fsp from 'fs/promises';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
 import type {
   Language,
   FileRecord,
@@ -380,7 +380,7 @@ export async function eoSetupParseEnvironment(
     .catch(() => false);
   let WorkerClass: typeof import('worker_threads').Worker | null = null;
   if (useWorker) {
-    const { Worker } = await import('worker_threads');
+    const { Worker } = await import('node:worker_threads');
     WorkerClass = Worker;
   } else {
     await loadGrammarsForLanguages(neededLanguages);

@@ -8,7 +8,7 @@
  * `db` field on the parent `QueryBuilder`.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';

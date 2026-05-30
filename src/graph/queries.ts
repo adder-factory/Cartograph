@@ -10,7 +10,7 @@ import { getOutgoingEdges, getIncomingEdges } from '../db/queries-edges.js';
 import { getAllFiles, getAllFilePaths } from '../db/queries-files.js';
 import { GraphTraverser } from './traversal.js';
 import { globToSafeRegex } from '../utils.js';
-import * as path from 'path';
+import * as path from 'node:path';
 
 /**
  * Extensions an extension-less relative import spec may resolve to on

@@ -20,8 +20,8 @@
  * etc. as "newly added".
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { getAllFiles } from '../../db/queries-files.js';

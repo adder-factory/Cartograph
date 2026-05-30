@@ -4,7 +4,7 @@
  * Resolves import paths to actual files and symbols.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import type { Language, Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, ReExport } from './types.js';
 import { applyAliases } from './path-aliases.js';

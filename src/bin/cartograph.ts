@@ -38,7 +38,7 @@
 // import below pulls in the db layer's `node:sqlite` dependency. See
 // version-check.ts. On Node < 22.5 it prints a clear message + exits.
 import './version-check.js';
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { errMsg } from '../errors.js';
 import { program } from './_cli-core.js';

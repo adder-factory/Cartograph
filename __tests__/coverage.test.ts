@@ -9,9 +9,9 @@ import {
   listCoverageSources,
   clearCoverageSource,
 } from '../src/db/queries-coverage.js';
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { parseLcov, summariseSpan } from '../src/coverage/lcov.js';
 
