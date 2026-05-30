@@ -177,16 +177,16 @@ const TEST_PATH_RE = /(?:^|\/)(?:__tests__|__mocks__)\//;
 // are deliberately NOT path-based here.
 const TEST_FILENAME_RE = new RegExp(
   // dot-suffixed (JS/TS family + Vue/Svelte/CoffeeScript)
-  '(?:\\.(?:test|spec)\\.(?:[jt]sx?|svelte|vue|cjs|mjs|coffee)$)' +
+  String.raw`(?:\.(?:test|spec)\.(?:[jt]sx?|svelte|vue|cjs|mjs|coffee)$)` +
     // snake_case suffix `_test` (Go, Python, Dart, Bash, Zsh)
-    '|(?:_test\\.(?:py|go|dart|sh|bash|zsh)$)' +
+    String.raw`|(?:_test\.(?:py|go|dart|sh|bash|zsh)$)` +
     // snake_case prefix `test_` (Python, Bash)
-    '|(?:(?:^|\\/)test_[^/]+\\.(?:py|sh|bash)$)' +
+    String.raw`|(?:(?:^|\/)test_[^/]+\.(?:py|sh|bash)$)` +
     // snake_case `_spec` suffix (Ruby, Elixir)
-    '|(?:_spec\\.(?:rb|exs?)$)' +
+    String.raw`|(?:_spec\.(?:rb|exs?)$)` +
     // PascalCase suffix `Test` / `Tests` / `Spec` / `Specs` / `IT`
     // (Java, Kotlin, Scala, Swift, C#, F#, Pascal, ReScript)
-    '|(?:(?:Test|Tests|Spec|Specs|IT)\\.(?:java|kt|kts|scala|sc|swift|cs|fs|fsx|res|resi|pas|dpr)$)',
+    String.raw`|(?:(?:Test|Tests|Spec|Specs|IT)\.(?:java|kt|kts|scala|sc|swift|cs|fs|fsx|res|resi|pas|dpr)$)`,
 );
 // Specific framework-handler type names. The pattern requires word
 // boundaries so substring matches inside identifiers don't trigger

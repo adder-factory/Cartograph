@@ -156,7 +156,7 @@ const HOOK_QNAME_MARKER = '::drupal-hook:';
 function collectRealHookFunctions(ctx: IndexHookContext): Map<string, string> {
   const rows = ctx.queries.db
     .prepare(
-      `SELECT id, name FROM nodes WHERE kind = 'function' AND language = 'php' AND name LIKE 'hook\\_%' ESCAPE '\\'`,
+      String.raw`SELECT id, name FROM nodes WHERE kind = 'function' AND language = 'php' AND name LIKE 'hook\_% ' ESCAPE '\'`,
     )
     .all() as Array<{ id: string; name: string }>;
   const map = new Map<string, string>();

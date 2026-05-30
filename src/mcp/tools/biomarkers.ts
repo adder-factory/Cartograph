@@ -576,7 +576,7 @@ function probeLowestCentralityForFilters(
   }
   if (args.excludeFile !== undefined && args.excludeFile.length > 0) {
     const escaped = args.excludeFile.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
-    where.push("n.file_path NOT LIKE @excludeLike ESCAPE '\\'");
+    where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
     params['excludeLike'] = escaped + '%';
   }
   const whereClause = where.join(' AND ');

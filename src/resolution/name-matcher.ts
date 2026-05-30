@@ -285,7 +285,7 @@ function inferJavaFieldReceiverType(
   // Signature shape: `<type-expr> <fieldName>` — strip the trailing
   // field-name word, then strip generic args + array dims from the
   // remaining type expression. The HEAD identifier is the class.
-  const fieldNameAtEnd = new RegExp(`\\s+${escapeRegExp(receiverName)}(?:\\s*=.*)?\\s*$`);
+  const fieldNameAtEnd = new RegExp(String.raw`\s+${escapeRegExp(receiverName)}(?:\s*=.*)?\s*$`);
   const typeExpr = field.signature.replace(fieldNameAtEnd, '').trim();
   if (!typeExpr) return null;
   // `Map<String, Foo>` → `Map`; `Foo[]` → `Foo`; `Foo.Inner` → `Inner`

@@ -202,7 +202,7 @@ function buildSymbolFilterClause(
     params.push(languageFilter);
   }
   if (pathFilter) {
-    conds.push("n.file_path LIKE ? ESCAPE '\\'");
+    conds.push(String.raw`n.file_path LIKE ? ESCAPE '\'`);
     params.push(`${escapeLike(pathFilter)}%`);
   }
   const clause = conds.length > 0 ? ` AND ${conds.join(' AND ')}` : '';

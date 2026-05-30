@@ -219,7 +219,7 @@ function collectMatches(args: WorkerCollectMatchesArgs): void {
 // comment) for why these regexes cap whitespace runs at {0,200}.
 const SUPPORTED_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 const MAX_WS_RUN = 200;
-const WS = `\\s{0,${MAX_WS_RUN}}`;
+const WS = String.raw`\s{0,${MAX_WS_RUN}}`;
 const CALL_ARG_RE = new RegExp(`(?<=[(,]${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,)])`, 'g');
 const PAIR_VALUE_RE = new RegExp(
   `(?<=[{,]${WS}[a-zA-Z_$][a-zA-Z_$0-9]{0,${MAX_WS_RUN}}${WS}:${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,}])`,

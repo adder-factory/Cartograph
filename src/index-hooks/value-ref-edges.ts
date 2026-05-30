@@ -154,7 +154,7 @@ const JS_RESERVED_HEAD: ReadonlySet<string> = new Set([
  *  runs in 240ms vs ~865ms unbounded; on the 3.5MB hang victim it
  *  runs in 1.5s instead of hanging forever. */
 const MAX_WS_RUN = 200;
-const WS = `\\s{0,${MAX_WS_RUN}}`;
+const WS = String.raw`\s{0,${MAX_WS_RUN}}`;
 
 /**
  * Capture a bare identifier that appears as a CALL ARGUMENT. The

@@ -222,7 +222,7 @@ function findMcpToolNameForHandle(node: Node, projectRoot: string): string | nul
   // The function name must appear as a standalone identifier — escape it
   // and bound the trailing edge with an identifier-char lookahead (a `\b`
   // mis-fires when `fnName` ends in `$`).
-  const handlePattern = new RegExp(`\\bhandle\\s*:\\s*${escapeRegExp(fnName)}(?![\\w$])`);
+  const handlePattern = new RegExp(String.raw`\bhandle\s*:\s*${escapeRegExp(fnName)}(?![\w$])`);
   if (!handlePattern.test(src)) return null;
 
   // Extract the MCP tool name from `name: 'cartograph_X'` or `name: "cartograph_X"`.

@@ -408,7 +408,7 @@ export function strictifyTable(
   // unquoted names, but keeping the anchor correct guards re-runs and
   // mirrors the corrected form in migration 064.
   const renameRegex = new RegExp(
-    `CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(?:"${tableName}"|${tableName}\\b)`,
+    String.raw`CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(?:"${tableName}"|${tableName}\b)`,
     'i',
   );
   if (!renameRegex.test(originalSql)) {

@@ -306,8 +306,8 @@ export function stripReasoningTokens(text: string): string {
   // The `(?:\s[^>]*)?` clause matches a single whitespace followed by any
   // non-`>` content, covering both attribute lists and stray content
   // before the closing `>`.
-  const open = '<\\s*think(?:ing)?(?:\\s[^>]*)?>';
-  const close = '<\\s*\\/\\s*think(?:ing)?\\s*>';
+  const open = String.raw`<\s*think(?:ing)?(?:\s[^>]*)?>`;
+  const close = String.raw`<\s*\/\s*think(?:ing)?\s*>`;
   // Closed reasoning blocks (handles arbitrary content + nested newlines).
   let out = text.replaceAll(new RegExp(`${open}[\\s\\S]*?${close}`, 'gi'), '');
   // Unclosed trailing opener — drop everything from it onward. Negative

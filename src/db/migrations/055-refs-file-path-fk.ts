@@ -133,7 +133,7 @@ function addFilePathFk(db: import('../sqlite-adapter.js').SqliteDatabase, table:
   // would be missed — the rename would silently no-op and the FK ADD
   // would skip the table. Mirrors the corrected form in migration 064.
   const renameRegex = new RegExp(
-    `CREATE\\s+TABLE\\s+(IF\\s+NOT\\s+EXISTS\\s+)?(?:"${tableName}"|${tableName}\\b)`,
+    String.raw`CREATE\s+TABLE\s+(IF\s+NOT\s+EXISTS\s+)?(?:"${tableName}"|${tableName}\b)`,
     'i',
   );
   const renamedSql = table.sql.replace(renameRegex, `CREATE TABLE ${tempName}`);

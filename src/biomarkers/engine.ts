@@ -187,7 +187,7 @@ export function buildAccidentalQuadraticRegex(): RegExp {
   const countAlt = ACCIDENTAL_QUADRATIC_PATTERNS.map((p) => p.countAccessor).join('|');
   const itemAlt = ACCIDENTAL_QUADRATIC_PATTERNS.map((p) => p.itemAccessor).join('|');
   return new RegExp(
-    `for\\s*\\(\\s*(?:let|var|const)\\s+(\\w+)\\s*=\\s*0\\s*;\\s*\\1\\s*<\\s*[\\w.\\[\\]]+\\.(?:${countAlt})\\s*;\\s*\\1\\s*\\+\\+\\s*\\)[^{]*\\{[^}]{0,300}\\.(?:${itemAlt})\\s*\\(\\s*\\1\\s*\\)`,
+    String.raw`for\s*\(\s*(?:let|var|const)\s+(\w+)\s*=\s*0\s*;\s*\1\s*<\s*[\w.\[\]]+\.(?:${countAlt})\s*;\s*\1\s*\+\+\s*\)[^{]*\{[^}]{0,300}\.(?:${itemAlt})\s*\(\s*\1\s*\)`,
     'g',
   );
 }
@@ -205,7 +205,7 @@ function buildSiblingIndexUseRegex(idxName: string): RegExp {
   // Escape + identifier-char lookbehind so a `$`-bearing index name
   // (rare but legal) doesn't turn `$` into a regex anchor and silently
   // disable the false-positive guard.
-  return new RegExp(`(?<![\\w$])${escapeRegExp(idxName)}\\s*[+-]\\s*\\d+`);
+  return new RegExp(String.raw`(?<![\w$])${escapeRegExp(idxName)}\s*[+-]\s*\d+`);
 }
 
 /** JS/TS-family languages where the known bug class (web-tree-sitter's
@@ -304,7 +304,7 @@ export const SYNC_IO_CALLS: ReadonlyArray<string> = [
 /** Build the call-name regex from {@link SYNC_IO_CALLS}. `\b` word
  *  boundary so `unlinkSync` doesn't match `myUnlinkSync`. */
 function buildSyncIoCallsRegex(): RegExp {
-  return new RegExp(`\\b(?:${SYNC_IO_CALLS.join('|')})\\s*\\(`, 'g');
+  return new RegExp(String.raw`\b(?:${SYNC_IO_CALLS.join('|')})\s*\(`, 'g');
 }
 
 const SYNC_IO_CALLS_RE = buildSyncIoCallsRegex();
