@@ -411,7 +411,7 @@ function statusPayload(ctx: RequestContext): unknown {
   // nothing writes, so these always returned null.
   const indexedAt = getMetadata(ctx.queries, 'index_timestamp') ?? null;
   const head = getMetadata(ctx.queries, 'index_head_sha') ?? null;
-  const languages = Object.keys(stats.filesByLanguage).sort();
+  const languages = Object.keys(stats.filesByLanguage).sort((a, b) => a.localeCompare(b));
   return {
     projectRoot: ctx.projectPath,
     files: stats.fileCount,

@@ -134,8 +134,8 @@ function arrayDeepEqual(a: unknown[], b: unknown[]): boolean {
 /** Key-set + value equality for plain objects. Sorts keys so the
  *  order of `Object.keys` doesn't matter. */
 function objectDeepEqual(a: Record<string, unknown>, b: Record<string, unknown>): boolean {
-  const ak = Object.keys(a).sort();
-  const bk = Object.keys(b).sort();
+  const ak = Object.keys(a).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
+  const bk = Object.keys(b).sort((x, y) => (x < y ? -1 : x > y ? 1 : 0));
   if (ak.length !== bk.length) return false;
   if (!ak.every((k, i) => k === bk[i])) return false;
   return ak.every((k) => jsonDeepEqual(a[k], b[k]));

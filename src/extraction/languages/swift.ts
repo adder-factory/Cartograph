@@ -63,9 +63,7 @@ const swiftExtractor: LanguageExtractor = {
       ? ('public' as const)
       : modText.includes('private') || modText.includes('fileprivate')
         ? ('private' as const)
-        : modText.includes('internal')
-          ? ('internal' as const)
-          : ('internal' as const); // Swift defaults to internal
+        : ('internal' as const); // Swift defaults to internal (also when 'internal' is explicit)
 
     const isLet = node.namedChildren.some((c: SyntaxNode) => c.type === 'value_binding_pattern' && c.text === 'let');
     const keyword = node.type === 'constant_declaration' || isLet ? 'let' : 'var';

@@ -136,9 +136,9 @@ function extractDeclaredDeps(args: ExtractDeclaredDepsArgs): {
     for (const k of Object.keys(m.packageJson['optionalDependencies'] ?? {})) optional.add(k);
   }
   return {
-    declaredRuntime: Array.from(runtime).sort(),
-    declaredDev: Array.from(dev).sort(),
-    declaredOptional: Array.from(optional).sort(),
+    declaredRuntime: Array.from(runtime).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    declaredDev: Array.from(dev).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
+    declaredOptional: Array.from(optional).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
   };
 }
 
@@ -898,7 +898,7 @@ function computeDepAnalysis(args: ComputeDepAnalysisArgs): {
     rule.apply(ctx);
   }
 
-  const used = Array.from(usedSet).sort();
+  const used = Array.from(usedSet).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const { unusedRuntime, unusedDev, unusedOptional } = computeUnusedSets({
     declaredRuntime,
     declaredDev,
@@ -948,7 +948,7 @@ function discoverNestedManifests(projectRoot: string): string[] {
     if (match.split('/').length > 5) continue;
     out.push(match);
   }
-  return out.sort();
+  return out.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 export function analyzeUnusedDeps(qb: QueryBuilder, projectRoot: string): UnusedDepsResult {

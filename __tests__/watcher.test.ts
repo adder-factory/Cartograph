@@ -118,7 +118,7 @@ describe('FileWatcher', () => {
       const watcher = new FileWatcher({ projectRoot: testDir, config: baseConfig, syncFn });
 
       expect(watcher.start()).toBe(true);
-      expect(watcher.start()).toBe(true); // Should not throw
+      expect(watcher.start()).toBe(false); // idempotent: already watching → no-op returns false
       expect(watcher.isActive()).toBe(true);
 
       watcher.stop();

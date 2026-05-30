@@ -32,6 +32,9 @@ Thumbs.db
 
 # Test coverage
 /coverage/
+
+# SonarQube scanner working directory
+/.scannerwork/
 .nyc_output/
 
 # Environment

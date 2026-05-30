@@ -181,10 +181,8 @@ export class OpenAiSdkChatBackend implements ChatBackend {
    */
   async isReachable(): Promise<boolean> {
     try {
-      const page = await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
-      for await (const _ of page) {
-        break;
-      }
+      // Awaiting list() performs the request and parses the body — that alone confirms 2xx + reachability.
+      await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
       this.lastReachabilityError = null;
       return true;
     } catch (err) {

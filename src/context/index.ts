@@ -1034,7 +1034,7 @@ function cbGetEntryPoints(subgraph: Subgraph): Node[] {
 function cbGetRelatedFiles(subgraph: Subgraph): string[] {
   const files = new Set<string>();
   for (const node of subgraph.nodes.values()) files.add(node.filePath);
-  return Array.from(files).sort();
+  return Array.from(files).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 }
 
 /** Generate a one-line summary of the context result. */

@@ -1339,7 +1339,7 @@ program
           cg.internals.graphManager,
           coreInput,
         );
-        const sortedTests = Array.from(affectedTests).sort();
+        const sortedTests = Array.from(affectedTests).sort((a, b) => a.localeCompare(b));
 
         // Row cap — mirrors cartograph_affected (MCP) DEFAULT_ROW_LIMIT.
         // An edited leaf module re-exported through a public-API barrel

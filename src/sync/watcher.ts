@@ -514,7 +514,8 @@ export class FileWatcher {
   /**
    * Start watching for file changes.
    *
-   * Returns `true` when the subscribe attempt has been initiated —
+   * Returns `true` when a new watch session is started (the subscribe
+   * attempt has been initiated), `false` when already watching (no-op) —
    * the actual `@parcel/watcher.subscribe()` resolves asynchronously
    * (typically <10ms after this call returns) and the resulting
    * subscription handle is stashed onto state once ready. The sync
@@ -531,7 +532,7 @@ export class FileWatcher {
    * the kernel handle to open before producing events.
    */
   start(): boolean {
-    if (this.st.subscription || this.st.subscribing) return true; // Already watching / opening
+    if (this.st.subscription || this.st.subscribing) return false; // Already watching / opening — no new session started
     this.st = watcherMakeState({
       syncFn: this.syncFn,
       debounceMs: this.debounceMs,

@@ -173,6 +173,6 @@ export function findAffectedTests(graph: FileDependentsSource, input: AffectedCo
   return {
     affectedTests,
     totalDependents: allDependents.size,
-    barrelsReached: Array.from(barrelsReached).sort(),
+    barrelsReached: Array.from(barrelsReached).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)),
   };
 }

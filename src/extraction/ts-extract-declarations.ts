@@ -450,13 +450,12 @@ function tryDivertPublicFieldToField(ext: TreeSitterExtractor, node: SyntaxNode)
 /**
  * When not inside a class-like node, routes a method_definition to either
  * tsExtractFunction (if the node looks like a top-level function) or skips it
- * (if it's inside an object literal). Returns true if routing occurred.
+ * (if it's inside an object literal).
  */
-function tsRouteNonClassMethod(ext: TreeSitterExtractor, node: SyntaxNode): boolean {
+function tsRouteNonClassMethod(ext: TreeSitterExtractor, node: SyntaxNode): void {
   const isInsideObjectLiteral = node.parent?.type === 'object' || node.parent?.type === 'object_expression';
-  if (isInsideObjectLiteral) return true; // skip
+  if (isInsideObjectLiteral) return; // skip
   tsExtractFunction(ext, node);
-  return true;
 }
 
 /**

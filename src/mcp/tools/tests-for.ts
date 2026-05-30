@@ -1046,7 +1046,7 @@ async function handleFilesMode(ctx: ToolCtx, args: TestsForArgs): Promise<ToolOu
       barrelsReached: bfsBarrels,
     });
   }
-  const sorted = [...affected].sort();
+  const sorted = [...affected].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   // The footers carry the load-bearing signals — the "showing first N
   // of M" cap notice and the barrel-blast-radius warning. The
   // chokepoint truncates the BODY first and appends the footers AFTER,
@@ -1105,7 +1105,7 @@ function buildFilesModeFooters(args: {
   // the same call when one input is a barrel AND BFS reaches another.
   if (inputBarrels.size > 0) {
     const barrelList = [...inputBarrels]
-      .sort()
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
       .map((b) => `\`${b}\``)
       .join(', ');
     const isPlural = inputBarrels.size > 1;
@@ -1116,7 +1116,7 @@ function buildFilesModeFooters(args: {
   }
   if (bfsBarrels.size > 0) {
     const barrelList = [...bfsBarrels]
-      .sort()
+      .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
       .map((b) => `\`${b}\``)
       .join(', ');
     footers.push(

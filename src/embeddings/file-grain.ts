@@ -68,7 +68,7 @@ export function computeCombinedHash(fileContentHash: string, summaryHashes: stri
   const h = createHash('sha256');
   h.update(fileContentHash);
   h.update('\n');
-  for (const sh of [...summaryHashes].sort()) {
+  for (const sh of [...summaryHashes].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))) {
     h.update(sh);
     h.update('\n');
   }

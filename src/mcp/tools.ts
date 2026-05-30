@@ -192,7 +192,7 @@ function formatDisabledMessage(options: ToolHandlerOptions, inv: PreFlightInvoca
   if (!carveOuts || carveOuts.size === 0) return generic;
   const action = inv.args['action'];
   const actionLabel = typeof action === 'string' ? `\`${action}\`` : '<missing>';
-  const allowed = [...carveOuts].sort().join(', ');
+  const allowed = [...carveOuts].sort((a, b) => a.localeCompare(b)).join(', ');
   return (
     `Tool \`${inv.toolName}\` action ${actionLabel} is disabled by this MCP server's configuration ` +
     `(--no-write-tools). Read-only actions still reachable: ${allowed}.`

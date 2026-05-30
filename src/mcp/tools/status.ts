@@ -1545,7 +1545,7 @@ function appendServerConfig(lines: string[], ctx: ToolCtx): void {
     serverLines.push('- **Write tools:** disabled (`--no-write-tools`)');
   }
   if (ctx.options.disabledTools && ctx.options.disabledTools.size > 0) {
-    const list = [...ctx.options.disabledTools].sort().join(', ');
+    const list = [...ctx.options.disabledTools].sort((a, b) => a.localeCompare(b)).join(', ');
     serverLines.push(`- **Disabled tools:** ${list}`);
   }
   if (ctx.options.allowStaleDefault) {

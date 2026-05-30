@@ -107,7 +107,7 @@ export function computeStructHash(
     (n) =>
       `${n.kind}${STRUCT_FIELD_SEP}${n.qualifiedName ?? n.name}${STRUCT_FIELD_SEP}${n.signature ?? ''}${STRUCT_FIELD_SEP}${n.bodyHash ?? ''}`,
   );
-  quads.sort();
+  quads.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
   const h = crypto.createHash('sha256');
   for (const q of quads) {
     h.update(q);

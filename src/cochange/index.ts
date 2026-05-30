@@ -174,7 +174,7 @@ function tallyCoChangePairs(
     for (const f of filtered) {
       fileCommits.set(f, (fileCommits.get(f) ?? 0) + 1);
     }
-    filtered.sort();
+    filtered.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
     for (let i = 0; i < filtered.length; i++) {
       for (let j = i + 1; j < filtered.length; j++) {
         const key = `${filtered[i]}\0${filtered[j]}`;

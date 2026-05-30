@@ -151,12 +151,9 @@ export class OpenAiSdkEmbeddingClient {
       return false;
     }
     try {
-      // models.list returns a paginator; we just need any response.
-      const page = await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
-      // Iterate to consume the first page — confirms 2xx + parseable body.
-      for await (const _ of page) {
-        break;
-      }
+      // models.list returns a paginator; awaiting it performs the request and
+      // parses the body — that alone confirms 2xx + reachability.
+      await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
       this.lastReachabilityError = null;
       return true;
     } catch (err) {
