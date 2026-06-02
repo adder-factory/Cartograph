@@ -417,7 +417,7 @@ function buildContainsAndRelEdges({ db, fileNodeId, symbolToNodeId, pushEdge }: 
       pushEdge({ source: containsSource, target: childId, kind: 'contains', confidence: 'EXTRACTED' });
     }
     for (const rel of si.relationships) {
-      if (!pushRelationshipEdge(rel, childId, symbolToNodeId, pushEdge)) {
+      if (!pushRelationshipEdge({ rel, childId, symbolToNodeId, pushEdge })) {
         unresolvedEdges++;
       }
     }
@@ -425,12 +425,13 @@ function buildContainsAndRelEdges({ db, fileNodeId, symbolToNodeId, pushEdge }: 
   return unresolvedEdges;
 }
 
-function pushRelationshipEdge(
-  rel: ScipRelationship,
-  childId: string,
-  symbolToNodeId: Map<string, string>,
-  pushEdge: (edge: Edge) => void,
-): boolean {
+function pushRelationshipEdge(args: {
+  rel: ScipRelationship;
+  childId: string;
+  symbolToNodeId: Map<string, string>;
+  pushEdge: (edge: Edge) => void;
+}): boolean {
+  const { rel, childId, symbolToNodeId, pushEdge } = args;
   const targetId = symbolToNodeId.get(rel.symbol);
   if (!targetId) return false;
   const kind = edgeKindForScipRelationship(rel);

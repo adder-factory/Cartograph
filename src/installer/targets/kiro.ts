@@ -24,11 +24,11 @@ import {
   atomicWriteFileSync,
   getHomeDir,
   getMcpServerConfig,
-  jsonDeepEqual,
   readJsonFile,
   writeJsonFile,
 } from './shared.js';
 import { INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.kiro') : path.join(process.cwd(), '.kiro');
@@ -103,25 +103,7 @@ class KiroTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  const file = mcpJsonPath(loc);
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  const existing = readJsonFile(file);
-  const before = existing['mcpServers']?.cartograph;
-  const after = getMcpServerConfig();
-
-  if (jsonDeepEqual(before, after)) {
-    return { path: file, action: 'unchanged' };
-  }
-  let action: 'created' | 'updated' = 'created';
-  if (before || fs.existsSync(file)) {
-    action = 'updated';
-  }
-  if (!existing['mcpServers']) existing['mcpServers'] = {};
-  existing['mcpServers'].cartograph = after;
-  writeJsonFile(file, existing);
-  return { path: file, action };
+  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath });
 }
 
 /**

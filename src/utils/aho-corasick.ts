@@ -145,19 +145,20 @@ function linkFailures(root: AhoCorasickNode): void {
   while (queue.length > 0) {
     const node = queue.shift()!;
     for (const [code, child] of node.children) {
-      child.fail = resolveFailureTarget(root, node.fail, child, code);
+      child.fail = resolveFailureTarget({ root, start: node.fail, child, code });
       inheritFailureOutputs(child);
       queue.push(child);
     }
   }
 }
 
-function resolveFailureTarget(
-  root: AhoCorasickNode,
-  start: AhoCorasickNode,
-  child: AhoCorasickNode,
-  code: number,
-): AhoCorasickNode {
+function resolveFailureTarget(args: {
+  root: AhoCorasickNode;
+  start: AhoCorasickNode;
+  child: AhoCorasickNode;
+  code: number;
+}): AhoCorasickNode {
+  const { root, start, child, code } = args;
   let f = start;
   while (f !== root && !f.children.has(code)) {
     f = f.fail;

@@ -382,7 +382,7 @@ async function runAdminIndexCommand(pathArg: string | undefined, options: AdminI
       return;
     }
 
-    await runInteractiveIndex(cg, projectPath, options, parseWorkers);
+    await runInteractiveIndex({ cg, projectPath, options, parseWorkers });
   } catch (err) {
     error(`Failed to index: ${errMsg(err)}`);
     process.exit(1);
@@ -409,12 +409,13 @@ async function runQuietIndex(
   cg.close();
 }
 
-async function runInteractiveIndex(
-  cg: AdminIndexGraph,
-  projectPath: string,
-  options: AdminIndexOptions,
-  parseWorkers: number | undefined,
-): Promise<void> {
+async function runInteractiveIndex(args: {
+  cg: AdminIndexGraph;
+  projectPath: string;
+  options: AdminIndexOptions;
+  parseWorkers: number | undefined;
+}): Promise<void> {
+  const { cg, projectPath, options, parseWorkers } = args;
   const clack = await import('@clack/prompts');
   clack.intro('Indexing project');
 

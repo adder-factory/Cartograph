@@ -221,7 +221,8 @@ async function runFileLoop(args: FileLoopArgs): Promise<void> {
     // Tiny inputs OR forced-serial: don't pay the streamingDispatch
     // setup. Below ~32 files, the per-file work is short enough that
     // even I/O-bound overlap doesn't help.
-    for (const relPath of targetFiles) {
+    for (let i = 0; i < targetFiles.length; i++) {
+      const relPath = targetFiles[i]!;
       if (options.signal?.aborted) break;
       const currentHash = currentHashes.get(relPath);
       await analyseSingleFile({ ctx, relPath, currentHash, stats });

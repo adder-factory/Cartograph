@@ -607,18 +607,19 @@ function emitKotlinAnnotatedParameters(ext: TreeSitterExtractor, methodNode: Nod
       continue;
     }
     if (pendingModifiers) {
-      emitKotlinAnnotatedParameter(ext, methodNode, child, pendingModifiers);
+      emitKotlinAnnotatedParameter({ ext, methodNode, parameterNode: child, modifiersNode: pendingModifiers });
     }
     pendingModifiers = null;
   }
 }
 
-function emitKotlinAnnotatedParameter(
-  ext: TreeSitterExtractor,
-  methodNode: Node,
-  parameterNode: SyntaxNode,
-  modifiersNode: SyntaxNode,
-): void {
+function emitKotlinAnnotatedParameter(args: {
+  ext: TreeSitterExtractor;
+  methodNode: Node;
+  parameterNode: SyntaxNode;
+  modifiersNode: SyntaxNode;
+}): void {
+  const { ext, methodNode, parameterNode, modifiersNode } = args;
   const hasAnnotation = modifiersNode.namedChildren.some((m) => m && DECORATOR_NODE_TYPES.has(m.type));
   if (!hasAnnotation) return;
   // Kotlin parameter shape: `simple_identifier ':' user_type`.

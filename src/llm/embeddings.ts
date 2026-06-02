@@ -427,7 +427,8 @@ async function embedBatchPerRow(
   const { client, queries, embeddingModel, batch, signal } = args;
   let generated = 0;
   let skipped = 0;
-  for (const row of batch) {
+  for (let i = 0; i < batch.length; i++) {
+    const row = batch[i]!;
     if (signal?.aborted) break;
     const wasGenerated = await embedOneRow({ client, queries, embeddingModel, row, signal });
     if (wasGenerated === null) {

@@ -372,7 +372,8 @@ async function runDetectedPath(
         initialValue: true,
       });
       if (!clack.isCancel(shouldPull) && shouldPull === true) {
-        for (const m of missing) {
+        for (let i = 0; i < missing.length; i++) {
+          const m = missing[i]!;
           await ollamaPull(clack, m.model);
         }
       }

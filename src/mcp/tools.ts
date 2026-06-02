@@ -459,12 +459,11 @@ function rewriteStaleBannerForMcp(banner: string | null): string | null {
 }
 
 export class ToolHandler {
-  /** LRU + watcher coordination for explicit-project cartographs. */
-  private readonly cache: ProjectCache = new ProjectCache();
-  /** Short-id cache for tabular row references (#15). */
-  private readonly refIds: RefIdCache = new RefIdCache();
-  /** Call-id cache for delta-mode (#16). */
-  private readonly callIds: CallIdCache = new CallIdCache();
+  private readonly st = {
+    cache: new ProjectCache(),
+    refIds: new RefIdCache(),
+    callIds: new CallIdCache(),
+  };
   /**
    * F#58 — per-(startPath, indexRoot) cache of the borrowed-worktree
    * banner. `null` value = checked + no mismatch; `undefined` (missing
@@ -539,12 +538,12 @@ export class ToolHandler {
       }
       return this.cg;
     }
-    return this.cache.getOrOpen(projectPath);
+    return this.st.cache.getOrOpen(projectPath);
   }
 
   /** Close every cached project + the default CG. */
   closeAll(): void {
-    this.cache.closeAll();
+    this.st.cache.closeAll();
     if (this.cg) {
       try {
         this.cg.watcher.stop?.();
@@ -567,7 +566,7 @@ export class ToolHandler {
       getCartograph: (projectPath?: string) => this.getCartograph(projectPath),
       options: this.options,
       defaultCg: this.cg,
-      projectCache: this.cache.readonlyView,
+      projectCache: this.st.cache.readonlyView,
       closeProjectsMatching: (resolvedRoot: string) => this.closeProjectsMatching(resolvedRoot),
       evictCachedProject: (projectPath: string) => {
         // Bust the cached Cartograph after config.json is written to disk.
@@ -597,10 +596,10 @@ export class ToolHandler {
             /* fall through and evict */
           }
         }
-        this.cache.evictProject(resolved);
+        this.st.cache.evictProject(resolved);
       },
-      refIds: this.refIds,
-      callIds: this.callIds,
+      refIds: this.st.refIds,
+      callIds: this.st.callIds,
       ...(opts?.onProgress ? { reportProgress: opts.onProgress } : {}),
     };
   }
@@ -610,7 +609,7 @@ export class ToolHandler {
    * plus the default CG if it matches.
    */
   private closeProjectsMatching(resolvedRoot: string): void {
-    this.cache.closeProjectsMatching(resolvedRoot);
+    this.st.cache.closeProjectsMatching(resolvedRoot);
     // Drop the default cg slot when it points at resolvedRoot.
     if (!this.cg) return;
     let matches: boolean;

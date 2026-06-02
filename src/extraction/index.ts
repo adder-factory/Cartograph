@@ -848,9 +848,11 @@ export function scanDirectory(
     return scanDirectoryWalk(rootDir, config, onProgress);
   }
   const ignoredDirs = findCartographIgnoredDirs(rootDir, gitFiles);
+  const visibleFiles = Array.from(gitFiles);
   const files: string[] = [];
   let count = 0;
-  for (const filePath of gitFiles) {
+  for (let i = 0; i < visibleFiles.length; i++) {
+    const filePath = visibleFiles[i]!;
     if (isUnderCartographIgnoredDir(filePath, ignoredDirs)) continue;
     if (!shouldIncludeFile(filePath, config)) continue;
     files.push(filePath);
@@ -874,7 +876,9 @@ export async function scanDirectoryAsync(
 
   const ignoredDirs = findCartographIgnoredDirs(rootDir, gitFiles);
   const files: string[] = [];
-  for (const filePath of gitFiles) {
+  const visibleFiles = Array.from(gitFiles);
+  for (let i = 0; i < visibleFiles.length; i++) {
+    const filePath = visibleFiles[i]!;
     if (isUnderCartographIgnoredDir(filePath, ignoredDirs)) continue;
     if (!shouldIncludeFile(filePath, config)) continue;
     files.push(filePath);
@@ -1074,33 +1078,20 @@ export interface ExtractionOrchestratorState {
  * Extraction orchestrator
  */
 export class ExtractionOrchestrator {
-  private readonly rootDir: string;
-  private readonly config: CartographConfig;
-  private readonly queries: QueryBuilder;
-  /** Mutable ref object shared with the `ExtractionOrchestratorState` returned
-   *  by `state()`. Module-scope helpers increment `cacheHits.count` directly;
-   *  `resetParseCacheHits` / `getParseCacheHits` read/write the same object. */
-  private readonly cacheHitsRef = { count: 0 };
+  private readonly st: ExtractionOrchestratorState;
 
   constructor(rootDir: string, config: CartographConfig, queries: QueryBuilder) {
-    this.rootDir = rootDir;
-    this.config = config;
-    this.queries = queries;
-  }
-
-  /** Snapshot of immutable deps + mutable cache-hit ref, threaded into `eo*` helpers. */
-  private state(): ExtractionOrchestratorState {
-    return { rootDir: this.rootDir, config: this.config, queries: this.queries, cacheHits: this.cacheHitsRef };
+    this.st = { rootDir, config, queries, cacheHits: { count: 0 } };
   }
 
   /** Reset the per-pass parse-cache hit counter. */
   resetParseCacheHits(): void {
-    this.cacheHitsRef.count = 0;
+    this.st.cacheHits.count = 0;
   }
 
   /** Read the per-pass parse-cache hit counter. */
   getParseCacheHits(): number {
-    return this.cacheHitsRef.count;
+    return this.st.cacheHits.count;
   }
 
   private async finishSuccessfulIndexAll(args: {
@@ -1148,7 +1139,7 @@ export class ExtractionOrchestrator {
       : (_msg: string) => {};
 
     this.resetParseCacheHits();
-    const st = this.state();
+    const st = this.st;
     // F#12 slice 1: export per-extraction env vars from config BEFORE
     // the worker pool spawns inside eoRunIndexParseAndStorePhase, so
     // workers inherit the right values.
@@ -1211,7 +1202,8 @@ export class ExtractionOrchestrator {
     let totalNodes = 0;
     let totalEdges = 0;
 
-    for (const filePath of filePaths) {
+    for (let i = 0; i < filePaths.length; i++) {
+      const filePath = filePaths[i]!;
       const result = await this.indexFile(filePath);
 
       if (result.errors.length > 0) {
@@ -1249,7 +1241,7 @@ export class ExtractionOrchestrator {
     // outside the root via symlink (or `..` segments) is rejected here
     // so neither the read below nor the DB write below it can leak
     // off-tree content.
-    const fullPath = validatePathWithinRootReal(this.rootDir, relativePath);
+    const fullPath = validatePathWithinRootReal(this.st.rootDir, relativePath);
 
     if (!fullPath) {
       return {
@@ -1303,7 +1295,7 @@ export class ExtractionOrchestrator {
     // The content was already read upstream via the parallel batch
     // reader; this is the chokepoint that decides whether a symlink-
     // pointing-outside-root path is allowed to be persisted.
-    const fullPath = validatePathWithinRootReal(this.rootDir, relativePath);
+    const fullPath = validatePathWithinRootReal(this.st.rootDir, relativePath);
     if (!fullPath) {
       logWarn('Path traversal blocked in indexFileWithContent', { relativePath });
       return emptyExtractionResult([
@@ -1312,10 +1304,10 @@ export class ExtractionOrchestrator {
     }
 
     // Check file size
-    if (stats.size > this.config.maxFileSize) {
+    if (stats.size > this.st.config.maxFileSize) {
       return emptyExtractionResult([
         {
-          message: `File exceeds max size (${stats.size} > ${this.config.maxFileSize})`,
+          message: `File exceeds max size (${stats.size} > ${this.st.config.maxFileSize})`,
           filePath: relativePath,
           severity: 'warning',
           code: 'size_exceeded',
@@ -1350,7 +1342,7 @@ export class ExtractionOrchestrator {
 
     // Store in database
     if (result.nodes.length > 0 || result.errors.length === 0) {
-      eoStoreExtractionResult(this.state(), { filePath: relativePath, content, language, stats, result });
+      eoStoreExtractionResult(this.st, { filePath: relativePath, content, language, stats, result });
     }
 
     return result;
@@ -1375,14 +1367,14 @@ export class ExtractionOrchestrator {
       nodesUpdated: 0,
     };
 
-    const lastSyncedHead = getMetadata(this.queries, LAST_SYNCED_HEAD_KEY);
-    const gitResult = getGitChangedFiles(this.rootDir, this.config, lastSyncedHead);
+    const lastSyncedHead = getMetadata(this.st.queries, LAST_SYNCED_HEAD_KEY);
+    const gitResult = getGitChangedFiles(this.st.rootDir, this.st.config, lastSyncedHead);
     const currentHead = gitResult?.currentHead ?? null;
     // When the last-synced HEAD is unreachable we drop to the filesystem
     // fallback, which uses on-disk hashes and is correct regardless of git.
     const gitChanges = gitResult && !gitResult.needsFullReindex ? gitResult.changes : null;
 
-    const st = this.state();
+    const st = this.st;
     // F#12 slice 1: same env-var export as the indexAll path so any
     // bulk re-extract spawned via `eoIndexChangedFiles` inherits the
     // configured threshold.
@@ -1412,7 +1404,7 @@ export class ExtractionOrchestrator {
    * Uses git status as a fast path when available, falling back to full scan.
    */
   getChangedFiles(): { added: string[]; modified: string[]; removed: string[] } {
-    const st = this.state();
+    const st = this.st;
     const lastSyncedHead = getMetadata(st.queries, LAST_SYNCED_HEAD_KEY);
     const gitResult = getGitChangedFiles(st.rootDir, st.config, lastSyncedHead);
     // Unreachable last-synced HEAD → drop to the filesystem fallback, which

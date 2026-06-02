@@ -482,32 +482,35 @@ interface BeginParcelSubscribeArgs {
 export class FileWatcher {
   /** All mutable runtime state in one slot — helpers read/write via this. */
   private st: WatcherState;
-
-  private readonly projectRoot: string;
-  private readonly config: CartographConfig;
-  private readonly debounceMs: number;
-  private readonly safetyNetIntervalMs: number;
-  private readonly syncFn: () => Promise<{ filesChanged: number; durationMs: number }>;
-  private readonly onSyncComplete?: WatchOptions['onSyncComplete'];
-  private readonly onSyncError?: WatchOptions['onSyncError'];
-  private readonly clock: Clock;
+  private readonly opts: {
+    projectRoot: string;
+    config: CartographConfig;
+    debounceMs: number;
+    safetyNetIntervalMs: number;
+    syncFn: () => Promise<{ filesChanged: number; durationMs: number }>;
+    onSyncComplete?: WatchOptions['onSyncComplete'];
+    onSyncError?: WatchOptions['onSyncError'];
+    clock: Clock;
+  };
 
   constructor(args: FileWatcherArgs) {
     const { projectRoot, config, syncFn, options = {} } = args;
-    this.projectRoot = projectRoot;
-    this.config = config;
-    this.syncFn = syncFn;
-    this.debounceMs = options.debounceMs ?? 2000;
-    this.safetyNetIntervalMs = options.safetyNetIntervalMs ?? 300_000;
-    this.onSyncComplete = options.onSyncComplete;
-    this.onSyncError = options.onSyncError;
-    this.clock = options.clock ?? realClock;
+    this.opts = {
+      projectRoot,
+      config,
+      syncFn,
+      debounceMs: options.debounceMs ?? 2000,
+      safetyNetIntervalMs: options.safetyNetIntervalMs ?? 300_000,
+      ...(options.onSyncComplete ? { onSyncComplete: options.onSyncComplete } : {}),
+      ...(options.onSyncError ? { onSyncError: options.onSyncError } : {}),
+      clock: options.clock ?? realClock,
+    };
     this.st = watcherMakeState({
       syncFn,
-      debounceMs: this.debounceMs,
-      onSyncComplete: this.onSyncComplete,
-      onSyncError: this.onSyncError,
-      clock: this.clock,
+      debounceMs: this.opts.debounceMs,
+      onSyncComplete: this.opts.onSyncComplete,
+      onSyncError: this.opts.onSyncError,
+      clock: this.opts.clock,
     });
   }
 
@@ -534,11 +537,11 @@ export class FileWatcher {
   start(): boolean {
     if (this.st.subscription || this.st.subscribing) return false; // Already watching / opening — no new session started
     this.st = watcherMakeState({
-      syncFn: this.syncFn,
-      debounceMs: this.debounceMs,
-      onSyncComplete: this.onSyncComplete,
-      onSyncError: this.onSyncError,
-      clock: this.clock,
+      syncFn: this.opts.syncFn,
+      debounceMs: this.opts.debounceMs,
+      onSyncComplete: this.opts.onSyncComplete,
+      onSyncError: this.opts.onSyncError,
+      clock: this.opts.clock,
     });
     this.st.subscribing = true;
 
@@ -547,14 +550,14 @@ export class FileWatcher {
     const scheduleFn = () => watcherScheduleSync(stRef, () => watcherFlush(stRef));
     const watchCtx: WatchEventCtx = {
       st: stRef,
-      config: this.config,
+      config: this.opts.config,
       projectRoot: watchRoot,
       scheduleFn,
     };
 
     this.beginParcelSubscribe({ watchRoot, stRef, watchCtx });
 
-    watcherStartSafetyNet(this.st, this.safetyNetIntervalMs);
+    watcherStartSafetyNet(this.st, this.opts.safetyNetIntervalMs);
     return true;
   }
 
@@ -576,10 +579,10 @@ export class FileWatcher {
    */
   private resolveWatchRoot(): string {
     try {
-      return fs.realpathSync(this.projectRoot);
+      return fs.realpathSync(this.opts.projectRoot);
     } catch (realpathErr) {
       logDebug('realpath on projectRoot failed; using as-is', { error: String(realpathErr) });
-      return this.projectRoot;
+      return this.opts.projectRoot;
     }
   }
 
@@ -610,14 +613,14 @@ export class FileWatcher {
     // (`!vendor/`) are filtered out because parcel-watcher's `ignore`
     // is a flat exclusion array with no opt-back-in semantics; the
     // resolver layer already handles negations downstream.
-    const ignoreGlobs = this.config.exclude.filter((p) => !p.startsWith('!'));
+    const ignoreGlobs = this.opts.config.exclude.filter((p) => !p.startsWith('!'));
 
     parcelSubscribe(
       watchRoot,
       (err, events) => {
         if (err) {
           logWarn('File watcher event error', { error: String(err) });
-          this.onSyncError?.(toError(err));
+          this.opts.onSyncError?.(toError(err));
           return;
         }
         // Parcel batches; events: Array<{type: 'create'|'update'|'delete', path: string}>.
@@ -643,9 +646,9 @@ export class FileWatcher {
         stRef.subscription = sub;
         stRef.subscribing = false;
         logDebug('File watcher started', {
-          projectRoot: this.projectRoot,
-          debounceMs: this.debounceMs,
-          safetyNetIntervalMs: this.safetyNetIntervalMs,
+          projectRoot: this.opts.projectRoot,
+          debounceMs: this.opts.debounceMs,
+          safetyNetIntervalMs: this.opts.safetyNetIntervalMs,
         });
       })
       .catch((subErr: unknown) => {
@@ -655,7 +658,7 @@ export class FileWatcher {
         logWarn('Could not start file watcher', { error: String(subErr) });
         stRef.subscribing = false;
         stRef.stopped = true;
-        this.onSyncError?.(toError(subErr));
+        this.opts.onSyncError?.(toError(subErr));
       });
   }
 
@@ -799,16 +802,16 @@ export class FileWatcher {
     if (this.st.stopped) return;
     // Re-resolve watchRoot per call so this works whether or not
     // `start()` was invoked (some tests inject without subscribing).
-    let watchRoot = this.projectRoot;
+    let watchRoot = this.opts.projectRoot;
     try {
-      watchRoot = fs.realpathSync(this.projectRoot);
+      watchRoot = fs.realpathSync(this.opts.projectRoot);
     } catch {
       // Use the unresolved root — same fallback as start().
     }
     const stRef = this.st;
     const watchCtx: WatchEventCtx = {
       st: stRef,
-      config: this.config,
+      config: this.opts.config,
       projectRoot: watchRoot,
       scheduleFn: () => watcherScheduleSync(stRef, () => watcherFlush(stRef)),
     };

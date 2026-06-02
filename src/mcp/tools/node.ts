@@ -1172,7 +1172,8 @@ async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: st
   const nodesShown: Node[] = [];
   const cards: string[] = [];
   let notFound = 0;
-  for (const symbol of symbolList) {
+  for (let i = 0; i < symbolList.length; i++) {
+    const symbol = symbolList[i]!;
     const result = await renderBatchSymbolCard({ ctx, cg, symbol, includeCode, detail, flags, deep, seenIds });
     if (result.kind === 'duplicate') continue;
     cards.push(result.card);

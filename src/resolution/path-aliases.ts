@@ -255,7 +255,7 @@ export function applyAliases(importPath: string, aliases: AliasMap, projectRoot:
   for (const pat of aliases.patterns) {
     const captured = captureAliasWildcard(importPath, pat);
     if (captured === null) continue;
-    return expandAliasPattern(pat, captured, aliases, projectRoot);
+    return expandAliasPattern({ pat, captured, aliases, projectRoot });
   }
   return [];
 }
@@ -267,7 +267,13 @@ function captureAliasWildcard(importPath: string, pat: AliasPattern): string | n
   return importPath === pat.prefix ? '' : null;
 }
 
-function expandAliasPattern(pat: AliasPattern, captured: string, aliases: AliasMap, projectRoot: string): string[] {
+function expandAliasPattern(args: {
+  pat: AliasPattern;
+  captured: string;
+  aliases: AliasMap;
+  projectRoot: string;
+}): string[] {
+  const { pat, captured, aliases, projectRoot } = args;
   const out: string[] = [];
   for (const target of pat.replacements) {
     const filled = pat.hasWildcard ? target.replace('*', captured) : target;

@@ -57,7 +57,8 @@ export async function installRecommendedModels(options: InstallModelsOptions = {
   const skipped: RecommendedModel[] = [];
   const paths = new Map<RecommendedModel, string>();
 
-  for (const model of models) {
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i]!;
     const target = path.join(dir, model.filename);
     paths.set(model, target);
     if (

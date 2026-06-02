@@ -22,9 +22,9 @@ import {
   getHomeDir,
   getMcpServerConfig,
   removeMarkedSection,
-  replaceOrAppendMarkedSection,
+  writeMarkedInstructionsFile,
 } from './shared.js';
-import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START } from '../instructions-template.js';
 import { buildTomlTable, removeTomlTable, upsertTomlTable } from './toml.js';
 
 const TOML_HEADER = 'mcp_servers.cartograph';
@@ -158,22 +158,7 @@ function writeMcpEntry(): WriteResult['files'][number] {
 
 function writeInstructionsEntry(): WriteResult['files'][number] {
   const file = instructionsPath();
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  const action = replaceOrAppendMarkedSection({
-    filePath: file,
-    body: INSTRUCTIONS_TEMPLATE,
-    startMarker: CARTOGRAPH_SECTION_START,
-    endMarker: CARTOGRAPH_SECTION_END,
-  });
-  let mapped: 'created' | 'updated' | 'unchanged' = 'updated';
-  if (action === 'created') {
-    mapped = 'created';
-  } else if (action === 'unchanged') {
-    mapped = 'unchanged';
-  }
-  return { path: file, action: mapped };
+  return { path: file, action: writeMarkedInstructionsFile(file) };
 }
 
 export const codexTarget: AgentTarget = new CodexTarget();

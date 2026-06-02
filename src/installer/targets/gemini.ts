@@ -19,13 +19,13 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import {
   getHomeDir,
   getMcpServerConfig,
-  jsonDeepEqual,
   readJsonFile,
   removeMarkedSection,
-  replaceOrAppendMarkedSection,
+  writeMarkedInstructionsFile,
   writeJsonFile,
 } from './shared.js';
-import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START } from '../instructions-template.js';
+import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.gemini') : path.join(process.cwd(), '.gemini');
@@ -103,45 +103,12 @@ class GeminiTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  const file = settingsJsonPath(loc);
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  const existing = readJsonFile(file);
-  const before = existing['mcpServers']?.cartograph;
-  const after = getMcpServerConfig();
-
-  if (jsonDeepEqual(before, after)) {
-    return { path: file, action: 'unchanged' };
-  }
-  let action: 'created' | 'updated' = 'created';
-  if (before || fs.existsSync(file)) {
-    action = 'updated';
-  }
-  if (!existing['mcpServers']) existing['mcpServers'] = {};
-  existing['mcpServers'].cartograph = after;
-  writeJsonFile(file, existing);
-  return { path: file, action };
+  return writeMcpEntryJson(loc, { resolvePath: settingsJsonPath });
 }
 
 function writeInstructionsEntry(loc: Location): WriteResult['files'][number] {
   const file = instructionsPath(loc);
-  const dir = path.dirname(file);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-
-  const action = replaceOrAppendMarkedSection({
-    filePath: file,
-    body: INSTRUCTIONS_TEMPLATE,
-    startMarker: CARTOGRAPH_SECTION_START,
-    endMarker: CARTOGRAPH_SECTION_END,
-  });
-  let mapped: 'created' | 'updated' | 'unchanged' = 'updated';
-  if (action === 'created') {
-    mapped = 'created';
-  } else if (action === 'unchanged') {
-    mapped = 'unchanged';
-  }
-  return { path: file, action: mapped };
+  return { path: file, action: writeMarkedInstructionsFile(file) };
 }
 
 export const geminiTarget: AgentTarget = new GeminiTarget();

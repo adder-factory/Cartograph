@@ -766,7 +766,8 @@ export async function eoRetryFreshHeap(
 ): Promise<ExtractionError[]> {
   const { candidates, errors, counters, requestParse, recycleWorker, signal, log } = args;
   const stillFailing: ExtractionError[] = [];
-  for (const errEntry of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const errEntry = candidates[i]!;
     const filePath = errEntry.filePath!;
     if (signal?.aborted) break;
     await recycleWorker();
@@ -812,7 +813,8 @@ export async function eoRetryStripped(
   },
 ): Promise<void> {
   const { candidates, errors, counters, requestParse, recycleWorker, signal, log } = args;
-  for (const errEntry of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const errEntry = candidates[i]!;
     const filePath = errEntry.filePath!;
     if (signal?.aborted) break;
     await recycleWorker();
@@ -1008,12 +1010,13 @@ function collectResolversWithAnchorHit(
   return hits;
 }
 
-function resolverMatchesFile(
-  resolver: FrameworkResolver,
-  resolverIdx: number,
-  language: Language,
-  resolversWithAnchorHit: Set<number> | null,
-): boolean {
+function resolverMatchesFile(args: {
+  resolver: FrameworkResolver;
+  resolverIdx: number;
+  language: Language;
+  resolversWithAnchorHit: Set<number> | null;
+}): boolean {
+  const { resolver, resolverIdx, language, resolversWithAnchorHit } = args;
   if (resolver.languages && !resolver.languages.includes(language)) return false;
   return !(
     resolver.anchors &&
@@ -1092,7 +1095,7 @@ function eoRunFrameworkExtractors(
   const resolversWithAnchorHit = collectResolversWithAnchorHit(getAnchorAutomaton(resolvers), content);
   for (let resolverIdx = 0; resolverIdx < resolvers.length; resolverIdx++) {
     const resolver = resolvers[resolverIdx]!;
-    if (!resolverMatchesFile(resolver, resolverIdx, language, resolversWithAnchorHit)) continue;
+    if (!resolverMatchesFile({ resolver, resolverIdx, language, resolversWithAnchorHit })) continue;
     // F#62 — `extract` (richer) wins over `extractNodes` (legacy) when
     // both are defined. The orchestrator does not call both for the
     // same file; resolvers that want refs implement `extract`, those

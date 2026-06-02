@@ -52,7 +52,8 @@ interface ReExportEdge {
 async function buildReExportEdges(ctx: IndexHookContext, files: FileTarget[]): Promise<ReExportEdge[]> {
   const edges: ReExportEdge[] = [];
   let processed = 0;
-  for (const file of files) {
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i]!;
     edges.push(...buildReExportEdgesForFile(ctx, file));
     // B24 (2026-05-24) — cooperative yield. See edge-resolution-helpers.ts.
     if (++processed % PER_FILE_YIELD_INTERVAL === 0) await yieldToEventLoop();

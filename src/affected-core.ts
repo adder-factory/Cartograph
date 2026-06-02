@@ -154,7 +154,7 @@ export function findAffectedTests(graph: FileDependentsSource, input: AffectedCo
       affectedTests.add(file);
       continue;
     }
-    collectAffectedDependents(graph, input, file, { affectedTests, allDependents, barrelsReached });
+    collectAffectedDependents({ graph, input, file, out: { affectedTests, allDependents, barrelsReached } });
   }
   return {
     affectedTests,
@@ -163,16 +163,17 @@ export function findAffectedTests(graph: FileDependentsSource, input: AffectedCo
   };
 }
 
-function collectAffectedDependents(
-  graph: FileDependentsSource,
-  input: AffectedCoreInput,
-  file: string,
+function collectAffectedDependents(args: {
+  graph: FileDependentsSource;
+  input: AffectedCoreInput;
+  file: string;
   out: {
     affectedTests: Set<string>;
     allDependents: Set<string>;
     barrelsReached: Set<string>;
-  },
-): void {
+  };
+}): void {
+  const { graph, input, file, out } = args;
   const queue: Array<{ file: string; depth: number }> = [{ file, depth: 0 }];
   const visited = new Set<string>([file]);
   while (queue.length > 0) {

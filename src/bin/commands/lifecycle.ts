@@ -372,8 +372,8 @@ async function runSetupModelStep(projectPath: string, options: { minimal?: boole
     const result = await installRecommendedModels({
       models: modelSet,
       onProgress: ({ model, downloaded, total }) => {
-        const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
-        const pct = total > 0 ? ((downloaded / total) * 100).toFixed(0) : '?';
+        const mb = (n: number): string => (n / BYTES_PER_MIB).toFixed(0);
+        const pct = total > 0 ? ((downloaded / total) * PERCENT_SCALE).toFixed(0) : '?';
         process.stderr.write(`\r  ${model.filename}: ${mb(downloaded)}/${total > 0 ? mb(total) : '?'} MB (${pct}%)   `);
       },
     });
@@ -387,6 +387,9 @@ async function runSetupModelStep(projectPath: string, options: { minimal?: boole
     // have a working subset from a prior run. doctor will catch a true gap.
   }
 }
+
+const BYTES_PER_MIB = 1024 * 1024;
+const PERCENT_SCALE = 100;
 
 async function writeSetupRecommendedConfig(projectPath: string): Promise<void> {
   const { writeRecommendedLlmConfig } = await import('../../installer/recommended-config.js');

@@ -323,7 +323,7 @@ function findMatchingClose(args: FindMatchingCloseArgs): number {
       inString = c;
       continue;
     }
-    depth = updateMatchingDepth(c, depth, openChar, closeChar);
+    depth = updateMatchingDepth({ c, depth, openChar, closeChar });
     if (depth === 0) return i;
   }
   return -1;
@@ -333,7 +333,13 @@ function isStringDelimiter(c: string | undefined): c is string {
   return c === '"' || c === "'" || c === '`';
 }
 
-function updateMatchingDepth(c: string | undefined, depth: number, openChar: string, closeChar: string): number {
+function updateMatchingDepth(args: {
+  c: string | undefined;
+  depth: number;
+  openChar: string;
+  closeChar: string;
+}): number {
+  const { c, depth, openChar, closeChar } = args;
   if (c === openChar) return depth + 1;
   if (c === closeChar) return depth - 1;
   return depth;

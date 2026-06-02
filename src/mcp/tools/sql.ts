@@ -414,18 +414,19 @@ function decorateNoSuchColumnError(
   const suggestions = suggestColumns({ db, badCol, candidateTables: tablesToSearch, k: 3 });
   const lines = [rawMsg];
 
-  appendColumnSuggestions(lines, suggestions, qualifier, targetTable);
+  appendColumnSuggestions({ lines, suggestions, qualifier, targetTable });
   appendColumnSchemaNotes(lines, badCol);
   appendColumnDumpTip(lines, targetTable);
   return lines.join('\n');
 }
 
-function appendColumnSuggestions(
-  lines: string[],
-  suggestions: ReadonlyArray<string>,
-  qualifier: string | undefined,
-  targetTable: string | undefined,
-): void {
+function appendColumnSuggestions(args: {
+  lines: string[];
+  suggestions: ReadonlyArray<string>;
+  qualifier: string | undefined;
+  targetTable: string | undefined;
+}): void {
+  const { lines, suggestions, qualifier, targetTable } = args;
   if (suggestions.length === 0) return;
   const renderedSuggestions = qualifier && targetTable ? suggestions.map((s) => `${qualifier}.${s}`) : suggestions;
   lines.push(`Did you mean: ${renderedSuggestions.join(', ')}?`);

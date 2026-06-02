@@ -984,12 +984,13 @@ function selectSupplementCandidatesQuery(
   );
 }
 
-function appendSupplementRows(
-  rows: NodeRow[],
-  results: SearchResult[],
-  existingIds: Set<string>,
-  baseScore: number,
-): void {
+function appendSupplementRows(args: {
+  rows: NodeRow[];
+  results: SearchResult[];
+  existingIds: Set<string>;
+  baseScore: number;
+}): void {
+  const { rows, results, existingIds, baseScore } = args;
   for (const row of rows) {
     if (existingIds.has(row.id)) continue;
     results.push({ node: rowToNode(row), score: baseScore });
@@ -1024,7 +1025,7 @@ function addSupplementCandidates(qb: QueryBuilder, p: SupplementParams): void {
   for (const v of values) {
     const value = predicate === 'eq' ? v : `%${v}%`;
     const rows = stmt.all({ value, kindsJson, languagesJson });
-    appendSupplementRows(rows, results, existingIds, baseScore);
+    appendSupplementRows({ rows, results, existingIds, baseScore });
   }
 }
 

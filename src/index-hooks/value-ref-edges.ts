@@ -67,6 +67,13 @@ import {
 } from './edge-resolution-helpers.js';
 import { getSymbolNameIndexByFile } from '../db/queries-search.js';
 import { buildValueRefEdgesInWorkers, shouldUseValueRefWorkers } from './value-ref-edges-pool.js';
+import {
+  CALL_ARG_RE,
+  PAIR_VALUE_RE,
+  SUPPORTED_VALUE_REF_LANGS,
+  collectValueRefMatches,
+  type ValueRefEdgeRecord,
+} from './value-ref-edge-scan.js';
 
 /** Algo-version SHA derived from this file's source. A change to the
  *  scanning regexes / keyword filter / resolution-gate behaviour
@@ -77,123 +84,7 @@ import { buildValueRefEdgesInWorkers, shouldUseValueRefWorkers } from './value-r
 export const VALUE_REF_EDGES_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./value-ref-edges']);
 const LAST_MINED_KEY = 'last_mined_value_ref_edges_algo_version';
 
-const SUPPORTED_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
-
-/**
- * JS / TS reserved keywords that LOOK like function calls / object
- * keys but are not user-defined symbols. Filtering these here keeps
- * us from probing the symbol table for every `if (x)` / `return (x)`
- * site (the cheap reject path before the DB lookup).
- *
- * Not exhaustive — only the high-frequency forms that would otherwise
- * dominate the false-positive set. A keyword we miss just means an
- * extra DB lookup that returns null; the edge isn't emitted either
- * way, so the consequence is wasted work, not wrong data.
- */
-const JS_RESERVED_HEAD: ReadonlySet<string> = new Set([
-  'if',
-  'while',
-  'for',
-  'switch',
-  'catch',
-  'return',
-  'typeof',
-  'await',
-  'new',
-  'delete',
-  'void',
-  'in',
-  'of',
-  'instanceof',
-  'yield',
-  'throw',
-  'function',
-  'class',
-  'extends',
-  'implements',
-  'static',
-  'async',
-  'super',
-  'this',
-  'true',
-  'false',
-  'null',
-  'undefined',
-  'import',
-  'export',
-  'from',
-  'as',
-  'default',
-  'const',
-  'let',
-  'var',
-  'do',
-  'else',
-  'finally',
-  'try',
-  'with',
-  'break',
-  'continue',
-  'case',
-]);
-
-/** Bound on `\s` runs inside the regex lookbehinds + lookaheads.
- *  V8's variable-length lookbehind walks BACKWARDS across the entire
- *  possible `\s*` span at every candidate position. On pathological
- *  inputs — a `\n`-heavy 3.5MB file (`tests/cases/fourslash/reallyLargeFile.ts`
- *  in microsoft/TypeScript) or a 4.2MB file with 16KB lines and no
- *  anchor chars — the unbounded `\s*` form goes ~O(n × max_run_length),
- *  hanging a worker past the 120s per-worker timeout and silently
- *  dropping the survivor edges across the next sync (closed
- *  separately via the algo-version-stamp gate in `refresh()`).
- *  Empirically (2026-05-24c bench/probe-worker-db-init investigation),
- *  bounding the `\s` runs to {0,200} fixes the pathology while
- *  preserving multi-line capability — 200 chars of whitespace covers
- *  any realistic indented `{ key:\n  value }` multi-line form. On
- *  `src/compiler/checker.ts` (3.15MB, ~22K matches) the bounded form
- *  runs in 240ms vs ~865ms unbounded; on the 3.5MB hang victim it
- *  runs in 1.5s instead of hanging forever. */
-const MAX_WS_RUN = 200;
-const WS = String.raw`\s{0,${MAX_WS_RUN}}`;
-
-/**
- * Capture a bare identifier that appears as a CALL ARGUMENT. The
- * lookbehind anchors on `(` (first arg) or `,` (subsequent args) and
- * the lookahead anchors on `,` or `)`. The identifier therefore can't
- * be part of a member expression / method call / arithmetic — just a
- * value-position identifier passed to a function.
- *
- *   foo(bar)        → captures `bar`
- *   foo(a, bar, c)  → captures `a`, `bar`, `c`
- *   foo(a.b)        → does NOT capture `a` (next char is `.`)
- *   foo(a())        → does NOT capture `a` (next char is `(`)
- *   foo(a + b)      → does NOT capture (next char is space-then-`+`)
- */
-const CALL_ARG_RE = new RegExp(`(?<=[(,]${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,)])`, 'g');
-
-/**
- * Capture a bare identifier that appears as an OBJECT-LITERAL PROPERTY
- * VALUE (the value side of `key: value`). Excludes shorthand
- * `{ foo }` — that's covered by the existing `captureBodyConstantReads`
- * + identifier-as-arg patterns when consumed at the call site.
- *
- *   { foo: bar }    → captures `bar`
- *   { foo: bar, }   → captures `bar`
- *   { foo: 'str' }  → does NOT capture (value is a literal)
- *   { foo: bar() }  → does NOT capture (next char is `(`)
- *   { foo: a.b }    → does NOT capture (next char is `.`)
- *   { foo }         → does NOT capture (no colon)
- */
-const PAIR_VALUE_RE = new RegExp(
-  `(?<=[{,]${WS}[a-zA-Z_$][a-zA-Z_$0-9]{0,${MAX_WS_RUN}}${WS}:${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,}])`,
-  'g',
-);
-
-interface ValueRefEdge {
-  source: string;
-  target: string;
-  kind: 'references';
-}
+type ValueRefEdge = ValueRefEdgeRecord;
 
 async function refresh(
   ctx: IndexHookContext,
@@ -263,7 +154,7 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
   const edges: ValueRefEdge[] = [];
   let processed = 0;
   for (const file of files) {
-    if (!SUPPORTED_LANGS.has(file.language)) continue;
+    if (!SUPPORTED_VALUE_REF_LANGS.has(file.language)) continue;
     const content = readFileSafe(path.join(ctx.projectRoot, file.path));
     if (!content) continue;
     const cleaned = stripJsComments(content);
@@ -276,48 +167,8 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
   return { edges, isPartial: false };
 }
 
-/** Per-file scan context passed to {@link collectMatches} so the
- *  helper can share dedupe state across the two regex passes. Bundles
- *  the params instead of taking 7 positional args (long_parameter_list
- *  error threshold is ≥7; the *Args interface is the codebase pattern
- *  for "this helper needs a wide call signature"). */
-interface CollectMatchesArgs {
-  cleaned: string;
-  re: RegExp;
-  fileNodeId: string;
-  /** B27 (2026-05-24) — names already attempted in this file.
-   *  Shared across both regex passes so the same identifier
-   *  matching from CALL_ARG_RE then PAIR_VALUE_RE skips the second
-   *  lookup. */
-  seenNames: Set<string>;
-  /** Tracks (fileNodeId → targetId) pairs already emitted — kept
-   *  for defensive idempotency in the rare case where two
-   *  different name-strings resolve to the same target id (e.g.
-   *  re-export aliases pointing at the same symbol). */
-  seen: Set<string>;
-  edges: ValueRefEdge[];
-  /** B37 (2026-05-25) — per-file `name → id` map fetched ONCE before
-   *  the regex passes. Replaces the per-name `lookupSymbolByNameInFile`
-   *  DB call with an in-memory Map.get(). 30× fewer DB calls on TS-
-   *  scale corpora (~63s → ~few seconds for the hook wall). */
-  nameIndex: ReadonlyMap<string, string>;
-}
-
 /** Run both regex passes against one file's stripped source and
- *  push (source, target) `references` edges into `edges`, deduping
- *  per file so an identifier passed N times produces ONE edge.
- *
- *  B27 (2026-05-24) — `seenNames` per-file dedup keeps the same
- *  identifier matching N times in a file (typical: `log` / `parse`
- *  / `process` repeated ~50× per file) from being looked up N times.
- *  Post-B37 the lookup is an in-memory Map.get(), but skipping the
- *  set membership check is still cheaper than re-looking-up.
- *
- *  B37 (2026-05-25) — the lookup is now an in-memory Map.get()
- *  against a per-file `nameIndex` pre-fetched ONCE before the regex
- *  passes; previously every unique name triggered a per-call DB
- *  round-trip. The original `seen` Set stays as a defensive
- *  target-id-level dedup for the cross-name-collision edge case. */
+ *  push (source, target) `references` edges into `edges`. */
 function collectEdgesFromFile(args: {
   ctx: IndexHookContext;
   filePath: string;
@@ -336,35 +187,8 @@ function collectEdgesFromFile(args: {
   // passes still run but exit cheaply.
   const nameIndex = getSymbolNameIndexByFile(ctx.queries, filePath);
   const baseArgs = { cleaned, fileNodeId, seenNames, seen, edges, nameIndex };
-  collectMatches({ ...baseArgs, re: CALL_ARG_RE });
-  collectMatches({ ...baseArgs, re: PAIR_VALUE_RE });
-}
-
-function collectMatches(args: CollectMatchesArgs): void {
-  const { cleaned, re, fileNodeId, seenNames, seen, edges, nameIndex } = args;
-  re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(cleaned)) !== null) {
-    const name = m[1];
-    if (!name || JS_RESERVED_HEAD.has(name)) continue;
-    // B27 (2026-05-24) — name-level dedup BEFORE the lookup. Same
-    // identifier matching N times in a file used to trigger N
-    // lookups; now triggers 1. Still relevant post-B37 (the lookup
-    // is in-memory but the dedup-set check is still cheaper).
-    if (seenNames.has(name)) continue;
-    seenNames.add(name);
-    // Symbol-resolution gate: only emit an edge when the captured
-    // name resolves to a symbol declared in the same file. This
-    // prunes the regex's natural false-positive set (parameter
-    // names, local variables) down to "names that match a real
-    // declaration in scope" — exactly what the dead-code rule needs.
-    const targetId = nameIndex.get(name);
-    if (!targetId) continue;
-    const key = `${fileNodeId}->${targetId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    edges.push({ source: fileNodeId, target: targetId, kind: 'references' });
-  }
+  collectValueRefMatches({ ...baseArgs, re: CALL_ARG_RE });
+  collectValueRefMatches({ ...baseArgs, re: PAIR_VALUE_RE });
 }
 
 export const HOOK: IndexHook = {

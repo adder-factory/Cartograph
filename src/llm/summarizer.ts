@@ -848,7 +848,7 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
     const sym = candidates[i];
     if (!sym) break;
 
-    const pendingItem = summaryPreparePendingItem(ctx, fileContentCache, projectRoot, sym);
+    const pendingItem = summaryPreparePendingItem({ ctx, fileContentCache, projectRoot, sym });
     if (!pendingItem) continue;
 
     // Lever C — cache MISS: honour the eager-limit. Priority-queue
@@ -865,7 +865,7 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
     // next pass — but a future "resume exactly where we stopped"
     // feature must account for these skipped-past slots, not assume
     // `counters.next` marks a clean boundary.
-    if (!summaryClaimMissBudget(counters, prioritySet, sym.id, budget)) break;
+    if (!summaryClaimMissBudget({ counters, prioritySet, symbolId: sym.id, budget })) break;
 
     pending.push(pendingItem);
     if (pending.length >= batchSize) {
@@ -879,24 +879,26 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
   }
 }
 
-function summaryClaimMissBudget(
-  counters: SummarizerCounters,
-  prioritySet: Set<string>,
-  symbolId: string,
-  budget: number,
-): boolean {
+function summaryClaimMissBudget(args: {
+  counters: SummarizerCounters;
+  prioritySet: Set<string>;
+  symbolId: string;
+  budget: number;
+}): boolean {
+  const { counters, prioritySet, symbolId, budget } = args;
   if (prioritySet.has(symbolId)) return true;
   if (counters.missesClaimed >= budget) return false;
   counters.missesClaimed++;
   return true;
 }
 
-function summaryPreparePendingItem(
-  ctx: SummarizerCallContext,
-  fileContentCache: Map<string, string[] | null>,
-  projectRoot: string,
-  sym: Node,
-): PendingItem | null {
+function summaryPreparePendingItem(args: {
+  ctx: SummarizerCallContext;
+  fileContentCache: Map<string, string[] | null>;
+  projectRoot: string;
+  sym: Node;
+}): PendingItem | null {
+  const { ctx, fileContentCache, projectRoot, sym } = args;
   const body = summaryReadBodyLines(fileContentCache, projectRoot, sym);
   if (!body) {
     ctx.counters.errors++;
@@ -940,7 +942,8 @@ async function summaryFlushBatch(state: SummarizerWorkerState, batch: PendingIte
 
   if (await summaryTryBatchSummarize(ctx, batch)) return;
 
-  for (const item of batch) {
+  for (let i = 0; i < batch.length; i++) {
+    const item = batch[i]!;
     if (options.signal?.aborted) return;
     await summaryGenerateSingle(ctx, item);
   }

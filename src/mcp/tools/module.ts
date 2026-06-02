@@ -92,12 +92,12 @@ function accumulateEdgeCounts(args: AccumulateEdgeCountsArgs): {
   let inboundEdges = 0;
   for (const f of dirFiles) {
     const deps = cg.internals.graphManager.getFileDependencies(f.path, indexedFiles);
-    const depCounts = countDependencyEdges(f.path, deps, dirPath, dirPrefix);
+    const depCounts = countDependencyEdges({ filePath: f.path, deps, dirPath, dirPrefix });
     intraDirEdges += depCounts.intraDirEdges;
     outboundEdges += depCounts.outboundEdges;
 
     const dependents = cg.internals.graphManager.getFileDependents(f.path);
-    inboundEdges += countInboundEdges(f.path, dependents, dirPath, dirPrefix);
+    inboundEdges += countInboundEdges({ filePath: f.path, dependents, dirPath, dirPrefix });
   }
   return { intraDirEdges, outboundEdges, inboundEdges };
 }
@@ -106,12 +106,13 @@ function isPathInDirectory(path: string, dirPath: string, dirPrefix: string): bo
   return path.startsWith(dirPrefix) || path === dirPath;
 }
 
-function countDependencyEdges(
-  filePath: string,
-  deps: ReadonlyArray<string>,
-  dirPath: string,
-  dirPrefix: string,
-): { intraDirEdges: number; outboundEdges: number } {
+function countDependencyEdges(args: {
+  filePath: string;
+  deps: ReadonlyArray<string>;
+  dirPath: string;
+  dirPrefix: string;
+}): { intraDirEdges: number; outboundEdges: number } {
+  const { filePath, deps, dirPath, dirPrefix } = args;
   let intraDirEdges = 0;
   let outboundEdges = 0;
   for (const depPath of deps) {
@@ -122,12 +123,13 @@ function countDependencyEdges(
   return { intraDirEdges, outboundEdges };
 }
 
-function countInboundEdges(
-  filePath: string,
-  dependents: ReadonlyArray<string>,
-  dirPath: string,
-  dirPrefix: string,
-): number {
+function countInboundEdges(args: {
+  filePath: string;
+  dependents: ReadonlyArray<string>;
+  dirPath: string;
+  dirPrefix: string;
+}): number {
+  const { filePath, dependents, dirPath, dirPrefix } = args;
   let inboundEdges = 0;
   for (const dependentPath of dependents) {
     if (dependentPath !== filePath && !isPathInDirectory(dependentPath, dirPath, dirPrefix)) inboundEdges++;

@@ -167,37 +167,50 @@ function parseDescriptors(s: string): Descriptor[] | null {
     const ch = s[i]!;
     // Parameter `(name)` / type-parameter `[name]` — bracket-led forms.
     if (ch === '(' || ch === '[') {
-      const after = appendBracketDescriptor(out, s, i, ch);
+      const after = appendBracketDescriptor({ out, s, i, ch });
       if (after === null) return null;
       i = after;
       continue;
     }
     const [name, afterName] = readName(s, i);
     if (afterName < 0 || afterName >= s.length) return null;
-    const after = appendNamedDescriptor(out, s, name, afterName);
+    const after = appendNamedDescriptor({ out, s, name, afterName });
     if (after === null) return null;
     i = after;
   }
   return out.length > 0 ? out : null;
 }
 
-function appendBracketDescriptor(out: Descriptor[], s: string, i: number, ch: '(' | '['): number | null {
+function appendBracketDescriptor(args: { out: Descriptor[]; s: string; i: number; ch: '(' | '[' }): number | null {
+  const { out, s, i, ch } = args;
   const parsed = parseBracketDescriptor(s, i, ch);
   if (!parsed) return null;
   out.push(parsed.descriptor);
   return parsed.after;
 }
 
-function appendMethodDescriptor(out: Descriptor[], s: string, name: string, afterName: number): number | null {
+function appendMethodDescriptor(args: {
+  out: Descriptor[];
+  s: string;
+  name: string;
+  afterName: number;
+}): number | null {
+  const { out, s, name, afterName } = args;
   const parsed = parseMethodDescriptor(s, name, afterName);
   if (!parsed) return null;
   out.push(parsed.descriptor);
   return parsed.after;
 }
 
-function appendNamedDescriptor(out: Descriptor[], s: string, name: string, afterName: number): number | null {
+function appendNamedDescriptor(args: {
+  out: Descriptor[];
+  s: string;
+  name: string;
+  afterName: number;
+}): number | null {
+  const { out, s, name, afterName } = args;
   const suffixChar = s[afterName]!;
-  if (suffixChar === '(') return appendMethodDescriptor(out, s, name, afterName);
+  if (suffixChar === '(') return appendMethodDescriptor({ out, s, name, afterName });
   const suffix = SUFFIX_BY_CHAR[suffixChar];
   if (suffix === undefined) return null;
   out.push({ name, suffix });

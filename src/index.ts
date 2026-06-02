@@ -496,33 +496,10 @@ export class CartographCore {
       // first hook phase, not here.
       hookWorker: new HookWorkerClient(),
     };
-    // Subsystem subclasses need a fully-typed `Cartograph` reference
-    // (they call `cg.sync()` and other methods only declared on the
-    // Cartograph subclass), so initialization is deferred to a
-    // subclass-override factory. Calling `this.makeSubsystems()` here
-    // dispatches to the subclass implementation per JS prototype
-    // semantics, where `this` is correctly typed as `Cartograph`
-    // without needing a cast.
-    const subsystems = this.makeSubsystems();
+    const subsystems = createCartographSubsystems(this);
     this.watcher = subsystems.watcher;
     this.llm = subsystems.llm;
     this.stats = subsystems.stats;
-  }
-
-  /**
-   * Build the subsystem instances. Overridden by {@link Cartograph} so
-   * `this` inside the override is typed as `Cartograph` — eliminating
-   * the parent-vs-subclass circular-ref cast we previously needed.
-   * Called from this constructor; subclass override runs even though
-   * the subclass's own constructor body hasn't yet — JS dispatches
-   * `this.method()` to the subclass via prototype.
-   */
-  protected makeSubsystems(): {
-    watcher: CartographWatcher;
-    llm: CartographLlmService;
-    stats: CartographStats;
-  } {
-    throw new Error('CartographCore is abstract — instantiate the Cartograph subclass instead.');
   }
 
   /** Close the Cartograph instance and release resources. */
@@ -598,6 +575,19 @@ export function cgRefreshConfigFromDisk(cg: CartographCore): void {
   }
 }
 
+function createCartographSubsystems(cg: CartographCore): {
+  watcher: CartographWatcher;
+  llm: CartographLlmService;
+  stats: CartographStats;
+} {
+  const cartograph = cg as Cartograph;
+  return {
+    watcher: new CartographWatcher(cartograph),
+    llm: new CartographLlmService(cartograph),
+    stats: new CartographStats(cartograph),
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Cartograph — 14 members (6 static + 8 instance)
 // Extends CartographCore without adding more fields; all new members are
@@ -610,25 +600,6 @@ export function cgRefreshConfigFromDisk(cg: CartographCore): void {
  * Provides the primary interface for interacting with the code knowledge graph.
  */
 export class Cartograph extends CartographCore {
-  /**
-   * Subsystem factory — override of {@link CartographCore.makeSubsystems}.
-   * Runs from the parent constructor via prototype dispatch; `this`
-   * here is typed as `Cartograph` so the subsystem refs can be passed
-   * directly without any downcast (closing the previous
-   * `as unknown as Cartograph` triple per G26 `ts_any_cast` cleanup).
-   */
-  protected override makeSubsystems(): {
-    watcher: CartographWatcher;
-    llm: CartographLlmService;
-    stats: CartographStats;
-  } {
-    return {
-      watcher: new CartographWatcher(this),
-      llm: new CartographLlmService(this),
-      stats: new CartographStats(this),
-    };
-  }
-
   // ===========================================================================
   // Static Lifecycle Methods
   // ===========================================================================

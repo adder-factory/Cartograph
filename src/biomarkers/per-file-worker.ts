@@ -148,7 +148,8 @@ async function main(): Promise<void> {
     try {
       await preloadGrammarsForBatch(init.batch, queries, loadGrammarsForLanguages);
       const results: PerFileResult[] = [];
-      for (const item of init.batch) {
+      for (let i = 0; i < init.batch.length; i++) {
+        const item = init.batch[i]!;
         const result = await analyseOneFile({
           relPath: item.relPath,
           currentHash: item.currentHash,

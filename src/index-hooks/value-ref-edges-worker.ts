@@ -34,6 +34,13 @@
  */
 
 import { parentPort, threadId, workerData } from 'node:worker_threads';
+import {
+  CALL_ARG_RE,
+  PAIR_VALUE_RE,
+  SUPPORTED_VALUE_REF_LANGS,
+  collectValueRefMatches,
+  type ValueRefEdgeRecord,
+} from './value-ref-edge-scan.js';
 
 /** Diagnostic per-file tracing. Off by default — opt in via env var
  *  `CARTOGRAPH_VALUE_REF_VERBOSE=1` (typically only when chasing the
@@ -44,12 +51,6 @@ import { parentPort, threadId, workerData } from 'node:worker_threads';
  *  worker leaves the last "enter" line in the captured log — which
  *  is enough to identify which file blocked the worker. */
 const VERBOSE = process.env['CARTOGRAPH_VALUE_REF_VERBOSE'] === '1';
-
-export interface ValueRefEdgeRecord {
-  source: string;
-  target: string;
-  kind: 'references';
-}
 
 interface ValueRefWorkerInit {
   readonly dbPath: string;
@@ -144,7 +145,7 @@ async function main(): Promise<void> {
 }
 
 function collectEdgesFromWorkerFile(file: ValueRefWorkerInit['fileRecords'][number], deps: WorkerFileDeps): void {
-  if (!SUPPORTED_LANGS.has(file.language)) return;
+  if (!SUPPORTED_VALUE_REF_LANGS.has(file.language)) return;
   const fileT0 = VERBOSE ? Date.now() : 0;
   if (VERBOSE) {
     // Enter line written BEFORE any work — if the worker hangs in any
@@ -161,9 +162,9 @@ function collectEdgesFromWorkerFile(file: ValueRefWorkerInit['fileRecords'][numb
   const seen = new Set<string>();
   const nameIndex = deps.queries.getSymbolNameIndexByFile(file.path);
   const baseArgs = { cleaned, fileNodeId, seenNames, seen, edges: deps.edges, nameIndex };
-  collectMatches({ ...baseArgs, re: CALL_ARG_RE });
+  collectValueRefMatches({ ...baseArgs, re: CALL_ARG_RE });
   const tAfterRe1 = VERBOSE ? Date.now() : 0;
-  collectMatches({ ...baseArgs, re: PAIR_VALUE_RE });
+  collectValueRefMatches({ ...baseArgs, re: PAIR_VALUE_RE });
   logVerboseFileTiming({ filePath: file.path, content, cleaned, fileT0, tAfterRead, tAfterStrip, tAfterRe1 });
 }
 
@@ -189,107 +190,5 @@ function logVerboseFileTiming(args: VerboseFileTimingArgs): void {
       `re2=${tEnd - tAfterRe1}ms`,
   );
 }
-
-/** Args bundle for {@link collectMatches}. Mirrors the main-thread
- *  path's `CollectMatchesArgs` shape — `*Args` bundle is the codebase
- *  pattern for helpers that would otherwise trip `long_parameter_list`
- *  (≥7 params is the error tier). */
-interface WorkerCollectMatchesArgs {
-  cleaned: string;
-  re: RegExp;
-  fileNodeId: string;
-  seenNames: Set<string>;
-  /** Target-id-level dedup keyed by `${fileNodeId}->${targetId}`. Catches
-   *  the rare case where two different name-strings resolve to the same
-   *  target id (e.g. re-export aliases). Mirrors the main path. */
-  seen: Set<string>;
-  edges: ValueRefEdgeRecord[];
-  /** B37 (2026-05-25) — per-file `name → id` map fetched once before
-   *  the regex passes. Replaces the per-name `getNodesByNameAndFile`
-   *  DB call with an in-memory Map.get(). Mirrors the main path. */
-  nameIndex: ReadonlyMap<string, string>;
-}
-
-/** Mirrors `collectMatches` in `value-ref-edges.ts` — kept in lockstep
- *  with the main-thread fallback path. The B27 name-dedup is preserved
- *  here so per-worker DB calls stay at "per unique identifier per file"
- *  not "per regex match". */
-function collectMatches(args: WorkerCollectMatchesArgs): void {
-  const { cleaned, re, fileNodeId, seenNames, seen, edges, nameIndex } = args;
-  re.lastIndex = 0;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(cleaned)) !== null) {
-    const name = m[1];
-    if (!name || JS_RESERVED_HEAD.has(name)) continue;
-    if (seenNames.has(name)) continue;
-    seenNames.add(name);
-    const targetId = nameIndex.get(name);
-    if (!targetId) continue;
-    const key = `${fileNodeId}->${targetId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    edges.push({ source: fileNodeId, target: targetId, kind: 'references' });
-  }
-}
-
-// Mirrors the main-thread constants so the worker stays self-contained.
-// Keep in lockstep with `value-ref-edges.ts` — a divergence here ships
-// silent extraction drift between the in-main and worker paths. See
-// the bounded-lookbehind rationale in value-ref-edges.ts (MAX_WS_RUN
-// comment) for why these regexes cap whitespace runs at {0,200}.
-const SUPPORTED_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
-const MAX_WS_RUN = 200;
-const WS = String.raw`\s{0,${MAX_WS_RUN}}`;
-const CALL_ARG_RE = new RegExp(`(?<=[(,]${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,)])`, 'g');
-const PAIR_VALUE_RE = new RegExp(
-  `(?<=[{,]${WS}[a-zA-Z_$][a-zA-Z_$0-9]{0,${MAX_WS_RUN}}${WS}:${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,}])`,
-  'g',
-);
-const JS_RESERVED_HEAD: ReadonlySet<string> = new Set([
-  'if',
-  'while',
-  'for',
-  'switch',
-  'catch',
-  'return',
-  'typeof',
-  'await',
-  'new',
-  'delete',
-  'void',
-  'in',
-  'of',
-  'instanceof',
-  'yield',
-  'throw',
-  'function',
-  'class',
-  'extends',
-  'implements',
-  'static',
-  'async',
-  'super',
-  'this',
-  'true',
-  'false',
-  'null',
-  'undefined',
-  'import',
-  'export',
-  'from',
-  'as',
-  'default',
-  'const',
-  'let',
-  'var',
-  'do',
-  'else',
-  'finally',
-  'try',
-  'with',
-  'break',
-  'continue',
-  'case',
-]);
 
 await main();

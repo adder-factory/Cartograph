@@ -296,7 +296,12 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
     // specific paths beyond the source tree are out of scope — they'd
     // require knowing the build's `-I` flags, which cartograph doesn't
     // have).
-    const quotedIncludeHit = resolveQuotedInclude(spec, importingFileAbs, projectRootAbs, opts.cIncludeStyle);
+    const quotedIncludeHit = resolveQuotedInclude({
+      spec,
+      importingFileAbs,
+      projectRootAbs,
+      cIncludeStyle: opts.cIncludeStyle,
+    });
     if (quotedIncludeHit) return quotedIncludeHit;
     return { kind: 'bare', extMissing: false };
   }
@@ -315,12 +320,13 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
   );
 }
 
-function resolveQuotedInclude(
-  spec: string,
-  importingFileAbs: string,
-  projectRootAbs: string,
-  cIncludeStyle: ClassifyImportOpts['cIncludeStyle'],
-): ImportClassification | null {
+function resolveQuotedInclude(args: {
+  spec: string;
+  importingFileAbs: string;
+  projectRootAbs: string;
+  cIncludeStyle: ClassifyImportOpts['cIncludeStyle'];
+}): ImportClassification | null {
+  const { spec, importingFileAbs, projectRootAbs, cIncludeStyle } = args;
   if (cIncludeStyle !== 'quoted') return null;
   const sameDir = path.resolve(path.dirname(importingFileAbs), spec);
   const sameDirHit = resolveDirectFileHit(sameDir, false);

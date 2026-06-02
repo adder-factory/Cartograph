@@ -928,7 +928,7 @@ function hasFunctionBodyOverThreshold(ext: TreeSitterExtractor, root: SyntaxNode
   const stack: SyntaxNode[] = [root];
   while (stack.length > 0) {
     const node = stack.pop()!;
-    if (nodeBodyExceedsThreshold(ext, node, fnTypes, threshold)) return true;
+    if (nodeBodyExceedsThreshold({ ext, node, fnTypes, threshold })) return true;
     for (const child of node.namedChildren) {
       if (child) stack.push(child);
     }
@@ -936,12 +936,13 @@ function hasFunctionBodyOverThreshold(ext: TreeSitterExtractor, root: SyntaxNode
   return false;
 }
 
-function nodeBodyExceedsThreshold(
-  ext: TreeSitterExtractor,
-  node: SyntaxNode,
-  fnTypes: ReadonlySet<string>,
-  threshold: number,
-): boolean {
+function nodeBodyExceedsThreshold(args: {
+  ext: TreeSitterExtractor;
+  node: SyntaxNode;
+  fnTypes: ReadonlySet<string>;
+  threshold: number;
+}): boolean {
+  const { ext, node, fnTypes, threshold } = args;
   if (!fnTypes.has(node.type)) return false;
   const body = resolveNodeBody(ext, node);
   if (!body) return false;

@@ -40,7 +40,12 @@ describe('read command internals', () => {
     fs.writeFileSync(diffPath, 'diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n');
     try {
       await expect(
-        read.buildAtRangeArgs('src/a.ts', '10', '12', { limit: '5', compact: true, fields: 'name,path' }),
+        read.buildAtRangeArgs({
+          file: 'src/a.ts',
+          startLine: '10',
+          endLine: '12',
+          options: { limit: '5', compact: true, fields: 'name,path' },
+        }),
       ).resolves.toMatchObject({
         file: 'src/a.ts',
         startLine: 10,
@@ -50,18 +55,30 @@ describe('read command internals', () => {
         fields: ['name', 'path'],
       });
       await expect(
-        read.buildAtRangeArgs(undefined, undefined, undefined, { ranges: 'src/a.ts:1-2,src/b.ts:3-4' }),
+        read.buildAtRangeArgs({
+          file: undefined,
+          startLine: undefined,
+          endLine: undefined,
+          options: { ranges: 'src/a.ts:1-2,src/b.ts:3-4' },
+        }),
       ).resolves.toMatchObject({
         ranges: [
           { file: 'src/a.ts', startLine: 1, endLine: 2 },
           { file: 'src/b.ts', startLine: 3, endLine: 4 },
         ],
       });
-      await expect(read.buildAtRangeArgs(undefined, undefined, undefined, { diff: diffPath })).resolves.toMatchObject({
+      await expect(
+        read.buildAtRangeArgs({ file: undefined, startLine: undefined, endLine: undefined, options: { diff: diffPath } }),
+      ).resolves.toMatchObject({
         diff: expect.stringContaining('+new'),
       });
       await expect(
-        read.buildAtRangeArgs(undefined, undefined, undefined, { diff: '@@ -1 +1 @@\n-old\n+new' }),
+        read.buildAtRangeArgs({
+          file: undefined,
+          startLine: undefined,
+          endLine: undefined,
+          options: { diff: '@@ -1 +1 @@\n-old\n+new' },
+        }),
       ).resolves.toMatchObject({ diff: expect.stringContaining('-old') });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

@@ -12,6 +12,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { errMsg, logWarn } from '../../errors.js';
+import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 
 /**
  * Resolve the user's home directory.
@@ -114,6 +115,17 @@ export function atomicWriteFileSync(filePath: string, content: string): void {
     safeUnlinkSync(tmpPath);
     throw err;
   }
+}
+
+export function writeMarkedInstructionsFile(filePath: string): 'created' | 'updated' | 'unchanged' {
+  const action = replaceOrAppendMarkedSection({
+    filePath,
+    body: INSTRUCTIONS_TEMPLATE,
+    startMarker: CARTOGRAPH_SECTION_START,
+    endMarker: CARTOGRAPH_SECTION_END,
+  });
+  if (action === 'created' || action === 'unchanged') return action;
+  return 'updated';
 }
 
 /**

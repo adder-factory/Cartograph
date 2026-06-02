@@ -152,7 +152,11 @@ function parseRangeSpecs(raw: string): Array<{ file: string; startLine: number; 
       error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
       process.exit(1);
     }
-    ranges.push({ file: m[1]!, startLine: Number.parseInt(m[2]!, 10), endLine: Number.parseInt(m[3]!, 10) });
+    ranges.push({
+      file: m[1]!,
+      startLine: Number.parseInt(m[2]!, DECIMAL_RADIX),
+      endLine: Number.parseInt(m[3]!, DECIMAL_RADIX),
+    });
   }
   if (ranges.length === 0) {
     error('--ranges had no valid `file:startLine-endLine` specs.');
@@ -161,12 +165,13 @@ function parseRangeSpecs(raw: string): Array<{ file: string; startLine: number; 
   return ranges;
 }
 
-async function buildAtRangeArgs(
-  file: string | undefined,
-  startLine: string | undefined,
-  endLine: string | undefined,
-  options: AtRangeOptions,
-): Promise<Record<string, unknown> | null> {
+async function buildAtRangeArgs(params: {
+  file: string | undefined;
+  startLine: string | undefined;
+  endLine: string | undefined;
+  options: AtRangeOptions;
+}): Promise<Record<string, unknown> | null> {
+  const { file, startLine, endLine, options } = params;
   const args: Record<string, unknown> = {};
   if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '20', optionName: '--limit', opts: { min: 1 } }))
     return null;
@@ -909,9 +914,12 @@ function printFileSummary(files: FileListing, maxDepth: number | undefined, dir:
     const label = row.dir === null ? '(root)' : `${row.dir}/`;
     const filesText = chalk.dim(`${row.files} files`.padStart(10));
     const symbolsText = chalk.dim(`${row.symbols} symbols`.padStart(14));
-    out(`  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`);
+    out(`  ${chalk.cyan(label.padEnd(SUMMARY_DIR_LABEL_WIDTH))} ${filesText} ${symbolsText}`);
   }
 }
+
+const DECIMAL_RADIX = 10;
+const SUMMARY_DIR_LABEL_WIDTH = 40;
 
 function fileSummaryHeader(dir: string | undefined, totalFiles: number, totalSymbols: number): string {
   const filterPrefix = trimTrailingSlashes(dir);
@@ -969,7 +977,7 @@ program
         fields?: string;
       },
     ) => {
-      const args = await buildAtRangeArgs(file, startLine, endLine, options);
+      const args = await buildAtRangeArgs({ file, startLine, endLine, options });
       if (!args) return;
       await runViaMCP('cartograph_at_range', args, options.projectPath);
     },

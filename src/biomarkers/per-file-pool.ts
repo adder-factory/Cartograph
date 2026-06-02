@@ -19,10 +19,10 @@
  * existing single-thread path; bench A/B escape hatch).
  */
 
-import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { logDebug, errMsg } from '../errors.js';
+import { logDebug } from '../errors.js';
 import { partitionRoundRobin } from '../utils.js';
+import { runWorkerSlice } from '../utils/worker-slice.js';
 import type { PerFileResult, PerFileWorkerReply } from './per-file-worker.js';
 
 /** Below this file count, the in-main streamingDispatch path beats the
@@ -88,50 +88,18 @@ interface RunOneWorkerArgs {
  *  Mirrors G9's `runOneRuleInWorker` shape — settled flag + per-worker
  *  timeout + exit-without-message handling. */
 function runOneWorker(args: RunOneWorkerArgs): Promise<PerFileWorkerReply> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const worker = new Worker(args.workerPath, {
-      workerData: {
-        dbPath: args.dbPath,
-        projectRoot: args.projectRoot,
-        batch: args.batch,
-        nowMs: args.nowMs,
-      },
-    });
-    let settled = false;
-    const settle = (reply: PerFileWorkerReply): void => {
-      if (settled) return;
-      settled = true;
-      resolve(reply);
-    };
-    const timer = setTimeout(() => {
-      logDebug(`biomarkers per-file worker ${args.sliceLabel} exceeded ${args.timeoutMs}ms budget; terminating`);
-      void worker.terminate();
-      settle({
-        ok: false,
-        error: `worker ${args.sliceLabel} timeout after ${args.timeoutMs}ms`,
-      });
-    }, args.timeoutMs);
-    worker.once('message', (raw: PerFileWorkerReply) => {
-      clearTimeout(timer);
-      settle(raw);
-    });
-    worker.once('error', (err) => {
-      clearTimeout(timer);
-      settle({
-        ok: false,
-        error: `worker ${args.sliceLabel} error after ${Date.now() - start}ms: ${errMsg(err)}`,
-      });
-    });
-    worker.once('exit', (code) => {
-      clearTimeout(timer);
-      if (!settled) {
-        settle({
-          ok: false,
-          error: `worker ${args.sliceLabel} exited with code ${code} after ${Date.now() - start}ms before posting a result`,
-        });
-      }
-    });
+  return runWorkerSlice<PerFileWorkerReply>({
+    workerPath: args.workerPath,
+    workerData: {
+      dbPath: args.dbPath,
+      projectRoot: args.projectRoot,
+      batch: args.batch,
+      nowMs: args.nowMs,
+    },
+    timeoutMs: args.timeoutMs,
+    sliceLabel: args.sliceLabel,
+    logPrefix: 'biomarkers per-file',
+    makeErrorReply: (error) => ({ ok: false, error }),
   });
 }
 

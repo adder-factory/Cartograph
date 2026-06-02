@@ -39,11 +39,11 @@
  * `CARTOGRAPH_VALUE_REF_WORKERS=N` / `=0` (0 forces serial).
  */
 
-import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
-import { logDebug, errMsg } from '../errors.js';
 import { partitionRoundRobin } from '../utils.js';
-import type { ValueRefEdgeRecord, ValueRefWorkerReply } from './value-ref-edges-worker.js';
+import { runWorkerSlice } from '../utils/worker-slice.js';
+import type { ValueRefEdgeRecord } from './value-ref-edge-scan.js';
+import type { ValueRefWorkerReply } from './value-ref-edges-worker.js';
 
 /** Below this file count, the in-main sync path beats the worker-spawn
  *  overhead. Tuned for M-series; small projects should never see the
@@ -112,49 +112,17 @@ export interface RunOneWorkerArgs {
  *  @internal — exported for the resilience-path tests; production
  *  callers go through `buildValueRefEdgesInWorkers`. */
 export function runOneWorker(args: RunOneWorkerArgs): Promise<ValueRefWorkerReply> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const worker = new Worker(args.workerPath, {
-      workerData: {
-        dbPath: args.dbPath,
-        projectRoot: args.projectRoot,
-        fileRecords: args.fileRecords,
-      },
-    });
-    let settled = false;
-    const settle = (reply: ValueRefWorkerReply): void => {
-      if (settled) return;
-      settled = true;
-      resolve(reply);
-    };
-    const timer = setTimeout(() => {
-      logDebug(`value-ref-edges: worker ${args.sliceLabel} exceeded ${args.timeoutMs}ms budget; terminating`);
-      void worker.terminate();
-      settle({
-        ok: false,
-        error: `worker ${args.sliceLabel} timeout after ${args.timeoutMs}ms`,
-      });
-    }, args.timeoutMs);
-    worker.once('message', (raw: ValueRefWorkerReply) => {
-      clearTimeout(timer);
-      settle(raw);
-    });
-    worker.once('error', (err) => {
-      clearTimeout(timer);
-      settle({
-        ok: false,
-        error: `worker ${args.sliceLabel} error after ${Date.now() - start}ms: ${errMsg(err)}`,
-      });
-    });
-    worker.once('exit', (code) => {
-      clearTimeout(timer);
-      if (!settled) {
-        settle({
-          ok: false,
-          error: `worker ${args.sliceLabel} exited with code ${code} after ${Date.now() - start}ms before posting a result`,
-        });
-      }
-    });
+  return runWorkerSlice<ValueRefWorkerReply>({
+    workerPath: args.workerPath,
+    workerData: {
+      dbPath: args.dbPath,
+      projectRoot: args.projectRoot,
+      fileRecords: args.fileRecords,
+    },
+    timeoutMs: args.timeoutMs,
+    sliceLabel: args.sliceLabel,
+    logPrefix: 'value-ref-edges:',
+    makeErrorReply: (error) => ({ ok: false, error }),
   });
 }
 

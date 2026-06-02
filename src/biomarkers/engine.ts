@@ -934,7 +934,7 @@ function computeAstWalkMetrics(bodyNode: TsNode, map: LangMap, language: Languag
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     const k = node.type;
-    if (isCountedBranch(node, k, map, language)) cyclomatic++;
+    if (isCountedBranch({ node, nodeType: k, map, language })) cyclomatic++;
     if (map.nesting.has(k)) {
       const newDepth = depth + 1;
       if (newDepth > maxNesting) maxNesting = newDepth;
@@ -957,7 +957,8 @@ function computeAstWalkMetrics(bodyNode: TsNode, map: LangMap, language: Languag
   };
 }
 
-function isCountedBranch(node: TsNode, nodeType: string, map: LangMap, language: Language): boolean {
+function isCountedBranch(args: { node: TsNode; nodeType: string; map: LangMap; language: Language }): boolean {
+  const { node, nodeType, map, language } = args;
   if (!map.branching.has(nodeType)) return false;
   // Go err-nil idiom: `if err != nil { return err }` (and its
   // `== nil` happy-path twin) inflates cyclomatic by +1 per error

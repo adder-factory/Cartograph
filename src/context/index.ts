@@ -1121,7 +1121,8 @@ async function cbExtractCodeBlocks(
 ): Promise<CodeBlock[]> {
   const priorityNodes = collectPriorityCodeBlockNodes(subgraph);
   const blocks: CodeBlock[] = [];
-  for (const node of priorityNodes) {
+  for (let i = 0; i < priorityNodes.length; i++) {
+    const node = priorityNodes[i]!;
     if (blocks.length >= budget.maxBlocks) break;
     const block = await cbTryBuildCodeBlock(st, node, budget.maxBlockSize);
     if (block) blocks.push(block);

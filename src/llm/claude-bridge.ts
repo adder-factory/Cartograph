@@ -194,9 +194,12 @@ export async function findOnPath(bin: string): Promise<string | null> {
   const PATH = process.env['PATH'] ?? '';
   const sep = process.platform === 'win32' ? ';' : ':';
   const exts = process.platform === 'win32' ? (process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT').split(';') : [''];
-  for (const dir of PATH.split(sep)) {
+  const dirs = PATH.split(sep);
+  for (let i = 0; i < dirs.length; i++) {
+    const dir = dirs[i]!;
     if (!dir) continue;
-    for (const ext of exts) {
+    for (let j = 0; j < exts.length; j++) {
+      const ext = exts[j]!;
       const found = await tryExecutableCandidate(path.join(dir, bin + ext));
       if (found) return found;
     }
