@@ -420,23 +420,30 @@ fi
 
 ## MCP Tools
 
-When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible AI assistant:
+When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible AI assistant. Most sessions start with the same small set:
 
-| Tool | Purpose |
-|------|---------|
-| `cartograph_find` | Find symbols by name (`exact`/`fuzzy`/`semantic`/`intent`), by regex content, or by env-var / SQL table refs (`by:` slice + `mode:`) |
-| `cartograph_context` | Build relevant code context for a task |
-| `cartograph_graph` | Navigate the call/dependency graph — callers, callees, blast radius, shortest path, or multi-hop BFS (`direction: 'callers'\|'callees'\|'impact'\|'path'\|'similar'`) |
-| `cartograph_node` | Get details about one symbol (or up to 20 via `symbols`), optionally with source code, callers, callees, biomarkers, or tests folded inline |
-| `cartograph_files` | Get indexed file structure (faster than filesystem scanning) |
-| `cartograph_status` | Check index health and statistics; pass `topHotspots: N` / `topBiomarkers: N` to fold those tools' rollups into the same response (onboarding "what's interesting?" in one call) |
-| `cartograph_review` | Review a diff (`mode: 'context'`), sister implementations (`neighbors`), project risk (`risk`), or agent-prone biomarker findings (`agent-audit`) |
+| Start With | Use It When You Need |
+|---|---|
+| `cartograph_status` | A quick health check, index stats, feature readiness, and optional hotspot / biomarker rollups |
+| `cartograph_find` | Symbols, regex content, env-var reads, or SQL references |
+| `cartograph_graph` | Callers, callees, blast radius, shortest paths, or embedding-similar symbols |
+| `cartograph_node` | One symbol's signature, summary, source preview, callers, callees, tests, or biomarkers |
+| `cartograph_context` | Task-shaped context when an agent needs relevant code for an implementation or bug |
+| `cartograph_review` | Diff review, sister implementations, risk triage, or agent-prone biomarker audit |
 
-This table is the core subset. The full 36-tool server also includes `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_history`, `cartograph_blame`, `cartograph_tests_for`, and `cartograph_at_range`.
+### Tool Families
 
-Operational tools such as `cartograph_admin`, `cartograph_affected`, `cartograph_imports`, `cartograph_sql`, `cartograph_changed_since`, `cartograph_compare_to_ref`, `cartograph_entry_points`, `cartograph_trace_to_culprits`, `cartograph_session`, `cartograph_note`, and `cartograph_summaries` are also available. Call `cartograph_playbook` or run `cartograph playbook` for the full catalog and tool-selection guidance.
+| Family | Tools |
+|---|---|
+| Explore | `cartograph_find`, `cartograph_files`, `cartograph_node`, `cartograph_graph`, `cartograph_context`, `cartograph_digest`, `cartograph_explore`, `cartograph_module`, `cartograph_ask`, `cartograph_local_chat` |
+| Review & Risk | `cartograph_review`, `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_trace_to_culprits` |
+| Tests & Change Impact | `cartograph_affected`, `cartograph_tests_for`, `cartograph_compare_to_ref`, `cartograph_changed_since`, `cartograph_at_range`, `cartograph_entry_points` |
+| History & Refactors | `cartograph_blame`, `cartograph_history`, `cartograph_propose_rename`, `cartograph_imports`, `cartograph_sql` |
+| Operations | `cartograph_status`, `cartograph_admin`, `cartograph_playbook`, `cartograph_session`, `cartograph_note`, `cartograph_summaries`, `cartograph_role`, `cartograph_discover` |
 
-### Which Tool Should I Use?
+The full 36-tool server is intentionally broader than the first six tools above, but the families keep related workflows close together. Call `cartograph_playbook` or run `cartograph playbook` for the complete tool contract, argument shapes, and selection guidance.
+
+### CLI / MCP Pairings
 
 | Need | CLI | MCP |
 |---|---|---|
