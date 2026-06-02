@@ -50,6 +50,21 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 | Non-built-in MCP clients | [Other MCP Clients](#other-mcp-clients) |
 | Full command catalog | [CLI Reference](#cli-reference) |
 
+## 60-Second Quickstart
+
+```bash
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
+bun install
+bun link
+
+cd /path/to/your/project
+cartograph admin init -i
+cartograph status --verbose
+```
+
+That gives you a local graph index immediately. Run `cartograph install` when you want an AI agent to use the same graph through MCP.
+
 ## At A Glance
 
 | Area | What Cartograph does |
@@ -60,6 +75,8 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 | Code health | Computes biomarkers, hotspots, churn, coverage joins, dependency audits, and risk reviews |
 | Optional LLMs | Adds summaries, embeddings, semantic search, ask, and rerank through OpenAI-compatible HTTP providers |
 | Agent support | Installer targets Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, and Kiro |
+
+> **No LLM required for the core graph.** Indexing, symbol search, call graphs, impacted tests, biomarkers, hotspots, dependency audits, and CLI/MCP operation run without an LLM. LLMs are optional and only power summaries, embeddings, semantic search, `ask`, and rerank.
 
 ## Status Snapshot
 
@@ -159,6 +176,30 @@ Common backend choices:
 | **Fresh Indexes** | Native file watching keeps the graph current with debounced auto-sync |
 | **Broad Language Coverage** | 36 language modes, including TS/JS, Python, Go, Rust, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Vue, Svelte, SQL, GraphQL, HCL, Prisma, XML, YAML, and more |
 | **Local-First Architecture** | Source indexing and graph storage stay local; LLM tiers can be local or cloud-hosted |
+
+## Terminal Examples
+
+```bash
+$ cartograph status --verbose
+Cartograph Status
+Project: /path/to/project
+Files: 939    Nodes: 18,494    Edges: 73,510
+Backend: bun:sqlite + sqlite-vec
+Index: up to date
+```
+
+```bash
+$ cartograph find "readReviewDiffInput" --by name --mode exact
+readReviewDiffInput  function  src/bin/commands/review.ts:25
+```
+
+```bash
+$ cartograph review risk --top-n 3
+# Risk review
+- Biomarkers: highest-severity findings first
+- Hotspots: high centrality x churn files
+- Coverage gaps: structurally important low-coverage symbols
+```
 
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
@@ -433,13 +474,13 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 
 ### Tool Families
 
-| Family | Tools |
-|---|---|
-| Explore | `cartograph_find`, `cartograph_files`, `cartograph_node`, `cartograph_graph`, `cartograph_context`, `cartograph_digest`, `cartograph_explore`, `cartograph_module`, `cartograph_ask`, `cartograph_local_chat` |
-| Review & Risk | `cartograph_review`, `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_trace_to_culprits` |
-| Tests & Change Impact | `cartograph_affected`, `cartograph_tests_for`, `cartograph_compare_to_ref`, `cartograph_changed_since`, `cartograph_at_range`, `cartograph_entry_points` |
-| History & Refactors | `cartograph_blame`, `cartograph_history`, `cartograph_propose_rename`, `cartograph_imports`, `cartograph_sql` |
-| Operations | `cartograph_status`, `cartograph_admin`, `cartograph_playbook`, `cartograph_session`, `cartograph_note`, `cartograph_summaries`, `cartograph_role`, `cartograph_discover` |
+| Family | Tools | Try |
+|---|---|---|
+| Explore | `cartograph_find`, `cartograph_files`, `cartograph_node`, `cartograph_graph`, `cartograph_context`, `cartograph_digest`, `cartograph_explore`, `cartograph_module`, `cartograph_ask`, `cartograph_local_chat` | [`cartograph find`](#terminal-examples), `cartograph graph`, `cartograph context` |
+| Review & Risk | `cartograph_review`, `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_trace_to_culprits` | [`cartograph review risk`](#terminal-examples), `cartograph biomarkers` |
+| Tests & Change Impact | `cartograph_affected`, `cartograph_tests_for`, `cartograph_compare_to_ref`, `cartograph_changed_since`, `cartograph_at_range`, `cartograph_entry_points` | [`cartograph affected`](#cartograph-affected), `cartograph compare-to-ref` |
+| History & Refactors | `cartograph_blame`, `cartograph_history`, `cartograph_propose_rename`, `cartograph_imports`, `cartograph_sql` | `cartograph blame`, `cartograph propose-rename` |
+| Operations | `cartograph_status`, `cartograph_admin`, `cartograph_playbook`, `cartograph_session`, `cartograph_note`, `cartograph_summaries`, `cartograph_role`, `cartograph_discover` | [`cartograph status`](#terminal-examples), `cartograph playbook` |
 
 The full 36-tool server is intentionally broader than the first six tools above, but the families keep related workflows close together. Call `cartograph_playbook` or run `cartograph playbook` for the complete tool contract, argument shapes, and selection guidance.
 
@@ -454,6 +495,24 @@ The full 36-tool server is intentionally broader than the first six tools above,
 | Check index health and project rollups | `cartograph status --verbose` | `cartograph_status({ verbose: true })` |
 | Find tests affected by source edits | `cartograph affected` | `cartograph_affected` |
 | Compare the final worktree to a ref | `cartograph compare-to-ref` | `cartograph_compare_to_ref` |
+
+### Example Agent Prompts
+
+```text
+Use Cartograph to find the riskiest code touched by my current diff and tell me what tests to run.
+```
+
+```text
+Before editing auth, use Cartograph to inspect callers, hotspots, biomarkers, and related tests.
+```
+
+```text
+Review this diff with Cartograph for blast radius, sister implementations, and co-change warnings.
+```
+
+```text
+Use Cartograph to find where billing routes enter the system, then summarize the implementation path.
+```
 
 ---
 
@@ -627,8 +686,14 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `include` | Glob patterns to index; derived from the language registry if omitted | language defaults |
 | `languages` | Languages to index (auto-detected if empty) | `[]` |
 | `exclude` | Glob patterns to ignore | dependency, build, cache, fixture, and generated-output defaults |
-| `frameworks` | Framework hints for extraction/resolution | `[]` |
 | `maxFileSize` | Skip files larger than this (bytes) | `5242880` (5MB) |
+
+<details>
+<summary><strong>Advanced config options</strong></summary>
+
+| Option | Description | Default |
+|--------|-------------|---------|
+| `frameworks` | Framework hints for extraction/resolution | `[]` |
 | `extractDocstrings` | Extract docstrings from code | `true` |
 | `trackCallSites` | Track call site locations | `true` |
 | `enableCentrality` / `enableBetweenness` | Compute graph centrality signals; betweenness is opt-in | `true` / `false` |
@@ -636,6 +701,17 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `enableConfigRefs` / `enableSqlRefs` / `enableBuildContextRefs` / `enableStringImports` | Add derived reference edges from non-call domains | `true` |
 | `indexSubmodules` | Recurse into git submodules | `true` |
 | `dependenciesAllowlist` | Packages never flagged by `cartograph deps` | `[]` |
+
+</details>
+
+## What Cartograph Is Not
+
+| Expectation | Reality |
+|---|---|
+| Hosted SaaS | Cartograph is local-first; the graph database lives under `.cartograph/` in your project |
+| Test replacement | It helps find affected tests and risk areas, but your test suite remains the source of truth |
+| LLM-only reviewer | Review tools are deterministic graph queries first; LLM features are optional enrichment |
+| Cloud dependency | Core indexing and graph tools work offline after dependencies are installed |
 
 ## Supported Languages & File Formats
 
