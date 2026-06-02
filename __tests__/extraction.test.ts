@@ -290,6 +290,44 @@ export class PaymentService {
     expect(chargeMethod).toBeDefined();
   });
 
+  it('attributes calls inside wrapped class-field function bodies to the method node', () => {
+    const code = `
+function memo(fn: () => void) { return fn; }
+function track(): void {}
+
+export class Widget {
+  handler = memo(() => {
+    track();
+  });
+}
+`;
+    const result = extractFromSource('widget.ts', code);
+    const method = result.nodes.find((n) => n.kind === 'method' && n.name === 'handler');
+    expect(method).toBeDefined();
+    const trackRef = result.unresolvedReferences.find(
+      (ref) => ref.fromNodeId === method?.id && ref.referenceName === 'track' && ref.referenceKind === 'calls',
+    );
+    expect(trackRef).toBeDefined();
+  });
+
+  it('classifies PascalCase function declarations returning JSX as components', () => {
+    const code = `
+function formatTitle(): string { return 'Cartograph'; }
+
+export function ProfileCard() {
+  return <section>{formatTitle()}</section>;
+}
+`;
+    const result = extractFromSource('ProfileCard.tsx', code);
+    const component = result.nodes.find((n) => n.kind === 'component' && n.name === 'ProfileCard');
+    expect(component).toBeDefined();
+    expect(result.nodes.find((n) => n.kind === 'function' && n.name === 'ProfileCard')).toBeUndefined();
+    const formatRef = result.unresolvedReferences.find(
+      (ref) => ref.fromNodeId === component?.id && ref.referenceName === 'formatTitle' && ref.referenceKind === 'calls',
+    );
+    expect(formatRef).toBeDefined();
+  });
+
   it('should extract interfaces', () => {
     const code = `
 export interface User {
