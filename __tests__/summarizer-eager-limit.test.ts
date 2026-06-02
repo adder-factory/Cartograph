@@ -170,4 +170,23 @@ describe('Lever C — eager-summary limit', () => {
     // The explicitly-requested symbol is among those summarised.
     expect(getSymbolSummary(cg.queries, echoId!)?.summary).toBeTruthy();
   });
+
+  it('falls back to per-symbol summaries when a batched response is malformed', async () => {
+    cg = await openIndexed();
+    let calls = 0;
+    vi.spyOn(LlmClient.prototype, 'chat').mockImplementation(async (messages) => {
+      calls += 1;
+      if (calls === 1) return { text: 'not json', durationMs: 1 };
+      return { text: defaultChatHandler(messages), durationMs: 1 };
+    });
+
+    const result = await cg.llm.summarizeAll({ eagerLimit: 2, summaryBatchSize: 2, concurrency: 1 });
+
+    expect(result.generated).toBe(2);
+    expect(result.errors).toBe(0);
+    expect(calls).toBeGreaterThanOrEqual(3);
+    const rows = cg.db.getDb().prepare('SELECT summary FROM symbol_summaries ORDER BY node_id').all();
+    expect(rows).toHaveLength(2);
+    expect(rows.every((row) => (row as { summary: string }).summary.length > 0)).toBe(true);
+  });
 });

@@ -105,7 +105,15 @@ describe('cartograph_graph direction:path', () => {
     expect(textOf(unresolvable)).toMatch(/not found/i);
   });
 
-  it('rejects batched symbols outside one-hop callers/callees mode with clear errors', async () => {
+  it('rejects batched symbols outside supported batch modes with clear errors', async () => {
+    const mutuallyExclusive = await handler.runHandler('cartograph_graph', {
+      direction: 'callers',
+      start: 'alpha',
+      symbols: ['alpha'],
+    });
+    expect(mutuallyExclusive.isError).toBeTruthy();
+    expect(textOf(mutuallyExclusive)).toContain('Cannot specify both `start` and `symbols`.');
+
     const multiHop = await handler.runHandler('cartograph_graph', {
       direction: 'callers',
       symbols: ['alpha'],
@@ -114,11 +122,11 @@ describe('cartograph_graph direction:path', () => {
     expect(multiHop.isError).toBeTruthy();
     expect(textOf(multiHop)).toContain('batch mode only supports one-hop');
 
-    const similar = await handler.runHandler('cartograph_graph', {
-      direction: 'similar',
+    const pathBatch = await handler.runHandler('cartograph_graph', {
+      direction: 'path',
       symbols: ['alpha', 'beta'],
     });
-    expect(similar.isError).toBeTruthy();
-    expect(textOf(similar)).toMatch(/symbols.*only supported.*callers.*callees/i);
+    expect(pathBatch.isError).toBeTruthy();
+    expect(textOf(pathBatch)).toMatch(/symbols.*only supported.*callers.*callees/i);
   });
 });

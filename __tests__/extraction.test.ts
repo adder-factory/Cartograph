@@ -510,6 +510,120 @@ const x = withDefaults(defineProps<{ n?: number }>(), { n: 0 })
     expect(component?.name).toBe('IconClose');
   });
 
+  it('Vue: ignores template expressions inside script and style blocks', () => {
+    const result = extractFromSource(
+      'Styled.vue',
+      `<script setup>
+const literal = '{{ shouldNotCount() }}'
+</script>
+
+<template>
+  <span>{{ visibleCall(user.name) }}</span>
+</template>
+
+<style>
+.icon::after { content: "{{ alsoIgnored() }}"; }
+</style>
+`,
+    );
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+    expect(calls).toContain('visibleCall');
+    expect(calls).not.toContain('shouldNotCount');
+    expect(calls).not.toContain('alsoIgnored');
+  });
+
+  it('Vue: skips empty and directive-like mustache expressions', () => {
+    const result = extractFromSource(
+      'DirectiveLike.vue',
+      `<template>
+  <span>{{ }}</span>
+  <span>{{ #internalCall() }}</span>
+  <span>{{ /closingCall() }}</span>
+  <span>{{ realCall() }}</span>
+</template>
+`,
+    );
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+    expect(calls).toContain('realCall');
+    expect(calls).not.toContain('internalCall');
+    expect(calls).not.toContain('closingCall');
+  });
+
+  it('Vue: offsets script refs, edges, and errors back to component source lines', () => {
+    const result = extractFromSource(
+      'Offset.vue',
+      `<template>
+  <Widget />
+</template>
+
+<script setup lang="ts">
+import { helper } from './helper'
+interface User { name: string }
+function render(user: User): string {
+  return helper(user.name)
+}
+</script>
+`,
+    );
+    const render = result.nodes.find((n) => n.name === 'render');
+    expect(render?.startLine).toBeGreaterThanOrEqual(8);
+    expect(result.edges.some((edge) => edge.kind === 'contains' && edge.target === render?.id)).toBe(true);
+    const helperCall = result.unresolvedReferences.find(
+      (r) => r.referenceName === 'helper' && r.referenceKind === 'calls',
+    );
+    expect(helperCall?.line).toBeGreaterThanOrEqual(9);
+    const userType = result.unresolvedReferences.find(
+      (r) => r.referenceName === 'User' && r.referenceKind === 'type_of',
+    );
+    expect(userType?.language).toBe('vue');
+    expect(userType?.filePath).toBe('Offset.vue');
+  });
+
+  it('Svelte: extracts script symbols, template calls, and component tags', () => {
+    const result = extractFromSource(
+      'Panel.svelte',
+      `<script lang="ts">
+  import Child from './Child.svelte';
+  export let user: User;
+  function formatName(name: string): string {
+    return name.toUpperCase();
+  }
+</script>
+
+<section>
+  <Child />
+  <p>{formatName(user.name)}</p>
+</section>
+`,
+    );
+    expect(result.nodes.find((n) => n.kind === 'component')?.name).toBe('Panel');
+    expect(result.nodes.find((n) => n.name === 'formatName')?.language).toBe('svelte');
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+    const refs = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'references')
+      .map((r) => r.referenceName);
+    expect(calls).toContain('formatName');
+    expect(refs).toContain('Child');
+  });
+
+  it('Svelte: filters runes and block syntax from template call references', () => {
+    const result = extractFromSource(
+      'Runes.svelte',
+      `<script>
+  const count = $state(0);
+</script>
+
+{#if count > 0}
+  <button>{buttonLabel(count)}</button>
+{/if}
+`,
+    );
+    const calls = result.unresolvedReferences.filter((r) => r.referenceKind === 'calls').map((r) => r.referenceName);
+    expect(calls).toContain('buttonLabel');
+    expect(calls).not.toContain('$state');
+    expect(calls).not.toContain('if');
+  });
+
   it('emits the head identifier on a generic extends `interface X extends Map<K, V>` (F#45)', () => {
     // Generic shapes wrap the head in `generic_type` — the handler
     // walks INTO `generic_type` to find the inner `type_identifier`.

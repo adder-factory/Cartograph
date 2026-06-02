@@ -35,6 +35,7 @@ import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import {
   chunkSymbol,
+  embedLongSymbols,
   LARGE_SYMBOL_LOC_THRESHOLD,
   CHUNK_LOC,
   CHUNK_OVERLAP,
@@ -113,6 +114,49 @@ function insertNode(qb: QueryBuilder, nodeId: string, startLine = 1, endLine = 1
        VALUES (?, 'function', ?, ?, '/src/test.ts', 'typescript', ?, ?, 0, 0, 0)`,
     )
     .run(nodeId, nodeId, nodeId, startLine, endLine);
+}
+
+function insertLongNode(
+  qb: QueryBuilder,
+  nodeId: string,
+  filePath: string,
+  lineCount = LARGE_SYMBOL_LOC_THRESHOLD,
+): void {
+  seedFile(qb, filePath);
+  qb.db
+    .prepare(
+      `INSERT OR IGNORE INTO nodes
+         (id, kind, name, qualified_name, file_path, language,
+          start_line, end_line, start_column, end_column, body_hash, updated_at)
+       VALUES (?, 'function', ?, ?, ?, 'typescript', 1, ?, 0, 0, ?, 0)`,
+    )
+    .run(nodeId, nodeId, nodeId, filePath, lineCount, `${nodeId}:body`);
+}
+
+function seedCanonicalEmbedding(qb: QueryBuilder, nodeId: string, model = 'nomic-embed-text'): void {
+  qb.db
+    .prepare(
+      `INSERT INTO symbol_embeddings
+         (node_id, embedding, embedding_model, source_content_hash, summary_hash_at_embed, grain)
+       VALUES (?, ?, ?, ?, 'summary-hash', 'symbol')`,
+    )
+    .run(nodeId, makeEmbeddingBuffer(), model, `${nodeId}:embedding-source`);
+}
+
+function writeLongSource(root: string, filePath: string, lineCount = LARGE_SYMBOL_LOC_THRESHOLD): void {
+  const full = path.join(root, filePath);
+  fs.mkdirSync(path.dirname(full), { recursive: true });
+  fs.writeFileSync(full, makeBody(lineCount));
+}
+
+function fakeEmbeddingClient(opts: { fail?: boolean; mismatch?: boolean } = {}) {
+  return {
+    async embed(texts: string[]) {
+      if (opts.fail) throw new Error('embed failed');
+      const count = opts.mismatch ? Math.max(0, texts.length - 1) : texts.length;
+      return Array.from({ length: count }, () => new Float32Array([1, 0, 0, 0]));
+    },
+  };
 }
 
 // ===========================================================================
@@ -596,5 +640,131 @@ describe('queries-chunk-embeddings — countChunkEmbeddings', () => {
     expect(countChunkEmbeddings(setup.qb)).toBe(3);
     clearChunkEmbeddings(setup.qb, 'node-z');
     expect(countChunkEmbeddings(setup.qb)).toBe(0);
+  });
+});
+
+// ===========================================================================
+// describe('embedLongSymbols — runtime pass')
+// ===========================================================================
+
+describe('embedLongSymbols — runtime pass', () => {
+  let setup: DbSetup;
+
+  beforeEach(() => {
+    setup = setupDb();
+  });
+
+  afterEach(() => {
+    teardownDb(setup);
+  });
+
+  it('embeds and persists chunks for a long symbol with a canonical embedding', async () => {
+    const filePath = 'src/long.ts';
+    insertLongNode(setup.qb, 'long-node', filePath);
+    seedCanonicalEmbedding(setup.qb, 'long-node');
+    writeLongSource(setup.dir, filePath);
+    const progress: Array<[number, number]> = [];
+
+    const result = await embedLongSymbols({
+      qb: setup.qb,
+      client: fakeEmbeddingClient(),
+      embeddingModel: 'nomic-embed-text',
+      projectRoot: setup.dir,
+      onProgress: (done, total) => progress.push([done, total]),
+    });
+
+    expect(result.candidates).toBe(1);
+    expect(result.chunked).toBe(1);
+    expect(result.bodyMisses).toBe(0);
+    expect(result.errors).toBe(0);
+    expect(result.chunksWritten).toBe(
+      chunkSymbol({ startLine: 1, endLine: LARGE_SYMBOL_LOC_THRESHOLD, body: makeBody(LARGE_SYMBOL_LOC_THRESHOLD) })
+        .length,
+    );
+    expect(getChunkEmbeddingsByNode(setup.qb, 'long-node')).toHaveLength(result.chunksWritten);
+    expect(progress).toEqual([
+      [0, 1],
+      [1, 1],
+    ]);
+  });
+
+  it('counts a body miss when the indexed file cannot be read', async () => {
+    const filePath = 'src/missing.ts';
+    insertLongNode(setup.qb, 'missing-body', filePath);
+    seedCanonicalEmbedding(setup.qb, 'missing-body');
+
+    const result = await embedLongSymbols({
+      qb: setup.qb,
+      client: fakeEmbeddingClient(),
+      embeddingModel: 'nomic-embed-text',
+      projectRoot: setup.dir,
+    });
+
+    expect(result).toMatchObject({ candidates: 1, chunked: 0, chunksWritten: 0, bodyMisses: 1, errors: 0 });
+  });
+
+  it('records one error per chunk when the embedding provider fails', async () => {
+    const filePath = 'src/fails.ts';
+    insertLongNode(setup.qb, 'provider-fails', filePath);
+    seedCanonicalEmbedding(setup.qb, 'provider-fails');
+    writeLongSource(setup.dir, filePath);
+    const expectedChunks = chunkSymbol({
+      startLine: 1,
+      endLine: LARGE_SYMBOL_LOC_THRESHOLD,
+      body: makeBody(LARGE_SYMBOL_LOC_THRESHOLD),
+    }).length;
+
+    const result = await embedLongSymbols({
+      qb: setup.qb,
+      client: fakeEmbeddingClient({ fail: true }),
+      embeddingModel: 'nomic-embed-text',
+      projectRoot: setup.dir,
+    });
+
+    expect(result.chunked).toBe(1);
+    expect(result.chunksWritten).toBe(0);
+    expect(result.errors).toBe(expectedChunks);
+    expect(getChunkEmbeddingsByNode(setup.qb, 'provider-fails')).toEqual([]);
+  });
+
+  it('records errors when the provider returns the wrong number of vectors', async () => {
+    const filePath = 'src/mismatch.ts';
+    insertLongNode(setup.qb, 'provider-mismatch', filePath);
+    seedCanonicalEmbedding(setup.qb, 'provider-mismatch');
+    writeLongSource(setup.dir, filePath);
+    const expectedChunks = chunkSymbol({
+      startLine: 1,
+      endLine: LARGE_SYMBOL_LOC_THRESHOLD,
+      body: makeBody(LARGE_SYMBOL_LOC_THRESHOLD),
+    }).length;
+
+    const result = await embedLongSymbols({
+      qb: setup.qb,
+      client: fakeEmbeddingClient({ mismatch: true }),
+      embeddingModel: 'nomic-embed-text',
+      projectRoot: setup.dir,
+    });
+
+    expect(result.chunksWritten).toBe(0);
+    expect(result.errors).toBe(expectedChunks);
+  });
+
+  it('honors an already-aborted signal before processing candidates', async () => {
+    const filePath = 'src/aborted.ts';
+    insertLongNode(setup.qb, 'aborted-node', filePath);
+    seedCanonicalEmbedding(setup.qb, 'aborted-node');
+    writeLongSource(setup.dir, filePath);
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await embedLongSymbols({
+      qb: setup.qb,
+      client: fakeEmbeddingClient(),
+      embeddingModel: 'nomic-embed-text',
+      projectRoot: setup.dir,
+      signal: controller.signal,
+    });
+
+    expect(result).toMatchObject({ candidates: 1, chunked: 0, chunksWritten: 0, bodyMisses: 0, errors: 0 });
   });
 });

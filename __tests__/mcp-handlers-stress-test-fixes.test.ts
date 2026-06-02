@@ -162,6 +162,33 @@ describe('Stress-test-fixes handler outputs', () => {
       expect(text).toContain('cartograph_summaries');
     });
 
+    it('reports intra-directory, inbound, and outbound module coupling', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src/feature'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src/feature/a.ts'),
+        [
+          "import { b } from './b';",
+          "import { outside } from '../outside';",
+          'export function a(): number {',
+          '  return b() + outside();',
+          '}',
+        ].join('\n'),
+      );
+      fs.writeFileSync(path.join(tempDir, 'src/feature/b.ts'), 'export function b(): number { return 1; }\n');
+      fs.writeFileSync(path.join(tempDir, 'src/outside.ts'), 'export function outside(): number { return 2; }\n');
+      fs.writeFileSync(
+        path.join(tempDir, 'src/consumer.ts'),
+        "import { a } from './feature/a';\nexport function consume(): number { return a(); }\n",
+      );
+      cg = await Cartograph.init(tempDir, { index: true });
+      handler = new ToolHandler(cg);
+
+      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/feature' });
+      const text = textOf(r);
+      expect(text).toContain('Coupling');
+      expect(text).toContain('1 intra-dir, 1 inbound, 1 outbound');
+    });
+
     it('replaces a bare mid-sentence "…" in a cached summary with an explicit [summary truncated] marker', async () => {
       fs.mkdirSync(path.join(tempDir, 'src/feature'), { recursive: true });
       fs.writeFileSync(

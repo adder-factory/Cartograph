@@ -150,6 +150,34 @@ describe('parseScipSymbol', () => {
     expect(parsed!.descriptors).toEqual(descriptors);
   });
 
+  it('round-trips macro and bracket-led descriptor suffixes', () => {
+    const descriptors = [
+      { name: 'src/macro.ts', suffix: DescriptorSuffix.Namespace },
+      { name: 'defineThing', suffix: DescriptorSuffix.Macro },
+      { name: 'T', suffix: DescriptorSuffix.TypeParameter },
+      { name: 'arg', suffix: DescriptorSuffix.Parameter },
+    ];
+    const sym = buildSymbolString('cartograph', { manager: 'cartograph', name: 'pkg', version: '2.0.0' }, descriptors);
+    const parsed = parseScipSymbol(sym);
+    expect(sym).toContain('defineThing![T](arg)');
+    expect(parsed!.descriptors).toEqual(descriptors);
+  });
+
+  it('doubles inner backticks in escaped descriptor names', () => {
+    const descriptors = [{ name: 'weird`name', suffix: DescriptorSuffix.Term }];
+    const sym = buildSymbolString('cartograph', { manager: 'cartograph', name: 'pkg', version: '2.0.0' }, descriptors);
+    expect(sym).toContain('`weird``name`.');
+    expect(parseScipSymbol(sym)!.descriptors).toEqual(descriptors);
+  });
+
+  it('rejects malformed descriptor tails', () => {
+    expect(parseScipSymbol('cartograph cartograph d 1 (param')).toBeNull();
+    expect(parseScipSymbol('cartograph cartograph d 1 [T)')).toBeNull();
+    expect(parseScipSymbol('cartograph cartograph d 1 foo(x)')).toBeNull();
+    expect(parseScipSymbol('cartograph cartograph d 1 `unterminated.')).toBeNull();
+    expect(parseScipSymbol('cartograph cartograph d 1 ?')).toBeNull();
+  });
+
   it('descriptorsToQualifiedName drops leading namespaces', () => {
     expect(
       descriptorsToQualifiedName([
