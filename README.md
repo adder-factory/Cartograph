@@ -21,7 +21,7 @@ Cartograph builds a local SQLite knowledge graph of your codebase and exposes it
 
 It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, and any client that can start a stdio MCP server.
 
-> Cartograph is a fork of [codegraph](https://github.com/colbymchenry/codegraph) by Colby Mchenry, used under the MIT License. It replaces codegraph's in-process LLM layer with OpenAI-compatible HTTP tiers for embedding, chat, and rerank. See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for full credits.
+> Cartograph is a fork of [codegraph](https://github.com/colbymchenry/codegraph) by Colby Mchenry, used under the MIT License. It keeps the local graph-indexing foundation and adds optional OpenAI-compatible HTTP tiers for embedding, chat, summaries, and rerank. See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for full credits.
 
 ## Start Here
 
