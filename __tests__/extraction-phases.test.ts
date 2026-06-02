@@ -7,6 +7,8 @@ import {
   eoApplyExtractionEnvFromConfig,
   eoFinalIndexResult,
   eoReadFileWithValidation,
+  eoRetryFreshHeap,
+  eoRetryStripped,
   isMinifiedJsFamily,
   type EoIndexCounters,
 } from '../src/extraction/extraction-phases.js';
@@ -119,5 +121,85 @@ describe('extraction phase helpers', () => {
     expect(isMinifiedJsFamily('javascript', formatted)).toBe(false);
     expect(isMinifiedJsFamily('python', minified)).toBe(false);
     expect(isMinifiedJsFamily('javascript', '')).toBe(false);
+  });
+
+  it('fresh-heap retry skips blocked/missing paths and returns parse failures for stripped retry', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-extraction-retry-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src'));
+      fs.writeFileSync(path.join(root, 'src/fails.ts'), 'export const value = 1;\n');
+      const errors: ExtractionError[] = [
+        { message: 'blocked', severity: 'error', code: 'parse_error', filePath: '../blocked.ts' },
+        { message: 'missing', severity: 'error', code: 'parse_error', filePath: 'src/missing.ts' },
+        { message: 'fails', severity: 'error', code: 'parse_error', filePath: 'src/fails.ts' },
+      ];
+      let recycled = 0;
+
+      const stillFailing = await eoRetryFreshHeap(state(root), {
+        candidates: errors,
+        errors,
+        counters: { filesIndexed: 0, filesErrored: 3, totalNodes: 0, totalEdges: 0 },
+        recycleWorker: async () => {
+          recycled += 1;
+        },
+        requestParse: async () => {
+          throw new Error('still broken');
+        },
+        signal: undefined,
+        log: () => {},
+      });
+
+      expect(recycled).toBe(3);
+      expect(stillFailing.map((error) => error.filePath)).toEqual(['src/fails.ts']);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('stripped retry stops on abort and tolerates blocked, missing, and parse-failing files', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-extraction-stripped-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src'));
+      fs.writeFileSync(path.join(root, 'src/fails.ts'), '// comment\nexport const value = 1;\n');
+      const candidates: ExtractionError[] = [
+        { message: 'blocked', severity: 'error', code: 'parse_error', filePath: '../blocked.ts' },
+        { message: 'missing', severity: 'error', code: 'parse_error', filePath: 'src/missing.ts' },
+        { message: 'fails', severity: 'error', code: 'parse_error', filePath: 'src/fails.ts' },
+      ];
+      let parsed = 0;
+
+      await eoRetryStripped(state(root), {
+        candidates,
+        errors: [...candidates],
+        counters: { filesIndexed: 0, filesErrored: 3, totalNodes: 0, totalEdges: 0 },
+        recycleWorker: async () => {},
+        requestParse: async () => {
+          parsed += 1;
+          throw new Error('still broken');
+        },
+        signal: undefined,
+        log: () => {},
+      });
+
+      expect(parsed).toBe(1);
+
+      const controller = new AbortController();
+      controller.abort();
+      await eoRetryStripped(state(root), {
+        candidates,
+        errors: [...candidates],
+        counters: { filesIndexed: 0, filesErrored: 3, totalNodes: 0, totalEdges: 0 },
+        recycleWorker: async () => {
+          throw new Error('should not recycle after abort');
+        },
+        requestParse: async () => {
+          throw new Error('should not parse after abort');
+        },
+        signal: controller.signal,
+        log: () => {},
+      });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
