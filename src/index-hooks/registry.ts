@@ -290,10 +290,9 @@ async function invokeOneHook(
     // a few ms, while still showing the centrality / biomarker /
     // git-mining phases that take seconds-to-minutes on real repos.
     if (durationMs >= POST_HOOK_LOG_THRESHOLD_MS) {
-      // Diagnostic; lands in the indexAll log. Routed via stdout
-      // (not console.log) so the agent_debug_log detector doesn't
-      // false-flag this intentional surface.
-      process.stdout.write(`[postHook] ${hook.name} ${phase}: ${durationMs}ms\n`);
+      // Diagnostic; stderr keeps CLI result streams and MCP JSON-RPC
+      // stdout clean while still surfacing long-running hooks.
+      writePostHookLog(`[postHook] ${hook.name} ${phase}: ${durationMs}ms`);
     }
     return { name: hook.name, phase, durationMs };
   } catch (err) {
@@ -308,6 +307,11 @@ async function invokeOneHook(
  *  and only the genuinely-long ones (centrality, biomarkers, git
  *  miners on big histories) show up. */
 const POST_HOOK_LOG_THRESHOLD_MS = 1_000;
+
+function writePostHookLog(message: string): void {
+  const line = message.endsWith('\n') ? message : `${message}\n`;
+  process.stderr.write(line);
+}
 
 /**
  * Shared runner: walk each hook group serially, fanning each
@@ -337,12 +341,12 @@ async function runHookPhase(
     // (gated at 1 sec); group end below shows the wall sum so the
     // user can see "Group C took 8 minutes" without summing
     // individual hooks.
-    process.stdout.write(`[postHook] group ${group} ${phase}: starting (${hooks.length} hooks)\n`);
+    writePostHookLog(`[postHook] group ${group} ${phase}: starting (${hooks.length} hooks)`);
     const groupResults = await Promise.all(hooks.map((hook) => invokeOneHook(hook, phase, getInvoker)));
     for (const r of groupResults) {
       if (r !== null) out.push(r);
     }
-    process.stdout.write(`[postHook] group ${group} ${phase}: done in ${Date.now() - groupStart}ms\n`);
+    writePostHookLog(`[postHook] group ${group} ${phase}: done in ${Date.now() - groupStart}ms`);
   }
   return out;
 }
