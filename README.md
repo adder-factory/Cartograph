@@ -2,7 +2,7 @@
 
 # Cartograph
 
-### Supercharge Claude Code with Semantic Code Intelligence
+### Semantic Code Intelligence for AI Coding Agents
 
 **Fewer tool calls · Faster exploration · Local-first by default**
 
@@ -17,110 +17,112 @@
 
 </div>
 
-> **Cartograph** is a fork of [**codegraph**](https://github.com/colbymchenry/codegraph) by Colby Mchenry, used under the MIT License. It pivots codegraph's LLM layer from in-process (libllama via Bun FFI) to OpenAI-compatible HTTP — embedding, chat, and rerank each run against a backend you choose per tier (llama-cpp's `llama-server`, Ollama, Apple MLX's `mlx_lm.server`, LM Studio, vLLM, LocalAI, or a cloud OpenAI-compatible provider). See [`ACKNOWLEDGEMENTS.md`](./ACKNOWLEDGEMENTS.md) for full credits.
+Cartograph builds a local SQLite knowledge graph of your codebase and exposes it to MCP-compatible agents. Instead of repeatedly scanning files, agents can ask structured questions about symbols, call graphs, changed tests, hotspots, and code health.
 
-## Get Started
+It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, and any client that can start a stdio MCP server.
 
-Cartograph runs on [Bun](https://bun.sh) ≥ 1.3 and is currently distributed from source (an npm package is not published yet):
+> Cartograph is a fork of [codegraph](https://github.com/colbymchenry/codegraph) by Colby Mchenry, used under the MIT License. It replaces codegraph's in-process LLM layer with OpenAI-compatible HTTP tiers for embedding, chat, and rerank. See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for full credits.
+
+## Start Here
+
+| Need | Use |
+|---|---|
+| Install Cartograph from source | [Install](#install) |
+| Wire it into your AI agent | [Configure Agents](#configure-agents) |
+| Bootstrap a project index | [Initialize a Project](#initialize-a-project) |
+| Use a non-built-in MCP client | [Other MCP Clients](#other-mcp-clients) |
+| See every command | [CLI Reference](#cli-reference) |
+
+## Install
+
+Cartograph runs on [Bun](https://bun.sh) >= 1.3. It is distributed from source for now; the npm package is not published yet.
 
 ```bash
 git clone https://github.com/adder-factory/cartograph.git
 cd cartograph
 bun install
-bun link                  # puts the `cartograph` command on your PATH
+bun link
 ```
 
-Then add a local LLM backend and let `cartograph` configure your agent:
+That puts the `cartograph` command on your PATH.
+
+## Configure Agents
+
+Run the installer once. It detects installed agents, writes their MCP config, and adds Cartograph usage instructions where the agent supports them.
 
 ```bash
-# A backend (macOS quickstart — pick one):
-brew install llama.cpp    # OR: brew install ollama (simpler, auto-starts as a service)
-
-# Configure your AI agent(s) — auto-detects Claude Code, Cursor, Codex CLI, opencode, and more
 cartograph install
-
-# One-shot bootstrap for a project — diagnose + auto-fix what doctor can fix
-cartograph doctor --fix /path/to/your/project
-
-# `doctor --fix` creates .cartograph/, downloads missing GGUFs, and writes the
-# recommended config. Starting the LLM backend(s) stays manual; doctor prints
-# the exact commands. For llama-cpp, run one llama-server per tier:
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.gguf --port 8080 --embeddings &
-llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 &
-
-# Re-verify after starting backends
-cartograph doctor /path/to/your/project
 ```
 
-**Using an AI assistant?** Any MCP-capable agent (Claude Code, Cursor, Windsurf, Codex CLI, opencode, LangChain, OpenAI Agent SDK, …) can drive the install via two MCP tools: `cartograph_admin({action: "llm-plan"})` returns the available setup presets (Ollama / llama-cpp / Apple MLX / cloud OpenAI / cloud OpenAI-compat / hybrid Claude-for-ask), and `cartograph_admin({action: "llm-apply", preset: "<id>", projectPath: "<abs>"})` writes the config and lists next-step commands. See [`AGENTS.md`](./AGENTS.md) for the full script.
+The installer can configure:
 
----
-
-## Why Cartograph?
-
-When Claude Code explores a codebase, it spawns **Explore agents** that scan files with grep, glob, and Read — consuming tokens on every tool call.
-
-**Cartograph gives those agents a pre-indexed knowledge graph** — symbol relationships, call graphs, and code structure. Agents query the graph instantly instead of scanning files.
-
----
-
-## Key Features
-
-| | |
+| Target | Config written |
 |---|---|
-| **Smart Context Building** | One tool call returns entry points, related symbols, and code snippets — no expensive exploration agents |
-| **Full-Text + Intent Search** | Find code by name (FTS5) OR by behavior — `mode='intent'` runs FTS5 over LLM-generated summaries so you can locate "the function that verifies JWT signatures" even when its name is `processBatch` |
-| **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
-| **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
-| **37 Language Modes** | TypeScript, Python, Go, Rust, Java, C/C++, C#, Objective-C, Swift, Kotlin, Scala, Ruby, PHP, Dart, Vue, Svelte, Lua, R, ReScript, Elixir, shells (Bash/Zsh/Fish), HCL, SQL, GraphQL, Prisma, XML/YAML/properties, and more — see [Supported Languages](#supported-languages) |
-| **Local-First** | Runs against local files and a local SQLite database. LLM tiers can stay fully local, or you can point selected tiers at a cloud OpenAI-compatible provider. |
+| Claude Code | `~/.claude.json`, `~/.claude/settings.json`, `~/.claude/CLAUDE.md` |
+| Cursor | `~/.cursor/mcp.json`, `.cursor/rules/cartograph.mdc` |
+| Codex CLI | `~/.codex/config.toml`, `~/.codex/AGENTS.md` |
+| opencode | `~/.config/opencode/opencode.json` or `opencode.json` |
+| Hermes | `$HERMES_HOME/config.yaml` |
+| Gemini CLI | `~/.gemini/settings.json`, `GEMINI.md` |
+| Antigravity | `~/.gemini/config/mcp_config.json` or legacy Antigravity config |
+| Kiro | `~/.kiro/settings/mcp.json`, `~/.kiro/steering/cartograph.md` |
 
----
-
-## Quick Start
-
-### 1. Run the Installer
+Non-interactive examples:
 
 ```bash
-cartograph install
-```
-
-The installer will:
-- Prompt to install `cartograph` globally (needed for the MCP server)
-- Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes**, **Gemini CLI**, **Antigravity**, and **Kiro**
-- Write each chosen agent's MCP server config + an instructions file (e.g. `CLAUDE.md`, `.cursor/rules/cartograph.mdc`, `~/.codex/AGENTS.md`)
-- Set up auto-allow permissions for the chosen agent (Claude Code only)
-- Optionally initialize your current project
-
-**Non-interactive (scripting / CI):**
-
-```bash
-cartograph install --yes                              # auto-detect agents, install global
-cartograph install --target=cursor,claude --yes       # explicit target list
-cartograph install --target=auto --location=local     # detected agents, project-local
-cartograph install --print-config codex               # print snippet, no file writes
+cartograph install --yes
+cartograph install --target=cursor,claude --yes
+cartograph install --target=auto --location=local
+cartograph install --print-config codex
 ```
 
 | Flag | Values | Default |
 |---|---|---|
 | `--target` | `auto`, `all`, `none`, or csv (`claude,cursor,...`) | prompt |
 | `--location` | `global`, `local` | prompt |
-| `--yes` | (boolean) | prompt every step |
-| `--no-permissions` | (boolean) skip Claude auto-allow list | permissions on |
-| `--print-config <id>` | dump snippet for one agent and exit | — |
+| `--yes` | Use defaults for scripting | prompt every step |
+| `--no-permissions` | Skip Claude auto-allow list | permissions on |
+| `--print-config <id>` | Print one target snippet and exit | - |
 
-### 2. Restart Your Agent
+Restart your agent after installation so it loads the MCP server.
 
-Restart your agent (Claude Code / Cursor / Codex CLI / opencode / Hermes / Gemini CLI / Antigravity / Kiro) for the MCP server to load.
+## Initialize a Project
 
-### 3. Initialize Projects
+From the project you want indexed:
 
 ```bash
 cd your-project
 cartograph admin init -i
 ```
 
-That's it! Claude Code will use Cartograph tools automatically when a `.cartograph/` directory exists.
+For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and prints the backend commands you still need to start manually.
+
+```bash
+cartograph doctor --fix /path/to/your/project
+
+# Start the printed backend commands, then verify:
+cartograph doctor /path/to/your/project
+```
+
+Common backend choices:
+
+| Backend | Good for |
+|---|---|
+| Ollama | Simple local setup; models load on demand |
+| llama-cpp `llama-server` | Explicit per-tier local servers; best control |
+| Apple MLX / LM Studio / vLLM / LocalAI | Any OpenAI-compatible local endpoint |
+| Cloud OpenAI-compatible provider | When you prefer hosted chat, embedding, or rerank tiers |
+
+## Key Features
+
+| | |
+|---|---|
+| **Smart Context Building** | One tool call returns entry points, related symbols, and code snippets for a task |
+| **Full-Text + Intent Search** | Find code by name, regex, env var, SQL table, semantic similarity, or summary intent |
+| **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
+| **Fresh Indexes** | Native file watching keeps the graph current with debounced auto-sync |
+| **Broad Language Coverage** | 37 language modes, including TS/JS, Python, Go, Rust, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Vue, Svelte, SQL, GraphQL, HCL, Prisma, XML, YAML, and more |
+| **Local-First Architecture** | Source indexing and graph storage stay local; LLM tiers can be local or cloud-hosted |
 
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
@@ -164,7 +166,7 @@ git clone https://github.com/adder-factory/cartograph.git && cd cartograph && bu
 <details>
 <summary><strong>Global Instructions Reference</strong></summary>
 
-The installer automatically adds these instructions to `~/.claude/CLAUDE.md`:
+The installer writes these instructions into each target's agent-instructions file where supported:
 
 ```markdown
 ## Cartograph
@@ -323,14 +325,14 @@ This is the core subset. The server exposes **30+ tools** in total — including
 
 ---
 
-## Using with Other MCP Clients
+## Other MCP Clients
 
 The MCP server runs over **stdio** and works with any MCP-compatible client — not just Claude Code. The interactive installer can write configs for the built-in targets; use the manual setup below for clients outside that list or for hand-managed configs.
 
 **Common steps for every client:**
 
 ```bash
-# install Cartograph from source first (see Get Started) so `cartograph` is on PATH
+# install Cartograph from source first (see Install) so `cartograph` is on PATH
 cd your-project
 cartograph admin init -i                     # initialize + index this project
 ```
@@ -518,6 +520,9 @@ The `.cartograph/config.json` file controls indexing:
 | SQL | `.sql`, `.ddl`, `.dml` | Full support (DDL — tables, views, functions, foreign keys) |
 | HCL / Terraform | `.tf`, `.tfvars`, `.hcl` | Full support (resources, variables, outputs) |
 | Prisma | `.prisma` | Full support (models, composite types, enums → struct / field / enum_member) |
+| Java Properties | `.properties` | Full support (configuration keys and values) |
+| XML (MyBatis) | `.xml` | Scoped support for MyBatis mapper/config files |
+| YAML | `.yaml`, `.yml` | Grammar-loaded support for framework route/config resolvers |
 
 Embedded schema DSLs are recognised inside their host language too — a Zod schema (TS/JS) or a Pydantic model (Python) yields `struct` / `field` / `enum_member` nodes, not an opaque constant.
 
