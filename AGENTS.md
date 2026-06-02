@@ -86,8 +86,8 @@ on demand, so [Bun](https://bun.sh) ≥ 1.3 is required. Clone the repo,
 install dependencies, and link the `cartograph` command onto PATH:
 
 ```sh
-git clone https://github.com/adder-factory/Cartograph.git
-cd Cartograph
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
 bun install
 bun link
 ```
@@ -317,8 +317,8 @@ If the user says "install cartograph", the minimal script is:
 command -v bun >/dev/null || curl -fsSL https://bun.sh/install | bash
 
 # 1. Cartograph from source
-git clone https://github.com/adder-factory/Cartograph.git /tmp/Cartograph
-(cd /tmp/Cartograph && bun install && bun link)
+git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
+(cd /tmp/cartograph && bun install && bun link)
 
 # 2. An OpenAI-compat backend. macOS quickstart:
 brew install llama.cpp  # OR: brew install ollama (simpler, auto-starts)

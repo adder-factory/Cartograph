@@ -75,7 +75,7 @@ if (nodeMajor >= 25) {
     `\x1b[33m⚠\x1b[0m  Cartograph may crash on Node.js ${nodeVersion} due to a V8 WASM compiler bug in Node 25+.\n`,
   );
   process.stderr.write('   Please use Node.js 22 LTS instead: https://nodejs.org/en/download\n');
-  process.stderr.write('   See: https://github.com/adder-factory/Cartograph/issues\n\n');
+  process.stderr.write('   See: https://github.com/adder-factory/cartograph/issues\n\n');
 }
 
 // Global error handlers — attached before any registration work so

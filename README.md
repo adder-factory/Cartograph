@@ -24,8 +24,8 @@
 Cartograph runs on [Bun](https://bun.sh) ≥ 1.3 and is currently distributed from source (an npm package is not published yet):
 
 ```bash
-git clone https://github.com/adder-factory/Cartograph.git
-cd Cartograph
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
 bun install
 bun link                  # puts the `cartograph` command on your PATH
 ```
@@ -127,7 +127,7 @@ That's it! Claude Code will use Cartograph tools automatically when a `.cartogra
 
 **Install from source:**
 ```bash
-git clone https://github.com/adder-factory/Cartograph.git && cd Cartograph && bun install && bun link
+git clone https://github.com/adder-factory/cartograph.git && cd cartograph && bun install && bun link
 ```
 
 **Add to `~/.claude.json`:**
@@ -547,6 +547,6 @@ MIT
 
 **Made for the Claude Code community**
 
-[Report Bug](https://github.com/adder-factory/Cartograph/issues) · [Request Feature](https://github.com/adder-factory/Cartograph/issues)
+[Report Bug](https://github.com/adder-factory/cartograph/issues) · [Request Feature](https://github.com/adder-factory/cartograph/issues)
 
 </div>

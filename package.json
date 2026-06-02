@@ -55,12 +55,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/adder-factory/Cartograph.git"
+    "url": "git+https://github.com/adder-factory/cartograph.git"
   },
   "bugs": {
-    "url": "https://github.com/adder-factory/Cartograph/issues"
+    "url": "https://github.com/adder-factory/cartograph/issues"
   },
-  "homepage": "https://github.com/adder-factory/Cartograph#readme",
+  "homepage": "https://github.com/adder-factory/cartograph#readme",
   "dependencies": {
     "@clack/prompts": "^1.4.0",
     "@parcel/watcher": "^2.5.6",
