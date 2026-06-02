@@ -61,9 +61,17 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 | Optional LLMs | Adds summaries, embeddings, semantic search, ask, and rerank through OpenAI-compatible HTTP providers |
 | Agent support | Installer targets Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, and Kiro |
 
+## Status Snapshot
+
+<p align="center">
+  <img src="docs/assets/status-verbose.svg" alt="Example cartograph status --verbose output" width="760">
+</p>
+
 ## Install
 
 Cartograph runs on [Bun](https://bun.sh) >= 1.3. It is distributed from source for now; the npm package is not published yet.
+
+> Until npm publishing is enabled, install from a source checkout and use `bun link`. The interactive installer uses the same source-linked command when it wires agents to Cartograph.
 
 ```bash
 git clone https://github.com/adder-factory/cartograph.git
@@ -331,6 +339,7 @@ cartograph admin sync [path]       # Incremental update
 cartograph status [path]           # Show index status and statistics
 cartograph find [query]            # Find symbols by name / regex / env-var / SQL ref (--by, --mode, --kind, --limit)
 cartograph ask <question> [path]   # Ask a natural-language question about the codebase (needs an LLM)
+cartograph llm                     # Local LLM setup utilities
 cartograph digest                  # "Land in a new repo" overview — hotspots, health, entry points
 cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
 cartograph context <task>          # Build context for AI (--format, --max-nodes)
@@ -426,6 +435,18 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 This table is the core subset. The full 36-tool server also includes `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_history`, `cartograph_blame`, `cartograph_tests_for`, and `cartograph_at_range`.
 
 Operational tools such as `cartograph_admin`, `cartograph_affected`, `cartograph_imports`, `cartograph_sql`, `cartograph_changed_since`, `cartograph_compare_to_ref`, `cartograph_entry_points`, `cartograph_trace_to_culprits`, `cartograph_session`, `cartograph_note`, and `cartograph_summaries` are also available. Call `cartograph_playbook` or run `cartograph playbook` for the full catalog and tool-selection guidance.
+
+### Which Tool Should I Use?
+
+| Need | CLI | MCP |
+|---|---|---|
+| Find symbols, regex content, env vars, or SQL refs | `cartograph find` | `cartograph_find` |
+| Trace callers, callees, impact, or symbol paths | `cartograph graph` | `cartograph_graph` |
+| Gather task-specific code context | `cartograph context` | `cartograph_context` |
+| Review a diff or inspect project risk | `cartograph review` | `cartograph_review` |
+| Check index health and project rollups | `cartograph status --verbose` | `cartograph_status({ verbose: true })` |
+| Find tests affected by source edits | `cartograph affected` | `cartograph_affected` |
+| Compare the final worktree to a ref | `cartograph compare-to-ref` | `cartograph_compare_to_ref` |
 
 ---
 
@@ -611,6 +632,11 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 
 ## Supported Languages & File Formats
 
+Cartograph currently supports **36 language modes**. Frameworks and embedded DSLs are listed separately below so the core language matrix stays readable.
+
+<details>
+<summary><strong>Show language matrix</strong></summary>
+
 | Language | Extension | Status |
 |----------|-----------|--------|
 | TypeScript | `.ts`, `.mts`, `.cts` | Full support |
@@ -649,6 +675,8 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | Java Properties | `.properties` | Full support (configuration keys and values) |
 | XML (MyBatis) | `.xml` | Scoped support for MyBatis mapper/config files |
 | YAML | `.yaml`, `.yml` | Grammar-loaded support for framework route/config resolvers |
+
+</details>
 
 ## Framework-Aware Signals
 

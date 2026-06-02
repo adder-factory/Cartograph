@@ -1,0 +1,37 @@
+<svg width="960" height="520" viewBox="0 0 960 520" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">Example cartograph status --verbose output</title>
+  <desc id="desc">A terminal-style screenshot showing Cartograph index status, graph counts, backend, and readiness checks.</desc>
+  <rect width="960" height="520" rx="22" fill="#0f172a"/>
+  <rect x="1" y="1" width="958" height="518" rx="21" stroke="#334155" stroke-width="2"/>
+
+  <rect x="0" y="0" width="960" height="58" rx="22" fill="#111827"/>
+  <circle cx="34" cy="29" r="8" fill="#ef4444"/>
+  <circle cx="60" cy="29" r="8" fill="#f59e0b"/>
+  <circle cx="86" cy="29" r="8" fill="#22c55e"/>
+  <text x="126" y="35" fill="#cbd5e1" font-family="Menlo, Consolas, monospace" font-size="16">cartograph status --verbose</text>
+
+  <text x="48" y="106" fill="#f8fafc" font-family="Menlo, Consolas, monospace" font-size="28" font-weight="700">Cartograph Status</text>
+  <text x="48" y="144" fill="#94a3b8" font-family="Menlo, Consolas, monospace" font-size="16">Project: ./cartograph</text>
+
+  <rect x="48" y="178" width="864" height="98" rx="14" fill="#172033" stroke="#334155"/>
+  <text x="78" y="215" fill="#a5b4fc" font-family="Menlo, Consolas, monospace" font-size="15">Files</text>
+  <text x="78" y="249" fill="#f8fafc" font-family="Menlo, Consolas, monospace" font-size="28" font-weight="700">939</text>
+  <text x="270" y="215" fill="#67e8f9" font-family="Menlo, Consolas, monospace" font-size="15">Nodes</text>
+  <text x="270" y="249" fill="#f8fafc" font-family="Menlo, Consolas, monospace" font-size="28" font-weight="700">18,494</text>
+  <text x="496" y="215" fill="#6ee7b7" font-family="Menlo, Consolas, monospace" font-size="15">Edges</text>
+  <text x="496" y="249" fill="#f8fafc" font-family="Menlo, Consolas, monospace" font-size="28" font-weight="700">73,510</text>
+  <text x="702" y="215" fill="#fde68a" font-family="Menlo, Consolas, monospace" font-size="15">Backend</text>
+  <text x="702" y="249" fill="#f8fafc" font-family="Menlo, Consolas, monospace" font-size="24" font-weight="700">sqlite-vec</text>
+
+  <rect x="48" y="304" width="410" height="150" rx="14" fill="#0b3b34" stroke="#0f766e"/>
+  <text x="76" y="342" fill="#ccfbf1" font-family="Menlo, Consolas, monospace" font-size="18" font-weight="700">Index</text>
+  <text x="76" y="378" fill="#f0fdfa" font-family="Menlo, Consolas, monospace" font-size="16">status    index is up to date</text>
+  <text x="76" y="410" fill="#f0fdfa" font-family="Menlo, Consolas, monospace" font-size="16">storage   bun:sqlite + sqlite-vec</text>
+  <text x="76" y="442" fill="#99f6e4" font-family="Menlo, Consolas, monospace" font-size="16">autosync  active for MCP sessions</text>
+
+  <rect x="502" y="304" width="410" height="150" rx="14" fill="#231f3b" stroke="#4f46e5"/>
+  <text x="530" y="342" fill="#c7d2fe" font-family="Menlo, Consolas, monospace" font-size="18" font-weight="700">Feature Readiness</text>
+  <text x="530" y="378" fill="#eef2ff" font-family="Menlo, Consolas, monospace" font-size="16">MCP tools       36 loaded</text>
+  <text x="530" y="410" fill="#eef2ff" font-family="Menlo, Consolas, monospace" font-size="16">language modes  36 enabled</text>
+  <text x="530" y="442" fill="#c7d2fe" font-family="Menlo, Consolas, monospace" font-size="16">risk lenses     biomarkers + hotspots</text>
+</svg>
