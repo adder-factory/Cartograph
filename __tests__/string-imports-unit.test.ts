@@ -10,8 +10,8 @@ describe('string import lexer', () => {
       'src/codegen.ts',
       [
         "// `import hidden from './commented';`",
-        "/* const x = \"require('./block-comment')\"; */",
-        "const re = /import\\s+from\\s+['\"]\\.\\/regex['\"]/g;",
+        '/* const x = "require(\'./block-comment\')"; */',
+        'const re = /import\\s+from\\s+[\'"]\\.\\/regex[\'"]/g;',
         'const fixture = `',
         "import defaultExport from './default';",
         "import { named } from './named';",

@@ -123,7 +123,14 @@ describe('HnswIndex', () => {
     for (const [envValue, expected] of cases) {
       process.env['CARTOGRAPH_USEARCH_QUANT'] = envValue;
       const idx = await HnswIndex.create(1);
-      await idx!.build([{ rowid: fakeUsearch.instances.length + 1, node_id: `node:${envValue}`, embedding_model: 'm', embedding: vectorBuffer([1]) }]);
+      await idx!.build([
+        {
+          rowid: fakeUsearch.instances.length + 1,
+          node_id: `node:${envValue}`,
+          embedding_model: 'm',
+          embedding: vectorBuffer([1]),
+        },
+      ]);
       expect(fakeUsearch.instances.at(-1)!.args.quantization).toBe(expected);
     }
   });
@@ -169,7 +176,9 @@ describe('HnswIndex', () => {
 
   it('returns a non-built result and clears readiness when no rows match the index dimension', async () => {
     const idx = await HnswIndex.create(4);
-    const result = await idx!.build([{ rowid: 1, node_id: 'node:a', embedding_model: 'm', embedding: vectorBuffer([1]) }]);
+    const result = await idx!.build([
+      { rowid: 1, node_id: 'node:a', embedding_model: 'm', embedding: vectorBuffer([1]) },
+    ]);
 
     expect(result).toEqual({ built: false, rowCount: 0, reason: 'no embeddings at this dim' });
     expect(idx!.isReady()).toBe(false);
@@ -209,7 +218,9 @@ describe('HnswIndex', () => {
 
     fakeUsearch.loadShouldThrow = false;
     const emptyMeta = await HnswIndex.create(2);
-    expect(emptyMeta!.load('/tmp/hnsw.bin', dbWithRows([{ rowid: 1, node_id: null, embedding_model: 'm' }]))).toBe(false);
+    expect(emptyMeta!.load('/tmp/hnsw.bin', dbWithRows([{ rowid: 1, node_id: null, embedding_model: 'm' }]))).toBe(
+      false,
+    );
     expect(emptyMeta!.isReady()).toBe(true);
     expect(emptyMeta!.size()).toBe(0);
   });
@@ -223,9 +234,7 @@ describe('HNSW embedding rowset helpers', () => {
 
   it('discovers only positive integer embedding dimensions from symbol-grain rows', () => {
     expect(
-      discoverEmbeddingDims(
-        dbWithRows([{ bytes: 8 }, { bytes: 12 }, { bytes: 0 }, { bytes: 10 }, { bytes: 16 }]),
-      ),
+      discoverEmbeddingDims(dbWithRows([{ bytes: 8 }, { bytes: 12 }, { bytes: 0 }, { bytes: 10 }, { bytes: 16 }])),
     ).toEqual([2, 3, 4]);
   });
 });

@@ -13,23 +13,25 @@ const state = {
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
   yieldToEventLoop: vi.fn(async () => {}),
-  refreshEdgesHook: vi.fn(async (args: {
-    ctx: IndexHookContext;
-    options: unknown;
-    hookName: string;
-    buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
-  }) => {
-    const edges = await args.buildEdges(args.ctx, [
-      { path: 'src/consumer.ts', language: 'typescript' },
-      { path: 'src/ignored.py', language: 'python' },
-      { path: 'src/no-import.ts', language: 'typescript' },
-      { path: 'src/self.ts', language: 'typescript' },
-    ]);
-    state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
-  }),
+  refreshEdgesHook: vi.fn(
+    async (args: {
+      ctx: IndexHookContext;
+      options: unknown;
+      hookName: string;
+      buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
+    }) => {
+      const edges = await args.buildEdges(args.ctx, [
+        { path: 'src/consumer.ts', language: 'typescript' },
+        { path: 'src/ignored.py', language: 'python' },
+        { path: 'src/no-import.ts', language: 'typescript' },
+        { path: 'src/self.ts', language: 'typescript' },
+      ]);
+      state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
+    },
+  ),
   resolveTargetFile: vi.fn((fileDir: string, source: string) => state.targets.get(`${fileDir}:${source}`) ?? null),
-  lookupSymbolByNameInFile: vi.fn((_ctx: IndexHookContext, name: string, targetFile: string) =>
-    state.symbols.get(`${targetFile}:${name}`) ?? null,
+  lookupSymbolByNameInFile: vi.fn(
+    (_ctx: IndexHookContext, name: string, targetFile: string) => state.symbols.get(`${targetFile}:${name}`) ?? null,
   ),
 }));
 
@@ -63,7 +65,7 @@ describe('dynamic-import-edges hook', () => {
       fs.writeFileSync(
         path.join(root, 'src', 'consumer.ts'),
         [
-          "const ignored = \"import('./inside-string').Nope\";",
+          'const ignored = "import(\'./inside-string\').Nope";',
           "// const { hidden } = await import('./commented.js');",
           "const { foo, bar: alias, type Baz, qux as renamed, ignoredMissing } = await import('./target.js');",
           "type Loaded = import('./types.js').Widget;",

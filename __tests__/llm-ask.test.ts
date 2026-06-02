@@ -13,10 +13,7 @@ class CapturingClient {
   calls: Array<{ messages: ChatMessage[]; options: ChatOptions & { useAskModel?: boolean } }> = [];
   nextText = 'The answer cites `EXTRACTION_LOGIC_VERSION`.';
 
-  async chat(
-    messages: ChatMessage[],
-    options: ChatOptions & { useAskModel?: boolean } = {},
-  ): Promise<ChatResult> {
+  async chat(messages: ChatMessage[], options: ChatOptions & { useAskModel?: boolean } = {}): Promise<ChatResult> {
     this.calls.push({ messages, options });
     return { text: this.nextText };
   }
@@ -74,7 +71,11 @@ describe('askWithCandidates', () => {
   });
 
   it('hard-pins named question entities, anchors the system prompt, and forwards ask options', async () => {
-    const payload = node('PAYLOAD_VERSION', path.join(testRoot, 'src/payload.ts'), 'export function PAYLOAD_VERSION() {}');
+    const payload = node(
+      'PAYLOAD_VERSION',
+      path.join(testRoot, 'src/payload.ts'),
+      'export function PAYLOAD_VERSION() {}',
+    );
     const extraction = node(
       'EXTRACTION_LOGIC_VERSION',
       path.join(testRoot, 'src/extraction.ts'),

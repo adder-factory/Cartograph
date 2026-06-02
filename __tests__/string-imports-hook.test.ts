@@ -14,7 +14,13 @@ vi.mock('../src/string-imports/index.js', () => ({
   extractStringImports: vi.fn((_root: string, targets: Array<{ path: string; language: string }>) => {
     state.calls.push({ name: 'extractStringImports', value: targets });
     if (state.throwExtract) throw new Error('extract failed');
-    return targets.map((target) => ({ filePath: target.path, line: 1, moduleName: './x', raw: 'import x', containerKind: 'string_literal' }));
+    return targets.map((target) => ({
+      filePath: target.path,
+      line: 1,
+      moduleName: './x',
+      raw: 'import x',
+      containerKind: 'string_literal',
+    }));
   }),
 }));
 
@@ -24,7 +30,9 @@ vi.mock('../src/db/queries-files.js', () => ({
 }));
 
 vi.mock('../src/db/queries-string-imports.js', () => ({
-  applyStringImports: vi.fn((_queries: unknown, refs: unknown) => state.calls.push({ name: 'applyStringImports', value: refs })),
+  applyStringImports: vi.fn((_queries: unknown, refs: unknown) =>
+    state.calls.push({ name: 'applyStringImports', value: refs }),
+  ),
   clearStringImports: vi.fn(() => state.calls.push({ name: 'clearStringImports' })),
   deleteStringImportsForPaths: vi.fn((_queries: unknown, paths: string[]) =>
     state.calls.push({ name: 'deleteStringImportsForPaths', value: paths }),

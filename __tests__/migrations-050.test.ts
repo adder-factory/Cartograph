@@ -117,7 +117,9 @@ describe('Migration 050 — content-addressed embedding store', () => {
     ]);
 
     const viewRows = db
-      .prepare(`SELECT node_id AS nodeId, source_content_hash AS bodyHash, grain FROM symbol_embeddings ORDER BY node_id`)
+      .prepare(
+        `SELECT node_id AS nodeId, source_content_hash AS bodyHash, grain FROM symbol_embeddings ORDER BY node_id`,
+      )
       .all() as Array<{ nodeId: string; bodyHash: string; grain: string }>;
     expect(viewRows).toEqual([
       { nodeId: 'node:a', bodyHash: 'hash:shared', grain: 'symbol' },
@@ -139,7 +141,9 @@ describe('Migration 050 — content-addressed embedding store', () => {
     ).run('node:a', buffer([0.5, 0.5]), 'model-a', 'hash:new', 'summary-new', 'symbol', 0);
     expect(
       db
-        .prepare(`SELECT body_hash AS bodyHash, summary_hash_at_embed AS summaryHash FROM embedding_refs WHERE node_id = ?`)
+        .prepare(
+          `SELECT body_hash AS bodyHash, summary_hash_at_embed AS summaryHash FROM embedding_refs WHERE node_id = ?`,
+        )
         .get('node:a'),
     ).toEqual({ bodyHash: 'hash:new', summaryHash: 'summary-new' });
 
@@ -150,7 +154,9 @@ describe('Migration 050 — content-addressed embedding store', () => {
     );
     expect(
       db
-        .prepare(`SELECT body_hash AS bodyHash, summary_hash_at_embed AS summaryHash FROM embedding_refs WHERE node_id = ?`)
+        .prepare(
+          `SELECT body_hash AS bodyHash, summary_hash_at_embed AS summaryHash FROM embedding_refs WHERE node_id = ?`,
+        )
         .get('node:a'),
     ).toEqual({ bodyHash: 'hash:updated', summaryHash: 'summary-updated' });
 

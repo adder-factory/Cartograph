@@ -142,7 +142,11 @@ describe('lifecycle command action bodies', () => {
 
   it('routes llm setup, trace-to-culprits, playbook, and viewer actions', async () => {
     await actions.get('llm:setup [path]')!('/repo');
-    await actions.get('program:trace-to-culprits')!({ projectPath: '/repo', limit: '4', trace: 'Error\n at src/a.ts:1' });
+    await actions.get('program:trace-to-culprits')!({
+      projectPath: '/repo',
+      limit: '4',
+      trace: 'Error\n at src/a.ts:1',
+    });
 
     const originalLog = console.log;
     const logs: string[] = [];

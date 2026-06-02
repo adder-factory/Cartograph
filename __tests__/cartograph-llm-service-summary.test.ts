@@ -164,7 +164,9 @@ describe('CartographLlmService summarizeAll and classifyAll', () => {
   });
 
   it('summarizes symbols, refreshes embeddings, file summaries, and directory summaries', async () => {
-    const svc = service(resolved({ summarizeLlm: { provider: 'anthropic-api', model: 'claude', apiKey: 'sk' } } as never));
+    const svc = service(
+      resolved({ summarizeLlm: { provider: 'anthropic-api', model: 'claude', apiKey: 'sk' } } as never),
+    );
 
     const result = await svc.summarizeAll({ concurrency: 2 });
 
@@ -207,7 +209,10 @@ describe('CartographLlmService summarizeAll and classifyAll', () => {
 
     expect(result.classified).toBe(2);
     expect(state.classifyCalls).toHaveLength(1);
-    const args = state.classifyCalls[0] as { modelLabel: string; options: { concurrency?: number; onProgress?: unknown } };
+    const args = state.classifyCalls[0] as {
+      modelLabel: string;
+      options: { concurrency?: number; onProgress?: unknown };
+    };
     expect(args.modelLabel).toBe('chat-model');
     expect(args.options.concurrency).toBe(6);
     expect(typeof args.options.onProgress).toBe('function');

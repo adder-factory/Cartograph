@@ -20,13 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import {
-  atomicWriteFileSync,
-  getHomeDir,
-  getMcpServerConfig,
-  readJsonFile,
-  writeJsonFile,
-} from './shared.js';
+import { atomicWriteFileSync, getHomeDir, getMcpServerConfig, readJsonFile, writeJsonFile } from './shared.js';
 import { INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 

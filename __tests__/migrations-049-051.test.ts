@@ -40,7 +40,9 @@ describe('migration 049 summary store', () => {
 
       MIG_049.up(db);
 
-      const store = db.prepare(`SELECT body_hash, model, summary FROM summary_store ORDER BY body_hash`).all() as Array<{
+      const store = db
+        .prepare(`SELECT body_hash, model, summary FROM summary_store ORDER BY body_hash`)
+        .all() as Array<{
         body_hash: string;
         model: string;
         summary: string;
@@ -55,8 +57,7 @@ describe('migration 049 summary store', () => {
 
       db.prepare(`INSERT INTO symbol_summaries VALUES (?, ?, ?, ?, ?)`).run('n3', 'body-c', 'summary C', 'm', 30);
       expect(
-        (db.prepare(`SELECT summary FROM summary_store WHERE body_hash='body-c'`).get() as { summary: string })
-          .summary,
+        (db.prepare(`SELECT summary FROM summary_store WHERE body_hash='body-c'`).get() as { summary: string }).summary,
       ).toBe('summary C');
 
       db.prepare(`UPDATE symbol_summaries SET content_hash=?, summary=? WHERE node_id=?`).run(
@@ -65,8 +66,7 @@ describe('migration 049 summary store', () => {
         'n3',
       );
       expect(
-        (db.prepare(`SELECT body_hash FROM summary_refs WHERE node_id='n3'`).get() as { body_hash: string })
-          .body_hash,
+        (db.prepare(`SELECT body_hash FROM summary_refs WHERE node_id='n3'`).get() as { body_hash: string }).body_hash,
       ).toBe('body-d');
 
       db.prepare(`DELETE FROM symbol_summaries WHERE node_id=?`).run('n3');
@@ -80,7 +80,9 @@ describe('migration 049 summary store', () => {
     const db = tempDb('summary-noop.db');
     try {
       expect(() => MIG_049.up(db)).not.toThrow();
-      db.exec(`CREATE TABLE symbol_summaries (node_id TEXT PRIMARY KEY, content_hash TEXT, summary TEXT, model TEXT, generated_at INTEGER)`);
+      db.exec(
+        `CREATE TABLE symbol_summaries (node_id TEXT PRIMARY KEY, content_hash TEXT, summary TEXT, model TEXT, generated_at INTEGER)`,
+      );
       expect(() => MIG_049.up(db)).not.toThrow();
       expect(db.prepare(`SELECT name FROM sqlite_master WHERE name='summary_store'`).get()).toBeNull();
     } finally {

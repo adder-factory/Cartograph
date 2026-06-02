@@ -64,10 +64,7 @@ describe('Cartograph lifecycle API', () => {
       reopened.close();
 
       const lcov = path.join(dir, 'unit.lcov');
-      fs.writeFileSync(
-        lcov,
-        ['TN:', 'SF:src/a.ts', 'DA:1,1', 'LF:1', 'LH:1', 'end_of_record', ''].join('\n'),
-      );
+      fs.writeFileSync(lcov, ['TN:', 'SF:src/a.ts', 'DA:1,1', 'LF:1', 'LH:1', 'end_of_record', ''].join('\n'));
       const coverage = await cg.ingestCoverage(lcov, { source: 'unit-test' });
       expect(coverage.filesMatched).toBeGreaterThanOrEqual(1);
 

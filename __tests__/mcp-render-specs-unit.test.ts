@@ -83,7 +83,9 @@ describe('cartograph_tests_for render specs', () => {
     );
 
     expect(rendered).toContain('### Direct importers (high confidence) (1)');
-    expect(rendered).toContain('- `__tests__/target.test.ts` — `testTarget`, `describeTarget` _(10 covering test blocks)_');
+    expect(rendered).toContain(
+      '- `__tests__/target.test.ts` — `testTarget`, `describeTarget` _(10 covering test blocks)_',
+    );
     expect(rendered).toContain('  - L10: "case 1"');
     expect(rendered).toContain('  - L17: "case 8"');
     expect(rendered).toContain('  - _…and 2 more covering blocks_');

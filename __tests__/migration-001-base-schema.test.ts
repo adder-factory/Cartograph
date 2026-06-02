@@ -31,7 +31,15 @@ describe('migration 001 base schema', () => {
       MIG_001.up(db);
 
       expect(names(db, 'table')).toEqual(
-        expect.arrayContaining(['schema_versions', 'nodes', 'edges', 'files', 'unresolved_refs', 'nodes_fts', 'vectors']),
+        expect.arrayContaining([
+          'schema_versions',
+          'nodes',
+          'edges',
+          'files',
+          'unresolved_refs',
+          'nodes_fts',
+          'vectors',
+        ]),
       );
       expect(names(db, 'index')).toEqual(
         expect.arrayContaining([
@@ -59,13 +67,31 @@ describe('migration 001 base schema', () => {
         `INSERT INTO nodes
           (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column, end_column, docstring, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      ).run('n1', 'function', 'searchThing', 'pkg.searchThing', 'src/app.ts', 'typescript', 1, 4, 1, 1, 'Finds a thing', 1);
+      ).run(
+        'n1',
+        'function',
+        'searchThing',
+        'pkg.searchThing',
+        'src/app.ts',
+        'typescript',
+        1,
+        4,
+        1,
+        1,
+        'Finds a thing',
+        1,
+      );
 
-      expect(
-        db.prepare(`SELECT id, name FROM nodes_fts WHERE nodes_fts MATCH 'searchThing'`).get(),
-      ).toEqual({ id: 'n1', name: 'searchThing' });
+      expect(db.prepare(`SELECT id, name FROM nodes_fts WHERE nodes_fts MATCH 'searchThing'`).get()).toEqual({
+        id: 'n1',
+        name: 'searchThing',
+      });
 
-      db.prepare(`UPDATE nodes SET name = ?, qualified_name = ? WHERE id = ?`).run('lookupThing', 'pkg.lookupThing', 'n1');
+      db.prepare(`UPDATE nodes SET name = ?, qualified_name = ? WHERE id = ?`).run(
+        'lookupThing',
+        'pkg.lookupThing',
+        'n1',
+      );
       expect(db.prepare(`SELECT id FROM nodes_fts WHERE nodes_fts MATCH 'searchThing'`).get()).toBeNull();
       expect(db.prepare(`SELECT id, name FROM nodes_fts WHERE nodes_fts MATCH 'lookupThing'`).get()).toEqual({
         id: 'n1',

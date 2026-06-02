@@ -58,7 +58,10 @@ async function readReviewDiffInput(raw: string): Promise<string> {
   }
 }
 
-async function loadReviewContextDiff(diffFile: string | undefined, options: ReviewContextOptions): Promise<string | null> {
+async function loadReviewContextDiff(
+  diffFile: string | undefined,
+  options: ReviewContextOptions,
+): Promise<string | null> {
   if (diffFile && options.diff !== undefined) {
     error('review context: pass either [diff-file] or --diff, not both.');
     process.exitCode = 1;
@@ -144,11 +147,11 @@ reviewCmd
   .option('--min-co-change-jaccard <n>', 'Minimum Jaccard for a co-change warning (default 0.4)')
   .option('--min-diff-magnitude <n>', 'Suppress co-change warnings when total diff lines < n (default 10, 0 disables)')
   .action(async (diffFile: string | undefined, options: ReviewContextOptions) => {
-      const diff = await loadReviewContextDiff(diffFile, options);
-      if (diff === null) return;
-      const args: Record<string, unknown> = { mode: 'context', diff };
-      if (!assignReviewContextArgs(args, options)) return;
-      await runViaMCP('cartograph_review', args, options.projectPath);
+    const diff = await loadReviewContextDiff(diffFile, options);
+    if (diff === null) return;
+    const args: Record<string, unknown> = { mode: 'context', diff };
+    if (!assignReviewContextArgs(args, options)) return;
+    await runViaMCP('cartograph_review', args, options.projectPath);
   });
 
 reviewCmd

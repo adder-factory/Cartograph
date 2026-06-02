@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const state = {
   files: [] as Array<{ path: string }>,
   subjectsByTest: new Map<string, string[]>(),
-  nodesByFile: new Map<string, Array<{ kind: string; name: string }>>,
+  nodesByFile: new Map<string, Array<{ kind: string; name: string }>>(),
   inserted: [] as unknown[][],
   deleteAll: [] as string[],
   deleteSource: [] as Array<{ source: string; kind: string }>,
@@ -137,10 +137,7 @@ describe('tests-edges index hook', () => {
   });
 
   it('falls back to a full rebuild on sync results without changedFilePaths', () => {
-    state.files = [
-      { path: 'src/foo.ts' },
-      { path: '__tests__/foo.test.ts' },
-    ];
+    state.files = [{ path: 'src/foo.ts' }, { path: '__tests__/foo.test.ts' }];
     state.subjectsByTest.set('__tests__/foo.test.ts', ['src/foo.ts']);
 
     HOOK.afterSync!(ctx(), { filesAdded: 1, filesModified: 0, filesRemoved: 0 } as never);

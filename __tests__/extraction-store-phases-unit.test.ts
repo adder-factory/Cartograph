@@ -214,7 +214,8 @@ describe('extraction store phase persistence', () => {
       stats: stats(),
       result: extractionResult(),
     });
-    priorStructHash = (calls.find((call) => call.name === 'putCachedParse')!.value as { structHash: string }).structHash;
+    priorStructHash = (calls.find((call) => call.name === 'putCachedParse')!.value as { structHash: string })
+      .structHash;
     existingFile = { path: 'src/app.ts', contentHash: 'old', language: 'typescript' } as FileRecord;
     calls.length = 0;
 
@@ -284,7 +285,13 @@ describe('extraction store phase persistence', () => {
         content: 'broken',
         language: 'typescript',
         stats: stats(),
-        result: { nodes: [], edges: [], unresolvedReferences: [], errors: [{ message: 'parse' }], durationMs: 1 } as never,
+        result: {
+          nodes: [],
+          edges: [],
+          unresolvedReferences: [],
+          errors: [{ message: 'parse' }],
+          durationMs: 1,
+        } as never,
         errors: errors as never,
         counters,
       }),

@@ -62,7 +62,9 @@ vi.mock('../src/bin/_cli-core.js', () => ({
     return true;
   }),
   formatNumber: (n: number) => String(n),
-  runViaMCP: vi.fn(async (tool: string, args: unknown, projectPath?: string) => calls.push({ tool, args, projectPath })),
+  runViaMCP: vi.fn(async (tool: string, args: unknown, projectPath?: string) =>
+    calls.push({ tool, args, projectPath }),
+  ),
 }));
 
 vi.mock('../src/directory.js', () => ({

@@ -68,7 +68,12 @@ describe('read command internals', () => {
         ],
       });
       await expect(
-        read.buildAtRangeArgs({ file: undefined, startLine: undefined, endLine: undefined, options: { diff: diffPath } }),
+        read.buildAtRangeArgs({
+          file: undefined,
+          startLine: undefined,
+          endLine: undefined,
+          options: { diff: diffPath },
+        }),
       ).resolves.toMatchObject({
         diff: expect.stringContaining('+new'),
       });

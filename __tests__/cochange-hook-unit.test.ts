@@ -52,7 +52,9 @@ vi.mock('../src/llm/commit-intent.js', () => ({
 }));
 
 vi.mock('../src/db/queries-commit-intents.js', () => ({
-  recordCommitIntents: vi.fn((_queries: unknown, rows: unknown) => state.calls.push({ name: 'recordCommitIntents', value: rows })),
+  recordCommitIntents: vi.fn((_queries: unknown, rows: unknown) =>
+    state.calls.push({ name: 'recordCommitIntents', value: rows }),
+  ),
   clearCommitIntents: vi.fn(() => state.calls.push({ name: 'clearCommitIntents' })),
 }));
 

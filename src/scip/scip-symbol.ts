@@ -202,12 +202,7 @@ function appendMethodDescriptor(args: {
   return parsed.after;
 }
 
-function appendNamedDescriptor(args: {
-  out: Descriptor[];
-  s: string;
-  name: string;
-  afterName: number;
-}): number | null {
+function appendNamedDescriptor(args: { out: Descriptor[]; s: string; name: string; afterName: number }): number | null {
   const { out, s, name, afterName } = args;
   const suffixChar = s[afterName]!;
   if (suffixChar === '(') return appendMethodDescriptor({ out, s, name, afterName });

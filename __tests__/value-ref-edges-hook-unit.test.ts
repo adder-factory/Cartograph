@@ -32,7 +32,9 @@ vi.mock('../src/db/queries-metadata.js', () => ({
 }));
 
 vi.mock('../src/db/queries-search.js', () => ({
-  getSymbolNameIndexByFile: vi.fn((_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map()),
+  getSymbolNameIndexByFile: vi.fn(
+    (_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map(),
+  ),
 }));
 
 vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
@@ -46,20 +48,22 @@ vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
   yieldToEventLoop: vi.fn(async () => state.calls.push({ name: 'yieldToEventLoop' })),
-  refreshEdgesHook: vi.fn(async (args: {
-    ctx: IndexHookContext;
-    options: unknown;
-    hookName: string;
-    buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
-  }) => {
-    const edges = await args.buildEdges(args.ctx, [
-      { path: 'src/a.ts', language: 'typescript' },
-      { path: 'src/b.js', language: 'javascript' },
-      { path: 'src/ignored.py', language: 'python' },
-      { path: 'src/missing.ts', language: 'typescript' },
-    ]);
-    state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
-  }),
+  refreshEdgesHook: vi.fn(
+    async (args: {
+      ctx: IndexHookContext;
+      options: unknown;
+      hookName: string;
+      buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
+    }) => {
+      const edges = await args.buildEdges(args.ctx, [
+        { path: 'src/a.ts', language: 'typescript' },
+        { path: 'src/b.js', language: 'javascript' },
+        { path: 'src/ignored.py', language: 'python' },
+        { path: 'src/missing.ts', language: 'typescript' },
+      ]);
+      state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
+    },
+  ),
 }));
 
 vi.mock('../src/errors.js', () => ({
@@ -140,9 +144,9 @@ describe('value-ref-edges hook orchestration', () => {
       });
       expect(state.refreshCalls[0]!.edges).toEqual([{ source: 'file:src/a.ts', target: 'node:a', kind: 'references' }]);
       expect(state.metadata.get('last_mined_value_ref_edges_algo_version')).toBeUndefined();
-      expect(state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('partial result'))).toBe(
-        true,
-      );
+      expect(
+        state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('partial result')),
+      ).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
@@ -182,9 +186,9 @@ describe('value-ref-edges hook orchestration', () => {
 
       await HOOK.afterIndexAll(ctx(root));
 
-      expect(state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('metadata locked'))).toBe(
-        true,
-      );
+      expect(
+        state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('metadata locked')),
+      ).toBe(true);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

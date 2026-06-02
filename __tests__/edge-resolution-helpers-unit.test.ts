@@ -17,8 +17,8 @@ vi.mock('../src/db/queries-files.js', () => ({
 }));
 
 vi.mock('../src/db/queries-search.js', () => ({
-  getNodesByNameAndFile: vi.fn((_queries: unknown, name: string, filePath: string) =>
-    state.symbols.get(`${filePath}:${name}`) ?? [],
+  getNodesByNameAndFile: vi.fn(
+    (_queries: unknown, name: string, filePath: string) => state.symbols.get(`${filePath}:${name}`) ?? [],
   ),
 }));
 
@@ -31,13 +31,8 @@ vi.mock('../src/errors.js', () => ({
   logDebug: vi.fn((message: string) => state.logs.push(message)),
 }));
 
-const {
-  collectTargets,
-  lookupSymbolByNameInFile,
-  refreshEdgesHook,
-  resolveTargetFile,
-  yieldToEventLoop,
-} = await import('../src/index-hooks/edge-resolution-helpers.js');
+const { collectTargets, lookupSymbolByNameInFile, refreshEdgesHook, resolveTargetFile, yieldToEventLoop } =
+  await import('../src/index-hooks/edge-resolution-helpers.js');
 
 function ctx(projectRoot = '/repo'): IndexHookContext {
   return { projectRoot, queries: {}, config: {} } as IndexHookContext;
@@ -94,7 +89,11 @@ describe('edge-resolution helper primitives', () => {
       options: { scope: 'files', files: ['src/a.ts'] },
       hookName: 'test-hook',
       buildEdges: (_hookCtx, targets) =>
-        targets.map((target) => ({ source: `file:${target.path}`, target: 'node:target', kind: 'references' as const })),
+        targets.map((target) => ({
+          source: `file:${target.path}`,
+          target: 'node:target',
+          kind: 'references' as const,
+        })),
     });
     expect(state.inserted).toEqual([[{ source: 'file:src/a.ts', target: 'node:target', kind: 'references' }]]);
 

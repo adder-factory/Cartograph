@@ -62,7 +62,8 @@ function ctx() {
         state.created.push({ kind, name, extra });
         return { id: `${kind}:${name}` };
       },
-      extractTypeRefs: (n: FakeNode, id: string, kind: string) => state.typeRefs.push({ node: n.text ?? n.type, id, kind }),
+      extractTypeRefs: (n: FakeNode, id: string, kind: string) =>
+        state.typeRefs.push({ node: n.text ?? n.type, id, kind }),
       pushScope: (id: string) => state.scopes.push(id),
       popScope: () => {
         state.popped++;
@@ -83,12 +84,16 @@ describe('ReScript language extractor', () => {
 
   it('extracts imports, signatures, and async markers', () => {
     const moduleExpr = node('module_expression', 'React');
-    expect(extractor.extractImport?.(node('open_statement', 'open React', { namedChildren: [moduleExpr] }) as never, '')).toEqual({
+    expect(
+      extractor.extractImport?.(node('open_statement', 'open React', { namedChildren: [moduleExpr] }) as never, ''),
+    ).toEqual({
       moduleName: 'React',
       signature: 'open React',
     });
     const moduleId = node('module_identifier', 'Belt');
-    expect(extractor.extractImport?.(node('include_statement', 'include Belt', { namedChildren: [moduleId] }) as never, '')).toEqual({
+    expect(
+      extractor.extractImport?.(node('include_statement', 'include Belt', { namedChildren: [moduleId] }) as never, ''),
+    ).toEqual({
       moduleName: 'Belt',
       signature: 'include Belt',
     });
@@ -105,7 +110,9 @@ describe('ReScript language extractor', () => {
     expect(extractor.isAsync?.(node('let_binding', 'let async', { fields: { body: asyncFn } }) as never)).toBe(true);
     expect(extractor.isAsync?.(node('let_binding', 'let plain') as never)).toBe(false);
 
-    const ext = node('external_declaration', 'external fetch', { namedChildren: [node('type_annotation', ': string => unit')] });
+    const ext = node('external_declaration', 'external fetch', {
+      namedChildren: [node('type_annotation', ': string => unit')],
+    });
     expect(extractor.getSignature?.(ext as never, '')).toBe(': string => unit');
   });
 
@@ -148,9 +155,7 @@ describe('ReScript language extractor', () => {
     extractor.visitNode?.(
       withParent(
         node('module_declaration', 'module M', {
-          namedChildren: [
-            node('module_binding', 'M', { fields: { name: node('name', 'M'), definition: moduleBody } }),
-          ],
+          namedChildren: [node('module_binding', 'M', { fields: { name: node('name', 'M'), definition: moduleBody } })],
         }),
       ) as never,
       h.ctx,
@@ -192,7 +197,10 @@ describe('ReScript language extractor', () => {
     );
     extractor.visitNode?.(
       node('pipe_expression', '|>', {
-        namedChildren: [node('identifier', 'value'), node('call_expression', 'map(value)', { fields: { function: node('function', 'map') } })],
+        namedChildren: [
+          node('identifier', 'value'),
+          node('call_expression', 'map(value)', { fields: { function: node('function', 'map') } }),
+        ],
       }) as never,
       h.ctx,
     );

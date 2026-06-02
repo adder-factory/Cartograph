@@ -76,7 +76,9 @@ describe('_search query helper units', () => {
   });
 
   it('builds concept hints only from non-qualified multi-token query words', () => {
-    const noConcept = buildConceptHintIfNeeded('getAllImports kind:function', [searchResult('getAllImports', 'imports')]);
+    const noConcept = buildConceptHintIfNeeded('getAllImports kind:function', [
+      searchResult('getAllImports', 'imports'),
+    ]);
     expect(noConcept.preResult).toBe('');
     expect(noConcept.postResult).toBe('');
 

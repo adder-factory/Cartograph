@@ -101,11 +101,11 @@ describe('biomarker per-file worker pool', () => {
     expect(state.workerCalls).toHaveLength(3);
     expect(state.workerCalls.map((call) => call.timeoutMs)).toEqual([77, 77, 77]);
     expect(state.workerCalls.map((call) => call.sliceLabel)).toEqual(['#0/3', '#1/3', '#2/3']);
-    expect(state.workerCalls.map((call) => (call.workerData as { batch: Array<{ relPath: string }> }).batch.map((f) => f.relPath))).toEqual([
-      ['src/a.ts', 'src/d.ts'],
-      ['src/b.ts'],
-      ['src/c.ts'],
-    ]);
+    expect(
+      state.workerCalls.map((call) =>
+        (call.workerData as { batch: Array<{ relPath: string }> }).batch.map((f) => f.relPath),
+      ),
+    ).toEqual([['src/a.ts', 'src/d.ts'], ['src/b.ts'], ['src/c.ts']]);
     expect(state.logs).toEqual(['biomarkers per-file worker failed: worker timeout']);
   });
 });

@@ -223,9 +223,7 @@ describe('CLI core contracts', () => {
     process.exitCode = 0;
 
     const tooSmall = captureConsoleError(() => {
-      expect(assignFloatArg({ args, key: 'score', raw: '-0.1', optionName: '--score', opts: { min: 0 } })).toBe(
-        false,
-      );
+      expect(assignFloatArg({ args, key: 'score', raw: '-0.1', optionName: '--score', opts: { min: 0 } })).toBe(false);
     });
     expect(tooSmall).toContain('must be >= 0');
   });
@@ -339,7 +337,11 @@ describe('CLI core contracts', () => {
       expect(lock.calls).toContainEqual(['error', 'database is locked']);
 
       const empty = fakeClack();
-      printIndexResult(empty as unknown as typeof import('@clack/prompts'), indexResult({ success: true }), projectRoot);
+      printIndexResult(
+        empty as unknown as typeof import('@clack/prompts'),
+        indexResult({ success: true }),
+        projectRoot,
+      );
       expect(empty.calls).toContainEqual(['warn', 'No files found to index']);
 
       const allErrored = fakeClack();

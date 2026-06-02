@@ -254,7 +254,17 @@ describe('status inline rollups', () => {
     expect(hotspot.formatRow(hotspot.rows[0]!)).toContain('LOC: null');
 
     const biomarkers = buildStatusInlineBiomarkersSpec({
-      rows: [{ name: 'fn', kind: 'function', biomarker: 'large_method', severity: 'warning', metric: 99, centrality: null, filePath: 'src/a.ts' }],
+      rows: [
+        {
+          name: 'fn',
+          kind: 'function',
+          biomarker: 'large_method',
+          severity: 'warning',
+          metric: 99,
+          centrality: null,
+          filePath: 'src/a.ts',
+        },
+      ],
       totalFindings: -1,
       topN: 1,
       pending: false,
@@ -279,11 +289,9 @@ describe('status inline rollups', () => {
     state.unresolvedRefs = 1_500;
     const lines: string[] = [];
 
-    appendFeatureReadiness(
-      lines,
-      cg({ llm: { bgCtrl: { progress: { phase: 'summarise', done: 1, total: 4 } } } }),
-      { summaryBreakdown: true },
-    );
+    appendFeatureReadiness(lines, cg({ llm: { bgCtrl: { progress: { phase: 'summarise', done: 1, total: 4 } } } }), {
+      summaryBreakdown: true,
+    });
     const text = lines.join('\n');
 
     expect(text).toContain('### 🚦 Feature Readiness');

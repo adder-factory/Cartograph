@@ -53,7 +53,10 @@ export function createComponentExtractorRuntime(filePath: string, source: string
   };
 }
 
-export function extractComponentFile(runtime: ComponentExtractorRuntime, config: ComponentExtractorConfig): ExtractionResult {
+export function extractComponentFile(
+  runtime: ComponentExtractorRuntime,
+  config: ComponentExtractorConfig,
+): ExtractionResult {
   const startTime = Date.now();
 
   try {

@@ -13,23 +13,25 @@ const state = {
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
   yieldToEventLoop: vi.fn(async () => {}),
-  refreshEdgesHook: vi.fn(async (args: {
-    ctx: IndexHookContext;
-    options: unknown;
-    hookName: string;
-    buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
-  }) => {
-    const edges = await args.buildEdges(args.ctx, [
-      { path: 'src/barrel.ts', language: 'typescript' },
-      { path: 'src/ignored.py', language: 'python' },
-      { path: 'src/self.ts', language: 'typescript' },
-      { path: 'src/empty.ts', language: 'typescript' },
-    ]);
-    state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
-  }),
+  refreshEdgesHook: vi.fn(
+    async (args: {
+      ctx: IndexHookContext;
+      options: unknown;
+      hookName: string;
+      buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
+    }) => {
+      const edges = await args.buildEdges(args.ctx, [
+        { path: 'src/barrel.ts', language: 'typescript' },
+        { path: 'src/ignored.py', language: 'python' },
+        { path: 'src/self.ts', language: 'typescript' },
+        { path: 'src/empty.ts', language: 'typescript' },
+      ]);
+      state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
+    },
+  ),
   resolveTargetFile: vi.fn((fileDir: string, source: string) => state.targets.get(`${fileDir}:${source}`) ?? null),
-  lookupSymbolByNameInFile: vi.fn((_ctx: IndexHookContext, name: string, targetFile: string) =>
-    state.symbols.get(`${targetFile}:${name}`) ?? null,
+  lookupSymbolByNameInFile: vi.fn(
+    (_ctx: IndexHookContext, name: string, targetFile: string) => state.symbols.get(`${targetFile}:${name}`) ?? null,
   ),
 }));
 

@@ -285,7 +285,9 @@ describe('Resolution Module', () => {
         ...overrides,
       });
 
-      const ref = (overrides: Partial<Parameters<typeof matchReference>[0]> = {}): Parameters<typeof matchReference>[0] => ({
+      const ref = (
+        overrides: Partial<Parameters<typeof matchReference>[0]> = {},
+      ): Parameters<typeof matchReference>[0] => ({
         fromNodeId: 'func:src/app.ts:run:1',
         referenceName: 'missing',
         referenceKind: 'calls',
@@ -296,10 +298,7 @@ describe('Resolution Module', () => {
         ...overrides,
       });
 
-      const contextWithNodes = (
-        nodes: Node[],
-        extra: Partial<ResolutionContext> = {},
-      ): ResolutionContext => ({
+      const contextWithNodes = (nodes: Node[], extra: Partial<ResolutionContext> = {}): ResolutionContext => ({
         getNodesInFile: (filePath) => nodes.filter((n) => n.filePath === filePath),
         getNodesByName: (name) => nodes.filter((n) => n.name === name),
         getNodesByQualifiedName: (qualifiedName) => nodes.filter((n) => n.qualifiedName === qualifiedName),
@@ -383,7 +382,10 @@ describe('Resolution Module', () => {
           qualifiedName: 'src/db/Repo.ts::Repo::save',
           filePath: 'src/db/Repo.ts',
         });
-        const result = matchReference(ref({ referenceName: 'UserService.save' }), contextWithNodes([serviceClass, saveMethod, unrelatedSave]));
+        const result = matchReference(
+          ref({ referenceName: 'UserService.save' }),
+          contextWithNodes([serviceClass, saveMethod, unrelatedSave]),
+        );
 
         expect(result).toMatchObject({
           targetNodeId: saveMethod.id,
@@ -438,7 +440,16 @@ describe('Resolution Module', () => {
           startLine: 3,
           endLine: 3,
         });
-        const source = ['class Manager {', '  private cache: TinyCache;', '  private store = new TinyCache();', '  run() {', '    cache.get();', '    store.get();', '  }', '}'].join('\n');
+        const source = [
+          'class Manager {',
+          '  private cache: TinyCache;',
+          '  private store = new TinyCache();',
+          '  run() {',
+          '    cache.get();',
+          '    store.get();',
+          '  }',
+          '}',
+        ].join('\n');
         const ctx = contextWithNodes([cacheClass, getMethod, manager, annotatedField, constructedField], {
           readFile: (filePath) => (filePath === 'src/app.ts' ? source : null),
         });

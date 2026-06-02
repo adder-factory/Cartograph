@@ -211,7 +211,13 @@ describe('name matcher focused resolver branches', () => {
         startLine: 3,
         endLine: 3,
       }),
-      node({ id: 'class:tiny', name: 'TinyCache', kind: 'class', qualifiedName: 'TinyCache', filePath: 'src/cache.ts' }),
+      node({
+        id: 'class:tiny',
+        name: 'TinyCache',
+        kind: 'class',
+        qualifiedName: 'TinyCache',
+        filePath: 'src/cache.ts',
+      }),
       node({
         id: 'method:remember',
         name: 'remember',
@@ -229,7 +235,13 @@ describe('name matcher focused resolver branches', () => {
   });
 
   it('suppresses unbacked builtin method calls but keeps imported or same-file callable names', () => {
-    const remoteSet = node({ id: 'method:remote-set', name: 'set', kind: 'method', qualifiedName: 'Cache.set', filePath: 'src/cache.ts' });
+    const remoteSet = node({
+      id: 'method:remote-set',
+      name: 'set',
+      kind: 'method',
+      qualifiedName: 'Cache.set',
+      filePath: 'src/cache.ts',
+    });
     expect(matchReference(ref({ referenceName: 'set' }), context([remoteSet]))).toBeNull();
 
     const sameFileSet = node({
@@ -246,7 +258,9 @@ describe('name matcher focused resolver branches', () => {
     expect(
       matchReference(
         ref({ referenceName: 'set' }),
-        context([remoteSet], { getImportMappings: () => [{ localName: 'set', importedName: 'set', source: './cache' }] as never }),
+        context([remoteSet], {
+          getImportMappings: () => [{ localName: 'set', importedName: 'set', source: './cache' }] as never,
+        }),
       ),
     ).toMatchObject({ targetNodeId: 'method:remote-set' });
   });
@@ -266,7 +280,13 @@ describe('name matcher focused resolver branches', () => {
       confidence: 0.3,
     });
 
-    const variable = node({ id: 'var:thing', name: 'thing', kind: 'variable', qualifiedName: 'thing', filePath: 'src/a.ts' });
+    const variable = node({
+      id: 'var:thing',
+      name: 'thing',
+      kind: 'variable',
+      qualifiedName: 'thing',
+      filePath: 'src/a.ts',
+    });
     expect(matchReference(ref({ referenceName: 'THING' }), context([variable]))).toBeNull();
   });
 });
