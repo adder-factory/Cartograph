@@ -212,53 +212,49 @@ At the start of a session, ask the user if they'd like to initialize Cartograph:
 
 ## How It Works
 
+```mermaid
+flowchart LR
+  source["Project source files"]
+  scan["Scan files<br/>apply include / exclude globs"]
+  extract["ExtractionOrchestrator<br/>detect languages<br/>parse with tree-sitter WASM workers<br/>emit symbols, raw edges, refs"]
+  store[("SQLite graph DB<br/>.cartograph/cartograph.db<br/>nodes / edges / files<br/>FTS lookup tables<br/>optional sqlite-vec tables")]
+  enrich["Enrichment passes<br/>reference resolution<br/>framework and index hooks<br/>biomarkers, churn, tests, coverage"]
+
+  source --> scan --> extract --> store --> enrich --> store
 ```
-┌──────────────────────┐
-│ Project source files │
-└──────────┬───────────┘
-           │ scan + glob filters
-           ▼
-┌────────────────────────────────────────────┐
-│ ExtractionOrchestrator                     │
-│ • detects languages                         │
-│ • parses with tree-sitter WASM workers      │
-│ • extracts files, symbols, raw edges, refs   │
-└──────────┬─────────────────────────────────┘
-           │
-           ▼
-┌────────────────────────────────────────────┐
-│ SQLite graph database (.cartograph/)       │
-│ • nodes / edges / files / unresolved refs   │
-│ • FTS search tables                         │
-│ • optional sqlite-vec vector tables         │
-└──────────┬─────────────────────────────────┘
-           │
-           ▼
-┌────────────────────────────────────────────┐
-│ Enrichment passes                          │
-│ • reference resolution                      │
-│ • framework/index hooks                     │
-│ • biomarkers, churn, tests, coverage, etc.  │
-└──────────┬─────────────────────────────────┘
-           │
-           ├───────────────┬──────────────────────┐
-           ▼               ▼                      ▼
-┌────────────────┐ ┌────────────────┐ ┌────────────────────────┐
-│ CLI commands   │ │ MCP stdio tools│ │ Library API             │
-│ cartograph ... │ │ cartograph_*   │ │ Cartograph.open/init()  │
-└────────────────┘ └────────────────┘ └────────────────────────┘
 
-┌────────────────────────────────────────────┐
-│ Auto-sync                                  │
-│ MCP startup sync + @parcel/watcher events  │
-│ rerun incremental sync for changed files   │
-└────────────────────────────────────────────┘
+```mermaid
+flowchart TB
+  db[("SQLite graph DB")]
 
-┌────────────────────────────────────────────┐
-│ Optional OpenAI-compatible LLM tiers       │
-│ summaries / embeddings / ask / rerank      │
-│ configured in .cartograph/config.json      │
-└────────────────────────────────────────────┘
+  subgraph surfaces["Query surfaces"]
+    cli["CLI<br/>cartograph ..."]
+    mcp["MCP stdio tools<br/>cartograph_*"]
+    api["Library API<br/>Cartograph.open / init"]
+  end
+
+  subgraph freshness["Freshness"]
+    startup["MCP startup sync"]
+    watcher["@parcel/watcher<br/>debounced file events"]
+    sync["Incremental sync<br/>changed files only"]
+  end
+
+  subgraph llm["Optional OpenAI-compatible LLM tiers"]
+    summaries["summaries"]
+    embeddings["embeddings"]
+    ask["ask"]
+    rerank["rerank"]
+  end
+
+  cli --> db
+  mcp --> db
+  api --> db
+  startup --> sync --> db
+  watcher --> sync
+  db --> summaries
+  db --> embeddings
+  db --> ask
+  db --> rerank
 ```
 
 1. **Extraction** — `ExtractionOrchestrator` scans included files, detects languages, and parses source with [tree-sitter](https://tree-sitter.github.io/) WASM grammars. Language-specific extractors emit files, symbols, raw edges, and unresolved references.
