@@ -4,7 +4,7 @@
 
 ### Supercharge Claude Code with Semantic Code Intelligence
 
-**Fewer tool calls · Faster exploration · 100% local**
+**Fewer tool calls · Faster exploration · Local-first by default**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
@@ -36,7 +36,7 @@ Then add a local LLM backend and let `cartograph` configure your agent:
 # A backend (macOS quickstart — pick one):
 brew install llama.cpp    # OR: brew install ollama (simpler, auto-starts as a service)
 
-# Configure your AI agent(s) — auto-detects Claude Code / Cursor / Codex CLI / opencode
+# Configure your AI agent(s) — auto-detects Claude Code, Cursor, Codex CLI, opencode, and more
 cartograph install
 
 # One-shot bootstrap for a project — diagnose + auto-fix what doctor can fix
@@ -72,8 +72,8 @@ When Claude Code explores a codebase, it spawns **Explore agents** that scan fil
 | **Full-Text + Intent Search** | Find code by name (FTS5) OR by behavior — `mode='intent'` runs FTS5 over LLM-generated summaries so you can locate "the function that verifies JWT signatures" even when its name is `processBatch` |
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Always Fresh** | File watcher uses native OS events (FSEvents/inotify/ReadDirectoryChangesW) with debounced auto-sync — the graph stays current as you code, zero config |
-| **31 Languages** | TypeScript, Python, Go, Rust, Java, C/C++, C#, Objective-C, Swift, Kotlin, Scala, Ruby, PHP, Dart, Vue, Svelte, Lua, R, ReScript, Elixir, shells (Bash/Zsh/Fish), HCL, SQL, GraphQL, Prisma, and more — see [Supported Languages](#supported-languages) |
-| **100% Local** | No data leaves your machine. No API keys. No external services. SQLite database only |
+| **37 Language Modes** | TypeScript, Python, Go, Rust, Java, C/C++, C#, Objective-C, Swift, Kotlin, Scala, Ruby, PHP, Dart, Vue, Svelte, Lua, R, ReScript, Elixir, shells (Bash/Zsh/Fish), HCL, SQL, GraphQL, Prisma, XML/YAML/properties, and more — see [Supported Languages](#supported-languages) |
+| **Local-First** | Runs against local files and a local SQLite database. LLM tiers can stay fully local, or you can point selected tiers at a cloud OpenAI-compatible provider. |
 
 ---
 
@@ -87,7 +87,7 @@ cartograph install
 
 The installer will:
 - Prompt to install `cartograph` globally (needed for the MCP server)
-- Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**
+- Ask which agent(s) to configure — auto-detects installed ones from: **Claude Code**, **Cursor**, **Codex CLI**, **opencode**, **Hermes**, **Gemini CLI**, **Antigravity**, and **Kiro**
 - Write each chosen agent's MCP server config + an instructions file (e.g. `CLAUDE.md`, `.cursor/rules/cartograph.mdc`, `~/.codex/AGENTS.md`)
 - Set up auto-allow permissions for the chosen agent (Claude Code only)
 - Optionally initialize your current project
@@ -111,7 +111,7 @@ cartograph install --print-config codex               # print snippet, no file w
 
 ### 2. Restart Your Agent
 
-Restart your agent (Claude Code / Cursor / Codex CLI / opencode) for the MCP server to load.
+Restart your agent (Claude Code / Cursor / Codex CLI / opencode / Hermes / Gemini CLI / Antigravity / Kiro) for the MCP server to load.
 
 ### 3. Initialize Projects
 
@@ -325,7 +325,7 @@ This is the core subset. The server exposes **30+ tools** in total — including
 
 ## Using with Other MCP Clients
 
-The MCP server runs over **stdio** and works with any MCP-compatible client — not just Claude Code. The interactive installer is Claude Code-specific (it writes `~/.claude.json`), so for other clients you'll want the manual setup.
+The MCP server runs over **stdio** and works with any MCP-compatible client — not just Claude Code. The interactive installer can write configs for the built-in targets; use the manual setup below for clients outside that list or for hand-managed configs.
 
 **Common steps for every client:**
 
@@ -362,6 +362,7 @@ In `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
 {
   "mcpServers": {
     "cartograph": {
+      "type": "stdio",
       "command": "cartograph",
       "args": ["serve", "--mcp"]
     }
@@ -420,7 +421,7 @@ Most MCP clients (Continue, Zed, custom integrations, etc.) accept some variatio
 The server reads the project root from the MCP `initialize` request's `rootUri` (set by the client when it connects). If your client doesn't send a `rootUri`, pass the project path explicitly:
 
 ```bash
-cartograph serve --mcp --path /absolute/path/to/project
+cartograph serve --mcp --project-path /absolute/path/to/project
 ```
 
 > **Note:** Cartograph's MCP server does **not** speak SSE/HTTP. If your client only supports `url` + `transport: "sse"`, you'll need to wrap stdio with a bridge like [supergateway](https://github.com/supercorp-ai/supergateway).
