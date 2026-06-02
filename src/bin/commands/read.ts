@@ -365,8 +365,8 @@ function printStatusIndexStats(stats: any, cg: any, hnswAvailable: boolean): voi
     out(chalk.yellow('  ⚠ sqlite-vec did not load — vector search is on the slow in-memory brute-force path.'));
     out(chalk.dim('     sqlite-vec ships prebuilts for darwin/linux x64+arm64 and windows-x64.'));
   } else if (!hnswAvailable) {
-    out(chalk.dim('  ℹ hnswlib-node not installed — similar_to edge builds use the vec0 brute-force path;'));
-    out(chalk.dim('     `npm install hnswlib-node` adds the O(log N) accelerator for large repos.'));
+    out(chalk.dim('  ℹ USearch unavailable — similar_to edge builds use the vec0 brute-force path;'));
+    out(chalk.dim('     `bun install` re-fetches the optional `usearch` accelerator for large repos.'));
   }
   out();
 }

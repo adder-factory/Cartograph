@@ -5,7 +5,7 @@
  *
  * Idempotent: runs deleteAllSimilarToEdges first.
  *
- * KNN backend: HNSW (hnswlib-node) when available, with brute-force
+ * KNN backend: HNSW (USearch) when available, with brute-force
  * vec0 as the fallback. HNSW is built once per buildSimilarToEdges
  * call (one index per embedding dim) instead of per-row vec0 scans —
  * extrapolated 312k symbols drops from ~30 min to ~3-5 min.

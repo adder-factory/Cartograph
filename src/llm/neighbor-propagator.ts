@@ -6,7 +6,7 @@
  * nearest embedding neighbor — IF the cosine similarity is high enough that
  * the neighbor's semantic intent really transfers. This is essentially free
  * coverage: embeddings already exist; one HNSW KNN per unsummarised node
- * (falling back to vec0 / in-memory cosine when hnswlib-node is unavailable)
+ * (falling back to vec0 / in-memory cosine when USearch is unavailable)
  * copies a high-confidence summary onto the new node_id with `model='neighbor:v1'`.
  *
  * Drift risk is mitigated by a strict cosine threshold (≥0.85 default) and
@@ -285,7 +285,7 @@ interface PropagatorConfig {
   projectRoot: string | undefined;
   embeddingModel: string;
   /** Built once per run by {@link buildHnswForPropagator}; null when
-   *  hnswlib-node is missing or when this dim has no rows yet. */
+   *  USearch is unavailable or when this dim has no rows yet. */
   hnsw: HnswIndex | null;
 }
 
@@ -311,7 +311,7 @@ function detectEmbeddingModel(qb: QueryBuilder): string | undefined {
 /**
  * Build a single in-memory HNSW index over every embedding for
  * `embeddingModel` so the per-row neighbor lookup runs in O(log N)
- * instead of O(N). Returns null when hnswlib-node is missing OR no
+ * instead of O(N). Returns null when USearch is unavailable OR no
  * rows exist; both signals trigger the vec0 / in-memory fallback in
  * {@link findNearestNeighbors}. The empty-rows branch is unreachable
  * via {@link runNeighborPropagator} since `detectEmbeddingModel`

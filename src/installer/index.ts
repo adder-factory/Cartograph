@@ -2,7 +2,8 @@
  * Cartograph Interactive Installer
  *
  * Multi-target: writes MCP server config + instructions for the
- * agents the user picks (Claude Code, Cursor, Codex CLI, opencode).
+ * agents the user picks (Claude Code, Cursor, Codex CLI, opencode,
+ * Hermes, Gemini CLI, Antigravity, Kiro).
  * Defaults to the Claude-only behavior for backwards compatibility
  * when no targets are explicitly chosen and nothing else is detected.
  *
@@ -130,27 +131,34 @@ function assertNotCancelled<T>(clack: ClackApi, value: T | symbol): T {
  */
 async function maybeInstallGlobally(clack: ClackApi, useDefaults: boolean): Promise<void> {
   if (useDefaults) return;
+  try {
+    await promisify(execFile)('cartograph', ['--version']);
+    clack.log.info('cartograph is already on PATH');
+    return;
+  } catch {
+    // Not on PATH yet; offer to link this source checkout below.
+  }
 
   const shouldInstall = assertNotCancelled(
     clack,
     await clack.confirm({
-      message: 'Install cartograph globally? (Required for MCP server)',
+      message: 'Link cartograph onto PATH with `bun link`? (Required for MCP server configs that use `cartograph`)',
       initialValue: true,
     }),
   );
   if (!shouldInstall) {
-    clack.log.info('Skipped global install — MCP server may not work without it');
+    clack.log.info('Skipped PATH linking — MCP server may not work unless your config uses an absolute command path');
     return;
   }
 
   const s = clack.spinner();
-  s.start('Installing cartograph globally...');
+  s.start('Linking cartograph globally...');
   try {
-    await promisify(execFile)('npm', ['install', '-g', '@adder-factory/cartograph']);
-    s.stop('Installed cartograph globally');
-  } catch {
-    s.stop('Could not install globally (permission denied)');
-    clack.log.warn('Try: sudo npm install -g @adder-factory/cartograph');
+    await promisify(execFile)('bun', ['link'], { cwd: path.join(import.meta.dirname, '..', '..') });
+    s.stop('Linked cartograph globally');
+  } catch (err) {
+    s.stop('Could not link cartograph globally');
+    clack.log.warn(`Run from the Cartograph source checkout: bun link (${errMsg(err)})`);
   }
 }
 

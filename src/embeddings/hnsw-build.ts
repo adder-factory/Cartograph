@@ -10,7 +10,7 @@
  * produced by that same detached pass — so the rebuild belongs with
  * it, not in the blocking index postHooks (where it sat until it was
  * moved out). Reads `embedding_store` only; no graph dependency.
- * Silently skips when hnswlib-node isn't installed.
+ * Silently skips when USearch isn't available.
  */
 
 import path from 'node:path';
@@ -175,7 +175,7 @@ function persistAndRecordMeta(args: PersistArgs): boolean {
  */
 export async function rebuildHnswIfStale(db: SqliteDatabase, projectRoot: string): Promise<void> {
   if (!(await isHnswAvailable())) {
-    logDebug('hnsw-build: skipped (hnswlib-node dep missing; vec0 fallback active)');
+    logDebug('hnsw-build: skipped (USearch unavailable; vec0 fallback active)');
     return;
   }
 

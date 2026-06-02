@@ -570,9 +570,9 @@ function appendBackendStatus(lines: string[], cg: Cartograph, hnswAvailable: boo
     );
   } else if (!hnswAvailable) {
     lines.push(
-      '  ℹ `hnswlib-node` not installed — `similar_to` edge builds use the vec0 ' +
-        'brute-force path (O(N²) at scale). Optional; `npm install hnswlib-node` ' +
-        'adds the O(log N) accelerator for large repos.',
+      '  ℹ USearch unavailable — `similar_to` edge builds use the vec0 brute-force ' +
+        'path (O(N²) at scale). Optional; `bun install` re-fetches the `usearch` ' +
+        'accelerator for large repos.',
     );
   }
 }

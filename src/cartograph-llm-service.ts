@@ -649,7 +649,7 @@ interface SemanticTopKArgs {
 /**
  * Lazy-load the HNSW index for one embedding dim from disk. Returns
  * null when:
- *   - the optional `hnswlib-node` dep is missing,
+ *   - the optional USearch dep is missing,
  *   - no `hnsw_meta` row exists for this dim (the embed phase hasn't built one yet),
  *   - the on-disk file is missing (out-of-band delete or fresh project),
  *   - the meta signature doesn't match the live rowset (stale; the next embed phase rebuilds).
