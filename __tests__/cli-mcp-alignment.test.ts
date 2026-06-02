@@ -296,17 +296,8 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
 
   // `cartograph review` is four subcommands (`review context` /
   // `review neighbors` / `review risk` / `review agent-audit`)
-  // reflecting the `mode` enum. The CLI takes `--files <paths...>`
-  // instead of the MCP `diff` field; `limit` is the MCP row-cap,
-  // not surfaced as a CLI flag because the CLI's rendered output
-  // is human-paged. `perDetectorLimit` / `minSeverity` are agent-
-  // audit-specific args that mirror `--limit` / `--min-severity`
-  // shapes already exposed on adjacent risk-related commands;
-  // adding them to the auto-generated CLI for one mode would
-  // pollute the others, so they live on the MCP surface only
-  // (agents drive `agent-audit`; humans drive `cartograph review
-  // risk` or grep the findings table directly).
-  review: new Set(['diff', 'limit', 'perDetectorLimit', 'minSeverity']),
+  // reflecting the `mode` enum. All schema fields are mirrored on
+  // that family surface, so no per-property carve-outs are needed.
 
   // `cartograph session` is a subcommand tree (create / resume / list
   // / delete / macro_save / macro_run / macro_list / macro_delete).

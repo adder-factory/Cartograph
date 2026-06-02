@@ -8,11 +8,20 @@
  * category-3 fix: one schema drives both the MCP `inputSchema` and
  * the CLI option list, so they cannot drift.
  */
-import { describe, it, expect, vi } from 'vitest';
+import { afterAll, afterEach, describe, it, expect, vi } from 'vitest';
 import { z } from 'zod';
 import { defineTool } from '../src/mcp/tools/_define-tool.js';
 import { buildGeneratedCommand, buildCoercionSchema, type RunViaMcp } from '../src/bin/_command-generator.js';
 import { zodSchemaToCliOptions } from '../src/mcp/tools/_zod-to-cli.js';
+
+afterEach(() => {
+  process.exitCode = 0;
+  vi.restoreAllMocks();
+});
+
+afterAll(() => {
+  process.exitCode = 0;
+});
 
 /** A minimal flat-arg tool for option-surface tests. */
 const flatTool = defineTool({
@@ -41,9 +50,9 @@ const familyTool = defineTool({
 });
 
 /** Parse a command in test mode (no process.exit on error). */
-function parse(cmd: ReturnType<typeof buildGeneratedCommand>, argv: string[]): void {
+async function parse(cmd: ReturnType<typeof buildGeneratedCommand>, argv: string[]): Promise<void> {
   cmd.exitOverride();
-  cmd.parse(argv, { from: 'user' });
+  await cmd.parseAsync(argv, { from: 'user' });
 }
 
 describe('buildGeneratedCommand — option surface', () => {
@@ -86,17 +95,14 @@ describe('buildGeneratedCommand — forwarding + coercion', () => {
   it('forwards parsed args and routes projectPath to the 3rd argument', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run);
-    parse(cmd, ['--query', 'hello', '--limit', '5', '--project-path', '/tmp/proj']);
-    // commander's async action — flush microtasks.
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'hello', '--limit', '5', '--project-path', '/tmp/proj']);
     expect(run).toHaveBeenCalledWith('cartograph_flat_demo', { query: 'hello', limit: 5 }, '/tmp/proj');
   });
 
   it('coerces a numeric CLI string to a number', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run);
-    parse(cmd, ['--query', 'q', '--limit', '42']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'q', '--limit', '42']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ limit: 42 });
     expect(typeof (run.mock.calls[0]?.[1] as { limit: unknown }).limit).toBe('number');
   });
@@ -113,8 +119,7 @@ describe('buildGeneratedCommand — forwarding + coercion', () => {
     });
     const prevExit = process.exitCode;
     const cmd = buildGeneratedCommand(flatTool, run);
-    parse(cmd, ['--query', 'q', '--limit', '999']); // max is 100
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'q', '--limit', '999']); // max is 100
     expect(run).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
     expect(stderrWrites.join(' ')).toMatch(/limit/);
@@ -124,15 +129,14 @@ describe('buildGeneratedCommand — forwarding + coercion', () => {
 
   it('rejects a non-numeric value for a number field', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
-    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     const prevExit = process.exitCode;
     const cmd = buildGeneratedCommand(flatTool, run);
-    parse(cmd, ['--query', 'q', '--limit', 'abc']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'q', '--limit', 'abc']);
     expect(run).not.toHaveBeenCalled();
     expect(process.exitCode).toBe(1);
     process.exitCode = prevExit;
-    errSpy.mockRestore();
+    stderrSpy.mockRestore();
   });
 });
 
@@ -147,8 +151,7 @@ describe('buildGeneratedCommand — family discriminator as positional', () => {
   it('forwards the positional discriminator value into args', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(familyTool, run, { discriminatorAsPositional: true });
-    parse(cmd, ['list', '--id', '7']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['list', '--id', '7']);
     expect(run).toHaveBeenCalledWith('cartograph_family_demo', { action: 'list', id: 7 }, undefined);
   });
 
@@ -184,8 +187,7 @@ describe('buildGeneratedCommand — short-flag aliases', () => {
   it('parses a value passed via the short alias', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run, { shortFlags: { limit: '-l' } });
-    parse(cmd, ['--query', 'q', '-l', '7']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'q', '-l', '7']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ limit: 7 });
   });
 });
@@ -205,24 +207,21 @@ describe('buildGeneratedCommand — non-discriminator positionals', () => {
   it('forwards positional values into args by declared order', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run, { positionalFields: ['dirPath'] });
-    parse(cmd, ['src/sync', '--limit', '5']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['src/sync', '--limit', '5']);
     expect(run).toHaveBeenCalledWith('cartograph_wide_demo', { dirPath: 'src/sync', limit: 5 }, undefined);
   });
 
   it('forwards a variadic positional as a collected array', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run, { positionalFields: ['names'] });
-    parse(cmd, ['a', 'b', 'c']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['a', 'b', 'c']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ names: ['a', 'b', 'c'] });
   });
 
   it('omits an unset optional positional from args', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run, { positionalFields: ['dirPath'] });
-    parse(cmd, ['--limit', '9']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--limit', '9']);
     expect(run.mock.calls[0]?.[1]).not.toHaveProperty('dirPath');
   });
 
@@ -247,8 +246,7 @@ describe('buildGeneratedCommand — joined variadic positional', () => {
   it('joins the collected tokens with a space into one forwarded string', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run, { joinedVariadicPositional: 'query' });
-    parse(cmd, ['Auth', 'login', 'session', '--limit', '5']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['Auth', 'login', 'session', '--limit', '5']);
     expect(run).toHaveBeenCalledWith('cartograph_flat_demo', { query: 'Auth login session', limit: 5 }, undefined);
   });
 
@@ -278,8 +276,7 @@ describe('buildGeneratedCommand — negatable booleans', () => {
   it('does not forward a negatable boolean when the user passes nothing', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run);
-    parse(cmd, ['--limit', '5']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--limit', '5']);
     // `compact` left to the schema default — NOT forwarded.
     expect(run.mock.calls[0]?.[1]).not.toHaveProperty('compact');
   });
@@ -287,16 +284,14 @@ describe('buildGeneratedCommand — negatable booleans', () => {
   it('forwards compact:false when --no-compact is passed', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run);
-    parse(cmd, ['--no-compact']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--no-compact']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ compact: false });
   });
 
   it('forwards compact:true when the positive --compact is passed', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(wideTool, run);
-    parse(cmd, ['--compact']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--compact']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ compact: true });
   });
 });
@@ -312,8 +307,7 @@ describe('buildGeneratedCommand — flagDefaults', () => {
   it('forwards the CLI default when the flag is omitted', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run, { flagDefaults: { query: 'all' } });
-    parse(cmd, ['--limit', '5']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--limit', '5']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ query: 'all', limit: 5 });
   });
 
@@ -335,8 +329,7 @@ describe('buildGeneratedCommand — longFlagOverrides', () => {
   it('forwards the overridden-flag value under the schema field name', async () => {
     const run = vi.fn<RunViaMcp>().mockResolvedValue();
     const cmd = buildGeneratedCommand(flatTool, run, { longFlagOverrides: { limit: '--max-rows' } });
-    parse(cmd, ['--query', 'q', '--max-rows', '7']);
-    await new Promise((r) => setTimeout(r, 0));
+    await parse(cmd, ['--query', 'q', '--max-rows', '7']);
     // Commander stores it as `maxRows`; it is forwarded under `limit`.
     expect(run.mock.calls[0]?.[1]).toMatchObject({ query: 'q', limit: 7 });
   });

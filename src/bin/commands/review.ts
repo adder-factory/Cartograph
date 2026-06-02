@@ -22,6 +22,30 @@ import {
 // installFamilyActionAlias in _cli-core.ts (handoff #23).
 installFamilyActionAlias(reviewCmd, 'review', 'mode');
 
+async function readReviewDiffInput(raw: string): Promise<string> {
+  if (raw === '-') {
+    return new Promise<string>((resolve, reject) => {
+      let buf = '';
+      process.stdin.setEncoding('utf-8');
+      process.stdin.on('data', (c) => (buf += c));
+      process.stdin.on('end', () => resolve(buf));
+      process.stdin.on('error', reject);
+    });
+  }
+  if (raw.includes('\n') || raw.startsWith('@@') || raw.startsWith('diff --git')) return raw;
+  try {
+    return fs.readFileSync(raw, 'utf-8');
+  } catch (readErr) {
+    if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') {
+      error(`review context: diff file not found: ${raw}`);
+    } else {
+      error(`review context: could not read diff file ${raw}: ${errMsg(readErr)}`);
+    }
+    process.exitCode = 1;
+    return '';
+  }
+}
+
 /**
  * cartograph review <mode>
  *
@@ -38,6 +62,7 @@ reviewCmd
   .command('context [diff-file]')
   .description("Diff-driven review context (mirrors cartograph_review({mode: 'context'}))")
   .option('-p, --project-path <path>', 'Project path')
+  .option('--diff <pathOrText|->', 'Unified diff text, path, or - for stdin (MCP arg mirror)')
   .option('--max-callers-per-symbol <n>', 'Cap callers per symbol (default 5)')
   .option('--max-callees-per-symbol <n>', 'Cap callees per symbol (default 5)')
   .option('--max-co-change-warnings <n>', 'Cap co-change warnings per file (default 3, 0 disables)')
@@ -48,6 +73,7 @@ reviewCmd
       diffFile: string | undefined,
       options: {
         projectPath?: string;
+        diff?: string;
         maxCallersPerSymbol?: string;
         maxCalleesPerSymbol?: string;
         maxCoChangeWarnings?: string;
@@ -56,20 +82,24 @@ reviewCmd
       },
     ) => {
       let diff: string;
-      if (diffFile) {
-        // Guard the read so a missing diff file yields a clean error +
-        // non-zero exit instead of a raw Node ENOENT stack trace.
-        try {
-          diff = fs.readFileSync(diffFile, 'utf-8');
-        } catch (err) {
-          if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-            error(`review context: diff file not found: ${diffFile}`);
-          } else {
-            error(`review context: could not read diff file ${diffFile}: ${errMsg(err)}`);
-          }
+      if (diffFile && options.diff !== undefined) {
+        error('review context: pass either [diff-file] or --diff, not both.');
+        process.exitCode = 1;
+        return;
+      }
+      if (options.diff !== undefined) {
+        diff = await readReviewDiffInput(options.diff);
+        if (process.exitCode) return;
+        if (diff.trim().length === 0) {
+          error('review context: --diff input is empty.');
           process.exitCode = 1;
           return;
         }
+      } else if (diffFile) {
+        // Guard the read so a missing diff file yields a clean error +
+        // non-zero exit instead of a raw Node ENOENT stack trace.
+        diff = await readReviewDiffInput(diffFile);
+        if (process.exitCode) return;
         // An explicitly-passed diff-file path that is empty / whitespace-only
         // is a caller error — fail fast instead of silently falling back to
         // `git diff HEAD` and reviewing the working tree (the no-arg / empty-
@@ -180,23 +210,65 @@ reviewCmd
     "Composed risk-triage report — biomarkers + hotspots + coverage gaps + dead-code (mirrors cartograph_review({mode: 'risk'}))",
   )
   .option('-p, --project-path <path>', 'Project path')
-  .option('-n, --top-n <n>', 'Per-lens cap (default 5)', '5')
+  .option('-n, --top-n <n>', 'Per-lens cap (default 5)')
+  .option('--limit <n>', 'Alias of --top-n (MCP arg mirror); --top-n wins when both are set')
   .option('--min-centrality <n>', 'Minimum centrality (0–1, default 0)')
   .option('--coverage-source <s>', 'Coverage source key (e.g. unit, e2e)')
-  .action(async (options: { projectPath?: string; topN?: string; minCentrality?: string; coverageSource?: string }) => {
-    const args: Record<string, unknown> = { mode: 'risk' };
-    if (!assignIntArg({ args, key: 'topN', raw: options.topN ?? '5', optionName: '--top-n', opts: { min: 1 } })) return;
+  .action(
+    async (options: {
+      projectPath?: string;
+      topN?: string;
+      limit?: string;
+      minCentrality?: string;
+      coverageSource?: string;
+    }) => {
+      const args: Record<string, unknown> = { mode: 'risk' };
+      if (options.limit !== undefined) {
+        if (!assignIntArg({ args, key: 'limit', raw: options.limit, optionName: '--limit', opts: { min: 1 } })) return;
+      }
+      const rawTopN = options.topN ?? (options.limit === undefined ? '5' : undefined);
+      if (!assignIntArg({ args, key: 'topN', raw: rawTopN, optionName: '--top-n', opts: { min: 1 } })) return;
+      if (
+        !assignFloatArg({
+          args,
+          key: 'minCentrality',
+          raw: options.minCentrality,
+          optionName: '--min-centrality',
+          opts: { min: 0, max: 1 },
+        })
+      )
+        return;
+      if (options.coverageSource) args['coverageSource'] = options.coverageSource;
+      await runViaMCP('cartograph_review', args, options.projectPath);
+    },
+  );
+
+reviewCmd
+  .command('agent-audit')
+  .description("Agent-prone biomarker audit (mirrors cartograph_review({mode: 'agent-audit'}))")
+  .option('-p, --project-path <path>', 'Project path')
+  .option('--per-detector-limit <n>', 'Max findings per detector (default 10, max 50)')
+  .option('--min-severity <level>', 'Minimum severity: info, warning, or error')
+  .action(async (options: { projectPath?: string; perDetectorLimit?: string; minSeverity?: string }) => {
+    const args: Record<string, unknown> = { mode: 'agent-audit' };
     if (
-      !assignFloatArg({
+      !assignIntArg({
         args,
-        key: 'minCentrality',
-        raw: options.minCentrality,
-        optionName: '--min-centrality',
-        opts: { min: 0, max: 1 },
+        key: 'perDetectorLimit',
+        raw: options.perDetectorLimit,
+        optionName: '--per-detector-limit',
+        opts: { min: 1, max: 50 },
       })
     )
       return;
-    if (options.coverageSource) args['coverageSource'] = options.coverageSource;
+    if (options.minSeverity !== undefined) {
+      if (!['info', 'warning', 'error'].includes(options.minSeverity)) {
+        error('--min-severity must be one of: info, warning, error');
+        process.exitCode = 1;
+        return;
+      }
+      args['minSeverity'] = options.minSeverity;
+    }
     await runViaMCP('cartograph_review', args, options.projectPath);
   });
 
