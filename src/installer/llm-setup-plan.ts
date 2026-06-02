@@ -36,6 +36,7 @@ import {
 } from '../llm/recommended-models.js';
 import { buildRecommendedLlmConfig } from './recommended-config.js';
 import { buildSingleEndpointConfig } from './build-endpoint-config.js';
+import { errMsg } from '../errors.js';
 import {
   backendInstallHint,
   backendLabel,
@@ -171,10 +172,7 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
   );
 
   const presets = buildPresets({ detectedBackends, claudeBin, anthropicApiKey, localGgufPresence });
-  // Detection-first: when ≥1 backend is running, the first detected
-  // preset is the recommendation; otherwise default to install-ollama
-  // (simplest install + auto model management).
-  const recommendedPresetId: SetupPresetId = presets.length > 0 ? presets[0]!.id : ('install-ollama' as SetupPresetId);
+  const recommendedPresetId = chooseRecommendedPresetId(detectedBackends, presets);
 
   return {
     detectedBackends: detectedBackends.map((b) => ({
@@ -188,6 +186,29 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
     presets,
     recommendedPresetId,
   };
+}
+
+function hasDetectedEndpoint(backends: readonly DetectedBackend[], endpoint: string): boolean {
+  return backends.some((b) => b.kind === 'llama-server' && b.endpoint === endpoint);
+}
+
+function hasStandardLlamaCppStack(backends: readonly DetectedBackend[]): boolean {
+  return (
+    hasDetectedEndpoint(backends, LLAMA_SERVER_EMBED_ENDPOINT) &&
+    hasDetectedEndpoint(backends, LLAMA_SERVER_SUMMARIZE_ENDPOINT) &&
+    hasDetectedEndpoint(backends, LLAMA_SERVER_ASK_ENDPOINT) &&
+    hasDetectedEndpoint(backends, LLAMA_SERVER_RERANKER_ENDPOINT)
+  );
+}
+
+export function chooseRecommendedPresetId(
+  detectedBackends: readonly DetectedBackend[],
+  presets: readonly SetupPreset[],
+): SetupPresetId {
+  if (hasStandardLlamaCppStack(detectedBackends)) return 'install-llama-cpp';
+  const firstDetected = presets.find((p) => p.id.startsWith('use-detected-'));
+  if (firstDetected) return firstDetected.id;
+  return 'install-ollama';
 }
 
 interface BuildPresetsArgs {
@@ -483,6 +504,70 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
     nextSteps,
     notes,
   };
+}
+
+export type LlmTuneTier = 'embed' | 'chat' | 'ask' | 'reranker';
+type LlmTuneConfigKey = 'embeddingLlm' | 'summarizeLlm' | 'askLlm' | 'rerankerLlm';
+
+const LLM_TUNE_CONFIG_KEYS: Record<LlmTuneTier, LlmTuneConfigKey> = {
+  embed: 'embeddingLlm',
+  chat: 'summarizeLlm',
+  ask: 'askLlm',
+  reranker: 'rerankerLlm',
+};
+
+export interface WriteLlmTierConcurrencyOverrideOptions {
+  readonly projectRoot: string;
+  readonly tier: LlmTuneTier;
+  readonly concurrency: number;
+}
+
+export interface WriteLlmTierConcurrencyOverrideResult {
+  readonly configPath: string;
+  readonly backupPath: string;
+  readonly configKey: LlmTuneConfigKey;
+  readonly previous: number | null;
+  readonly concurrency: number;
+}
+
+export async function writeLlmTierConcurrencyOverride(
+  opts: WriteLlmTierConcurrencyOverrideOptions,
+): Promise<WriteLlmTierConcurrencyOverrideResult> {
+  if (!Number.isInteger(opts.concurrency) || opts.concurrency < 1) {
+    throw new Error('concurrency must be a positive integer');
+  }
+  const configKey = LLM_TUNE_CONFIG_KEYS[opts.tier];
+  const configPath = `${opts.projectRoot}/.cartograph/config.json`;
+  const exists = await fsp
+    .access(configPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!exists) {
+    throw new Error(`no config.json at ${configPath}`);
+  }
+  let parsed: Record<string, unknown>;
+  try {
+    const raw = await fsp.readFile(configPath, 'utf-8');
+    const value = JSON.parse(raw) as unknown;
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      throw new Error('config root must be an object');
+    }
+    parsed = value as Record<string, unknown>;
+  } catch (error_) {
+    throw new Error(`could not parse ${configPath}: ${errMsg(error_)}`);
+  }
+  const llm = (parsed['llm'] as Record<string, unknown> | undefined) ?? {};
+  const tierBlock = (llm[configKey] as Record<string, unknown> | null | undefined) ?? null;
+  if (!tierBlock) throw new Error(`no llm.${configKey} block in ${configPath}`);
+  const previous = typeof tierBlock['concurrency'] === 'number' ? tierBlock['concurrency'] : null;
+  tierBlock['concurrency'] = opts.concurrency;
+  llm[configKey] = tierBlock;
+  parsed['llm'] = llm;
+  const backupPath = `${configPath}.bak.${Date.now()}`;
+  await fsp.copyFile(configPath, backupPath);
+  await fsp.writeFile(`${configPath}.tmp`, JSON.stringify(parsed, null, 2), 'utf-8');
+  await fsp.rename(`${configPath}.tmp`, configPath);
+  return { configPath, backupPath, configKey, previous, concurrency: opts.concurrency };
 }
 
 interface InstallPresetNote {

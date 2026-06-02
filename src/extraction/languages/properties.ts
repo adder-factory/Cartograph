@@ -58,8 +58,10 @@ function isPropertiesSeparator(ch: string | undefined): boolean {
   return ch === '=' || ch === ':';
 }
 
+const ESCAPED_KEY_CHARS = new Set(['=', ':', '\\', ' ', '\t']);
+
 function isEscapedKeyChar(ch: string | undefined): boolean {
-  return ch === '=' || ch === ':' || ch === '\\' || ch === ' ' || ch === '\t';
+  return ch !== undefined && ESCAPED_KEY_CHARS.has(ch);
 }
 
 function firstSignificantColumn(rawLine: string): number {
@@ -71,7 +73,8 @@ function firstSignificantColumn(rawLine: string): number {
 function parseKeyEscape(line: string, i: number): { text: string; nextIdx: number } {
   const ch = line[i] ?? '';
   const next = line[i + 1] ?? '';
-  return isEscapedKeyChar(next) ? { text: next, nextIdx: i + 2 } : { text: ch + next, nextIdx: i + 2 };
+  const text = isEscapedKeyChar(next) ? next : ch + next;
+  return { text, nextIdx: i + 2 };
 }
 
 function valueStartAfterSeparator(rawLine: string, separatorIdx: number): number {

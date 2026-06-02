@@ -181,6 +181,15 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
     }
   });
 
+  it('infers neighbors mode when symbols are provided without an explicit mode', async () => {
+    const tool = getReviewNeighborsTool();
+    const result = await tool.handle(makeCtx(f.cg), { symbols: ['alpha'], k: 1 });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('Review neighbors');
+    expect(text).not.toContain('Review context');
+    if (f.cg.db.hasVecExtension()) expect(text).toMatch(/beta/i);
+  });
+
   it('excludes the changed-symbol set itself from the lookalike output', async () => {
     const tool = getReviewNeighborsTool();
     const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 5 });

@@ -16,7 +16,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { planLlmSetup, applyLlmSetupChoice, AVAILABLE_PRESETS } from '../src/installer/llm-setup-plan.js';
+import {
+  planLlmSetup,
+  applyLlmSetupChoice,
+  AVAILABLE_PRESETS,
+  chooseRecommendedPresetId,
+} from '../src/installer/llm-setup-plan.js';
 
 describe('planLlmSetup', () => {
   it('returns a stable JSON shape with all required fields', async () => {
@@ -70,6 +75,33 @@ describe('planLlmSetup', () => {
     const plan = await planLlmSetup();
     const ids = plan.presets.map((p) => p.id);
     expect(ids).toContain(plan.recommendedPresetId);
+  });
+
+  it('recommends the 4-port llama.cpp preset when the standard stack is detected', () => {
+    const detected = [8080, 8081, 8082, 8083].map((port) => ({
+      kind: 'llama-server' as const,
+      endpoint: `http://localhost:${port}`,
+      models: [`model-${port}`],
+    }));
+    const presets = [
+      {
+        id: 'use-detected-llama-server-http---localhost-8080' as const,
+        label: 'detected',
+        description: 'detected',
+        summary: 'detected',
+        nextSteps: [],
+        requiresInstall: false,
+      },
+      {
+        id: 'install-llama-cpp' as const,
+        label: 'llama',
+        description: 'llama',
+        summary: 'llama',
+        nextSteps: [],
+        requiresInstall: true,
+      },
+    ];
+    expect(chooseRecommendedPresetId(detected, presets)).toBe('install-llama-cpp');
   });
 });
 

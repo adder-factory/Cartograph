@@ -150,12 +150,23 @@ interface RailsRouteNodeArgs {
 
 function buildRailsRouteNode(args: RailsRouteNodeArgs): Node {
   const { pattern, match, filePath, line, now } = args;
-  if (pattern.source.includes('resources')) return railsResourceNode(filePath, match[1]!, line, match[0].length, now);
-  if (pattern.source.includes('root')) return railsRootNode(filePath, match[1]!, line, match[0].length, now);
-  return railsHttpRouteNode(filePath, match[1]!.toUpperCase(), match[2]!, line, match[0].length, now);
+  const endColumn = match[0].length;
+  if (pattern.source.includes('resources'))
+    return railsResourceNode({ filePath, resourceName: match[1]!, line, endColumn, now });
+  if (pattern.source.includes('root')) return railsRootNode({ filePath, target: match[1]!, line, endColumn, now });
+  return railsHttpRouteNode({ filePath, method: match[1]!.toUpperCase(), routePath: match[2]!, line, endColumn, now });
 }
 
-function railsResourceNode(filePath: string, resourceName: string, line: number, endColumn: number, now: number): Node {
+interface RailsResourceNodeArgs {
+  filePath: string;
+  resourceName: string;
+  line: number;
+  endColumn: number;
+  now: number;
+}
+
+function railsResourceNode(args: RailsResourceNodeArgs): Node {
+  const { filePath, resourceName, line, endColumn, now } = args;
   return railsRouteNode({
     id: `route:${filePath}:resource:${resourceName}:${line}`,
     name: `resource:${resourceName}`,
@@ -167,7 +178,16 @@ function railsResourceNode(filePath: string, resourceName: string, line: number,
   });
 }
 
-function railsRootNode(filePath: string, target: string, line: number, endColumn: number, now: number): Node {
+interface RailsRootNodeArgs {
+  filePath: string;
+  target: string;
+  line: number;
+  endColumn: number;
+  now: number;
+}
+
+function railsRootNode(args: RailsRootNodeArgs): Node {
+  const { filePath, target, line, endColumn, now } = args;
   return railsRouteNode({
     id: `route:${filePath}:root:${line}`,
     name: `/ -> ${target}`,
@@ -179,14 +199,17 @@ function railsRootNode(filePath: string, target: string, line: number, endColumn
   });
 }
 
-function railsHttpRouteNode(
-  filePath: string,
-  method: string,
-  routePath: string,
-  line: number,
-  endColumn: number,
-  now: number,
-): Node {
+interface RailsHttpRouteNodeArgs {
+  filePath: string;
+  method: string;
+  routePath: string;
+  line: number;
+  endColumn: number;
+  now: number;
+}
+
+function railsHttpRouteNode(args: RailsHttpRouteNodeArgs): Node {
+  const { filePath, method, routePath, line, endColumn, now } = args;
   return railsRouteNode({
     id: `route:${filePath}:${method}:${routePath}:${line}`,
     name: `${method} ${routePath}`,

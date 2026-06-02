@@ -50,6 +50,16 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         'class Crate {}',
         'function packParcel(): Crate { return new Crate(); }',
         '',
+        'class TinyCache {',
+        '  get(id: string): number | undefined { return id.length; }',
+        '  delete(id: string): void {}',
+        '}',
+        'class CacheUser {',
+        '  private cache = new TinyCache();',
+        '  read(id: string): number | undefined { return this.cache.get(id); }',
+        '  drop(id: string): void { this.cache.delete(id); }',
+        '}',
+        '',
         '// Not exported, no incoming edges of any kind — genuine orphan.',
         'class AbandonedBin {}',
       ].join('\n'),
@@ -92,6 +102,14 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
     expect(names).not.toContain('Crate');
     // A class with no incoming edges at all is still a genuine orphan.
     expect(names).toContain('AbandonedBin');
+  });
+
+  it('does not flag helper methods used through field/member access', () => {
+    const candidates = findGraphCandidates({ queries: cg.queries, max: 50 });
+    const cacheMethods = candidates
+      .filter((c) => c.filePath.endsWith('src/box.ts') && (c.name === 'get' || c.name === 'delete'))
+      .map((c) => c.name);
+    expect(cacheMethods).toEqual([]);
   });
 
   it('gates constructor names by language — TS `initialize` is kept, Ruby `initialize` is dropped', () => {

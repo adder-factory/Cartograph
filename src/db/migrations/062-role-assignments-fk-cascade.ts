@@ -1,4 +1,5 @@
 import type { MigrationModule } from './types.js';
+import { isSqliteTableOptionSuffix } from '../sqlite-table-options.js';
 
 /**
  * F-U fix: add `FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE
@@ -47,27 +48,6 @@ interface ObjectRow {
 }
 
 const TEMP_SUFFIX = '__fk_tmp';
-
-function isSqliteTableOptionSuffix(suffix: string): boolean {
-  const normalized = trimSqliteSuffixPadding(suffix).replaceAll(/\s+/g, ' ').toUpperCase();
-  if (normalized === '') return true;
-  if (normalized === 'STRICT') return true;
-  if (normalized === 'WITHOUT ROWID') return true;
-  const commaParts = normalized.split(',').map((part) => part.trim());
-  return commaParts.length === 2 && commaParts[0] === 'STRICT' && commaParts[1] === 'WITHOUT ROWID';
-}
-
-function trimSqliteSuffixPadding(value: string): string {
-  let start = 0;
-  let end = value.length;
-  while (start < end && isSqliteSuffixPadding(value[start]!)) start++;
-  while (end > start && isSqliteSuffixPadding(value[end - 1]!)) end--;
-  return value.slice(start, end);
-}
-
-function isSqliteSuffixPadding(char: string): boolean {
-  return char === ';' || /\s/.test(char);
-}
 
 export const MIGRATION: MigrationModule = {
   description: 'Add node_id FK to role_assignments + reap dead-node orphans',

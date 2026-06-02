@@ -533,7 +533,7 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
     cmd.option('-p, --project-path <path>', 'Path to the project (defaults to current directory)');
   }
 
-  validateOptionOverrideNames(spec, mod, forceNegatable, flagDefaults, longOverrides);
+  validateOptionOverrideNames({ spec, mod, forceNegatable, flagDefaults, longOverrides });
 
   const forwarded: CliOptionSpec[] = [];
   for (const rawOpt of spec.options) {
@@ -541,7 +541,7 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
     // A positional-rendered field (discriminator / data / joined
     // variadic) is excluded — it arrives as a positional arg.
     if (positionalSet.has(rawOpt.name)) continue;
-    const opt = cliOptionForRegistration(rawOpt, mod, forceNegatable, flagDefaults, longOverrides);
+    const opt = cliOptionForRegistration({ rawOpt, mod, forceNegatable, flagDefaults, longOverrides });
     registerOption(cmd, opt, shortFlags[opt.name]);
     forwarded.push(opt);
   }
@@ -559,13 +559,16 @@ function commanderKey(opt: CliOptionSpec): string {
   return opt.flag.replace(/^--/, '').replaceAll(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
 }
 
-function validateOptionOverrideNames(
-  spec: CommandSpec,
-  mod: ToolModule,
-  forceNegatable: ReadonlySet<string>,
-  flagDefaults: Readonly<Record<string, unknown>>,
-  longOverrides: Readonly<Record<string, string>>,
-): void {
+interface OptionOverrideArgs {
+  spec: CommandSpec;
+  mod: ToolModule;
+  forceNegatable: ReadonlySet<string>;
+  flagDefaults: Readonly<Record<string, unknown>>;
+  longOverrides: Readonly<Record<string, string>>;
+}
+
+function validateOptionOverrideNames(args: OptionOverrideArgs): void {
+  const { spec, mod, forceNegatable, flagDefaults, longOverrides } = args;
   for (const [label, names] of [
     ['negatableFields', forceNegatable] as const,
     ['flagDefaults', Object.keys(flagDefaults)] as const,
@@ -581,13 +584,16 @@ function validateOptionOverrideNames(
   }
 }
 
-function cliOptionForRegistration(
-  rawOpt: CliOptionSpec,
-  mod: ToolModule,
-  forceNegatable: ReadonlySet<string>,
-  flagDefaults: Readonly<Record<string, unknown>>,
-  longOverrides: Readonly<Record<string, string>>,
-): CliOptionSpec {
+interface CliOptionRegistrationArgs {
+  rawOpt: CliOptionSpec;
+  mod: ToolModule;
+  forceNegatable: ReadonlySet<string>;
+  flagDefaults: Readonly<Record<string, unknown>>;
+  longOverrides: Readonly<Record<string, string>>;
+}
+
+function cliOptionForRegistration(args: CliOptionRegistrationArgs): CliOptionSpec {
+  const { rawOpt, mod, forceNegatable, flagDefaults, longOverrides } = args;
   if (forceNegatable.has(rawOpt.name) && rawOpt.kind !== 'boolean') {
     throw new Error(
       `buildGeneratedCommand: negatableFields entry \`${rawOpt.name}\` on ` +

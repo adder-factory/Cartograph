@@ -46,6 +46,12 @@ type LoadedCartographModule = Awaited<ReturnType<typeof loadCartograph>>;
 type AdminIndexGraph = Awaited<ReturnType<LoadedCartographModule['default']['open']>>;
 type ClackPrompts = typeof import('@clack/prompts');
 
+const PHASE_PERCENT_SCALE = 100;
+const PHASE_LABEL_WIDTH = 14;
+const PHASE_DURATION_WIDTH = 8;
+const PHASE_PERCENT_WIDTH = 2;
+const POST_HOOK_LABEL_WIDTH = 12;
+
 function parseParseWorkers(raw: string | undefined): number | undefined {
   if (raw === undefined) return undefined;
   const n = Number.parseInt(raw, 10);
@@ -54,6 +60,15 @@ function parseParseWorkers(raw: string | undefined): number | undefined {
     process.exit(1);
   }
   return n;
+}
+
+function parseConcurrencyOption(raw: string | undefined): number {
+  if (raw === undefined) return parseConcurrency(undefined);
+  if (!/^\d+$/.test(raw.trim())) {
+    error('--concurrency must be a positive integer');
+    process.exit(1);
+  }
+  return parseConcurrency(raw);
 }
 
 function indexAllOptions(
@@ -76,14 +91,10 @@ function indexAllOptions(
 function phaseTimingLines(result: IndexResult): string[] {
   const p = result.profile;
   if (!p) return [];
-  const PERCENT_SCALE = 100;
-  const LABEL_WIDTH = 14;
-  const DURATION_WIDTH = 8;
-  const PERCENT_WIDTH = 2;
   const fmt = (label: string, ms: number | undefined): string => {
     if (ms === undefined) return '';
-    const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PERCENT_SCALE) : 0;
-    return `  ${label.padEnd(LABEL_WIDTH)} ${formatDuration(ms).padStart(DURATION_WIDTH)}  (${pct.toString().padStart(PERCENT_WIDTH)}%)`;
+    const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PHASE_PERCENT_SCALE) : 0;
+    return `  ${label.padEnd(PHASE_LABEL_WIDTH)} ${formatDuration(ms).padStart(PHASE_DURATION_WIDTH)}  (${pct.toString().padStart(PHASE_PERCENT_WIDTH)}%)`;
   };
   const lines = [fmt('scan', p.scanMs), fmt('parse+store', p.parseStoreMs)];
   if (p.retryMs && p.retryMs > 0) lines.push(fmt('retry', p.retryMs));
@@ -91,9 +102,9 @@ function phaseTimingLines(result: IndexResult): string[] {
   if (p.postHooksByHook && p.postHooksMs && p.postHooksMs > 0) {
     const sorted = Object.entries(p.postHooksByHook).sort((a, b) => b[1] - a[1]);
     for (const [name, ms] of sorted) {
-      const pct = p.postHooksMs > 0 ? Math.round((ms / p.postHooksMs) * 100) : 0;
+      const pct = p.postHooksMs > 0 ? Math.round((ms / p.postHooksMs) * PHASE_PERCENT_SCALE) : 0;
       lines.push(
-        `    ${name.padEnd(12)} ${formatDuration(ms).padStart(8)}  (${pct.toString().padStart(2)}% of postHooks)`,
+        `    ${name.padEnd(POST_HOOK_LABEL_WIDTH)} ${formatDuration(ms).padStart(PHASE_DURATION_WIDTH)}  (${pct.toString().padStart(PHASE_PERCENT_WIDTH)}% of postHooks)`,
       );
     }
   }
@@ -724,7 +735,7 @@ adminCmd
         // Match the MCP `cartograph_admin({action: 'summarize'})` clamp [1, 16] so both
         // surfaces enforce the same upper bound. Local LLMs and rate-
         // limited cloud endpoints both work poorly past ~8 concurrent.
-        const concurrency = parseConcurrency(options.concurrency);
+        const concurrency = parseConcurrencyOption(options.concurrency);
 
         // Lever C — eager-summary cap. `--all` wins, then `--limit`,
         // else undefined so the service falls back to
@@ -800,7 +811,7 @@ adminCmd
 
       // Clamped to [1, 16] — typical embedding endpoints rate-limit
       // around 4–8 concurrent requests; anything higher just queues.
-      const concurrency = parseConcurrency(options.concurrency);
+      const concurrency = parseConcurrencyOption(options.concurrency);
 
       if (options.quiet) {
         await cg.llm.embed.embedAll({ concurrency });
@@ -864,7 +875,7 @@ adminCmd
       // Clamped to [1, 16] — same band as summarize/embed; classifier
       // chat calls are short and per-symbol, so concurrency speeds the
       // happy path but local LLMs queue past ~8 anyway.
-      const concurrency = parseConcurrency(options.concurrency);
+      const concurrency = parseConcurrencyOption(options.concurrency);
 
       if (options.quiet) {
         await cg.llm.classifyAll({ concurrency });
@@ -1257,6 +1268,136 @@ adminCmd
       }
     } catch (err) {
       error(`install-models failed: ${errMsg(err)}`);
+      process.exit(1);
+    }
+  });
+
+/**
+ * MCP-parity aliases for installer/LLM admin actions.
+ */
+adminCmd
+  .command('doctor [path]')
+  .description("Diagnose install state (mirrors cartograph_admin MCP tool with action='doctor')")
+  .option('--fix', 'Auto-apply fixable remediations')
+  .option('--skip-project-checks', 'Skip project init/config checks')
+  .action(async (pathArg: string | undefined, options: { fix?: boolean; skipProjectChecks?: boolean }) => {
+    const projectPath = resolveProjectPath(pathArg);
+    try {
+      const { runDoctor, formatDoctorReport } = await import('../../installer/doctor.js');
+      const result = await runDoctor({
+        projectPath,
+        fix: options.fix === true,
+        skipProjectChecks: options.skipProjectChecks === true,
+      });
+      console.log(formatDoctorReport(result));
+      if (result.overallStatus === 'fail') process.exit(1);
+    } catch (err) {
+      error(`doctor failed: ${errMsg(err)}`);
+      process.exit(1);
+    }
+  });
+
+adminCmd
+  .command('llm-plan')
+  .description("Print agent-friendly LLM setup presets (mirrors cartograph_admin MCP tool with action='llm-plan')")
+  .action(async () => {
+    try {
+      const { planLlmSetup } = await import('../../installer/llm-setup-plan.js');
+      const plan = await planLlmSetup();
+      console.log(`Recommended preset: ${plan.recommendedPresetId}`);
+      console.log('');
+      console.log('Detected backends:');
+      if (plan.detectedBackends.length === 0) {
+        console.log('- none');
+      } else {
+        for (const b of plan.detectedBackends) {
+          console.log(`- ${b.label} at ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'})`);
+        }
+      }
+      console.log('');
+      console.log('Available presets:');
+      for (const preset of plan.presets) {
+        console.log(`- ${preset.id} — ${preset.summary}`);
+      }
+    } catch (err) {
+      error(`llm-plan failed: ${errMsg(err)}`);
+      process.exit(1);
+    }
+  });
+
+adminCmd
+  .command('llm-apply')
+  .description(
+    "Apply an LLM setup preset non-interactively (mirrors cartograph_admin MCP tool with action='llm-apply')",
+  )
+  .requiredOption('--preset <id>', 'Preset id returned by `cartograph admin llm-plan`')
+  .option('-p, --project-path <path>', 'Project root to write config for (default: cwd)')
+  .action(async (options: { preset: string; projectPath?: string }) => {
+    const projectRoot = resolveProjectPath(options.projectPath);
+    try {
+      const { applyLlmSetupChoice } = await import('../../installer/llm-setup-plan.js');
+      const result = await applyLlmSetupChoice({
+        projectRoot,
+        preset: options.preset as Parameters<typeof applyLlmSetupChoice>[0]['preset'],
+      });
+      if (result.applied) {
+        success(`Applied preset ${result.preset}: ${result.configPath}`);
+        if (result.backupPath) info(`Backup written: ${result.backupPath}`);
+      } else {
+        info(`Preset ${result.preset}: no config written`);
+      }
+      if (result.notes.length > 0) {
+        for (const note of result.notes) info(note);
+      }
+      if (result.nextSteps.length > 0) {
+        info('Next steps:');
+        for (const step of result.nextSteps) console.log(`  ${step}`);
+      }
+    } catch (err) {
+      error(`llm-apply failed: ${errMsg(err)}`);
+      process.exit(1);
+    }
+  });
+
+adminCmd
+  .command('llm-tune [path]')
+  .description("Inspect or override LLM concurrency tuning (mirrors cartograph_admin MCP tool with action='llm-tune')")
+  .option('--tier <name>', 'Tier to override: embed, chat, ask, reranker')
+  .option('--concurrency <n>', 'Positive integer concurrency override for --tier')
+  .action(async (pathArg: string | undefined, options: { tier?: string; concurrency?: string }) => {
+    const projectPath = resolveProjectPath(pathArg);
+    try {
+      const { describeHardware, recommendedTuning } = await import('../../installer/hardware-tuning.js');
+      const tuning = recommendedTuning();
+      if (!options.tier) {
+        console.log(`Detected: ${describeHardware()}`);
+        console.log(`embed: ${tuning.embed.cartographConcurrency}`);
+        console.log(`chat: ${tuning.chat.cartographConcurrency}`);
+        console.log(`ask: ${tuning.ask.cartographConcurrency}`);
+        console.log(`reranker: ${tuning.reranker.cartographConcurrency}`);
+        return;
+      }
+      const tiers = new Set(['embed', 'chat', 'ask', 'reranker']);
+      if (!tiers.has(options.tier)) {
+        error('--tier must be one of embed, chat, ask, reranker');
+        process.exit(1);
+      }
+      const n = Number.parseInt(options.concurrency ?? '', 10);
+      if (!Number.isInteger(n) || n < 1) {
+        error('--concurrency must be a positive integer when --tier is set');
+        process.exit(1);
+      }
+      const { writeLlmTierConcurrencyOverride } = await import('../../installer/llm-setup-plan.js');
+      const result = await writeLlmTierConcurrencyOverride({
+        projectRoot: projectPath,
+        tier: options.tier as Parameters<typeof writeLlmTierConcurrencyOverride>[0]['tier'],
+        concurrency: n,
+      });
+      success(`Updated ${result.configPath}`);
+      if (result.backupPath) info(`Backup written: ${result.backupPath}`);
+      info(`llm.${result.configKey}.concurrency: ${result.previous ?? '(unset)'} → ${result.concurrency}`);
+    } catch (err) {
+      error(`llm-tune failed: ${errMsg(err)}`);
       process.exit(1);
     }
   });

@@ -677,6 +677,11 @@ describe('cartograph_sql read-only gate — value-PRAGMA rejection', () => {
     expect(isReadOnlySql('EXPLAIN\nSELECT * FROM nodes')).toBe(true);
   });
 
+  it('allows read-only CTEs whose string literals contain write-keyword text', () => {
+    expect(isReadOnlySql("WITH c(x) AS (SELECT 'UPDATE') SELECT x FROM c")).toBe(true);
+    expect(isReadOnlySql("WITH c(x) AS (SELECT 'DELETE FROM nodes') SELECT x FROM c")).toBe(true);
+  });
+
   it('still rejects identifiers that begin with SELECT/WITH/EXPLAIN substrings', () => {
     expect(isReadOnlySql('SELECTOR')).toBe(false);
     expect(isReadOnlySql('WITHIN')).toBe(false);

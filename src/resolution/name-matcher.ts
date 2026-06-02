@@ -179,6 +179,10 @@ function isJvmLang(language: string): boolean {
   return JVM_LANGS.has(language);
 }
 
+function isTsJsFamilyLang(language: string): boolean {
+  return TS_JS_FAMILY_LANGS.has(language);
+}
+
 /**
  * Whether a candidate node's language is compatible with the ref's
  * language for method/class lookup. JVM languages cross-resolve; all
@@ -297,6 +301,61 @@ function inferJavaFieldReceiverType(
   // the resolver looks up).
   const segments = typeExpr.split(/[<[\s]/, 1)[0]!.split('.');
   return segments.at(-1) ?? null;
+}
+
+/**
+ * Infer a TS/JS field receiver from simple class-field declarations.
+ * Covers common code like `private cache = new TinyCache()` and
+ * `private cache: TinyCache`, where the AST has a `field` node but no
+ * persisted signature. This runs only after the literal receiver and
+ * capitalized-receiver strategies miss, so it does not weaken concrete
+ * qualified-name matches.
+ */
+function inferTsJsFieldReceiverType(
+  receiverName: string,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): string | null {
+  if (!isTsJsFamilyLang(ref.language)) return null;
+  const field = findEnclosingClassField(receiverName, ref, context);
+  if (!field) return null;
+
+  const source = context.readFile(ref.filePath);
+  const line = source?.split(/\r?\n/)[field.startLine - 1] ?? '';
+  if (!line) return null;
+
+  const nameIndex = line.search(new RegExp(String.raw`\b${escapeRegExp(receiverName)}\b`));
+  if (nameIndex < 0) return null;
+  const tail = line.slice(nameIndex + receiverName.length);
+  const annotated = /^\s*:\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(tail);
+  if (annotated?.[1]) return annotated[1];
+  const constructed = /=\s*new\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(tail);
+  return constructed?.[1] ?? null;
+}
+
+function findEnclosingClassField(receiverName: string, ref: UnresolvedRef, context: ResolutionContext): Node | null {
+  const fileNodes = context.getNodesInFile(ref.filePath);
+  let enclosing: Node | null = null;
+  let bestSpan = Number.POSITIVE_INFINITY;
+  for (const n of fileNodes) {
+    if (n.kind !== 'class' && n.kind !== 'interface') continue;
+    if (ref.line < n.startLine || ref.line > n.endLine) continue;
+    const span = n.endLine - n.startLine;
+    if (span < bestSpan) {
+      enclosing = n;
+      bestSpan = span;
+    }
+  }
+  if (!enclosing) return null;
+  return (
+    fileNodes.find(
+      (n) =>
+        (n.kind === 'field' || n.kind === 'property') &&
+        n.name === receiverName &&
+        n.startLine >= enclosing.startLine &&
+        n.endLine <= enclosing.endLine,
+    ) ?? null
+  );
 }
 
 function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map<string, string> {
@@ -685,15 +744,27 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
   // signature. The declared type IS the class name we should resolve
   // against. Strictly more permissive than Strategy 2 (which only
   // handles the camel-case convention).
-  const fromField = findJvmFieldReceiverMethod({
+  const fromField = findInferredFieldReceiverMethod({
     objectOrClass,
     capitalizedReceiver,
     methodName,
     ref,
     context,
     jvmImportFqnMap,
+    inferType: inferJavaFieldReceiverType,
   });
   if (fromField) return fromField;
+
+  const fromTsJsField = findInferredFieldReceiverMethod({
+    objectOrClass,
+    capitalizedReceiver,
+    methodName,
+    ref,
+    context,
+    jvmImportFqnMap,
+    inferType: inferTsJsFieldReceiverType,
+  });
+  if (fromTsJsField) return fromTsJsField;
 
   // F2 — strategies 1/2 having failed means the receiver (`objectOrClass`
   // / its capitalized form) is NOT a known user class. If the method
@@ -829,6 +900,10 @@ interface ReceiverFallbackArgs {
   jvmImportFqnMap: Map<string, string> | undefined;
 }
 
+interface InferredFieldReceiverArgs extends ReceiverFallbackArgs {
+  inferType: (receiverName: string, ref: UnresolvedRef, context: ResolutionContext) => string | null;
+}
+
 function findCapitalizedReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef | null {
   const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap } = args;
   if (capitalizedReceiver === objectOrClass) return null;
@@ -843,10 +918,9 @@ function findCapitalizedReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef 
   });
 }
 
-function findJvmFieldReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef | null {
-  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap } = args;
-  if (!isJvmLang(ref.language)) return null;
-  const inferredType = inferJavaFieldReceiverType(objectOrClass, ref, context);
+function findInferredFieldReceiverMethod(args: InferredFieldReceiverArgs): ResolvedRef | null {
+  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap, inferType } = args;
+  const inferredType = inferType(objectOrClass, ref, context);
   if (!inferredType || inferredType === objectOrClass || inferredType === capitalizedReceiver) return null;
   return findReceiverMethod({
     receiverName: inferredType,

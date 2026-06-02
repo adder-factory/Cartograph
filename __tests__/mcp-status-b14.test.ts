@@ -62,7 +62,7 @@ describe('cartograph_status B14 — Pending Changes section', () => {
     // Freshness banner reports the content-hash drift inline using
     // wording that distinguishes it from git-side commit-count drift
     // (FRICTION-status-changed_since-semantic-disagreement 2026-05-14).
-    expect(text).toMatch(/3 files content-changed since index/);
+    expect(text).toMatch(/1 file content-changed since index/);
     expect(text).toMatch(/cartograph admin sync/);
     // Cross-reference to `cartograph_changed_since` so the reader can
     // jump to the per-file path list without guessing which tool owns
@@ -75,6 +75,14 @@ describe('cartograph_status B14 — Pending Changes section', () => {
     const text = textOf(await handler.runHandler('cartograph_status', {}));
     expect(text).toContain('### 📂 Pending changes');
     expect(text).toContain('-1 removed');
+  });
+
+  it('does not label added-only drift as content-changed', async () => {
+    fs.writeFileSync(path.join(tempDir, 'src/b.ts'), 'export function beta() {}\n');
+    const text = textOf(await handler.runHandler('cartograph_status', {}));
+    expect(text).toContain('### 📂 Pending changes');
+    expect(text).toContain('+1 added');
+    expect(text).not.toMatch(/files? content-changed since index/);
   });
 
   // FRICTION-status-changed_since-semantic-disagreement (2026-05-14):

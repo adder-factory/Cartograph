@@ -1113,7 +1113,7 @@ async function searchHybridBlendWithEmbeddings(args: SearchHybridBlendArgs): Pro
     ? { kind: 'skipped-no-hits' }
     : { kind: 'skipped-no-config' };
 
-  const embedded = await embedHybridQuery(client, query, ftsResults, limit, noRerankerOutcome);
+  const embedded = await embedHybridQuery({ client, query, ftsResults, limit, noRerankerOutcome });
   if (embedded.fallback) return embedded.fallback;
   const queryVec = embedded.queryVec!;
 
@@ -1146,13 +1146,16 @@ async function searchHybridBlendWithEmbeddings(args: SearchHybridBlendArgs): Pro
   return { results: diversifyByName(fusedResults, limit), rerankOutcome: reranked.rerankOutcome };
 }
 
-async function embedHybridQuery(
-  client: EmbeddingProvider,
-  query: string,
-  ftsResults: SearchResult[],
-  limit: number,
-  noRerankerOutcome: RerankOutcome,
-): Promise<EmbedQueryResult> {
+interface EmbedHybridQueryArgs {
+  client: EmbeddingProvider;
+  query: string;
+  ftsResults: SearchResult[];
+  limit: number;
+  noRerankerOutcome: RerankOutcome;
+}
+
+async function embedHybridQuery(args: EmbedHybridQueryArgs): Promise<EmbedQueryResult> {
+  const { client, query, ftsResults, limit, noRerankerOutcome } = args;
   try {
     const vecs = await client.embed([query]);
     if (vecs.length === 0 || !vecs[0]) {

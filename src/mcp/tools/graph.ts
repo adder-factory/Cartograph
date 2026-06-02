@@ -485,23 +485,8 @@ async function handleGraph(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> 
   const direction = args.direction as GraphDirection;
   const hops = args.hops;
 
-  // ── Dispatcher-layer start / symbols validation ──────────────────
-  // Mutual-exclusivity check and `start` shape — the per-helper
-  // handlers also re-validate `symbol` / `symbols` after the arg
-  // forwarding step, but doing it here too keeps the error message
-  // pinned to the public arg names (`start` / `symbols`) instead of
-  // leaking the internal `symbol`. Skips when only `symbols` was
-  // passed (start may legitimately be absent on the batched callers/
-  // callees path).
-  const startRaw = args.start;
-  const symbolsRaw = args.symbols;
-  if (startRaw !== undefined && symbolsRaw !== undefined) {
-    return err('Cannot specify both `start` and `symbols`.');
-  }
-  if (symbolsRaw === undefined) {
-    const startVal = validateStringOutcome({ value: startRaw, name: 'start' });
-    if (typeof startVal !== 'string') return startVal;
-  }
+  const validation = validateGraphDispatchArgs(args, direction, hops);
+  if (validation) return validation;
 
   // ── direction='impact'/'both' always uses the impact formatter ───
   // The impact path produces a per-file concentration rollup +
@@ -576,6 +561,34 @@ async function handleGraph(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> 
   // Preserves the old `_callees` behavior including container-method
   // hint on empty results.
   return handleCallees(ctx, forwardCallersOrCalleesArgs(args));
+}
+
+function validateGraphDispatchArgs(args: GraphArgs, direction: GraphDirection, hops: number): ToolOutcome | null {
+  // Mutual-exclusivity check and `start` shape — the per-helper
+  // handlers also re-validate `symbol` / `symbols` after the arg
+  // forwarding step, but doing it here too keeps the error message
+  // pinned to the public arg names (`start` / `symbols`) instead of
+  // leaking the internal `symbol`. Skips when only `symbols` was
+  // passed (start may legitimately be absent on the batched callers/
+  // callees path).
+  const startRaw = args.start;
+  const symbolsRaw = args.symbols;
+  if (startRaw !== undefined && symbolsRaw !== undefined) {
+    return err('Cannot specify both `start` and `symbols`.');
+  }
+  if (symbolsRaw !== undefined) return validateGraphBatchArgs(args, direction, hops);
+  const startVal = validateStringOutcome({ value: startRaw, name: 'start' });
+  return typeof startVal === 'string' ? null : startVal;
+}
+
+function validateGraphBatchArgs(args: GraphArgs, direction: GraphDirection, hops: number): ToolOutcome | null {
+  if (direction !== 'callers' && direction !== 'callees') {
+    return err('`symbols` is only supported with `direction: "callers"` or `direction: "callees"`.');
+  }
+  if (hops !== 1 || args.rankBy !== undefined || args.maxNodes !== undefined) {
+    return err('`symbols` batch mode only supports one-hop callers/callees queries (`hops: 1`, no walk-only args).');
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

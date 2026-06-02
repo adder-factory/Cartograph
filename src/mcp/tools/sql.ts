@@ -144,6 +144,25 @@ function hasExtraStatement(sql: string): boolean {
   return false;
 }
 
+function maskNonCodeSql(sql: string): string {
+  let state: ScanState = 'default';
+  let i = 0;
+  let out = '';
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    const next = sql[i + 1];
+    const step: ScanStep = STEP_HANDLERS[state](ch, next);
+    if (state === 'default') {
+      out += sql.slice(i, i + step.advance);
+    } else {
+      out += ' '.repeat(step.advance);
+    }
+    state = step.state;
+    i += step.advance;
+  }
+  return out;
+}
+
 /** @internal Exported for the CLI/MCP alignment test — verifies the
  *  read-only gate rejects value-setting PRAGMAs (`PRAGMA user_version
  *  = 5`) while still permitting bare introspection PRAGMAs. */
@@ -154,7 +173,7 @@ export function isReadOnlySql(sql: string): boolean {
   // sqlite.prepare() only runs the leading statement today, but a guard
   // that accepts `SELECT 1; DELETE FROM nodes` is a stale-bug risk.
   if (hasExtraStatement(trimmed)) return false;
-  const upper = trimmed.toUpperCase();
+  const upper = maskNonCodeSql(trimmed).toUpperCase();
   // `\s` (not a literal space) so a multi-line query that places the
   // keyword on its own line (`SELECT\n  name, kind\nFROM nodes`) isn't
   // mis-classified as a write. F#30 — `startsWith('SELECT ')` would
@@ -449,8 +468,13 @@ function clipCell(value: unknown): string {
   const isNullish = value === null || value === undefined;
   if (isNullish) return '_null_';
   const str = typeof value === 'string' ? value : JSON.stringify(value);
-  const exceedsLimit = str.length > MAX_CELL_CHARS;
-  return exceedsLimit ? str.slice(0, MAX_CELL_CHARS) + '…' : str;
+  const normalized = str
+    .replaceAll('\r\n', '\n')
+    .replaceAll('\r', '\n')
+    .replaceAll('\n', String.raw`\n`)
+    .replaceAll('|', String.raw`\|`);
+  const exceedsLimit = normalized.length > MAX_CELL_CHARS;
+  return exceedsLimit ? normalized.slice(0, MAX_CELL_CHARS) + '…' : normalized;
 }
 function formatRows(rows: Array<Record<string, unknown>>): string {
   if (rows.length === 0) return '_(0 rows)_';

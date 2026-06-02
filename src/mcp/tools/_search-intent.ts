@@ -364,22 +364,22 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   const [orExpr, andExpr] = buildMatchExpressions(query);
 
   try {
-    summaryHits = runSymbolIntentQuery(
+    summaryHits = runSymbolIntentQuery({
       db,
-      queryDefs.summarySql,
-      orExpr,
-      symFilterParams,
-      overFetch,
-      coverage.summaryRows,
-    );
-    docstringHits = runSymbolIntentQuery(
+      sql: queryDefs.summarySql,
+      expr: orExpr,
+      params: symFilterParams,
+      limit: overFetch,
+      rowCount: coverage.summaryRows,
+    });
+    docstringHits = runSymbolIntentQuery({
       db,
-      queryDefs.docstringSql,
-      orExpr,
-      symFilterParams,
-      overFetch,
-      coverage.docstringRows,
-    );
+      sql: queryDefs.docstringSql,
+      expr: orExpr,
+      params: symFilterParams,
+      limit: overFetch,
+      rowCount: coverage.docstringRows,
+    });
     testNameHits = runTestNameIntentQuery({ db, queryDefs, orExpr, limit, coverage, languageFilter, kind });
     collectAndConfirmedIds({ db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out: andConfirmedIds });
   } catch (e) {
@@ -392,14 +392,17 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   return { summaryHits, docstringHits, testNameHits, andConfirmedIds };
 }
 
-function runSymbolIntentQuery(
-  db: any,
-  sql: string,
-  expr: string,
-  params: ReadonlyArray<unknown>,
-  limit: number,
-  rowCount: number,
-): SymbolIntentRow[] {
+interface SymbolIntentQueryArgs {
+  db: any;
+  sql: string;
+  expr: string;
+  params: ReadonlyArray<unknown>;
+  limit: number;
+  rowCount: number;
+}
+
+function runSymbolIntentQuery(args: SymbolIntentQueryArgs): SymbolIntentRow[] {
+  const { db, sql, expr, params, limit, rowCount } = args;
   if (rowCount <= 0) return [];
   return db.prepare(sql).all(expr, ...params, limit) as SymbolIntentRow[];
 }
@@ -429,24 +432,24 @@ function collectAndConfirmedIds(args: {
 }): void {
   const { db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out } = args;
   if (andExpr === null || (coverage.summaryRows <= 0 && coverage.docstringRows <= 0)) return;
-  for (const row of runSymbolIntentQuery(
+  for (const row of runSymbolIntentQuery({
     db,
-    queryDefs.summarySql,
-    andExpr,
-    symFilterParams,
-    overFetch,
-    coverage.summaryRows,
-  )) {
+    sql: queryDefs.summarySql,
+    expr: andExpr,
+    params: symFilterParams,
+    limit: overFetch,
+    rowCount: coverage.summaryRows,
+  })) {
     out.add(row.id);
   }
-  for (const row of runSymbolIntentQuery(
+  for (const row of runSymbolIntentQuery({
     db,
-    queryDefs.docstringSql,
-    andExpr,
-    symFilterParams,
-    overFetch,
-    coverage.docstringRows,
-  )) {
+    sql: queryDefs.docstringSql,
+    expr: andExpr,
+    params: symFilterParams,
+    limit: overFetch,
+    rowCount: coverage.docstringRows,
+  })) {
     out.add(row.id);
   }
 }

@@ -577,7 +577,7 @@ describe('handleAtRange — compact + fields', () => {
     fsModule.mkdirSync(pathModule.join(testDir, 'src'));
     fsModule.writeFileSync(
       pathModule.join(testDir, 'src', 'a.ts'),
-      'export function funcA1(): number {\n  return 1;\n}\n',
+      'export function funcA1(): number | undefined {\n  return 1;\n}\n',
     );
     fsModule.writeFileSync(pathModule.join(testDir, '.gitignore'), '.cartograph/\n');
     git(testDir, 'init', '-q');
@@ -615,6 +615,42 @@ describe('handleAtRange — compact + fields', () => {
       // path / line / signature were excluded by fields — confirm absence.
       expect(text).not.toMatch(/funcA1\|function\|src\/a\.ts/);
       expect(text).not.toMatch(/funcA1\|function\|:/);
+    } finally {
+      handler.closeAll();
+      cg.close();
+    }
+  });
+
+  it('accepts absolute paths by normalizing them to indexed relative paths', async () => {
+    const { cg, handler } = await setupSingleFileProject();
+    try {
+      const result = await handler.execute('cartograph_at_range', {
+        file: path.join(testDir, 'src/a.ts'),
+        startLine: 2,
+        endLine: 2,
+      });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain('## Symbols overlapping src/a.ts:2-2');
+      expect(text).toContain('funcA1');
+    } finally {
+      handler.closeAll();
+      cg.close();
+    }
+  });
+
+  it('escapes pipe delimiters in compact signatures', async () => {
+    const { cg, handler } = await setupSingleFileProject();
+    try {
+      const result = await handler.execute('cartograph_at_range', {
+        file: 'src/a.ts',
+        startLine: 1,
+        endLine: 3,
+        compact: true,
+        fields: ['name', 'kind', 'path', 'line', 'signature'],
+      });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain(String.raw`sig:(): number \| undefined`);
+      expect(text).not.toContain('sig:(): number | undefined');
     } finally {
       handler.closeAll();
       cg.close();

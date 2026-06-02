@@ -555,13 +555,17 @@ export function sampleSiblingNames(args: SampleSiblingNamesArgs): string[] {
  *  ever constructed (`instantiates`), subclassed (`extends`), implemented
  *  (`implements`), overridden, used as a type (`type_of` / `returns`),
  *  applied as a decorator (`decorates`), or otherwise named
- *  (`references`). Without these, a class that is only `new`'d — never
- *  called — would be falsely flagged dead. `contains` / `imports` /
+ *  (`references`). `field_access` covers methods/properties reached
+ *  through member access when call resolution cannot disambiguate the
+ *  callee but field resolution can. Without these, a class that is
+ *  only `new`'d — never called — would be falsely flagged dead.
+ *  `contains` / `imports` /
  *  `exports` are deliberately excluded: they are structural, not use. */
 const ORPHAN_LIVENESS_EDGE_KINDS = [
   'calls',
   'instantiates',
   'references',
+  'field_access',
   'extends',
   'implements',
   'overrides',

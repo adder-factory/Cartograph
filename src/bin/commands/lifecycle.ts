@@ -7,7 +7,17 @@
 import { isInitialized } from '../../directory.js';
 import { compact } from '../../utils.js';
 import { errMsg } from '../../errors.js';
-import { program, llmCmd, chalk, resolveProjectPath, error, info, assignIntArg, runViaMCP } from '../_cli-core.js';
+import {
+  program,
+  llmCmd,
+  chalk,
+  resolveProjectPath,
+  error,
+  info,
+  assignIntArg,
+  runViaMCP,
+  loadCartograph,
+} from '../_cli-core.js';
 
 /**
  * cartograph serve
@@ -326,56 +336,60 @@ program
     const projectPath = resolveProjectPath(pathArg);
     const { runDoctor, formatDoctorReport } = await import('../../installer/doctor.js');
 
-    // ─── Step 1: admin init ─────────────────────────────────────────
-    // Use directory existence rather than `isInitialized()` (which
-    // additionally checks the DB) — setup creates the directory
-    // without populating the DB; the DB lands on a subsequent
-    // `cartograph admin index`. A bare `.cartograph/` with no DB
-    // counts as "init done" from setup's perspective.
-    const { existsSync } = await import('node:fs');
-    const { join } = await import('node:path');
-    const cgDir = join(projectPath, '.cartograph');
-    if (existsSync(cgDir)) {
-      info(`Step 1/3: ${cgDir} already exists — skipping init`);
-    } else {
-      info(`Step 1/3: initialising .cartograph/ at ${projectPath}`);
-      const { createDirectory } = await import('../../directory.js');
-      createDirectory(projectPath);
-    }
-
-    // ─── Step 2: install-models ─────────────────────────────────────
-    if (options.models === false) {
-      info('Step 2/3: --no-models → skipping models install');
-    } else {
-      info(`Step 2/3: installing ${options.minimal ? 'minimal' : 'full'} GGUF set`);
-      const { installRecommendedModels } = await import('../../installer/install-models.js');
-      const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await import('../../llm/recommended-models.js');
-      const modelSet = options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS;
-      try {
-        const result = await installRecommendedModels({
-          models: modelSet,
-          onProgress: ({ model, downloaded, total }) => {
-            const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
-            const pct = total > 0 ? ((downloaded / total) * 100).toFixed(0) : '?';
-            process.stderr.write(
-              `\r  ${model.filename}: ${mb(downloaded)}/${total > 0 ? mb(total) : '?'} MB (${pct}%)   `,
-            );
-          },
-        });
-        process.stderr.write('\n');
-        if (result.downloaded.length > 0) info(`  downloaded ${result.downloaded.length} GGUF(s)`);
-        if (result.skipped.length > 0) info(`  ${result.skipped.length} already present (skipped)`);
-      } catch (error_) {
-        error(`install-models failed: ${errMsg(error_)}`);
-        // models are needed for LLM features — but the user might
-        // already have a working subset from a prior run. doctor will
-        // catch a true gap.
-      }
-    }
-
-    // ─── Step 3: doctor verification ───────────────────────────────
+    await runSetupInitStep(projectPath);
+    await runSetupModelStep(projectPath, options);
     info('Step 3/3: running doctor verification');
     const result = await runDoctor({ projectPath });
     console.log('\n' + formatDoctorReport(result));
     if (result.overallStatus === 'fail') process.exit(1);
   });
+
+async function runSetupInitStep(projectPath: string): Promise<void> {
+  if (isInitialized(projectPath)) {
+    info(`Step 1/3: ${projectPath} already initialized — skipping init`);
+    return;
+  }
+
+  info(`Step 1/3: initialising Cartograph at ${projectPath}`);
+  const { default: Cartograph } = await loadCartograph();
+  const cg = await Cartograph.init(projectPath, { index: false });
+  cg.close();
+}
+
+async function runSetupModelStep(projectPath: string, options: { minimal?: boolean; models?: boolean }): Promise<void> {
+  if (options.models === false) {
+    info('Step 2/3: --no-models → skipping models install');
+    return;
+  }
+
+  info(`Step 2/3: installing ${options.minimal ? 'minimal' : 'full'} GGUF set`);
+  const { installRecommendedModels } = await import('../../installer/install-models.js');
+  const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await import('../../llm/recommended-models.js');
+  const modelSet = options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS;
+  try {
+    const result = await installRecommendedModels({
+      models: modelSet,
+      onProgress: ({ model, downloaded, total }) => {
+        const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
+        const pct = total > 0 ? ((downloaded / total) * 100).toFixed(0) : '?';
+        process.stderr.write(`\r  ${model.filename}: ${mb(downloaded)}/${total > 0 ? mb(total) : '?'} MB (${pct}%)   `);
+      },
+    });
+    process.stderr.write('\n');
+    if (result.downloaded.length > 0) info(`  downloaded ${result.downloaded.length} GGUF(s)`);
+    if (result.skipped.length > 0) info(`  ${result.skipped.length} already present (skipped)`);
+    await writeSetupRecommendedConfig(projectPath);
+  } catch (error_) {
+    error(`install-models failed: ${errMsg(error_)}`);
+    // models are needed for LLM features, but the user might already
+    // have a working subset from a prior run. doctor will catch a true gap.
+  }
+}
+
+async function writeSetupRecommendedConfig(projectPath: string): Promise<void> {
+  const { writeRecommendedLlmConfig } = await import('../../installer/recommended-config.js');
+  const writeOpts: { projectRoot: string; dir?: string } = { projectRoot: projectPath };
+  const { configPath, backupPath } = writeRecommendedLlmConfig(writeOpts);
+  info(`  wrote recommended LLM config: ${configPath}`);
+  if (backupPath) info(`  backup written: ${backupPath}`);
+}

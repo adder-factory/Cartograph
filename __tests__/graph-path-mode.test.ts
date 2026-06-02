@@ -104,4 +104,21 @@ describe('cartograph_graph direction:path', () => {
     expect(unresolvable.isError).toBeTruthy();
     expect(textOf(unresolvable)).toMatch(/not found/i);
   });
+
+  it('rejects batched symbols outside one-hop callers/callees mode with clear errors', async () => {
+    const multiHop = await handler.runHandler('cartograph_graph', {
+      direction: 'callers',
+      symbols: ['alpha'],
+      hops: 2,
+    });
+    expect(multiHop.isError).toBeTruthy();
+    expect(textOf(multiHop)).toContain('batch mode only supports one-hop');
+
+    const similar = await handler.runHandler('cartograph_graph', {
+      direction: 'similar',
+      symbols: ['alpha', 'beta'],
+    });
+    expect(similar.isError).toBeTruthy();
+    expect(textOf(similar)).toMatch(/symbols.*only supported.*callers.*callees/i);
+  });
 });

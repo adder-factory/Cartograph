@@ -5,6 +5,7 @@
  * commands on `program`.
  */
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
@@ -40,6 +41,10 @@ import {
  *  top-level import of status.ts. The dynamic-import path still clamps
  *  with the real `parseInlineTopN`. */
 const STATUS_MAX_INLINE_TOP_N = 30;
+
+function out(message = ''): void {
+  process.stdout.write(`${message}\n`);
+}
 
 interface AtRangeOptions {
   projectPath?: string;
@@ -127,7 +132,11 @@ async function readDiffOption(diff: string): Promise<string> {
   if (diff.includes('\n') || diff.startsWith('@@') || diff.startsWith('diff --git')) {
     return diff;
   }
-  if (fs.existsSync(diff)) return fs.readFileSync(diff, 'utf-8');
+  const exists = await fsp
+    .access(diff)
+    .then(() => true)
+    .catch(() => false);
+  if (exists) return fsp.readFile(diff, 'utf-8');
   warn(`--diff: "${diff}" is not an existing file — treating it as inline diff text.`);
   return diff;
 }
@@ -251,14 +260,14 @@ async function printAskAnnotations(
   const cited = groundCitations(cg, result.answer);
   const report = buildCitationReport(cited);
   for (const line of report.sections) {
-    console.log(line ? chalk.dim(line) : '');
+    out(line ? chalk.dim(line) : '');
   }
-  console.log('\n' + chalk.dim('Retrieval sources:'));
+  out('\n' + chalk.dim('Retrieval sources:'));
   for (const c of result.citations) {
     const loc = c.node.startLine ? `:${c.node.startLine}` : '';
-    console.log(chalk.dim(`  • ${c.node.name} (${c.node.kind}) ${c.node.filePath}${loc}`));
+    out(chalk.dim(`  • ${c.node.name} (${c.node.kind}) ${c.node.filePath}${loc}`));
   }
-  console.log(
+  out(
     chalk.dim(
       `\n  retrieve ${result.retrieveMs}ms · chat ${result.chatMs}ms · model ${displayModelName(askModel)} · ${report.counter}`,
     ),
@@ -284,10 +293,10 @@ async function buildStatusRollupConfig(options: StatusOptions): Promise<StatusRo
 
 function printUninitializedStatus(projectPath: string, options: StatusOptions): void {
   if (options.json) {
-    console.log(JSON.stringify({ initialized: false, projectPath }));
+    out(JSON.stringify({ initialized: false, projectPath }));
     return;
   }
-  console.log(chalk.bold('\nCartograph Status\n'));
+  out(chalk.bold('\nCartograph Status\n'));
   info(`Project: ${projectPath}`);
   warn('Not initialized');
   info('Run "cartograph admin init" to initialize');
@@ -316,7 +325,7 @@ function printStatusJson(args: {
   args.rollups.appendFeatureReadiness(jsonRollups, args.cg, { summaryBreakdown: args.rollups.summaryBreakdown });
   args.rollups.appendInlineHotspots(jsonRollups, args.cg, args.rollups.topHotspots);
   args.rollups.appendInlineBiomarkers(jsonRollups, args.cg, args.rollups.topBiomarkers);
-  console.log(
+  out(
     JSON.stringify({
       initialized: true,
       projectPath: args.projectPath,
@@ -343,34 +352,34 @@ function printStatusJson(args: {
 }
 
 function printStatusIndexStats(stats: any, cg: any, hnswAvailable: boolean): void {
-  console.log(chalk.bold('Index Statistics:'));
-  console.log(`  Files:     ${formatNumber(stats.fileCount)}`);
-  console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
-  console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
-  console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
+  out(chalk.bold('Index Statistics:'));
+  out(`  Files:     ${formatNumber(stats.fileCount)}`);
+  out(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
+  out(`  Edges:     ${formatNumber(stats.edgeCount)}`);
+  out(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
   const vec = cg.db.hasVecExtension();
   const vecSuffix = vec ? ' + sqlite-vec' : '';
   const backendLabel = chalk.magenta(`bun:sqlite${vecSuffix}`);
-  console.log(`  Backend:   ${backendLabel}`);
+  out(`  Backend:   ${backendLabel}`);
   if (!vec) {
-    console.log(chalk.yellow('  ⚠ sqlite-vec did not load — vector search is on the slow in-memory brute-force path.'));
-    console.log(chalk.dim('     sqlite-vec ships prebuilts for darwin/linux x64+arm64 and windows-x64.'));
+    out(chalk.yellow('  ⚠ sqlite-vec did not load — vector search is on the slow in-memory brute-force path.'));
+    out(chalk.dim('     sqlite-vec ships prebuilts for darwin/linux x64+arm64 and windows-x64.'));
   } else if (!hnswAvailable) {
-    console.log(chalk.dim('  ℹ hnswlib-node not installed — similar_to edge builds use the vec0 brute-force path;'));
-    console.log(chalk.dim('     `npm install hnswlib-node` adds the O(log N) accelerator for large repos.'));
+    out(chalk.dim('  ℹ hnswlib-node not installed — similar_to edge builds use the vec0 brute-force path;'));
+    out(chalk.dim('     `npm install hnswlib-node` adds the O(log N) accelerator for large repos.'));
   }
-  console.log();
+  out();
 }
 
 function printCountBreakdown(title: string, entries: Record<string, number>): void {
-  console.log(chalk.bold(title));
+  out(chalk.bold(title));
   const sorted = Object.entries(entries)
     .filter(([, count]) => count > 0)
     .sort((a, b) => b[1] - a[1]);
   for (const [label, count] of sorted) {
-    console.log(`  ${label.padEnd(15)} ${formatNumber(count)}`);
+    out(`  ${label.padEnd(15)} ${formatNumber(count)}`);
   }
-  console.log();
+  out();
 }
 
 async function printParseCacheStatus(cg: any): Promise<void> {
@@ -380,11 +389,11 @@ async function printParseCacheStatus(cg: any): Promise<void> {
     if (pc.rows === 0) return;
     const sizeMB = (pc.sizeBytes / 1024 / 1024).toFixed(1);
     const stale = pc.staleVersionRows > 0 ? chalk.yellow(`  (${pc.staleVersionRows} stale, will LRU out)`) : '';
-    console.log(chalk.bold('Parse Cache:'));
-    console.log(
+    out(chalk.bold('Parse Cache:'));
+    out(
       `  Replayable: ${formatNumber(pc.currentVersionRows)} entries (${sizeMB} MB) · schema _v${pc.currentVersion}${stale}`,
     );
-    console.log();
+    out();
   } catch {
     /* pre-migration-026 DB */
   }
@@ -394,52 +403,52 @@ function printPendingChanges(changes: any, realModifiedCount: number, healOnly: 
   const totalChanges = changes.added.length + realModifiedCount + changes.removed.length + healOnly.length;
   if (totalChanges === 0) {
     success('Index is up to date');
-    console.log();
+    out();
     return;
   }
-  console.log(chalk.bold('Pending Changes:'));
-  if (changes.added.length > 0) console.log(`  Added:     ${changes.added.length} files`);
-  if (realModifiedCount > 0) console.log(`  Modified:  ${realModifiedCount} files`);
-  if (changes.removed.length > 0) console.log(`  Removed:   ${changes.removed.length} files`);
+  out(chalk.bold('Pending Changes:'));
+  if (changes.added.length > 0) out(`  Added:     ${changes.added.length} files`);
+  if (realModifiedCount > 0) out(`  Modified:  ${realModifiedCount} files`);
+  if (changes.removed.length > 0) out(`  Removed:   ${changes.removed.length} files`);
   if (healOnly.length > 0) {
-    console.log(
+    out(
       `  Heal-flagged (re-extract): ${healOnly.length} files ` +
         `(extraction-logic-version drift; no on-disk content change)`,
     );
   }
   info('Run "cartograph admin sync" to update the index');
-  console.log();
+  out();
 }
 
 async function printLlmStatus(cg: any, projectPath: string): Promise<void> {
-  console.log(chalk.bold('LLM Enrichment:'));
+  out(chalk.bold('LLM Enrichment:'));
   const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   if (!llmConfig) {
-    console.log(
+    out(
       '  No LLM configured. Run `cartograph admin install-models --write-config` for the recommended stack (llama-server HTTP — embed :8080 / chat :8081 / ask :8082 / reranker :8083), or set config.llm in .cartograph/config.json.',
     );
-    console.log();
+    out();
     return;
   }
   const { getAskModel, getChatModel, getEmbeddingModel, getDisplayEndpoint } = await import('../../llm/provider.js');
   const chatModel = getChatModel(llmConfig);
   const askModel = getAskModel(llmConfig);
-  console.log(`  Endpoint:  ${getDisplayEndpoint(llmConfig)} (configured)`);
-  console.log(`  Model:     ${chatModel ?? '(no summarize model)'}`);
+  out(`  Endpoint:  ${getDisplayEndpoint(llmConfig)} (configured)`);
+  out(`  Model:     ${chatModel ?? '(no summarize model)'}`);
   if (askModel && askModel !== chatModel) {
     const askProvider = llmConfig.askLlm?.provider;
     const askProviderSuffix = askProvider ? ` (${askProvider})` : '';
-    console.log(`  Ask model: ${askModel}${askProviderSuffix}`);
+    out(`  Ask model: ${askModel}${askProviderSuffix}`);
   }
   const embedModel = getEmbeddingModel(llmConfig);
-  if (embedModel) console.log(`  Embed:     ${embedModel}`);
+  if (embedModel) out(`  Embed:     ${embedModel}`);
   printSummaryCoverage(cg);
   const { getDetachedSummarizeState } = await import('../../llm/detached-summarize.js');
   const bg = getDetachedSummarizeState(projectPath);
   if (bg.running) {
-    console.log(`  Summaries: background pass running (pid ${bg.pid}) — coverage is still climbing`);
+    out(`  Summaries: background pass running (pid ${bg.pid}) — coverage is still climbing`);
   }
-  console.log();
+  out();
 }
 
 function printSummaryCoverage(cg: any): void {
@@ -449,7 +458,7 @@ function printSummaryCoverage(cg: any): void {
   const weighted = getWeightedSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
   const weightedSuffix =
     weighted.weightedRatio === null ? '' : ` — centrality-weighted ${Math.round(weighted.weightedRatio * 100)}%`;
-  console.log(`  Summaries: ${formatNumber(cov.summarised)}/${formatNumber(cov.total)} (${pct}%)${weightedSuffix}`);
+  out(`  Summaries: ${formatNumber(cov.summarised)}/${formatNumber(cov.total)} (${pct}%)${weightedSuffix}`);
 }
 
 function printStatusRollups(cg: any, rollups: StatusRollupConfig): void {
@@ -461,16 +470,16 @@ function printStatusRollups(cg: any, rollups: StatusRollupConfig): void {
   for (const line of rollupLines) {
     printStatusRollupLine(line);
   }
-  console.log();
+  out();
 }
 
 function printStatusRollupLine(line: string): void {
   if (line === '') {
-    console.log();
+    out();
   } else if (line.startsWith('### ')) {
-    console.log(chalk.bold(line.slice(4)));
+    out(chalk.bold(line.slice(4)));
   } else {
-    console.log(line);
+    out(line);
   }
 }
 
@@ -656,7 +665,7 @@ async function deriveChangedFilesFromGit(
 
 function printNoDerivedChanges(options: AffectedOptions): void {
   if (options.json) {
-    console.log(JSON.stringify({ changedFiles: [], affectedTests: [], totalDependentsTraversed: 0 }, null, 2));
+    out(JSON.stringify({ changedFiles: [], affectedTests: [], totalDependentsTraversed: 0 }, null, 2));
   } else if (!options.quiet) {
     info('No uncommitted changes — nothing to re-test.');
   }
@@ -712,14 +721,14 @@ function printAffectedOutput(args: AffectedOutputArgs): void {
   if (args.options.json) {
     printAffectedJson(args);
   } else if (args.options.quiet) {
-    for (const t of args.sortedTests) console.log(t);
+    for (const t of args.sortedTests) out(t);
   } else {
     printAffectedHuman(args);
   }
 }
 
 function printAffectedJson(args: AffectedOutputArgs): void {
-  console.log(
+  out(
     JSON.stringify(
       {
         changedFiles: args.changedFiles,
@@ -737,17 +746,17 @@ function printAffectedJson(args: AffectedOutputArgs): void {
 function printAffectedHuman(args: AffectedOutputArgs): void {
   if (args.derivedFromGit) printDerivedChangedFiles(args.changedFiles);
   printAffectedTestList(args.sortedTests);
-  console.log(chalk.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`));
+  out(chalk.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`));
   printBarrelWarning(args.barrelsReached);
 }
 
 function printDerivedChangedFiles(changedFiles: string[]): void {
-  console.log(
+  out(
     chalk.dim(
       `\nChanged set derived from \`git diff HEAD\` (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'}):`,
     ),
   );
-  for (const f of changedFiles) console.log(chalk.dim('  ' + f));
+  for (const f of changedFiles) out(chalk.dim('  ' + f));
 }
 
 function printAffectedTestList(sortedTests: string[]): void {
@@ -757,23 +766,23 @@ function printAffectedTestList(sortedTests: string[]): void {
     return;
   }
   const shown = sortedTests.slice(0, AFFECTED_ROW_LIMIT);
-  console.log(chalk.bold(`\nAffected test files (${sortedTests.length}):\n`));
-  for (const t of shown) console.log('  ' + chalk.cyan(t));
+  out(chalk.bold(`\nAffected test files (${sortedTests.length}):\n`));
+  for (const t of shown) out('  ' + chalk.cyan(t));
   if (sortedTests.length > AFFECTED_ROW_LIMIT) {
-    console.log(
+    out(
       chalk.dim(
         `\n  … showing first ${shown.length} of ${sortedTests.length} (sorted). Pass --filter <glob> or narrow the input set to see fewer.`,
       ),
     );
   }
-  console.log();
+  out();
 }
 
 function printBarrelWarning(barrelsReached: string[]): void {
   if (barrelsReached.length === 0) return;
   const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
-  console.log();
-  console.log(
+  out();
+  out(
     chalk.yellow(
       `⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
         `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
@@ -813,27 +822,29 @@ function parseFilesOutputOptions(
   return { format, maxDepth };
 }
 
-function printFilesOutput(
-  files: FileListing,
-  format: FileListFormat,
-  includeMetadata: boolean,
-  maxDepth: number | undefined,
-  dir: string | undefined,
-  queries: Parameters<typeof getFileSummaries>[0],
-): void {
-  switch (format) {
+interface PrintFilesOutputArgs {
+  files: FileListing;
+  format: FileListFormat;
+  includeMetadata: boolean;
+  maxDepth: number | undefined;
+  dir: string | undefined;
+  queries: Parameters<typeof getFileSummaries>[0];
+}
+
+function printFilesOutput(args: PrintFilesOutputArgs): void {
+  switch (args.format) {
     case 'flat':
-      printFlatFiles(files, includeMetadata, queries);
+      printFlatFiles(args.files, args.includeMetadata, args.queries);
       break;
     case 'grouped':
-      printGroupedFiles(files, includeMetadata);
+      printGroupedFiles(args.files, args.includeMetadata);
       break;
     case 'summary':
-      printFileSummary(files, maxDepth, dir);
+      printFileSummary(args.files, args.maxDepth, args.dir);
       break;
     default:
-      console.log(chalk.bold(`\nProject Structure (${files.length} files):\n`));
-      printFileTree({ files, includeMetadata, maxDepth, chalk });
+      out(chalk.bold(`\nProject Structure (${args.files.length} files):\n`));
+      printFileTree({ files: args.files, includeMetadata: args.includeMetadata, maxDepth: args.maxDepth, chalk });
       break;
   }
 }
@@ -843,7 +854,7 @@ function printFlatFiles(
   includeMetadata: boolean,
   queries: Parameters<typeof getFileSummaries>[0],
 ): void {
-  console.log(chalk.bold(`\nFiles (${files.length}):\n`));
+  out(chalk.bold(`\nFiles (${files.length}):\n`));
   const flatSummaries =
     files.length <= 80
       ? getFileSummaries(
@@ -856,17 +867,17 @@ function printFlatFiles(
   for (const file of sortedFiles) {
     if (includeMetadata) {
       const metadata = chalk.dim(`(${file.language}, ${file.nodeCount} symbols)`);
-      console.log(`  ${file.path} ${metadata}`);
+      out(`  ${file.path} ${metadata}`);
     } else {
-      console.log(`  ${file.path}`);
+      out(`  ${file.path}`);
     }
     const summary = flatSummaries?.get(file.path);
-    if (summary) console.log(`    ${chalk.dim(summary)}`);
+    if (summary) out(`    ${chalk.dim(summary)}`);
   }
 }
 
 function printGroupedFiles(files: FileListing, includeMetadata: boolean): void {
-  console.log(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
+  out(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
   const byLang = new Map<string, FileListing>();
   for (const file of files) {
     const existing = byLang.get(file.language) || [];
@@ -876,34 +887,43 @@ function printGroupedFiles(files: FileListing, includeMetadata: boolean): void {
   const sortedLangs = [...byLang.entries()];
   sortedLangs.sort((a, b) => b[1].length - a[1].length);
   for (const [lang, langFiles] of sortedLangs) {
-    console.log(chalk.cyan(`${lang} (${langFiles.length}):`));
+    out(chalk.cyan(`${lang} (${langFiles.length}):`));
     const sortedLangFiles = [...langFiles];
     sortedLangFiles.sort((a, b) => a.path.localeCompare(b.path));
     for (const file of sortedLangFiles) {
       if (includeMetadata) {
         const metadata = chalk.dim(`(${file.nodeCount} symbols)`);
-        console.log(`  ${file.path} ${metadata}`);
+        out(`  ${file.path} ${metadata}`);
       } else {
-        console.log(`  ${file.path}`);
+        out(`  ${file.path}`);
       }
     }
-    console.log();
+    out();
   }
 }
 
 function printFileSummary(files: FileListing, maxDepth: number | undefined, dir: string | undefined): void {
   const rollup = buildDirRollup(files, maxDepth, dir);
-  const filterPrefix = dir ? dir.replace(/\/+$/, '') : null;
-  const header = filterPrefix
-    ? `\nSubtree Summary — ${filterPrefix}/ (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`
-    : `\nProject Summary (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`;
-  console.log(chalk.bold(header));
+  out(chalk.bold(fileSummaryHeader(dir, rollup.totalFiles, rollup.totalSymbols)));
   for (const row of rollup.rows) {
     const label = row.dir === null ? '(root)' : `${row.dir}/`;
     const filesText = chalk.dim(`${row.files} files`.padStart(10));
     const symbolsText = chalk.dim(`${row.symbols} symbols`.padStart(14));
-    console.log(`  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`);
+    out(`  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`);
   }
+}
+
+function fileSummaryHeader(dir: string | undefined, totalFiles: number, totalSymbols: number): string {
+  const filterPrefix = trimTrailingSlashes(dir);
+  if (filterPrefix) return `\nSubtree Summary — ${filterPrefix}/ (${totalFiles} files, ${totalSymbols} symbols):\n`;
+  return `\nProject Summary (${totalFiles} files, ${totalSymbols} symbols):\n`;
+}
+
+function trimTrailingSlashes(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  let end = value.length;
+  while (end > 0 && value.codePointAt(end - 1) === 47) end--;
+  return value.slice(0, end);
 }
 
 /**
@@ -1024,7 +1044,7 @@ program
           return;
         }
         const result = await cg.llm.ask(question, { retrieveK });
-        console.log(result.answer);
+        out(result.answer);
         if (!options.quiet) {
           // Verified-citations block — mirror the MCP `cartograph_ask`
           // surface (friction #33). `groundCitations` resolves every
@@ -1101,9 +1121,9 @@ program
           return;
         }
 
-        console.log(chalk.bold('\nCartograph Status\n'));
-        console.log(chalk.cyan('Project:'), projectPath);
-        console.log();
+        out(chalk.bold('\nCartograph Status\n'));
+        out(`${chalk.cyan('Project:')} ${projectPath}`);
+        out();
         printStatusIndexStats(stats, cg, hnswAvailable);
         printCountBreakdown('Nodes by Kind:', stats.nodesByKind);
         printCountBreakdown('Files by Language:', stats.filesByLanguage);
@@ -1312,7 +1332,7 @@ program
             nodeCount: f.nodeCount,
             size: f.size,
           }));
-          console.log(JSON.stringify(output, null, 2));
+          out(JSON.stringify(output, null, 2));
           cg.close();
           return;
         }
@@ -1325,9 +1345,16 @@ program
         if (!outputOptions) return;
 
         // Format output
-        printFilesOutput(files, outputOptions.format, includeMetadata, outputOptions.maxDepth, options.dir, cg.queries);
+        printFilesOutput({
+          files,
+          format: outputOptions.format,
+          includeMetadata,
+          maxDepth: outputOptions.maxDepth,
+          dir: options.dir,
+          queries: cg.queries,
+        });
 
-        console.log();
+        out();
         cg.close();
       } catch (err) {
         error(`Failed to list files: ${errMsg(err)}`);

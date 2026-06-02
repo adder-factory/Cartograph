@@ -46,6 +46,15 @@ describe('cartograph_sql', () => {
     expect(text).toMatch(/\| name \|/); // markdown table header
   });
 
+  it('escapes markdown table delimiters and normalizes newlines in cell values', async () => {
+    const result = await handler.execute('cartograph_sql', {
+      query: "SELECT 'a|b' AS value, 'line1' || char(10) || 'line2' AS multi",
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('| a\\|b | line1\\nline2 |');
+    expect(text).not.toContain('| a|b | line1\nline2 |');
+  });
+
   it('honours `schema: true` mode (returns CREATE TABLE statements)', async () => {
     const result = await handler.execute('cartograph_sql', { schema: true });
     const text = result.content[0]?.text ?? '';

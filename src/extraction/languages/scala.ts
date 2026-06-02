@@ -2,6 +2,7 @@ import type { Node as SyntaxNode } from 'web-tree-sitter';
 import type { NodeKind } from '../../types.js';
 import { getNodeText } from '../tree-sitter-helpers.js';
 import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
+import { isCurrentScopeClassLike } from './class-scope.js';
 
 function getValVarName(node: SyntaxNode, source: string): string | null {
   const patternNode = node.childForFieldName('pattern');
@@ -21,24 +22,6 @@ function extractVisibility(node: SyntaxNode): 'public' | 'private' | 'protected'
     }
   }
   return 'public';
-}
-
-function isClassLikeKind(kind: string): boolean {
-  return (
-    kind === 'class' ||
-    kind === 'trait' ||
-    kind === 'interface' ||
-    kind === 'struct' ||
-    kind === 'enum' ||
-    kind === 'module'
-  );
-}
-
-function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
-  if (ctx.nodeStack.length === 0) return false;
-  const parentId = ctx.nodeStack.at(-1);
-  const parentNode = ctx.nodes.find((n) => n.id === parentId);
-  return parentNode != null && isClassLikeKind(parentNode.kind);
 }
 
 function visitScalaEnumCases(node: SyntaxNode, ctx: ExtractorContext): boolean {

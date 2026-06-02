@@ -181,22 +181,25 @@ function collectAffectedDependents(
     for (const dep of graph.getFileDependents(current.file)) {
       if (visited.has(dep)) continue;
       visited.add(dep);
-      recordDependent(input, dep, current.depth + 1, queue, out);
+      recordDependent({ input, dep, nextDepth: current.depth + 1, queue, out });
     }
   }
 }
 
-function recordDependent(
-  input: AffectedCoreInput,
-  dep: string,
-  nextDepth: number,
-  queue: Array<{ file: string; depth: number }>,
+interface RecordDependentArgs {
+  input: AffectedCoreInput;
+  dep: string;
+  nextDepth: number;
+  queue: Array<{ file: string; depth: number }>;
   out: {
     affectedTests: Set<string>;
     allDependents: Set<string>;
     barrelsReached: Set<string>;
-  },
-): void {
+  };
+}
+
+function recordDependent(args: RecordDependentArgs): void {
+  const { input, dep, nextDepth, queue, out } = args;
   out.allDependents.add(dep);
   if (isBarrelFile(dep)) out.barrelsReached.add(dep);
   if (isTestFile(dep, input)) out.affectedTests.add(dep);

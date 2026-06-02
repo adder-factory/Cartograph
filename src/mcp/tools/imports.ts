@@ -347,7 +347,7 @@ function appendFixtureExclusionNote(args: AppendFixtureExclusionNoteArgs): void 
   const excluded = hits.filter((h) => isFixturePath(h.file)).length;
   if (excluded === 0) return;
   lines.push(
-    `_(${excluded} fixture import${excluded === 1 ? '' : 's'} excluded; pass \`includeFixtures: true\` (i.e. \`excludeFixtures: false\`) to show)_`,
+    `_(${excluded} fixture import${excluded === 1 ? '' : 's'} excluded; pass \`excludeFixtures: false\` to show)_`,
   );
 }
 

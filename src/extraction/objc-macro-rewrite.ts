@@ -125,14 +125,17 @@ function writeSkeleton(chars: string[], start: number, skeleton: string): void {
   for (let k = 0; k < skeleton.length; k++) chars[start + k] = skeleton.charAt(k);
 }
 
-function rewriteMacroInvocation(
-  source: string,
-  chars: string[],
-  start: number,
-  spec: RnMacroSpec,
-  openParen: number,
-  closeParen: number,
-): void {
+interface RewriteMacroInvocationArgs {
+  source: string;
+  chars: string[];
+  start: number;
+  spec: RnMacroSpec;
+  openParen: number;
+  closeParen: number;
+}
+
+function rewriteMacroInvocation(args: RewriteMacroInvocationArgs): void {
+  const { source, chars, start, spec, openParen, closeParen } = args;
   // 1. `MACRO(` → skeleton + spaces (covers [start, openParen], same length).
   blankRange(chars, start, openParen);
   writeSkeleton(chars, start, spec.skeleton);
@@ -180,7 +183,7 @@ export function rewriteReactNativeMacros(source: string): string {
     }
     chars ??= Array.from(source);
 
-    rewriteMacroInvocation(source, chars, i, spec, openParen, closeParen);
+    rewriteMacroInvocation({ source, chars, start: i, spec, openParen, closeParen });
     i = closeParen + 1;
   }
 

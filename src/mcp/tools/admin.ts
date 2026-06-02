@@ -221,7 +221,7 @@ interface NoLlmFooterBackend {
 }
 export async function buildNoLlmFooter(scan?: () => Promise<readonly NoLlmFooterBackend[]>): Promise<string> {
   const bare =
-    'Base graph is queryable now. (No LLM configured — `find mode:intent` / `ask` need `cartograph admin llm-apply`.)';
+    'Base graph is queryable now. (No LLM configured — `find mode:intent` / `ask` need `cartograph llm setup`, `cartograph admin install-models --write-config`, or `cartograph_admin({action: "llm-plan"})` then `llm-apply`.)';
   const runScan =
     scan ??
     (async () => {
@@ -685,6 +685,8 @@ async function handleClassifyPhase(ctx: ToolCtx, args: Record<string, unknown>):
 async function handleInstallModels(_ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const dir = typeof args['dir'] === 'string' ? args['dir'] : undefined;
   const minimal = args['minimal'] === true;
+  const writeConfig = args['writeConfig'] === true;
+  const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : undefined;
   const { installRecommendedModels } = await import('../../installer/install-models.js');
   const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await import('../../llm/recommended-models.js');
   try {
@@ -692,27 +694,73 @@ async function handleInstallModels(_ctx: ToolCtx, args: Record<string, unknown>)
       ...(dir ? { dir } : {}),
       models: minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS,
     });
-    const lines: string[] = [
-      `## Installed ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}`,
-    ];
-    if (result.downloaded.length > 0) {
-      lines.push('', '**Downloaded:**');
-      for (const m of result.downloaded) {
-        lines.push(`- ${m.filename} (~${m.sizeMb} MB) — ${m.description}`);
-      }
-    }
-    if (result.skipped.length > 0) {
-      lines.push('', '**Already present (skipped):**');
-      for (const m of result.skipped) lines.push(`- ${m.filename}`);
-    }
-    lines.push(
-      '',
-      'Set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` in `.cartograph/config.json` to point at the GGUF paths above, or call this from the installer with `--write-config`.',
-    );
+    const lines = formatInstallModelsResultLines(result);
+    const configLines = await installModelsConfigLines({ writeConfig, projectPath, dir });
+    if (!configLines.ok) return configLines;
+    lines.push(...configLines.value);
     return ok(textResult(lines.join('\n')));
   } catch (error_) {
     return err(`install-models failed: ${errMsg(error_)}`);
   }
+}
+
+interface InstalledModelInfo {
+  readonly filename: string;
+  readonly sizeMb: number;
+  readonly description: string;
+}
+
+function formatInstallModelsResultLines(result: {
+  downloaded: readonly InstalledModelInfo[];
+  skipped: readonly InstalledModelInfo[];
+}): string[] {
+  const lines: string[] = [
+    `## Installed ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}`,
+  ];
+  appendDownloadedModelLines(lines, result.downloaded);
+  appendSkippedModelLines(lines, result.skipped);
+  return lines;
+}
+
+function appendDownloadedModelLines(lines: string[], downloaded: readonly InstalledModelInfo[]): void {
+  if (downloaded.length === 0) return;
+  lines.push('', '**Downloaded:**');
+  for (const m of downloaded) lines.push(`- ${m.filename} (~${m.sizeMb} MB) — ${m.description}`);
+}
+
+function appendSkippedModelLines(lines: string[], skipped: readonly InstalledModelInfo[]): void {
+  if (skipped.length === 0) return;
+  lines.push('', '**Already present (skipped):**');
+  for (const m of skipped) lines.push(`- ${m.filename}`);
+}
+
+type InstallModelsConfigLinesResult = { ok: true; value: string[] } | { ok: false; error: string };
+
+async function installModelsConfigLines(args: {
+  readonly writeConfig: boolean;
+  readonly projectPath: string | undefined;
+  readonly dir: string | undefined;
+}): Promise<InstallModelsConfigLinesResult> {
+  if (!args.writeConfig) {
+    return {
+      ok: true,
+      value: [
+        '',
+        'Set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` in `.cartograph/config.json`, call `cartograph_admin({action: "llm-plan"})` / `llm-apply`, or re-run this tool with `writeConfig: true` and `projectPath`.',
+      ],
+    };
+  }
+  if (!args.projectPath) {
+    return { ok: false, error: 'install-models with `writeConfig: true` requires `projectPath`.' };
+  }
+  const { writeRecommendedLlmConfig } = await import('../../installer/recommended-config.js');
+  const writeOpts: { projectRoot: string; dir?: string } = { projectRoot: args.projectPath };
+  if (args.dir) writeOpts.dir = args.dir;
+  const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
+  const lines = ['', `Updated \`${configPath}\`.`];
+  if (backupPath) lines.push(`Backup written: \`${backupPath}\`.`);
+  if (diff.addedOrUpdated.length > 0) lines.push(`Added/updated: ${diff.addedOrUpdated.join(', ')}.`);
+  return { ok: true, value: lines };
 }
 
 async function handleDoctor(_ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
@@ -1149,6 +1197,16 @@ const adminSchema = z.object({
     .optional()
     .describe(
       '(action=install-models) Install only the smallest viable subset (embed + 3B chat, ~2.1 GB) instead of the full ~7 GB set. Default false.',
+    ),
+  dir: z
+    .string()
+    .optional()
+    .describe('(action=install-models) Directory to install GGUFs into. Default `~/.cartograph/models`.'),
+  writeConfig: z
+    .boolean()
+    .optional()
+    .describe(
+      '(action=install-models) Merge the recommended LLM block into `<projectPath>/.cartograph/config.json` after download. Requires `projectPath`. Default false.',
     ),
   skipProjectChecks: z
     .boolean()

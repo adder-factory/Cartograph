@@ -1,25 +1,8 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText } from '../tree-sitter-helpers.js';
-import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
+import type { LanguageExtractor } from '../tree-sitter-types.js';
 import { compact } from '../../utils.js';
-
-function isClassLikeKind(kind: string): boolean {
-  return (
-    kind === 'class' ||
-    kind === 'struct' ||
-    kind === 'interface' ||
-    kind === 'trait' ||
-    kind === 'enum' ||
-    kind === 'module'
-  );
-}
-
-function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
-  if (ctx.nodeStack.length === 0) return false;
-  const parentId = ctx.nodeStack.at(-1);
-  const parentNode = ctx.nodes.find((n) => n.id === parentId);
-  return parentNode != null && isClassLikeKind(parentNode.kind);
-}
+import { isCurrentScopeClassLike } from './class-scope.js';
 
 function isStaticDeclaration(node: SyntaxNode): boolean {
   return node.children.some((child: SyntaxNode) => child?.type === 'static');

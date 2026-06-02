@@ -179,8 +179,26 @@ const reviewSchema = z.object({
 
 type ReviewArgs = z.infer<typeof reviewSchema>;
 
+function inferReviewMode(args: ReviewArgs): (typeof REVIEW_MODE_NAMES)[number] {
+  if (args.mode) return args.mode;
+  if ((args.files && args.files.length > 0) || (args.symbols && args.symbols.length > 0)) return 'neighbors';
+  if (args.diff) return 'context';
+  if (args.perDetectorLimit !== undefined || args.minSeverity !== undefined) {
+    return 'agent-audit';
+  }
+  if (
+    args.limit !== undefined ||
+    args.topN !== undefined ||
+    args.minCentrality !== undefined ||
+    args.coverageSource !== undefined
+  ) {
+    return 'risk';
+  }
+  return 'risk';
+}
+
 async function handleReview(ctx: ToolCtx, args: ReviewArgs): Promise<ToolOutcome> {
-  const mode = args.mode ?? 'context';
+  const mode = inferReviewMode(args);
   const handler = REVIEW_MODES[mode];
   // `mode` is enum-validated by Zod, so a `handler` miss is unreachable
   // in practice — keep the guard as a defensive fallback for the legacy

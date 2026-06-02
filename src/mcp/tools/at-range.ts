@@ -157,6 +157,16 @@ function validateFileWithinRoot(projectRoot: string, filePath: string): string |
   return `file path '${filePath}' is outside the project root.`;
 }
 
+function toIndexedFilePath(projectRoot: string, filePath: string): string {
+  const trimmed = filePath.trim();
+  if (!path.isAbsolute(trimmed)) return trimmed;
+  return path.relative(path.resolve(projectRoot), path.resolve(trimmed)).split(path.sep).join('/');
+}
+
+function compactCell(value: string): string {
+  return value.replaceAll('\\', '\\\\').replaceAll('|', String.raw`\|`).replaceAll('\n', String.raw`\n`);
+}
+
 /** Format the signature cell — escape pipe characters or show dash when absent. */
 function formatSigCell(n: NodeAtRange): string {
   const hasSignature = n.signature !== undefined && n.signature !== null && n.signature.length > 0;
@@ -201,20 +211,20 @@ function formatRowsCompact(nodes: NodeAtRange[], fields?: ReadonlyArray<AtRangeF
   return nodes
     .map((n) => {
       const cols: string[] = [];
-      if (fieldSet.has('name')) cols.push(n.name);
-      if (fieldSet.has('kind')) cols.push(n.kind);
+      if (fieldSet.has('name')) cols.push(compactCell(n.name));
+      if (fieldSet.has('kind')) cols.push(compactCell(n.kind));
       // `path` and `line` collapse into ONE column rendered as `path:line`
       // (matches the universal `file:line` editor-jump convention; matches
       // the documented playbook shape). If only one of the two fields is
       // included, render that field alone — no orphan leading colon.
       const hasPathField = fieldSet.has('path');
       const hasLineField = fieldSet.has('line');
-      if (hasPathField && hasLineField) cols.push(`${n.file_path}:${n.start_line}`);
-      else if (hasPathField) cols.push(n.file_path);
+      if (hasPathField && hasLineField) cols.push(`${compactCell(n.file_path)}:${n.start_line}`);
+      else if (hasPathField) cols.push(compactCell(n.file_path));
       else if (hasLineField) cols.push(String(n.start_line));
       const showEndLine = fieldSet.has('endLine') && n.end_line !== n.start_line;
       if (showEndLine) cols.push(`end:${n.end_line}`);
-      if (fieldSet.has('signature') && n.signature) cols.push(`sig:${n.signature}`);
+      if (fieldSet.has('signature') && n.signature) cols.push(`sig:${compactCell(n.signature)}`);
       return cols.join('|');
     })
     .join('\n');
@@ -289,6 +299,7 @@ async function handleAtRangeSingle(
   const filePath = fileRaw.trim();
   const pathError = validateFileWithinRoot(cg.projectRoot, filePath);
   if (pathError) return err(pathError);
+  const indexedFilePath = toIndexedFilePath(cg.projectRoot, filePath);
 
   // `startLine`/`endLine` are Zod-validated integers ≥ 1 when present;
   // a sub-1 or non-integer value was already rejected at the dispatch
@@ -301,12 +312,12 @@ async function handleAtRangeSingle(
   // Over-fetch by one so "exactly `limit` rows exist" can be told apart
   // from "more than `limit` rows exist" — `getNodesAtRange` does a plain
   // `LIMIT ?` with no over-fetch of its own (audit-4 #2).
-  const fetched = getNodesAtRange(cg.queries, { filePath, startLine, endLine, limit: limit + 1 });
+  const fetched = getNodesAtRange(cg.queries, { filePath: indexedFilePath, startLine, endLine, limit: limit + 1 });
   const hitsCapReached = fetched.length > limit;
   const nodes = fetched.slice(0, limit);
   if (nodes.length === 0) {
     // Distinguish "file not in index" from "file indexed but no symbols overlap this range".
-    const indexed = getFileByPath(cg.queries, filePath);
+    const indexed = getFileByPath(cg.queries, indexedFilePath);
     if (!indexed) {
       // DECISION (task #16): a non-indexed path is almost always a typo or a
       // wrong-cwd-relative path — fail LOUD with the `err` arm (isError/exit 1)
@@ -314,14 +325,14 @@ async function handleAtRangeSingle(
       // file. An indexed file with no overlapping symbols (the branch below)
       // is a real empty answer and stays a success result (exit 0).
       return err(
-        `File not indexed: "${filePath}" is not in the cartograph index. ` +
+        `File not indexed: "${indexedFilePath}" is not in the cartograph index. ` +
           'Run `cartograph admin index` to add it, or check the path is relative to the project root.',
       );
     }
     return ok(
       renderToolResponse({
         body: '',
-        empty: { message: `No symbols overlap ${filePath}:${startLine}-${endLine}` },
+        empty: { message: `No symbols overlap ${indexedFilePath}:${startLine}-${endLine}` },
       }),
     );
   }
@@ -330,7 +341,7 @@ async function handleAtRangeSingle(
   const fields = args.fields;
   const rendered = formatResults({
     nodes,
-    filePath,
+    filePath: indexedFilePath,
     startLine,
     endLine,
     ...(compact ? { compact: true } : {}),
@@ -375,7 +386,7 @@ function validateBulkRanges(rangesRaw: unknown, projectRoot: string): ValidatedR
     if ('error' in validated) return validated;
     const pathError = validateFileWithinRoot(projectRoot, validated.file);
     if (pathError) return { error: `ranges[${i}]: ${pathError}` };
-    validatedRanges.push(validated);
+    validatedRanges.push({ ...validated, file: toIndexedFilePath(projectRoot, validated.file) });
   }
   return validatedRanges;
 }

@@ -587,12 +587,13 @@ function appendModuleFormat(lines: string[], projectRoot: string): void {
   if (modFmt) lines.push(modFmt);
 }
 
-/** True drifted count for a `ChangedFiles` snapshot — heal-only entries
- *  are EXCLUDED because they have no on-disk content change. 0 when null.
- *  This is what the "N files content-changed since index" banner counts. */
+/** True content-modified count for a `ChangedFiles` snapshot — added,
+ *  removed, and heal-only entries are EXCLUDED because they are not
+ *  "content-changed since index" in the same sense as
+ *  `cartograph_changed_since`'s content-hash bucket. */
 function changedTotal(changes: ChangedFiles | null): number {
   if (!changes) return 0;
-  return changes.added.length + changes.modified.length + changes.removed.length - changes.healOnly.length;
+  return realModifiedCount(changes);
 }
 
 /** Format the commit-count-drift status line. Pulled out of
@@ -628,6 +629,17 @@ function formatContentDriftLine(
   return (
     `**Status:** 🟡 ${uncommittedCount} file${uncommittedCount === 1 ? '' : 's'} content-changed ` +
     `since index${atHead} — run \`cartograph admin sync\` to refresh`
+  );
+}
+
+function formatPendingPathDriftLine(
+  freshness: NonNullable<ReturnType<Cartograph['stats']['getFreshness']>>,
+  count: number,
+): string {
+  const atHead = !freshness.isStale && freshness.indexedSha ? ' (index at HEAD)' : '';
+  return (
+    `**Status:** 🟡 ${count} file${count === 1 ? '' : 's'} added/removed since index${atHead} — ` +
+    `run \`cartograph admin sync\` to refresh`
   );
 }
 
@@ -692,6 +704,7 @@ function appendFreshness(
     lines.push(`**Indexed HEAD:** \`${shortSha(freshness.indexedSha)}\``);
   }
   const uncommittedCount = changedTotal(changedFiles);
+  const pendingPathDriftCount = changedFiles ? changedFiles.added.length + changedFiles.removed.length : 0;
   const healFlaggedCount = changedFiles?.healOnly.length ?? 0;
   // Three orthogonal drift facets — render each that's active so signals
   // never crowd or contradict each other:
@@ -713,6 +726,10 @@ function appendFreshness(
   }
   if (uncommittedCount > 0) {
     lines.push(formatContentDriftLine(freshness, uncommittedCount));
+    rendered = true;
+  }
+  if (pendingPathDriftCount > 0) {
+    lines.push(formatPendingPathDriftLine(freshness, pendingPathDriftCount));
     rendered = true;
   }
   if (healFlaggedCount > 0) {
@@ -750,7 +767,7 @@ function appendFreshness(
   // pressure: `cartograph_changed_since` won't show those files (they
   // have no on-disk drift), so pointing the reader at it would be
   // misleading.
-  if (rendered && (freshness.isStale || uncommittedCount > 0 || contentDrifted > 0)) {
+  if (rendered && (freshness.isStale || uncommittedCount > 0 || pendingPathDriftCount > 0 || contentDrifted > 0)) {
     lines.push(
       '_For the per-file content-hash list (path-by-path drift, not ' +
         'commit-count), run `cartograph_changed_since`._',

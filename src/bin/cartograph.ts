@@ -56,6 +56,17 @@ import './commands/summaries.js';
 import './commands/session.js';
 import './commands/generated.js';
 
+function isEpipe(error: unknown): boolean {
+  return (error as { code?: string } | undefined)?.code === 'EPIPE';
+}
+
+function exitOnEpipe(error: unknown): void {
+  if (isEpipe(error)) process.exit(0);
+}
+
+process.stdout.on('error', exitOnEpipe);
+process.stderr.on('error', exitOnEpipe);
+
 // Warn about unsupported Node.js versions (Node 25+ has V8 turboshaft WASM bugs)
 const nodeVersion = process.versions.node;
 const nodeMajor = Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10);
@@ -70,10 +81,12 @@ if (nodeMajor >= 25) {
 // Global error handlers — attached before any registration work so
 // early throws (e.g. corrupted lazy imports) are caught.
 process.on('uncaughtException', (error) => {
+  if ((error as NodeJS.ErrnoException).code === 'EPIPE') process.exit(0);
   process.stderr.write(`[Cartograph] Uncaught exception: ${String(error)}\n`);
 });
 
 process.on('unhandledRejection', (reason) => {
+  if ((reason as NodeJS.ErrnoException | undefined)?.code === 'EPIPE') process.exit(0);
   process.stderr.write(`[Cartograph] Unhandled rejection: ${String(reason)}\n`);
 });
 

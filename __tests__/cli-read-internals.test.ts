@@ -406,7 +406,16 @@ describe('read command internals', () => {
       size: i,
     }));
     const flat = stripAnsi(
-      captureOutput(() => read.printFilesOutput(flatFiles, 'flat', true, undefined, undefined, {})),
+      captureOutput(() =>
+        read.printFilesOutput({
+          files: flatFiles,
+          format: 'flat',
+          includeMetadata: true,
+          maxDepth: undefined,
+          dir: undefined,
+          queries: {},
+        }),
+      ),
     );
     expect(flat).toContain('Files (81)');
     expect(flat).toContain('src/00.ts');

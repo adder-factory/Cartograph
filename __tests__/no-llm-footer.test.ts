@@ -14,7 +14,8 @@ describe('buildNoLlmFooter — F#29', () => {
   it('falls back to the bare message when the scan returns no backends', async () => {
     const text = await buildNoLlmFooter(async () => []);
     expect(text).toMatch(/No LLM configured/);
-    expect(text).toMatch(/cartograph admin llm-apply/);
+    expect(text).toMatch(/cartograph llm setup/);
+    expect(text).toMatch(/llm-plan/);
   });
 
   it('lists a single detected backend with its endpoint and points at llm-plan', async () => {

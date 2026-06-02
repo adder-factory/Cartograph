@@ -44,6 +44,7 @@ import {
 } from './scan-backends.js';
 import { describeHardware, recommendedTuning } from './hardware-tuning.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './default-endpoints.js';
+import { loadConfig } from '../config.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -171,7 +172,8 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
       name: 'Project config',
       status: 'warn',
       detail: `No config.json at ${configPath}.`,
-      remediation: '`cartograph admin init` to regenerate, or hand-author `.cartograph/config.json`.',
+      remediation:
+        '`cartograph admin install-models --write-config` to regenerate a working recommended config, or hand-author `.cartograph/config.json`.',
     };
   }
   let parsed: Record<string, unknown>;
@@ -194,6 +196,16 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
       remediation:
         'LLM-driven features (semantic search, dead-code judge, ask) need at least an embedding model. ' +
         'Run `cartograph admin install-models --write-config` to install + wire the recommended GGUF set in one go.',
+    };
+  }
+  try {
+    loadConfig(projectPath);
+  } catch (e) {
+    return {
+      name: 'Project config',
+      status: 'fail',
+      detail: `${configPath} failed runtime validation: ${(e as Error).message}`,
+      remediation: 'Fix `.cartograph/config.json`, or re-run `cartograph admin install-models --write-config`.',
     };
   }
   return { name: 'Project config', status: 'ok', detail: `${configPath} valid` };
@@ -572,7 +584,7 @@ async function readEmbeddingLlmFromConfig(projectPath: string): Promise<Record<s
     .catch(() => false);
   if (!configExists) return null;
   try {
-    const parsed = JSON.parse(await fsp.readFile(configPath, 'utf8')) as Record<string, unknown>;
+    const parsed = loadConfig(projectPath) as unknown as Record<string, unknown>;
     const llm = parsed['llm'] as Record<string, unknown> | undefined;
     if (!llm || typeof llm !== 'object') return null;
     const embedding = llm['embeddingLlm'] as Record<string, unknown> | undefined;

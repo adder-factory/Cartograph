@@ -2,24 +2,7 @@ import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
 import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
 import { compact } from '../../utils.js';
-
-function isClassLikeKind(kind: string): boolean {
-  return (
-    kind === 'class' ||
-    kind === 'trait' ||
-    kind === 'interface' ||
-    kind === 'struct' ||
-    kind === 'enum' ||
-    kind === 'module'
-  );
-}
-
-function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
-  if (ctx.nodeStack.length === 0) return false;
-  const parentId = ctx.nodeStack.at(-1);
-  const parentNode = ctx.nodes.find((n) => n.id === parentId);
-  return parentNode != null && isClassLikeKind(parentNode.kind);
-}
+import { isCurrentScopeClassLike } from './class-scope.js';
 
 /** True when `node` is a `user_type` whose first `type_identifier`
  *  child is the literal `interface`. Reused by the direct-child and
@@ -107,6 +90,15 @@ function kotlinPropertyTypeText(varDecl: SyntaxNode, source: string): string | u
   return typeNode ? getNodeText(typeNode, source) : undefined;
 }
 
+function kotlinPropertyKind(isVal: boolean, isClassScope: boolean): 'constant' | 'variable' | 'field' {
+  if (isClassScope) return 'field';
+  return isVal ? 'constant' : 'variable';
+}
+
+function kotlinPropertySignature(keyword: string, name: string, typeText: string | undefined): string {
+  return typeText ? `${keyword} ${name}: ${typeText}` : `${keyword} ${name}`;
+}
+
 function visitKotlinPropertyDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
   if (node.type !== 'property_declaration') return false;
   const varDecl = node.namedChildren.find((c: SyntaxNode) => c.type === 'variable_declaration');
@@ -118,20 +110,23 @@ function visitKotlinPropertyDeclaration(node: SyntaxNode, ctx: ExtractorContext)
   const bindingKind = node.namedChildren.find((c: SyntaxNode) => c.type === 'binding_pattern_kind');
   const isVal = bindingKind?.text === 'val';
   const keyword = isVal ? 'val' : 'var';
+  const isClassScope = isCurrentScopeClassLike(ctx);
 
-  if (!isCurrentScopeClassLike(ctx)) {
+  if (!isClassScope) {
     // Top-level or local: keep as constant (val) or variable (var)
-    ctx.createNode({ kind: isVal ? 'constant' : 'variable', name, node });
+    ctx.createNode({ kind: kotlinPropertyKind(isVal, isClassScope), name, node });
     return true;
   }
 
   const typeText = kotlinPropertyTypeText(varDecl, ctx.source);
-  const sig = typeText ? `${keyword} ${name}: ${typeText}` : `${keyword} ${name}`;
   ctx.createNode({
-    kind: 'field',
+    kind: kotlinPropertyKind(isVal, isClassScope),
     name,
     node,
-    extra: compact({ signature: sig, visibility: kotlinPropertyVisibility(node) }),
+    extra: compact({
+      signature: kotlinPropertySignature(keyword, name, typeText),
+      visibility: kotlinPropertyVisibility(node),
+    }),
   });
   return true;
 }
