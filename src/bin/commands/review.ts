@@ -3,7 +3,7 @@
  * extracted from the bin/cartograph.ts decomposition; side-effecting
  * module: importing it registers the commands.
  */
-import * as fs from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { errMsg } from '../../errors.js';
 import {
   program,
@@ -34,7 +34,7 @@ async function readReviewDiffInput(raw: string): Promise<string> {
   }
   if (raw.includes('\n') || raw.startsWith('@@') || raw.startsWith('diff --git')) return raw;
   try {
-    return fs.readFileSync(raw, 'utf-8');
+    return await readFile(raw, 'utf-8');
   } catch (readErr) {
     if ((readErr as NodeJS.ErrnoException).code === 'ENOENT') {
       error(`review context: diff file not found: ${raw}`);
