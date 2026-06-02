@@ -10,7 +10,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { resolveLlmProviders } from '../src/llm/provider.js';
+import {
+  getAskModel,
+  getChatModel,
+  getDisplayEndpoint,
+  getEmbeddingModel,
+  resolveLlmProviders,
+} from '../src/llm/provider.js';
 import { normalizeEndpointConfig } from '../src/llm/client.js';
 import type { CartographConfig } from '../src/types.js';
 
@@ -229,6 +235,164 @@ describe('resolveLlmProviders', () => {
       }),
     );
     expect(r).toBeNull();
+  });
+
+  it('openai-compat summarizeLlm without model returns null even when endpoint is set', async () => {
+    const r = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: {
+          provider: 'openai-compat',
+          endpoint: 'http://localhost:11434',
+        },
+      }),
+    );
+    expect(r).toBeNull();
+  });
+
+  it('openai-compat summarizeLlm with apiKey only resolves as cloud', async () => {
+    const r = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: {
+          provider: 'openai-compat',
+          apiKey: 'sk-cloud',
+          model: 'gpt-compatible',
+          askModel: 'gpt-compatible-ask',
+          timeoutMs: 1234,
+          summaryBatchSize: 9,
+        },
+      }),
+    );
+    expect(r?.summarizeLlm?.provider).toBe('openai-compat');
+    expect(r?.summarizeLlm?.endpoint).toBeUndefined();
+    expect(r?.summarizeLlm?.apiKey).toBe('sk-cloud');
+    expect(r?.summarizeLlm?.askModel).toBe('gpt-compatible-ask');
+    expect(r?.summarizeLlm?.timeoutMs).toBe(1234);
+    expect(r?.summarizeLlm?.summaryBatchSize).toBe(9);
+    expect(r?.resolutionTrace).toContain('chat=openai-compat(cloud|gpt-compatible)');
+  });
+
+  it('askLlm openai-compat resolves independently and uses askLlm trace', async () => {
+    const r = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        askLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8082', model: 'ask' },
+      }),
+    );
+    expect(r?.askLlm?.provider).toBe('openai-compat');
+    expect(r?.askLlm?.model).toBe('ask');
+    expect(r?.resolutionTrace).toContain('askLlm=openai-compat(http://localhost:8082|ask)');
+  });
+
+  it('askLlm anthropic-api uses explicit api key and default ask model', async () => {
+    const r = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        askLlm: { provider: 'anthropic-api', apiKey: 'sk-anthropic' },
+      }),
+    );
+    expect(r?.askLlm?.provider).toBe('anthropic-api');
+    expect(r?.askLlm?.model).toBe('claude-sonnet-4-6');
+    expect(r?.askLlm?.apiKey).toBe('sk-anthropic');
+    expect(r?.resolutionTrace).toContain('askChat=anthropic-api');
+  });
+
+  it('askLlm unsupported or incomplete configs are dropped without disabling summarize', async () => {
+    const unknown = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        askLlm: { provider: 'bogus' as never, model: 'ask' } as never,
+      }),
+    );
+    expect(unknown?.summarizeLlm?.model).toBe('summary');
+    expect(unknown?.askLlm).toBeFalsy();
+
+    const incomplete = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        askLlm: { provider: 'openai-compat', model: 'ask' },
+      }),
+    );
+    expect(incomplete?.summarizeLlm?.model).toBe('summary');
+    expect(incomplete?.askLlm).toBeFalsy();
+  });
+
+  it('localLlm resolves openai-compat and unsupported local provider is dropped', async () => {
+    const r = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        localLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8084', model: 'local' },
+      }),
+    );
+    expect(r?.localLlm?.provider).toBe('openai-compat');
+    expect(r?.localLlm?.model).toBe('local');
+    expect(r?.resolutionTrace).toContain('localLlm=openai-compat(http://localhost:8084|local)');
+
+    const bad = await resolveLlmProviders(
+      baseConfig({
+        summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8081', model: 'summary' },
+        localLlm: { provider: 'bogus' as never, model: 'local' } as never,
+      }),
+    );
+    expect(bad?.localLlm).toBeFalsy();
+  });
+
+  it('rerankerLlm validates endpoint-or-apiKey and model', async () => {
+    const valid = await resolveLlmProviders(
+      baseConfig({
+        embeddingLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8080', model: 'embed' },
+        rerankerLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8083', model: 'rerank' },
+      }),
+    );
+    expect(valid?.rerankerLlm?.provider).toBe('openai-compat');
+    expect(valid?.rerankerLlm?.model).toBe('rerank');
+    expect(valid?.resolutionTrace).toContain('rerankerLlm:openai-compat(http://localhost:8083|rerank)');
+
+    const noEndpoint = await resolveLlmProviders(
+      baseConfig({
+        embeddingLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8080', model: 'embed' },
+        rerankerLlm: { provider: 'openai-compat', model: 'rerank' },
+      }),
+    );
+    expect(noEndpoint?.rerankerLlm).toBeFalsy();
+
+    const noModel = await resolveLlmProviders(
+      baseConfig({
+        embeddingLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8080', model: 'embed' },
+        rerankerLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8083' },
+      }),
+    );
+    expect(noModel?.rerankerLlm).toBeFalsy();
+  });
+
+  it('model and endpoint display helpers handle every resolved shape', () => {
+    const resolved = {
+      summarizeLlm: {
+        provider: 'openai-compat' as const,
+        endpoint: 'http://localhost:8081',
+        model: 'summary',
+        askModel: 'summary-ask',
+      },
+      askLlm: { provider: 'openai-compat' as const, endpoint: 'http://localhost:8082', model: 'ask' },
+      embeddingLlm: { provider: 'openai-compat' as const, endpoint: 'http://localhost:8080', model: 'embed' },
+      localLlm: null,
+      rerankerLlm: null,
+    };
+    expect(getChatModel(resolved)).toBe('summary');
+    expect(getAskModel(resolved)).toBe('ask');
+    expect(getEmbeddingModel(resolved)).toBe('embed');
+    expect(getDisplayEndpoint(resolved)).toBe('openai-compat (http://localhost:8081|summary)');
+    expect(getDisplayEndpoint(null)).toBe('(unconfigured)');
+    expect(
+      getDisplayEndpoint({ summarizeLlm: { provider: 'claude-bridge', model: 'm', claudeBin: '/bin/claude' } }),
+    ).toBe('claude-bridge (subprocess)');
+    expect(getDisplayEndpoint({ summarizeLlm: { provider: 'anthropic-api', model: 'm', apiKey: 'sk' } })).toBe(
+      'anthropic-api (HTTPS)',
+    );
+    expect(
+      getDisplayEndpoint({
+        summarizeLlm: { provider: 'openai-compat', apiKey: 'sk', model: 'cloud-model' },
+      }),
+    ).toBe('openai-compat (cloud|cloud-model)');
   });
 });
 

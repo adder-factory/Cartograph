@@ -24,18 +24,17 @@ try {
 let testDir: string;
 let cg: Cartograph | null = null;
 
-function git(...args: string[]): string {
+function git(args: string[], env: NodeJS.ProcessEnv = {}): string {
   return execFileSync('git', args, {
     cwd: testDir,
     encoding: 'utf-8',
     env: {
       ...process.env,
+      ...env,
       GIT_AUTHOR_NAME: 'Test',
       GIT_AUTHOR_EMAIL: 'test@example.com',
       GIT_COMMITTER_NAME: 'Test',
       GIT_COMMITTER_EMAIL: 'test@example.com',
-      GIT_AUTHOR_DATE: process.env.GIT_AUTHOR_DATE,
-      GIT_COMMITTER_DATE: process.env.GIT_COMMITTER_DATE,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   }).trim();
@@ -47,12 +46,11 @@ function commitAt(date: string, files: Record<string, string>, message: string) 
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content);
   }
-  git('add', '-A');
-  process.env.GIT_AUTHOR_DATE = date;
-  process.env.GIT_COMMITTER_DATE = date;
-  git('commit', '-m', message);
-  delete process.env.GIT_AUTHOR_DATE;
-  delete process.env.GIT_COMMITTER_DATE;
+  git(['add', '-A']);
+  git(['commit', '-m', message], {
+    GIT_AUTHOR_DATE: date,
+    GIT_COMMITTER_DATE: date,
+  });
 }
 
 beforeEach(() => {
@@ -176,8 +174,8 @@ describe('extractDeclaration', () => {
 
 describe.skipIf(!HAS_GIT)('mineIssueCommits', () => {
   beforeEach(() => {
-    git('init', '-q', '-b', 'main');
-    git('config', 'commit.gpgsign', 'false');
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'commit.gpgsign', 'false']);
   });
 
   it('finds commits with `Fixes #N` in the subject', async () => {
@@ -215,8 +213,8 @@ describe.skipIf(!HAS_GIT)('mineIssueCommits', () => {
 
 describe.skipIf(!HAS_GIT)('Cartograph issue history', () => {
   beforeEach(() => {
-    git('init', '-q', '-b', 'main');
-    git('config', 'commit.gpgsign', 'false');
+    git(['init', '-q', '-b', 'main']);
+    git(['config', 'commit.gpgsign', 'false']);
   });
 
   it('attributes a Fixes #N commit to the modified function', async () => {

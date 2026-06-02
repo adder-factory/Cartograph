@@ -1,0 +1,192 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import type { IndexHookContext } from '../src/index-hooks/types.js';
+
+const state = {
+  refreshCalls: [] as Array<{ hookName: string; options: unknown; edges: unknown[] }>,
+  metadata: new Map<string, string>(),
+  calls: [] as Array<{ name: string; value?: unknown }>,
+  useWorkers: false,
+  workerResult: { edges: [] as unknown[], isPartial: false },
+  nameIndexes: new Map<string, Map<string, string>>(),
+  throwSetMetadata: false,
+};
+
+vi.mock('../src/algo-hash.js', () => ({
+  computeAlgoHash: vi.fn(() => 'value-ref-algo-test'),
+}));
+
+vi.mock('../src/db/index.js', () => ({
+  getDatabasePath: vi.fn((projectRoot: string) => `${projectRoot}/.cartograph/cartograph.db`),
+}));
+
+vi.mock('../src/db/queries-metadata.js', () => ({
+  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
+  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
+    state.calls.push({ name: 'setMetadata', value: { key, value } });
+    if (state.throwSetMetadata) throw new Error('metadata locked');
+    state.metadata.set(key, value);
+  }),
+}));
+
+vi.mock('../src/db/queries-search.js', () => ({
+  getSymbolNameIndexByFile: vi.fn((_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map()),
+}));
+
+vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
+  shouldUseValueRefWorkers: vi.fn(() => state.useWorkers),
+  buildValueRefEdgesInWorkers: vi.fn(async (args: unknown) => {
+    state.calls.push({ name: 'buildValueRefEdgesInWorkers', value: args });
+    return state.workerResult;
+  }),
+}));
+
+vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
+  PER_FILE_YIELD_INTERVAL: 2,
+  yieldToEventLoop: vi.fn(async () => state.calls.push({ name: 'yieldToEventLoop' })),
+  refreshEdgesHook: vi.fn(async (args: {
+    ctx: IndexHookContext;
+    options: unknown;
+    hookName: string;
+    buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
+  }) => {
+    const edges = await args.buildEdges(args.ctx, [
+      { path: 'src/a.ts', language: 'typescript' },
+      { path: 'src/b.js', language: 'javascript' },
+      { path: 'src/ignored.py', language: 'python' },
+      { path: 'src/missing.ts', language: 'typescript' },
+    ]);
+    state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
+  }),
+}));
+
+vi.mock('../src/errors.js', () => ({
+  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
+  logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
+}));
+
+const { HOOK, VALUE_REF_EDGES_ALGO_VERSION } = await import('../src/index-hooks/value-ref-edges.js');
+
+function tempProject(): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-value-ref-hook-'));
+  fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+  return root;
+}
+
+function ctx(projectRoot: string): IndexHookContext {
+  return { projectRoot, queries: {}, config: {} } as IndexHookContext;
+}
+
+beforeEach(() => {
+  state.refreshCalls = [];
+  state.metadata.clear();
+  state.calls = [];
+  state.useWorkers = false;
+  state.workerResult = { edges: [], isPartial: false };
+  state.nameIndexes.clear();
+  state.throwSetMetadata = false;
+  vi.clearAllMocks();
+});
+
+describe('value-ref-edges hook orchestration', () => {
+  it('mines in-process value-reference edges and stamps the algorithm version after a clean run', async () => {
+    const root = tempProject();
+    try {
+      fs.writeFileSync(path.join(root, 'src', 'a.ts'), 'const cfg = { onRun: runTask }; refine(checkTask);');
+      fs.writeFileSync(path.join(root, 'src', 'b.js'), 'apply(otherTask);');
+      state.nameIndexes.set(
+        'src/a.ts',
+        new Map([
+          ['runTask', 'node:runTask'],
+          ['checkTask', 'node:checkTask'],
+        ]),
+      );
+      state.nameIndexes.set('src/b.js', new Map([['otherTask', 'node:otherTask']]));
+
+      await HOOK.afterIndexAll(ctx(root));
+
+      expect(VALUE_REF_EDGES_ALGO_VERSION).toBe('value-ref-algo-test');
+      expect(state.refreshCalls).toHaveLength(1);
+      expect(state.refreshCalls[0]!.hookName).toBe('value-ref-edges');
+      expect(state.refreshCalls[0]!.options).toEqual({ scope: 'all' });
+      expect(state.refreshCalls[0]!.edges).toEqual([
+        { source: 'file:src/a.ts', target: 'node:checkTask', kind: 'references' },
+        { source: 'file:src/a.ts', target: 'node:runTask', kind: 'references' },
+        { source: 'file:src/b.js', target: 'node:otherTask', kind: 'references' },
+      ]);
+      expect(state.metadata.get('last_mined_value_ref_edges_algo_version')).toBe('value-ref-algo-test');
+      expect(state.calls.map((call) => call.name)).toContain('yieldToEventLoop');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('uses worker results for large batches and leaves metadata stale when the result is partial', async () => {
+    const root = tempProject();
+    try {
+      state.useWorkers = true;
+      state.workerResult = {
+        edges: [{ source: 'file:src/a.ts', target: 'node:a', kind: 'references' }],
+        isPartial: true,
+      };
+
+      await HOOK.afterIndexAll(ctx(root));
+
+      expect(state.calls.find((call) => call.name === 'buildValueRefEdgesInWorkers')?.value).toMatchObject({
+        dbPath: `${root}/.cartograph/cartograph.db`,
+        projectRoot: root,
+      });
+      expect(state.refreshCalls[0]!.edges).toEqual([{ source: 'file:src/a.ts', target: 'node:a', kind: 'references' }]);
+      expect(state.metadata.get('last_mined_value_ref_edges_algo_version')).toBeUndefined();
+      expect(state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('partial result'))).toBe(
+        true,
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('self-heals stale metadata before changed-file handling and skips no-op syncs when fresh', async () => {
+    const root = tempProject();
+    try {
+      fs.writeFileSync(path.join(root, 'src', 'a.ts'), 'apply(runTask);');
+      state.nameIndexes.set('src/a.ts', new Map([['runTask', 'node:runTask']]));
+
+      state.metadata.set('last_mined_value_ref_edges_algo_version', 'old');
+      await HOOK.afterSync(ctx(root), { changedFilePaths: ['src/a.ts'], filesRemoved: 0 } as never);
+      expect(state.refreshCalls[0]!.options).toEqual({ scope: 'all' });
+
+      state.refreshCalls = [];
+      state.metadata.set('last_mined_value_ref_edges_algo_version', 'value-ref-algo-test');
+      await HOOK.afterSync(ctx(root), { changedFilePaths: [], filesRemoved: 0 } as never);
+      expect(state.refreshCalls).toEqual([]);
+
+      await HOOK.afterSync(ctx(root), { changedFilePaths: ['src/a.ts'], filesRemoved: 0 } as never);
+      expect(state.refreshCalls[0]!.options).toEqual({ scope: 'files', files: ['src/a.ts'] });
+
+      await HOOK.afterSync(ctx(root), { changedFilePaths: undefined, filesRemoved: 1 } as never);
+      expect(state.refreshCalls.at(-1)!.options).toEqual({ scope: 'files', files: [] });
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('logs metadata stamp failures without failing the hook', async () => {
+    const root = tempProject();
+    try {
+      fs.writeFileSync(path.join(root, 'src', 'a.ts'), 'apply(runTask);');
+      state.nameIndexes.set('src/a.ts', new Map([['runTask', 'node:runTask']]));
+      state.throwSetMetadata = true;
+
+      await HOOK.afterIndexAll(ctx(root));
+
+      expect(state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('metadata locked'))).toBe(
+        true,
+      );
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

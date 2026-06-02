@@ -901,6 +901,32 @@ describe('formatRerankTag (F#23 — reranker observability)', () => {
   });
 });
 
+describe('isDistributionPath — source vs build artifact boundaries', () => {
+  it('treats root bin and built assets as distribution paths', () => {
+    expect(isDistributionPath('bin/cartograph.js')).toBe(true);
+    expect(isDistributionPath('packages/api/dist/index.js')).toBe(true);
+    expect(isDistributionPath('public/app.bundle.js')).toBe(true);
+    expect(isDistributionPath('publish.min.js')).toBe(true);
+  });
+
+  it('does not misclassify source-layout bin directories', () => {
+    expect(isDistributionPath('src/bin/cartograph.ts')).toBe(false);
+    expect(isDistributionPath('packages/cli/src/bin/run.ts')).toBe(false);
+  });
+});
+
+describe('formatCitationCounter — count wording', () => {
+  it('uses the no-citation label for all-zero counts', () => {
+    expect(formatCitationCounter(0, 0, 0)).toBe('no symbol citations');
+  });
+
+  it('uses singular citation wording for one total citation', () => {
+    expect(formatCitationCounter(1, 0, 0)).toBe('1 confirmed, 0 uncertain, 0 unverified citation');
+    expect(formatCitationCounter(0, 1, 0)).toBe('0 confirmed, 1 uncertain, 0 unverified citation');
+    expect(formatCitationCounter(0, 0, 1)).toBe('0 confirmed, 0 uncertain, 1 unverified citation');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // F#23: buildAskOutput — reranker failure warning prepended above citations
 // ---------------------------------------------------------------------------
@@ -971,5 +997,23 @@ describe('buildAskOutput — reranker warning (F#23)', () => {
     const output = buildAskOutput(result, [], 'some-model');
     const footer = output.split('\n').find((l) => l.startsWith('_Retrieved'));
     expect(footer).toContain('reranker not configured');
+  });
+
+  it('includes skipped reranker reasons in the retrieval footer', () => {
+    const noHits = buildAskOutput(makeAskResult({ rerankOutcome: { kind: 'skipped-no-hits' } }), [], 'some-model');
+    expect(noHits).toContain('rerank skipped (no hits)');
+
+    const emptyCandidates = buildAskOutput(
+      makeAskResult({ rerankOutcome: { kind: 'skipped-no-text' } }),
+      [],
+      'some-model',
+    );
+    expect(emptyCandidates).toContain('rerank skipped (empty candidates)');
+  });
+
+  it('warns when a sub-3B ask model produces a near-empty answer', () => {
+    const output = buildAskOutput(makeAskResult({ answer: 'symbol only' }), [], '/models/qwen-3b.gguf');
+    expect(output).toContain('is small');
+    expect(output).toContain('qwen-3b.gguf');
   });
 });

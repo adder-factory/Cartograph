@@ -8,6 +8,7 @@ import {
   assignFloatArg,
   assignIntArg,
   createVerboseProgress,
+  error,
   formatDuration,
   formatNumber,
   info,
@@ -133,6 +134,17 @@ describe('CLI core contracts', () => {
     }
   });
 
+  it('returns the absolute input path when no initialized project exists above it', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-unresolved-'));
+    const child = path.join(projectRoot, 'src', 'feature');
+    fs.mkdirSync(child, { recursive: true });
+    try {
+      expect(resolveProjectPath(child)).toBe(path.resolve(child));
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('returns a styled uninitialized result without opening Cartograph for MCP capture', async () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-uninit-'));
     try {
@@ -162,6 +174,29 @@ describe('CLI core contracts', () => {
     process.exitCode = 0;
   });
 
+  it('rejects integer CLI options that are empty no-ops, fractional, too small, or too large', () => {
+    const args: Record<string, unknown> = {};
+    expect(assignIntArg({ args, key: 'limit', raw: '', optionName: '--limit' })).toBe(true);
+    expect(args).toEqual({});
+
+    const fractional = captureConsoleError(() => {
+      expect(assignIntArg({ args, key: 'limit', raw: '1.5', optionName: '--limit' })).toBe(false);
+    });
+    expect(fractional).toContain('is not an integer');
+    process.exitCode = 0;
+
+    const tooSmall = captureConsoleError(() => {
+      expect(assignIntArg({ args, key: 'limit', raw: '0', optionName: '--limit', opts: { min: 1 } })).toBe(false);
+    });
+    expect(tooSmall).toContain('must be >= 1');
+    process.exitCode = 0;
+
+    const tooLarge = captureConsoleError(() => {
+      expect(assignIntArg({ args, key: 'limit', raw: '11', optionName: '--limit', opts: { max: 10 } })).toBe(false);
+    });
+    expect(tooLarge).toContain('must be <= 10');
+  });
+
   it('validates float CLI options and rejects out-of-range values', () => {
     const args: Record<string, unknown> = {};
     expect(
@@ -177,6 +212,28 @@ describe('CLI core contracts', () => {
     expect(stderr).toContain('must be <= 1');
     expect(process.exitCode).toBe(1);
     process.exitCode = 0;
+  });
+
+  it('rejects invalid and too-small float CLI options', () => {
+    const args: Record<string, unknown> = {};
+    const invalid = captureConsoleError(() => {
+      expect(assignFloatArg({ args, key: 'score', raw: '0.5x', optionName: '--score' })).toBe(false);
+    });
+    expect(invalid).toContain('is not a number');
+    process.exitCode = 0;
+
+    const tooSmall = captureConsoleError(() => {
+      expect(assignFloatArg({ args, key: 'score', raw: '-0.1', optionName: '--score', opts: { min: 0 } })).toBe(
+        false,
+      );
+    });
+    expect(tooSmall).toContain('must be >= 0');
+  });
+
+  it('prints styled error messages to stderr', () => {
+    const stderr = captureConsoleError(() => error('failed'));
+    expect(stderr).toContain('✗');
+    expect(stderr).toContain('failed');
   });
 
   it('prints verbose progress only on phase changes, useful percentage steps, and scan cadence', () => {
@@ -220,6 +277,16 @@ describe('CLI core contracts', () => {
     }
   });
 
+  it('skips writing error logs when the project metadata directory is absent', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-no-log-'));
+    try {
+      writeErrorLog(projectRoot, [{ severity: 'info', message: 'ignored' }]);
+      expect(fs.existsSync(path.join(projectRoot, '.cartograph', 'errors.log'))).toBe(false);
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('prints index result breakdowns and clears stale logs on clean runs', () => {
     const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-index-'));
     fs.mkdirSync(path.join(projectRoot, '.cartograph'), { recursive: true });
@@ -256,6 +323,64 @@ describe('CLI core contracts', () => {
     }
   });
 
+  it('prints lock failures, empty indexes, all-error indexes, and size-skip logs', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-index-branches-'));
+    fs.mkdirSync(path.join(projectRoot, '.cartograph'), { recursive: true });
+    try {
+      const lock = fakeClack();
+      printIndexResult(
+        lock as unknown as typeof import('@clack/prompts'),
+        indexResult({
+          success: false,
+          errors: [{ severity: 'error', message: 'database is locked', code: 'store_error' }],
+        }),
+        projectRoot,
+      );
+      expect(lock.calls).toContainEqual(['error', 'database is locked']);
+
+      const empty = fakeClack();
+      printIndexResult(empty as unknown as typeof import('@clack/prompts'), indexResult({ success: true }), projectRoot);
+      expect(empty.calls).toContainEqual(['warn', 'No files found to index']);
+
+      const allErrored = fakeClack();
+      printIndexResult(
+        allErrored as unknown as typeof import('@clack/prompts'),
+        indexResult({
+          success: false,
+          filesErrored: 2,
+          errors: [
+            { severity: 'error', filePath: 'src/a.ts', message: 'parse', code: 'parse_error' },
+            { severity: 'error', filePath: 'src/b.ts', message: 'store', code: 'store_error' },
+          ],
+        }),
+        projectRoot,
+      );
+      expect(allErrored.calls).toContainEqual(['error', 'Indexing failed — all 2 files had errors']);
+      expect(allErrored.calls.some(([kind, message]) => kind === 'note' && message.includes('DB contention'))).toBe(
+        true,
+      );
+
+      const sizeSkipped = fakeClack();
+      printIndexResult(
+        sizeSkipped as unknown as typeof import('@clack/prompts'),
+        indexResult({
+          success: true,
+          filesSkipped: 1,
+          errors: [{ severity: 'warning', filePath: 'large.js', message: 'too large', code: 'size_exceeded' }],
+        }),
+        projectRoot,
+      );
+      expect(sizeSkipped.calls.some(([kind, message]) => kind === 'warn' && message.includes('maxFileSize'))).toBe(
+        true,
+      );
+      expect(fs.readFileSync(path.join(projectRoot, '.cartograph', 'errors.log'), 'utf-8')).toContain(
+        'large.js: too large',
+      );
+    } finally {
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
+  });
+
   it('rewrites family --action aliases into canonical subcommand argv shape', () => {
     const originalArgv = process.argv;
     try {
@@ -266,6 +391,10 @@ describe('CLI core contracts', () => {
       process.argv = ['bun', 'cartograph', 'review', '--mode=risk', '--json'];
       installFamilyActionAlias(new Command('review'), 'review', 'mode');
       expect(process.argv).toEqual(['bun', 'cartograph', 'review', 'risk', '--json']);
+
+      process.argv = ['bun', 'cartograph', 'review', 'context', '--json'];
+      installFamilyActionAlias(new Command('review'), 'review', 'mode');
+      expect(process.argv).toEqual(['bun', 'cartograph', 'review', 'context', '--json']);
     } finally {
       process.argv = originalArgv;
     }

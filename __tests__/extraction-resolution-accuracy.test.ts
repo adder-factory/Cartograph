@@ -17,8 +17,58 @@ import { aspnetResolver } from '../src/resolution/frameworks/csharp.js';
 import { rustResolver } from '../src/resolution/frameworks/rust.js';
 import { laravelResolver } from '../src/resolution/frameworks/laravel.js';
 import { goResolver } from '../src/resolution/frameworks/go.js';
+import { reactResolver } from '../src/resolution/frameworks/react.js';
+import type { Node } from '../src/types.js';
+import type { ResolutionContext, UnresolvedRef } from '../src/resolution/types.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
+
+function frameworkNode(overrides: Partial<Node> & Pick<Node, 'id' | 'kind' | 'name' | 'filePath'>): Node {
+  return {
+    qualifiedName: `${overrides.filePath}::${overrides.name}`,
+    language: 'python',
+    startLine: 1,
+    endLine: 1,
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: Date.now(),
+    ...overrides,
+  };
+}
+
+function frameworkContext(args: {
+  nodes?: Node[];
+  files?: Record<string, string>;
+  existing?: Set<string>;
+}): ResolutionContext {
+  const nodes = args.nodes ?? [];
+  const files = args.files ?? {};
+  const existing = args.existing ?? new Set<string>();
+  return {
+    getNodesInFile: (filePath) => nodes.filter((n) => n.filePath === filePath),
+    getNodesByName: (name) => nodes.filter((n) => n.name === name),
+    getNodesByQualifiedName: () => [],
+    getNodesByKind: (kind) => nodes.filter((n) => n.kind === kind),
+    getNodesByLowerName: (name) => nodes.filter((n) => n.name.toLowerCase() === name),
+    getImportMappings: () => [],
+    fileExists: (filePath) => existing.has(filePath),
+    readFile: (filePath) => files[filePath] ?? null,
+    getProjectRoot: () => '/repo',
+    getAllFiles: () => [...new Set([...Object.keys(files), ...nodes.map((n) => n.filePath), ...existing])],
+  };
+}
+
+function frameworkRef(name: string, language: UnresolvedRef['language'] = 'python'): UnresolvedRef {
+  return {
+    fromNodeId: 'caller',
+    referenceName: name,
+    referenceKind: 'references',
+    line: 1,
+    column: 0,
+    filePath: language === 'rust' ? 'src/main.rs' : 'app.py',
+    language,
+  };
+}
 
 describe('UTF-8 BOM normalization (bug #5)', () => {
   it('stripBom removes leading U+FEFF', () => {
@@ -209,6 +259,19 @@ describe('Framework regex no longer matches docstrings/comments (bug #4)', () =>
       expect(names.some((n) => n.includes('/real'))).toBe(true);
       expect(names.some((n) => n.includes('/docfake'))).toBe(false);
     });
+
+    it('extracts actix/rocket routes without duplicating shared #[get] attributes and extracts axum routes', () => {
+      const content = [
+        '#[get("/users")]',
+        'async fn users() {}',
+        '#[options("/health")]',
+        'async fn health() {}',
+        'Router::new().route("/items", post(create_item))',
+      ].join('\n');
+      const nodes = rustResolver.extractNodes!('src/main.rs', content);
+      expect(nodes.map((n) => n.name).sort(byString)).toEqual(['GET /users', 'OPTIONS /health', 'POST /items']);
+      expect(nodes.filter((n) => n.name === 'GET /users')).toHaveLength(1);
+    });
   });
 
   describe('ASP.NET (C#)', () => {
@@ -242,6 +305,206 @@ describe('Framework regex no longer matches docstrings/comments (bug #4)', () =>
       expect(names.some((n) => n.includes('/real'))).toBe(true);
       expect(names.some((n) => n.includes('/linefake'))).toBe(false);
       expect(names.some((n) => n.includes('/blockfake'))).toBe(false);
+    });
+  });
+});
+
+describe('Framework resolver detection and convention-based resolution', () => {
+  it('detects Django, Flask, FastAPI, and Rust project signatures', () => {
+    expect(djangoResolver.detect(frameworkContext({ files: { 'requirements.txt': 'django==5.0' } }))).toBe(true);
+    expect(djangoResolver.detect(frameworkContext({ existing: new Set(['manage.py']) }))).toBe(true);
+    expect(flaskResolver.detect(frameworkContext({ files: { 'app.py': 'app = Flask(__name__)' } }))).toBe(true);
+    expect(fastapiResolver.detect(frameworkContext({ files: { 'main.py': 'app = FastAPI()' } }))).toBe(true);
+    expect(rustResolver.detect(frameworkContext({ existing: new Set(['Cargo.toml']) }))).toBe(true);
+  });
+
+  it('resolves Django models, views, and forms from conventional directories', () => {
+    const userModel = frameworkNode({
+      id: 'class:app/models.py:User',
+      kind: 'class',
+      name: 'User',
+      filePath: 'app/models.py',
+    });
+    const userView = frameworkNode({
+      id: 'class:app/views.py:UserViewSet',
+      kind: 'class',
+      name: 'UserViewSet',
+      filePath: 'app/views.py',
+    });
+    const userForm = frameworkNode({
+      id: 'class:app/forms.py:UserForm',
+      kind: 'class',
+      name: 'UserForm',
+      filePath: 'app/forms.py',
+    });
+    const ctx = frameworkContext({ nodes: [userModel, userView, userForm] });
+
+    expect(djangoResolver.resolve(frameworkRef('User'), ctx)).toMatchObject({ targetNodeId: userModel.id });
+    expect(djangoResolver.resolve(frameworkRef('UserViewSet'), ctx)).toMatchObject({ targetNodeId: userView.id });
+    expect(djangoResolver.resolve(frameworkRef('UserForm'), ctx)).toMatchObject({ targetNodeId: userForm.id });
+    expect(djangoResolver.resolve(frameworkRef('unknown_name'), ctx)).toBeNull();
+  });
+
+  it('resolves Flask blueprints and FastAPI routers/dependencies by framework naming conventions', () => {
+    const blueprint = frameworkNode({
+      id: 'var:api/users.py:users_bp',
+      kind: 'variable',
+      name: 'users_bp',
+      filePath: 'api/users.py',
+    });
+    const router = frameworkNode({
+      id: 'var:api/routes/users.py:users_router',
+      kind: 'variable',
+      name: 'users_router',
+      filePath: 'api/routes/users.py',
+    });
+    const dependency = frameworkNode({
+      id: 'func:api/deps/auth.py:get_current_user',
+      kind: 'function',
+      name: 'get_current_user',
+      filePath: 'api/dependencies/auth.py',
+    });
+    const ctx = frameworkContext({ nodes: [blueprint, router, dependency] });
+
+    expect(flaskResolver.resolve(frameworkRef('users_bp'), ctx)).toMatchObject({ targetNodeId: blueprint.id });
+    expect(fastapiResolver.resolve(frameworkRef('users_router'), ctx)).toMatchObject({ targetNodeId: router.id });
+    expect(fastapiResolver.resolve(frameworkRef('get_current_user'), ctx)).toMatchObject({
+      targetNodeId: dependency.id,
+      confidence: 0.75,
+    });
+  });
+
+  it('resolves Rust handlers, services, structs, and module references', () => {
+    const handler = frameworkNode({
+      id: 'func:src/handlers/users.rs:list_handler',
+      kind: 'function',
+      name: 'list_handler',
+      filePath: 'src/handlers/users.rs',
+      language: 'rust',
+    });
+    const service = frameworkNode({
+      id: 'struct:src/services/user.rs:UserService',
+      kind: 'struct',
+      name: 'UserService',
+      filePath: 'src/services/user.rs',
+      language: 'rust',
+    });
+    const model = frameworkNode({
+      id: 'struct:src/models/user.rs:User',
+      kind: 'struct',
+      name: 'User',
+      filePath: 'src/models/user.rs',
+      language: 'rust',
+    });
+    const module = frameworkNode({
+      id: 'module:src/auth/mod.rs:auth',
+      kind: 'module',
+      name: 'auth',
+      filePath: 'src/auth/mod.rs',
+      language: 'rust',
+    });
+    const ctx = frameworkContext({
+      nodes: [handler, service, model, module],
+      existing: new Set(['src/auth/mod.rs']),
+    });
+
+    expect(rustResolver.resolve(frameworkRef('list_handler', 'rust'), ctx)).toMatchObject({
+      targetNodeId: handler.id,
+      confidence: 0.8,
+    });
+    expect(rustResolver.resolve(frameworkRef('UserService', 'rust'), ctx)).toMatchObject({ targetNodeId: service.id });
+    expect(rustResolver.resolve(frameworkRef('User', 'rust'), ctx)).toMatchObject({
+      targetNodeId: model.id,
+      confidence: 0.7,
+    });
+    expect(rustResolver.resolve(frameworkRef('auth', 'rust'), ctx)).toMatchObject({
+      targetNodeId: module.id,
+      confidence: 0.6,
+    });
+    expect(rustResolver.resolve(frameworkRef('missing_module', 'rust'), ctx)).toBeNull();
+  });
+
+  it('detects React from package metadata or JSX/TSX files and ignores invalid package JSON', () => {
+    expect(
+      reactResolver.detect(
+        frameworkContext({ files: { 'package.json': JSON.stringify({ dependencies: { react: '^19.0.0' } }) } }),
+      ),
+    ).toBe(true);
+    expect(reactResolver.detect(frameworkContext({ files: { 'package.json': '{not-json' } }))).toBe(false);
+    expect(reactResolver.detect(frameworkContext({ files: { 'src/App.tsx': '' } }))).toBe(true);
+  });
+
+  it('extracts Next.js pages/app routes and preserves route language', () => {
+    const pageRoutes = [
+      ...reactResolver.extractNodes!('src/pages/index.tsx', 'export default function Home() { return null; }'),
+      ...reactResolver.extractNodes!('src/pages/blog/[slug].jsx', 'export default function Blog() { return null; }'),
+      ...reactResolver.extractNodes!('src/app/users/[id]/page.ts', 'export default function Page() { return null; }'),
+      ...reactResolver.extractNodes!('src/app/users/layout.tsx', 'export default function Layout() { return null; }'),
+    ];
+
+    expect(pageRoutes.map((n) => `${n.name}:${n.language}`).sort(byString)).toEqual([
+      '/:tsx',
+      '/blog/:slug:javascript',
+      '/users/:id:typescript',
+    ]);
+  });
+
+  it('resolves React components, hooks, and contexts using React conventions', () => {
+    const localButton = frameworkNode({
+      id: 'component:src/screens/Button.tsx:Button',
+      kind: 'component',
+      name: 'Button',
+      filePath: 'src/screens/Button.tsx',
+      language: 'tsx',
+    });
+    const libraryButton = frameworkNode({
+      id: 'component:src/components/Button.tsx:Button',
+      kind: 'component',
+      name: 'Button',
+      filePath: 'src/components/Button.tsx',
+      language: 'tsx',
+    });
+    const hook = frameworkNode({
+      id: 'function:src/hooks/useAuth.ts:useAuth',
+      kind: 'function',
+      name: 'useAuth',
+      filePath: 'src/hooks/useAuth.ts',
+      language: 'typescript',
+    });
+    const context = frameworkNode({
+      id: 'variable:src/providers/AuthContext.tsx:AuthContext',
+      kind: 'variable',
+      name: 'AuthContext',
+      filePath: 'src/providers/AuthContext.tsx',
+      language: 'tsx',
+    });
+    const baseContext = frameworkNode({
+      id: 'variable:src/providers/Theme.tsx:Theme',
+      kind: 'variable',
+      name: 'Theme',
+      filePath: 'src/providers/Theme.tsx',
+      language: 'tsx',
+    });
+    const ctx = frameworkContext({ nodes: [libraryButton, localButton, hook, context, baseContext] });
+
+    const componentRef = frameworkRef('Button', 'tsx');
+    componentRef.filePath = 'src/screens/App.tsx';
+    expect(reactResolver.resolve(componentRef, ctx)).toMatchObject({
+      targetNodeId: localButton.id,
+      confidence: 0.8,
+    });
+    expect(reactResolver.resolve(frameworkRef('String', 'tsx'), ctx)).toBeNull();
+    expect(reactResolver.resolve(frameworkRef('useAuth', 'tsx'), ctx)).toMatchObject({
+      targetNodeId: hook.id,
+      confidence: 0.85,
+    });
+    expect(reactResolver.resolve(frameworkRef('AuthContext', 'tsx'), ctx)).toMatchObject({
+      targetNodeId: context.id,
+      confidence: 0.8,
+    });
+    expect(reactResolver.resolve(frameworkRef('ThemeProvider', 'tsx'), ctx)).toMatchObject({
+      targetNodeId: baseContext.id,
+      confidence: 0.8,
     });
   });
 });

@@ -1,21 +1,115 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { ADMIN_TOOL, __adminToolInternals as admin } from '../src/mcp/tools/admin.js';
 import { buildNoLlmFooter } from '../src/mcp/tools/admin.js';
 
+vi.mock('../src/embeddings/similar-edges.js', () => ({
+  buildSimilarToEdges: vi.fn(async () => ({ written: 7, processed: 3, reason: 'threshold too high for some nodes' })),
+}));
+
+vi.mock('../src/db/queries-summaries.js', () => ({
+  MS_PER_DAY: 24 * 60 * 60 * 1000,
+  PRUNE_STORE_DEFAULT_DAYS: 30,
+  pruneOrphanStoreRows: vi.fn(() => ({
+    summariesPruned: 2,
+    embeddingsPruned: 1,
+    cutoffMs: Date.UTC(2026, 0, 1),
+  })),
+}));
+
+vi.mock('../src/db/index.js', () => ({
+  dbReclaimAfterBulkDelete: vi.fn(),
+}));
+
+vi.mock('../src/scip/index.js', () => ({
+  writeScipExport: vi.fn(() => ({
+    outPath: '/repo/index.scip',
+    stats: { documents: 2, symbols: 3, occurrences: 4, bytes: 99, disambiguated: 1 },
+  })),
+  writeScipImport: vi.fn(() => ({
+    stats: { documents: 2, files: 1, nodes: 3, edges: 4, skippedDocuments: 1, unresolvedEdges: 2 },
+  })),
+}));
+
+vi.mock('../src/installer/install-models.js', () => ({
+  installRecommendedModels: vi.fn(async () => ({
+    downloaded: [{ filename: 'embed.gguf', sizeMb: 100, description: 'embedding model' }],
+    skipped: [{ filename: 'chat.gguf', sizeMb: 200, description: 'chat model' }],
+  })),
+}));
+
+vi.mock('../src/llm/recommended-models.js', () => ({
+  RECOMMENDED_MODELS: [{ filename: 'full.gguf' }],
+  MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
+}));
+
+vi.mock('../src/installer/recommended-config.js', () => ({
+  writeRecommendedLlmConfig: vi.fn(() => ({
+    configPath: '/repo/.cartograph/config.json',
+    backupPath: '/repo/.cartograph/config.json.bak',
+    diff: { addedOrUpdated: ['llm.embeddingLlm', 'llm.summarizeLlm'] },
+  })),
+}));
+
+vi.mock('../src/installer/doctor.js', () => ({
+  runDoctor: vi.fn(async () => ({ overallStatus: 'pass', checks: [] })),
+  formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
+}));
+
+vi.mock('../src/installer/llm-setup-plan.js', () => ({
+  planLlmSetup: vi.fn(async () => ({
+    detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
+    cloudChatAvailable: { claudeBin: '/bin/claude', anthropicApiKey: true },
+    recommendedPresetId: 'install-ollama',
+    presets: [
+      {
+        id: 'install-ollama',
+        label: 'Ollama',
+        description: 'Use Ollama',
+        summary: 'Local dynamic model loading',
+        nextSteps: ['ollama pull qwen2.5-coder:3b'],
+      },
+    ],
+  })),
+  applyLlmSetupChoice: vi.fn(async () => ({
+    applied: true,
+    preset: 'install-ollama',
+    configPath: '/repo/.cartograph/config.json',
+    backupPath: '/repo/.cartograph/config.json.bak',
+    notes: ['configured Ollama'],
+    nextSteps: ['ollama serve'],
+  })),
+}));
+
+vi.mock('../src/installer/hardware-tuning.js', () => ({
+  describeHardware: vi.fn(() => '8-core test host'),
+  recommendedTuning: vi.fn(() => ({
+    embed: { llamaServerParallel: 2, cartographConcurrency: 2 },
+    chat: { llamaServerParallel: 1, cartographConcurrency: 1 },
+    ask: { llamaServerParallel: 1, cartographConcurrency: 1 },
+    reranker: { llamaServerParallel: 1, cartographConcurrency: 1 },
+  })),
+}));
+
+vi.mock('../src/db/migrations.js', () => ({
+  CURRENT_SCHEMA_VERSION: 999,
+}));
+
 function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
   return result.content[0]?.text ?? '';
 }
 
 function fakeCtx(cg: unknown, progress: string[] = []) {
+  const evicted: string[] = [];
   return {
     getCartograph: () => cg,
     reportProgress: (current: number, total?: number, message?: string) =>
       progress.push(`${current}/${total}:${message}`),
     closeProjectsMatching: () => {},
-    evictCachedProject: () => {},
+    evictCachedProject: (projectPath: string) => evicted.push(projectPath),
+    evicted,
     options: {},
     defaultCg: null,
     projectCache: new Map(),
@@ -274,5 +368,121 @@ describe('MCP admin formatter contracts', () => {
     expect(progress).toContain('1/3:summarising symbol 1/3');
     expect(progress).toContain('2/4:embedding symbol 2/4');
     expect(progress).toContain('3/3:classifying role 3/3');
+  });
+
+  it('dispatches similarity, prune-store, SCIP export/import, install-models, and doctor actions', async () => {
+    let sizeCall = 0;
+    const cg = {
+      projectRoot: '/repo',
+      queries: {},
+      db: {
+        getSize: () => (sizeCall++ === 0 ? 4096 : 2048),
+      },
+    };
+
+    const similarity = await ADMIN_TOOL.handle(fakeCtx(cg), {
+      action: 'build-similarity-edges',
+      k: 3,
+      minScore: 0.8,
+    } as any);
+    expect(textOf(similarity)).toContain('Built similarity edges');
+    expect(textOf(similarity)).toContain('Written: 7');
+
+    const prune = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'prune-store', maxAgeDays: 7 } as any);
+    expect(textOf(prune)).toContain('Pruned cold orphan store rows');
+    expect(textOf(prune)).toContain('summary_store rows pruned: 2');
+    expect(textOf(prune)).toContain('reclaimed');
+
+    const scipExport = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'scip-export' } as any);
+    expect(textOf(scipExport)).toContain('Exported SCIP index');
+    expect(textOf(scipExport)).toContain('Disambiguated: 1');
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-scip-'));
+    const inPath = path.join(dir, 'index.scip');
+    fs.writeFileSync(inPath, Buffer.from([1, 2, 3]));
+    try {
+      const scipImport = await ADMIN_TOOL.handle(fakeCtx({ ...cg, projectRoot: dir }), {
+        action: 'scip-import',
+        in: inPath,
+      } as any);
+      expect(textOf(scipImport)).toContain('Imported SCIP index');
+      expect(textOf(scipImport)).toContain('Skipped: 1');
+      expect(textOf(scipImport)).toContain('Dropped: 2');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+
+    const install = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'install-models', minimal: true } as any);
+    expect(textOf(install)).toContain('Installed 1 model');
+    expect(textOf(install)).toContain('embed.gguf');
+    expect(textOf(install)).toContain('Already present');
+
+    const installConfig = await ADMIN_TOOL.handle(fakeCtx(cg), {
+      action: 'install-models',
+      writeConfig: true,
+      projectPath: '/repo',
+      dir: '/models',
+    } as any);
+    expect(textOf(installConfig)).toContain('Updated `/repo/.cartograph/config.json`');
+    expect(textOf(installConfig)).toContain('Added/updated');
+
+    const doctor = await ADMIN_TOOL.handle(fakeCtx(cg), {
+      action: 'doctor',
+      projectPath: '/repo',
+      fix: true,
+      skipProjectChecks: true,
+    } as any);
+    expect(textOf(doctor)).toContain('Doctor');
+    expect(textOf(doctor)).toContain('All checks passed');
+  });
+
+  it('dispatches LLM plan/apply/tune actions and tuning write mode', async () => {
+    const cg = { queries: {} };
+    const plan = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-plan' } as any);
+    expect(textOf(plan)).toContain('LLM setup plan');
+    expect(textOf(plan)).toContain('Ollama');
+    expect(textOf(plan)).toContain('ANTHROPIC_API_KEY');
+
+    const applyCtx = fakeCtx(cg);
+    const applied = await ADMIN_TOOL.handle(applyCtx, {
+      action: 'llm-apply',
+      projectPath: '/repo',
+      preset: 'install-ollama',
+    } as any);
+    expect(textOf(applied)).toContain('Applied preset `install-ollama`');
+    expect(textOf(applied)).toContain('configured Ollama');
+    expect(applyCtx.evicted).toEqual(['/repo']);
+
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-tune-'));
+    const cartoDir = path.join(dir, '.cartograph');
+    fs.mkdirSync(cartoDir);
+    fs.writeFileSync(
+      path.join(cartoDir, 'config.json'),
+      JSON.stringify({
+        llm: {
+          embeddingLlm: { model: 'embed', concurrency: 2 },
+          summarizeLlm: { model: 'chat' },
+        },
+      }),
+    );
+    try {
+      const report = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-tune', projectPath: dir } as any);
+      expect(textOf(report)).toContain('LLM tuning');
+      expect(textOf(report)).toContain('8-core test host');
+      expect(textOf(report)).toContain('| embed');
+
+      const write = await ADMIN_TOOL.handle(fakeCtx(cg), {
+        action: 'llm-tune',
+        projectPath: dir,
+        tier: 'chat',
+        concurrency: 4,
+      } as any);
+      expect(textOf(write)).toContain('Applied tuning override');
+      expect(textOf(write)).toContain('summarizeLlm');
+      const updated = JSON.parse(fs.readFileSync(path.join(cartoDir, 'config.json'), 'utf-8'));
+      expect(updated.llm.summarizeLlm.concurrency).toBe(4);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -640,9 +640,7 @@ function parsePorcelainOutput(output: string, pathPrefix: string, ctx: Porcelain
   for (const line of output.split('\n')) {
     if (line.length < PORCELAIN_MIN_LINE_LENGTH) continue;
     const code = line.substring(0, 2);
-    const raw = pathPrefix
-      ? unquoteGitPath(line.substring(PORCELAIN_PATH_OFFSET))
-      : line.substring(PORCELAIN_PATH_OFFSET);
+    const raw = unquoteGitPath(line.substring(PORCELAIN_PATH_OFFSET));
     const filePath = normalizePath(pathPrefix + raw);
     applyPorcelainStatusEntry(code, filePath, ctx);
   }

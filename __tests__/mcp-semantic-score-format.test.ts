@@ -23,8 +23,13 @@ import type { Node, SearchResult } from '../src/types.js';
 // and import the importer via dynamic `await import(...)` below.
 const store: { results: SearchResult[] } = { results: [] };
 mock.module('../src/cartograph-llm-service.js', () => ({
+  CartographLlmService: class CartographLlmService {},
+  llmFindDeadCode: async () => ({ candidates: [], totalCandidates: 0 }),
   llmFindImplementations: async () => store.results,
+  llmLocalChat: async () => ({ text: '' }),
   llmFindSimilar: async () => [],
+  llmCheckNamingDrift: async () => ({ verdict: 'ok', confidence: 0, reasoning: '' }),
+  llmSummarizeChange: async () => ({ intent: '', confidence: 0, evidence: [] }),
 }));
 
 // ── Import after mock registration ────────────────────────────────────────

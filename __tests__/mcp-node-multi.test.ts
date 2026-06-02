@@ -46,8 +46,14 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
     // callers/callees fan-out for the inline-expansion tests.
     fs.writeFileSync(
       path.join(dir, 'src', 'core.ts'),
-      ['export function alpha(): number { return 1; }', 'export function beta(): number { return 2; }'].join('\n') +
-        '\n',
+      [
+        'export function alpha(): number { return 1; }',
+        'export function beta(): number { return 2; }',
+        'export function longBody(): number {',
+        ...Array.from({ length: 45 }, (_, i) => `  const value${i} = ${i};`),
+        '  return value44;',
+        '}',
+      ].join('\n') + '\n',
     );
     fs.writeFileSync(
       path.join(dir, 'src', 'caller.ts'),
@@ -86,6 +92,34 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
     expect(text).not.toMatch(/^# \d+ symbol/m);
     // No horizontal rule (single card).
     expect(text).not.toMatch(/^---$/m);
+  });
+
+  it('code preview truncates long bodies and full detail renders the complete body', async () => {
+    const preview = await handler.execute('cartograph_node', { symbol: 'longBody', code: true });
+    const previewText = preview.content[0]?.text ?? '';
+    expect(previewText).toContain('## longBody');
+    expect(previewText).toContain('```typescript');
+    expect(previewText).toContain('const value25 = 25;');
+    expect(previewText).not.toContain('const value44 = 44;');
+    expect(previewText).toContain('Showing first 30 of');
+    expect(previewText).toContain('Pass `detail: "full"`');
+
+    const full = await handler.execute('cartograph_node', { symbol: 'longBody', code: true, detail: 'full' });
+    const fullText = full.content[0]?.text ?? '';
+    expect(fullText).toContain('const value44 = 44;');
+    expect(fullText).not.toContain('Showing first 30');
+  });
+
+  it('code output warns when the source file changed after indexing', async () => {
+    fs.appendFileSync(path.join(dir, 'src', 'core.ts'), '\nexport const changedAfterIndex = true;\n');
+
+    const result = await handler.execute('cartograph_node', { symbol: 'alpha', code: true });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('source from indexed snapshot');
+    expect(text).toContain('modified since last index');
+    expect(text).toContain('Run `cartograph admin sync`');
+    expect(text).toContain('return 1');
   });
 
   it('symbols: [alpha, beta] returns both cards under a count header', async () => {

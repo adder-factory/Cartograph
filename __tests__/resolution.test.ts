@@ -273,6 +273,247 @@ describe('Resolution Module', () => {
       expect(result?.targetNodeId).toBe('method:user.ts:User.save:15');
     });
 
+    describe('matchReference strategy coverage', () => {
+      const node = (overrides: Partial<Node> & Pick<Node, 'id' | 'kind' | 'name' | 'filePath'>): Node => ({
+        qualifiedName: `${overrides.filePath}::${overrides.name}`,
+        language: 'typescript',
+        startLine: 1,
+        endLine: 1,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: Date.now(),
+        ...overrides,
+      });
+
+      const ref = (overrides: Partial<Parameters<typeof matchReference>[0]> = {}): Parameters<typeof matchReference>[0] => ({
+        fromNodeId: 'func:src/app.ts:run:1',
+        referenceName: 'missing',
+        referenceKind: 'calls',
+        line: 10,
+        column: 2,
+        filePath: 'src/app.ts',
+        language: 'typescript',
+        ...overrides,
+      });
+
+      const contextWithNodes = (
+        nodes: Node[],
+        extra: Partial<ResolutionContext> = {},
+      ): ResolutionContext => ({
+        getNodesInFile: (filePath) => nodes.filter((n) => n.filePath === filePath),
+        getNodesByName: (name) => nodes.filter((n) => n.name === name),
+        getNodesByQualifiedName: (qualifiedName) => nodes.filter((n) => n.qualifiedName === qualifiedName),
+        getNodesByLowerName: (lowerName) => nodes.filter((n) => n.name.toLowerCase() === lowerName),
+        getNodesByKind: (kind) => nodes.filter((n) => n.kind === kind),
+        getImportMappings: () => [],
+        fileExists: () => true,
+        readFile: () => null,
+        getProjectRoot: () => '/test',
+        getAllFiles: () => [...new Set(nodes.map((n) => n.filePath))],
+        ...extra,
+      });
+
+      it('resolves path-like references to file nodes by exact path, suffix, then filename-only fallback', () => {
+        const exactFile = node({
+          id: 'file:snippets/drawer-menu.liquid',
+          kind: 'file',
+          name: 'drawer-menu.liquid',
+          qualifiedName: 'snippets/drawer-menu.liquid',
+          filePath: 'snippets/drawer-menu.liquid',
+          language: 'liquid',
+        });
+        const nestedFile = node({
+          id: 'file:src/snippets/card.liquid',
+          kind: 'file',
+          name: 'card.liquid',
+          qualifiedName: 'src/snippets/card.liquid',
+          filePath: 'src/snippets/card.liquid',
+          language: 'liquid',
+        });
+        const singleFilename = node({
+          id: 'file:theme/sections/hero.liquid',
+          kind: 'file',
+          name: 'hero.liquid',
+          qualifiedName: 'theme/sections/hero.liquid',
+          filePath: 'theme/sections/hero.liquid',
+          language: 'liquid',
+        });
+        const ctx = contextWithNodes([exactFile, nestedFile, singleFilename]);
+
+        expect(matchReference(ref({ referenceName: 'snippets/drawer-menu.liquid' }), ctx)).toMatchObject({
+          targetNodeId: exactFile.id,
+          confidence: 0.95,
+          resolvedBy: 'file-path',
+        });
+        expect(matchReference(ref({ referenceName: 'snippets/card.liquid' }), ctx)).toMatchObject({
+          targetNodeId: nestedFile.id,
+          confidence: 0.85,
+          resolvedBy: 'file-path',
+        });
+        expect(matchReference(ref({ referenceName: 'blocks/hero.liquid' }), ctx)).toMatchObject({
+          targetNodeId: singleFilename.id,
+          confidence: 0.7,
+          resolvedBy: 'file-path',
+        });
+      });
+
+      it('uses receiver-qualified method resolution before exact-name fallback', () => {
+        const serviceClass = node({
+          id: 'class:src/services/UserService.ts:UserService',
+          kind: 'class',
+          name: 'UserService',
+          qualifiedName: 'src/services/UserService.ts::UserService',
+          filePath: 'src/services/UserService.ts',
+          startLine: 1,
+          endLine: 20,
+        });
+        const saveMethod = node({
+          id: 'method:src/services/UserService.ts:UserService.save',
+          kind: 'method',
+          name: 'save',
+          qualifiedName: 'src/services/UserService.ts::UserService::save',
+          filePath: 'src/services/UserService.ts',
+          startLine: 5,
+          endLine: 8,
+        });
+        const unrelatedSave = node({
+          id: 'method:src/db/Repo.ts:Repo.save',
+          kind: 'method',
+          name: 'save',
+          qualifiedName: 'src/db/Repo.ts::Repo::save',
+          filePath: 'src/db/Repo.ts',
+        });
+        const result = matchReference(ref({ referenceName: 'UserService.save' }), contextWithNodes([serviceClass, saveMethod, unrelatedSave]));
+
+        expect(result).toMatchObject({
+          targetNodeId: saveMethod.id,
+          confidence: 0.85,
+          resolvedBy: 'qualified-name',
+        });
+      });
+
+      it('infers TypeScript field receiver types from annotations and new expressions', () => {
+        const cacheClass = node({
+          id: 'class:src/cache/TinyCache.ts:TinyCache',
+          kind: 'class',
+          name: 'TinyCache',
+          qualifiedName: 'src/cache/TinyCache.ts::TinyCache',
+          filePath: 'src/cache/TinyCache.ts',
+          startLine: 1,
+          endLine: 20,
+        });
+        const getMethod = node({
+          id: 'method:src/cache/TinyCache.ts:TinyCache.get',
+          kind: 'method',
+          name: 'get',
+          qualifiedName: 'src/cache/TinyCache.ts::TinyCache::get',
+          filePath: 'src/cache/TinyCache.ts',
+          startLine: 3,
+          endLine: 5,
+        });
+        const manager = node({
+          id: 'class:src/app.ts:Manager',
+          kind: 'class',
+          name: 'Manager',
+          qualifiedName: 'src/app.ts::Manager',
+          filePath: 'src/app.ts',
+          startLine: 1,
+          endLine: 20,
+        });
+        const annotatedField = node({
+          id: 'field:src/app.ts:Manager.cache',
+          kind: 'field',
+          name: 'cache',
+          qualifiedName: 'src/app.ts::Manager::cache',
+          filePath: 'src/app.ts',
+          startLine: 2,
+          endLine: 2,
+        });
+        const constructedField = node({
+          id: 'field:src/app.ts:Manager.store',
+          kind: 'field',
+          name: 'store',
+          qualifiedName: 'src/app.ts::Manager::store',
+          filePath: 'src/app.ts',
+          startLine: 3,
+          endLine: 3,
+        });
+        const source = ['class Manager {', '  private cache: TinyCache;', '  private store = new TinyCache();', '  run() {', '    cache.get();', '    store.get();', '  }', '}'].join('\n');
+        const ctx = contextWithNodes([cacheClass, getMethod, manager, annotatedField, constructedField], {
+          readFile: (filePath) => (filePath === 'src/app.ts' ? source : null),
+        });
+
+        expect(matchReference(ref({ referenceName: 'cache.get', line: 5 }), ctx)).toMatchObject({
+          targetNodeId: getMethod.id,
+          confidence: 0.8,
+          resolvedBy: 'instance-method',
+        });
+        expect(matchReference(ref({ referenceName: 'store.get', line: 6 }), ctx)).toMatchObject({
+          targetNodeId: getMethod.id,
+          confidence: 0.8,
+          resolvedBy: 'instance-method',
+        });
+      });
+
+      it('prefers the same-language fuzzy candidate and reports fuzzy confidence', () => {
+        const tsCandidate = node({
+          id: 'func:src/app.ts:CalculateTotal',
+          kind: 'function',
+          name: 'CalculateTotal',
+          qualifiedName: 'src/app.ts::CalculateTotal',
+          filePath: 'src/app.ts',
+          language: 'typescript',
+        });
+        const pyCandidate = node({
+          id: 'func:tools/calc.py:calculateTotal',
+          kind: 'function',
+          name: 'calculateTotal',
+          qualifiedName: 'tools/calc.py::calculateTotal',
+          filePath: 'tools/calc.py',
+          language: 'python',
+        });
+        const result = matchReference(
+          ref({ referenceName: 'calculatetotal' }),
+          contextWithNodes([pyCandidate, tsCandidate], {
+            getNodesByName: () => [],
+          }),
+        );
+
+        expect(result).toMatchObject({
+          targetNodeId: tsCandidate.id,
+          confidence: 0.5,
+          resolvedBy: 'fuzzy',
+        });
+      });
+
+      it('surfaces tieMargin on multi-candidate exact-name matches', () => {
+        const local = node({
+          id: 'func:src/feature/refresh.ts:refresh',
+          kind: 'function',
+          name: 'refresh',
+          qualifiedName: 'src/feature/refresh.ts::refresh',
+          filePath: 'src/feature/refresh.ts',
+          startLine: 12,
+        });
+        const neighbor = node({
+          id: 'func:tools/refresh.ts:refresh',
+          kind: 'function',
+          name: 'refresh',
+          qualifiedName: 'tools/refresh.ts::refresh',
+          filePath: 'tools/refresh.ts',
+          startLine: 1,
+        });
+        const result = matchReference(
+          ref({ referenceName: 'refresh', filePath: 'src/feature/app.ts', line: 11 }),
+          contextWithNodes([neighbor, local]),
+        );
+
+        expect(result?.targetNodeId).toBe(local.id);
+        expect(result?.resolvedBy).toBe('exact-match');
+        expect(result?.tieMargin).toBeGreaterThan(0);
+      });
+    });
+
     // -- F2: builtin prototype-method calls must not phantom-resolve --
     describe('F2 — builtin prototype-method denylist', () => {
       // A user symbol literally named `set` (mirrors the QueryBuilder LRU

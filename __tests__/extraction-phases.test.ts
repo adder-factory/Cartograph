@@ -6,10 +6,14 @@ import {
   eoAbortIndexResult,
   eoApplyExtractionEnvFromConfig,
   eoFinalIndexResult,
+  eoProcessOneFile,
   eoReadFileWithValidation,
+  eoRunIndexRetryPhase,
+  eoRunIndexRetryPhaseIfNeeded,
   eoRetryFreshHeap,
   eoRetryStripped,
   isMinifiedJsFamily,
+  renderSlowFilesSummary,
   type EoIndexCounters,
 } from '../src/extraction/extraction-phases.js';
 import type { ExtractionOrchestratorState } from '../src/extraction/index.js';
@@ -33,6 +37,17 @@ afterEach(() => {
 
 function state(rootDir: string, config: Record<string, unknown> = {}): ExtractionOrchestratorState {
   return { rootDir, config } as unknown as ExtractionOrchestratorState;
+}
+
+function counters(): EoIndexCounters {
+  return {
+    filesIndexed: 0,
+    filesSkipped: 0,
+    filesErrored: 0,
+    totalNodes: 0,
+    totalEdges: 0,
+    processed: 0,
+  };
 }
 
 describe('extraction phase helpers', () => {
@@ -121,6 +136,137 @@ describe('extraction phase helpers', () => {
     expect(isMinifiedJsFamily('javascript', formatted)).toBe(false);
     expect(isMinifiedJsFamily('python', minified)).toBe(false);
     expect(isMinifiedJsFamily('javascript', '')).toBe(false);
+  });
+
+  it('renders slow parse files slowest first and caps the summary rows', () => {
+    const log: string[] = [];
+    const slowFiles = Array.from({ length: 12 }, (_, idx) => ({
+      filePath: `src/file-${idx}.ts`,
+      elapsedMs: 100 + idx,
+      status: 'finished',
+    }));
+    slowFiles.push({ filePath: 'src/timed-out.ts', elapsedMs: null, status: 'timeout' });
+
+    renderSlowFilesSummary(slowFiles, (message) => log.push(message));
+
+    expect(log[0]).toContain('13 total');
+    expect(log[1]).toContain('src/file-11.ts');
+    expect(log.some((line) => line.includes('src/file-0.ts'))).toBe(false);
+    expect(log.at(-1)).toContain('.cartograph/config.json');
+  });
+
+  it('skips index retry when failures are not worker memory failures or workers are unavailable', async () => {
+    const errors: ExtractionError[] = [
+      { message: 'ordinary parser failure', severity: 'error', code: 'parse_error', filePath: 'src/a.ts' },
+      { message: 'Worker exited with code 1', severity: 'error', code: 'parse_error', filePath: 'src/b.ts' },
+      { message: 'memory access out of bounds', severity: 'error', code: 'parse_error' },
+    ];
+    const env = {
+      pool: null,
+      hasWorker: false,
+      poolSize: 0,
+      getSlowFiles: () => [],
+      recycleWorker: async () => {
+        throw new Error('retry should not recycle without a worker');
+      },
+      requestParse: async () => {
+        throw new Error('retry should not parse without a worker');
+      },
+    };
+
+    const retryMs = await eoRunIndexRetryPhaseIfNeeded(state('/tmp/project'), {
+      errors,
+      counters: { filesIndexed: 0, filesErrored: 0, totalNodes: 0, totalEdges: 0 },
+      env,
+      signal: undefined,
+      log: () => {},
+    });
+
+    expect(retryMs).toBe(0);
+  });
+
+  it('preserves main counters when the retry phase has no eligible failures', async () => {
+    const mainCounters = counters();
+    mainCounters.filesIndexed = 2;
+    mainCounters.filesErrored = 1;
+    mainCounters.totalNodes = 5;
+    mainCounters.totalEdges = 3;
+
+    const retryMs = await eoRunIndexRetryPhase(state('/tmp/project'), {
+      counters: mainCounters,
+      errors: [{ message: 'read failed', severity: 'error', code: 'read_error', filePath: 'src/a.ts' }],
+      env: {
+        pool: null,
+        hasWorker: true,
+        poolSize: 1,
+        getSlowFiles: () => [],
+        recycleWorker: async () => {},
+        requestParse: async () => ({ nodes: [], edges: [], errors: [], unresolvedReferences: [] }),
+      },
+      signal: undefined,
+      log: () => {},
+    });
+
+    expect(retryMs).toBe(0);
+    expect(mainCounters).toMatchObject({ filesIndexed: 2, filesErrored: 1, totalNodes: 5, totalEdges: 3 });
+  });
+
+  it('processes read failures, oversize files, and minified bundles without invoking the parser', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-extraction-process-'));
+    try {
+      const errors: ExtractionError[] = [];
+      const progress: Array<{ phase: string; current: number; total: number; currentFile?: string }> = [];
+      const count = counters();
+      let parseCalls = 0;
+      const requestParse = async () => {
+        parseCalls += 1;
+        throw new Error('parser should not be called for skipped inputs');
+      };
+      const stats = (size: number) => ({ size, mtimeMs: Date.now() }) as fs.Stats;
+
+      await eoProcessOneFile(state(root, { maxFileSize: 10 }), {
+        filePath: 'src/missing.ts',
+        content: null,
+        stats: null,
+        error: new Error('missing'),
+        total: 3,
+        errors,
+        counters: count,
+        onProgress: (item) => progress.push(item),
+        requestParse,
+      });
+
+      await eoProcessOneFile(state(root, { maxFileSize: 10 }), {
+        filePath: 'src/large.ts',
+        content: 'export const large = true;',
+        stats: stats(11),
+        error: null,
+        total: 3,
+        errors,
+        counters: count,
+        onProgress: (item) => progress.push(item),
+        requestParse,
+      });
+
+      await eoProcessOneFile(state(root, { maxFileSize: 10_000 }), {
+        filePath: 'public/bundle.js',
+        content: `const bundled='${'x'.repeat(260)}';`,
+        stats: stats(280),
+        error: null,
+        total: 3,
+        errors,
+        counters: count,
+        onProgress: (item) => progress.push(item),
+        requestParse,
+      });
+
+      expect(parseCalls).toBe(0);
+      expect(count).toMatchObject({ processed: 3, filesErrored: 1, filesSkipped: 2 });
+      expect(errors.map((error) => error.code)).toEqual(['read_error', 'size_exceeded', 'minified_skip']);
+      expect(progress.map((item) => item.current)).toEqual([2, 2, 3]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('fresh-heap retry skips blocked/missing paths and returns parse failures for stripped retry', async () => {
