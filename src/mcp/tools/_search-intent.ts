@@ -364,7 +364,14 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   const [orExpr, andExpr] = buildMatchExpressions(query);
 
   try {
-    summaryHits = runSymbolIntentQuery(db, queryDefs.summarySql, orExpr, symFilterParams, overFetch, coverage.summaryRows);
+    summaryHits = runSymbolIntentQuery(
+      db,
+      queryDefs.summarySql,
+      orExpr,
+      symFilterParams,
+      overFetch,
+      coverage.summaryRows,
+    );
     docstringHits = runSymbolIntentQuery(
       db,
       queryDefs.docstringSql,
@@ -422,7 +429,14 @@ function collectAndConfirmedIds(args: {
 }): void {
   const { db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out } = args;
   if (andExpr === null || (coverage.summaryRows <= 0 && coverage.docstringRows <= 0)) return;
-  for (const row of runSymbolIntentQuery(db, queryDefs.summarySql, andExpr, symFilterParams, overFetch, coverage.summaryRows)) {
+  for (const row of runSymbolIntentQuery(
+    db,
+    queryDefs.summarySql,
+    andExpr,
+    symFilterParams,
+    overFetch,
+    coverage.summaryRows,
+  )) {
     out.add(row.id);
   }
   for (const row of runSymbolIntentQuery(

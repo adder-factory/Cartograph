@@ -1122,8 +1122,24 @@ async function searchHybridBlendWithEmbeddings(args: SearchHybridBlendArgs): Pro
     return { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome };
   }
 
-  semanticHits = await expandSemanticHitsIfNeeded({ svc, query, client, embeddingsCfg, resolved, semanticHits, fetchLimit, signal });
-  const reranked = await rerankSemanticHitsIfConfigured({ svc, query, resolved, semanticHits, signal, noRerankerOutcome });
+  semanticHits = await expandSemanticHitsIfNeeded({
+    svc,
+    query,
+    client,
+    embeddingsCfg,
+    resolved,
+    semanticHits,
+    fetchLimit,
+    signal,
+  });
+  const reranked = await rerankSemanticHitsIfConfigured({
+    svc,
+    query,
+    resolved,
+    semanticHits,
+    signal,
+    noRerankerOutcome,
+  });
 
   const fused = await fuseHybridSearchRanks(ftsResults, reranked.semanticHits);
   const fusedResults = buildFusedSearchResults(svc, ftsResults, fused);
@@ -1140,12 +1156,18 @@ async function embedHybridQuery(
   try {
     const vecs = await client.embed([query]);
     if (vecs.length === 0 || !vecs[0]) {
-      return { queryVec: null, fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome } };
+      return {
+        queryVec: null,
+        fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome },
+      };
     }
     return { queryVec: vecs[0], fallback: null };
   } catch (err) {
     logDebug('Hybrid search: query embed failed, falling back to FTS', { error: String(err) });
-    return { queryVec: null, fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome } };
+    return {
+      queryVec: null,
+      fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome },
+    };
   }
 }
 
@@ -1160,7 +1182,9 @@ interface ExpandSemanticHitsArgs {
   signal: AbortSignal | undefined;
 }
 
-async function expandSemanticHitsIfNeeded(args: ExpandSemanticHitsArgs): Promise<Array<{ nodeId: string; score: number }>> {
+async function expandSemanticHitsIfNeeded(
+  args: ExpandSemanticHitsArgs,
+): Promise<Array<{ nodeId: string; score: number }>> {
   const { svc, query, client, embeddingsCfg, resolved, semanticHits, fetchLimit, signal } = args;
   const topScore = semanticHits[0]?.score ?? 0;
   if (topScore >= QUERY_EXPANSION_SCORE_THRESHOLD || !resolved?.summarizeLlm) return semanticHits;

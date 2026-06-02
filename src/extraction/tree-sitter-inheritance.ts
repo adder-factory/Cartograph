@@ -106,7 +106,12 @@ function extractObjcClassInterfaceInheritance(extractor: TreeSitterExtractor, no
   }
 }
 
-function tryExtractInheritanceChild(extractor: TreeSitterExtractor, node: SyntaxNode, child: SyntaxNode, classId: string): boolean {
+function tryExtractInheritanceChild(
+  extractor: TreeSitterExtractor,
+  node: SyntaxNode,
+  child: SyntaxNode,
+  classId: string,
+): boolean {
   const handler = INHERITANCE_HANDLERS[child.type];
   if (handler) {
     handler(extractor, child, classId);

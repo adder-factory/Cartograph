@@ -31,7 +31,11 @@ function context(files: string[], nodes: Node[] = [], packageJson: string | null
   } as any;
 }
 
-function ref(referenceName: string, referenceKind: 'calls' | 'imports' = 'calls', filePath = 'src/routes/+page.svelte') {
+function ref(
+  referenceName: string,
+  referenceKind: 'calls' | 'imports' = 'calls',
+  filePath = 'src/routes/+page.svelte',
+) {
   return {
     fromNodeId: 'component:src/routes/+page.svelte:Page:1',
     referenceName,
@@ -74,7 +78,9 @@ describe('Svelte framework resolver', () => {
     expect(store?.confidence).toBe(0.85);
     expect(svelteResolver.resolve(ref('$$props'), ctx)).toBeNull();
 
-    expect(svelteResolver.resolve(ref('$app/navigation', 'imports'), ctx)?.targetNodeId).toBe(ref('$app/navigation').fromNodeId);
+    expect(svelteResolver.resolve(ref('$app/navigation', 'imports'), ctx)?.targetNodeId).toBe(
+      ref('$app/navigation').fromNodeId,
+    );
     const libImport = svelteResolver.resolve(ref('$lib/Card', 'imports'), ctx);
     expect(libImport?.targetNodeId).toBe('component:lib-card');
     expect(libImport?.confidence).toBe(0.9);

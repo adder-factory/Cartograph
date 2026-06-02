@@ -199,8 +199,7 @@ function buildEmptyResultsResponse(
   const suggestions = suggestSymbolNames(cg.queries, query, MAX_SUGGESTIONS);
   const queryTokens = query.trim().split(/\s+/);
   const suggestionNames = suggestions.map((s) => `\`${s.name}\``).join(', ');
-  const suggestionLine =
-    suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
+  const suggestionLine = suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
   const exploreHint =
     queryTokens.length >= 2
       ? `\n\n> **Tip:** Multi-word queries are concept searches — try \`cartograph_explore\` for "${query}" to search across signatures and bodies.`

@@ -437,10 +437,7 @@ function safeParseDetailJson(raw: string): unknown {
 }
 
 /** All findings on a single symbol, ordered by severity then biomarker. */
-export function getFindingsForNode(
-  qb: QueryBuilder,
-  nodeId: string,
-): Array<FindingForNode> {
+export function getFindingsForNode(qb: QueryBuilder, nodeId: string): Array<FindingForNode> {
   qb.queries.getFindingsForNode ??= getFindingsForNodeQuery(qb.db);
   const rows = qb.queries.getFindingsForNode.all({ nodeId });
   return rows.map((r) => ({

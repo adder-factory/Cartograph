@@ -486,10 +486,7 @@ function sortAndFilterDocuments(documents: Map<string, ScipDocument>): ScipDocum
     .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   for (const doc of orderedDocs) {
     doc.occurrences.sort(
-      (a, b) =>
-        a.range[0]! - b.range[0]! ||
-        a.range[1]! - b.range[1]! ||
-        a.symbol.localeCompare(b.symbol),
+      (a, b) => a.range[0]! - b.range[0]! || a.range[1]! - b.range[1]! || a.symbol.localeCompare(b.symbol),
     );
     doc.symbols.sort((a, b) => a.symbol.localeCompare(b.symbol));
   }

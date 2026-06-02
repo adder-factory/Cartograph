@@ -866,15 +866,17 @@ function registerOption(cmd: Command, opt: CliOptionSpec, short?: string): void 
   // A scalar default is stringified so commander stores it as the CLI
   // would have received it; the coercion schema parses it back.
   const stringifyDefault = (value: unknown): string => {
-    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean' ||
+      typeof value === 'bigint'
+    ) {
       return String(value);
     }
     return JSON.stringify(value) ?? '<unserializable>';
   };
-  const def =
-    opt.defaultValue === undefined
-      ? undefined
-      : stringifyDefault(opt.defaultValue);
+  const def = opt.defaultValue === undefined ? undefined : stringifyDefault(opt.defaultValue);
   // Scalar value option. `<value>` for required, `[value]` is avoided
   // — commander treats `[value]` as an OPTIONAL-ARGUMENT option which
   // changes parse semantics; an unset optional field simply isn't

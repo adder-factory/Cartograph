@@ -194,11 +194,7 @@ function formatNodeCardHeader(
 }
 
 /** Append the issues line + optional short docstring to the lines accumulator. */
-function appendIssuesAndDocstring(
-  lines: string[],
-  node: Node,
-  issues: NodeIssue[],
-): void {
+function appendIssuesAndDocstring(lines: string[], node: Node, issues: NodeIssue[]): void {
   const issuesLine = formatIssuesLine(issues);
   if (issuesLine) lines.push(issuesLine);
   // Only include docstring if it's short and useful

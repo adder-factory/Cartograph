@@ -309,7 +309,9 @@ describe('file-grain.buildFileEmbedText', () => {
   });
 
   it('whitespace in summary is trimmed', () => {
-    const c = makeBuildTextCandidate([{ name: 'fn', signature: null, summary: '  trimmed summary  ', summaryHash: '' }]);
+    const c = makeBuildTextCandidate([
+      { name: 'fn', signature: null, summary: '  trimmed summary  ', summaryHash: '' },
+    ]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('fn: trimmed summary');
     expect(text).not.toContain('  trimmed summary  ');

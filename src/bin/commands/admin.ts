@@ -101,12 +101,16 @@ function phaseTimingLines(result: IndexResult): string[] {
   return lines.filter(Boolean);
 }
 
-function parseEagerLimit(options: { quiet?: boolean; limit?: string; all?: boolean }, onInvalid?: () => void): number | undefined {
+function parseEagerLimit(
+  options: { quiet?: boolean; limit?: string; all?: boolean },
+  onInvalid?: () => void,
+): number | undefined {
   if (options.all) return Number.POSITIVE_INFINITY;
   if (options.limit === undefined) return undefined;
   const parsed = Number(options.limit);
   if (!Number.isInteger(parsed) || parsed < 0) {
-    if (!options.quiet) error('--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)');
+    if (!options.quiet)
+      error('--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)');
     onInvalid?.();
     process.exit(1);
   }
@@ -206,7 +210,8 @@ function printSummarizeEmbedDetails(
   if (embed.generated === 0) return;
   const counters: string[] = [];
   if (embed.errors > 0) counters.push(`${formatNumber(embed.errors)} errors`);
-  if (embed.skipped > 0) counters.push(`${formatNumber(embed.skipped)} skipped — too large for embed server's batch size`);
+  if (embed.skipped > 0)
+    counters.push(`${formatNumber(embed.skipped)} skipped — too large for embed server's batch size`);
   clack.log.success(
     `Embedded ${formatNumber(embed.generated)} new vectors in ${formatDuration(embed.durationMs)}` +
       (counters.length > 0 ? ` (${counters.join(', ')})` : ''),

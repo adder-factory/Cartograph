@@ -44,7 +44,8 @@ function fakeQueries(): QueryBuilder {
   return {
     queries: {
       findOrphanedSymbols: {
-        all: ({ limit, offset }: { limit: number; offset: number }) => candidateStream.candidates.slice(offset, offset + limit),
+        all: ({ limit, offset }: { limit: number; offset: number }) =>
+          candidateStream.candidates.slice(offset, offset + limit),
       },
     },
   } as unknown as QueryBuilder;

@@ -870,8 +870,17 @@ function resolveMethodCandidate(args: {
   anyFqnMatch: boolean;
   candidateCount: number;
 }): ResolvedRef {
-  const { ref, methodNode, classNode, confidence, resolvedBy, preferredFqn, fqnAvailable, anyFqnMatch, candidateCount } =
-    args;
+  const {
+    ref,
+    methodNode,
+    classNode,
+    confidence,
+    resolvedBy,
+    preferredFqn,
+    fqnAvailable,
+    anyFqnMatch,
+    candidateCount,
+  } = args;
   if (fqnAvailable && fqnMatchesFilePath(classNode.filePath, preferredFqn!)) {
     return { original: ref, targetNodeId: methodNode.id, confidence: 0.9, resolvedBy: 'fqn-disambiguated' };
   }

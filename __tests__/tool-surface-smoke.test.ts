@@ -385,11 +385,7 @@ describe('MCP tool surface — numeric property fuzz', () => {
             const result = await handler.runHandler(name, args);
             // Result need not be successful — error is fine — but it
             // must be a well-formed ToolResult, not undefined/garbage.
-            if (
-              !result ||
-              !Array.isArray(result.content) ||
-              result.content.length === 0
-            ) {
+            if (!result || !Array.isArray(result.content) || result.content.length === 0) {
               failures.push(`${prop}=${label}: handler returned a malformed result ` + `(${JSON.stringify(result)})`);
             }
           } catch (err) {

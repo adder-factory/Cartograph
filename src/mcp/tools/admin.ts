@@ -772,7 +772,10 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
   }
 }
 
-function appendDetectedBackends(lines: string[], plan: Awaited<ReturnType<typeof import('../../installer/llm-setup-plan.js')['planLlmSetup']>>): void {
+function appendDetectedBackends(
+  lines: string[],
+  plan: Awaited<ReturnType<typeof import('../../installer/llm-setup-plan.js')['planLlmSetup']>>,
+): void {
   if (plan.detectedBackends.length === 0) {
     lines.push('**No backends detected.** Wizard recommends installing one (see presets below).', '');
     return;
@@ -828,11 +831,7 @@ async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Prom
       // re-opens the instance and loads the fresh config from disk.
       ctx.evictCachedProject(projectPath);
     }
-    const lines: string[] = [
-      `## Applied preset \`${result.preset}\``,
-      '',
-      formatAppliedPresetLine(result),
-    ];
+    const lines: string[] = [`## Applied preset \`${result.preset}\``, '', formatAppliedPresetLine(result)];
     if (result.notes.length > 0) {
       lines.push('', '**Notes:**');
       for (const n of result.notes) lines.push(`- ${n}`);

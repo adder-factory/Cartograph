@@ -968,11 +968,7 @@ function tryCollectNestedFnManifest(ext: TreeSitterExtractor, node: SyntaxNode):
  *  language's classifier. Pulled out of {@link tryExtractBodyStructuralChild}
  *  so the else-if cascade (which parses as nested if_statement) doesn't
  *  contribute 5 levels of nested_complexity to the dispatcher. */
-function extractClassByDispatch(
-  ext: TreeSitterExtractor,
-  node: SyntaxNode,
-  classification: string,
-): void {
+function extractClassByDispatch(ext: TreeSitterExtractor, node: SyntaxNode, classification: string): void {
   switch (classification) {
     case 'struct':
       tsExtractStruct(ext, node);

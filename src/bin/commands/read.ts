@@ -838,7 +838,11 @@ function printFilesOutput(
   }
 }
 
-function printFlatFiles(files: FileListing, includeMetadata: boolean, queries: Parameters<typeof getFileSummaries>[0]): void {
+function printFlatFiles(
+  files: FileListing,
+  includeMetadata: boolean,
+  queries: Parameters<typeof getFileSummaries>[0],
+): void {
   console.log(chalk.bold(`\nFiles (${files.length}):\n`));
   const flatSummaries =
     files.length <= 80
@@ -898,9 +902,7 @@ function printFileSummary(files: FileListing, maxDepth: number | undefined, dir:
     const label = row.dir === null ? '(root)' : `${row.dir}/`;
     const filesText = chalk.dim(`${row.files} files`.padStart(10));
     const symbolsText = chalk.dim(`${row.symbols} symbols`.padStart(14));
-    console.log(
-      `  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`,
-    );
+    console.log(`  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`);
   }
 }
 

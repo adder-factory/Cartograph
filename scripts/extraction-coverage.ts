@@ -313,9 +313,7 @@ function collectSamplesForRun(extMap: Map<string, Language>): { samples: Sample[
       .filter((d) => d.grammar)
       .map((d) => d.name),
   );
-  const skipped = [...new Set(samples.map((s) => s.language))]
-    .filter((l) => !grammarLanguages.has(l))
-    .sort(byString);
+  const skipped = [...new Set(samples.map((s) => s.language))].filter((l) => !grammarLanguages.has(l)).sort(byString);
   samples = samples.filter((s) => grammarLanguages.has(s.language));
   return { samples, skipped };
 }

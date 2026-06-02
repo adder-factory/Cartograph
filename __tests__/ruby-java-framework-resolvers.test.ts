@@ -50,20 +50,26 @@ function context(files: Record<string, string>, nodes: Node[] = []): ResolutionC
 describe('Ruby and Java framework resolvers', () => {
   it('detects Rails and Spring projects from real framework signals', () => {
     expect(railsResolver.detect(context({ Gemfile: "gem 'rails'\n" }))).toBe(true);
-    expect(railsResolver.detect(context({ 'config/application.rb': 'module Shop\nclass Application < Rails::Application\nend' }))).toBe(
-      true,
-    );
-    expect(railsResolver.detect(context({ 'app/controllers/application_controller.rb': 'class ApplicationController' }))).toBe(
-      true,
-    );
+    expect(
+      railsResolver.detect(
+        context({ 'config/application.rb': 'module Shop\nclass Application < Rails::Application\nend' }),
+      ),
+    ).toBe(true);
+    expect(
+      railsResolver.detect(context({ 'app/controllers/application_controller.rb': 'class ApplicationController' })),
+    ).toBe(true);
 
-    expect(springResolver.detect(context({ 'pom.xml': '<artifactId>spring-boot-starter-web</artifactId>' }))).toBe(true);
-    expect(springResolver.detect(context({ 'build.gradle.kts': 'implementation("org.springframework.boot:spring-boot")' }))).toBe(
+    expect(springResolver.detect(context({ 'pom.xml': '<artifactId>spring-boot-starter-web</artifactId>' }))).toBe(
       true,
     );
     expect(
+      springResolver.detect(context({ 'build.gradle.kts': 'implementation("org.springframework.boot:spring-boot")' })),
+    ).toBe(true);
+    expect(
       springResolver.detect(
-        context({ 'src/main/java/com/acme/App.java': '@SpringBootApplication class App {}\n@RestController class Api {}' }),
+        context({
+          'src/main/java/com/acme/App.java': '@SpringBootApplication class App {}\n@RestController class Api {}',
+        }),
       ),
     ).toBe(true);
   });
@@ -77,7 +83,14 @@ describe('Ruby and Java framework resolvers', () => {
 
     const actions = railsResolver.extractNodes!(
       'app/controllers/orders_controller.rb',
-      ['class OrdersController < ApplicationController', '  def index', '  end', '  def set_order', '  end', 'end'].join('\n'),
+      [
+        'class OrdersController < ApplicationController',
+        '  def index',
+        '  end',
+        '  def set_order',
+        '  end',
+        'end',
+      ].join('\n'),
     );
     expect(actions.map((n) => n.name)).toEqual(['index']);
 
@@ -117,7 +130,10 @@ describe('Ruby and Java framework resolvers', () => {
       nodes,
     );
 
-    expect(railsResolver.resolve(ref('OrderItem', 'ruby'), ctx)).toMatchObject({ targetNodeId: 'model', confidence: 0.8 });
+    expect(railsResolver.resolve(ref('OrderItem', 'ruby'), ctx)).toMatchObject({
+      targetNodeId: 'model',
+      confidence: 0.8,
+    });
     expect(railsResolver.resolve(ref('Auditable', 'ruby'), ctx)).toMatchObject({ targetNodeId: 'concern' });
     expect(railsResolver.resolve(ref('ApiOrdersController', 'ruby'), ctx)).toMatchObject({
       targetNodeId: 'controller',
@@ -133,7 +149,13 @@ describe('Ruby and Java framework resolvers', () => {
       node('plain-service', 'BillingService', 'class', 'src/main/java/com/acme/BillingService.java', 'java'),
       node('service', 'BillingService', 'class', 'src/main/java/com/acme/service/BillingService.java', 'java'),
       node('repo', 'OrderRepository', 'interface', 'src/main/java/com/acme/repository/OrderRepository.java', 'java'),
-      node('controller', 'OrdersController', 'class', 'src/main/java/com/acme/controllers/OrdersController.java', 'java'),
+      node(
+        'controller',
+        'OrdersController',
+        'class',
+        'src/main/java/com/acme/controllers/OrdersController.java',
+        'java',
+      ),
       node('entity', 'Order', 'class', 'src/main/java/com/acme/domain/Order.java', 'java'),
       node('config', 'WebConfig', 'class', 'src/main/java/com/acme/config/WebConfig.java', 'java'),
     ];
@@ -145,8 +167,14 @@ describe('Ruby and Java framework resolvers', () => {
     });
     expect(springResolver.resolve(ref('OrderRepository', 'java'), ctx)).toMatchObject({ targetNodeId: 'repo' });
     expect(springResolver.resolve(ref('OrdersController', 'java'), ctx)).toMatchObject({ targetNodeId: 'controller' });
-    expect(springResolver.resolve(ref('Order', 'java'), ctx)).toMatchObject({ targetNodeId: 'entity', confidence: 0.7 });
-    expect(springResolver.resolve(ref('WebConfig', 'java'), ctx)).toMatchObject({ targetNodeId: 'config', confidence: 0.8 });
+    expect(springResolver.resolve(ref('Order', 'java'), ctx)).toMatchObject({
+      targetNodeId: 'entity',
+      confidence: 0.7,
+    });
+    expect(springResolver.resolve(ref('WebConfig', 'java'), ctx)).toMatchObject({
+      targetNodeId: 'config',
+      confidence: 0.8,
+    });
   });
 
   it('extracts Laravel routes and resolves Laravel model/controller references by convention', () => {
@@ -165,7 +193,13 @@ describe('Ruby and Java framework resolvers', () => {
       node('method', 'active', 'method', 'app/Models/User.php', 'php'),
       node('model', 'LegacyOrder', 'class', 'app/LegacyOrder.php', 'php'),
       node('controller-method', 'index', 'method', 'app/Http/Controllers/OrderController.php', 'php'),
-      node('namespaced-controller', 'AdminUserController', 'class', 'app/Http/Controllers/Admin/UserController.php', 'php'),
+      node(
+        'namespaced-controller',
+        'AdminUserController',
+        'class',
+        'app/Http/Controllers/Admin/UserController.php',
+        'php',
+      ),
       node('namespaced-method', 'show', 'method', 'app/Http/Controllers/Admin/UserController.php', 'php'),
     ];
     const ctx = context(

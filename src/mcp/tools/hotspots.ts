@@ -145,7 +145,7 @@ function buildCategorizedQueryOpts(args: BuildCategorizedQueryOptsArgs): Categor
  * MarkdownTableSpec contract. The category=all composite now also
  * routes null LOC through the `'—'` rendering used by the
  * per-category specs from batch 1+2 — the legacy template-literal
-   * `'null'` emission documented in the prior g16-track-b follow-up
+ * `'null'` emission documented in the prior g16-track-b follow-up
  * comments is gone.
  */
 

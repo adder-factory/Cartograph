@@ -333,12 +333,7 @@ function isStringDelimiter(c: string | undefined): c is string {
   return c === '"' || c === "'" || c === '`';
 }
 
-function updateMatchingDepth(
-  c: string | undefined,
-  depth: number,
-  openChar: string,
-  closeChar: string,
-): number {
+function updateMatchingDepth(c: string | undefined, depth: number, openChar: string, closeChar: string): number {
   if (c === openChar) return depth + 1;
   if (c === closeChar) return depth - 1;
   return depth;

@@ -493,10 +493,7 @@ function buildModuleLevelFallback(args: BuildModuleLevelFallbackArgs): AffectedS
     .map(({ s }) => s);
 
   const siblingList = siblingCandidates.map((s) => `${s.name} (${s.kind}) at line ${s.startLine}`).join(', ');
-  const siblingNote =
-    siblingCandidates.length > 0
-      ? `; nearest siblings: ${siblingList}`
-      : '';
+  const siblingNote = siblingCandidates.length > 0 ? `; nearest siblings: ${siblingList}` : '';
   const note = `module-level edit (no enclosing symbol body)${siblingNote}`;
 
   const affected = buildAffectedSymbol({ sym: fileNode, traverser: runCtx.traverser, queries: runCtx.queries, opts });

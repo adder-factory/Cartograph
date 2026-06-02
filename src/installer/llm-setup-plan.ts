@@ -490,10 +490,7 @@ interface InstallPresetNote {
   readonly note: string;
 }
 
-async function buildInstallPresetNote(
-  preset: SetupPreset,
-  nextSteps: readonly string[],
-): Promise<InstallPresetNote> {
+async function buildInstallPresetNote(preset: SetupPreset, nextSteps: readonly string[]): Promise<InstallPresetNote> {
   const defaultNote =
     'The chosen preset assumes the backend is not yet running. Follow the `nextSteps` lines before re-running doctor.';
   // For local install presets, re-probe the target endpoints to see

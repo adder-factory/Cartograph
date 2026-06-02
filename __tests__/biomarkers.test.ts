@@ -958,10 +958,7 @@ compute();
     // Non-exported so the cross-file unused_export rule can't fire and
     // mask the per-file replace behaviour we're testing here.
     const branchLines = Array.from({ length: 250 }, (_, i) => `  if (x === ${i}) return ${i};`).join('\n');
-    fs.writeFileSync(
-      filePath,
-      `function ugly(x: number): number {\n${branchLines}\n  return -1;\n}\nugly(0);\n`,
-    );
+    fs.writeFileSync(filePath, `function ugly(x: number): number {\n${branchLines}\n  return -1;\n}\nugly(0);\n`);
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'biomarker-stale', version: '0.0.0' }));
 
     const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });

@@ -88,15 +88,19 @@ function payloadDeltaFor(baseline: EvalResult | null, candidate: EvalResult | nu
   return (candidate.payloadBytes - baseline.payloadBytes) / baseline.payloadBytes;
 }
 
-function regressionReason(baseline: EvalResult | null, candidate: EvalResult | null, recallDelta: number, payloadDelta: number): string {
+function regressionReason(
+  baseline: EvalResult | null,
+  candidate: EvalResult | null,
+  recallDelta: number,
+  payloadDelta: number,
+): string {
   if (!candidate) return 'case missing from candidate report';
   if (!baseline) return '';
   if (recallDelta < -RECALL_REGRESSION_THRESHOLD) {
     return `recall dropped ${recallDelta.toFixed(2)} (threshold -${RECALL_REGRESSION_THRESHOLD})`;
   }
   const shouldCheckPayload =
-    Boolean(baseline.payloadBytes && candidate.payloadBytes) &&
-    baseline.payloadBytes! >= PAYLOAD_MIN_BYTES_FOR_CHECK;
+    Boolean(baseline.payloadBytes && candidate.payloadBytes) && baseline.payloadBytes! >= PAYLOAD_MIN_BYTES_FOR_CHECK;
   if (shouldCheckPayload && payloadDelta > PAYLOAD_REGRESSION_THRESHOLD) {
     return `payload grew +${(payloadDelta * 100).toFixed(0)}% (threshold +${(PAYLOAD_REGRESSION_THRESHOLD * 100).toFixed(0)}%)`;
   }

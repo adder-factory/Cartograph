@@ -405,7 +405,9 @@ async function main(): Promise<void> {
     console.log(`${state.tagsHarvested.length} tags.scm harvested  →  ${path.relative(REPO_ROOT, TAGS_DIR)}/`);
   }
   if (state.missingPkgs.length > 0) {
-    console.log(`\nInstall missing source packages, then re-run:\n  npm i -D ${[...new Set(state.missingPkgs)].join(' ')}`);
+    console.log(
+      `\nInstall missing source packages, then re-run:\n  npm i -D ${[...new Set(state.missingPkgs)].join(' ')}`,
+    );
   }
   if (state.failed.length > 0) {
     console.log('\nFailures:');

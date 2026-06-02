@@ -199,8 +199,7 @@ export const goResolver: FrameworkResolver = {
     // Args / RunE follow). Lazy quantifier locks on the FIRST `Use:` per
     // literal so nested handler structs that happen to define their own
     // `Use` later don't double-fire.
-    const cobraCommandPattern =
-      /(?<!\w)(?:&\s*)?cobra\.Command\s*\{[\s\S]{0,400}?Use:\s*["']([^"'\n]+?)["']/g;
+    const cobraCommandPattern = /(?<!\w)(?:&\s*)?cobra\.Command\s*\{[\s\S]{0,400}?Use:\s*["']([^"'\n]+?)["']/g;
     const cobraSeen = new Set<string>();
 
     while ((match = cobraCommandPattern.exec(safe)) !== null) {

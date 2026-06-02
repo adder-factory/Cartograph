@@ -118,9 +118,11 @@ function decoratorTargetFromChild(child: SyntaxNode): SyntaxNode | null {
     return getChildByField(child, 'function') ?? child.namedChild(0);
   }
   if (child.type === 'constructor_invocation') {
-    return child.namedChildren
-      .find((c) => c?.type === 'user_type')
-      ?.namedChildren.find((c) => c?.type === 'type_identifier') ?? null;
+    return (
+      child.namedChildren
+        .find((c) => c?.type === 'user_type')
+        ?.namedChildren.find((c) => c?.type === 'type_identifier') ?? null
+    );
   }
   if (child.type === 'user_type') {
     return child.namedChildren.find((c) => c?.type === 'type_identifier') ?? null;

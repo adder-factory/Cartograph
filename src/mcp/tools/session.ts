@@ -102,8 +102,7 @@ function handleResume(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome 
   if (!session) {
     const lookupLabel = id ? `id=${id}` : `label=${label}`;
     return err(
-      `No session matched ${lookupLabel}. ` +
-        `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
+      `No session matched ${lookupLabel}. ` + `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
     );
   }
   const calls = callsForSession(cg.queries, session.id);
@@ -190,8 +189,7 @@ function handleDelete(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome 
   if (!session) {
     const lookupLabel = id ? `id=${id}` : `label=${label}`;
     return err(
-      `No session matched ${lookupLabel}. ` +
-        `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
+      `No session matched ${lookupLabel}. ` + `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
     );
   }
   deleteSession(cg.queries, session.id);
@@ -361,10 +359,7 @@ async function handleMacroRun(ctx: ToolCtx, args: Record<string, unknown>): Prom
   }
   if (macroRunStack.length >= MACRO_RUN_MAX_DEPTH) {
     const stack = macroRunStack.map((n) => `\`${n}\``).join(' → ');
-    return err(
-      `Macro nesting too deep (limit ${MACRO_RUN_MAX_DEPTH}); ` +
-        `run stack: ${stack}.`,
-    );
+    return err(`Macro nesting too deep (limit ${MACRO_RUN_MAX_DEPTH}); ` + `run stack: ${stack}.`);
   }
   macroRunStack.push(name);
   try {

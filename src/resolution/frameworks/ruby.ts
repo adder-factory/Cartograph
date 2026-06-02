@@ -179,7 +179,14 @@ function railsRootNode(filePath: string, target: string, line: number, endColumn
   });
 }
 
-function railsHttpRouteNode(filePath: string, method: string, routePath: string, line: number, endColumn: number, now: number): Node {
+function railsHttpRouteNode(
+  filePath: string,
+  method: string,
+  routePath: string,
+  line: number,
+  endColumn: number,
+  now: number,
+): Node {
   return railsRouteNode({
     id: `route:${filePath}:${method}:${routePath}:${line}`,
     name: `${method} ${routePath}`,

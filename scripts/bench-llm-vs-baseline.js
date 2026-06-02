@@ -92,10 +92,7 @@ async function main() {
   phaseStart = performance.now();
   const indexResult = await cg.indexAll({ summarize: false });
   const indexMs = performance.now() - phaseStart;
-  timings.push(
-    { label: 'Init', durationMs: initMs },
-    { label: 'indexAll (no summaries)', durationMs: indexMs },
-  );
+  timings.push({ label: 'Init', durationMs: initMs }, { label: 'indexAll (no summaries)', durationMs: indexMs });
 
   const stats = cg.getStats();
   console.log('\n  Index complete:');

@@ -326,7 +326,8 @@ function formatFreshnessHeader(freshness: ReturnType<Cartograph['stats']['getFre
     commitsSeg = `${freshness.commitsAhead} commit${freshness.commitsAhead === 1 ? '' : 's'} ahead`;
   }
   const fileCountLabel = freshness.filesChanged === 1 ? 'file' : 'files';
-  const filesSeg = freshness.filesChanged == null ? '' : ` (${freshness.filesChanged} ${fileCountLabel} in \`git diff\`)`;
+  const filesSeg =
+    freshness.filesChanged == null ? '' : ` (${freshness.filesChanged} ${fileCountLabel} in \`git diff\`)`;
   return (
     `**Indexed HEAD:** \`${sha}\` — current HEAD is ${commitsSeg}${filesSeg}. ` +
     `The list below is the per-file *content-hash* drift, which can be smaller than the ` +

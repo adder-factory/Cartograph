@@ -25,7 +25,7 @@
  *                (default — original score-based ordering)
  *
  * Unknown field prefixes (e.g. `foo:bar`) are passed through to FTS
-   * as plain text — that's how someone searching for task markers gets a
+ * as plain text — that's how someone searching for task markers gets a
  * result instead of a parse error.
  *
  * Quoting:

@@ -128,9 +128,7 @@ export class ClaudeBridgeChatBackend implements ChatBackend {
     } catch (err) {
       const tail = stderr.slice(-500);
       const stderrTail = tail ? ` — stderr: ${tail}` : '';
-      throw new LlmEndpointError(
-        `claude-bridge: failed to parse output (${errMsg(err)})${stderrTail}`,
-      );
+      throw new LlmEndpointError(`claude-bridge: failed to parse output (${errMsg(err)})${stderrTail}`);
     }
 
     return compact({
@@ -287,10 +285,7 @@ function buildProcessResult(state: ProcessState, exit: ProcessExit): ProcResult 
   }
   if (exit.code !== 0) {
     const stderrTail = exit.stderr ? ` — ${exit.stderr.slice(0, 500)}` : '';
-    throw new LlmEndpointError(
-      `claude-bridge: exit ${exit.code}${stderrTail}`,
-      exit.code ?? undefined,
-    );
+    throw new LlmEndpointError(`claude-bridge: exit ${exit.code}${stderrTail}`, exit.code ?? undefined);
   }
   const stdout = Buffer.concat(state.stdoutChunks).toString('utf-8');
   return { stdout, stderr: exit.stderr };

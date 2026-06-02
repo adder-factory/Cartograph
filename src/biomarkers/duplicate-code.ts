@@ -489,11 +489,7 @@ function bucketPartialCloneCandidates(
   return byLang;
 }
 
-function buildPartialCloneFinding(
-  nodeId: string,
-  peers: Set<string>,
-  byId: Map<string, CandidateRow>,
-): Finding {
+function buildPartialCloneFinding(nodeId: string, peers: Set<string>, byId: Map<string, CandidateRow>): Finding {
   const member = byId.get(nodeId)!;
   // The "class" for this finding is the node plus its direct peers.
   const classMembers = [member, ...[...peers].map((id) => byId.get(id)!)];
@@ -662,11 +658,7 @@ function emitClassFindings(members: CandidateRow[]): Finding[] {
   return findings;
 }
 
-function emitExactCloneFindings(
-  members: CandidateRow[],
-  exactClaimed: Set<string>,
-  findings: Finding[],
-): void {
+function emitExactCloneFindings(members: CandidateRow[], exactClaimed: Set<string>, findings: Finding[]): void {
   const byBodyHash = new Map<string, CandidateRow[]>();
   for (const m of members) {
     const g = byBodyHash.get(m.bodyHash);
@@ -690,11 +682,7 @@ function emitExactCloneFindings(
   }
 }
 
-function emitNearCloneFindings(
-  members: CandidateRow[],
-  exactClaimed: Set<string>,
-  findings: Finding[],
-): void {
+function emitNearCloneFindings(members: CandidateRow[], exactClaimed: Set<string>, findings: Finding[]): void {
   const residue = members.filter((m) => !exactClaimed.has(m.nodeId));
   if (residue.length < 2) return;
   if (!spansMultipleHashes(residue)) return;

@@ -164,8 +164,9 @@ describe('CLI core contracts', () => {
 
   it('validates float CLI options and rejects out-of-range values', () => {
     const args: Record<string, unknown> = {};
-    expect(assignFloatArg({ args, key: 'minScore', raw: '0.75', optionName: '--min-score', opts: { min: 0, max: 1 } }))
-      .toBe(true);
+    expect(
+      assignFloatArg({ args, key: 'minScore', raw: '0.75', optionName: '--min-score', opts: { min: 0, max: 1 } }),
+    ).toBe(true);
     expect(args['minScore']).toBe(0.75);
 
     const stderr = captureConsoleError(() => {
@@ -239,9 +240,9 @@ describe('CLI core contracts', () => {
         projectRoot,
       );
       expect(clack.calls).toContainEqual(['success', 'Indexed 2 files (1 could not be parsed)']);
-      expect(clack.calls.some(([kind, message]) => kind === 'note' && message.includes('1 files failed to parse'))).toBe(
-        true,
-      );
+      expect(
+        clack.calls.some(([kind, message]) => kind === 'note' && message.includes('1 files failed to parse')),
+      ).toBe(true);
       expect(fs.existsSync(logPath)).toBe(true);
 
       printIndexResult(

@@ -49,13 +49,14 @@ describe('read command internals', () => {
         compact: true,
         fields: ['name', 'path'],
       });
-      await expect(read.buildAtRangeArgs(undefined, undefined, undefined, { ranges: 'src/a.ts:1-2,src/b.ts:3-4' }))
-        .resolves.toMatchObject({
-          ranges: [
-            { file: 'src/a.ts', startLine: 1, endLine: 2 },
-            { file: 'src/b.ts', startLine: 3, endLine: 4 },
-          ],
-        });
+      await expect(
+        read.buildAtRangeArgs(undefined, undefined, undefined, { ranges: 'src/a.ts:1-2,src/b.ts:3-4' }),
+      ).resolves.toMatchObject({
+        ranges: [
+          { file: 'src/a.ts', startLine: 1, endLine: 2 },
+          { file: 'src/b.ts', startLine: 3, endLine: 4 },
+        ],
+      });
       await expect(read.buildAtRangeArgs(undefined, undefined, undefined, { diff: diffPath })).resolves.toMatchObject({
         diff: expect.stringContaining('+new'),
       });
@@ -360,9 +361,7 @@ describe('read command internals', () => {
     expect(read.parseAffectedDepth({ depth: '0' }, { close: () => closeCalls.push('zero-depth') })).toBeNull();
     expect(closeCalls).toEqual(['bad-depth', 'zero-depth']);
 
-    await expect(
-      read.collectAffectedChangedFiles(['src/a.ts'], { files: ['src/b.ts'] }, '/repo'),
-    ).resolves.toEqual({
+    await expect(read.collectAffectedChangedFiles(['src/a.ts'], { files: ['src/b.ts'] }, '/repo')).resolves.toEqual({
       changedFiles: ['src/a.ts', 'src/b.ts'],
       derivedFromGit: false,
     });

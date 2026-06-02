@@ -48,7 +48,6 @@ describe('admin command internals', () => {
     expect(admin.parseEagerLimit({})).toBeUndefined();
     expect(admin.parseEagerLimit({ limit: '0' })).toBe(0);
     expect(admin.parseEagerLimit({ all: true })).toBe(Number.POSITIVE_INFINITY);
-
   });
 
   it('renders phase timings including retry and post-hook breakdowns', () => {
@@ -80,8 +79,20 @@ describe('admin command internals', () => {
       downloaded: [{ filename: 'embed.gguf', description: 'embedding model' }],
       skipped: [{ filename: 'chat.gguf' }],
     });
-    admin.printSyncResult(clack as any, { filesAdded: 1, filesModified: 2, filesRemoved: 1, nodesUpdated: 5, durationMs: 1250 });
-    admin.printSyncResult(clack as any, { filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0, durationMs: 1 });
+    admin.printSyncResult(clack as any, {
+      filesAdded: 1,
+      filesModified: 2,
+      filesRemoved: 1,
+      nodesUpdated: 5,
+      durationMs: 1250,
+    });
+    admin.printSyncResult(clack as any, {
+      filesAdded: 0,
+      filesModified: 0,
+      filesRemoved: 0,
+      nodesUpdated: 0,
+      durationMs: 1,
+    });
     admin.printSummarizeDetails(clack as any, {
       candidates: 10,
       generated: 3,

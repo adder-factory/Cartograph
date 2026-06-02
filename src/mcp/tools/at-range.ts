@@ -405,7 +405,10 @@ function renderBulkRangeReport(args: RenderBulkRangeReportArgs): string {
     } else if (compact) {
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
-      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|', formatTableRows(result.nodes));
+      parts.push(
+        '| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|',
+        formatTableRows(result.nodes),
+      );
     }
     parts.push('');
   }
@@ -553,7 +556,10 @@ function renderDiffRangeReport(args: RenderDiffRangeReportArgs): string {
     } else if (compact) {
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
-      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|', formatTableRows(result.nodes));
+      parts.push(
+        '| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|',
+        formatTableRows(result.nodes),
+      );
     }
     parts.push('');
   }

@@ -246,7 +246,10 @@ function listStrictifyBaseTables(db: SqliteDatabase, virtualNames: readonly stri
   ).filter((row) => row.sql !== null && !isVirtualShadowObject(row.name, virtualNames));
 }
 
-function listDroppableTriggers(db: SqliteDatabase, virtualNames: readonly string[]): Array<ObjectRow & { tbl_name: string }> {
+function listDroppableTriggers(
+  db: SqliteDatabase,
+  virtualNames: readonly string[],
+): Array<ObjectRow & { tbl_name: string }> {
   return (
     db
       .prepare(`SELECT name, sql, tbl_name FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL`)
@@ -263,7 +266,11 @@ function dropViewsAndTriggers(db: SqliteDatabase, views: readonly ObjectRow[], t
   }
 }
 
-function restoreViewsAndTriggers(db: SqliteDatabase, views: readonly ObjectRow[], triggers: readonly ObjectRow[]): void {
+function restoreViewsAndTriggers(
+  db: SqliteDatabase,
+  views: readonly ObjectRow[],
+  triggers: readonly ObjectRow[],
+): void {
   for (const view of views) {
     const exists = db.prepare(`SELECT 1 AS one FROM sqlite_master WHERE type = 'view' AND name = ?`).get(view.name);
     if (!exists && view.sql) db.exec(view.sql);

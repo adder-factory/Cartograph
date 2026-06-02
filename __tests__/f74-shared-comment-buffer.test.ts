@@ -12,7 +12,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as utils from '../src/utils.js';
 
-function createStrippedGetter(content: string, language: Parameters<typeof utils.stripCommentsForRegex>[1]): () => string {
+function createStrippedGetter(
+  content: string,
+  language: Parameters<typeof utils.stripCommentsForRegex>[1],
+): () => string {
   let strippedCache: string | undefined;
   return () => {
     strippedCache ??= utils.stripCommentsForRegex(content, language);

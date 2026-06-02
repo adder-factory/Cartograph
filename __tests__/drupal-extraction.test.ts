@@ -342,9 +342,8 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
         '',
       ].join('\n'),
     );
-    const cls = (name: string): string => ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {}`, ''].join(
-      '\n',
-    );
+    const cls = (name: string): string =>
+      ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {}`, ''].join('\n');
     fs.writeFileSync(path.join(modDir, 'src', 'Cleaner.php'), cls('Cleaner'));
     fs.writeFileSync(path.join(modDir, 'src', 'Helper.php'), cls('Helper'));
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
@@ -412,9 +411,14 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
       ].join('\n'),
     );
     const cls = (name: string): string =>
-      ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {`, '  public function create() {}', '}', ''].join(
-        '\n',
-      );
+      [
+        '<?php',
+        String.raw`namespace Drupal\my_module;`,
+        `class ${name} {`,
+        '  public function create() {}',
+        '}',
+        '',
+      ].join('\n');
     fs.writeFileSync(path.join(modDir, 'src', 'LoggerFactory.php'), cls('LoggerFactory'));
     fs.writeFileSync(path.join(modDir, 'src', 'Consumer.php'), cls('Consumer'));
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });

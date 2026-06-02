@@ -256,9 +256,7 @@ export function createVerboseProgress(): (progress: {
       if (pct >= lastPct + VERBOSE_PROGRESS_PCT_STEP || progress.current === progress.total) {
         lastPct = pct;
         const currentFileSuffix = progress.currentFile ? ` — ${progress.currentFile}` : '';
-        process.stdout.write(
-          `[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${currentFileSuffix}\n`,
-        );
+        process.stdout.write(`[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${currentFileSuffix}\n`);
       }
     } else if (progress.current > 0) {
       // Scanning phase (no total yet) — log periodically

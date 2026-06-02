@@ -12,7 +12,8 @@ function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
 function fakeCtx(cg: unknown, progress: string[] = []) {
   return {
     getCartograph: () => cg,
-    reportProgress: (current: number, total?: number, message?: string) => progress.push(`${current}/${total}:${message}`),
+    reportProgress: (current: number, total?: number, message?: string) =>
+      progress.push(`${current}/${total}:${message}`),
     closeProjectsMatching: () => {},
     evictCachedProject: () => {},
     options: {},
@@ -132,13 +133,15 @@ describe('MCP admin formatter contracts', () => {
     expect(detectedLines.join('\n')).toContain('ANTHROPIC_API_KEY');
 
     await expect(buildNoLlmFooter(async () => [])).resolves.toContain('No LLM configured');
-    await expect(buildNoLlmFooter(async () => [{ kind: 'ollama', endpoint: 'http://localhost:11434' }])).resolves.toContain(
-      '1 OpenAI-compat backend detected',
-    );
+    await expect(
+      buildNoLlmFooter(async () => [{ kind: 'ollama', endpoint: 'http://localhost:11434' }]),
+    ).resolves.toContain('1 OpenAI-compat backend detected');
   });
 
   it('formats apply and tuning override reports', () => {
-    expect(admin.formatAppliedPresetLine({ applied: false, configPath: null, backupPath: null })).toBe('No config written.');
+    expect(admin.formatAppliedPresetLine({ applied: false, configPath: null, backupPath: null })).toBe(
+      'No config written.',
+    );
     expect(
       admin.formatAppliedPresetLine({
         applied: true,

@@ -165,10 +165,7 @@ function handleCoverageDrop(cg: Cartograph, source: string | undefined): ToolOut
   const known = listCoverageSources(cg.queries);
   if (!known.some((s) => s.source === source)) {
     const knownSourceNames = known.map((s) => `\`${s.source}\``).join(', ');
-    const names =
-      known.length > 0
-        ? ` Known sources: ${knownSourceNames}.`
-        : ' No coverage sources are ingested.';
+    const names = known.length > 0 ? ` Known sources: ${knownSourceNames}.` : ' No coverage sources are ingested.';
     return err(`No coverage source named \`${source}\` — nothing to drop.${names}`);
   }
   const removed = clearCoverageSource(cg.queries, source);

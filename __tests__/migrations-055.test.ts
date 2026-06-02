@@ -36,31 +36,36 @@ const TARGETS = ['unresolved_refs', 'config_refs', 'sql_refs', 'build_context_re
 // where present (seeded via `seedNode` in the cascade test).
 const insertOrphan: Record<string, (db: ReturnType<DatabaseConnection['getDb']>, fp: string) => void> = {
   unresolved_refs: (db, fp) => {
-    db
-      .prepare(
-        `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run('n_seed', 'foo', 'calls', 1, 0, fp, 'typescript');
+    db.prepare(
+      `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    ).run('n_seed', 'foo', 'calls', 1, 0, fp, 'typescript');
   },
   config_refs: (db, fp) => {
-    db
-      .prepare(`INSERT INTO config_refs (config_kind, config_key, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`)
-      .run('env', 'KEY', null, fp, 1);
+    db.prepare(
+      `INSERT INTO config_refs (config_kind, config_key, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`,
+    ).run('env', 'KEY', null, fp, 1);
   },
   sql_refs: (db, fp) => {
-    db
-      .prepare(`INSERT INTO sql_refs (table_name, op, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`)
-      .run('users', 'read', null, fp, 1);
+    db.prepare(`INSERT INTO sql_refs (table_name, op, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`).run(
+      'users',
+      'read',
+      null,
+      fp,
+      1,
+    );
   },
   build_context_refs: (db, fp) => {
-    db
-      .prepare(`INSERT INTO build_context_refs (ref_kind, source_node_id, file_path, line) VALUES (?, ?, ?, ?)`)
-      .run('dirname', null, fp, 1);
+    db.prepare(`INSERT INTO build_context_refs (ref_kind, source_node_id, file_path, line) VALUES (?, ?, ?, ?)`).run(
+      'dirname',
+      null,
+      fp,
+      1,
+    );
   },
   string_imports: (db, fp) => {
-    db
-      .prepare(`INSERT INTO string_imports (file_path, line, module_name, raw, container_kind) VALUES (?, ?, ?, ?, ?)`)
-      .run(fp, 1, 'foo', `'foo'`, 'string_literal');
+    db.prepare(
+      `INSERT INTO string_imports (file_path, line, module_name, raw, container_kind) VALUES (?, ?, ?, ?, ?)`,
+    ).run(fp, 1, 'foo', `'foo'`, 'string_literal');
   },
 };
 

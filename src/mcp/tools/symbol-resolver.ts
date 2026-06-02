@@ -488,8 +488,7 @@ function fuzzyFallbackResult(cg: Cartograph, symbol: string, fuzzy: Node): { nod
     .filter((s) => s.name !== fuzzy.name)
     .slice(0, SUGGESTION_RENDER_LIMIT);
   const suggestionNames = suggestions.map((s) => `\`${s.name}\``).join(', ');
-  const suggestionList =
-    suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
+  const suggestionList = suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
   const note = `\n\n> **Note:** No exact match for "${symbol}". Showing closest fuzzy result \`${fuzzy.name}\` (${fuzzy.kind}).${suggestionList}`;
   return { node: fuzzy, note };
 }

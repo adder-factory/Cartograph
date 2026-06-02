@@ -796,10 +796,7 @@ interface FormatTestReportArgs {
 function formatReport(args: FormatTestReportArgs): string {
   const { symbol, node, direct, transitive, sameFileTests, mcpToolName, dispatchTests, describeNameTests } = args;
   const lineSuffix = node.startLine ? `:${node.startLine}` : '';
-  const lines: string[] = [
-    `## Tests covering ${symbol} (${node.kind}) — ${node.filePath}${lineSuffix}`,
-    '',
-  ];
+  const lines: string[] = [`## Tests covering ${symbol} (${node.kind}) — ${node.filePath}${lineSuffix}`, ''];
   const hasStaticTests = direct.length > 0 || transitive.length > 0;
   const hasSameFileTests = sameFileTests != null && sameFileTests.length > 0;
   const hasDispatchTests = dispatchTests != null && dispatchTests.length > 0;
@@ -814,7 +811,11 @@ function formatReport(args: FormatTestReportArgs): string {
   if (direct.length > 0) lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('direct', direct)));
   if (transitive.length > 0) lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('transitive', transitive)));
   if (hasSameFileTests) {
-    lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('sameFile', sameFileTests)), buildTestsForSameFileExplainer(node), '');
+    lines.push(
+      renderMarkdownBulletList(buildTestsForBucketSpec('sameFile', sameFileTests)),
+      buildTestsForSameFileExplainer(node),
+      '',
+    );
   }
   if (hasDispatchTests && mcpToolName) {
     lines.push(renderMarkdownBulletList(buildTestsForDispatchSpec(mcpToolName, dispatchTests)));

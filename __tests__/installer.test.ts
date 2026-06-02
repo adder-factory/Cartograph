@@ -12,10 +12,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 // We test the exported functions from config-writer
-import {
-  writeMcpConfig,
-  writeClaudeMd,
-} from '../src/installer/config-writer.js';
+import { writeMcpConfig, writeClaudeMd } from '../src/installer/config-writer.js';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-installer-test-'));

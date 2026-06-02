@@ -126,7 +126,10 @@ const PATTERNS: PatternDef[] = [
   },
   // ALTER TABLE / DROP TABLE
   { re: new RegExp(String.raw`\bALTER\s+TABLE\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'ddl' },
-  { re: new RegExp(String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'ddl' },
+  {
+    re: new RegExp(String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'),
+    op: 'ddl',
+  },
 ];
 
 /**

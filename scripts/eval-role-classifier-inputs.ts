@@ -183,7 +183,10 @@ function printRoleDistribution(samples: Sample[], variants: ReadonlyArray<readon
   for (const [variantName, results] of variants) {
     printDistribution(`  ${variantName}:`, results);
   }
-  printDistribution('  baseline:', samples.map((s) => s.baselineRole));
+  printDistribution(
+    '  baseline:',
+    samples.map((s) => s.baselineRole),
+  );
 }
 
 function printDistribution(prefix: string, values: string[]): void {
@@ -194,7 +197,12 @@ function printDistribution(prefix: string, values: string[]): void {
   console.log(`${prefix} ${formatted}`);
 }
 
-function printDecisionCriterion(ab: { agree: number; total: number }, ad: { agree: number; total: number }, aBaseline: { agree: number; total: number }, dBaseline: { agree: number; total: number }): void {
+function printDecisionCriterion(
+  ab: { agree: number; total: number },
+  ad: { agree: number; total: number },
+  aBaseline: { agree: number; total: number },
+  dBaseline: { agree: number; total: number },
+): void {
   console.log('\n=== Decision criterion (pre-set) ===');
   const abPct = (ab.agree / ab.total) * 100;
   const adPct = (ad.agree / ad.total) * 100;

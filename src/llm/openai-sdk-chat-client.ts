@@ -208,10 +208,7 @@ function buildChatCompletionParams(
   };
 }
 
-function buildChatResult(
-  res: OpenAI.Chat.ChatCompletion,
-  durationMs: number,
-): ChatResult {
+function buildChatResult(res: OpenAI.Chat.ChatCompletion, durationMs: number): ChatResult {
   const text = res.choices[0]?.message?.content ?? '';
   const out: ChatResult = { text, durationMs };
   if (typeof res.usage?.prompt_tokens === 'number') out.promptTokens = res.usage.prompt_tokens;

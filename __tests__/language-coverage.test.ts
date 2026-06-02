@@ -115,7 +115,7 @@ function summarise(language: string, fixture: string): LangResult {
  *  list at collection time. */
 function discoverFixtures(): Array<{ language: string; fixture: string }> {
   const out: Array<{ language: string; fixture: string }> = [];
-for (const lang of fs.readdirSync(TESTBEDS).sort(byString)) {
+  for (const lang of fs.readdirSync(TESTBEDS).sort(byString)) {
     const dir = path.join(TESTBEDS, lang);
     if (!fs.statSync(dir).isDirectory()) continue;
     const fixture = fs.readdirSync(dir).find((f) => f.startsWith('fixture.'));

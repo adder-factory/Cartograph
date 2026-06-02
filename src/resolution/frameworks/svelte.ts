@@ -66,7 +66,12 @@ export const svelteResolver: FrameworkResolver = {
   },
 
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
-    return resolveRune(ref) ?? resolveStoreSubscription(ref, context) ?? resolveSvelteKitImport(ref, context) ?? resolveSvelteComponent(ref, context);
+    return (
+      resolveRune(ref) ??
+      resolveStoreSubscription(ref, context) ??
+      resolveSvelteKitImport(ref, context) ??
+      resolveSvelteComponent(ref, context)
+    );
   },
 
   // SvelteKit route files: `+page.svelte` (svelte), `+server.ts` /

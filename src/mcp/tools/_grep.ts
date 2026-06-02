@@ -264,10 +264,7 @@ export function buildGrepFileSpec(args: {
 function formatGrepOutput(args: FormatGrepOutputArgs): string {
   const { pattern, hits, totalMatched, limit, skippedLargeFiles } = args;
   const hitCountText = totalMatched > limit ? `${hits.length} of ${totalMatched}+` : String(hits.length);
-  const lines: string[] = [
-    `## Grep results for \`${pattern}\` (${hitCountText} hits)`,
-    '',
-  ];
+  const lines: string[] = [`## Grep results for \`${pattern}\` (${hitCountText} hits)`, ''];
   const broadHint = computeBroadPatternHint(pattern, totalMatched);
   if (broadHint !== null) {
     lines.push(broadHint, '');

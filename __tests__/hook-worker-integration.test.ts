@@ -33,50 +33,46 @@ function resolveBun(): string | null {
 const bunBin = resolveBun();
 
 describe('hook worker — integration (forked child under bun)', () => {
-  it(
-    'runs the real hook phase in a forked child and returns outcomes',
-    () => {
-      if (bunBin === null) {
-        expect(bunBin).toBeNull();
-        return;
-      }
+  it('runs the real hook phase in a forked child and returns outcomes', () => {
+    if (bunBin === null) {
+      expect(bunBin).toBeNull();
+      return;
+    }
 
-      const harness = fileURLToPath(new URL('./fixtures/hook-worker-smoke.ts', import.meta.url));
-      const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-hookworker-'));
-      try {
-        // Clear the in-process override the suite sets — the spawned
-        // process must take the real forked-child path.
-        const env = { ...process.env };
-        delete env['CARTOGRAPH_HOOKS_IN_PROCESS'];
+    const harness = fileURLToPath(new URL('./fixtures/hook-worker-smoke.ts', import.meta.url));
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-hookworker-'));
+    try {
+      // Clear the in-process override the suite sets — the spawned
+      // process must take the real forked-child path.
+      const env = { ...process.env };
+      delete env['CARTOGRAPH_HOOKS_IN_PROCESS'];
 
-        const run = spawnSync(bunBin, [harness, projectDir], {
-          encoding: 'utf-8',
-          timeout: 120_000,
-          env,
-        });
+      const run = spawnSync(bunBin, [harness, projectDir], {
+        encoding: 'utf-8',
+        timeout: 120_000,
+        env,
+      });
 
-        const verdictLine = (run.stdout ?? '').split('\n').find((l) => l.includes('__HOOK_WORKER_SMOKE__'));
-        expect(
-          verdictLine,
-          `harness emitted no verdict (exit=${run.status}).\n` + `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
-        ).toBeTruthy();
+      const verdictLine = (run.stdout ?? '').split('\n').find((l) => l.includes('__HOOK_WORKER_SMOKE__'));
+      expect(
+        verdictLine,
+        `harness emitted no verdict (exit=${run.status}).\n` + `stdout:\n${run.stdout}\nstderr:\n${run.stderr}`,
+      ).toBeTruthy();
 
-        const verdict = JSON.parse(verdictLine!.slice(verdictLine!.indexOf('{'))) as {
-          ok: boolean;
-          viaWorker?: boolean;
-          names?: string[] | null;
-          error?: string;
-        };
+      const verdict = JSON.parse(verdictLine!.slice(verdictLine!.indexOf('{'))) as {
+        ok: boolean;
+        viaWorker?: boolean;
+        names?: string[] | null;
+        error?: string;
+      };
 
-        // The decisive assertion: the phase ran in the forked child,
-        // not the in-process fallback.
-        expect(verdict.viaWorker, `expected the forked child to run; verdict: ${JSON.stringify(verdict)}`).toBe(true);
-        expect(verdict.ok, `harness verdict: ${JSON.stringify(verdict)}`).toBe(true);
-        expect(verdict.names).toContain('centrality');
-      } finally {
-        fs.rmSync(projectDir, { recursive: true, force: true });
-      }
-    },
-    130_000,
-  );
+      // The decisive assertion: the phase ran in the forked child,
+      // not the in-process fallback.
+      expect(verdict.viaWorker, `expected the forked child to run; verdict: ${JSON.stringify(verdict)}`).toBe(true);
+      expect(verdict.ok, `harness verdict: ${JSON.stringify(verdict)}`).toBe(true);
+      expect(verdict.names).toContain('centrality');
+    } finally {
+      fs.rmSync(projectDir, { recursive: true, force: true });
+    }
+  }, 130_000);
 });

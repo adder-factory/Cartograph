@@ -721,7 +721,11 @@ function extractPHPImports(content: string): ImportMapping[] {
  */
 type JsStringQuote = '"' | "'" | '`';
 
-function processJsStringChar(content: string, i: number, str: JsStringQuote | null): [number, JsStringQuote | null, string] {
+function processJsStringChar(
+  content: string,
+  i: number,
+  str: JsStringQuote | null,
+): [number, JsStringQuote | null, string] {
   const ch = content[i]!;
   let out = ch;
   if (ch === '\\' && i + 1 < content.length) {

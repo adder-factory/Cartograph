@@ -418,10 +418,7 @@ declare module './queries.js' {
       never
     >;
     getSymbolIssuesCount?: TypedQuery<Record<string, never>, { count: number }>;
-    getIssuesForNode?: TypedQuery<
-      { nodeId: string },
-      SymbolIssueRow
-    >;
+    getIssuesForNode?: TypedQuery<{ nodeId: string }, SymbolIssueRow>;
     getSymbolCoChanges?: TypedQuery<
       { nodeId: string; maxNodesPerCommit: number; minCount: number; limit: number },
       { nodeId: string; coOccurrences: number; commitShas: string }

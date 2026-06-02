@@ -10,11 +10,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { extractSymbolFromContext, extractDeclaration } from '../src/issue-history/parse-diff.js';
-import {
-  mineIssueCommits,
-  ISSUE_REGEX,
-  LAST_MINED_ISSUES_HEAD_KEY,
-} from '../src/issue-history/index.js';
+import { mineIssueCommits, ISSUE_REGEX, LAST_MINED_ISSUES_HEAD_KEY } from '../src/issue-history/index.js';
 import Cartograph from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 

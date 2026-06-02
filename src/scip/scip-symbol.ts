@@ -204,11 +204,7 @@ function appendNamedDescriptor(out: Descriptor[], s: string, name: string, after
   return afterName + 1;
 }
 
-function parseBracketDescriptor(
-  s: string,
-  i: number,
-  ch: '(' | '[',
-): { descriptor: Descriptor; after: number } | null {
+function parseBracketDescriptor(s: string, i: number, ch: '(' | '['): { descriptor: Descriptor; after: number } | null {
   const close = ch === '(' ? ')' : ']';
   const [name, after] = readName(s, i + 1);
   if (after < 0 || s[after] !== close) return null;

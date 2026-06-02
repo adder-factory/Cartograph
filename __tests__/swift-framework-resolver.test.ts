@@ -47,21 +47,21 @@ function context(files: Record<string, string>, nodes: Node[] = []): ResolutionC
 
 describe('Swift framework resolvers', () => {
   it('detects SwiftUI, UIKit, and Vapor from real project signals', () => {
-    expect(swiftUIResolver.detect(context({ 'Sources/App.swift': 'import SwiftUI\nstruct ContentView: View {}' }))).toBe(
-      true,
-    );
+    expect(
+      swiftUIResolver.detect(context({ 'Sources/App.swift': 'import SwiftUI\nstruct ContentView: View {}' })),
+    ).toBe(true);
     expect(swiftUIResolver.detect(context({ 'Cartograph.xcodeproj': '' }))).toBe(true);
 
-    expect(uikitResolver.detect(context({ 'Sources/Profile.swift': 'import UIKit\nclass ProfileView: UIView {}' }))).toBe(
-      true,
-    );
+    expect(
+      uikitResolver.detect(context({ 'Sources/Profile.swift': 'import UIKit\nclass ProfileView: UIView {}' })),
+    ).toBe(true);
 
     expect(vaporResolver.detect(context({ 'Package.swift': '.package(url: "https://github.com/vapor/vapor")' }))).toBe(
       true,
     );
-    expect(vaporResolver.detect(context({ 'Sources/routes.swift': 'import Vapor\nfunc routes(_ app: Application) {}' }))).toBe(
-      true,
-    );
+    expect(
+      vaporResolver.detect(context({ 'Sources/routes.swift': 'import Vapor\nfunc routes(_ app: Application) {}' })),
+    ).toBe(true);
   });
 
   it('extracts SwiftUI app/view nodes, UIKit class nodes, and Vapor routes', () => {

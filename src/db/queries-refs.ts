@@ -293,14 +293,8 @@ declare module './queries.js' {
       { configKind: string; limit: number },
       { configKey: string; reads: number; distinctFiles: number }
     >;
-    getSqlRefsByTableAnyOp?: TypedQuery<
-      { tableName: string },
-      SqlRefByTableOpRow
-    >;
-    getSqlRefsByTableAndOp?: TypedQuery<
-      { tableName: string; op: SqlRefOperation },
-      SqlRefByTableOpRow
-    >;
+    getSqlRefsByTableAnyOp?: TypedQuery<{ tableName: string }, SqlRefByTableOpRow>;
+    getSqlRefsByTableAndOp?: TypedQuery<{ tableName: string; op: SqlRefOperation }, SqlRefByTableOpRow>;
   }
 }
 
