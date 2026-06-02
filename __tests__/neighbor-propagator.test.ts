@@ -9,11 +9,7 @@ import * as os from 'node:os';
 import * as crypto from 'node:crypto';
 import { Cartograph } from '../src/index.js';
 import type { QueryBuilder } from '../src/db/queries.js';
-import {
-  runNeighborPropagator,
-  NeighborPropagatorOptions,
-  NeighborPropagatorResult,
-} from '../src/llm/neighbor-propagator.js';
+import { runNeighborPropagator } from '../src/llm/neighbor-propagator.js';
 import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
 import { getSymbolSummary } from '../src/db/queries-summaries.js';
 
@@ -41,7 +37,7 @@ function createDeterministicVector(seed: number, dim: number = 384): Float32Arra
   // Fill with deterministic values derived from the hash.
   for (let i = 0; i < dim; i++) {
     const byteVal = hash[i % hash.length];
-    vec[i] = (byteVal / 255.0) * 2 - 1; // Range [-1, 1]
+    vec[i] = (byteVal / 255) * 2 - 1; // Range [-1, 1]
   }
 
   // L2-normalize.
@@ -70,7 +66,7 @@ function createSimilarVector(baseVec: Float32Array, noiseMagnitude: number = 0.0
   const noise = h.digest();
 
   for (let i = 0; i < baseVec.length; i++) {
-    const noiseVal = (noise[i % noise.length] / 255.0) * 2 - 1;
+    const noiseVal = (noise[i % noise.length] / 255) * 2 - 1;
     similar[i] = baseVec[i] + noiseVal * noiseMagnitude;
   }
 

@@ -18,6 +18,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('NestJS routes index-hook (B10)', () => {
   let tempDir: string;
   let cg: Cartograph | undefined;
@@ -27,7 +29,7 @@ describe('NestJS routes index-hook (B10)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -164,7 +166,7 @@ class AllMethodsController {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const routes = getNodesByKind(cg.queries, 'route');
-    const methods = routes.map((r) => r.name.split(' ')[0]!).sort();
+    const methods = routes.map((r) => r.name.split(' ')[0]!).sort(byString);
     expect(methods).toEqual(['ALL', 'DELETE', 'GET', 'HEAD', 'OPTIONS', 'PATCH', 'POST', 'PUT']);
   });
 
@@ -189,7 +191,7 @@ class AuthorsResolver {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const routes = getNodesByKind(cg.queries, 'route');
-    const names = routes.map((r) => r.name).sort();
+    const names = routes.map((r) => r.name).sort(byString);
     // The GraphQL field is the METHOD name — the `{ name: 'authors' }`
     // override is an object-literal arg B9 doesn't capture, and the
     // method name is Nest's default field anyway.
@@ -228,7 +230,7 @@ class EventsController {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const routes = getNodesByKind(cg.queries, 'route');
-    const names = routes.map((r) => r.name).sort();
+    const names = routes.map((r) => r.name).sort(byString);
     // The pattern string IS a captured string arg (unlike GraphQL), so exact.
     expect(names).toEqual(['EventPattern user_created', 'MessagePattern sum', 'WebSocket events']);
   });
@@ -256,7 +258,7 @@ class UsersController {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const routes = getNodesByKind(cg.queries, 'route');
-    const names = routes.map((r) => r.name).sort();
+    const names = routes.map((r) => r.name).sort(byString);
     // Resolver → only the GraphQL route (the @Get is gated out);
     // Controller → only the HTTP route (the @Query is gated out).
     expect(names).toEqual(['GET /users', 'GraphQL Query findAll']);
@@ -280,7 +282,7 @@ class HybridController {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const routes = getNodesByKind(cg.queries, 'route');
-    const names = routes.map((r) => r.name).sort();
+    const names = routes.map((r) => r.name).sort(byString);
     expect(names).toEqual(['GET /api/:id', 'GraphQL Query thing']);
   });
 });

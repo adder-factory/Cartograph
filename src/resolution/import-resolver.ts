@@ -303,11 +303,10 @@ export function extractImportMappings(_filePath: string, content: string, langua
   return [];
 }
 
-/** ES6 `import {a, b as c, default as d, * as ns} from 'src'` regex. */
-const ES6_IMPORT_REGEX =
-  /import\s+(?:(\w+)\s*,?\s*)?(?:\{([^}]+)\})?\s*(?:(\*)\s+as\s+(\w+))?\s*from\s*['"]([^'"]+)['"]/g;
-/** CJS `const x = require('src')` / `const {a, b: c} = require('src')` regex. */
-const CJS_REQUIRE_REGEX = /(?:const|let|var)\s+(?:(\w+)|{([^}]+)})\s*=\s*require\(['"]([^'"]+)['"]\)/g;
+/** CJS `const x = require('src')` regex. */
+const CJS_DEFAULT_REQUIRE_RE = /(?:const|let|var)\s+(\w+)\s*=\s*require\(['"]([^'"]+)['"]\)/g;
+/** CJS `const {a, b: c} = require('src')` regex. */
+const CJS_DESTRUCTURED_REQUIRE_RE = /(?:const|let|var)\s+{([^}]+)}\s*=\s*require\(['"]([^'"]+)['"]\)/g;
 /** Named-import alias: `a as b` (ES6) or `a: b` (CJS destructured). */
 const NAMED_ALIAS_RE = /(\w+)\s+as\s+(\w+)/;
 const CJS_ALIAS_RE = /(\w+)\s*:\s*(\w+)/;
@@ -367,30 +366,137 @@ function pushNamedImports(args: PushNamedImportsArgs): void {
   }
 }
 
+interface Es6ImportClause {
+  defaultImport: string | null;
+  namedImports: string | null;
+  namespaceAlias: string | null;
+}
+
+function parseEs6ImportClause(clause: string): Es6ImportClause {
+  const named = extractBracedImportList(clause);
+  const namespaceAlias = extractNamespaceAlias(clause);
+  const defaultImport = extractDefaultImportName(clause);
+  return { defaultImport, namedImports: named, namespaceAlias };
+}
+
+function extractBracedImportList(clause: string): string | null {
+  const open = clause.indexOf('{');
+  if (open < 0) return null;
+  const close = clause.indexOf('}', open + 1);
+  if (close < 0) return null;
+  return clause.slice(open + 1, close);
+}
+
+function extractNamespaceAlias(clause: string): string | null {
+  const star = clause.indexOf('*');
+  if (star < 0) return null;
+  const afterStar = clause.slice(star + 1).trimStart();
+  if (!afterStar.startsWith('as ')) return null;
+  const alias = afterStar.slice(3).trim().split(/\s+/)[0];
+  return alias || null;
+}
+
+function extractDefaultImportName(clause: string): string | null {
+  const beforeSpecialImport = clause.split(/[,{*]/, 1)[0]?.trim();
+  if (!beforeSpecialImport) return null;
+  return /^\w+$/.test(beforeSpecialImport) ? beforeSpecialImport : null;
+}
+
+interface Es6ImportMatch {
+  clause: string;
+  source: string;
+  index: number;
+  end: number;
+}
+
+function findNextEs6Import(content: string, startAt: number): Es6ImportMatch | null {
+  let searchAt = startAt;
+  while (searchAt < content.length) {
+    const importIndex = content.indexOf('import', searchAt);
+    if (importIndex < 0) return null;
+    const clauseStart = skipWhitespace(content, importIndex + 'import'.length);
+    if (clauseStart === importIndex + 'import'.length) {
+      searchAt = importIndex + 'import'.length;
+      continue;
+    }
+    const found = readEs6ImportFrom(content, importIndex, clauseStart);
+    if (found) return found;
+    searchAt = importIndex + 'import'.length;
+  }
+  return null;
+}
+
+function readEs6ImportFrom(content: string, importIndex: number, clauseStart: number): Es6ImportMatch | null {
+  let braceDepth = 0;
+  for (let i = clauseStart; i < content.length; i++) {
+    const char = content[i]!;
+    if (char === ';' && braceDepth === 0) return null;
+    if (char === '{') braceDepth++;
+    if (char === '}') braceDepth = Math.max(0, braceDepth - 1);
+    if (braceDepth === 0 && isFromKeywordAt(content, i)) {
+      const source = readImportSource(content, i + 'from'.length);
+      if (!source) return null;
+      return {
+        clause: content.slice(clauseStart, i).trimEnd(),
+        source: source.value,
+        index: importIndex,
+        end: source.end,
+      };
+    }
+  }
+  return null;
+}
+
+function isFromKeywordAt(content: string, index: number): boolean {
+  if (!content.startsWith('from', index)) return false;
+  return isWhitespace(content[index - 1]) && isWhitespace(content[index + 'from'.length]);
+}
+
+function readImportSource(content: string, startAt: number): { value: string; end: number } | null {
+  const quoteIndex = skipWhitespace(content, startAt);
+  const quote = content[quoteIndex];
+  if (quote !== "'" && quote !== '"') return null;
+  const endQuote = content.indexOf(quote, quoteIndex + 1);
+  if (endQuote < 0) return null;
+  return { value: content.slice(quoteIndex + 1, endQuote), end: endQuote + 1 };
+}
+
+function skipWhitespace(content: string, startAt: number): number {
+  let i = startAt;
+  while (i < content.length && isWhitespace(content[i])) i++;
+  return i;
+}
+
+function isWhitespace(char: string | undefined): boolean {
+  return char === ' ' || char === '\t' || char === '\n' || char === '\r';
+}
+
 /** Walk every ES6 `import ... from` match and push the resulting mappings. */
 function pushES6Imports(content: string, out: ImportMapping[]): void {
-  let match: RegExpExecArray | null;
-  while ((match = ES6_IMPORT_REGEX.exec(content)) !== null) {
-    const [, defaultImport, namedImports, star, namespaceAlias, source] = match;
+  let offset = 0;
+  let match: Es6ImportMatch | null;
+  while ((match = findNextEs6Import(content, offset)) !== null) {
+    offset = match.end;
+    const { defaultImport, namedImports, namespaceAlias } = parseEs6ImportClause(match.clause);
     const line = lineOfOffset(content, match.index);
     if (defaultImport) {
       out.push({
         localName: defaultImport,
         exportedName: 'default',
-        source: source!,
+        source: match.source,
         isDefault: true,
         isNamespace: false,
         line,
       });
     }
     if (namedImports) {
-      pushNamedImports({ out, source: source!, namesList: namedImports, aliasRegex: NAMED_ALIAS_RE, line });
+      pushNamedImports({ out, source: match.source, namesList: namedImports, aliasRegex: NAMED_ALIAS_RE, line });
     }
-    if (star && namespaceAlias) {
+    if (namespaceAlias) {
       out.push({
         localName: namespaceAlias,
         exportedName: '*',
-        source: source!,
+        source: match.source,
         isDefault: false,
         isNamespace: true,
         line,
@@ -401,23 +507,35 @@ function pushES6Imports(content: string, out: ImportMapping[]): void {
 
 /** Walk every CJS `const ... = require(...)` match and push the resulting mappings. */
 function pushRequireImports(content: string, out: ImportMapping[]): void {
+  const matches: Array<{ index: number; push: () => void }> = [];
   let match: RegExpExecArray | null;
-  while ((match = CJS_REQUIRE_REGEX.exec(content)) !== null) {
-    const [, defaultName, destructured, source] = match;
+  while ((match = CJS_DEFAULT_REQUIRE_RE.exec(content)) !== null) {
+    const [, defaultName, source] = match;
     const line = lineOfOffset(content, match.index);
-    if (defaultName) {
-      out.push({
-        localName: defaultName,
-        exportedName: 'default',
-        source: source!,
-        isDefault: true,
-        isNamespace: false,
-        line,
-      });
-    }
-    if (destructured) {
-      pushNamedImports({ out, source: source!, namesList: destructured, aliasRegex: CJS_ALIAS_RE, line });
-    }
+    matches.push({
+      index: match.index,
+      push: () =>
+        out.push({
+          localName: defaultName!,
+          exportedName: 'default',
+          source: source!,
+          isDefault: true,
+          isNamespace: false,
+          line,
+        }),
+    });
+  }
+  while ((match = CJS_DESTRUCTURED_REQUIRE_RE.exec(content)) !== null) {
+    const [, destructured, source] = match;
+    const line = lineOfOffset(content, match.index);
+    matches.push({
+      index: match.index,
+      push: () => pushNamedImports({ out, source: source!, namesList: destructured!, aliasRegex: CJS_ALIAS_RE, line }),
+    });
+  }
+  matches.sort((a, b) => a.index - b.index);
+  for (const matchInfo of matches) {
+    matchInfo.push();
   }
 }
 
@@ -504,7 +622,7 @@ function pushPythonFromImportNames(mappings: ImportMapping[], source: string, im
   const cleaned = importsList.replaceAll(/#[^\n]*/g, '');
   const names = cleaned.split(',').map((s) => s.trim());
   for (const name of names) {
-    const aliasMatch = name.match(/(\w+)\s+as\s+(\w+)/);
+    const aliasMatch = /(\w+)\s+as\s+(\w+)/.exec(name);
     if (aliasMatch) {
       mappings.push({
         localName: aliasMatch[2]!,
@@ -601,11 +719,9 @@ function extractPHPImports(content: string): ImportMapping[] {
  * Process character inside a JS string (quote-aware).
  * Returns [nextIndex, stringState, output].
  */
-function processJsStringChar(
-  content: string,
-  i: number,
-  str: '"' | "'" | '`' | null,
-): [number, '"' | "'" | '`' | null, string] {
+type JsStringQuote = '"' | "'" | '`';
+
+function processJsStringChar(content: string, i: number, str: JsStringQuote | null): [number, JsStringQuote | null, string] {
   const ch = content[i]!;
   let out = ch;
   if (ch === '\\' && i + 1 < content.length) {
@@ -753,33 +869,10 @@ export function stripJsComments(content: string): string {
       continue;
     }
     if (ch === '/') {
-      const next = content[i + 1];
-      if (next === '/') {
-        // Line comment — skip to end of line; reset prevSig.
-        while (i < content.length && content[i] !== '\n') i++;
-        prevSig = '';
-        continue;
-      }
-      if (next === '*') {
-        // Block comment — skip to closing */; reset prevSig.
-        i += 2;
-        while (i < content.length && !(content[i] === '*' && content[i + 1] === '/')) i++;
-        i += 2;
-        prevSig = '';
-        continue;
-      }
-      if (prevSig === '' || STRIP_EXPRESSION_PRECEDERS.has(prevSig)) {
-        // Regex literal — emit verbatim so quote chars inside don't confuse the string tracker.
-        const { chunk, nextI } = consumeRegexLiteral(content, i);
-        out += chunk;
-        i = nextI;
-        prevSig = '/';
-        continue;
-      }
-      // Division operator — emit as normal char.
-      out += ch;
-      prevSig = '/';
-      i++;
+      const next = consumeJsSlash(content, i, prevSig);
+      out += next.out;
+      i = next.nextI;
+      prevSig = next.prevSig;
       continue;
     }
     // Track prevSig for non-whitespace chars.
@@ -790,6 +883,36 @@ export function stripJsComments(content: string): string {
     i++;
   }
   return out;
+}
+
+function consumeJsSlash(content: string, i: number, prevSig: string): { out: string; nextI: number; prevSig: string } {
+  const commentEnd = skipJsComment(content, i);
+  if (commentEnd !== null) return { out: '', nextI: commentEnd, prevSig: '' };
+  if (prevSig === '' || STRIP_EXPRESSION_PRECEDERS.has(prevSig)) {
+    // Regex literal — emit verbatim so quote chars inside don't confuse the string tracker.
+    const { chunk, nextI } = consumeRegexLiteral(content, i);
+    return { out: chunk, nextI, prevSig: '/' };
+  }
+  // Division operator — emit as normal char.
+  return { out: '/', nextI: i + 1, prevSig: '/' };
+}
+
+function skipJsComment(content: string, i: number): number | null {
+  const next = content[i + 1];
+  if (next === '/') return skipJsLineComment(content, i);
+  if (next === '*') return skipJsBlockComment(content, i);
+  return null;
+}
+
+function skipJsLineComment(content: string, i: number): number {
+  while (i < content.length && content[i] !== '\n') i++;
+  return i;
+}
+
+function skipJsBlockComment(content: string, i: number): number {
+  i += 2;
+  while (i < content.length && !(content[i] === '*' && content[i + 1] === '/')) i++;
+  return i + 2;
 }
 
 /**

@@ -185,8 +185,8 @@ class C {
     // `attribute > parameters:(arguments (argument name:(name) (string …)))`.
     // The named-arg path records each `name: value` into `namedArgs`; the
     // Drupal plugin hook reads `namedArgs.id` to synthesize the plugin node.
-    const src = `<?php
-use Drupal\\Core\\Block\\Attribute\\Block;
+    const src = String.raw`<?php
+use Drupal\Core\Block\Attribute\Block;
 #[Block(id: 'my_block', admin_label: 'My Block', category: 'Custom')]
 class MyBlockPlugin {}
 `;
@@ -205,8 +205,8 @@ class MyBlockPlugin {}
     // `#[\Drupal\…\Action(id: 'x')]` — the attribute name parses as a
     // `qualified_name`; `recordDecoratorIfPresent` strips the `\`-prefix to
     // the last segment so the decorator name matches the bare-`use` form.
-    const src = `<?php
-#[\\Drupal\\Core\\Action\\Attribute\\Action(id: 'fqcn_action')]
+    const src = String.raw`<?php
+#[\Drupal\Core\Action\Attribute\Action(id: 'fqcn_action')]
 class MyActionPlugin {}
 `;
     const result = extractFromSource('MyActionPlugin.php', src);

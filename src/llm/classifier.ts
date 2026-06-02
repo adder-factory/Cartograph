@@ -175,19 +175,23 @@ const TEST_PATH_RE = /(?:^|\/)(?:__tests__|__mocks__)\//;
 // `src/test/` collide with non-test usage (OpenAPI specs, language-
 // spec implementations, JUnit-style production utilities) so they
 // are deliberately NOT path-based here.
-const TEST_FILENAME_RE = new RegExp(
+const TEST_FILENAME_PATTERNS: readonly RegExp[] = [
   // dot-suffixed (JS/TS family + Vue/Svelte/CoffeeScript)
-  String.raw`(?:\.(?:test|spec)\.(?:[jt]sx?|svelte|vue|cjs|mjs|coffee)$)` +
-    // snake_case suffix `_test` (Go, Python, Dart, Bash, Zsh)
-    String.raw`|(?:_test\.(?:py|go|dart|sh|bash|zsh)$)` +
-    // snake_case prefix `test_` (Python, Bash)
-    String.raw`|(?:(?:^|\/)test_[^/]+\.(?:py|sh|bash)$)` +
-    // snake_case `_spec` suffix (Ruby, Elixir)
-    String.raw`|(?:_spec\.(?:rb|exs?)$)` +
-    // PascalCase suffix `Test` / `Tests` / `Spec` / `Specs` / `IT`
-    // (Java, Kotlin, Scala, Swift, C#, F#, Pascal, ReScript)
-    String.raw`|(?:(?:Test|Tests|Spec|Specs|IT)\.(?:java|kt|kts|scala|sc|swift|cs|fs|fsx|res|resi|pas|dpr)$)`,
-);
+  /\.(?:test|spec)\.(?:[jt]sx?|svelte|vue|cjs|mjs|coffee)$/,
+  // snake_case suffix `_test` (Go, Python, Dart, Bash, Zsh)
+  /_test\.(?:py|go|dart|sh|bash|zsh)$/,
+  // snake_case prefix `test_` (Python, Bash)
+  /(?:^|\/)test_[^/]+\.(?:py|sh|bash)$/,
+  // snake_case `_spec` suffix (Ruby, Elixir)
+  /_spec\.(?:rb|exs?)$/,
+  // PascalCase suffix `Test` / `Tests` / `Spec` / `Specs` / `IT`
+  // (Java, Kotlin, Scala, Swift, C#, F#, Pascal, ReScript)
+  /(?:Test|Tests|Spec|Specs|IT)\.(?:java|kt|kts|scala|sc|swift|cs|fs|fsx|res|resi|pas|dpr)$/,
+];
+
+function isTestFilename(filePath: string): boolean {
+  return TEST_FILENAME_PATTERNS.some((pattern) => pattern.test(filePath));
+}
 // Specific framework-handler type names. The pattern requires word
 // boundaries so substring matches inside identifiers don't trigger
 // (e.g. `MyRequestHandlerBase` matches via word-suffix; `Handler<`
@@ -212,8 +216,17 @@ const REQ_RES_PAIR_RE = /\(\s*(?:req(?:uest)?)[^,)]*,\s*(?:res(?:ponse)?)/i;
 //     `kind: 'route'`; this signature regex catches handlers that the
 //     extractor missed (dynamically-built Commands, methods with the
 //     handler signature wired in elsewhere, etc.).
-const GO_HANDLER_RE =
-  /\(\s*\w+\s+(?:\*?gin\.Context|echo\.Context|\*?fiber\.Ctx|http\.ResponseWriter\s*,\s*\w+\s+\*http\.Request|\*cobra\.Command\s*,\s*\w+\s+\[\]string)\s*\)/;
+const GO_HANDLER_SIGNATURE_PATTERNS: readonly RegExp[] = [
+  /\(\s*\w+\s+\*?gin\.Context\s*\)/,
+  /\(\s*\w+\s+echo\.Context\s*\)/,
+  /\(\s*\w+\s+\*?fiber\.Ctx\s*\)/,
+  /\(\s*\w+\s+http\.ResponseWriter\s*,\s*\w+\s+\*http\.Request\s*\)/,
+  /\(\s*\w+\s+\*cobra\.Command\s*,\s*\w+\s+\[\]string\s*\)/,
+];
+
+function hasGoHandlerSignature(signature: string): boolean {
+  return GO_HANDLER_SIGNATURE_PATTERNS.some((pattern) => pattern.test(signature));
+}
 /** Parameter decorators (NestJS `@Body`/`@Param`/`@Query`, Spring
  *  `@RequestParam`/`@PathVariable`, FastAPI `Depends`) carried in a
  *  symbol's `signature` — they imply the function is a request handler
@@ -275,7 +288,7 @@ export function classifyByStructure(c: {
   signature: string | null;
 }): RoleLabel | null {
   // Test files are test_helpers regardless of internal shape.
-  if (TEST_PATH_RE.test(c.filePath) || TEST_FILENAME_RE.test(c.filePath)) {
+  if (TEST_PATH_RE.test(c.filePath) || isTestFilename(c.filePath)) {
     return 'test_helper';
   }
   // Type-only declarations are data models. Extractor-deterministic
@@ -296,7 +309,7 @@ export function classifyByStructure(c: {
   }
   // Express / Lambda / Go-framework handler signatures, conservatively matched.
   const sig = c.signature ?? '';
-  if (HANDLER_TYPE_RE.test(sig) || REQ_RES_PAIR_RE.test(sig) || GO_HANDLER_RE.test(sig)) {
+  if (HANDLER_TYPE_RE.test(sig) || REQ_RES_PAIR_RE.test(sig) || hasGoHandlerSignature(sig)) {
     return 'api_endpoint';
   }
   // Project-style verb-prefix functions / methods that cartograph uses
@@ -326,7 +339,7 @@ function hasApiEndpointEvidence(input: { kind: string; signature?: string | null
   return (
     HANDLER_TYPE_RE.test(sig) ||
     REQ_RES_PAIR_RE.test(sig) ||
-    GO_HANDLER_RE.test(sig) ||
+    hasGoHandlerSignature(sig) ||
     API_PARAM_DECORATOR_RE.test(sig)
   );
 }

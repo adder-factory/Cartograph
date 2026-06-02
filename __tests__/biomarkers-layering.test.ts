@@ -89,7 +89,7 @@ describe('layering rule', () => {
       await cg.indexAll({ summarize: false });
       expect(illegalImportFindings(cg)).toHaveLength(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -124,7 +124,7 @@ describe('layering rule', () => {
       expect(findings[0]!.detail.fromLayer).toBe('mcp-tools');
       expect(findings[0]!.detail.toLayer).toBe('core');
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -171,7 +171,7 @@ describe('layering rule', () => {
       expect(findings).toHaveLength(1);
       expect(findings[0]!.detail.toFile).toContain('core/internal/secret');
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -211,7 +211,7 @@ describe('layering rule', () => {
       expect(hit).toBeDefined();
       expect(hit!.detail.fromLayer).toBe('mcp-tools');
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -239,7 +239,7 @@ describe('layering rule', () => {
       await cg.indexAll({ summarize: false });
       expect(illegalImportFindings(cg)).toHaveLength(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -281,7 +281,7 @@ describe('layering rule', () => {
       expect(findings.some((f) => f.detail.fromFile.includes('biomarkers'))).toBe(false);
       expect(findings.some((f) => f.detail.fromFile.includes('other'))).toBe(true);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -315,7 +315,7 @@ describe('layering rule', () => {
       await cg.indexAll({ summarize: false });
       expect(illegalImportFindings(cg)).toHaveLength(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -348,7 +348,7 @@ describe('layering rule', () => {
       await cg.indexAll({ summarize: false });
       expect(illegalImportFindings(cg)).toHaveLength(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -399,7 +399,7 @@ describe('layering rule', () => {
       // this asserts the deny-list-wins precedence the warn message states.
       expect(findings.some((f) => f.detail.toLayer === 'shared')).toBe(false);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 });

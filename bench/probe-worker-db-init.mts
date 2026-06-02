@@ -75,7 +75,7 @@ function summarise(label: string, replies: ProbeReply[]): void {
   const totalMs = replies.map((r) => r.totalMs).sort((a, b) => a - b);
   const median = (arr: number[]): number => arr[Math.floor(arr.length / 2)] ?? 0;
   const min = (arr: number[]): number => arr[0] ?? 0;
-  const max = (arr: number[]): number => arr[arr.length - 1] ?? 0;
+  const max = (arr: number[]): number => arr.at(-1) ?? 0;
   console.log(`\n[${label}] N=${replies.length}`);
   console.log(`  imports ms  min=${min(importsMs)}  median=${median(importsMs)}  max=${max(importsMs)}`);
   console.log(`  db-open ms  min=${min(dbOpenMs)}  median=${median(dbOpenMs)}  max=${max(dbOpenMs)}`);
@@ -93,4 +93,4 @@ async function main(): Promise<void> {
   }
 }
 
-void main();
+await main();

@@ -114,7 +114,10 @@ function writeMcpEntry(loc: Location): WriteResult['files'][number] {
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
   }
-  const action: 'created' | 'updated' = before ? 'updated' : fs.existsSync(file) ? 'updated' : 'created';
+  let action: 'created' | 'updated' = 'created';
+  if (before || fs.existsSync(file)) {
+    action = 'updated';
+  }
   if (!existing['mcpServers']) existing['mcpServers'] = {};
   existing['mcpServers'].cartograph = after;
   writeJsonFile(file, existing);
@@ -132,8 +135,12 @@ function writeInstructionsEntry(loc: Location): WriteResult['files'][number] {
     startMarker: CARTOGRAPH_SECTION_START,
     endMarker: CARTOGRAPH_SECTION_END,
   });
-  const mapped: 'created' | 'updated' | 'unchanged' =
-    action === 'created' ? 'created' : action === 'unchanged' ? 'unchanged' : 'updated';
+  let mapped: 'created' | 'updated' | 'unchanged' = 'updated';
+  if (action === 'created') {
+    mapped = 'created';
+  } else if (action === 'unchanged') {
+    mapped = 'unchanged';
+  }
   return { path: file, action: mapped };
 }
 

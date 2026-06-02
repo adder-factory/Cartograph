@@ -1,5 +1,7 @@
 import type { MigrationModule } from './types.js';
 
+type SqliteDatabase = import('../sqlite-adapter.js').SqliteDatabase;
+
 /**
  * Convert every base table to SQLite STRICT mode.
  *
@@ -121,7 +123,10 @@ const ROLE_LABELS = [
 const EDGE_CONFIDENCE = ['EXTRACTED', 'INFERRED', 'AMBIGUOUS'];
 const EMBEDDING_GRAINS = ['symbol', 'file'];
 
-const inList = (vals: string[]): string => `(${vals.map((v) => `'${v}'`).join(', ')})`;
+const inList = (vals: string[]): string => {
+  const quotedValues = vals.map((v) => `'${v}'`).join(', ');
+  return `(${quotedValues})`;
+};
 
 // The three SQLite scalar storage classes the copy step CASTs through
 // to coerce loose pre-STRICT affinities (step 2). BLOB / ANY / a
@@ -203,6 +208,72 @@ const WITHOUT_ROWID_TABLES = new Set<string>([
   'commit_intents',
 ]);
 
+function hasStrictifyCompatibleNodesTable(db: SqliteDatabase): boolean {
+  const hasNodes = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name='nodes'").get() as
+    | { one: number }
+    | undefined;
+  if (!hasNodes) return true;
+  const nodeCols = new Set(
+    (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name),
+  );
+  return nodeCols.has('start_line') && nodeCols.has('end_line');
+}
+
+function listVirtualTableNames(db: SqliteDatabase): string[] {
+  return (
+    db
+      .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'`)
+      .all() as Array<{ name: string }>
+  ).map((r) => r.name);
+}
+
+function isVirtualShadowObject(name: string, virtualNames: readonly string[]): boolean {
+  return virtualNames.some((v) => name.startsWith(`${v}_`));
+}
+
+function listStrictifyBaseTables(db: SqliteDatabase, virtualNames: readonly string[]): ObjectRow[] {
+  return (
+    db
+      .prepare(
+        `SELECT name, sql FROM sqlite_master
+          WHERE type = 'table'
+            AND name NOT LIKE '${SYSTEM_PREFIX}%'
+            AND name NOT LIKE '${VEC_PREFIX}%'
+            AND sql IS NOT NULL
+            AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'`,
+      )
+      .all() as ObjectRow[]
+  ).filter((row) => row.sql !== null && !isVirtualShadowObject(row.name, virtualNames));
+}
+
+function listDroppableTriggers(db: SqliteDatabase, virtualNames: readonly string[]): Array<ObjectRow & { tbl_name: string }> {
+  return (
+    db
+      .prepare(`SELECT name, sql, tbl_name FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL`)
+      .all() as Array<ObjectRow & { tbl_name: string }>
+  ).filter((t) => !virtualNames.includes(t.tbl_name) && !isVirtualShadowObject(t.tbl_name, virtualNames));
+}
+
+function dropViewsAndTriggers(db: SqliteDatabase, views: readonly ObjectRow[], triggers: readonly ObjectRow[]): void {
+  for (const trg of triggers) {
+    db.exec(`DROP TRIGGER IF EXISTS "${trg.name}"`);
+  }
+  for (const view of views) {
+    db.exec(`DROP VIEW IF EXISTS "${view.name}"`);
+  }
+}
+
+function restoreViewsAndTriggers(db: SqliteDatabase, views: readonly ObjectRow[], triggers: readonly ObjectRow[]): void {
+  for (const view of views) {
+    const exists = db.prepare(`SELECT 1 AS one FROM sqlite_master WHERE type = 'view' AND name = ?`).get(view.name);
+    if (!exists && view.sql) db.exec(view.sql);
+  }
+  for (const trg of triggers) {
+    const exists = db.prepare(`SELECT 1 AS one FROM sqlite_master WHERE type = 'trigger' AND name = ?`).get(trg.name);
+    if (!exists && trg.sql) db.exec(trg.sql);
+  }
+}
+
 export const MIGRATION: MigrationModule = {
   description: 'Rebuild every base table as STRICT for type enforcement',
   requiresFkDisable: true,
@@ -218,15 +289,7 @@ export const MIGRATION: MigrationModule = {
     // the inserted-into table is unrelated). Skip cleanly so test
     // fixtures stay green; on a real production DB `nodes` always has
     // these columns since v1, so the guard is a no-op there.
-    const hasNodes = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name='nodes'").get() as
-      | { one: number }
-      | undefined;
-    if (hasNodes) {
-      const nodeCols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-      if (!nodeCols.includes('start_line') || !nodeCols.includes('end_line')) {
-        return;
-      }
-    }
+    if (!hasStrictifyCompatibleNodesTable(db)) return;
 
     // Collect virtual-table names so we can also skip their backing
     // shadow tables (rtree creates `<name>_node` / `_rowid` / `_parent`,
@@ -234,28 +297,9 @@ export const MIGRATION: MigrationModule = {
     // etc). Those backing tables are SQLite-internal and have column
     // shapes (typeless aliased ROWIDs) that aren't STRICT-legal —
     // touching them would corrupt the virtual table.
-    const virtualNames = (
-      db
-        .prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND sql LIKE 'CREATE VIRTUAL TABLE%'`)
-        .all() as Array<{ name: string }>
-    ).map((r) => r.name);
+    const virtualNames = listVirtualTableNames(db);
 
-    const baseTables = (
-      db
-        .prepare(
-          `SELECT name, sql FROM sqlite_master
-            WHERE type = 'table'
-              AND name NOT LIKE '${SYSTEM_PREFIX}%'
-              AND name NOT LIKE '${VEC_PREFIX}%'
-              AND sql IS NOT NULL
-              AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'`,
-        )
-        .all() as ObjectRow[]
-    ).filter((row) => {
-      if (!row.sql) return false;
-      // Skip shadow tables backing any virtual table.
-      return !virtualNames.some((v) => row.name.startsWith(`${v}_`));
-    });
+    const baseTables = listStrictifyBaseTables(db, virtualNames);
 
     // Capture every user view + every non-virtual-shadow trigger up
     // front, drop them, and restore at the end of the loop. Before
@@ -287,21 +331,8 @@ export const MIGRATION: MigrationModule = {
     const droppedViews = db
       .prepare(`SELECT name, sql FROM sqlite_master WHERE type = 'view' AND sql IS NOT NULL`)
       .all() as ObjectRow[];
-    const droppedTriggers = (
-      db
-        .prepare(`SELECT name, sql, tbl_name FROM sqlite_master WHERE type = 'trigger' AND sql IS NOT NULL`)
-        .all() as Array<ObjectRow & { tbl_name: string }>
-    ).filter((t) => {
-      if (virtualNames.includes(t.tbl_name)) return false;
-      if (virtualNames.some((v) => t.tbl_name.startsWith(`${v}_`))) return false;
-      return true;
-    });
-    for (const trg of droppedTriggers) {
-      db.exec(`DROP TRIGGER IF EXISTS "${trg.name}"`);
-    }
-    for (const view of droppedViews) {
-      db.exec(`DROP VIEW IF EXISTS "${view.name}"`);
-    }
+    const droppedTriggers = listDroppableTriggers(db, virtualNames);
+    dropViewsAndTriggers(db, droppedViews, droppedTriggers);
 
     for (const table of baseTables) {
       try {
@@ -343,14 +374,7 @@ export const MIGRATION: MigrationModule = {
     // reference base tables 057 will re-create; those still compile
     // here because 054's rebuild left the base tables in place
     // (DROP-then-RENAME inside the same transaction).
-    for (const view of droppedViews) {
-      const exists = db.prepare(`SELECT 1 AS one FROM sqlite_master WHERE type = 'view' AND name = ?`).get(view.name);
-      if (!exists && view.sql) db.exec(view.sql);
-    }
-    for (const trg of droppedTriggers) {
-      const exists = db.prepare(`SELECT 1 AS one FROM sqlite_master WHERE type = 'trigger' AND name = ?`).get(trg.name);
-      if (!exists && trg.sql) db.exec(trg.sql);
-    }
+    restoreViewsAndTriggers(db, droppedViews, droppedTriggers);
 
     // Reclaim space from the rebuild — every strictified table left a
     // free-page hole behind. VACUUM compacts the file. Cheap on a

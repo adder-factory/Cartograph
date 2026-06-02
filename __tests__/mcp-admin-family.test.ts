@@ -41,7 +41,7 @@ describe('cartograph_admin family (#7-4)', () => {
     // received value — the human-readable separator is not part of
     // the contract.
     const adminTool = getToolModules().find((m) => m.definition.name === 'cartograph_admin');
-    const enumValues = adminTool?.definition.inputSchema.properties?.['action']?.['enum'] as string[] | undefined;
+    const enumValues = adminTool?.definition.inputSchema.properties?.['action']?.['enum'];
     expect(enumValues).toBeDefined();
 
     const missing = await handler.execute('cartograph_admin', {});
@@ -85,7 +85,7 @@ describe('cartograph_admin family (#7-4)', () => {
 
   it("'reload-modules' is NOT in the action enum — retired 2026-05-20 under bun (ESM cache-bust is a no-op)", () => {
     const adminTool = getToolModules().find((m) => m.definition.name === 'cartograph_admin');
-    const enumValues = adminTool?.definition.inputSchema.properties?.['action']?.['enum'] as string[] | undefined;
+    const enumValues = adminTool?.definition.inputSchema.properties?.['action']?.['enum'];
     expect(enumValues).not.toContain('reload-modules');
   });
 });

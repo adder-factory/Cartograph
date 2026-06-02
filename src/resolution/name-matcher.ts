@@ -290,12 +290,12 @@ function inferJavaFieldReceiverType(
   if (!typeExpr) return null;
   // `Map<String, Foo>` → `Map`; `Foo[]` → `Foo`; `Foo.Inner` → `Inner`
   // (the inner class is the actual receiver type).
-  const headMatch = typeExpr.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*[<\[]?/g);
+  const headMatch = typeExpr.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*[<[]?/g);
   if (!headMatch) return null;
   // Pick the LAST identifier in a dotted path (`com.example.Foo`
   // collapses to `Foo` since the simple name is what the rest of
   // the resolver looks up).
-  const segments = typeExpr.split(/[<\[\s]/, 1)[0]!.split('.');
+  const segments = typeExpr.split(/[<[\s]/, 1)[0]!.split('.');
   return segments.at(-1) ?? null;
 }
 
@@ -652,15 +652,14 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
   // `jvmClassLookupName` translates alias→real name before lookup.
   const jvmImportFqnMap = isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined;
 
-  const directFqn = jvmImportFqnMap?.get(objectOrClass);
-  const direct = findMethodOnClassByName({
-    className: jvmClassLookupName(objectOrClass, directFqn),
+  const direct = findReceiverMethod({
+    receiverName: objectOrClass,
     methodName,
     ref,
     context,
+    jvmImportFqnMap,
     confidence: QUALIFIED_RECEIVER_CONFIDENCE,
     resolvedBy: 'qualified-name',
-    preferredFqn: directFqn,
   });
   if (direct) return direct;
 
@@ -668,19 +667,15 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
   // find the matching class. e.g. `permissionEngine.foo()` → look for
   // a `PermissionEngine` class.
   const capitalizedReceiver = objectOrClass.charAt(0).toUpperCase() + objectOrClass.slice(1);
-  if (capitalizedReceiver !== objectOrClass) {
-    const capFqn = jvmImportFqnMap?.get(capitalizedReceiver);
-    const capitalized = findMethodOnClassByName({
-      className: jvmClassLookupName(capitalizedReceiver, capFqn),
-      methodName,
-      ref,
-      context,
-      confidence: INSTANCE_RECEIVER_CONFIDENCE,
-      resolvedBy: 'instance-method',
-      preferredFqn: capFqn,
-    });
-    if (capitalized) return capitalized;
-  }
+  const capitalized = findCapitalizedReceiverMethod({
+    objectOrClass,
+    capitalizedReceiver,
+    methodName,
+    ref,
+    context,
+    jvmImportFqnMap,
+  });
+  if (capitalized) return capitalized;
 
   // F#64a (B11) — Strategy 2.5: JVM-only field-receiver type inference.
   // When `fooConverter` doesn't capitalize cleanly to the declared
@@ -690,22 +685,15 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
   // signature. The declared type IS the class name we should resolve
   // against. Strictly more permissive than Strategy 2 (which only
   // handles the camel-case convention).
-  if (isJvmLang(ref.language)) {
-    const inferredType = inferJavaFieldReceiverType(objectOrClass, ref, context);
-    if (inferredType && inferredType !== objectOrClass && inferredType !== capitalizedReceiver) {
-      const inferredFqn = jvmImportFqnMap?.get(inferredType);
-      const fromField = findMethodOnClassByName({
-        className: jvmClassLookupName(inferredType, inferredFqn),
-        methodName,
-        ref,
-        context,
-        confidence: INSTANCE_RECEIVER_CONFIDENCE,
-        resolvedBy: 'instance-method',
-        preferredFqn: inferredFqn,
-      });
-      if (fromField) return fromField;
-    }
-  }
+  const fromField = findJvmFieldReceiverMethod({
+    objectOrClass,
+    capitalizedReceiver,
+    methodName,
+    ref,
+    context,
+    jvmImportFqnMap,
+  });
+  if (fromField) return fromField;
 
   // F2 — strategies 1/2 having failed means the receiver (`objectOrClass`
   // / its capitalized form) is NOT a known user class. If the method
@@ -727,6 +715,30 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
   // overlap with the containing class. Handles abbreviated variable
   // names like `permEngine.run()` → `PermissionRuleEngine.run()`.
   return matchMethodByNameOverlap({ objectOrClass, methodName, ref, context });
+}
+
+interface FindReceiverMethodArgs {
+  receiverName: string;
+  methodName: string;
+  ref: UnresolvedRef;
+  context: ResolutionContext;
+  jvmImportFqnMap: Map<string, string> | undefined;
+  confidence: number;
+  resolvedBy: 'qualified-name' | 'instance-method';
+}
+
+function findReceiverMethod(args: FindReceiverMethodArgs): ResolvedRef | null {
+  const { receiverName, methodName, ref, context, jvmImportFqnMap, confidence, resolvedBy } = args;
+  const preferredFqn = jvmImportFqnMap?.get(receiverName);
+  return findMethodOnClassByName({
+    className: jvmClassLookupName(receiverName, preferredFqn),
+    methodName,
+    ref,
+    context,
+    confidence,
+    resolvedBy,
+    preferredFqn,
+  });
 }
 
 /** Class-kind enum the resolver considers method receivers. */
@@ -793,22 +805,80 @@ function findMethodOnClassByName(args: FindMethodOnClassByNameArgs): ResolvedRef
       .find((n) => n.kind === 'method' && n.name === methodName && n.qualifiedName.includes(classNode.name));
     if (!methodNode) continue;
 
-    // Confidence policy:
-    //  - THIS candidate matched the FQN → strongest signal, upgrade.
-    //  - FQN provided but matched NOTHING in the candidate set AND
-    //    there were ≥2 candidates → genuinely ambiguous, downgrade.
-    //  - Otherwise (no FQN provided, or FQN narrowed exactly one
-    //    candidate-with-method) → caller's confidence stays.
-    const thisMatchesFqn = fqnAvailable && fqnMatchesFilePath(classNode.filePath, preferredFqn);
-    if (thisMatchesFqn) {
-      return { original: ref, targetNodeId: methodNode.id, confidence: 0.9, resolvedBy: 'fqn-disambiguated' };
-    }
-    if (fqnAvailable && !anyFqnMatch && candidates.length > 1) {
-      return { original: ref, targetNodeId: methodNode.id, confidence: 0.6, resolvedBy };
-    }
-    return { original: ref, targetNodeId: methodNode.id, confidence, resolvedBy };
+    return resolveMethodCandidate({
+      ref,
+      methodNode,
+      classNode,
+      confidence,
+      resolvedBy,
+      preferredFqn,
+      fqnAvailable,
+      anyFqnMatch,
+      candidateCount: candidates.length,
+    });
   }
   return null;
+}
+
+interface ReceiverFallbackArgs {
+  objectOrClass: string;
+  capitalizedReceiver: string;
+  methodName: string;
+  ref: UnresolvedRef;
+  context: ResolutionContext;
+  jvmImportFqnMap: Map<string, string> | undefined;
+}
+
+function findCapitalizedReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef | null {
+  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap } = args;
+  if (capitalizedReceiver === objectOrClass) return null;
+  return findReceiverMethod({
+    receiverName: capitalizedReceiver,
+    methodName,
+    ref,
+    context,
+    jvmImportFqnMap,
+    confidence: INSTANCE_RECEIVER_CONFIDENCE,
+    resolvedBy: 'instance-method',
+  });
+}
+
+function findJvmFieldReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef | null {
+  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap } = args;
+  if (!isJvmLang(ref.language)) return null;
+  const inferredType = inferJavaFieldReceiverType(objectOrClass, ref, context);
+  if (!inferredType || inferredType === objectOrClass || inferredType === capitalizedReceiver) return null;
+  return findReceiverMethod({
+    receiverName: inferredType,
+    methodName,
+    ref,
+    context,
+    jvmImportFqnMap,
+    confidence: INSTANCE_RECEIVER_CONFIDENCE,
+    resolvedBy: 'instance-method',
+  });
+}
+
+function resolveMethodCandidate(args: {
+  ref: UnresolvedRef;
+  methodNode: Node;
+  classNode: Node;
+  confidence: number;
+  resolvedBy: 'qualified-name' | 'instance-method';
+  preferredFqn: string | undefined;
+  fqnAvailable: boolean;
+  anyFqnMatch: boolean;
+  candidateCount: number;
+}): ResolvedRef {
+  const { ref, methodNode, classNode, confidence, resolvedBy, preferredFqn, fqnAvailable, anyFqnMatch, candidateCount } =
+    args;
+  if (fqnAvailable && fqnMatchesFilePath(classNode.filePath, preferredFqn!)) {
+    return { original: ref, targetNodeId: methodNode.id, confidence: 0.9, resolvedBy: 'fqn-disambiguated' };
+  }
+  if (fqnAvailable && !anyFqnMatch && candidateCount > 1) {
+    return { original: ref, targetNodeId: methodNode.id, confidence: 0.6, resolvedBy };
+  }
+  return { original: ref, targetNodeId: methodNode.id, confidence, resolvedBy };
 }
 
 /**

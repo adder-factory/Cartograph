@@ -33,9 +33,14 @@ function resolveBun(): string | null {
 const bunBin = resolveBun();
 
 describe('hook worker — integration (forked child under bun)', () => {
-  it.skipIf(bunBin === null)(
+  it(
     'runs the real hook phase in a forked child and returns outcomes',
     () => {
+      if (bunBin === null) {
+        expect(bunBin).toBeNull();
+        return;
+      }
+
       const harness = fileURLToPath(new URL('./fixtures/hook-worker-smoke.ts', import.meta.url));
       const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-hookworker-'));
       try {
@@ -44,7 +49,7 @@ describe('hook worker — integration (forked child under bun)', () => {
         const env = { ...process.env };
         delete env['CARTOGRAPH_HOOKS_IN_PROCESS'];
 
-        const run = spawnSync(bunBin as string, [harness, projectDir], {
+        const run = spawnSync(bunBin, [harness, projectDir], {
           encoding: 'utf-8',
           timeout: 120_000,
           env,

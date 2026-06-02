@@ -107,49 +107,21 @@ export const bunServeResolver: FrameworkResolver = {
     const callRe = /\bBun\.serve\s*\(/g;
     let callMatch: RegExpExecArray | null;
     while ((callMatch = callRe.exec(safe)) !== null) {
-      // `callMatch.index` points at `B` in `Bun.serve(`; the `(` is at
-      // `callMatch.index + callMatch[0].length - 1`. Walk to find the
-      // matching `)`.
-      const openParenIdx = callMatch.index + callMatch[0].length - 1;
-      const closeParenIdx = findMatchingClose({ source: safe, openIdx: openParenIdx, openChar: '(', closeChar: ')' });
-      if (closeParenIdx === -1) continue;
-
-      // Locate the config object's opening `{` (skip whitespace +
-      // optional leading identifier — Bun.serve doesn't accept a
-      // typed call in the wild, but the skip-whitespace step is
-      // cheap defensive code).
-      let configOpenIdx = openParenIdx + 1;
-      while (configOpenIdx < closeParenIdx && /\s/.test(safe[configOpenIdx] ?? '')) configOpenIdx++;
-      if (safe[configOpenIdx] !== '{') continue;
-      const configBodyStart = configOpenIdx + 1;
-      // Find `routes: {` at the TOP LEVEL of the Bun.serve config
-      // object. We don't require the routes key to be first or only —
-      // Bun.serve calls typically interleave `port`, `hostname`,
-      // `idleTimeout`, `fetch`, `websocket`, `routes` in any order.
-      // The depth gate stops a contrived inner-object property
-      // literally named `routes:` (e.g. a `custom: { routes: {...} }`
-      // block) from being matched ahead of the real top-level block.
-      const routesKeyRe = /\broutes\s*:\s*\{/g;
-      let routesMatch: RegExpExecArray | null;
-      routesKeyRe.lastIndex = configBodyStart;
-      while ((routesMatch = routesKeyRe.exec(safe)) !== null) {
-        if (routesMatch.index >= closeParenIdx) {
-          routesMatch = null;
-          break;
-        }
-        if (depthAtIndex(safe, configBodyStart, routesMatch.index) === 0) break;
-      }
-      if (!routesMatch) continue;
-
-      const routesOpenIdx = routesMatch.index + routesMatch[0].length - 1;
-      const routesCloseIdx = findMatchingClose({ source: safe, openIdx: routesOpenIdx, openChar: '{', closeChar: '}' });
-      if (routesCloseIdx === -1 || routesCloseIdx > closeParenIdx) continue;
+      const routesBlock = findBunServeRoutesBlock(safe, callMatch);
+      if (!routesBlock) continue;
+      const routesCloseIdx = findMatchingClose({
+        source: safe,
+        openIdx: routesBlock.routesOpenIdx,
+        openChar: '{',
+        closeChar: '}',
+      });
+      if (routesCloseIdx === -1 || routesCloseIdx > routesBlock.closeParenIdx) continue;
 
       // Walk top-level path entries inside the routes block.
       collectRouteEntries({
         safe,
         lineOf,
-        routesBodyStart: routesOpenIdx + 1,
+        routesBodyStart: routesBlock.routesOpenIdx + 1,
         routesBodyEnd: routesCloseIdx,
         filePath,
         language,
@@ -161,6 +133,41 @@ export const bunServeResolver: FrameworkResolver = {
     return nodes;
   },
 };
+
+function findBunServeRoutesBlock(
+  safe: string,
+  callMatch: RegExpExecArray,
+): { routesOpenIdx: number; closeParenIdx: number } | null {
+  // `callMatch.index` points at `B` in `Bun.serve(`; the `(` is at
+  // `callMatch.index + callMatch[0].length - 1`.
+  const openParenIdx = callMatch.index + callMatch[0].length - 1;
+  const closeParenIdx = findMatchingClose({ source: safe, openIdx: openParenIdx, openChar: '(', closeChar: ')' });
+  if (closeParenIdx === -1) return null;
+
+  const configOpenIdx = firstNonWhitespaceIndex(safe, openParenIdx + 1, closeParenIdx);
+  if (safe[configOpenIdx] !== '{') return null;
+
+  const routesMatch = findTopLevelRoutesMatch(safe, configOpenIdx + 1, closeParenIdx);
+  if (!routesMatch) return null;
+  return { routesOpenIdx: routesMatch.index + routesMatch[0].length - 1, closeParenIdx };
+}
+
+function firstNonWhitespaceIndex(safe: string, start: number, limit: number): number {
+  let i = start;
+  while (i < limit && /\s/.test(safe[i] ?? '')) i++;
+  return i;
+}
+
+function findTopLevelRoutesMatch(safe: string, configBodyStart: number, closeParenIdx: number): RegExpExecArray | null {
+  const routesKeyRe = /\broutes\s*:\s*\{/g;
+  routesKeyRe.lastIndex = configBodyStart;
+  let routesMatch: RegExpExecArray | null;
+  while ((routesMatch = routesKeyRe.exec(safe)) !== null) {
+    if (routesMatch.index >= closeParenIdx) return null;
+    if (depthAtIndex(safe, configBodyStart, routesMatch.index) === 0) return routesMatch;
+  }
+  return null;
+}
 
 interface CollectRouteEntriesArgs {
   safe: string;
@@ -307,24 +314,45 @@ function findMatchingClose(args: FindMatchingCloseArgs): number {
   for (let i = openIdx; i < source.length; i++) {
     const c = source[i];
     if (inString !== null) {
-      if (c === '\\') {
-        i++;
-        continue;
-      }
-      if (c === inString) inString = null;
+      const consumed = consumeStringChar(c, inString);
+      inString = consumed.inString;
+      if (consumed.skipNext) i++;
       continue;
     }
-    if (c === '"' || c === "'" || c === '`') {
+    if (isStringDelimiter(c)) {
       inString = c;
       continue;
     }
-    if (c === openChar) depth++;
-    else if (c === closeChar) {
-      depth--;
-      if (depth === 0) return i;
-    }
+    depth = updateMatchingDepth(c, depth, openChar, closeChar);
+    if (depth === 0) return i;
   }
   return -1;
+}
+
+function isStringDelimiter(c: string | undefined): c is string {
+  return c === '"' || c === "'" || c === '`';
+}
+
+function updateMatchingDepth(
+  c: string | undefined,
+  depth: number,
+  openChar: string,
+  closeChar: string,
+): number {
+  if (c === openChar) return depth + 1;
+  if (c === closeChar) return depth - 1;
+  return depth;
+}
+
+function consumeStringChar(c: string | undefined, inString: string): { inString: string | null; skipNext: boolean } {
+  if (c === '\\') return { inString, skipNext: true };
+  return { inString: c === inString ? null : inString, skipNext: false };
+}
+
+function updateBraceDepth(c: string | undefined, depth: number): number {
+  if (c === '{') return depth + 1;
+  if (c === '}') return depth - 1;
+  return depth;
 }
 
 /**
@@ -340,19 +368,18 @@ function depthAtIndex(s: string, from: number, at: number): number {
   for (let i = from; i < at; i++) {
     const c = s[i];
     if (inString !== null) {
-      if (c === '\\') {
+      const next = consumeStringChar(c, inString);
+      inString = next.inString;
+      if (next.skipNext) {
         i++;
-        continue;
       }
-      if (c === inString) inString = null;
       continue;
     }
     if (c === '"' || c === "'" || c === '`') {
       inString = c;
       continue;
     }
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
+    depth = updateBraceDepth(c, depth);
   }
   return depth;
 }

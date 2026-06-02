@@ -115,14 +115,7 @@ export const fabricViewResolver: FrameworkResolver = {
     for (let i = 0; i < Math.min(files.length, 200); i++) {
       const f = files[i];
       if (!f) continue;
-      if (f.endsWith('.ts') || f.endsWith('.tsx')) {
-        const src = context.readFile(f);
-        if (src && isFabricSpec(src)) return true;
-      } else if (f.endsWith('.m') || f.endsWith('.mm') || f.endsWith('.java') || f.endsWith('.kt')) {
-        const src = context.readFile(f);
-        if (src && (/\bRCT_(?:EXPORT|CUSTOM|REMAP)_VIEW_PROPERTY\b/.test(src) || src.includes('@ReactProp')))
-          return true;
-      }
+      if (fileHasFabricSignal(f, (path) => context.readFile(path))) return true;
     }
     return false;
   },
@@ -154,3 +147,15 @@ export const fabricViewResolver: FrameworkResolver = {
     return null;
   },
 };
+
+function fileHasFabricSignal(filePath: string, readFile: (filePath: string) => string | null): boolean {
+  const src = readFile(filePath);
+  if (!src) return false;
+  if (filePath.endsWith('.ts') || filePath.endsWith('.tsx')) return isFabricSpec(src);
+  if (!isNativeViewManagerFile(filePath)) return false;
+  return /\bRCT_(?:EXPORT|CUSTOM|REMAP)_VIEW_PROPERTY\b/.test(src) || src.includes('@ReactProp');
+}
+
+function isNativeViewManagerFile(filePath: string): boolean {
+  return filePath.endsWith('.m') || filePath.endsWith('.mm') || filePath.endsWith('.java') || filePath.endsWith('.kt');
+}

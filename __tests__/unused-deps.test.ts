@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterEach } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import { Cartograph } from '../src/index.js';
 import { analyzeUnusedDeps } from '../src/deps/unused.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';

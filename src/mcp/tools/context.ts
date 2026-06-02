@@ -160,11 +160,10 @@ function looksLikeFeatureRequest(task: string): boolean {
  * `null` when the findings table is absent (e.g. older indexes) or
  * the node has no findings.
  */
-function topFindingForNode(
-  cg: Cartograph,
-  nodeId: string,
-): { biomarker: string; severity: 'info' | 'warning' | 'error' } | null {
-  let top: { biomarker: string; severity: 'info' | 'warning' | 'error' } | null = null;
+type ContextFindingSummary = { biomarker: string; severity: 'info' | 'warning' | 'error' };
+
+function topFindingForNode(cg: Cartograph, nodeId: string): ContextFindingSummary | null {
+  let top: ContextFindingSummary | null = null;
   try {
     const findings = getFindingsForNode(cg.queries, nodeId);
     for (const f of findings) {
@@ -254,7 +253,9 @@ function fmtAgo(days: number): string {
 
 /** Severity → traffic-light icon for the biomarker badge in each row. */
 function severityIcon(sev: 'info' | 'warning' | 'error'): string {
-  return sev === 'error' ? '🔴' : sev === 'warning' ? '🟡' : '⚪';
+  if (sev === 'error') return '🔴';
+  if (sev === 'warning') return '🟡';
+  return '⚪';
 }
 
 function formatContextRiskSignals(cg: Cartograph, nodes: Node[]): string {

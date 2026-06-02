@@ -318,7 +318,7 @@ function spawnWorkers(args: SpawnWorkersArgs): WorkerHandle[] {
     // after each iteration. The persistent `.on` is safe — we never
     // remove this listener for the worker's lifetime.
     worker.on('error', (err) => {
-      if (args.errorSink.error === null) args.errorSink.error = err;
+      args.errorSink.error ??= err;
     });
     // B29 (2026-05-24) — also capture silent exits. A worker that
     // process.exit()s without an 'error' event would otherwise leave
@@ -339,14 +339,12 @@ function spawnWorkers(args: SpawnWorkersArgs): WorkerHandle[] {
     //      promise directly.
     worker.on('exit', (code) => {
       if (!args.iterationActive.value) return;
-      if (args.errorSink.error === null) {
-        args.errorSink.error = new Error(`pagerank worker exited with code ${code} mid-iteration`);
-      }
+      args.errorSink.error ??= new Error(`pagerank worker exited with code ${code} mid-iteration`);
       args.currentSettle.fn?.();
     });
     let load = 0;
-    for (let i = 0; i < targets.length; i++) {
-      load += perTargetCounts[targets[i]!]!;
+    for (const target of targets) {
+      load += perTargetCounts[target]!;
     }
     return { worker, load };
   });
@@ -441,11 +439,9 @@ function runOneIteration(args: RunIterationArgs): Promise<void> {
     currentSettle.fn = settle;
     const timer = setTimeout(() => {
       if (settled) return;
-      if (errorSink.error === null) {
-        errorSink.error = new Error(
-          `pagerank iteration exceeded ${timeoutMs}ms budget (${remaining}/${workers.length} workers still pending)`,
-        );
-      }
+      errorSink.error ??= new Error(
+        `pagerank iteration exceeded ${timeoutMs}ms budget (${remaining}/${workers.length} workers still pending)`,
+      );
       settle();
     }, timeoutMs);
     for (const h of workers) {
@@ -529,8 +525,8 @@ export async function computePageRankParallel(
       // path (the per-iter `for (i=0;i<N;i++)` was the dominant
       // bottleneck after B38 LPT made worker compute cheap).
       let danglingSum = 0;
-      for (let d = 0; d < danglingIndices.length; d++) {
-        danglingSum += pr[danglingIndices[d]!]!;
+      for (const danglingIndex of danglingIndices) {
+        danglingSum += pr[danglingIndex]!;
       }
       const baseline = (1 - PR_DAMPING) / N;
       const basePlusDangling = baseline + (PR_DAMPING * danglingSum) / N;
@@ -551,10 +547,6 @@ export async function computePageRankParallel(
     }
 
     for (let i = 0; i < N; i++) scores.set(nodes[i]!.id, pr[i]!);
-    // `next` declared for clarity above; it's the same buffer we
-    // copy from on each iteration. Silence the never-read lint at
-    // module boundary without changing semantics.
-    void next;
     return { scores, iterations: PR_ITERATIONS, durationMs: Date.now() - start };
   } finally {
     // Flip iterationActive BEFORE `terminate()` so the persistent

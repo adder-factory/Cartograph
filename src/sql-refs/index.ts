@@ -108,25 +108,25 @@ const PATTERNS: PatternDef[] = [
   // and let DELETE's own regex below tag it 'write'. Last write wins
   // because Map dedup is keyed by (table, op), so the DELETE one
   // produces a separate write row alongside this read row.
-  { re: new RegExp(`\\bFROM\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'read' },
-  { re: new RegExp(`\\bJOIN\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'read' },
+  { re: new RegExp(String.raw`\bFROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'read' },
+  { re: new RegExp(String.raw`\bJOIN\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'read' },
   // INSERT INTO <table>
-  { re: new RegExp(`\\bINSERT\\s+INTO\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'write' },
+  { re: new RegExp(String.raw`\bINSERT\s+INTO\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'write' },
   // UPDATE <table> ... SET
-  { re: new RegExp(`\\bUPDATE\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}\\s+SET\\b`, 'gi'), op: 'write' },
+  { re: new RegExp(String.raw`\bUPDATE\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}\s+SET\b`, 'gi'), op: 'write' },
   // DELETE FROM <table>
-  { re: new RegExp(`\\bDELETE\\s+FROM\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'write' },
+  { re: new RegExp(String.raw`\bDELETE\s+FROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'write' },
   // CREATE TABLE [IF NOT EXISTS] <table>
   {
     re: new RegExp(
-      `\\bCREATE\\s+(?:TEMP(?:ORARY)?\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`,
+      String.raw`\bCREATE\s+(?:TEMP(?:ORARY)?\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`,
       'gi',
     ),
     op: 'ddl',
   },
   // ALTER TABLE / DROP TABLE
-  { re: new RegExp(`\\bALTER\\s+TABLE\\s+(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'ddl' },
-  { re: new RegExp(`\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?(?:[A-Za-z_]\\w*\\s*\\.\\s*)?${IDENT}`, 'gi'), op: 'ddl' },
+  { re: new RegExp(String.raw`\bALTER\s+TABLE\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'ddl' },
+  { re: new RegExp(String.raw`\bDROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'ddl' },
 ];
 
 /**

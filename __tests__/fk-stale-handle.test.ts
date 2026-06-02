@@ -37,7 +37,7 @@ describe('FK safety on stale node ids', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 

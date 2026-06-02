@@ -16,7 +16,7 @@ const EMBED_DIM = 8;
 function fakeEmbedVector(text: string, index: number = 0): Float32Array {
   const v = new Float32Array(EMBED_DIM);
   for (let i = 0; i < text.length; i++) {
-    v[i % EMBED_DIM] += (text.charCodeAt(i) + index) % 17;
+    v[i % EMBED_DIM] += ((text.codePointAt(i) ?? 0) + index) % 17;
   }
   return v;
 }

@@ -63,10 +63,9 @@ function renderSearchMarkdown(
   const lines: string[] = [`## Search Results (${results.length} found)`, ''];
   for (const r of results) {
     const loc = r.node.startLine ? `:${r.node.startLine}` : '';
-    lines.push(`### ${r.node.name} (${r.node.kind})`);
-    lines.push(`${r.node.filePath}${loc}`);
-    if (r.node.signature) lines.push(`\`${r.node.signature}\``);
-    lines.push('');
+    const entry = [`### ${r.node.name} (${r.node.kind})`, `${r.node.filePath}${loc}`];
+    if (r.node.signature) entry.push(`\`${r.node.signature}\``);
+    lines.push(...entry, '');
   }
   return lines.join('\n');
 }
@@ -131,12 +130,8 @@ function record(label: string, md: string, toon: string, rows: number): Sample {
   return { label, rows, mdBytes, toonBytes, saving };
 }
 
-async function main(): Promise<void> {
-  const projectRoot = path.resolve(import.meta.dirname, '../../');
-  const cg = Cartograph.openSync(projectRoot);
+function collectSearchSamples(cg: Cartograph): Sample[] {
   const samples: Sample[] = [];
-
-  // ─── cartograph_search representative queries ────────────────────
   for (const query of ['Cartograph', 'extractFromSource', 'compareToRef', 'handleSearch', 'parseTrace']) {
     const results = searchNodes(cg.queries, query, { limit: 10 });
     if (results.length === 0) continue;
@@ -144,8 +139,11 @@ async function main(): Promise<void> {
     const toon = renderSearchToon(results);
     samples.push(record(`search "${query}" (${results.length} rows)`, md, toon, results.length));
   }
+  return samples;
+}
 
-  // suggest fallback for the few-row shape
+function collectSuggestSamples(cg: Cartograph): Sample[] {
+  const samples: Sample[] = [];
   for (const query of ['CodGrap', 'extracFromSorce']) {
     const ranked = suggestSymbolNames(cg.queries, query, 10);
     if (ranked.length === 0) continue;
@@ -156,35 +154,34 @@ async function main(): Promise<void> {
     const toon = renderSearchToon(fakeResults);
     samples.push(record(`suggest "${query}" (${ranked.length} rows)`, md, toon, ranked.length));
   }
+  return samples;
+}
 
-  // ─── synthesised callers rows (mix of confidences) ──────────────
+function collectCallerSample(cg: Cartograph): Sample | null {
   const callerNode = searchNodes(cg.queries, 'extractFromSource', { limit: 1 })[0]?.node;
-  if (callerNode) {
-    const callerEdges = getIncomingEdges(cg.queries, callerNode.id);
-    const rows = callerEdges
-      .slice(0, 20)
-      .map((e) => {
-        const src = cg.queries.getNodeById(e.source);
-        if (!src) return null;
-        return {
-          name: src.name,
-          kind: src.kind,
-          file: src.filePath,
-          line: src.startLine ?? 0,
-          confidence: e.confidence ?? 'EXTRACTED',
-        };
-      })
-      .filter((r): r is { name: string; kind: string; file: string; line: number; confidence: string } => !!r);
-    if (rows.length > 0) {
-      const md = renderCallersMarkdown(rows);
-      const toon = renderCallersToon(rows);
-      samples.push(record(`callers of extractFromSource (${rows.length} rows)`, md, toon, rows.length));
-    }
-  }
+  if (!callerNode) return null;
+  const callerEdges = getIncomingEdges(cg.queries, callerNode.id);
+  const rows = callerEdges
+    .slice(0, 20)
+    .map((e) => {
+      const src = cg.queries.getNodeById(e.source);
+      if (!src) return null;
+      return {
+        name: src.name,
+        kind: src.kind,
+        file: src.filePath,
+        line: src.startLine ?? 0,
+        confidence: e.confidence ?? 'EXTRACTED',
+      };
+    })
+    .filter((r): r is { name: string; kind: string; file: string; line: number; confidence: string } => !!r);
+  if (rows.length === 0) return null;
+  const md = renderCallersMarkdown(rows);
+  const toon = renderCallersToon(rows);
+  return record(`callers of extractFromSource (${rows.length} rows)`, md, toon, rows.length);
+}
 
-  cg.close();
-
-  // ─── report ─────────────────────────────────────────────────────
+function printReport(samples: Sample[]): void {
   console.log('\n# TOON vs markdown payload measurement (#6)\n');
   const idLen = Math.max(...samples.map((s) => s.label.length));
   console.log(`  ${'sample'.padEnd(idLen)}  rows  md(B)  toon(B)  saving`);
@@ -199,6 +196,10 @@ async function main(): Promise<void> {
     totalMd += s.mdBytes;
     totalToon += s.toonBytes;
   }
+  printDecision(totalMd, totalToon);
+}
+
+function printDecision(totalMd: number, totalToon: number): void {
   const overall = totalMd > 0 ? (totalMd - totalToon) / totalMd : 0;
   console.log('');
   console.log(`  TOTAL: md=${totalMd}B  toon=${totalToon}B  aggregate saving ${(overall * 100).toFixed(1)}%`);
@@ -219,7 +220,24 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+async function main(): Promise<void> {
+  const projectRoot = path.resolve(import.meta.dirname, '../../');
+  const cg = Cartograph.openSync(projectRoot);
+  try {
+    const callerSample = collectCallerSample(cg);
+    const samples = [...collectSearchSamples(cg), ...collectSuggestSamples(cg)];
+    if (callerSample) {
+      samples.push(callerSample);
+    }
+    printReport(samples);
+  } finally {
+    cg.close();
+  }
+}
+
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

@@ -9,10 +9,10 @@
  *   bun scripts/bench-llm-vs-baseline.ts [--cap-seconds 90]
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { performance } from 'perf_hooks';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { performance } from 'node:perf_hooks';
 import { Cartograph } from '../src';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -73,31 +73,18 @@ function copyRecursive(src: string, dst: string): void {
   }
 }
 
-async function main() {
-  header('Cartograph: WITH LLM vs WITHOUT LLM bench');
-  console.log(`  Sample codebase: ${PROJECT_ROOT}`);
-  console.log(`  Summary cap:     ${CAP_SECONDS}s`);
+type BenchCartograph = Awaited<ReturnType<typeof Cartograph.init>>;
 
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-bench-'));
-  console.log(`  Working copy:    ${tmpDir}`);
-
-  let phaseStart = performance.now();
-  copyRecursive(PROJECT_ROOT, tmpDir);
-  timings.push({ label: 'Copy source tree', durationMs: performance.now() - phaseStart });
-
-  // -----------------------------------------------------------------
-  // Phase 1: Index, summaries disabled
-  // -----------------------------------------------------------------
+async function initAndIndex(tmpDir: string): Promise<{ cg: BenchCartograph; initMs: number; indexMs: number }> {
   header('Phase 1: index with summaries DISABLED');
-  phaseStart = performance.now();
+  let phaseStart = performance.now();
   const cg = await Cartograph.init(tmpDir);
   const initMs = performance.now() - phaseStart;
 
   phaseStart = performance.now();
   const indexResult = await cg.indexAll({ summarize: false });
   const indexMs = performance.now() - phaseStart;
-  timings.push({ label: 'Init', durationMs: initMs });
-  timings.push({ label: 'indexAll (no summaries)', durationMs: indexMs });
+  timings.push({ label: 'Init', durationMs: initMs }, { label: 'indexAll (no summaries)', durationMs: indexMs });
 
   const stats = cg.getStats();
   console.log('\n  Index complete:');
@@ -107,39 +94,27 @@ async function main() {
   console.log(`    Edges:          ${stats.edgeCount}`);
   console.log(`    Init time:      ${fmtMs(initMs)}`);
   console.log(`    Index time:     ${fmtMs(indexMs)}`);
+  return { cg, initMs, indexMs };
+}
 
-  // Surface what auto-detection sees on this machine.
-  const llmConfig = await cg.getEffectiveLlmConfig();
-  console.log('\n  Auto-detect probe:');
-  if (llmConfig) {
-    console.log(`    Endpoint:       ${llmConfig.endpoint}`);
-    console.log(`    Chat model:     ${llmConfig.chatModel}`);
-    console.log(`    Embedding:      ${llmConfig.embeddingModel ?? '(none)'}`);
-  } else {
-    console.log('    No local LLM detected — bench will skip Phase 2.');
-    cg.close();
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    return;
-  }
-
-  // -----------------------------------------------------------------
-  // Sample searches WITHOUT summaries
-  // -----------------------------------------------------------------
-  subheader('Searches BEFORE summarisation');
+function printSearchSamples(cg: BenchCartograph, title: string, includeSummaries: boolean): void {
+  subheader(title);
   for (const q of SAMPLE_QUERIES) {
     const results = cg.searchNodes(q, { limit: 3 });
+    const summaries = includeSummaries ? cg.getSymbolSummaries(results.map((r) => r.node.id)) : undefined;
     console.log(`\n  Q: "${q}" → ${results.length} hits`);
     for (const r of results) {
       const sig = r.node.signature ? ` ${r.node.signature.slice(0, 80)}` : '';
       console.log(`    • ${r.node.name} (${r.node.kind}) — ${r.node.filePath}:${r.node.startLine}${sig}`);
+      const summary = summaries?.get(r.node.id);
+      if (summary) console.log(`      ↳ ${summary}`);
     }
   }
+}
 
-  // -----------------------------------------------------------------
-  // Phase 2: LLM summarisation pass with wall-clock cap
-  // -----------------------------------------------------------------
+async function runSummarizationPass(cg: BenchCartograph, chatModel: string): Promise<void> {
   header('Phase 2: LLM summarisation pass');
-  console.log(`\n  Model: ${llmConfig.chatModel}`);
+  console.log(`\n  Model: ${chatModel}`);
   console.log(`  Cap:   ${CAP_SECONDS}s\n`);
 
   const controller = new AbortController();
@@ -158,16 +133,15 @@ async function main() {
       concurrency: 2,
       onProgress: (done, total) => {
         const now = performance.now();
-        if (now - lastReport >= 5_000 || done === total) {
-          const elapsed = (now - runStart) / 1000;
-          const rate = done > 0 ? (done / elapsed).toFixed(2) : '0';
-          const recent = done - lastDone;
-          process.stdout.write(
-            `  ${done}/${total} symbols   ${rate}/s overall   +${recent} since last tick   ${fmtMs(elapsed * 1000)}\n`,
-          );
-          lastReport = now;
-          lastDone = done;
-        }
+        if (now - lastReport < 5_000 && done !== total) return;
+        const elapsed = (now - runStart) / 1000;
+        const rate = done > 0 ? (done / elapsed).toFixed(2) : '0';
+        const recent = done - lastDone;
+        process.stdout.write(
+          `  ${done}/${total} symbols   ${rate}/s overall   +${recent} since last tick   ${fmtMs(elapsed * 1000)}\n`,
+        );
+        lastReport = now;
+        lastDone = done;
       },
     });
   } catch (err) {
@@ -178,7 +152,14 @@ async function main() {
 
   const sumWallMs = performance.now() - runStart;
   timings.push({ label: 'summarizeAll', durationMs: sumWallMs });
+  printSummaryPassResult(cg, summaryResult, sumWallMs);
+}
 
+function printSummaryPassResult(
+  cg: BenchCartograph,
+  summaryResult: Awaited<ReturnType<BenchCartograph['summarizeAll']>> | null,
+  sumWallMs: number,
+): void {
   const coverage = cg.getSummaryCoverage();
   const pct = coverage.total > 0 ? Math.round((coverage.summarised / coverage.total) * 100) : 0;
 
@@ -190,34 +171,15 @@ async function main() {
     console.log(`    Cache hits:          ${summaryResult.cacheHits}`);
     console.log(`    Errors:              ${summaryResult.errors}`);
     if (summaryResult.generated > 0) {
-      const perSym = sumWallMs / summaryResult.generated;
-      console.log(`    Avg per generation:  ${fmtMs(perSym)}`);
+      console.log(`    Avg per generation:  ${fmtMs(sumWallMs / summaryResult.generated)}`);
     }
   } else {
     console.log('    (aborted before completion)');
   }
   console.log(`    Coverage:            ${coverage.summarised}/${coverage.total} (${pct}% of summarisable kinds)`);
+}
 
-  // -----------------------------------------------------------------
-  // Sample searches WITH summaries
-  // -----------------------------------------------------------------
-  subheader('Searches AFTER summarisation');
-  for (const q of SAMPLE_QUERIES) {
-    const results = cg.searchNodes(q, { limit: 3 });
-    const ids = results.map((r) => r.node.id);
-    const summaries = cg.getSymbolSummaries(ids);
-    console.log(`\n  Q: "${q}" → ${results.length} hits`);
-    for (const r of results) {
-      const sig = r.node.signature ? ` ${r.node.signature.slice(0, 80)}` : '';
-      console.log(`    • ${r.node.name} (${r.node.kind}) — ${r.node.filePath}:${r.node.startLine}${sig}`);
-      const s = summaries.get(r.node.id);
-      if (s) console.log(`      ↳ ${s}`);
-    }
-  }
-
-  // -----------------------------------------------------------------
-  // Spot-check specific symbols (cartograph_node-style detail view)
-  // -----------------------------------------------------------------
+function printDetailSpotChecks(cg: BenchCartograph): void {
   subheader('Detail spot-checks (cartograph_node parity)');
   for (const name of PROBE_NODES) {
     const hit = cg.searchNodes(name, { limit: 1 })[0];
@@ -231,6 +193,55 @@ async function main() {
     if (hit.node.signature) console.log(`      sig: ${hit.node.signature.slice(0, 100)}`);
     console.log(`      summary: ${s ?? '(none — not yet summarised or skipped)'}`);
   }
+}
+
+async function main() {
+  header('Cartograph: WITH LLM vs WITHOUT LLM bench');
+  console.log(`  Sample codebase: ${PROJECT_ROOT}`);
+  console.log(`  Summary cap:     ${CAP_SECONDS}s`);
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-bench-'));
+  console.log(`  Working copy:    ${tmpDir}`);
+
+  const phaseStart = performance.now();
+  copyRecursive(PROJECT_ROOT, tmpDir);
+  timings.push({ label: 'Copy source tree', durationMs: performance.now() - phaseStart });
+
+  const { cg } = await initAndIndex(tmpDir);
+
+  // Surface what auto-detection sees on this machine.
+  const llmConfig = await cg.getEffectiveLlmConfig();
+  console.log('\n  Auto-detect probe:');
+  if (llmConfig) {
+    console.log(`    Endpoint:       ${llmConfig.endpoint}`);
+    console.log(`    Chat model:     ${llmConfig.chatModel}`);
+    console.log(`    Embedding:      ${llmConfig.embeddingModel ?? '(none)'}`);
+  } else {
+    console.log('    No local LLM detected — bench will skip Phase 2.');
+    cg.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    return;
+  }
+
+  // -----------------------------------------------------------------
+  // Sample searches WITHOUT summaries
+  // -----------------------------------------------------------------
+  printSearchSamples(cg, 'Searches BEFORE summarisation', false);
+
+  // -----------------------------------------------------------------
+  // Phase 2: LLM summarisation pass with wall-clock cap
+  // -----------------------------------------------------------------
+  await runSummarizationPass(cg, llmConfig.chatModel);
+
+  // -----------------------------------------------------------------
+  // Sample searches WITH summaries
+  // -----------------------------------------------------------------
+  printSearchSamples(cg, 'Searches AFTER summarisation', true);
+
+  // -----------------------------------------------------------------
+  // Spot-check specific symbols (cartograph_node-style detail view)
+  // -----------------------------------------------------------------
+  printDetailSpotChecks(cg);
 
   // -----------------------------------------------------------------
   // Final timing summary
@@ -244,7 +255,9 @@ async function main() {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('Bench failed:', err);
   process.exit(1);
-});
+}

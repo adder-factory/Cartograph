@@ -260,8 +260,6 @@ describe('cartograph_walk — BFS shape', () => {
       expect(result.isError).toBeFalsy();
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/Walk from foo/);
-      // bar should appear once (deduplication), not repeatedly
-      const barMatches = (text.match(/\bbар|\bbar/g) ?? []).length;
       // bar may appear in multiple lines (header, row) but should not be
       // duplicated as a node row
       const rowLines = text.split('\n').filter((l) => l.includes('|depth='));
@@ -508,7 +506,7 @@ describe('cartograph_walk — output format', () => {
       hops: 2,
     });
     const text = walk.content[0]?.text ?? '';
-    const uidMatch = text.match(/\|id:(n_[0-9a-f]{8})\b/);
+    const uidMatch = /\|id:(n_[0-9a-f]{8})\b/.exec(text);
     expect(uidMatch).toBeTruthy();
     const uid = uidMatch![1]!;
     // Chain the minted UID into a follow-up call as the `start` symbol.
@@ -555,8 +553,8 @@ describe('cartograph_walk — output format', () => {
     const impactText = impactResult.content[0]?.text ?? '';
     const bothText = bothResult.content[0]?.text ?? '';
     // Both should produce the same Impact header (same internal path).
-    const impactMatch = impactText.match(/Impact:.*affects (\d+) symbols/);
-    const bothMatch = bothText.match(/Impact:.*affects (\d+) symbols/);
+    const impactMatch = /Impact:.*affects (\d+) symbols/.exec(impactText);
+    const bothMatch = /Impact:.*affects (\d+) symbols/.exec(bothText);
     expect(impactMatch?.[1]).toBeDefined();
     expect(impactMatch?.[1]).toBe(bothMatch?.[1]);
   });
@@ -605,8 +603,8 @@ describe('cartograph_walk — output format', () => {
     const bfsText = bfsResult.content[0]?.text ?? '';
     const centText = centResult.content[0]?.text ?? '';
     // Same node count
-    const bfsMatch = bfsText.match(/\((\d+) nodes\)/);
-    const centMatch = centText.match(/\((\d+) nodes\)/);
+    const bfsMatch = /\((\d+) nodes\)/.exec(bfsText);
+    const centMatch = /\((\d+) nodes\)/.exec(centText);
     expect(bfsMatch?.[1]).toBe(centMatch?.[1]);
     // Both contain beta and gamma
     expect(centText).toMatch(/beta/);

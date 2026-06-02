@@ -31,18 +31,7 @@ const MIGRATIONS_DIR = path.join(REPO_ROOT, 'src/db/migrations');
 const CREATE_TABLE_RE = /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*(?:\(|USING\s)/gi;
 const DROP_TABLE_RE = /DROP\s+TABLE\s+(?:IF\s+EXISTS\s+)?(\w+)/gi;
 const RENAME_TO_RE = /ALTER\s+TABLE\s+(\w+)\s+RENAME\s+TO\s+(\w+)/gi;
-
-/**
- * Tables an early migration created that were superseded (data now
- * lives elsewhere) but never explicitly `DROP`'d — so an upgraded DB
- * still carries them empty while a fresh install doesn't. Currently
- * empty: the last entry (`vectors`) was cleared by migration 065 on
- * 2026-05-19. Add a new entry ONLY when a thorough investigation
- * concludes the drift is genuinely legacy + harmless; prefer landing
- * a `DROP TABLE` migration instead, which removes the test exemption
- * AND the leftover from upgraded installs.
- */
-const KNOWN_HISTORICAL_DRIFT = new Set<string>();
+const byName = (a: string, b: string): number => a.localeCompare(b);
 
 /** Strip JS block + full-line comments so a `CREATE TABLE …` in a
  *  JSDoc / `//`-prefixed comment doesn't false-positive. Trailing
@@ -74,7 +63,7 @@ describe('migrations <-> schema.sql parity', () => {
     const migrationFiles = fs
       .readdirSync(MIGRATIONS_DIR)
       .filter((f) => /^\d+-.*\.ts$/.test(f))
-      .sort();
+      .sort(byName);
     for (const f of migrationFiles) {
       const text = stripJsComments(fs.readFileSync(path.join(MIGRATIONS_DIR, f), 'utf-8'));
       for (const t of captureGroup1(text, CREATE_TABLE_RE)) live.add(t);
@@ -86,7 +75,7 @@ describe('migrations <-> schema.sql parity', () => {
         live.add(rm[2]!.toLowerCase());
       }
     }
-    const missingFromSchema = [...live].filter((t) => !schemaTables.has(t) && !KNOWN_HISTORICAL_DRIFT.has(t)).sort();
+    const missingFromSchema = [...live].filter((t) => !schemaTables.has(t)).sort(byName);
     expect(missingFromSchema).toEqual([]);
   });
 });

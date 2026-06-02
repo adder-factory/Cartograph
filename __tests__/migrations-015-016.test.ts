@@ -139,8 +139,8 @@ describe('Migration 016 — split embeddings into symbol_embeddings table', () =
         "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name IN ('embedding_refs', 'embedding_store')",
       )
       .all() as Array<{ name: string }>;
-    const idxNames = idx.map((r) => r.name);
-    expect(idxNames.includes('idx_embedding_refs_model') || idxNames.includes('idx_embedding_store_model')).toBe(true);
+    const idxNames = new Set(idx.map((r) => r.name));
+    expect(idxNames.has('idx_embedding_refs_model') || idxNames.has('idx_embedding_store_model')).toBe(true);
 
     expect(getCurrentVersion(adapter)).toBeGreaterThanOrEqual(16);
 

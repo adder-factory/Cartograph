@@ -74,7 +74,9 @@ async function main(): Promise<void> {
   console.log(`Done. Files=${stats.fileCount} Nodes=${stats.nodeCount} Edges=${stats.edgeCount} (indexed in ${dur}s).`);
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

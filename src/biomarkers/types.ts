@@ -71,7 +71,7 @@ export const BIOMARKER_NAMES = [
    *  Warn at 1, error 5. Path-based carve-outs (CLI bin, bench) would
    *  need a higher-layer gate not present in SIMPLE_RULES. */
   'agent_debug_log',
-  /** TODO / FIXME / XXX / HACK marker comments + the
+  /** Incomplete-work marker comments + the
    *  `throw new Error('not implemented')` shape inside a symbol body.
    *  The canonical "agent stubbed it and moved on" pattern. All
    *  languages (comment-like markers are universal). Info at 1, warn

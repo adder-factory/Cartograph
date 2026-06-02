@@ -71,7 +71,7 @@ export const expressResolver: FrameworkResolver = {
     }
 
     // Pattern 3: Service/helper references
-    const serviceMatch = ref.referenceName.match(/^(\w+)(Service|Helper|Utils?)\.(\w+)$/);
+    const serviceMatch = /^(\w+)(Service|Helper|Utils?)\.(\w+)$/.exec(ref.referenceName);
     if (serviceMatch) {
       const [, name, suffix, method] = serviceMatch;
       const result = resolveServiceMethod(name! + suffix!, method!, context);

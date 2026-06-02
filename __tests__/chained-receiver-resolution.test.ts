@@ -32,7 +32,7 @@ describe('Chained-receiver method-call resolution', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 

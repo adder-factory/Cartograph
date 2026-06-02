@@ -18,6 +18,10 @@ import { compact } from '../utils.js';
 
 const MAX_SIBLING_SAMPLE = 30;
 
+function zodFallback<T extends z.ZodType>(schema: T, value: z.output<T>): z.ZodCatch<T> {
+  return schema['catch'](value);
+}
+
 /**
  * JSON-schema for the naming verdict. Passed as
  * `ChatOptions.responseSchema` — on the grammar-constrained backends
@@ -76,19 +80,14 @@ function buildPrompt(name: string, kind: string, examples: string[]): string {
  * non-object payload (a bare string / number / array) into the same
  * all-default verdict, so `.parse` never throws.
  */
-const NamingJudgeSchema = z
-  .object({
-    consistent: z.boolean().catch(true),
-    suggestion: z
-      .string()
-      .catch('')
-      .transform((s) => s.slice(0, 80)),
-    reason: z
-      .string()
-      .catch('')
-      .transform((s) => s.slice(0, 200)),
-  })
-  .catch({ consistent: true, suggestion: '', reason: '' });
+const NamingJudgeSchema = zodFallback(
+  z.object({
+    consistent: zodFallback(z.boolean(), true),
+    suggestion: zodFallback(z.string(), '').transform((s) => s.slice(0, 80)),
+    reason: zodFallback(z.string(), '').transform((s) => s.slice(0, 200)),
+  }),
+  { consistent: true, suggestion: '', reason: '' },
+);
 
 function parseResponse(text: string, examples: string[]): NamingCheckResult {
   const cleaned = text

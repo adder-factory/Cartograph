@@ -431,7 +431,7 @@ describe('cartograph_affected — barrel-dump cap + hint', () => {
     const result = await handler.execute('cartograph_affected', { files: ['src/leaf.ts'] });
     const text = result.content[0]?.text ?? '';
     // The header counts the full affected set...
-    expect(text).toMatch(new RegExp(`Affected test files \\(${TEST_COUNT}\\)`));
+    expect(text).toMatch(new RegExp(String.raw`Affected test files \(${TEST_COUNT}\)`));
     // ...but the body is capped at the default 40 rows.
     const renderedRows = (text.match(/^- `src\/t\d+\.test\.ts`$/gm) ?? []).length;
     expect(renderedRows).toBe(40);

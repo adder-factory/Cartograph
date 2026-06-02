@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
-import { extractFromSource, scanDirectory, shouldIncludeFile } from '../src/extraction/index.js';
+import { extractFromSource, scanDirectory } from '../src/extraction/index.js';
 import {
   detectLanguage,
   isLanguageSupported,
@@ -20,6 +20,8 @@ import {
 } from '../src/extraction/grammars.js';
 import { normalizePath } from '../src/utils.js';
 import { DEFAULT_CONFIG } from '../src/types.js';
+
+const byString = (a: string, b: string): number => a.localeCompare(b);
 
 beforeAll(async () => {
   await initGrammars();
@@ -36,6 +38,38 @@ function cleanupTempDir(dir: string): void {
   if (fs.existsSync(dir)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+function typeRefNamesFor(code: string, file = 'consumer.ts'): string[] {
+  const result = extractFromSource(file, code);
+  return result.unresolvedReferences.filter((r) => r.referenceKind === 'type_of').map((r) => r.referenceName);
+}
+
+function fieldAccessNamesFor(code: string, file = 'consumer.ts'): string[] {
+  const result = extractFromSource(file, code);
+  return result.unresolvedReferences.filter((r) => r.referenceKind === 'field_access').map((r) => r.referenceName);
+}
+
+function refsByKind(code: string, kind: string, file = 'fixture.ts'): Array<{ from: string; name: string }> {
+  const result = extractFromSource(file, code);
+  return result.unresolvedReferences
+    .filter((r) => r.referenceKind === kind)
+    .map((r) => {
+      const owner = result.nodes.find((n) => n.id === r.fromNodeId);
+      return { from: owner?.name ?? r.fromNodeId, name: r.referenceName };
+    });
+}
+
+function nodeNamesByKind(result: ReturnType<typeof extractFromSource>, kind: 'variable' | 'constant'): string[] {
+  return result.nodes.filter((n) => n.kind === kind).map((n) => n.name);
+}
+
+function findExtractedNodeByName(result: ReturnType<typeof extractFromSource>, name: string) {
+  return result.nodes.find((n) => n.name === name);
+}
+
+function findExtractedFieldByName(result: ReturnType<typeof extractFromSource>, name: string) {
+  return result.nodes.find((n) => n.kind === 'field' && n.name === name);
 }
 
 describe('Language Detection', () => {
@@ -564,7 +598,7 @@ const internal = () => 'not exported';
 
     const exported = result.nodes.filter((n) => n.kind === 'function' && n.isExported);
     expect(exported).toHaveLength(2);
-    expect(exported.map((n) => n.name).sort()).toEqual(['add', 'subtract']);
+    expect(exported.map((n) => n.name).sort(byString)).toEqual(['add', 'subtract']);
 
     const internalNode = result.nodes.find((n) => n.name === 'internal');
     expect(internalNode).toBeDefined();
@@ -609,7 +643,7 @@ export const RULES = [
     const callsFromConst = result.unresolvedReferences.filter(
       (r) => r.fromNodeId === constNode!.id && r.referenceKind === 'calls',
     );
-    const calleeNames = callsFromConst.map((r) => r.referenceName).sort();
+    const calleeNames = callsFromConst.map((r) => r.referenceName).sort(byString);
     expect(calleeNames).toEqual(['findGodClasses', 'findUnusedExports']);
   });
 
@@ -628,7 +662,7 @@ export const handlers = {
     const calleeNames = result.unresolvedReferences
       .filter((r) => r.fromNodeId === constNode!.id && r.referenceKind === 'calls')
       .map((r) => r.referenceName)
-      .sort();
+      .sort(byString);
     expect(calleeNames).toEqual(['fetchData', 'persistData']);
   });
 
@@ -745,7 +779,7 @@ export function outer() {
     // The inline arrow is intentionally not a binding-name, so it
     // shouldn't appear as a named function either.
     const fns = result.nodes.filter((n) => n.kind === 'function');
-    expect(fns.map((f) => f.name).sort()).toEqual(['outer']);
+    expect(fns.map((f) => f.name).sort(byString)).toEqual(['outer']);
   });
 
   it('SKIPS eager extraction when a function body crosses the threshold', () => {
@@ -866,7 +900,7 @@ export function megaFn() {
 `;
     const result = extractFromSource('mega.ts', code);
     const manifest = result.nestedFunctionManifest ?? [];
-    const names = manifest.map((r) => r.name).sort();
+    const names = manifest.map((r) => r.name).sort(byString);
     expect(names).toEqual(['checkSourceFile', 'getTypeOfSymbol']);
     const outer = result.nodes.find((n) => n.kind === 'function' && n.name === 'megaFn')!;
     for (const row of manifest) {
@@ -892,7 +926,7 @@ export function megaFn() {
 }
 `;
     const result = extractFromSource('mega-arrow.ts', code);
-    const names = (result.nestedFunctionManifest ?? []).map((r) => r.name).sort();
+    const names = (result.nestedFunctionManifest ?? []).map((r) => r.name).sort(byString);
     expect(names).toEqual(['helper', 'tighter']);
   });
 
@@ -952,11 +986,6 @@ describe('Body-position type-of edges (consumer-side type usage)', () => {
   // Without these edges, an exported type whose only consumer is a
   // test that casts/parameterises with it gets falsely flagged as
   // unused_export. Each `it` block exercises one body-position shape.
-
-  function typeRefNamesFor(code: string, file = 'consumer.ts'): string[] {
-    const result = extractFromSource(file, code);
-    return result.unresolvedReferences.filter((r) => r.referenceKind === 'type_of').map((r) => r.referenceName);
-  }
 
   it('emits type_of for `value as Foo` casts inside a body', () => {
     const refs = typeRefNamesFor(`
@@ -1040,11 +1069,6 @@ function consumer(): void {
 });
 
 describe('field_access edges (data-access detection for ATFD/LAA)', () => {
-  function fieldAccessNamesFor(code: string, file = 'consumer.ts'): string[] {
-    const result = extractFromSource(file, code);
-    return result.unresolvedReferences.filter((r) => r.referenceKind === 'field_access').map((r) => r.referenceName);
-  }
-
   it('emits field_access for `obj.field` reads inside a body', () => {
     const refs = fieldAccessNamesFor(`
 function consumer(order: any): number {
@@ -1583,16 +1607,6 @@ describe('In-file SCREAMING_SNAKE_CASE constant reads (references edges)', () =>
   // identifier reads of named constants were a structural blind
   // spot — closed by `captureBodyConstantReads` in
   // `src/extraction/tree-sitter.ts`.
-  function refsByKind(code: string, kind: string, file = 'fixture.ts'): Array<{ from: string; name: string }> {
-    const result = extractFromSource(file, code);
-    return result.unresolvedReferences
-      .filter((r) => r.referenceKind === kind)
-      .map((r) => {
-        const owner = result.nodes.find((n) => n.id === r.fromNodeId);
-        return { from: owner?.name ?? r.fromNodeId, name: r.referenceName };
-      });
-  }
-
   it('emits references edge for SCREAMING_SNAKE constant read inside a function body', () => {
     const code = `
 export const FOO_VERSION = 1;
@@ -1769,7 +1783,7 @@ type Internal = string;
 
     const exported = typeAliases.filter((n) => n.isExported);
     expect(exported).toHaveLength(2);
-    expect(exported.map((n) => n.name).sort()).toEqual(['DateFormat', 'UnitSystem']);
+    expect(exported.map((n) => n.name).sort(byString)).toEqual(['DateFormat', 'UnitSystem']);
   });
 });
 
@@ -1822,7 +1836,7 @@ export const API_VERSION = "v2";
 
     const variables = result.nodes.filter((n) => n.kind === 'constant');
     expect(variables).toHaveLength(2);
-    expect(variables.map((n) => n.name).sort()).toEqual(['API_VERSION', 'MAX_RETRIES']);
+    expect(variables.map((n) => n.name).sort(byString)).toEqual(['API_VERSION', 'MAX_RETRIES']);
   });
 
   it('should NOT duplicate arrow functions as both function and variable', () => {
@@ -2128,10 +2142,8 @@ var Single = 99
 `;
     const result = extractFromSource('blocks.go', code);
 
-    const names = (kind: 'variable' | 'constant') => result.nodes.filter((n) => n.kind === kind).map((n) => n.name);
-
-    expect(names('variable').sort()).toEqual(['Alpha', 'Charlie', 'Single', 'bravo']);
-    expect(names('constant').sort()).toEqual(['DELTA', 'echo']);
+    expect(nodeNamesByKind(result, 'variable').sort(byString)).toEqual(['Alpha', 'bravo', 'Charlie', 'Single']);
+    expect(nodeNamesByKind(result, 'constant').sort(byString)).toEqual(['DELTA', 'echo']);
   });
 
   it('extracts Go qualified-type embedded fields (model.Base / *tokenizer.Tokenizer)', () => {
@@ -2153,7 +2165,7 @@ type Model struct {
     const result = extractFromSource('model.go', code);
 
     const extendsRefs = result.unresolvedReferences.filter((r) => r.referenceKind === 'extends');
-    const names = extendsRefs.map((r) => r.referenceName).sort();
+    const names = extendsRefs.map((r) => r.referenceName).sort(byString);
     // Both the qualified embeds AND the local *Options should produce
     // refs. The qualifier (`model.` / `tokenizer.`) is stripped — the
     // resolver matches by bare name and walks files to find the right
@@ -2219,21 +2231,20 @@ type Client struct {
     const result = extractFromSource('client.go', code);
 
     const fields = result.nodes.filter((n) => n.kind === 'field');
-    const fieldNames = fields.map((n) => n.name).sort();
+    const fieldNames = fields.map((n) => n.name).sort(byString);
     // Expect: Host, Port, timeout, X, Y, db (6 named); *Mutex skipped (embedded)
-    expect(fieldNames).toEqual(['Host', 'Port', 'X', 'Y', 'db', 'timeout']);
+    expect(fieldNames).toEqual(['db', 'Host', 'Port', 'timeout', 'X', 'Y']);
 
-    const byName = (n: string) => fields.find((f) => f.name === n);
     // Multi-name `X, Y float64` - both get the same type signature
-    expect(byName('X')?.signature).toContain('float64');
-    expect(byName('Y')?.signature).toContain('float64');
+    expect(findExtractedFieldByName(result, 'X')?.signature).toContain('float64');
+    expect(findExtractedFieldByName(result, 'Y')?.signature).toContain('float64');
     // Pointer type preserved
-    expect(byName('db')?.signature).toContain('*Database');
+    expect(findExtractedFieldByName(result, 'db')?.signature).toContain('*Database');
     // Tag is stripped from the signature (the raw_string_literal exclusion path).
-    expect(byName('Port')?.signature).toBe('Port int');
+    expect(findExtractedFieldByName(result, 'Port')?.signature).toBe('Port int');
     // isExported follows the Go convention
-    expect(byName('Host')?.isExported).toBe(true);
-    expect(byName('timeout')?.isExported).toBe(false);
+    expect(findExtractedFieldByName(result, 'Host')?.isExported).toBe(true);
+    expect(findExtractedFieldByName(result, 'timeout')?.isExported).toBe(false);
   });
 
   it('should extract Go interface methods as nodes with contains edges from the interface', () => {
@@ -2257,7 +2268,7 @@ type Backend interface {
     expect(ifaceNode).toBeDefined();
 
     const methods = result.nodes.filter((n) => n.kind === 'method');
-    const methodNames = methods.map((m) => m.name).sort();
+    const methodNames = methods.map((m) => m.name).sort(byString);
     expect(methodNames).toEqual(['BackendMemory', 'Close', 'Load']);
 
     const closeMethod = methods.find((m) => m.name === 'Close');
@@ -2308,27 +2319,25 @@ func (c *Client) reset() {}
 `;
     const result = extractFromSource('api.go', code);
 
-    const byName = (name: string) => result.nodes.find((n) => n.name === name);
-
     // Functions
-    expect(byName('PublicHelper')?.isExported).toBe(true);
-    expect(byName('privateHelper')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'PublicHelper')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'privateHelper')?.isExported).toBe(false);
 
     // Type aliases routed to struct/interface
-    expect(byName('Client')?.isExported).toBe(true);
-    expect(byName('internalState')?.isExported).toBe(false);
-    expect(byName('Reader')?.isExported).toBe(true);
-    expect(byName('unsafeReader')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'Client')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'internalState')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'Reader')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'unsafeReader')?.isExported).toBe(false);
 
     // Variables / constants
-    expect(byName('MaxRetries')?.isExported).toBe(true);
-    expect(byName('defaultTimeout')?.isExported).toBe(false);
-    expect(byName('DefaultClient')?.isExported).toBe(true);
-    expect(byName('logger')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'MaxRetries')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'defaultTimeout')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'DefaultClient')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'logger')?.isExported).toBe(false);
 
     // Methods — Go methods are top-level decls and carry their own exportedness
-    expect(byName('Connect')?.isExported).toBe(true);
-    expect(byName('reset')?.isExported).toBe(false);
+    expect(findExtractedNodeByName(result, 'Connect')?.isExported).toBe(true);
+    expect(findExtractedNodeByName(result, 'reset')?.isExported).toBe(false);
   });
 });
 
@@ -3264,7 +3273,7 @@ import './styles.css';
 
       const typeOnlyRefs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
       expect(typeOnlyRefs.length).toBe(2);
-      expect(typeOnlyRefs.map((r) => r.referenceName).sort()).toEqual(['FC', 'ReactNode']);
+      expect(typeOnlyRefs.map((r) => r.referenceName).sort(byString)).toEqual(['FC', 'ReactNode']);
     });
 
     it('should emit references for mixed type imports', () => {
@@ -3273,7 +3282,7 @@ import './styles.css';
 
       const refs = result.unresolvedReferences.filter((r) => r.referenceKind === 'references');
       expect(refs.length).toBe(2);
-      expect(refs.map((r) => r.referenceName).sort()).toEqual(['Bar', 'Baz']);
+      expect(refs.map((r) => r.referenceName).sort(byString)).toEqual(['Bar', 'Baz']);
     });
 
     it('should extract aliased named imports', () => {
@@ -3753,12 +3762,12 @@ using Microsoft.Extensions.DependencyInjection;
 
   describe('PHP imports', () => {
     it('should extract simple use', () => {
-      const code = `<?php use PHPUnit\\Framework\\TestCase;`;
+      const code = String.raw`<?php use PHPUnit\Framework\TestCase;`;
       const result = extractFromSource('Test.php', code);
 
       const importNode = result.nodes.find((n) => n.kind === 'import');
       expect(importNode).toBeDefined();
-      expect(importNode?.name).toBe('PHPUnit\\Framework\\TestCase');
+      expect(importNode?.name).toBe(String.raw`PHPUnit\Framework\TestCase`);
     });
 
     it('should extract aliased use', () => {
@@ -3772,31 +3781,31 @@ using Microsoft.Extensions.DependencyInjection;
     });
 
     it('should extract function use', () => {
-      const code = `<?php use function Illuminate\\Support\\env;`;
+      const code = String.raw`<?php use function Illuminate\Support\env;`;
       const result = extractFromSource('helpers.php', code);
 
       const importNode = result.nodes.find((n) => n.kind === 'import');
       expect(importNode).toBeDefined();
-      expect(importNode?.name).toBe('Illuminate\\Support\\env');
+      expect(importNode?.name).toBe(String.raw`Illuminate\Support\env`);
       expect(importNode?.signature).toContain('function');
     });
 
     it('should extract grouped use', () => {
-      const code = `<?php use Illuminate\\Database\\{Model, Builder};`;
+      const code = String.raw`<?php use Illuminate\Database\{Model, Builder};`;
       const result = extractFromSource('Models.php', code);
 
       const importNodes = result.nodes.filter((n) => n.kind === 'import');
       expect(importNodes.length).toBe(2);
 
       const names = importNodes.map((n) => n.name);
-      expect(names).toContain('Illuminate\\Database\\Model');
-      expect(names).toContain('Illuminate\\Database\\Builder');
+      expect(names).toContain(String.raw`Illuminate\Database\Model`);
+      expect(names).toContain(String.raw`Illuminate\Database\Builder`);
     });
 
     it('should extract multiple uses', () => {
-      const code = `<?php
-use Illuminate\\Support\\Collection;
-use Illuminate\\Support\\Str;
+      const code = String.raw`<?php
+use Illuminate\Support\Collection;
+use Illuminate\Support\Str;
 use Closure;
 `;
       const result = extractFromSource('Service.php', code);
@@ -3805,8 +3814,8 @@ use Closure;
       expect(importNodes.length).toBe(3);
 
       const names = importNodes.map((n) => n.name);
-      expect(names).toContain('Illuminate\\Support\\Collection');
-      expect(names).toContain('Illuminate\\Support\\Str');
+      expect(names).toContain(String.raw`Illuminate\Support\Collection`);
+      expect(names).toContain(String.raw`Illuminate\Support\Str`);
       expect(names).toContain('Closure');
     });
   });
@@ -3947,7 +3956,7 @@ end
       expect(cls).toBeDefined();
 
       const fields = result.nodes.filter((n) => n.kind === 'field');
-      const names = fields.map((n) => n.name).sort();
+      const names = fields.map((n) => n.name).sort(byString);
       expect(names).toEqual(['email', 'name', 'role', 'timestamp']);
 
       // Containment edges: class → each field
@@ -5251,8 +5260,8 @@ export function multiply(a: number, b: number): number {
 
 describe('Path Normalization', () => {
   it('should convert backslashes to forward slashes', () => {
-    expect(normalizePath('gui\\node_modules\\foo')).toBe('gui/node_modules/foo');
-    expect(normalizePath('src\\components\\Button.tsx')).toBe('src/components/Button.tsx');
+    expect(normalizePath(String.raw`gui\node_modules\foo`)).toBe('gui/node_modules/foo');
+    expect(normalizePath(String.raw`src\components\Button.tsx`)).toBe('src/components/Button.tsx');
   });
 
   it('should leave forward-slash paths unchanged', () => {

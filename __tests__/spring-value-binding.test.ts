@@ -15,6 +15,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('Spring @Value config-key linkage (B11/F#64c)', () => {
   let tempDir: string;
   let cg: Cartograph | undefined;
@@ -24,7 +26,7 @@ describe('Spring @Value config-key linkage (B11/F#64c)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -44,7 +46,7 @@ db.url = jdbc:postgresql://localhost/x
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const constants = getNodesByKind(cg.queries, 'constant').filter((c) => c.language === 'properties');
-    const keys = constants.map((c) => c.qualifiedName).sort();
+    const keys = constants.map((c) => c.qualifiedName).sort(byString);
     expect(keys).toEqual(['app.cache.size', 'app.cache.ttl', 'db.url', 'server.port']);
 
     // Signatures carry the value.

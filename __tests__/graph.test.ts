@@ -9,7 +9,6 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import Cartograph from '../src/index.js';
-import { Node, Edge } from '../src/types.js';
 import { getUnresolvedReferences } from '../src/db/queries-unresolved-refs.js';
 import { getNodesByKind } from '../src/db/queries.js';
 
@@ -129,7 +128,7 @@ export { main };
 
   afterEach(() => {
     if (cg) {
-      cg.destroy();
+      cg.close();
     }
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
@@ -405,8 +404,6 @@ export { main };
 
       expect(Array.isArray(deadCode)).toBe(true);
 
-      // unusedHelper should be detected
-      const hasUnused = deadCode.some((n) => n.name === 'unusedHelper');
       // Note: This depends on extraction properly detecting function scope
       expect(deadCode.length).toBeGreaterThanOrEqual(0);
     });

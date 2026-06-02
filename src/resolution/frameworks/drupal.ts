@@ -384,6 +384,22 @@ function collectServiceReferences(args: ServiceRefArgs): UnresolvedReference[] {
     return refs;
   }
 
+  collectClassAliasParentRefs({ bodyMapping, serviceId, defLine, addRef });
+  const factoryRef = collectFactoryRef(findMappingPair(bodyMapping, 'factory'));
+  if (factoryRef) addRef(factoryRef.id, factoryRef.line);
+  collectArgumentRefs(bodyMapping, addRef);
+  return refs;
+}
+
+interface ServiceRefCollectorArgs {
+  bodyMapping: YamlNode;
+  serviceId: string;
+  defLine: number;
+  addRef(referenceName: string, line: number): void;
+}
+
+function collectClassAliasParentRefs(args: ServiceRefCollectorArgs): void {
+  const { bodyMapping, serviceId, defLine, addRef } = args;
   const classPair = findMappingPair(bodyMapping, 'class');
   const classValue = readPairScalar(classPair);
   const classFqcn = classValue ?? (serviceId.includes('\\') ? serviceId : null);
@@ -397,24 +413,18 @@ function collectServiceReferences(args: ServiceRefArgs): UnresolvedReference[] {
   const parentPair = findMappingPair(bodyMapping, 'parent');
   const parentTarget = readPairScalar(parentPair);
   if (parentPair && parentTarget) addRef(parentTarget, parentPair.startPosition.row + 1);
+}
 
-  // `factory: ['@svc', 'method']` / `'@svc:method'` — the factory service.
-  const factoryRef = collectFactoryRef(findMappingPair(bodyMapping, 'factory'));
-  if (factoryRef) addRef(factoryRef.id, factoryRef.line);
-
+function collectArgumentRefs(bodyMapping: YamlNode, addRef: (referenceName: string, line: number) => void): void {
   const argsPair = findMappingPair(bodyMapping, 'arguments');
-  if (argsPair) {
-    const argsValue = pairValue(argsPair);
-    // Positional form `arguments: ['@a', '@b']` and named form
-    // `arguments: { $a: '@a' }` are mutually exclusive shapes — each
-    // collector returns [] for the other, so both run without
-    // double-emitting.
-    for (const arg of [...collectSequenceScalars(argsValue), ...collectMappingArguments(argsValue)]) {
-      const refId = serviceRefId(arg.text);
-      if (refId) addRef(refId, arg.line);
-    }
+  if (!argsPair) return;
+  const argsValue = pairValue(argsPair);
+  // Positional form `arguments: ['@a', '@b']` and named form
+  // `arguments: { $a: '@a' }` are mutually exclusive shapes.
+  for (const arg of [...collectSequenceScalars(argsValue), ...collectMappingArguments(argsValue)]) {
+    const refId = serviceRefId(arg.text);
+    if (refId) addRef(refId, arg.line);
   }
-  return refs;
 }
 
 /** Extract the ref a `factory:` references, from the four common forms:
@@ -484,50 +494,60 @@ function extractDrupalServices(
   const now = Date.now();
 
   for (const doc of root.namedChildren) {
-    if (doc.type !== 'document') continue;
-    const topMapping = asMapping(doc.namedChildren[0] ?? null);
-    if (!topMapping) continue;
-
-    const servicesPair = findMappingPair(topMapping, 'services');
-    const servicesMapping = servicesPair ? asMapping(pairValue(servicesPair)) : null;
+    const servicesMapping = findDrupalServicesMapping(doc);
     if (!servicesMapping) continue;
-
     for (const svcPair of servicesMapping.namedChildren) {
-      if (svcPair.type !== 'block_mapping_pair') continue;
-      const idNode = svcPair.namedChildren[0];
-      if (!idNode) continue;
-      const serviceId = readYamlScalar(idNode);
-      // Skip Symfony DI pseudo-keys (`_defaults`, `_instanceof`) — they
-      // configure autowiring defaults, they're not services.
-      if (!serviceId || serviceId.startsWith('_')) continue;
-
-      const lineNum = idNode.startPosition.row + 1;
-      const serviceNodeId = generateNodeId({ filePath, kind: 'resource', name: serviceId, ordinal: 0 });
-      nodes.push({
-        id: serviceNodeId,
-        kind: 'resource' as NodeKind,
-        name: serviceId,
-        qualifiedName: `${filePath}::${serviceId}`,
-        filePath,
-        language: 'yaml',
-        startLine: lineNum,
-        endLine: lineNum,
-        startColumn: 0,
-        endColumn: 0,
-        updatedAt: now,
-      });
-
-      references.push(
-        ...collectServiceReferences({
-          bodyMapping: asMapping(pairValue(svcPair)),
-          serviceId,
-          serviceNodeId,
-          defLine: lineNum,
-        }),
-      );
+      const extracted = extractDrupalServicePair({ svcPair, filePath, now });
+      if (!extracted) continue;
+      nodes.push(extracted.node);
+      references.push(...extracted.references);
     }
   }
   return { nodes, references };
+}
+
+function findDrupalServicesMapping(doc: YamlNode): YamlNode | null {
+  if (doc.type !== 'document') return null;
+  const topMapping = asMapping(doc.namedChildren[0] ?? null);
+  if (!topMapping) return null;
+  const servicesPair = findMappingPair(topMapping, 'services');
+  return servicesPair ? asMapping(pairValue(servicesPair)) : null;
+}
+
+function extractDrupalServicePair(args: {
+  svcPair: YamlNode;
+  filePath: string;
+  now: number;
+}): { node: Node; references: UnresolvedReference[] } | null {
+  const { svcPair, filePath, now } = args;
+  if (svcPair.type !== 'block_mapping_pair') return null;
+  const idNode = svcPair.namedChildren[0];
+  if (!idNode) return null;
+  const serviceId = readYamlScalar(idNode);
+  if (!serviceId || serviceId.startsWith('_')) return null;
+
+  const lineNum = idNode.startPosition.row + 1;
+  const serviceNodeId = generateNodeId({ filePath, kind: 'resource', name: serviceId, ordinal: 0 });
+  const node: Node = {
+    id: serviceNodeId,
+    kind: 'resource' as NodeKind,
+    name: serviceId,
+    qualifiedName: `${filePath}::${serviceId}`,
+    filePath,
+    language: 'yaml',
+    startLine: lineNum,
+    endLine: lineNum,
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: now,
+  };
+  const references = collectServiceReferences({
+    bodyMapping: asMapping(pairValue(svcPair)),
+    serviceId,
+    serviceNodeId,
+    defLine: lineNum,
+  });
+  return { node, references };
 }
 
 /** One service↔tag relationship parsed from a `*.services.yml`: a service
@@ -598,18 +618,19 @@ export function extractServiceTagFacts(content: string): DrupalServiceTagFact[] 
     const servicesMapping = servicesPair ? asMapping(pairValue(servicesPair)) : null;
     if (!servicesMapping) continue;
 
-    for (const svcPair of servicesMapping.namedChildren) {
-      if (svcPair.type !== 'block_mapping_pair') continue;
-      const idNode = svcPair.namedChildren[0];
-      if (!idNode) continue;
-      const serviceId = readYamlScalar(idNode);
-      if (!serviceId || serviceId.startsWith('_')) continue;
-      const body = asMapping(pairValue(svcPair));
-      if (!body) continue;
-      collectServiceTagFacts(body, serviceId, facts);
-    }
+    for (const svcPair of servicesMapping.namedChildren) collectFactsFromServicePair(svcPair, facts);
   }
   return facts;
+}
+
+function collectFactsFromServicePair(svcPair: YamlNode, facts: DrupalServiceTagFact[]): void {
+  if (svcPair.type !== 'block_mapping_pair') return;
+  const idNode = svcPair.namedChildren[0];
+  if (!idNode) return;
+  const serviceId = readYamlScalar(idNode);
+  if (!serviceId || serviceId.startsWith('_')) return;
+  const body = asMapping(pairValue(svcPair));
+  if (body) collectServiceTagFacts(body, serviceId, facts);
 }
 
 /** Append a single service's tag facts (provides + consumes) to `facts`. */
@@ -631,22 +652,69 @@ function collectServiceTagFacts(body: YamlNode, serviceId: string, facts: Drupal
 function taggedArgNodes(argsValue: YamlNode | null): YamlNode[] {
   if (!argsValue) return [];
   const out: YamlNode[] = [];
-  const seq = asSequence(argsValue);
-  if (seq) {
-    for (const item of seq.namedChildren) {
-      const leaf = item.type === 'block_sequence_item' ? (item.namedChildren[0] ?? null) : item;
-      if (leaf) out.push(leaf);
-    }
-  }
-  const mapping = asMapping(argsValue);
-  if (mapping) {
-    for (const pair of mapping.namedChildren) {
-      if (pair.type !== 'block_mapping_pair' && pair.type !== 'flow_pair') continue;
-      const v = pairValue(pair);
-      if (v) out.push(v);
-    }
-  }
+  collectTaggedSequenceArgNodes(argsValue, out);
+  collectTaggedMappingArgNodes(argsValue, out);
   return out;
+}
+
+function collectTaggedSequenceArgNodes(argsValue: YamlNode, out: YamlNode[]): void {
+  const seq = asSequence(argsValue);
+  if (!seq) return;
+  for (const item of seq.namedChildren) {
+    const leaf = item.type === 'block_sequence_item' ? (item.namedChildren[0] ?? null) : item;
+    if (leaf) out.push(leaf);
+  }
+}
+
+function collectTaggedMappingArgNodes(argsValue: YamlNode, out: YamlNode[]): void {
+  const mapping = asMapping(argsValue);
+  if (!mapping) return;
+  for (const pair of mapping.namedChildren) {
+    if (pair.type !== 'block_mapping_pair' && pair.type !== 'flow_pair') continue;
+    const v = pairValue(pair);
+    if (v) out.push(v);
+  }
+}
+
+function frameworkResolved(ref: UnresolvedRef, targetNodeId: string, confidence: number): ResolvedRef {
+  return { original: ref, targetNodeId, confidence, resolvedBy: 'framework' };
+}
+
+function resolveDrupalController(ref: UnresolvedRef, context: ResolutionContext, name: string): ResolvedRef | null {
+  const controllerMatch = /^\\?(?:Drupal\\[^:]+\\)?([^\\:]+)::(\w+)$/.exec(name);
+  if (!controllerMatch) return null;
+  const className = controllerMatch[1];
+  const methodName = controllerMatch[2];
+  if (!className || !methodName) return null;
+
+  for (const cls of context.getNodesByName(className)) {
+    if (cls.kind !== 'class') continue;
+    const method = context.getNodesInFile(cls.filePath).find((n) => n.kind === 'method' && n.name === methodName);
+    return frameworkResolved(ref, method?.id ?? cls.id, method ? 0.9 : 0.7);
+  }
+  return null;
+}
+
+function resolveDrupalFqcn(ref: UnresolvedRef, context: ResolutionContext, name: string): ResolvedRef | null {
+  if (!name.includes('\\') || name.includes('::')) return null;
+  const className = lastFqcnSegment(name);
+  if (!className) return null;
+  const cls = context.getNodesByName(className).find((n) => n.kind === 'class');
+  return cls ? frameworkResolved(ref, cls.id, 0.85) : null;
+}
+
+function resolveDrupalHook(ref: UnresolvedRef, context: ResolutionContext, name: string): ResolvedRef | null {
+  if (!name.startsWith('hook_')) return null;
+  const suffixLower = `_${name.slice('hook_'.length)}`;
+  const first = context
+    .getNodesByKind('function')
+    .find((n) => n.name.endsWith(suffixLower) && isDrupalHookFile(n.filePath));
+  return first ? frameworkResolved(ref, first.id, 0.75) : null;
+}
+
+function resolveDrupalService(ref: UnresolvedRef, context: ResolutionContext, name: string): ResolvedRef | null {
+  const svc = context.getNodesByName(name).find((n) => n.kind === 'resource');
+  return svc ? frameworkResolved(ref, svc.id, 0.85) : null;
 }
 
 export const drupalResolver: FrameworkResolver = {
@@ -661,8 +729,11 @@ export const drupalResolver: FrameworkResolver = {
         require?: Record<string, string>;
         'require-dev'?: Record<string, string>;
       };
-      const deps = { ...(json.require ?? {}), ...(json['require-dev'] ?? {}) };
-      return Object.keys(deps).some((k) => k.startsWith('drupal/'));
+      const dependencyNames = [
+        ...(json.require ? Object.keys(json.require) : []),
+        ...(json['require-dev'] ? Object.keys(json['require-dev']) : []),
+      ];
+      return dependencyNames.some((k) => k.startsWith('drupal/'));
     } catch {
       return false;
     }
@@ -671,63 +742,12 @@ export const drupalResolver: FrameworkResolver = {
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
     const name = ref.referenceName;
 
-    // `_controller: '\Drupal\…\ClassName::methodName'`
-    const controllerMatch = /^\\?(?:Drupal\\[^:]+\\)?([^\\:]+)::(\w+)$/.exec(name);
-    if (controllerMatch) {
-      const className = controllerMatch[1];
-      const methodName = controllerMatch[2];
-      if (className && methodName) {
-        for (const cls of context.getNodesByName(className)) {
-          if (cls.kind !== 'class') continue;
-          const method = context.getNodesInFile(cls.filePath).find((n) => n.kind === 'method' && n.name === methodName);
-          if (method) {
-            return { original: ref, targetNodeId: method.id, confidence: 0.9, resolvedBy: 'framework' };
-          }
-          // Class found but no method match — return the class as a
-          // fallback target with reduced confidence so the route → class
-          // edge isn't silently dropped.
-          return { original: ref, targetNodeId: cls.id, confidence: 0.7, resolvedBy: 'framework' };
-        }
-      }
-    }
-
-    // `_form: '\Drupal\…\Form\MyForm'`  (no `::method` suffix)
-    if (name.includes('\\') && !name.includes('::')) {
-      const className = lastFqcnSegment(name);
-      if (className) {
-        const cls = context.getNodesByName(className).find((n) => n.kind === 'class');
-        if (cls) {
-          return { original: ref, targetNodeId: cls.id, confidence: 0.85, resolvedBy: 'framework' };
-        }
-      }
-    }
-
-    // `hook_X` — first matching `*_X` function in any hook file.
-    if (name.startsWith('hook_')) {
-      const hookSuffix = name.slice('hook_'.length);
-      const suffixLower = `_${hookSuffix}`;
-      const candidates = context
-        .getNodesByKind('function')
-        .filter((n) => n.name.endsWith(suffixLower) && isDrupalHookFile(n.filePath));
-      const first = candidates[0];
-      if (first) {
-        return { original: ref, targetNodeId: first.id, confidence: 0.75, resolvedBy: 'framework' };
-      }
-    }
-
-    // services.yml `@service_id` argument / `alias:` target — emitted as the
-    // bare service id (no `@`, so it passes the resolver's known-name
-    // pre-filter, since service ids are `resource` node names). Resolve to the
-    // `resource` node of that exact id. Only matches a real service node, so
-    // it never hijacks an ordinary class/function ref (those have no
-    // same-named `resource`). Project-local services resolve; un-indexed core
-    // services (e.g. `entity_type.manager`) stay unresolved — best-effort.
-    const svc = context.getNodesByName(name).find((n) => n.kind === 'resource');
-    if (svc) {
-      return { original: ref, targetNodeId: svc.id, confidence: 0.85, resolvedBy: 'framework' };
-    }
-
-    return null;
+    return (
+      resolveDrupalController(ref, context, name) ??
+      resolveDrupalFqcn(ref, context, name) ??
+      resolveDrupalHook(ref, context, name) ??
+      resolveDrupalService(ref, context, name)
+    );
   },
 
   extract(filePath: string, content: string): { nodes: Node[]; references: UnresolvedReference[] } {

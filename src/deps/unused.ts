@@ -402,7 +402,14 @@ function isPlausibleNpmSpecifier(spec: string): boolean {
 
 function collectUsedFromScriptsAndAllowlist(args: CollectUsedFromScriptsAndAllowlistArgs): void {
   const { projectRoot, manifests, declaredDeps, usedSet, binToPackage } = args;
+  collectUsedFromScripts({ manifests, declaredDeps, usedSet, binToPackage });
+  for (const dep of loadDependenciesAllowlist(projectRoot)) {
+    usedSet.add(dep);
+  }
+}
 
+function collectUsedFromScripts(args: Omit<CollectUsedFromScriptsAndAllowlistArgs, 'projectRoot'>): void {
+  const { manifests, declaredDeps, usedSet, binToPackage } = args;
   // Walk scripts across EVERY workspace manifest (root + each
   // workspace child). Without this a workspace's `typecheck: tsc
   // --noEmit` would never surface `tsc → typescript` as a used
@@ -423,17 +430,14 @@ function collectUsedFromScriptsAndAllowlist(args: CollectUsedFromScriptsAndAllow
       }
     }
   }
+}
 
-  let allowlist: string[] = [];
+function loadDependenciesAllowlist(projectRoot: string): string[] {
   try {
     const config = loadConfig(projectRoot);
-    allowlist = config.dependenciesAllowlist ?? [];
+    return config.dependenciesAllowlist ?? [];
   } catch {
-    // Ignore config load errors
-  }
-
-  for (const dep of allowlist) {
-    usedSet.add(dep);
+    return [];
   }
 }
 
@@ -510,7 +514,7 @@ function collectUsedFromScriptFiles(args: CollectUsedFromScriptFilesArgs): void 
   // `tree-sitter`) matches literally.
   const binRegexes: Array<{ bin: string; pkg: string; re: RegExp }> = [];
   for (const [bin, pkg] of binToPackage) {
-    const escaped = bin.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = bin.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
     // (?:^|[^A-Za-z0-9_./-]) and lookahead mirror — keeps the bin
     // name as a standalone shell token (preceded / followed by
     // whitespace, line boundary, or a shell metacharacter).

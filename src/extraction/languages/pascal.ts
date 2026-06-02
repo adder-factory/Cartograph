@@ -2,6 +2,15 @@ import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
 import type { LanguageExtractor } from '../tree-sitter-types.js';
 
+function visibilityFromDeclSection(node: SyntaxNode): 'public' | 'private' | 'protected' | undefined {
+  for (const child of node.children) {
+    if (child?.type === 'kPublic' || child?.type === 'kPublished') return 'public';
+    if (child?.type === 'kPrivate') return 'private';
+    if (child?.type === 'kProtected') return 'protected';
+  }
+  return undefined;
+}
+
 const pascalExtractor: LanguageExtractor = {
   functionTypes: ['declProc'],
   classTypes: ['declClass'],
@@ -32,11 +41,8 @@ const pascalExtractor: LanguageExtractor = {
     let current = node.parent;
     while (current) {
       if (current.type === 'declSection') {
-        for (const child of current.children) {
-          if (child?.type === 'kPublic' || child?.type === 'kPublished') return 'public';
-          if (child?.type === 'kPrivate') return 'private';
-          if (child?.type === 'kProtected') return 'protected';
-        }
+        const visibility = visibilityFromDeclSection(current);
+        if (visibility) return visibility;
       }
       current = current.parent;
     }

@@ -198,7 +198,7 @@ class BgSummaryController {
    * this — tracked as a follow-up.
    */
   private async runPasses(controller: AbortController): Promise<void> {
-    const resolved = await this.svc.resolveLlmConfig();
+    const resolved = await this.svc.config.resolveLlmConfig();
     if (!resolved || controller.signal.aborted) return;
 
     // claude-bridge: subprocess startup overhead → 4 in flight.
@@ -377,7 +377,7 @@ export class CartographLlmService {
       projectRoot: this.cg.projectRoot,
       queries: this.cg.queries,
       client,
-      modelLabel: resolved.summarizeLlm!.model,
+      modelLabel: resolved.summarizeLlm.model,
       // Conditional spread — `exactOptionalPropertyTypes` rejects an
       // explicit `eagerLimit: undefined`.
       options: { ...options, summaryBatchSize, ...(eagerLimit === undefined ? {} : { eagerLimit }) },
@@ -396,7 +396,7 @@ export class CartographLlmService {
         projectRoot: this.cg.projectRoot,
         queries: this.cg.queries,
         client,
-        modelLabel: resolved.summarizeLlm!.model,
+        modelLabel: resolved.summarizeLlm.model,
         options: {
           concurrency: 1,
           ...(options.signal ? { signal: options.signal } : {}),
@@ -419,7 +419,7 @@ export class CartographLlmService {
         projectRoot: this.cg.projectRoot,
         queries: this.cg.queries,
         client,
-        modelLabel: resolved.summarizeLlm!.model,
+        modelLabel: resolved.summarizeLlm.model,
         options: {
           concurrency: 1,
           ...(options.signal ? { signal: options.signal } : {}),
@@ -458,7 +458,7 @@ export class CartographLlmService {
   async classifyAll(
     options: { signal?: AbortSignal; concurrency?: number; onProgress?: (done: number, total: number) => void } = {},
   ): Promise<ClassifierResult> {
-    const resolved = await this.resolveLlmConfig();
+    const resolved = await this.config.resolveLlmConfig();
     if (!resolved?.summarizeLlm) {
       throw new Error('No summarize provider configured. Run `cartograph llm setup` or set config.llm.summarizeLlm.');
     }
@@ -469,7 +469,7 @@ export class CartographLlmService {
     return classifyAllRoles({
       queries: this.cg.queries,
       client,
-      modelLabel: resolved.summarizeLlm!.model,
+      modelLabel: resolved.summarizeLlm.model,
       options: {
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
@@ -506,7 +506,7 @@ export class CartographLlmService {
    * to check before calling for a graceful UX.
    */
   async ask(question: string, options: AskOptions = {}): Promise<AskResult> {
-    const resolved = await this.resolveLlmConfig();
+    const resolved = await this.config.resolveLlmConfig();
     if (!resolved?.summarizeLlm) {
       throw new Error(
         'No ask provider configured for cartograph_ask. Run `cartograph llm setup` or set config.llm.summarizeLlm.',
@@ -554,7 +554,7 @@ export class CartographLlmService {
     const fetchLimit = Math.max(HYBRID_FETCH_FLOOR, limit * HYBRID_FETCH_MULTIPLIER);
     const ftsResults = searchNodes(this.cg.queries, query, { ...options, limit: fetchLimit });
 
-    const resolved = await this.resolveLlmConfig();
+    const resolved = await this.config.resolveLlmConfig();
     if (!resolved?.embeddingLlm) {
       return {
         results: diversifyByName(ftsResults, limit),
@@ -612,7 +612,7 @@ export async function llmLocalChat(
         `local_chat is for bulk prose subtasks; for larger inputs, slice the work and call multiple times.`,
     );
   }
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.summarizeLlm) {
     throw new Error('No summarize provider configured. Run `cartograph llm setup` or set config.llm.summarizeLlm.');
   }
@@ -838,7 +838,7 @@ async function llmPrepareSummarizeClient(
   client: LlmClient;
   summaryBatchSize: number;
 }> {
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.summarizeLlm) {
     throw new Error('No summarize provider configured. Run `cartograph llm setup` or set config.llm.summarizeLlm.');
   }
@@ -1102,75 +1102,111 @@ interface BlendWithEmbeddingsResult {
   rerankOutcome: RerankOutcome;
 }
 
+interface EmbedQueryResult {
+  queryVec: Float32Array | null;
+  fallback: BlendWithEmbeddingsResult | null;
+}
+
 async function searchHybridBlendWithEmbeddings(args: SearchHybridBlendArgs): Promise<BlendWithEmbeddingsResult> {
   const { svc, query, ftsResults, client, embeddingsCfg, resolved, signal, limit, fetchLimit } = args;
   const noRerankerOutcome: RerankOutcome = resolved?.rerankerLlm
     ? { kind: 'skipped-no-hits' }
     : { kind: 'skipped-no-config' };
 
-  let queryVec: Float32Array;
-  try {
-    const vecs = await client.embed([query]);
-    if (vecs.length === 0 || !vecs[0]) {
-      return { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome };
-    }
-    queryVec = vecs[0];
-  } catch (err) {
-    logDebug('Hybrid search: query embed failed, falling back to FTS', { error: String(err) });
-    return { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome };
-  }
+  const embedded = await embedHybridQuery(client, query, ftsResults, limit, noRerankerOutcome);
+  if (embedded.fallback) return embedded.fallback;
+  const queryVec = embedded.queryVec!;
 
   let semanticHits = await llmSemanticTopK({ svc, queryVec, model: embeddingsCfg.model, k: fetchLimit });
   if (semanticHits.length === 0) {
     return { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome };
   }
 
-  // Query expansion (#6) — when the merged top-1 score (after the
-  // file-grain fallback in llmSemanticTopK already had a chance to
-  // raise it) is below QUERY_EXPANSION_SCORE_THRESHOLD AND the chat
-  // backend is configured, ask the LLM for paraphrases and merge
-  // their hits via per-nodeId score max-pool. Cached by
-  // sha256(model + n + text) so repeated queries are zero-cost.
+  semanticHits = await expandSemanticHitsIfNeeded({ svc, query, client, embeddingsCfg, resolved, semanticHits, fetchLimit, signal });
+  const reranked = await rerankSemanticHitsIfConfigured({ svc, query, resolved, semanticHits, signal, noRerankerOutcome });
+
+  const fused = await fuseHybridSearchRanks(ftsResults, reranked.semanticHits);
+  const fusedResults = buildFusedSearchResults(svc, ftsResults, fused);
+  return { results: diversifyByName(fusedResults, limit), rerankOutcome: reranked.rerankOutcome };
+}
+
+async function embedHybridQuery(
+  client: EmbeddingProvider,
+  query: string,
+  ftsResults: SearchResult[],
+  limit: number,
+  noRerankerOutcome: RerankOutcome,
+): Promise<EmbedQueryResult> {
+  try {
+    const vecs = await client.embed([query]);
+    if (vecs.length === 0 || !vecs[0]) {
+      return { queryVec: null, fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome } };
+    }
+    return { queryVec: vecs[0], fallback: null };
+  } catch (err) {
+    logDebug('Hybrid search: query embed failed, falling back to FTS', { error: String(err) });
+    return { queryVec: null, fallback: { results: diversifyByName(ftsResults, limit), rerankOutcome: noRerankerOutcome } };
+  }
+}
+
+interface ExpandSemanticHitsArgs {
+  svc: CartographLlmService;
+  query: string;
+  client: EmbeddingProvider;
+  embeddingsCfg: NonNullable<ResolvedLlm['embeddingLlm']>;
+  resolved: ResolvedLlm | undefined;
+  semanticHits: Array<{ nodeId: string; score: number }>;
+  fetchLimit: number;
+  signal: AbortSignal | undefined;
+}
+
+async function expandSemanticHitsIfNeeded(args: ExpandSemanticHitsArgs): Promise<Array<{ nodeId: string; score: number }>> {
+  const { svc, query, client, embeddingsCfg, resolved, semanticHits, fetchLimit, signal } = args;
   const topScore = semanticHits[0]?.score ?? 0;
-  if (topScore < QUERY_EXPANSION_SCORE_THRESHOLD && resolved?.summarizeLlm) {
-    semanticHits = await maybeExpandAndMaxPool({
-      svc,
-      query,
-      client,
-      embeddingsCfg,
-      resolved,
-      initialHits: semanticHits,
-      k: fetchLimit,
-      ...(signal ? { signal } : {}),
-    });
-  }
+  if (topScore >= QUERY_EXPANSION_SCORE_THRESHOLD || !resolved?.summarizeLlm) return semanticHits;
+  return maybeExpandAndMaxPool({
+    svc,
+    query,
+    client,
+    embeddingsCfg,
+    resolved,
+    initialHits: semanticHits,
+    k: fetchLimit,
+    ...(signal ? { signal } : {}),
+  });
+}
 
-  // Cross-encoder rerank (#4) — when the operator opted in via
-  // `config.rerankerLlm`, score each (query, candidate) pair jointly
-  // through the reranker and reorder. Replaces semanticHits' cosine
-  // scores with sigmoid-of-logit scores in [0, 1]; the downstream
-  // RRF fusion uses rank position only, so the score replacement is safe.
-  let rerankOutcome: RerankOutcome = noRerankerOutcome;
-  if (resolved?.rerankerLlm) {
-    const rerankResult = await maybeRerankSemantic({
-      svc,
-      query,
-      resolved,
-      hits: semanticHits,
-      ...(signal ? { signal } : {}),
-    });
-    semanticHits = rerankResult.hits;
-    rerankOutcome = rerankResult.rerank;
-  }
+interface RerankSemanticHitsArgs {
+  svc: CartographLlmService;
+  query: string;
+  resolved: ResolvedLlm | undefined;
+  semanticHits: Array<{ nodeId: string; score: number }>;
+  signal: AbortSignal | undefined;
+  noRerankerOutcome: RerankOutcome;
+}
 
-  const { reciprocalRankFusion } = await import('./llm/embeddings.js');
-  const ftsRanked = ftsResults.map((r) => ({ id: r.node.id }));
-  const semRanked = semanticHits.map((h) => ({ id: h.nodeId }));
-  const fused = reciprocalRankFusion([ftsRanked, semRanked]);
+async function rerankSemanticHitsIfConfigured(
+  args: RerankSemanticHitsArgs,
+): Promise<{ semanticHits: Array<{ nodeId: string; score: number }>; rerankOutcome: RerankOutcome }> {
+  const { svc, query, resolved, semanticHits, signal, noRerankerOutcome } = args;
+  if (!resolved?.rerankerLlm) return { semanticHits, rerankOutcome: noRerankerOutcome };
+  const rerankResult = await maybeRerankSemantic({
+    svc,
+    query,
+    resolved,
+    hits: semanticHits,
+    ...(signal ? { signal } : {}),
+  });
+  return { semanticHits: rerankResult.hits, rerankOutcome: rerankResult.rerank };
+}
 
+function buildFusedSearchResults(
+  svc: CartographLlmService,
+  ftsResults: SearchResult[],
+  fused: Map<string, number>,
+): SearchResult[] {
   const known = new Map<string, SearchResult>();
   for (const r of ftsResults) known.set(r.node.id, r);
-
   const orderedIds = [...fused.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
   const fusedResults: SearchResult[] = [];
   for (const id of orderedIds) {
@@ -1182,7 +1218,17 @@ async function searchHybridBlendWithEmbeddings(args: SearchHybridBlendArgs): Pro
     }
     fusedResults.push(result);
   }
-  return { results: diversifyByName(fusedResults, limit), rerankOutcome };
+  return fusedResults;
+}
+
+async function fuseHybridSearchRanks(
+  ftsResults: SearchResult[],
+  semanticHits: Array<{ nodeId: string }>,
+): Promise<Map<string, number>> {
+  const { reciprocalRankFusion } = await import('./llm/embeddings.js');
+  const ftsRanked = ftsResults.map((r) => ({ id: r.node.id }));
+  const semRanked = semanticHits.map((h) => ({ id: h.nodeId }));
+  return reciprocalRankFusion([ftsRanked, semRanked]);
 }
 
 /**
@@ -1194,7 +1240,7 @@ export async function llmFindDeadCode(
   svc: CartographLlmService,
   options: DeadCodeOptions = {},
 ): Promise<DeadCodeResult> {
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.summarizeLlm) {
     throw new Error('No summarize provider configured for dead-code judge.');
   }
@@ -1213,7 +1259,7 @@ export async function llmCheckNamingDrift(
   svc: CartographLlmService,
   symbol: { name: string; kind: string; filePath: string },
 ): Promise<NamingCheckResult> {
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.summarizeLlm) {
     throw new Error('No summarize provider configured for naming-drift check.');
   }
@@ -1235,7 +1281,7 @@ export async function llmSummarizeChange(
   },
 ): Promise<ChangeIntentResult> {
   const { name, kind, beforeBody, afterBody, options = {} } = args;
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.summarizeLlm) {
     throw new Error('No summarize provider configured for summarizeChange.');
   }
@@ -1255,7 +1301,7 @@ export async function llmFindImplementations(
   options: { limit?: number; languageFilter?: string } = {},
 ): Promise<SearchResult[]> {
   const limit = options.limit ?? 10;
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.embeddingLlm) return [];
 
   const client = createEmbeddingClient(resolved.embeddingLlm);
@@ -1291,7 +1337,7 @@ export async function llmFindSimilar(
   options: { limit?: number; sameLanguage?: boolean; differentLanguage?: boolean } = {},
 ): Promise<SearchResult[]> {
   const limit = options.limit ?? 10;
-  const resolved = await svc.resolveLlmConfig();
+  const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.embeddingLlm) return [];
 
   const sourceNode = svc.cg.queries.getNodeById(nodeId);

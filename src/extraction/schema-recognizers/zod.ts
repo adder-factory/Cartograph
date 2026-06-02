@@ -82,7 +82,7 @@ function findZodCall(value: SyntaxNode | null, method: string): SyntaxNode | nul
   while (n) {
     if (n.type === 'call_expression') {
       const fn = n.childForFieldName('function');
-      if (fn && fn.type === 'member_expression') {
+      if (fn?.type === 'member_expression') {
         const obj = fn.childForFieldName('object');
         const prop = fn.childForFieldName('property');
         if (obj?.type === 'identifier' && obj.text === 'z' && prop?.text === method) {
@@ -109,6 +109,27 @@ function firstArg(call: SyntaxNode | null): SyntaxNode | null {
   return args?.namedChild(0) ?? null;
 }
 
+function memberExpressionParts(node: SyntaxNode | null): { obj: SyntaxNode | null; prop: SyntaxNode | null } | null {
+  if (node?.type !== 'member_expression') return null;
+  return { obj: node.childForFieldName('object'), prop: node.childForFieldName('property') };
+}
+
+function directZodMethodName(call: SyntaxNode): string | null | undefined {
+  if (call.type !== 'call_expression') return undefined;
+  const parts = memberExpressionParts(call.childForFieldName('function'));
+  if (!parts) return undefined;
+  if (parts.obj?.type === 'identifier' && parts.obj.text === 'z') return parts.prop?.text ?? null;
+  return undefined;
+}
+
+function nextZodChainNode(node: SyntaxNode): SyntaxNode | null {
+  if (node.type === 'member_expression') return node.childForFieldName('object');
+  if (node.type !== 'call_expression') return null;
+  const fn = node.childForFieldName('function');
+  const parts = memberExpressionParts(fn);
+  return parts ? parts.obj : fn;
+}
+
 /**
  * The leading Zod method of a field's value chain — `z.string()...` →
  * `'string'`, `z.enum([...])` → `'enum'`. `null` when the value is not
@@ -117,25 +138,9 @@ function firstArg(call: SyntaxNode | null): SyntaxNode | null {
 function zodLeafType(value: SyntaxNode | null): string | null {
   let n: SyntaxNode | null = value;
   while (n) {
-    if (n.type === 'call_expression') {
-      const fn = n.childForFieldName('function');
-      if (fn && fn.type === 'member_expression') {
-        const obj = fn.childForFieldName('object');
-        const prop = fn.childForFieldName('property');
-        if (obj?.type === 'identifier' && obj.text === 'z') {
-          return prop ? prop.text : null;
-        }
-        n = obj;
-        continue;
-      }
-      n = fn;
-      continue;
-    }
-    if (n.type === 'member_expression') {
-      n = n.childForFieldName('object');
-      continue;
-    }
-    return null;
+    const method = directZodMethodName(n);
+    if (method !== undefined) return method;
+    n = nextZodChainNode(n);
   }
   return null;
 }
@@ -203,6 +208,13 @@ interface RecognizedSchema {
   readonly fields: ReadonlyMap<string, string>;
 }
 
+interface ConsumerEdgeDraft {
+  readonly source: string;
+  readonly target: string;
+  readonly kind: 'type_of' | 'references';
+  readonly line: number;
+}
+
 /** `extractSchema`'s result — nodes/edges plus the schema descriptor. */
 interface ExtractSchemaResult extends SchemaRecognizerResult {
   /** The schema descriptor, or `null` when the declarator isn't one. */
@@ -262,7 +274,7 @@ function emitObjectFields(args: EmitObjectFieldsArgs): ObjectFieldsResult {
   const fields = new Map<string, string>();
 
   for (const pair of objArg.namedChildren) {
-    if (!pair || pair.type !== 'pair') continue;
+    if (pair?.type !== 'pair') continue;
     const keyNode = pair.childForFieldName('key');
     const fieldValue = pair.childForFieldName('value');
     if (!keyNode || !fieldValue) continue;
@@ -555,17 +567,65 @@ function pickOmitRefs(call: SyntaxNode): { schema: string; fields: string[] } | 
   if (!fn || fn?.type !== 'member_expression') return null;
   const obj = fn.childForFieldName('object');
   const prop = fn.childForFieldName('property');
-  if (!obj || obj?.type !== 'identifier' || !prop) return null;
+  if (obj?.type !== 'identifier' || !prop) return null;
   if (prop.text !== 'pick' && prop.text !== 'omit') return null;
   const arg = firstArg(call);
-  if (!arg || arg?.type !== 'object') return null;
+  if (arg?.type !== 'object') return null;
   const fields: string[] = [];
   for (const pair of arg.namedChildren) {
-    if (!pair || pair.type !== 'pair') continue;
+    if (pair?.type !== 'pair') continue;
     const key = pair.childForFieldName('key');
     if (key) fields.push(unquote(key.text));
   }
   return { schema: obj.text, fields };
+}
+
+function extractGenericTypeConsumer(
+  node: SyntaxNode,
+  ctx: SchemaRecognizerContext,
+  schemas: ReadonlyMap<string, RecognizedSchema>,
+): ConsumerEdgeDraft | null {
+  const nameNode = node.namedChild(0);
+  if (nameNode?.text !== 'z.infer') return null;
+  const targetName = typeofArgName(node);
+  const schema = targetName ? schemas.get(targetName) : undefined;
+  if (!schema) return null;
+  return {
+    source: enclosingNodeId(node, ctx),
+    target: schema.structId,
+    kind: 'type_of',
+    line: node.startPosition.row + 1,
+  };
+}
+
+function extractShapeFieldConsumer(
+  node: SyntaxNode,
+  ctx: SchemaRecognizerContext,
+  schemas: ReadonlyMap<string, RecognizedSchema>,
+): ConsumerEdgeDraft | null {
+  const ref = shapeFieldRef(node);
+  const fieldId = ref ? schemas.get(ref.schema)?.fields.get(ref.field) : undefined;
+  if (!fieldId) return null;
+  return { source: enclosingNodeId(node, ctx), target: fieldId, kind: 'references', line: node.startPosition.row + 1 };
+}
+
+function extractPickOmitConsumers(
+  node: SyntaxNode,
+  ctx: SchemaRecognizerContext,
+  schemas: ReadonlyMap<string, RecognizedSchema>,
+): ConsumerEdgeDraft[] {
+  const refs = pickOmitRefs(node);
+  const schema = refs ? schemas.get(refs.schema) : undefined;
+  if (!schema || !refs) return [];
+
+  const source = enclosingNodeId(node, ctx);
+  const line = node.startPosition.row + 1;
+  const out: ConsumerEdgeDraft[] = [];
+  for (const f of refs.fields) {
+    const fieldId = schema.fields.get(f);
+    if (fieldId) out.push({ source, target: fieldId, kind: 'references', line });
+  }
+  return out;
 }
 
 /**
@@ -577,7 +637,7 @@ function pickOmitRefs(call: SyntaxNode): { schema: string; fields: string[] } | 
 function extractConsumers(ctx: SchemaRecognizerContext, schemas: ReadonlyMap<string, RecognizedSchema>): Edge[] {
   const edges: Edge[] = [];
   const seen = new Set<string>();
-  const add = (e: { source: string; target: string; kind: 'type_of' | 'references'; line: number }): void => {
+  const add = (e: ConsumerEdgeDraft): void => {
     const key = `${e.source}|${e.target}|${e.kind}`;
     if (seen.has(key)) return;
     seen.add(key);
@@ -587,39 +647,19 @@ function extractConsumers(ctx: SchemaRecognizerContext, schemas: ReadonlyMap<str
   walkTree(ctx.rootNode, (n) => {
     // (a) `z.infer<typeof X>` annotation → `type_of` edge to struct X.
     if (n.type === 'generic_type') {
-      const nameNode = n.namedChild(0);
-      if (nameNode?.text === 'z.infer') {
-        const targetName = typeofArgName(n);
-        const schema = targetName ? schemas.get(targetName) : undefined;
-        if (schema)
-          add({
-            source: enclosingNodeId(n, ctx),
-            target: schema.structId,
-            kind: 'type_of',
-            line: n.startPosition.row + 1,
-          });
-      }
+      const edge = extractGenericTypeConsumer(n, ctx, schemas);
+      if (edge) add(edge);
       return;
     }
     // (b) `X.shape.<field>` member access → `references` edge to field.
     if (n.type === 'member_expression') {
-      const ref = shapeFieldRef(n);
-      const fieldId = ref ? schemas.get(ref.schema)?.fields.get(ref.field) : undefined;
-      if (fieldId)
-        add({ source: enclosingNodeId(n, ctx), target: fieldId, kind: 'references', line: n.startPosition.row + 1 });
+      const edge = extractShapeFieldConsumer(n, ctx, schemas);
+      if (edge) add(edge);
       return;
     }
     // (c) `X.pick({...})` / `X.omit({...})` → `references` edge per field.
     if (n.type === 'call_expression') {
-      const refs = pickOmitRefs(n);
-      const schema = refs ? schemas.get(refs.schema) : undefined;
-      if (schema && refs) {
-        const source = enclosingNodeId(n, ctx);
-        for (const f of refs.fields) {
-          const fieldId = schema.fields.get(f);
-          if (fieldId) add({ source, target: fieldId, kind: 'references', line: n.startPosition.row + 1 });
-        }
-      }
+      for (const edge of extractPickOmitConsumers(n, ctx, schemas)) add(edge);
     }
   });
   return edges;

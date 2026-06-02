@@ -1,4 +1,4 @@
-/* eslint-disable */
+/* eslint-disable no-console */
 /**
  * Companion to bench-llm-vs-baseline.js: indexes once, then targets a
  * curated set of interesting symbols (instead of iterating
@@ -9,11 +9,15 @@
  *   node scripts/bench-targeted-summaries.js
  */
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { performance } = require('perf_hooks');
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const { default: Cartograph } = require(path.join(PROJECT_ROOT, 'dist', 'index.js'));
 const { LlmClient } = require(path.join(PROJECT_ROOT, 'dist', 'llm', 'client.js'));
@@ -133,13 +137,6 @@ async function main() {
       const summary = (result.text.split('\n')[0] || '').trim();
       const elapsed = performance.now() - symStart;
 
-      // Persist via the public API
-      const crypto = require('crypto');
-      const h = crypto.createHash('sha256');
-      h.update(node.signature || '');
-      h.update('\0');
-      h.update(truncated);
-      const hash = h.digest('hex').slice(0, 32);
       // Use the queries layer reflectively via the singleton — test surface
       // exposes upsertSymbolSummary on QueryBuilder, accessed through
       // direct require since we're a bench script.
@@ -163,7 +160,9 @@ async function main() {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('failed:', err);
   process.exit(1);
-});
+}

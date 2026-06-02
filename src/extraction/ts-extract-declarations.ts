@@ -547,7 +547,6 @@ function tsEmitAnnotatedParameters(ext: TreeSitterExtractor, methodNode: Node, m
   }
   if (ext.language === 'kotlin') {
     emitKotlinAnnotatedParameters(ext, methodNode, methodSyntaxNode);
-    return;
   }
 }
 
@@ -607,38 +606,38 @@ function emitKotlinAnnotatedParameters(ext: TreeSitterExtractor, methodNode: Nod
       pendingModifiers = null;
       continue;
     }
-    if (!pendingModifiers) continue; // un-annotated param — skip
-    const hasAnnotation = pendingModifiers.namedChildren.some((m) => m && DECORATOR_NODE_TYPES.has(m.type));
-    if (!hasAnnotation) {
-      pendingModifiers = null;
-      continue;
-    }
-    // Kotlin parameter shape: `simple_identifier ':' user_type`.
-    const ident = child.namedChildren.find((c) => c?.type === 'simple_identifier');
-    if (!ident) {
-      pendingModifiers = null;
-      continue;
-    }
-    const paramName = ext.source.substring(ident.startIndex, ident.endIndex);
-    if (!paramName) {
-      pendingModifiers = null;
-      continue;
-    }
-    const paramNode = ext.createNode({
-      kind: 'parameter',
-      name: paramName,
-      node: child,
-      extra: { qualifiedName: `${methodNode.qualifiedName}::${paramName}` },
-    });
-    if (paramNode) {
-      ext.edges.push({ source: methodNode.id, target: paramNode.id, kind: 'contains' });
-      // Pass the parameter_modifiers node itself — its named children
-      // are annotation nodes, which `tsExtractDecoratorsFor`'s outer
-      // loop will recognise via `recordDecoratorIfPresent`.
-      tsExtractDecoratorsFor(ext, pendingModifiers, paramNode.id);
+    if (pendingModifiers) {
+      emitKotlinAnnotatedParameter(ext, methodNode, child, pendingModifiers);
     }
     pendingModifiers = null;
   }
+}
+
+function emitKotlinAnnotatedParameter(
+  ext: TreeSitterExtractor,
+  methodNode: Node,
+  parameterNode: SyntaxNode,
+  modifiersNode: SyntaxNode,
+): void {
+  const hasAnnotation = modifiersNode.namedChildren.some((m) => m && DECORATOR_NODE_TYPES.has(m.type));
+  if (!hasAnnotation) return;
+  // Kotlin parameter shape: `simple_identifier ':' user_type`.
+  const ident = parameterNode.namedChildren.find((c) => c?.type === 'simple_identifier');
+  if (!ident) return;
+  const paramName = ext.source.substring(ident.startIndex, ident.endIndex);
+  if (!paramName) return;
+  const paramNode = ext.createNode({
+    kind: 'parameter',
+    name: paramName,
+    node: parameterNode,
+    extra: { qualifiedName: `${methodNode.qualifiedName}::${paramName}` },
+  });
+  if (!paramNode) return;
+  ext.edges.push({ source: methodNode.id, target: paramNode.id, kind: 'contains' });
+  // Pass the parameter_modifiers node itself — its named children
+  // are annotation nodes, which `tsExtractDecoratorsFor`'s outer
+  // loop will recognise via `recordDecoratorIfPresent`.
+  tsExtractDecoratorsFor(ext, modifiersNode, paramNode.id);
 }
 
 /**
@@ -736,7 +735,7 @@ export function tsExtractInterface(ext: TreeSitterExtractor, node: SyntaxNode): 
   ext.nodeStack.push(interfaceNode.id);
   let body =
     ext.extractor.resolveBody?.(node, ext.extractor.bodyField) ?? getChildByField(node, ext.extractor.bodyField);
-  if (!body) body = node;
+  body ??= node;
   for (const child of body.namedChildren) {
     if (child) ext.visitNode(child);
   }

@@ -38,7 +38,7 @@ describe('audit-4 — symbol-resolver fuzzy-fallback gate + stale-UID detection'
       path.join(dir, 'src', 'engine.ts'),
       [
         'export function computeChecksum(input: string): number { return input.length; }',
-        'export function renderReport(rows: string[]): string { return rows.join("\\n"); }',
+        String.raw`export function renderReport(rows: string[]): string { return rows.join("\n"); }`,
         'export const MAX_RETRY_COUNT = 5;',
       ].join('\n') + '\n',
     );

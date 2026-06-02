@@ -25,8 +25,8 @@
  *     carry enough role-discriminating signal.
  */
 
-import * as path from 'path';
-import { fileURLToPath } from 'url';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Cartograph } from '../src/index.js';
 import { llmLocalChat } from '../src/cartograph-llm-service.js';
 
@@ -94,11 +94,11 @@ function parseRole(text: string): string {
   const lower = text
     .toLowerCase()
     .trim()
-    .replace(/^[`'"\s]+|[`'"\s]+$/g, '');
-  const firstToken = lower.split(/\s+/)[0]?.replace(/[^a-z_]/g, '') ?? '';
+    .replaceAll(/^[`'"\s]+|[`'"\s]+$/g, '');
+  const firstToken = lower.split(/\s+/)[0]?.replaceAll(/[^a-z_]/g, '') ?? '';
   if (firstToken && ROLE_LABELS.has(firstToken)) return firstToken;
   const joined = lower
-    .replace(/[^a-z\s]/g, '')
+    .replaceAll(/[^a-z\s]/g, '')
     .split(/\s+/)
     .filter(Boolean)
     .join('_');
@@ -166,6 +166,68 @@ function confusionLines(label: string, a: string[], b: string[]): string[] {
   return lines;
 }
 
+function printRawResponses(rawSamples: string[][], samples: Sample[]): void {
+  console.log('\n=== Raw LLM responses (first 3 samples per variant) ===');
+  const variantNames = ['summary+sig', 'docstring+sig', 'name+kind+sig', 'summary+docstring+sig'];
+  for (let v = 0; v < 4; v++) {
+    console.log(`\n--- ${variantNames[v]} ---`);
+    for (let i = 0; i < Math.min(3, rawSamples[v]!.length); i++) {
+      const raw = rawSamples[v]![i]!.replaceAll('\n', String.raw`\n`).slice(0, 200);
+      console.log(`  [${i}] (${samples[i]!.name}): "${raw}"`);
+    }
+  }
+}
+
+function printRoleDistribution(samples: Sample[], variants: ReadonlyArray<readonly [string, string[]]>): void {
+  console.log('\n=== Role distribution per variant ===');
+  for (const [variantName, results] of variants) {
+    printDistribution(`  ${variantName}:`, results);
+  }
+  printDistribution('  baseline:', samples.map((s) => s.baselineRole));
+}
+
+function printDistribution(prefix: string, values: string[]): void {
+  const dist = new Map<string, number>();
+  for (const value of values) dist.set(value, (dist.get(value) ?? 0) + 1);
+  const sorted = [...dist.entries()].sort((x, y) => y[1] - x[1]);
+  const formatted = sorted.map(([k, v]) => `${k}=${v}`).join(', ');
+  console.log(`${prefix} ${formatted}`);
+}
+
+function printDecisionCriterion(ab: { agree: number; total: number }, ad: { agree: number; total: number }, aBaseline: { agree: number; total: number }, dBaseline: { agree: number; total: number }): void {
+  console.log('\n=== Decision criterion (pre-set) ===');
+  const abPct = (ab.agree / ab.total) * 100;
+  const adPct = (ad.agree / ad.total) * 100;
+  const dBaselinePct = (dBaseline.agree / dBaseline.total) * 100;
+  const aBaselinePct = (aBaseline.agree / aBaseline.total) * 100;
+  if (abPct >= 80) {
+    console.log(`A↔B >=80% (${pct(ab.agree, ab.total)}): docstring-only is a VIABLE replacement.`);
+  } else if (abPct >= 60) {
+    console.log(`A↔B 60-80% (${pct(ab.agree, ab.total)}): marginal — docstring-only is close but not a drop-in.`);
+  } else {
+    console.log(`A↔B <60% (${pct(ab.agree, ab.total)}): docstring-only loses too much signal.`);
+  }
+  console.log(`A↔D agreement: ${pct(ad.agree, ad.total)} — does adding docstring NEXT TO summary change outputs?`);
+  if (adPct >= 90) {
+    console.log('  >=90%: docstring contributes negligible signal beyond summary; pure summary is sufficient.');
+  } else if (adPct >= 75) {
+    console.log('  75-90%: docstring shifts some classifications when added — partial signal complement.');
+  } else {
+    console.log('  <75%: docstring substantially changes classifier output — meaningful added signal.');
+  }
+  if (dBaselinePct > aBaselinePct + 5) {
+    console.log(
+      `Hybrid D beats summary-only A on baseline agreement by ${(dBaselinePct - aBaselinePct).toFixed(1)} pts — adding docstring HELPS.`,
+    );
+  } else if (dBaselinePct < aBaselinePct - 5) {
+    console.log(
+      `Hybrid D LOSES vs summary-only A by ${(aBaselinePct - dBaselinePct).toFixed(1)} pts — adding docstring is NOISE.`,
+    );
+  } else {
+    console.log(`Hybrid D and summary-only A within ±5 pts on baseline agreement — adding docstring is a wash.`);
+  }
+}
+
 async function main(): Promise<void> {
   console.log(`Eval: role classifier input-feature ablation (N=${N})`);
   console.log(`Project: ${PROJECT_ROOT}`);
@@ -200,32 +262,13 @@ async function main(): Promise<void> {
     const resC = await classifyAllForVariant(cg, samples, 'name+kind+sig', rawSamples);
     const resD = await classifyAllForVariant(cg, samples, 'summary+docstring+sig', rawSamples);
 
-    console.log('\n=== Raw LLM responses (first 3 samples per variant) ===');
-    const variantNames = ['summary+sig', 'docstring+sig', 'name+kind+sig', 'summary+docstring+sig'];
-    for (let v = 0; v < 4; v++) {
-      console.log(`\n--- ${variantNames[v]} ---`);
-      for (let i = 0; i < Math.min(3, rawSamples[v]!.length); i++) {
-        const raw = rawSamples[v]![i]!.replace(/\n/g, '\\n').slice(0, 200);
-        console.log(`  [${i}] (${samples[i]!.name}): "${raw}"`);
-      }
-    }
-
-    console.log('\n=== Role distribution per variant ===');
-    for (const [variantName, results] of [
+    printRawResponses(rawSamples, samples);
+    printRoleDistribution(samples, [
       ['A', resA.classifications],
       ['B', resB.classifications],
       ['C', resC.classifications],
       ['D', resD.classifications],
-    ] as const) {
-      const dist = new Map<string, number>();
-      for (const r of results) dist.set(r, (dist.get(r) ?? 0) + 1);
-      const sorted = [...dist.entries()].sort((x, y) => y[1] - x[1]);
-      console.log(`  ${variantName}: ${sorted.map(([k, v]) => `${k}=${v}`).join(', ')}`);
-    }
-    const baselineDist = new Map<string, number>();
-    for (const s of samples) baselineDist.set(s.baselineRole, (baselineDist.get(s.baselineRole) ?? 0) + 1);
-    const baselineSorted = [...baselineDist.entries()].sort((x, y) => y[1] - x[1]);
-    console.log(`  baseline: ${baselineSorted.map(([k, v]) => `${k}=${v}`).join(', ')}`);
+    ]);
 
     const baseline = samples.map((s) => s.baselineRole);
     const ab = agreement(resA.classifications, resB.classifications);
@@ -274,43 +317,15 @@ async function main(): Promise<void> {
     console.log();
     for (const line of confusionLines('A vs D', resA.classifications, resD.classifications)) console.log(line);
 
-    console.log('\n=== Decision criterion (pre-set) ===');
-    const abPct = (ab.agree / ab.total) * 100;
-    const adPct = (ad.agree / ad.total) * 100;
-    const dBaselinePct = (dBaseline.agree / dBaseline.total) * 100;
-    const aBaselinePct = (aBaseline.agree / aBaseline.total) * 100;
-    if (abPct >= 80) {
-      console.log(`A↔B >=80% (${pct(ab.agree, ab.total)}): docstring-only is a VIABLE replacement.`);
-    } else if (abPct >= 60) {
-      console.log(`A↔B 60-80% (${pct(ab.agree, ab.total)}): marginal — docstring-only is close but not a drop-in.`);
-    } else {
-      console.log(`A↔B <60% (${pct(ab.agree, ab.total)}): docstring-only loses too much signal.`);
-    }
-    console.log(`A↔D agreement: ${pct(ad.agree, ad.total)} — does adding docstring NEXT TO summary change outputs?`);
-    if (adPct >= 90) {
-      console.log('  >=90%: docstring contributes negligible signal beyond summary; pure summary is sufficient.');
-    } else if (adPct >= 75) {
-      console.log('  75-90%: docstring shifts some classifications when added — partial signal complement.');
-    } else {
-      console.log('  <75%: docstring substantially changes classifier output — meaningful added signal.');
-    }
-    if (dBaselinePct > aBaselinePct + 5) {
-      console.log(
-        `Hybrid D beats summary-only A on baseline agreement by ${(dBaselinePct - aBaselinePct).toFixed(1)} pts — adding docstring HELPS.`,
-      );
-    } else if (dBaselinePct < aBaselinePct - 5) {
-      console.log(
-        `Hybrid D LOSES vs summary-only A by ${(aBaselinePct - dBaselinePct).toFixed(1)} pts — adding docstring is NOISE.`,
-      );
-    } else {
-      console.log(`Hybrid D and summary-only A within ±5 pts on baseline agreement — adding docstring is a wash.`);
-    }
+    printDecisionCriterion(ab, ad, aBaseline, dBaseline);
   } finally {
     cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('Eval failed:', err);
   process.exit(1);
-});
+}

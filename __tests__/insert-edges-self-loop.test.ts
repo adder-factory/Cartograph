@@ -17,6 +17,22 @@ import { Cartograph } from '../src/index.js';
 import { insertEdges } from '../src/db/queries-edges.js';
 import type { Edge, Node } from '../src/types.js';
 
+function makeNode(id: string): Node {
+  return {
+    id,
+    kind: 'struct',
+    name: id,
+    qualifiedName: id,
+    filePath: 'fake.go',
+    language: 'go',
+    startLine: 1,
+    endLine: 5,
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: Date.now(),
+  };
+}
+
 describe('insertEdges self-loop filter', () => {
   let dir: string;
   let cg: Cartograph;
@@ -35,22 +51,6 @@ describe('insertEdges self-loop filter', () => {
     if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
-
-  function makeNode(id: string): Node {
-    return {
-      id,
-      kind: 'struct',
-      name: id,
-      qualifiedName: id,
-      filePath: 'fake.go',
-      language: 'go',
-      startLine: 1,
-      endLine: 5,
-      startColumn: 0,
-      endColumn: 0,
-      updatedAt: Date.now(),
-    };
-  }
 
   it('drops a type_of self-loop (constructor return FP)', () => {
     cg.queries.insertNode(makeNode('struct:Client'));

@@ -66,7 +66,9 @@ describe('identifierBoundaryRegex', () => {
   it('honours the global flag for find-all call-site scans (rename)', () => {
     const re = identifierBoundaryRegex('user$', 'g');
     const src = 'user$.pipe(); log(user$); const x = user$;';
-    expect(src.match(re)).toHaveLength(3);
+    let count = 0;
+    while (re.exec(src)) count++;
+    expect(count).toBe(3);
   });
 
   it('escapes metacharacters in the identifier itself', () => {

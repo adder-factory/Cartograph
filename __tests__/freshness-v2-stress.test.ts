@@ -52,7 +52,7 @@ describeStress('Freshness v2 — parallel auto-sync', () => {
   }, 30000);
 
   afterAll(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -98,7 +98,7 @@ describeStress('Freshness v2 — block-on-heavy boundaries', () => {
   }, 30000);
 
   afterAll(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -148,7 +148,7 @@ describeStress('Freshness v2 — migration 020 idempotency', () => {
       // Sanity: getStaleArtifactsCount works
       const counts = getStaleArtifactsCount(cg.queries);
       expect(counts.total).toBe(0);
-      cg.destroy();
+      cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -169,7 +169,7 @@ describeStress('Freshness v2 — migration 020 idempotency', () => {
         .queries.db;
       // Should not throw — guard checks column existence.
       expect(() => MIGRATION.up(rawDb as any)).not.toThrow();
-      cg.destroy();
+      cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -211,7 +211,7 @@ describeStress('Freshness v2 — getStaleArtifactsCount performance', () => {
       );
 
       expect(elapsed).toBeLessThan(100);
-      cg.destroy();
+      cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
@@ -244,7 +244,7 @@ describeStress('Freshness v2 — watcher end-to-end with real git', () => {
       const started = watcher.start();
       if (!started) {
         console.log('watcher start failed — skipping (platform support)');
-        cg.destroy();
+        cg.close();
         return;
       }
 
@@ -266,7 +266,7 @@ describeStress('Freshness v2 — watcher end-to-end with real git', () => {
       expect(syncFired).toBe(true);
 
       watcher.stop();
-      cg.destroy();
+      cg.close();
     } finally {
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     }

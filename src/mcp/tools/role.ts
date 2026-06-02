@@ -7,7 +7,7 @@ import {
   getUnclassifiedTargetNodeCount,
   upsertSymbolRole,
 } from '../../db/queries-roles.js';
-import { getSymbolDescriptions } from '../../db/queries-summaries.js';
+import { getSymbolDescriptions, type SymbolDescription } from '../../db/queries-summaries.js';
 import { classifyByStructure, STRUCTURAL_ROLE_MODEL } from '../../llm/classifier.js';
 import { displayModelName, validateStringOutcome } from './shared.js';
 import { renderToolResponse } from './_response.js';
@@ -179,68 +179,84 @@ function renderUnknownDiagnostic({ desc, signature }: RenderUnknownDiagnosticArg
 
 /** Render the get-role-of block for one resolved symbol. */
 function renderGetRoleOfBlock({ cg, nodeId, label, via, fuzzyBanner }: RenderGetRoleOfBlockArgs): string[] {
-  let { role, roleModel } = getNodeRoleInfo(cg, nodeId);
+  const { role, roleModel, inferredOnDemand, onDemandAttempted } = resolveRoleForDisplay({ cg, nodeId, via });
   const descs = getSymbolDescriptions(cg.queries, [nodeId]);
   const desc = descs.get(nodeId);
   const signature = cg.queries.getNodeById(nodeId)?.signature ?? null;
-
-  // When a symbol hasn't been classified by the bulk pass, try the
-  // on-demand structural pre-filter (free) and persist the result so
-  // future queries are cached.
-  let inferredOnDemand = false;
-  // True once the structural pre-filter has been *attempted* for this
-  // node — distinguishes "the on-demand pass ran and matched nothing"
-  // from "no classification has been attempted at all". `via='llm'`
-  // skips the pass (handled with an error upstream for get-role-of),
-  // so this tracks the real cascade state rather than assuming it ran.
-  let onDemandAttempted = false;
-  if (role === null) {
-    onDemandAttempted = via !== 'llm';
-    const inferred = inferRoleOnDemand({ cg, nodeId, via });
-    if (inferred) {
-      role = inferred.role;
-      roleModel = inferred.roleModel;
-      inferredOnDemand = true;
-    }
-  }
-
   const displayRole = role ?? 'unknown';
   // Prepend the fuzzy-fallback banner so the agent never reads a role
   // for a symbol that doesn't exist under the queried name.
   const banner = fuzzyBanner ? [fuzzyBanner, ''] : [];
   const lines: string[] = [...banner, `## Role for ${label}`, ''];
 
-  if (role === null) {
-    // "not classified yet" would be misleading once the on-demand
-    // structural pass HAS run for this node — it ran, it just found no
-    // matching rule. Word the verdict to match the cascade state.
-    const suffix = onDemandAttempted
-      ? 'structural pre-filter ran, no rule matched; awaiting the bulk LLM classify pass'
-      : 'not classified yet';
-    lines.push(`- **Role:** unknown (${suffix})`);
-  } else {
-    lines.push(`- **Role:** ${role}${inferredOnDemand ? ' (inferred on demand)' : ''}`);
-  }
-
-  if (roleModel) {
-    // Collapse an absolute GGUF path down to its basename so the line
-    // doesn't leak the operator's home directory (mirrors ask /
-    // local-chat — friction #42).
-    lines.push(`- **Classified by:** ${displayModelName(roleModel)}`);
-  }
-
-  if (desc) {
-    const preview = desc.text.length > 80 ? desc.text.slice(0, 80) + '...' : desc.text;
-    lines.push(`- **Source:** ${desc.source}`, `- **Input:** "${preview}"`);
-  } else {
-    lines.push(`- **Source:** NONE`, `- **Input:** NONE — no summary, no docstring, no test coverage`);
-  }
+  lines.push(renderRoleLine(role, inferredOnDemand, onDemandAttempted));
+  appendRoleModelLine(lines, roleModel);
+  appendRoleInputLines(lines, desc);
 
   if (displayRole === 'unknown' || role === null) {
     lines.push(...renderUnknownDiagnostic({ desc, signature }));
   }
 
   return lines;
+}
+
+interface DisplayRoleResolution {
+  role: string | null;
+  roleModel: string | null;
+  inferredOnDemand: boolean;
+  onDemandAttempted: boolean;
+}
+
+function resolveRoleForDisplay(args: {
+  cg: import('../../index.js').default;
+  nodeId: string;
+  via: ClassifierVia;
+}): DisplayRoleResolution {
+  const { cg, nodeId, via } = args;
+  const cached = getNodeRoleInfo(cg, nodeId);
+  if (cached.role !== null) {
+    return { ...cached, inferredOnDemand: false, onDemandAttempted: false };
+  }
+
+  // When a symbol hasn't been classified by the bulk pass, try the
+  // on-demand structural pre-filter (free) and persist the result so
+  // future queries are cached. `via='llm'` skips the pass (handled with
+  // an error upstream for get-role-of), so this tracks the real cascade
+  // state rather than assuming it ran.
+  const onDemandAttempted = via !== 'llm';
+  const inferred = inferRoleOnDemand({ cg, nodeId, via });
+  if (!inferred) {
+    return { role: null, roleModel: cached.roleModel, inferredOnDemand: false, onDemandAttempted };
+  }
+  return { role: inferred.role, roleModel: inferred.roleModel, inferredOnDemand: true, onDemandAttempted };
+}
+
+function renderRoleLine(role: string | null, inferredOnDemand: boolean, onDemandAttempted: boolean): string {
+  if (role !== null) return `- **Role:** ${role}${inferredOnDemand ? ' (inferred on demand)' : ''}`;
+  // "not classified yet" would be misleading once the on-demand
+  // structural pass HAS run for this node — it ran, it just found no
+  // matching rule. Word the verdict to match the cascade state.
+  const suffix = onDemandAttempted
+    ? 'structural pre-filter ran, no rule matched; awaiting the bulk LLM classify pass'
+    : 'not classified yet';
+  return `- **Role:** unknown (${suffix})`;
+}
+
+function appendRoleModelLine(lines: string[], roleModel: string | null): void {
+  if (!roleModel) return;
+  // Collapse an absolute GGUF path down to its basename so the line
+  // doesn't leak the operator's home directory (mirrors ask /
+  // local-chat — friction #42).
+  lines.push(`- **Classified by:** ${displayModelName(roleModel)}`);
+}
+
+function appendRoleInputLines(lines: string[], desc: SymbolDescription | undefined): void {
+  if (!desc) {
+    lines.push(`- **Source:** NONE`, `- **Input:** NONE — no summary, no docstring, no test coverage`);
+    return;
+  }
+  const preview = desc.text.length > 80 ? desc.text.slice(0, 80) + '...' : desc.text;
+  lines.push(`- **Source:** ${desc.source}`, `- **Input:** "${preview}"`);
 }
 
 interface HandleGetRoleOfArgs {
@@ -465,17 +481,19 @@ function renderRoleDistribution(args: RenderRoleDistributionArgs): ToolOutcome {
     ...sorted.map(([role, n]) => ({ role, count: n, isTotal: false })),
     { role: 'Total', count: total, isTotal: true },
   ];
-  const unclassifiedFooter =
-    unclassifiedTargets > 0
-      ? `_${unclassifiedTargets} classifier-target node${unclassifiedTargets === 1 ? '' : 's'} not yet classified — ` +
-        "run `cartograph_admin({action: 'classify'})` to label them._"
-      : undefined;
-  const skippedFooter =
-    nonTargetSkipped > 0
-      ? `_${nonTargetSkipped} node${nonTargetSkipped === 1 ? '' : 's'} intentionally not classified ` +
-        '(file / import / constant / variable / property / field / parameter / etc. — kinds the classifier never targets, ' +
-        'so they are excluded from the percentage denominator)._'
-      : undefined;
+  let unclassifiedFooter: string | undefined;
+  if (unclassifiedTargets > 0) {
+    unclassifiedFooter =
+      `_${unclassifiedTargets} classifier-target node${unclassifiedTargets === 1 ? '' : 's'} not yet classified — ` +
+      "run `cartograph_admin({action: 'classify'})` to label them._";
+  }
+  let skippedFooter: string | undefined;
+  if (nonTargetSkipped > 0) {
+    skippedFooter =
+      `_${nonTargetSkipped} node${nonTargetSkipped === 1 ? '' : 's'} intentionally not classified ` +
+      '(file / import / constant / variable / property / field / parameter / etc. — kinds the classifier never targets, ' +
+      'so they are excluded from the percentage denominator)._';
+  }
   return ok(
     renderToolResponse({
       body: renderMarkdownTable(buildRoleDistributionSpec(rows, total)),
@@ -538,28 +556,15 @@ export function buildRoleDistributionSpec(
 
 async function handleRole(ctx: ToolCtx, args: RoleArgs): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args.projectPath);
-
-  const hasRole = args.role != null;
-  const hasSingle = args.symbol != null;
-  const hasBatch = Array.isArray(args.symbols);
+  const mode = getRoleMode(args);
   // `via` defaults to `auto` (set explicitly here, not in the schema,
   // so the `args.via != null` check below can still distinguish "the
   // caller passed `via`" from "defaulted"); `rule`/`auto` behave
   // identically on the structural-only on-demand path.
   const via = args.via ?? 'auto';
 
-  // Mutual-exclusion guards. Contradictory args are a hard error
-  // (`err(...)` → `isError` on MCP, exit 1 on the CLI) — a caller that
-  // passed both modes cannot tell a real result from this advisory
-  // otherwise. Consistent with `tests-for` / `sql`, which reject the
-  // same contradictory-args shape; the CLI command is generated from
-  // this schema, so this is the single enforcement point.
-  if (hasSingle && hasBatch) {
-    return err('Pass either `symbol` or `symbols`, not both.');
-  }
-  if (hasRole && (hasSingle || hasBatch)) {
-    return err('Pass either `role` (list-by-role) or `symbol`/`symbols` (get-role-of), not both.');
-  }
+  const modeError = validateRoleMode(mode);
+  if (modeError) return modeError;
 
   // No-arg path — project-wide role distribution. The percentage
   // denominator counts ONLY classifier-target kinds (function / method /
@@ -569,38 +574,12 @@ async function handleRole(ctx: ToolCtx, args: RoleArgs): Promise<ToolOutcome> {
   // disclosure footer instead of being folded into the denominator —
   // otherwise the "unclassified %" would overstate the gap by every
   // node the classifier never even targets (bug #12).
-  if (!hasRole && !hasSingle && !hasBatch) {
-    const counts = getRoleCounts(cg.queries);
-    const unclassifiedTargets = getUnclassifiedTargetNodeCount(cg.queries);
-    const nonTargetSkipped = getNonClassifierTargetNodeCount(cg.queries);
-    return renderRoleDistribution({ cg, counts, unclassifiedTargets, nonTargetSkipped });
-  }
+  if (isDistributionMode(mode)) return handleRoleDistribution(cg);
 
   // `via='llm'` on the get-role-of path is unsupported — the on-demand
   // path runs the structural pre-filter only. Surface a helpful error
   // rather than silently returning unknown.
-  if ((hasSingle || hasBatch) && via === 'llm') {
-    return err(
-      "via='llm' is not supported on `cartograph_role` get-role-of — the on-demand path runs the structural pre-filter only. " +
-        "Run the bulk `cartograph_admin({action: 'classify'})` pipeline to populate roles via the LLM path, " +
-        "then re-query without `via` (or with `via: 'auto'`) to read the cached label.",
-    );
-  }
-
-  // get-role-of path. `batchedSymbols` enforced `.min(1).max(20)` at
-  // the Zod boundary, so a present `args.symbols` is guaranteed to be
-  // a non-empty bounded string array — no defensive slice needed.
-  if (hasSingle || hasBatch) {
-    let symbols: string[];
-    if (hasBatch) {
-      symbols = args.symbols ?? [];
-    } else {
-      const symbolResult = validateStringOutcome({ value: args.symbol, name: 'symbol' });
-      if (typeof symbolResult !== 'string') return symbolResult;
-      symbols = [symbolResult];
-    }
-    return handleGetRoleOf({ cg, symbols, via, refIds: ctx.refIds });
-  }
+  if (isGetRoleOfMode(mode)) return handleRoleGetRoleOf({ cg, args, mode, via, refIds: ctx.refIds });
 
   // list-by-role path (original behaviour). The list query just reads
   // cached `nodes.role` rows — there's no on-demand inference to pin —
@@ -608,19 +587,96 @@ async function handleRole(ctx: ToolCtx, args: RoleArgs): Promise<ToolOutcome> {
   // default `auto`) is therefore a no-op; reject it loudly rather than
   // silently dropping it, so the agent isn't misled into thinking it
   // triggered a classification pass.
-  if (args.via != null && via !== 'auto') {
-    return err(
-      `\`via\` is not supported on \`cartograph_role\` list-by-role — listing only reads cached \`nodes.role\` rows, ` +
-        `there is no on-demand classification to steer. ` +
-        `Drop \`via\` to list; to (re-)populate roles via the LLM run \`cartograph_admin({action: 'classify'})\`.`,
-    );
-  }
+  const viaError = validateListByRoleVia(args, via);
+  if (viaError) return viaError;
   const role = validateStringOutcome({ value: args.role, name: 'role' });
   if (typeof role !== 'string') return role;
   // `limit` is already an integer in [1, 500] — Zod rejected anything
   // else at the dispatch boundary, so no clamp is needed.
   const limit = args.limit ?? ROLE_LIST_DEFAULT_LIMIT;
   return handleFindByRole(cg, role, limit);
+}
+
+interface RoleMode {
+  hasRole: boolean;
+  hasSingle: boolean;
+  hasBatch: boolean;
+}
+
+function getRoleMode(args: RoleArgs): RoleMode {
+  return {
+    hasRole: args.role != null,
+    hasSingle: args.symbol != null,
+    hasBatch: Array.isArray(args.symbols),
+  };
+}
+
+function validateRoleMode(mode: RoleMode): ToolOutcome | undefined {
+  // Mutual-exclusion guards. Contradictory args are a hard error
+  // (`err(...)` → `isError` on MCP, exit 1 on the CLI) — a caller that
+  // passed both modes cannot tell a real result from this advisory
+  // otherwise. Consistent with `tests-for` / `sql`, which reject the
+  // same contradictory-args shape; the CLI command is generated from
+  // this schema, so this is the single enforcement point.
+  if (mode.hasSingle && mode.hasBatch) return err('Pass either `symbol` or `symbols`, not both.');
+  if (mode.hasRole && (mode.hasSingle || mode.hasBatch)) {
+    return err('Pass either `role` (list-by-role) or `symbol`/`symbols` (get-role-of), not both.');
+  }
+  return undefined;
+}
+
+function isDistributionMode(mode: RoleMode): boolean {
+  return !mode.hasRole && !mode.hasSingle && !mode.hasBatch;
+}
+
+function isGetRoleOfMode(mode: RoleMode): boolean {
+  return mode.hasSingle || mode.hasBatch;
+}
+
+function handleRoleDistribution(cg: import('../../index.js').default): ToolOutcome {
+  const counts = getRoleCounts(cg.queries);
+  const unclassifiedTargets = getUnclassifiedTargetNodeCount(cg.queries);
+  const nonTargetSkipped = getNonClassifierTargetNodeCount(cg.queries);
+  return renderRoleDistribution({ cg, counts, unclassifiedTargets, nonTargetSkipped });
+}
+
+function handleRoleGetRoleOf(args: {
+  cg: import('../../index.js').default;
+  args: RoleArgs;
+  mode: RoleMode;
+  via: ClassifierVia;
+  refIds: RefIdCache | undefined;
+}): ToolOutcome {
+  const { cg, args: roleArgs, mode, via, refIds } = args;
+  if (via === 'llm') {
+    return err(
+      "via='llm' is not supported on `cartograph_role` get-role-of — the on-demand path runs the structural pre-filter only. " +
+        "Run the bulk `cartograph_admin({action: 'classify'})` pipeline to populate roles via the LLM path, " +
+        "then re-query without `via` (or with `via: 'auto'`) to read the cached label.",
+    );
+  }
+  const symbols = getRoleOfSymbols(roleArgs, mode);
+  if ('ok' in symbols) return symbols;
+  return handleGetRoleOf({ cg, symbols, via, refIds });
+}
+
+function getRoleOfSymbols(args: RoleArgs, mode: RoleMode): string[] | ToolOutcome {
+  // `batchedSymbols` enforced `.min(1).max(20)` at the Zod boundary, so
+  // a present `args.symbols` is guaranteed to be a non-empty bounded
+  // string array — no defensive slice needed.
+  if (mode.hasBatch) return args.symbols ?? [];
+  const symbolResult = validateStringOutcome({ value: args.symbol, name: 'symbol' });
+  if (typeof symbolResult !== 'string') return symbolResult;
+  return [symbolResult];
+}
+
+function validateListByRoleVia(args: RoleArgs, via: ClassifierVia): ToolOutcome | undefined {
+  if (args.via == null || via === 'auto') return undefined;
+  return err(
+    `\`via\` is not supported on \`cartograph_role\` list-by-role — listing only reads cached \`nodes.role\` rows, ` +
+      `there is no on-demand classification to steer. ` +
+      `Drop \`via\` to list; to (re-)populate roles via the LLM run \`cartograph_admin({action: 'classify'})\`.`,
+  );
 }
 
 /**

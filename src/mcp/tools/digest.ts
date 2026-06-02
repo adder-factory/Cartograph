@@ -38,6 +38,7 @@ import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
 import { areBiomarkersPending } from './biomarkers.js';
 import { type ToolOutcome, ok } from './_outcome.js';
+import type { Node } from '../../types.js';
 
 const digestSchema = z.object({
   projectPath: projectPathField,
@@ -134,11 +135,10 @@ function appendBiomarkersSection(lines: string[], cg: Cartograph): void {
     // post-hook is still in flight after a re-index, so don't render a
     // misleading "clean" verdict.
     const indexedAt = safe(() => getMetadata(cg.queries, 'index_timestamp'));
-    const state: BiomarkerSectionState = indexedAt
-      ? (safe(() => areBiomarkersPending(cg)) ?? false)
-        ? 'pending'
-        : 'clean'
-      : 'never-ran';
+    let state: BiomarkerSectionState = 'never-ran';
+    if (indexedAt) {
+      state = safe(() => areBiomarkersPending(cg)) ? 'pending' : 'clean';
+    }
     lines.push(renderMarkdownBulletList(buildDigestBiomarkersSpec({ findings: [], stats: null, state })));
     return;
   }
@@ -281,20 +281,31 @@ function appendEntryPointsSection(lines: string[], cg: Cartograph): void {
   // hand-built. The wording is locked through the exported
   // `DIGEST_ROUTES_PREFIX` / `DIGEST_PUBLIC_EXPORTS_PREFIX_FN`
   // constants below.
-  if (routes.length > 0) {
-    const shown = routes.slice(0, TOP_ENTRIES);
-    lines.push(`${DIGEST_ROUTES_PREFIX} (${routes.length}):**`);
-    for (const r of shown) lines.push(`- \`${r.name}\` — ${r.filePath}${r.startLine ? `:${r.startLine}` : ''}`);
-    if (routes.length > TOP_ENTRIES)
-      lines.push(`- _… +${routes.length - TOP_ENTRIES} more (call \`cartograph_entry_points\` for all)_`);
-    lines.push('');
+  appendDigestRoutes(lines, routes);
+  appendDigestPublicExports(lines, publicExports);
+}
+
+function appendDigestRoutes(lines: string[], routes: Node[]): void {
+  if (routes.length === 0) return;
+  const shown = routes.slice(0, TOP_ENTRIES);
+  lines.push(`${DIGEST_ROUTES_PREFIX} (${routes.length}):**`);
+  for (const r of shown) {
+    const lineSuffix = r.startLine ? `:${r.startLine}` : '';
+    lines.push(`- \`${r.name}\` — ${r.filePath}${lineSuffix}`);
   }
-  if (publicExports.length > 0) {
-    lines.push(DIGEST_PUBLIC_EXPORTS_PREFIX_FN(publicExports.length));
-    for (const n of publicExports)
-      lines.push(`- \`${n.name}\` (${n.kind}) — ${n.filePath}${n.startLine ? `:${n.startLine}` : ''}`);
-    lines.push('');
+  if (routes.length > TOP_ENTRIES)
+    lines.push(`- _… +${routes.length - TOP_ENTRIES} more (call \`cartograph_entry_points\` for all)_`);
+  lines.push('');
+}
+
+function appendDigestPublicExports(lines: string[], publicExports: Node[]): void {
+  if (publicExports.length === 0) return;
+  lines.push(DIGEST_PUBLIC_EXPORTS_PREFIX_FN(publicExports.length));
+  for (const n of publicExports) {
+    const lineSuffix = n.startLine ? `:${n.startLine}` : '';
+    lines.push(`- \`${n.name}\` (${n.kind}) — ${n.filePath}${lineSuffix}`);
   }
+  lines.push('');
 }
 
 /** Empty-section note for the 🚪 Entry points digest section when

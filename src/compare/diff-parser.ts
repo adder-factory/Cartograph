@@ -58,43 +58,48 @@ export function parseUnifiedDiff(diff: string): DiffRange[] {
     const line = rawLine;
 
     // --- file header: `diff --git a/… b/…` ---
-    const gitMatch = DIFF_GIT_HEADER.exec(line);
-    if (gitMatch) {
-      currentFile = gitMatch[1]!.trim();
+    const gitPath = parseGitDiffPath(line);
+    if (gitPath) {
+      currentFile = gitPath;
       continue;
     }
 
     // --- file header: `+++ b/…` (also resets currentFile for patches without diff --git) ---
     if (line.startsWith('+++ ')) {
-      const plusMatch = PLUS_PLUS_HEADER.exec(line);
-      if (plusMatch) {
-        const newPath = plusMatch[1]!.trim();
-        // Skip deleted files
-        if (newPath === '/dev/null') {
-          currentFile = null;
-        } else {
-          currentFile = newPath;
-        }
-      }
+      currentFile = parsePlusPlusPath(line, currentFile);
       continue;
     }
 
     // --- hunk header: `@@ -x,y +x,y @@ …` ---
     if (line.startsWith('@@') && currentFile !== null) {
-      const hunkMatch = HUNK_HEADER.exec(line);
-      if (!hunkMatch) continue; // malformed — skip
-
-      const newStart = Number.parseInt(hunkMatch[1]!, 10);
-      // newLen is absent when exactly one line; defaults to 1 per the unified diff spec
-      const newLen = hunkMatch[2] === undefined ? 1 : Number.parseInt(hunkMatch[2]!, 10);
-
-      // Pure deletion hunks: no post-image lines to query
-      if (newLen === 0) continue;
-
-      const endLine = newStart + newLen - 1;
-      ranges.push({ file: currentFile, startLine: newStart, endLine });
+      const range = parseHunkRange(line, currentFile);
+      if (range) ranges.push(range);
     }
   }
 
   return ranges;
+}
+
+function parseGitDiffPath(line: string): string | null {
+  const gitMatch = DIFF_GIT_HEADER.exec(line);
+  return gitMatch ? gitMatch[1]!.trim() : null;
+}
+
+function parsePlusPlusPath(line: string, currentFile: string | null): string | null {
+  const plusMatch = PLUS_PLUS_HEADER.exec(line);
+  if (!plusMatch) return currentFile;
+  const newPath = plusMatch[1]!.trim();
+  return newPath === '/dev/null' ? null : newPath;
+}
+
+function parseHunkRange(line: string, currentFile: string): DiffRange | null {
+  const hunkMatch = HUNK_HEADER.exec(line);
+  if (!hunkMatch) return null;
+  const newStartRaw = hunkMatch[1];
+  if (newStartRaw === undefined) return null;
+  const newStart = Number.parseInt(newStartRaw, 10);
+  // newLen is absent when exactly one line; defaults to 1 per the unified diff spec
+  const newLen = hunkMatch[2] === undefined ? 1 : Number.parseInt(hunkMatch[2], 10);
+  if (newLen === 0) return null;
+  return { file: currentFile, startLine: newStart, endLine: newStart + newLen - 1 };
 }

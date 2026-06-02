@@ -35,4 +35,4 @@ async function main(): Promise<void> {
   process.exit(0);
 }
 
-void main();
+await main();

@@ -23,6 +23,8 @@ import {
 } from '../src/extraction/grammars.js';
 import { extractFromSource } from '../src/extraction/tree-sitter.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 beforeAll(async () => {
   await initGrammars();
   await loadAllGrammars();
@@ -70,7 +72,7 @@ void helperFunction(int count) {
     expect(classes.filter((c) => c.name === 'MyClass').length).toBeGreaterThanOrEqual(1);
 
     const methods = result.nodes.filter((n) => n.kind === 'method');
-    const methodNames = methods.map((m) => m.name).sort();
+    const methodNames = methods.map((m) => m.name).sort(byString);
     expect(methodNames).toContain('greet');
     expect(methodNames).toContain('shared');
     // Multi-keyword selector reconstruction — the core F#65 win.

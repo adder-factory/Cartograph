@@ -7,7 +7,7 @@
  * promoted node so callees / refs / field-accesses out of the promoted
  * fn surface from the right source.
  */
-import { describe, it, expect, afterEach, beforeEach } from 'vitest';
+import { describe, it, expect, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';

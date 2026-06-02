@@ -8,6 +8,8 @@
 import { describe, it, expect } from 'vitest';
 import { parseQuery } from '../src/search/query-parser.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('parseQuery', () => {
   it('returns plain text for a query with no field prefixes', () => {
     const r = parseQuery('authenticate user');
@@ -33,7 +35,9 @@ describe('parseQuery', () => {
 
   it('handles multiple kind: filters as an OR set', () => {
     const r = parseQuery('kind:function kind:method auth');
-    expect(r.kinds.sort()).toEqual(['function', 'method']);
+    const sortedKinds = [...r.kinds];
+    sortedKinds.sort(byString);
+    expect(sortedKinds).toEqual(['function', 'method']);
   });
 
   it('extracts path: and name: as substring filters (kept verbatim)', () => {

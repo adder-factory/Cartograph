@@ -14,7 +14,7 @@ import {
 import { getCurrentHeadSha as getGitHead } from '../src/git-utils.js';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder, qbTransaction } from '../src/db/queries.js';
-import { applyChurnDeltas, clearChurn } from '../src/db/queries-history.js';
+import { applyChurnDeltas } from '../src/db/queries-history.js';
 import { upsertFile, getFileByPath, removeFileFromIndex, removeFileFromIndexInTx } from '../src/db/queries-files.js';
 import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 import { HOOK as ChurnHook } from '../src/index-hooks/churn.js';
@@ -58,6 +58,47 @@ function commitAt(date: string, paths: string[], content?: string) {
   git('commit', '-m', `commit at ${date}`);
   delete process.env.GIT_AUTHOR_DATE;
   delete process.env.GIT_COMMITTER_DATE;
+}
+
+function setupChurnHookDb(): { db: DatabaseConnection; q: QueryBuilder } {
+  const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-churn-hook-'));
+  const db = DatabaseConnection.initialize(path.join(dbDir, 'test.db'));
+  const q = new QueryBuilder(db.getDb());
+  // Match files in tempDir's git history.
+  db.getDb()
+    .prepare(
+      `INSERT INTO files (path, content_hash, language, size, modified_at, indexed_at)
+         VALUES (?, '', 'typescript', 0, 0, 0)`,
+    )
+    .run('a.ts');
+  return { db, q };
+}
+
+function setupReextractDb(): { db: DatabaseConnection; q: QueryBuilder } {
+  const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-churn-reextract-'));
+  const db = DatabaseConnection.initialize(path.join(dbDir, 'test.db'));
+  const q = new QueryBuilder(db.getDb());
+  return { db, q };
+}
+
+function seedReextractFile(q: QueryBuilder, p: string): void {
+  upsertFile(q, {
+    path: p,
+    contentHash: 'hash-v1',
+    language: 'typescript',
+    size: 10,
+    modifiedAt: 1,
+    indexedAt: 1,
+    nodeCount: 0,
+  });
+}
+
+function getCommitCount(db: DatabaseConnection, filePath: string): number {
+  const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path=?').get(filePath) as
+    | { commit_count: number }
+    | undefined;
+  if (!row) throw new Error(`missing file row: ${filePath}`);
+  return row.commit_count;
 }
 
 beforeEach(() => {
@@ -235,26 +276,12 @@ describe('readFileLoc', () => {
 });
 
 describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () => {
-  function setupDb(): { db: DatabaseConnection; q: QueryBuilder } {
-    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-churn-hook-'));
-    const db = DatabaseConnection.initialize(path.join(dbDir, 'test.db'));
-    const q = new QueryBuilder(db.getDb());
-    // Match files in tempDir's git history.
-    db.getDb()
-      .prepare(
-        `INSERT INTO files (path, content_hash, language, size, modified_at, indexed_at)
-         VALUES (?, '', 'typescript', 0, 0, 0)`,
-      )
-      .run('a.ts');
-    return { db, q };
-  }
-
   it('forces a full rescan when the stored algo version is stale', async () => {
     // Seed a 2-commit history; current algo would record commit_count=2.
     commitAt('2025-01-01T00:00:00Z', ['a.ts']);
     commitAt('2025-02-01T00:00:00Z', ['a.ts']);
 
-    const { db, q } = setupDb();
+    const { db, q } = setupChurnHookDb();
     try {
       // Simulate pre-fix state with an older stamped version.
       applyChurnDeltas(q, [{ path: 'a.ts', commitCountDelta: 99, lastTouchedTs: 0, firstSeenTs: 0 }]);
@@ -276,8 +303,7 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
         durationMs: 0,
       });
 
-      const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path=?').get('a.ts') as any;
-      expect(row.commit_count).toBe(2);
+      expect(getCommitCount(db, 'a.ts')).toBe(2);
       expect(getMetadata(q, LAST_MINED_CHURN_ALGO_VERSION_KEY)).toBe(CHURN_ALGO_VERSION);
     } finally {
       db.close();
@@ -291,7 +317,7 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
     commitAt('2025-01-01T00:00:00Z', ['a.ts']);
     commitAt('2025-02-01T00:00:00Z', ['a.ts']);
 
-    const { db, q } = setupDb();
+    const { db, q } = setupChurnHookDb();
     try {
       applyChurnDeltas(q, [{ path: 'a.ts', commitCountDelta: 99, lastTouchedTs: 0, firstSeenTs: 0 }]);
       setMetadata(q, LAST_MINED_CHURN_HEAD_KEY, 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef');
@@ -313,8 +339,7 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
         durationMs: 0,
       });
 
-      const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path=?').get('a.ts') as any;
-      expect(row.commit_count).toBe(2);
+      expect(getCommitCount(db, 'a.ts')).toBe(2);
       expect(getMetadata(q, LAST_MINED_CHURN_ALGO_VERSION_KEY)).toBe(CHURN_ALGO_VERSION);
     } finally {
       db.close();
@@ -326,7 +351,7 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
     const headBeforeNewCommit = git('rev-parse', 'HEAD');
     commitAt('2025-02-01T00:00:00Z', ['a.ts']);
 
-    const { db, q } = setupDb();
+    const { db, q } = setupChurnHookDb();
     try {
       // Seed: stamped at the current algo version, with the
       // last-mined head pointing to commit 1. Pretend incremental
@@ -353,8 +378,7 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
       // Incremental should add the 1 new commit on top of the seeded 1
       // — total 2, NOT a full rescan that would also see the seeded
       // 1 plus the 2 actual commits.
-      const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path=?').get('a.ts') as any;
-      expect(row.commit_count).toBe(2);
+      expect(getCommitCount(db, 'a.ts')).toBe(2);
     } finally {
       db.close();
     }
@@ -379,29 +403,10 @@ describe.skipIf(!HAS_GIT)('churn hook self-heal on algo-version mismatch', () =>
  * (`removeFileFromIndex`) still drops the row.
  */
 describe('re-extract evict preserves mined churn columns', () => {
-  function setupDb(): { db: DatabaseConnection; q: QueryBuilder } {
-    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-churn-reextract-'));
-    const db = DatabaseConnection.initialize(path.join(dbDir, 'test.db'));
-    const q = new QueryBuilder(db.getDb());
-    return { db, q };
-  }
-
-  function seedFile(q: QueryBuilder, p: string): void {
-    upsertFile(q, {
-      path: p,
-      contentHash: 'hash-v1',
-      language: 'typescript',
-      size: 10,
-      modifiedAt: 1,
-      indexedAt: 1,
-      nodeCount: 0,
-    });
-  }
-
   it('keeps commit_count / first_seen_ts / last_touched_ts across removeFileFromIndexInTx + upsertFile', () => {
-    const { db, q } = setupDb();
+    const { db, q } = setupReextractDb();
     try {
-      seedFile(q, 'a.ts');
+      seedReextractFile(q, 'a.ts');
       // Mining persisted real churn for the file.
       applyChurnDeltas(q, [{ path: 'a.ts', commitCountDelta: 7, lastTouchedTs: 1764547200, firstSeenTs: 1735689600 }]);
 
@@ -435,9 +440,9 @@ describe('re-extract evict preserves mined churn columns', () => {
   });
 
   it('removeFileFromIndex still fully drops the files row (genuine removal)', () => {
-    const { db, q } = setupDb();
+    const { db, q } = setupReextractDb();
     try {
-      seedFile(q, 'gone.ts');
+      seedReextractFile(q, 'gone.ts');
       applyChurnDeltas(q, [
         { path: 'gone.ts', commitCountDelta: 3, lastTouchedTs: 1764547200, firstSeenTs: 1735689600 },
       ]);

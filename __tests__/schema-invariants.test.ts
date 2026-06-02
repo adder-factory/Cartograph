@@ -392,7 +392,7 @@ describe('ROLE_LABELS — schema.sql CHECK ↔ classifier.ts canonical export', 
     // whitespace/newlines so a future re-indent doesn't break the
     // test, but the structure (a comma-separated list of single-
     // quoted identifiers) is locked.
-    const match = schemaSql.match(/role\s+IS\s+NULL\s+OR\s+role\s+IN\s*\(([^)]+)\)/i);
+    const match = /role\s+IS\s+NULL\s+OR\s+role\s+IN\s*\(([^)]+)\)/i.exec(schemaSql);
     expect(match, 'expected to find `role IS NULL OR role IN (...)` in schema.sql').not.toBeNull();
     const inListBody = match![1] ?? '';
     const labelsFromSchema = [...inListBody.matchAll(/'([^']+)'/g)].map((m) => m[1]).filter((s): s is string => !!s);

@@ -468,14 +468,14 @@ describe('cartograph_node ↔ cartograph_graph — caller-count parity (friction
     const graphText = graphResult.content[0]?.text ?? '';
 
     // node.ts header: `**Callers** (N total, showing top M):` or `**Callers** (N):`
-    const nodeMatch = nodeText.match(/\*\*Callers\*\* \((\d+)/);
+    const nodeMatch = /\*\*Callers\*\* \((\d+)/.exec(nodeText);
     expect(nodeMatch).not.toBeNull();
-    const nodeCount = nodeMatch ? parseInt(nodeMatch[1]!, 10) : NaN;
+    const nodeCount = nodeMatch ? Number.parseInt(nodeMatch[1]!, 10) : Number.NaN;
 
     // graph header: `## Callers of helper (N found)` or similar.
-    const graphMatch = graphText.match(/Callers of helper \((\d+)/);
+    const graphMatch = /Callers of helper \((\d+)/.exec(graphText);
     expect(graphMatch).not.toBeNull();
-    const graphCount = graphMatch ? parseInt(graphMatch[1]!, 10) : NaN;
+    const graphCount = graphMatch ? Number.parseInt(graphMatch[1]!, 10) : Number.NaN;
 
     expect(nodeCount).toBe(graphCount);
   });

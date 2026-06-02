@@ -42,8 +42,8 @@ export async function handleRiskReview(ctx: ToolCtx, args: Record<string, unknow
   appendStructuralBridgeLens(lines, cg, topN);
   appendDeadCodeLens(lines, cg, topN);
 
-  lines.push(`---`);
   lines.push(
+    `---`,
     `> Suggested next moves: drill into the top biomarker symbol with \`cartograph_node\` + \`cartograph_graph({direction: 'callers'})\`; for hotspot files run \`cartograph_biomarkers mode=symbol symbol=<file's central class>\`; for coverage gaps weigh against \`cartograph_graph({direction: 'callers'})\` to see who would benefit from a test.`,
   );
 

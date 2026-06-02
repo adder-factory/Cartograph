@@ -112,8 +112,7 @@ function pageRankStep(ctx: PageRankStepCtx): Float64Array {
   for (let t = 0; t < N; t++) {
     const sources = inEdges[t]!;
     let s = 0;
-    for (let k = 0; k < sources.length; k++) {
-      const src = sources[k]!;
+    for (const src of sources) {
       s += pr[src]! / outDeg[src]!;
     }
     next[t]! += PR_DAMPING * s;

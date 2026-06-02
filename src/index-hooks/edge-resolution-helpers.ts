@@ -70,7 +70,7 @@ export function lookupSymbolByNameInFile(ctx: IndexHookContext, name: string, fi
  */
 export function resolveTargetFile(fromDir: string, importPath: string, projectRoot: string): string | null {
   if (!importPath.startsWith('.')) return null;
-  const cleaned = importPath.replace(/\.(?:m|c)?js$/, '').replace(/\.(?:m|c)?ts$/, '');
+  const cleaned = importPath.replace(/\.[mc]?js$/, '').replace(/\.[mc]?ts$/, '');
   const baseRel = path.normalize(path.join(fromDir, cleaned));
   for (const ext of MODULE_EXTENSIONS) {
     const direct = baseRel + ext;

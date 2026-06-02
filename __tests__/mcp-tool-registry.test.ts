@@ -9,6 +9,8 @@ import { describe, it, expect } from 'vitest';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
 import { ToolHandler, tools } from '../src/mcp/tools.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 describe('MCP tool registry — single source of truth', () => {
   it('every tool module has a non-empty name and description', () => {
     for (const m of getToolModules()) {
@@ -24,8 +26,8 @@ describe('MCP tool registry — single source of truth', () => {
   });
 
   it('exported `tools` array exactly mirrors the registry', () => {
-    const fromRegistry = registryTools.map((t) => t.name).sort();
-    const fromExport = tools.map((t) => t.name).sort();
+    const fromRegistry = registryTools.map((t) => t.name).sort(byName);
+    const fromExport = tools.map((t) => t.name).sort(byName);
     expect(fromExport).toEqual(fromRegistry);
   });
 
@@ -76,7 +78,7 @@ describe('MCP tool registry — single source of truth', () => {
     ];
     const actual = getToolModules()
       .map((m) => m.definition.name)
-      .sort();
+      .sort(byName);
     expect(actual).toEqual(expected);
   });
 

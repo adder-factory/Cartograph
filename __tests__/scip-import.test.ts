@@ -30,6 +30,8 @@ import { decodeScipIndex } from '../src/scip/scip-decode.js';
 import { exportScipIndex, type ScipExportInput } from '../src/scip/export.js';
 import { buildGraphFromScip } from '../src/scip/import.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 // ── ProtoWriter ⇄ proto-reader round-trip ─────────────────────────
 
 describe('proto-reader', () => {
@@ -83,7 +85,7 @@ describe('proto-reader', () => {
       0,
       0,
       0, // field 1, I64
-      (2 << 3) | 0,
+      Math.trunc(2 * 2 ** 3),
       9, // field 2, varint 9
     ]);
     expect(getVarint(decodeMessage(bytes), 2)).toBe(9);
@@ -287,7 +289,7 @@ function twoDocIndex(): ScipIndex {
 describe('buildGraphFromScip', () => {
   it('produces one file group per document plus a synthesised file node', () => {
     const graph = buildGraphFromScip(twoDocIndex());
-    expect([...graph.filesByPath.keys()].sort()).toEqual(['src/a.ts', 'src/b.ts']);
+    expect([...graph.filesByPath.keys()].sort(byString)).toEqual(['src/a.ts', 'src/b.ts']);
     // src/a.ts: Foo + bar + the synthesised file node = 3.
     const aNodes = graph.filesByPath.get('src/a.ts')!.nodes;
     expect(aNodes).toHaveLength(3);
@@ -483,7 +485,7 @@ describe('export → import round-trip', () => {
     const graph = buildGraphFromScip(decodeScipIndex(bytes));
 
     // Both files survive; each keeps exactly one file node.
-    expect([...graph.filesByPath.keys()].sort()).toEqual(['src/a.ts', 'src/b.ts']);
+    expect([...graph.filesByPath.keys()].sort(byString)).toEqual(['src/a.ts', 'src/b.ts']);
     const allNodes = [...graph.filesByPath.values()].flatMap((f) => f.nodes);
     expect(allNodes.filter((n) => n.kind === 'file')).toHaveLength(2);
 

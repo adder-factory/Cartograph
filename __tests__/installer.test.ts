@@ -14,11 +14,7 @@ import * as os from 'node:os';
 // We test the exported functions from config-writer
 import {
   writeMcpConfig,
-  writePermissions,
   writeClaudeMd,
-  hasMcpConfig,
-  hasPermissions,
-  hasClaudeMdSection,
 } from '../src/installer/config-writer.js';
 
 function createTempDir(): string {

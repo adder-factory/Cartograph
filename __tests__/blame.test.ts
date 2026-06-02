@@ -94,7 +94,7 @@ describe('cartograph_blame', () => {
     delete process.env['GIT_AUTHOR_EMAIL'];
     delete process.env['GIT_COMMITTER_NAME'];
     delete process.env['GIT_COMMITTER_EMAIL'];
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -270,7 +270,7 @@ describe('cartograph_blame', () => {
       // oldest timestamp (commit 1) precedes lateAddition's -L timestamp (commit 2).
       expect(text).not.toMatch(/Timeline truncated at file rename/);
     } finally {
-      if (subCg) subCg.destroy();
+      if (subCg) subCg.close();
       if (fs.existsSync(subDir)) fs.rmSync(subDir, { recursive: true, force: true });
     }
   });

@@ -262,19 +262,19 @@ describe('classifyCommitMessage — fallback', () => {
   it('empty string → unknown', () => {
     const r = classifyCommitMessage('');
     expect(r.intent).toBe('unknown');
-    expect(r.score).toBe(0.0);
+    expect(r.score).toBe(0);
   });
 
   it('"WIP" → unknown', () => {
     const r = classifyCommitMessage('WIP');
     expect(r.intent).toBe('unknown');
-    expect(r.score).toBe(0.0);
+    expect(r.score).toBe(0);
   });
 
   it('"asdf" → unknown', () => {
     const r = classifyCommitMessage('asdf');
     expect(r.intent).toBe('unknown');
-    expect(r.score).toBe(0.0);
+    expect(r.score).toBe(0);
   });
 
   it('"merge branch feature/X" → chore 0.5', () => {
@@ -305,7 +305,7 @@ describe('classifyCommitMessage — priority', () => {
     expect(r.intent).toBe('feat');
   });
 
-  it('prefix beats footer: "feat: something\\n\\nFixes #1" → feat', () => {
+  it(String.raw`prefix beats footer: "feat: something\n\nFixes #1" → feat`, () => {
     // Rule 1 fires on the subject; rule 3 is never reached.
     const r = classifyCommitMessage('feat: something\n\nFixes #1');
     expect(r.intent).toBe('feat');

@@ -37,7 +37,7 @@ export function compute(x: number, y: number): number {
     );
     cg = Cartograph.initSync(testDir, { config: { include: ['src/**/*.ts'], exclude: [] } });
     await cg.indexAll();
-    cg.destroy();
+    cg.close();
     handle = await startViewerServer(testDir, { port: 0 });
   });
 
@@ -141,7 +141,7 @@ export function compute(x: number, y: number): number {
 
   it('returns coverage: null when no lcov has been loaded', async () => {
     const res = await fetch(`${handle.url}api/symbol/compute`);
-    const body = (await res.json()) as { coverage: unknown | null };
+    const body = (await res.json()) as { coverage: unknown };
     expect(body.coverage).toBeNull();
   });
 

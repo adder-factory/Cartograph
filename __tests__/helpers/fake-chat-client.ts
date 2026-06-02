@@ -60,7 +60,7 @@ const EMBED_MOD = 11;
 /** Deterministic toy embedding so tests can correlate identical input → identical vector. */
 export function fakeEmbedVector(s: string): number[] {
   const v = new Array(EMBED_DIM).fill(0);
-  for (let i = 0; i < s.length; i++) v[i % EMBED_DIM] += s.charCodeAt(i) % EMBED_MOD;
+  for (let i = 0; i < s.length; i++) v[i % EMBED_DIM] += (s.codePointAt(i) ?? 0) % EMBED_MOD;
   return v;
 }
 
@@ -73,7 +73,7 @@ function countBatchedItems(userText: string, isSummary: boolean): number {
     const headers = userText.match(/^###\s+\d+\./gm);
     return headers?.length ?? 1;
   }
-  const m = userText.match(/Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/);
+  const m = /Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/.exec(userText);
   const lines = (m?.[1] ?? '').split('\n').filter((l) => /^\d+\./.test(l));
   return lines.length || 1;
 }

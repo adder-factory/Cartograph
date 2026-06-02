@@ -227,9 +227,9 @@ function getTableColumns(db: DbHandle, table: string): string[] {
   let cols: string[] = [];
   try {
     // PRAGMA cannot take a bound parameter; the table name is
-    // whitelisted upstream (caller filters by [a-zA-Z0-9_]) so direct
+    // whitelisted upstream (caller filters by \w) so direct
     // interpolation is safe.
-    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(table)) {
+    if (!/^[A-Za-z_]\w*$/.test(table)) {
       perDb.set(table, []);
       return [];
     }
@@ -370,57 +370,76 @@ function decorateSqlError(
   db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } },
   rawMsg: string,
 ): string {
-  const noSuchCol = /no such column:\s*(?:([A-Za-z_][A-Za-z0-9_]*)\.)?([A-Za-z_][A-Za-z0-9_]*)/i.exec(rawMsg);
-  if (noSuchCol) {
-    const qualifier = noSuchCol[1];
-    const badCol = noSuchCol[2]!;
-    // Narrow the suggestion search to the qualifier's likely table
-    // when we recognise the alias (n/e/f → nodes/edges/files). Without
-    // narrowing, a same-named column on another table (e.g. `files.path`)
-    // will win over the actual near-match on the aliased table
-    // (e.g. `nodes.file_path`) by edit distance — defeating the hint.
-    const targetTable = qualifier ? ALIAS_TO_TABLE[qualifier.toLowerCase()] : undefined;
-    const tablesToSearch = targetTable ? [targetTable] : COMMON_TABLES;
-    const suggestions = suggestColumns({ db, badCol, candidateTables: tablesToSearch, k: 3 });
-    const lines = [rawMsg];
-    if (suggestions.length > 0) {
-      const renderedSuggestions = qualifier && targetTable ? suggestions.map((s) => `${qualifier}.${s}`) : suggestions;
-      lines.push(`Did you mean: ${renderedSuggestions.join(', ')}?`);
-    }
-    // The `files.path` vs `<other>.file_path` split is the dominant
-    // cause of a `path` / `file_path` miss — spell it out explicitly;
-    // the edit-distance suggester names the right column but never
-    // explains why it differs by table.
-    if (isPathSplitColumn(badCol)) {
-      lines.push(PATH_NAMING_SPLIT_HINT);
-    }
-    if (isEdgesEndpointColumn(badCol)) {
-      lines.push(
-        `Schema note: the \`edges\` table uses \`source\` and \`target\` for its endpoint FK columns, not \`${badCol}\`. Use \`e.source\` / \`e.target\`.`,
-      );
-    }
-    // Point at the NARROW schema-dump form, not the 60-table full dump.
-    // When the user wrote `n.<col>` they almost certainly only need the
-    // `nodes` columns; for unqualified queries the COMMON_TABLES list
-    // is a reasonable shortlist. The full `schema: true` dump exists
-    // but is rarely what the agent wants on a column-typo error.
-    const dumpTables = targetTable ? [targetTable] : COMMON_TABLES.slice(0, 3);
-    const dumpArg = dumpTables.map((t) => `'${t}'`).join(', ');
-    lines.push(
-      `Tip: dump just the relevant column list with \`schema: true, tables: [${dumpArg}], compact: true\` (MCP) or \`--schema --tables ${dumpTables.join(',')} --compact\` (CLI).`,
-    );
-    return lines.join('\n');
-  }
-  const ambig = /ambiguous column name:\s*([A-Za-z_][A-Za-z0-9_]*)/i.exec(rawMsg);
-  if (ambig) {
-    const col = ambig[1]!;
-    return [
-      rawMsg,
-      `Qualify with an alias: try \`n.${col}\` (from nodes) or \`e.${col}\` (from edges) — whichever table the FROM clause aliases.`,
-      'Tip: use the schema option (`schema: true` on the MCP tool, `--schema` on the CLI) to see the table layout.',
-    ].join('\n');
-  }
+  const noSuchCol = /no such column:\s*(?:((?!\d)\w+)\.)?((?!\d)\w+)/i.exec(rawMsg);
+  if (noSuchCol) return decorateNoSuchColumnError(db, rawMsg, noSuchCol);
+
+  const ambig = /ambiguous column name:\s*((?!\d)\w+)/i.exec(rawMsg);
+  if (ambig) return decorateAmbiguousColumnError(rawMsg, ambig[1]!);
+
   return rawMsg;
+}
+
+function decorateNoSuchColumnError(
+  db: { prepare(sql: string): { all(...args: unknown[]): unknown[] } },
+  rawMsg: string,
+  match: RegExpExecArray,
+): string {
+  const qualifier = match[1];
+  const badCol = match[2]!;
+  // Narrow the suggestion search to the qualifier's likely table when
+  // we recognise the alias (n/e/f → nodes/edges/files). Without
+  // narrowing, a same-named column on another table can beat the actual
+  // near-match on the aliased table by edit distance.
+  const targetTable = qualifier ? ALIAS_TO_TABLE[qualifier.toLowerCase()] : undefined;
+  const tablesToSearch = targetTable ? [targetTable] : COMMON_TABLES;
+  const suggestions = suggestColumns({ db, badCol, candidateTables: tablesToSearch, k: 3 });
+  const lines = [rawMsg];
+
+  appendColumnSuggestions(lines, suggestions, qualifier, targetTable);
+  appendColumnSchemaNotes(lines, badCol);
+  appendColumnDumpTip(lines, targetTable);
+  return lines.join('\n');
+}
+
+function appendColumnSuggestions(
+  lines: string[],
+  suggestions: ReadonlyArray<string>,
+  qualifier: string | undefined,
+  targetTable: string | undefined,
+): void {
+  if (suggestions.length === 0) return;
+  const renderedSuggestions = qualifier && targetTable ? suggestions.map((s) => `${qualifier}.${s}`) : suggestions;
+  lines.push(`Did you mean: ${renderedSuggestions.join(', ')}?`);
+}
+
+function appendColumnSchemaNotes(lines: string[], badCol: string): void {
+  // The `files.path` vs `<other>.file_path` split is the dominant cause
+  // of a `path` / `file_path` miss — spell it out explicitly.
+  if (isPathSplitColumn(badCol)) lines.push(PATH_NAMING_SPLIT_HINT);
+  if (!isEdgesEndpointColumn(badCol)) return;
+  lines.push(
+    `Schema note: the \`edges\` table uses \`source\` and \`target\` for its endpoint FK columns, not \`${badCol}\`. Use \`e.source\` / \`e.target\`.`,
+  );
+}
+
+function appendColumnDumpTip(lines: string[], targetTable: string | undefined): void {
+  // Point at the NARROW schema-dump form, not the 60-table full dump.
+  // When the user wrote `n.<col>` they almost certainly only need the
+  // `nodes` columns; for unqualified queries the COMMON_TABLES list is
+  // a reasonable shortlist.
+  const dumpTables = targetTable ? [targetTable] : COMMON_TABLES.slice(0, 3);
+  const dumpArg = dumpTables.map((t) => `'${t}'`).join(', ');
+  lines.push(
+    `Tip: dump just the relevant column list with \`schema: true, tables: [${dumpArg}], compact: true\` (MCP) or \`--schema --tables ${dumpTables.join(',')} --compact\` (CLI).`,
+  );
+}
+
+function decorateAmbiguousColumnError(rawMsg: string, col: string): string {
+  return [
+    rawMsg,
+    `Qualify with an alias: try \`n.${col}\` (from nodes) or \`e.${col}\` (from edges) — whichever table the FROM clause aliases.`,
+    'Tip: use the schema option (`schema: true` on the MCP tool, `--schema` on the CLI) to see the table layout.',
+  ].join('\n');
 }
 
 /** Render a markdown table from query rows. Caps cell width to keep
@@ -477,7 +496,7 @@ function formatCompactColumn(row: { name: string; type: string; notnull: number;
 function renderCompactColumns(db: FetchSchemaArgs['db'], name: string): string {
   // Safety: name interpolation into PRAGMA. sqlite_master.name is
   // well-formed by construction but guard anyway.
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+  if (!/^[A-Za-z_]\w*$/.test(name)) {
     return '_(skipped — non-identifier name)_';
   }
   const cols = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{
@@ -751,13 +770,13 @@ async function handleSql(ctx: ToolCtx, args: SqlArgs): Promise<ToolOutcome> {
     const { rows, truncated, timedOut } = executeQuery({ db, query, limit, timeoutMs });
     const output = buildQueryOutput({ rows, truncated, limit, timedOut, timeoutMs });
     return ok(textResult(output));
-  } catch (caught) {
+  } catch (error_) {
     // Post-process the raw SQLite error for the two common shapes
     // (`no such column`, `ambiguous column name`) so the agent gets
     // an edit-distance suggestion + the `schema: true` tip without
     // a round-trip. Falls back to the raw message on every other
     // error shape. See friction F-O.
-    const decorated = decorateSqlError(db, errMsg(caught));
+    const decorated = decorateSqlError(db, errMsg(error_));
     return err(`SQL failed: ${decorated}`);
   }
 }

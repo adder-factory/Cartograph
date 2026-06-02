@@ -72,7 +72,7 @@ export function efForIndexSize(size: number): number {
 
 /** USearch quantization knob — F16 default (free 2× win at no measurable
  *  recall cost on jina embeddings). Override via env var. */
-function resolveQuantization(usearch: USearchNs): UScalarKind {
+function resolveQuantization(usearch: USearchNs): string {
   const want = (process.env['CARTOGRAPH_USEARCH_QUANT'] ?? 'f16').toLowerCase();
   switch (want) {
     case 'f32':
@@ -105,33 +105,29 @@ interface UIndex {
   size(): number;
   dimensions(): number;
 }
-type UMetricKind = string;
-type UScalarKind = string;
 interface UIndexCtorArgs {
   dimensions: number;
-  metric: UMetricKind;
-  quantization: UScalarKind;
+  metric: string;
+  quantization: string;
   connectivity: number;
   expansion_add: number;
   expansion_search: number;
   multi: boolean;
 }
-interface UIndexCtor {
-  new (args: UIndexCtorArgs): UIndex;
-}
+type UIndexCtor = new (args: UIndexCtorArgs) => UIndex;
 interface UMetricKindNs {
-  Cos: UMetricKind;
-  IP: UMetricKind;
-  L2sq: UMetricKind;
-  [k: string]: UMetricKind;
+  Cos: string;
+  IP: string;
+  L2sq: string;
+  [k: string]: string;
 }
 interface UScalarKindNs {
-  F32: UScalarKind;
-  F16: UScalarKind;
-  BF16: UScalarKind;
-  I8: UScalarKind;
-  B1: UScalarKind;
-  [k: string]: UScalarKind;
+  F32: string;
+  F16: string;
+  BF16: string;
+  I8: string;
+  B1: string;
+  [k: string]: string;
 }
 interface USearchNs {
   Index: UIndexCtor;
@@ -224,7 +220,7 @@ export class HnswIndex {
   private rowidToMeta = new Map<number, { nodeId: string; model: string }>();
   private readonly dim: number;
   private readonly ns: USearchNs;
-  private readonly quant: UScalarKind;
+  private readonly quant: string;
 
   private constructor(ns: USearchNs, dim: number) {
     this.ns = ns;

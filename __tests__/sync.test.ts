@@ -14,6 +14,10 @@ import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { searchNodes } from '../src/db/queries-search.js';
 
+function runSyncGit(cwd: string, ...args: string[]): void {
+  execFileSync('git', args, { cwd, stdio: 'pipe' });
+}
+
 describe('Sync Module', () => {
   describe('Sync Functionality', () => {
     let testDir: string;
@@ -39,7 +43,7 @@ describe('Sync Module', () => {
 
     afterEach(() => {
       if (cg) {
-        cg.destroy();
+        cg.close();
       }
       if (fs.existsSync(testDir)) {
         fs.rmSync(testDir, { recursive: true, force: true });
@@ -439,25 +443,20 @@ export function newFn(): number { return 42; }
   describe('Git-based sync', () => {
     let testDir: string;
     let cg: Cartograph;
-
-    function git(...args: string[]) {
-      execFileSync('git', args, { cwd: testDir, stdio: 'pipe' });
-    }
-
     beforeEach(async () => {
       testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-git-sync-'));
 
       // Initialize a git repo with an initial commit
-      git('init');
-      git('config', 'user.email', 'test@test.com');
-      git('config', 'user.name', 'Test');
+      runSyncGit(testDir, 'init');
+      runSyncGit(testDir, 'config', 'user.email', 'test@test.com');
+      runSyncGit(testDir, 'config', 'user.name', 'Test');
 
       const srcDir = path.join(testDir, 'src');
       fs.mkdirSync(srcDir);
       fs.writeFileSync(path.join(srcDir, 'index.ts'), `export function hello() { return 'world'; }`);
 
-      git('add', '-A');
-      git('commit', '-m', 'initial');
+      runSyncGit(testDir, 'add', '-A');
+      runSyncGit(testDir, 'commit', '-m', 'initial');
 
       // Initialize Cartograph and index
       cg = Cartograph.initSync(testDir, {
@@ -471,7 +470,7 @@ export function newFn(): number { return 42; }
 
     afterEach(() => {
       if (cg) {
-        cg.destroy();
+        cg.close();
       }
       if (fs.existsSync(testDir)) {
         fs.rmSync(testDir, { recursive: true, force: true });
@@ -596,25 +595,20 @@ export function newFn(): number { return 42; }
   describe('HEAD-moving git operations', () => {
     let testDir: string;
     let cg: Cartograph;
-
-    function git(...args: string[]) {
-      execFileSync('git', args, { cwd: testDir, stdio: 'pipe' });
-    }
-
     beforeEach(async () => {
       testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-head-move-'));
 
-      git('init');
-      git('config', 'user.email', 'test@test.com');
-      git('config', 'user.name', 'Test');
-      git('symbolic-ref', 'HEAD', 'refs/heads/main');
+      runSyncGit(testDir, 'init');
+      runSyncGit(testDir, 'config', 'user.email', 'test@test.com');
+      runSyncGit(testDir, 'config', 'user.name', 'Test');
+      runSyncGit(testDir, 'symbolic-ref', 'HEAD', 'refs/heads/main');
 
       const srcDir = path.join(testDir, 'src');
       fs.mkdirSync(srcDir);
       fs.writeFileSync(path.join(srcDir, 'index.ts'), `export function hello() { return 'world'; }`);
 
-      git('add', '-A');
-      git('commit', '-m', 'initial');
+      runSyncGit(testDir, 'add', '-A');
+      runSyncGit(testDir, 'commit', '-m', 'initial');
 
       cg = Cartograph.initSync(testDir, {
         config: { include: ['**/*.ts'], exclude: [] },
@@ -623,20 +617,20 @@ export function newFn(): number { return 42; }
     });
 
     afterEach(() => {
-      if (cg) cg.destroy();
+      if (cg) cg.close();
       if (fs.existsSync(testDir)) {
         fs.rmSync(testDir, { recursive: true, force: true });
       }
     });
 
     it('should detect changes brought in by `git merge`', async () => {
-      git('checkout', '-b', 'feature');
+      runSyncGit(testDir, 'checkout', '-b', 'feature');
       fs.writeFileSync(path.join(testDir, 'src', 'index.ts'), `export function merged() { return 'from-branch'; }`);
       fs.writeFileSync(path.join(testDir, 'src', 'added.ts'), `export function fromBranch() { return 1; }`);
-      git('add', '-A');
-      git('commit', '-m', 'feature work');
-      git('checkout', 'main');
-      git('merge', '--no-ff', 'feature', '-m', 'merge feature');
+      runSyncGit(testDir, 'add', '-A');
+      runSyncGit(testDir, 'commit', '-m', 'feature work');
+      runSyncGit(testDir, 'checkout', 'main');
+      runSyncGit(testDir, 'merge', '--no-ff', 'feature', '-m', 'merge feature');
 
       const result = await cg.sync();
 
@@ -647,12 +641,12 @@ export function newFn(): number { return 42; }
     });
 
     it('should detect changes after `git checkout` to a different branch', async () => {
-      git('checkout', '-b', 'other');
+      runSyncGit(testDir, 'checkout', '-b', 'other');
       fs.writeFileSync(path.join(testDir, 'src', 'index.ts'), `export function onOther() { return 'other'; }`);
-      git('add', '-A');
-      git('commit', '-m', 'other work');
-      git('checkout', 'main');
-      git('checkout', 'other');
+      runSyncGit(testDir, 'add', '-A');
+      runSyncGit(testDir, 'commit', '-m', 'other work');
+      runSyncGit(testDir, 'checkout', 'main');
+      runSyncGit(testDir, 'checkout', 'other');
 
       const result = await cg.sync();
 
@@ -662,8 +656,8 @@ export function newFn(): number { return 42; }
     });
 
     it('should detect file deletion brought in by a committed change', async () => {
-      git('rm', path.join('src', 'index.ts'));
-      git('commit', '-m', 'remove index');
+      runSyncGit(testDir, 'rm', path.join('src', 'index.ts'));
+      runSyncGit(testDir, 'commit', '-m', 'remove index');
 
       const result = await cg.sync();
 
@@ -673,8 +667,8 @@ export function newFn(): number { return 42; }
 
     it('should fall back to full scan when last-synced HEAD is unreachable', async () => {
       fs.writeFileSync(path.join(testDir, 'src', 'index.ts'), `export function rewritten() { return 'rewritten'; }`);
-      git('add', '-A');
-      git('commit', '--amend', '-m', 'rewritten');
+      runSyncGit(testDir, 'add', '-A');
+      runSyncGit(testDir, 'commit', '--amend', '-m', 'rewritten');
       const result = await cg.sync();
 
       expect(result.filesModified + result.filesAdded).toBeGreaterThanOrEqual(1);
@@ -696,32 +690,28 @@ export function newFn(): number { return 42; }
     let submoduleSrc: string;
     let cg: Cartograph;
 
-    function git(cwd: string, ...args: string[]) {
-      execFileSync('git', args, { cwd, stdio: 'pipe' });
-    }
-
     beforeEach(async () => {
       parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-submod-parent-'));
       submoduleSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-submod-src-'));
 
-      git(submoduleSrc, 'init');
-      git(submoduleSrc, 'config', 'user.email', 'test@test.com');
-      git(submoduleSrc, 'config', 'user.name', 'Test');
+      runSyncGit(submoduleSrc, 'init');
+      runSyncGit(submoduleSrc, 'config', 'user.email', 'test@test.com');
+      runSyncGit(submoduleSrc, 'config', 'user.name', 'Test');
       fs.writeFileSync(path.join(submoduleSrc, 'lib.ts'), `export function fromSubmodule() { return 'sub'; }`);
-      git(submoduleSrc, 'add', '-A');
-      git(submoduleSrc, 'commit', '-m', 'submodule initial');
+      runSyncGit(submoduleSrc, 'add', '-A');
+      runSyncGit(submoduleSrc, 'commit', '-m', 'submodule initial');
 
-      git(parentDir, 'init');
-      git(parentDir, 'config', 'user.email', 'test@test.com');
-      git(parentDir, 'config', 'user.name', 'Test');
+      runSyncGit(parentDir, 'init');
+      runSyncGit(parentDir, 'config', 'user.email', 'test@test.com');
+      runSyncGit(parentDir, 'config', 'user.name', 'Test');
 
       const parentSrc = path.join(parentDir, 'src');
       fs.mkdirSync(parentSrc);
       fs.writeFileSync(path.join(parentSrc, 'main.ts'), `export function fromParent() { return 'parent'; }`);
 
-      git(parentDir, '-c', 'protocol.file.allow=always', 'submodule', 'add', submoduleSrc, 'vendor/sub');
-      git(parentDir, 'add', '-A');
-      git(parentDir, 'commit', '-m', 'parent initial with submodule');
+      runSyncGit(parentDir, '-c', 'protocol.file.allow=always', 'submodule', 'add', submoduleSrc, 'vendor/sub');
+      runSyncGit(parentDir, 'add', '-A');
+      runSyncGit(parentDir, 'commit', '-m', 'parent initial with submodule');
 
       cg = Cartograph.initSync(parentDir, {
         config: {
@@ -732,7 +722,7 @@ export function newFn(): number { return 42; }
     });
 
     afterEach(() => {
-      if (cg) cg.destroy();
+      if (cg) cg.close();
       if (fs.existsSync(parentDir)) fs.rmSync(parentDir, { recursive: true, force: true });
       if (fs.existsSync(submoduleSrc)) fs.rmSync(submoduleSrc, { recursive: true, force: true });
     });
@@ -783,7 +773,7 @@ export function newFn(): number { return 42; }
     });
 
     it('should skip submodule contents when indexSubmodules is false', async () => {
-      cg.destroy();
+      cg.close();
       fs.rmSync(path.join(parentDir, '.cartograph'), { recursive: true, force: true });
       cg = Cartograph.initSync(parentDir, {
         config: {
@@ -822,7 +812,7 @@ export function newFn(): number { return 42; }
     });
 
     afterEach(() => {
-      if (bulkCg) bulkCg.destroy();
+      if (bulkCg) bulkCg.close();
       if (fs.existsSync(bulkDir)) {
         fs.rmSync(bulkDir, { recursive: true, force: true });
       }

@@ -168,25 +168,7 @@ export class OpenAiSdkRerankerClient {
         );
       }
       const body = (await res.json()) as RerankResponse;
-      if (!Array.isArray(body.results)) {
-        throw new LlmEndpointError(
-          `rerank endpoint returned a body without a \`results\` array. ` +
-            'Backend may not implement the Cohere-compatible /v1/rerank shape.',
-        );
-      }
-      // Fill scores in input order — backends may sort by score descending.
-      const scores = new Array<number>(candidates.length).fill(0);
-      for (const entry of body.results) {
-        if (
-          typeof entry?.index === 'number' &&
-          entry.index >= 0 &&
-          entry.index < candidates.length &&
-          typeof entry.relevance_score === 'number'
-        ) {
-          scores[entry.index] = entry.relevance_score;
-        }
-      }
-      return scores;
+      return scoresFromRerankResponse(body, candidates.length);
     } catch (err) {
       if (err instanceof LlmEndpointError) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
@@ -230,4 +212,28 @@ export class OpenAiSdkRerankerClient {
   reachabilityError(): string | null {
     return this.lastReachabilityError;
   }
+}
+
+function scoresFromRerankResponse(body: RerankResponse, candidateCount: number): number[] {
+  if (!Array.isArray(body.results)) {
+    throw new LlmEndpointError(
+      `rerank endpoint returned a body without a \`results\` array. ` +
+        'Backend may not implement the Cohere-compatible /v1/rerank shape.',
+    );
+  }
+  // Fill scores in input order — backends may sort by score descending.
+  const scores = new Array<number>(candidateCount).fill(0);
+  for (const entry of body.results) {
+    if (isValidRerankEntry(entry, candidateCount)) scores[entry.index] = entry.relevance_score;
+  }
+  return scores;
+}
+
+function isValidRerankEntry(entry: RerankResultEntry | undefined, candidateCount: number): entry is RerankResultEntry {
+  return (
+    typeof entry?.index === 'number' &&
+    entry.index >= 0 &&
+    entry.index < candidateCount &&
+    typeof entry.relevance_score === 'number'
+  );
 }

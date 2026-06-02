@@ -105,7 +105,7 @@ describe('callers + node disambiguation regressions (#33 + #35)', () => {
     // The primary card's location line must reference the production
     // file. The fixture path may still surface as an "Others" entry,
     // but the primary must be the non-fixture match.
-    const primaryLocationMatch = text.match(/\*\*Location:\*\*\s+`?([^\n`]+)`?/);
+    const primaryLocationMatch = /\*\*Location:\*\*\s+`?([^\n`]+)`?/.exec(text);
     expect(primaryLocationMatch, 'expected a Location: line').not.toBeNull();
     const primaryPath = primaryLocationMatch?.[1] ?? '';
     expect(primaryPath).toMatch(/^src\/core\.ts/);

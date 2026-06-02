@@ -25,9 +25,9 @@
  * achievable upper bound on the win, not the field-typical case.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 
 const FILE_COUNT = 220;
@@ -73,13 +73,15 @@ async function main(): Promise<void> {
     `sanity: fn0=${n0?.id?.slice(0, 12) ?? 'MISSING'}  fn${FILE_COUNT - 1}=${nLast?.id?.slice(0, 12) ?? 'MISSING'}`,
   );
 
-  cg.destroy();
+  cg.close();
   fs.rmSync(dir, { recursive: true, force: true });
 
   if (verdict === 'FAIL') process.exit(1);
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(2);
-});
+}

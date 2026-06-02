@@ -667,7 +667,7 @@ describe('cartograph_tests_for — multi-it coverage count (FRICTION-F3)', () =>
     // Six `it` blocks call runDetector; the `setup helper` and
     // `commented mention` blocks do NOT. The pre-fix behaviour reported
     // exactly one block — the regression this test guards against.
-    const countMatch = text.match(/\((\d+) covering test blocks?\)/);
+    const countMatch = /\((\d+) covering test blocks?\)/.exec(text);
     expect(countMatch).not.toBeNull();
     const count = Number(countMatch![1]);
     expect(count).toBeGreaterThanOrEqual(6);
@@ -731,7 +731,7 @@ describe('cartograph_tests_for — files-mode barrel cap + warning', () => {
     const result = await handler.execute('cartograph_tests_for', { files: ['src/leaf.ts'] });
     const text = result.content[0]?.text ?? '';
     // The header counts the full affected set...
-    expect(text).toMatch(new RegExp(`Affected test files \\(${TEST_COUNT}\\)`));
+    expect(text).toMatch(new RegExp(String.raw`Affected test files \(${TEST_COUNT}\)`));
     // ...but the body is capped at the default 40 rows.
     const renderedRows = (text.match(/^- `src\/t\d+\.test\.ts`/gm) ?? []).length;
     expect(renderedRows).toBe(40);

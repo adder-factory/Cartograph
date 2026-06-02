@@ -8,7 +8,7 @@ import type { MigrationModule } from './types.js';
  * Until now the stale-summary query compared `symbol_summaries.content_hash`
  * (per-symbol body hash) against `files.content_hash` (per-file hash),
  * an always-mismatch that reported 100% stale forever. Quick-win D in
- * 46ec645 mitigated the display by returning 0 with a TODO. This
+   * 46ec645 mitigated the display by returning 0 with a placeholder. This
  * migration unblocks the proper fix.
  *
  * `body_hash` is computed by the extractor (tree-sitter `createNode`)

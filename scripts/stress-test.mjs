@@ -133,14 +133,13 @@ console.log('\n[Phase 4] Index-hook framework (PR #119)');
 const { getRegisteredHooks } = await import('../dist/index-hooks/registry.js');
 const hooks = getRegisteredHooks();
 console.log(`  ✓ ${hooks.length} hooks registered: ${hooks.map((h) => h.name).join(', ')}`);
-if (hooks.length >= 6) pass('all hooks registered', `${hooks.length} hooks`);
-else fail('all hooks registered', `expected ≥6, got ${hooks.length}`);
+if (hooks.length < 6) fail('all hooks registered', `expected ≥6, got ${hooks.length}`);
+else pass('all hooks registered', `${hooks.length} hooks`);
 
 // Each hook should have populated some state
 const sampleNode = cg.getTopCentralNodes({ limit: 1 })[0];
-if (sampleNode && sampleNode.centrality != null)
-  pass('centrality hook populated nodes', `top node centrality=${sampleNode.centrality.toFixed(5)}`);
-else fail('centrality hook populated nodes', 'no top central nodes');
+if (sampleNode?.centrality == null) fail('centrality hook populated nodes', 'no top central nodes');
+else pass('centrality hook populated nodes', `top node centrality=${sampleNode.centrality.toFixed(5)}`);
 
 const sampleHotspot = cg.getHotspots({ limit: 1, minCommits: 0 })[0];
 if (sampleHotspot && sampleHotspot.commitCount > 0)
@@ -417,7 +416,9 @@ const fails = RESULTS.filter((r) => r.status === 'FAIL').length;
 console.log(`  ${passes} PASS · ${warns} WARN · ${fails} FAIL\n`);
 
 for (const r of RESULTS) {
-  const sym = r.status === 'PASS' ? '✓' : r.status === 'WARN' ? '⚠' : '✗';
+  let sym = '✗';
+  if (r.status === 'PASS') sym = '✓';
+  else if (r.status === 'WARN') sym = '⚠';
   console.log(`  ${sym} [${r.status}] ${r.name}${r.detail ? ': ' + r.detail : ''}`);
 }
 

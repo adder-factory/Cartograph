@@ -45,14 +45,14 @@ async function handleInit(_ctx: ToolCtx, args: Record<string, unknown>): Promise
     // module-load cycle. Loading Cartograph lazily breaks the cycle.
     const { default: Cartograph } = await import('../../index.js');
     const cg = await Cartograph.init(projectPath, { index: false });
-    cg.destroy();
+    cg.close();
     return ok(
       textResult(
         `## Initialized\n\n- Path: \`${projectPath}\`\n- Created: \`.cartograph/\`\n- Next: pass \`projectPath: "${projectPath}"\` to other tools, or run \`cartograph_admin({action: "index"})\` to populate the index.`,
       ),
     );
-  } catch (caught) {
-    return err(`Init failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Init failed: ${errMsg(error_)}`);
   }
 }
 
@@ -61,13 +61,13 @@ async function handleInit(_ctx: ToolCtx, args: Record<string, unknown>): Promise
  *  error string when mkdir failed. Pulled out of {@link handleInit}
  *  so the inner try/catch nested inside the outer try doesn't sit
  *  4 levels deep. */
-function ensureProjectDirExists(fsMod: typeof import('fs'), projectPath: string): string | null {
+function ensureProjectDirExists(fsMod: typeof import('node:fs'), projectPath: string): string | null {
   if (fsMod.existsSync(projectPath)) return null;
   try {
     fsMod.mkdirSync(projectPath, { recursive: true });
     return null;
-  } catch (caught) {
-    return `Could not create project directory ${projectPath}: ${errMsg(caught)}`;
+  } catch (error_) {
+    return `Could not create project directory ${projectPath}: ${errMsg(error_)}`;
   }
 }
 
@@ -98,8 +98,8 @@ async function handleUninit(ctx: ToolCtx, args: Record<string, unknown>): Promis
     ctx.closeProjectsMatching(resolved);
     await fsp.rm(dir, { recursive: true, force: true });
     return ok(textResult(`## Uninitialized\n\n- Removed: \`${dir}\`\n- All indexed data dropped.`));
-  } catch (caught) {
-    return err(`Uninit failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Uninit failed: ${errMsg(error_)}`);
   }
 }
 
@@ -109,8 +109,8 @@ async function handleUnlock(ctx: ToolCtx, args: Record<string, unknown>): Promis
   try {
     const cg = ctx.getCartograph(projectPath);
     resolvedRoot = cg.projectRoot;
-  } catch (caught) {
-    return err(`Unlock failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Unlock failed: ${errMsg(error_)}`);
   }
   try {
     const { default: pathMod } = await import('node:path');
@@ -126,8 +126,8 @@ async function handleUnlock(ctx: ToolCtx, args: Record<string, unknown>): Promis
     await fsp.unlink(lockPath);
     const relPath = pathMod.relative(resolvedRoot, lockPath);
     return ok(textResult(`## Lock cleared\n\n- Removed: \`${relPath}\``));
-  } catch (caught) {
-    return err(`Unlock failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Unlock failed: ${errMsg(error_)}`);
   }
 }
 
@@ -161,8 +161,8 @@ async function handleSync(ctx: ToolCtx, args: Record<string, unknown>): Promise<
       );
     }
     return ok(textResult(formatSyncResult(result)));
-  } catch (caught) {
-    return err(`Sync failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Sync failed: ${errMsg(error_)}`);
   }
 }
 
@@ -285,8 +285,8 @@ async function handleIndex(ctx: ToolCtx, args: Record<string, unknown>): Promise
       }
     }
     return ok(textResult(base + tail));
-  } catch (caught) {
-    return err(`Reindex failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Reindex failed: ${errMsg(error_)}`);
   }
 }
 
@@ -306,14 +306,14 @@ async function handleEmbedOnly(ctx: ToolCtx, args: Record<string, unknown>): Pro
     }
     let embedSummary = '';
     try {
-      const r = await cg.llm.embedAll({});
+      const r = await cg.llm.embed.embedAll({});
       embedSummary = `\nEmbedded ${r.generated}/${r.candidates} symbols (${r.errors} errors, ${r.durationMs}ms)`;
-    } catch (caught) {
-      embedSummary = `\nEmbed pass skipped: ${errMsg(caught)}`;
+    } catch (error_) {
+      embedSummary = `\nEmbed pass skipped: ${errMsg(error_)}`;
     }
     return ok(textResult(formatIndexResult({ result, force: false, parseCacheCleared: false }) + embedSummary));
-  } catch (caught) {
-    return err(`Embed-only index failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Embed-only index failed: ${errMsg(error_)}`);
   }
 }
 
@@ -426,8 +426,8 @@ async function handleBuildSimilarityEdges(ctx: ToolCtx, args: Record<string, unk
       lines.push(`- Note: ${result.reason}`);
     }
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Build similarity edges failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Build similarity edges failed: ${errMsg(error_)}`);
   }
 }
 
@@ -479,8 +479,8 @@ async function handlePruneStore(ctx: ToolCtx, args: Record<string, unknown>): Pr
       );
     }
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Prune store failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Prune store failed: ${errMsg(error_)}`);
   }
 }
 
@@ -505,8 +505,8 @@ async function handleScipExport(ctx: ToolCtx, args: Record<string, unknown>): Pr
       lines.push(`- Disambiguated: ${result.stats.disambiguated} symbol(s) had name collisions`);
     }
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`scip-export failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`scip-export failed: ${errMsg(error_)}`);
   }
 }
 
@@ -542,8 +542,8 @@ async function handleScipImport(ctx: ToolCtx, args: Record<string, unknown>): Pr
       lines.push(`- Dropped: ${result.stats.unresolvedEdges} edge(s) — target symbol had no definition`);
     }
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`scip-import failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`scip-import failed: ${errMsg(error_)}`);
   }
 }
 
@@ -614,8 +614,8 @@ async function handleSummarizePhase(ctx: ToolCtx, args: Record<string, unknown>)
     const embedLine = formatEmbedPhaseLine(result.embed);
     if (embedLine) lines.push(embedLine);
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Summarize failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Summarize failed: ${errMsg(error_)}`);
   }
 }
 
@@ -629,7 +629,7 @@ async function handleEmbedPhase(ctx: ToolCtx, args: Record<string, unknown>): Pr
             ctx.reportProgress!(done, total, `embedding symbol ${done}/${total}`),
         }
       : {};
-    const result = await cg.llm.embedAll({ concurrency, ...progressOpts });
+    const result = await cg.llm.embed.embedAll({ concurrency, ...progressOpts });
     const lines: string[] = [
       `## Embedded ${result.generated} new vector${result.generated === 1 ? '' : 's'} in ${(result.durationMs / 1000).toFixed(1)}s`,
     ];
@@ -646,8 +646,8 @@ async function handleEmbedPhase(ctx: ToolCtx, args: Record<string, unknown>): Pr
     }
     if (details.length > 0) lines.push(`- ${details.join(' — ')}`);
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Embed failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Embed failed: ${errMsg(error_)}`);
   }
 }
 
@@ -677,8 +677,8 @@ async function handleClassifyPhase(ctx: ToolCtx, args: Record<string, unknown>):
     }
     if (details.length > 0) lines.push(`- ${details.join(' — ')}`);
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Classify failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Classify failed: ${errMsg(error_)}`);
   }
 }
 
@@ -710,8 +710,8 @@ async function handleInstallModels(_ctx: ToolCtx, args: Record<string, unknown>)
       'Set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` in `.cartograph/config.json` to point at the GGUF paths above, or call this from the installer with `--write-config`.',
     );
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`install-models failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`install-models failed: ${errMsg(error_)}`);
   }
 }
 
@@ -727,8 +727,8 @@ async function handleDoctor(_ctx: ToolCtx, args: Record<string, unknown>): Promi
       fix,
     });
     return ok(textResult(formatDoctorReport(result)));
-  } catch (caught) {
-    return err(`doctor failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`doctor failed: ${errMsg(error_)}`);
   }
 }
 
@@ -752,22 +752,8 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
   try {
     const plan = await planLlmSetup();
     const lines: string[] = ['## LLM setup plan', ''];
-    if (plan.detectedBackends.length > 0) {
-      lines.push('**Detected backends:**');
-      for (const b of plan.detectedBackends) {
-        const modelHint = b.models.length > 0 ? `${b.models.length} models loaded` : 'no models loaded';
-        lines.push(`- ${b.label} at \`${b.endpoint}\` (${modelHint})`);
-      }
-      lines.push('');
-    } else {
-      lines.push('**No backends detected.** Wizard recommends installing one (see presets below).', '');
-    }
-    if (plan.cloudChatAvailable.claudeBin) {
-      lines.push(`**Cloud chat available:** \`claude\` CLI at \`${plan.cloudChatAvailable.claudeBin}\``);
-    }
-    if (plan.cloudChatAvailable.anthropicApiKey) {
-      lines.push('**Cloud chat available:** ANTHROPIC_API_KEY set');
-    }
+    appendDetectedBackends(lines, plan);
+    appendCloudChatAvailability(lines, plan.cloudChatAvailable);
     lines.push('', `**Recommended preset:** \`${plan.recommendedPresetId}\``, '', '**Available presets:**');
     for (const p of plan.presets) {
       lines.push(`- \`${p.id}\` — **${p.label}**`, `  - ${p.description}`, `  - Summary: ${p.summary}`);
@@ -781,8 +767,33 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
       'To apply a preset: `cartograph_admin({action: "llm-apply", preset: "<id>"})`. The agent can show this list to the user, take their pick, and call back.',
     );
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`llm-plan failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`llm-plan failed: ${errMsg(error_)}`);
+  }
+}
+
+function appendDetectedBackends(lines: string[], plan: Awaited<ReturnType<typeof import('../../installer/llm-setup-plan.js')['planLlmSetup']>>): void {
+  if (plan.detectedBackends.length === 0) {
+    lines.push('**No backends detected.** Wizard recommends installing one (see presets below).', '');
+    return;
+  }
+  lines.push('**Detected backends:**');
+  for (const b of plan.detectedBackends) {
+    const modelHint = b.models.length > 0 ? `${b.models.length} models loaded` : 'no models loaded';
+    lines.push(`- ${b.label} at \`${b.endpoint}\` (${modelHint})`);
+  }
+  lines.push('');
+}
+
+function appendCloudChatAvailability(
+  lines: string[],
+  cloudChatAvailable: { claudeBin: string | null; anthropicApiKey: boolean },
+): void {
+  if (cloudChatAvailable.claudeBin) {
+    lines.push(`**Cloud chat available:** \`claude\` CLI at \`${cloudChatAvailable.claudeBin}\``);
+  }
+  if (cloudChatAvailable.anthropicApiKey) {
+    lines.push('**Cloud chat available:** ANTHROPIC_API_KEY set');
   }
 }
 
@@ -795,7 +806,7 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
  */
 async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : null;
-  const preset = typeof args['preset'] === 'string' ? (args['preset'] as string) : '';
+  const preset = typeof args['preset'] === 'string' ? args['preset'] : '';
   if (!projectPath) {
     return err(
       "llm-apply requires `projectPath: <absolute-path>` — the wizard writes `<projectPath>/.cartograph/config.json` and silently falling back to the MCP server's cwd would land the config in the wrong project. Pass the project root explicitly.",
@@ -820,9 +831,7 @@ async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Prom
     const lines: string[] = [
       `## Applied preset \`${result.preset}\``,
       '',
-      result.applied
-        ? `Wrote \`${result.configPath}\`${result.backupPath ? ` (backup at \`${result.backupPath}\`)` : ''}.`
-        : 'No config written.',
+      formatAppliedPresetLine(result),
     ];
     if (result.notes.length > 0) {
       lines.push('', '**Notes:**');
@@ -833,9 +842,19 @@ async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Prom
       for (const step of result.nextSteps) lines.push(`- \`${step}\``);
     }
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`llm-apply failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`llm-apply failed: ${errMsg(error_)}`);
   }
+}
+
+function formatAppliedPresetLine(result: {
+  readonly applied: boolean;
+  readonly configPath: string | null;
+  readonly backupPath: string | null;
+}): string {
+  if (!result.applied) return 'No config written.';
+  const backupSuffix = result.backupPath ? ` (backup at \`${result.backupPath}\`)` : '';
+  return `Wrote \`${result.configPath}\`${backupSuffix}.`;
 }
 
 /**
@@ -857,7 +876,7 @@ async function handleLlmApply(ctx: ToolCtx, args: Record<string, unknown>): Prom
 type LlmTier = 'embed' | 'chat' | 'ask' | 'reranker';
 type LlmTierConfigKey = 'embeddingLlm' | 'summarizeLlm' | 'askLlm' | 'rerankerLlm';
 
-const LLM_TIERS: readonly LlmTier[] = ['embed', 'chat', 'ask', 'reranker'];
+const LLM_TIERS: ReadonlySet<LlmTier> = new Set(['embed', 'chat', 'ask', 'reranker']);
 const LLM_TIER_TO_CONFIG_KEY: Record<LlmTier, LlmTierConfigKey> = {
   embed: 'embeddingLlm',
   chat: 'summarizeLlm',
@@ -886,7 +905,7 @@ interface WriteLlmTuneOverrideArgs {
 /** Write mode — apply a per-tier concurrency override to .cartograph/config.json. */
 async function writeLlmTuneOverride(args: WriteLlmTuneOverrideArgs): Promise<ToolOutcome> {
   const { projectPath, tier, concurrency } = args;
-  if (!LLM_TIERS.includes(tier as LlmTier)) {
+  if (!LLM_TIERS.has(tier as LlmTier)) {
     return err(`llm-tune: \`tier\` must be one of 'embed' / 'chat' / 'ask' / 'reranker' (got '${tier}').`);
   }
   if (concurrency === null || !Number.isInteger(concurrency) || concurrency < 1) {
@@ -926,8 +945,8 @@ async function writeLlmTuneOverride(args: WriteLlmTuneOverrideArgs): Promise<Too
     return ok(
       textResult(buildOverrideAppliedReport({ tier, configKey, previous, concurrency, configPath, backupPath })),
     );
-  } catch (caught) {
-    return err(`llm-tune write failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`llm-tune write failed: ${errMsg(error_)}`);
   }
 }
 
@@ -945,7 +964,7 @@ function buildOverrideAppliedReport(args: OverrideAppliedReportArgs): string {
     '## Applied tuning override',
     '',
     `**Tier:** \`${args.tier}\` (config key \`llm.${args.configKey}\`)`,
-    `**Concurrency:** ${args.previous === null ? '(unset)' : args.previous} → **${args.concurrency}**`,
+    `**Concurrency:** ${args.previous ?? '(unset)'} → **${args.concurrency}**`,
     `**Config:** \`${args.configPath}\``,
     `**Backup:** \`${args.backupPath}\``,
     '',
@@ -1183,3 +1202,17 @@ export const ADMIN_TOOL = defineTool({
   bypassFreshnessGate: true,
   isWriteTool: true,
 });
+
+export const __adminToolInternals = {
+  ensureProjectDirExists,
+  formatProgressMsg,
+  formatSyncResult,
+  buildIndexProgressOpts,
+  buildIndexTagStr,
+  formatIndexResult,
+  formatEmbedPhaseLine,
+  appendDetectedBackends,
+  appendCloudChatAvailability,
+  formatAppliedPresetLine,
+  buildOverrideAppliedReport,
+};

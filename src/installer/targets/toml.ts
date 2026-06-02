@@ -42,7 +42,8 @@ function serializeTomlTableBody(values: Record<string, string | string[]>): stri
 function quoteString(s: string): string {
   // TOML basic strings: backslash and double-quote escapes; control
   // chars not expected in our payload (paths/args).
-  return '"' + s.replaceAll('\\', '\\\\').replaceAll('"', '\\"') + '"';
+  const backslash = String.fromCodePoint(92);
+  return '"' + s.replaceAll(backslash, backslash + backslash).replaceAll('"', backslash + '"') + '"';
 }
 
 /**

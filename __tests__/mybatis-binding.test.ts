@@ -18,6 +18,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('MyBatis Java<->XML binding (B11/F#64b)', () => {
   let tempDir: string;
   let cg: Cartograph | undefined;
@@ -27,7 +29,7 @@ describe('MyBatis Java<->XML binding (B11/F#64b)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -63,7 +65,7 @@ describe('MyBatis Java<->XML binding (B11/F#64b)', () => {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const xmlMethods = getNodesByKind(cg.queries, 'method').filter((m) => m.language === 'xml');
-    const names = xmlMethods.map((m) => m.qualifiedName).sort();
+    const names = xmlMethods.map((m) => m.qualifiedName).sort(byString);
     expect(names).toEqual([
       'UserMapper::commonColumns',
       'UserMapper::deleteById',
@@ -359,7 +361,7 @@ public interface OrderMapper {
     // Only `real` should be extracted — the four comment-shaped tags
     // (todoSelect / todoFrag / ghost / todoMap) are stripped before
     // the regex scan runs.
-    expect(xmlMethods.map((m) => m.name).sort()).toEqual(['real']);
+    expect(xmlMethods.map((m) => m.name).sort(byString)).toEqual(['real']);
     expect(xmlTypes.length).toBe(0);
   });
 
@@ -676,7 +678,7 @@ public interface UserMapper {
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
 
     const params = getNodesByKind(cg.queries, 'parameter').filter((n) => n.language === 'kotlin');
-    const qns = params.map((p) => p.qualifiedName).sort();
+    const qns = params.map((p) => p.qualifiedName).sort(byString);
     expect(qns).toEqual([
       'UserMapper::findById::userId',
       'UserMapper::findByName::limit',

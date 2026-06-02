@@ -167,39 +167,77 @@ function parseDescriptors(s: string): Descriptor[] | null {
     const ch = s[i]!;
     // Parameter `(name)` / type-parameter `[name]` — bracket-led forms.
     if (ch === '(' || ch === '[') {
-      const close = ch === '(' ? ')' : ']';
-      const [name, after] = readName(s, i + 1);
-      if (after < 0 || s[after] !== close) return null;
-      out.push({
-        name,
-        suffix: ch === '(' ? DescriptorSuffix.Parameter : DescriptorSuffix.TypeParameter,
-      });
-      i = after + 1;
+      const after = appendBracketDescriptor(out, s, i, ch);
+      if (after === null) return null;
+      i = after;
       continue;
     }
     const [name, afterName] = readName(s, i);
     if (afterName < 0 || afterName >= s.length) return null;
-    const suffixChar = s[afterName]!;
-    if (suffixChar === '(') {
-      // Method `name(disambiguator).`
-      let j = afterName + 1;
-      while (j < s.length && s[j] !== ')') j += 1;
-      if (j >= s.length || s[j + 1] !== '.') return null;
-      const disambiguator = s.slice(afterName + 1, j);
-      out.push({
-        name,
-        suffix: DescriptorSuffix.Method,
-        ...(disambiguator ? { disambiguator } : {}),
-      });
-      i = j + 2;
-      continue;
-    }
-    const suffix = SUFFIX_BY_CHAR[suffixChar];
-    if (suffix === undefined) return null;
-    out.push({ name, suffix });
-    i = afterName + 1;
+    const after = appendNamedDescriptor(out, s, name, afterName);
+    if (after === null) return null;
+    i = after;
   }
   return out.length > 0 ? out : null;
+}
+
+function appendBracketDescriptor(out: Descriptor[], s: string, i: number, ch: '(' | '['): number | null {
+  const parsed = parseBracketDescriptor(s, i, ch);
+  if (!parsed) return null;
+  out.push(parsed.descriptor);
+  return parsed.after;
+}
+
+function appendMethodDescriptor(out: Descriptor[], s: string, name: string, afterName: number): number | null {
+  const parsed = parseMethodDescriptor(s, name, afterName);
+  if (!parsed) return null;
+  out.push(parsed.descriptor);
+  return parsed.after;
+}
+
+function appendNamedDescriptor(out: Descriptor[], s: string, name: string, afterName: number): number | null {
+  const suffixChar = s[afterName]!;
+  if (suffixChar === '(') return appendMethodDescriptor(out, s, name, afterName);
+  const suffix = SUFFIX_BY_CHAR[suffixChar];
+  if (suffix === undefined) return null;
+  out.push({ name, suffix });
+  return afterName + 1;
+}
+
+function parseBracketDescriptor(
+  s: string,
+  i: number,
+  ch: '(' | '[',
+): { descriptor: Descriptor; after: number } | null {
+  const close = ch === '(' ? ')' : ']';
+  const [name, after] = readName(s, i + 1);
+  if (after < 0 || s[after] !== close) return null;
+  return {
+    descriptor: {
+      name,
+      suffix: ch === '(' ? DescriptorSuffix.Parameter : DescriptorSuffix.TypeParameter,
+    },
+    after: after + 1,
+  };
+}
+
+function parseMethodDescriptor(
+  s: string,
+  name: string,
+  afterName: number,
+): { descriptor: Descriptor; after: number } | null {
+  let j = afterName + 1;
+  while (j < s.length && s[j] !== ')') j += 1;
+  if (j >= s.length || s[j + 1] !== '.') return null;
+  const disambiguator = s.slice(afterName + 1, j);
+  return {
+    descriptor: {
+      name,
+      suffix: DescriptorSuffix.Method,
+      ...(disambiguator ? { disambiguator } : {}),
+    },
+    after: j + 2,
+  };
 }
 
 /**

@@ -44,6 +44,11 @@ interface ObjectRow {
   sql: string | null;
 }
 
+interface ObjectRowWithSql {
+  name: string;
+  sql: string;
+}
+
 const TEMP_SUFFIX = '__fk_tmp';
 
 const TABLES_WITH_FILE_PATH_FK: readonly string[] = [
@@ -54,6 +59,52 @@ const TABLES_WITH_FILE_PATH_FK: readonly string[] = [
   'string_imports',
 ];
 
+function hasFilesTable(db: import('../sqlite-adapter.js').SqliteDatabase): boolean {
+  const hasFiles = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name='files'").get() as
+    | { one: number }
+    | undefined;
+  return hasFiles !== undefined;
+}
+
+function getRefTableRow(db: import('../sqlite-adapter.js').SqliteDatabase, tableName: string): ObjectRowWithSql | null {
+  const row = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type='table' AND name=?`).get(tableName) as
+    | ObjectRow
+    | undefined;
+  if (!row?.sql) return null;
+  return { name: row.name, sql: row.sql };
+}
+
+function tableAlreadyHasFilePathFk(sql: string): boolean {
+  return /FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(sql);
+}
+
+function logSkippedRefTableMigration(tableName: string, err: unknown): void {
+  if (!process.env['CARTOGRAPH_DEBUG_MIGRATIONS']) return;
+  const msg = err instanceof Error ? err.message : String(err);
+  console.warn(`[migration 055] skipped ${tableName}: ${msg}`);
+}
+
+function isSqliteTableOptionSuffix(suffix: string): boolean {
+  const normalized = trimSqliteSuffixPadding(suffix).replaceAll(/\s+/g, ' ').toUpperCase();
+  if (normalized === '') return true;
+  if (normalized === 'STRICT') return true;
+  if (normalized === 'WITHOUT ROWID') return true;
+  const commaParts = normalized.split(',').map((part) => part.trim());
+  return commaParts.length === 2 && commaParts[0] === 'STRICT' && commaParts[1] === 'WITHOUT ROWID';
+}
+
+function trimSqliteSuffixPadding(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isSqliteSuffixPadding(value[start]!)) start++;
+  while (end > start && isSqliteSuffixPadding(value[end - 1]!)) end--;
+  return value.slice(start, end);
+}
+
+function isSqliteSuffixPadding(char: string): boolean {
+  return char === ';' || /\s/.test(char);
+}
+
 export const MIGRATION: MigrationModule = {
   description: 'Add file_path FK to *_refs tables (unresolved/config/sql/build_context/string_imports)',
   requiresFkDisable: true,
@@ -62,19 +113,14 @@ export const MIGRATION: MigrationModule = {
     // host DB doesn't have a real `files` table, there's nothing to
     // FK against — skip cleanly so test fixtures that build minimal
     // schemas don't trip this migration.
-    const hasFiles = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name='files'").get() as
-      | { one: number }
-      | undefined;
-    if (!hasFiles) return;
+    if (!hasFilesTable(db)) return;
 
     for (const tableName of TABLES_WITH_FILE_PATH_FK) {
-      const row = db.prepare(`SELECT name, sql FROM sqlite_master WHERE type='table' AND name=?`).get(tableName) as
-        | ObjectRow
-        | undefined;
-      if (!row?.sql) continue;
+      const row = getRefTableRow(db, tableName);
+      if (!row) continue;
       // Skip if FK is already declared in the stored CREATE statement
       // (fresh DBs whose schema.sql already has it replay as a no-op).
-      if (/FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(row.sql)) continue;
+      if (tableAlreadyHasFilePathFk(row.sql)) continue;
 
       try {
         addFilePathFk(db, row);
@@ -85,10 +131,7 @@ export const MIGRATION: MigrationModule = {
         } catch {
           // Best-effort.
         }
-        if (process.env['CARTOGRAPH_DEBUG_MIGRATIONS']) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.warn(`[migration 055] skipped ${tableName}: ${msg}`);
-        }
+        logSkippedRefTableMigration(tableName, err);
       }
     }
   },
@@ -153,7 +196,7 @@ function addFilePathFk(db: import('../sqlite-adapter.js').SqliteDatabase, table:
     throw new Error(`migration 055: ${tableName} CREATE statement has no closing paren`);
   }
   const suffix = renamedSql.slice(close + 1);
-  if (!/^[\s;]*(?:STRICT\s*(?:,\s*WITHOUT\s+ROWID)?|WITHOUT\s+ROWID)?[\s;]*$/i.test(suffix)) {
+  if (!isSqliteTableOptionSuffix(suffix)) {
     throw new Error(
       `migration 055: unexpected content after ${tableName} table-closing paren: ${JSON.stringify(suffix)}`,
     );

@@ -239,12 +239,12 @@ export class VueExtractor {
       isTypeScript: boolean;
     }> = [];
 
-    const scriptRegex = /<script(\s[^>]*)?>(?<content>[\s\S]*?)<\/script>/g;
+    const scriptRegex = /<script(\s[^>]*)?>([\s\S]*?)<\/script>/g;
     let match: RegExpExecArray | null;
 
     while ((match = scriptRegex.exec(this.source)) !== null) {
       const attrs = match[1] || '';
-      const content = match.groups?.['content'] || match[2] || '';
+      const content = match[2] || '';
 
       const isTypeScript = /lang\s*=\s*["'](ts|typescript)["']/.test(attrs);
       // `setup` may be a bare attribute (`<script setup>`) or an

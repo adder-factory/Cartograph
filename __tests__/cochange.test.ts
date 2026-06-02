@@ -202,7 +202,7 @@ describe('QueryBuilder co-change CRUD', () => {
 
   it('canonicalises pair ordering on upsert', () => {
     applyCoChangeDeltas(q, [['b.ts', 'a.ts', 3]]);
-    const row = db.getDb().prepare('SELECT * FROM co_changes').get() as any;
+    const row = db.getDb().prepare('SELECT * FROM co_changes').get();
     expect(row.file_a).toBe('a.ts');
     expect(row.file_b).toBe('b.ts');
     expect(row.count).toBe(3);
@@ -211,13 +211,13 @@ describe('QueryBuilder co-change CRUD', () => {
   it('accumulates counts on repeated apply', () => {
     applyCoChangeDeltas(q, [['a.ts', 'b.ts', 2]]);
     applyCoChangeDeltas(q, [['a.ts', 'b.ts', 3]]);
-    const row = db.getDb().prepare('SELECT count FROM co_changes').get() as any;
+    const row = db.getDb().prepare('SELECT count FROM co_changes').get();
     expect(row.count).toBe(5);
   });
 
   it('skips no-op self-pairs', () => {
     applyCoChangeDeltas(q, [['a.ts', 'a.ts', 5]]);
-    const cnt = db.getDb().prepare('SELECT COUNT(*) AS n FROM co_changes').get() as any;
+    const cnt = db.getDb().prepare('SELECT COUNT(*) AS n FROM co_changes').get();
     expect(cnt.n).toBe(0);
   });
 
@@ -227,7 +227,7 @@ describe('QueryBuilder co-change CRUD', () => {
     // must not touch it.
     db.getDb().prepare('UPDATE files SET commit_count = 7 WHERE path = ?').run('a.ts');
     applyCoChangeDeltas(q, [['a.ts', 'b.ts', 3]]);
-    const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path = ?').get('a.ts') as any;
+    const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path = ?').get('a.ts');
     expect(row.commit_count).toBe(7);
   });
 
@@ -235,10 +235,10 @@ describe('QueryBuilder co-change CRUD', () => {
     db.getDb().prepare('UPDATE files SET commit_count = 5 WHERE path = ?').run('a.ts');
     applyCoChangeDeltas(q, [['a.ts', 'b.ts', 3]]);
     clearCoChanges(q);
-    const cnt = db.getDb().prepare('SELECT COUNT(*) AS n FROM co_changes').get() as any;
+    const cnt = db.getDb().prepare('SELECT COUNT(*) AS n FROM co_changes').get();
     expect(cnt.n).toBe(0);
     // Churn-miner-owned commit_count must survive cochange's wipe.
-    const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path = ?').get('a.ts') as any;
+    const row = db.getDb().prepare('SELECT commit_count FROM files WHERE path = ?').get('a.ts');
     expect(row.commit_count).toBe(5);
   });
 });
@@ -377,7 +377,7 @@ describe('Cartograph end-to-end (mining wired into indexAll/sync)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -420,7 +420,7 @@ describe('Cartograph end-to-end (mining wired into indexAll/sync)', () => {
     });
     await cg2.indexAll();
     expect(getCoChangedFiles(cg2.queries, 'a.ts')).toHaveLength(0);
-    cg2.destroy();
+    cg2.close();
     fs.rmSync(dir2, { recursive: true, force: true });
   });
 

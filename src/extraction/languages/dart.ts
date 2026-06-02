@@ -1,7 +1,75 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText } from '../tree-sitter-helpers.js';
-import type { LanguageExtractor } from '../tree-sitter-types.js';
+import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
 import { compact } from '../../utils.js';
+
+function isClassLikeKind(kind: string): boolean {
+  return (
+    kind === 'class' ||
+    kind === 'struct' ||
+    kind === 'interface' ||
+    kind === 'trait' ||
+    kind === 'enum' ||
+    kind === 'module'
+  );
+}
+
+function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
+  if (ctx.nodeStack.length === 0) return false;
+  const parentId = ctx.nodeStack.at(-1);
+  const parentNode = ctx.nodes.find((n) => n.id === parentId);
+  return parentNode != null && isClassLikeKind(parentNode.kind);
+}
+
+function isStaticDeclaration(node: SyntaxNode): boolean {
+  return node.children.some((child: SyntaxNode) => child?.type === 'static');
+}
+
+function firstNamedChildOfType(node: SyntaxNode, type: string): SyntaxNode | undefined {
+  return node.namedChildren.find((c: SyntaxNode) => c.type === type);
+}
+
+function dartUriFromConfigurableUri(configurableUri: SyntaxNode, source: string): string | null {
+  const uri = firstNamedChildOfType(configurableUri, 'uri');
+  const stringLiteral = uri ? firstNamedChildOfType(uri, 'string_literal') : undefined;
+  return stringLiteral ? getNodeText(stringLiteral, source).replaceAll(/['"]/g, '') : null;
+}
+
+function dartImportModuleName(node: SyntaxNode, source: string): string | null {
+  const libraryImport = firstNamedChildOfType(node, 'library_import');
+  if (libraryImport) {
+    const importSpec = firstNamedChildOfType(libraryImport, 'import_specification');
+    const configurableUri = importSpec ? firstNamedChildOfType(importSpec, 'configurable_uri') : undefined;
+    if (configurableUri) return dartUriFromConfigurableUri(configurableUri, source);
+  }
+
+  const libraryExport = firstNamedChildOfType(node, 'library_export');
+  const configurableUri = libraryExport ? firstNamedChildOfType(libraryExport, 'configurable_uri') : undefined;
+  return configurableUri ? dartUriFromConfigurableUri(configurableUri, source) : null;
+}
+
+function hasArgumentPart(node: SyntaxNode): boolean {
+  return node.namedChildren.some((c: SyntaxNode) => c.type === 'argument_part');
+}
+
+function dartAccessorMethodName(node: SyntaxNode): string | null {
+  const accessor = node.namedChildren.find(
+    (c: SyntaxNode) => c.type === 'unconditional_assignable_selector' || c.type === 'conditional_assignable_selector',
+  );
+  const methodId = accessor?.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
+  if (!methodId) return null;
+  const accessorPrev = node.previousNamedSibling;
+  return accessorPrev?.type === 'identifier' ? accessorPrev.text + '.' + methodId.text : methodId.text;
+}
+
+function dartSelectorCallName(prev: SyntaxNode): string | undefined {
+  if (prev.type === 'identifier') return prev.text;
+  if (prev.type === 'selector') return dartAccessorMethodName(prev) ?? undefined;
+  if (prev.type === 'unconditional_assignable_selector' || prev.type === 'conditional_assignable_selector') {
+    return prev.namedChildren.find((c: SyntaxNode) => c.type === 'identifier')?.text;
+  }
+  return undefined;
+}
 
 const dartExtractor: LanguageExtractor = {
   functionTypes: ['function_signature'],
@@ -37,41 +105,19 @@ const dartExtractor: LanguageExtractor = {
     if (node.type !== 'declaration') return false;
 
     // Only extract as fields when inside a class-like parent
-    const isInClass =
-      ctx.nodeStack.length > 0 &&
-      (() => {
-        const parentId = ctx.nodeStack.at(-1);
-        const parentNode = ctx.nodes.find((n) => n.id === parentId);
-        return (
-          parentNode != null &&
-          (parentNode.kind === 'class' ||
-            parentNode.kind === 'struct' ||
-            parentNode.kind === 'interface' ||
-            parentNode.kind === 'trait' ||
-            parentNode.kind === 'enum' ||
-            parentNode.kind === 'module')
-        );
-      })();
+    if (!isCurrentScopeClassLike(ctx)) return false;
 
-    if (!isInClass) return false;
-
-    const idList = node.namedChildren.find((c: SyntaxNode) => c.type === 'initialized_identifier_list');
+    const idList = firstNamedChildOfType(node, 'initialized_identifier_list');
     if (!idList) return false;
 
     const idNodes = idList.namedChildren.filter((c: SyntaxNode) => c.type === 'initialized_identifier');
     if (idNodes.length === 0) return false;
 
     // Detect static: `static` is an anonymous (non-named) child of declaration
-    let isStatic = false;
-    for (const child of node.children) {
-      if (child?.type === 'static') {
-        isStatic = true;
-        break;
-      }
-    }
+    const isStatic = isStaticDeclaration(node);
 
     // Type text (first type_identifier child of declaration, skipping modifiers)
-    const typeNode = node.namedChildren.find((c: SyntaxNode) => c.type === 'type_identifier');
+    const typeNode = firstNamedChildOfType(node, 'type_identifier');
     const typeText = typeNode ? getNodeText(typeNode, ctx.source) : undefined;
 
     for (const idNode of idNodes) {
@@ -144,89 +190,18 @@ const dartExtractor: LanguageExtractor = {
   },
   extractImport: (node, source) => {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
-    let moduleName = '';
-
     // Dart imports: import 'dart:async'; import 'package:foo/bar.dart' as bar;
-    const libraryImport = node.namedChildren.find((c: SyntaxNode) => c.type === 'library_import');
-    if (libraryImport) {
-      const importSpec = libraryImport.namedChildren.find((c: SyntaxNode) => c.type === 'import_specification');
-      if (importSpec) {
-        const configurableUri = importSpec.namedChildren.find((c: SyntaxNode) => c.type === 'configurable_uri');
-        if (configurableUri) {
-          const uri = configurableUri.namedChildren.find((c: SyntaxNode) => c.type === 'uri');
-          if (uri) {
-            const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
-            if (stringLiteral) {
-              moduleName = getNodeText(stringLiteral, source).replaceAll(/['"]/g, '');
-            }
-          }
-        }
-      }
-    }
-
     // Also handle exports: export 'src/foo.dart';
-    if (!moduleName) {
-      const libraryExport = node.namedChildren.find((c: SyntaxNode) => c.type === 'library_export');
-      if (libraryExport) {
-        const configurableUri = libraryExport.namedChildren.find((c: SyntaxNode) => c.type === 'configurable_uri');
-        if (configurableUri) {
-          const uri = configurableUri.namedChildren.find((c: SyntaxNode) => c.type === 'uri');
-          if (uri) {
-            const stringLiteral = uri.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
-            if (stringLiteral) {
-              moduleName = getNodeText(stringLiteral, source).replaceAll(/['"]/g, '');
-            }
-          }
-        }
-      }
-    }
-
-    if (moduleName) {
-      return { moduleName, signature: importText };
-    }
-    return null;
+    const moduleName = dartImportModuleName(node, source);
+    return moduleName ? { moduleName, signature: importText } : null;
   },
   extractBareCall: (node, _source) => {
     // Dart calls are: identifier + selector(argument_part), not a dedicated call node.
     // Match on selector nodes that contain argument_part.
     if (node.type === 'selector') {
-      const hasArgPart = node.namedChildren.some((c: SyntaxNode) => c.type === 'argument_part');
-      if (!hasArgPart) return undefined;
-
+      if (!hasArgumentPart(node)) return undefined;
       const prev = node.previousNamedSibling;
-      if (!prev) return undefined;
-
-      // Simple function/constructor call: prev is identifier (e.g., runApp(...), MyWidget(...))
-      if (prev.type === 'identifier') {
-        return prev.text;
-      }
-
-      // Method call: prev is selector with accessor (e.g., obj.method(...), Navigator.push(...))
-      if (prev.type === 'selector') {
-        const accessor = prev.namedChildren.find(
-          (c: SyntaxNode) =>
-            c.type === 'unconditional_assignable_selector' || c.type === 'conditional_assignable_selector',
-        );
-        if (accessor) {
-          const methodId = accessor.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
-          if (methodId) {
-            // Include receiver for first call in chain (receiver is a direct identifier)
-            const accessorPrev = prev.previousNamedSibling;
-            if (accessorPrev?.type === 'identifier') {
-              return accessorPrev.text + '.' + methodId.text;
-            }
-            return methodId.text;
-          }
-        }
-      }
-
-      // super.method() / this.method(): prev is bare unconditional_assignable_selector
-      if (prev.type === 'unconditional_assignable_selector' || prev.type === 'conditional_assignable_selector') {
-        const methodId = prev.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
-        if (methodId) return methodId.text;
-      }
-
-      return undefined;
+      return prev ? dartSelectorCallName(prev) : undefined;
     }
 
     // new MyWidget() — explicit constructor call

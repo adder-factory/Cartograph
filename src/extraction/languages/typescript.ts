@@ -24,7 +24,7 @@ function tryExtractTsFunctionDeclarationAsComponent(node: SyntaxNode, ctx: Extra
   if (!/^[A-Z]/.test(name)) return false;
 
   const body = getChildByField(node, 'body');
-  if (!body || !JSX_RETURN_TYPES_TS.some((t) => subtreeContainsType(body, t))) return false;
+  if (!body || !tsBodyContainsJsx(body)) return false;
 
   const compNode = ctx.createNode({ kind: 'component', name, node });
   if (!compNode) return false;
@@ -33,6 +33,33 @@ function tryExtractTsFunctionDeclarationAsComponent(node: SyntaxNode, ctx: Extra
   ctx.visitFunctionBody(body, compNode.id);
   ctx.popScope();
   return true;
+}
+
+function tsBodyContainsJsx(node: SyntaxNode): boolean {
+  return JSX_RETURN_TYPES_TS.some((t) => subtreeContainsType(node, t));
+}
+
+function isFunctionLikeExpression(node: SyntaxNode): boolean {
+  return node.type === 'arrow_function' || node.type === 'function_expression';
+}
+
+function resolveWrappedFunctionBody(node: SyntaxNode, bodyField: string): SyntaxNode | null {
+  const args = getChildByField(node, 'arguments');
+  if (!args) return null;
+  const fn = args.namedChildren.find((arg: SyntaxNode) => isFunctionLikeExpression(arg));
+  return fn ? getChildByField(fn, bodyField) : null;
+}
+
+function resolvePublicFieldDefinitionBody(node: SyntaxNode, bodyField: string): SyntaxNode | null {
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (isFunctionLikeExpression(child)) return getChildByField(child, bodyField);
+    if (child.type === 'call_expression') {
+      const wrappedBody = resolveWrappedFunctionBody(child, bodyField);
+      if (wrappedBody) return wrappedBody;
+    }
+  }
+  return null;
 }
 
 export const typescriptExtractor: LanguageExtractor = {
@@ -61,26 +88,7 @@ export const typescriptExtractor: LanguageExtractor = {
     //   public_field_definition → arrow_function → body (statement_block)
     // Also handles wrapper patterns like: field = withBatchedUpdates((e) => { ... })
     //   public_field_definition → call_expression → arguments → arrow_function → body
-    if (node.type === 'public_field_definition') {
-      for (const child of node.namedChildren) {
-        if (!child) continue;
-        if (child.type === 'arrow_function' || child.type === 'function_expression') {
-          return getChildByField(child, bodyField);
-        }
-        // Check inside call_expression arguments (HOF wrappers like throttle, debounce)
-        if (child.type === 'call_expression') {
-          const args = getChildByField(child, 'arguments');
-          if (args) {
-            for (const arg of args.namedChildren) {
-              if (arg && (arg.type === 'arrow_function' || arg.type === 'function_expression')) {
-                return getChildByField(arg, bodyField);
-              }
-            }
-          }
-        }
-      }
-    }
-    return null;
+    return node.type === 'public_field_definition' ? resolvePublicFieldDefinitionBody(node, bodyField) : null;
   },
   paramsField: 'parameters',
   returnField: 'return_type',

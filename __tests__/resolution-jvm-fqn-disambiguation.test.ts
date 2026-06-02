@@ -43,7 +43,7 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -96,8 +96,8 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
 
     const target = cg.queries.getNodeById(calls[0]!.target);
     expect(target?.name).toBe('convert');
-    expect(target?.filePath.replaceAll(/\\/g, '/')).toContain('service/');
-    expect(target?.filePath.replaceAll(/\\/g, '/')).not.toContain('dao/');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('service/');
+    expect(target?.filePath.replaceAll('\\', '/')).not.toContain('dao/');
   });
 
   it('Kotlin import with no `;` still feeds the FQN map (regex bug upstream had)', async () => {
@@ -150,8 +150,8 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
 
     const target = cg.queries.getNodeById(calls[0]!.target);
     expect(target?.name).toBe('run');
-    expect(target?.filePath.replaceAll(/\\/g, '/')).toContain('mod-b/');
-    expect(target?.filePath.replaceAll(/\\/g, '/')).not.toContain('mod-a/');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-b/');
+    expect(target?.filePath.replaceAll('\\', '/')).not.toContain('mod-a/');
   });
 
   it('Kotlin `as` alias maps local-name to imported FQN', async () => {
@@ -200,7 +200,7 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
     const calls = getOutgoingEdges(cg.queries, goMethod!.id).filter((e) => e.kind === 'calls');
     const target = calls.length > 0 ? cg.queries.getNodeById(calls[0]!.target) : null;
     expect(target?.name).toBe('run');
-    expect(target?.filePath.replaceAll(/\\/g, '/')).toContain('mod-a/');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-a/');
   });
 
   it('Kotlin caller importing a Java class resolves across the language boundary', async () => {
@@ -244,6 +244,6 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
     const processed = calls.map((e) => cg!.queries.getNodeById(e.target)).find((n) => n?.name === 'process');
     expect(processed, 'Kotlin caller should resolve into Java JavaService.process').toBeDefined();
     expect(processed!.language).toBe('java');
-    expect(processed!.filePath.replaceAll(/\\/g, '/')).toContain('com/example/svc/JavaService.java');
+    expect(processed!.filePath.replaceAll('\\', '/')).toContain('com/example/svc/JavaService.java');
   });
 });

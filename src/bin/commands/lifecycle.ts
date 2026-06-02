@@ -143,7 +143,12 @@ program
         // (or `true` when --yes implies it). Otherwise the auto-allow
         // prompt is silently skipped on every interactive run.
         const explicitNoPermissions = opts.permissions === false;
-        const autoAllow: boolean | undefined = explicitNoPermissions ? false : opts.yes ? true : undefined;
+        let autoAllow: boolean | undefined;
+        if (explicitNoPermissions) {
+          autoAllow = false;
+        } else if (opts.yes) {
+          autoAllow = true;
+        }
 
         await runInstallerWithOptions(
           compact({
@@ -360,8 +365,8 @@ program
         process.stderr.write('\n');
         if (result.downloaded.length > 0) info(`  downloaded ${result.downloaded.length} GGUF(s)`);
         if (result.skipped.length > 0) info(`  ${result.skipped.length} already present (skipped)`);
-      } catch (caught) {
-        error(`install-models failed: ${errMsg(caught)}`);
+      } catch (error_) {
+        error(`install-models failed: ${errMsg(error_)}`);
         // models are needed for LLM features — but the user might
         // already have a working subset from a prior run. doctor will
         // catch a true gap.

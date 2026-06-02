@@ -216,8 +216,12 @@ export function writeInstructionsEntry(loc: Location): WriteResult['files'][numb
     endMarker: CARTOGRAPH_SECTION_END,
   });
   // Map the four-state action to WriteResult's action vocabulary.
-  const mapped: 'created' | 'updated' | 'unchanged' =
-    action === 'created' ? 'created' : action === 'unchanged' ? 'unchanged' : 'updated';
+  let mapped: 'created' | 'updated' | 'unchanged' = 'updated';
+  if (action === 'created') {
+    mapped = 'created';
+  } else if (action === 'unchanged') {
+    mapped = 'unchanged';
+  }
   return { path: file, action: mapped };
 }
 

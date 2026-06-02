@@ -121,7 +121,7 @@ export async function handleCoverageRefresh(ctx: ToolCtx, args: Record<string, u
       renderConsidered(candidates, picked),
     ];
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Coverage refresh failed loading \`${picked.relPath}\`: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Coverage refresh failed loading \`${picked.relPath}\`: ${errMsg(error_)}`);
   }
 }

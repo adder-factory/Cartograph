@@ -135,7 +135,8 @@ function renderReviewedFile(f: MdReviewedFile): string[] {
     for (const s of f.affectedSymbols) lines.push(...renderAffectedSymbol(s));
   }
   if (f.tests.length > 0) {
-    lines.push(`- _Covering tests: ${f.tests.map((t) => `\`${t}\``).join(', ')}_`);
+    const testList = f.tests.map((t) => `\`${t}\``).join(', ');
+    lines.push(`- _Covering tests: ${testList}_`);
   }
   if (f.brokenIncomingRefs && f.brokenIncomingRefs.length > 0) {
     lines.push(`- ⚠ Broken incoming refs (symbols vanish on delete): ${f.brokenIncomingRefs.map(fmtRef).join(', ')}`);

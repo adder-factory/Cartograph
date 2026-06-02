@@ -129,7 +129,7 @@ function resolveChangedNodes(args: ResolveChangedNodesArgs): { changedNodes: Res
 
 async function detectEmbeddingModel(cg: Cartograph): Promise<string | null> {
   try {
-    const resolved = await cg.llm.resolveLlmConfig();
+    const resolved = await cg.llm.config.resolveLlmConfig();
     const fromConfig = resolved?.embeddingLlm?.model ?? null;
     if (fromConfig) return fromConfig;
   } catch {
@@ -254,8 +254,26 @@ const CONSTANT_LIKE_KINDS: ReadonlySet<string> = new Set(['constant', 'variable'
  * lookalike for. Backtick literals are deliberately NOT in the trivial
  * set — a template literal can carry an interpolation.
  */
-const TRIVIAL_CONSTANT_BODY_RE =
-  /^=\s*(?:-?\d[\d_]*(?:\.\d+)?(?:e-?\d+)?|0[xob][0-9a-f_]+|true|false|null|undefined|'[^']{0,16}'|"[^"]{0,16}")\s*;?\s*$/i;
+const DECIMAL_LITERAL_RE = /^-?\d[\d_]*(?:\.\d+)?(?:e-?\d+)?$/i;
+const BASE_LITERAL_RE = /^0[xob][0-9a-f_]+$/i;
+const TRIVIAL_KEYWORD_LITERALS: ReadonlySet<string> = new Set(['true', 'false', 'null', 'undefined']);
+
+function isTrivialConstantBody(signature: string): boolean {
+  const trimmed = signature.trim();
+  if (!trimmed.startsWith('=')) return false;
+  let value = trimmed.slice(1).trim();
+  if (value.endsWith(';')) value = value.slice(0, -1).trim();
+  if (TRIVIAL_KEYWORD_LITERALS.has(value.toLowerCase())) return true;
+  if (DECIMAL_LITERAL_RE.test(value)) return true;
+  if (BASE_LITERAL_RE.test(value)) return true;
+  return isShortStringLiteral(value, "'") || isShortStringLiteral(value, '"');
+}
+
+function isShortStringLiteral(value: string, quote: "'" | '"'): boolean {
+  if (!value.startsWith(quote) || !value.endsWith(quote)) return false;
+  const body = value.slice(1, -1);
+  return body.length <= 16 && !body.includes(quote);
+}
 
 /**
  * True when `kind`/`signature` describe a constant/variable bound to a
@@ -267,7 +285,7 @@ export function isTrivialConstant(kind: string, signature: string | null): boole
   // No signature recorded → can't prove it's structured; treat a
   // bare constant as trivial (the common one-liner case).
   if (signature == null || signature.trim() === '') return true;
-  return TRIVIAL_CONSTANT_BODY_RE.test(signature.trim());
+  return isTrivialConstantBody(signature);
 }
 
 // ---------------------------------------------------------------------------
@@ -449,10 +467,11 @@ function formatReviewNeighborsOutput(args: FormatOutputArgs): string {
     '',
   );
 
-  lines.push(renderMarkdownBulletList(buildReviewNeighborsChangedSymbolsSpec({ changedNodes })));
-
   const rankedRows = resolveLookalikeRows(ranked, byId);
-  lines.push(renderMarkdownCardList(buildReviewNeighborsLookalikesSpec({ ranked: rankedRows, trivialFiltered })));
+  lines.push(
+    renderMarkdownBulletList(buildReviewNeighborsChangedSymbolsSpec({ changedNodes })),
+    renderMarkdownCardList(buildReviewNeighborsLookalikesSpec({ ranked: rankedRows, trivialFiltered })),
+  );
 
   return lines.join('\n');
 }

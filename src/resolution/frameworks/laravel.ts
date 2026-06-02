@@ -13,26 +13,26 @@ import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
  * Exported for potential use in facade resolution
  */
 export const FACADE_MAPPINGS: Record<string, string> = {
-  Auth: 'Illuminate\\Auth\\AuthManager',
-  Cache: 'Illuminate\\Cache\\CacheManager',
-  Config: 'Illuminate\\Config\\Repository',
-  DB: 'Illuminate\\Database\\DatabaseManager',
-  Event: 'Illuminate\\Events\\Dispatcher',
-  File: 'Illuminate\\Filesystem\\Filesystem',
-  Gate: 'Illuminate\\Auth\\Access\\Gate',
-  Hash: 'Illuminate\\Hashing\\HashManager',
-  Log: 'Illuminate\\Log\\LogManager',
-  Mail: 'Illuminate\\Mail\\Mailer',
-  Queue: 'Illuminate\\Queue\\QueueManager',
-  Redis: 'Illuminate\\Redis\\RedisManager',
-  Request: 'Illuminate\\Http\\Request',
-  Response: 'Illuminate\\Http\\Response',
-  Route: 'Illuminate\\Routing\\Router',
-  Session: 'Illuminate\\Session\\SessionManager',
-  Storage: 'Illuminate\\Filesystem\\FilesystemManager',
-  URL: 'Illuminate\\Routing\\UrlGenerator',
-  Validator: 'Illuminate\\Validation\\Factory',
-  View: 'Illuminate\\View\\Factory',
+  Auth: String.raw`Illuminate\Auth\AuthManager`,
+  Cache: String.raw`Illuminate\Cache\CacheManager`,
+  Config: String.raw`Illuminate\Config\Repository`,
+  DB: String.raw`Illuminate\Database\DatabaseManager`,
+  Event: String.raw`Illuminate\Events\Dispatcher`,
+  File: String.raw`Illuminate\Filesystem\Filesystem`,
+  Gate: String.raw`Illuminate\Auth\Access\Gate`,
+  Hash: String.raw`Illuminate\Hashing\HashManager`,
+  Log: String.raw`Illuminate\Log\LogManager`,
+  Mail: String.raw`Illuminate\Mail\Mailer`,
+  Queue: String.raw`Illuminate\Queue\QueueManager`,
+  Redis: String.raw`Illuminate\Redis\RedisManager`,
+  Request: String.raw`Illuminate\Http\Request`,
+  Response: String.raw`Illuminate\Http\Response`,
+  Route: String.raw`Illuminate\Routing\Router`,
+  Session: String.raw`Illuminate\Session\SessionManager`,
+  Storage: String.raw`Illuminate\Filesystem\FilesystemManager`,
+  URL: String.raw`Illuminate\Routing\UrlGenerator`,
+  Validator: String.raw`Illuminate\Validation\Factory`,
+  View: String.raw`Illuminate\View\Factory`,
 };
 
 export const laravelResolver: FrameworkResolver = {
@@ -132,7 +132,7 @@ export const laravelResolver: FrameworkResolver = {
     for (const pattern of routePatterns) {
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(safe)) !== null) {
-        if (pattern.source.includes('resource')) {
+        if (pattern.source.includes('resource') || pattern.source.includes('Resource')) {
           const [, resourceName] = match;
           const line = lineOf(match.index);
           nodes.push({

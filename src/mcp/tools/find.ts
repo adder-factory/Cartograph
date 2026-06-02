@@ -411,8 +411,9 @@ function rejectSentinelValues(by: FindAxis, args: FindArgs): ToolOutcome | null 
     );
   }
   if (Array.isArray(args.fields) && args.fields.length > 0 && !args.fields.includes('name')) {
+    const fieldList = args.fields.map((f) => `'${f}'`).join(', ');
     return err(
-      `cartograph_find: \`fields\` must include 'name' so rows are identifiable. Got fields=[${args.fields.map((f) => `'${f}'`).join(', ')}].`,
+      `cartograph_find: \`fields\` must include 'name' so rows are identifiable. Got fields=[${fieldList}].`,
     );
   }
   if ((by === 'env' || by === 'sql') && typeof args.key === 'string' && args.key.length === 0) {

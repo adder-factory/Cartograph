@@ -17,6 +17,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as https from 'node:https';
+import type { IncomingMessage } from 'node:http';
 import { RECOMMENDED_MODELS, MODELS_DIR_DEFAULT, type RecommendedModel } from '../llm/recommended-models.js';
 
 export interface InstallModelsOptions {
@@ -99,6 +100,48 @@ const MAX_REDIRECT_HOPS = 5;
 /** Initial hop counter passed to the recursive `request` helper. */
 const INITIAL_HOP = 0;
 
+interface DownloadState {
+  downloaded: number;
+  total: number;
+}
+
+interface DownloadResponseArgs {
+  res: IncomingMessage;
+  model: RecommendedModel;
+  state: DownloadState;
+  out: fs.WriteStream;
+  emit: (downloaded: number, total: number) => void;
+  request: (url: string, hops: number) => void;
+  hops: number;
+  reject: (reason?: unknown) => void;
+}
+
+function handleDownloadResponse(args: DownloadResponseArgs): void {
+  const { res, model, state, out, emit, request, hops, reject } = args;
+  // HF serves a redirect to a CDN; follow up to MAX_REDIRECT_HOPS hops.
+  if (
+    res.statusCode &&
+    res.statusCode >= HTTP_REDIRECT_MIN &&
+    res.statusCode < HTTP_REDIRECT_MAX &&
+    res.headers.location
+  ) {
+    res.resume();
+    request(res.headers.location, hops + 1);
+    return;
+  }
+  if (res.statusCode !== HTTP_OK) {
+    reject(new Error(`HTTP ${res.statusCode} fetching ${model.filename}`));
+    res.resume();
+    return;
+  }
+  state.total = Number(res.headers['content-length'] ?? 0);
+  res.on('data', (chunk: Buffer) => {
+    state.downloaded += chunk.length;
+    emit(state.downloaded, state.total);
+  });
+  res.pipe(out);
+}
+
 async function downloadOne(
   model: RecommendedModel,
   target: string,
@@ -137,38 +180,16 @@ async function downloadOne(
   try {
     await new Promise<void>((resolve, reject) => {
       const out = fs.createWriteStream(tmp);
-      let downloaded = 0;
-      let total = 0;
+      const state: DownloadState = { downloaded: 0, total: 0 };
 
       const request = (url: string, hops: number): void => {
         if (hops > MAX_REDIRECT_HOPS) {
           reject(new Error(`too many redirects fetching ${model.filename}`));
           return;
         }
-        const req = https.get(url, (res) => {
-          // HF serves a redirect to a CDN; follow up to MAX_REDIRECT_HOPS hops.
-          if (
-            res.statusCode &&
-            res.statusCode >= HTTP_REDIRECT_MIN &&
-            res.statusCode < HTTP_REDIRECT_MAX &&
-            res.headers.location
-          ) {
-            res.resume();
-            request(res.headers.location, hops + 1);
-            return;
-          }
-          if (res.statusCode !== HTTP_OK) {
-            reject(new Error(`HTTP ${res.statusCode} fetching ${model.filename}`));
-            res.resume();
-            return;
-          }
-          total = Number(res.headers['content-length'] ?? 0);
-          res.on('data', (chunk: Buffer) => {
-            downloaded += chunk.length;
-            emit(downloaded, total);
-          });
-          res.pipe(out);
-        });
+        const req = https.get(url, (res) =>
+          handleDownloadResponse({ res, model, state, out, emit, request, hops, reject }),
+        );
         req.on('error', reject);
         out.on('finish', () => resolve());
         out.on('error', reject);

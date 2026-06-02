@@ -160,7 +160,9 @@ function validateFileWithinRoot(projectRoot: string, filePath: string): string |
 /** Format the signature cell — escape pipe characters or show dash when absent. */
 function formatSigCell(n: NodeAtRange): string {
   const hasSignature = n.signature !== undefined && n.signature !== null && n.signature.length > 0;
-  return hasSignature ? `\`${n.signature!.replaceAll('|', String.raw`\|`)}\`` : '—';
+  if (!hasSignature) return '—';
+  const escapedSignature = n.signature!.replaceAll('|', String.raw`\|`);
+  return `\`${escapedSignature}\``;
 }
 
 /** Format the line-range cell — single number when start === end. */
@@ -194,7 +196,7 @@ function formatTableRows(nodes: NodeAtRange[]): string {
 function formatRowsCompact(nodes: NodeAtRange[], fields?: ReadonlyArray<AtRangeFieldName>): string {
   const defaultFields: ReadonlyArray<AtRangeFieldName> = ['name', 'kind', 'path', 'line', 'endLine', 'signature'];
   const hasExplicitFields = Array.isArray(fields) && fields.length > 0;
-  const fieldSet = hasExplicitFields ? new Set<string>(fields!) : new Set<string>(defaultFields);
+  const fieldSet = hasExplicitFields ? new Set<string>(fields) : new Set<string>(defaultFields);
 
   return nodes
     .map((n) => {
@@ -337,9 +339,10 @@ async function handleAtRangeSingle(
   // The over-fetch "N results shown" footer routes through the
   // chokepoint's footer slot — the symbol table is truncated first, so a
   // dense range can't push the "pass a higher limit" hint off-budget.
-  const capFooter = hitsCapReached
-    ? `> ${nodes.length} ${nodes.length === 1 ? 'result' : 'results'} shown — pass a higher \`limit\` to see more.`
-    : undefined;
+  let capFooter: string | undefined;
+  if (hitsCapReached) {
+    capFooter = `> ${nodes.length} ${nodes.length === 1 ? 'result' : 'results'} shown — pass a higher \`limit\` to see more.`;
+  }
   return ok(renderToolResponse({ body: rendered, footers: [capFooter] }));
 }
 
@@ -402,8 +405,7 @@ function renderBulkRangeReport(args: RenderBulkRangeReportArgs): string {
     } else if (compact) {
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
-      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|');
-      parts.push(formatTableRows(result.nodes));
+      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|', formatTableRows(result.nodes));
     }
     parts.push('');
   }
@@ -551,8 +553,7 @@ function renderDiffRangeReport(args: RenderDiffRangeReportArgs): string {
     } else if (compact) {
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
-      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|');
-      parts.push(formatTableRows(result.nodes));
+      parts.push('| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|', formatTableRows(result.nodes));
     }
     parts.push('');
   }

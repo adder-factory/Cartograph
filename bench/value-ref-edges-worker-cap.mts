@@ -29,6 +29,8 @@ import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildValueRefEdgesInWorkers } from '../src/index-hooks/value-ref-edges-pool.js';
 
+const byNumber = (a: number, b: number): number => a - b;
+
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(HERE, '..'); // cartograph repo root
 const DB_PATH = path.join(PROJECT_ROOT, '.cartograph', 'cartograph.db');
@@ -114,7 +116,7 @@ for (const N of Ns) {
     continue;
   }
   const lines = (child.stdout ?? '').trim().split('\n');
-  const jsonLine = lines[lines.length - 1] ?? '';
+  const jsonLine = lines.at(-1) ?? '';
   let row: RunRow;
   try {
     row = JSON.parse(jsonLine) as RunRow;
@@ -136,7 +138,7 @@ for (const N of Ns) {
 const distinctEdgeCounts = new Set(results.map((r) => r.edges));
 console.log('');
 if (distinctEdgeCounts.size > 1) {
-  console.log(`⚠ CORRECTNESS: edge counts differ across N: ${[...distinctEdgeCounts].sort().join(', ')}`);
+  console.log(`⚠ CORRECTNESS: edge counts differ across N: ${[...distinctEdgeCounts].sort(byNumber).join(', ')}`);
 } else if (results.length > 0) {
   console.log(`✓ Correctness: every N produced the same ${results[0]!.edges} edges.`);
 }

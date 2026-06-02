@@ -29,22 +29,46 @@ interface EdgeRef {
   target: string;
 }
 
+function nextLcgValue(seed: number): { seed: number; value: number } {
+  const nextSeed = (seed * 1664525 + 1013904223) >>> 0;
+  return { seed: nextSeed, value: nextSeed / 0x100000000 };
+}
+
 /** Generate a synthetic graph with `nodeCount` nodes and ~`edgeCount`
  *  edges using a deterministic LCG seed so tests are reproducible. */
 function buildSyntheticGraph(nodeCount: number, edgeCount: number, seed = 42): { nodes: NodeRef[]; edges: EdgeRef[] } {
   const nodes: NodeRef[] = Array.from({ length: nodeCount }, (_, i) => ({ id: `n${i}` }));
   const edges: EdgeRef[] = [];
   let rng = seed;
-  const next = (): number => {
-    rng = (rng * 1664525 + 1013904223) >>> 0; // LCG
-    return rng / 0x100000000;
-  };
   for (let i = 0; i < edgeCount; i++) {
-    const s = Math.floor(next() * nodeCount);
-    const t = Math.floor(next() * nodeCount);
+    const sourceRoll = nextLcgValue(rng);
+    rng = sourceRoll.seed;
+    const targetRoll = nextLcgValue(rng);
+    rng = targetRoll.seed;
+    const s = Math.floor(sourceRoll.value * nodeCount);
+    const t = Math.floor(targetRoll.value * nodeCount);
     if (s !== t) edges.push({ source: `n${s}`, target: `n${t}` });
   }
   return { nodes, edges };
+}
+
+/** Compare two score Maps with a tolerance — log the max diff so a
+ *  parity failure is easy to triage. */
+function expectScoresClose(a: Map<string, number>, b: Map<string, number>, tol = 1e-9): void {
+  expect(a.size).toBe(b.size);
+  let maxDiff = 0;
+  let worstKey = '';
+  for (const [k, v] of a) {
+    const other = b.get(k);
+    expect(other).toBeDefined();
+    const diff = Math.abs(v - (other ?? 0));
+    if (diff > maxDiff) {
+      maxDiff = diff;
+      worstKey = k;
+    }
+  }
+  expect({ maxDiff, worstKey, tolerance: tol }).toMatchObject({ maxDiff: expect.any(Number) });
+  expect(maxDiff).toBeLessThan(tol);
 }
 
 describe('shouldUseParallel routing predicate', () => {
@@ -72,25 +96,6 @@ describe('shouldUseParallel routing predicate', () => {
 });
 
 describe('computePageRankParallel — parity with serial', () => {
-  /** Compare two score Maps with a tolerance — log the max diff so a
-   *  parity failure is easy to triage. */
-  function expectScoresClose(a: Map<string, number>, b: Map<string, number>, tol = 1e-9): void {
-    expect(a.size).toBe(b.size);
-    let maxDiff = 0;
-    let worstKey = '';
-    for (const [k, v] of a) {
-      const other = b.get(k);
-      expect(other).toBeDefined();
-      const diff = Math.abs(v - (other ?? 0));
-      if (diff > maxDiff) {
-        maxDiff = diff;
-        worstKey = k;
-      }
-    }
-    expect({ maxDiff, worstKey, tolerance: tol }).toMatchObject({ maxDiff: expect.any(Number) });
-    expect(maxDiff).toBeLessThan(tol);
-  }
-
   it('matches serial output on a tiny graph (5 nodes / 10 edges)', async () => {
     const { nodes, edges } = buildSyntheticGraph(5, 10);
     const serial = computePageRank(nodes, edges);

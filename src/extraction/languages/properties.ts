@@ -50,6 +50,38 @@ interface ParsedLine {
   keyStartColumn: number;
 }
 
+function isPropertiesWhitespace(ch: string | undefined): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\f';
+}
+
+function isPropertiesSeparator(ch: string | undefined): boolean {
+  return ch === '=' || ch === ':';
+}
+
+function isEscapedKeyChar(ch: string | undefined): boolean {
+  return ch === '=' || ch === ':' || ch === '\\' || ch === ' ' || ch === '\t';
+}
+
+function firstSignificantColumn(rawLine: string): number {
+  let startCol = 0;
+  while (startCol < rawLine.length && isPropertiesWhitespace(rawLine[startCol])) startCol++;
+  return startCol;
+}
+
+function parseKeyEscape(line: string, i: number): { text: string; nextIdx: number } {
+  const ch = line[i] ?? '';
+  const next = line[i + 1] ?? '';
+  return isEscapedKeyChar(next) ? { text: next, nextIdx: i + 2 } : { text: ch + next, nextIdx: i + 2 };
+}
+
+function valueStartAfterSeparator(rawLine: string, separatorIdx: number): number {
+  if (!isPropertiesWhitespace(rawLine[separatorIdx])) return separatorIdx + 1;
+
+  let j = separatorIdx;
+  while (j < rawLine.length && isPropertiesWhitespace(rawLine[j])) j++;
+  return j < rawLine.length && isPropertiesSeparator(rawLine[j]) ? j + 1 : j;
+}
+
 /**
  * Walk the key portion of a line, returning the parsed key + the
  * index at which the separator (=, :, or first unescaped whitespace
@@ -62,22 +94,17 @@ function parseKey(line: string, startCol: number): { key: string; separatorIdx: 
   while (i < line.length) {
     const ch = line[i];
     if (ch === '\\' && i + 1 < line.length) {
-      const next = line[i + 1];
-      if (next === '=' || next === ':' || next === '\\' || next === ' ' || next === '\t') {
-        key += next;
-        i += 2;
-        continue;
-      }
       // Unknown escape — keep both chars verbatim (lossless v1).
-      key += ch + next;
-      i += 2;
+      const parsed = parseKeyEscape(line, i);
+      key += parsed.text;
+      i = parsed.nextIdx;
       continue;
     }
-    if (ch === '=' || ch === ':') {
+    if (isPropertiesSeparator(ch)) {
       if (key.length === 0) return null;
       return { key, separatorIdx: i };
     }
-    if (ch === ' ' || ch === '\t' || ch === '\f') {
+    if (isPropertiesWhitespace(ch)) {
       if (key.length === 0) {
         // Should not happen — caller already trimmed leading whitespace.
         i++;
@@ -98,12 +125,7 @@ function parseKey(line: string, startCol: number): { key: string; separatorIdx: 
  */
 function parseLine(rawLine: string, lineNumber: number): ParsedLine | null {
   // Leading whitespace stripped to find the first significant char.
-  let startCol = 0;
-  while (startCol < rawLine.length) {
-    const ch = rawLine[startCol];
-    if (ch !== ' ' && ch !== '\t' && ch !== '\f') break;
-    startCol++;
-  }
+  const startCol = firstSignificantColumn(rawLine);
   if (startCol >= rawLine.length) return null;
   const first = rawLine[startCol];
   if (first === '#' || first === '!') return null;
@@ -115,27 +137,12 @@ function parseLine(rawLine: string, lineNumber: number): ParsedLine | null {
   // Skip whitespace between key and separator (Java spec: a bare
   // whitespace terminator counts as the separator; an `=` or `:`
   // following whitespace is still the separator and is consumed once).
-  let valueStart = separatorIdx;
   // If the separator char was whitespace, scan forward to see if
   // there's an `=` or `:` after the whitespace run — Java treats
   // `key = value` as separator `=`, not separator ` `.
-  if (rawLine[separatorIdx] === ' ' || rawLine[separatorIdx] === '\t' || rawLine[separatorIdx] === '\f') {
-    let j = separatorIdx;
-    while (j < rawLine.length && (rawLine[j] === ' ' || rawLine[j] === '\t' || rawLine[j] === '\f')) j++;
-    if (j < rawLine.length && (rawLine[j] === '=' || rawLine[j] === ':')) {
-      valueStart = j + 1;
-    } else {
-      valueStart = j;
-    }
-  } else {
-    valueStart = separatorIdx + 1;
-  }
+  let valueStart = valueStartAfterSeparator(rawLine, separatorIdx);
   // Strip leading whitespace from the value.
-  while (valueStart < rawLine.length) {
-    const ch = rawLine[valueStart];
-    if (ch !== ' ' && ch !== '\t' && ch !== '\f') break;
-    valueStart++;
-  }
+  while (valueStart < rawLine.length && isPropertiesWhitespace(rawLine[valueStart])) valueStart++;
   const value = rawLine.substring(valueStart);
   return { key, value, lineNumber, keyStartColumn: startCol };
 }

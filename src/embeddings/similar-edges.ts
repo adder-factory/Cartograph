@@ -18,11 +18,11 @@ import { findSimilarViaVec } from '../db/vec-helpers.js';
 import { deleteAllSimilarToEdges, insertSimilarToEdges } from '../db/queries-similarity.js';
 import { HnswIndex, type HnswEmbeddingRow } from './hnsw-index.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
+export { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
 
 // DEFAULT_SIMILAR_K / DEFAULT_SIMILAR_MIN_SCORE live in the dependency-
 // free `similarity-defaults` module so the CLI / MCP can read them at
 // command-definition time without loading this HNSW-heavy module.
-export { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE };
 
 const FLOAT32_BYTES = 4;
 
@@ -88,7 +88,7 @@ function viewVec(buf: Buffer): Float32Array {
  */
 function unitVector(v: Float32Array): Float32Array {
   let sumSq = 0;
-  for (let i = 0; i < v.length; i++) sumSq += v[i]! * v[i]!;
+  for (const value of v) sumSq += value * value;
   const norm = Math.sqrt(sumSq);
   if (norm === 0) return v;
   const out = new Float32Array(v.length);

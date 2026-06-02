@@ -117,6 +117,38 @@ function findNthTopLevelComma(source: string, start: number, n: number): number 
   return -1;
 }
 
+function blankRange(chars: string[], start: number, end: number): void {
+  for (let k = start; k <= end; k++) chars[k] = ' ';
+}
+
+function writeSkeleton(chars: string[], start: number, skeleton: string): void {
+  for (let k = 0; k < skeleton.length; k++) chars[start + k] = skeleton.charAt(k);
+}
+
+function rewriteMacroInvocation(
+  source: string,
+  chars: string[],
+  start: number,
+  spec: RnMacroSpec,
+  openParen: number,
+  closeParen: number,
+): void {
+  // 1. `MACRO(` → skeleton + spaces (covers [start, openParen], same length).
+  blankRange(chars, start, openParen);
+  writeSkeleton(chars, start, spec.skeleton);
+
+  // 2. Blank RCT_REMAP leading args (js-name [, return type]) up to and
+  //    including the n-th top-level comma; the native selector follows.
+  if (spec.leadingArgs > 0) {
+    const blankEnd = findNthTopLevelComma(source, openParen + 1, spec.leadingArgs);
+    if (blankEnd >= 0) blankRange(chars, openParen + 1, blankEnd);
+    // Too few commas (malformed) → leave the rest untouched; still length-safe.
+  }
+
+  // 3. Closing `)` → a space, so the method body `{…}` follows cleanly.
+  chars[closeParen] = ' ';
+}
+
 /**
  * Rewrite every RN bridge macro invocation in `source` to length-equivalent
  * ObjC method syntax. Returns the input unchanged when no macro is present.
@@ -146,25 +178,9 @@ export function rewriteReactNativeMacros(source: string): string {
       i = openParen + 1;
       continue;
     }
-    if (!chars) chars = Array.from(source);
+    chars ??= Array.from(source);
 
-    // 1. `MACRO(` → skeleton + spaces (covers [i, openParen], same length).
-    for (let k = i; k <= openParen; k++) chars[k] = ' ';
-    for (let k = 0; k < spec.skeleton.length; k++) chars[i + k] = spec.skeleton.charAt(k);
-
-    // 2. Blank RCT_REMAP leading args (js-name [, return type]) up to and
-    //    including the n-th top-level comma; the native selector follows.
-    if (spec.leadingArgs > 0) {
-      const blankEnd = findNthTopLevelComma(source, openParen + 1, spec.leadingArgs);
-      if (blankEnd >= 0) {
-        for (let k = openParen + 1; k <= blankEnd; k++) chars[k] = ' ';
-      }
-      // Too few commas (malformed) → leave the rest untouched; still length-safe.
-    }
-
-    // 3. Closing `)` → a space, so the method body `{…}` follows cleanly.
-    chars[closeParen] = ' ';
-
+    rewriteMacroInvocation(source, chars, i, spec, openParen, closeParen);
     i = closeParen + 1;
   }
 

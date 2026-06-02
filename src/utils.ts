@@ -47,7 +47,7 @@ import type { Language } from './types.js';
  */
 const JS_FAMILY_LANGUAGES: ReadonlySet<Language> = new Set<Language>(['typescript', 'javascript', 'tsx', 'jsx']);
 
-export function isJsFamily(language: Language | string | undefined): boolean {
+export function isJsFamily(language: string | undefined): boolean {
   if (!language) return false;
   return JS_FAMILY_LANGUAGES.has(language as Language);
 }
@@ -309,16 +309,16 @@ export function stripReasoningTokens(text: string): string {
   const open = String.raw`<\s*think(?:ing)?(?:\s[^>]*)?>`;
   const close = String.raw`<\s*\/\s*think(?:ing)?\s*>`;
   // Closed reasoning blocks (handles arbitrary content + nested newlines).
-  let out = text.replaceAll(new RegExp(`${open}[\\s\\S]*?${close}`, 'gi'), '');
+  let out = text.replaceAll(new RegExp(String.raw`${open}[\s\S]*?${close}`, 'gi'), '');
   // Unclosed trailing opener — drop everything from it onward. Negative
   // lookbehind on a backtick so a literal mention like `<think>` inside
   // backticks (e.g. when summarising the strip-reasoning function itself)
   // doesn't get eaten as CoT.
-  out = out.replace(new RegExp(`(?<!\`)${open}[\\s\\S]*$`, 'i'), '');
+  out = out.replace(new RegExp(String.raw`(?<!\`)${open}[\s\S]*$`, 'i'), '');
   // Stray closer with no opener.
   out = out.replaceAll(new RegExp(close, 'gi'), '');
   // Collapse leading blank lines created by the strip.
-  out = out.replace(/^[\s\n]+/, '');
+  out = out.replace(/^\s+/, '');
   return out;
 }
 
@@ -409,26 +409,41 @@ function stripInlineLineComments(line: string, tokens: readonly string[]): strin
   let inStr: string | null = null;
   for (let i = 0; i < line.length; i++) {
     const c = line[i]!;
-    if (inStr !== null) {
-      if (c === '\\') {
-        i++;
-        continue;
-      }
-      if (c === inStr) inStr = null;
+    const stringStep = advanceInlineCommentStringState(c, inStr);
+    if (stringStep.inString) {
+      inStr = stringStep.nextString;
+      if (stringStep.skipNext) i++;
       continue;
     }
-    if (c === '"' || c === "'" || c === '`') {
-      inStr = c;
-      continue;
-    }
-    for (const tok of tokens) {
-      if (!line.startsWith(tok, i)) continue;
-      if (tok === '//' && line[i - 1] === '\\') continue;
-      if (tok === '#' && (line[i + 1] === '{' || line[i + 1] === '[')) continue;
-      return line.slice(0, i) + ' '.repeat(line.length - i);
-    }
+    inStr = stringStep.nextString;
+    const commentStart = findLineCommentToken(line, i, tokens);
+    if (commentStart) return line.slice(0, i) + ' '.repeat(line.length - i);
   }
   return line;
+}
+
+function advanceInlineCommentStringState(
+  c: string,
+  inStr: string | null,
+): { inString: boolean; nextString: string | null; skipNext: boolean } {
+  if (inStr !== null) {
+    if (c === '\\') return { inString: true, nextString: inStr, skipNext: true };
+    return { inString: true, nextString: c === inStr ? null : inStr, skipNext: false };
+  }
+  if (c === '"' || c === "'" || c === '`') {
+    return { inString: true, nextString: c, skipNext: false };
+  }
+  return { inString: false, nextString: null, skipNext: false };
+}
+
+function findLineCommentToken(line: string, index: number, tokens: readonly string[]): string | null {
+  for (const tok of tokens) {
+    if (!line.startsWith(tok, index)) continue;
+    if (tok === '//' && line[index - 1] === '\\') continue;
+    if (tok === '#' && (line[index + 1] === '{' || line[index + 1] === '[')) continue;
+    return tok;
+  }
+  return null;
 }
 
 /**
@@ -597,7 +612,7 @@ export function globToSafeRegex(glob: string): string | null {
  * includes `*`, which some older hand-rolled copies omitted.
  */
 export function escapeRegExp(s: string): string {
-  return s.replaceAll(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return s.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }
 
 /**
@@ -615,7 +630,7 @@ export function escapeRegExp(s: string): string {
  * `compileSafeRegex` in src/regex.ts).
  */
 export function identifierBoundaryRegex(name: string, flags = ''): RegExp {
-  return new RegExp(`(?<![\\w$])${escapeRegExp(name)}(?![\\w$])`, flags);
+  return new RegExp(String.raw`(?<![\w$])${escapeRegExp(name)}(?![\w$])`, flags);
 }
 
 /**
@@ -627,7 +642,7 @@ export function splitIdentifierTokens(name: string): string[] {
   return name
     .replaceAll(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .split(/[\s_\-.\/:\\]+/)
+    .split(/[\s_\-./:\\]+/)
     .map((t) => t.toLowerCase())
     .filter((t) => t.length > 0);
 }

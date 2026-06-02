@@ -795,8 +795,9 @@ interface FormatTestReportArgs {
 
 function formatReport(args: FormatTestReportArgs): string {
   const { symbol, node, direct, transitive, sameFileTests, mcpToolName, dispatchTests, describeNameTests } = args;
+  const lineSuffix = node.startLine ? `:${node.startLine}` : '';
   const lines: string[] = [
-    `## Tests covering ${symbol} (${node.kind}) — ${node.filePath}${node.startLine ? `:${node.startLine}` : ''}`,
+    `## Tests covering ${symbol} (${node.kind}) — ${node.filePath}${lineSuffix}`,
     '',
   ];
   const hasStaticTests = direct.length > 0 || transitive.length > 0;
@@ -813,8 +814,7 @@ function formatReport(args: FormatTestReportArgs): string {
   if (direct.length > 0) lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('direct', direct)));
   if (transitive.length > 0) lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('transitive', transitive)));
   if (hasSameFileTests) {
-    lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('sameFile', sameFileTests)));
-    lines.push(buildTestsForSameFileExplainer(node), '');
+    lines.push(renderMarkdownBulletList(buildTestsForBucketSpec('sameFile', sameFileTests)), buildTestsForSameFileExplainer(node), '');
   }
   if (hasDispatchTests && mcpToolName) {
     lines.push(renderMarkdownBulletList(buildTestsForDispatchSpec(mcpToolName, dispatchTests)));
@@ -932,11 +932,12 @@ function testRowAsLines(r: TestRow): string[] {
     out.push(`- \`${r.filePath}\` _(no test-shaped symbols matched the heuristic)_`);
     return out;
   }
-  const symPart = r.testSymbols.length > 0 ? ` — ${r.testSymbols.map((s) => `\`${s}\``).join(', ')}` : '';
-  const countPart =
-    r.testDescriptions.length > 0
-      ? ` _(${r.testDescriptions.length} covering test block${r.testDescriptions.length === 1 ? '' : 's'})_`
-      : '';
+  const testSymbols = r.testSymbols.map((s) => `\`${s}\``).join(', ');
+  const symPart = r.testSymbols.length > 0 ? ` — ${testSymbols}` : '';
+  let countPart = '';
+  if (r.testDescriptions.length > 0) {
+    countPart = ` _(${r.testDescriptions.length} covering test block${r.testDescriptions.length === 1 ? '' : 's'})_`;
+  }
   out.push(`- \`${r.filePath}\`${symPart}${countPart}`);
   if (r.testDescriptions.length === 0) return out;
   const shown = r.testDescriptions.slice(0, MAX_TEST_DESCRIPTIONS_SHOWN);
@@ -1013,8 +1014,10 @@ async function handleFilesMode(ctx: ToolCtx, args: TestsForArgs): Promise<ToolOu
   const indexedPaths = new Set(getAllFiles(cg.queries).map((f) => f.path));
   const unmatchedInputs = files.filter((f) => !indexedPaths.has(f));
   if (unmatchedInputs.length === files.length && files.length > 0) {
+    const unmatchedList = unmatchedInputs.map((f) => `\`${f}\``).join(', ');
+    const fileWordSuffix = files.length === 1 ? '' : 's';
     return err(
-      `None of the ${files.length} input file${files.length === 1 ? '' : 's'} match indexed paths: ${unmatchedInputs.map((f) => `\`${f}\``).join(', ')}. Check spelling, or run \`cartograph_admin({action: 'sync'})\` if the files are new.`,
+      `None of the ${files.length} input file${fileWordSuffix} match indexed paths: ${unmatchedList}. Check spelling, or run \`cartograph_admin({action: 'sync'})\` if the files are new.`,
     );
   }
 
@@ -1088,8 +1091,11 @@ function buildFilesModeFooters(args: {
   const { sorted, totalDependents, inputBarrels, bfsBarrels, unmatchedInputs } = args;
   const footers: string[] = [];
   if (unmatchedInputs.length > 0) {
+    const unmatchedList = unmatchedInputs.map((f) => `\`${f}\``).join(', ');
+    const pathSuffix = unmatchedInputs.length === 1 ? '' : 's';
+    const verb = unmatchedInputs.length === 1 ? 'was' : 'were';
     footers.push(
-      `> ⚠ ${unmatchedInputs.length} input path${unmatchedInputs.length === 1 ? '' : 's'} matched no indexed file and ${unmatchedInputs.length === 1 ? 'was' : 'were'} skipped: ${unmatchedInputs.map((f) => `\`${f}\``).join(', ')}. Check spelling, or \`cartograph_admin({action: 'sync'})\` if the files are new.`,
+      `> ⚠ ${unmatchedInputs.length} input path${pathSuffix} matched no indexed file and ${verb} skipped: ${unmatchedList}. Check spelling, or \`cartograph_admin({action: 'sync'})\` if the files are new.`,
     );
   }
   if (sorted.length > FILES_MODE_RENDER_CAP) {

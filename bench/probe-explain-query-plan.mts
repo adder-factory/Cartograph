@@ -45,7 +45,7 @@
 // first call.
 process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'] = '1';
 
-import * as path from 'path';
+import * as path from 'node:path';
 
 const { Cartograph } = await import('../src/index.js');
 const { getDefinedQueryRegistry } = await import('../src/db/typed-query.js');
@@ -109,14 +109,14 @@ function classifyPlanRow(detail: string): {
   //   "USE TEMP B-TREE FOR ORDER BY"
   //   "LIST SUBQUERY 1"
   //   "MATERIALIZE 1"
-  const scanMatch = detail.match(/^SCAN(?: TABLE)?\s+(\S+)/);
+  const scanMatch = /^SCAN(?: TABLE)?\s+(\S+)/.exec(detail);
   if (scanMatch) {
     const tableName = scanMatch[1];
     const isCoveringIndexScan = / USING COVERING INDEX /.test(detail);
     const isVirtualTableScan = / VIRTUAL TABLE /.test(detail);
     return { isScan: true, isSearch: false, tableName, isCoveringIndexScan, isVirtualTableScan };
   }
-  const searchMatch = detail.match(/^SEARCH(?: TABLE)?\s+(\S+)/);
+  const searchMatch = /^SEARCH(?: TABLE)?\s+(\S+)/.exec(detail);
   if (searchMatch) {
     return {
       isScan: false,
@@ -188,7 +188,7 @@ function compareConcerning(a: QueryAudit, b: QueryAudit): number {
 }
 
 function previewSql(sql: string, max: number): string {
-  const oneLine = sql.replace(/\s+/g, ' ').trim();
+  const oneLine = sql.replaceAll(/\s+/g, ' ').trim();
   return oneLine.length <= max ? oneLine : `${oneLine.slice(0, max - 1)}…`;
 }
 
@@ -234,7 +234,7 @@ async function main(): Promise<void> {
       if (errors.length > 10) console.log(`  … ${errors.length - 10} more`);
     }
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 

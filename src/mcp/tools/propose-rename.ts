@@ -429,8 +429,9 @@ function appendCallSitesSection(out: string[], callSites: readonly CallSite[], l
 
 function appendDocHitsSection(out: string[], docHits: readonly DocHit[], docLimit: number): void {
   if (docHits.length === 0) return;
-  out.push('### Textual mentions (doc / comment / strings)', '');
   out.push(
+    '### Textual mentions (doc / comment / strings)',
+    '',
     '_These are word-boundary regex matches outside the graph edges above — JSDoc references, ' +
       'string literals, comment mentions. Review case-by-case: not every match is the same symbol._',
     '',

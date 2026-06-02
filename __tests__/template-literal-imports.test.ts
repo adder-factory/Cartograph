@@ -22,6 +22,8 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('template-literal / string-literal imports', () => {
   let testDir: string;
   let cg: Cartograph;
@@ -63,7 +65,7 @@ describe('template-literal / string-literal imports', () => {
 
   it('string_imports table is populated with template-literal specifiers', () => {
     const rows = getStringImports(cg.queries, { moduleNameLike: './%' });
-    const specs = rows.map((r) => r.moduleName).sort();
+    const specs = rows.map((r) => r.moduleName).sort(byString);
     expect(specs).toContain('./real');
     expect(specs).toContain('./ns');
     // Each row attributes the right container kind. The template-literal

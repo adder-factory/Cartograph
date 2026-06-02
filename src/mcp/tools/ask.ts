@@ -118,7 +118,7 @@ function isStdlibQualifiedGlobal(id: string): boolean {
 function extractCitedIdentifiers(text: string): string[] {
   const seen = new Set<string>();
   const out: string[] = [];
-  const re = /`([A-Za-z_][A-Za-z0-9_]*(?:(?:\.|::)[A-Za-z_][A-Za-z0-9_]*)*)`/g;
+  const re = /`([A-Za-z_]\w*(?:(?:\.|::)[A-Za-z_]\w*)*)`/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text)) !== null) {
     const id = m[1]!;
@@ -147,7 +147,7 @@ function extractCitedIdentifiers(text: string): string[] {
  * Patterns checked (in order):
  *   - `publish.js` or `publish.min.js` at the project root
  *   - Any path under `dist/`, `build/`, `out/` (matches anywhere so
- *     workspace-nested builds like `packages/foo/dist/` are caught)
+ *     workspace-nested builds like `packages/foo/dist/` are error_)
  *   - `bin/` ONLY at the project root — nested `src/bin/` is a
  *     canonical source layout for CLI entry points (cartograph itself
  *     keeps `src/bin/cartograph.ts` there); matching it would
@@ -629,7 +629,7 @@ type AskToolArgs = z.infer<typeof askSchema>;
  *  Heuristic: trips on `-1b`/`-1B`/`-2b`/`-3b` size tokens. Surfaces
  *  a warning when a small model is bound — the agent can either
  *  swap to a larger model or read the retrieval sources directly. */
-const SMALL_MODEL_RE = /-(?:1|2|3)b\b/i;
+const SMALL_MODEL_RE = /-[123]b\b/i;
 
 /**
  * The verified / signature / unverified citation report for an answer.
@@ -686,8 +686,10 @@ export function buildCitationReport(cited: ReadonlyArray<CitedIdentifier>): Cita
 export function formatRerankTag(ro: AskResult['rerankOutcome']): string {
   if (!ro) return '';
   switch (ro.kind) {
-    case 'fired':
-      return ` rerank ${ro.durationMs}ms (${ro.rerankedCount} reranked${ro.skippedCount > 0 ? ` / ${ro.skippedCount} skipped` : ''});`;
+    case 'fired': {
+      const skippedSuffix = ro.skippedCount > 0 ? ` / ${ro.skippedCount} skipped` : '';
+      return ` rerank ${ro.durationMs}ms (${ro.rerankedCount} reranked${skippedSuffix});`;
+    }
     case 'skipped-no-config':
       return ' reranker not configured;';
     case 'skipped-no-hits':
@@ -753,7 +755,7 @@ async function handleAsk(ctx: ToolCtx, args: AskToolArgs): Promise<ToolOutcome> 
   const { question, retrieveK } = args;
 
   const cg = ctx.getCartograph(args.projectPath);
-  const llmConfig = await cg.llm.getEffectiveLlmConfig();
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   // ask uses the ask path (useAskModel: true), so check getAskModel
   // — covers split-provider configs where chat is e.g. a fast local
   // model and askChat is a more capable model for synthesis.
@@ -769,8 +771,8 @@ async function handleAsk(ctx: ToolCtx, args: AskToolArgs): Promise<ToolOutcome> 
     const cited = groundCitations(cg, result.answer);
     const output = buildAskOutput(result, cited, askModel);
     return ok(textResult(truncateOutput(output)));
-  } catch (caught) {
-    return err(errMsg(caught));
+  } catch (error_) {
+    return err(errMsg(error_));
   }
 }
 

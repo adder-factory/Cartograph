@@ -24,12 +24,41 @@ import { buildReviewContext } from '../src/review/index.js';
 import { renderReviewContextMarkdown, type MdReviewContext } from '../src/mcp/tools/review-context.js';
 import Cartograph from '../src/index.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
-import type { ToolCtx, ToolResult } from '../src/mcp/tool-types.js';
+import type { ToolCtx } from '../src/mcp/tool-types.js';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { insertEdges } from '../src/db/queries-edges.js';
 import { GraphTraverser } from '../src/graph/traversal.js';
 import type { Node, Edge } from '../src/types.js';
+
+function modifyDoFooDiff(): string {
+  return `diff --git a/src/foo.ts b/src/foo.ts
+index abc..def 100644
+--- a/src/foo.ts
++++ b/src/foo.ts
+@@ -10,3 +10,4 @@
+ ctx
+-old impl
++new impl
++plus one
+ ctx`;
+}
+
+/** Get the unified `cartograph_review` tool from the registry. */
+function getReviewTool() {
+  const tool = getToolModules().find((t) => t.definition.name === 'cartograph_review');
+  if (!tool) throw new Error('cartograph_review tool not registered');
+  return tool;
+}
+
+function makeReviewToolCtx(cg: InstanceType<typeof Cartograph>): ToolCtx {
+  return { getCartograph: () => cg } as unknown as ToolCtx;
+}
+
+/** Run git in `dir`, swallowing output. */
+function runReviewGit(dir: string, ...gitArgs: string[]): void {
+  execFileSync('git', gitArgs, { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
+}
 
 // =============================================================================
 // parseDiff
@@ -248,16 +277,17 @@ index abc..def 100644
     expect(h.removedLines).toBe(4);
   });
 
-  it('does not count the "\\ No newline at end of file" marker as a change', () => {
+  it(String.raw`does not count the "\ No newline at end of file" marker as a change`, () => {
+    const noNewlineMarker = String.raw`\ No newline at end of file`;
     const diff = `diff --git a/src/x.ts b/src/x.ts
 index abc..def 100644
 --- a/src/x.ts
 +++ b/src/x.ts
 @@ -1,1 +1,1 @@
 -old
-\\ No newline at end of file
+${noNewlineMarker}
 +new
-\\ No newline at end of file`;
+${noNewlineMarker}`;
     const h = parseDiff(diff)[0].hunks[0];
     expect(h.addedLines).toBe(1);
     expect(h.removedLines).toBe(1);
@@ -392,19 +422,6 @@ describe('buildReviewContext (integration)', () => {
     db.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
-
-  function modifyDoFooDiff(): string {
-    return `diff --git a/src/foo.ts b/src/foo.ts
-index abc..def 100644
---- a/src/foo.ts
-+++ b/src/foo.ts
-@@ -10,3 +10,4 @@
- ctx
--old impl
-+new impl
-+plus one
- ctx`;
-  }
 
   it('attaches callers and callees for affected symbols', () => {
     const ctx = buildReviewContext(modifyDoFooDiff(), { queries: q, traverser });
@@ -1015,30 +1032,16 @@ index abc..def 100644
 });
 
 describe('cartograph_review mode=context — git-diff derivation (friction-22)', () => {
-  /** Get the unified `cartograph_review` tool from the registry. */
-  function getReviewTool() {
-    const tool = getToolModules().find((t) => t.definition.name === 'cartograph_review');
-    if (!tool) throw new Error('cartograph_review tool not registered');
-    return tool;
-  }
-  function makeCtx(cg: InstanceType<typeof Cartograph>): ToolCtx {
-    return { getCartograph: () => cg } as unknown as ToolCtx;
-  }
-  /** Run git in `dir`, swallowing output. */
-  function git(dir: string, ...gitArgs: string[]): void {
-    execFileSync('git', gitArgs, { cwd: dir, stdio: ['pipe', 'pipe', 'pipe'] });
-  }
-
   it('derives the diff from `git diff HEAD` when `diff` is omitted', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-gitderive-'));
-    git(dir, 'init', '-q');
-    git(dir, 'config', 'user.email', 't@t.t');
-    git(dir, 'config', 'user.name', 'test');
+    runReviewGit(dir, 'init', '-q');
+    runReviewGit(dir, 'config', 'user.email', 't@t.t');
+    runReviewGit(dir, 'config', 'user.name', 'test');
     const srcDir = path.join(dir, 'src');
     fs.mkdirSync(srcDir);
     fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'export function alpha(): number { return 1; }\n');
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-qm', 'init');
+    runReviewGit(dir, 'add', '-A');
+    runReviewGit(dir, 'commit', '-qm', 'init');
     // Make a working-tree change so `git diff HEAD` is non-empty.
     fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'export function alpha(): number { return 2; }\n');
 
@@ -1047,7 +1050,7 @@ describe('cartograph_review mode=context — git-diff derivation (friction-22)',
     try {
       const tool = getReviewTool();
       // No `diff` passed — handler must derive it from git.
-      const result = (await tool.handle(makeCtx(cg), { mode: 'context' })) as ToolResult;
+      const result = await tool.handle(makeReviewToolCtx(cg), { mode: 'context' });
       const text = result.content[0]?.text ?? '';
       // It should have produced a real review (markdown), not the
       // "diff must be a non-empty string" hard-error.
@@ -1061,20 +1064,20 @@ describe('cartograph_review mode=context — git-diff derivation (friction-22)',
 
   it('returns a friendly "no uncommitted changes" message on a clean tree', async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'review-gitclean-'));
-    git(dir, 'init', '-q');
-    git(dir, 'config', 'user.email', 't@t.t');
-    git(dir, 'config', 'user.name', 'test');
+    runReviewGit(dir, 'init', '-q');
+    runReviewGit(dir, 'config', 'user.email', 't@t.t');
+    runReviewGit(dir, 'config', 'user.name', 'test');
     const srcDir = path.join(dir, 'src');
     fs.mkdirSync(srcDir);
     fs.writeFileSync(path.join(srcDir, 'foo.ts'), 'export function alpha(): number { return 1; }\n');
-    git(dir, 'add', '-A');
-    git(dir, 'commit', '-qm', 'init');
+    runReviewGit(dir, 'add', '-A');
+    runReviewGit(dir, 'commit', '-qm', 'init');
 
     const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
     try {
       const tool = getReviewTool();
-      const result = (await tool.handle(makeCtx(cg), { mode: 'context' })) as ToolResult;
+      const result = await tool.handle(makeReviewToolCtx(cg), { mode: 'context' });
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/no uncommitted changes/i);
       expect(text).not.toMatch(/diff must be a non-empty string/i);

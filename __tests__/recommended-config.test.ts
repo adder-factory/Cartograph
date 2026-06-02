@@ -2,7 +2,7 @@
  * Tests for the recommended-config writer (FRICTION-11).
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -81,7 +81,7 @@ describe('mergeRecommendedLlmConfig (FRICTION-11)', () => {
   it('handles a config with no prior llm block', () => {
     const current = { version: 1, include: ['**/*.ts'] };
     const recommended = buildRecommendedLlmConfig({ dir: '/tmp/models-test' });
-    const { nextConfig, diff } = mergeRecommendedLlmConfig(current, recommended);
+    const { nextConfig } = mergeRecommendedLlmConfig(current, recommended);
     const llm = nextConfig['llm'] as Record<string, unknown>;
     expect(llm['summarizeLlm']).toBeDefined();
   });
@@ -227,17 +227,18 @@ describe('loadConfig legacy-llm write-back guard (FRICTION-11)', () => {
       // is about the renamed-field migration, not the provider enum.
       llm: { chat: { provider: 'claude-bridge', model: 'claude-haiku-4-5' } },
     };
-    fs.writeFileSync(path.join(cgDir, 'config.json'), JSON.stringify(valid, null, 2), 'utf-8');
+    const configPath = path.join(cgDir, 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify(valid, null, 2), 'utf-8');
 
-    // Read-only dir → the backup copy + write-back fail, so `changed`
-    // stays true across loads (the file never gets migrated on disk).
-    fs.chmodSync(cgDir, 0o555);
+    const copyFileSync = vi.spyOn(fs, 'copyFileSync').mockImplementation((src) => {
+      if (src.toString() === configPath) throw new Error('simulated write-back failure');
+    });
     try {
       loadConfig(tempDir);
       loadConfig(tempDir);
       loadConfig(tempDir);
     } finally {
-      fs.chmodSync(cgDir, 0o755);
+      copyFileSync.mockRestore();
     }
 
     // Without the guard this would be 3 (one failed write-back per

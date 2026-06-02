@@ -4,8 +4,8 @@
  * its full structure, plus checks for parser errors / missing nodes.
  */
 
-import * as fs from 'fs';
-import { findNodeInTree, parseSource, computeMetrics } from '../src/biomarkers/engine.js';
+import * as fs from 'node:fs';
+import { findNodeInTree, parseSource } from '../src/biomarkers/engine.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 
 await initGrammars();

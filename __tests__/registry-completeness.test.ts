@@ -38,6 +38,7 @@ import { getToolModules } from '../src/mcp/tools/registry.js';
 
 const TOOLS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../src/mcp/tools');
 const REGISTRY_PATH = join(TOOLS_DIR, 'registry.ts');
+const byString = (a: string, b: string): number => a.localeCompare(b);
 
 /** Matches `export const FOO_TOOL = ` (the `defineTool(...)` result). */
 const TOOL_EXPORT_RE = /export\s+const\s+([A-Z][A-Z0-9_]*_TOOL)\s*=/g;
@@ -51,7 +52,7 @@ function candidateToolFiles(): string[] {
     .filter((f) => !f.startsWith('_'))
     .filter((f) => !f.endsWith('.test.ts'))
     .filter((f) => f !== 'registry.ts')
-    .sort();
+    .sort(byString);
 }
 
 /** All `<NAME>_TOOL` identifiers exported from a tool source file. */

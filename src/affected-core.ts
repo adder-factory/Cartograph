@@ -154,25 +154,51 @@ export function findAffectedTests(graph: FileDependentsSource, input: AffectedCo
       affectedTests.add(file);
       continue;
     }
-    const queue: Array<{ file: string; depth: number }> = [{ file, depth: 0 }];
-    const visited = new Set<string>([file]);
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      if (current.depth >= input.depth) continue;
-      const dependents = graph.getFileDependents(current.file);
-      for (const dep of dependents) {
-        if (visited.has(dep)) continue;
-        visited.add(dep);
-        allDependents.add(dep);
-        if (isBarrelFile(dep)) barrelsReached.add(dep);
-        if (isTestFile(dep, input)) affectedTests.add(dep);
-        else queue.push({ file: dep, depth: current.depth + 1 });
-      }
-    }
+    collectAffectedDependents(graph, input, file, { affectedTests, allDependents, barrelsReached });
   }
   return {
     affectedTests,
     totalDependents: allDependents.size,
     barrelsReached: Array.from(barrelsReached).sort((a, b) => Number(a > b) - Number(a < b)),
   };
+}
+
+function collectAffectedDependents(
+  graph: FileDependentsSource,
+  input: AffectedCoreInput,
+  file: string,
+  out: {
+    affectedTests: Set<string>;
+    allDependents: Set<string>;
+    barrelsReached: Set<string>;
+  },
+): void {
+  const queue: Array<{ file: string; depth: number }> = [{ file, depth: 0 }];
+  const visited = new Set<string>([file]);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current.depth >= input.depth) continue;
+    for (const dep of graph.getFileDependents(current.file)) {
+      if (visited.has(dep)) continue;
+      visited.add(dep);
+      recordDependent(input, dep, current.depth + 1, queue, out);
+    }
+  }
+}
+
+function recordDependent(
+  input: AffectedCoreInput,
+  dep: string,
+  nextDepth: number,
+  queue: Array<{ file: string; depth: number }>,
+  out: {
+    affectedTests: Set<string>;
+    allDependents: Set<string>;
+    barrelsReached: Set<string>;
+  },
+): void {
+  out.allDependents.add(dep);
+  if (isBarrelFile(dep)) out.barrelsReached.add(dep);
+  if (isTestFile(dep, input)) out.affectedTests.add(dep);
+  else queue.push({ file: dep, depth: nextDepth });
 }

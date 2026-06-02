@@ -14,6 +14,8 @@ import {
 import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 import Cartograph from '../src/index.js';
 
+const byConfigKey = (a: string, b: string): number => a.localeCompare(b);
+
 let testDir: string;
 let cg: Cartograph | null = null;
 
@@ -29,7 +31,7 @@ beforeEach(() => {
 
 afterEach(() => {
   if (cg) {
-    cg.destroy();
+    cg.close();
     cg = null;
   }
   if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
@@ -81,7 +83,7 @@ describe('extractConfigRefs', () => {
     );
     const refs = extractConfigRefs(testDir, [{ path: 'a.py', language: 'python' }], () => null);
     // Exactly one ref per call site — no duplicates.
-    expect(refs.map((r) => r.configKey).sort()).toEqual(['BARE_KEY', 'DOTTED_KEY']);
+    expect(refs.map((r) => r.configKey).sort(byConfigKey)).toEqual(['BARE_KEY', 'DOTTED_KEY']);
   });
 
   it('extracts os.Getenv / os.LookupEnv from Go', () => {
@@ -222,7 +224,11 @@ describe('Cartograph config refs', () => {
 
     // All three keys should be visible.
     const keys = getConfigKeys(cg.queries, { configKind: 'env' });
-    expect(keys.map((k) => k.configKey).sort()).toEqual(['OBSIDIAN_API_KEY', 'OBSIDIAN_HOST', 'OBSIDIAN_PORT']);
+    expect(keys.map((k) => k.configKey).sort(byConfigKey)).toEqual([
+      'OBSIDIAN_API_KEY',
+      'OBSIDIAN_HOST',
+      'OBSIDIAN_PORT',
+    ]);
 
     // The OBSIDIAN_PORT read should be attributed to `start`.
     const portSites = getConfigRefsByKey(cg.queries, 'OBSIDIAN_PORT');
@@ -251,7 +257,7 @@ describe('Cartograph config refs', () => {
     const node = cg.queries.getNodesByFile('src/a.ts').find((n) => n.name === 'loadConfig')!;
     const keys = getConfigKeysForNode(cg.queries, node.id)
       .map((r) => r.configKey)
-      .sort();
+      .sort(byConfigKey);
     expect(keys).toEqual(['KEY_A', 'KEY_B']);
   });
 
@@ -272,7 +278,7 @@ describe('Cartograph config refs', () => {
     expect(
       getConfigKeys(cg.queries)
         .map((k) => k.configKey)
-        .sort(),
+        .sort(byConfigKey),
     ).toEqual(['OLD_KEY', 'UNCHANGED_KEY']);
 
     // Edit only a.ts — UNCHANGED_KEY should still be there.
@@ -281,7 +287,7 @@ describe('Cartograph config refs', () => {
 
     const keys = getConfigKeys(cg.queries)
       .map((k) => k.configKey)
-      .sort();
+      .sort(byConfigKey);
     expect(keys).toContain('NEW_KEY');
     expect(keys).toContain('UNCHANGED_KEY');
     expect(keys).not.toContain('OLD_KEY');
@@ -340,7 +346,7 @@ describe('config-refs hook algo-version self-heal', () => {
     // Confirm both keys were indexed.
     const keysBefore = getConfigKeys(cg.queries)
       .map((k) => k.configKey)
-      .sort();
+      .sort(byConfigKey);
     expect(keysBefore).toEqual(['KEY_A', 'KEY_B']);
 
     // Stamp a bogus algo version — simulates a pre-fix install where the
@@ -355,7 +361,7 @@ describe('config-refs hook algo-version self-heal', () => {
 
     const keysAfter = getConfigKeys(cg.queries)
       .map((k) => k.configKey)
-      .sort();
+      .sort(byConfigKey);
     // KEY_A_NEW comes from the changed a.ts — always present.
     expect(keysAfter).toContain('KEY_A_NEW');
     // KEY_B comes from the UNCHANGED b.ts — only present if b.ts was

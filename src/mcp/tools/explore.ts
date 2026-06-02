@@ -158,10 +158,10 @@ function buildExploreBody(args: BuildExploreBodyArgs): ToolResponseSpec {
   // caller exactly how many they're seeing and how to expand. Skip the
   // suffix when everything fit (it's noise then).
   const totalFiles = fileGroups.size;
-  const framingSuffix =
-    totalFiles > maxFiles
-      ? `; capped at ${maxFiles} ${maxFiles === 1 ? 'file' : 'files'} (raise \`maxFiles\` to expand)`
-      : '';
+  let framingSuffix = '';
+  if (totalFiles > maxFiles) {
+    framingSuffix = `; capped at ${maxFiles} ${maxFiles === 1 ? 'file' : 'files'} (raise \`maxFiles\` to expand)`;
+  }
   const lines: string[] = [
     `## Exploration: ${query}`,
     '',
@@ -563,43 +563,71 @@ function appendFileSections(args: AppendFileSectionsArgs): RenderedFiles {
     if (filesIncluded >= maxFiles) break;
     if (!summary && totalChars > EXPLORE_MAX_OUTPUT * 0.9) break;
 
-    const fileLines = readFileLinesSafely(projectRoot, filePath);
-    if (!fileLines) continue;
-
-    const ranges = collectRangeRefs({ groupNodes: group.nodes, fileLineCount: fileLines.length, cg, subgraph });
-    if (ranges.length === 0) continue;
-
-    const clusters = clusterRanges(ranges);
-    const lang = group.nodes[0]?.language ?? '';
-    const { fileSection, allSymbols } = renderClusters(clusters, fileLines, lang);
-    const { defines, references } = partitionDefinesReferences(allSymbols);
-
-    if (summary) {
-      // Summary mode: header only, no code block, no budget gate
-      // (headers are cheap — a few hundred bytes per file at most).
-      pushFileBlock({ lines, filePath, defines, references, lang, body: null, summary });
-      filesIncluded++;
-      rendered.add(filePath);
-      continue;
-    }
-
-    const remainingBudget = EXPLORE_MAX_OUTPUT - totalChars - FILE_BUDGET_OVERHEAD_CHARS;
-    if (fileSection.length > remainingBudget) {
-      if (remainingBudget < MIN_FILE_BUDGET_CHARS) break;
-      const trimmed = fileSection.slice(0, remainingBudget) + '\n// ... trimmed ...';
-      pushFileBlock({ lines, filePath, defines, references, lang, body: trimmed, summary });
-      totalChars += trimmed.length + FILE_BUDGET_OVERHEAD_CHARS;
-      filesIncluded++;
-      rendered.add(filePath);
-      break;
-    }
-
-    pushFileBlock({ lines, filePath, defines, references, lang, body: fileSection, summary });
-    totalChars += fileSection.length + FILE_BUDGET_OVERHEAD_CHARS;
+    const result = appendOneFileSection({
+      lines,
+      filePath,
+      group,
+      projectRoot,
+      cg,
+      subgraph,
+      summary,
+      totalChars,
+    });
+    if (result.kind === 'skip') continue;
     filesIncluded++;
     rendered.add(filePath);
+    if (result.kind === 'stop') break;
+    totalChars += result.charsAdded;
   }
   return { count: filesIncluded, paths: rendered };
+}
+
+type AppendOneFileSectionResult =
+  | { kind: 'skip' }
+  | { kind: 'continue'; charsAdded: number }
+  | { kind: 'stop'; charsAdded: number };
+
+interface AppendOneFileSectionArgs {
+  lines: string[];
+  filePath: string;
+  group: FileGroup;
+  projectRoot: string;
+  cg: Cartograph;
+  subgraph: Subgraph;
+  summary: boolean;
+  totalChars: number;
+}
+
+function appendOneFileSection(args: AppendOneFileSectionArgs): AppendOneFileSectionResult {
+  const { lines, filePath, group, projectRoot, cg, subgraph, summary, totalChars } = args;
+  const fileLines = readFileLinesSafely(projectRoot, filePath);
+  if (!fileLines) return { kind: 'skip' };
+
+  const ranges = collectRangeRefs({ groupNodes: group.nodes, fileLineCount: fileLines.length, cg, subgraph });
+  if (ranges.length === 0) return { kind: 'skip' };
+
+  const clusters = clusterRanges(ranges);
+  const lang = group.nodes[0]?.language ?? '';
+  const { fileSection, allSymbols } = renderClusters(clusters, fileLines, lang);
+  const { defines, references } = partitionDefinesReferences(allSymbols);
+
+  if (summary) {
+    // Summary mode: header only, no code block, no budget gate
+    // (headers are cheap — a few hundred bytes per file at most).
+    pushFileBlock({ lines, filePath, defines, references, lang, body: null, summary });
+    return { kind: 'continue', charsAdded: 0 };
+  }
+
+  const remainingBudget = EXPLORE_MAX_OUTPUT - totalChars - FILE_BUDGET_OVERHEAD_CHARS;
+  if (fileSection.length > remainingBudget) {
+    if (remainingBudget < MIN_FILE_BUDGET_CHARS) return { kind: 'stop', charsAdded: 0 };
+    const trimmed = fileSection.slice(0, remainingBudget) + '\n// ... trimmed ...';
+    pushFileBlock({ lines, filePath, defines, references, lang, body: trimmed, summary });
+    return { kind: 'stop', charsAdded: 0 };
+  }
+
+  pushFileBlock({ lines, filePath, defines, references, lang, body: fileSection, summary });
+  return { kind: 'continue', charsAdded: fileSection.length + FILE_BUDGET_OVERHEAD_CHARS };
 }
 
 /** Symlink-safe file read returning split lines, or null on missing/unreadable. */
@@ -761,7 +789,7 @@ export function collapseCommentBlocks(source: string, language: string): string 
     while (j < lines.length && isCommentOnly(j)) j++;
     const runLen = j - i;
     if (runLen >= MIN_COLLAPSIBLE_COMMENT_RUN) {
-      const indent = lines[i]!.match(/^\s*/)?.[0] ?? '';
+      const indent = /^\s*/.exec(lines[i]!)?.[0] ?? '';
       out.push(`${indent}// ... ${runLen} lines of comments ...`);
     } else {
       for (let k = i; k < j; k++) out.push(lines[k]!);
@@ -792,11 +820,9 @@ function partitionDefinesReferences(symbols: ReadonlyArray<SymbolRef>): { define
         seenDef.add(label);
         defines.push(label);
       }
-    } else {
-      if (!seenRef.has(label)) {
-        seenRef.add(label);
-        references.push(label);
-      }
+    } else if (!seenRef.has(label)) {
+      seenRef.add(label);
+      references.push(label);
     }
   }
   return { defines, references };

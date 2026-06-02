@@ -37,6 +37,8 @@ import { extractFromSource } from '../src/extraction/tree-sitter.js';
 import { getLanguageDefs } from '../src/extraction/languages/registry.js';
 import type { Language } from '../src/types.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const TESTBEDS = path.join(REPO_ROOT, 'docs', 'test-beds');
 
@@ -193,7 +195,7 @@ function safeStat(p: string): fs.Stats | null {
 function collectTestbedSamples(): Sample[] {
   const out: Sample[] = [];
   if (!fs.existsSync(TESTBEDS)) return out;
-  for (const lang of fs.readdirSync(TESTBEDS).sort()) {
+  for (const lang of fs.readdirSync(TESTBEDS).sort(byString)) {
     const dir = path.join(TESTBEDS, lang);
     if (!safeStat(dir)?.isDirectory()) continue;
     for (const f of fs.readdirSync(dir)) {
@@ -297,39 +299,40 @@ function printReport(reports: LangReport[], skipped: string[]): void {
   }
 }
 
-// ── Main ──────────────────────────────────────────────────────────────
-
-async function main(): Promise<void> {
-  const extMap = buildExtensionMap();
-
+function collectSamplesForRun(extMap: Map<string, Language>): { samples: Sample[]; skipped: string[] } {
   let samples = extraPath ? collectPathSamples(extraPath, extMap) : collectTestbedSamples();
   if (langFilter) samples = samples.filter((s) => s.language === langFilter);
 
   if (samples.length === 0) {
-    if (langFilter) {
-      console.error(`✗ --lang='${langFilter}' matched no sample (unknown language, or no fixture for it)`);
-    } else {
-      console.error(
-        extraPath
-          ? `✗ no source files with a tree-sitter grammar found under '${extraPath}'`
-          : `✗ no test-bed fixtures found under ${path.relative(REPO_ROOT, TESTBEDS)}/`,
-      );
-    }
+    printNoSamplesError();
     process.exit(1);
   }
 
-  // Grammar-less languages (Liquid, Svelte) can't be node-type-walked.
   const grammarLanguages = new Set(
     getLanguageDefs()
       .filter((d) => d.grammar)
       .map((d) => d.name),
   );
-  const skipped = [...new Set(samples.map((s) => s.language))].filter((l) => !grammarLanguages.has(l)).sort();
+  const skipped = [...new Set(samples.map((s) => s.language))]
+    .filter((l) => !grammarLanguages.has(l))
+    .sort(byString);
   samples = samples.filter((s) => grammarLanguages.has(s.language));
+  return { samples, skipped };
+}
 
-  await initGrammars();
-  await loadGrammarsForLanguages([...new Set(samples.map((s) => s.language))]);
+function printNoSamplesError(): void {
+  if (langFilter) {
+    console.error(`✗ --lang='${langFilter}' matched no sample (unknown language, or no fixture for it)`);
+    return;
+  }
+  console.error(
+    extraPath
+      ? `✗ no source files with a tree-sitter grammar found under '${extraPath}'`
+      : `✗ no test-bed fixtures found under ${path.relative(REPO_ROOT, TESTBEDS)}/`,
+  );
+}
 
+function analyzeSamples(samples: Sample[]): Map<string, LangCoverage> {
   const byLang = new Map<string, LangCoverage>();
   for (const { language, filePath } of samples) {
     let source: string;
@@ -346,7 +349,19 @@ async function main(): Promise<void> {
     }
     analyzeFile(language, filePath, source, acc);
   }
+  return byLang;
+}
 
+// ── Main ──────────────────────────────────────────────────────────────
+
+async function main(): Promise<void> {
+  const extMap = buildExtensionMap();
+  const { samples, skipped } = collectSamplesForRun(extMap);
+
+  await initGrammars();
+  await loadGrammarsForLanguages([...new Set(samples.map((s) => s.language))]);
+
+  const byLang = analyzeSamples(samples);
   const reports = [...byLang.values()].map(buildReport).sort((a, b) => a.language.localeCompare(b.language));
 
   if (asJson) {
@@ -356,7 +371,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

@@ -11,14 +11,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { Buffer } from 'node:buffer';
-
 import Cartograph from '../src/index.js';
 import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
 import { isTrivialConstant } from '../src/mcp/tools/review-neighbors.js';
-import type { ToolCtx, ToolResult } from '../src/mcp/tool-types.js';
+import type { ToolCtx } from '../src/mcp/tool-types.js';
 
 const DIM = 16;
 const MODEL = 'stub-embed-model';
@@ -60,7 +58,7 @@ async function setupFixture(): Promise<Fixture> {
     cg,
     dir,
     cleanup: () => {
-      cg.destroy();
+      cg.close();
       fs.rmSync(dir, { recursive: true, force: true });
     },
   };
@@ -109,7 +107,7 @@ describe('cartograph_review_neighbors — input validation', () => {
 
   it('returns an error when neither files nor symbols are provided', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors' })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors' });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/files|symbols/i);
     expect(text).toMatch(/at least one/i);
@@ -117,17 +115,17 @@ describe('cartograph_review_neighbors — input validation', () => {
 
   it('returns "no symbols resolved" when files match no indexed paths', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), {
+    const result = await tool.handle(makeCtx(f.cg), {
       mode: 'neighbors',
       files: ['nonexistent/path.ts'],
-    })) as ToolResult;
+    });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/no symbols resolved/i);
   });
 
   it('returns "no embedding model" when symbols resolve but no embeddings exist', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'] })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'] });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/no embedding model|no embeddings/i);
   });
@@ -156,7 +154,7 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
 
   it('resolves a file → returns lookalikes for its symbols', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 3 })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 3 });
     const text = result.content[0]?.text ?? '';
     // alpha + beta come from a.ts so they are the changed set;
     // their neighbors gamma + delta should NOT appear since they're in a
@@ -167,7 +165,7 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
 
   it('resolves a symbol name → finds its semantic peer in another file', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 5 })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 5 });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/alpha/i);
     // beta should be the top peer (same direction); skip the assertion
@@ -185,7 +183,7 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
 
   it('excludes the changed-symbol set itself from the lookalike output', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 5 })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 5 });
     const text = result.content[0]?.text ?? '';
     // The lookalikes section (the part AFTER the "## Top N lookalikes"
     // sub-header, not the H1 banner) should not list alpha or beta —
@@ -203,14 +201,14 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
     // documented `.max(50)` bound, so an over-max value is REJECTED at
     // the dispatch boundary (locked reject-out-of-range policy) rather
     // than silently clamped to 50.
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 999 })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 999 });
     expect(result.isError).toBe(true);
     expect(result.content[0]?.text).toMatch(/k: must be ≤ 50/);
   });
 
   it('accepts k within the documented maximum', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 50 })) as ToolResult;
+    const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 50 });
     expect(result.isError).not.toBe(true);
   });
 });
@@ -243,7 +241,7 @@ describe('cartograph_review_neighbors — dedupeByName', () => {
       cg,
       dir,
       cleanup: () => {
-        cg.destroy();
+        cg.close();
         fs.rmSync(dir, { recursive: true, force: true });
       },
     };
@@ -276,11 +274,11 @@ describe('cartograph_review_neighbors — dedupeByName', () => {
 
   it('default dedupeByName=true: top-3 contains AT MOST ONE `dup` instance', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), {
+    const result = await tool.handle(makeCtx(f.cg), {
       mode: 'neighbors',
       files: ['changed.ts'],
       k: 3,
-    })) as ToolResult;
+    });
     if (!f.cg.db.hasVecExtension()) return; // skip when sqlite-vec missing
     const text = result.content[0]?.text ?? '';
     // Count `### dup ` occurrences in the lookalikes section. With dedupe,
@@ -293,12 +291,12 @@ describe('cartograph_review_neighbors — dedupeByName', () => {
 
   it('dedupeByName=false: top-3 may contain MULTIPLE `dup` instances (legacy)', async () => {
     const tool = getReviewNeighborsTool();
-    const result = (await tool.handle(makeCtx(f.cg), {
+    const result = await tool.handle(makeCtx(f.cg), {
       mode: 'neighbors',
       files: ['changed.ts'],
       k: 3,
       dedupeByName: false,
-    })) as ToolResult;
+    });
     if (!f.cg.db.hasVecExtension()) return;
     const text = result.content[0]?.text ?? '';
     const lookalikesSection = text.split(/##\s*Top\s+\d+\s+lookalikes/i)[1] ?? '';

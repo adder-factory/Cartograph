@@ -46,8 +46,10 @@ interface ImportFilters {
   language: string | undefined;
 }
 
+type ImportSourceFilter = 'static' | 'literal' | 'all';
+
 interface ImportRenderParams {
-  source: 'static' | 'literal' | 'all';
+  source: ImportSourceFilter;
   filters: ImportFilters;
   limit: number;
   projectRoot: string;
@@ -166,7 +168,10 @@ function collectStaticImports(cg: Cartograph): Hit[] {
     // Derive C/C++ include style from the signature: `#include "x"` vs
     // `#include <x>`. Cheap regex peek; non-C/C++ imports skip the check.
     const isCFamily = r.language === 'c' || r.language === 'cpp';
-    const cIncludeStyle = isCFamily ? (sig.includes('"') ? 'quoted' : 'angled') : undefined;
+    let cIncludeStyle: 'quoted' | 'angled' | undefined;
+    if (isCFamily) {
+      cIncludeStyle = sig.includes('"') ? 'quoted' : 'angled';
+    }
     // TS / TSX / JS / JSX imports may carry path aliases.
     const isTsFamily =
       r.language === 'typescript' || r.language === 'tsx' || r.language === 'javascript' || r.language === 'jsx';
@@ -237,21 +242,22 @@ function collectLiteralImports(cg: Cartograph): Hit[] {
  * kind to match.
  */
 function applyImportFilters(hits: Hit[], filters: ImportFilters): Hit[] {
+  return hits.filter((h) => importHitMatchesFilters(h, filters));
+}
+
+function importHitMatchesFilters(h: Hit, filters: ImportFilters): boolean {
   const { target, extMissingFilter, dynamicFilter, pathFilter, excludeFixtures, language } = filters;
-  return hits.filter((h) => {
-    if (target) {
-      if (h.origin === 'literal') return false;
-      if (h.kind !== target) return false;
-    }
-    if (extMissingFilter === true && !h.extMissing) return false;
-    if (extMissingFilter === false && h.extMissing) return false;
-    if (dynamicFilter === true && !h.isDynamic) return false;
-    if (dynamicFilter === false && h.isDynamic) return false;
-    if (pathFilter && !h.file.startsWith(pathFilter)) return false;
-    if (excludeFixtures && isFixturePath(h.file)) return false;
-    if (language && h.language !== language) return false;
-    return true;
-  });
+  if (target && (h.origin === 'literal' || h.kind !== target)) return false;
+  if (!matchesBooleanFilter(h.extMissing, extMissingFilter)) return false;
+  if (!matchesBooleanFilter(h.isDynamic, dynamicFilter)) return false;
+  if (pathFilter && !h.file.startsWith(pathFilter)) return false;
+  if (excludeFixtures && isFixturePath(h.file)) return false;
+  if (language && h.language !== language) return false;
+  return true;
+}
+
+function matchesBooleanFilter(value: boolean, filter: boolean | undefined): boolean {
+  return filter === undefined || value === filter;
 }
 
 /** Group order for the rendered output — most-actionable kinds first. */
@@ -269,10 +275,11 @@ function formatImportsResponse(hits: Hit[], filtered: Hit[], params: ImportRende
   const slice = filtered.slice(0, limit);
 
   const lines: string[] = [];
+  const truncationLabel = truncated ? ` (showing first ${limit})` : '';
   lines.push(
     buildImportsTitle(source, filters),
     '',
-    `**Matched:** ${filtered.length}${truncated ? ` (showing first ${limit})` : ''} / ${hits.length} total`,
+    `**Matched:** ${filtered.length}${truncationLabel} / ${hits.length} total`,
   );
 
   appendFixtureExclusionNote({ lines, hits, filters });
@@ -418,7 +425,7 @@ export function buildImportsGroupSpec(args: {
   key: string;
   hits: ReadonlyArray<Hit>;
   countLabel: string;
-  source: 'static' | 'literal' | 'all';
+  source: ImportSourceFilter;
 }): MarkdownBulletListSpec<Hit> {
   const { key, hits, countLabel, source } = args;
   return {
@@ -451,7 +458,7 @@ function appendGroupedHits(args: AppendGroupedHitsArgs): void {
 }
 
 /** Compose the active-filter title row, omitting the implicit `source=static` default. */
-function buildImportsTitle(source: 'static' | 'literal' | 'all', filters: ImportFilters): string {
+function buildImportsTitle(source: ImportSourceFilter, filters: ImportFilters): string {
   const parts: string[] = ['## Imports'];
   if (source !== 'static') parts.push(`(source=${source})`);
   if (filters.target) parts.push(`(target=${filters.target})`);
@@ -467,7 +474,7 @@ function buildImportsTitle(source: 'static' | 'literal' | 'all', filters: Import
 }
 
 /** Build the bracketed flag suffix on a hit row, e.g. ` [ext-missing, dynamic, static]`. */
-function formatHitFlags(h: Hit, source: 'static' | 'literal' | 'all'): string {
+function formatHitFlags(h: Hit, source: ImportSourceFilter): string {
   const flags: string[] = [];
   if (h.extMissing) flags.push('ext-missing');
   if (h.isDynamic) flags.push('dynamic');

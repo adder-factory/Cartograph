@@ -1,15 +1,19 @@
-/* eslint-disable */
+/* eslint-disable no-console, sonarjs/cognitive-complexity */
 /**
  * End-to-end demo of every LLM feature shipped in this PR.
  *
  *   node scripts/demo-all-features.js [--summary-cap-s=120]
  */
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { performance } = require('perf_hooks');
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const { default: Cartograph } = require(path.join(PROJECT_ROOT, 'dist', 'index.js'));
 const { LlmClient } = require(path.join(PROJECT_ROOT, 'dist', 'llm', 'client.js'));
@@ -261,9 +265,7 @@ async function main() {
   // Pick a well-known symbol with a summary
   const summarizedNodes = cg.searchNodes('summarize', { limit: 5 });
   const seed = summarizedNodes.find((r) => cg.getSymbolSummaries([r.node.id]).get(r.node.id));
-  if (!seed) {
-    console.log('  (no summarised seed node found yet)');
-  } else {
+  if (seed) {
     sub(`Seed: ${seed.node.name} ${seed.node.filePath}:${seed.node.startLine}`);
     const similar = await cg.findSimilar(seed.node.id, { limit: 5 });
     const sums = cg.getSymbolSummaries(similar.map((r) => r.node.id));
@@ -274,6 +276,8 @@ async function main() {
       const s = sums.get(r.node.id);
       if (s) console.log(`        ↳ ${s}`);
     }
+  } else {
+    console.log('  (no summarised seed node found yet)');
   }
 
   // -------------------------------------------------------------------
@@ -381,7 +385,9 @@ async function main() {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('Demo failed:', err);
   process.exit(1);
-});
+}

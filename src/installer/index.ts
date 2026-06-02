@@ -101,8 +101,10 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     clack.note('cd your-project\ncartograph admin init -i', 'Quick start');
   }
 
-  const finalNote =
-    targets.length > 0 ? `Done! Restart your agent${targets.length > 1 ? 's' : ''} to use Cartograph.` : 'Done!';
+  let finalNote = 'Done!';
+  if (targets.length > 0) {
+    finalNote = `Done! Restart your agent${targets.length > 1 ? 's' : ''} to use Cartograph.`;
+  }
   clack.outro(finalNote);
 }
 
@@ -214,7 +216,12 @@ function installTargetsAt(args: InstallTargetsArgs): void {
     }
     const result = target.install(location, { autoAllow });
     for (const file of result.files) {
-      const verb = file.action === 'unchanged' ? 'Unchanged' : file.action === 'created' ? 'Created' : 'Updated';
+      let verb = 'Updated';
+      if (file.action === 'unchanged') {
+        verb = 'Unchanged';
+      } else if (file.action === 'created') {
+        verb = 'Created';
+      }
       clack.log.success(`${target.displayName}: ${verb} ${tildify(file.path)}`);
     }
     for (const note of result.notes ?? []) {

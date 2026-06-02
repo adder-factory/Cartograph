@@ -150,7 +150,7 @@ function resolvePackageDir(pkg: string): string | null {
 
 /** A `.wasm` bundled in the package whose name matches the grammar, or null. */
 function findBundledWasm(pkgDir: string, g: Grammar): string | null {
-  const norm = (s: string) => s.replace(/[-_]/g, '').toLowerCase();
+  const norm = (s: string) => s.replaceAll(/[-_]/g, '').toLowerCase();
   const want = norm(g.wasm);
   // Scan the package root AND (when set) the grammar subdir — packages
   // vary on where they place a bundled `.wasm`.
@@ -263,7 +263,7 @@ async function loadTest(wasmPath: string, sample: string): Promise<string | null
     const lang = await wts.Language.load(fs.readFileSync(wasmPath));
     wtsParser!.setLanguage(lang);
     const tree = wtsParser!.parse(sample);
-    if (!tree || !tree.rootNode) return 'parse returned no tree';
+    if (!tree?.rootNode) return 'parse returned no tree';
     const rootType = tree.rootNode.type;
     tree.delete();
     return rootType ? null : 'empty root node';
@@ -284,6 +284,89 @@ async function loadTest(wasmPath: string, sample: string): Promise<string | null
   }
 }
 
+interface BuildGrammarState {
+  harvested: string[];
+  built: string[];
+  tagsHarvested: string[];
+  failed: Array<{ wasm: string; reason: string }>;
+  missingPkgs: string[];
+}
+
+async function tryHarvestBundledWasm(
+  g: Grammar,
+  pkgDir: string,
+  grammarDir: string,
+  outPath: string,
+  state: BuildGrammarState,
+): Promise<boolean> {
+  const bundled = findBundledWasm(pkgDir, g);
+  if (!bundled) return false;
+  const err = await loadTest(bundled, g.sample);
+  if (err) {
+    console.log(`  (bundled ${g.wasm} rejected: ${err} — building from source)`);
+    return false;
+  }
+  fs.copyFileSync(bundled, outPath);
+  state.harvested.push(g.wasm);
+  console.log(`  harvested  ${g.wasm.padEnd(12)} ← ${path.relative(REPO_ROOT, bundled)}`);
+  maybeHarvestTags(g, pkgDir, grammarDir, state.tagsHarvested, state.failed);
+  return true;
+}
+
+async function buildTargetWasm(
+  g: Grammar,
+  treeSitterBin: string,
+  grammarDir: string,
+  outPath: string,
+  failed: Array<{ wasm: string; reason: string }>,
+): Promise<boolean | null> {
+  let outcome: string | null;
+  try {
+    buildWasm(treeSitterBin, grammarDir, outPath);
+    outcome = await loadTest(outPath, g.sample);
+  } catch (err) {
+    outcome = `build failed: ${err instanceof Error ? err.message.split('\n')[0] : err}`;
+  }
+
+  let repaired = false;
+  if (outcome && regenerateGrammar(treeSitterBin, grammarDir)) {
+    try {
+      buildWasm(treeSitterBin, grammarDir, outPath);
+      outcome = await loadTest(outPath, g.sample);
+      repaired = outcome === null;
+    } catch (err) {
+      outcome = `rebuild failed: ${err instanceof Error ? err.message.split('\n')[0] : err}`;
+    }
+  }
+
+  if (!outcome) return repaired;
+  fs.rmSync(outPath, { force: true });
+  failed.push({ wasm: g.wasm, reason: outcome });
+  return null;
+}
+
+async function processGrammarTarget(g: Grammar, treeSitterBin: string, state: BuildGrammarState): Promise<void> {
+  const pkgDir = resolvePackageDir(g.pkg);
+  if (!pkgDir) {
+    state.missingPkgs.push(g.pkg);
+    state.failed.push({ wasm: g.wasm, reason: `source package '${g.pkg}' not installed` });
+    return;
+  }
+
+  const grammarDir = g.subdir ? path.join(pkgDir, g.subdir) : pkgDir;
+  const outPath = path.join(OUT_DIR, `${g.wasm}.wasm`);
+  if (!forceBuild && (await tryHarvestBundledWasm(g, pkgDir, grammarDir, outPath, state))) return;
+
+  const repaired = await buildTargetWasm(g, treeSitterBin, grammarDir, outPath, state.failed);
+  if (repaired === null) return;
+
+  state.built.push(g.wasm);
+  console.log(
+    `  built      ${g.wasm.padEnd(12)} ← tree-sitter build --wasm${repaired ? ' (regenerated — shipped parser.c was broken)' : ''}`,
+  );
+  maybeHarvestTags(g, pkgDir, grammarDir, state.tagsHarvested, state.failed);
+}
+
 // ── main ────────────────────────────────────────────────────────────
 
 async function main(): Promise<void> {
@@ -301,91 +384,40 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const harvested: string[] = [];
-  const built: string[] = [];
-  const tagsHarvested: string[] = [];
-  const failed: Array<{ wasm: string; reason: string }> = [];
-  const missingPkgs: string[] = [];
+  const state: BuildGrammarState = {
+    harvested: [],
+    built: [],
+    tagsHarvested: [],
+    failed: [],
+    missingPkgs: [],
+  };
 
   for (const g of targets) {
-    const pkgDir = resolvePackageDir(g.pkg);
-    if (!pkgDir) {
-      missingPkgs.push(g.pkg);
-      failed.push({ wasm: g.wasm, reason: `source package '${g.pkg}' not installed` });
-      continue;
-    }
-    const grammarDir = g.subdir ? path.join(pkgDir, g.subdir) : pkgDir;
-    const outPath = path.join(OUT_DIR, `${g.wasm}.wasm`);
-
-    // 1. harvest
-    if (!forceBuild) {
-      const bundled = findBundledWasm(pkgDir, g);
-      if (bundled) {
-        const err = await loadTest(bundled, g.sample);
-        if (!err) {
-          fs.copyFileSync(bundled, outPath);
-          harvested.push(g.wasm);
-          console.log(`  harvested  ${g.wasm.padEnd(12)} ← ${path.relative(REPO_ROOT, bundled)}`);
-          maybeHarvestTags(g, pkgDir, grammarDir, tagsHarvested, failed);
-          continue;
-        }
-        console.log(`  (bundled ${g.wasm} rejected: ${err} — building from source)`);
-      }
-    }
-
-    // 2. build — from the maintainer's shipped `parser.c` first (keeps
-    //    their grammar revision + ABI). Regenerate with the current CLI
-    //    only as a repair: a stale shipped parser.c can build cleanly
-    //    yet trap at runtime (tree-sitter-graphql).
-    let outcome: string | null;
-    try {
-      buildWasm(treeSitterBin, grammarDir, outPath);
-      outcome = await loadTest(outPath, g.sample);
-    } catch (err) {
-      outcome = `build failed: ${err instanceof Error ? err.message.split('\n')[0] : err}`;
-    }
-    let repaired = false;
-    if (outcome && regenerateGrammar(treeSitterBin, grammarDir)) {
-      try {
-        buildWasm(treeSitterBin, grammarDir, outPath);
-        outcome = await loadTest(outPath, g.sample);
-        repaired = outcome === null;
-      } catch (err) {
-        outcome = `rebuild failed: ${err instanceof Error ? err.message.split('\n')[0] : err}`;
-      }
-    }
-    if (outcome) {
-      fs.rmSync(outPath, { force: true });
-      failed.push({ wasm: g.wasm, reason: outcome });
-      continue;
-    }
-    built.push(g.wasm);
-    console.log(
-      `  built      ${g.wasm.padEnd(12)} ← tree-sitter build --wasm${repaired ? ' (regenerated — shipped parser.c was broken)' : ''}`,
-    );
-    maybeHarvestTags(g, pkgDir, grammarDir, tagsHarvested, failed);
+    await processGrammarTarget(g, treeSitterBin, state);
   }
 
   // ── summary ───────────────────────────────────────────────────────
   console.log(
-    `\n${harvested.length} harvested · ${built.length} built · ${failed.length} failed` +
+    `\n${state.harvested.length} harvested · ${state.built.length} built · ${state.failed.length} failed` +
       `  →  ${path.relative(REPO_ROOT, OUT_DIR)}/`,
   );
-  if (tagsHarvested.length > 0) {
-    console.log(`${tagsHarvested.length} tags.scm harvested  →  ${path.relative(REPO_ROOT, TAGS_DIR)}/`);
+  if (state.tagsHarvested.length > 0) {
+    console.log(`${state.tagsHarvested.length} tags.scm harvested  →  ${path.relative(REPO_ROOT, TAGS_DIR)}/`);
   }
-  if (missingPkgs.length > 0) {
-    console.log(`\nInstall missing source packages, then re-run:\n  npm i -D ${[...new Set(missingPkgs)].join(' ')}`);
+  if (state.missingPkgs.length > 0) {
+    console.log(`\nInstall missing source packages, then re-run:\n  npm i -D ${[...new Set(state.missingPkgs)].join(' ')}`);
   }
-  if (failed.length > 0) {
+  if (state.failed.length > 0) {
     console.log('\nFailures:');
-    for (const f of failed) console.log(`  ✗ ${f.wasm}: ${f.reason}`);
+    for (const f of state.failed) console.log(`  ✗ ${f.wasm}: ${f.reason}`);
     process.exit(1);
   }
   console.log('✓ all grammars produced and load-tested clean in web-tree-sitter');
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

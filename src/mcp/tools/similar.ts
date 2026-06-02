@@ -149,11 +149,18 @@ interface ResolveHitsArgs {
  * on-demand vec0. The two sources never mix per call: edge results
  * mean a `build-similarity-edges` pass ran, in which case we trust it.
  */
-function resolveHits(args: ResolveHitsArgs): { hits: Hit[]; via: 'edge' | 'vec0' | 'empty' } {
+type SimilarHitSource = 'edge' | 'vec0' | 'empty';
+
+function resolveHits(args: ResolveHitsArgs): { hits: Hit[]; via: SimilarHitSource } {
   const { cg, source, k, minScore, sameLanguage } = args;
   const edgeHits = readSimilarFromEdges({ cg, nodeId: source.id, k, minScore });
   let hits = edgeHits.length > 0 ? edgeHits : readSimilarFromVec({ cg, node: source, k, minScore });
-  const via: 'edge' | 'vec0' | 'empty' = edgeHits.length > 0 ? 'edge' : hits.length > 0 ? 'vec0' : 'empty';
+  let via: SimilarHitSource = 'empty';
+  if (edgeHits.length > 0) {
+    via = 'edge';
+  } else if (hits.length > 0) {
+    via = 'vec0';
+  }
 
   if (sameLanguage) {
     hits = hits.filter((h) => h.node.language === source.language);

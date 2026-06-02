@@ -17,28 +17,30 @@ function findBalancedArrayEnd(text: string, start: number): number {
   let inString = false;
   let escapeNext = false;
   for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (escapeNext) {
-      escapeNext = false;
-      continue;
-    }
-    if (ch === '\\' && inString) {
-      escapeNext = true;
-      continue;
-    }
-    if (ch === '"') {
-      inString = !inString;
-      continue;
-    }
+    const state = advanceStringScanState(text[i], inString, escapeNext);
+    inString = state.inString;
+    escapeNext = state.escapeNext;
+    if (state.consumed) continue;
     if (inString) continue;
-    if (ch === '[') {
+    if (text[i] === '[') {
       depth++;
       continue;
     }
-    if (ch !== ']') continue;
+    if (text[i] !== ']') continue;
     if (--depth === 0) return i;
   }
   return -1;
+}
+
+function advanceStringScanState(
+  ch: string | undefined,
+  inString: boolean,
+  escapeNext: boolean,
+): { inString: boolean; escapeNext: boolean; consumed: boolean } {
+  if (escapeNext) return { inString, escapeNext: false, consumed: true };
+  if (ch === '\\' && inString) return { inString, escapeNext: true, consumed: true };
+  if (ch === '"') return { inString: !inString, escapeNext: false, consumed: true };
+  return { inString, escapeNext: false, consumed: false };
 }
 
 /**

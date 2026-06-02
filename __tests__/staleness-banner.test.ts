@@ -96,7 +96,7 @@ describe('FileWatcher pending-files API (F#60)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -147,7 +147,7 @@ describe('staleness banner on ToolHandler.execute (F#60)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -243,7 +243,7 @@ describe('textMentionsPath word-boundary check (F#60 internal)', () => {
       // The footer SHOULD fire — a.ts is pending and elsewhere in project.
       expect(text).toContain('pending index sync but were not referenced above');
       cg.watcher.stop();
-      cg.destroy();
+      cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

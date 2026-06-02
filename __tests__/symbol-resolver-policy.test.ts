@@ -83,7 +83,7 @@ describe('withDisambiguationBanner — string primitive', () => {
     expect(withDisambiguationBanner(undefined, 'body')).toBe('body');
   });
 
-  it('normalises leading \\n and inserts a blank-line separator', () => {
+  it(String.raw`normalises leading \n and inserts a blank-line separator`, () => {
     const out = withDisambiguationBanner('\n\n> **Note:** picked X', '## Body header');
     expect(out).toBe('> **Note:** picked X\n\n## Body header');
   });

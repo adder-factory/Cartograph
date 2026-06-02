@@ -25,7 +25,7 @@
  *                (default — original score-based ordering)
  *
  * Unknown field prefixes (e.g. `foo:bar`) are passed through to FTS
- * as plain text — that's how someone searching for `TODO:` gets a
+   * as plain text — that's how someone searching for task markers gets a
  * result instead of a parse error.
  *
  * Quoting:
@@ -284,7 +284,7 @@ function classifyQueryToken(tok: string, out: ParsedQuery, textParts: string[]):
  * through to FTS.
  */
 function parseCentralityValue(raw: string): CentralityFilter | null {
-  const m = /^(>=|<=|>|<)?([0-9]+(?:\.[0-9]+)?)$/.exec(raw);
+  const m = /^(>=|<=|>|<)?(\d+(?:\.\d+)?)$/.exec(raw);
   if (!m) return null;
   const op = (m[1] ?? '>=') as CentralityComparator;
   const value = Number(m[2]);

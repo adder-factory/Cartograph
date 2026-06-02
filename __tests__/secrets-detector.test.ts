@@ -174,7 +174,7 @@ describe('detectSecretsHandling — composite scoring', () => {
       'const tok = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";', // jwt-literal
     ].join('\n');
     const result = detectSecretsHandling(input({ body }));
-    expect(result.score).toBeLessThanOrEqual(1.0);
+    expect(result.score).toBeLessThanOrEqual(1);
     expect(result.signals.length).toBeGreaterThan(3);
   });
 

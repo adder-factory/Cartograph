@@ -51,8 +51,7 @@ function formatCodeBlocksSection(codeBlocks: TaskContext['codeBlocks']): string[
   const lines: string[] = ['### Code\n'];
   for (const block of codeBlocks) {
     const nodeName = block.node?.name ?? 'Unknown';
-    lines.push(`#### ${nodeName} (${block.filePath}:${block.startLine})\n`);
-    lines.push('```' + block.language, block.content, '```\n');
+    lines.push(`#### ${nodeName} (${block.filePath}:${block.startLine})\n`, '```' + block.language, block.content, '```\n');
   }
   return lines;
 }
@@ -66,25 +65,17 @@ function formatCodeBlocksSection(codeBlocks: TaskContext['codeBlocks']): string[
  * - Code blocks only for key symbols
  */
 export function formatContextAsMarkdown(context: TaskContext): string {
-  const lines: string[] = [];
-
-  // Header with query
-  lines.push('## Code Context\n');
-  lines.push(`**Query:** ${context.query}\n`);
-
-  // Entry points - compact format
-  lines.push(...formatEntryPointsSection(context.entryPoints));
-
-  // Related symbols - compact list (skip verbose structure tree)
   const otherSymbols = Array.from(context.subgraph.nodes.values())
     .filter((n) => !context.entryPoints.some((e) => e.id === n.id))
     .slice(0, 10); // Limit to 10 related symbols
-  lines.push(...formatRelatedSymbolsSection(otherSymbols));
 
-  // Code blocks - only for key entry points
-  lines.push(...formatCodeBlocksSection(context.codeBlocks));
-
-  return lines.join('\n');
+  return [
+    '## Code Context\n',
+    `**Query:** ${context.query}\n`,
+    ...formatEntryPointsSection(context.entryPoints),
+    ...formatRelatedSymbolsSection(otherSymbols),
+    ...formatCodeBlocksSection(context.codeBlocks),
+  ].join('\n');
 }
 
 /**

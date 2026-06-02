@@ -53,8 +53,10 @@ export const MIGRATION: MigrationModule = {
     // rebuild's INSERT step would trip the broken trigger. Production
     // DBs always have these columns since v1, so the guard is a
     // no-op there.
-    const nodeCols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-    if (!nodeCols.includes('start_line') || !nodeCols.includes('end_line')) {
+    const nodeCols = new Set(
+      (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    if (!nodeCols.has('start_line') || !nodeCols.has('end_line')) {
       return;
     }
 

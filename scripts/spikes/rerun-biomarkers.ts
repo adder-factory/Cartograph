@@ -29,7 +29,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('rerun-biomarkers failed:', err);
   process.exit(1);
-});
+}

@@ -923,6 +923,32 @@ function getLargeFunctionThreshold(): number {
   return Number.isFinite(n) && n >= 0 ? n : 500;
 }
 
+function hasFunctionBodyOverThreshold(ext: TreeSitterExtractor, root: SyntaxNode, threshold: number): boolean {
+  const fnTypes = new Set<string>([...ext.extractor!.functionTypes, ...ext.extractor!.methodTypes]);
+  const stack: SyntaxNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (nodeBodyExceedsThreshold(ext, node, fnTypes, threshold)) return true;
+    for (const child of node.namedChildren) {
+      if (child) stack.push(child);
+    }
+  }
+  return false;
+}
+
+function nodeBodyExceedsThreshold(
+  ext: TreeSitterExtractor,
+  node: SyntaxNode,
+  fnTypes: ReadonlySet<string>,
+  threshold: number,
+): boolean {
+  if (!fnTypes.has(node.type)) return false;
+  const body = resolveNodeBody(ext, node);
+  if (!body) return false;
+  const loc = body.endPosition.row - body.startPosition.row + 1;
+  return loc > threshold;
+}
+
 /**
  * F#12 slice 1: decide whether this file gets eager nested-function
  * extraction. JS/JS-family-only — other languages need their own
@@ -940,22 +966,7 @@ function determineEagerNestedFnMode(ext: TreeSitterExtractor, root: SyntaxNode):
   if (threshold === Number.POSITIVE_INFINITY) return true;
   const fileLoc = root.endPosition.row - root.startPosition.row + 1;
   if (fileLoc <= threshold) return true;
-  const fnTypes = new Set<string>([...ext.extractor.functionTypes, ...ext.extractor.methodTypes]);
-  const stack: SyntaxNode[] = [root];
-  while (stack.length > 0) {
-    const node = stack.pop()!;
-    if (fnTypes.has(node.type)) {
-      const body = resolveNodeBody(ext, node);
-      if (body) {
-        const loc = body.endPosition.row - body.startPosition.row + 1;
-        if (loc > threshold) return false;
-      }
-    }
-    for (const child of node.namedChildren) {
-      if (child) stack.push(child);
-    }
-  }
-  return true;
+  return !hasFunctionBodyOverThreshold(ext, root, threshold);
 }
 
 /**

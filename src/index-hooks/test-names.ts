@@ -34,12 +34,31 @@ import {
 
 const TS_JS_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 
-// Captures: group 1 = quote char (' / " / `), group 2 = description.
-// The middle non-capture handles common chained forms (`it.skip`,
-// `test.each`, etc.). Description body allows escaped chars; bails on
-// the matching quote so each call extracts one description per match.
-const TEST_CALL_RE =
-  /(?:^|[^\w$.])(?:it|test|describe|context|fit|fdescribe|fcontext|xit|xtest|xdescribe)(?:\.(?:skip|only|each|todo|concurrent|sequential|failing))?\s*\(\s*(['"`])((?:\\.|(?!\1).)*)\1/g;
+const TEST_CALL_NAMES: ReadonlySet<string> = new Set([
+  'it',
+  'test',
+  'describe',
+  'context',
+  'fit',
+  'fdescribe',
+  'fcontext',
+  'xit',
+  'xtest',
+  'xdescribe',
+]);
+const TEST_CALL_MODIFIERS: ReadonlySet<string> = new Set([
+  'skip',
+  'only',
+  'each',
+  'todo',
+  'concurrent',
+  'sequential',
+  'failing',
+]);
+
+// Captures the callee before `(`; quoted description parsing happens
+// separately so the call-shape regex stays simple.
+const TEST_CALL_OPEN_RE = /(?:^|[^\w$.])([A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)?)\s*\(\s*/g;
 
 function lineOf(text: string, offset: number): number {
   let line = 1;
@@ -52,6 +71,29 @@ function lineOf(text: string, offset: number): number {
   return line;
 }
 
+function isRecognizedTestCall(callee: string): boolean {
+  const parts = callee.split('.');
+  if (parts.length === 1) return TEST_CALL_NAMES.has(parts[0]!);
+  return parts.length === 2 && TEST_CALL_NAMES.has(parts[0]!) && TEST_CALL_MODIFIERS.has(parts[1]!);
+}
+
+function readQuotedDescription(text: string, offset: number): { description: string; endOffset: number } | null {
+  const quote = text[offset];
+  if (quote !== "'" && quote !== '"' && quote !== '`') return null;
+  let out = '';
+  for (let i = offset + 1; i < text.length; i++) {
+    const char = text[i]!;
+    if (char === quote) return { description: out, endOffset: i + 1 };
+    if (char === '\\' && i + 1 < text.length) {
+      out += char + text[i + 1]!;
+      i++;
+      continue;
+    }
+    out += char;
+  }
+  return null;
+}
+
 function mineFile(rootDir: string, relPath: string): TestNameRow[] {
   let text: string;
   try {
@@ -60,10 +102,15 @@ function mineFile(rootDir: string, relPath: string): TestNameRow[] {
     return [];
   }
   const out: TestNameRow[] = [];
-  TEST_CALL_RE.lastIndex = 0;
+  TEST_CALL_OPEN_RE.lastIndex = 0;
   let m: RegExpExecArray | null;
-  while ((m = TEST_CALL_RE.exec(text)) !== null) {
-    const description = m[2];
+  while ((m = TEST_CALL_OPEN_RE.exec(text)) !== null) {
+    const callee = m[1];
+    if (!callee || !isRecognizedTestCall(callee)) continue;
+    const quoted = readQuotedDescription(text, TEST_CALL_OPEN_RE.lastIndex);
+    if (!quoted) continue;
+    TEST_CALL_OPEN_RE.lastIndex = quoted.endOffset;
+    const { description } = quoted;
     if (!description || description.length === 0) continue;
     if (description.length > 500) continue;
     const decoded = description.replaceAll(/\\(['"`\\])/g, '$1');

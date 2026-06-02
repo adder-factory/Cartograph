@@ -157,7 +157,7 @@ export class LiquidExtractor extends StandaloneExtractor {
    */
   private extractSnippetReferences(fileNodeId: string): void {
     const st = this.state();
-    const renderRegex = /\{%[-]?\s*(render|include)\s+['"]([^'"]+)['"]/g;
+    const renderRegex = /\{%-?\s*(render|include)\s+['"]([^'"]+)['"]/g;
     let match: RegExpExecArray | null;
     while ((match = renderRegex.exec(this.source)) !== null) {
       const [fullMatch, tagType, snippetName] = match;
@@ -177,7 +177,7 @@ export class LiquidExtractor extends StandaloneExtractor {
    */
   private extractSectionReferences(fileNodeId: string): void {
     const st = this.state();
-    const sectionRegex = /\{%[-]?\s*section\s+['"]([^'"]+)['"]/g;
+    const sectionRegex = /\{%-?\s*section\s+['"]([^'"]+)['"]/g;
     let match: RegExpExecArray | null;
     while ((match = sectionRegex.exec(this.source)) !== null) {
       const [fullMatch, sectionName] = match;
@@ -205,7 +205,7 @@ export class LiquidExtractor extends StandaloneExtractor {
    */
   private extractSchema(fileNodeId: string): void {
     const { source, idFactory, filePath, nodes, edges } = this;
-    const schemaRegex = /\{%[-]?\s*schema\s*[-]?%\}([\s\S]*?)\{%[-]?\s*endschema\s*[-]?%\}/g;
+    const schemaRegex = /\{%-?\s*schema\s*-?%\}([\s\S]*?)\{%-?\s*endschema\s*-?%\}/g;
     let match: RegExpExecArray | null;
 
     while ((match = schemaRegex.exec(source)) !== null) {
@@ -251,7 +251,7 @@ export class LiquidExtractor extends StandaloneExtractor {
    * Extract {% assign var = value %} statements
    */
   private extractAssignments(fileNodeId: string): void {
-    const assignRegex = /\{%[-]?\s*assign\s+(\w+)\s*=/g;
+    const assignRegex = /\{%-?\s*assign\s+(\w+)\s*=/g;
     let match: RegExpExecArray | null;
 
     while ((match = assignRegex.exec(this.source)) !== null) {

@@ -233,6 +233,16 @@ const getSqlRefsByTableAndOpQuery = defineQuery({
 
 // ─── Module augmentation: register typed entries on QueryRegistry ─────────
 
+type SqlRefOperation = 'read' | 'write' | 'ddl';
+type SqlRefByTableOpRow = {
+  op: SqlRefOperation;
+  filePath: string;
+  line: number;
+  sourceNodeId: string | null;
+  sourceName: string | null;
+  sourceKind: string | null;
+};
+
 declare module './queries.js' {
   interface QueryRegistry {
     deleteConfigRefsByFile?: TypedQuery<{ filePath: string }, never>;
@@ -285,25 +295,11 @@ declare module './queries.js' {
     >;
     getSqlRefsByTableAnyOp?: TypedQuery<
       { tableName: string },
-      {
-        op: 'read' | 'write' | 'ddl';
-        filePath: string;
-        line: number;
-        sourceNodeId: string | null;
-        sourceName: string | null;
-        sourceKind: string | null;
-      }
+      SqlRefByTableOpRow
     >;
     getSqlRefsByTableAndOp?: TypedQuery<
-      { tableName: string; op: 'read' | 'write' | 'ddl' },
-      {
-        op: 'read' | 'write' | 'ddl';
-        filePath: string;
-        line: number;
-        sourceNodeId: string | null;
-        sourceName: string | null;
-        sourceKind: string | null;
-      }
+      { tableName: string; op: SqlRefOperation },
+      SqlRefByTableOpRow
     >;
   }
 }
@@ -458,7 +454,7 @@ export function applySqlRefs(
   qb: QueryBuilder,
   rows: Array<{
     tableName: string;
-    op: 'read' | 'write' | 'ddl';
+    op: SqlRefOperation;
     sourceNodeId: string | null;
     filePath: string;
     line: number;
@@ -484,7 +480,7 @@ export function replaceAllSqlRefs(
   qb: QueryBuilder,
   rows: Array<{
     tableName: string;
-    op: 'read' | 'write' | 'ddl';
+    op: SqlRefOperation;
     sourceNodeId: string | null;
     filePath: string;
     line: number;
@@ -543,15 +539,8 @@ export function getSqlTables(
 export function getSqlRefsByTable(
   qb: QueryBuilder,
   tableName: string,
-  opts: { op?: 'read' | 'write' | 'ddl' } = {},
-): Array<{
-  op: 'read' | 'write' | 'ddl';
-  filePath: string;
-  line: number;
-  sourceNodeId: string | null;
-  sourceName: string | null;
-  sourceKind: string | null;
-}> {
+  opts: { op?: SqlRefOperation } = {},
+): Array<SqlRefByTableOpRow> {
   const tableLower = tableName.toLowerCase();
   if (opts.op) {
     qb.queries.getSqlRefsByTableAndOp ??= getSqlRefsByTableAndOpQuery(qb.db);

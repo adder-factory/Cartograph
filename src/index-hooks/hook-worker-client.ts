@@ -39,7 +39,7 @@ import type { SyncResult } from '../extraction/index.js';
 import type { CartographConfig } from '../types.js';
 
 /** True iff we're running on the Bun runtime. */
-const IS_BUN = typeof (globalThis as { Bun?: unknown }).Bun !== 'undefined';
+const IS_BUN = (globalThis as { Bun?: unknown }).Bun !== undefined;
 
 /**
  * Minimal Node-style child handle the rest of this file talks to.

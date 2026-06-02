@@ -66,80 +66,7 @@ export const svelteResolver: FrameworkResolver = {
   },
 
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
-    // Pattern 1: Svelte runes ($state, $derived, $effect, etc.)
-    if (isRuneReference(ref.referenceName)) {
-      // Runes are compiler-provided — return a high-confidence "framework" resolution
-      // so Cartograph doesn't waste time searching for user-defined symbols.
-      // We use the fromNodeId as targetNodeId since runes don't have real targets.
-      return {
-        original: ref,
-        targetNodeId: ref.fromNodeId,
-        confidence: 1.0,
-        resolvedBy: 'framework',
-      };
-    }
-
-    // Pattern 2: Store auto-subscriptions ($storeName)
-    if (ref.referenceName.startsWith('$') && !ref.referenceName.startsWith('$$')) {
-      const storeName = ref.referenceName.substring(1);
-      const storeNode = context.getNodesByName(storeName).find((n) => n.kind === 'variable' || n.kind === 'constant');
-      if (storeNode) {
-        return {
-          original: ref,
-          targetNodeId: storeNode.id,
-          confidence: 0.85,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 3: SvelteKit module imports ($app/*, $env/*, $lib/*)
-    if (ref.referenceKind === 'imports' && ref.referenceName.startsWith('$')) {
-      // $lib/* resolves to src/lib/* — try to find the target file
-      if (ref.referenceName.startsWith('$lib/')) {
-        const libPath = ref.referenceName.replace('$lib/', 'src/lib/');
-        // Try common extensions
-        for (const ext of ['', '.ts', '.js', '.svelte', '/index.ts', '/index.js']) {
-          const fullPath = libPath + ext;
-          if (context.fileExists(fullPath)) {
-            const nodes = context.getNodesInFile(fullPath);
-            if (nodes.length > 0) {
-              return {
-                original: ref,
-                targetNodeId: nodes[0]!.id,
-                confidence: 0.9,
-                resolvedBy: 'framework',
-              };
-            }
-          }
-        }
-      }
-
-      // $app/* and $env/* are framework-provided
-      if (SVELTEKIT_MODULE_PREFIXES.some((prefix) => ref.referenceName.startsWith(prefix))) {
-        return {
-          original: ref,
-          targetNodeId: ref.fromNodeId,
-          confidence: 1.0,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 4: Component references (PascalCase) — resolve to .svelte files
-    if (isPascalCase(ref.referenceName) && ref.referenceKind === 'calls') {
-      const result = resolveComponent(ref.referenceName, ref.filePath, context);
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.8,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    return null;
+    return resolveRune(ref) ?? resolveStoreSubscription(ref, context) ?? resolveSvelteKitImport(ref, context) ?? resolveSvelteComponent(ref, context);
   },
 
   // SvelteKit route files: `+page.svelte` (svelte), `+server.ts` /
@@ -194,6 +121,50 @@ function isRuneReference(name: string): boolean {
   if (name === '$state' || name === '$derived' || name === '$effect') return true;
 
   return false;
+}
+
+function frameworkResolved(ref: UnresolvedRef, targetNodeId: string, confidence: number): ResolvedRef {
+  return { original: ref, targetNodeId, confidence, resolvedBy: 'framework' };
+}
+
+function resolveRune(ref: UnresolvedRef): ResolvedRef | null {
+  if (!isRuneReference(ref.referenceName)) return null;
+  return frameworkResolved(ref, ref.fromNodeId, 1);
+}
+
+function resolveStoreSubscription(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  if (!ref.referenceName.startsWith('$') || ref.referenceName.startsWith('$$')) return null;
+  const storeName = ref.referenceName.substring(1);
+  const storeNode = context.getNodesByName(storeName).find((n) => n.kind === 'variable' || n.kind === 'constant');
+  return storeNode ? frameworkResolved(ref, storeNode.id, 0.85) : null;
+}
+
+function resolveSvelteKitImport(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  if (ref.referenceKind !== 'imports' || !ref.referenceName.startsWith('$')) return null;
+  return resolveLibImport(ref, context) ?? resolveProvidedSvelteKitModule(ref);
+}
+
+function resolveLibImport(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  if (!ref.referenceName.startsWith('$lib/')) return null;
+  const libPath = ref.referenceName.replace('$lib/', 'src/lib/');
+  for (const ext of ['', '.ts', '.js', '.svelte', '/index.ts', '/index.js']) {
+    const fullPath = libPath + ext;
+    if (!context.fileExists(fullPath)) continue;
+    const nodes = context.getNodesInFile(fullPath);
+    if (nodes.length > 0) return frameworkResolved(ref, nodes[0]!.id, 0.9);
+  }
+  return null;
+}
+
+function resolveProvidedSvelteKitModule(ref: UnresolvedRef): ResolvedRef | null {
+  const isFrameworkModule = SVELTEKIT_MODULE_PREFIXES.some((prefix) => ref.referenceName.startsWith(prefix));
+  return isFrameworkModule ? frameworkResolved(ref, ref.fromNodeId, 1) : null;
+}
+
+function resolveSvelteComponent(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  if (!isPascalCase(ref.referenceName) || ref.referenceKind !== 'calls') return null;
+  const result = resolveComponent(ref.referenceName, ref.filePath, context);
+  return result ? frameworkResolved(ref, result, 0.8) : null;
 }
 
 /**

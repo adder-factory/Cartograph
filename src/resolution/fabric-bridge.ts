@@ -46,7 +46,7 @@ export interface FabricExtraction {
 
 // ─── Fabric Codegen (TS / TSX) ──────────────────────────────────────────────
 
-const CODEGEN_DECL_SRC = String.raw`codegenNativeComponent\s*(?:<[^>]+>)?\s*\(\s*['"]([A-Za-z_][A-Za-z0-9_]*)['"]`;
+const CODEGEN_DECL_SRC = String.raw`codegenNativeComponent\s*(?:<[^>]+>)?\s*\(\s*['"]([A-Za-z_]\w*)['"]`;
 
 /** Cheap gate: a Codegen spec file mentions `codegenNativeComponent`. */
 export function isFabricSpec(source: string): boolean {
@@ -66,7 +66,7 @@ function extractNativeProps(source: string): FabricMember[] {
   // `e` property node — rare in real NativeProps (function types are usually
   // single-line); these are name-discoverability nodes, so the over-capture is
   // low-harm and not worth paren-depth tracking.
-  const re = /^[ \t]*([A-Za-z_][\w]*)\??\s*:/gm;
+  const re = /^[ \t]*([A-Za-z_]\w*)\??\s*:/gm;
   let m: RegExpExecArray | null;
   while ((m = re.exec(iface.body)) !== null) {
     const name = m[1];
@@ -93,9 +93,9 @@ export function parseCodegenSpecs(source: string): FabricExtraction | null {
 
 // ─── Legacy Paper view managers (native) ────────────────────────────────────
 
-const OBJC_IMPL_SRC = String.raw`@implementation\s+([A-Za-z_][A-Za-z0-9_]*)`;
-const JVM_CLASS_SRC = String.raw`\bclass\s+([A-Za-z_][A-Za-z0-9_]*)\b`;
-const RCT_VIEW_PROP_SRC = String.raw`\bRCT_(?:EXPORT|CUSTOM|REMAP)_VIEW_PROPERTY\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)`;
+const OBJC_IMPL_SRC = String.raw`@implementation\s+([A-Za-z_]\w*)`;
+const JVM_CLASS_SRC = String.raw`\bclass\s+([A-Za-z_]\w*)\b`;
+const RCT_VIEW_PROP_SRC = String.raw`\bRCT_(?:EXPORT|CUSTOM|REMAP)_VIEW_PROPERTY\s*\(\s*([A-Za-z_]\w*)`;
 const REACT_PROP_SRC = String.raw`@ReactProp\s*\(\s*(?:name\s*=\s*)?["']([^"']+)["']`;
 
 /** Derive the JS-visible component name from a view-manager class name: strip a

@@ -66,14 +66,12 @@ async function main(): Promise<void> {
   // child shuts down on its own via the `disconnect` event or sticks.
 }
 
-void main().then(
-  () => {
-    // Normal exit — Bun should fire 'disconnect' on the child's IPC
-    // channel as the parent's end closes.
-    process.exit(0);
-  },
-  (err) => {
-    console.error('parent-exit bench failed:', err);
-    process.exit(1);
-  },
-);
+try {
+  await main();
+  // Normal exit — Bun should fire 'disconnect' on the child's IPC
+  // channel as the parent's end closes.
+  process.exit(0);
+} catch (err) {
+  console.error('parent-exit bench failed:', err);
+  process.exit(1);
+}

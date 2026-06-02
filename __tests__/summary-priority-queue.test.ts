@@ -92,7 +92,7 @@ describe('Summary Priority Queue', () => {
   });
 
   it('should silently skip FK-missing nodeIds', () => {
-    const result = enqueueForPrioritySummary({
+    enqueueForPrioritySummary({
       qb,
       nodeIds: ['nonexistent-node'],
     });

@@ -50,7 +50,8 @@ for (let i = 0; i < N_RUNS; i++) {
   prTimes.push(dt);
   if (i === 0) {
     const top = [...result.scores.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3);
-    console.log(`  top-3 by PR: ${top.map(([id, s]) => `${id.substring(0, 30)}=${s.toFixed(5)}`).join(', ')}`);
+    const topScores = top.map(([id, s]) => `${id.substring(0, 30)}=${s.toFixed(5)}`).join(', ');
+    console.log(`  top-3 by PR: ${topScores}`);
   }
 }
 console.log(`  per-run ms: [${prTimes.map((t) => t.toFixed(1)).join(', ')}]`);
@@ -80,7 +81,8 @@ if (embedRowCount.c === 0) {
   console.log(`  per-run ms: [${knnTimes.map((t) => t.toFixed(0)).join(', ')}]`);
   console.log(`  median: ${median(knnTimes).toFixed(0)}ms`);
   if (lastResult) {
-    console.log(`  result: ${lastResult.processed} processed, ${lastResult.written} edges${lastResult.reason ? ` (${lastResult.reason})` : ''}`);
+    const reasonSuffix = lastResult.reason ? ` (${lastResult.reason})` : '';
+    console.log(`  result: ${lastResult.processed} processed, ${lastResult.written} edges${reasonSuffix}`);
     console.log(`  effective KNN queries/sec: ${(lastResult.processed / (median(knnTimes) / 1000)).toFixed(0).toLocaleString()}`);
   }
 }

@@ -435,17 +435,7 @@ interface FindPartialClonesArgs {
 function findPartialClones(args: FindPartialClonesArgs): Finding[] {
   const { candidates, tokensById, flagged, minOverlap } = args;
   // Bucket eligible candidates by language.
-  const byLang = new Map<string, PartialItem[]>();
-  for (const c of candidates) {
-    if (flagged.has(c.nodeId)) continue;
-    if (c.endLine - c.startLine + 1 < DUP_NEAR_MIN_LOC) continue;
-    const tokens = tokensById.get(c.nodeId);
-    if (!tokens) continue;
-    const item: PartialItem = { candidate: c, multiset: tokenMultiset(tokens), total: tokens.length };
-    const g = byLang.get(c.language);
-    if (g) g.push(item);
-    else byLang.set(c.language, [item]);
-  }
+  const byLang = bucketPartialCloneCandidates(candidates, tokensById, flagged);
 
   // Direct-neighbour adjacency — nodeId → set of partial-clone peers.
   const neighbours = new Map<string, Set<string>>();
@@ -475,18 +465,45 @@ function findPartialClones(args: FindPartialClonesArgs): Finding[] {
 
   const findings: Finding[] = [];
   for (const [nodeId, peers] of neighbours) {
-    const member = byId.get(nodeId)!;
-    // The "class" for this finding is the node plus its direct peers.
-    const classMembers = [member, ...[...peers].map((id) => byId.get(id)!)];
-    findings.push({
-      nodeId,
-      biomarker: 'duplicate_code' as const,
-      severity: 'info' as const,
-      metric: member.endLine - member.startLine + 1,
-      detail: buildDetail(member, classMembers, 'partial'),
-    });
+    findings.push(buildPartialCloneFinding(nodeId, peers, byId));
   }
   return findings;
+}
+
+function bucketPartialCloneCandidates(
+  candidates: CandidateRow[],
+  tokensById: Map<string, string[]>,
+  flagged: Set<string>,
+): Map<string, PartialItem[]> {
+  const byLang = new Map<string, PartialItem[]>();
+  for (const c of candidates) {
+    if (flagged.has(c.nodeId)) continue;
+    if (c.endLine - c.startLine + 1 < DUP_NEAR_MIN_LOC) continue;
+    const tokens = tokensById.get(c.nodeId);
+    if (!tokens) continue;
+    const item: PartialItem = { candidate: c, multiset: tokenMultiset(tokens), total: tokens.length };
+    const g = byLang.get(c.language);
+    if (g) g.push(item);
+    else byLang.set(c.language, [item]);
+  }
+  return byLang;
+}
+
+function buildPartialCloneFinding(
+  nodeId: string,
+  peers: Set<string>,
+  byId: Map<string, CandidateRow>,
+): Finding {
+  const member = byId.get(nodeId)!;
+  // The "class" for this finding is the node plus its direct peers.
+  const classMembers = [member, ...[...peers].map((id) => byId.get(id)!)];
+  return {
+    nodeId,
+    biomarker: 'duplicate_code' as const,
+    severity: 'info' as const,
+    metric: member.endLine - member.startLine + 1,
+    detail: buildDetail(member, classMembers, 'partial'),
+  };
 }
 
 /**
@@ -639,11 +656,17 @@ function emitClassFindings(members: CandidateRow[]): Finding[] {
   const findings: Finding[] = [];
   const exactClaimed = new Set<string>();
 
-  // Pass 1 — peel off exact clones (byte-identical body_hash) under
-  // the lower DUP_MIN_LOC floor. A bucket can contain multiple
-  // exact sub-groups (e.g. two distinct sets of byte-identical
-  // bodies that all normalise to the same token stream); each
-  // sub-group ≥ 2 members produces its own findings.
+  emitExactCloneFindings(members, exactClaimed, findings);
+
+  emitNearCloneFindings(members, exactClaimed, findings);
+  return findings;
+}
+
+function emitExactCloneFindings(
+  members: CandidateRow[],
+  exactClaimed: Set<string>,
+  findings: Finding[],
+): void {
   const byBodyHash = new Map<string, CandidateRow[]>();
   for (const m of members) {
     const g = byBodyHash.get(m.bodyHash);
@@ -665,18 +688,18 @@ function emitClassFindings(members: CandidateRow[]): Finding[] {
       });
     }
   }
+}
 
-  // Pass 2 — near clones across the remainder. Members already
-  // claimed by an exact sub-group above are dropped first; the
-  // residue is treated as a normal near class if it still has ≥ 2
-  // members AND spans multiple body_hashes (i.e. is genuinely a
-  // "renamed" clone class rather than the leftover of an exact
-  // group). The DUP_NEAR_MIN_LOC floor still applies.
+function emitNearCloneFindings(
+  members: CandidateRow[],
+  exactClaimed: Set<string>,
+  findings: Finding[],
+): void {
   const residue = members.filter((m) => !exactClaimed.has(m.nodeId));
-  if (residue.length < 2) return findings;
-  if (!spansMultipleHashes(residue)) return findings;
+  if (residue.length < 2) return;
+  if (!spansMultipleHashes(residue)) return;
   const nearKept = residue.filter((m) => m.endLine - m.startLine + 1 >= DUP_NEAR_MIN_LOC);
-  if (nearKept.length < 2) return findings;
+  if (nearKept.length < 2) return;
   for (const m of nearKept) {
     findings.push({
       nodeId: m.nodeId,
@@ -686,7 +709,6 @@ function emitClassFindings(members: CandidateRow[]): Finding[] {
       detail: buildDetail(m, nearKept, 'near'),
     });
   }
-  return findings;
 }
 
 /**

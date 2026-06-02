@@ -16,6 +16,8 @@ import { QueryBuilder } from '../src/db/queries.js';
 import { recordCommitIntents, getUnknownCommitShas } from '../src/db/queries-commit-intents.js';
 import { getCommitSubjects, getCurrentHeadSha } from '../src/git-utils.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('getUnknownCommitShas', () => {
   let dir: string;
   let db: DatabaseConnection;
@@ -42,7 +44,7 @@ describe('getUnknownCommitShas', () => {
       { sha: 'c'.repeat(40), intent: 'unknown', score: 0 },
       { sha: 'd'.repeat(40), intent: 'fix', score: 0.8 },
     ]);
-    expect(getUnknownCommitShas(q).sort()).toEqual(['b'.repeat(40), 'c'.repeat(40)]);
+    expect(getUnknownCommitShas(q).sort(byString)).toEqual(['b'.repeat(40), 'c'.repeat(40)]);
   });
 
   it('returns empty when nothing is unknown', () => {

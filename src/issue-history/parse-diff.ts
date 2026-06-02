@@ -78,33 +78,55 @@ const SKIP_NAMES = new Set([
 ]);
 
 /** Path patterns we never extract diff symbols from. */
-const SKIP_PATH_RE =
-  /^(?:dist\/|node_modules\/|\.cartograph\/|coverage\/|build\/|out\/)|\.lock$|\.snap$|^package(?:-lock)?\.json$|\.md$|\.json$|\.svg$|\.png$|\.jpg$|\.gif$|\.ico$|\.txt$|\.yml$|\.yaml$|\.toml$/i;
+const SKIP_PATH_PREFIXES = ['dist/', 'node_modules/', '.cartograph/', 'coverage/', 'build/', 'out/'] as const;
+const SKIP_PATH_SUFFIXES = [
+  '.lock',
+  '.snap',
+  '.md',
+  '.json',
+  '.svg',
+  '.png',
+  '.jpg',
+  '.gif',
+  '.ico',
+  '.txt',
+  '.yml',
+  '.yaml',
+  '.toml',
+] as const;
+const SKIP_PATH_EXACT = new Set(['package.json', 'package-lock.json']);
+
+function shouldSkipDiffPath(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  if (SKIP_PATH_EXACT.has(lower)) return true;
+  if (SKIP_PATH_PREFIXES.some((prefix) => lower.startsWith(prefix))) return true;
+  return SKIP_PATH_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
 
 /** Declaration patterns; capture group 1 is the symbol name.
  * Designed to be loose — better to over-collect and miss in the
  * symbol-resolver step than to under-collect (the resolver is cheap). */
 const DECL_PATTERNS: RegExp[] = [
   // function foo / function* foo / async function foo
-  /^[+\-]\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)/,
+  /^[+-]\s*(?:export\s+)?(?:async\s+)?function\s*\*?\s+([A-Za-z_$][\w$]*)/,
   // class Foo / abstract class Foo / export class Foo
-  /^[+\-]\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/,
+  /^[+-]\s*(?:export\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/,
   // interface Foo
-  /^[+\-]\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/,
+  /^[+-]\s*(?:export\s+)?interface\s+([A-Za-z_$][\w$]*)/,
   // type Foo = ... / type alias
-  /^[+\-]\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/,
+  /^[+-]\s*(?:export\s+)?type\s+([A-Za-z_$][\w$]*)\s*=/,
   // enum Foo
-  /^[+\-]\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)/,
+  /^[+-]\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][\w$]*)/,
   // const Foo = (..) =>  /  const Foo = function
-  /^[+\-]\s*(?:export\s+)?const\s+([A-Z][\w$]*)\s*=\s*(?:\([^)]*\)\s*=>|function|async\s)/,
+  /^[+-]\s*(?:export\s+)?const\s+([A-Z][\w$]*)\s*=\s*(?:\([^)]*\)\s*=>|function|async\s)/,
   // method-like:  visibility?  name(    (loose; SKIP_NAMES filters keywords)
-  /^[+\-]\s*(?:public|private|protected|static|async)\s+(?:[a-z]+\s+)*([A-Za-z_$][\w$]*)\s*\(/,
+  /^[+-]\s*(?:public|private|protected|static|async)\s+(?:[a-z]+\s+)*([A-Za-z_$][\w$]*)\s*\(/,
   // Python: def name(  /  async def name(
-  /^[+\-]\s*(?:async\s+)?def\s+([A-Za-z_][\w]*)\s*\(/,
+  /^[+-]\s*(?:async\s+)?def\s+([A-Za-z_]\w*)\s*\(/,
   // Go: func name(  /  func (recv) name(
-  /^[+\-]\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_][\w]*)\s*\(/,
+  /^[+-]\s*func\s+(?:\([^)]*\)\s+)?([A-Za-z_]\w*)\s*\(/,
   // Rust: fn name(  /  pub fn name<...>(
-  /^[+\-]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_][\w]*)\s*[<(]/,
+  /^[+-]\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)\s*[<(]/,
 ];
 
 interface FileDiffSets {
@@ -141,13 +163,14 @@ export function extractSymbolFromContext(ctx: string): string | null {
  * Pull a declared symbol name out of a single `+` or `-` diff line.
  */
 export function extractDeclaration(diffLine: string): { name: string; sign: '+' | '-' } | null {
-  if (!diffLine || (diffLine[0] !== '+' && diffLine[0] !== '-')) return null;
+  if (!diffLine || (!diffLine.startsWith('+') && !diffLine.startsWith('-'))) return null;
+  const sign = diffLine.startsWith('+') ? '+' : '-';
   // Skip the file-marker lines emitted by git.
   if (diffLine.startsWith('+++') || diffLine.startsWith('---')) return null;
   for (const re of DECL_PATTERNS) {
     const m = re.exec(diffLine);
     if (m?.[1] && !SKIP_NAMES.has(m[1])) {
-      return { name: m[1], sign: diffLine[0] };
+      return { name: m[1], sign };
     }
   }
   return null;
@@ -164,7 +187,7 @@ export function extractDeclaration(diffLine: string): { name: string; sign: '+' 
  * leading space (the diff context-line prefix).
  */
 function extractContextDeclaration(diffLine: string): string | null {
-  if (!diffLine || diffLine[0] !== ' ') return null;
+  if (!diffLine?.startsWith(' ')) return null;
   for (const re of DECL_PATTERNS) {
     // DECL_PATTERNS anchor on `[+\-]` — accept space too by trying
     // again with that prefix swapped.
@@ -193,14 +216,14 @@ function recordHunkContextSymbol(line: string, sets: FileDiffSets): void {
 }
 
 /** Parse a `diff --git a/<old> b/<new>` header line. Returns the new
- *  path (or `null` when the path is in the SKIP_PATH_RE blocklist or
+ *  path (or `null` when the path is in the skip-path blocklist or
  *  the line doesn't match the expected shape). Idempotent on the
  *  perFile map — registers a fresh entry only when none exists. */
 function startNewDiffFile(line: string, perFile: Map<string, FileDiffSets>): string | null {
   const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(line);
   if (!m) return null;
   const newPath = m[2]!;
-  if (SKIP_PATH_RE.test(newPath)) return null;
+  if (shouldSkipDiffPath(newPath)) return null;
   if (!perFile.has(newPath)) {
     perFile.set(newPath, { modCtx: new Set(), added: new Set(), removed: new Set() });
   }

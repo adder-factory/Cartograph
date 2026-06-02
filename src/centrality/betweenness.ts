@@ -84,7 +84,7 @@ export interface BetweennessResult {
 /** Default sample size — empirically stable top-K rankings on TS-scale. */
 export const DEFAULT_K = 200;
 /** Default RNG seed for source sampling — overridable via opts.seed. */
-export const DEFAULT_SEED = 0xc0de_2026;
+export const DEFAULT_SEED = 0xc0de2026;
 
 /**
  * Algo-version SHA derived from the betweenness spec set (this file +
@@ -259,7 +259,7 @@ export function brandesSingleSource(args: {
       }
       // Tie on a shortest path through v — accumulate path count +
       // record v as a predecessor.
-      if (dist[w]! === dv + 1) {
+      if ((dist[w] as number) === dv + 1) {
         sigma[w]! += sv;
         predFlat[predTop] = v;
         predNext[predTop] = predHead[w]!;
@@ -335,9 +335,9 @@ export function computeBetweenness(
     sources = pickSourceIndices(N, requestedK, makeRng(seed));
   }
 
-  for (let i = 0; i < sources.length; i++) {
+  for (const source of sources) {
     brandesSingleSource({
-      source: sources[i]!,
+      source,
       N,
       outOffsets,
       outFlat,

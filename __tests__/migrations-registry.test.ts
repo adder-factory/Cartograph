@@ -84,7 +84,7 @@ describe('migration files — filename ↔ version coupling', () => {
     expect(files.length).toBeGreaterThan(0);
     const registeredVersions = new Set(ALL_MIGRATIONS.map((m) => m.version));
     for (const f of files) {
-      const version = parseInt(f.slice(0, 3), 10);
+      const version = Number.parseInt(f.slice(0, 3), 10);
       if (!registeredVersions.has(version)) {
         throw new Error(
           `Migration file ${f} exists on disk but is not registered in src/db/migrations/index.ts. ` +
@@ -96,7 +96,7 @@ describe('migration files — filename ↔ version coupling', () => {
 
   it('every registered version has a matching NNN-*.ts file (no phantom registrations)', () => {
     const files = listMigrationFiles().filter((f) => STRICT_NNN_PATTERN.test(f));
-    const filenameVersions = new Set(files.map((f) => parseInt(f.slice(0, 3), 10)));
+    const filenameVersions = new Set(files.map((f) => Number.parseInt(f.slice(0, 3), 10)));
     for (const m of ALL_MIGRATIONS) {
       expect(filenameVersions.has(m.version)).toBe(true);
     }

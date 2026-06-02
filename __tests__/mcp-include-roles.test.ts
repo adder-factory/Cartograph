@@ -62,7 +62,7 @@ describe('cartograph_callers — includeRoles', () => {
 
   afterEach(() => {
     handler.closeAll();
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -124,7 +124,7 @@ describe('cartograph_walk — includeRoles', () => {
 
   afterEach(() => {
     handler.closeAll();
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -167,7 +167,7 @@ describe('cartograph_role — no-arg distribution mode', () => {
 
   afterEach(() => {
     handler.closeAll();
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   });
 

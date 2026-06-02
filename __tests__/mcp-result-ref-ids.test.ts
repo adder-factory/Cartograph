@@ -37,7 +37,7 @@ describe('Result-reference IDs (#15)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 

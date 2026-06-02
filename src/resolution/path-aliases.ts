@@ -91,14 +91,10 @@ function stripJsonc(src: string): string {
     const ch = src[i]!;
 
     if (inString) {
-      out += ch;
-      if (ch === '\\' && i + 1 < src.length) {
-        out += src[i + 1]!;
-        i += 2;
-        continue;
-      }
-      if (ch === '"') inString = false;
-      i++;
+      const next = consumeJsonStringChar(src, i, out);
+      out = next.out;
+      inString = next.inString;
+      i = next.nextIndex;
       continue;
     }
 
@@ -126,6 +122,20 @@ function stripJsonc(src: string): string {
   // Trailing commas before } or ] — outside strings, so safe to
   // run on the comment-stripped output.
   return out.replaceAll(/,(\s*[}\]])/g, '$1');
+}
+
+function consumeJsonStringChar(
+  src: string,
+  i: number,
+  out: string,
+): { out: string; inString: boolean; nextIndex: number } {
+  const ch = src[i]!;
+  let nextOut = out + ch;
+  if (ch === '\\' && i + 1 < src.length) {
+    nextOut += src[i + 1]!;
+    return { out: nextOut, inString: true, nextIndex: i + 2 };
+  }
+  return { out: nextOut, inString: ch !== '"', nextIndex: i + 1 };
 }
 
 interface RawTsconfig {
@@ -243,29 +253,27 @@ function compareAliasSpecificity(a: AliasPattern, b: AliasPattern): number {
  */
 export function applyAliases(importPath: string, aliases: AliasMap, projectRoot: string): string[] {
   for (const pat of aliases.patterns) {
-    if (!importPath.startsWith(pat.prefix)) continue;
-    if (pat.suffix && !importPath.endsWith(pat.suffix)) continue;
-
-    let captured = '';
-    if (pat.hasWildcard) {
-      captured = importPath.slice(pat.prefix.length, importPath.length - pat.suffix.length);
-    } else if (importPath !== pat.prefix) {
-      // Literal pattern must match exactly.
-      continue;
-    }
-
-    const out: string[] = [];
-    for (const target of pat.replacements) {
-      const filled = pat.hasWildcard ? target.replace('*', captured) : target;
-      // baseUrl is absolute; produce a path relative to projectRoot
-      const absolute = path.resolve(aliases.baseUrl, filled);
-      const relative = path.relative(projectRoot, absolute);
-      // Skip if the rewrite escapes the project root (unsafe + can't
-      // be looked up via the file index anyway).
-      if (relative.startsWith('..')) continue;
-      out.push(relative.replaceAll('\\', '/'));
-    }
-    return out;
+    const captured = captureAliasWildcard(importPath, pat);
+    if (captured === null) continue;
+    return expandAliasPattern(pat, captured, aliases, projectRoot);
   }
   return [];
+}
+
+function captureAliasWildcard(importPath: string, pat: AliasPattern): string | null {
+  if (!importPath.startsWith(pat.prefix)) return null;
+  if (pat.suffix && !importPath.endsWith(pat.suffix)) return null;
+  if (pat.hasWildcard) return importPath.slice(pat.prefix.length, importPath.length - pat.suffix.length);
+  return importPath === pat.prefix ? '' : null;
+}
+
+function expandAliasPattern(pat: AliasPattern, captured: string, aliases: AliasMap, projectRoot: string): string[] {
+  const out: string[] = [];
+  for (const target of pat.replacements) {
+    const filled = pat.hasWildcard ? target.replace('*', captured) : target;
+    const relative = path.relative(projectRoot, path.resolve(aliases.baseUrl, filled));
+    if (relative.startsWith('..')) continue;
+    out.push(relative.replaceAll('\\', '/'));
+  }
+  return out;
 }

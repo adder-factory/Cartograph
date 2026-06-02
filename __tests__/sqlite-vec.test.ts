@@ -34,6 +34,8 @@ import {
 } from '../src/db/vec-helpers.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 const DIM = 8; // Small enough for fast tests, large enough that ordering is meaningful.
 
 function unitVec(seed: number): Float32Array {
@@ -253,7 +255,7 @@ describe('vec-helpers — bootstrap + mirror + KNN', () => {
     const queryVec = unitVec(1);
     const hitsA = findSimilarViaVec({ db, vecLoaded: true, queryVec, model: 'model-A', k: 5 });
     const hitsB = findSimilarViaVec({ db, vecLoaded: true, queryVec, model: 'model-B', k: 5 });
-    expect(hitsA.map((h) => h.nodeId).sort()).toEqual(['n1', 'n3']);
+    expect(hitsA.map((h) => h.nodeId).sort(byString)).toEqual(['n1', 'n3']);
     expect(hitsB.map((h) => h.nodeId)).toEqual(['n2']);
   });
 
@@ -359,7 +361,7 @@ describe('vec-helpers — bootstrap + mirror + KNN', () => {
   it('ensureVecTable rejects invalid dims silently (no throw, no table)', () => {
     ensureVecTable(db, 0);
     ensureVecTable(db, -1);
-    ensureVecTable(db, NaN);
+    ensureVecTable(db, Number.NaN);
     ensureVecTable(db, 99999);
     const tables = db
       .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vec_symbol_embeddings_%'`)

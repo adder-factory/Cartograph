@@ -26,6 +26,49 @@ import { filterStopwords, STOP_WORDS } from '../src/search/query-utils.js';
 import { runMigrations, getCurrentVersion } from '../src/db/migrations.js';
 import { createDatabase } from '../src/db/sqlite-adapter.js';
 
+function makeNode(id: string, name: string, kind: Node['kind'], docstring?: string): Node {
+  return {
+    id,
+    kind,
+    name,
+    qualifiedName: name,
+    filePath: `src/${name}.ts`,
+    language: 'typescript',
+    startLine: 1,
+    endLine: 1,
+    startColumn: 0,
+    endColumn: 0,
+    docstring,
+    updatedAt: Date.now(),
+  };
+}
+
+/**
+ * Seed `files` rows for every distinct `filePath` referenced by `nodes`
+ * so the migration-056 FK (`nodes.file_path -> files(path)`) is satisfied
+ * when we then call `insertNodes`. Idempotent.
+ */
+function seedFilesForNodes(qb: QueryBuilder, nodes: Node[]): void {
+  const stmt = qb.db.prepare(
+    `INSERT OR IGNORE INTO files (path, content_hash, language, size, modified_at, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+  );
+  const seen = new Set<string>();
+  for (const n of nodes) {
+    if (seen.has(n.filePath)) continue;
+    seen.add(n.filePath);
+    stmt.run(n.filePath, 'h', 'typescript', 0, 0, 0);
+  }
+}
+
+/**
+ * Seed parent files rows then insert nodes — FK-safe wrapper around
+ * `q.insertNodes` for use by the integration tests below.
+ */
+function insertNodesFkSafe(qb: QueryBuilder, nodes: Node[]): void {
+  seedFilesForNodes(qb, nodes);
+  qb.insertNodes(nodes);
+}
+
 describe('splitIdentifierTokens', () => {
   it('splits camelCase', () => {
     expect(splitIdentifierTokens('getParser')).toEqual(['get', 'parser']);
@@ -48,7 +91,7 @@ describe('splitIdentifierTokens', () => {
   });
 
   it('splits backslash-separated PHP-style namespace segments', () => {
-    expect(splitIdentifierTokens('App\\Service\\UserService')).toEqual(['app', 'service', 'user', 'service']);
+    expect(splitIdentifierTokens(String.raw`App\Service\UserService`)).toEqual(['app', 'service', 'user', 'service']);
   });
 
   it('keeps single-word identifiers as-is', () => {
@@ -117,49 +160,6 @@ describe('FTS5 search quality (integration)', () => {
   let db: DatabaseConnection;
   let q: QueryBuilder;
 
-  function makeNode(id: string, name: string, kind: Node['kind'], docstring?: string): Node {
-    return {
-      id,
-      kind,
-      name,
-      qualifiedName: name,
-      filePath: `src/${name}.ts`,
-      language: 'typescript',
-      startLine: 1,
-      endLine: 1,
-      startColumn: 0,
-      endColumn: 0,
-      docstring,
-      updatedAt: Date.now(),
-    };
-  }
-
-  /**
-   * Seed `files` rows for every distinct `filePath` referenced by `nodes`
-   * so the migration-056 FK (`nodes.file_path -> files(path)`) is satisfied
-   * when we then call `insertNodes`. Idempotent.
-   */
-  function seedFilesForNodes(qb: QueryBuilder, nodes: Node[]): void {
-    const stmt = qb.db.prepare(
-      `INSERT OR IGNORE INTO files (path, content_hash, language, size, modified_at, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`,
-    );
-    const seen = new Set<string>();
-    for (const n of nodes) {
-      if (seen.has(n.filePath)) continue;
-      seen.add(n.filePath);
-      stmt.run(n.filePath, 'h', 'typescript', 0, 0, 0);
-    }
-  }
-
-  /**
-   * Seed parent files rows then insert nodes — FK-safe wrapper around
-   * `q.insertNodes` for use by the integration tests below.
-   */
-  function insertNodesFkSafe(nodes: Node[]): void {
-    seedFilesForNodes(q, nodes);
-    q.insertNodes(nodes);
-  }
-
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-search-quality-'));
     db = DatabaseConnection.initialize(path.join(dir, 'test.db'));
@@ -172,25 +172,25 @@ describe('FTS5 search quality (integration)', () => {
   });
 
   it('finds getParser for a `parser` query (subword tokens)', () => {
-    insertNodesFkSafe([makeNode('n1', 'getParser', 'function'), makeNode('n2', 'unrelated', 'function')]);
+    insertNodesFkSafe(q, [makeNode('n1', 'getParser', 'function'), makeNode('n2', 'unrelated', 'function')]);
     const results = searchNodes(q, 'parser', { limit: 10 });
     expect(results.find((r) => r.node.name === 'getParser')).toBeDefined();
   });
 
   it('finds DatabaseConnection for a `connection` query (subword tokens)', () => {
-    insertNodesFkSafe([makeNode('n1', 'DatabaseConnection', 'class'), makeNode('n2', 'unrelated', 'function')]);
+    insertNodesFkSafe(q, [makeNode('n1', 'DatabaseConnection', 'class'), makeNode('n2', 'unrelated', 'function')]);
     const results = searchNodes(q, 'connection', { limit: 10 });
     expect(results.find((r) => r.node.name === 'DatabaseConnection')).toBeDefined();
   });
 
   it('matches `parsing` against `getParser` via Porter stemmer', () => {
-    insertNodesFkSafe([makeNode('n1', 'getParser', 'function'), makeNode('n2', 'unrelated', 'function')]);
+    insertNodesFkSafe(q, [makeNode('n1', 'getParser', 'function'), makeNode('n2', 'unrelated', 'function')]);
     const results = searchNodes(q, 'parsing', { limit: 10 });
     expect(results.find((r) => r.node.name === 'getParser')).toBeDefined();
   });
 
   it('matches `resolves references` against resolveOne', () => {
-    insertNodesFkSafe([makeNode('n1', 'resolveOne', 'method'), makeNode('n2', 'unrelated', 'function')]);
+    insertNodesFkSafe(q, [makeNode('n1', 'resolveOne', 'method'), makeNode('n2', 'unrelated', 'function')]);
     const results = searchNodes(q, 'resolves references', { limit: 10 });
     expect(results.find((r) => r.node.name === 'resolveOne')).toBeDefined();
   });
@@ -198,7 +198,7 @@ describe('FTS5 search quality (integration)', () => {
   it('strips stopwords so `how does parser work` finds getParser', () => {
     // Without stopword stripping the docstring of `unrelated` (containing
     // "how" and "does") would BM25-flood the result list.
-    insertNodesFkSafe([
+    insertNodesFkSafe(q, [
       makeNode('n1', 'getParser', 'function'),
       makeNode('n2', 'unrelated', 'function', 'How does this work? It does many things — does, does, does.'),
     ]);
@@ -213,7 +213,7 @@ describe('FTS5 search quality (integration)', () => {
   });
 
   it('exact identifier search still works (no regression on direct queries)', () => {
-    insertNodesFkSafe([
+    insertNodesFkSafe(q, [
       makeNode('n1', 'ExtractionOrchestrator', 'class'),
       makeNode('n2', 'extraction', 'variable'),
       makeNode('n3', 'orchestrator', 'variable'),

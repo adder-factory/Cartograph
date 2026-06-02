@@ -124,7 +124,10 @@ type SetupChoice =
 function backendOptionLabel(b: DetectedBackend): string {
   const label = backendLabel(b.kind);
   const modelCount = b.models.length;
-  const modelHint = modelCount > 0 ? `${modelCount} model${modelCount === 1 ? '' : 's'} loaded` : 'no models loaded';
+  let modelHint = 'no models loaded';
+  if (modelCount > 0) {
+    modelHint = `${modelCount} model${modelCount === 1 ? '' : 's'} loaded`;
+  }
   return `✓ Use detected ${label} at ${b.endpoint} (${modelHint})`;
 }
 
@@ -317,7 +320,6 @@ export async function runLlmSetup(
   envArg?: LlmEnvironment,
   _projectPath?: string,
 ): Promise<NonNullable<CartographConfig['llm']> | null> {
-  void _projectPath;
   const env = envArg ?? (await probeEnvironment());
   showEnvironmentSummary(clack, env);
 
@@ -356,7 +358,6 @@ async function runDetectedPath(
   backend: DetectedBackend,
   _env: LlmEnvironment,
 ): Promise<NonNullable<CartographConfig['llm']> | null> {
-  void _env;
   if (backend.kind === 'ollama') {
     const needed: Array<{ tier: 'embed' | 'summarize' | 'ask' | 'reranker'; model: string }> = [
       { tier: 'embed', model: OLLAMA_RECOMMENDED_MODELS.embed },
@@ -406,7 +407,6 @@ async function runInstallOllamaPath(
   clack: ClackPrompts,
   _env: LlmEnvironment,
 ): Promise<NonNullable<CartographConfig['llm']> | null> {
-  void _env;
   printInstallGuide(clack, 'ollama');
   clack.note(
     `After install, pull the recommended models:\n` +

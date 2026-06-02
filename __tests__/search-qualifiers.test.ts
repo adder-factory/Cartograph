@@ -30,7 +30,7 @@ describe('Search qualifiers — DB-level integration', () => {
 
   afterEach(() => {
     if (cg) {
-      cg.destroy();
+      cg.close();
       cg = null;
     } else if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true });

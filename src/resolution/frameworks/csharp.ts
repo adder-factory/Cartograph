@@ -67,97 +67,7 @@ export const aspnetResolver: FrameworkResolver = {
   },
 
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
-    // Pattern 1: Controller references
-    if (ref.referenceName.endsWith('Controller')) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: CLASS_KINDS,
-        preferredDirPatterns: CONTROLLER_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.85,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 2: Service references (dependency injection)
-    if (ref.referenceName.endsWith('Service') || (ref.referenceName.startsWith('I') && ref.referenceName.length > 1)) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: SERVICE_KINDS,
-        preferredDirPatterns: SERVICE_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.85,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 3: Repository references
-    if (ref.referenceName.endsWith('Repository')) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: SERVICE_KINDS,
-        preferredDirPatterns: REPO_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.85,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 4: Model/Entity references
-    if (/^[A-Z][a-zA-Z]+$/.test(ref.referenceName)) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: CLASS_KINDS,
-        preferredDirPatterns: MODEL_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.7,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 5: ViewModel references
-    if (ref.referenceName.endsWith('ViewModel') || ref.referenceName.endsWith('Dto')) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: CLASS_KINDS,
-        preferredDirPatterns: VIEWMODEL_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.8,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    return null;
+    return resolveAspnetConvention(ref, context);
   },
 
   languages: ['csharp'],
@@ -265,6 +175,27 @@ export const aspnetResolver: FrameworkResolver = {
   },
 };
 
+interface AspnetConventionRule {
+  matches(name: string): boolean;
+  kinds: Set<string>;
+  preferredDirPatterns: string[];
+  confidence: number;
+}
+
+function resolveAspnetConvention(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  for (const rule of ASPNET_CONVENTION_RULES) {
+    if (!rule.matches(ref.referenceName)) continue;
+    const result = resolveByNameAndKind({
+      name: ref.referenceName,
+      kinds: rule.kinds,
+      preferredDirPatterns: rule.preferredDirPatterns,
+      context,
+    });
+    if (result) return { original: ref, targetNodeId: result, confidence: rule.confidence, resolvedBy: 'framework' };
+  }
+  return null;
+}
+
 // Directory patterns
 const CONTROLLER_DIRS = ['/Controllers/'];
 const SERVICE_DIRS = ['/Services/', '/Service/', '/Application/'];
@@ -274,3 +205,36 @@ const VIEWMODEL_DIRS = ['/ViewModels/', '/ViewModel/', '/DTOs/', '/Dto/'];
 
 const CLASS_KINDS = new Set(['class']);
 const SERVICE_KINDS = new Set(['class', 'interface']);
+
+const ASPNET_CONVENTION_RULES: AspnetConventionRule[] = [
+  {
+    matches: (name) => name.endsWith('Controller'),
+    kinds: CLASS_KINDS,
+    preferredDirPatterns: CONTROLLER_DIRS,
+    confidence: 0.85,
+  },
+  {
+    matches: (name) => name.endsWith('Service') || (name.startsWith('I') && name.length > 1),
+    kinds: SERVICE_KINDS,
+    preferredDirPatterns: SERVICE_DIRS,
+    confidence: 0.85,
+  },
+  {
+    matches: (name) => name.endsWith('Repository'),
+    kinds: SERVICE_KINDS,
+    preferredDirPatterns: REPO_DIRS,
+    confidence: 0.85,
+  },
+  {
+    matches: (name) => /^[A-Z][a-zA-Z]+$/.test(name),
+    kinds: CLASS_KINDS,
+    preferredDirPatterns: MODEL_DIRS,
+    confidence: 0.7,
+  },
+  {
+    matches: (name) => name.endsWith('ViewModel') || name.endsWith('Dto'),
+    kinds: CLASS_KINDS,
+    preferredDirPatterns: VIEWMODEL_DIRS,
+    confidence: 0.8,
+  },
+];

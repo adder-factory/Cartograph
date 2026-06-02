@@ -69,6 +69,8 @@ import { createDatabase, type SqliteDatabase } from '../src/db/sqlite-adapter.js
 import { ALL_MIGRATIONS } from '../src/db/migrations/index.js';
 import { DatabaseConnection } from '../src/db/index.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-schema-drift-'));
 }
@@ -153,8 +155,8 @@ describe('schema.sql ↔ migration-replay equivalence', () => {
       );
       conn.close();
 
-      const onlyInMigrations = [...migratedNames].filter((n) => !freshNames.has(n)).sort();
-      const onlyInSchemaSql = [...freshNames].filter((n) => !migratedNames.has(n)).sort();
+      const onlyInMigrations = [...migratedNames].filter((n) => !freshNames.has(n)).sort(byName);
+      const onlyInSchemaSql = [...freshNames].filter((n) => !migratedNames.has(n)).sort(byName);
 
       // A table/view created by a migration but absent from
       // schema.sql → fresh installs get a "no such table" at runtime.
@@ -207,7 +209,7 @@ describe('schema.sql ↔ migration-replay equivalence', () => {
           }>
         )
           .map((f) => `${f.from}->${f.table}.${f.to ?? ''}:${f.on_delete}/${f.on_update}`)
-          .sort()
+          .sort(byName)
           .join('|');
 
       const drift: string[] = [];
@@ -241,6 +243,12 @@ describe('schema.sql ↔ migration-replay equivalence', () => {
         .map((o) => o.name)
         .filter((n) => !n.endsWith('_fts') && !n.startsWith('nodes_rtree'));
 
+      const formatDefaultValue = (value: unknown): string => {
+        if (value === null || value === undefined) return 'NULL';
+        if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+        return JSON.stringify(value) ?? '<unserializable>';
+      };
+
       const columnSig = (db: SqliteDatabase, table: string): string =>
         (
           db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{
@@ -251,8 +259,8 @@ describe('schema.sql ↔ migration-replay equivalence', () => {
             pk: number;
           }>
         )
-          .map((c) => `${c.name}:${c.type}:${c.notnull}:${c.dflt_value ?? 'NULL'}:${c.pk}`)
-          .sort()
+          .map((c) => `${c.name}:${c.type}:${c.notnull}:${formatDefaultValue(c.dflt_value)}:${c.pk}`)
+          .sort(byName)
           .join('|');
 
       const drift: string[] = [];

@@ -167,8 +167,12 @@ function writeInstructionsEntry(): WriteResult['files'][number] {
     startMarker: CARTOGRAPH_SECTION_START,
     endMarker: CARTOGRAPH_SECTION_END,
   });
-  const mapped: 'created' | 'updated' | 'unchanged' =
-    action === 'created' ? 'created' : action === 'unchanged' ? 'unchanged' : 'updated';
+  let mapped: 'created' | 'updated' | 'unchanged' = 'updated';
+  if (action === 'created') {
+    mapped = 'created';
+  } else if (action === 'unchanged') {
+    mapped = 'unchanged';
+  }
   return { path: file, action: mapped };
 }
 

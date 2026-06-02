@@ -48,7 +48,10 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
   // A pre-existing file containing other MCP servers (no `cartograph`
   // key) is 'updated', not 'created' — we're adding an entry to a
   // file that was already there.
-  const action: 'created' | 'updated' = before ? 'updated' : fs.existsSync(file) ? 'updated' : 'created';
+  let action: 'created' | 'updated' = 'created';
+  if (before || fs.existsSync(file)) {
+    action = 'updated';
+  }
 
   if (!existing['mcpServers']) existing['mcpServers'] = {};
   existing['mcpServers'].cartograph = after;

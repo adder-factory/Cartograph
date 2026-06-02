@@ -1,6 +1,7 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
+import type { NodeKind } from '../../types.js';
 import { getNodeText } from '../tree-sitter-helpers.js';
-import type { LanguageExtractor } from '../tree-sitter-types.js';
+import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
 
 function getValVarName(node: SyntaxNode, source: string): string | null {
   const patternNode = node.childForFieldName('pattern');
@@ -20,6 +21,67 @@ function extractVisibility(node: SyntaxNode): 'public' | 'private' | 'protected'
     }
   }
   return 'public';
+}
+
+function isClassLikeKind(kind: string): boolean {
+  return (
+    kind === 'class' ||
+    kind === 'trait' ||
+    kind === 'interface' ||
+    kind === 'struct' ||
+    kind === 'enum' ||
+    kind === 'module'
+  );
+}
+
+function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
+  if (ctx.nodeStack.length === 0) return false;
+  const parentId = ctx.nodeStack.at(-1);
+  const parentNode = ctx.nodes.find((n) => n.id === parentId);
+  return parentNode != null && isClassLikeKind(parentNode.kind);
+}
+
+function visitScalaEnumCases(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'enum_case_definitions') return false;
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (child.type === 'simple_enum_case' || child.type === 'full_enum_case') {
+      const nameNode = child.childForFieldName('name');
+      if (nameNode) ctx.createNode({ kind: 'enum_member', name: getNodeText(nameNode, ctx.source), node: child });
+    }
+  }
+  return true;
+}
+
+function visitScalaValVarDefinition(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'val_definition' && node.type !== 'var_definition') return false;
+
+  const name = getValVarName(node, ctx.source);
+  if (!name) return false;
+
+  const isVal = node.type === 'val_definition';
+  const typeNode = node.childForFieldName('type');
+  const keyword = isVal ? 'val' : 'var';
+  const sig = typeNode ? `${keyword} ${name}: ${getNodeText(typeNode, ctx.source)}` : undefined;
+  const kind = scalaValVarKind(ctx, isVal);
+
+  ctx.createNode({ kind, name, node, extra: compact({ signature: sig, visibility: extractVisibility(node) }) });
+  return true;
+}
+
+function scalaValVarKind(ctx: ExtractorContext, isVal: boolean): NodeKind {
+  if (isCurrentScopeClassLike(ctx)) return 'field';
+  return isVal ? 'constant' : 'variable';
+}
+
+function visitScalaExtensionDefinition(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'extension_definition') return false;
+  const body = node.childForFieldName('body');
+  if (!body) return true;
+  for (const child of body.namedChildren) {
+    if (child) ctx.visitNode(child);
+  }
+  return true;
 }
 
 const scalaExtractor: LanguageExtractor = {
@@ -70,61 +132,14 @@ const scalaExtractor: LanguageExtractor = {
   },
 
   visitNode: (node: SyntaxNode, ctx) => {
-    const t = node.type;
-
     // val/var: name is in `pattern` field (identifier), not `name`
-    if (t === 'val_definition' || t === 'var_definition') {
-      const name = getValVarName(node, ctx.source);
-      if (!name) return false;
-
-      const isInClass =
-        ctx.nodeStack.length > 0 &&
-        (() => {
-          const parentId = ctx.nodeStack.at(-1);
-          const parentNode = ctx.nodes.find((n) => n.id === parentId);
-          return (
-            parentNode != null &&
-            (parentNode.kind === 'class' ||
-              parentNode.kind === 'trait' ||
-              parentNode.kind === 'interface' ||
-              parentNode.kind === 'struct' ||
-              parentNode.kind === 'enum' ||
-              parentNode.kind === 'module')
-          );
-        })();
-
-      const kind = isInClass ? 'field' : t === 'val_definition' ? 'constant' : 'variable';
-      const typeNode = node.childForFieldName('type');
-      const sig = typeNode
-        ? `${t === 'val_definition' ? 'val' : 'var'} ${name}: ${getNodeText(typeNode, ctx.source)}`
-        : undefined;
-
-      ctx.createNode({ kind, name, node, extra: compact({ signature: sig, visibility: extractVisibility(node) }) });
-      return true;
-    }
+    if (visitScalaValVarDefinition(node, ctx)) return true;
 
     // enum_case_definitions wraps simple_enum_case / full_enum_case children
-    if (t === 'enum_case_definitions') {
-      for (const child of node.namedChildren) {
-        if (!child) continue;
-        if (child.type === 'simple_enum_case' || child.type === 'full_enum_case') {
-          const nameNode = child.childForFieldName('name');
-          if (nameNode) ctx.createNode({ kind: 'enum_member', name: getNodeText(nameNode, ctx.source), node: child });
-        }
-      }
-      return true;
-    }
+    if (visitScalaEnumCases(node, ctx)) return true;
 
     // extension_definition: visit body children directly, no container node
-    if (t === 'extension_definition') {
-      const body = node.childForFieldName('body');
-      if (body) {
-        for (const child of body.namedChildren) {
-          if (child) ctx.visitNode(child);
-        }
-      }
-      return true;
-    }
+    if (visitScalaExtensionDefinition(node, ctx)) return true;
 
     return false;
   },

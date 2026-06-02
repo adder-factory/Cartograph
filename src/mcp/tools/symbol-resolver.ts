@@ -218,7 +218,7 @@ export function isUnresolvedUid(
 ): boolean {
   if (!RefIdCache.isUid(symbol)) return false;
   // No cache at all, or the cache has no entry for this UID.
-  return !refIds || refIds?.resolve(symbol) === null;
+  return (refIds?.resolve(symbol) ?? null) === null;
 }
 
 /**
@@ -487,8 +487,9 @@ function fuzzyFallbackResult(cg: Cartograph, symbol: string, fuzzy: Node): { nod
   const suggestions = plausibleSuggestions(suggestSymbolNames(cg.queries, symbol, SUGGESTION_LIMIT))
     .filter((s) => s.name !== fuzzy.name)
     .slice(0, SUGGESTION_RENDER_LIMIT);
+  const suggestionNames = suggestions.map((s) => `\`${s.name}\``).join(', ');
   const suggestionList =
-    suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `\`${s.name}\``).join(', ')}?` : '';
+    suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
   const note = `\n\n> **Note:** No exact match for "${symbol}". Showing closest fuzzy result \`${fuzzy.name}\` (${fuzzy.kind}).${suggestionList}`;
   return { node: fuzzy, note };
 }
@@ -740,6 +741,29 @@ export function findAllSymbols(
   symbol: string,
   refIds?: { resolve: (uid: string) => string | null },
 ): { nodes: Node[]; note: string } {
+  const shortcut = resolveAllSymbolsShortcut(cg, symbol, refIds);
+  if (shortcut) return shortcut;
+
+  if (!symbol.includes('.')) {
+    const exact = lookupAllByExactName(cg, symbol);
+    if (exact) return exact;
+    // null → fall through to FTS-backed search. The
+    // FTS path's own exact-match filter (matchesSymbol) will still
+    // return empty in most cases, but we keep the fallback for
+    // qualified-name forms that have no dot — e.g. C++ `Class::method`,
+    // Go-flavored `Mod/Func`, Rust `crate::path::ident`. matchesSymbol
+    // only handles the dot-prefixed form, so other delimiters land
+    // here and at least get FTS-ranked exact matches.
+  }
+
+  return resolveAllViaFtsExactFilter(cg, symbol);
+}
+
+function resolveAllSymbolsShortcut(
+  cg: Cartograph,
+  symbol: string,
+  refIds?: { resolve: (uid: string) => string | null },
+): { nodes: Node[]; note: string } | null {
   // #15: short-id shortcut — same as findSymbol. UID always
   // resolves to a single node (or empty when evicted).
   if (refIds && RefIdCache.isUid(symbol)) {
@@ -764,19 +788,7 @@ export function findAllSymbols(
     if (fileNode) return { nodes: [fileNode], note: '' };
   }
 
-  if (!symbol.includes('.')) {
-    const exact = lookupAllByExactName(cg, symbol);
-    if (exact) return exact;
-    // null → fall through to FTS-backed search. The
-    // FTS path's own exact-match filter (matchesSymbol) will still
-    // return empty in most cases, but we keep the fallback for
-    // qualified-name forms that have no dot — e.g. C++ `Class::method`,
-    // Go-flavored `Mod/Func`, Rust `crate::path::ident`. matchesSymbol
-    // only handles the dot-prefixed form, so other delimiters land
-    // here and at least get FTS-ranked exact matches.
-  }
-
-  return resolveAllViaFtsExactFilter(cg, symbol);
+  return null;
 }
 
 /**

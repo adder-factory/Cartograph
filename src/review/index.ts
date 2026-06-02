@@ -492,9 +492,10 @@ function buildModuleLevelFallback(args: BuildModuleLevelFallbackArgs): AffectedS
     .slice(0, MODULE_LEVEL_FALLBACK_SIBLING_COUNT)
     .map(({ s }) => s);
 
+  const siblingList = siblingCandidates.map((s) => `${s.name} (${s.kind}) at line ${s.startLine}`).join(', ');
   const siblingNote =
     siblingCandidates.length > 0
-      ? `; nearest siblings: ${siblingCandidates.map((s) => `${s.name} (${s.kind}) at line ${s.startLine}`).join(', ')}`
+      ? `; nearest siblings: ${siblingList}`
       : '';
   const note = `module-level edit (no enclosing symbol body)${siblingNote}`;
 

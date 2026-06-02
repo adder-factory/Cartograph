@@ -213,25 +213,37 @@ function formatNodeListCompact(args: FormatNodeListArgs): string {
   const hasExplicitFields = Array.isArray(fields) && fields.length > 0;
   const fieldSet = hasExplicitFields ? new Set<string>(fields) : new Set(defaultFields);
   for (const node of nodes) {
-    const cols: string[] = [];
-    if (fieldSet.has('name')) cols.push(node.name);
-    if (fieldSet.has('kind')) cols.push(node.kind);
-    // `path` and `line` collapse into ONE column rendered as `path:line`
-    // (matches the universal `file:line` editor-jump convention; matches
-    // the documented playbook shape). If only one of the two fields is
-    // included, render that field alone — no orphan leading colon.
-    const hasPathField = fieldSet.has('path');
-    const hasLineField = fieldSet.has('line') && Boolean(node.startLine);
-    if (hasPathField && hasLineField) cols.push(`${node.filePath}:${node.startLine}`);
-    else if (hasPathField) cols.push(node.filePath);
-    else if (hasLineField) cols.push(String(node.startLine));
-    if (fieldSet.has('role')) {
-      const role = roles?.get(node.id);
-      if (role) cols.push(`role:${role}`);
-    }
-    const hasIdField = fieldSet.has('id') && refIds !== undefined;
-    if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
-    lines.push(cols.join('|'));
+    lines.push(formatCompactNodeColumns({ node, fieldSet, refIds, roles }));
   }
   return lines.join('\n');
+}
+
+function formatCompactNodeColumns(args: {
+  node: Node;
+  fieldSet: ReadonlySet<string>;
+  refIds: RefIdCache | undefined;
+  roles: Map<string, string> | undefined;
+}): string {
+  const { node, fieldSet, refIds, roles } = args;
+  const cols: string[] = [];
+  if (fieldSet.has('name')) cols.push(node.name);
+  if (fieldSet.has('kind')) cols.push(node.kind);
+  pushPathLineColumns(cols, node, fieldSet);
+  if (fieldSet.has('role')) {
+    const role = roles?.get(node.id);
+    if (role) cols.push(`role:${role}`);
+  }
+  const hasIdField = fieldSet.has('id') && refIds !== undefined;
+  if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
+  return cols.join('|');
+}
+
+function pushPathLineColumns(cols: string[], node: Node, fieldSet: ReadonlySet<string>): void {
+  // `path` and `line` collapse into ONE column rendered as `path:line`
+  // when both are requested. If only one is included, render it alone.
+  const hasPathField = fieldSet.has('path');
+  const hasLineField = fieldSet.has('line') && Boolean(node.startLine);
+  if (hasPathField && hasLineField) cols.push(`${node.filePath}:${node.startLine}`);
+  else if (hasPathField) cols.push(node.filePath);
+  else if (hasLineField) cols.push(String(node.startLine));
 }

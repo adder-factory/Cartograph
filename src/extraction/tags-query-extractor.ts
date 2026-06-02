@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { Query } from 'web-tree-sitter';
-import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
+import type { Node as SyntaxNode, QueryMatch, Tree } from 'web-tree-sitter';
 import type { ExtractionResult, NodeKind, Language } from '../types.js';
 import { getNodeText, type NodeIdFactory } from './tree-sitter-helpers.js';
 import { getParser, getLanguageGrammar } from './grammars.js';
@@ -320,21 +320,35 @@ function buildDefAndRefRecords({ matches, suppression, source, filePath, idFacto
   const ctx: DefBuildContext = { filePath, source, seenDefKeys: new Set<string>(), idFactory };
 
   for (const match of matches) {
-    const role = readMatchRole(match);
-    if (!role) continue;
-    if (suppression.ignoredNodeIds.has(role.nameNode.id)) continue; // rule 1
-    const name = getNodeText(role.nameNode, source).trim();
-    if (!name) continue;
-
-    if (role.roleKind === 'reference') {
-      const ref = buildRefRecord(role, name, suppression);
-      if (ref) refs.push(ref);
-    } else {
-      const def = buildDefRecord(role, name, ctx);
-      if (def) defs.push(def);
-    }
+    appendRecordFromMatch({ match, suppression, source, ctx, defs, refs });
   }
   return { defs, refs };
+}
+
+interface AppendRecordFromMatchArgs {
+  match: QueryMatch;
+  suppression: SuppressionSets;
+  source: string;
+  ctx: DefBuildContext;
+  defs: DefRecord[];
+  refs: RefRecord[];
+}
+
+function appendRecordFromMatch({ match, suppression, source, ctx, defs, refs }: AppendRecordFromMatchArgs): void {
+  const role = readMatchRole(match);
+  if (!role) return;
+  if (suppression.ignoredNodeIds.has(role.nameNode.id)) return; // rule 1
+  const name = getNodeText(role.nameNode, source).trim();
+  if (!name) return;
+
+  if (role.roleKind === 'reference') {
+    const ref = buildRefRecord(role, name, suppression);
+    if (ref) refs.push(ref);
+    return;
+  }
+
+  const def = buildDefRecord(role, name, ctx);
+  if (def) defs.push(def);
 }
 
 // ---------------------------------------------------------------------------

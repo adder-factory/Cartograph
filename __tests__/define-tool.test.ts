@@ -16,11 +16,23 @@ import {
   toJsonSchema,
   formatZodError,
 } from '../src/mcp/tools/_define-tool.js';
-import type { ToolCtx } from '../src/mcp/tools/types.js';
-import type { ToolModule } from '../src/mcp/tools/types.js';
+import type { ToolResult } from '../src/mcp/tool-types.js';
+import type { ToolCtx, ToolModule } from '../src/mcp/tools/types.js';
 
 /** A throwaway ctx — the test handlers below never touch it. */
 const fakeCtx = {} as ToolCtx;
+
+const noopHandle = async (): Promise<ToolResult> => ({ content: [{ type: 'text', text: '' }] });
+
+function errFor<S extends z.ZodTypeAny>(schema: S, value: unknown): string {
+  const parsed = schema.safeParse(value);
+  if (parsed.success) throw new Error('expected a parse failure');
+  // Pass the raw value as the dispatcher does — Zod 4 issues no
+  // longer carry the received value, so `formatZodError` resolves it
+  // from the args to keep the `expected X, received Y` / `(got …)`
+  // diagnostics.
+  return formatZodError(parsed.error, value as Record<string, unknown>);
+}
 
 describe('toJsonSchema', () => {
   it('produces an object-root JSON Schema with properties + required', () => {
@@ -124,8 +136,6 @@ describe('defineTool — write-time schema-shape validation', () => {
   // the guards exist precisely to surface authoring footguns at
   // module-load instead of at first call.
 
-  const noopHandle = async (): Promise<ToolResult> => ({ content: [{ type: 'text', text: '' }] });
-
   it('rejects a tool with an empty top-level description', () => {
     expect(() =>
       defineTool({
@@ -224,16 +234,6 @@ describe('defineTool — handler receives parsed, typed args', () => {
 });
 
 describe('formatZodError — readable single-line messages', () => {
-  function errFor<S extends z.ZodTypeAny>(schema: S, value: unknown): string {
-    const parsed = schema.safeParse(value);
-    if (parsed.success) throw new Error('expected a parse failure');
-    // Pass the raw value as the dispatcher does — Zod 4 issues no
-    // longer carry the received value, so `formatZodError` resolves it
-    // from the args to keep the `expected X, received Y` / `(got …)`
-    // diagnostics.
-    return formatZodError(parsed.error, value as Record<string, unknown>);
-  }
-
   it('formats a missing required field as `field: required`', () => {
     expect(errFor(z.object({ q: z.string() }), {})).toBe('q: required');
   });

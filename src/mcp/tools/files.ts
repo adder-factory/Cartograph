@@ -61,7 +61,9 @@ const MAX_FILES_FOR_INLINE_SUMMARY = 80;
 
 function formatFilesFlat(files: FileRow[], includeMetadata: boolean, summaries?: Map<string, string>): string {
   const lines: string[] = [`## Files (${files.length})`, ''];
-  for (const file of files.sort((a, b) => a.path.localeCompare(b.path))) {
+  const sortedFiles = [...files];
+  sortedFiles.sort((a, b) => a.path.localeCompare(b.path));
+  for (const file of sortedFiles) {
     if (includeMetadata) {
       lines.push(`- ${file.path} (${file.language}, ${file.nodeCount} symbols)`);
     } else {
@@ -86,11 +88,14 @@ function formatFilesGrouped(files: FileRow[], includeMetadata: boolean): string 
   const lines: string[] = [`## Files by Language (${files.length} total)`, ''];
 
   // Sort languages by file count (descending)
-  const sortedLangs = [...byLang.entries()].sort((a, b) => b[1].length - a[1].length);
+  const sortedLangs = [...byLang.entries()];
+  sortedLangs.sort((a, b) => b[1].length - a[1].length);
 
   for (const [lang, langFiles] of sortedLangs) {
     lines.push(`### ${lang} (${langFiles.length})`);
-    for (const file of langFiles.sort((a, b) => a.path.localeCompare(b.path))) {
+    const sortedLangFiles = [...langFiles];
+    sortedLangFiles.sort((a, b) => a.path.localeCompare(b.path));
+    for (const file of sortedLangFiles) {
       if (includeMetadata) {
         lines.push(`- ${file.path} (${file.nodeCount} symbols)`);
       } else {
@@ -156,43 +161,60 @@ export function buildDirRollup(files: ReadonlyArray<FileRow>, maxDepth?: number,
   let rootBucketFiles = 0;
   let rootBucketSymbols = 0;
   for (const file of files) {
-    const parts = file.path.split('/');
     totalSymbols += file.nodeCount;
-    if (parts.length === 1) {
+    if (isRootFile(file)) {
       rootBucketFiles++;
       rootBucketSymbols += file.nodeCount;
       continue;
     }
-    // Walk ancestors. parts[length - 1] is the filename, so the
-    // deepest DIRECTORY is parts[0..length - 2].
-    for (let depth = 1; depth < parts.length; depth++) {
-      if (maxDepth !== undefined && depth > maxDepth) break;
-      const dir = parts.slice(0, depth).join('/');
-      if (!dir) continue;
-      const cur = dirStats.get(dir) ?? { files: 0, symbols: 0 };
-      cur.files++;
-      cur.symbols += file.nodeCount;
-      dirStats.set(dir, cur);
-    }
+    addFileAncestors(dirStats, file, maxDepth);
   }
 
   const filterPrefix = dirFilter ? dirFilter.replace(/\/+$/, '') : null;
-  const rows: DirRollupRow[] = [];
-  const sorted = [...dirStats.entries()].sort((a, b) => b[1].symbols - a[1].symbols || a[0].localeCompare(b[0]));
-  for (const [dir, stats] of sorted) {
-    if (filterPrefix && dir !== filterPrefix && filterPrefix.startsWith(dir + '/')) {
-      // Strict-ancestor row — drop. The dirFilter's own row and its
-      // descendants render normally.
-      continue;
-    }
-    rows.push({ dir, files: stats.files, symbols: stats.symbols });
-  }
+  const rows = buildDirRollupRows(dirStats, filterPrefix);
   if (rootBucketFiles > 0) {
     // `(root)` row last so it's easy to spot but doesn't outrank
     // the heavy subtrees in the symbol-density ranking.
     rows.push({ dir: null, files: rootBucketFiles, symbols: rootBucketSymbols });
   }
   return { rows, totalFiles: files.length, totalSymbols };
+}
+
+function isRootFile(file: FileRow): boolean {
+  return !file.path.includes('/');
+}
+
+function addFileAncestors(
+  dirStats: Map<string, { files: number; symbols: number }>,
+  file: FileRow,
+  maxDepth: number | undefined,
+): void {
+  const parts = file.path.split('/');
+  // Walk ancestors. parts[length - 1] is the filename, so the
+  // deepest DIRECTORY is parts[0..length - 2].
+  for (let depth = 1; depth < parts.length; depth++) {
+    if (maxDepth !== undefined && depth > maxDepth) break;
+    const dir = parts.slice(0, depth).join('/');
+    if (!dir) continue;
+    const cur = dirStats.get(dir) ?? { files: 0, symbols: 0 };
+    cur.files++;
+    cur.symbols += file.nodeCount;
+    dirStats.set(dir, cur);
+  }
+}
+
+function buildDirRollupRows(
+  dirStats: ReadonlyMap<string, { files: number; symbols: number }>,
+  filterPrefix: string | null,
+): DirRollupRow[] {
+  return [...dirStats.entries()]
+    .sort((a, b) => b[1].symbols - a[1].symbols || a[0].localeCompare(b[0]))
+    .filter(([dir]) => !isStrictAncestorOfFilter(dir, filterPrefix))
+    .map(([dir, stats]) => ({ dir, files: stats.files, symbols: stats.symbols }));
+}
+
+function isStrictAncestorOfFilter(dir: string, filterPrefix: string | null): boolean {
+  return filterPrefix !== null && dir !== filterPrefix && filterPrefix.startsWith(dir + '/');
 }
 
 /** Options bundle for {@link formatFilesSummary}. */
@@ -340,30 +362,37 @@ function buildEmptyDirHint(allFiles: ReadonlyArray<FileRow>, dir: string | undef
   // Absolute path inside the project root (`/Users/.../cartograph/src/x`).
   // Strip the project-root prefix and probe — emit a "did you mean..."
   // hint with the project-relative form. Handoff #5 sub-i.
-  if (path.isAbsolute(dir)) {
-    const normRoot = projectRoot.replace(/\/+$/, '');
-    if (dir === normRoot || dir.startsWith(normRoot + '/')) {
-      const stripped = dir === normRoot ? '' : dir.slice(normRoot.length + 1);
-      if (stripped.length === 0 || filterFilesByDir(allFiles, stripped).length > 0) {
-        const suggestion = stripped.length === 0 ? '(omit `dir`)' : `"${stripped}"`;
-        return `\n\n> _\`dir\` "${dir}" looks like an absolute path inside the project. Did you mean ${suggestion}? Path filters are project-relative._`;
-      }
-    }
-  }
+  const absoluteHint = buildAbsoluteDirHint(allFiles, dir, projectRoot);
+  if (absoluteHint) return absoluteHint;
   // A leading `/` is silently swallowed by `filterFilesByDir`'s
   // normalisation only when the rest matches — strip it and probe.
-  if (dir.startsWith('/')) {
-    const stripped = dir.replace(/^\/+/, '');
-    if (stripped.length > 0 && filterFilesByDir(allFiles, stripped).length > 0) {
-      return `\n\n> _\`dir\` "${dir}" matched 0 files. Did you mean "${stripped}"? Path filters are index-relative — drop the leading "/"._`;
-    }
-  }
+  const leadingSlashHint = buildLeadingSlashDirHint(allFiles, dir);
+  if (leadingSlashHint) return leadingSlashHint;
   // Project-root-basename prefix (`cartograph/src/...`).
   return pathFilterStripHint({
     pathFilter: dir,
     projectRoot,
     probe: (s) => filterFilesByDir(allFiles, s).length > 0,
   });
+}
+
+function buildAbsoluteDirHint(allFiles: ReadonlyArray<FileRow>, dir: string, projectRoot: string): string {
+  if (!path.isAbsolute(dir)) return '';
+  const normRoot = projectRoot.replace(/\/+$/, '');
+  if (dir !== normRoot && !dir.startsWith(normRoot + '/')) return '';
+
+  const stripped = dir === normRoot ? '' : dir.slice(normRoot.length + 1);
+  if (stripped.length > 0 && filterFilesByDir(allFiles, stripped).length === 0) return '';
+
+  const suggestion = stripped.length === 0 ? '(omit `dir`)' : `"${stripped}"`;
+  return `\n\n> _\`dir\` "${dir}" looks like an absolute path inside the project. Did you mean ${suggestion}? Path filters are project-relative._`;
+}
+
+function buildLeadingSlashDirHint(allFiles: ReadonlyArray<FileRow>, dir: string): string {
+  if (!dir.startsWith('/')) return '';
+  const stripped = dir.replace(/^\/+/, '');
+  if (stripped.length === 0 || filterFilesByDir(allFiles, stripped).length === 0) return '';
+  return `\n\n> _\`dir\` "${dir}" matched 0 files. Did you mean "${stripped}"? Path filters are index-relative — drop the leading "/"._`;
 }
 
 /** Detect unsupported glob constructs in a `pattern` arg. The

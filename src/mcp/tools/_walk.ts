@@ -218,16 +218,15 @@ interface BfsArgs {
   excludeTests: boolean;
 }
 
+interface QueueEntry {
+  nodeId: string;
+  depth: number;
+  viaName: string;
+  viaId: string;
+}
+
 function runBfs(args: BfsArgs): WalkRow[] {
   const { cg, startId, startName, direction, hops, maxNodes, edgeKindFilter, includeContains, excludeTests } = args;
-
-  interface QueueEntry {
-    nodeId: string;
-    depth: number;
-    viaName: string;
-    viaId: string;
-  }
-
   // visited maps nodeId → { depth, viaName, viaId }
   const visited = new Map<string, { depth: number; viaName: string; viaId: string }>();
   visited.set(startId, { depth: 0, viaName: '', viaId: '' });
@@ -237,44 +236,118 @@ function runBfs(args: BfsArgs): WalkRow[] {
 
   while (queue.length > 0 && rows.length < maxNodes) {
     const current = queue.shift()!;
-    const { nodeId, depth, viaName, viaId } = current;
-
-    if (depth >= hops) continue;
-
-    const neighborIds = fetchNeighborIds({ cg, nodeId, direction, edgeKindFilter, includeContains });
-    // Batch-fetch neighbor nodes to avoid N+1 lookups
-    const uniqueNewIds = [...new Set(neighborIds)].filter((id) => !visited.has(id));
-    const neighborNodes = uniqueNewIds.length > 0 ? cg.queries.getNodesByIds(uniqueNewIds) : new Map<string, Node>();
-
-    for (const nextId of neighborIds) {
-      if (visited.has(nextId)) continue;
-      const nextNode = neighborNodes.get(nextId);
-      if (!nextNode) continue;
-      // Test-file noise filter: BFS from production code into test-file
-      // consumers is structural noise for "what does X transitively call"
-      // queries. Marking the node visited (without pushing a row or
-      // queue entry) blocks rediscovery via other paths and avoids
-      // walking deeper through a test file's helpers.
-      if (excludeTests && isTestPath(nextNode.filePath)) {
-        visited.set(nextId, { depth: depth + 1, viaName, viaId });
-        continue;
-      }
-
-      visited.set(nextId, { depth: depth + 1, viaName, viaId });
-      rows.push({ node: nextNode, depth: depth + 1, viaName, viaId });
-
-      if (rows.length >= maxNodes) break;
-
-      queue.push({
-        nodeId: nextId,
-        depth: depth + 1,
-        viaName: nextNode.name,
-        viaId: nextId,
-      });
-    }
+    processBfsQueueEntry({
+      cg,
+      current,
+      queue,
+      rows,
+      visited,
+      direction,
+      hops,
+      maxNodes,
+      edgeKindFilter,
+      includeContains,
+      excludeTests,
+    });
   }
 
   return rows;
+}
+
+function processBfsQueueEntry(args: {
+  cg: Cartograph;
+  current: QueueEntry;
+  queue: QueueEntry[];
+  rows: WalkRow[];
+  visited: Map<string, { depth: number; viaName: string; viaId: string }>;
+  direction: WalkDirection;
+  hops: number;
+  maxNodes: number;
+  edgeKindFilter: string | undefined;
+  includeContains: boolean;
+  excludeTests: boolean;
+}): void {
+  const {
+    cg,
+    current,
+    queue,
+    rows,
+    visited,
+    direction,
+    hops,
+    maxNodes,
+    edgeKindFilter,
+    includeContains,
+    excludeTests,
+  } = args;
+  const { nodeId, depth, viaName, viaId } = current;
+  if (depth >= hops) return;
+
+  const neighborIds = fetchNeighborIds({ cg, nodeId, direction, edgeKindFilter, includeContains });
+  // Batch-fetch neighbor nodes to avoid N+1 lookups
+  const uniqueNewIds = [...new Set(neighborIds)].filter((id) => !visited.has(id));
+  const neighborNodes = uniqueNewIds.length > 0 ? cg.queries.getNodesByIds(uniqueNewIds) : new Map<string, Node>();
+
+  for (const nextId of neighborIds) {
+    enqueueBfsNeighborIfPresent({
+      queue,
+      rows,
+      visited,
+      nextId,
+      neighborNodes,
+      depth,
+      viaName,
+      viaId,
+      excludeTests,
+      maxNodes,
+    });
+    if (rows.length >= maxNodes) break;
+  }
+}
+
+function enqueueBfsNeighborIfPresent(args: {
+  queue: QueueEntry[];
+  rows: WalkRow[];
+  visited: Map<string, { depth: number; viaName: string; viaId: string }>;
+  nextId: string;
+  neighborNodes: ReadonlyMap<string, Node>;
+  depth: number;
+  viaName: string;
+  viaId: string;
+  excludeTests: boolean;
+  maxNodes: number;
+}): void {
+  const { queue, rows, visited, nextId, neighborNodes, depth, viaName, viaId, excludeTests, maxNodes } = args;
+  if (visited.has(nextId)) return;
+  const nextNode = neighborNodes.get(nextId);
+  if (!nextNode) return;
+  // Test-file noise filter: BFS from production code into test-file
+  // consumers is structural noise for "what does X transitively call"
+  // queries. Marking the node visited (without pushing a row or queue
+  // entry) blocks rediscovery via other paths and avoids walking deeper
+  // through a test file's helpers.
+  enqueueWalkNeighbor({ queue, rows, visited, nextId, nextNode, depth, viaName, viaId, excludeTests, maxNodes });
+}
+
+function enqueueWalkNeighbor(args: {
+  queue: QueueEntry[];
+  rows: WalkRow[];
+  visited: Map<string, { depth: number; viaName: string; viaId: string }>;
+  nextId: string;
+  nextNode: Node;
+  depth: number;
+  viaName: string;
+  viaId: string;
+  excludeTests: boolean;
+  maxNodes: number;
+}): void {
+  const { queue, rows, visited, nextId, nextNode, depth, viaName, viaId, excludeTests, maxNodes } = args;
+  const nextDepth = depth + 1;
+  visited.set(nextId, { depth: nextDepth, viaName, viaId });
+  if (excludeTests && isTestPath(nextNode.filePath)) return;
+  rows.push({ node: nextNode, depth: nextDepth, viaName, viaId });
+  if (rows.length >= maxNodes) return;
+  queue.push({ nodeId: nextId, depth: nextDepth, viaName: nextNode.name, viaId: nextId });
 }
 
 // ---------------------------------------------------------------------------
@@ -310,15 +383,6 @@ function formatWalkResult(args: FormatWalkArgs): string {
   const rankByPart = rankBy === 'centrality' ? ' rankBy=centrality' : '';
   const header = `Walk from ${startName} direction=${direction} hops=${hops}${rankByPart} (${rows.length} nodes)`;
 
-  // Tip when centrality data is sparse
-  let centralityTip = '';
-  if (rankBy === 'centrality' && rows.length > 0) {
-    const nullCount = rows.filter((r) => r.node.centrality == null).length;
-    if (nullCount >= Math.ceil(rows.length / 2)) {
-      centralityTip = `\n> Note: ${nullCount} of ${rows.length} rows have no centrality computed yet — run a fresh \`cartograph admin index\` for the centrality hook to fire.`;
-    }
-  }
-
   if (rows.length === 0) {
     return `${header}\n(no neighbors found)`;
   }
@@ -326,26 +390,37 @@ function formatWalkResult(args: FormatWalkArgs): string {
   const lines: string[] = [header, ''];
 
   if (compact) {
-    for (const { node, depth, viaName } of rows) {
-      const loc = node.startLine ? `:${node.startLine}` : '';
-      const via = viaName ? `|via=${viaName}` : '';
-      const role = roles?.get(node.id);
-      const roleCol = role ? `|role:${role}` : '';
-      lines.push(`${node.name}|${node.kind}|${node.filePath}${loc}|depth=${depth}${via}${roleCol}|id:${node.id}`);
-    }
+    for (const row of rows) lines.push(formatWalkCompactRow(row, roles));
   } else {
-    for (const { node, depth, viaName } of rows) {
-      const loc = node.startLine ? `:${node.startLine}` : '';
-      const via = viaName ? ` via ${viaName}` : '';
-      const role = roles?.get(node.id);
-      const roleTag = role ? `, role:${role}` : '';
-      lines.push(
-        `- **${node.name}** (${node.kind}${roleTag}) — \`${node.filePath}${loc}\` depth=${depth}${via} \`id:${node.id}\``,
-      );
-    }
+    for (const row of rows) lines.push(formatWalkMarkdownRow(row, roles));
   }
 
-  return lines.join('\n') + centralityTip;
+  return lines.join('\n') + buildCentralitySparseTip(rankBy, rows);
+}
+
+function buildCentralitySparseTip(rankBy: WalkRankBy, rows: ReadonlyArray<WalkRow>): string {
+  if (rankBy !== 'centrality' || rows.length === 0) return '';
+  const nullCount = rows.filter((r) => r.node.centrality == null).length;
+  if (nullCount < Math.ceil(rows.length / 2)) return '';
+  return `\n> Note: ${nullCount} of ${rows.length} rows have no centrality computed yet — run a fresh \`cartograph admin index\` for the centrality hook to fire.`;
+}
+
+function formatWalkCompactRow(row: WalkRow, roles: Map<string, string> | undefined): string {
+  const { node, depth, viaName } = row;
+  const loc = node.startLine ? `:${node.startLine}` : '';
+  const via = viaName ? `|via=${viaName}` : '';
+  const role = roles?.get(node.id);
+  const roleCol = role ? `|role:${role}` : '';
+  return `${node.name}|${node.kind}|${node.filePath}${loc}|depth=${depth}${via}${roleCol}|id:${node.id}`;
+}
+
+function formatWalkMarkdownRow(row: WalkRow, roles: Map<string, string> | undefined): string {
+  const { node, depth, viaName } = row;
+  const loc = node.startLine ? `:${node.startLine}` : '';
+  const via = viaName ? ` via ${viaName}` : '';
+  const role = roles?.get(node.id);
+  const roleTag = role ? `, role:${role}` : '';
+  return `- **${node.name}** (${node.kind}${roleTag}) — \`${node.filePath}${loc}\` depth=${depth}${via} \`id:${node.id}\``;
 }
 
 // ---------------------------------------------------------------------------
@@ -434,16 +509,16 @@ function parseWalkArgs(args: Record<string, unknown>, ctx: ToolCtx): WalkArgs | 
  * preserved as the tie-breaker among equal centrality values.
  */
 function sortByCentrality(rows: WalkRow[], maxNodes: number): WalkRow[] {
-  return rows
-    .sort((a, b) => {
-      const ca = a.node.centrality ?? null;
-      const cb = b.node.centrality ?? null;
-      if (ca === null && cb === null) return 0;
-      if (ca === null) return 1; // nulls sort last
-      if (cb === null) return -1;
-      return cb - ca; // descending
-    })
-    .slice(0, maxNodes);
+  const sortedRows = [...rows];
+  sortedRows.sort((a, b) => {
+    const ca = a.node.centrality ?? null;
+    const cb = b.node.centrality ?? null;
+    if (ca === null && cb === null) return 0;
+    if (ca === null) return 1; // nulls sort last
+    if (cb === null) return -1;
+    return cb - ca; // descending
+  });
+  return sortedRows.slice(0, maxNodes);
 }
 
 // ---------------------------------------------------------------------------

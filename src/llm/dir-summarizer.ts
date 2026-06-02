@@ -257,7 +257,7 @@ export function extractClaudeMdAnchor(content: string): string | null {
   if (headingIndexes.length === 0) return null;
   // Prefer "Project Overview" (case-insensitive); else use the first `## ` heading.
   const overviewIdx = headingIndexes.findIndex((h) => /project\s*overview/i.test(h.title));
-  const startIdx = overviewIdx >= 0 ? overviewIdx : 0;
+  const startIdx = Math.max(overviewIdx, 0);
   const startLine = headingIndexes[startIdx]!.line;
   const endLine = startIdx + 1 < headingIndexes.length ? headingIndexes[startIdx + 1]!.line : lines.length;
   const block = lines.slice(startLine, endLine).join('\n');
@@ -440,7 +440,7 @@ export function detectDirectoryPattern(
   // structural count (opts.toolExportCount) wins when supplied — and is
   // checked BEFORE the empty-items guard so a caller that supplies the
   // count still gets a verdict when `items` is empty.
-  const toolExportCount = opts?.toolExportCount ?? items.filter((it) => /_TOOL$/.test(it.name)).length;
+  const toolExportCount = opts?.toolExportCount ?? items.filter((it) => it.name.endsWith('_TOOL')).length;
   if (toolExportCount >= MCP_TOOL_EXPORT_FLOOR) {
     return 'mcp_tools';
   }
@@ -510,8 +510,6 @@ export function buildStructuralDirectorySummary(
 
   // Exhaustiveness guard — fall back to a generic stub.
   // (Unreachable today; keeps the function total over the union.)
-  const _exhaustive: never = pattern;
-  void _exhaustive;
   return `The \`${dirPath}\` directory is a structurally-recognised module.`;
 }
 
@@ -541,18 +539,13 @@ export function buildPrompt(group: DirGroup, anchorText: string): string {
     `exposes, and how a caller would use it. Ground the description in the`,
     `Project Overview above and in the symbol summaries below; do not invent`,
     `functionality that is not present in the symbol summaries.`,
-  );
-  // Handoff #9: dir-summary prose hallucinated acronym expansions for
-  // directory names (e.g. "mcp" → "Microcontroller Platform" /
-  // "Minecraft Code Platform"). Same guidance as file-summarizer.ts.
-  lines.push(
     `When the directory path contains an acronym (e.g. "mcp", "hnsw"), use it`,
     `VERBATIM unless the Project Overview above explicitly defines its`,
     `expansion. Never guess at acronym meanings from training data.`,
     `No bullet lists. No headers. Just prose.`,
     '',
+    '## Symbols in this module',
   );
-  lines.push('## Symbols in this module');
   const items = group.items.slice(0, MAX_SYMBOLS_IN_PROMPT);
   for (const it of items) {
     lines.push(`- ${it.name} (${it.kind}): ${it.summary}`);
@@ -560,8 +553,7 @@ export function buildPrompt(group: DirGroup, anchorText: string): string {
   if (group.items.length > items.length) {
     lines.push(`- ... and ${group.items.length - items.length} more`);
   }
-  lines.push('');
-  lines.push('Module summary:');
+  lines.push('', 'Module summary:');
   return lines.join('\n');
 }
 

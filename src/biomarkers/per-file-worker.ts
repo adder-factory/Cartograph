@@ -482,4 +482,4 @@ function evaluateAnalysableNodesInline(args: EvaluateAnalysableArgs): void {
   }
 }
 
-void main();
+await main();

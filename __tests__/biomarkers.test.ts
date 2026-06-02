@@ -782,7 +782,7 @@ describe('codeHealthScore', () => {
   });
 
   it('floors at 1', () => {
-    const many = Array(20).fill({ severity: 'error' as const });
+    const many = new Array(20).fill({ severity: 'error' as const });
     expect(codeHealthScore(many)).toBe(1);
   });
 });
@@ -871,7 +871,7 @@ describe('end-to-end through Cartograph', () => {
         expect(banded.every((r) => r.metric >= minMetric && r.metric <= maxMetric)).toBe(true);
       }
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -916,7 +916,7 @@ describe('end-to-end through Cartograph', () => {
       const onScriptFile = ranked.filter((r) => r.filePath === 'scripts/gnarly-bench.ts');
       expect(onScriptFile).toEqual([]);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -948,7 +948,7 @@ compute();
       const stats = getFindingsStats(cg.queries);
       expect(stats.totalFindings).toBe(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -957,9 +957,10 @@ compute();
     const filePath = path.join(dir, 'src', 'fixme.ts');
     // Non-exported so the cross-file unused_export rule can't fire and
     // mask the per-file replace behaviour we're testing here.
+    const branchLines = Array.from({ length: 250 }, (_, i) => `  if (x === ${i}) return ${i};`).join('\n');
     fs.writeFileSync(
       filePath,
-      `function ugly(x: number): number {\n${Array.from({ length: 250 }, (_, i) => `  if (x === ${i}) return ${i};`).join('\n')}\n  return -1;\n}\nugly(0);\n`,
+      `function ugly(x: number): number {\n${branchLines}\n  return -1;\n}\nugly(0);\n`,
     );
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'biomarker-stale', version: '0.0.0' }));
 
@@ -981,7 +982,7 @@ compute();
       const ranked = getFindingsRanked(cg.queries, { minSeverity: 'info', limit: 100 });
       expect(ranked.find((r) => r.name === 'ugly')).toBeUndefined();
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1020,7 +1021,7 @@ compute();
       const stats = getFindingsStats(cg.queries);
       expect(stats.totalFindings).toBe(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1044,7 +1045,7 @@ compute();
       expect(god).toBeDefined();
       expect(god!.metric).toBe(16);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1103,7 +1104,7 @@ export class Customer {
       expect(detail.ownAccesses).toBe(0);
       expect(detail.foreignAccesses).toBeGreaterThanOrEqual(6);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1145,7 +1146,7 @@ export class Cart {
       const findings = getFindingsForNode(cg.queries, total!.id);
       expect(findings.some((f) => f.biomarker === 'feature_envy')).toBe(false);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1185,7 +1186,7 @@ export class Orchestrator {
       const findings = getFindingsForNode(cg.queries, coordinate!.id);
       expect(findings.some((f) => f.biomarker === 'feature_envy')).toBe(false);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1227,7 +1228,7 @@ export function aggregate(order: Order): number {
       const findings = getFindingsForNode(cg.queries, agg!.id);
       expect(findings.some((f) => f.biomarker === 'feature_envy')).toBe(false);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1283,7 +1284,7 @@ export function aggregate(order: Order): number {
       });
       expect(afterFullPass.find((r) => r.name === 'unusedAfterEdit')).toBeDefined();
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1353,7 +1354,7 @@ export function aggregate(order: Order): number {
       expect(unusedRow).toBeDefined();
       expect(unusedRow!.surfaceReason).toBe('full-pass');
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1422,7 +1423,7 @@ export function aggregate(order: Order): number {
       });
       expect(underscoreInput.some((r) => r.name === 'keepOne')).toBe(true);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -1506,7 +1507,7 @@ export function aggregate(order: Order): number {
       // Error row is still surfaced.
       expect(ranked2.some((r) => r.name === 'lowReachHelper' && r.severity === 'error')).toBe(true);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 });
@@ -1544,8 +1545,7 @@ describe('cartograph_biomarkers: F-D — minCentrality empty hint', () => {
     for (let i = 0; i < 90; i++) {
       lines.push('  result += result;');
     }
-    lines.push('  return result;');
-    lines.push('}');
+    lines.push('  return result;', '}');
     fs.writeFileSync(path.join(dir, 'src', 'gnarly.ts'), lines.join('\n'));
     fs.writeFileSync(
       path.join(dir, 'package.json'),
@@ -1558,7 +1558,7 @@ describe('cartograph_biomarkers: F-D — minCentrality empty hint', () => {
 
   afterEach(() => {
     handler?.closeAll();
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1608,7 +1608,7 @@ describe('cartograph_biomarkers: F-D — minCentrality empty hint', () => {
       fields: ['name', 'id'],
     });
     const findText = findResult.content[0]?.text ?? '';
-    const match = findText.match(/id:(n_[0-9a-f]{8})/);
+    const match = /id:(n_[0-9a-f]{8})/.exec(findText);
     expect(match).not.toBeNull();
     const uid = match![1]!;
 

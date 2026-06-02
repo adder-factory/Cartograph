@@ -145,20 +145,32 @@ function linkFailures(root: AhoCorasickNode): void {
   while (queue.length > 0) {
     const node = queue.shift()!;
     for (const [code, child] of node.children) {
-      let f = node.fail;
-      while (f !== root && !f.children.has(code)) {
-        f = f.fail;
-      }
-      // f either has a `code` child (use it) or is root. If root has
-      // a `code` child different from `child` itself, that's the
-      // failure target; otherwise fail to root.
-      const candidate = f.children.get(code);
-      child.fail = candidate && candidate !== child ? candidate : root;
-      for (const outputIdx of child.fail.outputs) {
-        if (!child.outputs.includes(outputIdx)) child.outputs.push(outputIdx);
-      }
+      child.fail = resolveFailureTarget(root, node.fail, child, code);
+      inheritFailureOutputs(child);
       queue.push(child);
     }
+  }
+}
+
+function resolveFailureTarget(
+  root: AhoCorasickNode,
+  start: AhoCorasickNode,
+  child: AhoCorasickNode,
+  code: number,
+): AhoCorasickNode {
+  let f = start;
+  while (f !== root && !f.children.has(code)) {
+    f = f.fail;
+  }
+  // f either has a `code` child (use it) or is root. If root has a `code`
+  // child different from `child` itself, that's the failure target.
+  const candidate = f.children.get(code);
+  return candidate && candidate !== child ? candidate : root;
+}
+
+function inheritFailureOutputs(child: AhoCorasickNode): void {
+  for (const outputIdx of child.fail.outputs) {
+    if (!child.outputs.includes(outputIdx)) child.outputs.push(outputIdx);
   }
 }
 

@@ -62,7 +62,7 @@ describe('Cartograph no-LLM smoke', () => {
     );
     const cg = await Cartograph.init(tempDir, { config: {} });
     try {
-      expect(cg.llm.hasLlm()).toBe(false);
+      expect(cg.llm.config.hasLlm()).toBe(false);
     } finally {
       cg.close();
       fs.rmSync(tempDir, { recursive: true, force: true });

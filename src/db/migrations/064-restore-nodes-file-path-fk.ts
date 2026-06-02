@@ -61,8 +61,10 @@ export const MIGRATION: MigrationModule = {
     // Partial-schema guard — same shape migrations 054 / 056 / 062 use.
     // Minimal test fixtures bootstrap a bare `nodes` without the rtree
     // columns the migration-034 triggers reference; skip cleanly there.
-    const nodeCols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-    if (!nodeCols.includes('start_line') || !nodeCols.includes('end_line')) return;
+    const nodeCols = new Set(
+      (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    if (!nodeCols.has('start_line') || !nodeCols.has('end_line')) return;
 
     const row = db.prepare("SELECT name, sql FROM sqlite_master WHERE type='table' AND name='nodes'").get() as
       | ObjectRow

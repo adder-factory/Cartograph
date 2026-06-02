@@ -36,12 +36,14 @@ import { judgeDeadCode } from '../src/llm/dead-code.js';
 import { LlmEndpointError, type ChatMessage } from '../src/llm/client.js';
 import { FakeLlmClient } from './helpers/fake-chat-client.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 /**
  * Parse the zero-indexed symbol block out of a batch judge prompt.
  * `buildBatchPrompt` emits `Symbols (zero-indexed):\n0. name (...)\n...`.
  */
 function batchSize(userText: string): number {
-  const m = userText.match(/Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/);
+  const m = /Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/.exec(userText);
   const lines = (m?.[1] ?? '').split('\n').filter((l) => /^\d+\./.test(l));
   return lines.length;
 }
@@ -51,7 +53,10 @@ function verdictHandler(messages: ChatMessage[]): string {
   const n = batchSize(messages[0]?.content ?? '');
   const entries = Array.from({ length: n }, (_, i) => {
     // Vary verdicts so the dead → uncertain → live sort is observable.
-    const verdict = i % 3 === 0 ? 'dead' : i % 3 === 1 ? 'live' : 'uncertain';
+    const remainder = i % 3;
+    let verdict = 'uncertain';
+    if (remainder === 0) verdict = 'dead';
+    else if (remainder === 1) verdict = 'live';
     return `{"i":${i},"verdict":"${verdict}","confidence":0.9,"reason":"stub ${i}"}`;
   });
   return `{"results":[${entries.join(',')}]}`;
@@ -188,7 +193,7 @@ describe('judgeDeadCode — DeadCodeJudgeRun.run / worker orchestration', () => 
     expect(result.results).toHaveLength(6);
 
     // Each of the six orphans appears exactly once in the results.
-    const names = result.results.map((r) => r.node.name).sort();
+    const names = result.results.map((r) => r.node.name).sort(byString);
     expect(names).toEqual(['orphan0', 'orphan1', 'orphan2', 'orphan3', 'orphan4', 'orphan5']);
 
     // batchSize 1 means one chat call per candidate — six in total,
@@ -320,7 +325,7 @@ describe('judgeDeadCode — bug #15: interface-dispatch confidence cap', () => {
     // interface-implementor methods.
     const orph = result.results.find((r) => r.node.name === 'trulyOrphan');
     if (orph) {
-      expect(orph.confidence).toBe(1.0);
+      expect(orph.confidence).toBe(1);
       expect(orph.reason).not.toMatch(/hedge:/i);
     }
   });

@@ -32,12 +32,12 @@ const edges = db.prepare(`
 `).all();
 
 const WEIGHTS = {
-  calls: 3.0,
-  instantiates: 2.0,
-  extends: 2.0,
-  implements: 2.0,
-  references: 1.0,
-  type_of: 1.0,
+  calls: 3,
+  instantiates: 2,
+  extends: 2,
+  implements: 2,
+  references: 1,
+  type_of: 1,
 };
 
 const N = allNodes.length;
@@ -51,14 +51,14 @@ for (const e of edges) {
   const s = idToIdx.get(e.source);
   const t = idToIdx.get(e.target);
   if (s == null || t == null) continue;
-  const w = WEIGHTS[e.kind] ?? 1.0;
+  const w = WEIGHTS[e.kind] ?? 1;
   outgoing[s] += w;
   if (!incoming.has(t)) incoming.set(t, []);
   incoming.get(t).push([s, w]);
 }
 
 const damping = 0.85;
-let pr = new Float64Array(N).fill(1.0 / N);
+let pr = new Float64Array(N).fill(1 / N);
 const teleport = (1 - damping) / N;
 
 for (let iter = 0; iter < 30; iter++) {

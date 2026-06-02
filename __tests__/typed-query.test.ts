@@ -107,15 +107,13 @@ const findAllNodesAll = defineQuery({
 // ---- compile-time assertions (these only need to typecheck) ---------------
 
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
-function _typeAssertions(q: ReturnType<typeof findNodeById>): void {
+function _typeAssertions(q: ReturnType<typeof findNodeById>) {
   type Params = TypedQueryParams<typeof q>;
   type Row = TypedQueryRow<typeof q>;
-  const _p: Params = { id: 'x' };
-  void _p;
-  const _r: Row | undefined = q.get({ id: 'x' });
-  const _rs: Row[] = q.all({ id: 'x' });
-  void _r;
-  void _rs;
+  const params: Params = { id: 'x' };
+  const row: Row | undefined = q.get({ id: 'x' });
+  const rows: Row[] = q.all({ id: 'x' });
+  return { params, row, rows };
 }
 
 // ---- tests ----------------------------------------------------------------

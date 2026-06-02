@@ -64,7 +64,7 @@ describe('getWeightedSummaryCoverage', () => {
     const r = getWeightedSummaryCoverage(qb, new Set(['function']));
     expect(r.totalNodes).toBe(2);
     expect(r.coveredNodes).toBe(1);
-    expect(r.totalWeight).toBeCloseTo(1.0, 3);
+    expect(r.totalWeight).toBeCloseTo(1, 3);
     expect(r.coveredWeight).toBeCloseTo(0.9, 3);
     expect(r.weightedRatio).toBeCloseTo(0.9, 3);
   });

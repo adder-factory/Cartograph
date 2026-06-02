@@ -57,8 +57,12 @@ if (!codebasePath) {
   console.error('   or: bun __tests__/evaluation/runner.ts /path/to/codebase [flags]');
   process.exit(1);
 }
-const activeCases: EvalTestCase[] =
-  casesMode === 'self' ? selfTestCases : casesMode === 'large' ? largeTestCases : testCases;
+let activeCases: EvalTestCase[] = testCases;
+if (casesMode === 'self') {
+  activeCases = selfTestCases;
+} else if (casesMode === 'large') {
+  activeCases = largeTestCases;
+}
 
 const resolvedPath = path.resolve(codebasePath);
 if (!fs.existsSync(path.join(resolvedPath, '.cartograph', 'cartograph.db'))) {
@@ -78,112 +82,120 @@ console.log(`Cases:    ${activeCases.length} (${casesMode})`);
 if (comparePath) console.log(`Baseline: ${comparePath}`);
 console.log('');
 
+type EvalCartograph = ReturnType<typeof Cartograph.openSync>;
+
+async function runEvalCase(cg: EvalCartograph, tc: EvalTestCase): Promise<EvalResult> {
+  const start = performance.now();
+
+  if (tc.api === 'searchNodes') {
+    const searchResults = searchNodes(cg.queries, tc.query, {
+      limit: 10,
+      kinds: tc.kinds,
+      ...(tc.options as Record<string, unknown>),
+    });
+    return scoreSearchNodes(tc.id, tc.expectedSymbols, searchResults, performance.now() - start);
+  }
+
+  if (tc.api === 'searchSemantic') {
+    return runSemanticEvalCase(cg, tc, start);
+  }
+
+  const subgraph = await cg.internals.contextBuilder.findRelevantContext(tc.query, {
+    searchLimit: 8,
+    traversalDepth: 3,
+    maxNodes: 80,
+    minScore: 0.2,
+    ...(tc.options as Record<string, unknown>),
+  });
+  return scoreFindRelevantContext(tc.id, tc.expectedSymbols, subgraph, performance.now() - start);
+}
+
+async function runSemanticEvalCase(cg: EvalCartograph, tc: EvalTestCase, start: number): Promise<EvalResult> {
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
+  const embModel = getEmbeddingModel(llmConfig);
+  if (!embModel) {
+    return scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-embeddings');
+  }
+
+  if (tc.symbolName) {
+    const sourceMatches = searchNodes(cg.queries, tc.symbolName, { limit: 1 });
+    const sourceNode = sourceMatches[0]?.node;
+    if (!sourceNode || !hasSymbolEmbedding(cg.queries, sourceNode.id, embModel)) {
+      return scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-source-embedding');
+    }
+    const peers = await llmFindSimilar(cg.llm, sourceNode.id, {
+      limit: 10,
+      ...(tc.options as Record<string, unknown>),
+    });
+    return scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start);
+  }
+
+  const peers = await llmFindImplementations(cg.llm, tc.query, {
+    limit: 10,
+    ...(tc.options as Record<string, unknown>),
+  });
+  return scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start);
+}
+
+function resultStatus(r: EvalResult): string {
+  if (r.skipped) return '\x1b[33mSKIP\x1b[0m';
+  if (r.pass) return '\x1b[32mPASS\x1b[0m';
+  return '\x1b[31mFAIL\x1b[0m';
+}
+
+const LATENCY_BUDGET_MS: Record<string, number> = {
+  searchNodes: 200,
+  searchSemantic: 200,
+  findRelevantContext: 1500,
+};
+
+function printResultRows(results: EvalResult[]): void {
+  const maxIdLen = Math.max(...results.map((r) => r.caseId.length));
+  for (const r of results) {
+    console.log(formatResultRow(r, maxIdLen));
+
+    if (r.missedSymbols.length > 0 && !r.skipped) {
+      console.log(`  ${' '.repeat(maxIdLen)}        missed: ${r.missedSymbols.join(', ')}`);
+    }
+  }
+}
+
+function formatResultRow(r: EvalResult, maxIdLen: number): string {
+  const status = resultStatus(r);
+  const id = r.caseId.padEnd(maxIdLen);
+  const recall = `recall=${r.recall.toFixed(2)}`;
+  const extra = r.edgeDensity === undefined ? `mrr=${r.mrr.toFixed(2)}` : `density=${r.edgeDensity.toFixed(2)}`;
+  const latency = `${Math.round(r.latencyMs)}ms`;
+  const skipNote = r.skipped ? `  (${r.skipped})` : '';
+  const slowNote = latencyBudgetNote(r);
+  return `  ${id}  ${status}  ${recall}  ${extra}  ${latency}${skipNote}${slowNote}`;
+}
+
+function latencyBudgetNote(r: EvalResult): string {
+  const tc = activeCases.find((c) => c.id === r.caseId);
+  const budget = tc ? LATENCY_BUDGET_MS[tc.api] : undefined;
+  if (budget === undefined || r.latencyMs <= budget || r.skipped) return '';
+  return `  \x1b[33m⚠ ${Math.round(r.latencyMs)}ms > ${budget}ms budget\x1b[0m`;
+}
+
 async function run() {
   const cg = Cartograph.openSync(resolvedPath);
   const results: EvalResult[] = [];
 
   for (const tc of activeCases) {
-    const start = performance.now();
-
-    if (tc.api === 'searchNodes') {
-      const searchResults = searchNodes(cg.queries, tc.query, {
-        limit: 10,
-        kinds: tc.kinds,
-        ...(tc.options as Record<string, unknown>),
-      });
-      const latency = performance.now() - start;
-      const result = scoreSearchNodes(tc.id, tc.expectedSymbols, searchResults, latency);
-      results.push(result);
-    } else if (tc.api === 'searchSemantic') {
-      // B9: semantic mode uses the LLM-bridge surface (concept query
-      // → findImplementations, peer mode → findSimilar). Skip cleanly
-      // when no embedding model is configured OR when the source
-      // symbol has no embedding row — those are environmental gaps,
-      // not regressions, and activate the case automatically once
-      // `cartograph embed` populates the vec0 table.
-      const llmConfig = await cg.llm.getEffectiveLlmConfig();
-      const embModel = getEmbeddingModel(llmConfig);
-      if (!embModel) {
-        results.push(scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-embeddings'));
-        continue;
-      }
-      if (tc.symbolName) {
-        const sourceMatches = searchNodes(cg.queries, tc.symbolName, { limit: 1 });
-        const sourceNode = sourceMatches[0]?.node;
-        if (!sourceNode || !hasSymbolEmbedding(cg.queries, sourceNode.id, embModel)) {
-          results.push(
-            scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-source-embedding'),
-          );
-          continue;
-        }
-        const peers = await llmFindSimilar(cg.llm, sourceNode.id, {
-          limit: 10,
-          ...(tc.options as Record<string, unknown>),
-        });
-        results.push(scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start));
-      } else {
-        const peers = await llmFindImplementations(cg.llm, tc.query, {
-          limit: 10,
-          ...(tc.options as Record<string, unknown>),
-        });
-        results.push(scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start));
-      }
-    } else {
-      const subgraph = await cg.internals.contextBuilder.findRelevantContext(tc.query, {
-        searchLimit: 8,
-        traversalDepth: 3,
-        maxNodes: 80,
-        minScore: 0.2,
-        ...(tc.options as Record<string, unknown>),
-      });
-      const latency = performance.now() - start;
-      const result = scoreFindRelevantContext(tc.id, tc.expectedSymbols, subgraph, latency);
-      results.push(result);
-    }
+    results.push(await runEvalCase(cg, tc));
   }
 
   cg.close();
 
   // Print results table
-  const maxIdLen = Math.max(...results.map((r) => r.caseId.length));
-
   // Per-api absolute latency budgets (B7). Cases that exceed get a
   // ⚠ note in the per-row display — separate from the pass/fail gate
   // so a slow-but-correct case doesn't poison the count, but the
   // operator sees the regression. Numbers chosen for the 1k-file
   // large fixture: any plausible production-size lookup should
   // finish well under these on a modern machine.
-  const LATENCY_BUDGET_MS: Record<string, number> = {
-    searchNodes: 200,
-    searchSemantic: 200,
-    findRelevantContext: 1500,
-  };
-
-  for (const r of results) {
-    // SKIP display takes priority — a skipped case isn't really a
-    // PASS, but counts as one in the gate so the operator can see at
-    // a glance which cases are dormant due to environment.
-    const status = r.skipped ? '\x1b[33mSKIP\x1b[0m' : r.pass ? '\x1b[32mPASS\x1b[0m' : '\x1b[31mFAIL\x1b[0m';
-    const id = r.caseId.padEnd(maxIdLen);
-    const recall = `recall=${r.recall.toFixed(2)}`;
-    const extra = r.edgeDensity === undefined ? `mrr=${r.mrr.toFixed(2)}` : `density=${r.edgeDensity.toFixed(2)}`;
-    const latency = `${Math.round(r.latencyMs)}ms`;
-    const skipNote = r.skipped ? `  (${r.skipped})` : '';
-    // Latency-budget warning: look up the case definition's api so
-    // the budget is api-aware (explore has more headroom than search).
-    const tc = activeCases.find((c) => c.id === r.caseId);
-    const budget = tc ? LATENCY_BUDGET_MS[tc.api] : undefined;
-    const slowNote =
-      budget !== undefined && r.latencyMs > budget && !r.skipped
-        ? `  \x1b[33m⚠ ${Math.round(r.latencyMs)}ms > ${budget}ms budget\x1b[0m`
-        : '';
-
-    console.log(`  ${id}  ${status}  ${recall}  ${extra}  ${latency}${skipNote}${slowNote}`);
-
-    if (r.missedSymbols.length > 0 && !r.skipped) {
-      console.log(`  ${' '.repeat(maxIdLen)}        missed: ${r.missedSymbols.join(', ')}`);
-    }
-  }
+  printResultRows(results);
 
   // Summary
   const passed = results.filter((r) => r.pass).length;
@@ -243,7 +255,9 @@ async function run() {
   process.exit(failed > 0 || regressionExit > 0 ? Math.max(regressionExit, 1) : 0);
 }
 
-run().catch((err) => {
+try {
+  await run();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

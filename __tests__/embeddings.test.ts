@@ -33,7 +33,7 @@ const EMBED_DIM = 8;
 
 function l2(v: Float32Array): Float32Array {
   let s = 0;
-  for (let i = 0; i < v.length; i++) s += v[i]! * v[i]!;
+  for (const value of v) s += value * value;
   const n = Math.sqrt(s) || 1;
   const out = new Float32Array(v.length);
   for (let i = 0; i < v.length; i++) out[i] = v[i]! / n;
@@ -296,7 +296,7 @@ export class TokenStore {
     }
   });
 
-  it('cg.llm.embedAll() runs the embed-only path', async () => {
+  it('cg.llm.embed.embedAll() runs the embed-only path', async () => {
     const cg = await Cartograph.init(tempDir, {
       config: {
         llm: {
@@ -320,7 +320,7 @@ export class TokenStore {
       const beforeChat = chatSpy.mock.calls.length;
       const beforeEmbed = fakeEmbed.embedCalls;
 
-      const result = await cg.llm.embedAll();
+      const result = await cg.llm.embed.embedAll();
 
       // Idempotent — already embedded, so no new vectors.
       expect(result.generated).toBe(0);

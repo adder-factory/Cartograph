@@ -133,53 +133,16 @@ export const goResolver: FrameworkResolver = {
     // Extract Gin routes
     // r.GET("/path", handler), router.POST("/path", handler), etc.
     const ginRoutePattern = /\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*\(\s*["']([^"']+)["']/g;
-
-    let match: RegExpExecArray | null;
-    while ((match = ginRoutePattern.exec(safe)) !== null) {
-      const [, method, path] = match;
-      const line = lineOf(match.index);
-
-      nodes.push({
-        id: `route:${filePath}:${method}:${path}:${line}`,
-        kind: 'route',
-        name: `${method} ${path}`,
-        qualifiedName: `${filePath}::${method}:${path}`,
-        filePath,
-        startLine: line,
-        endLine: line,
-        startColumn: 0,
-        endColumn: match[0].length,
-        language: 'go',
-        updatedAt: now,
-      });
-    }
+    collectGoRegexRoutes({ nodes, pattern: ginRoutePattern, safe, lineOf, filePath, now });
 
     // Extract Echo routes
     // e.GET("/path", handler)
     const echoRoutePattern = /e\.\s*(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["']([^"']+)["']/g;
-
-    while ((match = echoRoutePattern.exec(safe)) !== null) {
-      const [, method, path] = match;
-      const line = lineOf(match.index);
-
-      nodes.push({
-        id: `route:${filePath}:${method}:${path}:${line}`,
-        kind: 'route',
-        name: `${method} ${path}`,
-        qualifiedName: `${filePath}::${method}:${path}`,
-        filePath,
-        startLine: line,
-        endLine: line,
-        startColumn: 0,
-        endColumn: match[0].length,
-        language: 'go',
-        updatedAt: now,
-      });
-    }
+    collectGoRegexRoutes({ nodes, pattern: echoRoutePattern, safe, lineOf, filePath, now });
 
     // Extract Chi routes
     // r.Get("/path", handler), r.Post("/path", handler)
-    // (?<![A-Za-z0-9_]) prevents matching the `r.` suffix inside words like
+    // (?<!\w) prevents matching the `r.` suffix inside words like
     // `Header.Get("X-Foo")` where the `r` in "Header" would otherwise fire.
     // The path string MUST start with `/` — Chi (and every HTTP router) only
     // mounts slash-rooted paths. This kills the false-positive class where a
@@ -187,26 +150,16 @@ export const goResolver: FrameworkResolver = {
     // a registry lookup `r.Get("bash")` (6 such fires in ollama's tool
     // registry tests). Confirmed in Chi's own docs / examples that every
     // route literal is slash-rooted.
-    const chiRoutePattern = /(?<![A-Za-z0-9_])r\.\s*(Get|Post|Put|Patch|Delete)\s*\(\s*["'](\/[^"']*)["']/g;
-
-    while ((match = chiRoutePattern.exec(safe)) !== null) {
-      const [, method, path] = match;
-      const line = lineOf(match.index);
-
-      nodes.push({
-        id: `route:${filePath}:${method!.toUpperCase()}:${path}:${line}`,
-        kind: 'route',
-        name: `${method!.toUpperCase()} ${path}`,
-        qualifiedName: `${filePath}::${method!.toUpperCase()}:${path}`,
-        filePath,
-        startLine: line,
-        endLine: line,
-        startColumn: 0,
-        endColumn: match[0].length,
-        language: 'go',
-        updatedAt: now,
-      });
-    }
+    const chiRoutePattern = /(?<!\w)r\.\s*(Get|Post|Put|Patch|Delete)\s*\(\s*["'](\/[^"']*)["']/g;
+    collectGoRegexRoutes({
+      nodes,
+      pattern: chiRoutePattern,
+      safe,
+      lineOf,
+      filePath,
+      now,
+      normalizeMethod: (method) => method.toUpperCase(),
+    });
 
     // Extract standard library net/http patterns:
     //   http.HandleFunc("/path", h)                         — DefaultServeMux
@@ -222,27 +175,16 @@ export const goResolver: FrameworkResolver = {
     //
     // Splits method-prefix specs into (METHOD, path); falls back to ANY
     // method when no method prefix is present.
-    const httpHandlePattern = /(?<![A-Za-z0-9_])(?:http|mux)\.(Handle|HandleFunc)\s*\(\s*["']([^"'\n]*\/[^"'\n]*)["']/g;
+    const httpHandlePattern = /(?<!\w)(?:http|mux)\.(Handle|HandleFunc)\s*\(\s*["']([^"'\n]*\/[^"'\n]*)["']/g;
+    let match: RegExpExecArray | null;
     while ((match = httpHandlePattern.exec(safe)) !== null) {
       const spec = match[2]!.trim();
-      const methodPrefixMatch = spec.match(/^([A-Z]+)\s+(\/.*)$/);
+      const methodPrefixMatch = /^([A-Z]+)\s+(\/.*)$/.exec(spec);
       const method = methodPrefixMatch ? methodPrefixMatch[1]! : 'ANY';
       const routePath = methodPrefixMatch ? methodPrefixMatch[2]! : spec;
       const line = lineOf(match.index);
 
-      nodes.push({
-        id: `route:${filePath}:${method}:${routePath}:${line}`,
-        kind: 'route',
-        name: `${method} ${routePath}`,
-        qualifiedName: `${filePath}::${method}:${routePath}`,
-        filePath,
-        startLine: line,
-        endLine: line,
-        startColumn: 0,
-        endColumn: match[0].length,
-        language: 'go',
-        updatedAt: now,
-      });
+      nodes.push(goRouteNode({ filePath, method, routePath, line, endColumn: match[0].length, now }));
     }
 
     // Extract cobra subcommands — the dominant CLI framework in Go (kubectl,
@@ -258,7 +200,7 @@ export const goResolver: FrameworkResolver = {
     // literal so nested handler structs that happen to define their own
     // `Use` later don't double-fire.
     const cobraCommandPattern =
-      /(?<![A-Za-z0-9_])(?:&\s*)?cobra\.Command\s*\{[\s\S]{0,400}?Use:\s*["']([^"'\n]+?)["']/g;
+      /(?<!\w)(?:&\s*)?cobra\.Command\s*\{[\s\S]{0,400}?Use:\s*["']([^"'\n]+?)["']/g;
     const cobraSeen = new Set<string>();
 
     while ((match = cobraCommandPattern.exec(safe)) !== null) {
@@ -273,25 +215,87 @@ export const goResolver: FrameworkResolver = {
       const id = `cli:${filePath}:${verb}:${line}`;
       if (cobraSeen.has(id)) continue;
       cobraSeen.add(id);
-      nodes.push({
-        id,
-        kind: 'route',
-        name: `cmd ${verb}`,
-        qualifiedName: `${filePath}::cmd:${verb}`,
-        filePath,
-        startLine: line,
-        endLine: line,
-        startColumn: 0,
-        endColumn: match[0].length,
-        language: 'go',
-        signature: useString,
-        updatedAt: now,
-      });
+      nodes.push(goCliNode({ id, filePath, verb, line, endColumn: match[0].length, signature: useString, now }));
     }
 
     return nodes;
   },
 };
+
+interface CollectGoRegexRoutesArgs {
+  nodes: Node[];
+  pattern: RegExp;
+  safe: string;
+  lineOf: (index: number) => number;
+  filePath: string;
+  now: number;
+  normalizeMethod?: (method: string) => string;
+}
+
+function collectGoRegexRoutes(args: CollectGoRegexRoutesArgs): void {
+  const { nodes, pattern, safe, lineOf, filePath, now, normalizeMethod } = args;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(safe)) !== null) {
+    const [, rawMethod, routePath] = match;
+    const method = normalizeMethod ? normalizeMethod(rawMethod!) : rawMethod!;
+    const line = lineOf(match.index);
+    nodes.push(goRouteNode({ filePath, method, routePath: routePath!, line, endColumn: match[0].length, now }));
+  }
+}
+
+interface GoRouteNodeArgs {
+  filePath: string;
+  method: string;
+  routePath: string;
+  line: number;
+  endColumn: number;
+  now: number;
+}
+
+function goRouteNode(args: GoRouteNodeArgs): Node {
+  const { filePath, method, routePath, line, endColumn, now } = args;
+  return {
+    id: `route:${filePath}:${method}:${routePath}:${line}`,
+    kind: 'route',
+    name: `${method} ${routePath}`,
+    qualifiedName: `${filePath}::${method}:${routePath}`,
+    filePath,
+    startLine: line,
+    endLine: line,
+    startColumn: 0,
+    endColumn,
+    language: 'go',
+    updatedAt: now,
+  };
+}
+
+interface GoCliNodeArgs {
+  id: string;
+  filePath: string;
+  verb: string;
+  line: number;
+  endColumn: number;
+  signature: string;
+  now: number;
+}
+
+function goCliNode(args: GoCliNodeArgs): Node {
+  const { id, filePath, verb, line, endColumn, signature, now } = args;
+  return {
+    id,
+    kind: 'route',
+    name: `cmd ${verb}`,
+    qualifiedName: `${filePath}::cmd:${verb}`,
+    filePath,
+    startLine: line,
+    endLine: line,
+    startColumn: 0,
+    endColumn,
+    language: 'go',
+    signature,
+    updatedAt: now,
+  };
+}
 
 // Directory patterns for framework resolution
 const HANDLER_DIRS = ['handler', 'handlers', 'api', 'routes', 'controller', 'controllers'];

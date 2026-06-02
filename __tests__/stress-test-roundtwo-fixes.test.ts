@@ -40,7 +40,7 @@ describe('Round-two stress-test fixes', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 
@@ -109,8 +109,8 @@ describe('Round-two stress-test fixes', () => {
       // Each source's downstream file should appear under its own block,
       // not co-mingled. Cheap heuristic: split by per-source headings and
       // confirm userA only shows up under a.ts's block, userB under b.ts's.
-      const aBlockMatch = text.match(/\*\*`src\/a\.ts:\d+`:\*\*([\s\S]*?)(?=\*\*`src\/|###|$)/);
-      const bBlockMatch = text.match(/\*\*`src\/b\.ts:\d+`:\*\*([\s\S]*?)(?=\*\*`src\/|###|$)/);
+      const aBlockMatch = /\*\*`src\/a\.ts:\d+`:\*\*([\s\S]*?)(?=\*\*`src\/|###|$)/.exec(text);
+      const bBlockMatch = /\*\*`src\/b\.ts:\d+`:\*\*([\s\S]*?)(?=\*\*`src\/|###|$)/.exec(text);
       expect(aBlockMatch?.[1]).toContain('userA.ts');
       expect(aBlockMatch?.[1]).not.toContain('userB.ts');
       expect(bBlockMatch?.[1]).toContain('userB.ts');

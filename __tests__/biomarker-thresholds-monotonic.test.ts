@@ -29,10 +29,45 @@ const REPO_ROOT = path.join(__dirname, '..');
 const ENGINE = path.join(REPO_ROOT, 'src/biomarkers/engine.ts');
 const INDEX = path.join(REPO_ROOT, 'src/biomarkers/index.ts');
 
-/** `const T_XXX = { info: N, warning: N, error: N };` — captures
- *  1=name, 2=info, 3=warning, 4=error. */
-const TABLE_RE =
-  /const\s+T_(\w+)\s*=\s*\{\s*info:\s*(\d+(?:\.\d+)?)\s*,\s*warning:\s*(\d+(?:\.\d+)?)\s*,\s*error:\s*(\d+(?:\.\d+)?)\s*\}/g;
+/** `const T_XXX = { ... }` — captures 1=name, 2=table body. */
+const TABLE_RE = /const\s+T_(\w+)\s*=\s*\{([^}]*)\}/g;
+const LEADING_WHITESPACE_RE = /\s*/y;
+const TABLE_FIELD_VALUE_RE = /\s*(\d+(?:\.\d+)?)\s*/y;
+const TABLE_FIELD_ORDER = ['info', 'warning', 'error'] as const;
+
+function parseThresholdTable(
+  name: string,
+  body: string,
+): { table: string; info: number; warning: number; error: number } | null {
+  const values: Partial<Record<(typeof TABLE_FIELD_ORDER)[number], number>> = {};
+  let offset = 0;
+
+  for (const [index, field] of TABLE_FIELD_ORDER.entries()) {
+    LEADING_WHITESPACE_RE.lastIndex = offset;
+    LEADING_WHITESPACE_RE.exec(body);
+    offset = LEADING_WHITESPACE_RE.lastIndex;
+
+    const fieldPrefix = `${field}:`;
+    if (!body.startsWith(fieldPrefix, offset)) return null;
+    offset += fieldPrefix.length;
+
+    TABLE_FIELD_VALUE_RE.lastIndex = offset;
+    const match = TABLE_FIELD_VALUE_RE.exec(body);
+    if (match === null) return null;
+
+    values[field] = Number(match[1]);
+    offset = TABLE_FIELD_VALUE_RE.lastIndex;
+
+    if (index < TABLE_FIELD_ORDER.length - 1) {
+      if (body[offset] !== ',') return null;
+      offset += 1;
+    } else if (body.slice(offset).trim() !== '') {
+      return null;
+    }
+  }
+
+  return { table: `T_${name}`, info: values.info!, warning: values.warning!, error: values.error! };
+}
 
 describe('biomarker thresholds — info ≤ warning ≤ error', () => {
   it('every {info,warning,error} table in engine.ts is monotone', () => {
@@ -42,12 +77,11 @@ describe('biomarker thresholds — info ≤ warning ≤ error', () => {
     TABLE_RE.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = TABLE_RE.exec(text)) !== null) {
+      const table = parseThresholdTable(m[1], m[2]);
+      if (table === null) continue;
       tableCount += 1;
-      const info = Number(m[2]);
-      const warning = Number(m[3]);
-      const error = Number(m[4]);
-      if (!(info <= warning && warning <= error)) {
-        offenders.push({ table: `T_${m[1]}`, info, warning, error });
+      if (!(table.info <= table.warning && table.warning <= table.error)) {
+        offenders.push(table);
       }
     }
     // Sanity: if the regex finds zero tables, the test would vacuously
@@ -59,7 +93,7 @@ describe('biomarker thresholds — info ≤ warning ≤ error', () => {
   it('biomarkers/index.ts god_class T_GOD_* trio is monotone', () => {
     const text = fs.readFileSync(INDEX, 'utf-8');
     const valOf = (k: string): number => {
-      const re = new RegExp(`const\\s+${k}\\s*=\\s*(\\d+)`);
+      const re = new RegExp(String.raw`const\s+${k}\s*=\s*(\d+)`);
       const m = re.exec(text);
       expect(m, `missing const ${k} in biomarkers/index.ts`).not.toBeNull();
       return Number(m![1]);

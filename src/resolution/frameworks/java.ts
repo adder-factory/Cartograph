@@ -110,25 +110,7 @@ export const springResolver: FrameworkResolver = {
       }
     }
 
-    // Pattern 4: Entity/Model references
-    if (/^[A-Z][a-zA-Z]+$/.test(ref.referenceName)) {
-      const result = resolveByNameAndKind({
-        name: ref.referenceName,
-        kinds: CLASS_KINDS,
-        preferredDirPatterns: ENTITY_DIRS,
-        context,
-      });
-      if (result) {
-        return {
-          original: ref,
-          targetNodeId: result,
-          confidence: 0.7,
-          resolvedBy: 'framework',
-        };
-      }
-    }
-
-    // Pattern 5: Component references
+    // Pattern 4: Component references
     if (ref.referenceName.endsWith('Component') || ref.referenceName.endsWith('Config')) {
       const result = resolveByNameAndKind({
         name: ref.referenceName,
@@ -141,6 +123,24 @@ export const springResolver: FrameworkResolver = {
           original: ref,
           targetNodeId: result,
           confidence: 0.8,
+          resolvedBy: 'framework',
+        };
+      }
+    }
+
+    // Pattern 5: Entity/Model references
+    if (/^[A-Z][a-zA-Z]+$/.test(ref.referenceName)) {
+      const result = resolveByNameAndKind({
+        name: ref.referenceName,
+        kinds: CLASS_KINDS,
+        preferredDirPatterns: ENTITY_DIRS,
+        context,
+      });
+      if (result) {
+        return {
+          original: ref,
+          targetNodeId: result,
+          confidence: 0.7,
           resolvedBy: 'framework',
         };
       }
@@ -162,14 +162,24 @@ export const springResolver: FrameworkResolver = {
       /@(Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*(?:value\s*=\s*)?["']([^"']+)["']/g,
       /@(Get|Post|Put|Patch|Delete|Request)Mapping\s*\(\s*(?:path\s*=\s*)?["']([^"']+)["']/g,
     ];
+    const baseMappingMatch = /@RequestMapping\s*\(\s*["']([^"']+)["']\s*\)/.exec(content);
+    const seenRoutes = new Set<string>();
 
     for (const pattern of mappingPatterns) {
       let match: RegExpExecArray | null;
       while ((match = pattern.exec(content)) !== null) {
         const [, mappingType, path] = match;
+        if (mappingType === 'Request' && match.index === baseMappingMatch?.index) {
+          continue;
+        }
         const line = lineOf(match.index);
 
         const method = mappingType === 'Request' ? 'ANY' : mappingType!.toUpperCase();
+        const routeKey = `${method}:${path}:${line}`;
+        if (seenRoutes.has(routeKey)) {
+          continue;
+        }
+        seenRoutes.add(routeKey);
 
         nodes.push({
           id: `route:${filePath}:${method}:${path}:${line}`,
@@ -188,12 +198,11 @@ export const springResolver: FrameworkResolver = {
     }
 
     // Extract class-level @RequestMapping for base path
-    const baseMappingMatch = /@RequestMapping\s*\(\s*["']([^"']+)["']\s*\)/.exec(content);
     if (baseMappingMatch) {
       const [, basePath] = baseMappingMatch;
       // `String.prototype.match` is typed as returning `index?: number`
       // but a successful non-global match always sets it; assert.
-      const line = lineOf(baseMappingMatch.index!);
+      const line = lineOf(baseMappingMatch.index);
 
       nodes.push({
         id: `route:${filePath}:BASE:${basePath}:${line}`,

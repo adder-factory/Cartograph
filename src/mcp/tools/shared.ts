@@ -468,10 +468,10 @@ export function freshnessHintForEmptyResult(cg: Cartograph): string {
   const f = cg.stats.getFreshness();
   if (!f) return '';
   if (f.isStale) {
-    const filesNote =
-      f.filesChanged !== null && f.filesChanged > 0
-        ? ` (${f.filesChanged} file${f.filesChanged === 1 ? '' : 's'} changed since last index)`
-        : '';
+    let filesNote = '';
+    if (f.filesChanged !== null && f.filesChanged > 0) {
+      filesNote = ` (${f.filesChanged} file${f.filesChanged === 1 ? '' : 's'} changed since last index)`;
+    }
     return `\n\n> ⚠ Index lagging${filesNote} — this empty result may be a freshness gap. Run \`cartograph_admin({action: 'sync'})\` and retry if you expected matches.`;
   }
   // `getFreshness()` compares only the indexed-vs-current HEAD SHA — it
@@ -512,6 +512,16 @@ export function freshnessHintForEmptyResult(cg: Cartograph): string {
 export function appendStaleFilesNote(cg: Cartograph, formatted: string, nodes: Node[]): string {
   if (nodes.length === 0) return formatted;
   if (cg.stats.getFreshness()?.isStale) return formatted;
+  const records = getUniqueFileRecordsForNodes(cg, nodes);
+  if (records.length === 0) return formatted;
+  const stale = getStaleFiles(cg.projectRoot, records);
+  if (stale.length === 0) return formatted;
+  const partition = partitionStalePaths(cg.projectRoot, stale);
+  const segments = renderStaleSegments(partition);
+  return `${formatted}\n\n> ⚠ Stale results — ${segments.join('; ')}`;
+}
+
+function getUniqueFileRecordsForNodes(cg: Cartograph, nodes: ReadonlyArray<Node>): FileRecord[] {
   const seen = new Set<string>();
   const records: FileRecord[] = [];
   for (const node of nodes) {
@@ -520,22 +530,31 @@ export function appendStaleFilesNote(cg: Cartograph, formatted: string, nodes: N
     const rec = getFileByPath(cg.queries, node.filePath);
     if (rec) records.push(rec);
   }
-  if (records.length === 0) return formatted;
-  const stale = getStaleFiles(cg.projectRoot, records);
-  if (stale.length === 0) return formatted;
+  return records;
+}
+
+interface StalePathPartition {
+  userEdited: string[];
+  indexLagged: string[];
+}
+
+function partitionStalePaths(projectRoot: string, stale: ReadonlyArray<string>): StalePathPartition {
   // Partition into "the user edited this file (per git status)" vs
   // "index lags disk for some other reason" so the agent isn't told the
   // file was modified when in fact only the index is behind. Best-
   // effort: a non-git repo (or a git error) collapses to "index lags"
   // — the safe direction, since the alternative wording wrongly
   // implies a user edit.
-  const userEditedSet = getUserEditedPathsSet(cg.projectRoot);
-  const userEdited: string[] = [];
-  const indexLagged: string[] = [];
+  const userEditedSet = getUserEditedPathsSet(projectRoot);
+  const partition: StalePathPartition = { userEdited: [], indexLagged: [] };
   for (const path of stale) {
-    if (userEditedSet?.has(path)) userEdited.push(path);
-    else indexLagged.push(path);
+    const bucket = userEditedSet?.has(path) ? partition.userEdited : partition.indexLagged;
+    bucket.push(path);
   }
+  return partition;
+}
+
+function renderStaleSegments({ userEdited, indexLagged }: StalePathPartition): string[] {
   const segments: string[] = [];
   if (userEdited.length > 0) {
     segments.push(
@@ -547,7 +566,7 @@ export function appendStaleFilesNote(cg: Cartograph, formatted: string, nodes: N
       `index lags disk for ${indexLagged.length === 1 ? 'file' : 'files'} (content_hash drift, no user edit detected — see \`cartograph_changed_since\`): ${renderStaleFileList(indexLagged)}`,
     );
   }
-  return `${formatted}\n\n> ⚠ Stale results — ${segments.join('; ')}`;
+  return segments;
 }
 
 /** Wall-clock budget (ms) for the `git status --porcelain` shell-out;

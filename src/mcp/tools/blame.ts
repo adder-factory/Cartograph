@@ -378,16 +378,13 @@ export function buildBlameAuthorsSpec(
 }
 
 function renderBlame(r: BlameResult): string {
-  const lines: string[] = [];
-  lines.push(`## Blame for \`${r.symbolName}\``);
-  lines.push('');
+  const lines: string[] = [`## Blame for \`${r.symbolName}\``, ''];
   // Fuzzy-fallback banner — surfaced directly under the title so the
   // agent sees, before reading the L-range timeline, that the blamed
   // symbol was a guess (matches the fuzzy note `cartograph_history`
   // surfaces; friction #20).
   if (r.fuzzyBanner) {
-    lines.push(r.fuzzyBanner);
-    lines.push('');
+    lines.push(r.fuzzyBanner, '');
   }
   const countLabel = r.truncated ? `≥${r.fetchedCommits}` : `${r.fetchedCommits}`;
   // Only render "(showing top N)" when N is actually a truncation of the
@@ -399,12 +396,12 @@ function renderBlame(r: BlameResult): string {
   const showingSuffix = r.commits.length < r.fetchedCommits ? ` (showing top ${r.commits.length})` : '';
   lines.push(
     `_${r.qualifiedName} — ${r.filePath} L${r.startLine}–${r.endLine} — ${countLabel} commit(s) touched this range${showingSuffix}._`,
+    '',
   );
-  lines.push('');
   if (r.earliest) {
     lines.push(renderMarkdownBulletList(buildBlameEarliestSpec(r.earliest)));
   }
-  const mostRecentIsDifferent = r.mostRecent && (!r.earliest || r.mostRecent.commit.sha !== r.earliest.commit.sha);
+  const mostRecentIsDifferent = r.mostRecent && r.mostRecent.commit.sha !== r.earliest?.commit.sha;
   if (mostRecentIsDifferent) {
     lines.push(renderMarkdownBulletList(buildBlameMostRecentSpec(r.mostRecent!)));
   }

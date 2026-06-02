@@ -223,22 +223,10 @@ export interface TsPathAliases {
  */
 function resolveTsPathAlias(spec: string, aliases: TsPathAliases): ImportClassification | null {
   for (const [pattern, substitutions] of Object.entries(aliases.paths)) {
-    const wildcardIdx = pattern.indexOf('*');
-    let tail: string;
-    if (wildcardIdx === -1) {
-      if (spec !== pattern) continue;
-      tail = '';
-    } else {
-      const prefix = pattern.slice(0, wildcardIdx);
-      const suffix = pattern.slice(wildcardIdx + 1);
-      if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) continue;
-      tail = spec.slice(prefix.length, spec.length - suffix.length);
-    }
+    const tail = matchTsPathAliasTail(spec, pattern);
+    if (tail === null) continue;
     for (const sub of substitutions) {
-      const subWildcardIdx = sub.indexOf('*');
-      const resolvedSub =
-        subWildcardIdx === -1 ? sub : sub.slice(0, subWildcardIdx) + tail + sub.slice(subWildcardIdx + 1);
-      const resolvedBase = path.resolve(aliases.baseUrl, resolvedSub);
+      const resolvedBase = path.resolve(aliases.baseUrl, substituteTsPathAlias(sub, tail));
       // TS aliases typically point at file-like targets; try the same
       // resolution cascade as relative specs (direct hit → JS↔TS rewrite
       // → extension permutation → directory with index).
@@ -251,6 +239,21 @@ function resolveTsPathAlias(spec: string, aliases: TsPathAliases): ImportClassif
     }
   }
   return null;
+}
+
+function matchTsPathAliasTail(spec: string, pattern: string): string | null {
+  const wildcardIdx = pattern.indexOf('*');
+  if (wildcardIdx === -1) return spec === pattern ? '' : null;
+  const prefix = pattern.slice(0, wildcardIdx);
+  const suffix = pattern.slice(wildcardIdx + 1);
+  if (!spec.startsWith(prefix) || !spec.endsWith(suffix)) return null;
+  return spec.slice(prefix.length, spec.length - suffix.length);
+}
+
+function substituteTsPathAlias(substitution: string, tail: string): string {
+  const subWildcardIdx = substitution.indexOf('*');
+  if (subWildcardIdx === -1) return substitution;
+  return substitution.slice(0, subWildcardIdx) + tail + substitution.slice(subWildcardIdx + 1);
 }
 
 /**
@@ -277,14 +280,8 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
     // Go intra-module path: strip the module-alias prefix and re-anchor.
     // Go package specs never have file extensions (they name packages,
     // not files), so extMissing is always false for the Go branch.
-    const goAlias = opts.goModuleAlias;
-    if (goAlias) {
-      const stripped = spec === goAlias ? '' : spec.startsWith(`${goAlias}/`) ? spec.slice(goAlias.length + 1) : null;
-      if (stripped !== null) {
-        const resolvedBase = path.resolve(projectRootAbs, stripped);
-        return resolveDirectoryTarget(resolvedBase, false) ?? { kind: 'unresolvable', extMissing: false };
-      }
-    }
+    const goAliasHit = resolveGoModuleAlias(spec, projectRootAbs, opts.goModuleAlias);
+    if (goAliasHit) return goAliasHit;
     // TS path-alias re-anchor (e.g. `@/contexts/Foo` → `<root>/src/contexts/Foo`).
     // Caller-supplied alias map keeps the classifier pure; null on no
     // alias match falls through to bare.
@@ -299,16 +296,8 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
     // specific paths beyond the source tree are out of scope — they'd
     // require knowing the build's `-I` flags, which cartograph doesn't
     // have).
-    if (opts.cIncludeStyle === 'quoted') {
-      const fromDir = path.dirname(importingFileAbs);
-      const sameDir = path.resolve(fromDir, spec);
-      const sameDirHit = resolveDirectFileHit(sameDir, false);
-      if (sameDirHit) return sameDirHit;
-      const rootRelative = path.resolve(projectRootAbs, spec);
-      const rootHit = resolveDirectFileHit(rootRelative, false);
-      if (rootHit) return rootHit;
-      return { kind: 'unresolvable', extMissing: false };
-    }
+    const quotedIncludeHit = resolveQuotedInclude(spec, importingFileAbs, projectRootAbs, opts.cIncludeStyle);
+    if (quotedIncludeHit) return quotedIncludeHit;
     return { kind: 'bare', extMissing: false };
   }
 
@@ -324,6 +313,34 @@ export function classifyImport(args: ClassifyImportArgs): ImportClassification {
     resolveExtensionPermutation(resolvedBase, extMissing) ??
     resolveDirectoryTarget(resolvedBase, extMissing) ?? { kind: 'unresolvable', extMissing }
   );
+}
+
+function resolveQuotedInclude(
+  spec: string,
+  importingFileAbs: string,
+  projectRootAbs: string,
+  cIncludeStyle: ClassifyImportOpts['cIncludeStyle'],
+): ImportClassification | null {
+  if (cIncludeStyle !== 'quoted') return null;
+  const sameDir = path.resolve(path.dirname(importingFileAbs), spec);
+  const sameDirHit = resolveDirectFileHit(sameDir, false);
+  if (sameDirHit) return sameDirHit;
+  const rootHit = resolveDirectFileHit(path.resolve(projectRootAbs, spec), false);
+  return rootHit ?? { kind: 'unresolvable', extMissing: false };
+}
+
+function resolveGoModuleAlias(
+  spec: string,
+  projectRootAbs: string,
+  goAlias: string | undefined,
+): ImportClassification | null {
+  if (!goAlias) return null;
+  let stripped: string | null = null;
+  if (spec === goAlias) stripped = '';
+  else if (spec.startsWith(`${goAlias}/`)) stripped = spec.slice(goAlias.length + 1);
+  if (stripped === null) return null;
+  const resolvedBase = path.resolve(projectRootAbs, stripped);
+  return resolveDirectoryTarget(resolvedBase, false) ?? { kind: 'unresolvable', extMissing: false };
 }
 
 /**

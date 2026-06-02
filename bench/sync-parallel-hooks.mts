@@ -28,10 +28,10 @@
  * pass timing section below isolates that change.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 import { getRegisteredHooks } from '../src/index-hooks/registry.js';
 import { analyseProject } from '../src/biomarkers/index.js';
@@ -103,7 +103,10 @@ async function runBiomarkerBenchAt(dir: string, _opts: { withTimings: boolean })
   const allFindings = [...serial.map((p) => p.findings), ...parallel.map((p) => p.findings)];
   const findingsMin = Math.min(...allFindings);
   const findingsMax = Math.max(...allFindings);
-  if (findingsMin !== findingsMax) {
+  const findingsAgree = findingsMin === findingsMax;
+  if (findingsAgree) {
+    console.log(`  findings invariance: ✓ (${findingsMin} every pass, serial + parallel)`);
+  } else {
     console.log(
       `  ⚠ findings DIVERGED across modes: ${findingsMin} vs ${findingsMax}\n` +
         '    Expected on BENCH_PROJECT_DIR pointed at a project whose MCP server is\n' +
@@ -113,8 +116,6 @@ async function runBiomarkerBenchAt(dir: string, _opts: { withTimings: boolean })
         '    writer) — start there for correctness signal; use real-project mode\n' +
         '    for the speedup number, not for invariance.',
     );
-  } else {
-    console.log(`  findings invariance: ✓ (${findingsMin} every pass, serial + parallel)`);
   }
 
   const serialMedian = median(serial.map((p) => p.wallMs));
@@ -142,7 +143,7 @@ async function timeBiomarkerPasses(dir: string, opts: { serial: boolean; passes:
       timings.push({ wallMs: Date.now() - start, findings: r.findingsEmitted });
     }
   } finally {
-    cg.destroy();
+    cg.close();
     delete process.env['CARTOGRAPH_BIOMARKER_SERIAL'];
   }
   return timings;
@@ -156,7 +157,7 @@ function median(values: number[]): number {
 function reportPasses(label: string, timings: PassTiming[]): void {
   const sorted = [...timings].sort((a, b) => a.wallMs - b.wallMs);
   const min = sorted[0]!.wallMs;
-  const max = sorted[sorted.length - 1]!.wallMs;
+  const max = sorted.at(-1)!.wallMs;
   const med = median(timings.map((t) => t.wallMs));
   const raw = timings.map((t) => `${t.wallMs}ms (${t.findings})`).join(' / ');
   const findings = timings.map((t) => t.findings);
@@ -184,11 +185,16 @@ async function timeIndexAll(dir: string): Promise<{ wallMs: number; hookOutcomes
     // HOOK_GROUPS' flat union, so the first 4 are Group A, the
     // next 10 are Group B, the last 2 are Group C.
     const i = hookOutcomes.length;
-    const phase: 'A' | 'B' | 'C' = i < 4 ? 'A' : i < 14 ? 'B' : 'C';
+    let phase: 'A' | 'B' | 'C' = 'C';
+    if (i < 4) {
+      phase = 'A';
+    } else if (i < 14) {
+      phase = 'B';
+    }
     hookOutcomes.push({ phase, hookName: h.name, durationMs: 0 });
   }
 
-  cg.destroy();
+  cg.close();
   return { wallMs, hookOutcomes };
 }
 
@@ -226,8 +232,9 @@ async function main(): Promise<void> {
       await cg.sync();
       warmTimings.push(Date.now() - s);
     }
-    cg.destroy();
-    console.log(`  warm sync runs: ${warmTimings.map((m) => `${m}ms`).join(' / ')}`);
+    cg.close();
+    const warmSyncRuns = warmTimings.map((m) => `${m}ms`).join(' / ');
+    console.log(`  warm sync runs: ${warmSyncRuns}`);
     const avgWarm = warmTimings.reduce((a, b) => a + b, 0) / warmTimings.length;
     console.log(`  warm avg: ${avgWarm.toFixed(0)}ms`);
 
@@ -255,7 +262,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

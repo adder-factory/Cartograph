@@ -68,7 +68,7 @@ describe('RN event-channel — end-to-end (real index)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-rn-event-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });

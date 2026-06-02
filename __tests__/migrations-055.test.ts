@@ -30,6 +30,46 @@ function seedFile(db: ReturnType<DatabaseConnection['getDb']>, fpath: string): v
 
 const TARGETS = ['unresolved_refs', 'config_refs', 'sql_refs', 'build_context_refs', 'string_imports'] as const;
 
+// Per-table insert helpers. Each accepts a (db, file_path) pair and
+// performs the minimal-column INSERT for that table. Ordered to
+// satisfy each table's NOT NULL columns including the node_id FK
+// where present (seeded via `seedNode` in the cascade test).
+const insertOrphan: Record<string, (db: ReturnType<DatabaseConnection['getDb']>, fp: string) => void> = {
+  unresolved_refs: (db, fp) => {
+    db
+      .prepare(
+        `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run('n_seed', 'foo', 'calls', 1, 0, fp, 'typescript');
+  },
+  config_refs: (db, fp) => {
+    db
+      .prepare(`INSERT INTO config_refs (config_kind, config_key, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`)
+      .run('env', 'KEY', null, fp, 1);
+  },
+  sql_refs: (db, fp) => {
+    db
+      .prepare(`INSERT INTO sql_refs (table_name, op, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`)
+      .run('users', 'read', null, fp, 1);
+  },
+  build_context_refs: (db, fp) => {
+    db
+      .prepare(`INSERT INTO build_context_refs (ref_kind, source_node_id, file_path, line) VALUES (?, ?, ?, ?)`)
+      .run('dirname', null, fp, 1);
+  },
+  string_imports: (db, fp) => {
+    db
+      .prepare(`INSERT INTO string_imports (file_path, line, module_name, raw, container_kind) VALUES (?, ?, ?, ?, ?)`)
+      .run(fp, 1, 'foo', `'foo'`, 'string_literal');
+  },
+};
+
+function seedNode(db: ReturnType<DatabaseConnection['getDb']>): void {
+  db.prepare(
+    `INSERT INTO nodes (id, name, qualified_name, kind, language, file_path, start_line, end_line, start_column, end_column, updated_at, body_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run('n_seed', 's', 's', 'function', 'typescript', 'src/a.ts', 1, 2, 0, 0, 0, '');
+}
+
 describe('Migration 055 — file_path FK on *_refs tables', () => {
   let dir: string;
   beforeEach(() => {
@@ -53,45 +93,6 @@ describe('Migration 055 — file_path FK on *_refs tables', () => {
       dbConn.close();
     }
   });
-
-  // Per-table insert helpers. Each accepts a (db, file_path) pair and
-  // performs the minimal-column INSERT for that table. Ordered to
-  // satisfy each table's NOT NULL columns including the node_id FK
-  // where present (seeded via `seedNode` in the cascade test).
-  const insertOrphan: Record<string, (db: ReturnType<DatabaseConnection['getDb']>, fp: string) => void> = {
-    unresolved_refs: (db, fp) =>
-      void db
-        .prepare(
-          `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        )
-        .run('n_seed', 'foo', 'calls', 1, 0, fp, 'typescript'),
-    config_refs: (db, fp) =>
-      void db
-        .prepare(
-          `INSERT INTO config_refs (config_kind, config_key, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run('env', 'KEY', null, fp, 1),
-    sql_refs: (db, fp) =>
-      void db
-        .prepare(`INSERT INTO sql_refs (table_name, op, source_node_id, file_path, line) VALUES (?, ?, ?, ?, ?)`)
-        .run('users', 'read', null, fp, 1),
-    build_context_refs: (db, fp) =>
-      void db
-        .prepare(`INSERT INTO build_context_refs (ref_kind, source_node_id, file_path, line) VALUES (?, ?, ?, ?)`)
-        .run('dirname', null, fp, 1),
-    string_imports: (db, fp) =>
-      void db
-        .prepare(
-          `INSERT INTO string_imports (file_path, line, module_name, raw, container_kind) VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(fp, 1, 'foo', `'foo'`, 'string_literal'),
-  };
-
-  function seedNode(db: ReturnType<DatabaseConnection['getDb']>): void {
-    db.prepare(
-      `INSERT INTO nodes (id, name, qualified_name, kind, language, file_path, start_line, end_line, start_column, end_column, updated_at, body_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run('n_seed', 's', 's', 'function', 'typescript', 'src/a.ts', 1, 2, 0, 0, 0, '');
-  }
 
   for (const t of TARGETS) {
     it(`${t}: rejects insert with non-existent file_path`, () => {

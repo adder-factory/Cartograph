@@ -14,11 +14,11 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { FileLock } from '../src/utils.js';
 import Cartograph from '../src/index.js';
-import { ToolHandler, tools } from '../src/mcp/tools.js';
+import { ToolHandler } from '../src/mcp/tools.js';
 import { shouldIncludeFile, scanDirectory } from '../src/extraction/index.js';
 import { shouldIncludeFile as configShouldInclude } from '../src/config.js';
 import { type CartographConfig, DEFAULT_CONFIG } from '../src/types.js';
-import { DatabaseConnection, getDatabasePath } from '../src/db/index.js';
+import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder, getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 import { getFileByPath } from '../src/db/queries-files.js';
@@ -65,7 +65,7 @@ describe('FileLock', () => {
 
     expect(fs.existsSync(lockPath)).toBe(true);
     const content = fs.readFileSync(lockPath, 'utf-8').trim();
-    expect(parseInt(content, 10)).toBe(process.pid);
+    expect(Number.parseInt(content, 10)).toBe(process.pid);
 
     lock.release();
     expect(fs.existsSync(lockPath)).toBe(false);

@@ -99,7 +99,7 @@ type ScopeSpans = Array<{ id: string; start: number; end: number }>;
 /** Per-call grep environment — bundles the cartograph handle, fs module, scope cache, and the dynamically-imported enclosing helpers so the searcher signature stays narrow. */
 interface GrepEnvironment {
   cg: Cartograph;
-  fsMod: typeof import('fs');
+  fsMod: typeof import('node:fs');
   enclosingCache: Map<string, ScopeSpans>;
   findEnclosingNode: (scopes: ScopeSpans, line: number) => string | null;
   sortScopesBySpan: (scopes: ScopeSpans) => ScopeSpans;
@@ -263,8 +263,9 @@ export function buildGrepFileSpec(args: {
  *  {@link buildGrepFileSpec}. */
 function formatGrepOutput(args: FormatGrepOutputArgs): string {
   const { pattern, hits, totalMatched, limit, skippedLargeFiles } = args;
+  const hitCountText = totalMatched > limit ? `${hits.length} of ${totalMatched}+` : String(hits.length);
   const lines: string[] = [
-    `## Grep results for \`${pattern}\` (${hits.length}${totalMatched > limit ? ` of ${totalMatched}+` : ''} hits)`,
+    `## Grep results for \`${pattern}\` (${hitCountText} hits)`,
     '',
   ];
   const broadHint = computeBroadPatternHint(pattern, totalMatched);

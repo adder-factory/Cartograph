@@ -122,6 +122,9 @@ function previewCode(code: string): { code: string; truncated: boolean; total: n
  * issue history (if any), short docstring, line count, optional code
  * block (full or preview-truncated).
  */
+type NodeIssueKind = 'modified' | 'added' | 'removed';
+type NodeIssue = { issueNumber: number; kind: NodeIssueKind; commitSha: string };
+
 interface FormatNodeDetailsArgs {
   node: Node;
   code: string | null;
@@ -135,7 +138,7 @@ interface FormatNodeDetailsArgs {
   staleWarning?: string | null;
   issues?: Array<{
     issueNumber: number;
-    kind: 'modified' | 'added' | 'removed';
+    kind: NodeIssueKind;
     commitSha: string;
   }>;
   testAssertions?: TestAssertionResult;
@@ -194,7 +197,7 @@ function formatNodeCardHeader(
 function appendIssuesAndDocstring(
   lines: string[],
   node: Node,
-  issues: Array<{ issueNumber: number; kind: 'modified' | 'added' | 'removed'; commitSha: string }>,
+  issues: NodeIssue[],
 ): void {
   const issuesLine = formatIssuesLine(issues);
   if (issuesLine) lines.push(issuesLine);
@@ -504,11 +507,9 @@ function fetchTestAssertionsForFile(cg: ReturnType<ToolCtx['getCartograph']>, no
 }
 
 /** Group issues by kind, sort numerically, and format as `#1, #2 (modified) — #3 (added)`. */
-function formatIssuesLine(
-  issues: Array<{ issueNumber: number; kind: 'modified' | 'added' | 'removed'; commitSha: string }>,
-): string | null {
+function formatIssuesLine(issues: NodeIssue[]): string | null {
   if (issues.length === 0) return null;
-  const byKind: Record<'modified' | 'added' | 'removed', Set<number>> = {
+  const byKind: Record<NodeIssueKind, Set<number>> = {
     modified: new Set(),
     added: new Set(),
     removed: new Set(),
@@ -803,9 +804,8 @@ function renderCallersSection(cg: Cartograph, node: Node): string {
   });
   const testCallersDropped = merged.length - nonTest.length;
   const list = formatCallersList(nonTest);
-  return testCallersDropped > 0
-    ? `${list}\n- _(${testCallersDropped} test-file caller${testCallersDropped === 1 ? '' : 's'} omitted — see the "Tested as" / "Tests" section)_`
-    : list;
+  if (testCallersDropped === 0) return list;
+  return `${list}\n- _(${testCallersDropped} test-file caller${testCallersDropped === 1 ? '' : 's'} omitted — see the "Tested as" / "Tests" section)_`;
 }
 
 /** Build the header line for a capped callees list. */
@@ -1177,35 +1177,14 @@ async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: st
   const cards: string[] = [];
   let notFound = 0;
   for (const symbol of symbolList) {
-    const match = findSymbol(cg, symbol, ctx.refIds);
-    if (!match) {
-      // F#12 slice 2/3: per-symbol manifest fallback under `deep:true`.
-      // A manifest hit counts as a "found" symbol for the batch (no
-      // increment of `notFound`); the card joins the batch under the
-      // same `---` separator as graph-node cards. Slice 3 also bumps
-      // hit_count + popularity inside `tryRenderManifestDeepView`.
-      if (deep && !isUnresolvedUid(symbol, ctx.refIds)) {
-        const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags });
-        if (manifest !== null) {
-          cards.push(manifest);
-          continue;
-        }
-      }
-      // Stale / cross-process UID — a cache miss, not a real absence
-      // (audit-4 #1). Render a UID-specific card line; the batch
-      // freshness footer's "true negative" claim still applies to any
-      // genuine name miss in the batch, so it is left untouched.
-      const missMsg = isUnresolvedUid(symbol, ctx.refIds) ? staleUidMessage(symbol) : notFoundMessage(cg, symbol);
-      cards.push(`## ${symbol}\n\n_${missMsg}_`);
+    const result = await renderBatchSymbolCard({ ctx, cg, symbol, includeCode, detail, flags, deep, seenIds });
+    if (result.kind === 'duplicate') continue;
+    cards.push(result.card);
+    if (result.kind === 'missing') {
       notFound++;
       continue;
     }
-    // Dedup: when two input names resolve to the same node (e.g.
-    // qualified + unqualified spelling), render the card once.
-    if (seenIds.has(match.node.id)) continue;
-    seenIds.add(match.node.id);
-    nodesShown.push(match.node);
-    cards.push(await renderOneNode({ cg, symbol, match, includeCode, detail, flags }));
+    if (result.kind === 'found') nodesShown.push(result.node);
   }
 
   const dedupCount = symbolList.length - notFound - seenIds.size;
@@ -1229,6 +1208,53 @@ async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: st
       freshness: { cg, nodes: nodesShown },
     }),
   );
+}
+
+type BatchSymbolCardResult =
+  | { kind: 'duplicate' }
+  | { kind: 'missing'; card: string }
+  | { kind: 'manifest'; card: string }
+  | { kind: 'found'; card: string; node: Node };
+
+interface RenderBatchSymbolCardArgs extends ProcessSymbolArgs {
+  symbol: string;
+  seenIds: Set<string>;
+}
+
+async function renderBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<BatchSymbolCardResult> {
+  const { ctx, cg, symbol, includeCode, detail, flags, seenIds } = args;
+  const match = findSymbol(cg, symbol, ctx.refIds);
+  if (!match) return renderMissingBatchSymbolCard(args);
+
+  // Dedup: when two input names resolve to the same node (e.g.
+  // qualified + unqualified spelling), render the card once.
+  if (seenIds.has(match.node.id)) return { kind: 'duplicate' };
+  seenIds.add(match.node.id);
+  return {
+    kind: 'found',
+    node: match.node,
+    card: await renderOneNode({ cg, symbol, match, includeCode, detail, flags }),
+  };
+}
+
+async function renderMissingBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<BatchSymbolCardResult> {
+  const { ctx, cg, symbol, includeCode, detail, flags, deep } = args;
+  // F#12 slice 2/3: per-symbol manifest fallback under `deep:true`.
+  // A manifest hit counts as a "found" symbol for the batch (no
+  // increment of `notFound`); the card joins the batch under the
+  // same `---` separator as graph-node cards. Slice 3 also bumps
+  // hit_count + popularity inside `tryRenderManifestDeepView`.
+  if (deep && !isUnresolvedUid(symbol, ctx.refIds)) {
+    const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags });
+    if (manifest !== null) return { kind: 'manifest', card: manifest };
+  }
+
+  // Stale / cross-process UID — a cache miss, not a real absence
+  // (audit-4 #1). Render a UID-specific card line; the batch
+  // freshness footer's "true negative" claim still applies to any
+  // genuine name miss in the batch, so it is left untouched.
+  const missMsg = isUnresolvedUid(symbol, ctx.refIds) ? staleUidMessage(symbol) : notFoundMessage(cg, symbol);
+  return { kind: 'missing', card: `## ${symbol}\n\n_${missMsg}_` };
 }
 
 /** Concatenate any active inline-expansion sections under a single

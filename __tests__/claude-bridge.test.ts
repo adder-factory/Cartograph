@@ -40,7 +40,7 @@ process.stdin.on('end', () => {
   const fmt = fmtIdx >= 0 ? argv[fmtIdx + 1] : 'text';
 
   if (stdin.startsWith('FAIL')) {
-    process.stderr.write('simulated failure\\n');
+    process.stderr.write('simulated failure${String.raw`\n`}');
     process.exit(2);
   }
   if (stdin.startsWith('SLOW')) {

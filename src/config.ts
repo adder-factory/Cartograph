@@ -235,8 +235,7 @@ export const VALID_LANGUAGES = [
 type _LanguageCoverageOk<Missing = Exclude<Language, (typeof VALID_LANGUAGES)[number]>> = [Missing] extends [never]
   ? true
   : never;
-const _languageCoverageOk: _LanguageCoverageOk = true;
-void _languageCoverageOk;
+export const LANGUAGE_COVERAGE_OK: _LanguageCoverageOk = true;
 
 /**
  * One LLM chat-provider block (`summarizeLlm` / `askLlm` / `localLlm`).

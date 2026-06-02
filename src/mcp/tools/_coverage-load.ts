@@ -41,7 +41,7 @@ export async function handleCoverageLoad(ctx: ToolCtx, args: Record<string, unkn
       `- Duration: ${(result.durationMs / 1000).toFixed(1)}s`,
     ];
     return ok(textResult(lines.join('\n')));
-  } catch (caught) {
-    return err(`Coverage ingestion failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`Coverage ingestion failed: ${errMsg(error_)}`);
   }
 }

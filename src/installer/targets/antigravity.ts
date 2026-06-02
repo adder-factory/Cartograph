@@ -189,7 +189,10 @@ function writeMcpEntry(): WriteResult['files'][number] {
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
   }
-  const action: 'created' | 'updated' = before ? 'updated' : fs.existsSync(file) ? 'updated' : 'created';
+  let action: 'created' | 'updated' = 'created';
+  if (before || fs.existsSync(file)) {
+    action = 'updated';
+  }
   if (!existing['mcpServers']) existing['mcpServers'] = {};
   existing['mcpServers'].cartograph = after;
   writeJsonFile(file, existing);

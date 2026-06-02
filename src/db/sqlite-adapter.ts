@@ -84,7 +84,7 @@ export type SqliteBackend = 'bun-sqlite';
  */
 function extractNamedPlaceholders(sql: string): Set<string> {
   const out = new Set<string>();
-  const re = /[@:$]([a-zA-Z_][a-zA-Z0-9_]*)/g;
+  const re = /[@:$]([a-zA-Z_]\w*)/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(sql)) !== null) {
     if (m[1]) out.add(m[1]);

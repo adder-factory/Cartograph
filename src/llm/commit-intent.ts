@@ -49,13 +49,13 @@ interface PrefixRule {
 }
 
 const PREFIX_RULES: PrefixRule[] = [
-  { pattern: /^(feat|feature)[\(:]/i, intent: 'feat' },
-  { pattern: /^(fix|bugfix|hotfix)[\(:]/i, intent: 'fix' },
-  { pattern: /^refactor[\(:]/i, intent: 'refactor' },
-  { pattern: /^perf[\(:]/i, intent: 'perf' },
-  { pattern: /^test[\(:]/i, intent: 'test' },
-  { pattern: /^docs?[\(:]/i, intent: 'docs' },
-  { pattern: /^(chore|build|ci)[\(:]/i, intent: 'chore' },
+  { pattern: /^(feat|feature)[(:]/i, intent: 'feat' },
+  { pattern: /^(fix|bugfix|hotfix)[(:]/i, intent: 'fix' },
+  { pattern: /^refactor[(:]/i, intent: 'refactor' },
+  { pattern: /^perf[(:]/i, intent: 'perf' },
+  { pattern: /^test[(:]/i, intent: 'test' },
+  { pattern: /^docs?[(:]/i, intent: 'docs' },
+  { pattern: /^(chore|build|ci)[(:]/i, intent: 'chore' },
 ];
 
 const PREFIX_SCORE = 0.95;
@@ -67,42 +67,109 @@ const PREFIX_SCORE = 0.95;
 // ---------------------------------------------------------------------------
 
 interface KeywordRule {
-  pattern: RegExp;
+  match: (subject: string) => string | null;
   intent: CommitIntent;
   score: number;
 }
 
+const DOCS_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\bupdate docs?\b/i,
+  /\bfix(?:ed)? docs?\b/i,
+  /\badd(?:ed)? docs?\b/i,
+  /\breadme\b/i,
+  /\bcomments?\b/i,
+];
+const FIX_VERB_PATTERNS: readonly RegExp[] = [
+  /\bfix(?:ed|es)?\b/i,
+  /\bresolve[ds]?\b/i,
+  /\bcorrect(?:ed|s)?\b/i,
+  /\bhandle[ds]?\b/i,
+];
+const FIX_SIGNAL_RE = /\b(?:bug|issue|error|crash|exception|fail|broken|regression)\b/i;
+const TEST_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\badd(?:ed)? tests?\b/i,
+  /\btests? for\b/i,
+  /\bspecs? for\b/i,
+  /\btest coverage\b/i,
+];
+const FEAT_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\badd(?:ed|s)?\b/i,
+  /\bimplement(?:ed|s)?\b/i,
+  /\bintroduce[ds]?\b/i,
+  /\bsupport(?:ed|s)?\b/i,
+];
+const REFACTOR_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\brefactor(?:ed|s)?\b/i,
+  /\brename[ds]?\b/i,
+  /\bextract(?:ed|s)?\b/i,
+  /\bsimplif(?:y|ied|ies)\b/i,
+  /\bclean(?:ed)? ?up\b/i,
+];
+const PERF_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\bimprove performance\b/i,
+  /\bspeed up\b/i,
+  /\boptimiz(?:e[ds]?|ation)\b/i,
+  /\bfaster\b/i,
+  /\bcach(?:e[ds]?|ing)\b/i,
+];
+const CHORE_KEYWORD_PATTERNS: readonly RegExp[] = [
+  /\bbump\b/i,
+  /\bupgrade[ds]?\b/i,
+  /\bdeps?\b/i,
+  /\bdependencies\b/i,
+  /\bdependency\b/i,
+];
+
+function firstKeywordCue(subject: string, patterns: readonly RegExp[]): string | null {
+  let best: RegExpExecArray | null = null;
+  let bestPatternIndex = Number.POSITIVE_INFINITY;
+  for (const [patternIndex, pattern] of patterns.entries()) {
+    const match = pattern.exec(subject);
+    if (!match) continue;
+    if (!best || match.index < best.index || (match.index === best.index && patternIndex < bestPatternIndex)) {
+      best = match;
+      bestPatternIndex = patternIndex;
+    }
+  }
+  return best?.[0] ?? null;
+}
+
+function orderedFixCue(subject: string): string | null {
+  const candidates: RegExpExecArray[] = [];
+  for (const pattern of FIX_VERB_PATTERNS) {
+    const match = pattern.exec(subject);
+    if (match) candidates.push(match);
+  }
+
+  candidates.sort((a, b) => a.index - b.index);
+  for (const verb of candidates) {
+    const afterVerb = subject.slice(verb.index + verb[0].length);
+    const signal = FIX_SIGNAL_RE.exec(afterVerb);
+    if (signal) {
+      return subject.slice(verb.index, verb.index + verb[0].length + signal.index + signal[0].length);
+    }
+  }
+  return null;
+}
+
 const KEYWORD_RULES: KeywordRule[] = [
   // docs — must come before fix so "fix typo" routes to docs
-  { pattern: /\btypo\b/i, intent: 'docs', score: 0.6 },
-  { pattern: /\b(update docs?|fix(ed)? docs?|add(ed)? docs?|readme|comment(s)?)\b/i, intent: 'docs', score: 0.6 },
+  { match: (subject) => firstKeywordCue(subject, [/\btypo\b/i]), intent: 'docs', score: 0.6 },
+  { match: (subject) => firstKeywordCue(subject, DOCS_KEYWORD_PATTERNS), intent: 'docs', score: 0.6 },
   // fix — keyword + signal word pairing
-  {
-    pattern:
-      /\b(fix(ed|es)?|resolve[ds]?|correct(ed|s)?|handle[ds]?)\b.*\b(bug|issue|error|crash|exception|fail|broken|regression)\b/i,
-    intent: 'fix',
-    score: 0.6,
-  },
+  { match: orderedFixCue, intent: 'fix', score: 0.6 },
   // test — add/spec before generic add
-  { pattern: /\b(add(ed)? tests?|test(s)? for|spec(s)? for|test coverage)\b/i, intent: 'test', score: 0.6 },
+  { match: (subject) => firstKeywordCue(subject, TEST_KEYWORD_PATTERNS), intent: 'test', score: 0.6 },
   // feat — broad add/implement/introduce/support
-  { pattern: /\b(add(ed|s)?|implement(ed|s)?|introduce[ds]?|support(ed|s)?)\b/i, intent: 'feat', score: 0.6 },
+  { match: (subject) => firstKeywordCue(subject, FEAT_KEYWORD_PATTERNS), intent: 'feat', score: 0.6 },
   // refactor
-  {
-    pattern: /\b(refactor(ed|s)?|rename[ds]?|extract(ed|s)?|simplif(y|ied|ies)|clean(ed)? ?up)\b/i,
-    intent: 'refactor',
-    score: 0.6,
-  },
+  { match: (subject) => firstKeywordCue(subject, REFACTOR_KEYWORD_PATTERNS), intent: 'refactor', score: 0.6 },
   // perf
-  {
-    pattern: /\b(improve performance|speed up|optimiz(e[ds]?|ation)|faster|cach(e[ds]?|ing))\b/i,
-    intent: 'perf',
-    score: 0.6,
-  },
+  { match: (subject) => firstKeywordCue(subject, PERF_KEYWORD_PATTERNS), intent: 'perf', score: 0.6 },
   // chore — bump/upgrade/deps
-  { pattern: /\b(bump|upgrade[ds]?|deps?|dependencies|dependency)\b/i, intent: 'chore', score: 0.55 },
+  { match: (subject) => firstKeywordCue(subject, CHORE_KEYWORD_PATTERNS), intent: 'chore', score: 0.55 },
   // chore — merge commits
-  { pattern: /^merge\b/i, intent: 'chore', score: 0.5 },
+  { match: (subject) => firstKeywordCue(subject, [/^merge\b/i]), intent: 'chore', score: 0.5 },
 ];
 
 // ---------------------------------------------------------------------------
@@ -135,7 +202,7 @@ const FOOTER_RULES: FooterRule[] = [
 export function classifyCommitMessage(message: string): CommitClassification {
   const trimmed = message.trim();
   if (!trimmed) {
-    return { intent: 'unknown', score: 0.0, reason: 'no rule matched' };
+    return { intent: 'unknown', score: 0, reason: 'no rule matched' };
   }
 
   const subject = trimmed.split('\n')[0]?.trim() ?? '';
@@ -154,8 +221,8 @@ export function classifyCommitMessage(message: string): CommitClassification {
 
   // Rule 2 — Keyword cues in subject
   for (const rule of KEYWORD_RULES) {
-    if (rule.pattern.test(subject)) {
-      const keyword = rule.pattern.exec(subject)?.[0] ?? subject.slice(0, 30);
+    const keyword = rule.match(subject);
+    if (keyword) {
       return {
         intent: rule.intent,
         score: rule.score,
@@ -177,7 +244,7 @@ export function classifyCommitMessage(message: string): CommitClassification {
   }
 
   // Fallback
-  return { intent: 'unknown', score: 0.0, reason: 'no rule matched' };
+  return { intent: 'unknown', score: 0, reason: 'no rule matched' };
 }
 
 // ---------------------------------------------------------------------------
@@ -246,7 +313,7 @@ export async function classifyCommitMessageWithFallback(
     if (!intent) return heuristic;
     return {
       intent,
-      score: 1.0,
+      score: 1,
       reason: `chat fallback (label "${intent}")`,
     };
   } catch {

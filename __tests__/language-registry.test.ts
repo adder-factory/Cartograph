@@ -21,6 +21,8 @@ import {
   EXTENSION_MAP,
 } from '../src/extraction/grammars.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 describe('language registry — single source of truth', () => {
   it('has at least the original 19 languages', () => {
     const defs = getLanguageDefs();
@@ -54,12 +56,10 @@ describe('language registry — single source of truth', () => {
     for (const def of getLanguageDefs()) {
       for (const ext of def.extensions) {
         const lower = ext.toLowerCase();
-        if (seen.has(lower)) {
-          // The .h ambiguity (C vs C++) is intentionally pinned to C
-          // by the registry; tree-sitter.ts has a content-sniff
-          // override. Anything else duplicating extensions is a bug.
-          throw new Error(`Extension ${lower} mapped twice: ${seen.get(lower)} and ${def.name}`);
-        }
+        // The .h ambiguity (C vs C++) is intentionally pinned to C
+        // by the registry; tree-sitter.ts has a content-sniff
+        // override. Anything else duplicating extensions is a bug.
+        expect(seen.has(lower), `Extension ${lower} mapped twice: ${seen.get(lower)} and ${def.name}`).toBe(false);
         seen.set(lower, def.name);
       }
     }
@@ -95,8 +95,8 @@ describe('derived consumers stay in sync with the registry', () => {
     const grammarBacked = getLanguageDefs()
       .filter((d) => d.grammar)
       .map((d) => d.name)
-      .sort();
-    const extractorKeys = Object.keys(EXTRACTORS).sort();
+      .sort(byName);
+    const extractorKeys = Object.keys(EXTRACTORS).sort(byName);
     expect(extractorKeys).toEqual(grammarBacked);
   });
 
@@ -118,7 +118,7 @@ describe('derived consumers stay in sync with the registry', () => {
       expect(EXTENSION_MAP[ext]).toBe(lang);
     }
     // Reverse: no extra keys in EXTENSION_MAP.
-    expect(Object.keys(EXTENSION_MAP).sort()).toEqual([...expected.keys()].sort());
+    expect(Object.keys(EXTENSION_MAP).sort(byName)).toEqual([...expected.keys()].sort(byName));
   });
 
   it('detectLanguage returns the expected name for every registered extension', () => {
@@ -141,8 +141,8 @@ describe('derived consumers stay in sync with the registry', () => {
   it('getSupportedLanguages returns exactly the registry names', () => {
     const fromRegistry = getLanguageDefs()
       .map((d) => d.name)
-      .sort();
-    const supported = (getSupportedLanguages() as string[]).sort();
+      .sort(byName);
+    const supported = (getSupportedLanguages() as string[]).sort(byName);
     expect(supported).toEqual(fromRegistry);
   });
 

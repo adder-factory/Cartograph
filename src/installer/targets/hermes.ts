@@ -177,7 +177,7 @@ function topLevelRange(lines: string[], key: string): LineRange | null {
 }
 
 function childRange(lines: string[], parent: LineRange, child: string): LineRange | null {
-  const startPattern = new RegExp(`^  ${escapeRegExp(child)}:\\s*(?:#.*)?$`);
+  const startPattern = new RegExp(String.raw`^  ${escapeRegExp(child)}:\s*(?:#.*)?$`);
   let start = -1;
   for (let i = parent.start + 1; i < parent.end; i++) {
     if (startPattern.test(lines[i] ?? '')) {
@@ -215,7 +215,7 @@ function listChildBlock(
   parent: LineRange,
   child: string,
 ): (LineRange & { itemIndent: string }) | null {
-  const startPattern = new RegExp(`^  ${escapeRegExp(child)}:\\s*(?:#.*)?$`);
+  const startPattern = new RegExp(String.raw`^  ${escapeRegExp(child)}:\s*(?:#.*)?$`);
   let start = -1;
   for (let i = parent.start + 1; i < parent.end; i++) {
     if (startPattern.test(lines[i] ?? '')) {
@@ -227,12 +227,7 @@ function listChildBlock(
 
   let end = parent.end;
   for (let i = start + 1; i < parent.end; i++) {
-    const line = lines[i] ?? '';
-    if (line.trim() === '') continue;
-    const indentMatch = /^( *)/.exec(line);
-    const indent = indentMatch?.[1]?.length ?? 0;
-    if (indent >= 4) continue;
-    if (indent === 2 && /^ {2}- /.test(line)) continue;
+    if (isListChildContinuation(lines[i] ?? '')) continue;
     end = i;
     break;
   }
@@ -249,6 +244,14 @@ function listChildBlock(
     }
   }
   return { start, end, itemIndent };
+}
+
+function isListChildContinuation(line: string): boolean {
+  if (line.trim() === '') return true;
+  const indentMatch = /^( *)/.exec(line);
+  const indent = indentMatch?.[1]?.length ?? 0;
+  if (indent >= 4) return true;
+  return indent === 2 && /^ {2}- /.test(line);
 }
 
 function renderCartographMcpChild(): string[] {

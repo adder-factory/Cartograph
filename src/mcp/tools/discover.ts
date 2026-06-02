@@ -51,9 +51,7 @@ interface BunSqliteHandle {
   close(): void;
 }
 
-interface BunSqliteCtor {
-  new (path: string, opts?: { readonly?: boolean; create?: boolean }): BunSqliteHandle;
-}
+type BunSqliteCtor = new (path: string, opts?: { readonly?: boolean; create?: boolean }) => BunSqliteHandle;
 
 /**
  * Best-effort minimal stats read. Open read-only via `bun:sqlite` (the

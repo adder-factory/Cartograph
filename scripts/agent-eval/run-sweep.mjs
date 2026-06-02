@@ -10,11 +10,11 @@
 //   node run-sweep.mjs --publish --runs 4 --label publish-<date>
 //   node run-sweep.mjs --corpora gin,nest,ktor --runs 2
 //   node run-sweep.mjs --all --runs 4
-import { readFileSync, readdirSync, mkdirSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { execFileSync } from 'child_process';
-import { homedir } from 'os';
+import { execFileSync } from 'node:child_process';
+import { readFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const args = process.argv.slice(2);
@@ -43,7 +43,7 @@ else if (has('--tier')) {
 
 const RUNS = val('--runs', '1');
 const MODEL = val('--model', 'opus');
-const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+const stamp = new Date().toISOString().replaceAll(/[:.]/g, '-').slice(0, 19);
 const LABEL = val('--label', `sweep-${stamp}`);
 const SWEEP_OUT = join(process.env.AGENT_EVAL_OUT || '/tmp/agent-eval', LABEL);
 const RL_BACKOFF_S = Number(process.env.RL_BACKOFF_S || 120);
@@ -54,7 +54,8 @@ if (!chosen.length) {
   process.exit(1);
 }
 console.log(`\n###### sweep "${LABEL}": ${chosen.length} corpora × ${RUNS} runs × {with,without}, model=${MODEL}`);
-console.log(`###### out: ${SWEEP_OUT}\n${chosen.map((c) => `   - ${c.name} (${c.language}, ${c.tier})`).join('\n')}\n`);
+const chosenLines = chosen.map((c) => `   - ${c.name} (${c.language}, ${c.tier})`).join('\n');
+console.log(`###### out: ${SWEEP_OUT}\n${chosenLines}\n`);
 
 const sleep = (s) => execFileSync('sleep', [String(s)]);
 const corpusRateLimited = (name) => {

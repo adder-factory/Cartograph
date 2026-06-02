@@ -25,9 +25,11 @@ import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Command, Option } from 'commander';
+import type { Command } from 'commander';
 import { getToolModules } from '../src/mcp/tools/registry.js';
 import { isReadOnlySql } from '../src/mcp/tools/sql.js';
+
+const byString = (a: string, b: string): number => a.localeCompare(b);
 
 /**
  * Identifiers known to be intentionally one-sided — each entry
@@ -95,25 +97,26 @@ function stripPrefix(toolName: string): string {
 /** Normalise CLI command name (`dead-code`) to underscore form
  *  (`dead_code`) so MCP and CLI sets share a single vocabulary. */
 function cliToMcpName(cliName: string): string {
-  return cliName.replaceAll(/-/g, '_');
+  return cliName.replaceAll('-', '_');
+}
+
+function visitCliCommand(cmd: Command, prefix: string[], ids: Set<string>): void {
+  const name = cmd.name();
+  // Skip the root program (no name) and the auto-injected `help` command.
+  if (!name || name === 'help' || name === 'cartograph') {
+    for (const sub of cmd.commands) visitCliCommand(sub, prefix, ids);
+    return;
+  }
+  const path = [...prefix, cliToMcpName(name)];
+  ids.add(path.join(':'));
+  for (const sub of cmd.commands) visitCliCommand(sub, path, ids);
 }
 
 /** Walk the commander tree and return every leaf-or-family
  *  identifier as `family[:sub[:sub...]]` (already MCP-normalised). */
 function collectCliIds(program: Command): Set<string> {
   const ids = new Set<string>();
-  function visit(cmd: Command, prefix: string[]): void {
-    const name = cmd.name();
-    // Skip the root program (no name) and the auto-injected `help` command.
-    if (!name || name === 'help' || name === 'cartograph') {
-      for (const sub of cmd.commands) visit(sub, prefix);
-      return;
-    }
-    const path = [...prefix, cliToMcpName(name)];
-    ids.add(path.join(':'));
-    for (const sub of cmd.commands) visit(sub, path);
-  }
-  visit(program, []);
+  visitCliCommand(program, [], ids);
   return ids;
 }
 
@@ -154,7 +157,7 @@ function collectMcpIds(): {
 /** Pretty list of identifiers for failure messages — sorted, one per line. */
 function fmt(set: Iterable<string>): string {
   return [...set]
-    .sort()
+    .sort(byString)
     .map((s) => `  - ${s}`)
     .join('\n');
 }
@@ -196,7 +199,271 @@ function extractDocumentedCliCommands(claudeMd: string): string[] {
     const m = /^\s*cartograph\s+([a-z][a-z-]*)\b/.exec(line);
     if (m) commands.add(m[1]!);
   }
-  return [...commands].sort();
+  return [...commands].sort(byString);
+}
+
+function cliCoversMcpId(id: string, cliIds: ReadonlySet<string>): boolean {
+  if (cliIds.has(id)) return true;
+  if (!id.includes(':')) return false;
+  const family = id.split(':')[0]!;
+  return cliIds.has(family);
+}
+
+function mcpCoversCliId(
+  id: string,
+  mcpIds: ReadonlySet<string>,
+  familyEnums: ReadonlyMap<string, { values: string[] }>,
+): boolean {
+  if (mcpIds.has(id)) return true;
+  if (!id.includes(':')) return false;
+  const [family, sub] = id.split(':');
+  const fam = familyEnums.get(family!);
+  return fam?.values.map(cliToMcpName).includes(sub!) ?? false;
+}
+
+function staleAsymmetryReason(id: string, mcpIds: ReadonlySet<string>, cliIds: ReadonlySet<string>): string | null {
+  const onMcp = mcpIds.has(id);
+  const onCli = cliIds.has(id);
+  if (onMcp && onCli) return `${id} (now mirrored on both sides — drop from KNOWN_ASYMMETRIC)`;
+  if (!onMcp && !onCli) return `${id} (absent from both sides — drop from KNOWN_ASYMMETRIC)`;
+  return null;
+}
+
+/**
+ * Per-tool exceptions. Keyed by stripped tool name. Value is the
+ * set of schema property names NOT required to appear on the CLI
+ * (with a justification), or the sentinel `'*'` to skip the whole
+ * tool (a deliberately hand-written CLI command whose surface is
+ * intentionally richer / different than the MCP schema).
+ */
+const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
+  // ── Hand-written direct implementations ─────────────────────────
+  // These tools have streaming progress / interactive UI / hand-curated
+  // subcommand trees that intentionally don't 1:1 mirror their MCP
+  // schema. Each `'*'` was retired (#31) in favor of per-property
+  // exemptions naming the actual gaps with justifications — the test
+  // now catches a NEW unmirrored field even on a hand-written tool.
+
+  // `cartograph admin` is a multi-subcommand surface (init / uninit /
+  // index / sync / migrate / unlock / build-similarity-edges /
+  // prune-store / scip-export / scip-import / summarize / embed /
+  // classify / install-models). `action` is the subcommand axis
+  // itself (not a flag); `confirm` is `uninit`-specific;
+  // `clearParseCacheLanguage` and `summarizeLimit` are advanced
+  // operator knobs deliberately kept off the headline CLI surface.
+  admin: new Set([
+    'action',
+    'confirm',
+    'clearParseCacheLanguage',
+    'summarizeLimit',
+    // `doctor` is a top-level `cartograph doctor` command (lifecycle.ts),
+    // not nested under `admin doctor`. The MCP schema's `skipProjectChecks`
+    // surfaces on the CLI as `--no-project-checks` (Commander's negate
+    // form); the alignment normaliser doesn't bridge "skip" → "no-" prefix
+    // semantically, so the field is carved out here.
+    'skipProjectChecks',
+    // `preset` is the action-arg for `llm-apply` — the agent-driven
+    // LLM-setup flow exposed via MCP. The CLI counterpart is
+    // `cartograph llm setup` (interactive @clack wizard, lifecycle.ts)
+    // which presents the same presets as a TTY menu rather than a
+    // single-string flag. Agents drive the MCP path; humans drive
+    // the wizard. Both share `llm-setup-plan.ts`.
+    'preset',
+    // `fix` is a flag on the top-level `cartograph doctor` command
+    // (lifecycle.ts), not under `admin doctor`. The MCP schema
+    // declares it on the admin action since `cartograph_admin({action:
+    // 'doctor'})` is the agent-facing entry point; the CLI mirror
+    // surfaces it on the dedicated `doctor` command which the
+    // alignment normaliser doesn't bridge to the admin subcommand
+    // tree.
+    'fix',
+    // `tier` is the action-arg for `llm-tune` — agent-driven
+    // per-tier concurrency override exposed via MCP only (no CLI
+    // counterpart). Same pattern as `preset`: humans hand-edit
+    // `<Tier>Llm.concurrency` in `.cartograph/config.json` directly
+    // or re-run the `cartograph llm setup` wizard; agents call the
+    // MCP action. Adding a CLI flag would require designing a new
+    // `cartograph llm tune` subcommand surface, which is out of
+    // scope here.
+    'tier',
+  ]),
+
+  // `cartograph files` carries hand-rendered tree / flat / grouped /
+  // summary layouts; the MCP `path` field is REMOVED (rejected at
+  // the schema boundary — use `dir`), and `includeMetadata` is the
+  // legacy alias for the current `metadata` flag.
+  files: new Set(['path', 'includeMetadata']),
+
+  // `cartograph review` is four subcommands (`review context` /
+  // `review neighbors` / `review risk` / `review agent-audit`)
+  // reflecting the `mode` enum. The CLI takes `--files <paths...>`
+  // instead of the MCP `diff` field; `limit` is the MCP row-cap,
+  // not surfaced as a CLI flag because the CLI's rendered output
+  // is human-paged. `perDetectorLimit` / `minSeverity` are agent-
+  // audit-specific args that mirror `--limit` / `--min-severity`
+  // shapes already exposed on adjacent risk-related commands;
+  // adding them to the auto-generated CLI for one mode would
+  // pollute the others, so they live on the MCP surface only
+  // (agents drive `agent-audit`; humans drive `cartograph review
+  // risk` or grep the findings table directly).
+  review: new Set(['diff', 'limit', 'perDetectorLimit', 'minSeverity']),
+
+  // `cartograph session` is a subcommand tree (create / resume / list
+  // / delete / macro_save / macro_run / macro_list / macro_delete).
+  // `action` is the subcommand axis.
+  session: new Set(['action']),
+
+  // `cartograph status` takes a `[path]` positional (resolved as
+  // projectPath) rather than the MCP `--project-path` flag. The
+  // `verbose` and `topHotspots` / `topBiomarkers` / `summaryBreakdown`
+  // knobs are still wired as `--verbose` / `--top-*`.
+  status: new Set(['projectPath']),
+
+  // `cartograph summaries` has two subcommands (`pending` / `save`)
+  // reflecting the `action` enum. `items` is the agent-bridge save
+  // payload — the CLI reads a JSON file argument instead of taking
+  // it as a flag.
+  summaries: new Set(['action', 'items']),
+
+  // ── `affected` and `ask` ────────────────────────────────────────
+  // Both formerly `'*'`; per the #31 audit ALL their schema fields
+  // ARE mirrored on the CLI. No per-property carve-outs needed.
+
+  // ── Permanent per-property carve-outs on generated commands ────
+  // `allowStale` is injected into every tool's schema by the
+  // registry's `withAllowStale` wrapper; the CLI deliberately does
+  // not surface it. Stripped globally below — no per-tool entry.
+  node: new Set([
+    // `cartograph node` is GENERATED but renders the schema's
+    // `symbols` array as the variadic `<symbols...>` positional and
+    // skips the scalar `symbol` field — the variadic already covers
+    // the single-symbol form, so `symbol` needs no separate flag.
+    // (skipFields: ['symbol'] on the registerGeneratedCommand call.)
+    'symbol',
+  ]),
+  graph: new Set([
+    // `cartograph graph` is GENERATED (registerGeneratedCommand), but
+    // two schema properties have an intentional CLI asymmetry:
+    // `symbols` (the batched callers/callees form) has no CLI flag —
+    // the CLI takes a single `<start>` positional (`skipFields`); and
+    // `k` is exposed under its long-standing CLI name `--top-k`
+    // (`longFlagOverrides`), which does not normalise back to `k`.
+    'symbols',
+    'k',
+  ]),
+  // `role` is GENERATED (registerGeneratedCommand) — the `role` enum
+  // is the `[role]` positional and `symbols` / `symbol` / `via` /
+  // `limit` are full `--flag` mirrors, so it carries no carve-out.
+};
+
+/** Schema properties suppressed for EVERY tool (cross-cutting). */
+const GLOBALLY_IGNORED_PROPS = new Set<string>([
+  'allowStale', // registry-injected freshness override; not a CLI flag
+]);
+
+/** kebab→camel and `-`/`_` normalisation so a CLI long flag
+ *  (`--max-depth`) and a schema property (`maxDepth`) compare equal. */
+function normalizeArgName(name: string): string {
+  return name.replace(/^--/, '').replaceAll(/[-_]/g, '').toLowerCase();
+}
+
+/**
+ * Collect every argument identifier reachable under a command:
+ * its own long-flag options + positional argument names, unioned
+ * recursively with every subcommand. A family command
+ * (`admin` / `coverage`) thus contributes the union of all its
+ * subcommands' flags — which is what a family tool's schema
+ * (one flat object) needs to mirror.
+ */
+function collectCommandArgNames(cmd: Command): Set<string> {
+  const names = new Set<string>();
+  for (const opt of cmd.options) {
+    if (opt.long) {
+      names.add(normalizeArgName(opt.long));
+      // Commander's negation form (`--no-foo`) has `.negate === true`
+      // and a destination key WITHOUT the `no-` prefix (`opts().foo`).
+      // The schema-property mirror is the positive name (`foo`), so
+      // also record that to avoid false-positive arg-shape drift on
+      // `--no-X` flags. Without this, every `--no-X` flag would need
+      // a per-property carve-out in ARG_SHAPE_EXCEPTIONS.
+      if (opt.negate) {
+        names.add(normalizeArgName(opt.long.replace(/^--no-/, '--')));
+      }
+    }
+  }
+  // `cmd.registeredArguments` (commander >=11) lists positionals.
+  const positionals =
+    (cmd as unknown as { registeredArguments?: Array<{ name(): string }> }).registeredArguments ??
+    (cmd as unknown as { _args?: Array<{ name(): string }> })._args ??
+    [];
+  for (const arg of positionals) {
+    names.add(normalizeArgName(arg.name()));
+  }
+  for (const sub of cmd.commands) {
+    if (sub.name() === 'help') continue;
+    for (const n of collectCommandArgNames(sub)) names.add(n);
+  }
+  return names;
+}
+
+/** Find the top-level CLI command mirroring a stripped tool name
+ *  (`dead_code` → the `dead-code` command). */
+function findMirrorCommand(program: Command, stripped: string): Command | undefined {
+  const wanted = normalizeArgName(stripped);
+  return program.commands.find((c) => normalizeArgName(c.name()) === wanted);
+}
+
+function schemaPropertiesMissingCliArgs(module: ReturnType<typeof getToolModules>[number], program: Command): string[] {
+  const stripped = stripPrefix(module.definition.name);
+  const exception = ARG_SHAPE_EXCEPTIONS[stripped];
+  if (exception === '*') return [];
+
+  const mirror = findMirrorCommand(program, stripped);
+  if (!mirror) return [];
+
+  const cliArgs = collectCommandArgNames(mirror);
+  const props = Object.keys(module.definition.inputSchema.properties ?? {});
+  return props
+    .filter((prop) => !GLOBALLY_IGNORED_PROPS.has(prop))
+    .filter((prop) => !(exception instanceof Set && exception.has(prop)))
+    .filter((prop) => !cliArgs.has(normalizeArgName(prop)))
+    .map((prop) => `${stripped}: schema property \`${prop}\` has no CLI option/argument`);
+}
+
+/** Walk the commander tree for a command by `path` and read its
+ *  `--limit` option default. */
+function cliLimitDefault(program: Command, segments: string[]): number {
+  let cmd: Command | undefined = program;
+  for (const seg of segments) {
+    cmd = cmd?.commands.find((c) => c.name() === seg);
+  }
+  if (!cmd) throw new Error(`CLI command not found: ${segments.join(' ')}`);
+  const opt = cmd.options.find((o) => o.long === '--limit');
+  if (!opt) throw new Error(`--limit option not found on: ${segments.join(' ')}`);
+  return Number(opt.defaultValue);
+}
+
+/** Read the `limit.default` from an MCP tool's inputSchema. */
+function mcpLimitDefault(toolDef: Record<string, unknown>): number {
+  const schema = toolDef['inputSchema'] as { properties?: Record<string, { default?: unknown }> };
+  const def = schema.properties?.['limit']?.default;
+  if (typeof def !== 'number') throw new Error('limit.default missing from MCP schema');
+  return def;
+}
+
+/** Run the CLI, returning stdout+stderr and the exit code. */
+function runCli(cliEntry: string, repoRoot: string, cliArgs: string[]): { out: string; code: number } {
+  try {
+    const out = execFileSync('bun', [cliEntry, ...cliArgs], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    return { out, code: 0 };
+  } catch (err) {
+    const e = err as { status?: number; stdout?: string; stderr?: string };
+    return { out: (e.stdout ?? '') + (e.stderr ?? ''), code: e.status ?? 1 };
+  }
 }
 
 // ── test ──────────────────────────────────────────────────────
@@ -220,16 +487,7 @@ describe('CLI ↔ MCP surface alignment', () => {
     const missingFromCli: string[] = [];
     for (const id of mcpIds) {
       if (KNOWN_ASYMMETRIC.has(id)) continue;
-      if (cliIds.has(id)) continue;
-      // Family-flag fallback: if `family:action`, accept when the CLI
-      // top-level `family` command exists. We trust the per-command
-      // wiring (action/mode is forwarded to runViaMCP) — the
-      // existing `mcp-tool-registry.test.ts` already confirms the
-      // MCP enum is the source of truth.
-      if (id.includes(':')) {
-        const family = id.split(':')[0]!;
-        if (cliIds.has(family)) continue;
-      }
+      if (cliCoversMcpId(id, cliIds)) continue;
       missingFromCli.push(id);
     }
     expect(
@@ -243,17 +501,7 @@ describe('CLI ↔ MCP surface alignment', () => {
     const orphanedCli: string[] = [];
     for (const id of cliIds) {
       if (KNOWN_ASYMMETRIC.has(id)) continue;
-      if (mcpIds.has(id)) continue;
-      // If the CLI id is `family:sub` and the family has an MCP
-      // enum that doesn't include `sub`, that's a real orphan. If
-      // the family has no enum at all (e.g. a plain top-level CLI
-      // command with no MCP family), fall through to the orphan
-      // list — the allowlist must justify it.
-      if (id.includes(':')) {
-        const [family, sub] = id.split(':');
-        const fam = familyEnums.get(family!);
-        if (fam?.values.map(cliToMcpName).includes(sub!)) continue;
-      }
+      if (mcpCoversCliId(id, mcpIds, familyEnums)) continue;
       orphanedCli.push(id);
     }
     expect(
@@ -266,13 +514,8 @@ describe('CLI ↔ MCP surface alignment', () => {
     // stale entries left behind after an asymmetry got resolved.
     const stale: string[] = [];
     for (const id of KNOWN_ASYMMETRIC) {
-      const onMcp = mcpIds.has(id);
-      const onCli = cliIds.has(id);
-      if (onMcp && onCli) {
-        stale.push(`${id} (now mirrored on both sides — drop from KNOWN_ASYMMETRIC)`);
-      } else if (!onMcp && !onCli) {
-        stale.push(`${id} (absent from both sides — drop from KNOWN_ASYMMETRIC)`);
-      }
+      const reason = staleAsymmetryReason(id, mcpIds, cliIds);
+      if (reason) stale.push(reason);
     }
     expect(stale, `KNOWN_ASYMMETRIC has stale entries:\n${stale.join('\n')}`).toEqual([]);
   });
@@ -303,7 +546,7 @@ describe('CLI ↔ MCP surface alignment', () => {
       drifted,
       'CLAUDE.md `## CLI Usage` documents cartograph command(s) that no longer exist ' +
         `in the CLI (prose-vs-surface drift):\n${fmt(drifted)}\n` +
-        `Registered top-level commands: ${[...realCommands].sort().join(', ')}`,
+        `Registered top-level commands: ${[...realCommands].sort(byString).join(', ')}`,
     ).toEqual([]);
   });
 });
@@ -330,190 +573,6 @@ describe('CLI ↔ MCP surface alignment', () => {
  * conversion is the P8 wave, which will shrink this allowlist.
  */
 describe('CLI ↔ MCP argument-shape parity (#cat3)', () => {
-  /**
-   * Per-tool exceptions. Keyed by stripped tool name. Value is the
-   * set of schema property names NOT required to appear on the CLI
-   * (with a justification), or the sentinel `'*'` to skip the whole
-   * tool (a deliberately hand-written CLI command whose surface is
-   * intentionally richer / different than the MCP schema).
-   */
-  const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
-    // ── Hand-written direct implementations ─────────────────────────
-    // These tools have streaming progress / interactive UI / hand-curated
-    // subcommand trees that intentionally don't 1:1 mirror their MCP
-    // schema. Each `'*'` was retired (#31) in favor of per-property
-    // exemptions naming the actual gaps with justifications — the test
-    // now catches a NEW unmirrored field even on a hand-written tool.
-
-    // `cartograph admin` is a multi-subcommand surface (init / uninit /
-    // index / sync / migrate / unlock / build-similarity-edges /
-    // prune-store / scip-export / scip-import / summarize / embed /
-    // classify / install-models). `action` is the subcommand axis
-    // itself (not a flag); `confirm` is `uninit`-specific;
-    // `clearParseCacheLanguage` and `summarizeLimit` are advanced
-    // operator knobs deliberately kept off the headline CLI surface.
-    admin: new Set([
-      'action',
-      'confirm',
-      'clearParseCacheLanguage',
-      'summarizeLimit',
-      // `doctor` is a top-level `cartograph doctor` command (lifecycle.ts),
-      // not nested under `admin doctor`. The MCP schema's `skipProjectChecks`
-      // surfaces on the CLI as `--no-project-checks` (Commander's negate
-      // form); the alignment normaliser doesn't bridge "skip" → "no-" prefix
-      // semantically, so the field is carved out here.
-      'skipProjectChecks',
-      // `preset` is the action-arg for `llm-apply` — the agent-driven
-      // LLM-setup flow exposed via MCP. The CLI counterpart is
-      // `cartograph llm setup` (interactive @clack wizard, lifecycle.ts)
-      // which presents the same presets as a TTY menu rather than a
-      // single-string flag. Agents drive the MCP path; humans drive
-      // the wizard. Both share `llm-setup-plan.ts`.
-      'preset',
-      // `fix` is a flag on the top-level `cartograph doctor` command
-      // (lifecycle.ts), not under `admin doctor`. The MCP schema
-      // declares it on the admin action since `cartograph_admin({action:
-      // 'doctor'})` is the agent-facing entry point; the CLI mirror
-      // surfaces it on the dedicated `doctor` command which the
-      // alignment normaliser doesn't bridge to the admin subcommand
-      // tree.
-      'fix',
-      // `tier` is the action-arg for `llm-tune` — agent-driven
-      // per-tier concurrency override exposed via MCP only (no CLI
-      // counterpart). Same pattern as `preset`: humans hand-edit
-      // `<Tier>Llm.concurrency` in `.cartograph/config.json` directly
-      // or re-run the `cartograph llm setup` wizard; agents call the
-      // MCP action. Adding a CLI flag would require designing a new
-      // `cartograph llm tune` subcommand surface, which is out of
-      // scope here.
-      'tier',
-    ]),
-
-    // `cartograph files` carries hand-rendered tree / flat / grouped /
-    // summary layouts; the MCP `path` field is REMOVED (rejected at
-    // the schema boundary — use `dir`), and `includeMetadata` is the
-    // legacy alias for the current `metadata` flag.
-    files: new Set(['path', 'includeMetadata']),
-
-    // `cartograph review` is four subcommands (`review context` /
-    // `review neighbors` / `review risk` / `review agent-audit`)
-    // reflecting the `mode` enum. The CLI takes `--files <paths...>`
-    // instead of the MCP `diff` field; `limit` is the MCP row-cap,
-    // not surfaced as a CLI flag because the CLI's rendered output
-    // is human-paged. `perDetectorLimit` / `minSeverity` are agent-
-    // audit-specific args that mirror `--limit` / `--min-severity`
-    // shapes already exposed on adjacent risk-related commands;
-    // adding them to the auto-generated CLI for one mode would
-    // pollute the others, so they live on the MCP surface only
-    // (agents drive `agent-audit`; humans drive `cartograph review
-    // risk` or grep the findings table directly).
-    review: new Set(['diff', 'limit', 'perDetectorLimit', 'minSeverity']),
-
-    // `cartograph session` is a subcommand tree (create / resume / list
-    // / delete / macro_save / macro_run / macro_list / macro_delete).
-    // `action` is the subcommand axis.
-    session: new Set(['action']),
-
-    // `cartograph status` takes a `[path]` positional (resolved as
-    // projectPath) rather than the MCP `--project-path` flag. The
-    // `verbose` and `topHotspots` / `topBiomarkers` / `summaryBreakdown`
-    // knobs are still wired as `--verbose` / `--top-*`.
-    status: new Set(['projectPath']),
-
-    // `cartograph summaries` has two subcommands (`pending` / `save`)
-    // reflecting the `action` enum. `items` is the agent-bridge save
-    // payload — the CLI reads a JSON file argument instead of taking
-    // it as a flag.
-    summaries: new Set(['action', 'items']),
-
-    // ── `affected` and `ask` ────────────────────────────────────────
-    // Both formerly `'*'`; per the #31 audit ALL their schema fields
-    // ARE mirrored on the CLI. No per-property carve-outs needed.
-
-    // ── Permanent per-property carve-outs on generated commands ────
-    // `allowStale` is injected into every tool's schema by the
-    // registry's `withAllowStale` wrapper; the CLI deliberately does
-    // not surface it. Stripped globally below — no per-tool entry.
-    node: new Set([
-      // `cartograph node` is GENERATED but renders the schema's
-      // `symbols` array as the variadic `<symbols...>` positional and
-      // skips the scalar `symbol` field — the variadic already covers
-      // the single-symbol form, so `symbol` needs no separate flag.
-      // (skipFields: ['symbol'] on the registerGeneratedCommand call.)
-      'symbol',
-    ]),
-    graph: new Set([
-      // `cartograph graph` is GENERATED (registerGeneratedCommand), but
-      // two schema properties have an intentional CLI asymmetry:
-      // `symbols` (the batched callers/callees form) has no CLI flag —
-      // the CLI takes a single `<start>` positional (`skipFields`); and
-      // `k` is exposed under its long-standing CLI name `--top-k`
-      // (`longFlagOverrides`), which does not normalise back to `k`.
-      'symbols',
-      'k',
-    ]),
-    // `role` is GENERATED (registerGeneratedCommand) — the `role` enum
-    // is the `[role]` positional and `symbols` / `symbol` / `via` /
-    // `limit` are full `--flag` mirrors, so it carries no carve-out.
-  };
-
-  /** Schema properties suppressed for EVERY tool (cross-cutting). */
-  const GLOBALLY_IGNORED_PROPS = new Set<string>([
-    'allowStale', // registry-injected freshness override; not a CLI flag
-  ]);
-
-  /** kebab→camel and `-`/`_` normalisation so a CLI long flag
-   *  (`--max-depth`) and a schema property (`maxDepth`) compare equal. */
-  function normalizeArgName(name: string): string {
-    return name.replace(/^--/, '').replaceAll(/[-_]/g, '').toLowerCase();
-  }
-
-  /**
-   * Collect every argument identifier reachable under a command:
-   * its own long-flag options + positional argument names, unioned
-   * recursively with every subcommand. A family command
-   * (`admin` / `coverage`) thus contributes the union of all its
-   * subcommands' flags — which is what a family tool's schema
-   * (one flat object) needs to mirror.
-   */
-  function collectCommandArgNames(cmd: Command): Set<string> {
-    const names = new Set<string>();
-    for (const opt of cmd.options) {
-      if (opt.long) {
-        names.add(normalizeArgName(opt.long));
-        // Commander's negation form (`--no-foo`) has `.negate === true`
-        // and a destination key WITHOUT the `no-` prefix (`opts().foo`).
-        // The schema-property mirror is the positive name (`foo`), so
-        // also record that to avoid false-positive arg-shape drift on
-        // `--no-X` flags. Without this, every `--no-X` flag would need
-        // a per-property carve-out in ARG_SHAPE_EXCEPTIONS.
-        if ((opt as Option).negate) {
-          names.add(normalizeArgName(opt.long.replace(/^--no-/, '--')));
-        }
-      }
-    }
-    // `cmd.registeredArguments` (commander >=11) lists positionals.
-    const positionals =
-      (cmd as unknown as { registeredArguments?: Array<{ name(): string }> }).registeredArguments ??
-      (cmd as unknown as { _args?: Array<{ name(): string }> })._args ??
-      [];
-    for (const arg of positionals) {
-      names.add(normalizeArgName(arg.name()));
-    }
-    for (const sub of cmd.commands) {
-      if (sub.name() === 'help') continue;
-      for (const n of collectCommandArgNames(sub)) names.add(n);
-    }
-    return names;
-  }
-
-  /** Find the top-level CLI command mirroring a stripped tool name
-   *  (`dead_code` → the `dead-code` command). */
-  function findMirrorCommand(program: Command, stripped: string): Command | undefined {
-    const wanted = normalizeArgName(stripped);
-    return program.commands.find((c) => normalizeArgName(c.name()) === wanted);
-  }
-
   it('every MCP tool inputSchema property has a CLI option / positional mirror', async () => {
     const cli = await import('../src/bin/cartograph.js');
     const program = cli.program;
@@ -521,24 +580,7 @@ describe('CLI ↔ MCP argument-shape parity (#cat3)', () => {
 
     const gaps: string[] = [];
     for (const m of modules) {
-      const stripped = stripPrefix(m.definition.name);
-      const exception = ARG_SHAPE_EXCEPTIONS[stripped];
-      if (exception === '*') continue;
-
-      const mirror = findMirrorCommand(program, stripped);
-      if (!mirror) {
-        // Existence is the OTHER test's job; a missing command here
-        // would double-report. Skip — the existence test fails first.
-        continue;
-      }
-      const cliArgs = collectCommandArgNames(mirror);
-      const props = Object.keys(m.definition.inputSchema.properties ?? {});
-      for (const prop of props) {
-        if (GLOBALLY_IGNORED_PROPS.has(prop)) continue;
-        if (exception instanceof Set && exception.has(prop)) continue;
-        if (cliArgs.has(normalizeArgName(prop))) continue;
-        gaps.push(`${stripped}: schema property \`${prop}\` has no CLI option/argument`);
-      }
+      gaps.push(...schemaPropertiesMissingCliArgs(m, program));
     }
 
     expect(
@@ -650,27 +692,6 @@ describe('cartograph_sql read-only gate — value-PRAGMA rejection', () => {
  * (CLI 10 vs MCP 20) and `note list` (CLI 30 vs MCP 50) diverging.
  */
 describe('CLI ↔ MCP list default-limit parity (#32)', () => {
-  /** Walk the commander tree for a command by `path` and read its
-   *  `--limit` option default. */
-  function cliLimitDefault(program: Command, segments: string[]): number {
-    let cmd: Command | undefined = program;
-    for (const seg of segments) {
-      cmd = cmd?.commands.find((c) => c.name() === seg);
-    }
-    if (!cmd) throw new Error(`CLI command not found: ${segments.join(' ')}`);
-    const opt = cmd.options.find((o) => o.long === '--limit');
-    if (!opt) throw new Error(`--limit option not found on: ${segments.join(' ')}`);
-    return Number(opt.defaultValue);
-  }
-
-  /** Read the `limit.default` from an MCP tool's inputSchema. */
-  function mcpLimitDefault(toolDef: Record<string, unknown>): number {
-    const schema = toolDef['inputSchema'] as { properties?: Record<string, { default?: unknown }> };
-    const def = schema.properties?.['limit']?.default;
-    if (typeof def !== 'number') throw new Error('limit.default missing from MCP schema');
-    return def;
-  }
-
   it('session list --limit default matches cartograph_session schema', async () => {
     const cli = await import('../src/bin/cartograph.js');
     const { SESSION_TOOL } = await import('../src/mcp/tools/session.js');
@@ -704,25 +725,10 @@ describe('CLI behaviour parity (spawned)', () => {
   const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
   const indexed = fs.existsSync(path.join(repoRoot, '.cartograph'));
 
-  /** Run the CLI, returning stdout+stderr and the exit code. */
-  function runCli(cliArgs: string[]): { out: string; code: number } {
-    try {
-      const out = execFileSync('bun', [cliEntry, ...cliArgs], {
-        cwd: repoRoot,
-        encoding: 'utf-8',
-        stdio: ['ignore', 'pipe', 'pipe'],
-      });
-      return { out, code: 0 };
-    } catch (err) {
-      const e = err as { status?: number; stdout?: string; stderr?: string };
-      return { out: (e.stdout ?? '') + (e.stderr ?? ''), code: e.status ?? 1 };
-    }
-  }
-
   it.skipIf(!indexed)(
     'sql exits non-zero on a rejected write query',
     () => {
-      const { code } = runCli(['sql', 'DELETE FROM nodes']);
+      const { code } = runCli(cliEntry, repoRoot, ['sql', 'DELETE FROM nodes']);
       expect(code).not.toBe(0);
     },
     60_000,
@@ -731,7 +737,7 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'sql exits non-zero on an invalid (no such table) query',
     () => {
-      const { code } = runCli(['sql', 'SELECT * FROM no_such_table_xyz']);
+      const { code } = runCli(cliEntry, repoRoot, ['sql', 'SELECT * FROM no_such_table_xyz']);
       expect(code).not.toBe(0);
     },
     60_000,
@@ -740,7 +746,7 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'find --by name exact returns the container + its members',
     () => {
-      const { out, code } = runCli(['find', '--by', 'name', 'GraphTraverser']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['find', '--by', 'name', 'GraphTraverser']);
       expect(code).toBe(0);
       // MCP exact mode lists the class then its member methods, not a
       // fuzzy relevance rank with `(NN%)` scores and unrelated imports.
@@ -756,7 +762,7 @@ describe('CLI behaviour parity (spawned)', () => {
   // to Commander's negation form so the help text's "default true"
   // promise becomes a real, flippable flag.
   it('find --help advertises --no-include-tests (handoff #3)', () => {
-    const help = runCli(['find', '--help']);
+    const help = runCli(cliEntry, repoRoot, ['find', '--help']);
     expect(help.code).toBe(0);
     expect(help.out).toContain('--no-include-tests');
   }, 60_000);
@@ -769,7 +775,7 @@ describe('CLI behaviour parity (spawned)', () => {
       // Commander accepts the negation form and the command runs to
       // completion (the empty-state message is acceptable when no env
       // refs match — what matters is that the option was recognized).
-      const { code } = runCli(['find', '--by', 'env', '--no-include-tests']);
+      const { code } = runCli(cliEntry, repoRoot, ['find', '--by', 'env', '--no-include-tests']);
       expect(code).toBe(0);
     },
     60_000,
@@ -778,9 +784,9 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'coverage with a bare positional symbol selects symbol mode',
     () => {
-      const { out, code } = runCli(['coverage', 'computeMetrics']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['coverage', 'computeMetrics']);
       expect(code).toBe(0);
-      expect(out).toContain('Coverage for `computeMetrics`');
+      expect(out).toMatch(/(?:Coverage for|No coverage data for) `computeMetrics`/);
       expect(out).not.toContain('lowest first');
     },
     60_000,
@@ -789,7 +795,7 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'role with no args produces the project-wide distribution table',
     () => {
-      const { out, code } = runCli(['role']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['role']);
       expect(code).toBe(0);
       // Bug #12 (2026-05-22) renamed the section title to scope the
       // denominator disclosure — the `(project-wide` prefix is the
@@ -810,13 +816,18 @@ describe('CLI behaviour parity (spawned)', () => {
     () => {
       // cartograph_node supports includeCallers/Callees/Biomarkers/Tests
       // + a batched `symbols` array — the CLI mirror must expose them.
-      const help = runCli(['node', '--help']);
+      const help = runCli(cliEntry, repoRoot, ['node', '--help']);
       expect(help.code).toBe(0);
       for (const flag of ['--include-callers', '--include-callees', '--include-biomarkers', '--include-tests']) {
         expect(help.out, `node --help should list ${flag}`).toContain(flag);
       }
       // Batched form: two positional symbols resolve in one call.
-      const { out, code } = runCli(['node', 'handleAtRange', 'renderDiffRangeReport', '--include-biomarkers']);
+      const { out, code } = runCli(cliEntry, repoRoot, [
+        'node',
+        'handleAtRange',
+        'renderDiffRangeReport',
+        '--include-biomarkers',
+      ]);
       expect(code).toBe(0);
       expect(out).toContain('handleAtRange');
       expect(out).toContain('renderDiffRangeReport');
@@ -828,13 +839,13 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'status accepts the MCP rollup flags and renders Feature Readiness',
     () => {
-      const help = runCli(['status', '--help']);
+      const help = runCli(cliEntry, repoRoot, ['status', '--help']);
       expect(help.code).toBe(0);
       for (const flag of ['--verbose', '--top-hotspots', '--top-biomarkers', '--summary-breakdown']) {
         expect(help.out, `status --help should list ${flag}`).toContain(flag);
       }
       // --verbose renders the Feature Readiness rollup the MCP tool shows.
-      const { out, code } = runCli(['status', '--verbose']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['status', '--verbose']);
       expect(code).toBe(0);
       expect(out).toContain('Feature Readiness');
     },
@@ -855,7 +866,7 @@ describe('CLI behaviour parity (spawned)', () => {
   ])(
     'status --top-biomarkers %s exits 0 (%s; handoff #4)',
     (value) => {
-      const { code } = runCli(['status', '--top-biomarkers', value]);
+      const { code } = runCli(cliEntry, repoRoot, ['status', '--top-biomarkers', value]);
       expect(code).toBe(0);
     },
     60_000,
@@ -867,14 +878,14 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'status --top-hotspots -5 exits 0 (silent suppress, parity with --top-biomarkers)',
     () => {
-      const { code } = runCli(['status', '--top-hotspots', '-5']);
+      const { code } = runCli(cliEntry, repoRoot, ['status', '--top-hotspots', '-5']);
       expect(code).toBe(0);
     },
     60_000,
   );
 
   it('status --help describes the coerce-on-invalid contract (handoff #4)', () => {
-    const help = runCli(['status', '--help']);
+    const help = runCli(cliEntry, repoRoot, ['status', '--help']);
     expect(help.code).toBe(0);
     // Help text now mirrors the MCP schema description — no more
     // contradictory "Clamped to [1, 30]" on a flag that rejects 0.
@@ -888,10 +899,10 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'at-range accepts the bulk --ranges mode',
     () => {
-      const help = runCli(['at-range', '--help']);
+      const help = runCli(cliEntry, repoRoot, ['at-range', '--help']);
       expect(help.code).toBe(0);
       expect(help.out).toContain('--ranges');
-      const { out, code } = runCli(['at-range', '--ranges', 'src/mcp/tools/at-range.ts:549-567']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['at-range', '--ranges', 'src/mcp/tools/at-range.ts:549-567']);
       expect(code).toBe(0);
       expect(out).toContain('renderDiffRangeReport');
     },
@@ -901,7 +912,7 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'affected surfaces the traversal count on the human surface',
     () => {
-      const { out, code } = runCli(['affected', 'src/mcp/tools/at-range.ts']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['affected', 'src/mcp/tools/at-range.ts']);
       expect(code).toBe(0);
       // The MCP tool prints "Traversed N dependents total." — the CLI
       // direct implementation must mirror that blast-radius signal.

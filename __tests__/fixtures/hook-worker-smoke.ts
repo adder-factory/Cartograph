@@ -61,8 +61,10 @@ async function main(): Promise<void> {
   process.exit(ok ? 0 : 1);
 }
 
-main().catch((err: unknown) => {
+try {
+  await main();
+} catch (err: unknown) {
   const message = err instanceof Error ? err.message : String(err);
   console.log(`${MARKER}${JSON.stringify({ ok: false, error: message })}`);
   process.exit(1);
-});
+}

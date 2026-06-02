@@ -421,7 +421,7 @@ export function getZodSchema(mod: ToolModule | undefined): ToolZodSchema | undef
   const candidate = (mod as Partial<ZodToolModule>)[ZOD_SCHEMA_KEY];
   // A Zod schema is an object with a `safeParse` method.
   if (candidate && typeof (candidate as { safeParse?: unknown }).safeParse === 'function') {
-    return candidate as ToolZodSchema;
+    return candidate;
   }
   return undefined;
 }

@@ -161,14 +161,17 @@ const ALIAS_ATTR_RE = /\balias\s*=\s*["']([^"']+)["']/;
  *  value. Other attributes (`parameterType`, `resultType`, etc.) are
  *  scanned across with `[^>]*` so the order doesn't matter. */
 const STATEMENT_RE = new RegExp(
-  `<(${MYBATIS_STATEMENT_TAGS.join('|')})\\b[^>]*\\bid\\s*=\\s*["']([^"']+)["'][^>]*>`,
+  String.raw`<(${MYBATIS_STATEMENT_TAGS.join('|')})\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>`,
   'gi',
 );
 
 /** Per-mapping regex for `<resultMap>` / `<parameterMap>`. Captures
  *  the tag name + the `id` attribute. `type` is captured separately
  *  via TYPE_ATTR_RE applied to the opening tag's full text. */
-const MAPPING_RE = new RegExp(`<(${MYBATIS_MAPPING_TAGS.join('|')})\\b[^>]*\\bid\\s*=\\s*["']([^"']+)["'][^>]*>`, 'gi');
+const MAPPING_RE = new RegExp(
+  String.raw`<(${MYBATIS_MAPPING_TAGS.join('|')})\b[^>]*\bid\s*=\s*["']([^"']+)["'][^>]*>`,
+  'gi',
+);
 
 /** Pulls the `type="X"` attribute value out of an opening-tag string. */
 const TYPE_ATTR_RE = /\btype\s*=\s*["']([^"']+)["']/;
@@ -242,7 +245,7 @@ function lineNumberAt(source: string, offset: number): number {
  *  Bounded via `source.substring(fromIdx)`; the regex isn't `g`/`y`
  *  so `lastIndex` has no effect here and isn't used. */
 function findClosingTag(source: string, tag: string, fromIdx: number): number {
-  const closeRe = new RegExp(`</${tag}\\b[^>]*>`, 'i');
+  const closeRe = new RegExp(String.raw`</${tag}\b[^>]*>`, 'i');
   const m = closeRe.exec(source.substring(fromIdx));
   return m ? fromIdx + m.index : source.length;
 }
@@ -454,7 +457,7 @@ function emitMapperMappings(args: MapperEmitArgs): void {
   while ((m = MAPPING_RE.exec(source)) !== null) {
     const tag = m[1]!; // preserve original casing for the signature label
     const id = m[2]!;
-    const openingText = m[0]!;
+    const openingText = m[0];
     const startLine = lineNumberAt(source, m.index);
     const typeMatch = TYPE_ATTR_RE.exec(openingText);
     const declaredType = typeMatch ? typeMatch[1]! : tag;
@@ -638,7 +641,7 @@ function extractMybatisConfigFile(filePath: string, source: string, startTime: n
   const aliasOrdinal = new Map<string, number>();
   TYPE_ALIAS_TAG_RE.lastIndex = 0;
   while ((m = TYPE_ALIAS_TAG_RE.exec(source)) !== null) {
-    const openingText = m[0]!;
+    const openingText = m[0];
     const aliasMatch = ALIAS_ATTR_RE.exec(openingText);
     if (!aliasMatch) continue;
     const typeMatch = TYPE_ATTR_RE.exec(openingText);

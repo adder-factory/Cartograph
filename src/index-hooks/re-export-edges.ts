@@ -53,25 +53,31 @@ async function buildReExportEdges(ctx: IndexHookContext, files: FileTarget[]): P
   const edges: ReExportEdge[] = [];
   let processed = 0;
   for (const file of files) {
-    if (!SUPPORTED_LANGS.has(file.language)) continue;
-    const content = readFileSafe(path.join(ctx.projectRoot, file.path));
-    if (!content) continue;
-
-    const reExports = extractReExports(content, file.language as Language);
-    if (reExports.length === 0) continue;
-
-    const fileNodeId = `file:${file.path}`;
-    const fileDir = path.dirname(file.path);
-    for (const rx of reExports) {
-      if (rx.kind !== 'named') continue;
-      const targetFile = resolveTargetFile(fileDir, rx.source, ctx.projectRoot);
-      if (!targetFile || targetFile === file.path) continue;
-      const targetSymbolId = lookupSymbolByNameInFile(ctx, rx.originalName, targetFile);
-      if (!targetSymbolId) continue;
-      edges.push({ source: fileNodeId, target: targetSymbolId, kind: 'references' });
-    }
+    edges.push(...buildReExportEdgesForFile(ctx, file));
     // B24 (2026-05-24) — cooperative yield. See edge-resolution-helpers.ts.
     if (++processed % PER_FILE_YIELD_INTERVAL === 0) await yieldToEventLoop();
+  }
+  return edges;
+}
+
+function buildReExportEdgesForFile(ctx: IndexHookContext, file: FileTarget): ReExportEdge[] {
+  if (!SUPPORTED_LANGS.has(file.language)) return [];
+  const content = readFileSafe(path.join(ctx.projectRoot, file.path));
+  if (!content) return [];
+
+  const reExports = extractReExports(content, file.language as Language);
+  if (reExports.length === 0) return [];
+
+  const edges: ReExportEdge[] = [];
+  const fileNodeId = `file:${file.path}`;
+  const fileDir = path.dirname(file.path);
+  for (const rx of reExports) {
+    if (rx.kind !== 'named') continue;
+    const targetFile = resolveTargetFile(fileDir, rx.source, ctx.projectRoot);
+    if (!targetFile || targetFile === file.path) continue;
+    const targetSymbolId = lookupSymbolByNameInFile(ctx, rx.originalName, targetFile);
+    if (!targetSymbolId) continue;
+    edges.push({ source: fileNodeId, target: targetSymbolId, kind: 'references' });
   }
   return edges;
 }

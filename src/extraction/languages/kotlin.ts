@@ -1,7 +1,25 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
-import type { LanguageExtractor } from '../tree-sitter-types.js';
+import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
 import { compact } from '../../utils.js';
+
+function isClassLikeKind(kind: string): boolean {
+  return (
+    kind === 'class' ||
+    kind === 'trait' ||
+    kind === 'interface' ||
+    kind === 'struct' ||
+    kind === 'enum' ||
+    kind === 'module'
+  );
+}
+
+function isCurrentScopeClassLike(ctx: ExtractorContext): boolean {
+  if (ctx.nodeStack.length === 0) return false;
+  const parentId = ctx.nodeStack.at(-1);
+  const parentNode = ctx.nodes.find((n) => n.id === parentId);
+  return parentNode != null && isClassLikeKind(parentNode.kind);
+}
 
 /** True when `node` is a `user_type` whose first `type_identifier`
  *  child is the literal `interface`. Reused by the direct-child and
@@ -9,7 +27,7 @@ import { compact } from '../../utils.js';
 function isInterfaceUserType(node: SyntaxNode): boolean {
   if (node.type !== 'user_type') return false;
   const typeId = node.namedChildren.find((c: SyntaxNode) => c.type === 'type_identifier');
-  return !!(typeId?.text === 'interface');
+  return typeId?.text === 'interface';
 }
 
 /** Pattern 2b: a `fun interface` misparse where the `user_type("interface")`
@@ -36,6 +54,113 @@ function isFunInterfaceNode(node: SyntaxNode): boolean {
   return hasFun && hasInterfaceType;
 }
 
+function findSimpleIdentifierInError(node: SyntaxNode): string | null {
+  const errorChild = node.children.find((child: SyntaxNode) => child?.type === 'ERROR');
+  const id = errorChild?.children.find((gc: SyntaxNode) => gc?.type === 'simple_identifier');
+  return id?.text ?? null;
+}
+
+function findDirectSimpleIdentifier(node: SyntaxNode): string | null {
+  const id = node.children.find((child: SyntaxNode) => child?.type === 'simple_identifier');
+  return id?.text ?? null;
+}
+
+function funInterfaceName(node: SyntaxNode): string | null {
+  return node.type === 'function_declaration'
+    ? (findSimpleIdentifierInError(node) ?? findDirectSimpleIdentifier(node))
+    : findDirectSimpleIdentifier(node);
+}
+
+function isClassBodyError(node: SyntaxNode): boolean {
+  if (node.type !== 'ERROR') return false;
+  const firstChild = node.child(0);
+  return firstChild?.type === '{';
+}
+
+function visitLambdaStatements(node: SyntaxNode, ctx: ExtractorContext): void {
+  const statements = node.namedChildren.find((child: SyntaxNode) => child?.type === 'statements');
+  if (!statements) return;
+  for (const stmt of statements.namedChildren) {
+    if (stmt) ctx.visitNode(stmt);
+  }
+}
+
+type KotlinVisibility = 'public' | 'private' | 'protected' | 'internal';
+
+function kotlinPropertyVisibility(node: SyntaxNode): KotlinVisibility {
+  const modifiers = node.namedChildren.find((c: SyntaxNode) => c.type === 'modifiers');
+  const visText = modifiers?.text ?? '';
+  if (visText.includes('private')) return 'private';
+  if (visText.includes('protected')) return 'protected';
+  if (visText.includes('internal')) return 'internal';
+  return 'public';
+}
+
+function kotlinPropertyTypeText(varDecl: SyntaxNode, source: string): string | undefined {
+  const typeNode = varDecl.namedChildren.find(
+    (c: SyntaxNode) =>
+      c.type === 'user_type' ||
+      c.type === 'nullable_type' ||
+      c.type === 'function_type' ||
+      c.type === 'parenthesized_type',
+  );
+  return typeNode ? getNodeText(typeNode, source) : undefined;
+}
+
+function visitKotlinPropertyDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'property_declaration') return false;
+  const varDecl = node.namedChildren.find((c: SyntaxNode) => c.type === 'variable_declaration');
+  if (!varDecl) return false; // destructuring or other unusual shape — skip
+  const nameNode = varDecl.namedChildren.find((c: SyntaxNode) => c.type === 'simple_identifier');
+  if (!nameNode) return false;
+
+  const name = getNodeText(nameNode, ctx.source);
+  const bindingKind = node.namedChildren.find((c: SyntaxNode) => c.type === 'binding_pattern_kind');
+  const isVal = bindingKind?.text === 'val';
+  const keyword = isVal ? 'val' : 'var';
+
+  if (!isCurrentScopeClassLike(ctx)) {
+    // Top-level or local: keep as constant (val) or variable (var)
+    ctx.createNode({ kind: isVal ? 'constant' : 'variable', name, node });
+    return true;
+  }
+
+  const typeText = kotlinPropertyTypeText(varDecl, ctx.source);
+  const sig = typeText ? `${keyword} ${name}: ${typeText}` : `${keyword} ${name}`;
+  ctx.createNode({
+    kind: 'field',
+    name,
+    node,
+    extra: compact({ signature: sig, visibility: kotlinPropertyVisibility(node) }),
+  });
+  return true;
+}
+
+function visitKotlinFunInterfaceDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type === 'lambda_literal') {
+    const prev = node.previousSibling;
+    return prev?.type === 'ERROR' && isFunInterfaceNode(prev);
+  }
+
+  if (node.type !== 'ERROR' && node.type !== 'function_declaration') return false;
+  if (isClassBodyError(node) || !isFunInterfaceNode(node)) return false;
+
+  // For function_declaration misparses (patterns 2a/2b), the real name is inside
+  // an ERROR child — direct simple_identifier children are the misparsed method name.
+  const nameText = funInterfaceName(node);
+  if (!nameText) return false;
+
+  const ifaceNode = ctx.createNode({ kind: 'interface', name: nameText, node });
+  if (!ifaceNode) return false;
+
+  ctx.pushScope(ifaceNode.id);
+  if (node.type === 'ERROR' && node.nextSibling?.type === 'lambda_literal') {
+    visitLambdaStatements(node.nextSibling, ctx);
+  }
+  ctx.popScope();
+  return true;
+}
+
 const kotlinExtractor: LanguageExtractor = {
   functionTypes: ['function_declaration'],
   classTypes: ['class_declaration'],
@@ -57,59 +182,7 @@ const kotlinExtractor: LanguageExtractor = {
     // Kotlin's tree-sitter grammar wraps the name in a `variable_declaration` child
     // (not a direct `name` field), so the core extractFieldFallbackByName path
     // cannot find the name. We handle it here instead.
-    if (node.type === 'property_declaration') {
-      const varDecl = node.namedChildren.find((c: SyntaxNode) => c.type === 'variable_declaration');
-      if (!varDecl) return false; // destructuring or other unusual shape — skip
-      const nameNode = varDecl.namedChildren.find((c: SyntaxNode) => c.type === 'simple_identifier');
-      if (!nameNode) return false;
-      const name = getNodeText(nameNode, ctx.source);
-
-      const isInClass =
-        ctx.nodeStack.length > 0 &&
-        (() => {
-          const parentId = ctx.nodeStack.at(-1);
-          const parentNode = ctx.nodes.find((n) => n.id === parentId);
-          return (
-            parentNode != null &&
-            (parentNode.kind === 'class' ||
-              parentNode.kind === 'trait' ||
-              parentNode.kind === 'interface' ||
-              parentNode.kind === 'struct' ||
-              parentNode.kind === 'enum' ||
-              parentNode.kind === 'module')
-          );
-        })();
-
-      const bindingKind = node.namedChildren.find((c: SyntaxNode) => c.type === 'binding_pattern_kind');
-      const isVal = bindingKind?.text === 'val';
-
-      if (isInClass) {
-        const typeNode = varDecl.namedChildren.find(
-          (c: SyntaxNode) =>
-            c.type === 'user_type' ||
-            c.type === 'nullable_type' ||
-            c.type === 'function_type' ||
-            c.type === 'parenthesized_type',
-        );
-        const typeText = typeNode ? getNodeText(typeNode, ctx.source) : undefined;
-        const sig = typeText ? `${isVal ? 'val' : 'var'} ${name}: ${typeText}` : `${isVal ? 'val' : 'var'} ${name}`;
-        // Extract modifiers for visibility
-        const modifiers = node.namedChildren.find((c: SyntaxNode) => c.type === 'modifiers');
-        const visText = modifiers?.text ?? '';
-        const visibility = visText.includes('private')
-          ? ('private' as const)
-          : visText.includes('protected')
-            ? ('protected' as const)
-            : visText.includes('internal')
-              ? ('internal' as const)
-              : ('public' as const);
-        ctx.createNode({ kind: 'field', name, node, extra: compact({ signature: sig, visibility }) });
-      } else {
-        // Top-level or local: keep as constant (val) or variable (var)
-        ctx.createNode({ kind: isVal ? 'constant' : 'variable', name, node });
-      }
-      return true;
-    }
+    if (visitKotlinPropertyDeclaration(node, ctx)) return true;
 
     // Handle Kotlin `fun interface` declarations.
     // Tree-sitter-kotlin doesn't support `fun interface` syntax (Kotlin 1.4+).
@@ -117,77 +190,7 @@ const kotlinExtractor: LanguageExtractor = {
     //   Pattern 1 (simple): ERROR node + sibling lambda_literal for body
     //   Pattern 2 (complex): function_declaration misparse with ERROR child
     // Skip lambda_literal bodies that were already consumed by a fun interface ERROR node
-    if (node.type === 'lambda_literal') {
-      const prev = node.previousSibling;
-      if (prev?.type === 'ERROR' && isFunInterfaceNode(prev)) return true;
-      return false;
-    }
-
-    if (node.type !== 'ERROR' && node.type !== 'function_declaration') return false;
-
-    // Skip ERROR nodes that are class bodies (start with `{`). These contain parent
-    // methods + trailing `fun interface` tokens. The methods are extracted via
-    // resolveBody; handling the ERROR here would consume the whole body.
-    if (node.type === 'ERROR') {
-      const firstChild = node.child(0);
-      if (firstChild?.type === '{') return false;
-    }
-
-    if (!isFunInterfaceNode(node)) return false;
-
-    // Extract the interface name.
-    // For function_declaration misparses (patterns 2a/2b), the real name is inside
-    // an ERROR child — direct simple_identifier children are the misparsed method name.
-    let nameText: string | null = null;
-    if (node.type === 'function_declaration') {
-      for (const child of node.children) {
-        if (child?.type === 'ERROR') {
-          for (const gc of child.children) {
-            if (gc?.type === 'simple_identifier') {
-              nameText = gc.text;
-              break;
-            }
-          }
-          if (nameText) break;
-        }
-      }
-    }
-    // Fallback: direct simple_identifier child (Pattern 1: ERROR node at top level)
-    if (!nameText) {
-      for (const child of node.children) {
-        if (child?.type === 'simple_identifier') {
-          nameText = child.text;
-          break;
-        }
-      }
-    }
-    if (!nameText) return false;
-
-    // Create the interface node
-    const ifaceNode = ctx.createNode({ kind: 'interface', name: nameText, node });
-    if (!ifaceNode) return false;
-
-    ctx.pushScope(ifaceNode.id);
-
-    if (node.type === 'ERROR') {
-      // Pattern 1: body is in the next sibling lambda_literal
-      const nextSibling = node.nextSibling;
-      if (nextSibling?.type === 'lambda_literal') {
-        for (const child of nextSibling.namedChildren) {
-          if (child?.type === 'statements') {
-            for (const stmt of child.namedChildren) {
-              if (stmt) ctx.visitNode(stmt);
-            }
-          }
-        }
-      }
-    }
-    // Pattern 2 (function_declaration): nested classes are siblings at source_file level,
-    // already visited by the normal traversal. The single abstract method is misparsed
-    // and cannot be reliably recovered, but the interface node itself is the key value.
-
-    ctx.popScope();
-    return true;
+    return visitKotlinFunInterfaceDeclaration(node, ctx);
   },
   paramsField: 'function_value_parameters',
   returnField: 'type',

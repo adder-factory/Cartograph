@@ -104,7 +104,6 @@ export function scoreFindRelevantContext(
   subgraph: { nodes: Map<string, { name: string }>; edges: unknown[]; roots: string[] },
   latencyMs: number,
 ): EvalResult {
-  const expectedLower = new Set(expectedSymbols.map((s) => s.toLowerCase()));
   const nodeNames = new Set<string>();
   for (const node of subgraph.nodes.values()) {
     nodeNames.add(node.name.toLowerCase());

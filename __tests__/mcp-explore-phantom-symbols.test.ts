@@ -47,7 +47,7 @@ const EDGE_KIND_VALUES = [
  * is the signature of the phantom-symbol bug.
  */
 function phantomSymbolPattern(kind: string): RegExp {
-  return new RegExp(`\\b${kind}\\(${kind}\\)`);
+  return new RegExp(String.raw`\b${kind}\(${kind}\)`);
 }
 
 describe('FRICTION-9 — explore references: must not contain EdgeKind phantom symbols', () => {
@@ -85,7 +85,7 @@ describe('FRICTION-9 — explore references: must not contain EdgeKind phantom s
         '',
         '/** Normalise a raw path string. */',
         'export function normalizePath(p: string): string {',
-        '  return p.replaceAll(/\\\\/g, "/");',
+        String.raw`  return p.replaceAll(/\\/g, "/");`,
         '}',
         '',
         '/** Main class wiring everything together. */',
@@ -103,7 +103,7 @@ describe('FRICTION-9 — explore references: must not contain EdgeKind phantom s
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 
@@ -183,12 +183,12 @@ describe('FRICTION-9 — explore references: must not contain EdgeKind phantom s
       }
       if (inRelSection && line.startsWith('### ')) break; // next top section
       if (!inRelSection) continue;
-      const kindMatch = line.match(/^\*\*(.+):\*\*$/);
+      const kindMatch = /^\*\*(.+):\*\*$/.exec(line);
       if (kindMatch) {
         currentKind = kindMatch[1]!;
         continue;
       }
-      const rowMatch = line.match(/^- (.+ → .+)$/);
+      const rowMatch = /^- (.+ → .+)$/.exec(line);
       if (rowMatch && !rowMatch[1]!.startsWith('...')) {
         const key = `${currentKind}|${rowMatch[1]}`;
         expect(seen.has(key), `duplicate relationship row: ${key}`).toBe(false);

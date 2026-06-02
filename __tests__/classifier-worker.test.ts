@@ -28,7 +28,7 @@ import { Cartograph } from '../src/index.js';
 import { getRoleCounts } from '../src/db/queries-roles.js';
 import { classifyAllRoles } from '../src/llm/classifier.js';
 import { LlmClient } from '../src/llm/client.js';
-import { FakeLlmClient, createFakeLlmClient } from './helpers/fake-chat-client.js';
+import { FakeLlmClient } from './helpers/fake-chat-client.js';
 
 // ── fake client helpers ────────────────────────────────────────────────────────
 
@@ -37,7 +37,7 @@ import { FakeLlmClient, createFakeLlmClient } from './helpers/fake-chat-client.j
  * Mirrors the old fake-Ollama `/chat/completions` path.
  */
 function buildBatchReply(userText: string): string {
-  const m = userText.match(/Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/);
+  const m = /Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/.exec(userText);
   const lines = (m?.[1] ?? '').split('\n').filter((l) => /^\d+\./.test(l));
   const n = lines.length || 1;
   // Object-rooted `{"results":[…]}` — the shape BATCH_ROLE_SCHEMA

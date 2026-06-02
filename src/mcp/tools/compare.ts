@@ -24,9 +24,10 @@ function fmtSymbol(sym: SymbolDelta): string {
   const lineRange = ` (L${sym.startLine}–${sym.endLine ?? sym.startLine})`;
   const loc = hasStart ? lineRange : '';
   const reasons = sym.modifiedReasons && sym.modifiedReasons.length > 0 ? ` — ${sym.modifiedReasons.join(', ')}` : '';
+  const findingList = sym.findings?.map((f) => `${f.biomarker} ${f.severity}`).join(', ') ?? '';
   const findings =
     sym.findings && sym.findings.length > 0
-      ? `  · findings: ${sym.findings.map((f) => `${f.biomarker} ${f.severity}`).join(', ')}`
+      ? `  · findings: ${findingList}`
       : '';
   return `  - \`${sym.qualifiedName}\` (${sym.kind})${loc}${reasons}${findings}`;
 }
@@ -187,12 +188,10 @@ function renderResult(result: CompareResult, findingsDeltaRequested = false): st
   appendCompareFindingsTotals(lines, result.files, findingsDeltaRequested);
   appendCompareBodyOnlyFiles(lines, result);
   appendCompareSkippedFiles(lines, result);
-  lines.push('');
-  for (const f of result.files) {
-    if (!shouldRenderCompareFile(f)) continue;
-    lines.push(...fmtFileSection(f));
-    lines.push('');
-  }
+  lines.push(
+    '',
+    ...result.files.flatMap((f) => (shouldRenderCompareFile(f) ? [...fmtFileSection(f), ''] : [])),
+  );
   return lines.join('\n');
 }
 
@@ -244,7 +243,7 @@ function appendCompareFindingsTotals(
  * `result.filesSkipped` count (avoids re-filtering) and lists paths inline.
  * Omitted entirely when 0 to keep clean diffs noise-free.
  *
- * @todo Add `--include-skipped` expansion flag for per-file detail on demand.
+   * Future: add `--include-skipped` expansion flag for per-file detail on demand.
  */
 function appendCompareSkippedFiles(lines: string[], result: CompareResult): void {
   if (result.filesSkipped === 0) return;

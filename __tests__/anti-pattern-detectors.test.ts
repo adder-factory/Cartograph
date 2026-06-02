@@ -176,10 +176,10 @@ describe('sync_io_in_async detector (B20)', () => {
   });
 
   it('catches multiple sync calls in one async body', () => {
-    const body = `async function build() {
+    const body = String.raw`async function build() {
       const cfg = readFileSync('config');
       const list = readdirSync('./src');
-      writeFileSync('out', list.join('\\n'));
+      writeFileSync('out', list.join('\n'));
     }`;
     expect(countSyncIoInAsync(body, 'typescript')).toBe(3);
   });

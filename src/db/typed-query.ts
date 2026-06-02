@@ -107,7 +107,7 @@ export function getDefinedQueryRegistry(): readonly DefinedQueryRecord[] {
 /** Parse the immediate caller's `<file>:<line>` from a V8-style stack
  *  trace. Returns '<unknown>' when the stack shape isn't recognised. */
 function captureCallerSource(): string {
-  const stack = new Error().stack;
+  const stack = new Error('capture caller source').stack;
   if (!stack) return '<unknown>';
   // Lines look like `    at functionName (/abs/path/file.ts:LINE:COL)`
   // or `    at /abs/path/file.ts:LINE:COL` (anonymous module-init).

@@ -25,6 +25,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 const CODEGEN_SPEC = [
   "import { codegenNativeComponent } from 'react-native';",
   "import type { ViewProps, ColorValue } from 'react-native';",
@@ -64,7 +66,7 @@ describe('Fabric — parse helpers', () => {
   it('parseCodegenSpecs: component name from the string arg + props from NativeProps', () => {
     const ex = parseCodegenSpecs(CODEGEN_SPEC);
     expect(ex?.components.map((c) => c.name)).toEqual(['MyView']);
-    expect(ex?.props.map((p) => p.name).sort()).toEqual(['color', 'enabled', 'onTap']);
+    expect(ex?.props.map((p) => p.name).sort(byString)).toEqual(['color', 'enabled', 'onTap']);
   });
 
   it('parseCodegenSpecs: bare codegenNativeComponent(no generic, no NativeProps) → component, 0 props', () => {
@@ -88,7 +90,7 @@ describe('Fabric — parse helpers', () => {
   it('parseObjcViewManager: component from manager class + props from RCT_EXPORT_VIEW_PROPERTY', () => {
     const ex = parseObjcViewManager(OBJC_MANAGER);
     expect(ex?.components.map((c) => c.name)).toEqual(['RNTFoo']);
-    expect(ex?.props.map((p) => p.name).sort()).toEqual(['color', 'enabled']);
+    expect(ex?.props.map((p) => p.name).sort(byString)).toEqual(['color', 'enabled']);
   });
 
   it('parseObjcViewManager: a non-manager ObjC class → null', () => {
@@ -99,7 +101,7 @@ describe('Fabric — parse helpers', () => {
     const ex = parseJvmViewManager(KOTLIN_MANAGER);
     expect(ex?.components.map((c) => c.name)).toEqual(['Foo']); // FooViewManager → Foo
     // prop names are the @ReactProp VALUEs (color/enabled), NOT the setter names.
-    expect(ex?.props.map((p) => p.name).sort()).toEqual(['color', 'enabled']);
+    expect(ex?.props.map((p) => p.name).sort(byString)).toEqual(['color', 'enabled']);
   });
 
   it('parseJvmViewManager: finds the manager class even when a helper class precedes it', () => {
@@ -126,7 +128,7 @@ describe('Fabric — synthesizer (extractNodes)', () => {
     const props = nodes.filter((n) => n.kind === 'property');
     expect(comps.map((n) => n.name)).toEqual(['MyView']);
     expect(comps[0]!.id.startsWith('fabric-component:')).toBe(true);
-    expect(props.map((n) => n.name).sort()).toEqual(['color', 'enabled', 'onTap']);
+    expect(props.map((n) => n.name).sort(byString)).toEqual(['color', 'enabled', 'onTap']);
     expect(props.every((n) => n.id.startsWith('fabric-prop:'))).toBe(true);
   });
 
@@ -137,7 +139,7 @@ describe('Fabric — synthesizer (extractNodes)', () => {
       nodes
         .filter((n) => n.kind === 'property')
         .map((n) => n.name)
-        .sort(),
+        .sort(byString),
     ).toEqual(['color', 'enabled']);
     expect(nodes.every((n) => n.language === 'objc')).toBe(true);
   });
@@ -161,7 +163,7 @@ describe('Fabric — end-to-end (real index)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-fabric-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });

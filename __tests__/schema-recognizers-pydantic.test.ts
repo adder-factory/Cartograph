@@ -19,6 +19,7 @@ beforeAll(async () => {
 const byKind = (nodes: Node[], kind: string): Node[] => nodes.filter((n) => n.kind === kind);
 const containsFrom = (edges: Edge[], sourceId: string): Edge[] =>
   edges.filter((e) => e.kind === 'contains' && e.source === sourceId);
+const byName = (a: string, b: string): number => a.localeCompare(b);
 
 describe('Pydantic schema recognizer (B2)', () => {
   it('synthesizes struct + field + enum_member nodes for a BaseModel class', () => {
@@ -37,13 +38,13 @@ class User(BaseModel):
     expect(structs.map((n) => n.name)).toContain('User');
 
     const fields = byKind(result.nodes, 'field');
-    expect(fields.map((n) => n.name).sort()).toEqual(['age', 'name', 'role']);
+    expect(fields.map((n) => n.name).sort(byName)).toEqual(['age', 'name', 'role']);
     // The annotation text is captured as the field signature.
     expect(fields.find((f) => f.name === 'name')?.signature).toBe('str');
     expect(fields.find((f) => f.name === 'age')?.signature).toBe('int');
 
     const members = byKind(result.nodes, 'enum_member');
-    expect(members.map((n) => n.name).sort()).toEqual(['admin', 'editor', 'viewer']);
+    expect(members.map((n) => n.name).sort(byName)).toEqual(['admin', 'editor', 'viewer']);
   });
 
   it('wires contains edges struct→field and field→enum_member', () => {
@@ -118,13 +119,13 @@ class Real(BaseModel):
     expect(
       byKind(result.nodes, 'struct')
         .map((n) => n.name)
-        .sort(),
+        .sort(byName),
     ).toEqual(['Address', 'AppSettings', 'User']);
     // Literal members across User.role + AppSettings.region.
     expect(
       byKind(result.nodes, 'enum_member')
         .map((n) => n.name)
-        .sort(),
+        .sort(byName),
     ).toEqual(['admin', 'editor', 'eu', 'us', 'viewer']);
 
     // The User model carries every declared field, including the
@@ -132,7 +133,9 @@ class Real(BaseModel):
     const userStruct = byKind(result.nodes, 'struct').find((n) => n.name === 'User')!;
     const fieldsById = new Map(byKind(result.nodes, 'field').map((n) => [n.id, n.name]));
     const userFields = containsFrom(result.edges, userStruct.id).map((e) => fieldsById.get(e.target));
-    expect(userFields.sort()).toEqual(['age', 'home', 'name', 'role']);
+    const sortedUserFields = [...userFields];
+    sortedUserFields.sort(byName);
+    expect(sortedUserFields).toEqual(['age', 'home', 'name', 'role']);
   });
 
   it('does NOT fire on a file that does not import pydantic (detect gate)', () => {

@@ -54,7 +54,7 @@ describe('compareToRef', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
   });
 
@@ -225,7 +225,7 @@ describe('compareToRef', () => {
       expect(result.error).toBeDefined();
       expect(result.totals).toEqual({ added: 0, removed: 0, modified: 0 });
     } finally {
-      cg2.destroy();
+      cg2.close();
       fs.rmSync(nonRepo, { recursive: true, force: true });
     }
   });

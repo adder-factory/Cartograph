@@ -117,7 +117,7 @@ async function handleSemanticConcept(args: HandleSemanticConceptArgs): Promise<T
   if (languageFilter) opts.languageFilter = languageFilter;
   const results = await llmFindImplementations(cg.llm, query, opts);
   if (results.length === 0) {
-    const llmConfig = await cg.llm.getEffectiveLlmConfig();
+    const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
     const embModel = getEmbeddingModel(llmConfig);
     const reason = embModel
       ? `No symbols matched the concept "${query}". Either no embeddings have been generated yet (run \`cartograph_admin({action: 'summarize'})\` to populate them) or the corpus genuinely has no peers for that concept.`
@@ -203,7 +203,7 @@ async function handleSemanticSymbol(args: SemanticSymbolArgs): Promise<ToolResul
  *  no model configured / no embedding row for this symbol / no peer
  *  passed cosine threshold. */
 async function explainEmptySemanticSymbolResult(cg: Cartograph, node: { id: string; name: string }): Promise<string> {
-  const llmConfig = await cg.llm.getEffectiveLlmConfig();
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   const embModel = getEmbeddingModel(llmConfig);
   if (!embModel) {
     return 'No embedding model configured. Run `cartograph admin install-models --write-config` to auto-wire the recommended stack (llama-server HTTP for every tier — embedding on :8080, chat on :8081, ask on :8082, reranker on :8083). Other OpenAI-compat backends (Ollama on :11434, mlx_lm.server on :8000, LM Studio on :1234) also work — set `config.llm.embeddingLlm.endpoint` accordingly.';

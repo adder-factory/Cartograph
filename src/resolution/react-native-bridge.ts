@@ -61,7 +61,7 @@ export function defaultObjcModuleName(className: string): string {
  * (`@implementation Foo (Bar)`) capture as `Foo`.
  */
 export function findObjcClassName(source: string): string | null {
-  const m = /@implementation\s+([A-Za-z_][A-Za-z0-9_]*)/.exec(source);
+  const m = /@implementation\s+([A-Za-z_]\w*)/.exec(source);
   return m?.[1] ?? null;
 }
 
@@ -103,8 +103,8 @@ export function parseObjcRNExports(source: string, className: string | null): Ob
 
   // Module name — RCT_EXPORT_MODULE (optional arg → class name) OR
   // RCT_EXTERN[_REMAP]_MODULE (first arg = JS module name). One per file.
-  const exportModuleMatch = /RCT_EXPORT_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)?\s*\)/.exec(source);
-  const externModuleMatch = /RCT_EXTERN(?:_REMAP)?_MODULE\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/.exec(source);
+  const exportModuleMatch = /RCT_EXPORT_MODULE\s*\(\s*([A-Za-z_]\w*)?\s*\)/.exec(source);
+  const externModuleMatch = /RCT_EXTERN(?:_REMAP)?_MODULE\s*\(\s*([A-Za-z_]\w*)/.exec(source);
   const moduleName =
     exportModuleMatch?.[1] ?? externModuleMatch?.[1] ?? (className ? defaultObjcModuleName(className) : null);
   if (!moduleName) return results;
@@ -115,8 +115,8 @@ export function parseObjcRNExports(source: string, className: string | null): Ob
   // RCT_EXTERN_REMAP_METHOD does NOT match here (it has `_REMAP_` before
   // `_METHOD`) — it's handled by the remap pass below.
   const firstKeywordRegexes = [
-    /RCT_EXPORT(?:_BLOCKING_SYNCHRONOUS)?_METHOD\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/g,
-    /RCT_EXTERN(?:__BLOCKING_SYNCHRONOUS)?_METHOD\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)/g,
+    /RCT_EXPORT(?:_BLOCKING_SYNCHRONOUS)?_METHOD\s*\(\s*([A-Za-z_]\w*)/g,
+    /RCT_EXTERN(?:__BLOCKING_SYNCHRONOUS)?_METHOD\s*\(\s*([A-Za-z_]\w*)/g,
   ];
   let m: RegExpExecArray | null;
   for (const re of firstKeywordRegexes) {
@@ -128,7 +128,7 @@ export function parseObjcRNExports(source: string, className: string | null): Ob
 
   // Remap methods — `RCT_[EXTERN_]REMAP_METHOD(jsName, nativeSelector:…)`: the
   // JS-visible name is the FIRST arg, overriding the selector.
-  const remapRegex = /RCT_(?:EXTERN_)?REMAP_METHOD\s*\(\s*([A-Za-z_][A-Za-z0-9_]*)\s*,\s*[A-Za-z_][A-Za-z0-9_]*/g;
+  const remapRegex = /RCT_(?:EXTERN_)?REMAP_METHOD\s*\(\s*([A-Za-z_]\w*)\s*,\s*[A-Za-z_]\w*/g;
   while ((m = remapRegex.exec(source)) !== null) {
     const jsName = m[1];
     if (jsName) results.push({ moduleName, jsName, index: m.index });
@@ -167,7 +167,7 @@ export function parseTurboModuleSpec(source: string): TurboModuleSpec | null {
   // or `;` so (a) single-line bodies (`{ a(): void; b(): void; }`) yield every
   // method and (b) parameter identifiers (after `(`) and inline-object-type
   // members (after `{`/`:`) are skipped. The `(` requirement skips properties.
-  const methodRegex = /(?:^|;)\s*([A-Za-z_][A-Za-z0-9_]*)\s*\(/gm;
+  const methodRegex = /(?:^|;)\s*([A-Za-z_]\w*)\s*\(/gm;
   let m: RegExpExecArray | null;
   while ((m = methodRegex.exec(iface.body)) !== null) {
     if (m[1]) methods.push(m[1]);

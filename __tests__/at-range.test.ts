@@ -731,9 +731,11 @@ describe('handleAtRange — diff-form fuzz fallback for tight hunks', () => {
     // a few lines above its def line must still resolve to it via fuzz.
     const lines: string[] = [];
     for (let i = 1; i <= 12; i++) lines.push(`// filler comment line ${i}`);
-    lines.push('export function targetFn(): number {'); // line 13
-    lines.push('  return 42;');
-    lines.push('}');
+    lines.push(
+      'export function targetFn(): number {', // line 13
+      '  return 42;',
+      '}',
+    );
     fsModule.writeFileSync(pathModule.join(testDir, 'src', 'a.ts'), lines.join('\n') + '\n');
     fsModule.writeFileSync(pathModule.join(testDir, '.gitignore'), '.cartograph/\n');
     git(testDir, 'init', '-q');

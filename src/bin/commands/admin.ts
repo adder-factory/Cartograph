@@ -33,6 +33,186 @@ import {
   type IndexResult,
 } from '../_cli-core.js';
 
+interface AdminIndexOptions {
+  force?: boolean;
+  quiet?: boolean;
+  verbose?: boolean;
+  profile?: boolean;
+  clearParseCache?: boolean | string;
+  parseWorkers?: string;
+}
+
+type LoadedCartographModule = Awaited<ReturnType<typeof loadCartograph>>;
+type AdminIndexGraph = Awaited<ReturnType<LoadedCartographModule['default']['open']>>;
+type ClackPrompts = typeof import('@clack/prompts');
+
+function parseParseWorkers(raw: string | undefined): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isInteger(n) || n < 1) {
+    error(`--parse-workers must be a positive integer (got "${raw}")`);
+    process.exit(1);
+  }
+  return n;
+}
+
+function indexAllOptions(
+  options: Pick<AdminIndexOptions, 'force' | 'profile'>,
+  parseWorkers: number | undefined,
+): {
+  summarize: false;
+  profile: boolean;
+  clearStructural: boolean;
+  parseWorkers?: number;
+} {
+  return {
+    summarize: false,
+    profile: !!options.profile,
+    clearStructural: !!options.force,
+    ...(parseWorkers !== undefined && { parseWorkers }),
+  };
+}
+
+function phaseTimingLines(result: IndexResult): string[] {
+  const p = result.profile;
+  if (!p) return [];
+  const PERCENT_SCALE = 100;
+  const LABEL_WIDTH = 14;
+  const DURATION_WIDTH = 8;
+  const PERCENT_WIDTH = 2;
+  const fmt = (label: string, ms: number | undefined): string => {
+    if (ms === undefined) return '';
+    const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PERCENT_SCALE) : 0;
+    return `  ${label.padEnd(LABEL_WIDTH)} ${formatDuration(ms).padStart(DURATION_WIDTH)}  (${pct.toString().padStart(PERCENT_WIDTH)}%)`;
+  };
+  const lines = [fmt('scan', p.scanMs), fmt('parse+store', p.parseStoreMs)];
+  if (p.retryMs && p.retryMs > 0) lines.push(fmt('retry', p.retryMs));
+  lines.push(fmt('resolve', p.resolveMs), fmt('postHooks', p.postHooksMs));
+  if (p.postHooksByHook && p.postHooksMs && p.postHooksMs > 0) {
+    const sorted = Object.entries(p.postHooksByHook).sort((a, b) => b[1] - a[1]);
+    for (const [name, ms] of sorted) {
+      const pct = p.postHooksMs > 0 ? Math.round((ms / p.postHooksMs) * 100) : 0;
+      lines.push(
+        `    ${name.padEnd(12)} ${formatDuration(ms).padStart(8)}  (${pct.toString().padStart(2)}% of postHooks)`,
+      );
+    }
+  }
+  lines.push(fmt('maintenance', p.maintenanceMs), fmt('total', result.durationMs));
+  return lines.filter(Boolean);
+}
+
+function parseEagerLimit(options: { quiet?: boolean; limit?: string; all?: boolean }, onInvalid?: () => void): number | undefined {
+  if (options.all) return Number.POSITIVE_INFINITY;
+  if (options.limit === undefined) return undefined;
+  const parsed = Number(options.limit);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    if (!options.quiet) error('--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)');
+    onInvalid?.();
+    process.exit(1);
+  }
+  return parsed;
+}
+
+function printInstallModelResults(result: {
+  downloaded: Array<{ filename: string; description: string }>;
+  skipped: Array<{ filename: string }>;
+}): void {
+  if (result.downloaded.length > 0) {
+    success(`Downloaded ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}:`);
+    for (const m of result.downloaded) info(`  ${m.filename} — ${m.description}`);
+  }
+  if (result.skipped.length > 0) {
+    info(`Already present (skipped): ${result.skipped.map((m) => m.filename).join(', ')}`);
+  }
+  info('');
+}
+
+function printSyncResult(
+  clack: typeof import('@clack/prompts'),
+  result: { filesAdded: number; filesModified: number; filesRemoved: number; nodesUpdated: number; durationMs: number },
+): void {
+  const totalChanges = result.filesAdded + result.filesModified + result.filesRemoved;
+  if (totalChanges === 0) {
+    clack.log.info('Already up to date');
+    return;
+  }
+  clack.log.success(`Synced ${formatNumber(totalChanges)} changed files`);
+  const details: string[] = [];
+  if (result.filesAdded > 0) details.push(`Added: ${result.filesAdded}`);
+  if (result.filesModified > 0) details.push(`Modified: ${result.filesModified}`);
+  if (result.filesRemoved > 0) details.push(`Removed: ${result.filesRemoved}`);
+  clack.log.info(
+    `${details.join(', ')} — ${formatNumber(result.nodesUpdated)} nodes in ${formatDuration(result.durationMs)}`,
+  );
+}
+
+function printSummarizeDetails(
+  clack: typeof import('@clack/prompts'),
+  result: {
+    candidates: number;
+    generated: number;
+    errors: number;
+    cacheHits: number;
+    deferred: number;
+    durationMs: number;
+    embed?: {
+      failed?: boolean;
+      failureReason?: string;
+      generated: number;
+      errors: number;
+      skipped: number;
+      durationMs: number;
+    } | null;
+  },
+): void {
+  const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
+  clack.log.success(`Summarised ${formatNumber(result.generated)} new symbols in ${formatDuration(result.durationMs)}`);
+  const details: string[] = [];
+  if (result.cacheHits > 0) details.push(`Cache hits: ${formatNumber(result.cacheHits)}`);
+  if (result.errors > 0) details.push(`Errors: ${formatNumber(result.errors)}`);
+  if (skipped > 0) details.push(`Skipped: ${formatNumber(skipped)}`);
+  if (details.length > 0) clack.log.info(details.join(' — '));
+  if (result.deferred > 0) {
+    clack.log.info(
+      `Deferred ${formatNumber(result.deferred)} lower-priority symbols — they summarise on demand ` +
+        `when \`find mode:intent\` references them. Run \`cartograph admin summarize --all\` for a full pass.`,
+    );
+  }
+  printSummarizeEmbedDetails(clack, result.embed ?? undefined);
+}
+
+function printSummarizeEmbedDetails(
+  clack: typeof import('@clack/prompts'),
+  embed:
+    | {
+        failed?: boolean;
+        failureReason?: string;
+        generated: number;
+        errors: number;
+        skipped: number;
+        durationMs: number;
+      }
+    | null
+    | undefined,
+): void {
+  if (!embed) return;
+  if (embed.failed) {
+    clack.log.warn(
+      `Embed phase failed: ${embed.failureReason ?? 'unknown error'}. ` +
+        `Summaries are persisted; rerun \`cartograph admin embed\` once the embedding endpoint is back.`,
+    );
+    return;
+  }
+  if (embed.generated === 0) return;
+  const counters: string[] = [];
+  if (embed.errors > 0) counters.push(`${formatNumber(embed.errors)} errors`);
+  if (embed.skipped > 0) counters.push(`${formatNumber(embed.skipped)} skipped — too large for embed server's batch size`);
+  clack.log.success(
+    `Embedded ${formatNumber(embed.generated)} new vectors in ${formatDuration(embed.durationMs)}` +
+      (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
+  );
+}
+
 /**
  * cartograph admin init [path]
  */
@@ -84,7 +264,7 @@ adminCmd
       }
 
       clack.outro('Done');
-      cg.destroy();
+      cg.close();
     } catch (err) {
       clack.log.error(`Failed: ${errMsg(err)}`);
       process.exit(1);
@@ -160,196 +340,179 @@ adminCmd
       'capped at 16. Lower it on memory-constrained CI runners; raise ' +
       'it on big monorepos. Bench with --profile before settling on a value.',
   )
-  .action(
-    async (
-      pathArg: string | undefined,
-      options: {
-        force?: boolean;
-        quiet?: boolean;
-        verbose?: boolean;
-        profile?: boolean;
-        clearParseCache?: boolean | string;
-        parseWorkers?: string;
-      },
-    ) => {
-      const projectPath = resolveProjectPath(pathArg);
+  .action(runAdminIndexCommand);
 
-      // Parse --parse-workers once: a positive integer overrides the
-      // pool-size default; anything else is rejected loudly rather than
-      // silently ignored.
-      let parseWorkers: number | undefined;
-      if (options.parseWorkers !== undefined) {
-        const n = Number.parseInt(options.parseWorkers, 10);
-        if (!Number.isInteger(n) || n < 1) {
-          error(`--parse-workers must be a positive integer (got "${options.parseWorkers}")`);
-          process.exit(1);
-        }
-        parseWorkers = n;
-      }
+async function runAdminIndexCommand(pathArg: string | undefined, options: AdminIndexOptions): Promise<void> {
+  const projectPath = resolveProjectPath(pathArg);
 
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          info('Run "cartograph admin init" first');
-          process.exit(1);
-        }
+  // Parse --parse-workers once: a positive integer overrides the
+  // pool-size default; anything else is rejected loudly rather than
+  // silently ignored.
+  const parseWorkers = parseParseWorkers(options.parseWorkers);
 
-        const { default: Cartograph } = await loadCartograph();
-        // Write path (admin index): explicitly opt in to auto-migration.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+  try {
+    if (!isInitialized(projectPath)) {
+      error(`Cartograph not initialized in ${projectPath}`);
+      info('Run "cartograph admin init" first');
+      process.exit(1);
+    }
 
-        if (options.quiet) {
-          // Quiet mode: no UI, no background summarisation (the process
-          // exits immediately and would kill in-flight LLM work anyway).
-          if (options.clearParseCache) {
-            const { clearParseCache } = await import('../../db/queries-parse-cache.js');
-            const lang = typeof options.clearParseCache === 'string' ? options.clearParseCache : undefined;
-            clearParseCache(cg.queries, lang);
-          }
-          // `--force` clear is threaded INTO indexAll so it runs under the
-          // file lock (a contended --force must not wipe the index).
-          const result = await cg.indexAll({
-            summarize: false,
-            profile: !!options.profile,
-            clearStructural: !!options.force,
-            ...(parseWorkers !== undefined && { parseWorkers }),
-          });
-          if (!result.success) process.exit(1);
-          if (options.profile && result.profile) {
-            // Quiet+profile is the scripted use case (CI bench, etc.) —
-            // emit a single compact JSON line so it parses cleanly.
-            process.stdout.write(JSON.stringify(result.profile) + '\n');
-          }
-          cg.destroy();
-          return;
-        }
+    const { default: Cartograph } = await loadCartograph();
+    // Write path (admin index): explicitly opt in to auto-migration.
+    const cg = await Cartograph.open(projectPath, { autoMigrate: true });
 
-        const clack = await import('@clack/prompts');
-        clack.intro('Indexing project');
+    if (options.quiet) {
+      await runQuietIndex(cg, options, parseWorkers);
+      return;
+    }
 
-        if (options.force) {
-          // The structural clear is threaded into indexAll (below) so it
-          // runs UNDER the file lock — a contended --force then leaves the
-          // existing index intact instead of wiping it with no rebuild.
-          clack.log.info(
-            'Full re-index (--force): structural index will be cleared under lock, then rebuilt (nothing is cleared if the lock is held); LLM caches preserved',
-          );
-        }
-        if (options.clearParseCache) {
-          const { clearParseCache } = await import('../../db/queries-parse-cache.js');
-          const lang = typeof options.clearParseCache === 'string' ? options.clearParseCache : undefined;
-          const dropped = clearParseCache(cg.queries, lang);
-          clack.log.info(
-            lang
-              ? `Cleared ${dropped} parse-cache entries for language=${lang}`
-              : `Cleared ${dropped} parse-cache entries (every file will fully re-parse)`,
-          );
-        }
+    await runInteractiveIndex(cg, projectPath, options, parseWorkers);
+  } catch (err) {
+    error(`Failed to index: ${errMsg(err)}`);
+    process.exit(1);
+  }
+}
 
-        let result: IndexResult;
+async function runQuietIndex(
+  cg: AdminIndexGraph,
+  options: AdminIndexOptions,
+  parseWorkers: number | undefined,
+): Promise<void> {
+  // Quiet mode: no UI, no background summarisation (the process
+  // exits immediately and would kill in-flight LLM work anyway).
+  await clearParseCacheIfRequested(cg, options.clearParseCache);
+  // `--force` clear is threaded INTO indexAll so it runs under the
+  // file lock (a contended --force must not wipe the index).
+  const result = await cg.indexAll(indexAllOptions(options, parseWorkers));
+  if (!result.success) process.exit(1);
+  if (options.profile && result.profile) {
+    // Quiet+profile is the scripted use case (CI bench, etc.) —
+    // emit a single compact JSON line so it parses cleanly.
+    process.stdout.write(JSON.stringify(result.profile) + '\n');
+  }
+  cg.close();
+}
 
-        // `summarize: false` — the LLM summary tail is NOT run inline.
-        // After base indexing the CLI hands it to a detached process
-        // (see below), so the in-process background pass must not also
-        // fire. Without this both would run and double the GPU load.
-        if (options.verbose) {
-          result = await cg.indexAll({
-            onProgress: createVerboseProgress(),
-            verbose: true,
-            summarize: false,
-            profile: !!options.profile,
-            clearStructural: !!options.force,
-            ...(parseWorkers !== undefined && { parseWorkers }),
-          });
-        } else {
-          process.stdout.write(`${colors.dim}│${colors.reset}\n`);
-          const progress = createShimmerProgress();
-          result = await cg.indexAll({
-            onProgress: progress.onProgress,
-            summarize: false,
-            profile: !!options.profile,
-            clearStructural: !!options.force,
-            ...(parseWorkers !== undefined && { parseWorkers }),
-          });
-          await progress.stop();
-        }
+async function runInteractiveIndex(
+  cg: AdminIndexGraph,
+  projectPath: string,
+  options: AdminIndexOptions,
+  parseWorkers: number | undefined,
+): Promise<void> {
+  const clack = await import('@clack/prompts');
+  clack.intro('Indexing project');
 
-        printIndexResult(clack, result, projectPath);
+  await prepareInteractiveIndex(cg, clack, options);
+  const result = await runIndexWithProgress(cg, options, parseWorkers);
+  printIndexResult(clack, result, projectPath);
 
-        if (options.profile && result.profile) {
-          const p = result.profile;
-          const lines: string[] = [];
-          // Profile-table layout: column widths + the percent scale.
-          const PERCENT_SCALE = 100;
-          const LABEL_WIDTH = 14;
-          const DURATION_WIDTH = 8;
-          const PERCENT_WIDTH = 2;
-          const fmt = (label: string, ms: number | undefined): string => {
-            if (ms === undefined) return '';
-            const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PERCENT_SCALE) : 0;
-            return `  ${label.padEnd(LABEL_WIDTH)} ${formatDuration(ms).padStart(DURATION_WIDTH)}  (${pct.toString().padStart(PERCENT_WIDTH)}%)`;
-          };
-          lines.push(fmt('scan', p.scanMs), fmt('parse+store', p.parseStoreMs));
-          if (p.retryMs && p.retryMs > 0) lines.push(fmt('retry', p.retryMs));
-          lines.push(fmt('resolve', p.resolveMs), fmt('postHooks', p.postHooksMs));
-          // Per-hook breakdown when postHooks is non-trivial. Sorted
-          // descending so the dominant sub-hook is at the top.
-          if (p.postHooksByHook && p.postHooksMs && p.postHooksMs > 0) {
-            const sorted = Object.entries(p.postHooksByHook).sort((a, b) => b[1] - a[1]);
-            for (const [name, ms] of sorted) {
-              const pct = p.postHooksMs > 0 ? Math.round((ms / p.postHooksMs) * 100) : 0;
-              lines.push(
-                `    ${name.padEnd(12)} ${formatDuration(ms).padStart(8)}  (${pct.toString().padStart(2)}% of postHooks)`,
-              );
-            }
-          }
-          lines.push(fmt('maintenance', p.maintenanceMs));
-          lines.push(fmt('total', result.durationMs));
-          clack.note(lines.filter(Boolean).join('\n'), 'Phase timings');
-        }
+  if (options.profile && result.profile) {
+    clack.note(phaseTimingLines(result).join('\n'), 'Phase timings');
+  }
+  if (!result.success) process.exit(1);
 
-        if (!result.success) {
-          process.exit(1);
-        }
+  await reportBackgroundSummaryStatus(cg, clack, projectPath);
+  clack.outro('Done');
+}
 
-        // Base graph is complete and queryable NOW. Hand the slow LLM
-        // summary tail (minutes) to a detached process so the CLI
-        // returns immediately instead of making the user sit and wait.
-        const llmCfgForSummary = await cg.llm.getEffectiveLlmConfig();
-        const eagerLimitCfg = cg.config.llm?.summarizeEagerLimit;
-        cg.destroy(); // release DB handles before the child opens them
-
-        if (!llmCfgForSummary) {
-          clack.log.info(
-            'No LLM configured — symbol summaries skipped. Run ' +
-              '`cartograph admin install-models --write-config` to enable them.',
-          );
-        } else if (eagerLimitCfg === 0) {
-          clack.log.info(
-            'Summaries: ad-hoc only (config.llm.summarizeEagerLimit = 0) — ' +
-              'generated on demand as `find mode:intent` references symbols.',
-          );
-        } else {
-          const { spawnDetachedSummarize } = await import('../../llm/detached-summarize.js');
-          const detached = spawnDetachedSummarize(projectPath);
-          if (detached.spawned) {
-            clack.log.success(
-              `Base index ready — cartograph is usable now. Symbol summaries are ` +
-                `generating in the background (pid ${detached.pid}); run \`cartograph status\` ` +
-                `for coverage, or \`cartograph admin summarize --all\` to wait for a full pass.`,
-            );
-          } else {
-            clack.log.info(`Base index ready. Background summarization ${detached.reason}.`);
-          }
-        }
-
-        clack.outro('Done');
-      } catch (err) {
-        error(`Failed to index: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    },
+async function prepareInteractiveIndex(
+  cg: AdminIndexGraph,
+  clack: ClackPrompts,
+  options: AdminIndexOptions,
+): Promise<void> {
+  if (options.force) {
+    // The structural clear is threaded into indexAll (below) so it
+    // runs UNDER the file lock — a contended --force then leaves the
+    // existing index intact instead of wiping it with no rebuild.
+    clack.log.info(
+      'Full re-index (--force): structural index will be cleared under lock, then rebuilt (nothing is cleared if the lock is held); LLM caches preserved',
+    );
+  }
+  const dropped = await clearParseCacheIfRequested(cg, options.clearParseCache);
+  if (!dropped) return;
+  clack.log.info(
+    dropped.lang
+      ? `Cleared ${dropped.count} parse-cache entries for language=${dropped.lang}`
+      : `Cleared ${dropped.count} parse-cache entries (every file will fully re-parse)`,
   );
+}
+
+async function clearParseCacheIfRequested(
+  cg: AdminIndexGraph,
+  clearParseCacheOption: boolean | string | undefined,
+): Promise<{ count: number; lang: string | undefined } | null> {
+  if (!clearParseCacheOption) return null;
+  const { clearParseCache } = await import('../../db/queries-parse-cache.js');
+  const lang = typeof clearParseCacheOption === 'string' ? clearParseCacheOption : undefined;
+  return { count: clearParseCache(cg.queries, lang), lang };
+}
+
+async function runIndexWithProgress(
+  cg: AdminIndexGraph,
+  options: AdminIndexOptions,
+  parseWorkers: number | undefined,
+): Promise<IndexResult> {
+  // `summarize: false` — the LLM summary tail is NOT run inline.
+  // After base indexing the CLI hands it to a detached process
+  // (see below), so the in-process background pass must not also
+  // fire. Without this both would run and double the GPU load.
+  if (options.verbose) {
+    return cg.indexAll({
+      onProgress: createVerboseProgress(),
+      verbose: true,
+      ...indexAllOptions(options, parseWorkers),
+    });
+  }
+
+  process.stdout.write(`${colors.dim}│${colors.reset}\n`);
+  const progress = createShimmerProgress();
+  const result = await cg.indexAll({
+    onProgress: progress.onProgress,
+    ...indexAllOptions(options, parseWorkers),
+  });
+  await progress.stop();
+  return result;
+}
+
+async function reportBackgroundSummaryStatus(
+  cg: AdminIndexGraph,
+  clack: ClackPrompts,
+  projectPath: string,
+): Promise<void> {
+  // Base graph is complete and queryable NOW. Hand the slow LLM
+  // summary tail (minutes) to a detached process so the CLI
+  // returns immediately instead of making the user sit and wait.
+  const llmCfgForSummary = await cg.llm.config.getEffectiveLlmConfig();
+  const eagerLimitCfg = cg.config.llm?.summarizeEagerLimit;
+  cg.close(); // release DB handles before the child opens them
+
+  if (!llmCfgForSummary) {
+    clack.log.info(
+      'No LLM configured — symbol summaries skipped. Run ' +
+        '`cartograph admin install-models --write-config` to enable them.',
+    );
+    return;
+  }
+  if (eagerLimitCfg === 0) {
+    clack.log.info(
+      'Summaries: ad-hoc only (config.llm.summarizeEagerLimit = 0) — ' +
+        'generated on demand as `find mode:intent` references symbols.',
+    );
+    return;
+  }
+
+  const { spawnDetachedSummarize } = await import('../../llm/detached-summarize.js');
+  const detached = spawnDetachedSummarize(projectPath);
+  if (detached.spawned) {
+    clack.log.success(
+      `Base index ready — cartograph is usable now. Symbol summaries are ` +
+        `generating in the background (pid ${detached.pid}); run \`cartograph status\` ` +
+        `for coverage, or \`cartograph admin summarize --all\` to wait for a full pass.`,
+    );
+    return;
+  }
+  clack.log.info(`Base index ready. Background summarization ${detached.reason}.`);
+}
 
 /**
  * cartograph admin embed-only [path]
@@ -387,13 +550,13 @@ adminCmd
         const result = await cg.indexAll({ summarize: false, embedOnly: true });
         if (!result.success) process.exit(1);
         try {
-          await cg.llm.embedAll();
+          await cg.llm.embed.embedAll();
         } catch (err) {
           error(`Embed pass failed: ${errMsg(err)}`);
-          cg.destroy();
+          cg.close();
           process.exit(1);
         }
-        cg.destroy();
+        cg.close();
         return;
       }
 
@@ -425,7 +588,7 @@ adminCmd
       // disables the auto-summarization trigger).
       try {
         clack.log.info('Running embed pass…');
-        const embedResult = await cg.llm.embedAll({});
+        const embedResult = await cg.llm.embed.embedAll({});
         clack.log.success(
           `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
             `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
@@ -435,7 +598,7 @@ adminCmd
       }
 
       clack.outro('Done');
-      cg.destroy();
+      cg.close();
     } catch (err) {
       error(`Failed to embed-only index: ${errMsg(err)}`);
       process.exit(1);
@@ -469,7 +632,7 @@ adminCmd
         // hook stays fast. The next interactive sync/index picks up
         // any new symbols.
         await cg.sync({ summarize: false });
-        cg.destroy();
+        cg.close();
         return;
       }
 
@@ -485,27 +648,14 @@ adminCmd
 
       await progress.stop();
 
-      const totalChanges = result.filesAdded + result.filesModified + result.filesRemoved;
-
-      if (totalChanges === 0) {
-        clack.log.info('Already up to date');
-      } else {
-        clack.log.success(`Synced ${formatNumber(totalChanges)} changed files`);
-        const details: string[] = [];
-        if (result.filesAdded > 0) details.push(`Added: ${result.filesAdded}`);
-        if (result.filesModified > 0) details.push(`Modified: ${result.filesModified}`);
-        if (result.filesRemoved > 0) details.push(`Removed: ${result.filesRemoved}`);
-        clack.log.info(
-          `${details.join(', ')} — ${formatNumber(result.nodesUpdated)} nodes in ${formatDuration(result.durationMs)}`,
-        );
-      }
+      printSyncResult(clack, result);
 
       // Await any background summarisation kicked off by sync() so
       // the work persists before exit.
       await awaitSummarisationWithProgress(cg, clack);
 
       clack.outro('Done');
-      cg.destroy();
+      cg.close();
     } catch (err) {
       if (!options.quiet) {
         error(`Failed to sync: ${errMsg(err)}`);
@@ -555,14 +705,14 @@ adminCmd
         // Write path (summarize): opt in to auto-migration.
         const cg = await Cartograph.open(projectPath, { autoMigrate: true });
 
-        const llmConfig = await cg.llm.getEffectiveLlmConfig();
+        const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
         if (!llmConfig) {
           if (!options.quiet) {
             error(
               'No LLM available. Add config.llm to .cartograph/config.json (run `cartograph admin install-models --write-config` for the recommended stack — llama-server HTTP for every tier — or set provider: "anthropic-api" for Claude).',
             );
           }
-          cg.destroy();
+          cg.close();
           process.exit(1);
         }
 
@@ -574,19 +724,7 @@ adminCmd
         // Lever C — eager-summary cap. `--all` wins, then `--limit`,
         // else undefined so the service falls back to
         // config.llm.summarizeEagerLimit (then the built-in default).
-        let eagerLimit: number | undefined;
-        if (options.all) {
-          eagerLimit = Number.POSITIVE_INFINITY;
-        } else if (options.limit !== undefined) {
-          const parsed = Number(options.limit);
-          if (!Number.isInteger(parsed) || parsed < 0) {
-            if (!options.quiet)
-              error('--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)');
-            cg.destroy();
-            process.exit(1);
-          }
-          eagerLimit = parsed;
-        }
+        const eagerLimit = parseEagerLimit(options, () => cg.close());
 
         // Conditional spread — `exactOptionalPropertyTypes` rejects an
         // explicit `eagerLimit: undefined` (let the service default it).
@@ -594,7 +732,7 @@ adminCmd
 
         if (options.quiet) {
           await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });
-          cg.destroy();
+          cg.close();
           return;
         }
 
@@ -614,46 +752,10 @@ adminCmd
 
         await progress.stop();
 
-        const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
-        clack.log.success(
-          `Summarised ${formatNumber(result.generated)} new symbols in ${formatDuration(result.durationMs)}`,
-        );
-        const details: string[] = [];
-        if (result.cacheHits > 0) details.push(`Cache hits: ${formatNumber(result.cacheHits)}`);
-        if (result.errors > 0) details.push(`Errors: ${formatNumber(result.errors)}`);
-        if (skipped > 0) details.push(`Skipped: ${formatNumber(skipped)}`);
-        if (details.length > 0) clack.log.info(details.join(' — '));
-        // Lever C — make the eager-limit visible: the deferred tail is
-        // not lost, it summarises on demand when intent-search hits it.
-        if (result.deferred > 0) {
-          clack.log.info(
-            `Deferred ${formatNumber(result.deferred)} lower-priority symbols — they summarise on demand ` +
-              `when \`find mode:intent\` references them. Run \`cartograph admin summarize --all\` for a full pass.`,
-          );
-        }
-
-        // Surface the embed-phase result. Three states: ran-with-work,
-        // ran-but-failed, ran-and-cached (silent, nothing to print).
-        if (result.embed) {
-          if (result.embed.failed) {
-            clack.log.warn(
-              `Embed phase failed: ${result.embed.failureReason ?? 'unknown error'}. ` +
-                `Summaries are persisted; rerun \`cartograph admin embed\` once the embedding endpoint is back.`,
-            );
-          } else if (result.embed.generated > 0) {
-            const counters: string[] = [];
-            if (result.embed.errors > 0) counters.push(`${formatNumber(result.embed.errors)} errors`);
-            if (result.embed.skipped > 0)
-              counters.push(`${formatNumber(result.embed.skipped)} skipped — too large for embed server's batch size`);
-            clack.log.success(
-              `Embedded ${formatNumber(result.embed.generated)} new vectors in ${formatDuration(result.embed.durationMs)}` +
-                (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
-            );
-          }
-        }
+        printSummarizeDetails(clack, result);
 
         clack.outro('Done');
-        cg.destroy();
+        cg.close();
       } catch (err) {
         if (!options.quiet) error(`Failed to summarise: ${errMsg(err)}`);
         process.exit(1);
@@ -696,14 +798,14 @@ adminCmd
       const concurrency = parseConcurrency(options.concurrency);
 
       if (options.quiet) {
-        await cg.llm.embedAll({ concurrency });
-        cg.destroy();
+        await cg.llm.embed.embedAll({ concurrency });
+        cg.close();
         return;
       }
 
       const clack = await import('@clack/prompts');
       clack.intro('Embedding indexed symbols');
-      const result = await cg.llm.embedAll({ concurrency });
+      const result = await cg.llm.embed.embedAll({ concurrency });
       const counters: string[] = [];
       if (result.errors > 0) counters.push(`${formatNumber(result.errors)} errors`);
       if (result.skipped > 0)
@@ -713,7 +815,7 @@ adminCmd
           (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
       );
       clack.outro('Done');
-      cg.destroy();
+      cg.close();
     } catch (err) {
       if (!options.quiet) error(`Failed to embed: ${errMsg(err)}`);
       process.exit(1);
@@ -761,7 +863,7 @@ adminCmd
 
       if (options.quiet) {
         await cg.llm.classifyAll({ concurrency });
-        cg.destroy();
+        cg.close();
         return;
       }
 
@@ -778,7 +880,7 @@ adminCmd
         );
       }
       clack.outro('Done');
-      cg.destroy();
+      cg.close();
     } catch (err) {
       if (!options.quiet) error(`Failed to classify: ${errMsg(err)}`);
       process.exit(1);
@@ -852,7 +954,7 @@ adminCmd
         migratedThisRun = true;
       }
       const v = cg.db.getSchemaVersion();
-      cg.destroy();
+      cg.close();
       if (migratedThisRun) {
         success(`Schema migrated to v${v?.version ?? '?'}.`);
         info(
@@ -897,7 +999,7 @@ adminCmd
       const o = opts as Record<string, string | undefined>;
       const parsed: Record<string, unknown> = {};
       if (!assignIntArg({ args: parsed, key: 'k', raw: o['k'], optionName: '--k', opts: { min: 1, max: 100 } })) {
-        cg.destroy();
+        cg.close();
         return;
       }
       if (
@@ -909,13 +1011,13 @@ adminCmd
           opts: { min: 0, max: 1 },
         })
       ) {
-        cg.destroy();
+        cg.close();
         return;
       }
       const k = (parsed['k'] as number | undefined) ?? DEFAULT_SIMILAR_K;
       const minScore = (parsed['minScore'] as number | undefined) ?? DEFAULT_SIMILAR_MIN_SCORE;
       const result = await buildSimilarToEdges(cg, { k, minScore });
-      cg.destroy();
+      cg.close();
       success(`Built similarity edges: ${result.written} edges from ${result.processed} nodes.`);
       if (result.reason) {
         info(`Note: ${result.reason}`);
@@ -999,7 +1101,7 @@ adminCmd
           );
         }
       } finally {
-        cg.destroy();
+        cg.close();
       }
     } catch (err) {
       error(`Failed to prune store: ${errMsg(err)}`);
@@ -1030,7 +1132,7 @@ adminCmd
       const cg = await Cartograph.open(projectPath);
       const outPath = options.out ?? path.join(projectPath, 'index.scip');
       const result = writeScipExport(cg.queries, cg.projectRoot, outPath);
-      cg.destroy();
+      cg.close();
       info(`Exported SCIP index → ${result.outPath}`);
       info(
         `${result.stats.documents} documents, ${result.stats.symbols} symbols, ${result.stats.occurrences} occurrences (${result.stats.bytes} bytes)`,
@@ -1072,7 +1174,7 @@ adminCmd
       const cg = await Cartograph.open(projectPath);
       const bytes = fs.readFileSync(inPath);
       const result = writeScipImport(cg.queries, cg.projectRoot, bytes);
-      cg.destroy();
+      cg.close();
       info(`Imported SCIP index ← ${inPath}`);
       info(
         `${result.stats.documents} documents, ${result.stats.files} files, ${result.stats.nodes} nodes, ${result.stats.edges} edges`,
@@ -1128,14 +1230,7 @@ adminCmd
         },
       });
       process.stderr.write('\n');
-      if (result.downloaded.length > 0) {
-        success(`Downloaded ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}:`);
-        for (const m of result.downloaded) info(`  ${m.filename} — ${m.description}`);
-      }
-      if (result.skipped.length > 0) {
-        info(`Already present (skipped): ${result.skipped.map((m) => m.filename).join(', ')}`);
-      }
-      info('');
+      printInstallModelResults(result);
 
       if (options.writeConfig) {
         const projectRoot = resolveProjectPath(options.projectPath);
@@ -1169,3 +1264,17 @@ adminCmd
 // helper for setup guidance.
 
 attachUnknownActionHandler(adminCmd, 'admin');
+
+export const __adminCommandInternals = {
+  parseParseWorkers,
+  indexAllOptions,
+  phaseTimingLines,
+  parseEagerLimit,
+  printInstallModelResults,
+  printSyncResult,
+  printSummarizeDetails,
+  printSummarizeEmbedDetails,
+  runQuietIndex,
+  clearParseCacheIfRequested,
+  reportBackgroundSummaryStatus,
+};

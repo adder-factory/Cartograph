@@ -66,8 +66,8 @@ describeStress('Freshness Gate — concurrency stress', () => {
   }, 60000);
 
   afterAll(() => {
-    if (staleCg) staleCg.destroy();
-    if (freshCg) freshCg.destroy();
+    if (staleCg) staleCg.close();
+    if (freshCg) freshCg.close();
     if (fs.existsSync(staleDir)) fs.rmSync(staleDir, { recursive: true, force: true });
     if (fs.existsSync(freshDir)) fs.rmSync(freshDir, { recursive: true, force: true });
   });
@@ -94,12 +94,10 @@ describeStress('Freshness Gate — concurrency stress', () => {
           if (useStale) {
             if (hasBanner) staleSeen++;
             else mismatches++;
+          } else if (hasBanner) {
+            mismatches++;
           } else {
-            if (hasBanner) {
-              mismatches++;
-            } else {
-              freshSeen++;
-            }
+            freshSeen++;
           }
         } catch (err) {
           errors++;
@@ -153,7 +151,7 @@ describeStress('Freshness Gate — adversarial edge cases', () => {
     expect(f!.filesChanged).toBeGreaterThanOrEqual(5000);
     expect(elapsed).toBeLessThan(3000); // shouldn't be agonizingly slow
 
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }, 120000);
 
@@ -185,7 +183,7 @@ describeStress('Freshness Gate — adversarial edge cases', () => {
     expect(f!.isStale).toBe(true); // indexed at second sha, now at first
     expect(f!.banner).toContain('Index out of date');
 
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }, 60000);
 
@@ -213,7 +211,7 @@ describeStress('Freshness Gate — adversarial edge cases', () => {
     expect(f!.isStale).toBe(false);
     expect(f!.banner).toBeNull();
 
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }, 30000);
 
@@ -241,7 +239,7 @@ describeStress('Freshness Gate — adversarial edge cases', () => {
     const f = cg.stats.getFreshness();
     // Corrupted timestamp should yield null (no info), not crash.
     expect(f).toBeNull();
-    cg.destroy();
+    cg.close();
     fs.rmSync(dir, { recursive: true, force: true });
   }, 30000);
 });

@@ -30,10 +30,10 @@ function formatDepsHeader(r: ReturnType<typeof analyzeUnusedDeps>): string[] {
   // >= 1); a `workspaces:` field surfaces additional entries. Render
   // the workspace line only when at least one child manifest was
   // resolved, so single-package repos keep the old terse output.
-  const packageJsonLine =
-    workspaceCount > 1
-      ? `**package.json:** ${r.packageJsonPath} (+ ${workspaceCount - 1} workspace manifest${workspaceCount - 1 === 1 ? '' : 's'})`
-      : `**package.json:** ${r.packageJsonPath}`;
+  let packageJsonLine = `**package.json:** ${r.packageJsonPath}`;
+  if (workspaceCount > 1) {
+    packageJsonLine = `**package.json:** ${r.packageJsonPath} (+ ${workspaceCount - 1} workspace manifest${workspaceCount - 1 === 1 ? '' : 's'})`;
+  }
   return [
     '## Unused Dependencies Audit',
     '',

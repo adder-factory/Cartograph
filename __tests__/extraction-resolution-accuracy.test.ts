@@ -18,6 +18,8 @@ import { rustResolver } from '../src/resolution/frameworks/rust.js';
 import { laravelResolver } from '../src/resolution/frameworks/laravel.js';
 import { goResolver } from '../src/resolution/frameworks/go.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('UTF-8 BOM normalization (bug #5)', () => {
   it('stripBom removes leading U+FEFF', () => {
     expect(stripBom('﻿hello')).toBe('hello');
@@ -315,7 +317,7 @@ describe('Go route extractor: Header.Get/Set/Add/Del args not treated as routes'
     const routes = nodes
       .filter((n) => n.kind === 'route')
       .map((n) => n.name)
-      .sort();
+      .sort(byString);
     expect(routes).toEqual([
       'ANY /health',
       'ANY /legacy',
@@ -358,7 +360,7 @@ describe('Go route extractor: Header.Get/Set/Add/Del args not treated as routes'
     ].join('\n');
     const nodes = goResolver.extractNodes!('cmd/cmd.go', content);
     const cliRoutes = nodes.filter((n) => n.kind === 'route' && n.name.startsWith('cmd '));
-    const cliRouteNames = cliRoutes.map((n) => n.name).sort();
+    const cliRouteNames = cliRoutes.map((n) => n.name).sort(byString);
     expect(cliRouteNames).toEqual(['cmd create', 'cmd ollama', 'cmd serve']);
 
     // Signature carries the full Use string for downstream context.
@@ -454,7 +456,7 @@ describe('stripCommentsForRegex preserves line offsets', () => {
   it('keeps code after an escaped // inside a regex literal', () => {
     // `/foo\/\//` ends in an escaped `//` then the regex terminator —
     // the `\`-preceded guard must not treat that as a comment start.
-    const input = 'const re = /foo\\/\\//; const KEEP_AFTER = 1;';
+    const input = String.raw`const re = /foo\/\//; const KEEP_AFTER = 1;`;
     const out = stripCommentsForRegex(input, 'typescript');
     expect(out).toContain('KEEP_AFTER');
   });

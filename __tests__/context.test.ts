@@ -150,7 +150,7 @@ export function validateEmail(email: string): boolean {
 
   afterEach(() => {
     if (cg) {
-      cg.destroy();
+      cg.close();
     }
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true, force: true });
@@ -492,10 +492,10 @@ export class FileWatcher {
         { format: 'json', maxNodes: 8, behaviorBias: true },
       );
       const parsed = JSON.parse(result as string);
-      const nodeNames = parsed.nodes.map((n: { name: string }) => n.name);
+      const nodeNames = new Set(parsed.nodes.map((n: { name: string }) => n.name));
       // Acceptance: at least one of the gating functions must surface.
       const gatingFunctions = ['watcherHandleFileEvent', 'watcherScheduleSync', 'watcherFlush'];
-      expect(gatingFunctions.some((name) => nodeNames.includes(name))).toBe(true);
+      expect(gatingFunctions.some((name) => nodeNames.has(name))).toBe(true);
     });
 
     it('accepts extraCandidates as a seed and merges them into the pool', async () => {
@@ -577,10 +577,10 @@ describe('Context Builder — exact-name promotion (FRICTION-AF)', () => {
     for (const lang of ['Hcl', 'Sql', 'Dfm', 'Css', 'Toml']) {
       fs.writeFileSync(
         path.join(srcDir, `${lang.toLowerCase()}-extractor.ts`),
-        `export class ${lang}Extractor {
+        String.raw`export class ${lang}Extractor {
   /** Extract symbols from a ${lang} source file. */
   extract(source: string): string[] {
-    return source.split('\\n');
+    return source.split('\n');
   }
 }
 `,

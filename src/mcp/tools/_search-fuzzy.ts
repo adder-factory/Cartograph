@@ -6,7 +6,7 @@
  * `search-fuzzy.ts` so eval baseline is unchanged.
  */
 
-import type { NodeKind } from '../../types.js';
+import type { NodeKind, SearchResult } from '../../types.js';
 import { clamp, compact, numArg } from '../../utils.js';
 import { textResult, truncateOutput, validateStringOutcome } from './shared.js';
 import { type ToolOutcome, ok } from './_outcome.js';
@@ -85,20 +85,29 @@ function collectFuzzyRows(args: CollectFuzzyArgs): FuzzyRow[] {
     for (const sr of nodes) {
       if (rows.length >= limit) break;
       // FTS may broaden — keep only exact name matches at this stage
-      if (sr.node.name !== r.name) continue;
-      if (seen.has(sr.node.id)) continue;
-      seen.add(sr.node.id);
-      rows.push({
-        name: sr.node.name,
-        dist: r.dist,
-        kind: sr.node.kind,
-        filePath: sr.node.filePath,
-        line: sr.node.startLine,
-        signature: sr.node.signature ?? null,
-      });
+      const row = fuzzySearchResultToRow(sr, r, seen);
+      if (row) rows.push(row);
     }
   }
   return rows;
+}
+
+function fuzzySearchResultToRow(
+  sr: SearchResult,
+  ranked: { name: string; dist: number },
+  seen: Set<string>,
+): FuzzyRow | null {
+  if (sr.node.name !== ranked.name) return null;
+  if (seen.has(sr.node.id)) return null;
+  seen.add(sr.node.id);
+  return {
+    name: sr.node.name,
+    dist: ranked.dist,
+    kind: sr.node.kind,
+    filePath: sr.node.filePath,
+    line: sr.node.startLine,
+    signature: sr.node.signature ?? null,
+  };
 }
 
 /**

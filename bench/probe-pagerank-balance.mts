@@ -21,7 +21,7 @@
  *   BENCH_PROJECT_DIR=/path bun bench/probe-pagerank-balance.mts
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { getAllNodes } from '../src/db/queries.js';
 import { computePageRank, PR_EDGE_KINDS } from '../src/centrality/index.js';
@@ -154,7 +154,11 @@ async function main(): Promise<void> {
       await computePageRankParallel(nodes, edges);
       parTimes.push(Date.now() - t0);
     }
-    const med = (xs: number[]): number => xs.sort((a, b) => a - b)[Math.floor(xs.length / 2)]!;
+    const med = (xs: number[]): number => {
+      const sorted = [...xs];
+      sorted.sort((a, b) => a - b);
+      return sorted[Math.floor(sorted.length / 2)]!;
+    };
     console.log(`  serial:   ${serialTimes.map((m) => m + 'ms').join(' / ')}  →  median ${med(serialTimes)}ms`);
     console.log(`  parallel: ${parTimes.map((m) => m + 'ms').join(' / ')}  →  median ${med(parTimes)}ms`);
     console.log(
@@ -167,11 +171,13 @@ async function main(): Promise<void> {
       `\nUpside of LPT vs contiguous: ${(contigImbalance / lptImbalance).toFixed(2)}× theoretical wall reduction (assuming compute is in-edge-proportional + perfect parallelism inside a worker).`,
     );
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

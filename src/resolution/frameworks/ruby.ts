@@ -103,54 +103,7 @@ export const railsResolver: FrameworkResolver = {
       for (const pattern of routePatterns) {
         let match: RegExpExecArray | null;
         while ((match = pattern.exec(content)) !== null) {
-          const line = lineOf(match.index);
-
-          if (pattern.source.includes('resources')) {
-            const [, resourceName] = match;
-            nodes.push({
-              id: `route:${filePath}:resource:${resourceName}:${line}`,
-              kind: 'route',
-              name: `resource:${resourceName}`,
-              qualifiedName: `${filePath}::resource:${resourceName}`,
-              filePath,
-              startLine: line,
-              endLine: line,
-              startColumn: 0,
-              endColumn: match[0].length,
-              language: 'ruby',
-              updatedAt: now,
-            });
-          } else if (pattern.source.includes('root')) {
-            const [, target] = match;
-            nodes.push({
-              id: `route:${filePath}:root:${line}`,
-              kind: 'route',
-              name: `/ -> ${target}`,
-              qualifiedName: `${filePath}::root`,
-              filePath,
-              startLine: line,
-              endLine: line,
-              startColumn: 0,
-              endColumn: match[0].length,
-              language: 'ruby',
-              updatedAt: now,
-            });
-          } else {
-            const [, method, path] = match;
-            nodes.push({
-              id: `route:${filePath}:${method!.toUpperCase()}:${path}:${line}`,
-              kind: 'route',
-              name: `${method!.toUpperCase()} ${path}`,
-              qualifiedName: `${filePath}::${method!.toUpperCase()}:${path}`,
-              filePath,
-              startLine: line,
-              endLine: line,
-              startColumn: 0,
-              endColumn: match[0].length,
-              language: 'ruby',
-              updatedAt: now,
-            });
-          }
+          nodes.push(buildRailsRouteNode({ pattern, match, filePath, line: lineOf(match.index), now }));
         }
       }
     }
@@ -183,9 +136,84 @@ export const railsResolver: FrameworkResolver = {
       }
     }
 
-    return nodes;
+    return nodes.sort((a, b) => a.startLine - b.startLine || a.startColumn - b.startColumn);
   },
 };
+
+interface RailsRouteNodeArgs {
+  pattern: RegExp;
+  match: RegExpExecArray;
+  filePath: string;
+  line: number;
+  now: number;
+}
+
+function buildRailsRouteNode(args: RailsRouteNodeArgs): Node {
+  const { pattern, match, filePath, line, now } = args;
+  if (pattern.source.includes('resources')) return railsResourceNode(filePath, match[1]!, line, match[0].length, now);
+  if (pattern.source.includes('root')) return railsRootNode(filePath, match[1]!, line, match[0].length, now);
+  return railsHttpRouteNode(filePath, match[1]!.toUpperCase(), match[2]!, line, match[0].length, now);
+}
+
+function railsResourceNode(filePath: string, resourceName: string, line: number, endColumn: number, now: number): Node {
+  return railsRouteNode({
+    id: `route:${filePath}:resource:${resourceName}:${line}`,
+    name: `resource:${resourceName}`,
+    qualifiedName: `${filePath}::resource:${resourceName}`,
+    filePath,
+    line,
+    endColumn,
+    now,
+  });
+}
+
+function railsRootNode(filePath: string, target: string, line: number, endColumn: number, now: number): Node {
+  return railsRouteNode({
+    id: `route:${filePath}:root:${line}`,
+    name: `/ -> ${target}`,
+    qualifiedName: `${filePath}::root`,
+    filePath,
+    line,
+    endColumn,
+    now,
+  });
+}
+
+function railsHttpRouteNode(filePath: string, method: string, routePath: string, line: number, endColumn: number, now: number): Node {
+  return railsRouteNode({
+    id: `route:${filePath}:${method}:${routePath}:${line}`,
+    name: `${method} ${routePath}`,
+    qualifiedName: `${filePath}::${method}:${routePath}`,
+    filePath,
+    line,
+    endColumn,
+    now,
+  });
+}
+
+function railsRouteNode(args: {
+  id: string;
+  name: string;
+  qualifiedName: string;
+  filePath: string;
+  line: number;
+  endColumn: number;
+  now: number;
+}): Node {
+  return {
+    id: args.id,
+    kind: 'route',
+    name: args.name,
+    qualifiedName: args.qualifiedName,
+    filePath: args.filePath,
+    startLine: args.line,
+    endLine: args.line,
+    startColumn: 0,
+    endColumn: args.endColumn,
+    language: 'ruby',
+    updatedAt: args.now,
+  };
+}
 
 // Helper functions
 

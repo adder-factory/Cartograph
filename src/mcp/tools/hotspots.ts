@@ -82,14 +82,17 @@ const hotspotsSchema = z.object({
 
 type HotspotsArgs = z.infer<typeof hotspotsSchema>;
 
+type HotspotSort = 'risk' | 'centrality' | 'churn';
+type HotspotCategory = 'risk' | 'maintenance' | 'brittle' | 'all';
+
 /** Parsed and normalized arguments for hotspots query. */
 interface ParsedHotspotsArgs {
   limit: number;
   minCommits: number;
   minCentrality: number;
-  sortBy: 'risk' | 'centrality' | 'churn';
+  sortBy: HotspotSort;
   recencyDays: number | undefined;
-  category: 'risk' | 'maintenance' | 'brittle' | 'all';
+  category: HotspotCategory;
 }
 
 /** Arguments for categorized hotspots query. */
@@ -142,7 +145,7 @@ function buildCategorizedQueryOpts(args: BuildCategorizedQueryOptsArgs): Categor
  * MarkdownTableSpec contract. The category=all composite now also
  * routes null LOC through the `'—'` rendering used by the
  * per-category specs from batch 1+2 — the legacy template-literal
- * `'null'` emission documented in the prior TODO(g16-track-b)
+   * `'null'` emission documented in the prior g16-track-b follow-up
  * comments is gone.
  */
 
@@ -372,7 +375,7 @@ export function buildHotspotsCategorySpec(
  * Format markdown output for category='risk' (default behavior).
  * Returns the raw body; the chokepoint owns truncation.
  */
-function formatRiskHotspots(sortBy: 'risk' | 'centrality' | 'churn', rows: HotspotRow[]): string {
+function formatRiskHotspots(sortBy: HotspotSort, rows: HotspotRow[]): string {
   const nowSec = Math.floor(Date.now() / MS_PER_SECOND);
   return renderMarkdownTable(buildHotspotsRiskSpec(rows, sortBy, nowSec));
 }
@@ -409,7 +412,7 @@ export interface HotspotsRiskTableRow {
  */
 export function buildHotspotsRiskSpec(
   rows: ReadonlyArray<Omit<HotspotsRiskTableRow, 'i'>>,
-  sortBy: 'risk' | 'centrality' | 'churn',
+  sortBy: HotspotSort,
   nowSec: number,
 ): MarkdownTableSpec<HotspotsRiskTableRow> {
   return {
@@ -501,7 +504,7 @@ function handleRiskCategory(cg: ReturnType<ToolCtx['getCartograph']>, parsed: Pa
     limit: number;
     minCommits: number;
     minCentrality: number;
-    sortBy: 'risk' | 'centrality' | 'churn';
+    sortBy: HotspotSort;
     recencyDays?: number;
   } = { limit, minCommits, minCentrality, sortBy };
   if (recencyDays !== undefined) opts.recencyDays = recencyDays;

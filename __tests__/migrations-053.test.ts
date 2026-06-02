@@ -17,6 +17,8 @@ import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { pruneOrphanStoreRows, MS_PER_DAY, PRUNE_STORE_DEFAULT_DAYS } from '../src/db/queries-summaries.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 // Test fixtures expressed in days for readability; converted to ms
 // at use via the production MS_PER_DAY constant so test ↔ runtime
 // stay in lock-step if someone ever changes the unit.
@@ -154,7 +156,7 @@ describe('Migration 053 — last_ref_at + prune-store', () => {
       const rows = qb.db.prepare(`SELECT body_hash FROM summary_store ORDER BY body_hash`).all() as Array<{
         body_hash: string;
       }>;
-      expect(rows.map((r) => r.body_hash).sort()).toEqual(['body_active', 'body_recent_orphan']);
+      expect(rows.map((r) => r.body_hash).sort(byString)).toEqual(['body_active', 'body_recent_orphan']);
     } finally {
       dbConn.close();
     }

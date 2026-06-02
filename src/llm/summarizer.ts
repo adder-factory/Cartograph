@@ -125,7 +125,7 @@ const MAX_SUMMARY_CHARS = 200;
  *  (forward declarations, .h files). e.g. "Abstract function: ggml_foo" or
  *  "Abstract class: Bar" — no real content, pollutes the FTS5 intent corpus. */
 const STUB_SUMMARY_PATTERN =
-  /^\s*abstract\s+(function|method|class|struct|interface|trait|enum|type|module)\s*:\s*[A-Za-z_]\w*\s*\.?\s*$/i;
+  /^\s*abstract\s+(function|method|class|struct|interface|trait|enum|type|module)\s*:\s*(?!\d)\w+\s*\.?\s*$/i;
 
 /** Default batch size — 1 (no batching). Caller picks 3 for
  *  claude-bridge / anthropic-api where per-call overhead amortises
@@ -848,16 +848,8 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
     const sym = candidates[i];
     if (!sym) break;
 
-    const body = summaryReadBodyLines(fileContentCache, projectRoot, sym);
-    if (!body) {
-      counters.errors++;
-      counters.done++;
-      options.onProgress?.(counters.done, total);
-      continue;
-    }
-    const hash = contentHashFor(sym, body);
-
-    if (summaryTryServeFromCache(ctx, sym, hash)) continue;
+    const pendingItem = summaryPreparePendingItem(ctx, fileContentCache, projectRoot, sym);
+    if (!pendingItem) continue;
 
     // Lever C — cache MISS: honour the eager-limit. Priority-queue
     // items are demand-driven and exempt; every other miss claims a
@@ -873,12 +865,9 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
     // next pass — but a future "resume exactly where we stopped"
     // feature must account for these skipped-past slots, not assume
     // `counters.next` marks a clean boundary.
-    if (!prioritySet.has(sym.id)) {
-      if (counters.missesClaimed >= budget) break;
-      counters.missesClaimed++;
-    }
+    if (!summaryClaimMissBudget(counters, prioritySet, sym.id, budget)) break;
 
-    pending.push({ sym, body, hash });
+    pending.push(pendingItem);
     if (pending.length >= batchSize) {
       await summaryFlushBatch(state, pending);
       pending.length = 0;
@@ -888,6 +877,36 @@ async function summaryRunWorker(state: SummarizerWorkerState): Promise<void> {
   if (pending.length > 0 && !options.signal?.aborted) {
     await summaryFlushBatch(state, pending);
   }
+}
+
+function summaryClaimMissBudget(
+  counters: SummarizerCounters,
+  prioritySet: Set<string>,
+  symbolId: string,
+  budget: number,
+): boolean {
+  if (prioritySet.has(symbolId)) return true;
+  if (counters.missesClaimed >= budget) return false;
+  counters.missesClaimed++;
+  return true;
+}
+
+function summaryPreparePendingItem(
+  ctx: SummarizerCallContext,
+  fileContentCache: Map<string, string[] | null>,
+  projectRoot: string,
+  sym: Node,
+): PendingItem | null {
+  const body = summaryReadBodyLines(fileContentCache, projectRoot, sym);
+  if (!body) {
+    ctx.counters.errors++;
+    ctx.counters.done++;
+    ctx.options.onProgress?.(ctx.counters.done, ctx.total);
+    return null;
+  }
+  const hash = contentHashFor(sym, body);
+  if (summaryTryServeFromCache(ctx, sym, hash)) return null;
+  return { sym, body, hash };
 }
 
 /**

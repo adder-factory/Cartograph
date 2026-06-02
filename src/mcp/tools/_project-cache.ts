@@ -157,7 +157,7 @@ export class ProjectCache {
    * so a follow-up reinit reopens cleanly with a fresh fingerprint.
    */
   closeProjectsMatching(resolvedRoot: string): void {
-    for (const [key, cached] of [...this.cgsByPath.entries()]) {
+    for (const [key, cached] of this.cgsByPath.entries()) {
       if (this.shouldEvictCachedProject(cached, resolvedRoot)) {
         this.cgsByPath.delete(key);
       }
@@ -228,7 +228,7 @@ export class ProjectCache {
     this.cachedRoots.delete(root);
     this.dbFingerprints.delete(root);
     const cg = this.cgsByPath.get(root);
-    for (const [key, value] of [...this.cgsByPath.entries()]) {
+    for (const [key, value] of this.cgsByPath.entries()) {
       if (value === cg) this.cgsByPath.delete(key);
     }
     if (this.watchedRoots.has(root)) {

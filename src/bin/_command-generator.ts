@@ -53,6 +53,7 @@ import { z } from 'zod';
 import type { ToolModule } from '../mcp/tools/types.js';
 import { getZodSchema } from '../mcp/tools/_define-tool.js';
 import { type CliOptionSpec, type CommandSpec, zodSchemaToCommandSpec } from '../mcp/tools/_zod-to-cli.js';
+export type { CommandSpec } from '../mcp/tools/_zod-to-cli.js';
 
 /**
  * The `runViaMCP`-shaped callback the generated command's `.action()`
@@ -447,7 +448,8 @@ function registerPositionals(ctx: GenContext, aliasedFieldNames: ReadonlySet<str
     const choices = disc.choices ?? [];
     const aliased = aliasedFieldNames.has(disc.name);
     const token = aliased ? `[${disc.name}]` : `<${disc.name}>`;
-    cmd.argument(token, `${disc.description}${choices.length ? ` — one of: ${choices.join(' | ')}` : ''}`);
+    const choicesSuffix = choices.length ? ` — one of: ${choices.join(' | ')}` : '';
+    cmd.argument(token, `${disc.description}${choicesSuffix}`);
     positionalSet.add(disc.name);
     leadingPositionals.push(disc);
   }
@@ -473,28 +475,39 @@ function registerPositionals(ctx: GenContext, aliasedFieldNames: ReadonlySet<str
   // collected token array is joined with ' ' in the action.
   const joinedVariadicName = opts.joinedVariadicPositional;
   if (joinedVariadicName !== undefined) {
-    const optSpec = spec.options.find((o) => o.name === joinedVariadicName);
-    if (!optSpec) {
-      throw new Error(
-        `buildGeneratedCommand: \`${mod.definition.name}\` has no field ` +
-          `\`${joinedVariadicName}\` to render as a joined variadic positional.`,
-      );
-    }
-    if (optSpec.kind !== 'string') {
-      throw new Error(
-        `buildGeneratedCommand: joinedVariadicPositional \`${joinedVariadicName}\` on ` +
-          `\`${mod.definition.name}\` is kind \`${optSpec.kind}\` — only a plain string ` +
-          `field can be a space-joined variadic positional.`,
-      );
-    }
+    const optSpec = registerJoinedVariadicPosition(ctx, joinedVariadicName, aliasedFieldNames);
     positionalSet.add(joinedVariadicName);
     leadingPositionals.push(optSpec);
-    const aliased = aliasedFieldNames.has(joinedVariadicName);
-    const required = optSpec.required && !aliased;
-    cmd.argument(required ? `<${joinedVariadicName}...>` : `[${joinedVariadicName}...]`, optSpec.description);
   }
 
   return { positionalSet, leadingPositionals, joinedVariadicName };
+}
+
+function registerJoinedVariadicPosition(
+  ctx: GenContext,
+  joinedVariadicName: string,
+  aliasedFieldNames: ReadonlySet<string>,
+): CliOptionSpec {
+  const { cmd, spec, mod } = ctx;
+  const optSpec = spec.options.find((o) => o.name === joinedVariadicName);
+  if (!optSpec) {
+    throw new Error(
+      `buildGeneratedCommand: \`${mod.definition.name}\` has no field ` +
+        `\`${joinedVariadicName}\` to render as a joined variadic positional.`,
+    );
+  }
+  if (optSpec.kind !== 'string') {
+    throw new Error(
+      `buildGeneratedCommand: joinedVariadicPositional \`${joinedVariadicName}\` on ` +
+        `\`${mod.definition.name}\` is kind \`${optSpec.kind}\` — only a plain string ` +
+        `field can be a space-joined variadic positional.`,
+    );
+  }
+
+  const aliased = aliasedFieldNames.has(joinedVariadicName);
+  const required = optSpec.required && !aliased;
+  cmd.argument(required ? `<${joinedVariadicName}...>` : `[${joinedVariadicName}...]`, optSpec.description);
+  return optSpec;
 }
 
 /**
@@ -520,21 +533,7 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
     cmd.option('-p, --project-path <path>', 'Path to the project (defaults to current directory)');
   }
 
-  // Every `negatableFields` / `flagDefaults` / `longFlagOverrides` key
-  // must name a real schema field — catch a typo rather than no-op.
-  for (const [label, names] of [
-    ['negatableFields', forceNegatable] as const,
-    ['flagDefaults', Object.keys(flagDefaults)] as const,
-    ['longFlagOverrides', Object.keys(longOverrides)] as const,
-  ]) {
-    for (const name of names) {
-      if (!spec.options.some((o) => o.name === name)) {
-        throw new Error(
-          `buildGeneratedCommand: ${label} entry \`${name}\` names no ` + `field on \`${mod.definition.name}\`.`,
-        );
-      }
-    }
-  }
+  validateOptionOverrideNames(spec, mod, forceNegatable, flagDefaults, longOverrides);
 
   const forwarded: CliOptionSpec[] = [];
   for (const rawOpt of spec.options) {
@@ -542,28 +541,7 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
     // A positional-rendered field (discriminator / data / joined
     // variadic) is excluded — it arrives as a positional arg.
     if (positionalSet.has(rawOpt.name)) continue;
-    // A forced-negatable boolean is rendered as the `--no-<flag>`
-    // tri-state pair even without a `.default(true)` in the schema.
-    if (forceNegatable.has(rawOpt.name) && rawOpt.kind !== 'boolean') {
-      throw new Error(
-        `buildGeneratedCommand: negatableFields entry \`${rawOpt.name}\` on ` +
-          `\`${mod.definition.name}\` is not a boolean field.`,
-      );
-    }
-    let opt: CliOptionSpec = rawOpt;
-    if (forceNegatable.has(opt.name) && !opt.isNegated) {
-      opt = { ...opt, isNegated: true };
-    }
-    // A CLI-side default for a field whose schema declares none.
-    const cliDefault = flagDefaults[opt.name];
-    if (cliDefault !== undefined && opt.defaultValue === undefined) {
-      opt = { ...opt, defaultValue: cliDefault };
-    }
-    // Override the auto-derived `--kebab` long flag.
-    const longOverride = longOverrides[opt.name];
-    if (longOverride !== undefined) {
-      opt = { ...opt, flag: longOverride };
-    }
+    const opt = cliOptionForRegistration(rawOpt, mod, forceNegatable, flagDefaults, longOverrides);
     registerOption(cmd, opt, shortFlags[opt.name]);
     forwarded.push(opt);
   }
@@ -579,6 +557,54 @@ function registerOptions(ctx: GenContext, positionalSet: ReadonlySet<string>): C
  */
 function commanderKey(opt: CliOptionSpec): string {
   return opt.flag.replace(/^--/, '').replaceAll(/-([a-z0-9])/g, (_, c: string) => c.toUpperCase());
+}
+
+function validateOptionOverrideNames(
+  spec: CommandSpec,
+  mod: ToolModule,
+  forceNegatable: ReadonlySet<string>,
+  flagDefaults: Readonly<Record<string, unknown>>,
+  longOverrides: Readonly<Record<string, string>>,
+): void {
+  for (const [label, names] of [
+    ['negatableFields', forceNegatable] as const,
+    ['flagDefaults', Object.keys(flagDefaults)] as const,
+    ['longFlagOverrides', Object.keys(longOverrides)] as const,
+  ]) {
+    for (const name of names) {
+      if (!spec.options.some((o) => o.name === name)) {
+        throw new Error(
+          `buildGeneratedCommand: ${label} entry \`${name}\` names no ` + `field on \`${mod.definition.name}\`.`,
+        );
+      }
+    }
+  }
+}
+
+function cliOptionForRegistration(
+  rawOpt: CliOptionSpec,
+  mod: ToolModule,
+  forceNegatable: ReadonlySet<string>,
+  flagDefaults: Readonly<Record<string, unknown>>,
+  longOverrides: Readonly<Record<string, string>>,
+): CliOptionSpec {
+  if (forceNegatable.has(rawOpt.name) && rawOpt.kind !== 'boolean') {
+    throw new Error(
+      `buildGeneratedCommand: negatableFields entry \`${rawOpt.name}\` on ` +
+        `\`${mod.definition.name}\` is not a boolean field.`,
+    );
+  }
+
+  let opt = forceNegatable.has(rawOpt.name) && !rawOpt.isNegated ? { ...rawOpt, isNegated: true } : rawOpt;
+  const cliDefault = flagDefaults[opt.name];
+  if (cliDefault !== undefined && opt.defaultValue === undefined) {
+    opt = { ...opt, defaultValue: cliDefault };
+  }
+  const longOverride = longOverrides[opt.name];
+  if (longOverride !== undefined) {
+    opt = { ...opt, flag: longOverride };
+  }
+  return opt;
 }
 
 /** Everything {@link buildActionHandler} needs to build the
@@ -624,7 +650,7 @@ function buildActionHandler(handler: ActionHandlerSpec): (...actionArgs: unknown
       reportCoercionFailure(handler.forwarded, parsed.error.issues[0]);
       return;
     }
-    const finalArgs = parsed.data as Record<string, unknown>;
+    const finalArgs = parsed.data;
     foldLeadingPositionals(handler, actionArgs, finalArgs);
     foldAliasFallback(handler, options, finalArgs);
     await handler.runViaMcp(handler.mod.definition.name, finalArgs, projectPath);
@@ -677,7 +703,8 @@ function reportCoercionFailure(
 ): void {
   const issueField = issue?.path.length ? String(issue.path[0]) : '';
   const issueFlag = forwarded.find((o) => o.name === issueField)?.flag;
-  const where = issueField ? `${issueFlag ?? `--${kebab(issueField)}`}: ` : '';
+  const fallbackFlag = issueField ? `--${kebab(issueField)}` : '';
+  const where = issueField ? `${issueFlag ?? fallbackFlag}: ` : '';
   process.stderr.write(`\x1b[31m✗\x1b[0m ${where}${issue?.message ?? 'invalid argument'}\n`);
   process.exitCode = 1;
 }
@@ -838,7 +865,16 @@ function registerOption(cmd: Command, opt: CliOptionSpec, short?: string): void 
   }
   // A scalar default is stringified so commander stores it as the CLI
   // would have received it; the coercion schema parses it back.
-  const def = opt.defaultValue === undefined ? undefined : String(opt.defaultValue);
+  const stringifyDefault = (value: unknown): string => {
+    if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+      return String(value);
+    }
+    return JSON.stringify(value) ?? '<unserializable>';
+  };
+  const def =
+    opt.defaultValue === undefined
+      ? undefined
+      : stringifyDefault(opt.defaultValue);
   // Scalar value option. `<value>` for required, `[value]` is avoided
   // — commander treats `[value]` as an OPTIONAL-ARGUMENT option which
   // changes parse semantics; an unset optional field simply isn't
@@ -909,6 +945,3 @@ function coerceField(opt: CliOptionSpec): z.ZodTypeAny {
   // drops out of the parsed result (and is never forwarded).
   return opt.required ? field : field.optional();
 }
-
-/** Re-export for callers that want the spec without the Command. */
-export type { CommandSpec };

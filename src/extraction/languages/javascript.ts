@@ -42,6 +42,29 @@ function tryExtractFunctionDeclarationAsComponent(node: SyntaxNode, ctx: Extract
   return true;
 }
 
+function isFunctionLikeExpression(node: SyntaxNode): boolean {
+  return node.type === 'arrow_function' || node.type === 'function_expression';
+}
+
+function resolveWrappedFunctionBody(node: SyntaxNode, bodyField: string): SyntaxNode | null {
+  const args = getChildByField(node, 'arguments');
+  if (!args) return null;
+  const fn = args.namedChildren.find((arg: SyntaxNode) => isFunctionLikeExpression(arg));
+  return fn ? getChildByField(fn, bodyField) : null;
+}
+
+function resolveFieldDefinitionBody(node: SyntaxNode, bodyField: string): SyntaxNode | null {
+  for (const child of node.namedChildren) {
+    if (!child) continue;
+    if (isFunctionLikeExpression(child)) return getChildByField(child, bodyField);
+    if (child.type === 'call_expression') {
+      const wrappedBody = resolveWrappedFunctionBody(child, bodyField);
+      if (wrappedBody) return wrappedBody;
+    }
+  }
+  return null;
+}
+
 export const javascriptExtractor: LanguageExtractor = {
   functionTypes: [
     'function_declaration',
@@ -67,25 +90,7 @@ export const javascriptExtractor: LanguageExtractor = {
     //   field_definition → arrow_function → body (statement_block)
     // Also handles wrapper patterns like: field = throttle((e) => { ... })
     //   field_definition → call_expression → arguments → arrow_function → body
-    if (node.type === 'field_definition') {
-      for (const child of node.namedChildren) {
-        if (!child) continue;
-        if (child.type === 'arrow_function' || child.type === 'function_expression') {
-          return getChildByField(child, bodyField);
-        }
-        if (child.type === 'call_expression') {
-          const args = getChildByField(child, 'arguments');
-          if (args) {
-            for (const arg of args.namedChildren) {
-              if (arg && (arg.type === 'arrow_function' || arg.type === 'function_expression')) {
-                return getChildByField(arg, bodyField);
-              }
-            }
-          }
-        }
-      }
-    }
-    return null;
+    return node.type === 'field_definition' ? resolveFieldDefinitionBody(node, bodyField) : null;
   },
   paramsField: 'parameters',
   getSignature: (node, source) => {

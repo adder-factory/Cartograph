@@ -250,10 +250,10 @@ function checkEmbeddingReachability(
   const base = normaliseEndpoint(endpoint);
   const match = detected.find((d) => d.endpoint === base);
   if (match) {
-    const modelInfo =
-      match.models.length > 0
-        ? `${match.models.length} model${match.models.length === 1 ? '' : 's'} loaded`
-        : 'no models loaded';
+    let modelInfo = 'no models loaded';
+    if (match.models.length > 0) {
+      modelInfo = `${match.models.length} model${match.models.length === 1 ? '' : 's'} loaded`;
+    }
     return {
       name: 'Embedding endpoint',
       status: 'ok',
@@ -263,13 +263,14 @@ function checkEmbeddingReachability(
 
   // Endpoint set but unreachable. Surface what IS running on the
   // machine as alternatives.
-  const alternatives =
-    detected.length > 0
-      ? `Detected ${detected.length} other backend${detected.length === 1 ? '' : 's'} running: ${detected
-          .map((d) => `${backendLabel(d.kind)} at ${d.endpoint}`)
-          .join(', ')}. Point \`embeddingLlm.endpoint\` at one of those, or start the configured backend.`
-      : 'No OpenAI-compat backends detected on common ports (8080, 11434, 8000, 1234, 5000). ' +
-        backendInstallHint('llama-server');
+  let alternatives =
+    'No OpenAI-compat backends detected on common ports (8080, 11434, 8000, 1234, 5000). ' +
+    backendInstallHint('llama-server');
+  if (detected.length > 0) {
+    alternatives = `Detected ${detected.length} other backend${detected.length === 1 ? '' : 's'} running: ${detected
+      .map((d) => `${backendLabel(d.kind)} at ${d.endpoint}`)
+      .join(', ')}. Point \`embeddingLlm.endpoint\` at one of those, or start the configured backend.`;
+  }
   return {
     name: 'Embedding endpoint',
     status: 'warn',
@@ -473,38 +474,13 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   // 1. Project init missing → create `.cartograph/`.
   const initCheck = checks.find((c) => c.name === 'Project init' && c.status !== 'ok');
   if (initCheck) {
-    try {
-      const { createDirectory } = await import('../directory.js');
-      createDirectory(projectPath);
-      steps.push({ check: 'Project init', action: 'ran-init', detail: `Created ${projectPath}/.cartograph/` });
-    } catch (err) {
-      steps.push({
-        check: 'Project init',
-        action: 'failed',
-        detail: `createDirectory failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
+    steps.push(await applyProjectInitRemediation(projectPath));
   }
 
   // 2. Missing GGUF models → install the curated set.
   const modelsCheck = checks.find((c) => c.name === 'LLM models' && c.status !== 'ok');
   if (modelsCheck) {
-    try {
-      const { installRecommendedModels } = await import('./install-models.js');
-      const { RECOMMENDED_MODELS } = await import('../llm/recommended-models.js');
-      const result = await installRecommendedModels({ models: RECOMMENDED_MODELS });
-      steps.push({
-        check: 'LLM models',
-        action: 'ran-install-models',
-        detail: `Downloaded ${result.downloaded.length} model(s); ${result.skipped.length} already present.`,
-      });
-    } catch (err) {
-      steps.push({
-        check: 'LLM models',
-        action: 'failed',
-        detail: `install-models failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
+    steps.push(await applyModelInstallRemediation());
   }
 
   // 3. Project config missing OR no llm block → apply the planner's
@@ -512,24 +488,7 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   //    saying "just pick the best path automatically").
   const configCheck = checks.find((c) => c.name === 'Project config' && c.status !== 'ok');
   if (configCheck) {
-    try {
-      const { planLlmSetup, applyLlmSetupChoice } = await import('./llm-setup-plan.js');
-      const plan = await planLlmSetup();
-      const result = await applyLlmSetupChoice({ projectRoot: projectPath, preset: plan.recommendedPresetId });
-      steps.push({
-        check: 'Project config',
-        action: 'ran-llm-apply',
-        detail: `Applied preset \`${result.preset}\` → ${result.configPath ?? '(no write)'}.${
-          result.nextSteps.length > 0 ? ` Next: ${result.nextSteps.join(' ; ')}` : ''
-        }`,
-      });
-    } catch (err) {
-      steps.push({
-        check: 'Project config',
-        action: 'failed',
-        detail: `llm-plan/apply failed: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
+    steps.push(await applyProjectConfigRemediation(projectPath));
   }
 
   // 4. Embedding endpoint unreachable → can't auto-fix (cartograph
@@ -545,6 +504,59 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   }
 
   return steps;
+}
+
+async function applyProjectInitRemediation(projectPath: string): Promise<RemediationStep> {
+  try {
+    const { createDirectory } = await import('../directory.js');
+    createDirectory(projectPath);
+    return { check: 'Project init', action: 'ran-init', detail: `Created ${projectPath}/.cartograph/` };
+  } catch (err) {
+    return {
+      check: 'Project init',
+      action: 'failed',
+      detail: `createDirectory failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function applyModelInstallRemediation(): Promise<RemediationStep> {
+  try {
+    const { installRecommendedModels } = await import('./install-models.js');
+    const { RECOMMENDED_MODELS } = await import('../llm/recommended-models.js');
+    const result = await installRecommendedModels({ models: RECOMMENDED_MODELS });
+    return {
+      check: 'LLM models',
+      action: 'ran-install-models',
+      detail: `Downloaded ${result.downloaded.length} model(s); ${result.skipped.length} already present.`,
+    };
+  } catch (err) {
+    return {
+      check: 'LLM models',
+      action: 'failed',
+      detail: `install-models failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
+}
+
+async function applyProjectConfigRemediation(projectPath: string): Promise<RemediationStep> {
+  try {
+    const { planLlmSetup, applyLlmSetupChoice } = await import('./llm-setup-plan.js');
+    const plan = await planLlmSetup();
+    const result = await applyLlmSetupChoice({ projectRoot: projectPath, preset: plan.recommendedPresetId });
+    const next = result.nextSteps.length > 0 ? ` Next: ${result.nextSteps.join(' ; ')}` : '';
+    return {
+      check: 'Project config',
+      action: 'ran-llm-apply',
+      detail: `Applied preset \`${result.preset}\` → ${result.configPath ?? '(no write)'}.${next}`,
+    };
+  } catch (err) {
+    return {
+      check: 'Project config',
+      action: 'failed',
+      detail: `llm-plan/apply failed: ${err instanceof Error ? err.message : String(err)}`,
+    };
+  }
 }
 
 /** Pull the parsed `embeddingLlm` block out of a project's config,

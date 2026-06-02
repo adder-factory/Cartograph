@@ -308,7 +308,10 @@ function buildAllMissingError(inputFiles: string[], allIndexedPaths: Set<string>
   }));
   const hintLines = perInput
     .filter((entry) => entry.suggestions.length > 0)
-    .map((entry) => `  \`${entry.input}\` → ${entry.suggestions.map((s) => `\`${s}\``).join(', ')}`);
+    .map((entry) => {
+      const suggestions = entry.suggestions.map((s) => `\`${s}\``).join(', ');
+      return `  \`${entry.input}\` → ${suggestions}`;
+    });
   const suggestionHint = hintLines.length > 0 ? `\nDid you mean:\n${hintLines.join('\n')}` : '';
   return `None of the ${inputFiles.length} input file${inputFiles.length === 1 ? '' : 's'} match indexed paths.${suggestionHint}`;
 }
@@ -466,8 +469,8 @@ async function handleAffected(ctx: ToolCtx, args: AffectedToolArgs): Promise<Too
         }),
       ),
     );
-  } catch (caught) {
-    return err(`affected failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`affected failed: ${errMsg(error_)}`);
   }
 }
 

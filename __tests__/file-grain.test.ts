@@ -34,6 +34,8 @@ import {
 } from '../src/embeddings/file-grain.js';
 import type { EmbeddingProvider } from '../src/llm/embedding-client.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 // ---------------------------------------------------------------------------
 // Helper utilities
 // ---------------------------------------------------------------------------
@@ -201,6 +203,26 @@ function insertSummary(qb: QueryBuilder, nodeId: string, summary: string, conten
     .run(nodeId, summary, contentHash);
 }
 
+function makeBuildTextCandidate(symbols: FileGrainSymbol[]): FileGrainCandidate {
+  return {
+    fileNodeId: 'file:test.ts',
+    filePath: 'src/test.ts',
+    fileContentHash: 'hash',
+    symbols,
+    combinedHash: 'combined-hash',
+  };
+}
+
+function makeUpsertCandidate(
+  fileNodeId: string,
+  filePath: string,
+  fileContentHash: string,
+  combinedHash: string,
+  symbols: FileGrainSymbol[] = [],
+): FileGrainCandidate {
+  return { fileNodeId, filePath, fileContentHash, symbols, combinedHash };
+}
+
 // ---------------------------------------------------------------------------
 // describe('file-grain.computeCombinedHash')
 // ---------------------------------------------------------------------------
@@ -241,24 +263,14 @@ describe('file-grain.computeCombinedHash', () => {
 // ---------------------------------------------------------------------------
 
 describe('file-grain.buildFileEmbedText', () => {
-  function makeCandidate(symbols: FileGrainSymbol[]): FileGrainCandidate {
-    return {
-      fileNodeId: 'file:test.ts',
-      filePath: 'src/test.ts',
-      fileContentHash: 'hash',
-      symbols,
-      combinedHash: 'combined-hash',
-    };
-  }
-
   it('has the file path header', () => {
-    const c = makeCandidate([{ name: 'foo', signature: null, summary: null, summaryHash: '' }]);
+    const c = makeBuildTextCandidate([{ name: 'foo', signature: null, summary: null, summaryHash: '' }]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('# src/test.ts');
   });
 
   it('prefers summary over signature', () => {
-    const c = makeCandidate([
+    const c = makeBuildTextCandidate([
       { name: 'foo', signature: 'foo(a: string): void', summary: 'The summary text', summaryHash: '' },
     ]);
     const text = buildFileEmbedText(c);
@@ -267,13 +279,15 @@ describe('file-grain.buildFileEmbedText', () => {
   });
 
   it('falls back to signature when summary is null', () => {
-    const c = makeCandidate([{ name: 'bar', signature: 'bar(x: number): string', summary: null, summaryHash: '' }]);
+    const c = makeBuildTextCandidate([
+      { name: 'bar', signature: 'bar(x: number): string', summary: null, summaryHash: '' },
+    ]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('bar: bar(x: number): string');
   });
 
   it('falls back to name-only when both summary and signature are null', () => {
-    const c = makeCandidate([{ name: 'baz', signature: null, summary: null, summaryHash: '' }]);
+    const c = makeBuildTextCandidate([{ name: 'baz', signature: null, summary: null, summaryHash: '' }]);
     const text = buildFileEmbedText(c);
     // The last symbol line has no trailing newline (join('\n') produces no trailing newline)
     expect(text).toContain('- baz');
@@ -281,13 +295,13 @@ describe('file-grain.buildFileEmbedText', () => {
   });
 
   it('skips empty/null summary AND falls through to signature', () => {
-    const c = makeCandidate([{ name: 'qux', signature: 'qux(): void', summary: '', summaryHash: '' }]);
+    const c = makeBuildTextCandidate([{ name: 'qux', signature: 'qux(): void', summary: '', summaryHash: '' }]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('qux: qux(): void');
   });
 
   it('skips empty/null signature AND falls through to name-only', () => {
-    const c = makeCandidate([{ name: 'quux', signature: '', summary: null, summaryHash: '' }]);
+    const c = makeBuildTextCandidate([{ name: 'quux', signature: '', summary: null, summaryHash: '' }]);
     const text = buildFileEmbedText(c);
     // empty signature → name-only
     expect(text).toContain('- quux');
@@ -295,14 +309,16 @@ describe('file-grain.buildFileEmbedText', () => {
   });
 
   it('whitespace in summary is trimmed', () => {
-    const c = makeCandidate([{ name: 'fn', signature: null, summary: '  trimmed summary  ', summaryHash: '' }]);
+    const c = makeBuildTextCandidate([{ name: 'fn', signature: null, summary: '  trimmed summary  ', summaryHash: '' }]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('fn: trimmed summary');
     expect(text).not.toContain('  trimmed summary  ');
   });
 
   it('whitespace in signature is trimmed', () => {
-    const c = makeCandidate([{ name: 'fn', signature: '  sig(a: number): void  ', summary: null, summaryHash: '' }]);
+    const c = makeBuildTextCandidate([
+      { name: 'fn', signature: '  sig(a: number): void  ', summary: null, summaryHash: '' },
+    ]);
     const text = buildFileEmbedText(c);
     expect(text).toContain('fn: sig(a: number): void');
   });
@@ -333,7 +349,7 @@ describe('file-grain.getFileGrainCandidates', () => {
 
     const candidates = getFileGrainCandidates(qb);
     expect(candidates).toHaveLength(2);
-    const paths = candidates.map((c) => c.filePath).sort();
+    const paths = candidates.map((c) => c.filePath).sort(byString);
     expect(paths).toEqual(['src/a.ts', 'src/b.ts']);
   });
 
@@ -374,7 +390,7 @@ describe('file-grain.getFileGrainCandidates', () => {
 
     // Insert symbols with varying centrality and line numbers
     // High centrality, late line
-    insertSymbolNode(qb, { name: 'highCentral', filePath: 'src/order.ts', startLine: 50, centrality: 1.0 });
+    insertSymbolNode(qb, { name: 'highCentral', filePath: 'src/order.ts', startLine: 50, centrality: 1 });
     // Low centrality, early line
     insertSymbolNode(qb, { name: 'lowCentral', filePath: 'src/order.ts', startLine: 5, centrality: 0.1 });
     // Medium centrality, early line
@@ -439,21 +455,11 @@ describe('file-grain.upsertFileEmbedding + isFileGrainStale', () => {
     teardownDb(setup);
   });
 
-  function makeCandidate(
-    fileNodeId: string,
-    filePath: string,
-    fileContentHash: string,
-    combinedHash: string,
-    symbols: FileGrainSymbol[] = [],
-  ): FileGrainCandidate {
-    return { fileNodeId, filePath, fileContentHash, symbols, combinedHash };
-  }
-
   it('fresh insert: returns true; isFileGrainStale → false on candidate with matching hashes', () => {
     const { qb } = setup;
     insertFileNode(qb, 'src/x.ts', 'hash-x', 'fnode-x');
 
-    const c = makeCandidate('fnode-x', 'src/x.ts', 'hash-x', 'combined-x');
+    const c = makeUpsertCandidate('fnode-x', 'src/x.ts', 'hash-x', 'combined-x');
     const embedding = makeRandomNormalisedBuffer(32);
 
     const wrote = upsertFileEmbedding({
@@ -514,18 +520,18 @@ describe('file-grain.upsertFileEmbedding + isFileGrainStale', () => {
     expect(wrote).toBe(true);
 
     // Now candidate with new combinedHash should not be stale
-    const updatedCandidate = makeCandidate('fnode-y', 'src/y.ts', 'hash-y', 'combined-v2');
+    const updatedCandidate = makeUpsertCandidate('fnode-y', 'src/y.ts', 'hash-y', 'combined-v2');
     expect(isFileGrainStale(qb, updatedCandidate, 'test-model')).toBe(false);
 
     // The OLD combinedHash candidate would still be stale
-    const oldCandidate = makeCandidate('fnode-y', 'src/y.ts', 'hash-y', 'combined-v1');
+    const oldCandidate = makeUpsertCandidate('fnode-y', 'src/y.ts', 'hash-y', 'combined-v1');
     expect(isFileGrainStale(qb, oldCandidate, 'test-model')).toBe(true);
   });
 
   it('isFileGrainStale → true when no row exists for that fileNodeId', () => {
     const { qb } = setup;
     insertFileNode(qb, 'src/z.ts', 'hash-z', 'fnode-z');
-    const c = makeCandidate('fnode-z', 'src/z.ts', 'hash-z', 'combined-z');
+    const c = makeUpsertCandidate('fnode-z', 'src/z.ts', 'hash-z', 'combined-z');
 
     // No embedding row exists yet
     expect(isFileGrainStale(qb, c, 'test-model')).toBe(true);
@@ -545,7 +551,7 @@ describe('file-grain.upsertFileEmbedding + isFileGrainStale', () => {
       combinedHash: 'combined-m',
     });
 
-    const c = makeCandidate('fnode-m', 'src/m.ts', 'hash-m', 'combined-m');
+    const c = makeUpsertCandidate('fnode-m', 'src/m.ts', 'hash-m', 'combined-m');
     // Different model → stale
     expect(isFileGrainStale(qb, c, 'model-B')).toBe(true);
     // Same model → fresh
@@ -567,7 +573,7 @@ describe('file-grain.upsertFileEmbedding + isFileGrainStale', () => {
     });
 
     // Candidate with new file content hash
-    const c = makeCandidate('fnode-c', 'src/c.ts', 'hash-v2', 'combined-c');
+    const c = makeUpsertCandidate('fnode-c', 'src/c.ts', 'hash-v2', 'combined-c');
     expect(isFileGrainStale(qb, c, 'test-model')).toBe(true);
   });
 
@@ -586,7 +592,7 @@ describe('file-grain.upsertFileEmbedding + isFileGrainStale', () => {
     });
 
     // Candidate with new combinedHash (summary changed)
-    const c = makeCandidate('fnode-s', 'src/s.ts', 'hash-s', 'combined-v2');
+    const c = makeUpsertCandidate('fnode-s', 'src/s.ts', 'hash-s', 'combined-v2');
     expect(isFileGrainStale(qb, c, 'test-model')).toBe(true);
   });
 });

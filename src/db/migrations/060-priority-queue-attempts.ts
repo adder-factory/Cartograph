@@ -43,8 +43,10 @@ export const MIGRATION: MigrationModule = {
     // DBs always have these columns since v1, so the guard is a
     // no-op there. Same pattern as migration 054 / 056 / 059's
     // pre-flight start_line check.
-    const nodeCols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-    if (!nodeCols.includes('start_line') || !nodeCols.includes('end_line')) {
+    const nodeCols = new Set(
+      (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    if (!nodeCols.has('start_line') || !nodeCols.has('end_line')) {
       return;
     }
 

@@ -9,8 +9,10 @@
 // visible rather than smuggled into the medians.
 //
 // Usage: node aggregate.mjs <dir> [--out <results.json>] [--label <name>]
-import { readFileSync, writeFileSync, readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { readFileSync, writeFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
+
+const byEntryKey = (a, b) => a[0].localeCompare(b[0]);
 
 const args = process.argv.slice(2);
 const root = args[0];
@@ -106,7 +108,7 @@ function armMedians(rs) {
 const pct = (w, wo) => (w == null || wo == null || wo === 0 ? null : Math.round(((wo - w) / wo) * 100));
 
 const rows = [];
-for (const [corpus, g] of Object.entries(byCorpus).sort()) {
+for (const [corpus, g] of Object.entries(byCorpus).sort(byEntryKey)) {
   const w = armMedians(g.with),
     wo = armMedians(g.without);
   rows.push({
@@ -146,17 +148,21 @@ const adoption = {
 };
 
 // --- console report ---
-const fmtMs = (ms) =>
-  ms == null
-    ? '?'
-    : ms >= 60000
-      ? `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`
-      : `${(ms / 1000).toFixed(0)}s`;
+const fmtMs = (ms) => {
+  if (ms == null) return '?';
+  if (ms >= 60000) return `${Math.floor(ms / 60000)}m${Math.round((ms % 60000) / 1000)}s`;
+  return `${(ms / 1000).toFixed(0)}s`;
+};
 const fmt$ = (c) => (c == null ? '?' : `$${c.toFixed(3)}`);
-const fmtK = (t) => (t == null ? '?' : t >= 1000 ? `${(t / 1000).toFixed(0)}k` : `${t}`);
+const fmtK = (t) => {
+  if (t == null) return '?';
+  if (t >= 1000) return `${(t / 1000).toFixed(0)}k`;
+  return `${t}`;
+};
 const sv = (p) => (p == null ? '?' : `${p}%`).padStart(5); // savings %, positive = cartograph cheaper/fewer/faster
 
-console.log(`\n=== agent-eval aggregate${label ? ` [${label}]` : ''} — ${rows.length} corpora ===\n`);
+const labelSuffix = label ? ` [${label}]` : '';
+console.log(`\n=== agent-eval aggregate${labelSuffix} — ${rows.length} corpora ===\n`);
 console.log(
   'corpus            lang     | cost  WITH→WITHOUT        | tokens WITH→WITHOUT   | time WITH→WITHOUT     | calls WITH→WITHOUT*  | dropped',
 );

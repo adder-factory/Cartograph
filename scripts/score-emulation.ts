@@ -24,7 +24,7 @@
  * file or grep for a specific tool to extract numbers.
  */
 
-import * as fs from 'fs';
+import * as fs from 'node:fs';
 
 interface Question {
   id: string;
@@ -138,63 +138,63 @@ function main(): void {
   const catalog = JSON.parse(fs.readFileSync(catalogPath!, 'utf8')) as QuestionCatalog;
   const tools = resultPaths.map((p) => JSON.parse(fs.readFileSync(p, 'utf8')) as ToolResultFile);
 
-  const lines: string[] = [];
-  lines.push(`# Emulation score report`);
-  lines.push('');
-  lines.push(`Catalog: \`${catalogPath}\` — ${catalog.questions.length} questions, ${tools.length} tool(s).`);
-  lines.push('');
+  const introLines = [
+    '# Emulation score report',
+    '',
+    `Catalog: \`${catalogPath}\` — ${catalog.questions.length} questions, ${tools.length} tool(s).`,
+    '',
+  ];
 
   // Per-question table
-  lines.push('## Per-question scores');
-  lines.push('');
   const header = ['Question', 'Tolerance', ...tools.flatMap((t) => [`${t.tool} F1`, `${t.tool} cost`])];
-  lines.push('| ' + header.join(' | ') + ' |');
-  lines.push('|' + header.map(() => '---').join('|') + '|');
 
   const aggregates: Map<string, { f1Sum: number; n: number; tokenSum: number; wallSum: number }> = new Map();
   for (const t of tools) aggregates.set(t.tool, { f1Sum: 0, n: 0, tokenSum: 0, wallSum: 0 });
 
-  for (const q of catalog.questions) {
-    const row: string[] = [q.label, q.tolerance];
-    for (const t of tools) {
+  const perQuestionRows = catalog.questions.map((q) => {
+    const cells = tools.flatMap((t) => {
       const entry = t.results[q.id];
-      if (!entry) {
-        row.push('(no result)', '—');
-        continue;
-      }
+      if (!entry) return ['(no result)', '—'];
       const s = scoreOne(q, entry);
       const agg = aggregates.get(t.tool)!;
       agg.f1Sum += s.f1;
       agg.n++;
       agg.tokenSum += entry.tokenCost;
       agg.wallSum += entry.wallMs;
-      row.push(s.binary ? `${s.f1}` : fmt(s.f1), `${entry.tokenCost}t / ${entry.wallMs}ms`);
-    }
-    lines.push('| ' + row.join(' | ') + ' |');
-  }
+      return [s.binary ? `${s.f1}` : fmt(s.f1), `${entry.tokenCost}t / ${entry.wallMs}ms`];
+    });
+    return '| ' + [q.label, q.tolerance, ...cells].join(' | ') + ' |';
+  });
 
   // Aggregate row
-  lines.push('');
-  lines.push('## Aggregate');
-  lines.push('');
-  lines.push('| Tool | Mean F1 | Total tokens | Total wall ms | Token / F1 | Wall / F1 |');
-  lines.push('|---|---|---|---|---|---|');
-  for (const t of tools) {
+  const aggregateRows = tools.map((t) => {
     const agg = aggregates.get(t.tool)!;
     const meanF1 = agg.n === 0 ? 0 : agg.f1Sum / agg.n;
     const tokensPerF1 = meanF1 === 0 ? Infinity : agg.tokenSum / agg.n / meanF1;
     const wallPerF1 = meanF1 === 0 ? Infinity : agg.wallSum / agg.n / meanF1;
-    lines.push(
-      `| ${t.tool} | ${fmt(meanF1)} | ${agg.tokenSum} | ${agg.wallSum} | ${fmt(tokensPerF1, 0)} | ${fmt(wallPerF1, 0)} |`,
-    );
-  }
+    return `| ${t.tool} | ${fmt(meanF1)} | ${agg.tokenSum} | ${agg.wallSum} | ${fmt(tokensPerF1, 0)} | ${fmt(wallPerF1, 0)} |`;
+  });
 
-  lines.push('');
-  lines.push('Reading the table:');
-  lines.push('- F1 closer to 1.0 is better.');
-  lines.push('- Token / F1 is the average tokens spent per unit of correctness — lower is better.');
-  lines.push('- Wall / F1 same shape, in milliseconds.');
-  lines.push('- A tool that returns nothing fast is correctly penalised: F1 = 0 → infinite cost-per-correctness.');
+  const lines = [
+    ...introLines,
+    '## Per-question scores',
+    '',
+    '| ' + header.join(' | ') + ' |',
+    '|' + header.map(() => '---').join('|') + '|',
+    ...perQuestionRows,
+    '',
+    '## Aggregate',
+    '',
+    '| Tool | Mean F1 | Total tokens | Total wall ms | Token / F1 | Wall / F1 |',
+    '|---|---|---|---|---|---|',
+    ...aggregateRows,
+    '',
+    'Reading the table:',
+    '- F1 closer to 1.0 is better.',
+    '- Token / F1 is the average tokens spent per unit of correctness — lower is better.',
+    '- Wall / F1 same shape, in milliseconds.',
+    '- A tool that returns nothing fast is correctly penalised: F1 = 0 → infinite cost-per-correctness.',
+  ];
 
   console.log(lines.join('\n'));
 }

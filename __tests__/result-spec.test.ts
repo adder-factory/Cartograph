@@ -24,6 +24,8 @@ import {
   type MarkdownTableSpec,
 } from '../src/mcp/tools/_result-spec.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 describe('renderMarkdownTable — output shape', () => {
   it('renders a minimal one-row table with H2 title + header row + separator + body row', () => {
     const spec: MarkdownTableSpec<{ name: string; count: number }> = {
@@ -459,7 +461,11 @@ describe('migrated-tool wording alignment (#32)', () => {
 
   it('digest biomarkers spec routes through 4 states (populated/never-ran/clean/pending)', () => {
     const noteKeys = Object.keys(DIGEST_BIOMARKER_STATE_NOTES);
-    expect(noteKeys.sort()).toEqual(['clean', 'never-ran', 'pending'].sort());
+    const sortedNoteKeys = [...noteKeys];
+    sortedNoteKeys.sort(byString);
+    const expectedNoteKeys = ['clean', 'never-ran', 'pending'];
+    expectedNoteKeys.sort(byString);
+    expect(sortedNoteKeys).toEqual(expectedNoteKeys);
     expect(DIGEST_BIOMARKER_STATE_NOTES['never-ran']).toMatch(/No biomarker data/);
     expect(DIGEST_BIOMARKER_STATE_NOTES.pending).toMatch(/pending/);
     expect(DIGEST_BIOMARKER_STATE_NOTES.clean).toMatch(/Project clean/);

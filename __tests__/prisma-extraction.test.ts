@@ -16,6 +16,7 @@ beforeAll(async () => {
 });
 
 const byKind = (nodes: Node[], kind: string): Node[] => nodes.filter((n) => n.kind === kind);
+const byString = (a: string, b: string): number => a.localeCompare(b);
 
 describe('Prisma extraction', () => {
   it('extracts a model as a struct with field children', () => {
@@ -31,7 +32,7 @@ model User {
     expect(struct).toBeDefined();
 
     const fields = byKind(result.nodes, 'field');
-    expect(fields.map((n) => n.name).sort()).toEqual(['email', 'id', 'name']);
+    expect(fields.map((n) => n.name).sort(byString)).toEqual(['email', 'id', 'name']);
     // The column type is captured as the field signature.
     expect(fields.find((f) => f.name === 'id')?.signature).toBe('Int');
 
@@ -53,7 +54,7 @@ enum Role {
     expect(enumNode).toBeDefined();
 
     const members = byKind(result.nodes, 'enum_member');
-    expect(members.map((n) => n.name).sort()).toEqual(['ADMIN', 'EDITOR', 'VIEWER']);
+    expect(members.map((n) => n.name).sort(byString)).toEqual(['ADMIN', 'EDITOR', 'VIEWER']);
     const contained = result.edges
       .filter((e) => e.kind === 'contains' && e.source === enumNode!.id)
       .map((e) => e.target);
@@ -94,7 +95,7 @@ type Photo {
     expect(
       byKind(result.nodes, 'field')
         .map((n) => n.name)
-        .sort(),
+        .sort(byString),
     ).toEqual(['height', 'width']);
   });
 

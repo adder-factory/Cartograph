@@ -12,6 +12,8 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { getSymbolNeighborhood } from '../src/db/queries-roles.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 const FIXTURE = `export class BaseEntity {
   id: string = '';
 }
@@ -67,7 +69,9 @@ describe('getSymbolNeighborhood', () => {
     const nbhd = getSymbolNeighborhood(cg!.queries);
     const user = nbhd.get(nodeId('User', 'class'));
     expect(user).toBeTruthy();
-    expect(user!.supertypes.sort()).toEqual(['BaseEntity', 'Greeter']);
+    const sortedSupertypes = [...user!.supertypes];
+    sortedSupertypes.sort(byString);
+    expect(sortedSupertypes).toEqual(['BaseEntity', 'Greeter']);
   });
 
   it('captures member methods/fields of a class', () => {

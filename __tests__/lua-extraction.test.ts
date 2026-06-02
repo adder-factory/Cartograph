@@ -16,6 +16,7 @@ beforeAll(async () => {
 });
 
 const byKind = (nodes: Node[], kind: string): Node[] => nodes.filter((n) => n.kind === kind);
+const byString = (a: string, b: string): number => a.localeCompare(b);
 
 describe('Lua extraction — colon-method promotion', () => {
   it('promotes function M:foo() colon syntax to a method node', () => {
@@ -49,8 +50,8 @@ end
     expect(
       byKind(result.nodes, 'function')
         .map((n) => n.name)
-        .sort(),
-    ).toEqual(['M.create', 'helper', 'plain']);
+        .sort(byString),
+    ).toEqual(['helper', 'M.create', 'plain']);
   });
 
   it('walks the colon-method body so calls inside it are attributed to the method', () => {

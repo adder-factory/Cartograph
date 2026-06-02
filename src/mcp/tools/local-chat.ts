@@ -100,8 +100,8 @@ async function handleLocalChat(ctx: ToolCtx, args: LocalChatArgs): Promise<ToolO
     // after the cut so it always survives.
     const body = truncateOutput(result.text, LOCAL_CHAT_MAX_OUTPUT_LENGTH);
     return ok(textResult(body + trailer));
-  } catch (caught) {
-    return err(`local_chat failed: ${errMsg(caught)}`);
+  } catch (error_) {
+    return err(`local_chat failed: ${errMsg(error_)}`);
   }
 }
 

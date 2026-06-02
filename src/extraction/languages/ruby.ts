@@ -1,6 +1,6 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
-import type { LanguageExtractor } from '../tree-sitter-types.js';
+import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
 
 /** Truncation cap on the `= <value>` signature column. Mirrors
  *  `INIT_SIGNATURE_MAX` in `tree-sitter-decls.ts` so top-level Ruby
@@ -46,6 +46,26 @@ const RUBY_ACCESSOR_MACROS: ReadonlySet<string> = new Set([
   'attr_accessor',
   'class_attribute',
 ]);
+const RUBY_BARE_CALL_BLOCK_PARENTS: ReadonlySet<string> = new Set([
+  'body_statement',
+  'then',
+  'else',
+  'do',
+  'begin',
+  'rescue',
+  'ensure',
+  'when',
+]);
+const RUBY_BARE_CALL_SKIP_NAMES: ReadonlySet<string> = new Set([
+  'true',
+  'false',
+  'nil',
+  'self',
+  'super',
+  '__FILE__',
+  '__LINE__',
+  '__dir__',
+]);
 
 interface RubyAccessorEmitArgs {
   node: SyntaxNode;
@@ -74,6 +94,79 @@ function rubyAccessorFieldNames(args: RubyAccessorEmitArgs): readonly string[] {
   return names;
 }
 
+function visitRubyModule(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'module') return false;
+  const nameNode = node.childForFieldName('name');
+  if (!nameNode) return false;
+  const moduleNode = ctx.createNode({ kind: 'module', name: nameNode.text, node });
+  if (!moduleNode) return false;
+
+  ctx.pushScope(moduleNode.id);
+  const body = node.childForFieldName('body');
+  if (body) {
+    for (const child of body.namedChildren) {
+      if (child) ctx.visitNode(child);
+    }
+  }
+  ctx.popScope();
+  return true;
+}
+
+function visitRubyAccessorCall(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'call' || node.parent?.type !== 'body_statement') return false;
+  const fieldNames = rubyAccessorFieldNames({ node, source: ctx.source });
+  if (fieldNames.length === 0) return false;
+  for (const name of fieldNames) {
+    ctx.createNode({ kind: 'field', name, node });
+  }
+  return true;
+}
+
+function visitRubyScopedConstant(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  if (node.type !== 'assignment' || ctx.nodeStack.length === 0) return false;
+  const left = node.childForFieldName('left') ?? node.namedChild(0);
+  if (left?.type !== 'constant') return false;
+
+  const name = getNodeText(left, ctx.source);
+  if (!name) return true;
+  const right = node.childForFieldName('right') ?? node.namedChild(1);
+  const signature = rubyConstantSignature(right, ctx.source);
+  ctx.createNode({
+    kind: 'constant',
+    name,
+    node,
+    ...(signature ? { extra: { signature } } : {}),
+  });
+  return true;
+}
+
+function rubyRequireModuleName(node: SyntaxNode, source: string): string | null {
+  const identifier = node.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
+  if (!identifier) return null;
+  const methodName = getNodeText(identifier, source);
+  if (methodName !== 'require' && methodName !== 'require_relative') return null;
+
+  const argList = node.namedChildren.find((c: SyntaxNode) => c.type === 'argument_list');
+  const stringNode = argList?.namedChildren.find((c: SyntaxNode) => c.type === 'string');
+  const stringContent = stringNode?.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
+  return stringContent ? getNodeText(stringContent, source) : null;
+}
+
+function isRubyUppercaseName(name: string): boolean {
+  const firstCodePoint = name.codePointAt(0) ?? 0;
+  return firstCodePoint >= 65 && firstCodePoint <= 90;
+}
+
+function rubyVisibilityFromCall(node: SyntaxNode): 'public' | 'private' | 'protected' | null {
+  if (node.type !== 'call') return null;
+  const methodName = getChildByField(node, 'method');
+  if (!methodName) return null;
+  if (methodName.text === 'private') return 'private';
+  if (methodName.text === 'protected') return 'protected';
+  if (methodName.text === 'public') return 'public';
+  return null;
+}
+
 const rubyExtractor: LanguageExtractor = {
   functionTypes: ['method'],
   classTypes: ['class'],
@@ -97,25 +190,7 @@ const rubyExtractor: LanguageExtractor = {
     return left?.type === 'constant';
   },
   visitNode: (node, ctx) => {
-    if (node.type === 'module') {
-      const nameNode = node.childForFieldName('name');
-      if (!nameNode) return false;
-      const name = nameNode.text;
-
-      const moduleNode = ctx.createNode({ kind: 'module', name, node });
-      if (!moduleNode) return false;
-
-      // Push module onto scope stack so children get proper qualified names
-      ctx.pushScope(moduleNode.id);
-      const body = node.childForFieldName('body');
-      if (body) {
-        for (const child of body.namedChildren) {
-          if (child) ctx.visitNode(child);
-        }
-      }
-      ctx.popScope();
-      return true; // handled
-    }
+    if (visitRubyModule(node, ctx)) return true;
 
     // F#35: Ruby class macros — attr_reader / attr_writer /
     // attr_accessor / class_attribute. Emit one `field` node per
@@ -126,15 +201,7 @@ const rubyExtractor: LanguageExtractor = {
     // The general `nodeStack.length > 0` guard isn't tight enough
     // because the extractor pushes the file node onto the stack
     // before visiting, so the stack is always non-empty.
-    if (node.type === 'call' && node.parent?.type === 'body_statement') {
-      const fieldNames = rubyAccessorFieldNames({ node, source: ctx.source });
-      if (fieldNames.length > 0) {
-        for (const name of fieldNames) {
-          ctx.createNode({ kind: 'field', name, node });
-        }
-        return true;
-      }
-    }
+    if (visitRubyAccessorCall(node, ctx)) return true;
 
     // F#34: class/module-scoped Ruby constants. The default dispatch
     // skips `assignment` nodes inside class-like scopes (so JS/TS
@@ -144,24 +211,7 @@ const rubyExtractor: LanguageExtractor = {
     // constants still flow through the default `variableTypes` path
     // (nodeStack empty → this branch falls through, default dispatch
     // handles).
-    if (node.type === 'assignment' && ctx.nodeStack.length > 0) {
-      const left = node.childForFieldName('left') ?? node.namedChild(0);
-      if (left?.type === 'constant') {
-        const name = getNodeText(left, ctx.source);
-        if (name) {
-          const right = node.childForFieldName('right') ?? node.namedChild(1);
-          const signature = rubyConstantSignature(right, ctx.source);
-          ctx.createNode({
-            kind: 'constant',
-            name,
-            node,
-            ...(signature ? { extra: { signature } } : {}),
-          });
-        }
-        return true;
-      }
-    }
-    return false;
+    return visitRubyScopedConstant(node, ctx);
   },
   extractBareCall: (node, _source) => {
     // Ruby bare method calls (no parens, no receiver) parse as plain identifiers.
@@ -172,18 +222,15 @@ const rubyExtractor: LanguageExtractor = {
     if (!parent) return undefined;
 
     // Only statement-level identifiers — direct children of block/body nodes
-    const BLOCK_PARENTS = new Set(['body_statement', 'then', 'else', 'do', 'begin', 'rescue', 'ensure', 'when']);
-    if (!BLOCK_PARENTS.has(parent.type)) return undefined;
+    if (!RUBY_BARE_CALL_BLOCK_PARENTS.has(parent.type)) return undefined;
 
     const name = node.text;
 
     // Skip Ruby keywords/literals
-    const SKIP = new Set(['true', 'false', 'nil', 'self', 'super', '__FILE__', '__LINE__', '__dir__']);
-    if (SKIP.has(name)) return undefined;
+    if (RUBY_BARE_CALL_SKIP_NAMES.has(name)) return undefined;
 
     // Skip constants (uppercase start) — these are class/module refs, not calls
-    const firstCodePoint = name.codePointAt(0) ?? 0;
-    if (firstCodePoint >= 65 && firstCodePoint <= 90) return undefined;
+    if (isRubyUppercaseName(name)) return undefined;
 
     return name;
   },
@@ -191,15 +238,8 @@ const rubyExtractor: LanguageExtractor = {
     // Ruby visibility is based on preceding visibility modifiers
     let sibling = node.previousNamedSibling;
     while (sibling) {
-      if (sibling.type === 'call') {
-        const methodName = getChildByField(sibling, 'method');
-        if (methodName) {
-          const text = methodName.text;
-          if (text === 'private') return 'private';
-          if (text === 'protected') return 'protected';
-          if (text === 'public') return 'public';
-        }
-      }
+      const visibility = rubyVisibilityFromCall(sibling);
+      if (visibility) return visibility;
       sibling = sibling.previousNamedSibling;
     }
     return 'public';
@@ -208,25 +248,9 @@ const rubyExtractor: LanguageExtractor = {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
 
     // Check if this is a require/require_relative call
-    const identifier = node.namedChildren.find((c: SyntaxNode) => c.type === 'identifier');
-    if (!identifier) return null;
-    const methodName = getNodeText(identifier, source);
-    if (methodName !== 'require' && methodName !== 'require_relative') {
-      return null; // Not an import, skip
-    }
-
-    // Find the argument (string)
-    const argList = node.namedChildren.find((c: SyntaxNode) => c.type === 'argument_list');
-    if (argList) {
-      const stringNode = argList.namedChildren.find((c: SyntaxNode) => c.type === 'string');
-      if (stringNode) {
-        const stringContent = stringNode.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
-        if (stringContent) {
-          return { moduleName: getNodeText(stringContent, source), signature: importText };
-        }
-      }
-    }
-    return null;
+    const moduleName = rubyRequireModuleName(node, source);
+    if (moduleName === null) return null;
+    return { moduleName, signature: importText };
   },
 };
 

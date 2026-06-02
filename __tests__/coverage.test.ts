@@ -15,6 +15,8 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { parseLcov, summariseSpan } from '../src/coverage/lcov.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-coverage-'));
 }
@@ -167,7 +169,7 @@ export function beta(x: number): number {
       expect(stats.weightedPct).toBeGreaterThan(0.5);
       expect(stats.weightedPct).toBeLessThan(1);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -215,9 +217,9 @@ export function beta(x: number): number {
       const after = getCoverageStats(cg.queries).symbolsWithCoverage;
       expect(after).toBe(before);
       const ranked = getCoverageRanked(cg.queries, { kinds: ['function'], limit: 10 });
-      expect(ranked.map((r) => r.name).sort()).toEqual(['alpha', 'beta']);
+      expect(ranked.map((r) => r.name).toSorted(byName)).toEqual(['alpha', 'beta']);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -239,7 +241,7 @@ export function beta(x: number): number {
       // Re-running same source overwrites — count unchanged.
       expect(stats.symbolsWithCoverage).toBe(r1.symbolsUpdated);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -260,7 +262,7 @@ export function beta(x: number): number {
       expect(result.filesMatched).toBe(1);
       expect(result.filesUnmatched).toBe(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -301,7 +303,7 @@ export function beta(x: number): number {
       const clearedStats = getCoverageStats(cg.queries);
       expect(clearedStats.symbolsWithCoverage).toBeLessThan(beforeCount);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -361,7 +363,7 @@ export function beta(x: number): number {
       expect(run).toBeDefined();
       expect(run!.totalLines).toBeGreaterThan(0);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -379,7 +381,7 @@ export function beta(x: number): number {
       await cg.ingestCoverage(lcovPath, { source: 'unit' });
       await cg.ingestCoverage(lcovPath, { source: 'e2e' });
       const stats = getCoverageStats(cg.queries);
-      expect(stats.sources.sort()).toEqual(['e2e', 'unit']);
+      expect(stats.sources.toSorted(byName)).toEqual(['e2e', 'unit']);
 
       // When a source is requested, the rollup AND the source list
       // both narrow to that source — surfacing all sources here would
@@ -387,7 +389,7 @@ export function beta(x: number): number {
       const unitOnly = getCoverageStats(cg.queries, 'unit');
       expect(unitOnly.sources).toEqual(['unit']);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -428,9 +430,9 @@ export function beta(x: number): number {
       expect(allStats.symbolsWithCoverage).toBe(oneSource.symbolsWithCoverage);
       expect(allStats.totalLines).toBe(oneSource.totalLines);
       expect(allStats.coveredLines).toBe(oneSource.coveredLines);
-      expect(allStats.sources.sort()).toEqual(['e2e', 'integration', 'unit']);
+      expect(allStats.sources.toSorted(byName)).toEqual(['e2e', 'integration', 'unit']);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 
@@ -449,7 +451,7 @@ export function beta(x: number): number {
       await cg.ingestCoverage(lcovPath, { source: 'stray' });
 
       const sources = listCoverageSources(cg.queries);
-      expect(sources.map((s) => s.source).sort()).toEqual(['stray', 'unit']);
+      expect(sources.map((s) => s.source).toSorted(byName)).toEqual(['stray', 'unit']);
       for (const s of sources) {
         expect(s.rowCount).toBeGreaterThan(0);
         expect(s.newestIngestedAt).toBeGreaterThan(0);
@@ -461,7 +463,7 @@ export function beta(x: number): number {
       const after = listCoverageSources(cg.queries);
       expect(after.map((s) => s.source)).toEqual(['unit']);
     } finally {
-      cg.destroy();
+      cg.close();
     }
   });
 });

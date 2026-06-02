@@ -164,9 +164,10 @@ function handleCoverageDrop(cg: Cartograph, source: string | undefined): ToolOut
   }
   const known = listCoverageSources(cg.queries);
   if (!known.some((s) => s.source === source)) {
+    const knownSourceNames = known.map((s) => `\`${s.source}\``).join(', ');
     const names =
       known.length > 0
-        ? ` Known sources: ${known.map((s) => `\`${s.source}\``).join(', ')}.`
+        ? ` Known sources: ${knownSourceNames}.`
         : ' No coverage sources are ingested.';
     return err(`No coverage source named \`${source}\` — nothing to drop.${names}`);
   }
@@ -217,8 +218,9 @@ function handleCoverageStats(cg: Cartograph, source: string | undefined): ToolOu
   // Mirrors the same scoping in handleCoverageRanked's filter-excluded
   // branch — both paths now treat `source` consistently.
   const newestIngestedAt = getNewestIngestedAt(cg, source);
+  const sourceSuffix = source ? ` (source: ${source})` : '';
   const lines = [
-    `## Project coverage${source ? ` (source: ${source})` : ''}`,
+    `## Project coverage${sourceSuffix}`,
     '',
     `- **Symbols with coverage:** ${stats.symbolsWithCoverage}`,
     `- **Weighted coverage:** ${fmtPct(stats.weightedPct)} (${stats.coveredLines}/${stats.totalLines} lines)`,

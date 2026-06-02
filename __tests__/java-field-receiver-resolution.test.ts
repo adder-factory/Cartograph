@@ -33,7 +33,7 @@ describe('Java this.field.method() + field-receiver type inference (F#64a)', () 
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });

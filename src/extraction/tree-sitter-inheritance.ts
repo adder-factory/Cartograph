@@ -87,6 +87,57 @@ function extractObjcProtocolList(extractor: TreeSitterExtractor, node: SyntaxNod
   }
 }
 
+function extractObjcClassInterfaceInheritance(extractor: TreeSitterExtractor, node: SyntaxNode, classId: string): void {
+  const identifiers = node.namedChildren.filter((c: SyntaxNode) => c.type === 'identifier');
+  const superclass = identifiers[1];
+  if (superclass) {
+    pushInheritanceRef({
+      extractor,
+      classId,
+      name: getNodeText(superclass, extractor.source),
+      kind: 'extends',
+      posNode: superclass,
+    });
+  }
+  const paramArgs = node.namedChildren.filter((c: SyntaxNode) => c.type === 'parameterized_arguments');
+  const protocols = paramArgs.at(-1);
+  if (protocols) {
+    extractObjcProtocolList(extractor, protocols, classId);
+  }
+}
+
+function tryExtractInheritanceChild(extractor: TreeSitterExtractor, node: SyntaxNode, child: SyntaxNode, classId: string): boolean {
+  const handler = INHERITANCE_HANDLERS[child.type];
+  if (handler) {
+    handler(extractor, child, classId);
+    return true;
+  }
+  // Python class def: `class Flask(Scaffold, Mixin):` — argument_list
+  // is the supertype carrier only when the parent is class_definition.
+  if (child.type === 'argument_list' && node.type === 'class_definition') {
+    extractPythonSuperclasses(extractor, child, classId);
+    return true;
+  }
+  // JS class_heritage > identifier: `class Foo extends Bar` →
+  // class_heritage > identifier("Bar"), no extends_clause wrapper.
+  if ((child.type === 'identifier' || child.type === 'type_identifier') && node.type === 'class_heritage') {
+    pushInheritanceRef({
+      extractor,
+      classId,
+      name: getNodeText(child, extractor.source),
+      kind: 'extends',
+      posNode: child,
+    });
+    return true;
+  }
+  // Container nodes — recurse to reach the inheritance children.
+  if (child.type === 'field_declaration_list' || child.type === 'class_heritage') {
+    extractInheritance(extractor, child, classId);
+    return true;
+  }
+  return false;
+}
+
 /** Per-language fan-out — recurses into class_heritage / field_declaration_list containers. */
 export function extractInheritance(extractor: TreeSitterExtractor, node: SyntaxNode, classId: string): void {
   // F#65 — Objective-C `@interface MyClass : NSObject <ProtoA, ProtoB>`
@@ -124,54 +175,13 @@ export function extractInheritance(extractor: TreeSitterExtractor, node: SyntaxN
   // (generics attach without whitespace, protocols are space-separated);
   // deferred.
   if (node.type === 'class_interface') {
-    const identifiers = node.namedChildren.filter((c: SyntaxNode) => c.type === 'identifier');
-    const superclass = identifiers[1];
-    if (superclass) {
-      pushInheritanceRef({
-        extractor,
-        classId,
-        name: getNodeText(superclass, extractor.source),
-        kind: 'extends',
-        posNode: superclass,
-      });
-    }
-    const paramArgs = node.namedChildren.filter((c: SyntaxNode) => c.type === 'parameterized_arguments');
-    const protocols = paramArgs.at(-1);
-    if (protocols) {
-      extractObjcProtocolList(extractor, protocols, classId);
-    }
+    extractObjcClassInterfaceInheritance(extractor, node, classId);
     return;
   }
 
   for (const child of node.namedChildren) {
     if (!child) continue;
-    const handler = INHERITANCE_HANDLERS[child.type];
-    if (handler) {
-      handler(extractor, child, classId);
-      continue;
-    }
-    // Python class def: `class Flask(Scaffold, Mixin):` — argument_list
-    // is the supertype carrier only when the parent is class_definition.
-    if (child.type === 'argument_list' && node.type === 'class_definition') {
-      extractPythonSuperclasses(extractor, child, classId);
-      continue;
-    }
-    // JS class_heritage > identifier: `class Foo extends Bar` →
-    // class_heritage > identifier("Bar"), no extends_clause wrapper.
-    if ((child.type === 'identifier' || child.type === 'type_identifier') && node.type === 'class_heritage') {
-      pushInheritanceRef({
-        extractor,
-        classId,
-        name: getNodeText(child, extractor.source),
-        kind: 'extends',
-        posNode: child,
-      });
-      continue;
-    }
-    // Container nodes — recurse to reach the inheritance children.
-    if (child.type === 'field_declaration_list' || child.type === 'class_heritage') {
-      extractInheritance(extractor, child, classId);
-    }
+    if (tryExtractInheritanceChild(extractor, node, child, classId)) continue;
   }
 }
 

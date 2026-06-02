@@ -29,6 +29,8 @@ import { extractFromSource } from '../src/extraction/tree-sitter.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import type { ExtractionResult } from '../src/types.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 /** When set, also dump the JSON breakdown + log a per-language line. */
 const DUMP = process.env.COVERAGE === '1';
 const TESTBEDS = path.join(__dirname, '..', 'docs', 'test-beds');
@@ -113,11 +115,11 @@ function summarise(language: string, fixture: string): LangResult {
  *  list at collection time. */
 function discoverFixtures(): Array<{ language: string; fixture: string }> {
   const out: Array<{ language: string; fixture: string }> = [];
-  for (const lang of fs.readdirSync(TESTBEDS).sort()) {
+for (const lang of fs.readdirSync(TESTBEDS).sort(byString)) {
     const dir = path.join(TESTBEDS, lang);
     if (!fs.statSync(dir).isDirectory()) continue;
-    const files = fs.readdirSync(dir).filter((f) => f.startsWith('fixture.'));
-    if (files[0]) out.push({ language: lang, fixture: path.join(dir, files[0]) });
+    const fixture = fs.readdirSync(dir).find((f) => f.startsWith('fixture.'));
+    if (fixture) out.push({ language: lang, fixture: path.join(dir, fixture) });
   }
   return out;
 }

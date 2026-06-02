@@ -100,8 +100,9 @@ function handleResume(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome 
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
   const session = lookupSession(cg, id, label);
   if (!session) {
+    const lookupLabel = id ? `id=${id}` : `label=${label}`;
     return err(
-      `No session matched ${id ? `id=${id}` : `label=${label}`}. ` +
+      `No session matched ${lookupLabel}. ` +
         `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
     );
   }
@@ -123,8 +124,9 @@ function lookupSession(
 
 /** Render the resume markdown card: header + tool-call history (or empty notice). */
 function formatResumeReport(session: SessionRow, calls: ReturnType<typeof callsForSession>): string {
+  const labelPrefix = session.label ? `\`${session.label}\` ` : '';
   const lines: string[] = [
-    `## Resume session ${session.label ? `\`${session.label}\` ` : ''}(${session.id})`,
+    `## Resume session ${labelPrefix}(${session.id})`,
     '',
     `- **started:** ${fmtTs(session.startedTs)}  •  ` +
       `**last activity:** ${fmtTs(session.lastActivityTs)}  •  ` +
@@ -186,8 +188,9 @@ function handleDelete(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome 
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
   const session = lookupSession(cg, id, label);
   if (!session) {
+    const lookupLabel = id ? `id=${id}` : `label=${label}`;
     return err(
-      `No session matched ${id ? `id=${id}` : `label=${label}`}. ` +
+      `No session matched ${lookupLabel}. ` +
         `Use \`cartograph_session({action: 'list'})\` to see recent sessions.`,
     );
   }
@@ -294,7 +297,7 @@ function substituteOne(v: unknown, positional: unknown[]): unknown {
     }
     return v.replaceAll(/\$\{(\d+)\}/g, (_m, idx) => {
       const replacement = positional[Number(idx)];
-      return replacement === undefined ? `\${${idx}}` : String(replacement);
+      return replacement === undefined ? `\${${idx}}` : stringifyMacroReplacement(replacement);
     });
   }
   if (Array.isArray(v)) return v.map((el) => substituteOne(el, positional));
@@ -306,6 +309,17 @@ function substituteOne(v: unknown, positional: unknown[]): unknown {
     return obj;
   }
   return v;
+}
+
+function stringifyMacroReplacement(value: unknown): string {
+  if (value === null) return 'null';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') return String(value);
+  try {
+    return JSON.stringify(value) ?? '<unserializable>';
+  } catch {
+    return '<unserializable>';
+  }
 }
 
 function substituteArgs(args: Record<string, unknown>, positional: unknown[]): Record<string, unknown> {
@@ -338,16 +352,18 @@ async function handleMacroRun(ctx: ToolCtx, args: Record<string, unknown>): Prom
     return err(`No macro named \`${name}\`. Use \`action: 'macro_list'\` to see saved macros.`);
   }
   if (macroRunStack.includes(name)) {
+    const stack = macroRunStack.map((n) => `\`${n}\``).join(' → ');
     return err(
       `Macro \`${name}\` is already running — recursive macro_run detected ` +
-        `(run stack: ${macroRunStack.map((n) => `\`${n}\``).join(' → ')} → \`${name}\`). ` +
+        `(run stack: ${stack} → \`${name}\`). ` +
         `A macro must not invoke itself, directly or via another macro.`,
     );
   }
   if (macroRunStack.length >= MACRO_RUN_MAX_DEPTH) {
+    const stack = macroRunStack.map((n) => `\`${n}\``).join(' → ');
     return err(
       `Macro nesting too deep (limit ${MACRO_RUN_MAX_DEPTH}); ` +
-        `run stack: ${macroRunStack.map((n) => `\`${n}\``).join(' → ')}.`,
+        `run stack: ${stack}.`,
     );
   }
   macroRunStack.push(name);
@@ -391,8 +407,8 @@ async function runMacroSteps(args: RunMacroStepsArgs): Promise<ToolOutcome> {
     try {
       const result = await mod.handle(ctx, concreteArgs);
       body = stripSinceCursorFooter(result.content?.[0]?.text ?? '_(no text content)_');
-    } catch (caught) {
-      body = `_step error: ${errMsg(caught)}_`;
+    } catch (error_) {
+      body = `_step error: ${errMsg(error_)}_`;
     }
     const dur = Date.now() - t0;
     sections.push(
@@ -447,7 +463,7 @@ const sessionSchema = z.object({
     // the deep structural check, so the schema only asserts the
     // array-of-objects shape the legacy `items: { type: 'object' }`
     // advertised.
-    .array(z.object({}).passthrough())
+    .array(z.looseObject({}))
     .optional()
     .describe('(macro_save) Ordered list of `{tool, args}` objects, each referencing an MCP tool by name.'),
   args: z

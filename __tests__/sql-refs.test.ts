@@ -10,6 +10,8 @@ import { extractSqlRefs, SQL_REFS_ALGO_VERSION, LAST_MINED_SQL_REFS_ALGO_VERSION
 import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 import Cartograph from '../src/index.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 let testDir: string;
 let cg: Cartograph | null = null;
 
@@ -25,7 +27,7 @@ beforeEach(() => {
 
 afterEach(() => {
   if (cg) {
-    cg.destroy();
+    cg.close();
     cg = null;
   }
   if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
@@ -62,7 +64,7 @@ describe('extractSqlRefs', () => {
     const refs = extractSqlRefs(testDir, [{ path: 'a.ts', language: 'typescript' }], () => null);
     // Both regexes (DELETE FROM as write, FROM as read) hit, so we expect
     // two refs for the same table but different ops.
-    expect(refs.map((r) => r.op).sort()).toEqual(['read', 'write']);
+    expect(refs.map((r) => r.op).sort(byString)).toEqual(['read', 'write']);
     expect(new Set(refs.map((r) => r.tableName))).toEqual(new Set(['sessions']));
   });
 
@@ -266,7 +268,7 @@ describe('Cartograph SQL refs', () => {
 
     const node = cg.queries.getNodesByFile('src/a.ts').find((n) => n.name === 'multiTouch')!;
     const touched = getSqlTablesForNode(cg.queries, node.id);
-    const summary = touched.map((r) => `${r.tableName}|${r.op}`).sort();
+    const summary = touched.map((r) => `${r.tableName}|${r.op}`).sort(byString);
     expect(summary).toEqual(['orders|write', 'users|read']);
   });
 

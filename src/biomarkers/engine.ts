@@ -78,7 +78,7 @@ interface SymbolMetrics {
    *  in the same body. JS/TS-gated. Drives the `agent_debug_log`
    *  biomarker. */
   agentDebugLogCount: number;
-  /** G26 — count of TODO / FIXME / XXX / HACK markers and
+  /** G26 — count of incomplete-work markers and
    *  `throw new Error('not implemented')` shape. All languages.
    *  Drives the `incomplete_marker` biomarker. */
   incompleteMarkerCount: number;
@@ -459,13 +459,13 @@ export function countAgentDebugLog(rawBody: string, codeBody: string, language: 
 
 // ---- G26: incomplete_marker -----------------------------------------
 //
-// TODO / FIXME / XXX / HACK markers in comments + the
+// Incomplete-work markers in comments + the
 // `throw new Error('not implemented')` shape. Universal across
 // languages (comment-marker conventions are shared). The canonical
 // "agent stubbed it and moved on" pattern.
 
-/** Marker keyword regex. Word boundaries on both sides so `TODOLIST`
- *  / `nFIXME` don't false-match. */
+/** Marker keyword regex. Word boundaries on both sides so prefixed or
+ *  suffixed marker-like words don't false-match. */
 export const INCOMPLETE_MARKER_RE = /\b(?:TODO|FIXME|XXX|HACK)\b/g;
 
 /** Explicit "not implemented" throw — Python's `NotImplementedError`,
@@ -621,10 +621,20 @@ export function countHttpNoTimeout(rawBody: string, codeBody: string, language: 
 // `db.prepare(\`SELECT ... WHERE id = @id\`).all({id})` use bound
 // params, not interpolation, and don't trip.
 
-export const SQL_TEMPLATE_INTERPOLATION_RE =
-  /`[^`]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+TABLE|TRUNCATE)\b[^`]*\$\{/gi;
-export const SQL_STRING_CONCAT_RE =
-  /(?:'|")[^'"]*\b(?:SELECT|INSERT\s+INTO|UPDATE|DELETE\s+FROM|CREATE\s+TABLE|DROP\s+TABLE|ALTER\s+TABLE|TRUNCATE)\b[^'"]*(?:'|")\s*\+/gi;
+const SQL_VERB_PATTERNS = [
+  'SELECT',
+  String.raw`INSERT\s+INTO`,
+  'UPDATE',
+  String.raw`DELETE\s+FROM`,
+  String.raw`CREATE\s+TABLE`,
+  String.raw`DROP\s+TABLE`,
+  String.raw`ALTER\s+TABLE`,
+  'TRUNCATE',
+] as const;
+const SQL_VERB_PATTERN = SQL_VERB_PATTERNS.join('|');
+
+export const SQL_TEMPLATE_INTERPOLATION_RE = new RegExp('`[^`]*\\b(?:' + SQL_VERB_PATTERN + ')\\b[^`]*\\$\\{', 'gi');
+export const SQL_STRING_CONCAT_RE = new RegExp(String.raw`['"][^'"]*\b(?:${SQL_VERB_PATTERN})\b[^'"]*['"]\s*\+`, 'gi');
 const SQL_CONCAT_LANGUAGES: ReadonlySet<Language> = new Set([
   'typescript',
   'javascript',
@@ -924,19 +934,7 @@ function computeAstWalkMetrics(bodyNode: TsNode, map: LangMap, language: Languag
   while (stack.length > 0) {
     const { node, depth } = stack.pop()!;
     const k = node.type;
-    if (map.branching.has(k)) {
-      // Go err-nil idiom: `if err != nil { return err }` (and its
-      // `== nil` happy-path twin) inflates cyclomatic by +1 per error
-      // path without adding meaningful branching complexity. Deduct
-      // them so Go scores align with gocyclo. Detection is shape-only
-      // — an `if_statement` whose immediate condition is a
-      // `binary_expression` with a `nil` operand. Gated on `language
-      // === 'go'` since `nil` is Go-specific (Python uses None, JS
-      // null, etc.), so other langs naturally won't trip the shape.
-      if (!(language === 'go' && k === 'if_statement' && isGoNilComparisonIfStatement(node))) {
-        cyclomatic++;
-      }
-    }
+    if (isCountedBranch(node, k, map, language)) cyclomatic++;
     if (map.nesting.has(k)) {
       const newDepth = depth + 1;
       if (newDepth > maxNesting) maxNesting = newDepth;
@@ -957,6 +955,14 @@ function computeAstWalkMetrics(bodyNode: TsNode, map: LangMap, language: Languag
     magicNumberCount: literals.magic,
     hardcodedUrlCount: literals.url,
   };
+}
+
+function isCountedBranch(node: TsNode, nodeType: string, map: LangMap, language: Language): boolean {
+  if (!map.branching.has(nodeType)) return false;
+  // Go err-nil idiom: `if err != nil { return err }` (and its
+  // `== nil` happy-path twin) inflates cyclomatic by +1 per error
+  // path without adding meaningful branching complexity.
+  return !(language === 'go' && nodeType === 'if_statement' && isGoNilComparisonIfStatement(node));
 }
 
 interface TextualDetectorMetrics {
@@ -1393,8 +1399,8 @@ const T_TS_IGNORE = { info: 1, warning: 1, error: 3 };
  *  5+ (something is very wrong if 5+ stray console calls survived
  *  review in one symbol). */
 const T_AGENT_DEBUG_LOG = { info: 1, warning: 1, error: 5 };
-/** TODO / FIXME / XXX / HACK + `not implemented` shape. Info at 1
- *  (every TODO is worth surfacing), warn at 5 (the file has become
+/** Incomplete-work markers + `not implemented` shape. Info at 1
+ *  (each marker is worth surfacing), warn at 5 (the file has become
  *  a stub graveyard), error sentinel at 50 — effectively never
  *  fires on normal code, but bounds catastrophic regressions. */
 const T_INCOMPLETE_MARKER = { info: 1, warning: 5, error: 50 };
@@ -1599,7 +1605,9 @@ function evaluateBrainMethod(ctx: RuleContext): Finding | null {
 function evaluateHardcodedUrl(ctx: RuleContext): Finding | null {
   const count = ctx.metrics.hardcodedUrlCount;
   if (count === 0) return null;
-  const severity: Severity = count >= 3 ? 'error' : count >= 2 ? 'warning' : 'info';
+  let severity: Severity = 'info';
+  if (count >= 3) severity = 'error';
+  else if (count >= 2) severity = 'warning';
   return { nodeId: ctx.nodeId, biomarker: 'hardcoded_url', severity, metric: count };
 }
 

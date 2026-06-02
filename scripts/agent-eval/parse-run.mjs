@@ -11,9 +11,9 @@
 //   - a `--json <path>` sidecar emit so aggregate.mjs can take medians
 //
 // Usage: node parse-run.mjs <run.jsonl> [--json <out.json>] [--meta k=v,k=v]
-import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'fs';
-import { join } from 'path';
-import { homedir } from 'os';
+import { readFileSync, writeFileSync, readdirSync, statSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 const args = process.argv.slice(2);
 const file = args[0];
@@ -44,7 +44,7 @@ const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
 // `Agent` in others (2.1.156 uses `Agent`) — count both.
 const SUBAGENT_TOOLS = new Set(['Task', 'Agent']);
 
-const calls = []; // { id, name, label, outBytes, subagent }
+const calls = [];
 let result = null;
 let initTools = null;
 let errored = false;
@@ -88,7 +88,9 @@ for (const line of lines) {
     for (const b of ev.message.content) {
       if (b.type !== 'tool_result') continue;
       const c = b.content;
-      const txt = typeof c === 'string' ? c : Array.isArray(c) ? c.map((x) => x?.text || '').join('') : '';
+      let txt = '';
+      if (typeof c === 'string') txt = c;
+      else if (Array.isArray(c)) txt = c.map((x) => x?.text || '').join('');
       const call = calls.find((k) => k.id === b.tool_use_id);
       if (call) call.outBytes = txt.length;
     }
@@ -130,6 +132,44 @@ for (const line of lines) {
 // counter is kept for the informational "the sub-agent did N calls" line.
 const isCgName = (n) => /cartograph/.test(n);
 
+function parseJsonLine(line) {
+  if (!line) return null;
+  try {
+    return JSON.parse(line);
+  } catch {
+    return null;
+  }
+}
+
+function contentBytes(content) {
+  if (typeof content === 'string') return content.length;
+  if (Array.isArray(content)) return content.reduce((a, x) => a + (x?.text?.length || 0), 0);
+  return 0;
+}
+
+function tallyToolUseBlock(block, acc, mainIds) {
+  const cg = isCgName(block.name);
+  const rd = block.name === 'Read';
+  const gp = block.name === 'Grep' || block.name === 'Glob';
+  acc.calls++;
+  if (cg) acc.cgCalls++;
+  else if (rd) acc.readCalls++;
+  else if (gp) acc.grepCalls++;
+  if (mainIds.has(block.id)) return;
+  acc.distinctCalls++;
+  if (cg) acc.distinctCgCalls++;
+  else if (rd) acc.distinctReadCalls++;
+  else if (gp) acc.distinctGrepCalls++;
+}
+
+function tallyTranscriptBlock(block, acc, mainIds) {
+  if (block.type === 'tool_use') {
+    tallyToolUseBlock(block, acc, mainIds);
+  } else if (block.type === 'tool_result') {
+    acc.outBytes += contentBytes(block.content);
+  }
+}
+
 /**
  * Tally a single transcript's tool_use names + tool_result bytes into `acc`.
  * `mainIds` is the set of tool_use ids already seen in the main stream; calls
@@ -138,35 +178,12 @@ const isCgName = (n) => /cartograph/.test(n);
  */
 function tallyTranscript(file, acc, mainIds) {
   for (const line of readFileSync(file, 'utf8').split('\n')) {
-    if (!line) continue;
-    let ev;
-    try {
-      ev = JSON.parse(line);
-    } catch {
-      continue;
-    }
+    const ev = parseJsonLine(line);
+    if (!ev) continue;
     const content = ev.message?.content;
     if (!Array.isArray(content)) continue;
     for (const b of content) {
-      if (b.type === 'tool_use') {
-        const cg = isCgName(b.name);
-        const rd = b.name === 'Read';
-        const gp = b.name === 'Grep' || b.name === 'Glob';
-        acc.calls++;
-        if (cg) acc.cgCalls++;
-        else if (rd) acc.readCalls++;
-        else if (gp) acc.grepCalls++;
-        if (!mainIds.has(b.id)) {
-          acc.distinctCalls++;
-          if (cg) acc.distinctCgCalls++;
-          else if (rd) acc.distinctReadCalls++;
-          else if (gp) acc.distinctGrepCalls++;
-        }
-      } else if (b.type === 'tool_result') {
-        const c = b.content;
-        acc.outBytes +=
-          typeof c === 'string' ? c.length : Array.isArray(c) ? c.reduce((a, x) => a + (x?.text?.length || 0), 0) : 0;
-      }
+      tallyTranscriptBlock(b, acc, mainIds);
     }
   }
 }
@@ -310,7 +327,9 @@ const metrics = {
 };
 
 // --- human summary ---
-console.log(`\n=== ${metrics.file}${meta.arm ? ` [${meta.arm}]` : ''}${meta.run ? ` run${meta.run}` : ''} ===`);
+const armSuffix = meta.arm ? ` [${meta.arm}]` : '';
+const runSuffix = meta.run ? ` run${meta.run}` : '';
+console.log(`\n=== ${metrics.file}${armSuffix}${runSuffix} ===`);
 console.log(`cartograph tools exposed: ${metrics.cartographToolsExposed ?? '?'}`);
 if (rateLimited) console.log('  ⚠ RATE-LIMITED / usage signal in result — treat as invalid, retry');
 if (errored) console.log(`  ⚠ result subtype: ${metrics.subtype}`);
@@ -335,7 +354,8 @@ console.log(
   `  out bytes: cg=${kb(metrics.cgOutBytes)} read=${kb(metrics.readOutBytes)} grep=${kb(metrics.grepOutBytes)} total=${kb(metrics.totalOutBytes)}`,
 );
 calls.forEach((c, i) => {
-  console.log(`  ${i + 1}. ${c.name}${c.label}${c.outBytes ? `  (${kb(c.outBytes)})` : ''}`);
+  const outBytesSuffix = c.outBytes ? `  (${kb(c.outBytes)})` : '';
+  console.log(`  ${i + 1}. ${c.name}${c.label}${outBytesSuffix}`);
 });
 if (result) {
   console.log(`\nResult: ${result.subtype} | duration ${fmtSec(result.duration_ms)} | turns ${result.num_turns}`);

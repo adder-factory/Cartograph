@@ -31,6 +31,8 @@ import { getUnresolvedReferences, insertUnresolvedRefsBatch } from '../src/db/qu
 import { getAllNodes, getNodesByKind, type QueryBuilder } from '../src/db/queries.js';
 import { upsertFile } from '../src/db/queries-files.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 /**
  * Insert a `files` row so subsequent `nodes` inserts referencing
  * `file_path` satisfy the FK. Production code always upserts a file
@@ -283,7 +285,7 @@ export function funcC(): void { console.log('c'); }
     const funcB = functions.find((n) => n.name === 'funcB');
 
     if (!funcB) {
-      cg.destroy();
+      cg.close();
       return;
     }
 
@@ -297,7 +299,7 @@ export function funcC(): void { console.log('c'); }
     expect(subgraph.nodes.size).toBeGreaterThanOrEqual(2);
     expect(subgraph.nodes.has(funcB.id)).toBe(true);
 
-    cg.destroy();
+    cg.close();
   });
 });
 
@@ -392,7 +394,7 @@ describe('Database Layer Improvements', () => {
 
     const refs = getUnresolvedReferences(queries);
     expect(refs).toHaveLength(2);
-    expect(refs.map((r) => r.referenceName).sort()).toEqual(['helperA', 'helperB']);
+    expect(refs.map((r) => r.referenceName).sort(byString)).toEqual(['helperA', 'helperB']);
 
     // Verify filePath and language are persisted
     expect(refs[0]?.filePath).toBe('test.ts');
@@ -429,7 +431,7 @@ describe('Database Layer Improvements', () => {
 
     const allNodes = getAllNodes(queries);
     expect(allNodes).toHaveLength(3);
-    expect(allNodes.map((n) => n.name).sort()).toEqual(['func0', 'func1', 'func2']);
+    expect(allNodes.map((n) => n.name).sort(byString)).toEqual(['func0', 'func1', 'func2']);
 
     db.close();
   });
@@ -510,7 +512,7 @@ export function otherFunc(): void { myFunc(); }
     // Should complete without error
     expect(result.stats.total).toBeGreaterThanOrEqual(0);
 
-    cg.destroy();
+    cg.close();
   });
 });
 
@@ -591,7 +593,7 @@ export function getValueFromCache(): number { return 2; }
       // Should not have a disambiguation note for single exact match
       expect(match!.note).toBe('');
 
-      cg.destroy();
+      cg.close();
       cleanupTempDir(tmpDir);
     });
 
@@ -628,7 +630,7 @@ export function handle(): void {}
       // Should have a disambiguation note
       expect(match!.note).toContain('2 symbols named "handle"');
 
-      cg.destroy();
+      cg.close();
       cleanupTempDir(tmpDir);
     });
 
@@ -649,7 +651,7 @@ export function handle(): void {}
       const match = findSymbol(cg, 'nonExistentSymbol');
       expect(match).toBeNull();
 
-      cg.destroy();
+      cg.close();
       cleanupTempDir(tmpDir);
     });
   });

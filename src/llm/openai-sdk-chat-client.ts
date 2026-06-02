@@ -139,30 +139,14 @@ export class OpenAiSdkChatBackend implements ChatBackend {
     if (messages.length === 0) throw new LlmEndpointError('chat: empty messages array');
     if (options.signal?.aborted) throw new LlmEndpointError('chat aborted');
 
-    const params: OpenAI.Chat.ChatCompletionCreateParamsNonStreaming = {
-      model: this.cfg.model,
-      messages: mapMessages(messages),
-      ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
-      ...(options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens }),
-      ...(options.responseSchema ? { response_format: buildResponseFormat(options.responseSchema) } : {}),
-    };
+    const params = buildChatCompletionParams(this.cfg.model, messages, options);
 
     const t0 = Date.now();
     try {
       const res = await this.client.chat.completions.create(params, options.signal ? { signal: options.signal } : {});
-      const text = res.choices[0]?.message?.content ?? '';
-      const durationMs = Date.now() - t0;
-      const out: ChatResult = { text, durationMs };
-      if (typeof res.usage?.prompt_tokens === 'number') out.promptTokens = res.usage.prompt_tokens;
-      if (typeof res.usage?.completion_tokens === 'number') out.completionTokens = res.usage.completion_tokens;
-      return out;
+      return buildChatResult(res, Date.now() - t0);
     } catch (err) {
-      if (err instanceof OpenAI.APIError) {
-        throw new LlmEndpointError(
-          `chat endpoint returned ${err.status ?? 'connection error'}: ${err.message}`,
-          typeof err.status === 'number' ? err.status : undefined,
-        );
-      }
+      if (err instanceof OpenAI.APIError) throw toChatEndpointError(err);
       if (err instanceof LlmEndpointError) throw err;
       throw err;
     }
@@ -208,4 +192,38 @@ export class OpenAiSdkChatBackend implements ChatBackend {
   reachabilityError(): string | null {
     return this.lastReachabilityError;
   }
+}
+
+function buildChatCompletionParams(
+  model: string,
+  messages: ChatMessage[],
+  options: ChatOptions,
+): OpenAI.Chat.ChatCompletionCreateParamsNonStreaming {
+  return {
+    model,
+    messages: mapMessages(messages),
+    ...(options.temperature === undefined ? {} : { temperature: options.temperature }),
+    ...(options.maxTokens === undefined ? {} : { max_tokens: options.maxTokens }),
+    ...(options.responseSchema ? { response_format: buildResponseFormat(options.responseSchema) } : {}),
+  };
+}
+
+function buildChatResult(
+  res: OpenAI.Chat.ChatCompletion,
+  durationMs: number,
+): ChatResult {
+  const text = res.choices[0]?.message?.content ?? '';
+  const out: ChatResult = { text, durationMs };
+  if (typeof res.usage?.prompt_tokens === 'number') out.promptTokens = res.usage.prompt_tokens;
+  if (typeof res.usage?.completion_tokens === 'number') out.completionTokens = res.usage.completion_tokens;
+  return out;
+}
+
+function toChatEndpointError(err: Error & { status?: unknown }): LlmEndpointError {
+  const statusLabel =
+    typeof err.status === 'number' || typeof err.status === 'string' ? err.status : 'connection error';
+  return new LlmEndpointError(
+    `chat endpoint returned ${statusLabel}: ${err.message}`,
+    typeof err.status === 'number' ? err.status : undefined,
+  );
 }

@@ -24,7 +24,7 @@
  * this against a live DB with the MCP attached is safe — the
  * write will queue behind any in-flight reader.
  */
-import * as path from 'path';
+import * as path from 'node:path';
 import { createDatabase } from '../../src/db/sqlite-adapter.js';
 
 const dbPath = path.resolve(process.argv[2] ?? path.join('.cartograph', 'cartograph.db'));

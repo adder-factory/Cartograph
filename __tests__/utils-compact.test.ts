@@ -10,18 +10,20 @@
 import { describe, it, expect } from 'vitest';
 import { compact, isDiagnosticPath } from '../src/utils.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 describe('compact()', () => {
   it('passes through an all-required object unchanged in shape', () => {
     const out = compact({ a: 1, b: 'x', c: true });
     expect(out).toEqual({ a: 1, b: 'x', c: true });
     // Same key set — nothing dropped.
-    expect(Object.keys(out).sort()).toEqual(['a', 'b', 'c']);
+    expect(Object.keys(out).sort(byName)).toEqual(['a', 'b', 'c']);
   });
 
   it('drops keys whose value is undefined', () => {
     const out = compact({ a: 1, b: undefined, c: 'x', d: undefined });
     expect(out).toEqual({ a: 1, c: 'x' });
-    expect(Object.keys(out).sort()).toEqual(['a', 'c']);
+    expect(Object.keys(out).sort(byName)).toEqual(['a', 'c']);
     expect('b' in out).toBe(false);
     expect('d' in out).toBe(false);
   });
@@ -29,12 +31,12 @@ describe('compact()', () => {
   it('preserves null, 0, empty string, and false (only undefined is stripped)', () => {
     const out = compact({ a: null, b: 0, c: '', d: false });
     expect(out).toEqual({ a: null, b: 0, c: '', d: false });
-    expect(Object.keys(out).sort()).toEqual(['a', 'b', 'c', 'd']);
+    expect(Object.keys(out).sort(byName)).toEqual(['a', 'b', 'c', 'd']);
   });
 
   it('does not iterate inherited prototype properties', () => {
     class Box {
-      static name = 'Box';
+      static readonly name = 'Box';
       x = 1;
       get y() {
         return 2;

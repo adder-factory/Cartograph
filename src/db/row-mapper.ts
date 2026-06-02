@@ -93,7 +93,7 @@ function readField<Row>(spec: FieldSpec<unknown, Row>, row: Row): unknown {
   // silently false-read every boolean column if a future call site
   // enables safeIntegers — guard with both shapes.
   if ('bool01' in obj) return raw === 1 || raw === 1n;
-  if ('nullable' in obj) return raw === null ? undefined : raw;
+  if ('nullable' in obj) return raw ?? undefined;
   if ('json' in obj) {
     return raw == null ? obj['fallback'] : safeJsonParse(raw as string, obj['fallback']);
   }

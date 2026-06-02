@@ -222,7 +222,7 @@ export interface CompareResult {
    * symbol-level entries. Formatter emits one informational line when > 0;
    * omits the line entirely when 0 to keep clean diffs noise-free.
    *
-   * @todo Surface per-file detail via `--include-skipped` expansion flag.
+   * Future: surface per-file detail via `--include-skipped` expansion flag.
    */
   filesSkipped: number;
   totals: {

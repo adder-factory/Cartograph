@@ -42,6 +42,7 @@ import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { errMsg } from '../errors.js';
 import { program } from './_cli-core.js';
+export { program } from './_cli-core.js';
 
 // Command groups — each module is side-effecting: importing it
 // registers that group's commands on `program` / a family parent.
@@ -76,12 +77,8 @@ process.on('unhandledRejection', (reason) => {
   process.stderr.write(`[Cartograph] Unhandled rejection: ${String(reason)}\n`);
 });
 
-// Expose the configured commander program so structural tests
-// (e.g. `__tests__/cli-mcp-alignment.test.ts`) can introspect the
-// registered command tree without spawning the CLI. The export is
-// metadata-only — calling sites still go through `program.parse()`
-// at module bottom.
-export { program };
+// The configured commander program is re-exported above so structural
+// tests can introspect the command tree without spawning the CLI.
 
 // Hand off the no-arg path to the interactive installer; otherwise
 // dispatch the CLI normally. Done at the bottom so all command
@@ -116,12 +113,13 @@ function isEntryPoint(): boolean {
 
 if (isEntryPoint()) {
   if (process.argv.length === 2) {
-    import('../installer/index.js')
-      .then(({ runInstaller }) => runInstaller())
-      .catch((err) => {
-        process.stderr.write(`Installation failed: ${errMsg(err)}\n`);
-        process.exit(1);
-      });
+    try {
+      const { runInstaller } = await import('../installer/index.js');
+      await runInstaller();
+    } catch (err) {
+      process.stderr.write(`Installation failed: ${errMsg(err)}\n`);
+      process.exit(1);
+    }
   } else {
     program.parse();
   }

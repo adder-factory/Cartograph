@@ -245,8 +245,14 @@ function looksLikeObjc(source: string): boolean {
 
 function looksLikeCpp(source: string): boolean {
   const sample = source.substring(0, 8192);
-  return /\bnamespace\b|\bclass\s+\w+\s*[:{]|\btemplate\s*<|\b(?:public|private|protected)\s*:|\bvirtual\b|\busing\s+(?:namespace\b|\w+\s*=)/.test(
-    sample,
+  return (
+    /\bnamespace\b/.test(sample) ||
+    /\bclass\s+\w+\s*[:{]/.test(sample) ||
+    /\btemplate\s*</.test(sample) ||
+    /\b(?:public|private|protected)\s*:/.test(sample) ||
+    /\bvirtual\b/.test(sample) ||
+    /\busing\s+namespace\b/.test(sample) ||
+    /\busing\s+\w+\s*=/.test(sample)
   );
 }
 

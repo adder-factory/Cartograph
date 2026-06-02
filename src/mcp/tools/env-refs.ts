@@ -160,8 +160,9 @@ function renderEnvKeySites(opts: RenderEnvKeySitesArgs): ToolResult {
   const shown = sites.slice(0, limit);
   const { prod: prodCount, test: testCount } = countByTestPath(sites, isFixtureOrTest);
   const truncated = sites.length > shown.length;
+  const showingSuffix = truncated ? `; showing first ${shown.length}` : '';
   const lines: string[] = [
-    `## Reads of \`${key}\` (${sites.length} site${sites.length === 1 ? '' : 's'} — ${prodCount} prod / ${testCount} test${truncated ? `; showing first ${shown.length}` : ''})`,
+    `## Reads of \`${key}\` (${sites.length} site${sites.length === 1 ? '' : 's'} — ${prodCount} prod / ${testCount} test${showingSuffix})`,
     '',
     ...shown.map((s) => formatRefSiteLine(s, undefined, isFixtureOrTest)),
   ];

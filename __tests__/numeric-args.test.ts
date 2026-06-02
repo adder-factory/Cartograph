@@ -39,7 +39,7 @@ describe('numArg', () => {
   });
 
   it('treats NaN and infinities as the missing case', () => {
-    expect(numArg(NaN, 7)).toBe(7);
+    expect(numArg(Number.NaN, 7)).toBe(7);
     expect(numArg(Infinity, 7)).toBe(7);
     expect(numArg(-Infinity, 7)).toBe(7);
   });
@@ -51,7 +51,7 @@ describe('numArg', () => {
 
 describe('clamp NaN-safety', () => {
   it('returns min when value is NaN', () => {
-    expect(clamp(NaN, 1, 10)).toBe(1);
+    expect(clamp(Number.NaN, 1, 10)).toBe(1);
   });
 
   it('returns min when value is Infinity (non-finite)', () => {

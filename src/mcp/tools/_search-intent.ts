@@ -164,7 +164,11 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
  * Helper to escape LIKE special characters.
  */
 function escapeLike(s: string): string {
-  return s.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
+  const backslash = String.fromCodePoint(92);
+  return s
+    .replaceAll(backslash, backslash + backslash)
+    .replaceAll('_', backslash + '_')
+    .replaceAll('%', backslash + '%');
 }
 
 /**
@@ -217,7 +221,7 @@ function buildSymbolFilterClause(
  */
 function buildTestNameFilterClause(pathFilter: string | undefined): [string, unknown[]] {
   if (!pathFilter) return ['', []];
-  const clause = ` AND tn.file_path LIKE ? ESCAPE '\\'`;
+  const clause = String.raw` AND tn.file_path LIKE ? ESCAPE '\'`;
   const params: unknown[] = [`${escapeLike(pathFilter)}%`];
   return [clause, params];
 }
@@ -360,40 +364,17 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   const [orExpr, andExpr] = buildMatchExpressions(query);
 
   try {
-    if (coverage.summaryRows > 0) {
-      summaryHits = db.prepare(queryDefs.summarySql).all(orExpr, ...symFilterParams, overFetch) as SymbolIntentRow[];
-    }
-    if (coverage.docstringRows > 0) {
-      docstringHits = db
-        .prepare(queryDefs.docstringSql)
-        .all(orExpr, ...symFilterParams, overFetch) as SymbolIntentRow[];
-    }
-    const testNamesAreIndexed = coverage.testNameRows > 0;
-    const testNamesAreUnfiltered = !kind && !languageFilter;
-    if (testNamesAreIndexed && testNamesAreUnfiltered) {
-      testNameHits = db
-        .prepare(queryDefs.testNameSql)
-        .all(orExpr, ...queryDefs.testNameFilterParams, limit) as TestNameIntentRow[];
-    }
-
-    // AND pass — collect node IDs where every token is present.
-    // Only run when there are ≥2 tokens (andExpr is non-null) and at least
-    // one symbol corpus has rows (test names get no AND boost — they are
-    // already a distinct block and the boost only applies to merged symbols).
-    if (andExpr !== null && (coverage.summaryRows > 0 || coverage.docstringRows > 0)) {
-      if (coverage.summaryRows > 0) {
-        const andSummaryHits = db
-          .prepare(queryDefs.summarySql)
-          .all(andExpr, ...symFilterParams, overFetch) as SymbolIntentRow[];
-        for (const row of andSummaryHits) andConfirmedIds.add(row.id);
-      }
-      if (coverage.docstringRows > 0) {
-        const andDocstringHits = db
-          .prepare(queryDefs.docstringSql)
-          .all(andExpr, ...symFilterParams, overFetch) as SymbolIntentRow[];
-        for (const row of andDocstringHits) andConfirmedIds.add(row.id);
-      }
-    }
+    summaryHits = runSymbolIntentQuery(db, queryDefs.summarySql, orExpr, symFilterParams, overFetch, coverage.summaryRows);
+    docstringHits = runSymbolIntentQuery(
+      db,
+      queryDefs.docstringSql,
+      orExpr,
+      symFilterParams,
+      overFetch,
+      coverage.docstringRows,
+    );
+    testNameHits = runTestNameIntentQuery({ db, queryDefs, orExpr, limit, coverage, languageFilter, kind });
+    collectAndConfirmedIds({ db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out: andConfirmedIds });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return err(
@@ -402,6 +383,58 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   }
 
   return { summaryHits, docstringHits, testNameHits, andConfirmedIds };
+}
+
+function runSymbolIntentQuery(
+  db: any,
+  sql: string,
+  expr: string,
+  params: ReadonlyArray<unknown>,
+  limit: number,
+  rowCount: number,
+): SymbolIntentRow[] {
+  if (rowCount <= 0) return [];
+  return db.prepare(sql).all(expr, ...params, limit) as SymbolIntentRow[];
+}
+
+function runTestNameIntentQuery(args: {
+  db: any;
+  queryDefs: QueryDefs;
+  orExpr: string;
+  limit: number;
+  coverage: IndexCoverageMetrics;
+  languageFilter: string | undefined;
+  kind: string | undefined;
+}): TestNameIntentRow[] {
+  const { db, queryDefs, orExpr, limit, coverage, languageFilter, kind } = args;
+  if (coverage.testNameRows <= 0 || kind || languageFilter) return [];
+  return db.prepare(queryDefs.testNameSql).all(orExpr, ...queryDefs.testNameFilterParams, limit) as TestNameIntentRow[];
+}
+
+function collectAndConfirmedIds(args: {
+  db: any;
+  queryDefs: QueryDefs;
+  andExpr: string | null;
+  symFilterParams: ReadonlyArray<unknown>;
+  overFetch: number;
+  coverage: IndexCoverageMetrics;
+  out: Set<string>;
+}): void {
+  const { db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out } = args;
+  if (andExpr === null || (coverage.summaryRows <= 0 && coverage.docstringRows <= 0)) return;
+  for (const row of runSymbolIntentQuery(db, queryDefs.summarySql, andExpr, symFilterParams, overFetch, coverage.summaryRows)) {
+    out.add(row.id);
+  }
+  for (const row of runSymbolIntentQuery(
+    db,
+    queryDefs.docstringSql,
+    andExpr,
+    symFilterParams,
+    overFetch,
+    coverage.docstringRows,
+  )) {
+    out.add(row.id);
+  }
 }
 
 /**

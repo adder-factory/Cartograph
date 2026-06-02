@@ -124,7 +124,9 @@ interface ImpactRecOpts {
  * their own methods/properties are visited.
  */
 function bfsEdgePriority(e: Edge): number {
-  return e.kind === 'contains' ? 0 : e.kind === 'calls' ? 1 : 2;
+  if (e.kind === 'contains') return 0;
+  if (e.kind === 'calls') return 1;
+  return 2;
 }
 
 /** Return the endpoint of an edge that is NOT the given node id —

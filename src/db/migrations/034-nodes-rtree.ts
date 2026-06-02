@@ -54,8 +54,8 @@ export const MIGRATION: MigrationModule = {
     // minimal `nodes (id TEXT PRIMARY KEY)` fixtures without start_line /
     // end_line don't fail. On real production DBs nodes always has these
     // columns (present since the initial schema v1).
-    const cols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-    if (cols.includes('start_line') && cols.includes('end_line')) {
+    const cols = new Set((db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name));
+    if (cols.has('start_line') && cols.has('end_line')) {
       db.exec(`
         INSERT OR REPLACE INTO nodes_rtree (id, start_line, end_line)
           SELECT rowid, start_line, end_line FROM nodes;

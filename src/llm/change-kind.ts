@@ -156,7 +156,7 @@ export async function classifyChangeKind(args: ClassifyChangeKindArgs): Promise<
     }
     return {
       kind: label,
-      score: 1.0,
+      score: 1,
       reason: `chat ("${label}")`,
     };
   } catch (err) {

@@ -86,7 +86,7 @@ describe('mapRow()', () => {
 
   it('applies an arbitrary cast() function', () => {
     const schema: Schema<{ count: number }, { count: number | null }> = {
-      count: { col: 'count', cast: (v) => (v as number | null) ?? -1 },
+      count: { col: 'count', cast: (v) => v ?? -1 },
     };
     expect(mapRow({ count: 5 }, schema)).toEqual({ count: 5 });
     expect(mapRow({ count: null }, schema)).toEqual({ count: -1 });

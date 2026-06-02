@@ -3,7 +3,7 @@ import { projectPathField } from './_common-fields.js';
 import type Cartograph from '../../index.js';
 import { getSymbolRoles } from '../../db/queries-roles.js';
 import { getAllDirectorySummaries, getDirectorySummary } from '../../db/queries-directory-summaries.js';
-import { getSymbolSummaries } from '../../db/queries-summaries.js';
+import { countSymbolSummaries } from '../../db/queries-summaries.js';
 import { getAllFiles } from '../../db/queries-files.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { textResult } from './shared.js';
@@ -92,18 +92,47 @@ function accumulateEdgeCounts(args: AccumulateEdgeCountsArgs): {
   let inboundEdges = 0;
   for (const f of dirFiles) {
     const deps = cg.internals.graphManager.getFileDependencies(f.path, indexedFiles);
-    for (const depPath of deps) {
-      if (depPath === f.path) continue;
-      if (depPath.startsWith(dirPrefix) || depPath === dirPath) intraDirEdges++;
-      else outboundEdges++;
-    }
+    const depCounts = countDependencyEdges(f.path, deps, dirPath, dirPrefix);
+    intraDirEdges += depCounts.intraDirEdges;
+    outboundEdges += depCounts.outboundEdges;
+
     const dependents = cg.internals.graphManager.getFileDependents(f.path);
-    for (const dependentPath of dependents) {
-      if (dependentPath === f.path) continue;
-      if (!dependentPath.startsWith(dirPrefix) && dependentPath !== dirPath) inboundEdges++;
-    }
+    inboundEdges += countInboundEdges(f.path, dependents, dirPath, dirPrefix);
   }
   return { intraDirEdges, outboundEdges, inboundEdges };
+}
+
+function isPathInDirectory(path: string, dirPath: string, dirPrefix: string): boolean {
+  return path.startsWith(dirPrefix) || path === dirPath;
+}
+
+function countDependencyEdges(
+  filePath: string,
+  deps: ReadonlyArray<string>,
+  dirPath: string,
+  dirPrefix: string,
+): { intraDirEdges: number; outboundEdges: number } {
+  let intraDirEdges = 0;
+  let outboundEdges = 0;
+  for (const depPath of deps) {
+    if (depPath === filePath) continue;
+    if (isPathInDirectory(depPath, dirPath, dirPrefix)) intraDirEdges++;
+    else outboundEdges++;
+  }
+  return { intraDirEdges, outboundEdges };
+}
+
+function countInboundEdges(
+  filePath: string,
+  dependents: ReadonlyArray<string>,
+  dirPath: string,
+  dirPrefix: string,
+): number {
+  let inboundEdges = 0;
+  for (const dependentPath of dependents) {
+    if (dependentPath !== filePath && !isPathInDirectory(dependentPath, dirPath, dirPrefix)) inboundEdges++;
+  }
+  return inboundEdges;
 }
 
 /**
@@ -323,8 +352,7 @@ function buildModuleStatsReport(cg: ReturnType<ToolCtx['getCartograph']>, dirPat
   const rolesMap = allNodeIds.length > 0 ? getSymbolRoles(cg.queries, allNodeIds) : new Map<string, string>();
   const roleCounts = buildRoleCounts(rolesMap);
 
-  const summariesMap = allNodeIds.length > 0 ? getSymbolSummaries(cg.queries, allNodeIds) : new Map<string, string>();
-  const summarisedHere = summariesMap.size;
+  const summarisedHere = allNodeIds.length > 0 ? countSymbolSummaries(cg.queries, allNodeIds) : 0;
   const totalSymbols = allNodeIds.length;
   const summary = getDirectorySummary(cg.queries, dirPath)?.summary ?? null;
 

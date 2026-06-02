@@ -35,7 +35,7 @@ describe('Stress-test follow-ups (2026-05-01 PM)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 

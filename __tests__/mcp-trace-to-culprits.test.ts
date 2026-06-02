@@ -89,7 +89,7 @@ main.processIncoming(...)
   });
 
   it('normalizes Windows backslash paths', () => {
-    const trace = `at fn (src\\server.ts:42:13)`;
+    const trace = String.raw`at fn (src\server.ts:42:13)`;
     const frames = parseTrace(trace);
     expect(frames[0]!.file).toBe('src/server.ts');
   });

@@ -106,29 +106,24 @@ const DECORATOR_TARGET_KINDS: ReadonlySet<string> = new Set([
 function findDecoratorTarget(n: SyntaxNode): SyntaxNode | null {
   for (const child of n.namedChildren) {
     if (!child) continue;
-    if (child.type === 'call_expression') {
-      const fn = getChildByField(child, 'function') ?? child.namedChild(0);
-      if (fn) return fn;
-    }
-    // Kotlin: `annotation > constructor_invocation > [user_type >
-    // type_identifier, value_arguments]`. The annotation's NAME is
-    // the type_identifier inside the user_type. Without this unwrap
-    // the Kotlin path silently fails to capture decorator names.
-    if (child.type === 'constructor_invocation') {
-      const userType = child.namedChildren.find((c) => c?.type === 'user_type');
-      const ident = userType?.namedChildren.find((c) => c?.type === 'type_identifier');
-      if (ident) return ident;
-    }
-    // Swift: `attribute > user_type > type_identifier` — the attribute
-    // name (`objc`, `objcMembers`, `nonobjc`, `IBAction`, …) is the
-    // type_identifier inside a bare `user_type` (no constructor_invocation
-    // wrapper, unlike Kotlin). Descend to it so `@objc` lands in
-    // `Node.decorators` for the Swift↔ObjC bridge resolver.
-    if (child.type === 'user_type') {
-      const ident = child.namedChildren.find((c) => c?.type === 'type_identifier');
-      if (ident) return ident;
-    }
+    const target = decoratorTargetFromChild(child);
+    if (target) return target;
     if (DECORATOR_TARGET_KINDS.has(child.type)) return child;
+  }
+  return null;
+}
+
+function decoratorTargetFromChild(child: SyntaxNode): SyntaxNode | null {
+  if (child.type === 'call_expression') {
+    return getChildByField(child, 'function') ?? child.namedChild(0);
+  }
+  if (child.type === 'constructor_invocation') {
+    return child.namedChildren
+      .find((c) => c?.type === 'user_type')
+      ?.namedChildren.find((c) => c?.type === 'type_identifier') ?? null;
+  }
+  if (child.type === 'user_type') {
+    return child.namedChildren.find((c) => c?.type === 'type_identifier') ?? null;
   }
   return null;
 }
@@ -333,7 +328,7 @@ function collectDecoratorArg(argRaw: SyntaxNode, source: string, buckets: Decora
   let arg = argRaw;
   if (argRaw.type === 'value_argument') {
     if (tryCollectKotlinNamedArg(argRaw, source, buckets.namedArgs)) return;
-    arg = argRaw.namedChildren.find((c) => c) ?? argRaw;
+    arg = argRaw.namedChildren.find(Boolean) ?? argRaw;
   }
   collectLiteralArg(arg, source, buckets);
 }
@@ -615,13 +610,7 @@ function buildObjcMessageSelector(node: SyntaxNode, source: string): string {
 function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string {
   const nameField = getChildByField(node, 'name');
   const objectField = getChildByField(node, 'object') || getChildByField(node, 'scope');
-  if (
-    nameField &&
-    objectField &&
-    (node.type === 'method_invocation' ||
-      node.type === 'member_call_expression' ||
-      node.type === 'scoped_call_expression')
-  ) {
+  if (isQualifiedInvocation(node, nameField, objectField)) {
     // F#64a (B11) — Java/Kotlin `this.field.method()` produces an
     // `object` field of type `field_access` whose first child is the
     // `this` literal and second child is the field identifier. The
@@ -633,12 +622,7 @@ function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string
     // the full receiver text — `this.x.y()` there is handled by the
     // METHOD_INVOCATION_SKIP_RECEIVERS check on the bare `this`
     // literal which `extractLeafReceiverName` already returns.
-    let receiverName = getNodeText(objectField, ext.source).replace(/^\$/, '');
-    if ((ext.language === 'java' || ext.language === 'kotlin') && objectField.type === 'field_access') {
-      const inner = unwrapJavaThisFieldAccess(objectField, ext.source);
-      if (inner !== null) receiverName = inner;
-    }
-    return tsQualifyCallReceiver(getNodeText(nameField, ext.source), receiverName, METHOD_INVOCATION_SKIP_RECEIVERS);
+    return resolveQualifiedInvocationName(ext, nameField!, objectField!);
   }
 
   // F#65 / F#67 / F#82a — Objective-C `message_expression` (`[obj a:1 b:2]`).
@@ -650,17 +634,7 @@ function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string
   // definition is `foo:`. Receivers `self` / `super` are skipped — same
   // convention as JS `this`.
   if (node.type === 'message_expression') {
-    const methodName = buildObjcMessageSelector(node, ext.source);
-    if (!methodName) return '';
-    const receiverField = getChildByField(node, 'receiver');
-    const OBJC_SKIP_RECEIVERS = new Set(['self', 'super']);
-    if (receiverField && receiverField.type !== 'message_expression') {
-      const receiverName = getNodeText(receiverField, ext.source);
-      if (receiverName && !OBJC_SKIP_RECEIVERS.has(receiverName)) {
-        return `${receiverName}.${methodName}`;
-      }
-    }
-    return methodName;
+    return resolveObjcMessageName(ext, node);
   }
 
   const func = getChildByField(node, 'function') || node.namedChild(0);
@@ -675,6 +649,47 @@ function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string
     return tsResolveMemberCallName(ext, func);
   }
   return getNodeText(func, ext.source);
+}
+
+function isQualifiedInvocation(
+  node: SyntaxNode,
+  nameField: SyntaxNode | null,
+  objectField: SyntaxNode | null,
+): boolean {
+  return (
+    !!nameField &&
+    !!objectField &&
+    (node.type === 'method_invocation' ||
+      node.type === 'member_call_expression' ||
+      node.type === 'scoped_call_expression')
+  );
+}
+
+function resolveQualifiedInvocationName(
+  ext: TreeSitterExtractor,
+  nameField: SyntaxNode,
+  objectField: SyntaxNode,
+): string {
+  let receiverName = getNodeText(objectField, ext.source).replace(/^\$/, '');
+  if ((ext.language === 'java' || ext.language === 'kotlin') && objectField.type === 'field_access') {
+    const inner = unwrapJavaThisFieldAccess(objectField, ext.source);
+    if (inner !== null) receiverName = inner;
+  }
+  return tsQualifyCallReceiver(getNodeText(nameField, ext.source), receiverName, METHOD_INVOCATION_SKIP_RECEIVERS);
+}
+
+function resolveObjcMessageName(ext: TreeSitterExtractor, node: SyntaxNode): string {
+  const methodName = buildObjcMessageSelector(node, ext.source);
+  if (!methodName) return '';
+  const receiverName = readObjcReceiverName(ext, node);
+  return receiverName ? `${receiverName}.${methodName}` : methodName;
+}
+
+function readObjcReceiverName(ext: TreeSitterExtractor, node: SyntaxNode): string | null {
+  const receiverField = getChildByField(node, 'receiver');
+  if (!receiverField || receiverField.type === 'message_expression') return null;
+  const receiverName = getNodeText(receiverField, ext.source);
+  return receiverName && receiverName !== 'self' && receiverName !== 'super' ? receiverName : null;
 }
 
 /**
@@ -922,21 +937,28 @@ export function tsExtractDecoratorsFor(ext: TreeSitterExtractor, declNode: Synta
   for (let k = ext.nodes.length - 1; k >= 0; k--) {
     const candidate = ext.nodes[k];
     if (candidate?.id === decoratedId) {
-      const existing = candidate.decorators;
-      candidate.decorators = existing && existing.length > 0 ? [...existing, ...names] : names;
-
-      // B9 — persist the per-decorator args. Drop the field entirely
-      // when every entry is null (no call-form decorators on this
-      // symbol) so the column stays NULL in the DB and we don't pay
-      // JSON-encode cost or storage on legacy `@Override`-only
-      // patterns. Compact representation: keep all non-null entries
-      // in source order; consumers index by `name` via `.find()`.
-      const compactArgs = argsByDecorator.filter((a): a is DecoratorArgsEntry => a !== null);
-      if (compactArgs.length > 0) {
-        const prior = candidate.decoratorArgs;
-        candidate.decoratorArgs = prior && prior.length > 0 ? [...prior, ...compactArgs] : compactArgs;
-      }
+      applyDecoratorMetadata(candidate, names, argsByDecorator);
       return;
     }
   }
+}
+
+function applyDecoratorMetadata(
+  candidate: { decorators?: string[]; decoratorArgs?: DecoratorArgsEntry[] },
+  names: string[],
+  argsByDecorator: Array<DecoratorArgsEntry | null>,
+): void {
+  const existing = candidate.decorators;
+  candidate.decorators = existing && existing.length > 0 ? [...existing, ...names] : names;
+
+  // B9 — persist the per-decorator args. Drop the field entirely
+  // when every entry is null (no call-form decorators on this
+  // symbol) so the column stays NULL in the DB and we don't pay
+  // JSON-encode cost or storage on legacy `@Override`-only
+  // patterns. Compact representation: keep all non-null entries
+  // in source order; consumers index by `name` via `.find()`.
+  const compactArgs = argsByDecorator.filter((a): a is DecoratorArgsEntry => a !== null);
+  if (compactArgs.length === 0) return;
+  const prior = candidate.decoratorArgs;
+  candidate.decoratorArgs = prior && prior.length > 0 ? [...prior, ...compactArgs] : compactArgs;
 }

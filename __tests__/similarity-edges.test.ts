@@ -1,9 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
-import { default as Cartograph } from '../src/index.js';
+import Cartograph from '../src/index.js';
 import { buildSimilarToEdges } from '../src/embeddings/similar-edges.js';
-import { upsertFile } from '../src/db/queries-files.js';
 
 describe('similarity edges', () => {
   let tempDir: string;
@@ -17,7 +16,7 @@ describe('similarity edges', () => {
   });
 
   afterEach(() => {
-    cg?.destroy();
+    cg?.close();
     rmSync(tempDir, { recursive: true, force: true });
   });
 

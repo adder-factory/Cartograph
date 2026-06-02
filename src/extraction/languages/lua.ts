@@ -102,14 +102,13 @@ const luaExtractor: LanguageExtractor = {
       return false;
     }
     if (node.type === 'variable_declaration') {
-      const handledFunctions = emitLuaLocalDecl(node, ctx);
+      emitLuaLocalDecl(node, ctx);
       // Return false — let the core recurse into the initializer so
       // calls / `require` nested in the RHS still produce edges.
       // For `function_definition` RHS, the body was already walked by
       // emitLuaLocalDecl via visitFunctionBody, and returning false
       // here won't re-emit a duplicate — the core won't dispatch on
       // `function_definition` because there's no matching functionType.
-      void handledFunctions;
       return false;
     }
     // Global (non-`local`) assignment: `name = function(...)`.

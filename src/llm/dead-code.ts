@@ -22,6 +22,10 @@ import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
 import { pathCategory, isFixturePath } from '../path-class.js';
 
+function zodFallback<T extends z.ZodType>(schema: T, value: z.output<T>): z.ZodCatch<T> {
+  return schema['catch'](value);
+}
+
 /** Kinds we'd flag as potentially dead. Skip data shapes (interfaces,
  *  types, enums) — those are usually used via type-positions the
  *  reference resolver doesn't track. */
@@ -277,20 +281,7 @@ export function findGraphCandidates(args: FindGraphCandidatesArgs): Node[] {
     const page = findOrphans(queries, pageSize, offset);
     if (page.length === 0) break;
     for (const node of page) {
-      if (!SUSPECT_KINDS.has(node.kind)) continue;
-      // A constructor is reached via `instantiates`, not `calls`, so
-      // it always looks orphaned — skip it; the class node carries the
-      // real liveness signal.
-      if (node.kind === 'method' && CONSTRUCTOR_METHOD_NAME_BY_LANGUAGE[node.language] === node.name) {
-        continue;
-      }
-      // Go conventions the resolver can't see: main / init / test-
-      // framework prefixes in _test.go / well-known interface methods.
-      // Skipped regardless of includeTests because the framework-
-      // dispatched cases are still live even when test files are in scope.
-      if (isGoConventionLive(node)) continue;
-      if (!includeTests && isSuspicionExemptPath(node.filePath)) continue;
-      if (isExempt?.(node.filePath)) continue;
+      if (shouldSkipGraphCandidate(node, includeTests, isExempt)) continue;
       out.push(node);
       if (out.length >= max) break;
     }
@@ -298,6 +289,22 @@ export function findGraphCandidates(args: FindGraphCandidatesArgs): Node[] {
     offset += pageSize;
   }
   return out;
+}
+
+function shouldSkipGraphCandidate(
+  node: Node,
+  includeTests: boolean,
+  isExempt: ((filePath: string) => boolean) | undefined,
+): boolean {
+  if (!SUSPECT_KINDS.has(node.kind)) return true;
+  // A constructor is reached via `instantiates`, not `calls`, so it always
+  // looks orphaned; the class node carries the real liveness signal.
+  if (node.kind === 'method' && CONSTRUCTOR_METHOD_NAME_BY_LANGUAGE[node.language] === node.name) return true;
+  // Go conventions the resolver can't see are skipped regardless of
+  // includeTests because framework-dispatched cases are still live.
+  if (isGoConventionLive(node)) return true;
+  if (!includeTests && isSuspicionExemptPath(node.filePath)) return true;
+  return isExempt?.(node.filePath) === true;
 }
 
 interface JudgeResponse {
@@ -614,12 +621,15 @@ export function truncateReason(reason: string): string {
  */
 const JudgeEntrySchema = z.object({
   i: z.coerce.number().int(),
-  verdict: z.preprocess((v) => String(v ?? '').toLowerCase(), z.enum(['dead', 'live', 'uncertain'])).catch('uncertain'),
-  confidence: z
-    .number()
-    .catch(DEFAULT_JUDGE_CONFIDENCE)
-    .transform((n) => Math.max(0, Math.min(1, n))),
-  reason: z.string().catch('').transform(truncateReason),
+  verdict: zodFallback(
+    z.preprocess(
+      (v) => (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' ? String(v).toLowerCase() : ''),
+      z.enum(['dead', 'live', 'uncertain']),
+    ),
+    'uncertain',
+  ),
+  confidence: zodFallback(z.number(), DEFAULT_JUDGE_CONFIDENCE).transform((n) => Math.max(0, Math.min(1, n))),
+  reason: zodFallback(z.string(), '').transform(truncateReason),
 });
 
 export function parseBatchJudges(text: string, expectedSize: number): Map<number, JudgeResponse> {

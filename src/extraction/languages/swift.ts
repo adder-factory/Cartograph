@@ -59,11 +59,12 @@ const swiftExtractor: LanguageExtractor = {
     // Extract visibility
     const modifiers = node.namedChildren.find((c: SyntaxNode) => c.type === 'modifiers');
     const modText = modifiers?.text ?? '';
-    const visibility = modText.includes('public')
-      ? ('public' as const)
-      : modText.includes('private') || modText.includes('fileprivate')
-        ? ('private' as const)
-        : ('internal' as const); // Swift defaults to internal (also when 'internal' is explicit)
+    let visibility: 'public' | 'private' | 'internal' = 'internal';
+    if (modText.includes('public')) {
+      visibility = 'public';
+    } else if (modText.includes('private') || modText.includes('fileprivate')) {
+      visibility = 'private';
+    }
 
     const isLet = node.namedChildren.some((c: SyntaxNode) => c.type === 'value_binding_pattern' && c.text === 'let');
     const keyword = node.type === 'constant_declaration' || isLet ? 'let' : 'var';

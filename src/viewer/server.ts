@@ -157,7 +157,7 @@ const HEALTH_DECIMAL_RESOLUTION = 10;
  * race the DB close.
  */
 /** Type guard: true when `server.address()` returned an `AddressInfo` object. */
-function isAddrObject(addr: ReturnType<import('http').Server['address']>): addr is import('net').AddressInfo {
+function isAddrObject(addr: ReturnType<import('node:http').Server['address']>): addr is import('node:net').AddressInfo {
   return typeof addr === 'object' && addr !== null;
 }
 
@@ -235,7 +235,9 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
  * manually.
  */
 export function openInBrowser(url: string): void {
-  const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'cmd' : 'xdg-open';
+  let cmd = 'xdg-open';
+  if (process.platform === 'darwin') cmd = 'open';
+  else if (process.platform === 'win32') cmd = 'cmd';
   const args = process.platform === 'win32' ? ['/c', 'start', '""', url] : [url];
   try {
     spawn(cmd, args, { detached: true, stdio: 'ignore' }).unref();
@@ -439,7 +441,8 @@ function graphPayload(ctx: RequestContext, focus: string | null, depth: number):
     const all: Node[] = [];
     for (const k of kinds) all.push(...getNodesByKind(ctx.queries, k));
     if (all.length === 0) return { nodes: [], edges: [], focus: null };
-    const root = all.sort((a, b) => (b.centrality ?? 0) - (a.centrality ?? 0))[0]!;
+    all.sort((a, b) => (b.centrality ?? 0) - (a.centrality ?? 0));
+    const root = all[0]!;
     return graphPayload(ctx, root.id, GRAPH_DEPTH.default);
   }
 
@@ -695,7 +698,16 @@ function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string> 
  * and reject anything that escapes (defends against tampered DBs
  * with `../../etc/passwd`-style filePath values).
  */
-function sourcePayload(ctx: RequestContext, idOrName: string): unknown | null {
+type SourcePayload = {
+  source: string;
+  startLine: number;
+  endLine: number;
+  language: string;
+  file?: string;
+  error?: string;
+};
+
+function sourcePayload(ctx: RequestContext, idOrName: string): SourcePayload | null {
   const node = resolveSymbolToNode(ctx.queries, idOrName);
   if (!node) return null;
   const abs = path.resolve(ctx.projectPath, node.filePath);
@@ -734,7 +746,7 @@ function sourcePayload(ctx: RequestContext, idOrName: string): unknown | null {
   };
 }
 
-function symbolPayload(ctx: RequestContext, idOrName: string): unknown | null {
+function symbolPayload(ctx: RequestContext, idOrName: string): Record<string, unknown> | null {
   const node = resolveSymbolToNode(ctx.queries, idOrName);
   if (!node) return null;
   const callers = ctx.traverser.getCallers(node.id, 1);

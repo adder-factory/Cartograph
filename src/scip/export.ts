@@ -337,24 +337,38 @@ function buildEdgeMaps(
   const relationshipsByNodeId = new Map<string, ScipRelationship[]>();
   for (const e of edges) {
     if (e.kind === 'contains') {
-      const childSym = symbolByNodeId.get(e.target);
-      const parentSym = symbolByNodeId.get(e.source);
-      if (childSym && parentSym) enclosingByNodeId.set(e.target, parentSym);
+      recordScipEnclosingSymbol(e, symbolByNodeId, enclosingByNodeId);
       continue;
     }
-    const relMeta = RELATIONSHIP_EDGE_KINDS[e.kind];
-    if (relMeta) {
-      const srcSym = symbolByNodeId.get(e.source);
-      const tgtSym = symbolByNodeId.get(e.target);
-      if (srcSym && tgtSym) {
-        const rel: ScipRelationship = { symbol: tgtSym, ...relMeta };
-        const list = relationshipsByNodeId.get(e.source);
-        if (list) list.push(rel);
-        else relationshipsByNodeId.set(e.source, [rel]);
-      }
-    }
+    recordScipRelationship(e, symbolByNodeId, relationshipsByNodeId);
   }
   return { enclosingByNodeId, relationshipsByNodeId };
+}
+
+function recordScipEnclosingSymbol(
+  edge: ScipEdge,
+  symbolByNodeId: Map<string, string>,
+  enclosingByNodeId: Map<string, string>,
+): void {
+  const childSym = symbolByNodeId.get(edge.target);
+  const parentSym = symbolByNodeId.get(edge.source);
+  if (childSym && parentSym) enclosingByNodeId.set(edge.target, parentSym);
+}
+
+function recordScipRelationship(
+  edge: ScipEdge,
+  symbolByNodeId: Map<string, string>,
+  relationshipsByNodeId: Map<string, ScipRelationship[]>,
+): void {
+  const relMeta = RELATIONSHIP_EDGE_KINDS[edge.kind];
+  if (!relMeta) return;
+  const srcSym = symbolByNodeId.get(edge.source);
+  const tgtSym = symbolByNodeId.get(edge.target);
+  if (!srcSym || !tgtSym) return;
+  const rel: ScipRelationship = { symbol: tgtSym, ...relMeta };
+  const list = relationshipsByNodeId.get(edge.source);
+  if (list) list.push(rel);
+  else relationshipsByNodeId.set(edge.source, [rel]);
 }
 
 /**
@@ -469,15 +483,15 @@ function emitReferences({ edges, nodeById, symbolByNodeId, docFor }: EmitReferen
 function sortAndFilterDocuments(documents: Map<string, ScipDocument>): ScipDocument[] {
   const orderedDocs = [...documents.values()]
     .filter((d) => d.symbols.length > 0 || d.occurrences.length > 0)
-    .sort((a, b) => (a.relativePath < b.relativePath ? -1 : a.relativePath > b.relativePath ? 1 : 0));
+    .sort((a, b) => a.relativePath.localeCompare(b.relativePath));
   for (const doc of orderedDocs) {
     doc.occurrences.sort(
       (a, b) =>
         a.range[0]! - b.range[0]! ||
         a.range[1]! - b.range[1]! ||
-        (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0),
+        a.symbol.localeCompare(b.symbol),
     );
-    doc.symbols.sort((a, b) => (a.symbol < b.symbol ? -1 : a.symbol > b.symbol ? 1 : 0));
+    doc.symbols.sort((a, b) => a.symbol.localeCompare(b.symbol));
   }
   return orderedDocs;
 }

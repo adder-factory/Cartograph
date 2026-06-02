@@ -8,6 +8,10 @@ import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 
+function zodFallback<T extends z.ZodType>(schema: T, value: z.output<T>): z.ZodCatch<T> {
+  return schema['catch'](value);
+}
+
 export interface MacroStep {
   tool: string;
   args: Record<string, unknown>;
@@ -21,13 +25,13 @@ export interface MacroStep {
  */
 const MacroStepSchema = z.object({
   tool: z.string().min(1),
-  args: z.record(z.string(), z.unknown()).catch({}),
+  args: zodFallback(z.record(z.string(), z.unknown()), {}),
 });
 
 /** A whole macro's step list. `.catch([])` degrades a corrupt or
  *  schema-drifted row to an empty macro rather than crashing a CRUD
  *  call mid-flight. */
-const MacroStepsSchema = z.array(MacroStepSchema).catch([]);
+const MacroStepsSchema = zodFallback(z.array(MacroStepSchema), []);
 
 /** Decode + validate a `steps_json` column. A non-JSON string and a
  *  payload that fails the schema both yield `[]` — never a throw. */

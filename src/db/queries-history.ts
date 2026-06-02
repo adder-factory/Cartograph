@@ -21,7 +21,8 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
 /** Default cap on returned hotspot rows. */
 const HOTSPOTS_DEFAULT_LIMIT = 15;
 /** SQL `ORDER BY` clause per sort mode. */
-const HOTSPOTS_ORDER_BY: Readonly<Record<'risk' | 'centrality' | 'churn', string>> = {
+type HotspotSort = 'risk' | 'centrality' | 'churn';
+const HOTSPOTS_ORDER_BY: Readonly<Record<HotspotSort, string>> = {
   risk: 'riskScore DESC',
   centrality: 'fileCentrality DESC',
   churn: 'commitCount DESC',
@@ -397,6 +398,9 @@ const coChangedFilesWithAnchorQuery = defineQuery({
   row: CoChangedFilesRowSchema,
 });
 
+type SymbolIssueKind = 'modified' | 'added' | 'removed';
+type SymbolIssueRow = { issueNumber: number; kind: SymbolIssueKind; commitSha: string };
+
 declare module './queries.js' {
   interface QueryRegistry {
     upsertCoChange?: TypedQuery<{ fileA: string; fileB: string; count: number }, never>;
@@ -409,14 +413,14 @@ declare module './queries.js' {
         nodeId: string;
         issueNumber: number;
         commitSha: string;
-        kind: 'modified' | 'added' | 'removed';
+        kind: SymbolIssueKind;
       },
       never
     >;
     getSymbolIssuesCount?: TypedQuery<Record<string, never>, { count: number }>;
     getIssuesForNode?: TypedQuery<
       { nodeId: string },
-      { issueNumber: number; kind: 'modified' | 'added' | 'removed'; commitSha: string }
+      SymbolIssueRow
     >;
     getSymbolCoChanges?: TypedQuery<
       { nodeId: string; maxNodesPerCommit: number; minCount: number; limit: number },
@@ -541,7 +545,7 @@ export function getHotspots(
     limit?: number;
     minCommits?: number;
     minCentrality?: number;
-    sortBy?: 'risk' | 'centrality' | 'churn';
+    sortBy?: HotspotSort;
     recencyDays?: number;
   } = {},
 ): Array<{
@@ -741,7 +745,7 @@ export function applyIssueAttributions(
     nodeId: string;
     issueNumber: number;
     commitSha: string;
-    kind: 'modified' | 'added' | 'removed';
+    kind: SymbolIssueKind;
   }>,
 ): void {
   qb.queries.insertSymbolIssue ??= insertSymbolIssueQuery(qb.db);
@@ -804,14 +808,7 @@ export function getNodesByCommits(
   return out;
 }
 
-export function getIssuesForNode(
-  qb: QueryBuilder,
-  nodeId: string,
-): Array<{
-  issueNumber: number;
-  kind: 'modified' | 'added' | 'removed';
-  commitSha: string;
-}> {
+export function getIssuesForNode(qb: QueryBuilder, nodeId: string): Array<SymbolIssueRow> {
   qb.queries.getIssuesForNode ??= getIssuesForNodeQuery(qb.db);
   return qb.queries.getIssuesForNode.all({ nodeId });
 }

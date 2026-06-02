@@ -378,7 +378,7 @@ export async function eoSetupParseEnvironment(
     .access(parseWorkerPath)
     .then(() => true)
     .catch(() => false);
-  let WorkerClass: typeof import('worker_threads').Worker | null = null;
+  let WorkerClass: typeof import('node:worker_threads').Worker | null = null;
   if (useWorker) {
     const { Worker } = await import('node:worker_threads');
     WorkerClass = Worker;
@@ -932,6 +932,38 @@ let cachedAnchorAutomaton: AhoCorasickAutomaton | null = null;
 let cachedAnchorOwners: number[] = [];
 let cachedAnchorResolverList: readonly FrameworkResolver[] = [];
 
+function buildAnchorIndex(resolvers: readonly FrameworkResolver[]): {
+  flatAnchors: string[];
+  owners: number[];
+} {
+  const flatAnchors: string[] = [];
+  const owners: number[] = [];
+  const seenAnchors = new Map<string, string>();
+  for (let i = 0; i < resolvers.length; i++) {
+    const resolver = resolvers[i]!;
+    const anchors = resolver.anchors;
+    if (!anchors || anchors.length === 0) continue;
+    for (const anchor of anchors) {
+      assertUniqueFrameworkAnchor(anchor, resolver.name, seenAnchors);
+      flatAnchors.push(anchor);
+      owners.push(i);
+    }
+  }
+  return { flatAnchors, owners };
+}
+
+function assertUniqueFrameworkAnchor(anchor: string, ownerName: string, seenAnchors: Map<string, string>): void {
+  const priorOwner = seenAnchors.get(anchor);
+  if (priorOwner !== undefined && priorOwner !== ownerName) {
+    throw new Error(
+      `Framework-resolver anchor collision: ${JSON.stringify(anchor)} declared by both ` +
+        `'${priorOwner}' and '${ownerName}'. Anchors must be unique across resolvers — see the ` +
+        `FrameworkResolver.anchors JSDoc for the reasoning.`,
+    );
+  }
+  seenAnchors.set(anchor, ownerName);
+}
+
 /** @internal Exposed for `__tests__/f73-anchor-prefilter.test.ts`; not
  *  part of the package's public API. The implementation is internal
  *  to the framework-resolver dispatcher. */
@@ -942,8 +974,6 @@ export function getAnchorAutomaton(resolvers: readonly FrameworkResolver[]): {
   // Rebuild when the resolver list reference changes. In production
   // the list is a module-level constant so this fires once.
   if (resolvers !== cachedAnchorResolverList) {
-    const flatAnchors: string[] = [];
-    const owners: number[] = [];
     // The pre-filter assumes each anchor string belongs to exactly
     // one resolver. If two resolvers declared the same anchor,
     // `buildAhoCorasick` would dedup the pattern to the first
@@ -957,31 +987,77 @@ export function getAnchorAutomaton(resolvers: readonly FrameworkResolver[]): {
     // explicitly so a future PR that adds a colliding anchor fails
     // loudly at build time rather than silently misfiring at scan
     // time.
-    const seenAnchors = new Map<string, string>();
-    for (let i = 0; i < resolvers.length; i++) {
-      const a = resolvers[i]!.anchors;
-      if (!a || a.length === 0) continue;
-      const ownerName = resolvers[i]!.name;
-      for (const anchor of a) {
-        const priorOwner = seenAnchors.get(anchor);
-        if (priorOwner !== undefined && priorOwner !== ownerName) {
-          throw new Error(
-            `Framework-resolver anchor collision: ${JSON.stringify(anchor)} declared by both ` +
-              `'${priorOwner}' and '${ownerName}'. Anchors must be unique across resolvers — see the ` +
-              `FrameworkResolver.anchors JSDoc for the reasoning.`,
-          );
-        }
-        seenAnchors.set(anchor, ownerName);
-        flatAnchors.push(anchor);
-        owners.push(i);
-      }
-    }
+    const { flatAnchors, owners } = buildAnchorIndex(resolvers);
     cachedAnchorResolverList = resolvers;
     cachedAnchorOwners = owners;
     cachedAnchorAutomaton = flatAnchors.length > 0 ? buildAhoCorasick(flatAnchors) : null;
   }
   if (!cachedAnchorAutomaton) return null;
   return { automaton: cachedAnchorAutomaton, anchorOwners: cachedAnchorOwners };
+}
+
+function collectResolversWithAnchorHit(
+  filterer: { automaton: AhoCorasickAutomaton; anchorOwners: readonly number[] } | null,
+  content: string,
+): Set<number> | null {
+  if (!filterer) return null;
+  const hits = new Set<number>();
+  for (const m of filterer.automaton.findAll(content)) {
+    hits.add(filterer.anchorOwners[m.patternIndex]!);
+  }
+  return hits;
+}
+
+function resolverMatchesFile(
+  resolver: FrameworkResolver,
+  resolverIdx: number,
+  language: Language,
+  resolversWithAnchorHit: Set<number> | null,
+): boolean {
+  if (resolver.languages && !resolver.languages.includes(language)) return false;
+  return !(
+    resolver.anchors &&
+    resolver.anchors.length > 0 &&
+    resolversWithAnchorHit &&
+    !resolversWithAnchorHit.has(resolverIdx)
+  );
+}
+
+function runFrameworkResolver(args: {
+  resolver: FrameworkResolver;
+  filePath: string;
+  content: string;
+  language: Language;
+  getStripped: () => string;
+  byId: Map<string, Node>;
+  references: UnresolvedReference[];
+}): void {
+  const { resolver, filePath, content, language, getStripped, byId, references } = args;
+  if (resolver.extract) {
+    try {
+      const extra = resolver.extract(filePath, content);
+      mergeUniqueFrameworkNodes(byId, extra.nodes, language);
+      references.push(...extra.references);
+    } catch (err) {
+      logDebug('Framework extract failed', {
+        framework: resolver.name,
+        filePath,
+        error: String(err),
+      });
+    }
+    return;
+  }
+  if (!resolver.extractNodes) return;
+  try {
+    const extra = resolver.extractNodes(filePath, content, getStripped);
+    mergeUniqueFrameworkNodes(byId, extra, language);
+  } catch (err) {
+    logDebug('Framework extractNodes failed', {
+      framework: resolver.name,
+      filePath,
+      error: String(err),
+    });
+  }
 }
 
 function eoRunFrameworkExtractors(
@@ -1003,9 +1079,7 @@ function eoRunFrameworkExtractors(
   // to `'javascript'` for TS / JSX / TSX files).
   let strippedCache: string | undefined;
   const getStripped = (): string => {
-    if (strippedCache === undefined) {
-      strippedCache = stripCommentsForRegex(content, language);
-    }
+    strippedCache ??= stripCommentsForRegex(content, language);
     return strippedCache;
   };
   // F#73 — single Aho-Corasick scan over the file content. The set
@@ -1015,55 +1089,16 @@ function eoRunFrameworkExtractors(
   // regex pass. Resolvers without declared anchors are absent from
   // `cachedAnchorOwners` and stay in the legacy "always run" path.
   const resolvers = getAllFrameworkResolvers();
-  const filterer = getAnchorAutomaton(resolvers);
-  let resolversWithAnchorHit: Set<number> | null = null;
-  if (filterer) {
-    resolversWithAnchorHit = new Set<number>();
-    for (const m of filterer.automaton.findAll(content)) {
-      resolversWithAnchorHit.add(filterer.anchorOwners[m.patternIndex]!);
-    }
-  }
+  const resolversWithAnchorHit = collectResolversWithAnchorHit(getAnchorAutomaton(resolvers), content);
   for (let resolverIdx = 0; resolverIdx < resolvers.length; resolverIdx++) {
     const resolver = resolvers[resolverIdx]!;
-    if (resolver.languages && !resolver.languages.includes(language)) continue;
-    if (
-      resolver.anchors &&
-      resolver.anchors.length > 0 &&
-      resolversWithAnchorHit &&
-      !resolversWithAnchorHit.has(resolverIdx)
-    ) {
-      continue;
-    }
+    if (!resolverMatchesFile(resolver, resolverIdx, language, resolversWithAnchorHit)) continue;
     // F#62 — `extract` (richer) wins over `extractNodes` (legacy) when
     // both are defined. The orchestrator does not call both for the
     // same file; resolvers that want refs implement `extract`, those
     // that only emit nodes keep `extractNodes`. Backward-compat:
     // every existing resolver still uses the original path.
-    if (resolver.extract) {
-      try {
-        const extra = resolver.extract(filePath, content);
-        mergeUniqueFrameworkNodes(byId, extra.nodes, language);
-        references.push(...extra.references);
-      } catch (err) {
-        logDebug('Framework extract failed', {
-          framework: resolver.name,
-          filePath,
-          error: String(err),
-        });
-      }
-      continue;
-    }
-    if (!resolver.extractNodes) continue;
-    try {
-      const extra = resolver.extractNodes(filePath, content, getStripped);
-      mergeUniqueFrameworkNodes(byId, extra, language);
-    } catch (err) {
-      logDebug('Framework extractNodes failed', {
-        framework: resolver.name,
-        filePath,
-        error: String(err),
-      });
-    }
+    runFrameworkResolver({ resolver, filePath, content, language, getStripped, byId, references });
   }
   return { nodes: [...byId.values()], references };
 }
@@ -1200,6 +1235,16 @@ function eoPersistValidNodes(st: ExtractionOrchestratorState, validNodes: Node[]
   }
 }
 
+function eoPersistNestedFunctionManifest(
+  st: ExtractionOrchestratorState,
+  p: EoPersistFileExtractionArgs,
+  insertedIds: ReadonlySet<string>,
+): void {
+  const manifest = p.result.nestedFunctionManifest ?? [];
+  const valid = manifest.filter((row) => insertedIds.has(row.parentNodeId));
+  upsertNestedFunctionsForFile(st.queries, p.filePath, valid);
+}
+
 /** Atomically persist the extraction result for one file in a transaction. */
 function eoPersistFileExtraction(st: ExtractionOrchestratorState, p: EoPersistFileExtractionArgs): void {
   profile('persist:txnTotal', () =>
@@ -1249,11 +1294,7 @@ function eoPersistFileExtraction(st: ExtractionOrchestratorState, p: EoPersistFi
       // the cascade-evict already cleared the rows via FK to nodes.
       // Filtering by `insertedIds.has(row.parentNodeId)` guards against
       // a parent-node validation drop between extract and persist.
-      profile('persist:nestedFnManifest', () => {
-        const manifest = p.result.nestedFunctionManifest ?? [];
-        const valid = manifest.filter((row) => insertedIds.has(row.parentNodeId));
-        upsertNestedFunctionsForFile(st.queries, p.filePath, valid);
-      });
+      profile('persist:nestedFnManifest', () => eoPersistNestedFunctionManifest(st, p, insertedIds));
 
       // Persist the parse_cache entry LAST — after the format-only
       // decision read the prior value via `getLatestStructHashForFile`.

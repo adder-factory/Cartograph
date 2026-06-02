@@ -54,30 +54,50 @@ function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
   const pkgJsonPath = path.join(projectRoot, 'package.json');
   const pkg = readJsonIfExists<PackageJsonShape>(pkgJsonPath);
   if (pkg) {
-    const allDeps = { ...(pkg.devDependencies ?? {}), ...(pkg.dependencies ?? {}) };
-    if ('vitest' in allDeps) {
-      return {
-        name: 'vitest',
-        command: 'npx vitest run --coverage',
-        outputHint: 'coverage/lcov.info',
-      };
-    }
-    if ('jest' in allDeps) {
-      return {
-        name: 'jest',
-        command: 'npx jest --coverage --coverageReporters=lcov',
-        outputHint: 'coverage/lcov.info',
-      };
-    }
-    if ('c8' in allDeps || 'nyc' in allDeps) {
-      return {
-        name: 'c8' in allDeps ? 'c8' : 'nyc',
-        command: 'c8' in allDeps ? 'npx c8 --reporter=lcov npm test' : 'npx nyc --reporter=lcov npm test',
-        outputHint: 'coverage/lcov.info',
-      };
-    }
+    const runner = detectNodeTestRunner(pkg);
+    if (runner) return runner;
   }
 
+  return detectNonNodeTestRunner(projectRoot);
+}
+
+function packageDependencyNames(pkg: PackageJsonShape): ReadonlySet<string> {
+  return new Set([
+    ...(pkg.devDependencies ? Object.keys(pkg.devDependencies) : []),
+    ...(pkg.dependencies ? Object.keys(pkg.dependencies) : []),
+  ]);
+}
+
+function detectNodeTestRunner(pkg: PackageJsonShape): TestRunner | null {
+  const dependencyNames = packageDependencyNames(pkg);
+  if (dependencyNames.has('vitest')) {
+    return {
+      name: 'vitest',
+      command: 'npx vitest run --coverage',
+      outputHint: 'coverage/lcov.info',
+    };
+  }
+  if (dependencyNames.has('jest')) {
+    return {
+      name: 'jest',
+      command: 'npx jest --coverage --coverageReporters=lcov',
+      outputHint: 'coverage/lcov.info',
+    };
+  }
+  if (dependencyNames.has('c8') || dependencyNames.has('nyc')) return detectIstanbulRunner(dependencyNames);
+  return null;
+}
+
+function detectIstanbulRunner(dependencyNames: ReadonlySet<string>): TestRunner {
+  const usesC8 = dependencyNames.has('c8');
+  return {
+    name: usesC8 ? 'c8' : 'nyc',
+    command: usesC8 ? 'npx c8 --reporter=lcov npm test' : 'npx nyc --reporter=lcov npm test',
+    outputHint: 'coverage/lcov.info',
+  };
+}
+
+function detectNonNodeTestRunner(projectRoot: string): TestRunner | null {
   if (fileExists(path.join(projectRoot, 'pyproject.toml')) || fileExists(path.join(projectRoot, 'setup.cfg'))) {
     return {
       name: 'pytest',
@@ -85,7 +105,6 @@ function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
       outputHint: 'coverage/lcov.info',
     };
   }
-
   if (fileExists(path.join(projectRoot, 'Cargo.toml'))) {
     return {
       name: 'cargo-tarpaulin',
@@ -93,7 +112,6 @@ function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
       outputHint: 'coverage/lcov.info',
     };
   }
-
   if (fileExists(path.join(projectRoot, 'go.mod'))) {
     return {
       name: 'go test',
@@ -101,7 +119,6 @@ function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
       outputHint: 'coverage/lcov.info',
     };
   }
-
   return null;
 }
 

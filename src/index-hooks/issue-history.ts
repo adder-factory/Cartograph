@@ -66,13 +66,9 @@ async function refresh(ctx: IndexHookContext): Promise<void> {
       const remined = await mineIssueHistory(ctx.projectRoot, resolveSymbol, null);
       applyIssueAttributions(ctx.queries, remined.attributions);
       setMetadata(ctx.queries, LAST_MINED_ISSUES_HEAD_KEY, remined.currentHead ?? '');
-    } else if (sinceSha) {
-      // Incremental — append attributions for new commits only.
-      applyIssueAttributions(ctx.queries, mined.attributions);
-      setMetadata(ctx.queries, LAST_MINED_ISSUES_HEAD_KEY, mined.currentHead);
     } else {
-      // First run on this index, OR attributions table is empty.
-      // Either way the slate is clean; just apply.
+      // Incremental, first run, or empty attributions table: apply the
+      // current mined result and record the head.
       applyIssueAttributions(ctx.queries, mined.attributions);
       setMetadata(ctx.queries, LAST_MINED_ISSUES_HEAD_KEY, mined.currentHead);
     }

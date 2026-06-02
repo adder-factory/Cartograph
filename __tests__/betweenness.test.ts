@@ -5,6 +5,12 @@ function asNodes(ids: string[]) {
   return ids.map((id) => ({ id }));
 }
 
+function chainGraph(n: number) {
+  const ids = Array.from({ length: n }, (_, i) => `n${i}`);
+  const edges = ids.slice(0, -1).map((src, i) => ({ source: src, target: ids[i + 1]! }));
+  return { nodes: asNodes(ids), edges };
+}
+
 describe('computeBetweenness — Brandes single-source correctness', () => {
   it('returns empty result for an empty graph', () => {
     const r = computeBetweenness([], []);
@@ -75,8 +81,7 @@ describe('computeBetweenness — Brandes single-source correctness', () => {
     const nodes = asNodes([...leaves, 'hub']);
     const edges = [];
     for (const l of leaves) {
-      edges.push({ source: l, target: 'hub' });
-      edges.push({ source: 'hub', target: l });
+      edges.push({ source: l, target: 'hub' }, { source: 'hub', target: l });
     }
     const r = computeBetweenness(nodes, edges, { normalize: false });
     const hub = r.scores.get('hub')!;
@@ -93,12 +98,6 @@ describe('computeBetweenness — Brandes single-source correctness', () => {
 });
 
 describe('computeBetweenness — sampling determinism', () => {
-  function chainGraph(n: number) {
-    const ids = Array.from({ length: n }, (_, i) => `n${i}`);
-    const edges = ids.slice(0, -1).map((src, i) => ({ source: src, target: ids[i + 1]! }));
-    return { nodes: asNodes(ids), edges };
-  }
-
   it('same seed produces byte-identical scores', () => {
     const { nodes, edges } = chainGraph(40);
     const a = computeBetweenness(nodes, edges, { k: 10, seed: 42 });

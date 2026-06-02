@@ -195,8 +195,9 @@ async function handleReview(ctx: ToolCtx, args: ReviewArgs): Promise<ToolOutcome
     const res = await handler(ctx, args as Record<string, unknown>);
     return 'ok' in res ? res : ok(res);
   }
+  const modeNames = REVIEW_MODE_NAMES.map((n) => `'${n}'`).join(', ');
   return err(
-    `cartograph_review: \`mode\` must be one of: ${REVIEW_MODE_NAMES.map((n) => `'${n}'`).join(', ')}. ` +
+    `cartograph_review: \`mode\` must be one of: ${modeNames}. ` +
       `Got ${JSON.stringify(mode)}.`,
   );
 }

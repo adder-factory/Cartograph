@@ -34,9 +34,9 @@ try {
 const tsPruneStrict = new Set();   // all entries, including "used in module"
 const tsPruneLoose = new Set();    // only truly-unused (no "(used in module)")
 for (const line of tsPruneOutput.split('\n')) {
-  const m = line.match(/^(.+?):(\d+) - (\S+)(?:\s+\(used in module\))?\s*$/);
+  const m = /^(.+?):(\d+) - (\S+)(?:\s+\(used in module\))?\s*$/.exec(line);
   if (!m) continue;
-  const [, file, lineno, name] = m;
+  const [, file, , name] = m;
   const usedInModule = line.includes('(used in module)');
   const key = `${file}:${name}`;
   tsPruneStrict.add(key);
@@ -48,7 +48,8 @@ console.log(`  ts-prune loose:  ${tsPruneLoose.size} entries (truly unused outsi
 // 2. Cartograph version: indexed exports with no external incoming edges
 console.log('Indexing with cartograph...');
 const cgDir = path.join(target, '.cartograph');
-import('node:fs').then(({ rmSync, existsSync }) => existsSync(cgDir) && rmSync(cgDir, { recursive: true, force: true }));
+const { rmSync, existsSync } = await import('node:fs');
+if (existsSync(cgDir)) rmSync(cgDir, { recursive: true, force: true });
 const cg = await Cartograph.init(target);
 await cg.indexAll();
 

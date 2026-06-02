@@ -14,11 +14,11 @@
  *   bun scripts/bench-string-imports.ts
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import * as os from 'os';
-import { fileURLToPath } from 'url';
-import { performance } from 'perf_hooks';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { performance } from 'node:perf_hooks';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { scanStringImports } from '../src/string-imports/index.js';
@@ -298,7 +298,9 @@ async function main() {
   console.log(`- DB footprint:            +${((on.dbSize - off.dbSize) / 1024).toFixed(0)} KiB on disk.`);
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

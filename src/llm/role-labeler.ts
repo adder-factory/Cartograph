@@ -141,7 +141,7 @@ export const FRAMEWORK_IMPORT_PREFIXES: readonly string[] = [
  *  Note: route-emitting decorators (@Controller / @Get / @Post / @app.route)
  *  are NOT here — those are already captured as `kind === 'route'` by
  *  the route extractor and become `api_endpoint` via classifyByStructure. */
-const FRAMEWORK_GLUE_DECORATORS: readonly string[] = [
+const FRAMEWORK_GLUE_DECORATORS: ReadonlySet<string> = new Set([
   // NestJS / Angular DI
   '@Injectable',
   '@Module',
@@ -161,7 +161,7 @@ const FRAMEWORK_GLUE_DECORATORS: readonly string[] = [
   '@admin.register',
   // FastAPI / Pydantic dependency injection
   '@Depends',
-];
+]);
 
 /** Class-method decorator regex matched against the start of the
  *  signature (Spring/NestJS class-level decorators sometimes leak
@@ -170,7 +170,7 @@ const FRAMEWORK_DECORATOR_SIG_RE =
   /@(?:Injectable|Module|Inject|Component|Directive|Pipe|Service|Repository|Configuration|Bean|Autowired|RestController|Controller|GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)\b/;
 
 /** Decorator names that put a symbol unambiguously in `data_model`. */
-const DATA_MODEL_DECORATORS: readonly string[] = [
+const DATA_MODEL_DECORATORS: ReadonlySet<string> = new Set([
   // ORM / typeorm / Prisma
   '@Entity',
   '@Schema',
@@ -181,7 +181,7 @@ const DATA_MODEL_DECORATORS: readonly string[] = [
   // `@pydantic.BaseModel` shows up via inheritance not decorator)
   '@dataclass',
   '@pydantic_dataclass',
-];
+]);
 
 // ─── Path patterns ──────────────────────────────────────────────────
 
@@ -196,14 +196,69 @@ const UTIL_PATH_RE = /(?:^|\/)(?:utils?|helpers?|lib|libs|common|shared|misc)\//
  *  describes a pure transform / parse / format / check, not a domain
  *  workflow. Anchored at start so e.g. `parseRequest` matches but
  *  `tryToParse` doesn't (that's a verb-then-verb business operation). */
-const UTIL_NAME_RE =
-  /^(?:format|parse|to|from|build|make|create|new|is|has|can|should|get|extract|compute|calc|calculate|normali[sz]e|sanitize|validate|escape|encode|decode|stringify|hash|fingerprint|sort|filter|map|reduce|merge|clone|deep[A-Z]|shallow[A-Z]|equals|equal|compare)/;
+const UTIL_NAME_PREFIX_PATTERNS: readonly RegExp[] = [
+  /^format/,
+  /^parse/,
+  /^to/,
+  /^from/,
+  /^build/,
+  /^make/,
+  /^create/,
+  /^new/,
+  /^is/,
+  /^has/,
+  /^can/,
+  /^should/,
+  /^get/,
+  /^extract/,
+  /^compute/,
+  /^calc/,
+  /^calculate/,
+  /^normali[sz]e/,
+  /^sanitize/,
+  /^validate/,
+  /^escape/,
+  /^encode/,
+  /^decode/,
+  /^stringify/,
+  /^hash/,
+  /^fingerprint/,
+  /^sort/,
+  /^filter/,
+  /^map/,
+  /^reduce/,
+  /^merge/,
+  /^clone/,
+  /^deep[A-Z]/,
+  /^shallow[A-Z]/,
+  /^equals/,
+  /^equal/,
+  /^compare/,
+];
+
+function isUtilName(name: string): boolean {
+  return UTIL_NAME_PREFIX_PATTERNS.some((pattern) => pattern.test(name));
+}
 
 /** Class name suffixes that imply `business_logic`. Caught after the
  *  decorator/structural rules so we don't shadow more-specific
  *  signals. */
-const BUSINESS_CLASS_SUFFIX_RE =
-  /(?:Service|Manager|UseCase|Workflow|Pipeline|Handler|Controller|Processor|Engine|Coordinator)$/;
+const BUSINESS_CLASS_SUFFIX_PATTERNS: readonly RegExp[] = [
+  /Service$/,
+  /Manager$/,
+  /UseCase$/,
+  /Workflow$/,
+  /Pipeline$/,
+  /Handler$/,
+  /Controller$/,
+  /Processor$/,
+  /Engine$/,
+  /Coordinator$/,
+];
+
+function hasBusinessClassSuffix(name: string): boolean {
+  return BUSINESS_CLASS_SUFFIX_PATTERNS.some((pattern) => pattern.test(name));
+}
 
 /** Function / method NAME prefixes that imply `business_logic` —
  *  orchestration / self-heal / migration / project-internal verbs
@@ -262,7 +317,7 @@ const RULES: ReadonlyArray<readonly [string, WeakLabeler]> = [
     'decorator-data-model',
     (i) => {
       if (!i.decorators.length) return null;
-      if (i.decorators.some((d) => DATA_MODEL_DECORATORS.includes(d))) {
+      if (i.decorators.some((d) => DATA_MODEL_DECORATORS.has(d))) {
         return { role: 'data_model', confidence: 'high', source: 'decorator', rule: 'data-model decorator' };
       }
       return null;
@@ -274,7 +329,7 @@ const RULES: ReadonlyArray<readonly [string, WeakLabeler]> = [
     'decorator-framework-glue',
     (i) => {
       if (!i.decorators.length) return null;
-      if (i.decorators.some((d) => FRAMEWORK_GLUE_DECORATORS.includes(d))) {
+      if (i.decorators.some((d) => FRAMEWORK_GLUE_DECORATORS.has(d))) {
         return { role: 'framework_glue', confidence: 'high', source: 'decorator', rule: 'framework-glue decorator' };
       }
       return null;
@@ -289,7 +344,7 @@ const RULES: ReadonlyArray<readonly [string, WeakLabeler]> = [
     'util-path-and-name',
     (i) => {
       if (!UTIL_PATH_RE.test(i.filePath)) return null;
-      if (!UTIL_NAME_RE.test(i.name)) return null;
+      if (!isUtilName(i.name)) return null;
       if (i.kind !== 'function' && i.kind !== 'method') return null;
       return { role: 'util', confidence: 'high', source: 'path', rule: 'util path + verb name' };
     },
@@ -388,7 +443,7 @@ const RULES: ReadonlyArray<readonly [string, WeakLabeler]> = [
     'class-suffix-business',
     (i) => {
       if (i.kind !== 'class') return null;
-      if (!BUSINESS_CLASS_SUFFIX_RE.test(i.name)) return null;
+      if (!hasBusinessClassSuffix(i.name)) return null;
       return { role: 'business_logic', confidence: 'medium', source: 'class-suffix', rule: 'DDD class suffix' };
     },
   ],
@@ -434,7 +489,7 @@ export function labelMethodWithParent(input: LabelerInput, parentClassName: stri
   if (input.kind !== 'method') return base;
   if (!parentClassName) return base;
   if (base.confidence === 'high') return base; // don't overwrite high-precision signal
-  if (BUSINESS_CLASS_SUFFIX_RE.test(parentClassName)) {
+  if (hasBusinessClassSuffix(parentClassName)) {
     return {
       role: 'business_logic',
       confidence: 'medium',

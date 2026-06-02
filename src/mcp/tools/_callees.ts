@@ -362,46 +362,60 @@ interface BuildBatchedSymbolSectionResult {
 
 /** Build the markdown section + collect callee nodes for one symbol in a batch. */
 function buildBatchedSymbolSection(args: BuildBatchedSymbolSectionArgs): BuildBatchedSymbolSectionResult {
-  const {
-    ctx,
-    cg,
-    sym,
-    perSymbolLimit,
-    edgeKindFilter,
-    minConfidence,
-    confidenceThreshold,
-    compact,
-    fields,
-    includeRoles,
-  } = args;
-
+  const { ctx, cg, sym } = args;
   const allMatches = findAllSymbols(cg, sym, ctx.refIds);
   if (allMatches.nodes.length === 0) {
     return { section: `### ${sym}\n\n_${notFoundMessage(cg, sym)}_`, collectedNodes: [], hasMore: false };
   }
 
   if (allMatches.nodes.length > 1) {
-    // Multi-match within a single symbol: reuse formatGroupedCallees.
-    const grouped = formatGroupedCallees({
-      cg,
-      symbol: sym,
-      matches: allMatches.nodes,
-      limit: perSymbolLimit,
-      edgeKindFilter,
-      minConfidence,
-      refIds: ctx.refIds,
-    });
-    const multiNodes: Node[] = [];
-    for (const m of allMatches.nodes) {
-      const raw = edgeKindFilter
-        ? cg.internals.traverser.getCallees(m.id).filter((c) => c.edge.kind === edgeKindFilter)
-        : cg.internals.traverser.getCallees(m.id);
-      multiNodes.push(...raw.map((c) => c.node));
-    }
-    return { section: `### ${sym}\n\n${grouped.text}`, collectedNodes: multiNodes, hasMore: grouped.hasMore };
+    return buildMultiMatchBatchedSymbolSection(args, allMatches.nodes);
   }
 
-  // Single-match within this symbol.
+  return buildSingleMatchBatchedSymbolSection(args, allMatches);
+}
+
+function buildMultiMatchBatchedSymbolSection(
+  args: BuildBatchedSymbolSectionArgs,
+  matches: ReadonlyArray<Node>,
+): BuildBatchedSymbolSectionResult {
+  const { ctx, cg, sym, perSymbolLimit, edgeKindFilter, minConfidence } = args;
+  const grouped = formatGroupedCallees({
+    cg,
+    symbol: sym,
+    matches: [...matches],
+    limit: perSymbolLimit,
+    edgeKindFilter,
+    minConfidence,
+    refIds: ctx.refIds,
+  });
+  return {
+    section: `### ${sym}\n\n${grouped.text}`,
+    collectedNodes: collectBatchedMultiMatchNodes(cg, matches, edgeKindFilter),
+    hasMore: grouped.hasMore,
+  };
+}
+
+function collectBatchedMultiMatchNodes(
+  cg: ReturnType<ToolCtx['getCartograph']>,
+  matches: ReadonlyArray<Node>,
+  edgeKindFilter: string | undefined,
+): Node[] {
+  const nodes: Node[] = [];
+  for (const m of matches) {
+    const raw = edgeKindFilter
+      ? cg.internals.traverser.getCallees(m.id).filter((c) => c.edge.kind === edgeKindFilter)
+      : cg.internals.traverser.getCallees(m.id);
+    nodes.push(...raw.map((c) => c.node));
+  }
+  return nodes;
+}
+
+function buildSingleMatchBatchedSymbolSection(
+  args: BuildBatchedSymbolSectionArgs,
+  allMatches: ReturnType<typeof findAllSymbols>,
+): BuildBatchedSymbolSectionResult {
+  const { ctx, cg, sym, perSymbolLimit, edgeKindFilter, confidenceThreshold, compact, fields, includeRoles } = args;
   const { allCallees, calleeEdges } = collectFlatCallees({
     cg,
     matches: allMatches.nodes,
@@ -411,8 +425,9 @@ function buildBatchedSymbolSection(args: BuildBatchedSymbolSectionArgs): BuildBa
 
   if (allCallees.length === 0) {
     const containerHint = buildContainerMethodHint({ cg, symbol: sym, matches: allMatches });
+    const emptyMessage = containerHint ?? `No callees found for "${sym}".`;
     return {
-      section: `### ${sym}\n\n_${containerHint ?? `No callees found for "${sym}".`}_`,
+      section: `### ${sym}\n\n_${emptyMessage}_`,
       collectedNodes: [],
       hasMore: false,
     };

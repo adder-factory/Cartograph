@@ -48,10 +48,10 @@ describe('cartograph_find by=content template-literal interpolation hint', () =>
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
-  it('emits the interpolation hint when query contains `\\d` and matches zero', async () => {
+  it(String.raw`emits the interpolation hint when query contains \d and matches zero`, async () => {
     const result = await handler.execute('cartograph_find', {
       by: 'content',
-      query: '\\(\\+\\d+ more',
+      query: String.raw`\(\+\d+ more`,
     });
     const text = result.content[0]?.text ?? '';
     expect(text).toContain('No matches for');
@@ -70,7 +70,7 @@ describe('cartograph_find by=content template-literal interpolation hint', () =>
     expect(text).toMatch(/cappedExtra/);
   });
 
-  it('does NOT emit the interpolation hint when query has no `\\d`', async () => {
+  it(String.raw`does NOT emit the interpolation hint when query has no \d`, async () => {
     // Empty result on a pattern with no numeric class — bare empty
     // message should NOT carry the interpolation footnote.
     const result = await handler.execute('cartograph_find', {
@@ -82,10 +82,10 @@ describe('cartograph_find by=content template-literal interpolation hint', () =>
     expect(text).not.toContain('template-literal interpolations');
   });
 
-  it('fires on `\\d+` (quantified) — common shape of the original friction', async () => {
+  it(String.raw`fires on \d+ (quantified) — common shape of the original friction`, async () => {
     const result = await handler.execute('cartograph_find', {
       by: 'content',
-      query: '\\d+ more',
+      query: String.raw`\d+ more`,
     });
     const text = result.content[0]?.text ?? '';
     expect(text).toContain('No matches for');

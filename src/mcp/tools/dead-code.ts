@@ -105,7 +105,7 @@ function resolveVia(args: DeadCodeArgs): ClassifierVia {
 }
 
 // P6: returns a `ToolOutcome`. Two error paths — "no LLM configured"
-// and a caught LLM-call failure — are now the typed `err(...)` arm;
+// and a error_ LLM-call failure — are now the typed `err(...)` arm;
 // success paths route through `ok(...)`. The `formatStaticDeadCode`
 // helper is a pure success path so it returns the `ToolResult`
 // directly and the caller wraps it in `ok(...)`.
@@ -132,7 +132,7 @@ async function handleDeadCode(ctx: ToolCtx, args: DeadCodeArgs): Promise<ToolOut
   // pre-`via` default (today's `judge`): error when no LLM is
   // configured, so the absence of a backing-mechanism becomes visible
   // rather than silently downgrading.
-  const llmConfig = await cg.llm.getEffectiveLlmConfig();
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   if (!getAskModel(llmConfig)) {
     return err(
       'No LLM available for dead-code judge. Configure config.llm.summarizeLlm (with optional askModel field) or config.llm.askLlm for a separate ask provider; legacy config.llm.chat / config.llm.askChat / flat config.llm.chatModel also work. Or call this tool with `via: "rule"` for the LLM-free graph-only candidate list.',
@@ -155,8 +155,8 @@ async function handleDeadCode(ctx: ToolCtx, args: DeadCodeArgs): Promise<ToolOut
     if (rows.length === 0) return ok(textResult(formatJudgeEmpty(cg, result, verdictFilter)));
     const judgeBody = formatJudgeRows(rows, result.candidates);
     return ok(textResult(truncateOutput(judgeBody)));
-  } catch (caught) {
-    return err(errMsg(caught));
+  } catch (error_) {
+    return err(errMsg(error_));
   }
 }
 

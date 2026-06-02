@@ -21,6 +21,8 @@ import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 function mkTmpDir(label: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), `cg-targets-${label}-`));
 }
@@ -137,7 +139,11 @@ describe('Installer targets — contract', () => {
             const out = target.printConfig(location);
             expect(out.length).toBeGreaterThan(0);
             const after = listAllFiles(tmpHome).concat(listAllFiles(tmpCwd));
-            expect(after.sort()).toEqual(before.sort());
+            const sortedAfter = [...after];
+            sortedAfter.sort(byString);
+            const sortedBefore = [...before];
+            sortedBefore.sort(byString);
+            expect(sortedAfter).toEqual(sortedBefore);
           });
         });
       }

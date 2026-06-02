@@ -412,7 +412,7 @@ function captureBodyFieldAccess(ext: TreeSitterExtractor, node: SyntaxNode): voi
 // Alt 2: all-caps prefix of ≥2 letters then digits — covers VERSION6, HTTP200.
 // The ≥2-letter guard on alt 2 rejects 2-char tokens like `A1` / `B2` that the
 // reviewer flagged (round 3) without changing real-world constant matching.
-const SCREAMING_SNAKE_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$|^[A-Z]{2,}[0-9]+[A-Z0-9_]*$/;
+const SCREAMING_SNAKE_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$|^[A-Z]{2,}\d+[A-Z0-9_]*$/;
 
 /**
  * Parent-position kinds where a bare identifier is being WRITTEN /
@@ -452,17 +452,17 @@ const CONSTANT_READ_SKIP_PARENT_KINDS: ReadonlySet<string> = new Set([
  *  binding identifier (the symbol being declared, not a read).
  *  Identifiers at other field positions on the same parent (value /
  *  type / body) are real reads that should still emit references. The
- *  positional check matters: adding `const_item` to the broad skip
- *  set would discard the RHS read of `MAX` in `const FOO: u32 = MAX;`
- *  along with the LHS declaration of `FOO`. */
+ *  positional check matters because declaration parents can also contain
+ *  readable identifiers in value, type, or body fields.
+ */
 const RUST_DECL_BINDING_FIELD: Record<string, string> = {
-  const_item: 'name', // const FOO: T = …
-  static_item: 'name', // static FOO: T = …
-  function_item: 'name', // fn FOO() { … }
-  mod_item: 'name', // mod FOO { … }
-  field_declaration: 'name', // struct S { FOO: T }
-  enum_variant: 'name', // enum E { FOO }
-  let_declaration: 'pattern', // let FOO = …  (bare-identifier pattern, no `mut`/`ref` wrapper)
+  const_item: 'name',
+  static_item: 'name',
+  function_item: 'name',
+  mod_item: 'name',
+  field_declaration: 'name',
+  enum_variant: 'name',
+  let_declaration: 'pattern',
 };
 
 /**
@@ -514,7 +514,7 @@ function isScopedCalleeDescendant(node: SyntaxNode): boolean {
  */
 function isMemberExpressionPropertyChild(node: SyntaxNode): boolean {
   const parent = node.parent;
-  if (!parent || parent.type !== 'member_expression') return false;
+  if (parent?.type !== 'member_expression') return false;
   const prop = getChildByField(parent, 'property') ?? parent.namedChild(1);
   return prop?.startIndex === node.startIndex;
 }
@@ -528,7 +528,7 @@ function isMemberExpressionPropertyChild(node: SyntaxNode): boolean {
  */
 function isObjectKeyPosition(node: SyntaxNode): boolean {
   const parent = node.parent;
-  if (!parent || parent.type !== 'pair') return false;
+  if (parent?.type !== 'pair') return false;
   const key = getChildByField(parent, 'key') ?? parent.namedChild(0);
   return key?.startIndex === node.startIndex;
 }
@@ -542,7 +542,7 @@ function isObjectKeyPosition(node: SyntaxNode): boolean {
  */
 function isAssignmentLeftPosition(node: SyntaxNode): boolean {
   const parent = node.parent;
-  if (!parent || parent.type !== 'assignment_expression') return false;
+  if (parent?.type !== 'assignment_expression') return false;
   const left = getChildByField(parent, 'left') ?? parent.namedChild(0);
   return left?.startIndex === node.startIndex;
 }
@@ -616,7 +616,7 @@ function isNonReadConstantPosition(args: ConstantReadPositionArgs): boolean {
  *     one `_` or trailing digit pattern). Conservative: single-word
  *     all-caps (`URL`, `HTML`, `OK`) don't fire — they're commonly
  *     type names and would produce false-positive caller edges to
- *     types. Go name MUST match `^[A-Z][a-zA-Z0-9_]*$` (any
+ *     types. Go name MUST match `^[A-Z]\w*$` (any
  *     PascalCase-start identifier — Go's exported-symbol convention).
  *   - Skip writes / declarations / destructures (see
  *     {@link CONSTANT_READ_SKIP_PARENT_KINDS}), member-expression
@@ -638,8 +638,8 @@ function captureBodyConstantReads(ext: TreeSitterExtractor, node: SyntaxNode): v
   const name = getNodeText(node, ext.source);
   if (isGo) {
     if (!GO_PASCAL_NAME_RE.test(name)) return;
-  } else {
-    if (!SCREAMING_SNAKE_RE.test(name)) return;
+  } else if (!SCREAMING_SNAKE_RE.test(name)) {
+    return;
   }
   const parent = node.parent;
   if (!parent) return;
@@ -659,7 +659,7 @@ function captureBodyConstantReads(ext: TreeSitterExtractor, node: SyntaxNode): v
 /**
  * F#44 (2026-05-26): Go exported-symbol matcher. Go's convention is
  * PascalCase (first char uppercase ⇒ package-exported); SCREAMING_SNAKE
- * is rare in idiomatic Go. The shape pattern `^[A-Z][a-zA-Z0-9_]*$`
+ * is rare in idiomatic Go. The shape pattern `^[A-Z]\w*$`
  * keeps lowercase locals out and matches both pure-letters
  * (`DebugMode`, `Form`) and digit-bearing names (`HTTP2`, `V1`).
  *
@@ -792,7 +792,7 @@ function pickJsxReferenceIdentifier(
     // is the imported symbol; the inner half is a property access on
     // it. The dead-code rule needs to see the outer binding used.
     const objectNode = getChildByField(nameNode, 'object') ?? nameNode.namedChild(0);
-    if (!objectNode || objectNode.type !== 'identifier') return null;
+    if (objectNode?.type !== 'identifier') return null;
     const text = getNodeText(objectNode, ext.source);
     if (!text || !/^[A-Z]/.test(text)) return null;
     return { name: text, line: objectNode.startPosition.row + 1, column: objectNode.startPosition.column };
@@ -971,7 +971,7 @@ function tryCollectNestedFnManifest(ext: TreeSitterExtractor, node: SyntaxNode):
 function extractClassByDispatch(
   ext: TreeSitterExtractor,
   node: SyntaxNode,
-  classification: 'struct' | 'enum' | 'interface' | 'trait' | 'class' | string,
+  classification: string,
 ): void {
   switch (classification) {
     case 'struct':

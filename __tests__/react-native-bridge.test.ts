@@ -30,6 +30,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 /** Mock ResolutionContext. `fileContents` lets a `.ts` spec file carry source
  *  with no extracted nodes (the resolver reads it via `readFile`). */
 function makeContext(nodes: Node[], fileContents: Record<string, string> = {}): ResolutionContext {
@@ -141,7 +143,7 @@ describe('React Native bridge — parse helpers', () => {
     expect(findObjcClassName(src)).toBeNull();
     const out = parseObjcRNExports(src, findObjcClassName(src));
     expect(out.every((e) => e.moduleName === 'CalendarManager')).toBe(true);
-    expect(out.map((e) => e.jsName).sort()).toEqual(['addEvent', 'findAll', 'getName']);
+    expect(out.map((e) => e.jsName).sort(byString)).toEqual(['addEvent', 'findAll', 'getName']);
   });
 
   it('parseObjcRNExports: RCT_EXTERN_REMAP_MODULE module name = the JS-name first arg (not the ObjC class)', () => {
@@ -385,7 +387,7 @@ describe('React Native bridge — end-to-end (real index)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-rn-bridge-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });

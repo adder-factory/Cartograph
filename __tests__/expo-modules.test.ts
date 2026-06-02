@@ -27,6 +27,8 @@ import { Cartograph } from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 function makeContext(fileContents: Record<string, string> = {}): ResolutionContext {
   const allFiles = new Set<string>(Object.keys(fileContents));
   return {
@@ -45,6 +47,49 @@ function makeContext(fileContents: Record<string, string> = {}): ResolutionConte
     getAllFiles: () => Array.from(allFiles),
     getImportMappings: () => [],
   };
+}
+
+function expoNode(name: string, language: Language): Node {
+  return {
+    id: `expo-module:${language}/Mod.${name}:1`,
+    kind: 'method',
+    name,
+    qualifiedName: `Mod::${name}`,
+    filePath: `${language}/Mod`,
+    language,
+    startLine: 1,
+    endLine: 1,
+    startColumn: 0,
+    endColumn: 0,
+    decorators: ['ExpoExport'],
+    updatedAt: 1,
+  } as Node;
+}
+
+function ctxByName(nodes: Node[]): ResolutionContext {
+  const ctx = makeContext();
+  (ctx as { getNodesByName: ResolutionContext['getNodesByName'] }).getNodesByName = (name) =>
+    nodes.filter((n) => n.name === name);
+  return ctx;
+}
+
+function jsRef(name: string, language: Language = 'javascript'): UnresolvedRef {
+  return {
+    fromNodeId: 'caller',
+    referenceName: name,
+    referenceKind: 'calls',
+    line: 1,
+    column: 0,
+    filePath: 'App.js',
+    language,
+  };
+}
+
+async function bootEdgeTargets(tempDir: string): Promise<{ cg: Cartograph; targets: string[] }> {
+  const cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+  const boot = getNodesByKind(cg.queries, 'function').find((n) => n.name === 'boot' && n.language === 'javascript');
+  expect(boot, 'JS caller indexed').toBeDefined();
+  return { cg, targets: getOutgoingEdges(cg.queries, boot!.id).map((e) => e.target) };
 }
 
 const SWIFT_HAPTICS = [
@@ -87,7 +132,7 @@ describe('Expo Modules — DSL parse helpers', () => {
   it('parseExpoModule (Kotlin): module name + Function/AsyncFunction members', () => {
     const parsed = parseExpoModule(KOTLIN_FOO);
     expect(parsed?.moduleName).toBe('ExpoFoo');
-    expect(parsed?.members.map((m) => m.name).sort()).toEqual(['doAsync', 'doSync']);
+    expect(parsed?.members.map((m) => m.name).sort(byString)).toEqual(['doAsync', 'doSync']);
   });
 
   it('parseExpoModule: falls back to the class name when there is no Name("X")', () => {
@@ -123,7 +168,7 @@ describe('Expo Modules — synthesizer (extractNodes)', () => {
 
   it('synthesizes Kotlin members with language=kotlin', () => {
     const nodes = expoModulesResolver.extractNodes!('android/FooModule.kt', KOTLIN_FOO);
-    expect(nodes.map((n) => n.name).sort()).toEqual(['doAsync', 'doSync']);
+    expect(nodes.map((n) => n.name).sort(byString)).toEqual(['doAsync', 'doSync']);
     expect(nodes.every((n) => n.language === 'kotlin')).toBe(true);
   });
 
@@ -150,40 +195,6 @@ describe('Expo Modules — detect()', () => {
 });
 
 describe('Expo Modules — resolve()', () => {
-  function expoNode(name: string, language: Language): Node {
-    return {
-      id: `expo-module:${language}/Mod.${name}:1`,
-      kind: 'method',
-      name,
-      qualifiedName: `Mod::${name}`,
-      filePath: `${language}/Mod`,
-      language,
-      startLine: 1,
-      endLine: 1,
-      startColumn: 0,
-      endColumn: 0,
-      decorators: ['ExpoExport'],
-      updatedAt: 1,
-    } as Node;
-  }
-  function ctxByName(nodes: Node[]): ResolutionContext {
-    const ctx = makeContext();
-    (ctx as { getNodesByName: ResolutionContext['getNodesByName'] }).getNodesByName = (name) =>
-      nodes.filter((n) => n.name === name);
-    return ctx;
-  }
-  function jsRef(name: string, language: Language = 'javascript'): UnresolvedRef {
-    return {
-      fromNodeId: 'caller',
-      referenceName: name,
-      referenceKind: 'calls',
-      line: 1,
-      column: 0,
-      filePath: 'App.js',
-      language,
-    };
-  }
-
   it('prefers the iOS (swift) target over Android (kotlin) when a module exists on both platforms', () => {
     const swift = expoNode('save', 'swift');
     const kotlin = expoNode('save', 'kotlin');
@@ -217,17 +228,10 @@ describe('Expo Modules — end-to-end (real index)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-expo-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
-
-  async function bootEdgeTargets(): Promise<string[]> {
-    cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
-    const boot = getNodesByKind(cg.queries, 'function').find((n) => n.name === 'boot' && n.language === 'javascript');
-    expect(boot, 'JS caller indexed').toBeDefined();
-    return getOutgoingEdges(cg.queries, boot!.id).map((e) => e.target);
-  }
 
   it('bridges a JS caller to a synthesized Swift Expo AsyncFunction', async () => {
     fs.writeFileSync(
@@ -259,8 +263,10 @@ describe('Expo Modules — end-to-end (real index)', () => {
       ].join('\n'),
     );
 
-    const targets = await bootEdgeTargets();
-    const synth = getNodesByKind(cg!.queries, 'method').find(
+    const booted = await bootEdgeTargets(tempDir);
+    cg = booted.cg;
+    const targets = booted.targets;
+    const synth = getNodesByKind(cg.queries, 'method').find(
       (n) => n.name === 'uniqueExpoHapticCall' && n.language === 'swift',
     );
     expect(synth, 'Swift Expo AsyncFunction synthesized').toBeDefined();
@@ -300,8 +306,10 @@ describe('Expo Modules — end-to-end (real index)', () => {
       ].join('\n'),
     );
 
-    const targets = await bootEdgeTargets();
-    const synth = getNodesByKind(cg!.queries, 'method').find(
+    const booted = await bootEdgeTargets(tempDir);
+    cg = booted.cg;
+    const targets = booted.targets;
+    const synth = getNodesByKind(cg.queries, 'method').find(
       (n) => n.name === 'uniqueExpoSettingsCall' && n.language === 'kotlin',
     );
     expect(synth, 'Kotlin Expo Function synthesized').toBeDefined();

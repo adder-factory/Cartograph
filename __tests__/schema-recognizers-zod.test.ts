@@ -19,6 +19,7 @@ beforeAll(async () => {
 const byKind = (nodes: Node[], kind: string): Node[] => nodes.filter((n) => n.kind === kind);
 const containsFrom = (edges: Edge[], sourceId: string): Edge[] =>
   edges.filter((e) => e.kind === 'contains' && e.source === sourceId);
+const byName = (a: string, b: string): number => a.localeCompare(b);
 
 describe('Zod schema recognizer (B2)', () => {
   it('synthesizes struct + field + enum_member nodes for a z.object schema', () => {
@@ -36,13 +37,13 @@ describe('Zod schema recognizer (B2)', () => {
     expect(structs.map((n) => n.name)).toContain('UserSchema');
 
     const fields = byKind(result.nodes, 'field');
-    expect(fields.map((n) => n.name).sort()).toEqual(['age', 'name', 'role']);
+    expect(fields.map((n) => n.name).sort(byName)).toEqual(['age', 'name', 'role']);
     // The leading Zod method is captured as the field signature.
     expect(fields.find((f) => f.name === 'name')?.signature).toBe('z.string');
     expect(fields.find((f) => f.name === 'role')?.signature).toBe('z.enum');
 
     const members = byKind(result.nodes, 'enum_member');
-    expect(members.map((n) => n.name).sort()).toEqual(['admin', 'editor', 'viewer']);
+    expect(members.map((n) => n.name).sort(byName)).toEqual(['admin', 'editor', 'viewer']);
   });
 
   it('wires contains edges struct→field and field→enum_member', () => {
@@ -148,7 +149,7 @@ describe('Zod schema recognizer (B2)', () => {
 
     // Top-level struct + a nested struct for the `address` field.
     const structs = byKind(result.nodes, 'struct');
-    expect(structs.map((n) => n.name).sort()).toEqual(['Order', 'address']);
+    expect(structs.map((n) => n.name).sort(byName)).toEqual(['address', 'Order']);
 
     const addressStruct = structs.find((n) => n.name === 'address')!;
     const addressField = byKind(result.nodes, 'field').find((n) => n.name === 'address')!;
@@ -158,7 +159,9 @@ describe('Zod schema recognizer (B2)', () => {
     // The nested struct contains its own inner fields.
     const fieldsById = new Map(byKind(result.nodes, 'field').map((n) => [n.id, n.name]));
     const nested = containsFrom(result.edges, addressStruct.id).map((e) => fieldsById.get(e.target));
-    expect(nested.sort()).toEqual(['city', 'street']);
+    const sortedNested = [...nested];
+    sortedNested.sort(byName);
+    expect(sortedNested).toEqual(['city', 'street']);
   });
 
   it('recognizes an inline z.object schema passed as a call argument (v2 step 3)', () => {
@@ -181,7 +184,9 @@ describe('Zod schema recognizer (B2)', () => {
 
     const fieldsById = new Map(byKind(result.nodes, 'field').map((n) => [n.id, n.name]));
     const inlineFields = containsFrom(result.edges, struct!.id).map((e) => fieldsById.get(e.target));
-    expect(inlineFields.sort()).toEqual(['count', 'target']);
+    const sortedInlineFields = [...inlineFields];
+    sortedInlineFields.sort(byName);
+    expect(sortedInlineFields).toEqual(['count', 'target']);
   });
 
   it('does not double-count a nested z.object as an inline schema', () => {
@@ -197,8 +202,8 @@ describe('Zod schema recognizer (B2)', () => {
     expect(
       byKind(result.nodes, 'struct')
         .map((n) => n.name)
-        .sort(),
-    ).toEqual(['Order', 'address']);
+        .sort(byName),
+    ).toEqual(['address', 'Order']);
   });
 
   it('extracts the realistic Zod fixture file end to end', () => {
@@ -209,12 +214,12 @@ describe('Zod schema recognizer (B2)', () => {
     expect(
       byKind(result.nodes, 'struct')
         .map((n) => n.name)
-        .sort(),
-    ).toEqual(['AddressSchema', 'UserSchema', 'home']);
+        .sort(byName),
+    ).toEqual(['AddressSchema', 'home', 'UserSchema']);
     expect(
       byKind(result.nodes, 'enum_member')
         .map((n) => n.name)
-        .sort(),
+        .sort(byName),
     ).toEqual(['admin', 'editor', 'viewer']);
 
     // z.infer<typeof UserSchema> → type_of edge into the UserSchema struct.

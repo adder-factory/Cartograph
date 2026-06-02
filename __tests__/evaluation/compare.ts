@@ -83,6 +83,35 @@ interface CompareResult {
   withinBudget: boolean;
 }
 
+function payloadDeltaFor(baseline: EvalResult | null, candidate: EvalResult | null): number {
+  if (!baseline?.payloadBytes || !candidate?.payloadBytes) return 0;
+  return (candidate.payloadBytes - baseline.payloadBytes) / baseline.payloadBytes;
+}
+
+function regressionReason(baseline: EvalResult | null, candidate: EvalResult | null, recallDelta: number, payloadDelta: number): string {
+  if (!candidate) return 'case missing from candidate report';
+  if (!baseline) return '';
+  if (recallDelta < -RECALL_REGRESSION_THRESHOLD) {
+    return `recall dropped ${recallDelta.toFixed(2)} (threshold -${RECALL_REGRESSION_THRESHOLD})`;
+  }
+  const shouldCheckPayload =
+    Boolean(baseline.payloadBytes && candidate.payloadBytes) &&
+    baseline.payloadBytes! >= PAYLOAD_MIN_BYTES_FOR_CHECK;
+  if (shouldCheckPayload && payloadDelta > PAYLOAD_REGRESSION_THRESHOLD) {
+    return `payload grew +${(payloadDelta * 100).toFixed(0)}% (threshold +${(PAYLOAD_REGRESSION_THRESHOLD * 100).toFixed(0)}%)`;
+  }
+  return '';
+}
+
+function meanPayloadDeltaFor(perCase: CaseDelta[]): number {
+  const paired = perCase.filter((e) => e.baseline?.payloadBytes && e.candidate?.payloadBytes);
+  const meanBaselinePayload =
+    paired.length > 0 ? paired.reduce((s, e) => s + (e.baseline!.payloadBytes ?? 0), 0) / paired.length : 0;
+  const meanCandidatePayload =
+    paired.length > 0 ? paired.reduce((s, e) => s + (e.candidate!.payloadBytes ?? 0), 0) / paired.length : 0;
+  return meanBaselinePayload > 0 ? (meanCandidatePayload - meanBaselinePayload) / meanBaselinePayload : 0;
+}
+
 export function compareReports(baseline: EvalReport, candidate: EvalReport): CompareResult {
   const baselineByCase = new Map(baseline.results.map((r) => [r.caseId, r]));
   const candidateByCase = new Map(candidate.results.map((r) => [r.caseId, r]));
@@ -101,24 +130,8 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport): Com
     // means "no signal", not "no change". The regression check below
     // only fires when both sides report and the baseline is above
     // PAYLOAD_MIN_BYTES_FOR_CHECK to avoid noise on tiny payloads.
-    let payloadDelta = 0;
-    if (b?.payloadBytes && c?.payloadBytes) {
-      payloadDelta = (c.payloadBytes - b.payloadBytes) / b.payloadBytes;
-    }
-    let reason = '';
-    if (!c) reason = 'case missing from candidate report';
-    else if (!b)
-      reason = ''; // new case — not a regression
-    else if (recallDelta < -RECALL_REGRESSION_THRESHOLD) {
-      reason = `recall dropped ${recallDelta.toFixed(2)} (threshold -${RECALL_REGRESSION_THRESHOLD})`;
-    } else if (
-      b.payloadBytes &&
-      c.payloadBytes &&
-      b.payloadBytes >= PAYLOAD_MIN_BYTES_FOR_CHECK &&
-      payloadDelta > PAYLOAD_REGRESSION_THRESHOLD
-    ) {
-      reason = `payload grew +${(payloadDelta * 100).toFixed(0)}% (threshold +${(PAYLOAD_REGRESSION_THRESHOLD * 100).toFixed(0)}%)`;
-    }
+    const payloadDelta = payloadDeltaFor(b, c);
+    const reason = regressionReason(b, c, recallDelta, payloadDelta);
     const regressed = reason !== '';
     const entry: CaseDelta = {
       caseId: id,
@@ -140,13 +153,7 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport): Com
   const passDelta = candidate.summary.passed - baseline.summary.passed;
 
   // Mean payload across cases that have payloadBytes on BOTH sides.
-  const paired = perCase.filter((e) => e.baseline?.payloadBytes && e.candidate?.payloadBytes);
-  const meanBaselinePayload =
-    paired.length > 0 ? paired.reduce((s, e) => s + (e.baseline!.payloadBytes ?? 0), 0) / paired.length : 0;
-  const meanCandidatePayload =
-    paired.length > 0 ? paired.reduce((s, e) => s + (e.candidate!.payloadBytes ?? 0), 0) / paired.length : 0;
-  const meanPayloadDelta =
-    meanBaselinePayload > 0 ? (meanCandidatePayload - meanBaselinePayload) / meanBaselinePayload : 0;
+  const meanPayloadDelta = meanPayloadDeltaFor(perCase);
 
   const meanRecallRegressed = meanRecallDelta < -MEAN_RECALL_REGRESSION_THRESHOLD;
   const meanPayloadRegressed = meanPayloadDelta > MEAN_PAYLOAD_REGRESSION_THRESHOLD;
@@ -161,11 +168,12 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport): Com
  * point at the bottom of this file.
  */
 export function formatComparison(baseline: EvalReport, candidate: EvalReport, cmp: CompareResult): string {
-  const lines: string[] = [];
-  lines.push(`Eval comparison`);
-  lines.push(`  baseline  ${baseline.cartographSha} @ ${baseline.timestamp}`);
-  lines.push(`  candidate ${candidate.cartographSha} @ ${candidate.timestamp}`);
-  lines.push('');
+  const lines: string[] = [
+    `Eval comparison`,
+    `  baseline  ${baseline.cartographSha} @ ${baseline.timestamp}`,
+    `  candidate ${candidate.cartographSha} @ ${candidate.timestamp}`,
+    '',
+  ];
   const idLen = Math.max(...cmp.perCase.map((e) => e.caseId.length));
   lines.push(`  ${'case'.padEnd(idLen)}  recallΔ    mrrΔ    latΔ  payloadΔ`);
   for (const e of [...cmp.perCase].sort((a, b) => a.caseId.localeCompare(b.caseId))) {
@@ -182,12 +190,12 @@ export function formatComparison(baseline: EvalReport, candidate: EvalReport, cm
     const flag = e.regressed ? ` ⚠ ${e.reason}` : '';
     lines.push(`  ${id}  ${recall}  ${mrr}  ${lat}  ${payload}${flag}`);
   }
-  lines.push('');
   lines.push(
+    '',
     `  summary: meanRecallΔ ${signed(cmp.meanRecallDelta, 3)}, meanMrrΔ ${signed(cmp.meanMrrDelta, 3)}, ` +
       `meanPayloadΔ ${signed(cmp.meanPayloadDelta * 100, 1)}%, passΔ ${signed(cmp.passDelta, 0)}`,
+    '',
   );
-  lines.push('');
   if (cmp.withinBudget) {
     lines.push(
       `  ✓ within regression budget (${cmp.regressions.length} per-case regressions, mean recall within ${MEAN_RECALL_REGRESSION_THRESHOLD}, mean payload within ${MEAN_PAYLOAD_REGRESSION_THRESHOLD * 100}%)`,

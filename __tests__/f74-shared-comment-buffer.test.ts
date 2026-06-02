@@ -12,6 +12,14 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as utils from '../src/utils.js';
 
+function createStrippedGetter(content: string, language: Parameters<typeof utils.stripCommentsForRegex>[1]): () => string {
+  let strippedCache: string | undefined;
+  return () => {
+    strippedCache ??= utils.stripCommentsForRegex(content, language);
+    return strippedCache;
+  };
+}
+
 describe('F#74 shared comment-stripped buffer', () => {
   let stripSpy: ReturnType<typeof vi.spyOn>;
 
@@ -30,13 +38,7 @@ describe('F#74 shared comment-stripped buffer', () => {
     // pipeline.
     const content = '/* a comment */ function foo() { return 1; }\n// trailing comment\nlet x = 1;';
     const language = 'javascript' as const;
-    let strippedCache: string | undefined;
-    const getStripped = (): string => {
-      if (strippedCache === undefined) {
-        strippedCache = utils.stripCommentsForRegex(content, language);
-      }
-      return strippedCache;
-    };
+    const getStripped = createStrippedGetter(content, language);
 
     // Simulate two stripping resolvers consuming the thunk.
     const aSafe = getStripped();
@@ -53,15 +55,9 @@ describe('F#74 shared comment-stripped buffer', () => {
     // (java / ruby / swift / react) must not trigger the strip.
     const content = 'class Foo { public void bar() {} }';
     const language = 'java' as const;
-    let strippedCache: string | undefined;
-    const getStripped = (): string => {
-      if (strippedCache === undefined) {
-        strippedCache = utils.stripCommentsForRegex(content, language);
-      }
-      return strippedCache;
-    };
+    const getStripped = createStrippedGetter(content, language);
     // Resolver chose NOT to call the thunk. No strip should happen.
-    void getStripped; // Pin: the thunk exists but is unused.
+    expect(getStripped).toBeInstanceOf(Function);
 
     expect(stripSpy).toHaveBeenCalledTimes(0);
   });

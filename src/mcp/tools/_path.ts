@@ -48,7 +48,7 @@ export async function handlePath(ctx: ToolCtx, args: PathArgs): Promise<ToolOutc
   // reports the runners-up in `note`. Surface BOTH endpoints' notes at the
   // top so a wrong-endpoint pick is visible before the path (mirrors
   // history.ts's banner-at-top rationale).
-  const note = [fromMatch.note, toMatch.note].filter((n) => n).join('\n');
+  const note = [fromMatch.note, toMatch.note].filter(Boolean).join('\n');
 
   if (fromMatch.node.id === toMatch.node.id) {
     return ok(
@@ -101,10 +101,11 @@ function renderPath(path: PathHop[], edgeKind: string | undefined): string {
   const from = path[0]!.node.name;
   const to = path.at(-1)!.node.name;
   const kinds = path.slice(1).map((h) => h.edge?.kind ?? '?');
+  const edgeKindSuffix = edgeKind ? ` (over \`${edgeKind}\` edges only)` : '';
   const lines: string[] = [
     `## Path: \`${from}\` → \`${to}\``,
     '',
-    `${hops} ${hops === 1 ? 'hop' : 'hops'}${edgeKind ? ` (over \`${edgeKind}\` edges only)` : ''} — ${kinds.join(' → ')}.`,
+    `${hops} ${hops === 1 ? 'hop' : 'hops'}${edgeKindSuffix} — ${kinds.join(' → ')}.`,
     '',
   ];
   path.forEach((hop, i) => {

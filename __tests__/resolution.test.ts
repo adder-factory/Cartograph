@@ -9,8 +9,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
-import { type Node, UnresolvedReference } from '../src/types.js';
-import { ReferenceResolver, createResolver, type ResolutionContext } from '../src/resolution/index.js';
+import type { Node } from '../src/types.js';
+import type { ResolutionContext } from '../src/resolution/index.js';
 import { matchReference } from '../src/resolution/name-matcher.js';
 import {
   resolveImportPath,
@@ -20,8 +20,7 @@ import {
 } from '../src/resolution/import-resolver.js';
 import { getUnresolvedReferences } from '../src/db/queries-unresolved-refs.js';
 import { detectFrameworks, getAllFrameworkResolvers } from '../src/resolution/frameworks/index.js';
-import { QueryBuilder, getNodesByKind } from '../src/db/queries.js';
-import { DatabaseConnection } from '../src/db/index.js';
+import { getNodesByKind } from '../src/db/queries.js';
 
 describe('Resolution Module', () => {
   let tempDir: string;
@@ -35,7 +34,7 @@ describe('Resolution Module', () => {
   afterEach(() => {
     // Clean up
     if (cg) {
-      cg.destroy();
+      cg.close();
     } else if (fs.existsSync(tempDir)) {
       fs.rmSync(tempDir, { recursive: true });
     }
@@ -1388,8 +1387,8 @@ describe('stripJsComments', () => {
   it('strips doc comments after an array of regex literals (replicates IMPORT_PATTERNS pattern)', () => {
     const src = [
       'const PATTERNS = [',
-      '  /\\bimport\\b[^\'"\\n]*?\\bfrom\\s*[\'"]([^\'"\\s]+)[\'"]/g,',
-      '  /require\\s*\\(\\s*[\'"]([^\'"\\s]+)[\'"]\\s*\\)/g,',
+      String.raw`  /\bimport\b[^'"\n]*?\bfrom\s*['"]([^'"\s]+)['"]/g,`,
+      String.raw`  /require\s*\(\s*['"]([^'"\s]+)['"]\s*\)/g,`,
       '];',
       "// Example: import('spec') or require('spec')",
     ].join('\n');
@@ -1454,9 +1453,9 @@ describe('stripJsComments', () => {
   });
 
   it('handles escape sequences inside strings', () => {
-    const src = `const s = "she said \\"hi\\""; // comment`;
+    const src = String.raw`const s = "she said \"hi\""; // comment`;
     const result = stripJsComments(src);
-    expect(result).toContain('\\"hi\\"');
+    expect(result).toContain(String.raw`\"hi\"`);
     expect(result).not.toContain('comment');
   });
 
@@ -1470,9 +1469,9 @@ describe('stripJsComments', () => {
 
   // -- Regex char class containing `/` (must not close regex early) --
   it('handles regex char class containing forward slash', () => {
-    const src = 'const r = /[a-z\\/]+/; // strip';
+    const src = String.raw`const r = /[a-z\/]+/; // strip`;
     const result = stripJsComments(src);
-    expect(result).toContain('/[a-z\\/]+/');
+    expect(result).toContain(String.raw`/[a-z\/]+/`);
     expect(result).not.toContain('strip');
   });
 });

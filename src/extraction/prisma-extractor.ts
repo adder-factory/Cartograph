@@ -138,7 +138,7 @@ export class PrismaExtractor extends StandaloneExtractor {
   /** First direct `identifier` child's text, or `null`. */
   private declName(decl: SyntaxNode): string | null {
     for (const c of decl.namedChildren) {
-      if (c && c.type === 'identifier') return getNodeText(c, this.source);
+      if (c?.type === 'identifier') return getNodeText(c, this.source);
     }
     return null;
   }
@@ -197,7 +197,7 @@ export class PrismaExtractor extends StandaloneExtractor {
   /** The base type name of a `column_type` (`Post[]` → `Post`). */
   private columnBaseType(typeNode: SyntaxNode): string | null {
     for (const c of typeNode.namedChildren) {
-      if (c && c.type === 'identifier') return getNodeText(c, this.source);
+      if (c?.type === 'identifier') return getNodeText(c, this.source);
     }
     return null;
   }
@@ -212,7 +212,7 @@ export class PrismaExtractor extends StandaloneExtractor {
     const block = decl.namedChildren.find((c: SyntaxNode | null) => c?.type === 'enum_block');
     if (!block) return;
     for (const e of block.namedChildren) {
-      if (!e || e.type !== 'enumeral') continue;
+      if (e?.type !== 'enumeral') continue;
       const memberName = this.declName(e) ?? getNodeText(e, this.source).trim();
       if (!memberName) continue;
       const memberId = this.mkNode({

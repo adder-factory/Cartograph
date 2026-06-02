@@ -190,7 +190,8 @@ export class OpenAiSdkEmbeddingClient {
       for await (const m of page) {
         if (typeof m.id === 'string') out.push(m.id);
       }
-      return out.length > 0 ? out : this.cfg.model ? [this.cfg.model] : [];
+      if (out.length > 0) return out;
+      return this.cfg.model ? [this.cfg.model] : [];
     } catch {
       // Some backends (older mlx_lm, llamafile) don't expose
       // /v1/models. Fall back to the configured model.

@@ -56,7 +56,7 @@ describe('makeLineIndex (F#72)', () => {
   });
 
   it('reuses one allocation across many lookups', () => {
-    const sample = Array(1000).fill('line').join('\n');
+    const sample = new Array(1000).fill('line').join('\n');
     const lineOf = makeLineIndex(sample);
     // The closure should be callable arbitrarily many times without
     // re-scanning. This test pins the contract, not the perf number.

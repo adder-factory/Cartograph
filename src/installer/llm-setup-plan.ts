@@ -208,12 +208,17 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
 
   // Install paths — always available; pushed below detected when
   // anything's running.
-  presets.push(buildInstallOllamaPreset(), buildInstallLlamaCppPreset(localGgufPresence), buildInstallMlxPreset());
+  presets.push(
+    buildInstallOllamaPreset(),
+    buildInstallLlamaCppPreset(localGgufPresence),
+    buildInstallMlxPreset(),
+    buildCloudOpenAiPreset(),
+    buildCloudOpenAiCompatPreset(),
+  );
 
   // Cloud presets — always available. Most accessible when local
   // hardware can't host the recommended model sizes (limited
   // VRAM/RAM, slow disk, no GPU).
-  presets.push(buildCloudOpenAiPreset(), buildCloudOpenAiCompatPreset());
 
   // Hybrid: cloud Claude for ask. Only when cloud auth is present.
   if (claudeBin !== null) presets.push(buildHybridPreset('hybrid-claude-bridge', claudeBin));
@@ -243,8 +248,8 @@ function buildUseDetectedPreset(b: DetectedBackend): SetupPreset {
       OLLAMA_RECOMMENDED_MODELS.summarize,
       OLLAMA_RECOMMENDED_MODELS.ask,
     ];
-    const loadedNames = b.models.map((m) => m.split(':')[0]!);
-    const missing = needed.filter((m) => !loadedNames.includes(m.split(':')[0]!));
+    const loadedNames = new Set(b.models.map((m) => m.split(':')[0]!));
+    const missing = needed.filter((m) => !loadedNames.has(m.split(':')[0]!));
     for (const m of missing) {
       nextSteps.push(`ollama pull ${m}`);
     }
@@ -466,35 +471,9 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
   const notes: string[] = [];
   let nextSteps: readonly string[] = preset.nextSteps;
   if (preset.requiresInstall) {
-    // For local install presets, re-probe the target endpoints to see
-    // whether the user's backends are already running. When at least
-    // one target is reachable the "assumes not yet running" note is
-    // misleading — replace it with a "detected running" note and drop
-    // the install lines from nextSteps (keep only the doctor step).
-    const targetEndpoints = installPresetTargetEndpoints(preset.id);
-    if (targetEndpoints.length > 0) {
-      const running = await scanForLlmBackends(targetEndpoints);
-      const runningTargets = running.filter((b) => targetEndpoints.includes(b.endpoint));
-      if (runningTargets.length > 0) {
-        const epList = runningTargets.map((b) => b.endpoint).join(', ');
-        notes.push(`Detected backend already running on ${epList}; skipping install instructions.`);
-        // Keep only the verification step so the agent can confirm the
-        // config works, but omit the backend-install / model-download
-        // lines that no longer apply.
-        const doctorStep = nextSteps.find((s) => s.startsWith('cartograph doctor'));
-        nextSteps = doctorStep === undefined ? [] : [doctorStep];
-      } else {
-        notes.push(
-          'The chosen preset assumes the backend is not yet running. Follow the `nextSteps` lines before re-running doctor.',
-        );
-      }
-    } else {
-      // Cloud / hybrid / compat presets: backends aren't local, keep
-      // the original note unchanged.
-      notes.push(
-        'The chosen preset assumes the backend is not yet running. Follow the `nextSteps` lines before re-running doctor.',
-      );
-    }
+    const installNote = await buildInstallPresetNote(preset, nextSteps);
+    nextSteps = installNote.nextSteps;
+    notes.push(installNote.note);
   }
   return {
     applied: true,
@@ -506,13 +485,40 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
   };
 }
 
+interface InstallPresetNote {
+  readonly nextSteps: readonly string[];
+  readonly note: string;
+}
+
+async function buildInstallPresetNote(
+  preset: SetupPreset,
+  nextSteps: readonly string[],
+): Promise<InstallPresetNote> {
+  const defaultNote =
+    'The chosen preset assumes the backend is not yet running. Follow the `nextSteps` lines before re-running doctor.';
+  // For local install presets, re-probe the target endpoints to see
+  // whether the user's backends are already running.
+  const targetEndpoints = installPresetTargetEndpoints(preset.id);
+  if (targetEndpoints.length === 0) return { nextSteps, note: defaultNote };
+
+  const running = await scanForLlmBackends(targetEndpoints);
+  const runningTargets = running.filter((b) => targetEndpoints.includes(b.endpoint));
+  if (runningTargets.length === 0) return { nextSteps, note: defaultNote };
+
+  const epList = runningTargets.map((b) => b.endpoint).join(', ');
+  const doctorStep = nextSteps.find((s) => s.startsWith('cartograph doctor'));
+  return {
+    nextSteps: doctorStep === undefined ? [] : [doctorStep],
+    note: `Detected backend already running on ${epList}; skipping install instructions.`,
+  };
+}
+
 /** Build the `llm` config block for a preset, given the current plan. */
 function buildConfigForPreset(
   id: SetupPresetId,
   plan: SetupPlan,
   _modelsDir: string | undefined,
 ): NonNullable<CartographConfig['llm']> | null {
-  void _modelsDir;
   // Detected presets: read the structurally-attached `detectedBackend`
   // off the preset object (kept in sync with the planner so a future
   // summary-wording change can't silently break config generation).

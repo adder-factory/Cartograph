@@ -25,10 +25,10 @@
  * bench can A/B-time both modes.
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 import { runBetweennessPass } from '../src/centrality/betweenness-pass.js';
 
@@ -83,7 +83,7 @@ async function runOne(
       parallel: r.parallel,
     };
   } finally {
-    cg.destroy();
+    cg.close();
     delete process.env['CARTOGRAPH_BETWEENNESS_SERIAL'];
   }
 }
@@ -105,7 +105,7 @@ async function main(): Promise<void> {
       const cg = await Cartograph.open(projectDir, { autoMigrate: false });
       console.log('cold index for synthetic corpus…');
       await cg.indexAll();
-      cg.destroy();
+      cg.close();
     } catch (err) {
       cleanup();
       throw err;
@@ -132,7 +132,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

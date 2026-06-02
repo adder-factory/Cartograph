@@ -22,6 +22,14 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import { StdioTransport } from '../src/mcp/transport.js';
 
+const byNumber = (a: number, b: number): number => a - b;
+
+/** Drain pending microtasks + setTimeout(0) ticks. */
+async function settle(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
 interface MockStdout extends EventEmitter {
   write: (chunk: string | Uint8Array, encodingOrCb?: unknown, cb?: unknown) => boolean;
 }
@@ -73,12 +81,6 @@ describe('StdioTransport write queue (F#19)', () => {
     (process.stdout as unknown as { emit: unknown }).emit = originalEmit;
   });
 
-  /** Drain pending microtasks + setTimeout(0) ticks. */
-  async function settle(): Promise<void> {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
-  }
-
   it('serialises sends under backpressure — second send waits for first drain', async () => {
     backpressureFirstN = 1; // First write returns false → queue awaits drain.
     const transport = new StdioTransport();
@@ -108,7 +110,7 @@ describe('StdioTransport write queue (F#19)', () => {
       const parsed = JSON.parse(chunk.trim()) as { jsonrpc: string; id: number };
       expect(parsed.jsonrpc).toBe('2.0');
     }
-    const ids = chunks.map((c) => (JSON.parse(c.trim()) as { id: number }).id).sort();
+    const ids = chunks.map((c) => (JSON.parse(c.trim()) as { id: number }).id).sort(byNumber);
     expect(ids).toEqual([1, 2]);
   });
 

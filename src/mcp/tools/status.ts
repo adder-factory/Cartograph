@@ -427,12 +427,14 @@ export function buildStatusInlineBiomarkersSpec(
 ): MarkdownBulletListSpec<BuildStatusInlineBiomarkersSpecArgs['rows'][number]> {
   const { rows, totalFindings, topN, pending } = args;
   if (rows.length === 0) {
-    const note = pending
-      ? STATUS_BIOMARKERS_PENDING_NOTE
-      : totalFindings === 0
-        ? STATUS_BIOMARKERS_CLEAN_NOTE
-        : `_No warning+ findings — ${totalFindings} info-level finding(s) present. ` +
-          "Call `cartograph_biomarkers mode=ranked` with `minSeverity: 'info'` to see them._";
+    let note =
+      `_No warning+ findings — ${totalFindings} info-level finding(s) present. ` +
+      "Call `cartograph_biomarkers mode=ranked` with `minSeverity: 'info'` to see them._";
+    if (pending) {
+      note = STATUS_BIOMARKERS_PENDING_NOTE;
+    } else if (totalFindings === 0) {
+      note = STATUS_BIOMARKERS_CLEAN_NOTE;
+    }
     return {
       title: '🩺 Biomarker findings',
       headingLevel: 3,
@@ -492,25 +494,24 @@ function appendDefaultProjectSection(lines: string[], ctx: ToolCtx, queriedRoot:
     })();
     if (!defaultRoot) return;
     const sameProject = defaultRoot === queriedRoot;
-    lines.push('');
-    lines.push('### 🏠 Default project');
+    lines.push('', '### 🏠 Default project');
     if (sameProject) {
       lines.push(`- ✅ \`${defaultRoot}\` — auto-sync via file watcher is active for this project.`);
     } else {
-      lines.push(`- ✅ Server default: \`${defaultRoot}\` (auto-synced).`);
-      lines.push(`- ℹ This status is for the queried project \`${queriedRoot}\` (loaded via \`projectPath\`).`);
+      lines.push(
+        `- ✅ Server default: \`${defaultRoot}\` (auto-synced).`,
+        `- ℹ This status is for the queried project \`${queriedRoot}\` (loaded via \`projectPath\`).`,
+      );
     }
     return;
   }
   // No default — surface the warning + actionable hint.
-  lines.push('');
-  lines.push('### ⚠ Default project: NONE');
   lines.push(
+    '',
+    '### ⚠ Default project: NONE',
     `- The MCP server has no default project bound. Every tool call must pass \`projectPath\` ` +
       `explicitly, and auto-sync via the file watcher only kicks in after the first query to a project ` +
       `(capped at 16 active projects).`,
-  );
-  lines.push(
     `- To fix: restart the MCP server with \`--project-path "${queriedRoot}"\` so this project becomes ` +
       `the default and gets auto-sync from session start. (In an MCP client config, add \`--project-path\` ` +
       `to the cartograph entry's \`args\`.)`,
@@ -554,12 +555,10 @@ function appendHeaderAndCounts(args: AppendHeaderAndCountsArgs): void {
  * backend.
  */
 function appendBackendStatus(lines: string[], cg: Cartograph, hnswAvailable: boolean): void {
-  const backend = cg.db.getBackend();
   const vec = cg.db.hasVecExtension();
   const vecSuffix = vec ? ' + sqlite-vec (indexed similarity) ✅' : ' ⚠ no sqlite-vec';
   // cartograph is Bun-only now — bun:sqlite is the sole backend.
   lines.push(`**Backend:** bun:sqlite${vecSuffix}`);
-  void backend;
   // Surface a degraded vector-search path so an operator on a platform
   // without a prebuilt binary knows they're on a slow fallback (and
   // how to fix it) instead of silently getting worse latency.
@@ -602,15 +601,19 @@ function changedTotal(changes: ChangedFiles | null): number {
 function formatStaleLine(freshness: NonNullable<ReturnType<Cartograph['stats']['getFreshness']>>): string {
   const sev = freshness.severity;
   // very_stale = 🔴, stale = 🟠, recent = 🟡.
-  const icon = sev === 'very_stale' ? '🔴' : sev === 'stale' ? '🟠' : '🟡';
-  const commitsSeg =
-    freshness.commitsAhead != null && freshness.commitsAhead > 0
-      ? `${freshness.commitsAhead} commit${freshness.commitsAhead === 1 ? '' : 's'} ahead of indexed HEAD`
-      : 'commits landed since index';
+  let icon = '🟡';
+  if (sev === 'very_stale') {
+    icon = '🔴';
+  } else if (sev === 'stale') {
+    icon = '🟠';
+  }
+  let commitsSeg = 'commits landed since index';
+  if (freshness.commitsAhead != null && freshness.commitsAhead > 0) {
+    commitsSeg = `${freshness.commitsAhead} commit${freshness.commitsAhead === 1 ? '' : 's'} ahead of indexed HEAD`;
+  }
+  const fileCountLabel = freshness.filesChanged === 1 ? 'file' : 'files';
   const filesSeg =
-    freshness.filesChanged == null
-      ? ''
-      : ` (${freshness.filesChanged} file${freshness.filesChanged === 1 ? '' : 's'} touched per \`git diff\`)`;
+    freshness.filesChanged == null ? '' : ` (${freshness.filesChanged} ${fileCountLabel} touched per \`git diff\`)`;
   return `**Status:** ${icon} stale — ${commitsSeg}${filesSeg} (severity: \`${sev}\`) — run \`cartograph admin sync\``;
 }
 
@@ -1064,13 +1067,19 @@ function readSummariesLens(cg: Cartograph, opts: { summaryBreakdown: boolean }):
         docCharThreshold: DEFAULT_DOC_CHAR_THRESHOLD,
       }),
     ) ?? 0;
-  const state: LensState = sumCov.summarised === 0 ? 'empty' : pending > 0 ? 'partial' : 'full';
-  const action =
-    state === 'empty'
-      ? " — run `cartograph summarize` (or `cartograph_summaries({action: 'pending'})` + `cartograph_summaries({action: 'save'})`)"
-      : state === 'partial'
-        ? ` — ${pending} pending; run \`cartograph summarize\` to complete`
-        : '';
+  let state: LensState = 'full';
+  if (sumCov.summarised === 0) {
+    state = 'empty';
+  } else if (pending > 0) {
+    state = 'partial';
+  }
+  let action = '';
+  if (state === 'empty') {
+    action =
+      " — run `cartograph summarize` (or `cartograph_summaries({action: 'pending'})` + `cartograph_summaries({action: 'save'})`)";
+  } else if (state === 'partial') {
+    action = ` — ${pending} pending; run \`cartograph summarize\` to complete`;
+  }
   // Centrality-weighted view: complements the raw count with a quality
   // signal — agents read centrality-weighted as "is the SPINE covered",
   // which matters more than tail coverage. Skipped silently when
@@ -1281,9 +1290,9 @@ export function appendFeatureReadiness(lines: string[], cg: Cartograph, opts: Le
  * Skipped when no LLM is configured.
  */
 async function appendLlmProviders(lines: string[], cg: Cartograph): Promise<void> {
-  let llmCfg: Awaited<ReturnType<typeof cg.llm.getEffectiveLlmConfig>> | undefined;
+  let llmCfg: Awaited<ReturnType<typeof cg.llm.config.getEffectiveLlmConfig>> | undefined;
   try {
-    llmCfg = await cg.llm.getEffectiveLlmConfig();
+    llmCfg = await cg.llm.config.getEffectiveLlmConfig();
   } catch {
     // Config errors aren't this tool's responsibility to surface.
     return;
@@ -1365,7 +1374,7 @@ async function appendLlmProviders(lines: string[], cg: Cartograph): Promise<void
 }
 
 async function renderReachabilitySection(
-  llmCfg: NonNullable<Awaited<ReturnType<Cartograph['llm']['getEffectiveLlmConfig']>>>,
+  llmCfg: NonNullable<Awaited<ReturnType<Cartograph['llm']['config']['getEffectiveLlmConfig']>>>,
 ): Promise<string[]> {
   const endpoints: Array<{ tier: string; endpoint: string }> = [];
   const collect = (tier: string, block: { provider?: string; endpoint?: string } | null | undefined): void => {
@@ -1411,7 +1420,7 @@ async function renderReachabilitySection(
 }
 
 function renderTuningSection(
-  llmCfg: NonNullable<Awaited<ReturnType<Cartograph['llm']['getEffectiveLlmConfig']>>>,
+  llmCfg: NonNullable<Awaited<ReturnType<Cartograph['llm']['config']['getEffectiveLlmConfig']>>>,
 ): string[] {
   // Pull effective per-tier concurrency: explicit user override (when
   // the *Llm.concurrency field is set) > hardware-aware default.
@@ -1574,7 +1583,7 @@ function appendNodesByKind(lines: string[], stats: ReturnType<Cartograph['stats'
     byKindLang.set(row.kind, list);
   }
   for (const [kind, count] of Object.entries(stats.nodesByKind)) {
-    if ((count as number) <= 0) continue;
+    if (count <= 0) continue;
     const langs = byKindLang.get(kind);
     if (langs && langs.length > 1) {
       const inline = langs.map(([l, c]) => `${l} ${c}`).join(', ');
@@ -1589,7 +1598,7 @@ function appendNodesByKind(lines: string[], stats: ReturnType<Cartograph['stats'
 function appendLanguages(lines: string[], stats: ReturnType<Cartograph['stats']['getStats']>): void {
   lines.push('', '### Languages:');
   for (const [lang, count] of Object.entries(stats.filesByLanguage)) {
-    if ((count as number) > 0) {
+    if (count > 0) {
       lines.push(`- ${lang}: ${count}`);
     }
   }

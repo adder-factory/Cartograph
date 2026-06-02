@@ -103,10 +103,10 @@ describe('cartograph_find by=content broad-pattern guard', () => {
     expect(text).toMatch(/is very broad|likely too broad/);
   });
 
-  it('warns on single-meta-char patterns like `\\w`', async () => {
+  it(String.raw`warns on single-meta-char patterns like \w`, async () => {
     const result = await handler.execute('cartograph_find', {
       by: 'content',
-      query: '\\w',
+      query: String.raw`\w`,
       limit: 50,
     });
     const text = result.content[0]?.text ?? '';

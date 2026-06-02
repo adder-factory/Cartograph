@@ -7,48 +7,47 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { mock } from 'bun:test';
-import type { Node } from '../src/types.js';
 import type { QueryBuilder } from '../src/db/queries.js';
+import type { NodeRow } from '../src/db/queries.js';
+import { DEAD_CODE_TOOL } from '../src/mcp/tools/dead-code.js';
 
-// Mock the dead-code helper so we can control the candidate stream
-// without needing a real SQLite instance. bun:test's `mock.module`
-// is NOT hoisted (unlike vitest's `vi.mock`), so register the mock
-// FIRST and import the importer via dynamic `await import(...)`.
-const candidateStream: { candidates: Node[] } = { candidates: [] };
-mock.module('../src/llm/dead-code.js', () => ({
-  // Faithfully model the real `findGraphCandidates` contract: the
-  // optional `isExempt` callback drops paths INLINE before the `max`
-  // cap, so callers no longer post-filter fixture nodes themselves.
-  findGraphCandidates: (args: {
-    queries: QueryBuilder;
-    max: number;
-    isExempt?: (filePath: string) => boolean;
-    includeTests?: boolean;
-  }): Node[] => {
-    return candidateStream.candidates.filter((n) => !args.isExempt?.(n.filePath)).slice(0, args.max);
-  },
-  // Stub the rest of the public surface so transitive importers
-  // (cartograph-llm-service.ts imports `judgeDeadCode`) don't trip a
-  // missing-export error at module-load. None of these get called in
-  // these tests.
-  judgeDeadCode: async () => ({ judged: [], unjudged: [] }),
-  parseBatchJudges: () => new Map(),
-  truncateReason: (s: string) => s,
-}));
+const candidateStream: { candidates: NodeRow[] } = { candidates: [] };
 
-const { DEAD_CODE_TOOL } = await import('../src/mcp/tools/dead-code.js');
-
-function fakeNode(name: string, filePath: string): Node {
+function fakeNode(name: string, filePath: string): NodeRow {
   return {
     id: `function:${filePath}:${name}`,
     name,
     kind: 'function',
-    filePath,
-    startLine: 1,
-    endLine: 5,
-    isExported: false,
-  } as Node;
+    qualified_name: name,
+    file_path: filePath,
+    language: filePath.endsWith('.rb') ? 'ruby' : 'typescript',
+    start_line: 1,
+    end_line: 5,
+    start_column: 0,
+    end_column: 0,
+    docstring: null,
+    signature: null,
+    visibility: null,
+    is_exported: 0,
+    is_async: 0,
+    is_static: 0,
+    decorators: null,
+    decorator_args: null,
+    updated_at: 0,
+    centrality: null,
+    betweenness: null,
+    body_hash: '',
+  };
+}
+
+function fakeQueries(): QueryBuilder {
+  return {
+    queries: {
+      findOrphanedSymbols: {
+        all: ({ limit, offset }: { limit: number; offset: number }) => candidateStream.candidates.slice(offset, offset + limit),
+      },
+    },
+  } as unknown as QueryBuilder;
 }
 
 beforeEach(() => {
@@ -68,7 +67,7 @@ describe('cartograph_dead_code — excludeFixtures parameter', () => {
     // Create a minimal ToolCtx
     const mockCg = {
       projectRoot: '/project',
-      queries: {} as QueryBuilder,
+      queries: fakeQueries(),
       llm: {
         getEffectiveLlmConfig: async () => ({}),
       },
@@ -113,7 +112,7 @@ describe('cartograph_dead_code — excludeFixtures parameter', () => {
 
     const mockCg = {
       projectRoot: '/project',
-      queries: {} as QueryBuilder,
+      queries: fakeQueries(),
       llm: {
         getEffectiveLlmConfig: async () => ({}),
       },
@@ -154,7 +153,7 @@ describe('cartograph_dead_code — excludeFixtures parameter', () => {
 
     const mockCg = {
       projectRoot: '/project',
-      queries: {} as QueryBuilder,
+      queries: fakeQueries(),
       llm: {
         getEffectiveLlmConfig: async () => ({}),
       },
@@ -192,7 +191,7 @@ describe('cartograph_dead_code — via:rule footer wording', () => {
 
     const mockCg = {
       projectRoot: '/project',
-      queries: {} as QueryBuilder,
+      queries: fakeQueries(),
       llm: { getEffectiveLlmConfig: async () => ({}) },
     };
     const ctx = {

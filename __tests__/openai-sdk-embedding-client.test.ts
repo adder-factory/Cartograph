@@ -287,7 +287,7 @@ describe('OpenAiSdkEmbeddingClient', () => {
     // Server returns each input echoed as a one-element vector whose value is the input parsed as a number.
     server = startMockServer(async (req) => {
       const body = (await req.json()) as { input: string[] };
-      return embedResp(body.input.map((s) => [parseFloat(s)]));
+      return embedResp(body.input.map((s) => [Number.parseFloat(s)]));
     });
     const c = new OpenAiSdkEmbeddingClient({ provider: 'openai-compat', model: 'm', endpoint: server.url });
     // 100 items → 2 batches of 64 + 36 with HTTP_BATCH_SIZE=64.

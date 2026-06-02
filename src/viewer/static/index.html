@@ -84,11 +84,6 @@
     -webkit-user-select: text;
     cursor: text;
   }
-  .codepane .lineno {
-    user-select: none;
-    -webkit-user-select: none;
-  }
-
   /* ───────── Top bar ───────── */
   .topbar {
     height: 52px;
@@ -195,10 +190,6 @@
   .canvas-col { grid-row: 1 / 2; grid-column: 2 / 3; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
   .canvas     { flex: 1 1 0; position: relative; min-height: 0; min-width: 0; overflow: hidden; background:
     radial-gradient(ellipse at 50% 40%, #161c2e 0%, var(--bg-0) 75%); }
-  /* Codepane visibility + height. Flex direction (row vs column)
-     is set on `.codepane` itself further down so the 60/40 split
-     between code and chat works inside it. */
-  .codepane { border-top: 1px solid var(--line); }
   .detailpane { grid-row: 1 / 2; grid-column: 3 / 4; background: var(--bg-1); border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; }
   .tracebar   { grid-row: 2 / 3; grid-column: 1 / 4; background: var(--bg-1); border-top: 1px solid var(--line); display: none; flex-direction: column; min-height: 0; }
   .stage.with-tracebar .tracebar { display: flex; }
@@ -389,10 +380,6 @@
   }
 
   /* Clickable caller/callee/finding rows in the right pane. */
-  .ref-row {
-    cursor: pointer;
-    transition: background .1s;
-  }
   .ref-row:hover {
     background: var(--bg-2);
   }
@@ -502,6 +489,7 @@
      row. Sourcetrail-style "graph + code at the same time", plus
      a chat that lives where the user already has context. */
   .codepane {
+    border-top: 1px solid var(--line);
     background: var(--bg-1);
     overflow: hidden;
     display: none;            /* hidden by default — toggled by .with-codepane */
@@ -517,7 +505,7 @@
   }
   /* Default 60/40 split. Splitter drag updates --code-flex /
      --chat-flex inline; localStorage persists across reloads. */
-  .codepane-code { flex: var(--code-flex, 6) 1 0; }
+  .codepane-code { flex: var(--code-flex, 6) 1 0; padding-right: 0; }
   .codepane-chat { flex: var(--chat-flex, 4) 1 0; }
 
   /* Splitters — thin visual line, wider invisible hit-area via padding-style.
@@ -550,9 +538,8 @@
   .splitter::before {
     content: ''; position: absolute; inset: 0; padding: 0;
   }
-  /* Reserve a small inner gap on the code pane's right edge so its
-     scrollbar has room before the splitter. */
-  .codepane-code { padding-right: 0; }
+  /* The code pane keeps zero right padding so its scrollbar has room
+     before the splitter. */
   /* Splitter-v lives directly between .canvas and .codepane in the
      canvas-col flex stack. It needs the with-codepane visibility. */
   .canvas-col:not(.with-codepane) .splitter-v { display: none; }
@@ -688,6 +675,7 @@
   .codepane .lineno {
     color: var(--text-dim);
     user-select: none;
+    -webkit-user-select: none;
     margin-right: var(--s-3);
     display: inline-block;
     text-align: right;
@@ -812,7 +800,7 @@
   .subtab .ct { color: var(--text-dim); margin-left: var(--s-1); font-variant-numeric: tabular-nums; font-size: 12px; }
 
   .subpanel { padding: var(--s-3) var(--s-5) var(--s-5); }
-  .ref-row { padding: var(--s-2) 0; font-size: 13px; border-bottom: 1px solid var(--line-soft); }
+  .ref-row { padding: var(--s-2) 0; font-size: 13px; border-bottom: 1px solid var(--line-soft); cursor: pointer; transition: background .1s; }
   .ref-row:last-child { border-bottom: none; }
   .ref-row .name { color: var(--text); font-family: "SF Mono", Menlo, monospace; word-break: break-all; }
   .ref-row .loc  { color: var(--text-dim); font-size: 11.5px; font-family: "SF Mono", Menlo, monospace; margin-top: var(--s-1); word-break: break-all; }
@@ -887,8 +875,8 @@
     border-color: var(--line);
   }
   .askpanel-msg .ask-loc { color: var(--text-dim); font-size: 11px; font-family: "SF Mono", Menlo, monospace; margin-left: 4px; }
-  .askpanel-msg.err { background: rgba(239,68,68,.1); border-color: var(--err); color: #fca5a5; font-size: 12px; }
-  .askpanel-msg.err .hint { color: var(--text-dim); font-size: 11.5px; margin-top: 4px; }
+  .askpanel-msg.err { background: #7f1d1d; border-color: var(--err); color: #ffffff; font-size: 12px; }
+  .askpanel-msg.err .hint { color: #f4f7fb; font-size: 11.5px; margin-top: 4px; }
   .askpanel-msg.loading { color: var(--text-dim); font-style: italic; }
   .askpanel-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3) var(--s-3); border-top: 1px solid var(--line); }
   .askpanel-form textarea {
@@ -1181,7 +1169,7 @@
            autocomplete="off" />
   </div>
   <div class="spacer"></div>
-  <nav class="tabs">
+  <nav class="tabs" aria-label="Primary views">
     <div class="tab active" data-view="graph">Graph</div>
     <div class="tab" data-view="trace">Agent trace</div>
     <div class="tab" data-view="health">Health</div>
@@ -1191,7 +1179,7 @@
 <main class="stage">
 
   <!-- ── left rail ── -->
-  <aside class="leftrail">
+  <aside class="leftrail" aria-label="Graph filters and ask panel">
     <section class="rail-section">
       <div class="rail-title">Kind <span class="rail-hint" id="kind-hint">click to filter</span></div>
       <div class="kind-chips" id="kind-chips">
@@ -1242,7 +1230,7 @@
     <div class="canvas-header" id="canvas-counter">Showing 0 nodes · 0 edges</div>
     <div class="canvas-banner" id="canvas-banner">Replay mode — click a step in the timeline below</div>
     <div id="cy"></div>
-    <div class="zoom-controls" role="group" aria-label="Zoom controls">
+    <div class="zoom-controls" aria-label="Zoom controls">
       <button id="btn-zoom-in"  title="Zoom in (+)"  aria-label="Zoom in">+</button>
       <button id="btn-zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
       <button id="btn-zoom-fit" title="Fit graph to viewport (0)" aria-label="Fit graph"><span class="fit-icon"></span></button>
@@ -1250,7 +1238,7 @@
     <div class="kbd-hint">
       <kbd>/</kbd> search · <kbd>Esc</kbd> clear · <kbd>+</kbd>/<kbd>−</kbd> zoom · <kbd>0</kbd> fit · double-click a node to focus
     </div>
-    <button class="show-code-btn" id="btn-show-code" title="Show source code panel" aria-label="Show source">⌃ Show source</button>
+    <button class="show-code-btn" id="btn-show-code" title="Show source code panel">⌃ Show source</button>
   </section>
   <div class="splitter splitter-v" id="splitter-v" title="Drag to resize"></div>
   <!-- ── code panel: 60% code + 40% AI chat split ── -->
@@ -1295,7 +1283,7 @@
   </div><!-- /.canvas-col -->
 
   <!-- ── detail pane ── -->
-  <aside class="detailpane" id="detail-pane">
+  <aside class="detailpane" id="detail-pane" aria-label="Selected symbol details">
     <header class="detail-head">
       <nav class="breadcrumb" id="d-breadcrumb" aria-label="symbol path"></nav>
       <div class="d-name-row">
@@ -1321,7 +1309,7 @@
       <div class="stat"><span class="k">Last touched</span><span class="v" id="m-last">—</span></div>
     </section>
     <section id="d-doc" class="docstring" style="display:none"></section>
-    <nav class="subtabs" id="subtabs">
+    <nav class="subtabs" id="subtabs" aria-label="Selected symbol sections">
       <div class="subtab active" data-sub="callers">Callers <span class="ct" id="d-callers-ct">(0)</span></div>
       <div class="subtab" data-sub="callees">Callees <span class="ct" id="d-callees-ct">(0)</span></div>
       <div class="subtab" data-sub="findings">Findings <span class="ct" id="d-findings-ct">(0)</span></div>
@@ -1383,13 +1371,13 @@
 
 <!-- Command palette (Cmd/Ctrl+K) — quick navigation overlay -->
 <div class="palette-backdrop" id="palette-backdrop" hidden>
-  <div class="palette" role="dialog" aria-label="Command palette">
+  <dialog class="palette" aria-label="Command palette">
     <input type="text" id="palette-input" placeholder="Type to filter — symbols, actions, recents…" spellcheck="false" autocomplete="off" />
     <div class="palette-list" id="palette-list"></div>
     <footer class="palette-foot">
       <kbd>↑</kbd><kbd>↓</kbd> navigate · <kbd>Enter</kbd> select · <kbd>Esc</kbd> close
     </footer>
-  </div>
+  </dialog>
 </div>
 
 <script>
@@ -1401,9 +1389,9 @@
 // Register fCoSE on the global cytoscape so the layout name resolves.
 // Both UMD globals are checked because the bundle name has shifted
 // across versions of the extension.
-if (typeof window.cytoscape !== 'undefined' && typeof cytoscape.use === 'function') {
-  const ext = window.cytoscapeFcose || window['cytoscape-fcose'];
-  if (ext) try { cytoscape.use(ext); } catch (_) { /* already registered */ }
+if (globalThis.cytoscape !== undefined && typeof cytoscape.use === 'function') {
+  const ext = globalThis.cytoscapeFcose || globalThis['cytoscape-fcose'];
+  if (ext) try { cytoscape.use(ext); } catch (err) { console.debug('cytoscape extension already registered', err); }
 }
 
 const KIND = { fn: 'function', method: 'method', class: 'class' };
@@ -1445,7 +1433,7 @@ const NODES = [
   { id: 'ContextBuilder',     label: 'ContextBuilder',     kind: KIND.class,  file: 'src/context/index.ts',     line: 22,  health: 'healthy',  centrality: 0.0078, coverage: 0.69 },
 
   // Callees that show in trace (impact subgraph)
-  { id: 'parseSource',        label: 'parseSource',        kind: KIND.fn,     file: 'src/extraction/parser.ts', line: 14,  health: 'healthy',  centrality: 0.0040, coverage: 0.92 },
+  { id: 'parseSource',        label: 'parseSource',        kind: KIND.fn,     file: 'src/extraction/parser.ts', line: 14,  health: 'healthy',  centrality: 0.004, coverage: 0.92 },
   { id: 'walkTree',           label: 'walkTree',           kind: KIND.fn,     file: 'src/extraction/walker.ts', line: 31,  health: 'warning',  centrality: 0.0023, coverage: 0.61 },
   { id: 'computeMetrics',     label: 'computeMetrics',     kind: KIND.fn,     file: 'src/biomarkers/engine.ts', line: 86,  health: 'healthy',  centrality: 0.0017, coverage: 0.88 },
   { id: 'analyseAnalysableNodes', label: 'analyseAnalysableNodes', kind: KIND.fn, file: 'src/biomarkers/index.ts', line: 381, health: 'warning', centrality: 0.0019, coverage: 0.71 },
@@ -1560,7 +1548,9 @@ const HEALTH_BORDER = {
 function fillForKind(kind) { return KIND_FILL[kind] ?? KIND_DEFAULT_FILL; }
 function borderForHealth(health) { return HEALTH_BORDER[health] ?? HEALTH_BORDER.healthy; }
 function borderWidthForHealth(health) {
-  return health === 'error' ? 3 : health === 'warning' ? 2 : 1;
+  if (health === 'error') return 3;
+  if (health === 'warning') return 2;
+  return 1;
 }
 
 /* Node size scales with PageRank centrality: hubs visibly bigger
@@ -1578,8 +1568,8 @@ function sizeForCentrality(c) {
    gives the right pane breathing room. Falls back to built-in 'cose'
    if the fCoSE extension didn't load (CDN failure). */
 function fcoseLayoutOpts() {
-  const hasFcose = window.cytoscapeFcose !== undefined
-                || window['cytoscape-fcose'] !== undefined;
+  const hasFcose = globalThis.cytoscapeFcose !== undefined
+                || globalThis['cytoscape-fcose'] !== undefined;
   return hasFcose ? {
     name: 'fcose',
     quality: 'proof',          // run more iterations for cleaner final positions
@@ -1589,7 +1579,7 @@ function fcoseLayoutOpts() {
     nodeSeparation: 180,        // more breathing room between adjacent nodes
     idealEdgeLength: 220,       // longer edges → spokes spread outward
     nodeRepulsion: 18000,       // hubs push neighbors further away
-    gravity: 0.10,              // weaker gravity → graph fills the canvas
+    gravity: 0.1,               // weaker gravity → graph fills the canvas
     gravityRange: 3.8,
     gravityCompound: 0.5,
     numIter: 4000,              // more iterations → simulation settles cleanly
@@ -1750,7 +1740,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(0.8);  return; }
   if (e.key === '0')                  { e.preventDefault(); cy.fit(undefined, 60); return; }
   if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); navTo(-1); return; }
-  if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navTo(+1); return; }
+  if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navTo(+1); }
 });
 
 /* Double-click a node → fit the viewport to that node + its
@@ -1802,7 +1792,7 @@ setTimeout(relayoutAndFit, 50);
    (graph, detail, Health tab, Agent-trace tab) is populated from
    real DB state. */
 
-const LIVE_MODE = window.location.protocol === 'http:' || window.location.protocol === 'https:';
+const LIVE_MODE = globalThis.location.protocol === 'http:' || globalThis.location.protocol === 'https:';
 let liveSymbolCache = null;       // last /api/symbol/:id response (used by renderSubpanel)
 const liveNodeIndex = new Map();  // id → {label, kind, file, line, centrality}
 
@@ -1826,7 +1816,7 @@ async function bootLive() {
       document.querySelector('.topbar .stats').innerHTML =
         `<b>${s.files}</b> files · <b>${s.nodes.toLocaleString()}</b> nodes · <b>${s.edges.toLocaleString()}</b> edges`;
     }
-  } catch (_) { /* keep mockup top-bar on failure */ }
+  } catch (err) { console.debug('status endpoint unavailable', err); }
 
   // Replace the hardcoded graph with /api/graph (no focus → top-30 by centrality)
   try {
@@ -1953,7 +1943,7 @@ function renderLiveTraceList() {
     </div>
   `).join('');
   tl.querySelectorAll('.trace-row').forEach(el =>
-    el.addEventListener('click', () => activateLiveTraceStep(parseInt(el.dataset.i, 10)))
+    el.addEventListener('click', () => activateLiveTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
 }
 
@@ -1978,7 +1968,7 @@ async function activateLiveTraceStep(i) {
   const c = liveTraceCalls[i];
   if (!c) return;
   document.querySelectorAll('.trace-row').forEach(el =>
-    el.classList.toggle('active', parseInt(el.dataset.i, 10) === i));
+    el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
   const symbol = c.args && typeof c.args === 'object' ? c.args.symbol : null;
   if (typeof symbol === 'string') {
     await selectSymbolLive(symbol);
@@ -2168,7 +2158,7 @@ function resetCodePanel(symbolId) {
   capturedSelection = '';
   capturedSelectionLines = 0;
   updateAskSelectionChip();
-  window.getSelection()?.removeAllRanges();
+  globalThis.getSelection()?.removeAllRanges();
   codeOriginalHtml = '';
   codeMatches = [];
   codeMatchIndex = -1;
@@ -2220,7 +2210,7 @@ document.getElementById('btn-code-selectall').addEventListener('click', () => {
   const range = document.createRange();
   range.setStartAfter(linenos[0]);
   range.setEndAfter(codeEl.lastChild ?? linenos[linenos.length - 1]);
-  const sel = window.getSelection();
+  const sel = globalThis.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
 });
@@ -2229,7 +2219,7 @@ document.getElementById('btn-code-export').addEventListener('click', () => {
   if (!src) return;
   const lang = liveSymbolCache?.language || 'typescript';
   const ext = EXT_BY_LANG[lang] || 'txt';
-  const safeName = (liveSymbolCache?.label || 'source').replace(/[^A-Za-z0-9_-]/g, '_');
+  const safeName = (liveSymbolCache?.label || 'source').replaceAll(/[^A-Za-z0-9_-]/g, '_');
   const blob = new Blob([src], { type: 'text/plain' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -2357,7 +2347,7 @@ function selectLineRange(startN, endN) {
   const tail = findLinenoSpan(codeEl, endN + 1);
   if (tail) range.setEndBefore(tail);
   else range.setEndAfter(codeEl.lastChild ?? endSpan);
-  const sel = window.getSelection();
+  const sel = globalThis.getSelection();
   sel.removeAllRanges();
   sel.addRange(range);
   startSpan.scrollIntoView({ block: 'start', behavior: 'smooth' });
@@ -2376,12 +2366,12 @@ function applyGotoExpression(raw) {
   // Range: "10-50" or "10 - 50" → select lines.
   const m = /^(\d+)\s*-\s*(\d+)$/.exec(v);
   if (m) {
-    if (!selectLineRange(parseInt(m[1], 10), parseInt(m[2], 10))) flashGotoError();
+    if (!selectLineRange(Number.parseInt(m[1], 10), Number.parseInt(m[2], 10))) flashGotoError();
     return;
   }
   // Single line: "123" → scroll + flash.
   if (/^\d+$/.test(v)) {
-    if (!gotoLine(parseInt(v, 10))) flashGotoError();
+    if (!gotoLine(Number.parseInt(v, 10))) flashGotoError();
     return;
   }
   flashGotoError();
@@ -2394,14 +2384,14 @@ document.getElementById('d-code-goto').addEventListener('keydown', (e) => {
   } else if (e.key === 'Escape') {
     e.target.value = '';
     e.target.blur();
-    window.getSelection()?.removeAllRanges();
+    globalThis.getSelection()?.removeAllRanges();
   }
 });
 document.getElementById('d-code-goto').addEventListener('input', (e) => {
   // Live single-line scroll only; ranges wait for Enter so the
   // selection doesn't thrash while the user is still typing.
   const v = e.target.value.trim();
-  if (/^\d+$/.test(v)) gotoLine(parseInt(v, 10));
+  if (/^\d+$/.test(v)) gotoLine(Number.parseInt(v, 10));
 });
 
 async function loadSourceLive(symbolId) {
@@ -2427,8 +2417,8 @@ async function loadSourceLive(symbolId) {
     /* All grammars are bundled up-front, so highlightElement is
        fully synchronous — decorate line numbers immediately
        afterwards, no callback or race window. */
-    if (window.Prism) {
-      try { Prism.highlightElement(codeEl); } catch (_) { /* unsupported lang -> stay plain */ }
+    if (globalThis.Prism) {
+      try { Prism.highlightElement(codeEl); } catch (err) { console.debug('syntax highlighting unavailable', err); }
     }
     decorateLineNumbers(codeEl, codeStartLine);
     codeOriginalHtml = codeEl.innerHTML;
@@ -2565,8 +2555,12 @@ function renderDocstringPreview(raw, symbolId) {
   const expanded = symbolId && docExpandedFor.has(symbolId);
   el.style.display = 'block';
   el.classList.toggle('expanded', expanded);
-  el.innerHTML = `<div class="docstring-body"></div>` +
-    (longish ? `<div class="docstring-toggle">${expanded ? '⌃ Collapse' : '⌄ Expand'}</div>` : '');
+  let toggleHtml = '';
+  if (longish) {
+    const toggleText = expanded ? '⌃ Collapse' : '⌄ Expand';
+    toggleHtml = `<div class="docstring-toggle">${toggleText}</div>`;
+  }
+  el.innerHTML = `<div class="docstring-body"></div>${toggleHtml}`;
   // textContent (not innerHTML) for the body so docstring text
   // can't inject HTML.
   el.querySelector('.docstring-body').textContent = cleaned;
@@ -2625,12 +2619,14 @@ function clickTab(view) {
 
 function openPalette() {
   document.getElementById('palette-backdrop').hidden = false;
+  document.querySelector('.palette').open = true;
   document.getElementById('palette-input').value = '';
   paletteActiveIndex = 0;
   renderPalette('');
   setTimeout(() => document.getElementById('palette-input').focus(), 0);
 }
 function closePalette() {
+  document.querySelector('.palette').open = false;
   document.getElementById('palette-backdrop').hidden = true;
 }
 
@@ -2653,7 +2649,8 @@ function renderPalette(query) {
     matchedActions.forEach((a) => {
       const idx = paletteVisible.length;
       paletteVisible.push({ kind: 'action', payload: a });
-      html += `<div class="palette-item" data-i="${idx}"><span class="it-icon">⚙</span> ${escapeHtml(a.label)} ${a.shortcut ? `<span class="it-shortcut">${escapeHtml(a.shortcut)}</span>` : ''}</div>`;
+      const shortcutHtml = a.shortcut ? `<span class="it-shortcut">${escapeHtml(a.shortcut)}</span>` : '';
+      html += `<div class="palette-item" data-i="${idx}"><span class="it-icon">⚙</span> ${escapeHtml(a.label)} ${shortcutHtml}</div>`;
     });
   }
   if (matchedRecents.length > 0) {
@@ -2716,7 +2713,7 @@ document.getElementById('palette-input').addEventListener('keydown', (e) => {
 document.getElementById('palette-list').addEventListener('click', (e) => {
   const row = e.target.closest('.palette-item[data-i]');
   if (!row) return;
-  selectPalette(paletteVisible[parseInt(row.dataset.i, 10)]);
+  selectPalette(paletteVisible[Number.parseInt(row.dataset.i, 10)]);
 });
 document.getElementById('palette-backdrop').addEventListener('click', (e) => {
   if (e.target.id === 'palette-backdrop') closePalette();
@@ -2777,7 +2774,19 @@ async function applyHashState() {
    so the user knows it landed. */
 async function copyToClipboard(text, btn) {
   try { await navigator.clipboard.writeText(text); }
-  catch { /* fallback */ try { const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); } catch (_) {} }
+  catch (err) {
+    console.debug('navigator clipboard unavailable', err);
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      ta.remove();
+    } catch (fallbackErr) {
+      console.debug('clipboard fallback failed', fallbackErr);
+    }
+  }
   if (btn) {
     const orig = btn.textContent;
     btn.textContent = '✓ Copied';
@@ -2806,7 +2815,7 @@ document.getElementById('btn-copy-mcp').addEventListener('click', (e) => {
   copyToClipboard(snippet, e.currentTarget);
 });
 
-window.addEventListener('hashchange', () => {
+globalThis.addEventListener('hashchange', () => {
   // Don't loop when we just wrote the hash ourselves.
   const s = readHashState();
   if (LIVE_MODE && s.focus && s.focus !== liveSymbolCache?.id) searchAndFocus(s.focus);
@@ -2815,12 +2824,12 @@ window.addEventListener('hashchange', () => {
 /* List of biomarker names used by the intent detector. Mirrors
    src/biomarkers/types.ts; rename / extend there to keep this in
    sync. Lowercase + underscore form is what the API expects. */
-const KNOWN_BIOMARKERS = [
+const KNOWN_BIOMARKERS = new Set([
   'large_method', 'complex_method', 'nested_complexity',
   'complex_conditional', 'brain_method', 'long_parameter_list',
   'magic_number', 'hardcoded_url', 'recently_grew', 'stale_doc',
   'unused_export', 'god_class', 'feature_envy',
-];
+]);
 const BIOMARKER_ALIASES = {
   'god classes': 'god_class', 'god class': 'god_class',
   'large methods': 'large_method', 'large method': 'large_method',
@@ -2838,16 +2847,21 @@ const BIOMARKER_ALIASES = {
 function detectIntent(raw) {
   const q = raw.trim().toLowerCase();
   // Bare biomarker name → biomarker filter.
-  if (KNOWN_BIOMARKERS.includes(q)) return { kind: 'biomarker', name: q };
+  if (KNOWN_BIOMARKERS.has(q)) return { kind: 'biomarker', name: q };
   if (BIOMARKER_ALIASES[q]) return { kind: 'biomarker', name: BIOMARKER_ALIASES[q] };
   // "show me god_class", "find god classes", "where are the god classes"
-  const m = /^(?:show(?:\s+me)?|find|locate|where(?:\s+(?:is|are))?(?:\s+the)?|list)\s+(?:all\s+|the\s+)?(.+?)\s*\??\s*$/i.exec(raw.trim());
-  if (m) {
-    const target = m[1].trim().toLowerCase();
-    if (KNOWN_BIOMARKERS.includes(target)) return { kind: 'biomarker', name: target };
+  const commandPrefixes = ['show me ', 'show ', 'find ', 'locate ', 'where is ', 'where are ', 'where the ', 'list '];
+  const prefix = commandPrefixes.find((candidate) => q.startsWith(candidate));
+  if (prefix) {
+    let target = q.slice(prefix.length).trim();
+    if (target.endsWith('?')) target = target.slice(0, -1).trim();
+    if (target.startsWith('all ')) target = target.slice(4).trim();
+    if (target.startsWith('the ')) target = target.slice(4).trim();
+    if (KNOWN_BIOMARKERS.has(target)) return { kind: 'biomarker', name: target };
     if (BIOMARKER_ALIASES[target]) return { kind: 'biomarker', name: BIOMARKER_ALIASES[target] };
     // Otherwise treat as a symbol name (preserve original case).
-    return { kind: 'symbol', name: m[1].trim() };
+    const symbolName = raw.trim().slice(prefix.length).replace(/\?$/, '').trim().replace(/^(?:all|the)\s+/i, '');
+    return { kind: 'symbol', name: symbolName };
   }
   return null;
 }
@@ -2962,7 +2976,7 @@ function updateAskSelectionChip() {
 }
 
 document.addEventListener('selectionchange', () => {
-  const sel = window.getSelection();
+  const sel = globalThis.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
     // Don't clear immediately — user might be moving focus to the
     // chat input. Only clear when an entirely-different focus
@@ -2989,7 +3003,7 @@ document.getElementById('ask-selection-clear').addEventListener('click', () => {
   capturedSelection = '';
   capturedSelectionLines = 0;
   updateAskSelectionChip();
-  window.getSelection()?.removeAllRanges();
+  globalThis.getSelection()?.removeAllRanges();
 });
 
 /* Ask-AI panel wiring.
@@ -3149,9 +3163,8 @@ async function selectSymbolLive(symbolId) {
     pushRecent(p);
     writeHashState();
     document.getElementById('d-name').textContent = p.label;
-    const subtitle = p.signature
-      ? `${p.kind} · ${p.file}:${p.line ?? '?'}${p.signature ? '  ' + p.signature.replace(/\s+/g, ' ').trim() : ''}`
-      : `${p.kind} · ${p.file}:${p.line ?? '?'}`;
+    const signatureSuffix = p.signature ? `  ${p.signature.replaceAll(/\s+/g, ' ').trim()}` : '';
+    const subtitle = `${p.kind} · ${p.file}:${p.line ?? '?'}${signatureSuffix}`;
     document.getElementById('d-loc').textContent = subtitle;
     renderBreadcrumb(p.file, p.label);
     renderDocstringPreview(p.docstring, p.id);
@@ -3159,10 +3172,15 @@ async function selectSymbolLive(symbolId) {
     document.getElementById('d-cent').textContent = (p.centrality ?? 0).toFixed(4);
     const errs = (p.findings ?? []).filter(f => f.severity === 'error').length;
     const warns = (p.findings ?? []).filter(f => f.severity === 'warning').length;
-    const health10 = errs > 0 ? '3/10' : warns > 0 ? '6/10' : '10/10';
+    let health10 = '10/10';
+    if (errs > 0) health10 = '3/10';
+    else if (warns > 0) health10 = '6/10';
     const healthEl = document.getElementById('d-health');
     healthEl.textContent = health10;
-    healthEl.className = 'v ' + (errs > 0 ? 'err' : warns > 0 ? 'warn' : 'ok');
+    let healthClass = 'ok';
+    if (errs > 0) healthClass = 'err';
+    else if (warns > 0) healthClass = 'warn';
+    healthEl.className = `v ${healthClass}`;
     document.getElementById('d-cov').textContent = p.coverage && p.coverage.ratio != null
       ? `${Math.round(p.coverage.ratio * 100)}%`
       : '—';
@@ -3197,29 +3215,34 @@ function renderSubpanelLive(sub) {
   // navigate without re-resolving by name (collisions on common
   // names would otherwise route to the wrong symbol).
   const refRow = (n) => `<div class="ref-row" data-symbol="${esc(n.id)}" title="${esc(n.label || n.id)} — click to focus"><div class="name">${esc(n.label || n.id)}</div><div class="loc">${esc(n.file)}:${esc(n.line ?? '?')}</div></div>`;
-  if (sub === 'callers') {
-    SUBPANEL.innerHTML = (p.callers ?? []).map(refRow).join('') || '<div class="empty">No callers</div>';
-  } else if (sub === 'callees') {
-    SUBPANEL.innerHTML = (p.callees ?? []).map(refRow).join('') || '<div class="empty">No callees</div>';
-  } else if (sub === 'findings') {
-    const findings = p.findings ?? [];
-    SUBPANEL.innerHTML = findings.length === 0
-      ? '<div class="empty">No findings — code health 10/10</div>'
-      : findings.map(f => `<div class="ref-row"><div class="name">${esc(f.biomarker)}</div><div class="loc">severity: ${esc(f.severity)} · metric ${esc(f.metric)}</div></div>`).join('');
-  } else if (sub === 'coverage') {
-    const cov = p.coverage;
-    if (!cov) {
-      SUBPANEL.innerHTML = '<div class="empty">No coverage data — run <code>cartograph coverage --mode load --report-path &lt;lcov&gt;</code> to ingest.</div>';
-    } else {
-      const pct = cov.ratio != null ? `${Math.round(cov.ratio * 100)}%` : '—';
-      const branches = cov.totalBranches != null
-        ? `${cov.coveredBranches}/${cov.totalBranches} branches covered`
-        : 'branch coverage not in source';
-      SUBPANEL.innerHTML =
-        `<div class="ref-row"><div class="name">Lines: ${esc(pct)}</div><div class="loc">${cov.coveredLines}/${cov.totalLines} lines · source: ${esc(cov.source)}</div></div>` +
-        `<div class="ref-row"><div class="name">Branches</div><div class="loc">${esc(branches)}</div></div>`;
-    }
-  }
+  SUBPANEL.innerHTML = renderLiveSubpanelHtml(sub, p, esc, refRow);
+}
+
+function renderLiveSubpanelHtml(sub, p, esc, refRow) {
+  if (sub === 'callers') return (p.callers ?? []).map(refRow).join('') || '<div class="empty">No callers</div>';
+  if (sub === 'callees') return (p.callees ?? []).map(refRow).join('') || '<div class="empty">No callees</div>';
+  if (sub === 'findings') return renderLiveFindingsHtml(p, esc);
+  if (sub === 'coverage') return renderLiveCoverageHtml(p, esc);
+  return '';
+}
+
+function renderLiveFindingsHtml(p, esc) {
+  const findings = p.findings ?? [];
+  return findings.length === 0
+    ? '<div class="empty">No findings — code health 10/10</div>'
+    : findings.map(f => `<div class="ref-row"><div class="name">${esc(f.biomarker)}</div><div class="loc">severity: ${esc(f.severity)} · metric ${esc(f.metric)}</div></div>`).join('');
+}
+
+function renderLiveCoverageHtml(p, esc) {
+  const cov = p.coverage;
+  if (!cov) return '<div class="empty">No coverage data — run <code>cartograph coverage --mode load --report-path &lt;lcov&gt;</code> to ingest.</div>';
+
+  const pct = typeof cov.ratio === 'number' ? `${Math.round(cov.ratio * 100)}%` : '—';
+  const branches = typeof cov.totalBranches === 'number'
+    ? `${cov.coveredBranches}/${cov.totalBranches} branches covered`
+    : 'branch coverage not in source';
+  return `<div class="ref-row"><div class="name">Lines: ${esc(pct)}</div><div class="loc">${cov.coveredLines}/${cov.totalLines} lines · source: ${esc(cov.source)}</div></div>` +
+    `<div class="ref-row"><div class="name">Branches</div><div class="loc">${esc(branches)}</div></div>`;
 }
 
 /* ───────── Detail pane ───────── */
@@ -3315,8 +3338,8 @@ cy.on('tap', 'node', (evt) => {
 
 /* default selection — only for the file:// fallback. Live mode picks
    its own initial selection inside bootLive() once the graph loads. */
-if (!LIVE_MODE) selectSymbol('extractFromSource');
-else bootLive();
+if (LIVE_MODE) await bootLive();
+else selectSymbol('extractFromSource');
 
 /* ───────── Trace timeline ───────── */
 
@@ -3332,10 +3355,10 @@ function renderTrace() {
     </div>
   `).join('');
   traceList.querySelectorAll('.trace-row').forEach(el =>
-    el.addEventListener('click', () => activateTraceStep(parseInt(el.dataset.i, 10)))
+    el.addEventListener('click', () => activateTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
 }
-function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function escapeHtml(s) { return s.replaceAll(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 renderTrace();
 
 let activeStep = -1;
@@ -3343,7 +3366,7 @@ let activeStep = -1;
 function activateTraceStep(i, fromCy = false) {
   activeStep = i;
   const t = TRACE[i];
-  document.querySelectorAll('.trace-row').forEach(el => el.classList.toggle('active', parseInt(el.dataset.i, 10) === i));
+  document.querySelectorAll('.trace-row').forEach(el => el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
   const row = traceList.querySelector(`.trace-row[data-i="${i}"]`);
   if (row && !fromCy) row.scrollIntoView({ block: 'nearest' });
 

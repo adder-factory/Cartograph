@@ -386,19 +386,45 @@ export function pruneOrphanStoreRows(
     // can mirror the deletions into vec0 after the SQL DELETE runs.
     const orphanRowids = qb.vecLoaded ? selectOrphanEmbeddingStoreRowids(qb, useFloor, cutoff) : [];
 
-    const deletedSummaryRows = useFloor
-      ? (qb.queries.deleteOrphanSummaryStoreWithFloor ??= deleteOrphanSummaryStoreWithFloorQuery(qb.db)).all({
+    const deletedSummaryRows = (() => {
+      if (useFloor) {
+        let query = qb.queries.deleteOrphanSummaryStoreWithFloor;
+        if (!query) {
+          query = deleteOrphanSummaryStoreWithFloorQuery(qb.db);
+          qb.queries.deleteOrphanSummaryStoreWithFloor = query;
+        }
+        return query.all({
           cutoff,
           floor: LAST_REF_AT_PLAUSIBLE_FLOOR,
-        })
-      : (qb.queries.deleteOrphanSummaryStoreAllAge ??= deleteOrphanSummaryStoreAllAgeQuery(qb.db)).all({ cutoff });
+        });
+      }
+      let query = qb.queries.deleteOrphanSummaryStoreAllAge;
+      if (!query) {
+        query = deleteOrphanSummaryStoreAllAgeQuery(qb.db);
+        qb.queries.deleteOrphanSummaryStoreAllAge = query;
+      }
+      return query.all({ cutoff });
+    })();
 
-    const deletedEmbeddingRows = useFloor
-      ? (qb.queries.deleteOrphanEmbeddingStoreWithFloor ??= deleteOrphanEmbeddingStoreWithFloorQuery(qb.db)).all({
+    const deletedEmbeddingRows = (() => {
+      if (useFloor) {
+        let query = qb.queries.deleteOrphanEmbeddingStoreWithFloor;
+        if (!query) {
+          query = deleteOrphanEmbeddingStoreWithFloorQuery(qb.db);
+          qb.queries.deleteOrphanEmbeddingStoreWithFloor = query;
+        }
+        return query.all({
           cutoff,
           floor: LAST_REF_AT_PLAUSIBLE_FLOOR,
-        })
-      : (qb.queries.deleteOrphanEmbeddingStoreAllAge ??= deleteOrphanEmbeddingStoreAllAgeQuery(qb.db)).all({ cutoff });
+        });
+      }
+      let query = qb.queries.deleteOrphanEmbeddingStoreAllAge;
+      if (!query) {
+        query = deleteOrphanEmbeddingStoreAllAgeQuery(qb.db);
+        qb.queries.deleteOrphanEmbeddingStoreAllAge = query;
+      }
+      return query.all({ cutoff });
+    })();
 
     if (qb.vecLoaded && orphanRowids.length > 0) {
       mirrorOrphanDeletionsToVec(qb, orphanRowids);
@@ -805,6 +831,15 @@ export function getSymbolSummaries(qb: QueryBuilder, nodeIds: readonly string[])
   });
   for (const r of rows) out.set(r.node_id, r.value);
   return out;
+}
+
+/** Count nodes in the input set that have true LLM summaries. */
+export function countSymbolSummaries(qb: QueryBuilder, nodeIds: readonly string[]): number {
+  if (nodeIds.length === 0) return 0;
+  qb.queries.getSymbolSummariesByIds ??= getSymbolSummariesByIdsQuery(qb.db);
+  return qb.queries.getSymbolSummariesByIds.all({
+    nodeIds: JSON.stringify([...nodeIds]),
+  }).length;
 }
 
 /**

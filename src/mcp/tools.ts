@@ -812,13 +812,14 @@ function toFreshnessMetadata(
   f: import('../freshness.js').FreshnessInfo,
   extra?: { autoSynced?: boolean; blocked?: boolean },
 ): import('./tool-types.js').FreshnessMetadata {
-  return {
+  const metadata: import('./tool-types.js').FreshnessMetadata = {
     isStale: f.isStale,
     indexedSha: f.indexedSha,
     currentSha: f.currentSha,
     filesChanged: f.filesChanged,
     commitsAhead: f.commitsAhead,
     breakdown: f.breakdown,
-    ...(extra ?? {}),
   };
+  if (extra) Object.assign(metadata, extra);
+  return metadata;
 }

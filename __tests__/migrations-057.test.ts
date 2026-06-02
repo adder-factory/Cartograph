@@ -20,6 +20,8 @@ import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import { MIGRATION as MIG_057 } from '../src/db/migrations/057-repair-strictify-drops.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-mig-057-'));
 }
@@ -131,7 +133,9 @@ describe('Migration 057 — repair strictify drops + schema integrity', () => {
           .prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN ('summary_store','summary_refs')`)
           .all() as Array<{ name: string }>
       ).map((r) => r.name);
-      expect(present.sort()).toEqual(['summary_refs', 'summary_store']);
+      const sortedPresent = [...present];
+      sortedPresent.sort(byString);
+      expect(sortedPresent).toEqual(['summary_refs', 'summary_store']);
     } finally {
       conn3.close();
     }

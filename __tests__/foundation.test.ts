@@ -13,15 +13,14 @@ import {
   reconcileFileNodeCounts,
 } from '../src/db/queries-files.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
-import { dbOptimize } from '../src/db/index.js';
+import { DatabaseConnection, dbOptimize, getDatabasePath } from '../src/db/index.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
-import { DEFAULT_CONFIG, Node, Edge } from '../src/types.js';
-import { loadConfig, saveConfig } from '../src/config.js';
-import { isInitialized, getCartographDir, validateDirectory } from '../src/directory.js';
-import { DatabaseConnection, getDatabasePath } from '../src/db/index.js';
+import { DEFAULT_CONFIG } from '../src/types.js';
+import { loadConfig } from '../src/config.js';
+import { getCartographDir, validateDirectory } from '../src/directory.js';
 import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
 
 // Create a temporary directory for each test
@@ -359,7 +358,7 @@ describe('Cartograph Foundation', () => {
     it('should close database but keep .Cartograph directory', () => {
       const cg = Cartograph.initSync(tempDir);
 
-      cg.destroy(); // destroy is alias for close
+      cg.close(); // destroy is alias for close
 
       expect(fs.existsSync(getCartographDir(tempDir))).toBe(true);
       expect(Cartograph.isInitialized(tempDir)).toBe(true);

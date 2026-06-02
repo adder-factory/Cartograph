@@ -12,7 +12,7 @@
  *   BENCH_PROJECT_DIR=/path bun bench/probe-hook-isolated.mts re-export-edges,dynamic-import-edges
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { getRegisteredHooks } from '../src/index-hooks/registry.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
@@ -60,11 +60,13 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

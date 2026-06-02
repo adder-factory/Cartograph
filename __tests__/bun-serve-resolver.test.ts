@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { bunServeResolver } from '../src/resolution/frameworks/bun-serve.js';
 
+const byName = (a: string, b: string): number => a.localeCompare(b);
+
 describe('bunServeResolver — language gate', () => {
   it('declares languages: [typescript, javascript, tsx, jsx]', () => {
     // Matches the express resolver's set so a `.get('a.ts')` SQLite
@@ -29,7 +31,7 @@ const server = Bun.serve({
 `;
     const nodes = bunServeResolver.extractNodes!('apps/server/server.ts', content);
     expect(nodes.length).toBe(3);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['/connections/:id', '/healthz', '/vault/status']);
     for (const n of nodes) {
       expect(n.kind).toBe('route');
@@ -49,7 +51,7 @@ const server = Bun.serve({
 });
 `;
     const nodes = bunServeResolver.extractNodes!('server.ts', content);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['DELETE /items/:id', 'GET /items', 'GET /items/:id', 'POST /items', 'PUT /items/:id']);
   });
 
@@ -63,7 +65,7 @@ Bun.serve({
 });
 `;
     const nodes = bunServeResolver.extractNodes!('mixed.ts', content);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['/healthz', 'GET /items', 'POST /items']);
   });
 
@@ -93,7 +95,7 @@ Bun.serve({
 });
 `;
     const nodes = bunServeResolver.extractNodes!('nested.ts', content);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['/healthz']);
   });
 
@@ -152,7 +154,7 @@ Bun.serve({
 });
 `;
     const nodes = bunServeResolver.extractNodes!('depth.ts', content);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['/real']);
   });
 
@@ -171,7 +173,7 @@ Bun.serve({
 });
 `;
     const nodes = bunServeResolver.extractNodes!('tight.ts', content);
-    const names = nodes.map((n) => n.name).sort();
+    const names = nodes.map((n) => n.name).sort(byName);
     expect(names).toEqual(['GET /items', 'POST /items']);
   });
 });

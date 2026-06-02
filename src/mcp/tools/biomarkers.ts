@@ -42,8 +42,13 @@ import type { RefIdCache } from './_id-cache.js';
 import { resolveSymbolToNode, symbolNotFound } from './symbol-resolver.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 
-const fmtSev = (s: 'info' | 'warning' | 'error'): string =>
-  s === 'error' ? '🔴 error' : s === 'warning' ? '🟡 warning' : '🔵 info';
+type BiomarkerSeverity = 'info' | 'warning' | 'error';
+
+const fmtSev = (s: BiomarkerSeverity): string => {
+  if (s === 'error') return '🔴 error';
+  if (s === 'warning') return '🟡 warning';
+  return '🔵 info';
+};
 
 /** Upper bound on `limit` from agent input on `mode='ranked'`. */
 const RANKED_LIMIT_MAX = 200;
@@ -468,7 +473,7 @@ function handleSymbolMode(
 interface RankedModeArgs {
   limit?: number | undefined;
   biomarker?: string | undefined;
-  minSeverity?: 'info' | 'warning' | 'error' | undefined;
+  minSeverity?: BiomarkerSeverity | undefined;
   minCentrality?: number | undefined;
   minMetric?: number | undefined;
   maxMetric?: number | undefined;
@@ -548,7 +553,7 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
  */
 interface MinCentralityProbeArgs {
   biomarker: string | undefined;
-  minSeverity: 'info' | 'warning' | 'error';
+  minSeverity: BiomarkerSeverity;
   minMetric: number | undefined;
   maxMetric: number | undefined;
   excludeFile: string | undefined;
@@ -575,7 +580,11 @@ function probeLowestCentralityForFilters(
     params['maxMetric'] = args.maxMetric;
   }
   if (args.excludeFile !== undefined && args.excludeFile.length > 0) {
-    const escaped = args.excludeFile.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
+    const backslash = String.fromCodePoint(92);
+    const escaped = args.excludeFile
+      .replaceAll(backslash, backslash + backslash)
+      .replaceAll('_', backslash + '_')
+      .replaceAll('%', backslash + '%');
     where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
     params['excludeLike'] = escaped + '%';
   }
@@ -623,28 +632,26 @@ function buildEmptyRankedHint(
     return "No biomarker findings — the project doesn't appear to have been indexed yet. Run `cartograph_admin({action: 'index'})` first.";
   }
 
-  const hints: string[] = [];
-  if (args.minCentrality !== undefined) {
-    const probe = probeLowestCentralityForFilters(cg, args);
-    if (probe.lowest !== null && probe.matchCount > 0) {
-      // Case 1 (common): findings DO exist, just below the threshold.
-      // Point the agent at the lowest observed value so they can
-      // drop the filter to exactly the cutoff that surfaces them.
-      const lowestFixed = probe.lowest.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') || '0';
-      hints.push(
-        `${probe.matchCount} finding${probe.matchCount === 1 ? '' : 's'} exist${probe.matchCount === 1 ? 's' : ''} with centrality < ${args.minCentrality} — pass \`minCentrality=${lowestFixed}\` (lowest observed) or omit \`minCentrality\` entirely to see them.`,
-      );
-    } else {
-      // Case 2 (rare): findings exist but centrality is genuinely
-      // NULL for them. The hint stays "lower the threshold or drop it"
-      // since centrality is not on the indexing-fresh-or-stale axis.
-      hints.push(
-        'A `minCentrality` filter was set, but findings exist that have no centrality computed yet. Try without `minCentrality` or run a fresh `cartograph index` so the centrality hook fires.',
-      );
-    }
-  }
+  const hints = buildEmptyRankedHints(cg, args);
   hints.push('Drop minSeverity to "info" or lower other filters to see info-tier findings.');
   return `No findings match those filters (${stats.totalFindings} total findings exist project-wide).\n\n- ${hints.join('\n- ')}`;
+}
+
+function buildEmptyRankedHints(
+  cg: import('../../index.js').default,
+  args: MinCentralityProbeArgs & { minCentrality: number | undefined },
+): string[] {
+  if (args.minCentrality === undefined) return [];
+  const probe = probeLowestCentralityForFilters(cg, args);
+  if (probe.lowest === null || probe.matchCount === 0) {
+    return [
+      'A `minCentrality` filter was set, but findings exist that have no centrality computed yet. Try without `minCentrality` or run a fresh `cartograph index` so the centrality hook fires.',
+    ];
+  }
+  const lowestFixed = probe.lowest.toFixed(6).replace(/0+$/, '').replace(/\.$/, '') || '0';
+  return [
+    `${probe.matchCount} finding${probe.matchCount === 1 ? '' : 's'} exist${probe.matchCount === 1 ? 's' : ''} with centrality < ${args.minCentrality} — pass \`minCentrality=${lowestFixed}\` (lowest observed) or omit \`minCentrality\` entirely to see them.`,
+  ];
 }
 
 /**
@@ -664,13 +671,13 @@ function renderRankedFindingsTable(
     kind: string;
     filePath: string;
     biomarker: string;
-    severity: 'info' | 'warning' | 'error';
+    severity: BiomarkerSeverity;
     metric: number;
     centrality: number | null;
     surfaceReason: 'full-pass' | 'partial-rescan' | 'cached';
   }>,
   biomarker: string | undefined,
-  minSeverity: 'info' | 'warning' | 'error',
+  minSeverity: BiomarkerSeverity,
 ): string[] {
   const headerNote = biomarker ? ` — \`${biomarker}\` only` : '';
   const tableHeader = biomarker

@@ -31,7 +31,7 @@ import { removeFileFromIndexInTx, upsertFile } from '../db/queries-files.js';
 import { isTestPath } from '../path-class.js';
 import { decodeScipIndex } from './scip-decode.js';
 import { parseScipSymbol, descriptorsToQualifiedName, DescriptorSuffix, type ParsedSymbol } from './scip-symbol.js';
-import { SYMBOL_ROLE_DEFINITION, type ScipIndex, type ScipOccurrence } from './scip-encode.js';
+import { SYMBOL_ROLE_DEFINITION, type ScipIndex, type ScipOccurrence, type ScipRelationship } from './scip-encode.js';
 
 // ── kind mapping (SCIP → cartograph) ───────────────────────────────
 
@@ -274,36 +274,9 @@ function buildDocNodes(doc: ScipIndex['documents'][number], { now, symbolToNodeI
   const nodes: Node[] = [];
   const fileSymbols: string[] = [];
   for (const si of doc.symbols) {
-    if (!si.symbol || symbolToNodeId.has(si.symbol)) continue; // skip dupes
-    const parsed = parseScipSymbol(si.symbol);
-    const kind = resolveNodeKind(si.kind, parsed);
-    // A `file`-kind symbol (cartograph's own export emits one per
-    // document) is folded into the synthesised file node below — no
-    // separate node, so the document never gets two file nodes.
-    if (kind === 'file') {
-      fileSymbols.push(si.symbol);
-      continue;
-    }
-    const leafName = parsed && parsed.descriptors.length > 0 ? parsed.descriptors.at(-1)!.name : '';
-    const name = si.displayName || leafName || '(anonymous)';
-    const span = definitionSpan(defOccBySymbol.get(si.symbol));
-    const id = mintNodeId(kind, si.symbol);
-    const node: Node = {
-      id,
-      kind,
-      name,
-      qualifiedName: parsed ? descriptorsToQualifiedName(parsed.descriptors) || name : name,
-      filePath: relPath,
-      language,
-      startLine: span.startLine,
-      endLine: span.endLine,
-      startColumn: span.startColumn,
-      endColumn: span.endColumn,
-      updatedAt: now,
-      ...(si.documentation.length > 0 ? { docstring: si.documentation.join('\n\n') } : {}),
-    };
+    const node = buildNodeForSymbol(si, { relPath, language, now, defOccBySymbol, symbolToNodeId, fileSymbols });
+    if (!node) continue;
     nodes.push(node);
-    symbolToNodeId.set(si.symbol, id);
   }
 
   return {
@@ -313,6 +286,46 @@ function buildDocNodes(doc: ScipIndex['documents'][number], { now, symbolToNodeI
     occurrences: doc.occurrences,
     symbols: doc.symbols,
     fileSymbols,
+  };
+}
+
+function buildNodeForSymbol(
+  si: ScipIndex['documents'][number]['symbols'][number],
+  args: {
+    relPath: string;
+    language: Language;
+    now: number;
+    defOccBySymbol: Map<string, ScipOccurrence>;
+    symbolToNodeId: Map<string, string>;
+    fileSymbols: string[];
+  },
+): Node | null {
+  if (!si.symbol || args.symbolToNodeId.has(si.symbol)) return null;
+  const parsed = parseScipSymbol(si.symbol);
+  const kind = resolveNodeKind(si.kind, parsed);
+  // A `file`-kind symbol is folded into the synthesised file node below.
+  if (kind === 'file') {
+    args.fileSymbols.push(si.symbol);
+    return null;
+  }
+  const leafName = parsed && parsed.descriptors.length > 0 ? parsed.descriptors.at(-1)!.name : '';
+  const name = si.displayName || leafName || '(anonymous)';
+  const span = definitionSpan(args.defOccBySymbol.get(si.symbol));
+  const id = mintNodeId(kind, si.symbol);
+  args.symbolToNodeId.set(si.symbol, id);
+  return {
+    id,
+    kind,
+    name,
+    qualifiedName: parsed ? descriptorsToQualifiedName(parsed.descriptors) || name : name,
+    filePath: args.relPath,
+    language: args.language,
+    startLine: span.startLine,
+    endLine: span.endLine,
+    startColumn: span.startColumn,
+    endColumn: span.endColumn,
+    updatedAt: args.now,
+    ...(si.documentation.length > 0 ? { docstring: si.documentation.join('\n\n') } : {}),
   };
 }
 
@@ -404,22 +417,32 @@ function buildContainsAndRelEdges({ db, fileNodeId, symbolToNodeId, pushEdge }: 
       pushEdge({ source: containsSource, target: childId, kind: 'contains', confidence: 'EXTRACTED' });
     }
     for (const rel of si.relationships) {
-      const targetId = symbolToNodeId.get(rel.symbol);
-      if (!targetId) {
+      if (!pushRelationshipEdge(rel, childId, symbolToNodeId, pushEdge)) {
         unresolvedEdges++;
-        continue;
       }
-      const kind: EdgeKind | null = rel.isImplementation
-        ? 'extends'
-        : rel.isTypeDefinition
-          ? 'type_of'
-          : rel.isReference
-            ? 'references'
-            : null;
-      if (kind) pushEdge({ source: childId, target: targetId, kind, confidence: 'EXTRACTED' });
     }
   }
   return unresolvedEdges;
+}
+
+function pushRelationshipEdge(
+  rel: ScipRelationship,
+  childId: string,
+  symbolToNodeId: Map<string, string>,
+  pushEdge: (edge: Edge) => void,
+): boolean {
+  const targetId = symbolToNodeId.get(rel.symbol);
+  if (!targetId) return false;
+  const kind = edgeKindForScipRelationship(rel);
+  if (kind) pushEdge({ source: childId, target: targetId, kind, confidence: 'EXTRACTED' });
+  return true;
+}
+
+function edgeKindForScipRelationship(rel: ScipRelationship): EdgeKind | null {
+  if (rel.isImplementation) return 'extends';
+  if (rel.isTypeDefinition) return 'type_of';
+  if (rel.isReference) return 'references';
+  return null;
 }
 
 /** Args for {@link buildReferenceEdges} — extends the shared edge args with definition spans. */

@@ -236,13 +236,9 @@ export const reactNativeBridgeResolver: FrameworkResolver = {
     let detected = pkg !== null && /["']react-native["']\s*:/.test(pkg);
     let objcScanned = 0;
     for (const f of context.getAllFiles()) {
-      if (isLikelyTurboSpecFile(f)) {
-        const src = context.readFile(f);
-        if (!src) continue;
-        if (/TurboModuleRegistry\.(?:get|getEnforcing)\s*</.test(src)) detected = true;
-        const spec = parseTurboModuleSpec(src);
-        if (spec) for (const m of spec.methods) rnSpecMethodNames.add(m);
-      } else if ((f.endsWith('.m') || f.endsWith('.mm')) && objcScanned < 200) {
+      const specDetected = collectTurboSpecMethods(f, (path) => context.readFile(path));
+      if (specDetected) detected = true;
+      if (!specDetected && (f.endsWith('.m') || f.endsWith('.mm')) && objcScanned < 200) {
         objcScanned++;
         const src = context.readFile(f);
         if (src && /(?:RCT_EXPORT_MODULE|RCT_EXTERN(?:_REMAP)?_MODULE)\b/.test(src)) detected = true;
@@ -323,3 +319,12 @@ export const reactNativeBridgeResolver: FrameworkResolver = {
     nativeMethodMaps.delete(context);
   },
 };
+
+function collectTurboSpecMethods(filePath: string, readFile: (filePath: string) => string | null): boolean {
+  if (!isLikelyTurboSpecFile(filePath)) return false;
+  const src = readFile(filePath);
+  if (!src) return false;
+  const spec = parseTurboModuleSpec(src);
+  if (spec) for (const m of spec.methods) rnSpecMethodNames.add(m);
+  return /TurboModuleRegistry\.(?:get|getEnforcing)\s*</.test(src);
+}

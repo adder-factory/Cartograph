@@ -18,7 +18,7 @@
  *   BENCH_PROJECT_DIR=/path/to/project bun bench/probe-biomarker-persist.mts
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { analyseProject } from '../src/biomarkers/index.js';
 import { setMetadata, getMetadata, type MetadataKey } from '../src/db/queries-metadata.js';
@@ -78,11 +78,13 @@ async function main(): Promise<void> {
       }
     }
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

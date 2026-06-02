@@ -13,6 +13,8 @@ import { describe, it, expect, beforeAll } from 'vitest';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import { extractFromSource } from '../src/extraction/tree-sitter.js';
 
+const byString = (a: string, b: string): number => a.localeCompare(b);
+
 beforeAll(async () => {
   await initGrammars();
   await loadAllGrammars();
@@ -59,7 +61,7 @@ describe('GraphQL extend type — cross-file merging', () => {
 
     // Each extension contributes an `extends` ref to the base type.
     const extendsRefs = r.unresolvedReferences.filter((u) => u.referenceKind === 'extends');
-    expect(extendsRefs.map((u) => u.referenceName).sort()).toEqual([
+    expect(extendsRefs.map((u) => u.referenceName).sort(byString)).toEqual([
       'Animal',
       'CreateUserInput',
       'Node',
@@ -94,7 +96,7 @@ describe('GraphQL extend type — cross-file merging', () => {
     const r = extractFromSource('schema.graphql', 'type User { id: ID! }\nextend type User { posts: [Post!]! }\n');
     const users = r.nodes.filter((n) => n.kind === 'class' && n.name === 'User');
     expect(users).toHaveLength(2);
-    const sigs = users.map((u) => u.signature).sort();
+    const sigs = users.map((u) => u.signature).sort(byString);
     expect(sigs).toEqual(['extend type User', 'type User']);
   });
 

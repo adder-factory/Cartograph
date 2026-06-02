@@ -31,6 +31,22 @@ function extractDecorators(node: SyntaxNode, source: string): string[] | undefin
   return decorators.length > 0 ? decorators : undefined;
 }
 
+function letBindingSignature(node: SyntaxNode, source: string): string | undefined {
+  const body = getChildByField(node, 'body');
+  if (body?.type !== 'function') return undefined;
+  const params = getChildByField(body, 'parameters');
+  if (!params) return undefined;
+  const returnType = getChildByField(body, 'return_type');
+  let sig = getNodeText(params, source);
+  if (returnType) sig += ' => ' + getNodeText(returnType, source);
+  return sig;
+}
+
+function externalDeclarationSignature(node: SyntaxNode, source: string): string | undefined {
+  const typeAnnotation = node.namedChildren.find((child) => child?.type === 'type_annotation');
+  return typeAnnotation ? getNodeText(typeAnnotation, source) : undefined;
+}
+
 // ============================================================================
 // Core visitor (uses ExtractorContext)
 // ============================================================================
@@ -185,7 +201,11 @@ function extractLetVariableBinding(args: LetBindingArgs): void {
   const { binding, name, body, docstring, decorators, ctx } = args;
   const typeAnnotation = binding.namedChildren.find((c) => c.type === 'type_annotation');
   const initValue = body ? getNodeText(body, ctx.source).slice(0, 100) : undefined;
-  const initSignature = initValue ? `= ${initValue}${initValue.length >= 100 ? '...' : ''}` : undefined;
+  let initSignature: string | undefined;
+  if (initValue) {
+    const ellipsis = initValue.length >= 100 ? '...' : '';
+    initSignature = `= ${initValue}${ellipsis}`;
+  }
   const varNode = ctx.createNode({
     kind: 'variable',
     name,
@@ -431,25 +451,8 @@ const rescriptExtractor: LanguageExtractor = {
   },
 
   getSignature(node, source) {
-    if (node.type === 'let_binding') {
-      const body = getChildByField(node, 'body');
-      if (body?.type === 'function') {
-        const params = getChildByField(body, 'parameters');
-        const returnType = getChildByField(body, 'return_type');
-        if (params) {
-          let sig = getNodeText(params, source);
-          if (returnType) sig += ' => ' + getNodeText(returnType, source);
-          return sig;
-        }
-      }
-    }
-    if (node.type === 'external_declaration') {
-      for (const child of node.namedChildren) {
-        if (child?.type === 'type_annotation') {
-          return getNodeText(child, source);
-        }
-      }
-    }
+    if (node.type === 'let_binding') return letBindingSignature(node, source);
+    if (node.type === 'external_declaration') return externalDeclarationSignature(node, source);
     return undefined;
   },
 

@@ -162,7 +162,7 @@ async function main(): Promise<void> {
   console.log('\nsummary:');
   console.log(`  peak concurrent children: ${peakConcurrent}`);
   console.log(`  distinct PIDs across run: ${allPidsSeen.size}`);
-  const lingering = snapshots[snapshots.length - 1]!.pids.length;
+  const lingering = snapshots.at(-1)!.pids.length;
   console.log(`  lingering after close: ${lingering}`);
   if (peakConcurrent > 1) console.warn('  ⚠️  proliferation observed (>1 concurrent child)');
   if (lingering > 0) {
@@ -172,7 +172,9 @@ async function main(): Promise<void> {
   console.log('  ✓ no orphans after close');
 }
 
-void main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('bench failed:', err);
   process.exit(1);
-});
+}

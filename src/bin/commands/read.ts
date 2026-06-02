@@ -41,6 +41,869 @@ import {
  *  with the real `parseInlineTopN`. */
 const STATUS_MAX_INLINE_TOP_N = 30;
 
+interface AtRangeOptions {
+  projectPath?: string;
+  limit?: string;
+  diff?: string;
+  ranges?: string;
+  compact?: boolean;
+  fields?: string;
+}
+
+interface StatusOptions {
+  json?: boolean;
+  verbose?: boolean;
+  topHotspots?: string;
+  topBiomarkers?: string;
+  summaryBreakdown?: boolean;
+}
+
+interface StatusRollupConfig {
+  topHotspots: number;
+  topBiomarkers: number;
+  summaryBreakdown: boolean;
+  appendFeatureReadiness: (lines: string[], cg: any, options: { summaryBreakdown: boolean }) => void;
+  appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
+  appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
+}
+
+interface FindOptions {
+  projectPath?: string;
+  by?: string;
+  query?: string;
+  limit?: string;
+  kind?: string;
+  mode?: string;
+  symbol?: string;
+  sameLanguage?: boolean;
+  differentLanguage?: boolean;
+  languageFilter?: string;
+  caseSensitive?: boolean;
+  pathFilter?: string;
+  language?: string;
+  key?: string;
+  op?: string;
+  includeTests?: boolean;
+  since?: string;
+  allowStale?: boolean;
+  compact?: boolean;
+  fields?: string;
+}
+
+interface AffectedOptions {
+  projectPath?: string;
+  files?: string[];
+  stdin?: boolean;
+  depth?: string;
+  filter?: string;
+  includeTests?: boolean;
+  json?: boolean;
+  quiet?: boolean;
+}
+
+interface ChangedFilesResult {
+  changedFiles: string[];
+  derivedFromGit: boolean;
+}
+
+interface AffectedOutputArgs {
+  changedFiles: string[];
+  sortedTests: string[];
+  totalDependents: number;
+  barrelsReached: string[];
+  derivedFromGit: boolean;
+  options: AffectedOptions;
+}
+
+async function readDiffOption(diff: string): Promise<string> {
+  if (diff === '-') {
+    return new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      process.stdin.on('data', (c) => chunks.push(c));
+      process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
+      process.stdin.on('error', reject);
+    });
+  }
+  if (diff.includes('\n') || diff.startsWith('@@') || diff.startsWith('diff --git')) {
+    return diff;
+  }
+  if (fs.existsSync(diff)) return fs.readFileSync(diff, 'utf-8');
+  warn(`--diff: "${diff}" is not an existing file — treating it as inline diff text.`);
+  return diff;
+}
+
+function parseRangeSpecs(raw: string): Array<{ file: string; startLine: number; endLine: number }> {
+  const ranges: Array<{ file: string; startLine: number; endLine: number }> = [];
+  for (const spec of raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)) {
+    const m = /^(.+):(\d+)-(\d+)$/.exec(spec);
+    if (!m) {
+      error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
+      process.exit(1);
+    }
+    ranges.push({ file: m[1]!, startLine: Number.parseInt(m[2]!, 10), endLine: Number.parseInt(m[3]!, 10) });
+  }
+  if (ranges.length === 0) {
+    error('--ranges had no valid `file:startLine-endLine` specs.');
+    process.exit(1);
+  }
+  return ranges;
+}
+
+async function buildAtRangeArgs(
+  file: string | undefined,
+  startLine: string | undefined,
+  endLine: string | undefined,
+  options: AtRangeOptions,
+): Promise<Record<string, unknown> | null> {
+  const args: Record<string, unknown> = {};
+  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '20', optionName: '--limit', opts: { min: 1 } }))
+    return null;
+  if (options.compact) args['compact'] = true;
+  if (options.fields) {
+    args['fields'] = options.fields
+      .split(',')
+      .map((f) => f.trim())
+      .filter(Boolean);
+  }
+  const modeFlags = [options.diff !== undefined, options.ranges !== undefined].filter(Boolean).length;
+  if (modeFlags > 1) {
+    error('--diff and --ranges are mutually exclusive.');
+    process.exit(1);
+  }
+  if (options.diff !== undefined) {
+    if (file !== undefined || startLine !== undefined || endLine !== undefined) {
+      error('--diff is mutually exclusive with positional file/startLine/endLine.');
+      process.exit(1);
+    }
+    args['diff'] = await readDiffOption(options.diff);
+    return args;
+  }
+  if (options.ranges !== undefined) {
+    if (file !== undefined || startLine !== undefined || endLine !== undefined) {
+      error('--ranges is mutually exclusive with positional file/startLine/endLine.');
+      process.exit(1);
+    }
+    args['ranges'] = parseRangeSpecs(options.ranges);
+    return args;
+  }
+  if (file === undefined || startLine === undefined || endLine === undefined) {
+    error('Pass <file> <startLine> <endLine> positionally OR use --diff <pathOrText|-> OR --ranges <list>.');
+    process.exit(1);
+  }
+  const startNum = Number.parseInt(startLine, 10);
+  const endNum = Number.parseInt(endLine, 10);
+  if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
+    error('startLine and endLine must be numbers.');
+    process.exitCode = 1;
+    return null;
+  }
+  args['file'] = file;
+  args['startLine'] = startNum;
+  args['endLine'] = endNum;
+  return args;
+}
+
+function validateAskQuestion(question: string): boolean {
+  if (question.trim().length === 0) {
+    error('ask: the question must not be empty.');
+    process.exitCode = 1;
+    return false;
+  }
+  if (question.length > 4096) {
+    error(`ask: the question must be at most 4096 characters (got ${question.length}).`);
+    process.exitCode = 1;
+    return false;
+  }
+  return true;
+}
+
+function parseRetrieveK(raw: string | undefined): number | null {
+  const retrieveKArgs: Record<string, unknown> = {};
+  if (
+    !assignIntArg({
+      args: retrieveKArgs,
+      key: 'retrieveK',
+      raw,
+      optionName: '--retrieve-k',
+      opts: { min: RETRIEVE_K_MIN, max: RETRIEVE_K_MAX },
+    })
+  ) {
+    return null;
+  }
+  return (retrieveKArgs['retrieveK'] as number | undefined) ?? RETRIEVE_K_DEFAULT;
+}
+
+async function printAskAnnotations(
+  cg: Parameters<typeof import('../../mcp/tools/ask.js')['groundCitations']>[0],
+  result: {
+    answer: string;
+    citations: Array<{ node: { name: string; kind: string; filePath: string; startLine?: number } }>;
+    retrieveMs: number;
+    chatMs: number;
+  },
+  askModel: string,
+): Promise<void> {
+  const { groundCitations, buildCitationReport } = await import('../../mcp/tools/ask.js');
+  const { displayModelName } = await import('../../mcp/tools/shared.js');
+  const cited = groundCitations(cg, result.answer);
+  const report = buildCitationReport(cited);
+  for (const line of report.sections) {
+    console.log(line ? chalk.dim(line) : '');
+  }
+  console.log('\n' + chalk.dim('Retrieval sources:'));
+  for (const c of result.citations) {
+    const loc = c.node.startLine ? `:${c.node.startLine}` : '';
+    console.log(chalk.dim(`  • ${c.node.name} (${c.node.kind}) ${c.node.filePath}${loc}`));
+  }
+  console.log(
+    chalk.dim(
+      `\n  retrieve ${result.retrieveMs}ms · chat ${result.chatMs}ms · model ${displayModelName(askModel)} · ${report.counter}`,
+    ),
+  );
+}
+
+async function buildStatusRollupConfig(options: StatusOptions): Promise<StatusRollupConfig> {
+  const { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots, parseInlineTopN } = await import(
+    '../../mcp/tools/status.js'
+  );
+  const verbose = options.verbose === true;
+  const rawTopHotspots = parseInlineTopN(options.topHotspots);
+  const rawTopBiomarkers = parseInlineTopN(options.topBiomarkers);
+  return {
+    topHotspots: verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots,
+    topBiomarkers: verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers,
+    summaryBreakdown: options.summaryBreakdown === true || verbose,
+    appendFeatureReadiness,
+    appendInlineHotspots,
+    appendInlineBiomarkers,
+  };
+}
+
+function printUninitializedStatus(projectPath: string, options: StatusOptions): void {
+  if (options.json) {
+    console.log(JSON.stringify({ initialized: false, projectPath }));
+    return;
+  }
+  console.log(chalk.bold('\nCartograph Status\n'));
+  info(`Project: ${projectPath}`);
+  warn('Not initialized');
+  info('Run "cartograph admin init" to initialize');
+}
+
+async function loadStatusChangeInfo(cg: any): Promise<{ changes: any; healOnly: string[]; realModifiedCount: number }> {
+  const { classifyChangedFiles, realModifiedCount: computeRealModified } = await import(
+    '../../changed-files-classify.js'
+  );
+  const changes = classifyChangedFiles(cg);
+  if (!changes) throw new Error('Failed to read changed files from the index');
+  return { changes, healOnly: changes.healOnly, realModifiedCount: computeRealModified(changes) };
+}
+
+function printStatusJson(args: {
+  cg: any;
+  projectPath: string;
+  stats: any;
+  changes: any;
+  healOnly: string[];
+  realModifiedCount: number;
+  hnswAvailable: boolean;
+  rollups: StatusRollupConfig;
+}): void {
+  const jsonRollups: string[] = [];
+  args.rollups.appendFeatureReadiness(jsonRollups, args.cg, { summaryBreakdown: args.rollups.summaryBreakdown });
+  args.rollups.appendInlineHotspots(jsonRollups, args.cg, args.rollups.topHotspots);
+  args.rollups.appendInlineBiomarkers(jsonRollups, args.cg, args.rollups.topBiomarkers);
+  console.log(
+    JSON.stringify({
+      initialized: true,
+      projectPath: args.projectPath,
+      fileCount: args.stats.fileCount,
+      nodeCount: args.stats.nodeCount,
+      edgeCount: args.stats.edgeCount,
+      dbSizeBytes: args.stats.dbSizeBytes,
+      backend: args.cg.db.getBackend(),
+      vecExtension: args.cg.db.hasVecExtension(),
+      hnswAvailable: args.hnswAvailable,
+      nodesByKind: args.stats.nodesByKind,
+      languages: Object.entries(args.stats.filesByLanguage)
+        .filter(([, count]) => (count as number) > 0)
+        .map(([lang]) => lang),
+      pendingChanges: {
+        added: args.changes.added.length,
+        modified: args.realModifiedCount,
+        removed: args.changes.removed.length,
+        healFlagged: args.healOnly.length,
+      },
+      rollups: jsonRollups.filter((l) => l !== ''),
+    }),
+  );
+}
+
+function printStatusIndexStats(stats: any, cg: any, hnswAvailable: boolean): void {
+  console.log(chalk.bold('Index Statistics:'));
+  console.log(`  Files:     ${formatNumber(stats.fileCount)}`);
+  console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
+  console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
+  console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
+  const vec = cg.db.hasVecExtension();
+  const vecSuffix = vec ? ' + sqlite-vec' : '';
+  const backendLabel = chalk.magenta(`bun:sqlite${vecSuffix}`);
+  console.log(`  Backend:   ${backendLabel}`);
+  if (!vec) {
+    console.log(chalk.yellow('  ⚠ sqlite-vec did not load — vector search is on the slow in-memory brute-force path.'));
+    console.log(chalk.dim('     sqlite-vec ships prebuilts for darwin/linux x64+arm64 and windows-x64.'));
+  } else if (!hnswAvailable) {
+    console.log(chalk.dim('  ℹ hnswlib-node not installed — similar_to edge builds use the vec0 brute-force path;'));
+    console.log(chalk.dim('     `npm install hnswlib-node` adds the O(log N) accelerator for large repos.'));
+  }
+  console.log();
+}
+
+function printCountBreakdown(title: string, entries: Record<string, number>): void {
+  console.log(chalk.bold(title));
+  const sorted = Object.entries(entries)
+    .filter(([, count]) => count > 0)
+    .sort((a, b) => b[1] - a[1]);
+  for (const [label, count] of sorted) {
+    console.log(`  ${label.padEnd(15)} ${formatNumber(count)}`);
+  }
+  console.log();
+}
+
+async function printParseCacheStatus(cg: any): Promise<void> {
+  try {
+    const { getParseCacheStats } = await import('../../db/queries-parse-cache.js');
+    const pc = getParseCacheStats(cg.queries);
+    if (pc.rows === 0) return;
+    const sizeMB = (pc.sizeBytes / 1024 / 1024).toFixed(1);
+    const stale = pc.staleVersionRows > 0 ? chalk.yellow(`  (${pc.staleVersionRows} stale, will LRU out)`) : '';
+    console.log(chalk.bold('Parse Cache:'));
+    console.log(
+      `  Replayable: ${formatNumber(pc.currentVersionRows)} entries (${sizeMB} MB) · schema _v${pc.currentVersion}${stale}`,
+    );
+    console.log();
+  } catch {
+    /* pre-migration-026 DB */
+  }
+}
+
+function printPendingChanges(changes: any, realModifiedCount: number, healOnly: string[]): void {
+  const totalChanges = changes.added.length + realModifiedCount + changes.removed.length + healOnly.length;
+  if (totalChanges === 0) {
+    success('Index is up to date');
+    console.log();
+    return;
+  }
+  console.log(chalk.bold('Pending Changes:'));
+  if (changes.added.length > 0) console.log(`  Added:     ${changes.added.length} files`);
+  if (realModifiedCount > 0) console.log(`  Modified:  ${realModifiedCount} files`);
+  if (changes.removed.length > 0) console.log(`  Removed:   ${changes.removed.length} files`);
+  if (healOnly.length > 0) {
+    console.log(
+      `  Heal-flagged (re-extract): ${healOnly.length} files ` +
+        `(extraction-logic-version drift; no on-disk content change)`,
+    );
+  }
+  info('Run "cartograph admin sync" to update the index');
+  console.log();
+}
+
+async function printLlmStatus(cg: any, projectPath: string): Promise<void> {
+  console.log(chalk.bold('LLM Enrichment:'));
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
+  if (!llmConfig) {
+    console.log(
+      '  No LLM configured. Run `cartograph admin install-models --write-config` for the recommended stack (llama-server HTTP — embed :8080 / chat :8081 / ask :8082 / reranker :8083), or set config.llm in .cartograph/config.json.',
+    );
+    console.log();
+    return;
+  }
+  const { getAskModel, getChatModel, getEmbeddingModel, getDisplayEndpoint } = await import('../../llm/provider.js');
+  const chatModel = getChatModel(llmConfig);
+  const askModel = getAskModel(llmConfig);
+  console.log(`  Endpoint:  ${getDisplayEndpoint(llmConfig)} (configured)`);
+  console.log(`  Model:     ${chatModel ?? '(no summarize model)'}`);
+  if (askModel && askModel !== chatModel) {
+    const askProvider = llmConfig.askLlm?.provider;
+    const askProviderSuffix = askProvider ? ` (${askProvider})` : '';
+    console.log(`  Ask model: ${askModel}${askProviderSuffix}`);
+  }
+  const embedModel = getEmbeddingModel(llmConfig);
+  if (embedModel) console.log(`  Embed:     ${embedModel}`);
+  printSummaryCoverage(cg);
+  const { getDetachedSummarizeState } = await import('../../llm/detached-summarize.js');
+  const bg = getDetachedSummarizeState(projectPath);
+  if (bg.running) {
+    console.log(`  Summaries: background pass running (pid ${bg.pid}) — coverage is still climbing`);
+  }
+  console.log();
+}
+
+function printSummaryCoverage(cg: any): void {
+  const cov = getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
+  if (cov.total === 0) return;
+  const pct = Math.round((cov.summarised / cov.total) * 100);
+  const weighted = getWeightedSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
+  const weightedSuffix =
+    weighted.weightedRatio === null ? '' : ` — centrality-weighted ${Math.round(weighted.weightedRatio * 100)}%`;
+  console.log(`  Summaries: ${formatNumber(cov.summarised)}/${formatNumber(cov.total)} (${pct}%)${weightedSuffix}`);
+}
+
+function printStatusRollups(cg: any, rollups: StatusRollupConfig): void {
+  const rollupLines: string[] = [];
+  rollups.appendFeatureReadiness(rollupLines, cg, { summaryBreakdown: rollups.summaryBreakdown });
+  rollups.appendInlineHotspots(rollupLines, cg, rollups.topHotspots);
+  rollups.appendInlineBiomarkers(rollupLines, cg, rollups.topBiomarkers);
+  if (rollupLines.length === 0) return;
+  for (const line of rollupLines) {
+    printStatusRollupLine(line);
+  }
+  console.log();
+}
+
+function printStatusRollupLine(line: string): void {
+  if (line === '') {
+    console.log();
+  } else if (line.startsWith('### ')) {
+    console.log(chalk.bold(line.slice(4)));
+  } else {
+    console.log(line);
+  }
+}
+
+function parseFieldsOption(fields: string | undefined): string[] | undefined {
+  return fields
+    ?.split(',')
+    .map((f) => f.trim())
+    .filter(Boolean);
+}
+
+type McpRunner = typeof runViaMCP;
+
+let readCommandMcpRunner: McpRunner = runViaMCP;
+
+function setReadCommandMcpRunnerForTest(runner: McpRunner): () => void {
+  const previous = readCommandMcpRunner;
+  readCommandMcpRunner = runner;
+  return () => {
+    readCommandMcpRunner = previous;
+  };
+}
+
+async function runFindCommand(queryArg: string | undefined, options: FindOptions): Promise<void> {
+  const query = queryArg === undefined && typeof options.query === 'string' ? options.query : queryArg;
+  const by = options.by ?? 'name';
+  if (!isValidFindAxis(by)) {
+    error(`--by: must be 'name' | 'content' | 'env' | 'sql'; got '${by}'.`);
+    process.exit(1);
+  }
+  if (by === 'content') return runFindContent(query, options);
+  if (by === 'env' || by === 'sql') return runFindEnvOrSql(by, options);
+  return runFindByName(query, options);
+}
+
+function isValidFindAxis(by: string): by is 'name' | 'content' | 'env' | 'sql' {
+  return by === 'name' || by === 'content' || by === 'env' || by === 'sql';
+}
+
+async function runFindContent(query: string | undefined, options: FindOptions): Promise<void> {
+  if (!query) {
+    error('--by content: [query] is required (regex pattern).');
+    process.exit(1);
+  }
+  const args: Record<string, unknown> = { by: 'content', query };
+  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '50', optionName: '--limit', opts: { min: 1 } }))
+    return;
+  if (options.caseSensitive) args['caseSensitive'] = true;
+  if (options.pathFilter) args['pathFilter'] = options.pathFilter;
+  if (options.language) args['language'] = options.language;
+  if (options.since) args['since'] = options.since;
+  if (options.allowStale) args['allowStale'] = true;
+  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
+}
+
+async function runFindEnvOrSql(by: 'env' | 'sql', options: FindOptions): Promise<void> {
+  const args: Record<string, unknown> = { by };
+  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '30', optionName: '--limit', opts: { min: 1 } }))
+    return;
+  if (options.key) args['key'] = options.key;
+  if (options.op) args['op'] = options.op;
+  args['includeTests'] = options.includeTests;
+  if (options.allowStale) args['allowStale'] = true;
+  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
+}
+
+async function runFindByName(query: string | undefined, options: FindOptions): Promise<void> {
+  const mode = options.mode ?? 'exact';
+  if (mode === 'fuzzy' || mode === 'semantic' || mode === 'intent') {
+    return runFindDelegatedNameMode(mode, query, options);
+  }
+  if (mode !== 'exact') {
+    error(`Unknown --mode: ${mode}. Valid: exact | fuzzy | semantic | intent.`);
+    process.exit(1);
+  }
+  return runFindExactName(query, options);
+}
+
+async function runFindDelegatedNameMode(mode: string, query: string | undefined, options: FindOptions): Promise<void> {
+  validateDelegatedNameMode(mode, query, options);
+  const args: Record<string, unknown> = { by: 'name', mode };
+  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '10', optionName: '--limit', opts: { min: 1 } }))
+    return;
+  if (query) args['query'] = query;
+  if (options.symbol) args['symbol'] = options.symbol;
+  if (options.kind) args['kind'] = options.kind;
+  if (options.sameLanguage) args['sameLanguage'] = true;
+  if (options.differentLanguage) args['differentLanguage'] = true;
+  if (options.languageFilter) args['languageFilter'] = options.languageFilter;
+  if (options.pathFilter) args['pathFilter'] = options.pathFilter;
+  if (options.allowStale) args['allowStale'] = true;
+  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
+}
+
+function validateDelegatedNameMode(mode: string, query: string | undefined, options: FindOptions): void {
+  if (mode === 'semantic') {
+    validateSemanticFind(query, options);
+    return;
+  }
+  if (!query) {
+    error(`--by name --mode ${mode}: [query] is required`);
+    process.exit(1);
+  }
+}
+
+function validateSemanticFind(query: string | undefined, options: FindOptions): void {
+  if (!options.symbol && !query) {
+    error('--by name --mode semantic: pass either [query] (concept text) or --symbol <name>');
+    process.exit(1);
+  }
+  if (options.symbol && query) {
+    error('--by name --mode semantic: [query] and --symbol are mutually exclusive — pick one');
+    process.exit(1);
+  }
+  if (options.sameLanguage && options.differentLanguage) {
+    error('--by name --mode semantic: --same-language and --different-language are mutually exclusive — pick one');
+    process.exit(1);
+  }
+}
+
+async function runFindExactName(query: string | undefined, options: FindOptions): Promise<void> {
+  if (!query) {
+    error('[query] is required for --by name --mode exact');
+    process.exit(1);
+  }
+  const exactArgs: Record<string, unknown> = { by: 'name', mode: 'exact', query };
+  if (
+    !assignIntArg({
+      args: exactArgs,
+      key: 'limit',
+      raw: options.limit ?? '10',
+      optionName: '--limit',
+      opts: { min: 1 },
+    })
+  )
+    return;
+  if (options.kind) exactArgs['kind'] = options.kind;
+  if (options.compact) exactArgs['compact'] = true;
+  const fields = parseFieldsOption(options.fields);
+  if (fields) exactArgs['fields'] = fields;
+  if (options.since) exactArgs['since'] = options.since;
+  if (options.allowStale) exactArgs['allowStale'] = true;
+  await readCommandMcpRunner('cartograph_find', exactArgs, options.projectPath);
+}
+
+async function collectAffectedChangedFiles(
+  fileArgs: string[],
+  options: AffectedOptions,
+  projectPath: string,
+): Promise<ChangedFilesResult | null> {
+  const changedFiles = [...(fileArgs || []), ...(options.files ?? [])];
+  if (options.stdin) changedFiles.push(...readFilesFromStdin());
+  if (changedFiles.length > 0 || options.stdin) return { changedFiles, derivedFromGit: false };
+  return deriveChangedFilesFromGit(projectPath, options);
+}
+
+function readFilesFromStdin(): string[] {
+  return fs
+    .readFileSync(0, 'utf-8')
+    .split('\n')
+    .map((f) => f.trim())
+    .filter(Boolean);
+}
+
+async function deriveChangedFilesFromGit(
+  projectPath: string,
+  options: AffectedOptions,
+): Promise<ChangedFilesResult | null> {
+  const { listChangedFilesSince } = await import('../../git-utils.js');
+  const derived = listChangedFilesSince(projectPath, 'HEAD');
+  if (derived === null) {
+    if (!options.quiet) {
+      info('No files provided and could not derive from git (git unavailable or no HEAD ref).');
+      info('Use file arguments or --stdin.');
+    }
+    process.exit(0);
+  }
+  if (derived.length === 0) {
+    printNoDerivedChanges(options);
+    process.exit(0);
+  }
+  return { changedFiles: derived, derivedFromGit: true };
+}
+
+function printNoDerivedChanges(options: AffectedOptions): void {
+  if (options.json) {
+    console.log(JSON.stringify({ changedFiles: [], affectedTests: [], totalDependentsTraversed: 0 }, null, 2));
+  } else if (!options.quiet) {
+    info('No uncommitted changes — nothing to re-test.');
+  }
+}
+
+function parseAffectedDepth(options: AffectedOptions, cg: any): number | null {
+  const maxDepth = Number.parseInt(options.depth || String(DEFAULT_DEPTH), 10);
+  if (!Number.isFinite(maxDepth)) {
+    error(`Invalid value for --depth: "${options.depth}" is not a number`);
+    cg.close();
+    process.exitCode = 1;
+    return null;
+  }
+  if (maxDepth < 1) {
+    error('Invalid value for --depth: must be >= 1');
+    cg.close();
+    process.exitCode = 1;
+    return null;
+  }
+  return maxDepth;
+}
+
+function buildAffectedFilter(pattern: string | undefined): RegExp | null {
+  if (!pattern) return null;
+  const regexBody = globToSafeRegex(pattern);
+  return regexBody === null ? null : new RegExp(regexBody);
+}
+
+function validateAffectedIndexedPaths(args: {
+  changedFiles: string[];
+  derivedFromGit: boolean;
+  coreInput: AffectedCoreInput;
+  cg: any;
+  quiet?: boolean;
+}): void {
+  if (args.derivedFromGit) return;
+  const missing = args.changedFiles.filter((f) => !args.coreInput.allIndexedPaths.has(f));
+  if (missing.length === args.changedFiles.length) {
+    error(
+      `None of the ${args.changedFiles.length} input file${args.changedFiles.length === 1 ? '' : 's'} match indexed paths: ${missing.join(', ')}`,
+    );
+    args.cg.close();
+    process.exit(1);
+  }
+  if (missing.length > 0 && !args.quiet) {
+    info(
+      `${missing.length} input path${missing.length === 1 ? '' : 's'} not in the index (skipped): ${missing.join(', ')}`,
+    );
+  }
+}
+
+function printAffectedOutput(args: AffectedOutputArgs): void {
+  if (args.options.json) {
+    printAffectedJson(args);
+  } else if (args.options.quiet) {
+    for (const t of args.sortedTests) console.log(t);
+  } else {
+    printAffectedHuman(args);
+  }
+}
+
+function printAffectedJson(args: AffectedOutputArgs): void {
+  console.log(
+    JSON.stringify(
+      {
+        changedFiles: args.changedFiles,
+        affectedTests: args.sortedTests,
+        totalDependentsTraversed: args.totalDependents,
+        barrelsReached: args.barrelsReached,
+        derivedFromGit: args.derivedFromGit,
+      },
+      null,
+      2,
+    ),
+  );
+}
+
+function printAffectedHuman(args: AffectedOutputArgs): void {
+  if (args.derivedFromGit) printDerivedChangedFiles(args.changedFiles);
+  printAffectedTestList(args.sortedTests);
+  console.log(chalk.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`));
+  printBarrelWarning(args.barrelsReached);
+}
+
+function printDerivedChangedFiles(changedFiles: string[]): void {
+  console.log(
+    chalk.dim(
+      `\nChanged set derived from \`git diff HEAD\` (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'}):`,
+    ),
+  );
+  for (const f of changedFiles) console.log(chalk.dim('  ' + f));
+}
+
+function printAffectedTestList(sortedTests: string[]): void {
+  const AFFECTED_ROW_LIMIT = 40;
+  if (sortedTests.length === 0) {
+    info('No test files affected by the changed files.');
+    return;
+  }
+  const shown = sortedTests.slice(0, AFFECTED_ROW_LIMIT);
+  console.log(chalk.bold(`\nAffected test files (${sortedTests.length}):\n`));
+  for (const t of shown) console.log('  ' + chalk.cyan(t));
+  if (sortedTests.length > AFFECTED_ROW_LIMIT) {
+    console.log(
+      chalk.dim(
+        `\n  … showing first ${shown.length} of ${sortedTests.length} (sorted). Pass --filter <glob> or narrow the input set to see fewer.`,
+      ),
+    );
+  }
+  console.log();
+}
+
+function printBarrelWarning(barrelsReached: string[]): void {
+  if (barrelsReached.length === 0) return;
+  const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
+  console.log();
+  console.log(
+    chalk.yellow(
+      `⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
+        `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
+    ),
+  );
+}
+
+type FileListing = ReturnType<typeof getAllFilesWithSymbolCount>;
+type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
+
+function parseFilesOutputOptions(
+  options: { format?: string; maxDepth?: string },
+  close: () => void,
+): { format: FileListFormat; maxDepth: number | undefined } | null {
+  const format = (options.format || 'tree') as FileListFormat;
+  const validFormats: FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
+  if (!validFormats.includes(format)) {
+    error(`Invalid value for --format: "${format}" — valid values: ${validFormats.join(', ')}`);
+    close();
+    process.exitCode = 1;
+    return null;
+  }
+  if (!options.maxDepth) return { format, maxDepth: undefined };
+  const maxDepth = Number.parseInt(options.maxDepth, 10);
+  if (!Number.isFinite(maxDepth)) {
+    error(`Invalid value for --max-depth: "${options.maxDepth}" is not a number`);
+    close();
+    process.exitCode = 1;
+    return null;
+  }
+  if (maxDepth < 1) {
+    error('Invalid value for --max-depth: must be >= 1');
+    close();
+    process.exitCode = 1;
+    return null;
+  }
+  return { format, maxDepth };
+}
+
+function printFilesOutput(
+  files: FileListing,
+  format: FileListFormat,
+  includeMetadata: boolean,
+  maxDepth: number | undefined,
+  dir: string | undefined,
+  queries: Parameters<typeof getFileSummaries>[0],
+): void {
+  switch (format) {
+    case 'flat':
+      printFlatFiles(files, includeMetadata, queries);
+      break;
+    case 'grouped':
+      printGroupedFiles(files, includeMetadata);
+      break;
+    case 'summary':
+      printFileSummary(files, maxDepth, dir);
+      break;
+    default:
+      console.log(chalk.bold(`\nProject Structure (${files.length} files):\n`));
+      printFileTree({ files, includeMetadata, maxDepth, chalk });
+      break;
+  }
+}
+
+function printFlatFiles(files: FileListing, includeMetadata: boolean, queries: Parameters<typeof getFileSummaries>[0]): void {
+  console.log(chalk.bold(`\nFiles (${files.length}):\n`));
+  const flatSummaries =
+    files.length <= 80
+      ? getFileSummaries(
+          queries,
+          files.map((f) => f.path),
+        )
+      : undefined;
+  const sortedFiles = [...files];
+  sortedFiles.sort((a, b) => a.path.localeCompare(b.path));
+  for (const file of sortedFiles) {
+    if (includeMetadata) {
+      const metadata = chalk.dim(`(${file.language}, ${file.nodeCount} symbols)`);
+      console.log(`  ${file.path} ${metadata}`);
+    } else {
+      console.log(`  ${file.path}`);
+    }
+    const summary = flatSummaries?.get(file.path);
+    if (summary) console.log(`    ${chalk.dim(summary)}`);
+  }
+}
+
+function printGroupedFiles(files: FileListing, includeMetadata: boolean): void {
+  console.log(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
+  const byLang = new Map<string, FileListing>();
+  for (const file of files) {
+    const existing = byLang.get(file.language) || [];
+    existing.push(file);
+    byLang.set(file.language, existing);
+  }
+  const sortedLangs = [...byLang.entries()];
+  sortedLangs.sort((a, b) => b[1].length - a[1].length);
+  for (const [lang, langFiles] of sortedLangs) {
+    console.log(chalk.cyan(`${lang} (${langFiles.length}):`));
+    const sortedLangFiles = [...langFiles];
+    sortedLangFiles.sort((a, b) => a.path.localeCompare(b.path));
+    for (const file of sortedLangFiles) {
+      if (includeMetadata) {
+        const metadata = chalk.dim(`(${file.nodeCount} symbols)`);
+        console.log(`  ${file.path} ${metadata}`);
+      } else {
+        console.log(`  ${file.path}`);
+      }
+    }
+    console.log();
+  }
+}
+
+function printFileSummary(files: FileListing, maxDepth: number | undefined, dir: string | undefined): void {
+  const rollup = buildDirRollup(files, maxDepth, dir);
+  const filterPrefix = dir ? dir.replace(/\/+$/, '') : null;
+  const header = filterPrefix
+    ? `\nSubtree Summary — ${filterPrefix}/ (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`
+    : `\nProject Summary (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`;
+  console.log(chalk.bold(header));
+  for (const row of rollup.rows) {
+    const label = row.dir === null ? '(root)' : `${row.dir}/`;
+    const filesText = chalk.dim(`${row.files} files`.padStart(10));
+    const symbolsText = chalk.dim(`${row.symbols} symbols`.padStart(14));
+    console.log(
+      `  ${chalk.cyan(label.padEnd(40))} ${filesText} ${symbolsText}`,
+    );
+  }
+}
+
 /**
  * cartograph at-range <file> <startLine> <endLine>
  *
@@ -84,92 +947,8 @@ program
         fields?: string;
       },
     ) => {
-      const args: Record<string, unknown> = {};
-      if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '20', optionName: '--limit', opts: { min: 1 } }))
-        return;
-      if (options.compact) args['compact'] = true;
-      if (options.fields)
-        args['fields'] = options.fields
-          .split(',')
-          .map((f) => f.trim())
-          .filter(Boolean);
-      const modeFlags = [options.diff !== undefined, options.ranges !== undefined].filter(Boolean).length;
-      if (modeFlags > 1) {
-        error('--diff and --ranges are mutually exclusive.');
-        process.exit(1);
-      }
-      if (options.diff !== undefined) {
-        if (file !== undefined || startLine !== undefined || endLine !== undefined) {
-          error('--diff is mutually exclusive with positional file/startLine/endLine.');
-          process.exit(1);
-        }
-        let diffText: string;
-        if (options.diff === '-') {
-          diffText = await new Promise<string>((resolve, reject) => {
-            const chunks: Buffer[] = [];
-            process.stdin.on('data', (c) => chunks.push(c));
-            process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-            process.stdin.on('error', reject);
-          });
-        } else if (
-          options.diff.includes('\n') ||
-          options.diff.startsWith('@@') ||
-          options.diff.startsWith('diff --git')
-        ) {
-          // Looks like inline diff text, not a path — pass it through verbatim.
-          diffText = options.diff;
-        } else {
-          const fs = await import('node:fs');
-          // A single-line value that is not an existing file is treated as
-          // inline diff text too (so `--diff "@@ ..."` works either way).
-          if (fs.existsSync(options.diff)) {
-            diffText = fs.readFileSync(options.diff, 'utf-8');
-          } else {
-            // Surface the ambiguity — a mistyped path would otherwise fall
-            // through as inline text and yield a confusing "no hunks" result.
-            warn(`--diff: "${options.diff}" is not an existing file — treating it as inline diff text.`);
-            diffText = options.diff;
-          }
-        }
-        args['diff'] = diffText;
-      } else if (options.ranges === undefined) {
-        if (file === undefined || startLine === undefined || endLine === undefined) {
-          error('Pass <file> <startLine> <endLine> positionally OR use --diff <pathOrText|-> OR --ranges <list>.');
-          process.exit(1);
-        }
-        args['file'] = file;
-        const startNum = Number.parseInt(startLine, 10);
-        const endNum = Number.parseInt(endLine, 10);
-        if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
-          error('startLine and endLine must be numbers.');
-          process.exitCode = 1;
-          return;
-        }
-        args['startLine'] = startNum;
-        args['endLine'] = endNum;
-      } else {
-        if (file !== undefined || startLine !== undefined || endLine !== undefined) {
-          error('--ranges is mutually exclusive with positional file/startLine/endLine.');
-          process.exit(1);
-        }
-        const ranges: Array<{ file: string; startLine: number; endLine: number }> = [];
-        for (const spec of options.ranges
-          .split(',')
-          .map((s) => s.trim())
-          .filter(Boolean)) {
-          const m = /^(.+):(\d+)-(\d+)$/.exec(spec);
-          if (!m) {
-            error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
-            process.exit(1);
-          }
-          ranges.push({ file: m[1]!, startLine: Number.parseInt(m[2]!, 10), endLine: Number.parseInt(m[3]!, 10) });
-        }
-        if (ranges.length === 0) {
-          error('--ranges had no valid `file:startLine-endLine` specs.');
-          process.exit(1);
-        }
-        args['ranges'] = ranges;
-      }
+      const args = await buildAtRangeArgs(file, startLine, endLine, options);
+      if (!args) return;
       await runViaMCP('cartograph_at_range', args, options.projectPath);
     },
   );
@@ -209,16 +988,7 @@ program
       // reject an empty / whitespace-only question and cap the length at
       // 4096 chars, so the CLI fails fast with a clean message instead of
       // forwarding junk to the LLM.
-      if (question.trim().length === 0) {
-        error('ask: the question must not be empty.');
-        process.exitCode = 1;
-        return;
-      }
-      if (question.length > 4096) {
-        error(`ask: the question must be at most 4096 characters (got ${question.length}).`);
-        process.exitCode = 1;
-        return;
-      }
+      if (!validateAskQuestion(question)) return;
       // `-p, --project-path` is an alias of the [path] positional so `ask`
       // matches the `local-chat` / `summaries` project-path convention.
       // The explicit flag wins on conflict.
@@ -230,12 +1000,12 @@ program
         }
         const { default: Cartograph } = await loadCartograph();
         const cg = await Cartograph.open(projectPath);
-        const llmConfig = await cg.llm.getEffectiveLlmConfig();
+        const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
         const { getChatModel, getAskModel } = await import('../../llm/provider.js');
         const chatModel = getChatModel(llmConfig);
         if (!chatModel) {
           error('No LLM available. Configure config.llm.summarizeLlm in .cartograph/config.json.');
-          cg.destroy();
+          cg.close();
           process.exit(1);
         }
         // Prefer the ask model id for the trailer — that's what actually
@@ -246,20 +1016,11 @@ program
         // value is REJECTED with a clean message (matching every other
         // bounded numeric flag) rather than silently clamped. `cg` is
         // already open here, so destroy it before returning on a bad arg.
-        const retrieveKArgs: Record<string, unknown> = {};
-        if (
-          !assignIntArg({
-            args: retrieveKArgs,
-            key: 'retrieveK',
-            raw: options.retrieveK,
-            optionName: '--retrieve-k',
-            opts: { min: RETRIEVE_K_MIN, max: RETRIEVE_K_MAX },
-          })
-        ) {
-          cg.destroy();
+        const retrieveK = parseRetrieveK(options.retrieveK);
+        if (retrieveK === null) {
+          cg.close();
           return;
         }
-        const retrieveK = (retrieveKArgs['retrieveK'] as number | undefined) ?? RETRIEVE_K_DEFAULT;
         const result = await cg.llm.ask(question, { retrieveK });
         console.log(result.answer);
         if (!options.quiet) {
@@ -268,27 +1029,9 @@ program
           // backtick-quoted identifier in the answer against the index;
           // `buildCitationReport` is the shared renderer so the CLI and
           // MCP citation sections cannot diverge.
-          const { groundCitations, buildCitationReport } = await import('../../mcp/tools/ask.js');
-          const { displayModelName } = await import('../../mcp/tools/shared.js');
-          const cited = groundCitations(cg, result.answer);
-          const report = buildCitationReport(cited);
-          for (const line of report.sections) {
-            // Section lines are markdown; dim everything except blanks
-            // so the block reads as a quiet annotation under the answer.
-            console.log(line ? chalk.dim(line) : '');
-          }
-          console.log('\n' + chalk.dim('Retrieval sources:'));
-          for (const c of result.citations) {
-            const loc = c.node.startLine ? `:${c.node.startLine}` : '';
-            console.log(chalk.dim(`  • ${c.node.name} (${c.node.kind}) ${c.node.filePath}${loc}`));
-          }
-          console.log(
-            chalk.dim(
-              `\n  retrieve ${result.retrieveMs}ms · chat ${result.chatMs}ms · model ${displayModelName(askModel)} · ${report.counter}`,
-            ),
-          );
+          await printAskAnnotations(cg, result, askModel);
         }
-        cg.destroy();
+        cg.close();
       } catch (err) {
         error(`Failed to answer: ${errMsg(err)}`);
         process.exit(1);
@@ -337,296 +1080,37 @@ program
     ) => {
       const projectPath = resolveProjectPath(pathArg);
 
-      // Resolve the composite-rollup flags. `--verbose` pre-fills the
-      // three flags at sensible defaults; an explicit value still wins
-      // (matches cartograph_status precedence). parseInlineTopN clamps to
-      // [1, MAX_INLINE_TOP_N] and collapses invalid input to 0.
-      // Dynamic import — a top-level import of `status.js` creates a
-      // load-order cycle (status.ts → registry.ts → status.ts) that
-      // throws a TDZ "Cannot access 'STATUS_TOOL' before initialization".
-      // Importing inside the action handler defers it past module init.
-      const { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots, parseInlineTopN } = await import(
-        '../../mcp/tools/status.js'
-      );
-      const verbose = options.verbose === true;
-      // Hand the raw string args straight to parseInlineTopN — the same
-      // function the MCP path uses. It coerces strings via Number() and
-      // applies the documented suppress-on-non-positive / clamp-to-MAX
-      // policy uniformly. Previously this branch wrapped both flags in
-      // `assignIntArg{min:1}` which REJECTED `0` / `-5` / `1.5` instead of
-      // silently suppressing them — a CLI-vs-MCP drift that broke the
-      // documented "negative / non-numeric → suppressed" contract on the
-      // CLI side and contradicted the help text's own "Clamped to
-      // [1, 30]" promise (which never applied to `0`). Closes handoff #4.
-      const rawTopHotspots = parseInlineTopN(options.topHotspots);
-      const rawTopBiomarkers = parseInlineTopN(options.topBiomarkers);
-      const topHotspots = verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots;
-      const topBiomarkers = verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers;
-      const summaryBreakdown = options.summaryBreakdown === true || verbose;
-
       try {
         if (!isInitialized(projectPath)) {
-          if (options.json) {
-            console.log(JSON.stringify({ initialized: false, projectPath }));
-            return;
-          }
-          console.log(chalk.bold('\nCartograph Status\n'));
-          info(`Project: ${projectPath}`);
-          warn('Not initialized');
-          info('Run "cartograph admin init" to initialize');
+          printUninitializedStatus(projectPath, options);
           return;
         }
 
+        const rollups = await buildStatusRollupConfig(options);
         const { default: Cartograph } = await loadCartograph();
         const cg = await Cartograph.open(projectPath);
         const stats = cg.stats.getStats();
-        // Classify the orchestrator's drift snapshot — added / modified /
-        // removed / heal-only — via the shared `changed-files-classify`
-        // module so the CLI and the `cartograph_status` MCP tool agree on
-        // what counts as a genuine content edit vs EXTRACTION_LOGIC_VERSION
-        // heal pressure. The heal-flag union in `getChangedFiles` appends
-        // needs_reextract paths to `modified`, but those files have no
-        // on-disk content change — calling them "Modified" reads as a lie
-        // next to `cartograph changed-since` (FRICTION-A 2026-05-14).
-        const { classifyChangedFiles, realModifiedCount: computeRealModified } = await import(
-          '../../changed-files-classify.js'
-        );
-        const changes = classifyChangedFiles(cg);
-        if (!changes) throw new Error('Failed to read changed files from the index');
-        const healOnly = changes.healOnly;
-        const realModifiedCount = computeRealModified(changes);
-
-        const backend = cg.db.getBackend();
-        // Optional HNSW accelerator — importable? (vec0 brute-force is
-        // the fallback when it isn't.) Dynamic import keeps hnsw-index
-        // off the load path of every other CLI command.
+        const { changes, healOnly, realModifiedCount } = await loadStatusChangeInfo(cg);
         const hnswAvailable = await (await import('../../embeddings/hnsw-index.js')).isHnswAvailable();
 
-        // JSON output mode
         if (options.json) {
-          // Composite rollups reuse the same MCP helpers as the text
-          // surface; they emit markdown lines, so JSON carries them as a
-          // `rollups` string array. Feature Readiness is always present;
-          // hotspots/biomarkers lines appear only when their flags are set.
-          const jsonRollups: string[] = [];
-          appendFeatureReadiness(jsonRollups, cg, { summaryBreakdown });
-          appendInlineHotspots(jsonRollups, cg, topHotspots);
-          appendInlineBiomarkers(jsonRollups, cg, topBiomarkers);
-          console.log(
-            JSON.stringify({
-              initialized: true,
-              projectPath,
-              fileCount: stats.fileCount,
-              nodeCount: stats.nodeCount,
-              edgeCount: stats.edgeCount,
-              dbSizeBytes: stats.dbSizeBytes,
-              backend,
-              vecExtension: cg.db.hasVecExtension(),
-              hnswAvailable,
-              nodesByKind: stats.nodesByKind,
-              languages: Object.entries(stats.filesByLanguage)
-                .filter(([, count]) => count > 0)
-                .map(([lang]) => lang),
-              pendingChanges: {
-                added: changes.added.length,
-                modified: realModifiedCount,
-                removed: changes.removed.length,
-                healFlagged: healOnly.length,
-              },
-              rollups: jsonRollups.filter((l) => l !== ''),
-            }),
-          );
-          cg.destroy();
+          printStatusJson({ cg, projectPath, stats, changes, healOnly, realModifiedCount, hnswAvailable, rollups });
+          cg.close();
           return;
         }
 
         console.log(chalk.bold('\nCartograph Status\n'));
-
-        // Project info
         console.log(chalk.cyan('Project:'), projectPath);
         console.log();
+        printStatusIndexStats(stats, cg, hnswAvailable);
+        printCountBreakdown('Nodes by Kind:', stats.nodesByKind);
+        printCountBreakdown('Files by Language:', stats.filesByLanguage);
+        await printParseCacheStatus(cg);
+        printPendingChanges(changes, realModifiedCount, healOnly);
+        await printLlmStatus(cg, projectPath);
+        printStatusRollups(cg, rollups);
 
-        // Index stats
-        console.log(chalk.bold('Index Statistics:'));
-        console.log(`  Files:     ${formatNumber(stats.fileCount)}`);
-        console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
-        console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
-        console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-        // cartograph is Bun-only now — bun:sqlite is the sole backend.
-        // Mention sqlite-vec when present — indexed-vector similarity is
-        // meaningfully faster on larger embeddings sets.
-        const vec = cg.db.hasVecExtension();
-        const vecSuffix = vec ? ' + sqlite-vec' : '';
-        console.log(`  Backend:   ${chalk.magenta(`bun:sqlite${vecSuffix}`)}`);
-        void backend;
-        // Make a degraded vector-search path visible — otherwise an
-        // operator on a platform without a prebuilt binary just gets
-        // silently slower similarity search.
-        if (!vec) {
-          console.log(
-            chalk.yellow('  ⚠ sqlite-vec did not load — vector search is on the slow in-memory brute-force path.'),
-          );
-          console.log(chalk.dim('     sqlite-vec ships prebuilts for darwin/linux x64+arm64 and windows-x64.'));
-        } else if (!hnswAvailable) {
-          console.log(
-            chalk.dim('  ℹ hnswlib-node not installed — similar_to edge builds use the vec0 brute-force path;'),
-          );
-          console.log(chalk.dim('     `npm install hnswlib-node` adds the O(log N) accelerator for large repos.'));
-        }
-        console.log();
-
-        // Node breakdown
-        console.log(chalk.bold('Nodes by Kind:'));
-        const nodesByKind = Object.entries(stats.nodesByKind)
-          .filter(([, count]) => count > 0)
-          .sort((a, b) => b[1] - a[1]);
-        for (const [kind, count] of nodesByKind) {
-          console.log(`  ${kind.padEnd(15)} ${formatNumber(count)}`);
-        }
-        console.log();
-
-        // Language breakdown
-        console.log(chalk.bold('Files by Language:'));
-        const filesByLang = Object.entries(stats.filesByLanguage)
-          .filter(([, count]) => count > 0)
-          .sort((a, b) => b[1] - a[1]);
-        for (const [lang, count] of filesByLang) {
-          console.log(`  ${lang.padEnd(15)} ${formatNumber(count)}`);
-        }
-        console.log();
-
-        // Parse cache — replayable extraction results keyed by content
-        // hash. Surfacing this here so a stale-version count or a zero-row
-        // count is visible without opening the DB. See
-        // queries-parse-cache.ts for the version-envelope rationale.
-        try {
-          const { getParseCacheStats } = await import('../../db/queries-parse-cache.js');
-          const pc = getParseCacheStats(cg.queries);
-          if (pc.rows > 0) {
-            const sizeMB = (pc.sizeBytes / 1024 / 1024).toFixed(1);
-            const stale = pc.staleVersionRows > 0 ? chalk.yellow(`  (${pc.staleVersionRows} stale, will LRU out)`) : '';
-            console.log(chalk.bold('Parse Cache:'));
-            console.log(
-              `  Replayable: ${formatNumber(pc.currentVersionRows)} entries (${sizeMB} MB) · schema _v${pc.currentVersion}${stale}`,
-            );
-            console.log();
-          }
-        } catch {
-          /* pre-migration-026 DB */
-        }
-
-        // Pending changes — heal-flagged files are split out from the
-        // Modified row so a clean tree with EXTRACTION_LOGIC_VERSION
-        // pressure doesn't report "Modified: N files" for files whose
-        // on-disk content didn't change (FRICTION-A 2026-05-14).
-        const totalChanges = changes.added.length + realModifiedCount + changes.removed.length + healOnly.length;
-        if (totalChanges > 0) {
-          console.log(chalk.bold('Pending Changes:'));
-          if (changes.added.length > 0) {
-            console.log(`  Added:     ${changes.added.length} files`);
-          }
-          if (realModifiedCount > 0) {
-            console.log(`  Modified:  ${realModifiedCount} files`);
-          }
-          if (changes.removed.length > 0) {
-            console.log(`  Removed:   ${changes.removed.length} files`);
-          }
-          if (healOnly.length > 0) {
-            console.log(
-              `  Heal-flagged (re-extract): ${healOnly.length} files ` +
-                `(extraction-logic-version drift; no on-disk content change)`,
-            );
-          }
-          info('Run "cartograph admin sync" to update the index');
-        } else {
-          success('Index is up to date');
-        }
-        console.log();
-
-        // LLM enrichment status — auto-detected or configured.
-        console.log(chalk.bold('LLM Enrichment:'));
-        const llmConfig = await cg.llm.getEffectiveLlmConfig();
-        if (llmConfig) {
-          const { getAskModel, getChatModel, getEmbeddingModel, getDisplayEndpoint } = await import(
-            '../../llm/provider.js'
-          );
-          const source = 'configured';
-          const chatModel = getChatModel(llmConfig);
-          const askModel = getAskModel(llmConfig);
-          console.log(`  Endpoint:  ${getDisplayEndpoint(llmConfig)} (${source})`);
-          console.log(`  Model:     ${chatModel ?? '(no summarize model)'}`);
-          // Surface a separate Ask line only when ask is routed differently
-          // (split-provider setup) — keeps single-provider status output unchanged.
-          if (askModel && askModel !== chatModel) {
-            // Only annotate the provider when ask is on a SEPARATE
-            // provider (split-provider setup). For a single-provider
-            // summarizeLlm.askModel override, the provider on the line above is
-            // already the right one and the parenthetical would be
-            // redundant.
-            const askProvider = llmConfig.askLlm?.provider;
-            console.log(`  Ask model: ${askModel}${askProvider ? ` (${askProvider})` : ''}`);
-          }
-          const embedModel = getEmbeddingModel(llmConfig);
-          if (embedModel) console.log(`  Embed:     ${embedModel}`);
-          const cov = getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
-          if (cov.total > 0) {
-            const pct = Math.round((cov.summarised / cov.total) * 100);
-            // Append the centrality-weighted view so the human sees both
-            // the raw count (capacity planning) and the weighted figure
-            // (spine vs long-tail). Skipped silently when centrality
-            // hasn't been computed yet.
-            const weighted = getWeightedSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
-            const weightedSuffix =
-              weighted.weightedRatio === null
-                ? ''
-                : ` — centrality-weighted ${Math.round(weighted.weightedRatio * 100)}%`;
-            // Labelled "Summaries" (not "Coverage") so it doesn't read as
-            // the separate test-coverage feature — matches the MCP `status`
-            // surface and the background-pass line below.
-            console.log(
-              `  Summaries: ${formatNumber(cov.summarised)}/${formatNumber(cov.total)} (${pct}%)${weightedSuffix}`,
-            );
-          }
-          // Surface a detached background summarizer (spawned by `admin
-          // index`) so the user knows the coverage figure above is still
-          // climbing. A pidfile pointing at a dead process reads as idle.
-          const { getDetachedSummarizeState } = await import('../../llm/detached-summarize.js');
-          const bg = getDetachedSummarizeState(projectPath);
-          if (bg.running) {
-            console.log(`  Summaries: background pass running (pid ${bg.pid}) — coverage is still climbing`);
-          }
-        } else {
-          console.log(
-            '  No LLM configured. Run `cartograph admin install-models --write-config` for the recommended stack (llama-server HTTP — embed :8080 / chat :8081 / ask :8082 / reranker :8083), or set config.llm in .cartograph/config.json.',
-          );
-        }
-        console.log();
-
-        // Composite rollups — Feature Readiness + (optional) top hotspots
-        // / top biomarkers. These reuse the SAME helpers the MCP
-        // `cartograph_status` tool renders (exported from
-        // src/mcp/tools/status.ts), so the two surfaces can't drift. They
-        // emit markdown-flavoured lines; the CLI prints them verbatim.
-        const rollupLines: string[] = [];
-        appendFeatureReadiness(rollupLines, cg, { summaryBreakdown });
-        appendInlineHotspots(rollupLines, cg, topHotspots);
-        appendInlineBiomarkers(rollupLines, cg, topBiomarkers);
-        if (rollupLines.length > 0) {
-          // appendFeatureReadiness prefixes its block with a leading
-          // blank line; trim it so the CLI section spacing stays even.
-          for (const line of rollupLines) {
-            if (line === '') {
-              console.log();
-            } else if (line.startsWith('### ')) {
-              console.log(chalk.bold(line.slice(4)));
-            } else {
-              console.log(line);
-            }
-          }
-          console.log();
-        }
-
-        cg.destroy();
+        cg.close();
       } catch (err) {
         error(`Failed to get status: ${errMsg(err)}`);
         process.exit(1);
@@ -721,151 +1205,7 @@ program
         fields?: string;
       },
     ) => {
-      // `--query <text>` aliases the `[query]` positional (handoff #23
-      // MCP-shape alignment): the positional wins on conflict so the
-      // canonical CLI form is unchanged; an unset positional falls
-      // back to the alias value.
-      if (query === undefined && typeof options.query === 'string') {
-        query = options.query;
-      }
-      const by = options.by ?? 'name';
-      if (by !== 'name' && by !== 'content' && by !== 'env' && by !== 'sql') {
-        error(`--by: must be 'name' | 'content' | 'env' | 'sql'; got '${by}'.`);
-        process.exit(1);
-      }
-
-      // ── --by content ─────────────────────────────────────────────
-      if (by === 'content') {
-        if (!query) {
-          error('--by content: [query] is required (regex pattern).');
-          process.exit(1);
-        }
-        const args: Record<string, unknown> = { by, query };
-        if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '50', optionName: '--limit', opts: { min: 1 } }))
-          return;
-        if (options.caseSensitive) args['caseSensitive'] = true;
-        if (options.pathFilter) args['pathFilter'] = options.pathFilter;
-        if (options.language) args['language'] = options.language;
-        if (options.since) args['since'] = options.since;
-        if (options.allowStale) args['allowStale'] = true;
-        await runViaMCP('cartograph_find', args, options.projectPath);
-        return;
-      }
-
-      // ── --by env / --by sql ──────────────────────────────────────
-      if (by === 'env' || by === 'sql') {
-        const args: Record<string, unknown> = { by };
-        if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '30', optionName: '--limit', opts: { min: 1 } }))
-          return;
-        if (options.key) args['key'] = options.key;
-        if (options.op) args['op'] = options.op;
-        // Commander's `--no-include-tests` negation form always initialises
-        // `options.includeTests` (default `true`; `false` when the flag is
-        // passed). The unconditional assignment is the explicit form of
-        // the always-true `!== undefined` guard the prior `--include-tests`
-        // toggle required.
-        args['includeTests'] = options.includeTests;
-        if (options.allowStale) args['allowStale'] = true;
-        await runViaMCP('cartograph_find', args, options.projectPath);
-        return;
-      }
-
-      // ── --by name ────────────────────────────────────────────────
-      const mode = options.mode ?? 'exact';
-
-      // Fuzzy / semantic / intent all delegate to the MCP family — same
-      // code path the agent uses, no CLI-side reimplementation.
-      if (mode === 'fuzzy' || mode === 'semantic' || mode === 'intent') {
-        if (mode === 'semantic') {
-          if (!options.symbol && !query) {
-            error('--by name --mode semantic: pass either [query] (concept text) or --symbol <name>');
-            process.exit(1);
-          }
-          if (options.symbol && query) {
-            error('--by name --mode semantic: [query] and --symbol are mutually exclusive — pick one');
-            process.exit(1);
-          }
-          // Mirror the guard the prior `similar` command had — both
-          // flags together produce contradictory results downstream
-          // (one would silently win); fail fast with a clear message.
-          if (options.sameLanguage && options.differentLanguage) {
-            error(
-              '--by name --mode semantic: --same-language and --different-language are mutually exclusive — pick one',
-            );
-            process.exit(1);
-          }
-        } else if (mode === 'intent') {
-          if (!query) {
-            error('--by name --mode intent: [query] is required');
-            process.exit(1);
-          }
-        } else {
-          if (!query) {
-            error('--by name --mode fuzzy: [query] is required');
-            process.exit(1);
-          }
-        }
-        const args: Record<string, unknown> = {
-          by: 'name',
-          mode,
-        };
-        if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '10', optionName: '--limit', opts: { min: 1 } }))
-          return;
-        if (query) args['query'] = query;
-        if (options.symbol) args['symbol'] = options.symbol;
-        if (options.kind) args['kind'] = options.kind;
-        if (options.sameLanguage) args['sameLanguage'] = true;
-        if (options.differentLanguage) args['differentLanguage'] = true;
-        if (options.languageFilter) args['languageFilter'] = options.languageFilter;
-        if (options.pathFilter) args['pathFilter'] = options.pathFilter;
-        if (options.allowStale) args['allowStale'] = true;
-        await runViaMCP('cartograph_find', args, options.projectPath);
-        return;
-      }
-
-      if (mode !== 'exact') {
-        error(`Unknown --mode: ${mode}. Valid: exact | fuzzy | semantic | intent.`);
-        process.exit(1);
-      }
-      if (!query) {
-        error('[query] is required for --by name --mode exact');
-        process.exit(1);
-      }
-
-      // mode=exact — route through the cartograph_find MCP tool, the same
-      // FTS code path the agent uses. Previously the CLI called
-      // `searchNodes` directly, a relevance-scored search that diverged
-      // from the MCP result set: a container-name query returned the
-      // class plus a fuzzy mix of unrelated symbols + imports with `(NN%)`
-      // scores, where the MCP tool returns the class + its members.
-      // The local `--json` flag is dropped in favour of `--compact`
-      // (+ `--fields`), the MCP tool's structured-output story.
-      const exactArgs: Record<string, unknown> = {
-        by: 'name',
-        mode: 'exact',
-        query,
-      };
-      if (
-        !assignIntArg({
-          args: exactArgs,
-          key: 'limit',
-          raw: options.limit ?? '10',
-          optionName: '--limit',
-          opts: { min: 1 },
-        })
-      )
-        return;
-      if (options.kind) exactArgs['kind'] = options.kind;
-      if (options.compact) exactArgs['compact'] = true;
-      if (options.fields) {
-        exactArgs['fields'] = options.fields
-          .split(',')
-          .map((f) => f.trim())
-          .filter(Boolean);
-      }
-      if (options.since) exactArgs['since'] = options.since;
-      if (options.allowStale) exactArgs['allowStale'] = true;
-      await runViaMCP('cartograph_find', exactArgs, options.projectPath);
+      await runFindCommand(query, options);
     },
   );
 
@@ -936,7 +1276,7 @@ program
 
         if (files.length === 0) {
           info('No files indexed. Run "cartograph admin index" first.');
-          cg.destroy();
+          cg.close();
           return;
         }
 
@@ -958,7 +1298,7 @@ program
 
         if (files.length === 0) {
           info('No files found matching the criteria.');
-          cg.destroy();
+          cg.close();
           return;
         }
 
@@ -971,123 +1311,22 @@ program
             size: f.size,
           }));
           console.log(JSON.stringify(output, null, 2));
-          cg.destroy();
+          cg.close();
           return;
         }
 
         const includeMetadata = options.metadata !== false;
-        const format = options.format || 'tree';
         // Validate --format against the four documented values so an
         // unknown value errors cleanly instead of silently falling
         // through to the `tree` default in the switch below.
-        const validFormats = ['tree', 'flat', 'grouped', 'summary'];
-        if (!validFormats.includes(format)) {
-          error(`Invalid value for --format: "${format}" — valid values: ${validFormats.join(', ')}`);
-          cg.destroy();
-          process.exitCode = 1;
-          return;
-        }
-        let maxDepth: number | undefined;
-        if (options.maxDepth) {
-          maxDepth = Number.parseInt(options.maxDepth, 10);
-          if (!Number.isFinite(maxDepth)) {
-            error(`Invalid value for --max-depth: "${options.maxDepth}" is not a number`);
-            cg.destroy();
-            process.exitCode = 1;
-            return;
-          }
-          if (maxDepth < 1) {
-            error('Invalid value for --max-depth: must be >= 1');
-            cg.destroy();
-            process.exitCode = 1;
-            return;
-          }
-        }
+        const outputOptions = parseFilesOutputOptions(options, () => cg.close());
+        if (!outputOptions) return;
 
         // Format output
-        switch (format) {
-          case 'flat': {
-            console.log(chalk.bold(`\nFiles (${files.length}):\n`));
-            // Mirror the MCP `cartograph_files` flat format: fold the
-            // per-file LLM summary in as an indented continuation line,
-            // but only when the listing is small enough to stay readable
-            // (filtered dir/pattern queries; full-project listings of
-            // hundreds of files are summary-free). 80 matches
-            // MAX_FILES_FOR_INLINE_SUMMARY in src/mcp/tools/files.ts.
-            const flatSummaries =
-              files.length <= 80
-                ? getFileSummaries(
-                    cg.queries,
-                    files.map((f) => f.path),
-                  )
-                : undefined;
-            for (const file of files.sort((a, b) => a.path.localeCompare(b.path))) {
-              if (includeMetadata) {
-                console.log(`  ${file.path} ${chalk.dim(`(${file.language}, ${file.nodeCount} symbols)`)}`);
-              } else {
-                console.log(`  ${file.path}`);
-              }
-              const summary = flatSummaries?.get(file.path);
-              if (summary) {
-                console.log(`    ${chalk.dim(summary)}`);
-              }
-            }
-            break;
-          }
-
-          case 'grouped': {
-            console.log(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
-            const byLang = new Map<string, typeof files>();
-            for (const file of files) {
-              const existing = byLang.get(file.language) || [];
-              existing.push(file);
-              byLang.set(file.language, existing);
-            }
-            const sortedLangs = [...byLang.entries()].sort((a, b) => b[1].length - a[1].length);
-            for (const [lang, langFiles] of sortedLangs) {
-              console.log(chalk.cyan(`${lang} (${langFiles.length}):`));
-              for (const file of langFiles.sort((a, b) => a.path.localeCompare(b.path))) {
-                if (includeMetadata) {
-                  console.log(`  ${file.path} ${chalk.dim(`(${file.nodeCount} symbols)`)}`);
-                } else {
-                  console.log(`  ${file.path}`);
-                }
-              }
-              console.log();
-            }
-            break;
-          }
-
-          case 'summary': {
-            // Per-directory rollup. The rollup COMPUTATION (grouping,
-            // counting, strict-ancestor suppression, the synthetic
-            // `(root)` bucket) is single-sourced in the shared
-            // `buildDirRollup` helper so the CLI and the MCP
-            // `cartograph_files` summary mode cannot drift. The CLI
-            // keeps its own header + chalk row formatting (richer
-            // human UI per the CLI/MCP-alignment exception B12).
-            const rollup = buildDirRollup(files, maxDepth, options.dir);
-            const filterPrefix = options.dir ? options.dir.replace(/\/+$/, '') : null;
-            const header = filterPrefix
-              ? `\nSubtree Summary — ${filterPrefix}/ (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`
-              : `\nProject Summary (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols):\n`;
-            console.log(chalk.bold(header));
-            for (const row of rollup.rows) {
-              const label = row.dir === null ? '(root)' : `${row.dir}/`;
-              console.log(
-                `  ${chalk.cyan(label.padEnd(40))} ${chalk.dim(`${row.files} files`.padStart(10))} ${chalk.dim(`${row.symbols} symbols`.padStart(14))}`,
-              );
-            }
-            break;
-          }
-          default:
-            console.log(chalk.bold(`\nProject Structure (${files.length} files):\n`));
-            printFileTree({ files, includeMetadata, maxDepth, chalk });
-            break;
-        }
+        printFilesOutput(files, outputOptions.format, includeMetadata, outputOptions.maxDepth, options.dir, cg.queries);
 
         console.log();
-        cg.destroy();
+        cg.close();
       } catch (err) {
         error(`Failed to list files: ${errMsg(err)}`);
         process.exit(1);
@@ -1211,17 +1450,6 @@ program
         quiet?: boolean;
       },
     ) => {
-      // `--include-tests` is parsed + accepted but is a no-op against
-      // the current affected-core surface (the BFS already filters to
-      // test files; including non-test dependents would change the
-      // result shape, not just the count). The flag is wired so a
-      // script that calls `affected --include-tests` against the CLI
-      // does not error — handoff #25 MCP-shape alignment.
-      void options.includeTests;
-      // --files <paths...> is an alias for positional args; merge both sets.
-      if (options.files && options.files.length > 0) {
-        fileArgs = [...fileArgs, ...options.files];
-      }
       const projectPath = resolveProjectPath(options.projectPath);
 
       try {
@@ -1230,110 +1458,32 @@ program
           process.exit(1);
         }
 
-        // Collect changed files from args or stdin
-        let changedFiles: string[] = [...(fileArgs || [])];
+        const changed = await collectAffectedChangedFiles(fileArgs, options, projectPath);
+        if (!changed) return;
 
-        if (options.stdin) {
-          const stdinData = fs.readFileSync(0, 'utf-8');
-          const stdinFiles = stdinData
-            .split('\n')
-            .map((f) => f.trim())
-            .filter(Boolean);
-          changedFiles.push(...stdinFiles);
-        }
-
-        // Friction-Y (2026-05-14): when no files were passed and no
-        // --stdin was used, derive from `git diff HEAD` so the typical
-        // post-edit workflow ("which tests should I re-run?") doesn't
-        // require any plumbing.
-        let derivedFromGit = false;
-        if (changedFiles.length === 0 && !options.stdin) {
-          const { listChangedFilesSince } = await import('../../git-utils.js');
-          const derived = listChangedFilesSince(projectPath, 'HEAD');
-          if (derived === null) {
-            if (!options.quiet) {
-              info('No files provided and could not derive from git (git unavailable or no HEAD ref).');
-              info('Use file arguments or --stdin.');
-            }
-            process.exit(0);
-          }
-          if (derived.length === 0) {
-            if (options.json) {
-              console.log(
-                JSON.stringify({ changedFiles: [], affectedTests: [], totalDependentsTraversed: 0 }, null, 2),
-              );
-            } else if (!options.quiet) {
-              info('No uncommitted changes — nothing to re-test.');
-            }
-            process.exit(0);
-          }
-          changedFiles = derived;
-          derivedFromGit = true;
-        }
-
-        if (changedFiles.length === 0) {
+        if (changed.changedFiles.length === 0) {
           if (!options.quiet) info('No files provided. Use file arguments or --stdin.');
           process.exit(0);
         }
 
         const { default: Cartograph } = await loadCartograph();
         const cg = await Cartograph.open(projectPath);
-        const maxDepth = Number.parseInt(options.depth || String(DEFAULT_DEPTH), 10);
-        if (!Number.isFinite(maxDepth)) {
-          error(`Invalid value for --depth: "${options.depth}" is not a number`);
-          cg.destroy();
-          process.exitCode = 1;
-          return;
-        }
-        if (maxDepth < 1) {
-          error('Invalid value for --depth: must be >= 1');
-          cg.destroy();
-          process.exitCode = 1;
-          return;
-        }
+        const maxDepth = parseAffectedDepth(options, cg);
+        if (maxDepth === null) return;
 
-        // Custom filter pattern (ReDoS-safe — globToSafeRegex coalesces
-        // consecutive wildcards so hostile inputs can't produce nested
-        // quantifiers like `.+.+.+`).
-        let customFilter: RegExp | null = null;
-        if (options.filter) {
-          const regexBody = globToSafeRegex(options.filter);
-          if (regexBody !== null) {
-            customFilter = new RegExp(regexBody);
-          }
-        }
-
-        // Test-file detection + the BFS-through-dependents walk share the
-        // polyglot `affected-core` module with the `cartograph_affected`
-        // MCP tool — the indexer's `is_test` flag, the polyglot
-        // `isTestPath` fallback, and test-name mining. The CLI's old
-        // JS-only regex set gave wrong answers on Go/Python/Rust/Java.
         const coreInput: AffectedCoreInput = {
-          files: changedFiles,
+          files: changed.changedFiles,
           depth: maxDepth,
-          customFilter,
+          customFilter: buildAffectedFilter(options.filter),
           ...buildIndexedPathSets(cg.queries),
         };
-        // Match cartograph_affected (MCP): explicitly-passed paths the
-        // index doesn't know about are surfaced, not silently BFS'd to an
-        // empty "no test files" result. The git-derived set is already
-        // filtered to indexed paths, so the check applies to explicit
-        // input only.
-        if (!derivedFromGit) {
-          const missing = changedFiles.filter((f) => !coreInput.allIndexedPaths.has(f));
-          if (missing.length === changedFiles.length) {
-            error(
-              `None of the ${changedFiles.length} input file${changedFiles.length === 1 ? '' : 's'} match indexed paths: ${missing.join(', ')}`,
-            );
-            cg.destroy();
-            process.exit(1);
-          }
-          if (missing.length > 0 && !options.quiet) {
-            info(
-              `${missing.length} input path${missing.length === 1 ? '' : 's'} not in the index (skipped): ${missing.join(', ')}`,
-            );
-          }
-        }
+        validateAffectedIndexedPaths({
+          changedFiles: changed.changedFiles,
+          derivedFromGit: changed.derivedFromGit,
+          coreInput,
+          cg,
+          quiet: options.quiet === true,
+        });
 
         const { affectedTests, totalDependents, barrelsReached } = findAffectedTests(
           cg.internals.graphManager,
@@ -1341,77 +1491,67 @@ program
         );
         const sortedTests = Array.from(affectedTests).sort((a, b) => a.localeCompare(b));
 
-        // Row cap — mirrors cartograph_affected (MCP) DEFAULT_ROW_LIMIT.
-        // An edited leaf module re-exported through a public-API barrel
-        // can fan out to ~half the suite; an uncapped dump buries the
-        // signal, so the human surface shows the first N with a footer.
-        const AFFECTED_ROW_LIMIT = 40;
+        printAffectedOutput({
+          changedFiles: changed.changedFiles,
+          sortedTests,
+          totalDependents,
+          barrelsReached,
+          derivedFromGit: changed.derivedFromGit,
+          options,
+        });
 
-        // Output
-        if (options.json) {
-          console.log(
-            JSON.stringify(
-              {
-                changedFiles,
-                affectedTests: sortedTests,
-                totalDependentsTraversed: totalDependents,
-                barrelsReached,
-                derivedFromGit,
-              },
-              null,
-              2,
-            ),
-          );
-        } else if (options.quiet) {
-          for (const t of sortedTests) console.log(t);
-        } else {
-          if (derivedFromGit) {
-            console.log(
-              chalk.dim(
-                `\nChanged set derived from \`git diff HEAD\` (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'}):`,
-              ),
-            );
-            for (const f of changedFiles) console.log(chalk.dim('  ' + f));
-          }
-          if (sortedTests.length === 0) {
-            info('No test files affected by the changed files.');
-          } else {
-            const shown = sortedTests.slice(0, AFFECTED_ROW_LIMIT);
-            console.log(chalk.bold(`\nAffected test files (${sortedTests.length}):\n`));
-            for (const t of shown) {
-              console.log('  ' + chalk.cyan(t));
-            }
-            if (sortedTests.length > AFFECTED_ROW_LIMIT) {
-              console.log(
-                chalk.dim(
-                  `\n  … showing first ${shown.length} of ${sortedTests.length} (sorted). Pass --filter <glob> or narrow the input set to see fewer.`,
-                ),
-              );
-            }
-            console.log();
-          }
-          // Traversal count — mirrors the MCP "_Traversed N dependents
-          // total._" line so an agent switching surfaces sees the same
-          // blast-radius signal.
-          console.log(chalk.dim(`Traversed ${totalDependents} dependent${totalDependents === 1 ? '' : 's'} total.`));
-          // Barrel warning — when the BFS passed through a public-API
-          // barrel the file-level answer stops being actionable.
-          if (barrelsReached.length > 0) {
-            const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
-            console.log();
-            console.log(
-              chalk.yellow(
-                `⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-                  `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
-              ),
-            );
-          }
-        }
-
-        cg.destroy();
+        cg.close();
       } catch (err) {
         error(`Affected analysis failed: ${errMsg(err)}`);
         process.exit(1);
       }
     },
   );
+
+export const __readCommandInternals = {
+  readDiffOption,
+  parseRangeSpecs,
+  buildAtRangeArgs,
+  validateAskQuestion,
+  parseRetrieveK,
+  printUninitializedStatus,
+  buildStatusRollupConfig,
+  printStatusJson,
+  printStatusIndexStats,
+  printCountBreakdown,
+  printParseCacheStatus,
+  printPendingChanges,
+  printLlmStatus,
+  printSummaryCoverage,
+  printStatusRollups,
+  printStatusRollupLine,
+  parseFieldsOption,
+  isValidFindAxis,
+  setReadCommandMcpRunnerForTest,
+  runFindCommand,
+  runFindContent,
+  runFindEnvOrSql,
+  runFindByName,
+  runFindDelegatedNameMode,
+  validateDelegatedNameMode,
+  validateSemanticFind,
+  runFindExactName,
+  collectAffectedChangedFiles,
+  readFilesFromStdin,
+  deriveChangedFilesFromGit,
+  printNoDerivedChanges,
+  parseAffectedDepth,
+  buildAffectedFilter,
+  validateAffectedIndexedPaths,
+  printAffectedOutput,
+  printAffectedJson,
+  printAffectedHuman,
+  printDerivedChangedFiles,
+  printAffectedTestList,
+  printBarrelWarning,
+  parseFilesOutputOptions,
+  printFilesOutput,
+  printGroupedFiles,
+  printFileSummary,
+  printFileTree,
+};

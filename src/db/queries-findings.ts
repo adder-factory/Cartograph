@@ -28,6 +28,33 @@ import { CROSS_FILE_BIOMARKERS } from '../biomarkers/types.js';
 
 const SeveritySchema = z.enum(['info', 'warning', 'error']);
 const PassKindSchema = z.enum(['full-pass', 'partial-rescan', 'cached']);
+type FindingSeverity = z.infer<typeof SeveritySchema>;
+type FindingInput = {
+  biomarker: string;
+  severity: FindingSeverity;
+  metric: number;
+  detail?: unknown;
+};
+type FindingForNode = {
+  biomarker: string;
+  severity: FindingSeverity;
+  metric: number;
+  detail: unknown;
+  detectedAt: number;
+  surfaceReason: PassKind;
+};
+type RankedFinding = {
+  nodeId: string;
+  name: string;
+  kind: string;
+  filePath: string;
+  biomarker: string;
+  severity: FindingSeverity;
+  metric: number;
+  centrality: number | null;
+  detail: unknown;
+  surfaceReason: PassKind;
+};
 
 const InsertFindingParamsSchema = z.object({
   nodeId: z.string(),
@@ -206,7 +233,7 @@ export function appendFindings(
   findings: ReadonlyArray<{
     nodeId: string;
     biomarker: string;
-    severity: 'info' | 'warning' | 'error';
+    severity: FindingSeverity;
     metric: number;
     detail?: unknown;
   }>,
@@ -295,15 +322,7 @@ function resolveFileHashOrWarn(qb: QueryBuilder, filePath: string): string {
 export interface ReplaceFindingsForFileArgs {
   qb: QueryBuilder;
   filePath: string;
-  findingsByNode: ReadonlyMap<
-    string,
-    ReadonlyArray<{
-      biomarker: string;
-      severity: 'info' | 'warning' | 'error';
-      metric: number;
-      detail?: unknown;
-    }>
-  >;
+  findingsByNode: ReadonlyMap<string, ReadonlyArray<FindingInput>>;
   passKind?: PassKind;
 }
 
@@ -421,14 +440,7 @@ function safeParseDetailJson(raw: string): unknown {
 export function getFindingsForNode(
   qb: QueryBuilder,
   nodeId: string,
-): Array<{
-  biomarker: string;
-  severity: 'info' | 'warning' | 'error';
-  metric: number;
-  detail: unknown | null;
-  detectedAt: number;
-  surfaceReason: PassKind;
-}> {
+): Array<FindingForNode> {
   qb.queries.getFindingsForNode ??= getFindingsForNodeQuery(qb.db);
   const rows = qb.queries.getFindingsForNode.all({ nodeId });
   return rows.map((r) => ({
@@ -507,8 +519,12 @@ const getFindingsRankedQuery = defineDynamicQuery({
       // Literal prefix exclusion via LIKE with explicit ESCAPE — paths
       // can contain `_` so we escape `_`/`%`/`\`. GLOB has no escape
       // syntax for its `*`/`?` metachars.
-      const escaped = p.excludeFile.replaceAll('\\', '\\\\').replaceAll('_', '\\_').replaceAll('%', '\\%');
-      where.push("n.file_path NOT LIKE @excludeLike ESCAPE '\\'");
+      const backslash = String.fromCodePoint(92);
+      const escaped = p.excludeFile
+        .replaceAll(backslash, backslash + backslash)
+        .replaceAll('_', backslash + '_')
+        .replaceAll('%', backslash + '%');
+      where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
       bindings['excludeLike'] = escaped + '%';
     }
     const sql =
@@ -533,23 +549,12 @@ function mapFindingsRow(r: {
   kind: string;
   file_path: string;
   biomarker: string;
-  severity: 'info' | 'warning' | 'error';
+  severity: FindingSeverity;
   metric: number;
   centrality: number | null;
   detail: string | null;
   pass_kind: string;
-}): {
-  nodeId: string;
-  name: string;
-  kind: string;
-  filePath: string;
-  biomarker: string;
-  severity: 'info' | 'warning' | 'error';
-  metric: number;
-  centrality: number | null;
-  detail: unknown | null;
-  surfaceReason: PassKind;
-} {
+}): RankedFinding {
   return {
     nodeId: r.node_id,
     name: r.name,
@@ -587,34 +592,14 @@ export function getFindingsRanked(
   qb: QueryBuilder,
   options: {
     biomarker?: string;
-    minSeverity?: 'info' | 'warning' | 'error';
+    minSeverity?: FindingSeverity;
     minCentrality?: number;
     minMetric?: number;
     maxMetric?: number;
     excludeFile?: string;
     limit?: number;
   } = {},
-): Array<{
-  nodeId: string;
-  name: string;
-  kind: string;
-  filePath: string;
-  biomarker: string;
-  severity: 'info' | 'warning' | 'error';
-  metric: number;
-  centrality: number | null;
-  detail: unknown | null;
-  /**
-   * Why this row is on the surface right now — one of:
-   *   - 'full-pass' (re-evaluated by the most recent full project pass),
-   *   - 'partial-rescan' (surfaced by a per-edit rescan since the last
-   *     full pass — may be a latent finding the edit re-exposed),
-   *   - 'cached' (carried over from the last full pass, not re-evaluated
-   *     this pass because the file content_hash was unchanged).
-   * See the `pass_kind` column doc in schema.sql for full semantics.
-   */
-  surfaceReason: PassKind;
-}> {
+): Array<RankedFinding> {
   qb.queries.getFindingsRanked ??= getFindingsRankedQuery(qb.db);
   const rows = qb.queries.getFindingsRanked.all({
     biomarker: options.biomarker,

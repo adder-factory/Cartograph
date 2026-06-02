@@ -14,7 +14,7 @@
  * Defaults to the cartograph repo itself if BENCH_PROJECT_DIR is unset.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { runRulesInWorkers } from '../src/biomarkers/worker-pool.js';
 import { CROSS_FILE_RULES } from '../src/biomarkers/index.js';
 
@@ -78,7 +78,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

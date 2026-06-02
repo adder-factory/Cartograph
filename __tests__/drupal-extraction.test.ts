@@ -46,7 +46,7 @@ describe('Drupal framework resolver (F#62)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -97,7 +97,7 @@ describe('Drupal framework resolver (F#62)', () => {
         'my_module.hello:',
         "  path: '/hello'",
         '  defaults:',
-        "    _controller: '\\Drupal\\my_module\\Controller\\HelloController::build'",
+        String.raw`    _controller: '\Drupal\my_module\Controller\HelloController::build'`,
         "    _title: 'Hello'",
         '  requirements:',
         "    _permission: 'access content'",
@@ -108,8 +108,8 @@ describe('Drupal framework resolver (F#62)', () => {
       path.join(modDir, 'src', 'Controller', 'HelloController.php'),
       [
         '<?php',
-        'namespace Drupal\\my_module\\Controller;',
-        'use Drupal\\Core\\Controller\\ControllerBase;',
+        String.raw`namespace Drupal\my_module\Controller;`,
+        String.raw`use Drupal\Core\Controller\ControllerBase;`,
         'class HelloController extends ControllerBase {',
         '  public function build() {',
         "    return ['#markup' => 'Hello'];",
@@ -246,7 +246,7 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-drupal-svc-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -265,17 +265,19 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
         '  _defaults:', // pseudo-key — must NOT become a node
         '    autowire: true',
         '  my_module.cleaner:',
-        '    class: Drupal\\my_module\\Cleaner',
+        String.raw`    class: Drupal\my_module\Cleaner`,
         "    arguments: ['@my_module.helper']", // service→service ref
         '  my_module.helper:',
-        '    class: Drupal\\my_module\\Helper',
+        String.raw`    class: Drupal\my_module\Helper`,
         '  my_module.cleaner_alias:',
         '    alias: my_module.cleaner', // alias → service ref
         '',
       ].join('\n'),
     );
     const cls = (name: string): string =>
-      ['<?php', 'namespace Drupal\\my_module;', `class ${name} {`, '  public function run() {}', '}', ''].join('\n');
+      ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {`, '  public function run() {}', '}', ''].join(
+        '\n',
+      );
     fs.writeFileSync(path.join(modDir, 'src', 'Cleaner.php'), cls('Cleaner'));
     fs.writeFileSync(path.join(modDir, 'src', 'Helper.php'), cls('Helper'));
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
@@ -332,15 +334,17 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
       [
         'services:',
         '  my_module.cleaner:',
-        '    class: Drupal\\my_module\\Cleaner',
+        String.raw`    class: Drupal\my_module\Cleaner`,
         '    arguments:', // block-sequence form (not inline ['...'])
         "      - '@my_module.helper'",
         '  my_module.helper:',
-        '    class: Drupal\\my_module\\Helper',
+        String.raw`    class: Drupal\my_module\Helper`,
         '',
       ].join('\n'),
     );
-    const cls = (name: string): string => ['<?php', 'namespace Drupal\\my_module;', `class ${name} {}`, ''].join('\n');
+    const cls = (name: string): string => ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {}`, ''].join(
+      '\n',
+    );
     fs.writeFileSync(path.join(modDir, 'src', 'Cleaner.php'), cls('Cleaner'));
     fs.writeFileSync(path.join(modDir, 'src', 'Helper.php'), cls('Helper'));
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
@@ -366,9 +370,9 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
       [
         'services:',
         '  my_module.base:',
-        '    class: Drupal\\my_module\\Base',
+        String.raw`    class: Drupal\my_module\Base`,
         '  my_module.factory:',
-        '    class: Drupal\\my_module\\FactoryService',
+        String.raw`    class: Drupal\my_module\FactoryService`,
         '  my_module.child:',
         '    parent: my_module.base', // parent → base service
         "    factory: ['@my_module.factory', 'create']", // @factory → factory service
@@ -397,18 +401,20 @@ describe('Drupal services.yml (v2, 2026-05-29)', () => {
       [
         'services:',
         '  my_module.logger_factory:',
-        '    class: Drupal\\my_module\\LoggerFactory',
+        String.raw`    class: Drupal\my_module\LoggerFactory`,
         '  my_module.made:',
-        "    factory: ['Drupal\\my_module\\LoggerFactory', 'create']", // class-static → class FQCN
+        String.raw`    factory: ['Drupal\my_module\LoggerFactory', 'create']`, // class-static → class FQCN
         '  my_module.consumer:',
-        '    class: Drupal\\my_module\\Consumer',
+        String.raw`    class: Drupal\my_module\Consumer`,
         '    arguments:',
         "      $factory: '@my_module.logger_factory'", // named arg → service ref
         '',
       ].join('\n'),
     );
     const cls = (name: string): string =>
-      ['<?php', 'namespace Drupal\\my_module;', `class ${name} {`, '  public function create() {}', '}', ''].join('\n');
+      ['<?php', String.raw`namespace Drupal\my_module;`, `class ${name} {`, '  public function create() {}', '}', ''].join(
+        '\n',
+      );
     fs.writeFileSync(path.join(modDir, 'src', 'LoggerFactory.php'), cls('LoggerFactory'));
     fs.writeFileSync(path.join(modDir, 'src', 'Consumer.php'), cls('Consumer'));
     cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
@@ -440,7 +446,7 @@ describe('Drupal service tags (v4, 2026-05-29)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-drupal-tags-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -461,7 +467,7 @@ describe('Drupal service tags (v4, 2026-05-29)', () => {
       [
         'services:',
         '  module_a.subscriber:',
-        '    class: Drupal\\module_a\\Subscriber',
+        String.raw`    class: Drupal\module_a\Subscriber`,
         '    tags:',
         '      - { name: event_subscriber }',
         '',
@@ -472,7 +478,7 @@ describe('Drupal service tags (v4, 2026-05-29)', () => {
       [
         'services:',
         '  module_b.dispatcher:',
-        '    class: Drupal\\module_b\\Dispatcher',
+        String.raw`    class: Drupal\module_b\Dispatcher`,
         '    arguments: [!tagged_iterator event_subscriber]',
         '',
       ].join('\n'),
@@ -510,7 +516,7 @@ describe('Drupal service tags (v4, 2026-05-29)', () => {
       [
         'services:',
         '  my_module.dispatcher:',
-        '    class: Drupal\\my_module\\Dispatcher',
+        String.raw`    class: Drupal\my_module\Dispatcher`,
         '    arguments: [!tagged_iterator core.unindexed_tag]',
         '',
       ].join('\n'),
@@ -540,7 +546,7 @@ describe('Drupal plugin annotations (v3, 2026-05-29)', () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-drupal-plugin-'));
   });
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
     cg = undefined;
   });
@@ -556,8 +562,8 @@ describe('Drupal plugin annotations (v3, 2026-05-29)', () => {
       path.join(blockDir, 'AnnoBlock.php'),
       [
         '<?php',
-        'namespace Drupal\\my_module\\Plugin\\Block;',
-        'use Drupal\\Core\\Block\\BlockBase;',
+        String.raw`namespace Drupal\my_module\Plugin\Block;`,
+        String.raw`use Drupal\Core\Block\BlockBase;`,
         '/**',
         ' * Provides a custom block.',
         ' *',
@@ -602,10 +608,10 @@ describe('Drupal plugin annotations (v3, 2026-05-29)', () => {
       path.join(blockDir, 'AttrBlock.php'),
       [
         '<?php',
-        'namespace Drupal\\my_module\\Plugin\\Block;',
-        'use Drupal\\Core\\Block\\BlockBase;',
-        'use Drupal\\Core\\Block\\Attribute\\Block;',
-        'use Drupal\\Core\\StringTranslation\\TranslatableMarkup;',
+        String.raw`namespace Drupal\my_module\Plugin\Block;`,
+        String.raw`use Drupal\Core\Block\BlockBase;`,
+        String.raw`use Drupal\Core\Block\Attribute\Block;`,
+        String.raw`use Drupal\Core\StringTranslation\TranslatableMarkup;`,
         '',
         '#[Block(',
         "  id: 'my_attr_block',",
@@ -614,7 +620,7 @@ describe('Drupal plugin annotations (v3, 2026-05-29)', () => {
         'class AttrBlock extends BlockBase {}',
         // A class with an attribute but NO `id:` must NOT become a plugin.
         '',
-        '#[\\Attribute]',
+        String.raw`#[\Attribute]`,
         'class NotAPlugin {}',
       ].join('\n'),
     );

@@ -66,6 +66,19 @@ interface PatternEntry {
   reason: string;
 }
 
+const AWS_LITERAL_AKIA_RE = /\bAKIA[0-9A-Z]{16}\b/;
+const JWT_LITERAL_RE = /["']eyJ[A-Za-z0-9_.+/=-]{20,}["']/;
+const PII_NAME_PATTERNS: readonly RegExp[] = [
+  /\bssn\b/i,
+  /\bsocial[_-]?security\b/i,
+  /\bcredit[_-]?card\b/i,
+  /\bcc[_-]?num\b/i,
+  /\bdate[_-]?of[_-]?birth\b/i,
+  /\bdob\b/i,
+  /\bphone[_-]?number\b/i,
+  /\bemail[_-]?address\b/i,
+];
+
 const PATTERN_TABLE: PatternEntry[] = [
   {
     signal: 'api-key-name',
@@ -79,7 +92,7 @@ const PATTERN_TABLE: PatternEntry[] = [
       // Function-call patterns for JWT operations
       /\b(verify|decode|sign)Jwt\b|\bjwt\.(sign|verify|decode)\b/,
       // Literal JWT value starting with eyJ (allows base64url chars + dots between segments)
-      /["']eyJ[A-Za-z0-9_.+/=-]{20,}["']/,
+      JWT_LITERAL_RE,
     ],
     weight: 0.3,
     reason: 'handles or contains a JWT token',
@@ -100,7 +113,7 @@ const PATTERN_TABLE: PatternEntry[] = [
     signal: 'aws-access-key',
     patterns: [
       // Literal hardcoded AWS access key ID
-      /\bAKIA[0-9A-Z]{16}\b/,
+      AWS_LITERAL_AKIA_RE,
       // Reference to AWS secret_access_key or access_key_id
       /aws[_-]?(secret[_-]?access[_-]?key|access[_-]?key[_-]?id)/i,
     ],
@@ -115,9 +128,7 @@ const PATTERN_TABLE: PatternEntry[] = [
   },
   {
     signal: 'pii-name',
-    patterns: [
-      /\b(ssn|social[_-]?security|credit[_-]?card|cc[_-]?num|date[_-]?of[_-]?birth|dob|phone[_-]?number|email[_-]?address)\b/i,
-    ],
+    patterns: [...PII_NAME_PATTERNS],
     weight: 0.2,
     reason: 'references personally identifiable information (PII)',
   },
@@ -184,24 +195,8 @@ export function detectSecretsHandling(input: SecretsDetectionInput): SecretsDete
 
   for (const entry of PATTERN_TABLE) {
     // Each category fires at most once (no double-counting within category).
-    let fired = false;
-    let entryWeight = entry.weight;
-
-    for (const pattern of entry.patterns) {
-      if (!pattern.test(corpus)) continue;
-
-      // Special-case weight overrides for high-confidence literal patterns.
-      if (entry.signal === 'aws-access-key' && /\bAKIA[0-9A-Z]{16}\b/.test(corpus)) {
-        entryWeight = AWS_LITERAL_AKIA_WEIGHT;
-      } else if (entry.signal === 'jwt-pattern' && /["']eyJ[A-Za-z0-9_.+/=-]{20,}["']/.test(corpus)) {
-        entryWeight = JWT_LITERAL_WEIGHT;
-      }
-
-      fired = true;
-      break; // one match per category is enough
-    }
-
-    if (fired) {
+    const entryWeight = matchedSecretSignalWeight(entry, corpus);
+    if (entryWeight !== null) {
       firedSignals.push(entry.signal);
       reasons.push(entry.reason);
       rawScore += entryWeight;
@@ -219,4 +214,17 @@ export function detectSecretsHandling(input: SecretsDetectionInput): SecretsDete
     reasons,
     signals: firedSignals,
   };
+}
+
+function matchedSecretSignalWeight(entry: (typeof PATTERN_TABLE)[number], corpus: string): number | null {
+  if (!entry.patterns.some((pattern) => pattern.test(corpus))) return null;
+
+  // Special-case weight overrides for high-confidence literal patterns.
+  if (entry.signal === 'aws-access-key' && AWS_LITERAL_AKIA_RE.test(corpus)) {
+    return AWS_LITERAL_AKIA_WEIGHT;
+  }
+  if (entry.signal === 'jwt-pattern' && JWT_LITERAL_RE.test(corpus)) {
+    return JWT_LITERAL_WEIGHT;
+  }
+  return entry.weight;
 }

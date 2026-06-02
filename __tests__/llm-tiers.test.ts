@@ -32,7 +32,7 @@ function countBatchedItems(userText: string, isSummary: boolean): number {
     const headers = userText.match(/^###\s+\d+\./gm);
     return headers?.length ?? 1;
   }
-  const m = userText.match(/Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/);
+  const m = /Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/.exec(userText);
   const lines = (m?.[1] ?? '').split('\n').filter((l) => /^\d+\./.test(l));
   return lines.length || 1;
 }

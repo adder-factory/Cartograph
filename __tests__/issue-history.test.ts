@@ -12,7 +12,6 @@ import { execFileSync } from 'node:child_process';
 import { extractSymbolFromContext, extractDeclaration } from '../src/issue-history/parse-diff.js';
 import {
   mineIssueCommits,
-  mineIssueHistory,
   ISSUE_REGEX,
   LAST_MINED_ISSUES_HEAD_KEY,
 } from '../src/issue-history/index.js';
@@ -68,7 +67,7 @@ afterEach(() => {
   delete process.env.GIT_AUTHOR_DATE;
   delete process.env.GIT_COMMITTER_DATE;
   if (cg) {
-    cg.destroy();
+    cg.close();
     cg = null;
   }
   if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });

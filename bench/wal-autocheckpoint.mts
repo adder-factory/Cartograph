@@ -35,10 +35,10 @@
  * Bigger corpus: `BENCH_FILE_COUNT=5000 bun bench/wal-autocheckpoint.mts`
  */
 
-import * as fs from 'fs';
-import * as os from 'os';
-import * as path from 'path';
-import { execFileSync } from 'child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 
 const FILE_COUNT = Number(process.env['BENCH_FILE_COUNT'] ?? 2000);
@@ -126,7 +126,7 @@ async function runOne(dir: string, value: number): Promise<RunResult> {
   const walPath = `${dbPath}-wal`;
   const dbBytes = fs.existsSync(dbPath) ? fs.statSync(dbPath).size : 0;
   const walBytes = fs.existsSync(walPath) ? fs.statSync(walPath).size : 0;
-  cg.destroy();
+  cg.close();
 
   return { value, wallMs, dbBytes, walBytes };
 }
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
 
     const ranked = [...summaries].sort((a, b) => a.medianWallMs - b.medianWallMs);
     const fastest = ranked[0]!;
-    const slowest = ranked[ranked.length - 1]!;
+    const slowest = ranked.at(-1)!;
     const spreadPct = ((slowest.medianWallMs / fastest.medianWallMs - 1) * 100).toFixed(1);
     console.log(`\nfastest median: ${labelFor(fastest.value)} @ ${fastest.medianWallMs}ms`);
     console.log(`slowest median: ${labelFor(slowest.value)} @ ${slowest.medianWallMs}ms`);
@@ -189,7 +189,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

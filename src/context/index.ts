@@ -249,11 +249,8 @@ function extractSymbolsFromQuery(query: string): string[] {
 
   // Each pattern extracts a different identifier shape. The minLength
   // gate skips noise that the bare regex would otherwise admit.
-  collectRegexMatches(
-    query,
-    { pattern: /\b([A-Z][a-z]+(?:[A-Z][a-z]*)*|[a-z]+(?:[A-Z][a-z]*)+)\b/g, minLength: 2 },
-    symbols,
-  );
+  collectRegexMatches(query, { pattern: /\b([A-Z][a-z]+(?:[A-Z][a-z]*)*)\b/g, minLength: 2 }, symbols);
+  collectRegexMatches(query, { pattern: /\b([a-z]+(?:[A-Z][a-z]*)+)\b/g, minLength: 2 }, symbols);
   collectRegexMatches(query, { pattern: /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/gi, minLength: 3 }, symbols);
   collectRegexMatches(query, { pattern: /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g, minLength: 1 }, symbols);
   collectRegexMatches(query, { pattern: /\b([A-Z]{2,})\b/g, minLength: 1 }, symbols);
@@ -261,13 +258,27 @@ function extractSymbolsFromQuery(query: string): string[] {
 
   // Dot notation needs its own loop because matches expand into parts
   // (e.g., "app.isPackaged" → ["app.isPackaged", "app", "isPackaged"]).
-  const dotPattern = /\b([a-zA-Z][a-zA-Z0-9]*(?:\.[a-zA-Z][a-zA-Z0-9]*)+)\b/g;
+  const dotPattern = /\b([a-zA-Z][a-zA-Z0-9.]*\.[a-zA-Z0-9.]*)\b/g;
   let match: RegExpExecArray | null;
   while ((match = dotPattern.exec(query)) !== null) {
-    if (match[1]) addDotPathAndParts(symbols, match[1]);
+    if (match[1] && isDottedIdentifierPath(match[1])) addDotPathAndParts(symbols, match[1]);
   }
 
   return Array.from(symbols).filter((s) => !QUERY_STOPWORDS.has(s.toLowerCase()));
+}
+
+function isDottedIdentifierPath(value: string): boolean {
+  const parts = value.split('.');
+  return parts.length > 1 && parts.every(isIdentifierPathPart);
+}
+
+function isIdentifierPathPart(value: string): boolean {
+  if (!value) return false;
+  if (!/[a-zA-Z]/.test(value[0]!)) return false;
+  for (const char of value.slice(1)) {
+    if (!/[a-zA-Z0-9]/.test(char)) return false;
+  }
+  return true;
 }
 
 /**
@@ -396,7 +407,7 @@ const EXTRA_CANDIDATE_RANK_DECAY = 0.7;
  * lexical pool are only boosted toward their rank-aware seed score,
  * never damped, via `Math.max`.
  */
-const EXTRA_CANDIDATE_FLOOR = 1.0;
+const EXTRA_CANDIDATE_FLOOR = 1;
 
 /**
  * Merge externally-supplied seed candidates into a running search-result
@@ -569,7 +580,7 @@ const COMPOUND_PER_TERM_BONUS = 20;
  * cautiously — over-amplification promotes hubs the user didn't
  * ask about.
  */
-const CENTRALITY_BOOST_WEIGHT = 5.0;
+const CENTRALITY_BOOST_WEIGHT = 5;
 /** Hard ceiling (100) on caller-supplied `searchLimit` — multiplied 5× elsewhere; cap prevents runaway fetches. */
 const MAX_SEARCH_LIMIT = 100;
 /** Hard ceiling on caller-supplied `maxNodes`. */
@@ -936,7 +947,7 @@ function countTermGroupMatches(node: Node, termGroups: string[][]): number {
 function groupMatchesNode(group: string[], nameLower: string, dirSegments: string[]): boolean {
   for (const term of group) {
     if (nameLower.includes(term)) return true;
-    if (dirSegments.some((seg) => seg === term)) return true;
+    if (dirSegments.includes(term)) return true;
   }
   return false;
 }
@@ -1125,10 +1136,7 @@ function cbResolveImportsToDefinitions(st: ContextBuilderState, results: SearchR
   for (const result of results) {
     const { node, score } = result;
     if (node.kind !== 'import' && node.kind !== 'export') {
-      if (!seenIds.has(node.id)) {
-        seenIds.add(node.id);
-        resolved.push(result);
-      }
+      cbPushUniqueSearchResult(resolved, seenIds, result);
       continue;
     }
     const edgeKind = node.kind === 'import' ? 'imports' : 'exports';
@@ -1136,9 +1144,7 @@ function cbResolveImportsToDefinitions(st: ContextBuilderState, results: SearchR
     let foundDefinition = false;
     for (const edge of outgoingEdges) {
       const targetNode = st.queries.getNodeById(edge.target);
-      if (targetNode && !seenIds.has(targetNode.id)) {
-        seenIds.add(targetNode.id);
-        resolved.push({ node: targetNode, score });
+      if (targetNode && cbPushUniqueSearchResult(resolved, seenIds, { node: targetNode, score })) {
         foundDefinition = true;
         logDebug('Resolved import to definition', {
           import: node.name,
@@ -1150,6 +1156,13 @@ function cbResolveImportsToDefinitions(st: ContextBuilderState, results: SearchR
     if (!foundDefinition) logDebug('Skipping unresolved import', { name: node.name, file: node.filePath });
   }
   return resolved;
+}
+
+function cbPushUniqueSearchResult(results: SearchResult[], seenIds: Set<string>, result: SearchResult): boolean {
+  if (seenIds.has(result.node.id)) return false;
+  seenIds.add(result.node.id);
+  results.push(result);
+  return true;
 }
 
 /** After all eviction passes, recover structurally-relevant edges between surviving nodes. */
@@ -1245,26 +1258,33 @@ interface TraversalAccumulator {
 /** Phase 2 of `findRelevantContext`: BFS traversal from each entry point. */
 function cbExpandViaTraversal(st: ContextBuilderState, entryPoints: SearchResult[], acc: TraversalAccumulator): void {
   for (const result of entryPoints) {
-    const traversalResult = st.traverser.traverseBFS(
-      result.node.id,
-      compact({
-        maxDepth: acc.opts.traversalDepth,
-        edgeKinds: acc.opts.edgeKinds && acc.opts.edgeKinds.length > 0 ? acc.opts.edgeKinds : undefined,
-        nodeKinds: acc.opts.nodeKinds && acc.opts.nodeKinds.length > 0 ? acc.opts.nodeKinds : undefined,
-        direction: 'both',
-        limit: Math.ceil(acc.opts.maxNodes / Math.max(1, entryPoints.length)),
-      }),
-    );
+    const traversalResult = st.traverser.traverseBFS(result.node.id, cbTraversalOptions(acc.opts, entryPoints.length));
     for (const [id, node] of traversalResult.nodes) {
       if (!acc.nodes.has(id)) acc.nodes.set(id, node);
     }
     for (const edge of traversalResult.edges) {
-      const exists = acc.edges.some(
-        (e) => e.source === edge.source && e.target === edge.target && e.kind === edge.kind,
-      );
-      if (!exists) acc.edges.push(edge);
+      cbPushUniqueEdge(acc.edges, edge);
     }
   }
+}
+
+function cbTraversalOptions(opts: Required<FindRelevantContextOptions>, entryPointCount: number) {
+  return compact({
+    maxDepth: opts.traversalDepth,
+    edgeKinds: nonEmptyArrayOrUndefined(opts.edgeKinds),
+    nodeKinds: nonEmptyArrayOrUndefined(opts.nodeKinds),
+    direction: 'both' as const,
+    limit: Math.ceil(opts.maxNodes / Math.max(1, entryPointCount)),
+  });
+}
+
+function nonEmptyArrayOrUndefined<T>(values: T[]): T[] | undefined {
+  return values.length > 0 ? values : undefined;
+}
+
+function cbPushUniqueEdge(edges: Edge[], edge: Edge): void {
+  const exists = edges.some((e) => e.source === edge.source && e.target === edge.target && e.kind === edge.kind);
+  if (!exists) edges.push(edge);
 }
 
 /**

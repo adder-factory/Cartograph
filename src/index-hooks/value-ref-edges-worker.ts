@@ -72,6 +72,17 @@ interface ValueRefWorkerReplyError {
 
 export type ValueRefWorkerReply = ValueRefWorkerReplyOk | ValueRefWorkerReplyError;
 
+interface WorkerFileDeps {
+  readonly projectRoot: string;
+  readonly queries: {
+    readonly getSymbolNameIndexByFile: (filePath: string) => ReadonlyMap<string, string>;
+  };
+  readonly readFileSafe: (filePath: string) => string | null;
+  readonly stripJsComments: (content: string) => string;
+  readonly joinPath: (...segments: string[]) => string;
+  readonly edges: ValueRefEdgeRecord[];
+}
+
 async function main(): Promise<void> {
   if (!parentPort) throw new Error('value-ref-edges-worker must run inside a Worker');
   const init = workerData as ValueRefWorkerInit;
@@ -101,56 +112,18 @@ async function main(): Promise<void> {
     const edges: ValueRefEdgeRecord[] = [];
 
     try {
+      const fileDeps: WorkerFileDeps = {
+        projectRoot: init.projectRoot,
+        queries: {
+          getSymbolNameIndexByFile: (filePath) => getSymbolNameIndexByFile(queries, filePath),
+        },
+        readFileSafe,
+        stripJsComments,
+        joinPath: path.join,
+        edges,
+      };
       for (const file of init.fileRecords) {
-        if (!SUPPORTED_LANGS.has(file.language)) continue;
-        const fileT0 = VERBOSE ? Date.now() : 0;
-        if (VERBOSE) {
-          // Enter line written BEFORE any work — if the worker hangs
-          // in any subsequent phase the last enter line names the file
-          // even after SIGTERM. Phases: read, strip, regex1, regex2.
-          console.error(`[vre w:${threadId}] enter ${file.path}`);
-        }
-        const content = readFileSafe(path.join(init.projectRoot, file.path));
-        if (!content) continue;
-        const tAfterRead = VERBOSE ? Date.now() : 0;
-        const cleaned = stripJsComments(content);
-        const tAfterStrip = VERBOSE ? Date.now() : 0;
-        const fileNodeId = `file:${file.path}`;
-        const seenNames = new Set<string>();
-        // `seen` mirrors the main-thread `collectEdgesFromFile` shape:
-        // target-id-level dedup catches the rare cross-name-collision
-        // case where two different name-strings (e.g. a re-export alias)
-        // resolve to the same target id. `insertEdges` is idempotent via
-        // UNIQUE constraint either way, but keeping the dedup here
-        // means the two paths emit byte-identical edge sets.
-        const seen = new Set<string>();
-        // B37 (2026-05-25) — pre-fetch the file's name → id index in
-        // one DB call so the per-match lookups inside the regex
-        // passes are in-memory Map.get(). Replaces ~30 per-name
-        // `getNodesByNameAndFile` calls per file. 30× fewer DB calls
-        // on TS-scale corpora; ~63s → ~few-second hook wall.
-        const nameIndex = getSymbolNameIndexByFile(queries, file.path);
-        const baseArgs = {
-          cleaned,
-          fileNodeId,
-          seenNames,
-          seen,
-          edges,
-          nameIndex,
-        };
-        collectMatches({ ...baseArgs, re: CALL_ARG_RE });
-        const tAfterRe1 = VERBOSE ? Date.now() : 0;
-        collectMatches({ ...baseArgs, re: PAIR_VALUE_RE });
-        if (VERBOSE) {
-          const tEnd = Date.now();
-          console.error(
-            `[vre w:${threadId}] done  ${file.path} ` +
-              `bytes=${content.length} cleaned=${cleaned.length} ` +
-              `total=${tEnd - fileT0}ms read=${tAfterRead - fileT0}ms ` +
-              `strip=${tAfterStrip - tAfterRead}ms re1=${tAfterRe1 - tAfterStrip}ms ` +
-              `re2=${tEnd - tAfterRe1}ms`,
-          );
-        }
+        collectEdgesFromWorkerFile(file, fileDeps);
       }
       parentPort.postMessage({
         ok: true,
@@ -168,6 +141,53 @@ async function main(): Promise<void> {
   } finally {
     process.exit(0);
   }
+}
+
+function collectEdgesFromWorkerFile(file: ValueRefWorkerInit['fileRecords'][number], deps: WorkerFileDeps): void {
+  if (!SUPPORTED_LANGS.has(file.language)) return;
+  const fileT0 = VERBOSE ? Date.now() : 0;
+  if (VERBOSE) {
+    // Enter line written BEFORE any work — if the worker hangs in any
+    // later phase the final enter line names the file.
+    console.error(`[vre w:${threadId}] enter ${file.path}`);
+  }
+  const content = deps.readFileSafe(deps.joinPath(deps.projectRoot, file.path));
+  if (!content) return;
+  const tAfterRead = VERBOSE ? Date.now() : 0;
+  const cleaned = deps.stripJsComments(content);
+  const tAfterStrip = VERBOSE ? Date.now() : 0;
+  const fileNodeId = `file:${file.path}`;
+  const seenNames = new Set<string>();
+  const seen = new Set<string>();
+  const nameIndex = deps.queries.getSymbolNameIndexByFile(file.path);
+  const baseArgs = { cleaned, fileNodeId, seenNames, seen, edges: deps.edges, nameIndex };
+  collectMatches({ ...baseArgs, re: CALL_ARG_RE });
+  const tAfterRe1 = VERBOSE ? Date.now() : 0;
+  collectMatches({ ...baseArgs, re: PAIR_VALUE_RE });
+  logVerboseFileTiming({ filePath: file.path, content, cleaned, fileT0, tAfterRead, tAfterStrip, tAfterRe1 });
+}
+
+interface VerboseFileTimingArgs {
+  readonly filePath: string;
+  readonly content: string;
+  readonly cleaned: string;
+  readonly fileT0: number;
+  readonly tAfterRead: number;
+  readonly tAfterStrip: number;
+  readonly tAfterRe1: number;
+}
+
+function logVerboseFileTiming(args: VerboseFileTimingArgs): void {
+  if (!VERBOSE) return;
+  const { filePath, content, cleaned, fileT0, tAfterRead, tAfterStrip, tAfterRe1 } = args;
+  const tEnd = Date.now();
+  console.error(
+    `[vre w:${threadId}] done  ${filePath} ` +
+      `bytes=${content.length} cleaned=${cleaned.length} ` +
+      `total=${tEnd - fileT0}ms read=${tAfterRead - fileT0}ms ` +
+      `strip=${tAfterStrip - tAfterRead}ms re1=${tAfterRe1 - tAfterStrip}ms ` +
+      `re2=${tEnd - tAfterRe1}ms`,
+  );
 }
 
 /** Args bundle for {@link collectMatches}. Mirrors the main-thread
@@ -272,4 +292,4 @@ const JS_RESERVED_HEAD: ReadonlySet<string> = new Set([
   'case',
 ]);
 
-void main();
+await main();

@@ -103,7 +103,7 @@ func register(r interface { GET(string, ...interface{}) }) {
   }, 60000);
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 

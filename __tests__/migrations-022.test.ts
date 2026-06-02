@@ -64,7 +64,9 @@ describe('Migration 022 — content_hash index + structural-clear preservation',
         name: string;
         seqno: number;
       }>;
-      const ordered = cols.sort((a, b) => a.seqno - b.seqno).map((c) => c.name);
+      const orderedCols = [...cols];
+      orderedCols.sort((a, b) => a.seqno - b.seqno);
+      const ordered = orderedCols.map((c) => c.name);
       expect(ordered).toEqual(['body_hash', 'model']);
     } finally {
       db.close();

@@ -109,11 +109,7 @@ export const reactResolver: FrameworkResolver = {
             endLine: lineNum,
             startColumn: 0,
             endColumn: 0,
-            language: filePath.endsWith('.tsx')
-              ? 'tsx'
-              : filePath.endsWith('.ts') || filePath.endsWith('.mts') || filePath.endsWith('.cts')
-                ? 'typescript'
-                : 'javascript',
+            language: routeLanguageForPath(filePath),
             updatedAt: now,
           });
         }
@@ -123,6 +119,12 @@ export const reactResolver: FrameworkResolver = {
     return nodes;
   },
 };
+
+function routeLanguageForPath(filePath: string): 'tsx' | 'typescript' | 'javascript' {
+  if (filePath.endsWith('.tsx')) return 'tsx';
+  if (filePath.endsWith('.ts') || filePath.endsWith('.mts') || filePath.endsWith('.cts')) return 'typescript';
+  return 'javascript';
+}
 
 /**
  * Check if string is PascalCase

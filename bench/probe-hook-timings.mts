@@ -18,7 +18,7 @@
  *     by the migration / open). Cold-cache timings are higher.
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { runAfterIndexAll } from '../src/index-hooks/registry.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
@@ -60,11 +60,13 @@ async function main(): Promise<void> {
       console.log(`Top 3 hooks: ${top3.map((h) => h.name).join(', ')} = ${top3Sum}ms (${top3Pct}% of total).`);
     }
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

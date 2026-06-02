@@ -276,7 +276,7 @@ describe('Cartograph integration with new provider shape', () => {
     const { default: Cartograph } = await import('../src/index.js');
     const cg = await Cartograph.init(tempDir);
     try {
-      expect(cg.llm.hasLlm()).toBe(false);
+      expect(cg.llm.config.hasLlm()).toBe(false);
     } finally {
       cg.close();
     }
@@ -293,7 +293,7 @@ describe('Cartograph integration with new provider shape', () => {
       },
     });
     try {
-      expect(cg.llm.hasLlm()).toBe(true);
+      expect(cg.llm.config.hasLlm()).toBe(true);
     } finally {
       cg.close();
     }
@@ -310,7 +310,7 @@ describe('Cartograph integration with new provider shape', () => {
       },
     });
     try {
-      expect(cg.llm.hasLlm()).toBe(false);
+      expect(cg.llm.config.hasLlm()).toBe(false);
     } finally {
       cg.close();
     }

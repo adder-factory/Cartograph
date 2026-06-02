@@ -23,16 +23,15 @@ import {
   type ResolutionContext,
   type FrameworkResolver,
   type ImportMapping,
+  type ReExport,
   classifyConfidence,
 } from './types.js';
 import { matchReference } from './name-matcher.js';
-import { isJsFamily } from '../utils.js';
+import { compact, isJsFamily } from '../utils.js';
 import { resolveViaImport, extractImportMappings, extractReExports } from './import-resolver.js';
 import { detectFrameworks } from './frameworks/index.js';
 import { loadProjectAliases, type AliasMap } from './path-aliases.js';
 import { logDebug } from '../errors.js';
-import type { ReExport } from './types.js';
-import { compact } from '../utils.js';
 
 // Re-export types
 export * from './types.js';

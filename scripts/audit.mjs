@@ -22,6 +22,8 @@ import path from 'node:path';
 import fs from 'node:fs';
 import process from 'node:process';
 
+const byString = (a, b) => a.localeCompare(b);
+
 const target = path.resolve(process.argv[2] ?? process.cwd());
 if (!fs.existsSync(target)) {
   console.error(`audit: target path does not exist: ${target}`);
@@ -177,7 +179,7 @@ for (const f of allFiles) {
   const partners = cg.getCoChangedFiles(f.filePath, { limit: 5, minCount: 3, minJaccard: 0.5 });
   for (const p of partners) {
     // Heuristic: high jaccard pair we haven't already seen
-    const key = [f.filePath, p.path].sort().join('|');
+    const key = [f.filePath, p.path].sort(byString).join('|');
     if (coupling.some((c) => c.key === key)) continue;
     if (p.jaccard >= 0.5) {
       coupling.push({ key, a: f.filePath, b: p.path, jaccard: p.jaccard, count: p.count });

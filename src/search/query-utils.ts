@@ -286,20 +286,76 @@ function matchesStemRule(term: string, rule: StemRule): boolean {
  * match the symbol's exact name as well as its split words.
  */
 function harvestCompoundIdentifiers(query: string, tokens: Set<string>): void {
-  const patterns = [
-    // CamelCase: scrapeLoop, UserService, getCallGraph
-    /\b([a-zA-Z][a-zA-Z0-9]*(?:[A-Z][a-z]+)+|[A-Z][a-z]+(?:[A-Z][a-z]*)+)\b/g,
-    // snake_case: scrape_loop, user_service
-    /\b([a-zA-Z][a-zA-Z0-9]*(?:_[a-zA-Z0-9]+)+)\b/g,
-  ];
-  for (const pattern of patterns) {
-    let match: RegExpExecArray | null;
-    while ((match = pattern.exec(query)) !== null) {
-      if (match[1] && match[1].length >= MIN_TOKEN_LENGTH) {
-        tokens.add(match[1].toLowerCase());
-      }
+  for (const identifier of scanAsciiIdentifiers(query)) {
+    if (identifier.length < MIN_TOKEN_LENGTH) continue;
+    if (isCamelOrPascalCompound(identifier) || isSnakeCompound(identifier)) {
+      tokens.add(identifier.toLowerCase());
     }
   }
+}
+
+function scanAsciiIdentifiers(value: string): string[] {
+  const identifiers: string[] = [];
+  let start = -1;
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i]!;
+    if (start === -1) {
+      if (isAsciiLetter(char) && !isIdentifierBodyChar(value[i - 1])) start = i;
+      continue;
+    }
+    if (isIdentifierBodyChar(char)) continue;
+    identifiers.push(value.slice(start, i));
+    start = -1;
+  }
+  if (start !== -1) identifiers.push(value.slice(start));
+  return identifiers;
+}
+
+function isIdentifierBodyChar(char: string | undefined): boolean {
+  if (!char) return false;
+  return isAsciiLetter(char) || isAsciiDigit(char) || char === '_';
+}
+
+function isAsciiLetter(char: string): boolean {
+  return isLowerAscii(char) || isUpperAscii(char);
+}
+
+function isSnakeCompound(identifier: string): boolean {
+  if (!identifier.includes('_')) return false;
+  const parts = identifier.split('_');
+  return parts.length > 1 && parts.every((part) => part.length > 0);
+}
+
+function isCamelOrPascalCompound(identifier: string): boolean {
+  if (identifier.includes('_')) return false;
+  for (let i = 1; i < identifier.length; i++) {
+    if (isLowerAscii(identifier[i - 1]!) && isUpperAscii(identifier[i]!)) return true;
+  }
+  for (let i = 1; i < identifier.length - 1; i++) {
+    if (isUpperAscii(identifier[i]!) && isLowerAscii(identifier[i + 1]!) && hasPriorUpperOrDigit(identifier, i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasPriorUpperOrDigit(value: string, endExclusive: number): boolean {
+  for (let i = 0; i < endExclusive; i++) {
+    if (isUpperAscii(value[i]!) || isAsciiDigit(value[i]!)) return true;
+  }
+  return false;
+}
+
+function isLowerAscii(char: string): boolean {
+  return char >= 'a' && char <= 'z';
+}
+
+function isUpperAscii(char: string): boolean {
+  return char >= 'A' && char <= 'Z';
+}
+
+function isAsciiDigit(char: string): boolean {
+  return char >= '0' && char <= '9';
 }
 
 export function extractSearchTerms(query: string, options?: { stems?: boolean }): string[] {
@@ -547,7 +603,7 @@ export function nameMatchBonus(nodeName: string, query: string): number {
     .filter((t) => t.length >= 2);
 
   // Full query as a single token (for compound identifiers like "CacheBuilder")
-  const queryLower = query.replaceAll(/[\s]+/g, '').toLowerCase();
+  const queryLower = query.replaceAll(/\s+/g, '').toLowerCase();
 
   if (nameLower === queryLower) return NAME_BONUS_EXACT_MATCH;
 

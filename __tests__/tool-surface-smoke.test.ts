@@ -82,6 +82,26 @@ const DESTRUCTIVE_ADMIN_ACTIONS = new Set<string>([
  *  and a no-op when no stale lock file exists. */
 const SAFE_ADMIN_ACTION = 'unlock';
 
+/** Walk the commander tree, collecting [pathSegments] for every
+ *  real command and nested subcommand (skipping the auto `help`). */
+function collectCommandPaths(program: Command): string[][] {
+  const paths: string[][] = [];
+  visitCommandPaths(program, [], paths);
+  return paths;
+}
+
+function visitCommandPaths(cmd: Command, prefix: string[], paths: string[][]): void {
+  for (const sub of cmd.commands) {
+    const subName = sub.name();
+    if (!subName || subName === 'help') {
+      continue;
+    }
+    const segs = [...prefix, subName];
+    paths.push(segs);
+    visitCommandPaths(sub, segs, paths);
+  }
+}
+
 /**
  * Tools (or tool actions) skipped entirely by the SMOKE pass, each
  * with a reason. They are still numeric-fuzzed where they declare
@@ -182,7 +202,9 @@ function numericProps(def: ToolDefinition): string[] {
  */
 function buildSmokeArgs(mod: ToolModule): Record<string, unknown> {
   const def = mod.definition;
-  const args: Record<string, unknown> = { ...(SMOKE_EXTRA_ARGS[def.name] ?? {}) };
+  const args: Record<string, unknown> = {};
+  const extras = SMOKE_EXTRA_ARGS[def.name];
+  if (extras) Object.assign(args, extras);
   // Family discriminator takes precedence — it must land on a safe action.
   Object.assign(args, SMOKE_DISCRIMINATOR[def.name] ?? {});
   // Fill any still-missing required key with a schema-shaped placeholder.
@@ -268,7 +290,7 @@ beforeAll(async () => {
 
 afterAll(() => {
   try {
-    cg?.destroy();
+    cg?.close();
   } catch {
     /* idempotent */
   }
@@ -365,8 +387,8 @@ describe('MCP tool surface — numeric property fuzz', () => {
             // must be a well-formed ToolResult, not undefined/garbage.
             if (
               !result ||
-              !Array.isArray((result as ToolResult).content) ||
-              (result as ToolResult).content.length === 0
+              !Array.isArray(result.content) ||
+              result.content.length === 0
             ) {
               failures.push(`${prop}=${label}: handler returned a malformed result ` + `(${JSON.stringify(result)})`);
             }
@@ -401,25 +423,6 @@ describe('CLI surface — every command responds to --help', () => {
       const e = err as { status?: number; stdout?: string; stderr?: string };
       return { out: (e.stdout ?? '') + (e.stderr ?? ''), code: e.status ?? 1 };
     }
-  }
-
-  /** Walk the commander tree, collecting [pathSegments] for every
-   *  real command and nested subcommand (skipping the auto `help`). */
-  function collectCommandPaths(program: Command): string[][] {
-    const paths: string[][] = [];
-    function visit(cmd: Command, prefix: string[]): void {
-      for (const sub of cmd.commands) {
-        const subName = sub.name();
-        if (!subName || subName === 'help') {
-          continue;
-        }
-        const segs = [...prefix, subName];
-        paths.push(segs);
-        visit(sub, segs);
-      }
-    }
-    visit(program, []);
-    return paths;
   }
 
   it('enumerates a non-trivial number of CLI commands', async () => {

@@ -48,6 +48,27 @@ interface ObjectRow {
 
 const TEMP_SUFFIX = '__fk_tmp';
 
+function isSqliteTableOptionSuffix(suffix: string): boolean {
+  const normalized = trimSqliteSuffixPadding(suffix).replaceAll(/\s+/g, ' ').toUpperCase();
+  if (normalized === '') return true;
+  if (normalized === 'STRICT') return true;
+  if (normalized === 'WITHOUT ROWID') return true;
+  const commaParts = normalized.split(',').map((part) => part.trim());
+  return commaParts.length === 2 && commaParts[0] === 'STRICT' && commaParts[1] === 'WITHOUT ROWID';
+}
+
+function trimSqliteSuffixPadding(value: string): string {
+  let start = 0;
+  let end = value.length;
+  while (start < end && isSqliteSuffixPadding(value[start]!)) start++;
+  while (end > start && isSqliteSuffixPadding(value[end - 1]!)) end--;
+  return value.slice(start, end);
+}
+
+function isSqliteSuffixPadding(char: string): boolean {
+  return char === ';' || /\s/.test(char);
+}
+
 export const MIGRATION: MigrationModule = {
   description: 'Add node_id FK to role_assignments + reap dead-node orphans',
   requiresFkDisable: true,
@@ -72,8 +93,10 @@ export const MIGRATION: MigrationModule = {
     // certain WITHOUT ROWID + virtual-table combinations on minimal
     // fixtures. Skip cleanly in that shape — production DBs always have
     // start_line / end_line so the guard is a no-op there.
-    const nodeCols = (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name);
-    if (!nodeCols.includes('start_line') || !nodeCols.includes('end_line')) {
+    const nodeCols = new Set(
+      (db.prepare('PRAGMA table_info(nodes)').all() as Array<{ name: string }>).map((r) => r.name),
+    );
+    if (!nodeCols.has('start_line') || !nodeCols.has('end_line')) {
       return;
     }
 
@@ -142,7 +165,7 @@ function rebuildRoleAssignmentsWithFk(db: import('../sqlite-adapter.js').SqliteD
     throw new Error('migration 062: role_assignments CREATE statement has no closing paren');
   }
   const suffix = renamedSql.slice(close + 1);
-  if (!/^[\s;]*(?:STRICT\s*(?:,\s*WITHOUT\s+ROWID)?|WITHOUT\s+ROWID)?[\s;]*$/i.test(suffix)) {
+  if (!isSqliteTableOptionSuffix(suffix)) {
     throw new Error(
       `migration 062: unexpected content after role_assignments table-closing paren: ${JSON.stringify(suffix)}`,
     );

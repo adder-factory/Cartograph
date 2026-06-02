@@ -171,7 +171,7 @@ describe('borrowed-worktree banner surfaces on ToolHandler.execute (F#58)', () =
     expect(text).toContain(real(worktree));
     expect(text).toContain(real(mainRepo));
 
-    cg.destroy();
+    cg.close();
   });
 
   it('no banner when projectPath and index live in the same tree', async () => {
@@ -190,6 +190,6 @@ describe('borrowed-worktree banner surfaces on ToolHandler.execute (F#58)', () =
     const text = result.content[0]?.text ?? '';
     expect(text).not.toContain('different git worktree');
 
-    cg.destroy();
+    cg.close();
   });
 });

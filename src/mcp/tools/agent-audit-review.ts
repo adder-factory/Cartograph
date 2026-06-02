@@ -74,11 +74,13 @@ function severityEmoji(sev: string): string {
   return '⚪';
 }
 
+type AgentAuditSeverity = 'info' | 'warning' | 'error';
+
 interface AgentAuditArgs {
   /** Max findings to surface per detector. Default 10. */
   perDetectorLimit?: number;
   /** Minimum severity to include. Default `info`. */
-  minSeverity?: 'info' | 'warning' | 'error';
+  minSeverity?: AgentAuditSeverity;
 }
 
 export async function handleAgentAuditReview(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolResult> {
@@ -121,12 +123,13 @@ export async function handleAgentAuditReview(ctx: ToolCtx, args: Record<string, 
     lines.push(`✓ No agent-prone findings at min-severity \`${minSeverity}\`.`, '');
   }
 
-  lines.push('---');
   lines.push(
+    '---',
     `_Audited ${AGENT_PRONE_BIOMARKERS.length} detectors. ${detectorsWithFindings.length} fired, ${detectorsClean.length} clean._`,
   );
   if (detectorsClean.length > 0 && detectorsClean.length <= 8) {
-    lines.push(`_Clean: ${detectorsClean.map((d) => `\`${d}\``).join(', ')}._`);
+    const cleanDetectorNames = detectorsClean.map((d) => `\`${d}\``).join(', ');
+    lines.push(`_Clean: ${cleanDetectorNames}._`);
   }
 
   return textResult(truncateOutput(lines.join('\n')));

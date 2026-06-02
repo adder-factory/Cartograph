@@ -40,6 +40,15 @@ function extractCPreprocDefConstant(node: SyntaxNode, ctx: ExtractorContext): bo
   return true;
 }
 
+function includeModuleName(node: SyntaxNode, source: string): string | null {
+  const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
+  if (systemLib) return getNodeText(systemLib, source).replaceAll(/^<|>$/g, '');
+
+  const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
+  const stringContent = stringLiteral?.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
+  return stringContent ? getNodeText(stringContent, source) : null;
+}
+
 const cExtractor: LanguageExtractor = {
   functionTypes: ['function_definition'],
   classTypes: [],
@@ -79,18 +88,9 @@ const cExtractor: LanguageExtractor = {
   extractImport: (node, source) => {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
     // C includes: #include <stdio.h>, #include "myheader.h"
-    const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
-    if (systemLib) {
-      return { moduleName: getNodeText(systemLib, source).replaceAll(/^<|>$/g, ''), signature: importText };
-    }
-    const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
-    if (stringLiteral) {
-      const stringContent = stringLiteral.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
-      if (stringContent) {
-        return { moduleName: getNodeText(stringContent, source), signature: importText };
-      }
-    }
-    return null;
+    const moduleName = includeModuleName(node, source);
+    if (moduleName === null) return null;
+    return { moduleName, signature: importText };
   },
 };
 
@@ -286,6 +286,26 @@ function visitMacroObscuredClass(node: SyntaxNode, info: MacroClassInfo, ctx: Ex
   ctx.popScope();
 }
 
+function cppAccessSpecifierVisibility(node: SyntaxNode): 'public' | 'private' | 'protected' | undefined {
+  if (node.type !== 'access_specifier') return undefined;
+  const text = node.text;
+  if (text.includes('public')) return 'public';
+  if (text.includes('private')) return 'private';
+  if (text.includes('protected')) return 'protected';
+  return undefined;
+}
+
+function cppParentVisibility(node: SyntaxNode): 'public' | 'private' | 'protected' | undefined {
+  const parent = node.parent;
+  if (!parent) return undefined;
+  for (const child of parent.children) {
+    if (!child) continue;
+    const visibility = cppAccessSpecifierVisibility(child);
+    if (visibility) return visibility;
+  }
+  return undefined;
+}
+
 const cppExtractor: LanguageExtractor = {
   functionTypes: ['function_definition'],
   classTypes: ['class_specifier'],
@@ -306,18 +326,7 @@ const cppExtractor: LanguageExtractor = {
   returnField: 'type',
   getVisibility: (node) => {
     // Check for access specifier in parent
-    const parent = node.parent;
-    if (parent) {
-      for (const child of parent.children) {
-        if (child?.type === 'access_specifier') {
-          const text = child.text;
-          if (text.includes('public')) return 'public';
-          if (text.includes('private')) return 'private';
-          if (text.includes('protected')) return 'protected';
-        }
-      }
-    }
-    return undefined;
+    return cppParentVisibility(node);
   },
   resolveTypeAliasKind: (node, _source) => {
     // C++ typedef: `typedef enum { ... } name;` or `typedef struct { ... } name;`
@@ -340,18 +349,9 @@ const cppExtractor: LanguageExtractor = {
   extractImport: (node, source) => {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
     // C++ includes: #include <iostream>, #include "myheader.h"
-    const systemLib = node.namedChildren.find((c: SyntaxNode) => c.type === 'system_lib_string');
-    if (systemLib) {
-      return { moduleName: getNodeText(systemLib, source).replaceAll(/^<|>$/g, ''), signature: importText };
-    }
-    const stringLiteral = node.namedChildren.find((c: SyntaxNode) => c.type === 'string_literal');
-    if (stringLiteral) {
-      const stringContent = stringLiteral.namedChildren.find((c: SyntaxNode) => c.type === 'string_content');
-      if (stringContent) {
-        return { moduleName: getNodeText(stringContent, source), signature: importText };
-      }
-    }
-    return null;
+    const moduleName = includeModuleName(node, source);
+    if (moduleName === null) return null;
+    return { moduleName, signature: importText };
   },
   visitNode: (node, ctx) => {
     // `#define` constants share the C path; tree-sitter-cpp inherits

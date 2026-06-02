@@ -85,7 +85,8 @@ export const MIGRATION: MigrationModule = {
     //     line CREATE TABLE shape)
     //   - negative lookahead on a leading `_` so `role_model TEXT`
     //     doesn't false-match
-    const inList = `(${ROLE_LABELS.map((v) => `'${v}'`).join(', ')})`;
+    const quotedRoles = ROLE_LABELS.map((v) => `'${v}'`).join(', ');
+    const inList = `(${quotedRoles})`;
     const checkClause = `CHECK (role IS NULL OR role IN ${inList})`;
     const injectionRegex = /(?<!\w)role\s+TEXT(?!\s+CHECK)\b/i;
     if (!injectionRegex.test(originalSql)) {

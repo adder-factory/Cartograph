@@ -12,11 +12,68 @@
  *   BENCH_PROJECT_DIR=/path bun bench/probe-pagerank-iter-cost.mts
  */
 
-import * as path from 'path';
+import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { getAllNodes } from '../src/db/queries.js';
 import { PR_DAMPING, PR_EDGE_KINDS, PR_ITERATIONS, computePageRank } from '../src/centrality/index.js';
+
+interface PageRankEdge {
+  source: string;
+  target: string;
+}
+
+interface CsrProbeData {
+  outDegBuf: SharedArrayBuffer;
+  outDeg: Int32Array;
+  inEdgesOffsetsBuf: SharedArrayBuffer;
+  inEdgesOffsets: Int32Array;
+  inEdgesFlatBuf: SharedArrayBuffer;
+  prBuf: SharedArrayBuffer;
+  nextBuf: SharedArrayBuffer;
+  pr: Float64Array;
+}
+
+function buildCsrProbeData(nodes: ReadonlyArray<{ id: string }>, edges: ReadonlyArray<PageRankEdge>): CsrProbeData {
+  const N = nodes.length;
+  const idx = new Map<string, number>();
+  for (let i = 0; i < N; i++) idx.set(nodes[i]!.id, i);
+  const outDegBuf = new SharedArrayBuffer(N * 4);
+  const outDeg = new Int32Array(outDegBuf);
+  const inCount = new Int32Array(N);
+  let ec = 0;
+  for (const e of edges) {
+    const s = idx.get(e.source);
+    const t = idx.get(e.target);
+    if (s === undefined || t === undefined) continue;
+    inCount[t]! += 1;
+    outDeg[s]! += 1;
+    ec++;
+  }
+  const inEdgesOffsetsBuf = new SharedArrayBuffer((N + 1) * 4);
+  const inEdgesOffsets = new Int32Array(inEdgesOffsetsBuf);
+  let running = 0;
+  for (let t = 0; t < N; t++) {
+    inEdgesOffsets[t] = running;
+    running += inCount[t]!;
+  }
+  inEdgesOffsets[N] = running;
+  const inEdgesFlatBuf = new SharedArrayBuffer(ec * 4);
+  const inEdgesFlat = new Int32Array(inEdgesFlatBuf);
+  const cursor = new Int32Array(N);
+  for (const e of edges) {
+    const s = idx.get(e.source);
+    const t = idx.get(e.target);
+    if (s === undefined || t === undefined) continue;
+    inEdgesFlat[inEdgesOffsets[t]! + cursor[t]!] = s;
+    cursor[t]! += 1;
+  }
+  const prBuf = new SharedArrayBuffer(N * 8);
+  const nextBuf = new SharedArrayBuffer(N * 8);
+  const pr = new Float64Array(prBuf);
+  pr.fill(1 / N);
+  return { outDegBuf, outDeg, inEdgesOffsetsBuf, inEdgesOffsets, inEdgesFlatBuf, prBuf, nextBuf, pr };
+}
 
 async function main(): Promise<void> {
   const projectRoot = process.env['BENCH_PROJECT_DIR'] ?? path.resolve('.');
@@ -29,7 +86,7 @@ async function main(): Promise<void> {
     const edgePlaceholders = PR_EDGE_KINDS.map(() => '?').join(',');
     const edges = cg.queries.db
       .prepare(`SELECT source, target FROM edges WHERE kind IN (${edgePlaceholders})`)
-      .all(...PR_EDGE_KINDS) as Array<{ source: string; target: string }>;
+      .all(...PR_EDGE_KINDS) as PageRankEdge[];
     console.log(`graph: ${N.toLocaleString()} nodes, ${edges.length.toLocaleString()} PR-edges`);
     console.log(
       `PR_ITERATIONS=${PR_ITERATIONS}, PR_DAMPING=${PR_DAMPING}, workers=${Math.max(2, Math.min(os.cpus().length - 1, 16))}\n`,
@@ -52,43 +109,8 @@ async function main(): Promise<void> {
     const workerPath = fileURLToPath(new URL(`../src/centrality/pagerank-worker${ext}`, import.meta.url));
 
     const setupT0 = Date.now();
-    // Build CSR
-    const idx = new Map<string, number>();
-    for (let i = 0; i < N; i++) idx.set(nodes[i]!.id, i);
-    const outDegBuf = new SharedArrayBuffer(N * 4);
-    const outDeg = new Int32Array(outDegBuf);
-    const inCount = new Int32Array(N);
-    let ec = 0;
-    for (const e of edges) {
-      const s = idx.get(e.source);
-      const t = idx.get(e.target);
-      if (s === undefined || t === undefined) continue;
-      inCount[t]! += 1;
-      outDeg[s]! += 1;
-      ec++;
-    }
-    const inEdgesOffsetsBuf = new SharedArrayBuffer((N + 1) * 4);
-    const inEdgesOffsets = new Int32Array(inEdgesOffsetsBuf);
-    let running = 0;
-    for (let t = 0; t < N; t++) {
-      inEdgesOffsets[t] = running;
-      running += inCount[t]!;
-    }
-    inEdgesOffsets[N] = running;
-    const inEdgesFlatBuf = new SharedArrayBuffer(ec * 4);
-    const inEdgesFlat = new Int32Array(inEdgesFlatBuf);
-    const cursor = new Int32Array(N);
-    for (const e of edges) {
-      const s = idx.get(e.source);
-      const t = idx.get(e.target);
-      if (s === undefined || t === undefined) continue;
-      inEdgesFlat[inEdgesOffsets[t]! + cursor[t]!] = s;
-      cursor[t]! += 1;
-    }
-    const prBuf = new SharedArrayBuffer(N * 8);
-    const nextBuf = new SharedArrayBuffer(N * 8);
-    const pr = new Float64Array(prBuf);
-    pr.fill(1 / N);
+    const { outDegBuf, outDeg, inEdgesOffsetsBuf, inEdgesOffsets, inEdgesFlatBuf, prBuf, nextBuf, pr } =
+      buildCsrProbeData(nodes, edges);
     const csrMs = Date.now() - setupT0;
 
     // LPT partition
@@ -123,14 +145,12 @@ async function main(): Promise<void> {
       const computeT0 = Date.now();
       await new Promise<void>((resolve) => {
         let remaining = workers.length;
-        const listeners: Array<{ w: Worker; l: (m: { type: string }) => void }> = [];
         for (const w of workers) {
           const l = (m: { type: string }): void => {
             if (m.type !== 'done') return;
             w.off('message', l);
             if (--remaining === 0) resolve();
           };
-          listeners.push({ w, l });
           w.on('message', l);
           w.postMessage({ type: 'step', basePlusDangling });
         }
@@ -158,11 +178,13 @@ async function main(): Promise<void> {
     console.log(`  other (pr.set + bookkeeping):    ${totalIterMs - totalDanglingMs - totalComputeMs}ms`);
     console.log(`parallel wall: ${csrMs + lptMs + spawnMs + totalIterMs}ms vs serial ${serialMs}ms`);
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error(err);
   process.exit(1);
-});
+}

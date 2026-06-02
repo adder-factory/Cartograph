@@ -32,7 +32,7 @@ describe('classifyChangeKind — grammar-constrained chat output', () => {
     const client = clientReplying('{"kind":"behavioral_change"}');
     const res = await classifyChangeKind({ client, ...baseArgs });
     expect(res.kind).toBe('behavioral_change');
-    expect(res.score).toBe(1.0);
+    expect(res.score).toBe(1);
     expect(client.chatCalls).toBe(1);
   });
 
@@ -74,7 +74,7 @@ describe('classifyCommitMessageWithFallback — grammar-constrained chat fallbac
     const client = clientReplying('{"intent":"perf"}');
     const res = await classifyCommitMessageWithFallback('wip', client);
     expect(res.intent).toBe('perf');
-    expect(res.score).toBe(1.0);
+    expect(res.score).toBe(1);
     expect(client.chatCalls).toBe(1);
   });
 

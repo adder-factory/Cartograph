@@ -214,11 +214,11 @@ const DirToolExportCountRowSchema = z.object({ c: z.number() });
 type DirToolExportCountRow = z.infer<typeof DirToolExportCountRowSchema>;
 
 const getDirToolExportConstantCountQuery = defineQuery({
-  sql: `SELECT COUNT(*) AS c FROM nodes
+  sql: String.raw`SELECT COUNT(*) AS c FROM nodes
       WHERE kind = 'constant'
-        AND name LIKE '%\\_TOOL' ESCAPE '\\'
-        AND file_path LIKE @likeImmediate ESCAPE '\\'
-        AND file_path NOT LIKE @likeNested ESCAPE '\\'`,
+        AND name LIKE '%\_TOOL' ESCAPE '\'
+        AND file_path LIKE @likeImmediate ESCAPE '\'
+        AND file_path NOT LIKE @likeNested ESCAPE '\'`,
   params: DirToolExportCountParamsSchema,
   row: DirToolExportCountRowSchema,
 });

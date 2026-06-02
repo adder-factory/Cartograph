@@ -143,6 +143,11 @@ function fmtDelta(delta: number): string {
   return `  (${delta > 0 ? '+' : ''}${delta.toFixed(2)})`;
 }
 
+function buildNearMissSummary(nearMiss: number): string {
+  if (nearMiss <= 0) return '';
+  return ` and the top ${nearMiss} near-miss${nearMiss === 1 ? '' : 'es'} (\`[-]\`, by final score)`;
+}
+
 /** Width the pass-name column is padded to inside the rendered block. */
 const PASS_NAME_COL = 18;
 
@@ -162,9 +167,7 @@ export function renderScoreExplanation(exp: ScoreExplanation): string {
     '',
     `Per-candidate score after each scoring pass — ${survivors} selected ` +
       `candidate${survivors === 1 ? '' : 's'} (\`[+]\`, in context-output order)` +
-      (nearMiss > 0
-        ? ` and the top ${nearMiss} near-miss${nearMiss === 1 ? '' : 'es'} (\`[-]\`, by final score)`
-        : '') +
+      buildNearMissSummary(nearMiss) +
       '. A candidate listed from a later pass entered the pool there.',
     '',
     '```',

@@ -16,18 +16,45 @@ import { searchNodes } from '../src/db/queries-search.js';
 import { diversifyByFile } from '../src/search/query-utils.js';
 import type { Node } from '../src/types.js';
 
-describe('diversifyByFile (unit)', () => {
-  function r(score: number, name: string, filePath: string) {
-    return { node: { id: name, name, filePath } as Node, score };
-  }
+function result(score: number, name: string, filePath: string) {
+  return { node: { id: name, name, filePath } as Node, score };
+}
 
+function makeNode(id: string, name: string, kind: Node['kind'], filePath: string): Node {
+  return {
+    id,
+    kind,
+    name,
+    qualifiedName: `${filePath}::${name}`,
+    filePath,
+    language: 'typescript',
+    startLine: 1,
+    endLine: 1,
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: Date.now(),
+  };
+}
+
+// Seed a row in `files` for the given path so the FK on `nodes.file_path`
+// (migration 056) doesn't reject test-only direct inserts. Safe to call
+// repeatedly for the same path.
+function seedFile(db: DatabaseConnection, fpath: string): void {
+  db.getDb()
+    .prepare(
+      `INSERT OR IGNORE INTO files (path, content_hash, language, size, modified_at, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(fpath, 'h', 'typescript', 0, 0, 0);
+}
+
+describe('diversifyByFile (unit)', () => {
   it('caps consecutive results from the same file at perFileCap', () => {
     const results = [
-      r(10, 'a1', 'a.ts'),
-      r(9, 'a2', 'a.ts'),
-      r(8, 'a3', 'a.ts'),
-      r(7, 'a4', 'a.ts'),
-      r(6, 'b1', 'b.ts'),
+      result(10, 'a1', 'a.ts'),
+      result(9, 'a2', 'a.ts'),
+      result(8, 'a3', 'a.ts'),
+      result(7, 'a4', 'a.ts'),
+      result(6, 'b1', 'b.ts'),
     ];
     const out = diversifyByFile(results, 5, 2);
     expect(out.map((x) => x.node.name)).toEqual(['a1', 'a2', 'b1', 'a3', 'a4']);
@@ -35,26 +62,31 @@ describe('diversifyByFile (unit)', () => {
   });
 
   it('preserves overall ranking when no file dominates', () => {
-    const results = [r(10, 'a1', 'a.ts'), r(9, 'b1', 'b.ts'), r(8, 'c1', 'c.ts'), r(7, 'a2', 'a.ts')];
+    const results = [
+      result(10, 'a1', 'a.ts'),
+      result(9, 'b1', 'b.ts'),
+      result(8, 'c1', 'c.ts'),
+      result(7, 'a2', 'a.ts'),
+    ];
     const out = diversifyByFile(results, 4, 2);
     expect(out.map((x) => x.node.name)).toEqual(['a1', 'b1', 'c1', 'a2']);
   });
 
   it('does not lose results — backfills from skipped when limit not yet filled', () => {
     // 10 candidates all from one file, limit 5, cap 2: pick 2, backfill 3.
-    const results = Array.from({ length: 10 }, (_, i) => r(10 - i, `n${i}`, 'a.ts'));
+    const results = Array.from({ length: 10 }, (_, i) => result(10 - i, `n${i}`, 'a.ts'));
     const out = diversifyByFile(results, 5, 2);
     expect(out).toHaveLength(5);
     expect(out.every((x) => x.node.filePath === 'a.ts')).toBe(true);
   });
 
   it('returns the input slice unchanged when perFileCap=0', () => {
-    const results = [r(10, 'a1', 'a.ts'), r(9, 'a2', 'a.ts'), r(8, 'a3', 'a.ts')];
+    const results = [result(10, 'a1', 'a.ts'), result(9, 'a2', 'a.ts'), result(8, 'a3', 'a.ts')];
     expect(diversifyByFile(results, 3, 0)).toEqual(results);
   });
 
   it('returns input unchanged when results.length <= limit and no reordering needed', () => {
-    const results = [r(10, 'a1', 'a.ts'), r(9, 'a2', 'a.ts')];
+    const results = [result(10, 'a1', 'a.ts'), result(9, 'a2', 'a.ts')];
     expect(diversifyByFile(results, 5, 2)).toEqual(results);
   });
 
@@ -62,11 +94,11 @@ describe('diversifyByFile (unit)', () => {
     // Same total count as limit, but the cap reorders to surface peer files
     // earlier in the list.
     const results = [
-      r(10, 'a1', 'a.ts'),
-      r(9, 'a2', 'a.ts'),
-      r(8, 'a3', 'a.ts'),
-      r(7, 'a4', 'a.ts'),
-      r(6, 'b1', 'b.ts'),
+      result(10, 'a1', 'a.ts'),
+      result(9, 'a2', 'a.ts'),
+      result(8, 'a3', 'a.ts'),
+      result(7, 'a4', 'a.ts'),
+      result(6, 'b1', 'b.ts'),
     ];
     const out = diversifyByFile(results, 5, 2);
     // First 2 from a.ts (cap), then b.ts, then backfill a.ts.
@@ -74,7 +106,12 @@ describe('diversifyByFile (unit)', () => {
   });
 
   it('respects the limit even when picked + skipped exceed it', () => {
-    const results = [r(10, 'a1', 'a.ts'), r(9, 'a2', 'a.ts'), r(8, 'a3', 'a.ts'), r(7, 'b1', 'b.ts')];
+    const results = [
+      result(10, 'a1', 'a.ts'),
+      result(9, 'a2', 'a.ts'),
+      result(8, 'a3', 'a.ts'),
+      result(7, 'b1', 'b.ts'),
+    ];
     const out = diversifyByFile(results, 2, 2);
     expect(out).toHaveLength(2);
     expect(out.map((x) => x.node.name)).toEqual(['a1', 'a2']);
@@ -82,11 +119,11 @@ describe('diversifyByFile (unit)', () => {
 
   it('always preserves the top-scoring result at position 0', () => {
     const results = [
-      r(100, 'top', 'big.ts'),
-      r(50, 'big2', 'big.ts'),
-      r(40, 'big3', 'big.ts'),
-      r(30, 'big4', 'big.ts'),
-      r(20, 'other', 'other.ts'),
+      result(100, 'top', 'big.ts'),
+      result(50, 'big2', 'big.ts'),
+      result(40, 'big3', 'big.ts'),
+      result(30, 'big4', 'big.ts'),
+      result(20, 'other', 'other.ts'),
     ];
     const out = diversifyByFile(results, 3, 2);
     expect(out[0].node.name).toBe('top');
@@ -98,39 +135,12 @@ describe('searchNodes per-file diversification (integration)', () => {
   let db: DatabaseConnection;
   let q: QueryBuilder;
 
-  function makeNode(id: string, name: string, kind: Node['kind'], filePath: string): Node {
-    return {
-      id,
-      kind,
-      name,
-      qualifiedName: `${filePath}::${name}`,
-      filePath,
-      language: 'typescript',
-      startLine: 1,
-      endLine: 1,
-      startColumn: 0,
-      endColumn: 0,
-      updatedAt: Date.now(),
-    };
-  }
-
-  // Seed a row in `files` for the given path so the FK on `nodes.file_path`
-  // (migration 056) doesn't reject test-only direct inserts. Safe to call
-  // repeatedly for the same path.
-  function seedFile(fpath: string): void {
-    db.getDb()
-      .prepare(
-        `INSERT OR IGNORE INTO files (path, content_hash, language, size, modified_at, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(fpath, 'h', 'typescript', 0, 0, 0);
-  }
-
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'diversify-search-'));
     db = DatabaseConnection.initialize(path.join(dir, 'test.db'));
     q = new QueryBuilder(db.getDb());
-    seedFile('src/db.ts');
-    seedFile('src/pool.ts');
+    seedFile(db, 'src/db.ts');
+    seedFile(db, 'src/pool.ts');
     // Simulate the "10 methods of one class" scenario: a class plus many
     // methods all sharing a common token, all in one file. Plus a peer
     // file with a sibling implementation.
@@ -191,7 +201,7 @@ describe('searchNodes per-file diversification (integration)', () => {
     const onlyOneFileNodes: Node[] = Array.from({ length: 10 }, (_, i) =>
       makeNode(`only${i}`, `solo${i}`, 'function', 'src/only.ts'),
     );
-    seedFile('src/only.ts');
+    seedFile(db, 'src/only.ts');
     q.insertNodes(onlyOneFileNodes);
     const results = searchNodes(q, 'solo', { limit: 5 });
     expect(results.length).toBe(5);

@@ -29,7 +29,7 @@ import { DatabaseConnection } from '../src/db/index.js';
 /** L2-normalise a Float32Array in-place and return it. */
 function normalise(v: Float32Array): Float32Array {
   let norm = 0;
-  for (let i = 0; i < v.length; i++) norm += (v[i] as number) * (v[i] as number);
+  for (const value of v) norm += value * value;
   norm = Math.sqrt(norm);
   if (norm > 0) for (let i = 0; i < v.length; i++) v[i] = (v[i] as number) / norm;
   return v;

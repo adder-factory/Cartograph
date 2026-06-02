@@ -292,7 +292,8 @@ function patternSingleFieldAccessor(qb: QueryBuilder, sym: Node): string | null 
   if (callsEdges.length > 0) return null;
 
   const edge = fieldEdges[0]!;
-  const fieldName = resolveTargetName(qb, edge.target) ?? String(edge.metadata?.['fieldName'] ?? 'field');
+  const metadataFieldName = edge.metadata?.['fieldName'];
+  const fieldName = resolveTargetName(qb, edge.target) ?? (typeof metadataFieldName === 'string' ? metadataFieldName : 'field');
 
   const sig = sym.signature ?? '';
   let verb: string;

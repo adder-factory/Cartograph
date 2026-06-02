@@ -43,7 +43,7 @@ describe('Delta mode (#16)', () => {
   });
 
   afterEach(() => {
-    if (cg) cg.destroy();
+    if (cg) cg.close();
     else if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true });
   });
 
@@ -188,7 +188,7 @@ describe('Delta mode (#16)', () => {
       // After the bumps, the target should still be resolvable even
       // though many newer entries were minted in between.
       expect(fresh.resolve(target)).not.toBeNull();
-      void survivor; // consumed for symmetry; first cache demonstrates the no-bump baseline
+      expect(cache.resolve(survivor)).toBeNull();
     });
   });
 

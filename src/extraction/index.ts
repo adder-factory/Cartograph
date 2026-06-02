@@ -91,7 +91,7 @@ const GIT_LIST_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 export const DEFAULT_PARSE_POOL_SIZE = (() => {
   // os import is at the top of the file; size from hardware concurrency.
   // Math.min is safe with NaN (returns NaN) which we coerce to 1.
-  const hc = typeof os !== 'undefined' && typeof os.cpus === 'function' ? Math.max(1, os.cpus().length) : 4;
+  const hc = os === undefined || typeof os.cpus !== 'function' ? 4 : Math.max(1, os.cpus().length);
   // Reserve one core for the main thread; floor at 1 so a single-core
   // box still gets a worker; POOL_SIZE_MAX bounds memory on big-core
   // machines.
@@ -496,7 +496,7 @@ function parseOctalEscape(body: string, i: number): [number, number] {
  * a path contains spaces, control chars, or non-ASCII bytes.
  */
 function unquoteGitPath(raw: string): string {
-  if (raw.length < 2 || raw[0] !== '"' || raw.at(-1) !== '"') {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) {
     return raw;
   }
   const body = raw.slice(1, -1);
@@ -1033,7 +1033,7 @@ export interface ParseEnvironment {
 }
 
 interface BuildParsePoolArgs {
-  WorkerClass: typeof import('worker_threads').Worker;
+  WorkerClass: typeof import('node:worker_threads').Worker;
   parseWorkerPath: string;
   poolSize: number;
   neededLanguages: Language[];
@@ -1103,6 +1103,29 @@ export class ExtractionOrchestrator {
     return this.cacheHitsRef.count;
   }
 
+  private async finishSuccessfulIndexAll(args: {
+    st: ExtractionOrchestratorState;
+    counters: EoIndexCounters;
+    errors: ExtractionError[];
+    env: ParseEnvironment;
+    signal: AbortSignal | undefined;
+    log: (msg: string) => void;
+  }): Promise<number> {
+    const { st, counters, errors, env, signal, log } = args;
+    const retryMs = await eoRunIndexRetryPhase(st, { counters, errors, env, signal, log });
+    if (env.pool) await env.pool.terminate('Indexing complete');
+    eoStampPostIndexBaseline(st);
+
+    // LRU eviction once per pass so the cache table can't grow
+    // without bound on long-lived projects. Cheap when under the
+    // cap (one COUNT(*) probe). When over, drops the oldest 25%.
+    const evicted = evictParseCacheIfOversized(st.queries);
+    if (st.cacheHits.count > 0 || evicted > 0) {
+      logDebug('parse_cache: pass summary', { hits: st.cacheHits.count, evicted });
+    }
+    return retryMs;
+  }
+
   /**
    * Index all files in the project
    */
@@ -1166,17 +1189,7 @@ export class ExtractionOrchestrator {
         aborted = true;
         if (pool) await pool.terminate('Aborted');
       } else {
-        retryMs = await eoRunIndexRetryPhase(st, { counters, errors, env, signal, log });
-        if (pool) await pool.terminate('Indexing complete');
-        eoStampPostIndexBaseline(st);
-
-        // LRU eviction once per pass so the cache table can't grow
-        // without bound on long-lived projects. Cheap when under the
-        // cap (one COUNT(*) probe). When over, drops the oldest 25%.
-        const evicted = evictParseCacheIfOversized(st.queries);
-        if (st.cacheHits.count > 0 || evicted > 0) {
-          logDebug('parse_cache: pass summary', { hits: st.cacheHits.count, evicted });
-        }
+        retryMs = await this.finishSuccessfulIndexAll({ st, counters, errors, env, signal, log });
       }
     } finally {
       finalizeDeferredNodeIndexes(st.queries.db, deferredIndex);

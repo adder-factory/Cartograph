@@ -117,6 +117,25 @@ interface FormatSearchResultsCompactArgs {
   refIds?: RefIdCache | undefined;
 }
 
+function pushSearchPathLineColumns(cols: string[], node: Node, fieldSet: ReadonlySet<string>): void {
+  const hasPathField = fieldSet.has('path');
+  const hasLineField = fieldSet.has('line') && Boolean(node.startLine);
+  if (hasPathField && hasLineField) cols.push(`${node.filePath}:${node.startLine}`);
+  else if (hasPathField) cols.push(node.filePath);
+  else if (hasLineField) cols.push(String(node.startLine));
+}
+
+function formatSearchCompactColumns(node: Node, fieldSet: ReadonlySet<string>, refIds: RefIdCache | undefined): string {
+  const cols: string[] = [];
+  if (fieldSet.has('name')) cols.push(node.name);
+  if (fieldSet.has('kind')) cols.push(node.kind);
+  pushSearchPathLineColumns(cols, node, fieldSet);
+  if (fieldSet.has('signature') && node.signature) cols.push(`sig:${node.signature}`);
+  const hasIdField = fieldSet.has('id') && refIds !== undefined;
+  if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
+  return cols.join('|');
+}
+
 function formatSearchResultsCompact(args: FormatSearchResultsCompactArgs): string {
   const { results, kindFilter, fields, refIds } = args;
   const headerSuffix = kindFilter ? ` (kind=${kindFilter})` : '';
@@ -129,23 +148,7 @@ function formatSearchResultsCompact(args: FormatSearchResultsCompactArgs): strin
   const fieldSet = hasExplicitFields ? new Set<string>(fields) : new Set<string>(defaultFields);
 
   for (const r of results) {
-    const { node } = r;
-    const cols: string[] = [];
-    if (fieldSet.has('name')) cols.push(node.name);
-    if (fieldSet.has('kind')) cols.push(node.kind);
-    // `path` and `line` collapse into ONE column rendered as `path:line`
-    // (matches the universal `file:line` editor-jump convention; matches
-    // the documented playbook shape). If only one of the two fields is
-    // included, render that field alone — no orphan leading colon.
-    const hasPathField = fieldSet.has('path');
-    const hasLineField = fieldSet.has('line') && Boolean(node.startLine);
-    if (hasPathField && hasLineField) cols.push(`${node.filePath}:${node.startLine}`);
-    else if (hasPathField) cols.push(node.filePath);
-    else if (hasLineField) cols.push(String(node.startLine));
-    if (fieldSet.has('signature') && node.signature) cols.push(`sig:${node.signature}`);
-    const hasIdField = fieldSet.has('id') && refIds !== undefined;
-    if (hasIdField) cols.push(`id:${refIds.mint(node.id)}`);
-    lines.push(cols.join('|'));
+    lines.push(formatSearchCompactColumns(r.node, fieldSet, refIds));
   }
   return lines.join('\n');
 }
@@ -195,8 +198,9 @@ function buildEmptyResultsResponse(
 
   const suggestions = suggestSymbolNames(cg.queries, query, MAX_SUGGESTIONS);
   const queryTokens = query.trim().split(/\s+/);
+  const suggestionNames = suggestions.map((s) => `\`${s.name}\``).join(', ');
   const suggestionLine =
-    suggestions.length > 0 ? ` Did you mean: ${suggestions.map((s) => `\`${s.name}\``).join(', ')}?` : '';
+    suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
   const exploreHint =
     queryTokens.length >= 2
       ? `\n\n> **Tip:** Multi-word queries are concept searches — try \`cartograph_explore\` for "${query}" to search across signatures and bodies.`
@@ -680,7 +684,7 @@ interface CentralitySearchArgs {
 
 /** @internal — exported for unit testing the centrality push-down. */
 export function runCentralityOnlySearch(args: CentralitySearchArgs): SearchResult[] {
-  const { cg, cf, kinds, languages, limit, sortByCentrality } = args;
+  const { cg, cf, kinds, languages, limit } = args;
   const op = centralitySqlOp(cf);
   let sql = `SELECT * FROM nodes WHERE centrality IS NOT NULL AND centrality ${op} ?`;
   const params: (string | number)[] = [cf.value];
@@ -698,7 +702,6 @@ export function runCentralityOnlySearch(args: CentralitySearchArgs): SearchResul
   // for this path (no FTS score exists when text is empty); the param
   // is kept for forward-compatibility with future `sort:relevance`-
   // over-centrality behavior.
-  void sortByCentrality;
   sql += ' ORDER BY centrality DESC LIMIT ?';
   params.push(limit);
   const rows = cg.queries.db.prepare(sql).all(...params) as NodeRow[];
@@ -934,17 +937,7 @@ function renderMultiNameGroupCompact(
   }
   const fieldSet = new Set<string>(fields);
   for (const node of group.nodes) {
-    const cols: string[] = [];
-    if (fieldSet.has('name')) cols.push(node.name);
-    if (fieldSet.has('kind')) cols.push(node.kind);
-    const hasPathField = fieldSet.has('path');
-    const hasLineField = fieldSet.has('line') && Boolean(node.startLine);
-    if (hasPathField && hasLineField) cols.push(`${node.filePath}:${node.startLine}`);
-    else if (hasPathField) cols.push(node.filePath);
-    else if (hasLineField) cols.push(String(node.startLine));
-    if (fieldSet.has('signature') && node.signature) cols.push(`sig:${node.signature}`);
-    if (fieldSet.has('id') && refIds !== undefined) cols.push(`id:${refIds.mint(node.id)}`);
-    lines.push(cols.join('|'));
+    lines.push(formatSearchCompactColumns(node, fieldSet, refIds));
   }
   return lines.join('\n');
 }
@@ -1023,10 +1016,10 @@ async function handleMultiNameExact(a: HandleMultiNameExactArgs): Promise<ToolRe
   // the auto-recovery so the agent learns the union view is the right
   // shape for disjunctions (rather than retrying `Foo OR Bar` as N
   // separate calls).
-  const opNote =
-    strippedOperators.length > 0
-      ? `> Detected boolean operator${strippedOperators.length === 1 ? '' : 's'} (${strippedOperators.join(', ')}) — \`cartograph_find (by='name')\` does NOT parse FTS5 boolean syntax. Stripped and routed to the per-token union view below — same semantics as the disjunction you likely wanted, in one call.\n\n`
-      : '';
+  let opNote = '';
+  if (strippedOperators.length > 0) {
+    opNote = `> Detected boolean operator${strippedOperators.length === 1 ? '' : 's'} (${strippedOperators.join(', ')}) — \`cartograph_find (by='name')\` does NOT parse FTS5 boolean syntax. Stripped and routed to the per-token union view below — same semantics as the disjunction you likely wanted, in one call.\n\n`;
+  }
   const body = opNote + unionBody;
   // Stale-files note keys off the rendered nodes so the agent sees the
   // same drift signal as a single-name call. Flatten across groups.

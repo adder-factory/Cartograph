@@ -187,7 +187,7 @@ const BINDING_TABLE_RESERVED_LITERALS: ReadonlySet<string> = new Set(['undefined
  * duplicate `unresolved_refs` rows that would resolve to the same edge.
  * The regex must mirror `SCREAMING_SNAKE_RE` in `ts-extract-bodies.ts`.
  */
-const BINDING_TABLE_SCREAMING_SNAKE_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$|^[A-Z]{2,}[0-9]+[A-Z0-9_]*$/;
+const BINDING_TABLE_SCREAMING_SNAKE_RE = /^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+$|^[A-Z]{2,}\d+[A-Z0-9_]*$/;
 
 /**
  * Walk `valueNode` looking for bare-identifier values in pair-value
@@ -219,21 +219,17 @@ function extractBindingTableRefs(extractor: TreeSitterExtractor, parentId: strin
     });
   };
 
+  const emitIdentifierIfBindingValue = (node: SyntaxNode): void => {
+    if (isBindingTableIdentifierValue(node)) {
+      emit(getNodeText(node, extractor.source), node);
+    }
+  };
+
   const visit = (node: SyntaxNode): void => {
     if (BINDING_TABLE_SKIP_KINDS.has(node.type)) return;
 
     if (node.type === 'identifier') {
-      const parent = node.parent;
-      if (parent) {
-        let isBindingValue = false;
-        if (parent.type === 'pair') {
-          const key = getChildByField(parent, 'key') ?? parent.namedChild(0);
-          if (key?.startIndex !== node.startIndex) isBindingValue = true;
-        } else if (parent.type === 'array') {
-          isBindingValue = true;
-        }
-        if (isBindingValue) emit(getNodeText(node, extractor.source), node);
-      }
+      emitIdentifierIfBindingValue(node);
     } else if (node.type === 'shorthand_property_identifier' && node.parent?.type === 'object') {
       // `const X = { handler }` shorthand — the identifier IS both the
       // property name and the value being bound. Same rationale as the
@@ -246,6 +242,15 @@ function extractBindingTableRefs(extractor: TreeSitterExtractor, parentId: strin
     }
   };
   visit(valueNode);
+}
+
+function isBindingTableIdentifierValue(node: SyntaxNode): boolean {
+  const parent = node.parent;
+  if (!parent) return false;
+  if (parent.type === 'array') return true;
+  if (parent.type !== 'pair') return false;
+  const key = getChildByField(parent, 'key') ?? parent.namedChild(0);
+  return key?.startIndex !== node.startIndex;
 }
 
 interface PythonRubyVarArgs {

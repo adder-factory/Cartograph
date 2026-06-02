@@ -204,7 +204,7 @@ const EXACT_NAME_DEFAULT_LIMIT = 50;
 /** Floor on the per-name limit when N query terms split the budget. */
 const MIN_PER_NAME_LIMIT = 8;
 /** SQL constant emitted as the base score for every exact-name match. */
-const EXACT_MATCH_SCORE = 1.0;
+const EXACT_MATCH_SCORE = 1;
 /** Multiplier on perNameLimit for the SQL fetch — overfetch so co-location boosts can surface. */
 const PER_NAME_FETCH_MULTIPLIER = 3;
 /** Score bonus applied when a result lives in a "distinctive" file (see findDistinctiveFiles). */
@@ -361,7 +361,7 @@ const SIGNATURE_OWNER_KINDS: ReadonlySet<string> = new Set([
  * hallucinations.
  *
  * Self-defending: returns null for any `token` that is not a bare
- * identifier (`[A-Za-z_][A-Za-z0-9_]*`). A qualified name (`Foo.bar`)
+ * identifier (`[A-Za-z_]\w*`). A qualified name (`Foo.bar`)
  * would mis-tokenise into a misleading two-token phrase, so the guard
  * lives in the function rather than relying on callers. The FTS5
  * `signature:"..."` phrase query is column-scoped and word-boundary-
@@ -383,7 +383,7 @@ const SIGNATURE_OWNER_KINDS: ReadonlySet<string> = new Set([
  */
 export function findSignatureTokenOwner(qb: QueryBuilder, token: string): Node | null {
   // Only a bare identifier is safe to interpolate into the phrase query.
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(token)) return null;
+  if (!/^[A-Za-z_]\w*$/.test(token)) return null;
   // Fetch a small bm25-ranked window rather than just the top hit:
   // the best lexical match may be an import/file node we must skip,
   // and the genuine signature owner could be ranked just behind it.
@@ -966,6 +966,37 @@ const supplementCandidatesQueries = {
   like_route: makeSupplementCandidatesQuery('like', ROUTE_LIKE_SUPPLEMENT_LIMIT),
 } as const;
 
+type SupplementCandidatesRegistryKey = 'supplementCandidatesEqExact' | 'supplementCandidatesLikeRoute';
+
+function selectSupplementCandidatesQuery(
+  predicate: SupplementParams['predicate'],
+  limit: number,
+): { query: ReturnType<typeof makeSupplementCandidatesQuery>; regKey: SupplementCandidatesRegistryKey } {
+  if (predicate === 'eq' && limit === EXACT_NAME_SUPPLEMENT_LIMIT) {
+    return { query: supplementCandidatesQueries.eq_exact, regKey: 'supplementCandidatesEqExact' };
+  }
+  if (predicate === 'like' && limit === ROUTE_LIKE_SUPPLEMENT_LIMIT) {
+    return { query: supplementCandidatesQueries.like_route, regKey: 'supplementCandidatesLikeRoute' };
+  }
+  throw new Error(
+    `addSupplementCandidates: unsupported (predicate=${predicate}, limit=${limit}); ` +
+      `the typed-query matrix covers only the two call-site pairs.`,
+  );
+}
+
+function appendSupplementRows(
+  rows: NodeRow[],
+  results: SearchResult[],
+  existingIds: Set<string>,
+  baseScore: number,
+): void {
+  for (const row of rows) {
+    if (existingIds.has(row.id)) continue;
+    results.push({ node: rowToNode(row), score: baseScore });
+    existingIds.add(row.id);
+  }
+}
+
 declare module './queries.js' {
   interface QueryRegistry {
     supplementCandidatesEqExact?: TypedQuery<
@@ -985,33 +1016,15 @@ function addSupplementCandidates(qb: QueryBuilder, p: SupplementParams): void {
   // ('eq', EXACT_NAME_SUPPLEMENT_LIMIT) or ('like', ROUTE_LIKE_SUPPLEMENT_LIMIT).
   // Pick the matching pre-prepared statement; an unknown combination
   // is a programming error caught here, not silently routed.
-  let q: ReturnType<typeof makeSupplementCandidatesQuery>;
-  let regKey: 'supplementCandidatesEqExact' | 'supplementCandidatesLikeRoute';
-  if (predicate === 'eq' && limit === EXACT_NAME_SUPPLEMENT_LIMIT) {
-    q = supplementCandidatesQueries.eq_exact;
-    regKey = 'supplementCandidatesEqExact';
-  } else if (predicate === 'like' && limit === ROUTE_LIKE_SUPPLEMENT_LIMIT) {
-    q = supplementCandidatesQueries.like_route;
-    regKey = 'supplementCandidatesLikeRoute';
-  } else {
-    throw new Error(
-      `addSupplementCandidates: unsupported (predicate=${predicate}, limit=${limit}); ` +
-        `the typed-query matrix covers only the two call-site pairs.`,
-    );
-  }
-  qb.queries[regKey] ??= q(qb.db);
-  const stmt = qb.queries[regKey]!;
+  const { query, regKey } = selectSupplementCandidatesQuery(predicate, limit);
+  qb.queries[regKey] ??= query(qb.db);
+  const stmt = qb.queries[regKey];
   const kindsJson = kinds && kinds.length > 0 ? JSON.stringify(kinds) : null;
   const languagesJson = languages && languages.length > 0 ? JSON.stringify(languages) : null;
   for (const v of values) {
     const value = predicate === 'eq' ? v : `%${v}%`;
     const rows = stmt.all({ value, kindsJson, languagesJson });
-    for (const row of rows) {
-      if (!existingIds.has(row.id)) {
-        results.push({ node: rowToNode(row), score: baseScore });
-        existingIds.add(row.id);
-      }
-    }
+    appendSupplementRows(rows, results, existingIds, baseScore);
   }
 }
 

@@ -255,8 +255,9 @@ export function createVerboseProgress(): (progress: {
       // Log every VERBOSE_PROGRESS_PCT_STEP percent to keep output manageable
       if (pct >= lastPct + VERBOSE_PROGRESS_PCT_STEP || progress.current === progress.total) {
         lastPct = pct;
+        const currentFileSuffix = progress.currentFile ? ` — ${progress.currentFile}` : '';
         process.stdout.write(
-          `[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${progress.currentFile ? ` — ${progress.currentFile}` : ''}\n`,
+          `[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${currentFileSuffix}\n`,
         );
       }
     } else if (progress.current > 0) {
@@ -494,16 +495,16 @@ export async function awaitSummarisationWithProgress(
   cg: import('../index.js').default,
   clack: typeof import('@clack/prompts'),
 ): Promise<void> {
-  if (!(cg.llm.bgCtrl.promise !== null)) return;
+  if (cg.llm.bgCtrl.promise === null) return;
 
-  const llmConfig = await cg.llm.getEffectiveLlmConfig();
+  const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   const { getChatModel } = await import('../llm/provider.js');
   const label = getChatModel(llmConfig) ?? 'local LLM';
   clack.log.info(`Summarising symbols with ${label} (Ctrl-C to skip)…`);
 
   const onSigint = (): void => {
     // Closing cancels the in-flight pass via AbortController.
-    cg.destroy();
+    cg.close();
     process.exit(0);
   };
   process.once('SIGINT', onSigint);
@@ -806,7 +807,7 @@ export async function runViaMCPCapture(
     const drifted = cg.stats.getFreshness()?.contentDriftedFiles ?? null;
     return { text, exitCode, contentDriftedFiles: drifted };
   } finally {
-    cg.destroy();
+    cg.close();
   }
 }
 
@@ -875,7 +876,7 @@ export async function runViaMCP(
       process.stdout.write(text + '\n');
     }
   } finally {
-    cg.destroy();
+    cg.close();
   }
   if (exitCode !== 0) process.exit(exitCode);
 }

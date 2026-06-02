@@ -1,4 +1,4 @@
-/* eslint-disable */
+/* eslint-disable no-console, sonarjs/cognitive-complexity */
 /**
  * Bench: cartograph indexing + search WITH vs WITHOUT LLM enrichment.
  * Uses the compiled dist/ build so tree-sitter WASM init paths match
@@ -7,11 +7,15 @@
  *   node scripts/bench-llm-vs-baseline.js [--cap-seconds=180]
  */
 
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { performance } = require('perf_hooks');
+import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { performance } from 'node:perf_hooks';
+import { fileURLToPath } from 'node:url';
 
+const require = createRequire(import.meta.url);
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const { default: Cartograph } = require(path.join(PROJECT_ROOT, 'dist', 'index.js'));
 
@@ -88,8 +92,10 @@ async function main() {
   phaseStart = performance.now();
   const indexResult = await cg.indexAll({ summarize: false });
   const indexMs = performance.now() - phaseStart;
-  timings.push({ label: 'Init', durationMs: initMs });
-  timings.push({ label: 'indexAll (no summaries)', durationMs: indexMs });
+  timings.push(
+    { label: 'Init', durationMs: initMs },
+    { label: 'indexAll (no summaries)', durationMs: indexMs },
+  );
 
   const stats = cg.getStats();
   console.log('\n  Index complete:');
@@ -160,7 +166,7 @@ async function main() {
       },
     });
   } catch (err) {
-    console.log(`  summarizeAll threw: ${err && err.message ? err.message : String(err)}`);
+    console.log(`  summarizeAll threw: ${err?.message ? err.message : String(err)}`);
   } finally {
     clearTimeout(cap);
   }
@@ -227,7 +233,9 @@ async function main() {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 }
 
-main().catch((err) => {
+try {
+  await main();
+} catch (err) {
   console.error('Bench failed:', err);
   process.exit(1);
-});
+}
