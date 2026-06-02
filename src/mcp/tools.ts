@@ -498,6 +498,11 @@ export class ToolHandler {
     return this.cg !== null;
   }
 
+  /** Snapshot explicit-project cache state for diagnostics and invariant tests. */
+  getProjectCacheSnapshot(): { cachedRoots: readonly string[]; watchedRoots: readonly string[] } {
+    return this.st.cache.snapshot();
+  }
+
   /**
    * Get tool definitions with dynamic descriptions based on project size.
    */

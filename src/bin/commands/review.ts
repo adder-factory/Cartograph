@@ -22,16 +22,28 @@ import {
 // installFamilyActionAlias in _cli-core.ts (handoff #23).
 installFamilyActionAlias(reviewCmd, 'review', 'mode');
 
+interface ReviewContextOptions {
+  projectPath?: string;
+  diff?: string;
+  maxCallersPerSymbol?: string;
+  maxCalleesPerSymbol?: string;
+  maxCoChangeWarnings?: string;
+  minCoChangeJaccard?: string;
+  minDiffMagnitude?: string;
+}
+
+function readStdinText(): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    let buf = '';
+    process.stdin.setEncoding('utf-8');
+    process.stdin.on('data', (c) => (buf += c));
+    process.stdin.on('end', () => resolve(buf));
+    process.stdin.on('error', reject);
+  });
+}
+
 async function readReviewDiffInput(raw: string): Promise<string> {
-  if (raw === '-') {
-    return new Promise<string>((resolve, reject) => {
-      let buf = '';
-      process.stdin.setEncoding('utf-8');
-      process.stdin.on('data', (c) => (buf += c));
-      process.stdin.on('end', () => resolve(buf));
-      process.stdin.on('error', reject);
-    });
-  }
+  if (raw === '-') return readStdinText();
   if (raw.includes('\n') || raw.startsWith('@@') || raw.startsWith('diff --git')) return raw;
   try {
     return await readFile(raw, 'utf-8');
@@ -44,6 +56,69 @@ async function readReviewDiffInput(raw: string): Promise<string> {
     process.exitCode = 1;
     return '';
   }
+}
+
+async function loadReviewContextDiff(diffFile: string | undefined, options: ReviewContextOptions): Promise<string | null> {
+  if (diffFile && options.diff !== undefined) {
+    error('review context: pass either [diff-file] or --diff, not both.');
+    process.exitCode = 1;
+    return null;
+  }
+
+  if (options.diff !== undefined) return loadExplicitReviewDiff(options.diff, '--diff input is empty.');
+  if (!diffFile) return readStdinText();
+
+  const diff = await readReviewDiffInput(diffFile);
+  if (process.exitCode) return null;
+  if (diff.trim().length > 0) return diff;
+
+  error(`review context: diff file is empty: ${diffFile}`);
+  process.exitCode = 1;
+  return null;
+}
+
+async function loadExplicitReviewDiff(raw: string, emptyMessage: string): Promise<string | null> {
+  const diff = await readReviewDiffInput(raw);
+  if (process.exitCode) return null;
+  if (diff.trim().length > 0) return diff;
+  error(`review context: ${emptyMessage}`);
+  process.exitCode = 1;
+  return null;
+}
+
+function assignReviewContextArgs(args: Record<string, unknown>, options: ReviewContextOptions): boolean {
+  return (
+    assignIntArg({
+      args,
+      key: 'maxCallersPerSymbol',
+      raw: options.maxCallersPerSymbol,
+      optionName: '--max-callers-per-symbol',
+    }) &&
+    assignIntArg({
+      args,
+      key: 'maxCalleesPerSymbol',
+      raw: options.maxCalleesPerSymbol,
+      optionName: '--max-callees-per-symbol',
+    }) &&
+    assignIntArg({
+      args,
+      key: 'maxCoChangeWarnings',
+      raw: options.maxCoChangeWarnings,
+      optionName: '--max-co-change-warnings',
+    }) &&
+    assignFloatArg({
+      args,
+      key: 'minCoChangeJaccard',
+      raw: options.minCoChangeJaccard,
+      optionName: '--min-co-change-jaccard',
+    }) &&
+    assignIntArg({
+      args,
+      key: 'minDiffMagnitude',
+      raw: options.minDiffMagnitude,
+      optionName: '--min-diff-magnitude',
+    })
+  );
 }
 
 /**
@@ -68,105 +143,13 @@ reviewCmd
   .option('--max-co-change-warnings <n>', 'Cap co-change warnings per file (default 3, 0 disables)')
   .option('--min-co-change-jaccard <n>', 'Minimum Jaccard for a co-change warning (default 0.4)')
   .option('--min-diff-magnitude <n>', 'Suppress co-change warnings when total diff lines < n (default 10, 0 disables)')
-  .action(
-    async (
-      diffFile: string | undefined,
-      options: {
-        projectPath?: string;
-        diff?: string;
-        maxCallersPerSymbol?: string;
-        maxCalleesPerSymbol?: string;
-        maxCoChangeWarnings?: string;
-        minCoChangeJaccard?: string;
-        minDiffMagnitude?: string;
-      },
-    ) => {
-      let diff: string;
-      if (diffFile && options.diff !== undefined) {
-        error('review context: pass either [diff-file] or --diff, not both.');
-        process.exitCode = 1;
-        return;
-      }
-      if (options.diff !== undefined) {
-        diff = await readReviewDiffInput(options.diff);
-        if (process.exitCode) return;
-        if (diff.trim().length === 0) {
-          error('review context: --diff input is empty.');
-          process.exitCode = 1;
-          return;
-        }
-      } else if (diffFile) {
-        // Guard the read so a missing diff file yields a clean error +
-        // non-zero exit instead of a raw Node ENOENT stack trace.
-        diff = await readReviewDiffInput(diffFile);
-        if (process.exitCode) return;
-        // An explicitly-passed diff-file path that is empty / whitespace-only
-        // is a caller error — fail fast instead of silently falling back to
-        // `git diff HEAD` and reviewing the working tree (the no-arg / empty-
-        // stdin case below keeps its friendly git-derivation fallback).
-        if (diff.trim().length === 0) {
-          error(`review context: diff file is empty: ${diffFile}`);
-          process.exitCode = 1;
-          return;
-        }
-      } else {
-        diff = await new Promise<string>((resolve, reject) => {
-          let buf = '';
-          process.stdin.setEncoding('utf-8');
-          process.stdin.on('data', (c) => (buf += c));
-          process.stdin.on('end', () => resolve(buf));
-          process.stdin.on('error', reject);
-        });
-      }
+  .action(async (diffFile: string | undefined, options: ReviewContextOptions) => {
+      const diff = await loadReviewContextDiff(diffFile, options);
+      if (diff === null) return;
       const args: Record<string, unknown> = { mode: 'context', diff };
-      if (
-        !assignIntArg({
-          args,
-          key: 'maxCallersPerSymbol',
-          raw: options.maxCallersPerSymbol,
-          optionName: '--max-callers-per-symbol',
-        })
-      )
-        return;
-      if (
-        !assignIntArg({
-          args,
-          key: 'maxCalleesPerSymbol',
-          raw: options.maxCalleesPerSymbol,
-          optionName: '--max-callees-per-symbol',
-        })
-      )
-        return;
-      if (
-        !assignIntArg({
-          args,
-          key: 'maxCoChangeWarnings',
-          raw: options.maxCoChangeWarnings,
-          optionName: '--max-co-change-warnings',
-        })
-      )
-        return;
-      if (
-        !assignFloatArg({
-          args,
-          key: 'minCoChangeJaccard',
-          raw: options.minCoChangeJaccard,
-          optionName: '--min-co-change-jaccard',
-        })
-      )
-        return;
-      if (
-        !assignIntArg({
-          args,
-          key: 'minDiffMagnitude',
-          raw: options.minDiffMagnitude,
-          optionName: '--min-diff-magnitude',
-        })
-      )
-        return;
+      if (!assignReviewContextArgs(args, options)) return;
       await runViaMCP('cartograph_review', args, options.projectPath);
-    },
-  );
+  });
 
 reviewCmd
   .command('neighbors')

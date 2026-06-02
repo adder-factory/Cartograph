@@ -30,6 +30,7 @@ import { validatePathWithinRootReal, compact } from '../utils.js';
 import { isDiagnosticPath } from '../path-class.js';
 import { ScoreTrace } from './score-trace.js';
 import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 /**
  * Extract likely symbol names from a natural language query
@@ -1121,12 +1122,12 @@ async function cbExtractCodeBlocks(
 ): Promise<CodeBlock[]> {
   const priorityNodes = collectPriorityCodeBlockNodes(subgraph);
   const blocks: CodeBlock[] = [];
-  for (let i = 0; i < priorityNodes.length; i++) {
-    const node = priorityNodes[i]!;
-    if (blocks.length >= budget.maxBlocks) break;
+  await runSequential(priorityNodes, async (node) => {
+    if (blocks.length >= budget.maxBlocks) return false;
     const block = await cbTryBuildCodeBlock(st, node, budget.maxBlockSize);
     if (block) blocks.push(block);
-  }
+    return true;
+  });
   return blocks;
 }
 

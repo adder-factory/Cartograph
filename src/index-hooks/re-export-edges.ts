@@ -33,6 +33,7 @@ import {
   PER_FILE_YIELD_INTERVAL,
   yieldToEventLoop,
 } from './edge-resolution-helpers.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 const SUPPORTED_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 
@@ -52,12 +53,12 @@ interface ReExportEdge {
 async function buildReExportEdges(ctx: IndexHookContext, files: FileTarget[]): Promise<ReExportEdge[]> {
   const edges: ReExportEdge[] = [];
   let processed = 0;
-  for (let i = 0; i < files.length; i++) {
-    const file = files[i]!;
+  await runSequential(files, async (file) => {
     edges.push(...buildReExportEdgesForFile(ctx, file));
     // B24 (2026-05-24) — cooperative yield. See edge-resolution-helpers.ts.
     if (++processed % PER_FILE_YIELD_INTERVAL === 0) await yieldToEventLoop();
-  }
+    return true;
+  });
   return edges;
 }
 

@@ -27,9 +27,14 @@ export interface ComponentExtractorConfig {
   readonly extractionName: string;
   readonly componentExtension: string;
   readonly componentLanguage: Language;
-  readonly templateExpressionRegex: RegExp;
+  readonly templateExpressions: (line: string) => TemplateExpressionMatch[];
   readonly templateSkipNames: ReadonlySet<string>;
   readonly ignoredReferenceNames: ReadonlySet<string>;
+}
+
+export interface TemplateExpressionMatch {
+  expr: string;
+  start: number;
 }
 
 export function createComponentExtractorRuntime(filePath: string, source: string): ComponentExtractorRuntime {
@@ -128,7 +133,7 @@ function extractComponentTemplateCalls(args: {
   extractTemplateCalls({
     st: args.runtime.st,
     componentNodeId: args.componentNodeId,
-    expressionRegex: args.config.templateExpressionRegex,
+    templateExpressions: args.config.templateExpressions,
     language: args.config.componentLanguage,
     skipNames: args.config.templateSkipNames,
   });
@@ -271,7 +276,7 @@ export function recordTemplateCallsInExpression(args: {
 export function extractTemplateCalls(args: {
   st: ComponentExtractorState;
   componentNodeId: string;
-  expressionRegex: RegExp;
+  templateExpressions: (line: string) => TemplateExpressionMatch[];
   language: Language;
   skipNames: ReadonlySet<string>;
 }): void {
@@ -280,13 +285,12 @@ export function extractTemplateCalls(args: {
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     if (coveredRanges.some(([start, end]) => lineIdx >= start && lineIdx <= end)) continue;
     const line = lines[lineIdx]!;
-    let exprMatch: RegExpExecArray | null;
-    while ((exprMatch = args.expressionRegex.exec(line)) !== null) {
+    for (const exprMatch of args.templateExpressions(line)) {
       recordTemplateCallsInExpression({
         st: args.st,
         componentNodeId: args.componentNodeId,
-        expr: exprMatch[1]!,
-        exprStart: exprMatch.index,
+        expr: exprMatch.expr,
+        exprStart: exprMatch.start,
         lineIdx,
         language: args.language,
         skipNames: args.skipNames,

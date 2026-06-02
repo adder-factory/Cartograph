@@ -2,6 +2,7 @@ import type { ExtractionResult } from '../types.js';
 import {
   type ComponentExtractorConfig,
   type ComponentExtractorRuntime,
+  type TemplateExpressionMatch,
   createComponentExtractorRuntime,
   extractComponentFile,
 } from './component-extractor-helpers.js';
@@ -13,6 +14,25 @@ const SVELTE_RUNES = new Set(['$props', '$state', '$derived', '$effect', '$binda
  *  as function calls — Svelte block keywords parsed by the same regex
  *  as `cn(` / `buttonVariants(` / etc. */
 const TEMPLATE_CALL_SKIP_KEYWORDS: ReadonlySet<string> = new Set(['if', 'else', 'each', 'await']);
+
+function findSvelteTemplateExpressions(line: string): TemplateExpressionMatch[] {
+  const expressions: TemplateExpressionMatch[] = [];
+  let cursor = 0;
+  while (cursor < line.length) {
+    const open = line.indexOf('{', cursor);
+    if (open < 0) break;
+    const first = line.charAt(open + 1);
+    if (first === '' || first === '}' || first === '#' || first === '/' || first === ':' || first === '@') {
+      cursor = open + 1;
+      continue;
+    }
+    const close = line.indexOf('}', open + 1);
+    if (close < 0) break;
+    expressions.push({ expr: line.slice(open + 1, close), start: open });
+    cursor = close + 1;
+  }
+  return expressions;
+}
 
 /**
  * SvelteExtractor - Extracts code relationships from Svelte component files
@@ -39,7 +59,7 @@ const SVELTE_COMPONENT_CONFIG: ComponentExtractorConfig = {
   extractionName: 'Svelte',
   componentExtension: '.svelte',
   componentLanguage: 'svelte',
-  templateExpressionRegex: /\{([^}#/:@][^}]*)\}/g,
+  templateExpressions: findSvelteTemplateExpressions,
   templateSkipNames: new Set([...SVELTE_RUNES, ...TEMPLATE_CALL_SKIP_KEYWORDS]),
   ignoredReferenceNames: SVELTE_RUNES,
 };

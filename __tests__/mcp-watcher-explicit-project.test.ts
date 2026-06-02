@@ -17,27 +17,9 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
-import type { ProjectCache } from '../src/mcp/tools/_project-cache.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-}
-
-/**
- * Test-only accessor: drill through ToolHandler's `cache` field into
- * the ProjectCache's private state. The cache fields used to live on
- * ToolHandler directly; the split moved them into ProjectCache, but
- * the test invariants (watchedRoots set size, cachedRoots map size)
- * still need to inspect them.
- */
-type CacheInternals = {
-  cachedRoots: Map<string, true>;
-  watchedRoots: Set<string>;
-};
-
-function inspectCache(handler: ToolHandler): CacheInternals {
-  const cache = (handler as unknown as { cache: ProjectCache }).cache;
-  return cache as unknown as CacheInternals;
 }
 
 describe('explicit-project watcher (auto-incremental fix)', () => {
@@ -75,8 +57,8 @@ describe('explicit-project watcher (auto-incremental fix)', () => {
     // Verify the watcher is recorded — accessing the private set is
     // OK in tests (vitest doesn't enforce private). Without the fix
     // this would be an empty set.
-    const { watchedRoots } = inspectCache(handler);
-    expect(watchedRoots.size).toBe(1);
+    const { watchedRoots } = handler.getProjectCacheSnapshot();
+    expect(watchedRoots.length).toBe(1);
 
     handler.closeAll();
   });
@@ -86,8 +68,8 @@ describe('explicit-project watcher (auto-incremental fix)', () => {
     await handler.execute('cartograph_status', { projectPath: dir });
     await handler.execute('cartograph_status', { projectPath: dir });
     await handler.execute('cartograph_status', { projectPath: dir });
-    const { watchedRoots } = inspectCache(handler);
-    expect(watchedRoots.size).toBe(1); // dedup by resolved root
+    const { watchedRoots } = handler.getProjectCacheSnapshot();
+    expect(watchedRoots.length).toBe(1); // dedup by resolved root
     handler.closeAll();
   });
 
@@ -136,9 +118,9 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
       });
       expect(result.isError).toBeFalsy();
     }
-    const { cachedRoots, watchedRoots } = inspectCache(handler);
-    expect(cachedRoots.size).toBeLessThanOrEqual(16);
-    expect(watchedRoots.size).toBeLessThanOrEqual(16);
+    const { cachedRoots, watchedRoots } = handler.getProjectCacheSnapshot();
+    expect(cachedRoots.length).toBeLessThanOrEqual(16);
+    expect(watchedRoots.length).toBeLessThanOrEqual(16);
     handler.closeAll();
   });
 
@@ -149,9 +131,9 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     for (let i = 1; i < PROJECT_COUNT; i++) {
       await handler.execute('cartograph_status', { projectPath: path.join(parentDir, `p${i}`) });
     }
-    const { cachedRoots } = inspectCache(handler);
+    const { cachedRoots } = handler.getProjectCacheSnapshot();
     // p0 evicted; the most recent 16 (p2..p17) should be in the cache.
-    const roots = [...cachedRoots.keys()];
+    const roots = [...cachedRoots];
     expect(roots.some((r) => r.endsWith('/p0'))).toBe(false);
     expect(roots.some((r) => r.endsWith(`/p${PROJECT_COUNT - 1}`))).toBe(true);
     handler.closeAll();

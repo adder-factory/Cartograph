@@ -31,6 +31,7 @@ import type { ExtractionResult } from '../types.js';
 import {
   type ComponentExtractorConfig,
   type ComponentExtractorRuntime,
+  type TemplateExpressionMatch,
   createComponentExtractorRuntime,
   extractComponentFile,
 } from './component-extractor-helpers.js';
@@ -61,11 +62,30 @@ const VUE_COMPILER_MACROS: ReadonlySet<string> = new Set([
  */
 const TEMPLATE_CALL_SKIP_KEYWORDS: ReadonlySet<string> = new Set(['if', 'else', 'for']);
 
+function findVueTemplateExpressions(line: string): TemplateExpressionMatch[] {
+  const expressions: TemplateExpressionMatch[] = [];
+  let cursor = 0;
+  while (cursor < line.length) {
+    const open = line.indexOf('{{', cursor);
+    if (open < 0) break;
+    const close = line.indexOf('}}', open + 2);
+    if (close < 0) break;
+    const raw = line.slice(open + 2, close);
+    const leadingTrim = raw.length - raw.trimStart().length;
+    const expr = raw.trim();
+    if (expr.length > 0 && !expr.startsWith('#') && !expr.startsWith('/')) {
+      expressions.push({ expr, start: open + 2 + leadingTrim });
+    }
+    cursor = close + 2;
+  }
+  return expressions;
+}
+
 const VUE_COMPONENT_CONFIG: ComponentExtractorConfig = {
   extractionName: 'Vue',
   componentExtension: '.vue',
   componentLanguage: 'vue',
-  templateExpressionRegex: /\{\{\s*([^{}#/][^{}]*?)\s*\}\}/g,
+  templateExpressions: findVueTemplateExpressions,
   templateSkipNames: new Set([...VUE_COMPILER_MACROS, ...TEMPLATE_CALL_SKIP_KEYWORDS]),
   ignoredReferenceNames: VUE_COMPILER_MACROS,
 };

@@ -61,6 +61,7 @@ import { loadGrammarsForLanguages } from '../extraction/grammars.js';
 import { EXTRACTION_LOGIC_VERSION } from '../extraction/extraction-logic-version.js';
 import { computeAlgoHash } from '../algo-hash.js';
 import type { Finding, CrossFileBiomarkerName } from './types.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 export type { BiomarkerName, Finding, Severity } from './types.js';
 export {
@@ -221,13 +222,13 @@ async function runFileLoop(args: FileLoopArgs): Promise<void> {
     // Tiny inputs OR forced-serial: don't pay the streamingDispatch
     // setup. Below ~32 files, the per-file work is short enough that
     // even I/O-bound overlap doesn't help.
-    for (let i = 0; i < targetFiles.length; i++) {
-      const relPath = targetFiles[i]!;
-      if (options.signal?.aborted) break;
+    await runSequential(targetFiles, async (relPath) => {
+      if (options.signal?.aborted) return false;
       const currentHash = currentHashes.get(relPath);
       await analyseSingleFile({ ctx, relPath, currentHash, stats });
       options.onProgress?.(stats.filesScanned, total);
-    }
+      return true;
+    });
     return;
   }
   // B22 (2026-05-24) — when the batch is big enough to amortize

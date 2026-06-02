@@ -148,7 +148,7 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
       projectRoot: ctx.projectRoot,
       files: files.map((f) => ({ path: f.path, language: f.language })),
     });
-    return { edges: poolResult.edges as ValueRefEdge[], isPartial: poolResult.isPartial };
+    return poolResult;
   }
 
   const edges: ValueRefEdge[] = [];

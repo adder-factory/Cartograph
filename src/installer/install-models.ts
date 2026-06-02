@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import * as https from 'node:https';
 import type { IncomingMessage } from 'node:http';
 import { RECOMMENDED_MODELS, MODELS_DIR_DEFAULT, type RecommendedModel } from '../llm/recommended-models.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 export interface InstallModelsOptions {
   /** Target directory. Defaults to `MODELS_DIR_DEFAULT`. */
@@ -57,8 +58,7 @@ export async function installRecommendedModels(options: InstallModelsOptions = {
   const skipped: RecommendedModel[] = [];
   const paths = new Map<RecommendedModel, string>();
 
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i]!;
+  await runSequential(models, async (model) => {
     const target = path.join(dir, model.filename);
     paths.set(model, target);
     if (
@@ -69,11 +69,12 @@ export async function installRecommendedModels(options: InstallModelsOptions = {
         .catch(() => false))
     ) {
       skipped.push(model);
-      continue;
+      return true;
     }
     await downloadOne(model, target, onProgress);
     downloaded.push(model);
-  }
+    return true;
+  });
 
   return { downloaded, skipped, paths };
 }

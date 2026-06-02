@@ -40,6 +40,7 @@ import { type LlmClient, LlmEndpointError, BATCH_PARSE_FAILURE_LOG_CHARS } from 
 import { extractJsonArrayFromText } from './json-utils.js';
 import { logDebug, logWarn } from '../errors.js';
 import { validatePathWithinRootReal, stripReasoningTokens, compact } from '../utils.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 /** Symbol kinds worth summarising. Skip parameters/imports/literals. */
 export const SUMMARIZABLE_KINDS: ReadonlySet<string> = new Set([
@@ -942,11 +943,11 @@ async function summaryFlushBatch(state: SummarizerWorkerState, batch: PendingIte
 
   if (await summaryTryBatchSummarize(ctx, batch)) return;
 
-  for (let i = 0; i < batch.length; i++) {
-    const item = batch[i]!;
-    if (options.signal?.aborted) return;
+  await runSequential(batch, async (item) => {
+    if (options.signal?.aborted) return false;
     await summaryGenerateSingle(ctx, item);
-  }
+    return true;
+  });
 }
 
 /**

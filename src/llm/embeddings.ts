@@ -29,6 +29,7 @@ import { getEmbeddableNodes, upsertSymbolEmbedding } from '../db/queries-embeddi
 import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
 import { recommendedTuning } from '../installer/hardware-tuning.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 /** Batch size per embed() call. Large enough to amortise per-call HTTP
  *  overhead; the backend's continuous-batching scheduler handles
@@ -427,16 +428,16 @@ async function embedBatchPerRow(
   const { client, queries, embeddingModel, batch, signal } = args;
   let generated = 0;
   let skipped = 0;
-  for (let i = 0; i < batch.length; i++) {
-    const row = batch[i]!;
-    if (signal?.aborted) break;
+  await runSequential(batch, async (row) => {
+    if (signal?.aborted) return false;
     const wasGenerated = await embedOneRow({ client, queries, embeddingModel, row, signal });
     if (wasGenerated === null) {
       skipped++;
     } else {
       generated += wasGenerated;
     }
-  }
+    return true;
+  });
   return { generated, errored: false, skipped };
 }
 

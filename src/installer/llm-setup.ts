@@ -62,6 +62,7 @@ import {
   type DetectedBackendKind,
 } from './scan-backends.js';
 import type { CartographConfig } from '../types.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 type ClackPrompts = typeof import('@clack/prompts');
 
@@ -372,10 +373,10 @@ async function runDetectedPath(
         initialValue: true,
       });
       if (!clack.isCancel(shouldPull) && shouldPull === true) {
-        for (let i = 0; i < missing.length; i++) {
-          const m = missing[i]!;
+        await runSequential(missing, async (m) => {
           await ollamaPull(clack, m.model);
-        }
+          return true;
+        });
       }
     }
     return buildSingleEndpointConfig(backend.endpoint, {

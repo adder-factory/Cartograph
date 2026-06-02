@@ -54,6 +54,7 @@ import {
   isSecretsRuleSelfPath,
   sharedDocstringsAcrossConstants,
 } from './per-file-shared.js';
+import { runSequential } from '../utils/async-iteration.js';
 
 export type PerFileOutcome = 'file-unreadable' | 'no-analysable' | 'unsupported-language' | 'parse-failed' | 'computed';
 
@@ -148,8 +149,7 @@ async function main(): Promise<void> {
     try {
       await preloadGrammarsForBatch(init.batch, queries, loadGrammarsForLanguages);
       const results: PerFileResult[] = [];
-      for (let i = 0; i < init.batch.length; i++) {
-        const item = init.batch[i]!;
+      await runSequential(init.batch, async (item) => {
         const result = await analyseOneFile({
           relPath: item.relPath,
           currentHash: item.currentHash,
@@ -168,7 +168,8 @@ async function main(): Promise<void> {
           getPriorLocSnapshots,
         });
         results.push(result);
-      }
+        return true;
+      });
       parentPort.postMessage({
         ok: true,
         results,

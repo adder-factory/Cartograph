@@ -117,7 +117,7 @@ const graphSchema = z.object({
     .optional()
     .describe(
       `Multi-symbol form (mutually exclusive with \`start\`): up to ${CALLERS_MAX_SYMBOLS} names or \`n_xxxxxxxx\` UIDs. ` +
-        'Only with `direction: callers | callees` and `hops: 1`; over-cap inputs are rejected (no silent truncation).',
+        'Use with `direction: callers | callees` at `hops: 1`, or with `direction: similar`; over-cap inputs are rejected (no silent truncation).',
     ),
   direction: z
     .enum(['callers', 'callees', 'impact', 'both', 'similar', 'path'])
@@ -582,6 +582,7 @@ function validateGraphDispatchArgs(args: GraphArgs, direction: GraphDirection, h
 }
 
 function validateGraphBatchArgs(args: GraphArgs, direction: GraphDirection, hops: number): ToolOutcome | null {
+  if (direction === 'similar') return null;
   if (direction !== 'callers' && direction !== 'callees') {
     return err('`symbols` is only supported with `direction: "callers"` or `direction: "callees"`.');
   }
@@ -602,7 +603,7 @@ export const GRAPH_TOOL = defineTool({
     'Navigate the call/dependency graph from a symbol — callers, callees, transitive impact, X→Y path, or multi-hop BFS in one tool.\n\n' +
     '`direction`: `callers` (incoming) | `callees` (outgoing) | `impact`/`both` (bidirectional blast radius) | `similar` | `path` (shortest `start`→`to` route). ' +
     '`hops`: 1 (default) = one-hop slice; >1 = BFS walk with depth + via-parent. ' +
-    'Batched form: `symbols: [...]` up to 20 (callers/callees only). ' +
+    'Batched form: `symbols: [...]` up to 20 (callers/callees one-hop, or similar peers). ' +
     '`edgeKind` filters edges; `compact`/`fields`/`since`/`includeRoles`/`minConfidence` for token control. ' +
     'Multi-hop BFS (`hops > 1`) excludes test-file targets by default — pass `includeTests: true` to walk into them.',
   schema: graphSchema,

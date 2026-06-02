@@ -23,6 +23,7 @@ import { validatePathWithinRootReal, normalizePath, stripBom, compact } from '..
 import { ParseWorkerPool } from './parse-worker-pool.js';
 import { getCurrentHeadSha, isCartographMetaPath } from '../git-utils.js';
 import { matchesGlob as globMatches } from '../glob.js';
+import { runSequential } from '../utils/async-iteration.js';
 import {
   type EoIndexCounters,
   eoScanFilesForIndex,
@@ -851,8 +852,7 @@ export function scanDirectory(
   const visibleFiles = Array.from(gitFiles);
   const files: string[] = [];
   let count = 0;
-  for (let i = 0; i < visibleFiles.length; i++) {
-    const filePath = visibleFiles[i]!;
+  for (const filePath of visibleFiles) {
     if (isUnderCartographIgnoredDir(filePath, ignoredDirs)) continue;
     if (!shouldIncludeFile(filePath, config)) continue;
     files.push(filePath);
@@ -877,8 +877,9 @@ export async function scanDirectoryAsync(
   const ignoredDirs = findCartographIgnoredDirs(rootDir, gitFiles);
   const files: string[] = [];
   const visibleFiles = Array.from(gitFiles);
-  for (let i = 0; i < visibleFiles.length; i++) {
-    const filePath = visibleFiles[i]!;
+  let index = 0;
+  while (index < visibleFiles.length) {
+    const filePath = visibleFiles[index++]!;
     if (isUnderCartographIgnoredDir(filePath, ignoredDirs)) continue;
     if (!shouldIncludeFile(filePath, config)) continue;
     files.push(filePath);
@@ -1202,8 +1203,7 @@ export class ExtractionOrchestrator {
     let totalNodes = 0;
     let totalEdges = 0;
 
-    for (let i = 0; i < filePaths.length; i++) {
-      const filePath = filePaths[i]!;
+    await runSequential(filePaths, async (filePath) => {
       const result = await this.indexFile(filePath);
 
       if (result.errors.length > 0) {
@@ -1219,7 +1219,8 @@ export class ExtractionOrchestrator {
       } else {
         filesSkipped++;
       }
-    }
+      return true;
+    });
 
     return {
       success: filesIndexed > 0 || errors.filter((e) => e.severity === 'error').length === 0,

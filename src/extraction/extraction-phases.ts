@@ -71,6 +71,7 @@ import {
   stripCommentsForRegex,
 } from '../utils.js';
 import { buildAhoCorasick, type AhoCorasickAutomaton } from '../utils/aho-corasick.js';
+import { runSequential } from '../utils/async-iteration.js';
 import type { FrameworkResolver } from '../resolution/types.js';
 import { getCurrentHeadSha } from '../git-utils.js';
 import {
@@ -766,19 +767,18 @@ export async function eoRetryFreshHeap(
 ): Promise<ExtractionError[]> {
   const { candidates, errors, counters, requestParse, recycleWorker, signal, log } = args;
   const stillFailing: ExtractionError[] = [];
-  for (let i = 0; i < candidates.length; i++) {
-    const errEntry = candidates[i]!;
+  await runSequential(candidates, async (errEntry) => {
     const filePath = errEntry.filePath!;
-    if (signal?.aborted) break;
+    if (signal?.aborted) return false;
     await recycleWorker();
     const fullPath = validatePathWithinRootReal(st.rootDir, filePath);
-    if (!fullPath) continue;
+    if (!fullPath) return true;
 
     let content: string;
     try {
       content = await fsp.readFile(fullPath, 'utf-8');
     } catch {
-      continue;
+      return true;
     }
 
     let result: ExtractionResult;
@@ -786,7 +786,7 @@ export async function eoRetryFreshHeap(
       result = await requestParse(filePath, content);
     } catch {
       stillFailing.push(errEntry);
-      continue;
+      return true;
     }
     if (result.nodes.length > 0 || result.errors.length === 0) {
       const language = detectLanguage(filePath, content);
@@ -795,7 +795,8 @@ export async function eoRetryFreshHeap(
       eoApplyRetrySuccess(errEntry, result, { errors, counters });
       log(`Retry OK: ${filePath} (${result.nodes.length} nodes)`);
     }
-  }
+    return true;
+  });
   return stillFailing;
 }
 
@@ -813,19 +814,18 @@ export async function eoRetryStripped(
   },
 ): Promise<void> {
   const { candidates, errors, counters, requestParse, recycleWorker, signal, log } = args;
-  for (let i = 0; i < candidates.length; i++) {
-    const errEntry = candidates[i]!;
+  await runSequential(candidates, async (errEntry) => {
     const filePath = errEntry.filePath!;
-    if (signal?.aborted) break;
+    if (signal?.aborted) return false;
     await recycleWorker();
     const fullPath = validatePathWithinRootReal(st.rootDir, filePath);
-    if (!fullPath) continue;
+    if (!fullPath) return true;
 
     let fullContent: string;
     try {
       fullContent = await fsp.readFile(fullPath, 'utf-8');
     } catch {
-      continue;
+      return true;
     }
     const language = detectLanguage(filePath, fullContent);
     const stripped = stripCommentLinesForRetry(fullContent, language);
@@ -834,7 +834,7 @@ export async function eoRetryStripped(
     try {
       result = await requestParse(filePath, stripped);
     } catch {
-      continue;
+      return true;
     }
 
     if (result.nodes.length > 0 || result.errors.length === 0) {
@@ -843,7 +843,8 @@ export async function eoRetryStripped(
       eoApplyRetrySuccess(errEntry, result, { errors, counters });
       log(`Retry (stripped) OK: ${filePath} (${result.nodes.length} nodes)`);
     }
-  }
+    return true;
+  });
 }
 
 /** Common bookkeeping when a retry attempt succeeds. */

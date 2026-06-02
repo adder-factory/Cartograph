@@ -1,4 +1,5 @@
 import { compact } from '../utils.js';
+import { runSequential } from '../utils/async-iteration.js';
 /**
  * Claude-bridge chat backend.
  *
@@ -195,16 +196,19 @@ export async function findOnPath(bin: string): Promise<string | null> {
   const sep = process.platform === 'win32' ? ';' : ':';
   const exts = process.platform === 'win32' ? (process.env['PATHEXT'] ?? '.EXE;.CMD;.BAT').split(';') : [''];
   const dirs = PATH.split(sep);
-  for (let i = 0; i < dirs.length; i++) {
-    const dir = dirs[i]!;
-    if (!dir) continue;
-    for (let j = 0; j < exts.length; j++) {
-      const ext = exts[j]!;
+  let match: string | null = null;
+  await runSequential(dirs, async (dir) => {
+    if (!dir) return true;
+    await runSequential(exts, async (ext) => {
       const found = await tryExecutableCandidate(path.join(dir, bin + ext));
-      if (found) return found;
-    }
-  }
-  return null;
+      if (!found) return true;
+      match = found;
+      return false;
+    });
+    if (match) return false;
+    return true;
+  });
+  return match;
 }
 
 /**

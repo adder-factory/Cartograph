@@ -60,22 +60,32 @@ function fingerprintProjectDb(resolvedRoot: string): string | null {
 }
 
 export class ProjectCache {
-  // May contain multiple alias keys pointing to the same CG (e.g.
-  // a subdir-projectPath + the resolved root both map to the same
-  // instance).
-  private readonly cgsByPath: Map<string, Cartograph> = new Map();
-  // Insertion-ordered set of RESOLVED ROOTS — used for FIFO eviction.
-  private readonly cachedRoots: Map<string, true> = new Map();
-  private readonly watchedRoots: Set<string> = new Set();
-  // Per-resolved-root fingerprint of the SQLite file at open time. A
-  // mismatch on subsequent lookup means the file was replaced (CLI
-  // re-init, manual delete + recreate) and the cached handle is
-  // stale — evict and reopen.
-  private readonly dbFingerprints: Map<string, string> = new Map();
+  private readonly st = {
+    // May contain multiple alias keys pointing to the same CG (e.g.
+    // a subdir-projectPath + the resolved root both map to the same
+    // instance).
+    cgsByPath: new Map<string, Cartograph>(),
+    // Insertion-ordered set of RESOLVED ROOTS — used for FIFO eviction.
+    cachedRoots: new Map<string, true>(),
+    watchedRoots: new Set<string>(),
+    // Per-resolved-root fingerprint of the SQLite file at open time. A
+    // mismatch on subsequent lookup means the file was replaced (CLI
+    // re-init, manual delete + recreate) and the cached handle is
+    // stale — evict and reopen.
+    dbFingerprints: new Map<string, string>(),
+  };
 
   /** Read-only view for status's "other projects" listing. */
   get readonlyView(): ReadonlyMap<string, Cartograph> {
-    return this.cgsByPath;
+    return this.st.cgsByPath;
+  }
+
+  /** Snapshot cache bookkeeping for diagnostics and invariant tests. */
+  snapshot(): { cachedRoots: readonly string[]; watchedRoots: readonly string[] } {
+    return {
+      cachedRoots: [...this.st.cachedRoots.keys()],
+      watchedRoots: [...this.st.watchedRoots],
+    };
   }
 
   /**
@@ -86,7 +96,7 @@ export class ProjectCache {
    * open so subsequent queries see edits without a manual sync.
    */
   getOrOpen(projectPath: string): Cartograph {
-    const cached = this.cgsByPath.get(projectPath);
+    const cached = this.st.cgsByPath.get(projectPath);
     if (cached && this.isCachedHandleFresh(cached)) return cached;
     if (cached) {
       // Stale handle (DB file inode/size changed since open). Evict the
@@ -105,9 +115,9 @@ export class ProjectCache {
 
     // Same resolved root reached via a different alias → reuse + alias
     // (after the same freshness check).
-    const cachedByRoot = this.cgsByPath.get(resolvedRoot);
+    const cachedByRoot = this.st.cgsByPath.get(resolvedRoot);
     if (cachedByRoot && this.isCachedHandleFresh(cachedByRoot)) {
-      this.cgsByPath.set(projectPath, cachedByRoot);
+      this.st.cgsByPath.set(projectPath, cachedByRoot);
       return cachedByRoot;
     }
     if (cachedByRoot) this.evictByRoot(resolvedRoot);
@@ -117,11 +127,11 @@ export class ProjectCache {
     // opt in to auto-migration here too (the schema-guard B4 catches
     // the opposite case where the DB is ahead of this binary).
     const cg = Cartograph.openSync(resolvedRoot, { autoMigrate: true });
-    this.cgsByPath.set(resolvedRoot, cg);
-    if (projectPath !== resolvedRoot) this.cgsByPath.set(projectPath, cg);
-    this.cachedRoots.set(resolvedRoot, true);
+    this.st.cgsByPath.set(resolvedRoot, cg);
+    if (projectPath !== resolvedRoot) this.st.cgsByPath.set(projectPath, cg);
+    this.st.cachedRoots.set(resolvedRoot, true);
     const fingerprint = fingerprintProjectDb(resolvedRoot);
-    if (fingerprint !== null) this.dbFingerprints.set(resolvedRoot, fingerprint);
+    if (fingerprint !== null) this.st.dbFingerprints.set(resolvedRoot, fingerprint);
     this.tryStartWatcher(cg);
     return cg;
   }
@@ -142,7 +152,7 @@ export class ProjectCache {
     } catch {
       return false;
     }
-    const recorded = this.dbFingerprints.get(root);
+    const recorded = this.st.dbFingerprints.get(root);
     if (recorded === undefined) return true; // never demote without a baseline
     const current = fingerprintProjectDb(root);
     if (current === null) return false; // file gone
@@ -157,20 +167,20 @@ export class ProjectCache {
    * so a follow-up reinit reopens cleanly with a fresh fingerprint.
    */
   closeProjectsMatching(resolvedRoot: string): void {
-    for (const [key, cached] of this.cgsByPath.entries()) {
+    for (const [key, cached] of this.st.cgsByPath.entries()) {
       if (this.shouldEvictCachedProject(cached, resolvedRoot)) {
-        this.cgsByPath.delete(key);
+        this.st.cgsByPath.delete(key);
       }
     }
-    this.cachedRoots.delete(resolvedRoot);
-    this.watchedRoots.delete(resolvedRoot);
-    this.dbFingerprints.delete(resolvedRoot);
+    this.st.cachedRoots.delete(resolvedRoot);
+    this.st.watchedRoots.delete(resolvedRoot);
+    this.st.dbFingerprints.delete(resolvedRoot);
   }
 
   /** Close every cached project. Idempotent — duplicate alias keys close the underlying CG once. */
   closeAll(): void {
     const closed = new Set<Cartograph>();
-    for (const cg of this.cgsByPath.values()) {
+    for (const cg of this.st.cgsByPath.values()) {
       if (closed.has(cg)) continue;
       closed.add(cg);
       try {
@@ -184,10 +194,10 @@ export class ProjectCache {
         /* idempotent */
       }
     }
-    this.cgsByPath.clear();
-    this.cachedRoots.clear();
-    this.watchedRoots.clear();
-    this.dbFingerprints.clear();
+    this.st.cgsByPath.clear();
+    this.st.cachedRoots.clear();
+    this.st.watchedRoots.clear();
+    this.st.dbFingerprints.clear();
   }
 
   /**
@@ -199,8 +209,8 @@ export class ProjectCache {
    * LRU bumping adds complexity without meaningful win in either case.)
    */
   private evictOldestIfFull(): void {
-    while (this.cachedRoots.size >= MAX_CACHED_PROJECTS) {
-      const oldest = this.cachedRoots.keys().next().value;
+    while (this.st.cachedRoots.size >= MAX_CACHED_PROJECTS) {
+      const oldest = this.st.cachedRoots.keys().next().value;
       // Explicit `=== undefined` (not truthy): a falsy-but-defined key
       // (e.g. empty-string path) must still evict, else this loop
       // returns early on a non-empty map → cache stuck oversized.
@@ -225,19 +235,19 @@ export class ProjectCache {
    *  Errors at watcher-stop and close-time are idempotent — best-effort
    *  cleanup, never throw. */
   private evictByRoot(root: string): void {
-    this.cachedRoots.delete(root);
-    this.dbFingerprints.delete(root);
-    const cg = this.cgsByPath.get(root);
-    for (const [key, value] of this.cgsByPath.entries()) {
-      if (value === cg) this.cgsByPath.delete(key);
+    this.st.cachedRoots.delete(root);
+    this.st.dbFingerprints.delete(root);
+    const cg = this.st.cgsByPath.get(root);
+    for (const [key, value] of this.st.cgsByPath.entries()) {
+      if (value === cg) this.st.cgsByPath.delete(key);
     }
-    if (this.watchedRoots.has(root)) {
+    if (this.st.watchedRoots.has(root)) {
       try {
         cg?.watcher.stop?.();
       } catch {
         /* idempotent */
       }
-      this.watchedRoots.delete(root);
+      this.st.watchedRoots.delete(root);
     }
     try {
       cg?.close();
@@ -261,8 +271,8 @@ export class ProjectCache {
     } catch {
       return;
     }
-    if (this.watchedRoots.has(root)) return;
-    if (this.watchedRoots.size >= MAX_WATCHED_PROJECTS) return;
+    if (this.st.watchedRoots.has(root)) return;
+    if (this.st.watchedRoots.size >= MAX_WATCHED_PROJECTS) return;
     const compat = checkSchemaCompat(cg);
     if (!compat.ok) {
       process.stderr.write(`[Cartograph MCP] ${formatSchemaMismatch(compat)} Watcher NOT started for ${root}.\n`);
@@ -281,7 +291,7 @@ export class ProjectCache {
           process.stderr.write(`[Cartograph MCP] Auto-sync error (${root}): ${err.message}\n`);
         },
       });
-      if (started) this.watchedRoots.add(root);
+      if (started) this.st.watchedRoots.add(root);
     } catch (err) {
       // Watcher startup must never fail the tool call.
       process.stderr.write(`[Cartograph MCP] Failed to start watcher for ${root}: ${errMsg(err)}\n`);
