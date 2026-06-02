@@ -47,7 +47,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"This stack trace — where do I look?"** → \`cartograph_trace_to_culprits\` (parse trace → ranked fix sites).
 - **"Imports/exports of this module"** → \`cartograph_imports\`, \`cartograph_module\`; **"unused package.json deps?"** → \`cartograph_deps\`.
 - **"What's this symbol's role?"** → \`cartograph_role\` (no args → project-wide distribution).
-- **"Summarise / review a PR diff"** → \`cartograph_review({mode: 'context'})\`; sister implementations → \`mode: 'neighbors'\`; "what did I change structurally?" → \`cartograph_compare_to_ref\`.
+- **"Summarise / review a PR diff"** → \`cartograph_review({mode: 'context'})\`; sister implementations → \`mode: 'neighbors'\`; project risk → \`mode: 'risk'\`; agent-prone detector audit → \`mode: 'agent-audit'\`; "what did I change structurally?" → \`cartograph_compare_to_ref\`.
 - **"Plan a rename"** → \`cartograph_propose_rename\` (every call site + doc mention + confidence).
 - **"Is the index ready / how big?"** → \`cartograph_status\` (\`verbose: true\` folds in top hotspots + biomarkers).
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` (read-only escape hatch; \`schema: true\` first).
@@ -65,7 +65,7 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 - **End-of-task self-report** (after ANY edit-touching turn): \`cartograph_compare_to_ref({findingsDelta: true})\` — surfaces the +/-/~ symbol delta + any new biomarker findings before you report "done".
 - **Onboard to a topic**: \`cartograph_context\` first; still unclear? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
 - **Onboard to a new repo**: \`cartograph_digest\` → \`cartograph_entry_points\`.
-- **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change.
+- **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
 - **Refactor planning**: \`cartograph_find\` → \`cartograph_biomarkers\` (Code Health) → \`cartograph_coverage\` (tests) → \`cartograph_graph({direction: 'impact'})\` (blast radius) → \`cartograph_propose_rename\`.
 - **Debug a regression**: \`cartograph_graph({direction: 'callers'})\` of the suspect + \`cartograph_hotspots\` + \`cartograph_biomarkers\`; with a trace, \`cartograph_trace_to_culprits\`.
 

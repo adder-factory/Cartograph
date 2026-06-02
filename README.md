@@ -272,6 +272,7 @@ cartograph digest                  # "Land in a new repo" overview — hotspots,
 cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
 cartograph context <task>          # Build context for AI (--format, --max-nodes)
 cartograph affected [files...]     # Find test files affected by changes (see below)
+cartograph review <mode>           # Review diffs, sister implementations, risk, or agent-prone findings
 cartograph serve --mcp             # Start MCP server
 ```
 
@@ -320,6 +321,7 @@ When running as an MCP server, Cartograph exposes these tools to any MCP-compati
 | `cartograph_node` | Get details about one symbol (or up to 20 via `symbols`), optionally with source code, callers, callees, biomarkers, or tests folded inline |
 | `cartograph_files` | Get indexed file structure (faster than filesystem scanning) |
 | `cartograph_status` | Check index health and statistics; pass `topHotspots: N` / `topBiomarkers: N` to fold those tools' rollups into the same response (onboarding "what's interesting?" in one call) |
+| `cartograph_review` | Review a diff (`mode: 'context'`), sister implementations (`neighbors`), project risk (`risk`), or agent-prone biomarker findings (`agent-audit`) |
 
 This is the core subset. The server exposes **30+ tools** in total — including `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_history`, `cartograph_blame`, `cartograph_tests_for`, and `cartograph_at_range`. Call `cartograph_playbook` for the full catalog.
 

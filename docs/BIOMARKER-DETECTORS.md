@@ -70,7 +70,8 @@ write a test in `__tests__/anti-pattern-detectors.test.ts`.
 ## G26 agent-prone tier (added 2026-05-24c/25)
 
 Twelve detectors targeting code patterns AI agents disproportionately
-produce. Filter to just this subset via `cartograph_review mode='agent-audit'`.
+produce. Filter to just this subset via `cartograph_review({mode: 'agent-audit'})`
+or `cartograph review agent-audit`.
 
 ### Phase 1 (2026-05-24c)
 

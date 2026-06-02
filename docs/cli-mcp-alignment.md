@@ -209,6 +209,9 @@ tool, the CLI must follow with the parallel family pattern:
   earlier; the CLI followed by adding `cartograph review
   <subcommand>` matching `admin <action>`. Top-level
   `review-context` / `review-neighbors` / `risk-review` deleted.
+  Later parity pass (`bfb34cb`) added the missing `agent-audit`
+  subcommand, `context --diff`, and the `risk --limit` alias so every
+  `cartograph_review` mode and exposed argument has a CLI counterpart.
 
 - **2026-05-11** Graph + find mega-merge. `cartograph_callers` /
   `_callees` / `_impact` / `_walk` collapsed into
