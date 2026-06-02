@@ -8,10 +8,21 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
+[![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](#other-mcp-clients)
+[![Storage](https://img.shields.io/badge/storage-SQLite-0f766e.svg)](#how-it-works)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
+
+<p>
+  <a href="#install">Install</a> ·
+  <a href="#configure-agents">Configure Agents</a> ·
+  <a href="#initialize-a-project">Initialize</a> ·
+  <a href="#mcp-tools">MCP Tools</a> ·
+  <a href="#cli-reference">CLI</a> ·
+  <a href="#supported-languages--file-formats">Languages</a>
+</p>
 
 <br />
 
@@ -25,13 +36,30 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 
 ## Start Here
 
-| Need | Use |
+| Step | Command | Result |
+|---|---|---|
+| 1. Install from source | `git clone ... && cd cartograph && bun install && bun link` | Puts `cartograph` on PATH |
+| 2. Configure your agent | `cartograph install` | Writes MCP config for supported clients |
+| 3. Index a project | `cartograph admin init -i` | Creates `.cartograph/` and builds the graph |
+| 4. Check readiness | `cartograph status --verbose` | Shows freshness, hotspots, biomarkers, and feature readiness |
+
+| What you need | Where to go |
 |---|---|
-| Install Cartograph from source | [Install](#install) |
-| Wire it into your AI agent | [Configure Agents](#configure-agents) |
-| Bootstrap a project index | [Initialize a Project](#initialize-a-project) |
-| Use a non-built-in MCP client | [Other MCP Clients](#other-mcp-clients) |
-| See every command | [CLI Reference](#cli-reference) |
+| Agent setup details | [Configure Agents](#configure-agents) |
+| LLM-backed features | [Initialize a Project](#initialize-a-project) |
+| Non-built-in MCP clients | [Other MCP Clients](#other-mcp-clients) |
+| Full command catalog | [CLI Reference](#cli-reference) |
+
+## At A Glance
+
+| Area | What Cartograph does |
+|---|---|
+| Graph index | Stores files, symbols, edges, references, metrics, and derived signals in local SQLite |
+| Query surfaces | Exposes the same graph through CLI commands, MCP stdio tools, and a library API |
+| Freshness | Runs MCP startup sync and debounced file-watch sync through `@parcel/watcher` |
+| Code health | Computes biomarkers, hotspots, churn, coverage joins, dependency audits, and risk reviews |
+| Optional LLMs | Adds summaries, embeddings, semantic search, ask, and rerank through OpenAI-compatible HTTP providers |
+| Agent support | Installer targets Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, and Kiro |
 
 ## Install
 
@@ -221,6 +249,15 @@ flowchart LR
   enrich["Enrichment passes<br/>reference resolution<br/>framework and index hooks<br/>biomarkers, churn, tests, coverage"]
 
   source --> scan --> extract --> store --> enrich --> store
+
+  classDef input fill:#eff6ff,stroke:#2563eb,color:#172554
+  classDef process fill:#f0fdf4,stroke:#16a34a,color:#052e16
+  classDef storage fill:#fefce8,stroke:#ca8a04,color:#422006
+  classDef enrich fill:#faf5ff,stroke:#9333ea,color:#3b0764
+  class source input
+  class scan,extract process
+  class store storage
+  class enrich enrich
 ```
 
 ```mermaid
@@ -255,6 +292,15 @@ flowchart TB
   db --> embeddings
   db --> ask
   db --> rerank
+
+  classDef db fill:#fefce8,stroke:#ca8a04,color:#422006
+  classDef surface fill:#eff6ff,stroke:#2563eb,color:#172554
+  classDef fresh fill:#f0fdf4,stroke:#16a34a,color:#052e16
+  classDef optional fill:#faf5ff,stroke:#9333ea,color:#3b0764
+  class db db
+  class cli,mcp,api surface
+  class startup,watcher,sync fresh
+  class summaries,embeddings,ask,rerank optional
 ```
 
 1. **Extraction** — `ExtractionOrchestrator` scans included files, detects languages, and parses source with [tree-sitter](https://tree-sitter.github.io/) WASM grammars. Language-specific extractors emit files, symbols, raw edges, and unresolved references.
@@ -563,7 +609,7 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `indexSubmodules` | Recurse into git submodules | `true` |
 | `dependenciesAllowlist` | Packages never flagged by `cartograph deps` | `[]` |
 
-## Supported Languages
+## Supported Languages & File Formats
 
 | Language | Extension | Status |
 |----------|-----------|--------|
@@ -604,7 +650,30 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | XML (MyBatis) | `.xml` | Scoped support for MyBatis mapper/config files |
 | YAML | `.yaml`, `.yml` | Grammar-loaded support for framework route/config resolvers |
 
-Embedded schema DSLs are recognised inside their host language too — a Zod schema (TS/JS) or a Pydantic model (Python) yields `struct` / `field` / `enum_member` nodes, not an opaque constant.
+## Framework-Aware Signals
+
+Cartograph indexes plain language structure first, then adds framework-aware nodes and edges when the project shape matches a registered resolver.
+
+| Ecosystem | Signals |
+|---|---|
+| JavaScript / TypeScript | Express routes, Bun.serve routes, React components, SvelteKit routes, Commander CLI commands |
+| Python | Django, Flask, and FastAPI route/controller patterns |
+| PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
+| Ruby | Rails routes and controller conventions |
+| Java / Kotlin | Spring route/config references and MyBatis Java/XML bindings |
+| Go / Rust / C# / Swift | Common route and framework entry-point patterns |
+| Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, and Fabric/Paper view components |
+
+## Embedded DSLs & Derived Signals
+
+| Signal | What gets added |
+|---|---|
+| Zod / Pydantic | Schema structs, fields, and enum members inside TS/JS or Python hosts |
+| GraphQL SDL | Types, fields, enums, interfaces, and references |
+| Prisma | Models, composite types, enums, fields, and enum members |
+| SQL | Tables, views, functions, triggers, schemas, and table references |
+| Config / env refs | Env-var, config-key, feature-flag, and build-context reference edges |
+| Tests / coverage / history | Test edges, lcov joins, churn, issue history, co-change, and hotspot signals |
 
 Want to add another language? See [`docs/ADDING-A-LANGUAGE.md`](docs/ADDING-A-LANGUAGE.md) — it walks through sourcing a tree-sitter grammar, probing the AST, choosing between the OO and self-contained extractor patterns, and the worked examples in the existing extractors.
 
