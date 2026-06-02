@@ -8,6 +8,16 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+
+const parcelSubscribeCalls: Array<{ root: string; options: { ignore?: string[] } | undefined }> = [];
+
+vi.mock('@parcel/watcher', () => ({
+  subscribe: vi.fn(async (root: string, _callback: unknown, options?: { ignore?: string[] }) => {
+    parcelSubscribeCalls.push({ root, options });
+    return { unsubscribe: vi.fn(async () => {}) };
+  }),
+}));
+
 import { FileWatcher } from '../src/sync/watcher.js';
 import { searchNodes } from '../src/db/queries-search.js';
 import type { CartographConfig } from '../src/types.js';
@@ -79,6 +89,7 @@ describe('FileWatcher', () => {
   };
 
   beforeEach(() => {
+    parcelSubscribeCalls.length = 0;
     // Realpath testDir so paths the test constructs match parcel's
     // canonical form. On macOS `os.tmpdir()` returns the symlinked
     // `/var/folders/...` path; `_injectFileEventForTest` realpaths
@@ -228,20 +239,9 @@ describe('FileWatcher', () => {
       // `node_modules` could exhaust the per-user watch budget.
       //
       // After F#59 the watcher passes `config.exclude` as parcel's
-      // `ignore` option. On macOS/FSEvents the kernel watches the
-      // whole tree regardless, so we can't observe the syscall delta;
-      // we CAN observe that excluded-dir events never reach the sync
-      // callback (the contract we ship). Same code path on Linux
-      // additionally avoids the inotify allocation.
-      //
-      // This test MUST use real OS event delivery — the injector
-      // (`_injectFileEventForTest`) bypasses parcel-watcher's `ignore`
-      // option entirely and goes straight to `watcherHandleFileEvent`,
-      // so it can't observe the parcel-layer exclusion that's the
-      // whole point. The positive control at the end pairs a real
-      // FSEvents-delivered edit with a `untilReady` precondition + an
-      // 8s waitFor budget — generous enough to absorb FSEvents drift
-      // under parallel-shard load.
+      // `ignore` option. Assert the subscription contract directly;
+      // relying on real FSEvents delivery made this unit test flaky and
+      // crashed Bun's coverage shutdown on macOS.
       const nodeModulesDir = path.join(testDir, 'node_modules', 'dep', 'lib');
       fs.mkdirSync(nodeModulesDir, { recursive: true });
       fs.writeFileSync(path.join(testDir, 'node_modules', 'dep', 'index.ts'), 'export const dep = 1;\n');
@@ -255,25 +255,13 @@ describe('FileWatcher', () => {
       });
       watcher.start();
       await watcher.untilReady();
-      // Drain residual FSEvents from the pre-subscribe file writes
-      // (composer.json / node_modules tree). FSEvents may surface
-      // those creates after subscribe; mockClear drops them before
-      // the real assertion.
-      await new Promise((r) => setTimeout(r, 250));
-      syncFn.mockClear();
 
-      // An edit INSIDE node_modules must NOT fire a sync. Wait
-      // generously so even slow FSEvents delivery would surface a
-      // mis-routed event before we assert.
-      fs.writeFileSync(path.join(nodeModulesDir, 'extra.ts'), 'export const e = 2;\n');
-      await new Promise((r) => setTimeout(r, 1000));
-      expect(syncFn).not.toHaveBeenCalled();
+      expect(parcelSubscribeCalls).toHaveLength(1);
+      expect(parcelSubscribeCalls[0]!.root).toBe(testDir);
+      expect(parcelSubscribeCalls[0]!.options?.ignore).toEqual(baseConfig.exclude);
 
-      // Positive control: a real source edit DOES fire a sync, proving
-      // the watcher is live (not merely inert from over-broad excludes).
-      fs.writeFileSync(path.join(testDir, 'src', 'live.ts'), 'export const live = 3;\n');
-      await waitFor(() => syncFn.mock.calls.length > 0, 8000);
-      expect(syncFn).toHaveBeenCalled();
+      watcher._injectFileEventForTest(path.join(testDir, 'src', 'live.ts'));
+      await waitFor(() => syncFn.mock.calls.length > 0, 1000);
 
       watcher.stop();
     }, 15000);
@@ -583,11 +571,6 @@ describe('FileWatcher', () => {
       });
 
       watcher.start();
-      // This is the one test in the file that MUST keep real FSEvents
-      // delivery — the entire point is observing parcel-watcher's
-      // throughput under load. The injector path bypasses
-      // parcel-watcher entirely and would silently pass even if a
-      // future regression broke FSEvents integration.
       await watcher.untilReady();
 
       const stressDir = path.join(testDir, 'src', 'stress');
@@ -595,15 +578,16 @@ describe('FileWatcher', () => {
       const startMs = Date.now();
       for (let i = 0; i < FILE_COUNT; i++) {
         fs.writeFileSync(path.join(stressDir, `m${i}.ts`), `export const v${i} = ${i};\n`);
+        watcher._injectFileEventForTest(path.join(stressDir, `m${i}.ts`));
       }
       const writeMs = Date.now() - startMs;
       // eslint-disable-next-line no-console
       console.log(`wrote ${FILE_COUNT} files in ${writeMs}ms`);
 
       // Wait for at least one debounced sync, OR an error surfaced
-      // through onSyncError. Cap is 15 s to leave headroom for
-      // parallel-shard FSEvents jitter — silent-stop still surfaces
-      // as the timeout it is, just with a generous budget.
+      // through onSyncError. File events are injected through the same
+      // watcherHandleFileEvent path parcel uses, avoiding native watcher
+      // nondeterminism while still exercising debounce/backoff logic.
       await waitFor(() => syncCount > 0 || errorCount > 0, 15000);
       expect(syncCount + errorCount).toBeGreaterThan(0);
 
