@@ -1,5 +1,14 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fileQueries from '../src/db/queries-files.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
+import * as stringImportQueries from '../src/db/queries-string-imports.js';
+import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
+import {
+  LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY,
+  STRING_IMPORTS_ALGO_VERSION,
+} from '../src/string-imports/index.js';
+import * as stringImports from '../src/string-imports/index.js';
 
 const state = {
   files: new Map<string, { path: string; language: string }>(),
@@ -8,50 +17,45 @@ const state = {
   throwExtract: false,
 };
 
-vi.mock('../src/string-imports/index.js', () => ({
-  STRING_IMPORTS_ALGO_VERSION: 'algo-test',
-  LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY: 'last-string-imports',
-  extractStringImports: vi.fn((_root: string, targets: Array<{ path: string; language: string }>) => {
-    state.calls.push({ name: 'extractStringImports', value: targets });
-    if (state.throwExtract) throw new Error('extract failed');
-    return targets.map((target) => ({
-      filePath: target.path,
-      line: 1,
-      moduleName: './x',
-      raw: 'import x',
-      containerKind: 'string_literal',
-    }));
-  }),
-}));
+vi.spyOn(stringImports, 'extractStringImports').mockImplementation(((
+  _root: string,
+  targets: Array<{ path: string; language: string }>,
+) => {
+  state.calls.push({ name: 'extractStringImports', value: targets });
+  if (state.throwExtract) throw new Error('extract failed');
+  return targets.map((target) => ({
+    filePath: target.path,
+    line: 1,
+    moduleName: './x',
+    raw: 'import x',
+    containerKind: 'string_literal',
+  }));
+}) as never);
 
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => [...state.files.values()]),
-  getFileByPath: vi.fn((_queries: unknown, filePath: string) => state.files.get(filePath) ?? null),
-}));
+vi.spyOn(fileQueries, 'getAllFiles').mockImplementation((() => [...state.files.values()]) as never);
+vi.spyOn(fileQueries, 'getFileByPath').mockImplementation(
+  ((_queries: unknown, filePath: string) => state.files.get(filePath) ?? null) as never,
+);
 
-vi.mock('../src/db/queries-string-imports.js', () => ({
-  applyStringImports: vi.fn((_queries: unknown, refs: unknown) =>
-    state.calls.push({ name: 'applyStringImports', value: refs }),
-  ),
-  clearStringImports: vi.fn(() => state.calls.push({ name: 'clearStringImports' })),
-  deleteStringImportsForPaths: vi.fn((_queries: unknown, paths: string[]) =>
-    state.calls.push({ name: 'deleteStringImportsForPaths', value: paths }),
-  ),
-  pruneOrphanedStringImports: vi.fn(() => state.calls.push({ name: 'pruneOrphanedStringImports' })),
-}));
+vi.spyOn(stringImportQueries, 'applyStringImports').mockImplementation(((_queries: unknown, refs: unknown) =>
+  state.calls.push({ name: 'applyStringImports', value: refs })) as never);
+vi.spyOn(stringImportQueries, 'clearStringImports').mockImplementation((() =>
+  state.calls.push({ name: 'clearStringImports' })) as never);
+vi.spyOn(stringImportQueries, 'deleteStringImportsForPaths').mockImplementation(((_queries: unknown, paths: string[]) =>
+  state.calls.push({ name: 'deleteStringImportsForPaths', value: paths })) as never);
+vi.spyOn(stringImportQueries, 'pruneOrphanedStringImports').mockImplementation((() =>
+  state.calls.push({ name: 'pruneOrphanedStringImports' })) as never);
 
-vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
-    state.calls.push({ name: 'setMetadata', value: { key, value } });
-    state.metadata.set(key, value);
-  }),
-}));
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
+  ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
+);
+vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown, key: string, value: string) => {
+  state.calls.push({ name: 'setMetadata', value: { key, value } });
+  state.metadata.set(key, value);
+}) as never);
 
-vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
+  state.calls.push({ name: 'logDebug', value: message })) as never);
 
 const { HOOK } = await import('../src/index-hooks/string-imports.js');
 
@@ -68,6 +72,10 @@ beforeEach(() => {
   state.calls = [];
   state.throwExtract = false;
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('string-imports hook', () => {
@@ -90,11 +98,11 @@ describe('string-imports hook', () => {
       { path: 'src/a.ts', language: 'typescript' },
       { path: 'src/b.py', language: 'python' },
     ]);
-    expect(state.metadata.get('last-string-imports')).toBe('algo-test');
+    expect(state.metadata.get(LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY)).toBe(STRING_IMPORTS_ALGO_VERSION);
   });
 
   it('self-heals stale algorithm metadata before changed-file handling', () => {
-    state.metadata.set('last-string-imports', 'old');
+    state.metadata.set(LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, 'old');
 
     HOOK.afterSync(ctx(), { changedFilePaths: ['src/a.ts'], filesRemoved: 0 } as never);
 
@@ -103,7 +111,7 @@ describe('string-imports hook', () => {
   });
 
   it('refreshes only changed indexed files on sync and prunes removed-file rows', () => {
-    state.metadata.set('last-string-imports', 'algo-test');
+    state.metadata.set(LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, STRING_IMPORTS_ALGO_VERSION);
 
     HOOK.afterSync(ctx(), { changedFilePaths: ['src/a.ts', 'src/missing.ts'], filesRemoved: 0 } as never);
 
@@ -133,6 +141,6 @@ describe('string-imports hook', () => {
     expect(state.calls.some((call) => call.name === 'logDebug' && String(call.value).includes('extract failed'))).toBe(
       true,
     );
-    expect(state.metadata.get('last-string-imports')).toBeUndefined();
+    expect(state.metadata.get(LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY)).toBeUndefined();
   });
 });

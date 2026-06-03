@@ -1,28 +1,27 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as parseCacheQueries from '../src/db/queries-parse-cache.js';
+import * as profileModule from '../src/extraction/profile.js';
 
 const state = {
   cached: null as null | { nodes: unknown[]; edges: unknown[]; errors: unknown[]; unresolvedReferences: unknown[] },
   cacheLookups: [] as unknown[],
 };
 
-vi.mock('../src/db/queries-parse-cache.js', () => ({
-  evictParseCacheIfOversized: vi.fn(),
-  getLatestStructHashForFile: vi.fn(() => null),
-  putCachedParse: vi.fn(),
-  getCachedParse: vi.fn((args: unknown) => {
-    state.cacheLookups.push(args);
-    return state.cached;
-  }),
-}));
+vi.spyOn(parseCacheQueries, 'evictParseCacheIfOversized').mockImplementation((() => {}) as never);
+vi.spyOn(parseCacheQueries, 'getLatestStructHashForFile').mockImplementation((() => null) as never);
+vi.spyOn(parseCacheQueries, 'putCachedParse').mockImplementation((() => {}) as never);
+vi.spyOn(parseCacheQueries, 'getCachedParse').mockImplementation(((args: unknown) => {
+  state.cacheLookups.push(args);
+  return state.cached;
+}) as never);
 
-vi.mock('../src/extraction/profile.js', () => ({
-  profile: vi.fn((_label: string, fn: () => unknown) => fn()),
-  profileTagged: vi.fn((args: { fn: () => unknown }) => args.fn()),
-  profileAsyncTagged: vi.fn((args: { fn: () => Promise<unknown> }) => args.fn()),
-  flushProfileReport: vi.fn(),
-  snapshotProfileDelta: vi.fn(() => []),
-  mergeProfileEntries: vi.fn(),
-}));
+vi.spyOn(profileModule, 'profile').mockImplementation(((_label: string, fn: () => unknown) => fn()) as never);
+vi.spyOn(profileModule, 'profileTagged').mockImplementation(((args: { fn: () => unknown }) => args.fn()) as never);
+vi.spyOn(profileModule, 'profileAsyncTagged').mockImplementation(((args: { fn: () => Promise<unknown> }) =>
+  args.fn()) as never);
+vi.spyOn(profileModule, 'flushProfileReport').mockImplementation((() => {}) as never);
+vi.spyOn(profileModule, 'snapshotProfileDelta').mockImplementation((() => []) as never);
+vi.spyOn(profileModule, 'mergeProfileEntries').mockImplementation((() => {}) as never);
 
 const { eoRunParseOrCached } = await import('../src/extraction/extraction-phases.js');
 
@@ -37,6 +36,10 @@ beforeEach(() => {
   state.cached = null;
   state.cacheLookups = [];
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('eoRunParseOrCached', () => {

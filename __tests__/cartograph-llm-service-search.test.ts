@@ -1,4 +1,9 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as queriesEmbeddings from '../src/db/queries-embeddings.js';
+import * as queriesSearch from '../src/db/queries-search.js';
+import * as vecHelpers from '../src/db/vec-helpers.js';
+import * as embeddingClient from '../src/llm/embedding-client.js';
+import * as rerankerClient from '../src/llm/reranker-client.js';
 import type { Node, SearchResult } from '../src/types.js';
 import type { ResolvedLlm } from '../src/llm/provider.js';
 
@@ -20,52 +25,22 @@ const state = {
   rerankerThrows: null as Error | null,
 };
 
-vi.mock('../src/db/queries-search.js', () => ({
-  searchNodes: vi.fn(() => state.ftsResults),
-}));
+vi.spyOn(queriesSearch, 'searchNodes').mockImplementation((() => state.ftsResults) as never);
 
-vi.mock('../src/llm/embedding-client.js', () => ({
-  createEmbeddingClient: vi.fn(() => ({
-    isConfigured: true,
-    isReachable: vi.fn(async () => state.embedReachable),
-    reachabilityError: vi.fn(() => null),
-    listModels: vi.fn(async () => []),
-    embed: vi.fn(async () => state.embedVectors),
-  })),
-}));
+vi.spyOn(embeddingClient, 'createEmbeddingClient').mockImplementation((() => ({
+  isConfigured: true,
+  isReachable: vi.fn(async () => state.embedReachable),
+  reachabilityError: vi.fn(() => null),
+  listModels: vi.fn(async () => []),
+  embed: vi.fn(async () => state.embedVectors),
+})) as never);
 
-vi.mock('../src/db/queries-embeddings.js', () => ({
-  nodeExistsQuery: {},
-  getAllEmbeddings: vi.fn(() => []),
-  getEmbeddingForNode: vi.fn(() => state.nodeEmbedding),
-  getEmbeddingsCount: vi.fn(() => 0),
-  getEmbeddingsTotal: vi.fn(() => 0),
-  hasSymbolEmbedding: vi.fn(() => false),
-  getEmbeddableNodes: vi.fn(() => []),
-  upsertSymbolEmbedding: vi.fn(() => true),
-}));
-
-vi.mock('../src/db/vec-helpers.js', () => ({
-  vecTableNameForDim: (dim: number) => `vec_symbols_${dim}`,
-  vecChunkTableNameForDim: (dim: number) => `vec_chunks_${dim}`,
-  bootstrapVecTables: vi.fn(),
-  ensureChunkVecTable: vi.fn(),
-  ensureVecTable: vi.fn(),
-  mirrorEmbeddingToVec: vi.fn(),
-  mirrorChunkEmbeddingToVec: vi.fn(),
-  clearVecTables: vi.fn(),
-  compactVecTables: vi.fn(),
-  findSimilarViaVec: vi.fn(() => state.vecHits),
-}));
-
-vi.mock('../src/llm/reranker-client.js', () => ({
-  RerankerClient: class {
-    async rerank(): Promise<number[]> {
-      if (state.rerankerThrows) throw state.rerankerThrows;
-      return state.rerankerScores;
-    }
-  },
-}));
+vi.spyOn(queriesEmbeddings, 'getEmbeddingForNode').mockImplementation((() => state.nodeEmbedding) as never);
+vi.spyOn(vecHelpers, 'findSimilarViaVec').mockImplementation((() => state.vecHits) as never);
+vi.spyOn(rerankerClient.RerankerClient.prototype, 'rerank').mockImplementation((async () => {
+  if (state.rerankerThrows) throw state.rerankerThrows;
+  return state.rerankerScores;
+}) as never);
 
 const { CartographLlmService, llmFindImplementations, llmFindSimilar } = await import(
   '../src/cartograph-llm-service.js'
@@ -332,4 +307,8 @@ describe('CartographLlmService semantic helper functions', () => {
     state.nodeEmbedding = null;
     await expect(llmFindSimilar(svc, 'source')).resolves.toEqual([]);
   });
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });

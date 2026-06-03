@@ -1,4 +1,15 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as coverageQueries from '../src/db/queries-coverage.js';
+import * as directorySummaryQueries from '../src/db/queries-directory-summaries.js';
+import * as embeddingQueries from '../src/db/queries-embeddings.js';
+import * as findingQueries from '../src/db/queries-findings.js';
+import * as historyQueries from '../src/db/queries-history.js';
+import * as roleQueries from '../src/db/queries-roles.js';
+import * as summaryQueries from '../src/db/queries-summaries.js';
+import * as unresolvedRefQueries from '../src/db/queries-unresolved-refs.js';
+import * as gitUtils from '../src/git-utils.js';
+import * as detachedSummarize from '../src/llm/detached-summarize.js';
+import * as biomarkerTool from '../src/mcp/tools/biomarkers.js';
 
 const state = {
   hotspots: [] as Array<{
@@ -37,97 +48,51 @@ const state = {
   unresolvedSamples: [] as Array<{ referenceName: string; referenceKind: string; language: string; count: number }>,
 };
 
-vi.mock('../src/db/queries-history.js', () => ({
-  getHotspots: vi.fn(() => {
-    if (state.hotspotsThrow) throw new Error('no hotspots table');
-    return state.hotspots;
-  }),
-}));
+vi.spyOn(historyQueries, 'getHotspots').mockImplementation((() => {
+  if (state.hotspotsThrow) throw new Error('no hotspots table');
+  return state.hotspots;
+}) as never);
 
-vi.mock('../src/db/queries-findings.js', () => ({
-  getFindingsRanked: vi.fn(() => {
-    if (state.findingsThrow) throw new Error('no findings table');
-    return state.findings;
-  }),
-  getFindingsStats: vi.fn(() => ({ totalFindings: state.totalFindings })),
-}));
+vi.spyOn(findingQueries, 'getFindingsRanked').mockImplementation((() => {
+  if (state.findingsThrow) throw new Error('no findings table');
+  return state.findings;
+}) as never);
+vi.spyOn(findingQueries, 'getFindingsStats').mockImplementation((() => ({
+  totalFindings: state.totalFindings,
+})) as never);
 
-vi.mock('../src/mcp/tools/biomarkers.js', () => ({
-  areBiomarkersPending: vi.fn(() => state.pending),
-}));
+vi.spyOn(biomarkerTool, 'areBiomarkersPending').mockImplementation((() => state.pending) as never);
 
-vi.mock('../src/git-utils.js', () => ({
-  isCartographMetaPath: vi.fn((filePath: string) => filePath.startsWith('.cartograph/')),
-  isShallowClone: vi.fn(() => state.shallowClone),
-  shortSha: vi.fn((sha: string, len = 12) => sha.slice(0, len)),
-  getCurrentHeadSha: vi.fn(() => null),
-  gitWorktreeRoot: vi.fn(() => null),
-  detectBorrowedWorktreeIndex: vi.fn(() => null),
-  borrowedWorktreeBanner: vi.fn(() => ''),
-  gitCommitCount: vi.fn(() => null),
-  hasUncommittedChanges: vi.fn(() => false),
-  getChangeBreakdownSince: vi.fn(() => null),
-  countCommitsAhead: vi.fn(() => null),
-  getLineRangeHistory: vi.fn(() => []),
-  fileWasEverRenamed: vi.fn(() => false),
-  getFileFollowEarliestTs: vi.fn(() => null),
-  isShaReachable: vi.fn(() => false),
-  getFileAtRef: vi.fn(() => null),
-  listChangedFilesSince: vi.fn(() => null),
-  getCommitSubjects: vi.fn(() => new Map()),
-}));
+vi.spyOn(gitUtils, 'isShallowClone').mockImplementation((() => state.shallowClone) as never);
+vi.spyOn(gitUtils, 'shortSha').mockImplementation(((sha: string, len = 12) => sha.slice(0, len)) as never);
 
-vi.mock('../src/db/queries-summaries.js', () => ({
-  MS_PER_DAY: 24 * 60 * 60 * 1000,
-  PRUNE_STORE_DEFAULT_DAYS: 30,
-  getSummarizableNodes: vi.fn(() => []),
-  getSummaryCoverage: vi.fn(() => state.summaryCoverage),
-  getWeightedSummaryCoverage: vi.fn(() => state.weightedSummaryCoverage),
-  countPendingSummarizable: vi.fn(() => state.pendingSummaries),
-  getSummaryBreakdown: vi.fn(() => state.summaryBreakdown),
-  pruneOrphanSummaries: vi.fn(() => ({ summariesDeleted: 0, embeddingsDeleted: 0 })),
-  pruneOrphanStoreRows: vi.fn(() => 0),
-  getSymbolSummary: vi.fn(() => null),
-  getSummaryByContentHash: vi.fn(() => null),
-  getSymbolDescriptions: vi.fn(() => new Map()),
-  getTestDerivedDescriptions: vi.fn(() => new Map()),
-  getSymbolSummaries: vi.fn(() => new Map()),
-  countSymbolSummaries: vi.fn(() => 0),
-  upsertSymbolSummary: vi.fn(() => true),
-}));
+vi.spyOn(summaryQueries, 'getSummaryCoverage').mockImplementation((() => state.summaryCoverage) as never);
+vi.spyOn(summaryQueries, 'getWeightedSummaryCoverage').mockImplementation(
+  (() => state.weightedSummaryCoverage) as never,
+);
+vi.spyOn(summaryQueries, 'countPendingSummarizable').mockImplementation((() => state.pendingSummaries) as never);
+vi.spyOn(summaryQueries, 'getSummaryBreakdown').mockImplementation((() => state.summaryBreakdown) as never);
 
-vi.mock('../src/llm/detached-summarize.js', () => ({
-  getDetachedSummarizeState: vi.fn(() => (state.detachedRunning ? { running: true, pid: 1234 } : { running: false })),
-}));
+vi.spyOn(detachedSummarize, 'getDetachedSummarizeState').mockImplementation((() =>
+  state.detachedRunning ? { running: true, pid: 1234 } : { running: false }) as never);
 
-vi.mock('../src/db/queries-embeddings.js', () => ({
-  getEmbeddingsTotal: vi.fn(() => state.embeddingsTotal),
-}));
+vi.spyOn(embeddingQueries, 'getEmbeddingsTotal').mockImplementation((() => state.embeddingsTotal) as never);
 
-vi.mock('../src/db/queries-coverage.js', () => ({
-  getCoverageStats: vi.fn(() => state.coverageStats),
-}));
+vi.spyOn(coverageQueries, 'getCoverageStats').mockImplementation((() => state.coverageStats) as never);
 
-vi.mock('../src/db/queries-roles.js', () => ({
-  getRoleCounts: vi.fn(() => state.roleCounts),
-}));
+vi.spyOn(roleQueries, 'getRoleCounts').mockImplementation((() => state.roleCounts) as never);
 
-vi.mock('../src/db/queries-directory-summaries.js', () => ({
-  getAllDirectorySummaries: vi.fn(() => state.dirSummaries),
-}));
+vi.spyOn(directorySummaryQueries, 'getAllDirectorySummaries').mockImplementation((() => state.dirSummaries) as never);
 
-vi.mock('../src/db/queries-unresolved-refs.js', () => ({
-  insertUnresolvedRefsBatch: vi.fn(),
-  getUnresolvedReferences: vi.fn(() => []),
-  getUnresolvedReferencesCount: vi.fn(() => state.unresolvedRefs),
-  getUnresolvedReferenceBuckets: vi.fn(() => state.unresolvedBuckets),
-  getCommonUnresolvedReferenceNames: vi.fn(() => state.unresolvedSamples),
-  getUnresolvedReferencesBatch: vi.fn(() => []),
-  getUnresolvedReferencesByFiles: vi.fn(() => []),
-  getUnresolvedReferencesByDefiningFiles: vi.fn(() => []),
-  reconstructCrossFileRefsToFile: vi.fn(),
-  deleteSpecificResolvedReferences: vi.fn(),
-}));
+vi.spyOn(unresolvedRefQueries, 'getUnresolvedReferencesCount').mockImplementation(
+  (() => state.unresolvedRefs) as never,
+);
+vi.spyOn(unresolvedRefQueries, 'getUnresolvedReferenceBuckets').mockImplementation(
+  (() => state.unresolvedBuckets) as never,
+);
+vi.spyOn(unresolvedRefQueries, 'getCommonUnresolvedReferenceNames').mockImplementation(
+  (() => state.unresolvedSamples) as never,
+);
 
 const {
   STATUS_BIOMARKERS_CLEAN_NOTE,
@@ -155,6 +120,10 @@ function cg(overrides: Record<string, unknown> = {}) {
     ...overrides,
   } as never;
 }
+
+afterAll(() => {
+  vi.restoreAllMocks();
+});
 
 describe('status inline rollups', () => {
   beforeEach(() => {

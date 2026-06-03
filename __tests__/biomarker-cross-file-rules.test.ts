@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as duplicateCode from '../src/biomarkers/duplicate-code.js';
+import * as layering from '../src/biomarkers/layering.js';
+import * as lowCoverage from '../src/biomarkers/low-coverage.js';
+import * as configModule from '../src/config.js';
+import * as biomarkerGraphQueries from '../src/db/queries-biomarkers-graph.js';
+import * as findingQueries from '../src/db/queries-findings.js';
 
 const state = {
   unusedExports: [] as Array<{ id: string; kind: string; name: string }>,
@@ -20,42 +26,32 @@ const state = {
   transactions: 0,
 };
 
-vi.mock('../src/db/queries-findings.js', () => ({
-  appendFindings: vi.fn((_queries: unknown, findings: unknown[], passKind: string) => {
-    state.appended.push({ findings, passKind });
-  }),
-  clearFindingsByKind: vi.fn((_queries: unknown, kind: string) => {
-    state.cleared.push(kind);
-  }),
-  demoteFullPassRowsToCached: vi.fn(),
-  promoteFullPassCachedToFullPass: vi.fn(),
-  replaceFindingsForFile: vi.fn(),
-}));
+vi.spyOn(findingQueries, 'appendFindings').mockImplementation(((
+  _queries: unknown,
+  findings: unknown[],
+  passKind: string,
+) => {
+  state.appended.push({ findings, passKind });
+}) as never);
+vi.spyOn(findingQueries, 'clearFindingsByKind').mockImplementation(((_queries: unknown, kind: string) => {
+  state.cleared.push(kind);
+}) as never);
+vi.spyOn(findingQueries, 'demoteFullPassRowsToCached').mockImplementation((() => {}) as never);
+vi.spyOn(findingQueries, 'promoteFullPassCachedToFullPass').mockImplementation((() => {}) as never);
+vi.spyOn(findingQueries, 'replaceFindingsForFile').mockImplementation((() => {}) as never);
 
-vi.mock('../src/db/queries-biomarkers-graph.js', () => ({
-  findUnusedExports: vi.fn(() => state.unusedExports),
-  findGodClasses: vi.fn(() => state.godClasses),
-  findFeatureEnvy: vi.fn(() => state.featureEnvy),
-}));
+vi.spyOn(biomarkerGraphQueries, 'findUnusedExports').mockImplementation((() => state.unusedExports) as never);
+vi.spyOn(biomarkerGraphQueries, 'findGodClasses').mockImplementation((() => state.godClasses) as never);
+vi.spyOn(biomarkerGraphQueries, 'findFeatureEnvy').mockImplementation((() => state.featureEnvy) as never);
 
-vi.mock('../src/config.js', () => ({
-  loadConfig: vi.fn(() => ({
-    layers: [{ name: 'ui', allowImportsFrom: ['core'] }],
-    layerExceptions: [{ file: 'tools/biomarkers.ts', canImport: ['core'] }],
-  })),
-}));
+vi.spyOn(configModule, 'loadConfig').mockImplementation((() => ({
+  layers: [{ name: 'ui', allowImportsFrom: ['core'] }],
+  layerExceptions: [{ file: 'tools/biomarkers.ts', canImport: ['core'] }],
+})) as never);
 
-vi.mock('../src/biomarkers/layering.js', () => ({
-  computeIllegalImports: vi.fn(() => state.illegalImports),
-}));
-
-vi.mock('../src/biomarkers/low-coverage.js', () => ({
-  findLowCoverage: vi.fn(() => state.lowCoverage),
-}));
-
-vi.mock('../src/biomarkers/duplicate-code.js', () => ({
-  findDuplicateCode: vi.fn(() => state.duplicates),
-}));
+vi.spyOn(layering, 'computeIllegalImports').mockImplementation((() => state.illegalImports) as never);
+vi.spyOn(lowCoverage, 'findLowCoverage').mockImplementation((() => state.lowCoverage) as never);
+vi.spyOn(duplicateCode, 'findDuplicateCode').mockImplementation((() => state.duplicates) as never);
 
 const { CROSS_FILE_RULES, reconcileCrossFileRuleResult } = await import('../src/biomarkers/index.js');
 
@@ -85,6 +81,10 @@ beforeEach(() => {
   state.appended = [];
   state.transactions = 0;
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('cross-file biomarker rule registry', () => {

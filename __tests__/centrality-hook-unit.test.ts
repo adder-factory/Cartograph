@@ -1,4 +1,10 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as centrality from '../src/centrality/index.js';
+import * as pagerankParallel from '../src/centrality/pagerank-parallel.js';
+import * as nodeQueries from '../src/db/queries.js';
+import * as centralityQueries from '../src/db/queries-centrality.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
+import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/registry.js';
 
 const state = {
@@ -10,47 +16,34 @@ const state = {
   calls: [] as Array<{ name: string; value?: unknown }>,
 };
 
-vi.mock('../src/centrality/index.js', () => ({
-  PR_DAMPING: 0.85,
-  PR_ITERATIONS: 20,
-  PR_EDGE_KINDS: ['calls', 'references'],
-  computePageRank: vi.fn((_nodes: unknown[], _edges: unknown[]) => {
-    state.calls.push({ name: 'computePageRank' });
-    return { scores: new Map([['n1', 0.5]]) };
-  }),
-}));
+vi.spyOn(centrality, 'computePageRank').mockImplementation(((_nodes: unknown[], _edges: unknown[]) => {
+  state.calls.push({ name: 'computePageRank' });
+  return { scores: new Map([['n1', 0.5]]) };
+}) as never);
 
-vi.mock('../src/centrality/pagerank-parallel.js', () => ({
-  shouldUseParallel: vi.fn(() => state.shouldParallel),
-  computePageRankParallel: vi.fn(async () => {
-    state.calls.push({ name: 'computePageRankParallel' });
-    return { scores: new Map([['n1', 0.75]]) };
-  }),
-}));
+vi.spyOn(pagerankParallel, 'shouldUseParallel').mockImplementation((() => state.shouldParallel) as never);
+vi.spyOn(pagerankParallel, 'computePageRankParallel').mockImplementation((async () => {
+  state.calls.push({ name: 'computePageRankParallel' });
+  return { scores: new Map([['n1', 0.75]]) };
+}) as never);
 
-vi.mock('../src/db/queries.js', () => ({
-  getAllNodes: vi.fn(() => state.nodes),
-}));
+vi.spyOn(nodeQueries, 'getAllNodes').mockImplementation((() => state.nodes) as never);
 
-vi.mock('../src/db/queries-centrality.js', () => ({
-  clearCentrality: vi.fn(() => state.calls.push({ name: 'clearCentrality' })),
-  applyCentralityScores: vi.fn((_queries: unknown, scores: unknown) =>
-    state.calls.push({ name: 'applyCentralityScores', value: scores }),
-  ),
-}));
+vi.spyOn(centralityQueries, 'clearCentrality').mockImplementation((() =>
+  state.calls.push({ name: 'clearCentrality' })) as never);
+vi.spyOn(centralityQueries, 'applyCentralityScores').mockImplementation(((_queries: unknown, scores: unknown) =>
+  state.calls.push({ name: 'applyCentralityScores', value: scores })) as never);
 
-vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
-    state.calls.push({ name: 'setMetadata', value: { key, value } });
-    state.metadata.set(key, value);
-  }),
-}));
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
+  ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
+);
+vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown, key: string, value: string) => {
+  state.calls.push({ name: 'setMetadata', value: { key, value } });
+  state.metadata.set(key, value);
+}) as never);
 
-vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
+  state.calls.push({ name: 'logDebug', value: message })) as never);
 
 const { HOOK } = await import('../src/index-hooks/centrality.js');
 
@@ -85,6 +78,15 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
+afterAll(() => {
+  vi.restoreAllMocks();
+});
+
+function expectedFingerprint(nodeCount = 2, edgeCount = 1, maxUpdated = 123): string {
+  const kinds = [...centrality.PR_EDGE_KINDS].sort((a, b) => Number(a > b) - Number(a < b)).join(',');
+  return `algo:d=${centrality.PR_DAMPING}|i=${centrality.PR_ITERATIONS}|k=${kinds}:${nodeCount}:${edgeCount}:${maxUpdated}`;
+}
+
 describe('centrality hook', () => {
   it('does nothing when centrality is disabled or there are no nodes', async () => {
     await HOOK.afterIndexAll(ctx({ enableCentrality: false }));
@@ -96,7 +98,7 @@ describe('centrality hook', () => {
   });
 
   it('skips recompute when the stored fingerprint matches', async () => {
-    state.metadata.set('last_centrality_fingerprint', 'algo:d=0.85|i=20|k=calls,references:2:1:123');
+    state.metadata.set('last_centrality_fingerprint', expectedFingerprint());
 
     await HOOK.afterIndexAll(ctx());
 
@@ -114,7 +116,7 @@ describe('centrality hook', () => {
       'applyCentralityScores',
       'setMetadata',
     ]);
-    expect(state.metadata.get('last_centrality_fingerprint')).toBe('algo:d=0.85|i=20|k=calls,references:2:1:123');
+    expect(state.metadata.get('last_centrality_fingerprint')).toBe(expectedFingerprint());
   });
 
   it('uses the parallel PageRank path when the graph is large enough', async () => {

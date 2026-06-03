@@ -1,8 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as changeOracle from '../src/change-oracle/index.js';
+import * as fileQueries from '../src/db/queries-files.js';
 import { hashContent, type ExtractionOrchestratorState, type SyncState } from '../src/extraction/index.js';
+import * as freshness from '../src/freshness.js';
 import type { FileRecord } from '../src/types.js';
 
 const files = new Map<string, FileRecord>();
@@ -14,30 +17,26 @@ const oracle = {
 let vanished: string[] = [];
 let reconciled = 0;
 
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => [...files.values()]),
-  getFileByPath: vi.fn((_queries: unknown, filePath: string) => files.get(filePath) ?? null),
-  reconcileFileNodeCounts: vi.fn(() => {
-    reconciled++;
-  }),
-  removeFileFromIndex: vi.fn((_queries: unknown, filePath: string) => {
-    removed.push(filePath);
-    files.delete(filePath);
-  }),
-  removeFileFromIndexInTx: vi.fn((_queries: unknown, filePath: string) => {
-    removed.push(filePath);
-    files.delete(filePath);
-  }),
-  upsertFile: vi.fn(),
-}));
+vi.spyOn(fileQueries, 'getAllFiles').mockImplementation((() => [...files.values()]) as never);
+vi.spyOn(fileQueries, 'getFileByPath').mockImplementation(
+  ((_queries: unknown, filePath: string) => files.get(filePath) ?? null) as never,
+);
+vi.spyOn(fileQueries, 'reconcileFileNodeCounts').mockImplementation((() => {
+  reconciled++;
+}) as never);
+vi.spyOn(fileQueries, 'removeFileFromIndex').mockImplementation(((_queries: unknown, filePath: string) => {
+  removed.push(filePath);
+  files.delete(filePath);
+}) as never);
+vi.spyOn(fileQueries, 'removeFileFromIndexInTx').mockImplementation(((_queries: unknown, filePath: string) => {
+  removed.push(filePath);
+  files.delete(filePath);
+}) as never);
+vi.spyOn(fileQueries, 'upsertFile').mockImplementation((() => {}) as never);
 
-vi.mock('../src/change-oracle/index.js', () => ({
-  whatChanged: vi.fn(() => oracle),
-}));
+vi.spyOn(changeOracle, 'whatChanged').mockImplementation((() => oracle) as never);
 
-vi.mock('../src/freshness.js', () => ({
-  findVanishedFiles: vi.fn(() => vanished),
-}));
+vi.spyOn(freshness, 'findVanishedFiles').mockImplementation((() => vanished) as never);
 
 const { eoApplySyncChanges, eoCollectFullScanChanges, eoCollectGitChanges } = await import(
   '../src/extraction/extraction-phases.js'
@@ -99,6 +98,11 @@ beforeEach(() => {
   oracle.contentDrift = [];
   vanished = [];
   reconciled = 0;
+  vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('extraction sync phase orchestration', () => {

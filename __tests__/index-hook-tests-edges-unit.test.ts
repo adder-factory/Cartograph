@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as edgeQueries from '../src/db/queries-edges.js';
+import * as fileQueries from '../src/db/queries-files.js';
+import * as testsEdges from '../src/tests-edges/index.js';
+import * as utils from '../src/utils.js';
 
 const state = {
   files: [] as Array<{ path: string }>,
@@ -10,43 +14,44 @@ const state = {
   inlineRust: new Set<string>(),
 };
 
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => state.files),
-}));
+vi.spyOn(fileQueries, 'getAllFiles').mockImplementation((() => state.files) as never);
 
-vi.mock('../src/db/queries-edges.js', () => ({
-  insertEdges: vi.fn((_queries: unknown, edges: unknown[]) => {
-    state.inserted.push(edges);
-  }),
-  deleteAllEdgesByKind: vi.fn((_queries: unknown, kind: string) => {
-    state.deleteAll.push(kind);
-  }),
-  deleteEdgesBySourceAndKind: vi.fn((_queries: unknown, source: string, kind: string) => {
-    state.deleteSource.push({ source, kind });
-  }),
-}));
+vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edges: unknown[]) => {
+  state.inserted.push(edges);
+}) as never);
+vi.spyOn(edgeQueries, 'deleteAllEdgesByKind').mockImplementation(((_queries: unknown, kind: string) => {
+  state.deleteAll.push(kind);
+}) as never);
+vi.spyOn(edgeQueries, 'deleteEdgesBySourceAndKind').mockImplementation(((
+  _queries: unknown,
+  source: string,
+  kind: string,
+) => {
+  state.deleteSource.push({ source, kind });
+}) as never);
 
-vi.mock('../src/tests-edges/index.js', () => ({
-  isTestFile: vi.fn((filePath: string) => /(^|\/)(__tests__|tests)\//.test(filePath) || /[._-]test\./.test(filePath)),
-  findTestSubjects: vi.fn((testFile: string) => state.subjectsByTest.get(testFile) ?? []),
-  cargoIntegrationCrateRoot: vi.fn((filePath: string) => {
-    const marker = '/tests/';
-    const idx = filePath.indexOf(marker);
-    return idx >= 0 ? filePath.slice(0, idx) : null;
-  }),
-  findRustCrateEntryPoint: vi.fn((crateRoot: string, allFilePaths: Set<string>) => {
-    const lib = `${crateRoot}/src/lib.rs`;
-    const main = `${crateRoot}/src/main.rs`;
-    if (allFilePaths.has(lib)) return lib;
-    if (allFilePaths.has(main)) return main;
-    return null;
-  }),
-  rustFileHasInlineTests: vi.fn((content: string) => state.inlineRust.has(content)),
-}));
+vi.spyOn(testsEdges, 'isTestFile').mockImplementation(
+  ((filePath: string) => /(^|\/)(__tests__|tests)\//.test(filePath) || /[._-]test\./.test(filePath)) as never,
+);
+vi.spyOn(testsEdges, 'findTestSubjects').mockImplementation(
+  ((testFile: string) => state.subjectsByTest.get(testFile) ?? []) as never,
+);
+vi.spyOn(testsEdges, 'cargoIntegrationCrateRoot').mockImplementation(((filePath: string) => {
+  const marker = '/tests/';
+  const idx = filePath.indexOf(marker);
+  return idx >= 0 ? filePath.slice(0, idx) : null;
+}) as never);
+vi.spyOn(testsEdges, 'findRustCrateEntryPoint').mockImplementation(((crateRoot: string, allFilePaths: Set<string>) => {
+  const lib = `${crateRoot}/src/lib.rs`;
+  const main = `${crateRoot}/src/main.rs`;
+  if (allFilePaths.has(lib)) return lib;
+  if (allFilePaths.has(main)) return main;
+  return null;
+}) as never);
+vi.spyOn(testsEdges, 'rustFileHasInlineTests').mockImplementation(((content: string) =>
+  state.inlineRust.has(content)) as never);
 
-vi.mock('../src/utils.js', () => ({
-  readFileSafe: vi.fn((filePath: string) => filePath),
-}));
+vi.spyOn(utils, 'readFileSafe').mockImplementation(((filePath: string) => filePath) as never);
 
 const { HOOK } = await import('../src/index-hooks/tests-edges.js');
 
@@ -68,6 +73,10 @@ beforeEach(() => {
   state.deleteSource = [];
   state.inlineRust = new Set();
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('tests-edges index hook', () => {

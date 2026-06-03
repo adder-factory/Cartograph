@@ -1,4 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as edgeQueries from '../src/db/queries-edges.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
 
 const state = {
   rows: [] as Array<{
@@ -16,18 +18,16 @@ const state = {
   metadata: new Map<string, string>(),
 };
 
-vi.mock('../src/db/queries-edges.js', () => ({
-  insertEdges: vi.fn((_queries: unknown, edges: unknown[]) => {
-    state.insertedEdges.push(edges);
-  }),
-}));
+vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edges: unknown[]) => {
+  state.insertedEdges.push(edges);
+}) as never);
 
-vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
-    state.metadata.set(key, value);
-  }),
-}));
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
+  ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
+);
+vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown, key: string, value: string) => {
+  state.metadata.set(key, value);
+}) as never);
 
 const { HOOK, NESTJS_ROUTES_ALGO_VERSION } = await import('../src/index-hooks/nestjs-routes.js');
 
@@ -60,6 +60,10 @@ beforeEach(() => {
   state.insertedEdges = [];
   state.metadata = new Map();
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('nestjs-routes index hook', () => {

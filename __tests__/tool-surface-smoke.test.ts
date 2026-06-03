@@ -54,6 +54,8 @@ import type { ToolDefinition, ToolResult } from '../src/mcp/tool-types.js';
 
 // ── safety lists ───────────────────────────────────────────────
 
+const TRACK_CONSUMED_ARGS_ENV = 'CARTOGRAPH_TRACK_CONSUMED_ARGS';
+
 /**
  * `cartograph_admin` actions that mutate or destroy the index, take
  * a long time, or reach outside the fixture. The smoke pass drives
@@ -212,6 +214,7 @@ function buildSmokeArgs(mod: ToolModule): Record<string, unknown> {
   for (const req of def.inputSchema.required ?? []) {
     if (req in args) continue;
     const schema = props[req] as { type?: string; enum?: unknown[] } | undefined;
+    if (schema && 'default' in schema) continue;
     if (schema?.enum && schema.enum.length > 0) {
       args[req] = schema.enum[0];
     } else if (schema?.type === 'number' || schema?.type === 'integer') {
@@ -225,6 +228,17 @@ function buildSmokeArgs(mod: ToolModule): Record<string, unknown> {
     }
   }
   return args;
+}
+
+async function withoutConsumedArgTracking<T>(fn: () => Promise<T>): Promise<T> {
+  const original = process.env[TRACK_CONSUMED_ARGS_ENV];
+  delete process.env[TRACK_CONSUMED_ARGS_ENV];
+  try {
+    return await fn();
+  } finally {
+    if (original === undefined) delete process.env[TRACK_CONSUMED_ARGS_ENV];
+    else process.env[TRACK_CONSUMED_ARGS_ENV] = original;
+  }
 }
 
 // ── fixture repo ───────────────────────────────────────────────
@@ -380,9 +394,11 @@ describe('MCP tool surface — numeric property fuzz', () => {
           const args = { ...baseArgs, [prop]: value };
           // `runHandler` bypasses schema validation so the adversarial
           // value reaches the handler body — that body is the thing
-          // being stress-tested. A throw here is a real bug.
+          // being stress-tested. Disable consumed-arg tracking for this
+          // block because fuzz deliberately sends mode/action-irrelevant
+          // fields; the dedicated consumed-args tests own contract checks.
           try {
-            const result = await handler.runHandler(name, args);
+            const result = await withoutConsumedArgTracking(() => handler.runHandler(name, args));
             // Result need not be successful — error is fine — but it
             // must be a well-formed ToolResult, not undefined/garbage.
             if (!result || !Array.isArray(result.content) || result.content.length === 0) {

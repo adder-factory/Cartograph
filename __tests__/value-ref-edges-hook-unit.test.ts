@@ -1,7 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as dbIndex from '../src/db/index.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
+import * as searchQueries from '../src/db/queries-search.js';
+import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 const state = {
@@ -18,24 +22,22 @@ vi.mock('../src/algo-hash.js', () => ({
   computeAlgoHash: vi.fn(() => 'value-ref-algo-test'),
 }));
 
-vi.mock('../src/db/index.js', () => ({
-  getDatabasePath: vi.fn((projectRoot: string) => `${projectRoot}/.cartograph/cartograph.db`),
-}));
+vi.spyOn(dbIndex, 'getDatabasePath').mockImplementation(
+  ((projectRoot: string) => `${projectRoot}/.cartograph/cartograph.db`) as never,
+);
 
-vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
-    state.calls.push({ name: 'setMetadata', value: { key, value } });
-    if (state.throwSetMetadata) throw new Error('metadata locked');
-    state.metadata.set(key, value);
-  }),
-}));
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
+  ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
+);
+vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown, key: string, value: string) => {
+  state.calls.push({ name: 'setMetadata', value: { key, value } });
+  if (state.throwSetMetadata) throw new Error('metadata locked');
+  state.metadata.set(key, value);
+}) as never);
 
-vi.mock('../src/db/queries-search.js', () => ({
-  getSymbolNameIndexByFile: vi.fn(
-    (_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map(),
-  ),
-}));
+vi.spyOn(searchQueries, 'getSymbolNameIndexByFile').mockImplementation(
+  ((_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map()) as never,
+);
 
 vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
   shouldUseValueRefWorkers: vi.fn(() => state.useWorkers),
@@ -47,7 +49,10 @@ vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
+  collectTargets: vi.fn(),
+  lookupSymbolByNameInFile: vi.fn(),
   yieldToEventLoop: vi.fn(async () => state.calls.push({ name: 'yieldToEventLoop' })),
+  resolveTargetFile: vi.fn(),
   refreshEdgesHook: vi.fn(
     async (args: {
       ctx: IndexHookContext;
@@ -66,10 +71,8 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   ),
 }));
 
-vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
+  state.calls.push({ name: 'logDebug', value: message })) as never);
 
 const { HOOK, VALUE_REF_EDGES_ALGO_VERSION } = await import('../src/index-hooks/value-ref-edges.js');
 
@@ -92,6 +95,10 @@ beforeEach(() => {
   state.nameIndexes.clear();
   state.throwSetMetadata = false;
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('value-ref-edges hook orchestration', () => {

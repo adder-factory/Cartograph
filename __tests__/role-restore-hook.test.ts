@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/registry.js';
 
 const state = {
@@ -8,10 +9,7 @@ const state = {
   calls: [] as string[],
 };
 
-vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.calls.push(message)),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) => state.calls.push(message)) as never);
 
 const { HOOK } = await import('../src/index-hooks/role-restore.js');
 
@@ -46,6 +44,10 @@ beforeEach(() => {
   state.throwOnTableCheck = false;
   state.calls = [];
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('role-restore hook', () => {

@@ -1,10 +1,13 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as treeSitterHelpers from '../src/extraction/tree-sitter-helpers.js';
 
-vi.mock('../src/extraction/tree-sitter-helpers.js', () => ({
-  getNodeText: vi.fn((node: { text?: string }) => node.text ?? ''),
-  getChildByField: vi.fn((node: { fields?: Record<string, unknown> }, field: string) => node.fields?.[field] ?? null),
-  getPrecedingDocstring: vi.fn((node: { doc?: string }) => node.doc),
-}));
+vi.spyOn(treeSitterHelpers, 'getNodeText').mockImplementation(((node: { text?: string }) => node.text ?? '') as never);
+vi.spyOn(treeSitterHelpers, 'getChildByField').mockImplementation(
+  ((node: { fields?: Record<string, unknown> }, field: string) => node.fields?.[field] ?? null) as never,
+);
+vi.spyOn(treeSitterHelpers, 'getPrecedingDocstring').mockImplementation(
+  ((node: { doc?: string }) => node.doc) as never,
+);
 
 const { RESCRIPT_DEF } = await import('../src/extraction/languages/rescript.js');
 
@@ -80,6 +83,10 @@ const extractor = RESCRIPT_DEF.grammar.extractor;
 describe('ReScript language extractor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  afterAll(() => {
+    vi.restoreAllMocks();
   });
 
   it('extracts imports, signatures, and async markers', () => {

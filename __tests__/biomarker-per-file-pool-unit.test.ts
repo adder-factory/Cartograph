@@ -1,4 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as errorModule from '../src/errors.js';
+import * as workerSlice from '../src/utils/worker-slice.js';
 
 const state = {
   replies: [] as Array<{ ok: true; results: unknown[] } | { ok: false; error: string }>,
@@ -6,18 +8,18 @@ const state = {
   logs: [] as string[],
 };
 
-vi.mock('../src/utils/worker-slice.js', () => ({
-  runWorkerSlice: vi.fn(async (args: { workerData: unknown; timeoutMs: number; sliceLabel: string }) => {
-    state.workerCalls.push(args);
-    const reply = state.replies.shift();
-    if (!reply) return { ok: true, results: [] };
-    return reply;
-  }),
-}));
+vi.spyOn(workerSlice, 'runWorkerSlice').mockImplementation((async (args: {
+  workerData: unknown;
+  timeoutMs: number;
+  sliceLabel: string;
+}) => {
+  state.workerCalls.push(args);
+  const reply = state.replies.shift();
+  if (!reply) return { ok: true, results: [] };
+  return reply;
+}) as never);
 
-vi.mock('../src/errors.js', () => ({
-  logDebug: vi.fn((message: string) => state.logs.push(message)),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) => state.logs.push(message)) as never);
 
 const { PER_FILE_WORKER_THRESHOLD, runPerFileBiomarkersInWorkers, shouldUsePerFileWorkers } = await import(
   '../src/biomarkers/per-file-pool.js'
@@ -40,6 +42,7 @@ beforeEach(() => {
 
 afterAll(() => {
   setWorkers(ORIGINAL_WORKERS);
+  vi.restoreAllMocks();
 });
 
 describe('biomarker per-file worker pool', () => {

@@ -1,4 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as directorySummaryQueries from '../src/db/queries-directory-summaries.js';
+import * as fileSummaryQueries from '../src/db/queries-file-summaries.js';
+import * as llmPass from '../src/cartograph-llm-pass.js';
+import * as askModule from '../src/llm/ask.js';
+import * as changeIntent from '../src/llm/change-intent.js';
+import * as classifier from '../src/llm/classifier.js';
+import * as llmClient from '../src/llm/client.js';
+import * as deadCode from '../src/llm/dead-code.js';
+import * as dirSummarizer from '../src/llm/dir-summarizer.js';
+import * as embeddingClient from '../src/llm/embedding-client.js';
+import * as fileSummarizer from '../src/llm/file-summarizer.js';
+import * as naming from '../src/llm/naming.js';
+import * as summarizer from '../src/llm/summarizer.js';
 import type { ResolvedLlm } from '../src/llm/provider.js';
 
 const state = {
@@ -19,129 +32,91 @@ const state = {
   changeCalls: [] as unknown[],
 };
 
-vi.mock('../src/llm/client.js', () => ({
-  LlmEndpointError: class extends Error {},
-  BATCH_PARSE_FAILURE_LOG_CHARS: 120,
-  normalizeEndpointConfig: (c: unknown) => c,
-  LlmClient: class {
-    async isReachable(): Promise<boolean> {
-      return state.reachable;
-    }
+vi.spyOn(llmClient.LlmClient.prototype, 'isReachable').mockImplementation(async () => state.reachable);
+vi.spyOn(llmClient.LlmClient.prototype, 'chat').mockImplementation(async (messages: unknown, options: unknown) => {
+  state.chatCalls.push({ messages, options });
+  return { text: 'local chat reply', durationMs: 11 };
+});
 
-    async chat(messages: unknown, options: unknown): Promise<{ text: string; durationMs: number }> {
-      state.chatCalls.push({ messages, options });
-      return { text: 'local chat reply', durationMs: 11 };
-    }
-  },
-}));
+vi.spyOn(embeddingClient, 'createEmbeddingClient').mockImplementation((() => ({
+  isConfigured: true,
+  isReachable: vi.fn(async () => true),
+  reachabilityError: vi.fn(() => null),
+  listModels: vi.fn(async () => []),
+  embed: vi.fn(async () => []),
+})) as never);
 
-vi.mock('../src/llm/ask.js', () => ({
-  askWithCandidates: vi.fn(async (args: unknown) => {
-    state.askCalls.push(args);
-    return { answer: 'grounded answer', citations: [], context: [] };
-  }),
-}));
+vi.spyOn(askModule, 'askWithCandidates').mockImplementation((async (args: unknown) => {
+  state.askCalls.push(args);
+  return { answer: 'grounded answer', citations: [], context: [] };
+}) as never);
 
-vi.mock('../src/llm/dead-code.js', () => ({
-  judgeDeadCode: vi.fn(async (...args: unknown[]) => {
-    state.deadCodeCalls.push(args);
-    return { candidates: [], judged: [], errors: 0 };
-  }),
-}));
+vi.spyOn(deadCode, 'judgeDeadCode').mockImplementation((async (...args: unknown[]) => {
+  state.deadCodeCalls.push(args);
+  return { candidates: [], judged: [], errors: 0 };
+}) as never);
 
-vi.mock('../src/llm/naming.js', () => ({
-  checkNamingConvention: vi.fn(async (args: unknown) => {
-    state.namingCalls.push(args);
-    return { consistent: true, suggestion: '', reason: 'ok', examples: [], durationMs: 4 };
-  }),
-}));
+vi.spyOn(naming, 'checkNamingConvention').mockImplementation((async (args: unknown) => {
+  state.namingCalls.push(args);
+  return { consistent: true, suggestion: '', reason: 'ok', examples: [], durationMs: 4 };
+}) as never);
 
-vi.mock('../src/llm/change-intent.js', () => ({
-  summarizeChange: vi.fn(async (args: unknown) => {
-    state.changeCalls.push(args);
-    return { intent: 'Adds useful behavior', durationMs: 6 };
-  }),
-}));
+vi.spyOn(changeIntent, 'summarizeChange').mockImplementation((async (args: unknown) => {
+  state.changeCalls.push(args);
+  return { intent: 'Adds useful behavior', durationMs: 6 };
+}) as never);
 
-vi.mock('../src/llm/summarizer.js', () => ({
-  SUMMARIZABLE_KINDS: new Set(['function', 'class', 'method', 'route']),
-  MIN_BODY_LINES: 4,
-  MIN_BODY_LINES_BY_KIND: new Map([['route', 1]]),
-  DEFAULT_DOC_CHAR_THRESHOLD: 20,
-  buildSummaryUserPrompt: vi.fn(() => 'prompt'),
-  parseBatchSummaries: vi.fn(() => new Map()),
-  contentHashFor: vi.fn(() => 'hash'),
-  stripPreamble: vi.fn((s: string) => s),
-  summarizeAll: vi.fn(async (args: unknown) => {
-    state.summarizeCalls.push(args);
-    return state.summaryResult;
-  }),
-}));
+vi.spyOn(summarizer, 'summarizeAll').mockImplementation((async (args: unknown) => {
+  state.summarizeCalls.push(args);
+  return state.summaryResult;
+}) as never);
 
-vi.mock('../src/llm/file-summarizer.js', () => ({
-  summarizeAllFiles: vi.fn(async (args: unknown) => {
-    state.fileSummaryCalls.push(args);
-  }),
-}));
+vi.spyOn(fileSummarizer, 'summarizeAllFiles').mockImplementation((async (args: unknown) => {
+  state.fileSummaryCalls.push(args);
+}) as never);
 
-vi.mock('../src/db/queries-file-summaries.js', () => ({
-  pruneOrphanFileSummaries: vi.fn(() => {
-    state.filePrunes++;
-  }),
-}));
+vi.spyOn(fileSummaryQueries, 'pruneOrphanFileSummaries').mockImplementation((() => {
+  state.filePrunes++;
+}) as never);
 
-vi.mock('../src/llm/dir-summarizer.js', () => ({
-  summarizeAllDirectories: vi.fn(async (args: unknown) => {
-    state.dirSummaryCalls.push(args);
-  }),
-}));
+vi.spyOn(dirSummarizer, 'summarizeAllDirectories').mockImplementation((async (args: unknown) => {
+  state.dirSummaryCalls.push(args);
+}) as never);
 
-vi.mock('../src/db/queries-directory-summaries.js', () => ({
-  pruneOrphanDirectorySummaries: vi.fn(() => {
-    state.dirPrunes++;
-  }),
-}));
+vi.spyOn(directorySummaryQueries, 'pruneOrphanDirectorySummaries').mockImplementation((() => {
+  state.dirPrunes++;
+}) as never);
 
-vi.mock('../src/llm/classifier.js', () => ({
-  ROLE_LABELS: ['api', 'utility', 'domain', 'infra', 'test', 'unknown'],
-  STRUCTURAL_ROLE_MODEL: 'structural:v2',
-  API_PARAM_DECORATOR_RE: /(?:^|[\s([{,])(?:[A-Z][A-Za-z0-9_]*Decorator|Param)\b/,
-  classifyByStructure: vi.fn(() => null),
-  sanitizeApiEndpointRole: vi.fn((role: string) => role),
-  parseBatchRoles: vi.fn(() => new Map()),
-  classifyAllRoles: vi.fn(async (args: unknown) => {
-    state.classifyCalls.push(args);
-    return { candidates: 3, classified: 2, cacheHits: 1, errors: 0, durationMs: 5 };
-  }),
-}));
+vi.spyOn(classifier, 'classifyAllRoles').mockImplementation((async (args: unknown) => {
+  state.classifyCalls.push(args);
+  return { candidates: 3, classified: 2, cacheHits: 1, errors: 0, durationMs: 5 };
+}) as never);
 
-vi.mock('../src/cartograph-llm-pass.js', () => ({
-  probeChatBackend: vi.fn(async () => state.probeReachable),
-  runStructuralPhase: vi.fn(async () => {
-    state.phaseCalls.push('structural');
-  }),
-  runEmbedPhase: vi.fn(async () => {
-    state.phaseCalls.push('embed');
-  }),
-  runNeighborPropagationPhase: vi.fn(async () => {
-    state.phaseCalls.push('neighbor');
-  }),
-  runSummaryPhase: vi.fn(async () => {
-    state.phaseCalls.push('summary');
-  }),
-  runFileSummaryPhase: vi.fn(async () => {
-    state.phaseCalls.push('file');
-  }),
-  runDirectorySummaryPhase: vi.fn(async () => {
-    state.phaseCalls.push('directory');
-  }),
-  runClassifyPhase: vi.fn(async () => {
-    state.phaseCalls.push('classify');
-  }),
-  runCommitIntentResiduePhase: vi.fn(async () => {
-    state.phaseCalls.push('commit-intent');
-  }),
-}));
+vi.spyOn(llmPass, 'probeChatBackend').mockImplementation(async () => state.probeReachable);
+vi.spyOn(llmPass, 'runStructuralPhase').mockImplementation((async () => {
+  state.phaseCalls.push('structural');
+}) as never);
+vi.spyOn(llmPass, 'runEmbedPhase').mockImplementation((async () => {
+  state.phaseCalls.push('embed');
+}) as never);
+vi.spyOn(llmPass, 'runNeighborPropagationPhase').mockImplementation((async () => {
+  state.phaseCalls.push('neighbor');
+}) as never);
+vi.spyOn(llmPass, 'runSummaryPhase').mockImplementation((async () => {
+  state.phaseCalls.push('summary');
+}) as never);
+vi.spyOn(llmPass, 'runFileSummaryPhase').mockImplementation((async () => {
+  state.phaseCalls.push('file');
+}) as never);
+vi.spyOn(llmPass, 'runDirectorySummaryPhase').mockImplementation((async () => {
+  state.phaseCalls.push('directory');
+}) as never);
+vi.spyOn(llmPass, 'runClassifyPhase').mockImplementation((async () => {
+  state.phaseCalls.push('classify');
+}) as never);
+vi.spyOn(llmPass, 'runCommitIntentResiduePhase').mockImplementation((async () => {
+  state.phaseCalls.push('commit-intent');
+}) as never);
 
 const { CartographLlmService, llmLocalChat, llmFindDeadCode, llmCheckNamingDrift, llmSummarizeChange } = await import(
   '../src/cartograph-llm-service.js'
@@ -435,4 +410,8 @@ describe('CartographLlmService summarizeAll and classifyAll', () => {
       }),
     ).rejects.toThrow(/Summarize backend not reachable/);
   });
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });

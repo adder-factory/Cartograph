@@ -1,101 +1,86 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as dbIndex from '../src/db/index.js';
+import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
+import * as summaryQueries from '../src/db/queries-summaries.js';
+import * as similarEdges from '../src/embeddings/similar-edges.js';
+import * as doctor from '../src/installer/doctor.js';
+import * as hardwareTuning from '../src/installer/hardware-tuning.js';
+import * as installModels from '../src/installer/install-models.js';
+import * as llmSetupPlan from '../src/installer/llm-setup-plan.js';
+import * as recommendedConfig from '../src/installer/recommended-config.js';
+import * as scip from '../src/scip/index.js';
 import { ADMIN_TOOL, __adminToolInternals as admin } from '../src/mcp/tools/admin.js';
 import { buildNoLlmFooter } from '../src/mcp/tools/admin.js';
 
-vi.mock('../src/embeddings/similar-edges.js', () => ({
-  buildSimilarToEdges: vi.fn(async () => ({ written: 7, processed: 3, reason: 'threshold too high for some nodes' })),
-}));
+vi.spyOn(similarEdges, 'buildSimilarToEdges').mockImplementation((async () => ({
+  written: 7,
+  processed: 3,
+  reason: 'threshold too high for some nodes',
+})) as never);
 
-vi.mock('../src/db/queries-summaries.js', () => ({
-  MS_PER_DAY: 24 * 60 * 60 * 1000,
-  PRUNE_STORE_DEFAULT_DAYS: 30,
-  pruneOrphanStoreRows: vi.fn(() => ({
-    summariesPruned: 2,
-    embeddingsPruned: 1,
-    cutoffMs: Date.UTC(2026, 0, 1),
-  })),
-}));
+vi.spyOn(summaryQueries, 'pruneOrphanStoreRows').mockImplementation((() => ({
+  summariesPruned: 2,
+  embeddingsPruned: 1,
+  cutoffMs: Date.UTC(2026, 0, 1),
+})) as never);
 
-vi.mock('../src/db/index.js', () => ({
-  dbReclaimAfterBulkDelete: vi.fn(),
-}));
+vi.spyOn(dbIndex, 'dbReclaimAfterBulkDelete').mockImplementation((() => {}) as never);
 
-vi.mock('../src/scip/index.js', () => ({
-  writeScipExport: vi.fn(() => ({
-    outPath: '/repo/index.scip',
-    stats: { documents: 2, symbols: 3, occurrences: 4, bytes: 99, disambiguated: 1 },
-  })),
-  writeScipImport: vi.fn(() => ({
-    stats: { documents: 2, files: 1, nodes: 3, edges: 4, skippedDocuments: 1, unresolvedEdges: 2 },
-  })),
-}));
+vi.spyOn(scip, 'writeScipExport').mockImplementation((() => ({
+  outPath: '/repo/index.scip',
+  stats: { documents: 2, symbols: 3, occurrences: 4, bytes: 99, disambiguated: 1 },
+})) as never);
+vi.spyOn(scip, 'writeScipImport').mockImplementation((() => ({
+  stats: { documents: 2, files: 1, nodes: 3, edges: 4, skippedDocuments: 1, unresolvedEdges: 2 },
+})) as never);
 
-vi.mock('../src/installer/install-models.js', () => ({
-  installRecommendedModels: vi.fn(async () => ({
-    downloaded: [{ filename: 'embed.gguf', sizeMb: 100, description: 'embedding model' }],
-    skipped: [{ filename: 'chat.gguf', sizeMb: 200, description: 'chat model' }],
-  })),
-}));
+vi.spyOn(installModels, 'installRecommendedModels').mockImplementation((async () => ({
+  downloaded: [{ filename: 'embed.gguf', sizeMb: 100, description: 'embedding model' }],
+  skipped: [{ filename: 'chat.gguf', sizeMb: 200, description: 'chat model' }],
+})) as never);
 
-vi.mock('../src/llm/recommended-models.js', () => ({
-  RECOMMENDED_MODELS: [{ filename: 'full.gguf' }],
-  MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
-}));
+vi.spyOn(recommendedConfig, 'writeRecommendedLlmConfig').mockImplementation((() => ({
+  configPath: '/repo/.cartograph/config.json',
+  backupPath: '/repo/.cartograph/config.json.bak',
+  diff: { addedOrUpdated: ['llm.embeddingLlm', 'llm.summarizeLlm'] },
+})) as never);
 
-vi.mock('../src/installer/recommended-config.js', () => ({
-  writeRecommendedLlmConfig: vi.fn(() => ({
-    configPath: '/repo/.cartograph/config.json',
-    backupPath: '/repo/.cartograph/config.json.bak',
-    diff: { addedOrUpdated: ['llm.embeddingLlm', 'llm.summarizeLlm'] },
-  })),
-}));
+vi.spyOn(doctor, 'runDoctor').mockImplementation((async () => ({ overallStatus: 'pass', checks: [] })) as never);
+vi.spyOn(doctor, 'formatDoctorReport').mockImplementation((() => '# Doctor\n\nAll checks passed.') as never);
 
-vi.mock('../src/installer/doctor.js', () => ({
-  runDoctor: vi.fn(async () => ({ overallStatus: 'pass', checks: [] })),
-  formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
-}));
+vi.spyOn(llmSetupPlan, 'planLlmSetup').mockImplementation((async () => ({
+  detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
+  cloudChatAvailable: { claudeBin: '/bin/claude', anthropicApiKey: true },
+  recommendedPresetId: 'install-ollama',
+  presets: [
+    {
+      id: 'install-ollama',
+      label: 'Ollama',
+      description: 'Use Ollama',
+      summary: 'Local dynamic model loading',
+      nextSteps: ['ollama pull qwen2.5-coder:3b'],
+    },
+  ],
+})) as never);
+vi.spyOn(llmSetupPlan, 'applyLlmSetupChoice').mockImplementation((async () => ({
+  applied: true,
+  preset: 'install-ollama',
+  configPath: '/repo/.cartograph/config.json',
+  backupPath: '/repo/.cartograph/config.json.bak',
+  notes: ['configured Ollama'],
+  nextSteps: ['ollama serve'],
+})) as never);
 
-vi.mock('../src/installer/llm-setup-plan.js', () => ({
-  planLlmSetup: vi.fn(async () => ({
-    detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
-    cloudChatAvailable: { claudeBin: '/bin/claude', anthropicApiKey: true },
-    recommendedPresetId: 'install-ollama',
-    presets: [
-      {
-        id: 'install-ollama',
-        label: 'Ollama',
-        description: 'Use Ollama',
-        summary: 'Local dynamic model loading',
-        nextSteps: ['ollama pull qwen2.5-coder:3b'],
-      },
-    ],
-  })),
-  applyLlmSetupChoice: vi.fn(async () => ({
-    applied: true,
-    preset: 'install-ollama',
-    configPath: '/repo/.cartograph/config.json',
-    backupPath: '/repo/.cartograph/config.json.bak',
-    notes: ['configured Ollama'],
-    nextSteps: ['ollama serve'],
-  })),
-}));
-
-vi.mock('../src/installer/hardware-tuning.js', () => ({
-  describeHardware: vi.fn(() => '8-core test host'),
-  recommendedTuning: vi.fn(() => ({
-    embed: { llamaServerParallel: 2, cartographConcurrency: 2 },
-    chat: { llamaServerParallel: 1, cartographConcurrency: 1 },
-    ask: { llamaServerParallel: 1, cartographConcurrency: 1 },
-    reranker: { llamaServerParallel: 1, cartographConcurrency: 1 },
-  })),
-}));
-
-vi.mock('../src/db/migrations.js', () => ({
-  CURRENT_SCHEMA_VERSION: 999,
-}));
+vi.spyOn(hardwareTuning, 'describeHardware').mockImplementation((() => '8-core test host') as never);
+vi.spyOn(hardwareTuning, 'recommendedTuning').mockImplementation((() => ({
+  embed: { llamaServerParallel: 2, cartographConcurrency: 2 },
+  chat: { llamaServerParallel: 1, cartographConcurrency: 1 },
+  ask: { llamaServerParallel: 1, cartographConcurrency: 1 },
+  reranker: { llamaServerParallel: 1, cartographConcurrency: 1 },
+})) as never);
 
 function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
   return result.content[0]?.text ?? '';
@@ -115,6 +100,10 @@ function fakeCtx(cg: unknown, progress: string[] = []) {
     projectCache: new Map(),
   } as any;
 }
+
+afterAll(() => {
+  vi.restoreAllMocks();
+});
 
 describe('MCP admin formatter contracts', () => {
   it('creates missing project directories and reports mkdir failures', () => {
@@ -315,7 +304,7 @@ describe('MCP admin formatter contracts', () => {
     const progress: string[] = [];
     const cg = {
       db: {
-        getSchemaVersion: () => ({ version: 999, description: 'current schema' }),
+        getSchemaVersion: () => ({ version: CURRENT_SCHEMA_VERSION, description: 'current schema' }),
       },
       llm: {
         summarizeAll: async (opts: any) => {
@@ -344,7 +333,7 @@ describe('MCP admin formatter contracts', () => {
     };
 
     const migrate = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'migrate' } as any);
-    expect(textOf(migrate)).toContain('Schema at v999');
+    expect(textOf(migrate)).toContain(`Schema at v${CURRENT_SCHEMA_VERSION}`);
     expect(textOf(migrate)).toContain('Already current');
 
     const summarize = await ADMIN_TOOL.handle(fakeCtx(cg, progress), {
