@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { registerReviewCommands } from '../src/bin/commands/review.js';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: Array<{ tool: string; args: Record<string, unknown>; projectPath?: string }> = [];
@@ -25,35 +26,36 @@ class FakeCommand {
   }
 }
 
-vi.mock('../src/bin/_cli-core.js', () => ({
-  program: new FakeCommand('program'),
-  reviewCmd: new FakeCommand('review'),
-  error: vi.fn((message: string) => errors.push(message)),
-  assignIntArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  assignFloatArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  runViaMCP: vi.fn(async (tool: string, args: Record<string, unknown>, projectPath?: string) => {
-    calls.push({ tool, args, projectPath });
-  }),
-  installFamilyActionAlias: vi.fn(),
-}));
-
-const reviewCommandModule = '../src/bin/commands/review.js?review-command-actions-unit';
-await import(reviewCommandModule);
+function loadReviewCommandActions(): void {
+  actions.clear();
+  calls.length = 0;
+  errors.length = 0;
+  process.exitCode = 0;
+  registerReviewCommands({
+    program: new FakeCommand('program'),
+    reviewCmd: new FakeCommand('review'),
+    error: vi.fn((message: string) => errors.push(message)),
+    assignIntArg: vi.fn(({ args, key, raw }) => {
+      if (raw !== undefined) args[key] = Number(raw);
+      return true;
+    }),
+    assignFloatArg: vi.fn(({ args, key, raw }) => {
+      if (raw !== undefined) args[key] = Number(raw);
+      return true;
+    }),
+    runViaMCP: vi.fn(async (tool: string, args: Record<string, unknown>, projectPath?: string) => {
+      calls.push({ tool, args, projectPath });
+    }),
+    installFamilyActionAlias: vi.fn(),
+  });
+}
 
 describe('review command action bodies', () => {
   beforeEach(() => {
-    calls.length = 0;
-    errors.length = 0;
-    process.exitCode = 0;
+    loadReviewCommandActions();
   });
 
-  it('routes context, neighbors, risk, agent-audit, and trust actions to cartograph_review', async () => {
+  it('routes review-family and similar actions through MCP payloads', async () => {
     await actions.get('context [diff-file]')!(undefined, {
       diff: '@@ -1 +1 @@\n-old\n+new',
       maxCallersPerSymbol: '2',
@@ -83,6 +85,12 @@ describe('review command action bodies', () => {
       projectPath: '/repo',
     });
     await actions.get('trust')!({
+      projectPath: '/repo',
+    });
+    await actions.get('similar <symbol>')!('alpha', {
+      topK: '6',
+      minScore: '0.72',
+      sameLanguage: true,
       projectPath: '/repo',
     });
 
@@ -125,6 +133,11 @@ describe('review command action bodies', () => {
         tool: 'cartograph_review',
         projectPath: '/repo',
         args: { mode: 'trust' },
+      },
+      {
+        tool: 'cartograph_graph',
+        projectPath: '/repo',
+        args: { direction: 'similar', start: 'alpha', k: 6, minScore: 0.72, sameLanguage: true },
       },
     ]);
   });
