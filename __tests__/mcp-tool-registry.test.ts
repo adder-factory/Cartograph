@@ -6,8 +6,13 @@
  * with the wrong shape).
  */
 import { describe, it, expect } from 'vitest';
+import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
 import { ToolHandler, tools } from '../src/mcp/tools.js';
+
+const MCP_TOOL_COUNT_BUDGET = 45;
+const MCP_TOOLS_LIST_CHAR_BUDGET = 65_000;
+const MCP_LOAD_CONTEXT_CHAR_BUDGET = 80_000;
 
 const byName = (a: string, b: string): number => a.localeCompare(b);
 
@@ -29,6 +34,20 @@ describe('MCP tool registry — single source of truth', () => {
     const fromRegistry = registryTools.map((t) => t.name).sort(byName);
     const fromExport = tools.map((t) => t.name).sort(byName);
     expect(fromExport).toEqual(fromRegistry);
+  });
+
+  it('keeps advertised MCP tool count and schema payload under budget', () => {
+    const handler = new ToolHandler(null);
+    const advertised = handler.getTools();
+    const payloadChars = JSON.stringify({ tools: advertised }).length;
+    const loadContextChars = payloadChars + JSON.stringify({ instructions: SERVER_INSTRUCTIONS }).length;
+
+    expect(advertised.length).toBeLessThanOrEqual(MCP_TOOL_COUNT_BUDGET);
+    expect(payloadChars).toBeLessThanOrEqual(MCP_TOOLS_LIST_CHAR_BUDGET);
+    expect(loadContextChars).toBeLessThanOrEqual(MCP_LOAD_CONTEXT_CHAR_BUDGET);
+
+    const readOnlyAdvertised = new ToolHandler(null, { disableWriteTools: true }).getTools();
+    expect(readOnlyAdvertised.length).toBeLessThan(advertised.length);
   });
 
   it('all main-line tools are registered (regression guard)', () => {

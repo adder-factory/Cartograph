@@ -156,7 +156,7 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
     .option('--mcp', 'Run as MCP server (stdio transport)')
     .option(
       '--no-write-tools',
-      'Disable write-class tools (cartograph_admin / _summaries / _coverage / _session / _note). Use for sandboxed read-only agents.',
+      'Disable write-class tools (cartograph_admin / _summaries / _coverage / _session / _note). Use for sandboxed read-only agents and smaller MCP load context.',
     )
     .option(
       '--allow-stale-default',
@@ -164,7 +164,7 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
     )
     .option(
       '--disable-tool <name...>',
-      'Disable specific tools by name. Repeatable: `--disable-tool cartograph_ask --disable-tool cartograph_dead_code`.',
+      'Disable specific tools by name to narrow the advertised MCP surface. Repeatable: `--disable-tool cartograph_ask --disable-tool cartograph_dead_code`.',
     )
     .option(
       '--no-startup-sync',

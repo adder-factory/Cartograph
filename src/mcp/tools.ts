@@ -52,6 +52,37 @@ export const tools: ToolDefinition[] = registryTools.slice();
 import { getExploreBudget } from './tools/explore-budget.js';
 export { getExploreBudget } from './tools/explore-budget.js';
 
+const MCP_TOOL_DESCRIPTION_MAX_CHARS = 260;
+const MCP_SCHEMA_DESCRIPTION_MAX_CHARS = 120;
+const TRUNCATED_DESCRIPTION_SUFFIX = '...';
+
+function compactMcpDescription(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `${text.slice(0, maxChars - TRUNCATED_DESCRIPTION_SUFFIX.length).trimEnd()}${TRUNCATED_DESCRIPTION_SUFFIX}`;
+}
+
+function compactMcpSchemaDescriptions(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => compactMcpSchemaDescriptions(item));
+  if (!value || typeof value !== 'object') return value;
+
+  const out: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    out[key] =
+      key === 'description' && typeof item === 'string'
+        ? compactMcpDescription(item, MCP_SCHEMA_DESCRIPTION_MAX_CHARS)
+        : compactMcpSchemaDescriptions(item);
+  }
+  return out;
+}
+
+function compactMcpToolDefinition(tool: ToolDefinition): ToolDefinition {
+  return {
+    ...tool,
+    description: compactMcpDescription(tool.description, MCP_TOOL_DESCRIPTION_MAX_CHARS),
+    inputSchema: compactMcpSchemaDescriptions(tool.inputSchema) as ToolDefinition['inputSchema'],
+  };
+}
+
 /**
  * Tool handler that executes tools against a Cartograph instance
  *
@@ -548,21 +579,22 @@ export class ToolHandler {
    */
   getTools(): ToolDefinition[] {
     const filtered = tools.filter((t) => !toolHandlerIsDisabled(this.options, t.name));
-    if (!this.cg) return filtered;
+    if (!this.cg) return filtered.map(compactMcpToolDefinition);
     try {
       const stats = this.cg.stats.getStats();
       const budget = getExploreBudget(stats.fileCount);
-      return filtered.map((tool) => {
+      const withDynamicDescriptions = filtered.map((tool) => {
         if (tool.name === 'cartograph_explore') {
           return {
             ...tool,
-            description: `${tool.description} Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed).`,
+            description: `Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed). ${tool.description}`,
           };
         }
         return tool;
       });
+      return withDynamicDescriptions.map(compactMcpToolDefinition);
     } catch {
-      return filtered;
+      return filtered.map(compactMcpToolDefinition);
     }
   }
 

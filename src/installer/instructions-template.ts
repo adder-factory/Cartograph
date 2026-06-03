@@ -44,6 +44,8 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, \`cartograph_at_range\`, \`cartograph_node\`, \`cartograph_files\`, and \`cartograph_imports\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
 
+If you control the MCP server launch, \`cartograph serve --mcp --no-write-tools\` and repeated \`--disable-tool <name>\` also reduce the advertised tool list loaded at connection time.
+
 | Tool | Use For |
 |------|---------|
 | \`cartograph_find\` | Find symbols by name / regex / env-var / SQL ref (\`by:\` slice + \`mode:\`) |
