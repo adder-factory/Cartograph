@@ -387,8 +387,9 @@ async function toolHandlerAttemptAutoSync(
       if (timeoutId) clearTimeout(timeoutId);
     }
     const f2 = cg.stats.getFreshness();
+    const syncedCount = freshnessSyncCandidateCount(f);
     return {
-      banner: `> ✓ Auto-synced ${f.filesChanged ?? '?'} file(s) before query.`,
+      banner: `> ✓ Auto-synced ${syncedCount ?? '?'} file(s) before query.`,
       freshnessMeta: f2 ? toFreshnessMetadata(f2, { autoSynced: true }) : null,
     };
   } catch {
@@ -397,7 +398,7 @@ async function toolHandlerAttemptAutoSync(
     // — the original banner says "run cartograph sync" (CLI), which is
     // not what an agent reading the banner from MCP should do.
     const cliHint = /run `cartograph sync`\.?$/;
-    const baseBanner = f.banner ? f.banner.replace(cliHint, '').trimEnd() : null;
+    const baseBanner = f.banner ? f.banner.replace(cliHint, '').trimEnd() : freshnessRiskBannerForMcp(f);
     const augmented = baseBanner
       ? baseBanner +
         ` Auto-sync exceeded ${AUTO_SYNC_TIMEOUT_MS}ms — call \`cartograph_admin({action: 'sync'})\` to refresh manually.`
@@ -424,10 +425,10 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
   const f = cg.stats.getFreshness();
   if (!f) return PASS_THROUGH;
 
-  if (!allowStale && f.isStale && toolRequiresFreshIndex(mod, args)) {
+  if (!allowStale && hasFreshnessRisk(f) && toolRequiresFreshIndex(mod, args)) {
     if (shouldAutoSync(f)) {
       const synced = await toolHandlerAttemptAutoSync(cg, f);
-      if (synced.freshnessMeta?.isStale !== true) {
+      if (!metadataHasFreshnessRisk(synced.freshnessMeta)) {
         return { blockResult: null, ...synced };
       }
     }
@@ -444,7 +445,7 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
     };
   }
 
-  if (!allowStale && f.isStale && shouldBlockOnHeavyDrift(f)) {
+  if (!allowStale && hasFreshnessRisk(f) && shouldBlockOnHeavyDrift(f)) {
     return {
       blockResult: {
         ...errorResult(
@@ -460,7 +461,7 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
     };
   }
 
-  if (!allowStale && f.isStale && shouldAutoSync(f)) {
+  if (!allowStale && hasFreshnessRisk(f) && shouldAutoSync(f)) {
     const synced = await toolHandlerAttemptAutoSync(cg, f);
     return { blockResult: null, ...synced };
   }
@@ -469,7 +470,7 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
   // unknown). The stale banner from freshness.ts ends with "run
   // `cartograph sync`" (CLI). Rewrite to MCP-side guidance so an agent
   // reading the banner from the MCP transport gets the right call.
-  return { blockResult: null, banner: rewriteStaleBannerForMcp(f.banner), freshnessMeta: toFreshnessMetadata(f) };
+  return { blockResult: null, banner: freshnessRiskBannerForMcp(f), freshnessMeta: toFreshnessMetadata(f) };
 }
 
 function toolRequiresFreshIndex(mod: ToolModule | undefined, args: Record<string, unknown>): boolean {
@@ -822,15 +823,33 @@ const AUTO_SYNC_TIMEOUT_MS = 10_000;
 const BLOCK_MAX_FILES = 100;
 const BLOCK_MAX_COMMITS = 20;
 
+function contentDriftCount(f: import('../freshness.js').FreshnessInfo): number {
+  return f.contentDriftedFiles ?? 0;
+}
+
+function hasFreshnessRisk(f: import('../freshness.js').FreshnessInfo): boolean {
+  return f.isStale || contentDriftCount(f) > 0;
+}
+
+function metadataHasFreshnessRisk(meta: import('./tool-types.js').FreshnessMetadata | null): boolean {
+  return meta?.recommendedAction === 'sync' || meta?.recommendedAction === 'sync_required';
+}
+
+function freshnessSyncCandidateCount(f: import('../freshness.js').FreshnessInfo): number | null {
+  if (f.filesChanged != null && f.filesChanged > 0) return f.filesChanged;
+  const drifted = contentDriftCount(f);
+  return drifted > 0 ? drifted : null;
+}
+
 function shouldAutoSync(f: import('../freshness.js').FreshnessInfo): boolean {
-  if (!f.isStale) return false;
-  if (f.filesChanged == null) return false;
-  return f.filesChanged > 0 && f.filesChanged <= AUTO_SYNC_MAX_FILES;
+  const candidates = freshnessSyncCandidateCount(f);
+  if (candidates == null) return false;
+  return candidates <= AUTO_SYNC_MAX_FILES;
 }
 
 function shouldBlockOnHeavyDrift(f: import('../freshness.js').FreshnessInfo): boolean {
-  if (!f.isStale) return false;
   if (f.filesChanged != null && f.filesChanged > BLOCK_MAX_FILES) return true;
+  if (contentDriftCount(f) > BLOCK_MAX_FILES) return true;
   if (f.commitsAhead != null && f.commitsAhead > BLOCK_MAX_COMMITS) return true;
   return false;
 }
@@ -838,8 +857,21 @@ function shouldBlockOnHeavyDrift(f: import('../freshness.js').FreshnessInfo): bo
 function describeDrift(f: import('../freshness.js').FreshnessInfo): string {
   const bits: string[] = [];
   if (f.commitsAhead != null) bits.push(`${f.commitsAhead} commits ahead`);
-  if (f.filesChanged != null) bits.push(`${f.filesChanged} files changed`);
+  if (f.filesChanged != null && f.filesChanged > 0) bits.push(`${f.filesChanged} files changed`);
+  const drifted = contentDriftCount(f);
+  if (drifted > 0) bits.push(`${drifted} content-drifted file${drifted === 1 ? '' : 's'}`);
   return bits.length > 0 ? bits.join(', ') : 'large drift';
+}
+
+function freshnessRiskBannerForMcp(f: import('../freshness.js').FreshnessInfo): string | null {
+  const rewritten = rewriteStaleBannerForMcp(f.banner);
+  if (rewritten) return rewritten;
+  const drifted = contentDriftCount(f);
+  if (drifted <= 0) return null;
+  return (
+    `> ⚠ Index content drift — ${drifted} file${drifted === 1 ? '' : 's'} content-drifted on disk vs indexed ` +
+    "`content_hash`; call `cartograph_changed_since` to inspect paths, then `cartograph_admin({action: 'sync'})`."
+  );
 }
 
 function toFreshnessMetadata(
@@ -865,7 +897,8 @@ function freshnessRecommendedAction(
   f: import('../freshness.js').FreshnessInfo,
   extra?: { autoSynced?: boolean; blocked?: boolean },
 ): import('./tool-types.js').FreshnessMetadata['recommendedAction'] {
-  if (extra?.autoSynced || !f.isStale) return 'none';
   if (extra?.blocked || shouldBlockOnHeavyDrift(f)) return 'sync_required';
-  return 'sync';
+  if (hasFreshnessRisk(f)) return 'sync';
+  if (extra?.autoSynced) return 'none';
+  return 'none';
 }

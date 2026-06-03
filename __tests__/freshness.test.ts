@@ -292,7 +292,7 @@ describe('Freshness Gate', () => {
       fs.utimesSync(aPath, future, future);
 
       cg.stats.invalidateFreshness();
-      const result = await handler.execute('cartograph_context', { task: 'alpha' });
+      const result = await handler.execute('cartograph_context', { task: 'alpha', allowStale: true });
       const text = (result.content[0] as { text?: string }).text ?? '';
       expect(text).toMatch(/Stale results.*src\/a\.ts/);
     });
@@ -320,7 +320,7 @@ describe('Freshness Gate', () => {
       // value — index lags disk, but the user never edited.
       cg.queries.db.prepare("UPDATE files SET content_hash = 'forced-drift' WHERE path = ?").run('src/a.ts');
       cg.stats.invalidateFreshness();
-      const result = await handler.execute('cartograph_context', { task: 'alpha' });
+      const result = await handler.execute('cartograph_context', { task: 'alpha', allowStale: true });
       const text = (result.content[0] as { text?: string }).text ?? '';
       // New wording — the file is in the porcelain-clean side, so the
       // "index lags disk" branch must fire (not the "user edit" branch).
@@ -532,6 +532,16 @@ describe('Freshness Gate', () => {
     let testDir: string;
     let cg: Cartograph;
 
+    function forceCleanGitContentDrift(paths: string[]): void {
+      const future = Math.floor(Date.now() / 1000) + 60;
+      const update = cg.queries.db.prepare('UPDATE files SET content_hash = ? WHERE path = ?');
+      for (const rel of paths) {
+        fs.utimesSync(path.join(testDir, rel), future, future);
+        update.run(`forced-drift-${rel}`, rel);
+      }
+      cg.stats.invalidateFreshness();
+    }
+
     beforeEach(async () => {
       testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-freshness-drift-'));
       const srcDir = path.join(testDir, 'src');
@@ -572,6 +582,75 @@ describe('Freshness Gate', () => {
       // ...but the git-independent per-file re-hash flags the drift, so
       // getFreshnessInfo no longer hands status a clean bill of health.
       expect(f!.contentDriftedFiles).toBe(1);
+    });
+
+    it('empty-result freshness hint warns on clean-git content drift', async () => {
+      // Simulate the index lagging disk while git stays clean: the file
+      // content is unchanged, but the indexed content_hash is wrong and the
+      // mtime moved far enough for isFileStale's hash check to run.
+      const { ToolHandler } = await import('../src/mcp/tools.js');
+      forceCleanGitContentDrift(['src/a.ts']);
+
+      const f = cg.stats.getFreshness();
+      expect(f!.isStale).toBe(false);
+      expect(f!.contentDriftedFiles).toBe(1);
+
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_find', {
+        by: 'name',
+        query: 'definitelyNoSuchSymbol',
+        allowStale: true,
+      });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain('Index content drift');
+      expect(text).toContain('cartograph_changed_since');
+      expect(text).not.toContain('true negative');
+      expect(result.metadata?.freshness?.contentDriftedFiles).toBe(1);
+      expect(result.metadata?.freshness?.recommendedAction).toBe('sync');
+    });
+
+    it('auto-syncs clean-git content drift on normal read tools', async () => {
+      const { ToolHandler } = await import('../src/mcp/tools.js');
+      forceCleanGitContentDrift(['src/a.ts']);
+
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
+      const text = result.content[0]?.text ?? '';
+      expect(result.isError).toBeFalsy();
+      expect(text).toContain('Auto-synced 1 file');
+      expect(text).toContain('alpha');
+      expect(result.metadata?.freshness?.autoSynced).toBe(true);
+      expect(result.metadata?.freshness?.contentDriftedFiles).toBe(0);
+      expect(result.metadata?.freshness?.recommendedAction).toBe('none');
+      expect(cg.stats.getFreshness()!.contentDriftedFiles).toBe(0);
+    });
+
+    it('blocks very large clean-git content drift unless allowStale is explicit', async () => {
+      const extraPaths: string[] = [];
+      for (let i = 0; i < 101; i++) {
+        const rel = `src/drift${i}.ts`;
+        extraPaths.push(rel);
+        fs.writeFileSync(path.join(testDir, rel), `export const drift${i} = ${i};\n`);
+      }
+      git(testDir, 'add', '.');
+      git(testDir, 'commit', '-q', '-m', 'add drift corpus');
+      await cg.indexAll({ summarize: false });
+      forceCleanGitContentDrift(['src/a.ts', ...extraPaths]);
+
+      const f = cg.stats.getFreshness();
+      expect(f!.isStale).toBe(false);
+      expect(f!.contentDriftedFiles).toBe(102);
+
+      const { ToolHandler } = await import('../src/mcp/tools.js');
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
+      const text = result.content[0]?.text ?? '';
+      expect(result.isError).toBe(true);
+      expect(text).toContain('too stale');
+      expect(text).toContain('102 content-drifted files');
+      expect(result.metadata?.freshness?.blocked).toBe(true);
+      expect(result.metadata?.freshness?.contentDriftedFiles).toBe(102);
+      expect(result.metadata?.freshness?.recommendedAction).toBe('sync_required');
     });
   });
 });

@@ -55,6 +55,7 @@ const STALE_FILES_CHANGED = 10;
 export type FreshnessSeverity = 'fresh' | 'recent' | 'stale' | 'very_stale';
 
 export interface FreshnessInfo {
+  /** HEAD-level staleness only. Per-file disk-vs-index drift lives in `contentDriftedFiles`. */
   isStale: boolean;
   indexedSha: string | null;
   currentSha: string | null;

@@ -211,6 +211,7 @@ describe('Real-work fixes', () => {
       const result = await handler.execute('cartograph_node', {
         symbol: 'GenerateHandler',
         code: true,
+        allowStale: true,
       });
       const text = (result.content[0] as { text?: string }).text ?? '';
       // New contract (2026-05-14): a body fence IS emitted AND a
@@ -242,6 +243,7 @@ describe('Real-work fixes', () => {
       const result = await handler.execute('cartograph_node', {
         symbol: 'GenerateHandler',
         code: true,
+        allowStale: true,
       });
       const text = (result.content[0] as { text?: string }).text ?? '';
       // Fenced code block must be present — the body was rendered

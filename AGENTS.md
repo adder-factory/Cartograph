@@ -1,5 +1,10 @@
 # AGENTS.md — install + bootstrap cartograph from an AI assistant
 
+## Session handoff trigger
+
+If the user says exactly `go`, read `NEXT_SESSION_GO.md` and begin the
+first unchecked task listed there.
+
 This file is for AI assistants (Claude Code, Cursor, Windsurf, etc.)
 helping a user install cartograph. The instructions are written
 sequentially so they can be followed mechanically: run a command,

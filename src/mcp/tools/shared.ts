@@ -454,8 +454,8 @@ export function formatRefSiteLine<T extends RefSite>(
  *
  * Returns:
  *   - empty string when no signal can be derived (no git, no metadata).
- *   - "Index in sync" line when the index matches HEAD — the empty
- *     result is a true negative; don't waste a sync round-trip.
+ *   - "Index in sync" line when the index matches HEAD and disk — the
+ *     empty result is a true negative; don't waste a sync round-trip.
  *   - "Index lagging" warning when the index is behind by enough that
  *     the empty result might be a freshness gap; agent can rerun after
  *     `cartograph_admin({action: 'sync'})`.
@@ -474,15 +474,22 @@ export function freshnessHintForEmptyResult(cg: Cartograph): string {
     }
     return `\n\n> ⚠ Index lagging${filesNote} — this empty result may be a freshness gap. Run \`cartograph_admin({action: 'sync'})\` and retry if you expected matches.`;
   }
-  // `getFreshness()` compares only the indexed-vs-current HEAD SHA — it
-  // does NOT see working-tree drift. A just-created or just-edited file
-  // (or one the file watcher has not synced yet) is invisible to
-  // `isStale`, so only claim a true negative when the working tree is
-  // also clean; otherwise the symbol may simply not be indexed yet.
+  // `isStale` compares only the indexed-vs-current HEAD SHA. A just-created
+  // or just-edited file may still be invisible to that flag, so hedge true
+  // negatives against git-side working-tree changes and the hash-drift
+  // counter below.
   if (hasUncommittedChanges(cg.projectRoot)) {
     return "\n\n> ⚠ Uncommitted changes on disk — a file you just created or edited may not be indexed yet. Run `cartograph_admin({action: 'sync'})` and retry if you expected a match.";
   }
-  // In-sync AND a clean working tree: the negative is real — don't sync.
+  const drifted = f.contentDriftedFiles ?? 0;
+  if (drifted > 0) {
+    return (
+      `\n\n> ⚠ Index content drift (${drifted} file${drifted === 1 ? '' : 's'} content-drifted on disk vs the index) — ` +
+      'this empty result may be a freshness gap. Run `cartograph_changed_since` to inspect paths, then ' +
+      "`cartograph_admin({action: 'sync'})` and retry if you expected a match."
+    );
+  }
+  // In-sync, clean working tree, AND no content-hash drift: the negative is real — don't sync.
   return '\n\n> _Index in sync — empty result is a true negative, not a freshness gap._';
 }
 

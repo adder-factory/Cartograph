@@ -113,7 +113,7 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
   it('code output warns when the source file changed after indexing', async () => {
     fs.appendFileSync(path.join(dir, 'src', 'core.ts'), '\nexport const changedAfterIndex = true;\n');
 
-    const result = await handler.execute('cartograph_node', { symbol: 'alpha', code: true });
+    const result = await handler.execute('cartograph_node', { symbol: 'alpha', code: true, allowStale: true });
     const text = result.content[0]?.text ?? '';
 
     expect(text).toContain('source from indexed snapshot');
