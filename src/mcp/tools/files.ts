@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import { z } from 'zod';
-import { projectPathField } from './_common-fields.js';
+import { projectPathField, lowTokensField } from './_common-fields.js';
 import { globToSafeRegex } from '../../utils.js';
 import { pathFilterStripHint } from './shared.js';
 import { renderToolResponse } from './_response.js';
@@ -58,6 +58,7 @@ export function filterFilesByDir<T extends { path: string }>(files: ReadonlyArra
  * stays readable.
  */
 const MAX_FILES_FOR_INLINE_SUMMARY = 80;
+const LOW_TOKEN_FILES_MAX_DEPTH = 3;
 
 function formatFilesFlat(files: FileRow[], includeMetadata: boolean, summaries?: Map<string, string>): string {
   const lines: string[] = [`## Files (${files.length})`, ''];
@@ -431,12 +432,12 @@ const filesSchema = z.object({
   pattern: z.string().optional().describe('Filter files by glob pattern (e.g. "*.tsx", "**/*.test.ts").'),
   format: z
     .enum(['tree', 'flat', 'grouped', 'summary'])
-    .default('tree')
+    .optional()
     .describe(
       'Output: "tree" (hierarchical, default), "flat" (alphabetical), "grouped" (by language), ' +
         '"summary" (per-directory file/symbol-count rollup, sorted by symbol density).',
     ),
-  metadata: z.boolean().default(true).describe('Include language and symbol count per file (default true).'),
+  metadata: z.boolean().optional().describe('Include language and symbol count per file (default true).'),
   maxDepth: z
     .number()
     .int()
@@ -461,6 +462,7 @@ const filesSchema = z.object({
     .optional()
     .describe('REMOVED — use `dir` instead. Passing `path` is rejected.'),
   includeMetadata: z.boolean().optional().describe('Legacy alias for `metadata`. Prefer `metadata`.'),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
@@ -470,16 +472,17 @@ async function handleFiles(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> 
   const cg = ctx.getCartograph(args.projectPath);
   const pathFilter = args.dir;
   const pattern = args.pattern;
-  const format = args.format;
+  const lowTokens = args.lowTokens === true;
+  const format = args.format ?? (lowTokens ? 'summary' : 'tree');
   // `metadata` is the canonical key (default true); accept legacy
   // `includeMetadata` as a fallback so older MCP clients keep working.
   // An explicit `includeMetadata: false` still wins over the `metadata`
   // default.
-  const includeMetadata = args.includeMetadata ?? args.metadata;
+  const includeMetadata = args.includeMetadata ?? args.metadata ?? !lowTokens;
   // `maxDepth` is already an integer in [1, 20] when present — Zod's
   // `.int().min().max()` rejected anything else at the dispatch
   // boundary. No clamp / range check needed.
-  const maxDepth = args.maxDepth;
+  const maxDepth = args.maxDepth ?? (lowTokens ? LOW_TOKEN_FILES_MAX_DEPTH : undefined);
 
   // Get all files from the index, with `nodeCount` corrected to a true
   // symbol count (the renderers below all label this figure "symbols").
@@ -588,6 +591,7 @@ export const FILES_TOOL = defineTool({
     'Indexed-file tree view with language + symbol count — faster than shell `find` for project structure. ' +
     'Filter by `dir` prefix or `pattern` glob (e.g. `**/*.test.ts`). ' +
     'Format: `tree` (default) | `flat` | `grouped` (by language) | `summary`. ' +
+    '`lowTokens: true` defaults to summary format, no metadata, and a shallow depth cap. ' +
     'The `flat` format folds a per-file LLM summary under each row when the listing is ≤80 files.',
   schema: filesSchema,
   handle: handleFiles,

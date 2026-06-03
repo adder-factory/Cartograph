@@ -21,6 +21,14 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): str
   return result.content[0]?.text ?? '';
 }
 
+function approxTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+function expectTokenBudget(text: string, maxTokens: number): void {
+  expect(approxTokens(text)).toBeLessThanOrEqual(maxTokens);
+}
+
 describe('MCP lowTokens option', () => {
   let dir: string;
   let cg: Cartograph;
@@ -36,6 +44,10 @@ describe('MCP lowTokens option', () => {
         'export function beta(): number { return alpha(); }',
         'export function gamma(): number { return beta() + alpha(); }',
       ].join('\n') + '\n',
+    );
+    fs.writeFileSync(
+      path.join(dir, 'src', 'consumer.ts'),
+      "import { alpha } from './core';\nexport const delta = alpha();\n",
     );
     fs.writeFileSync(path.join(dir, '.gitignore'), '.cartograph/\n');
     git(dir, 'init', '-q');
@@ -63,6 +75,7 @@ describe('MCP lowTokens option', () => {
     expect(text).not.toMatch(/^## Search Results/m);
     expect(text).not.toMatch(/^### alpha/m);
     expect(text).not.toContain('sig:');
+    expectTokenBudget(text, 220);
   });
 
   it('cartograph_find lowTokens does not inject exact-only compact args into fuzzy mode', async () => {
@@ -72,6 +85,7 @@ describe('MCP lowTokens option', () => {
 
     expect(text).toMatch(/^## Fuzzy search/);
     expect(text).not.toContain("`compact` / `fields` require `mode: 'exact'`");
+    expectTokenBudget(text, 300);
   });
 
   it('cartograph_graph lowTokens compacts one-hop callers', async () => {
@@ -82,6 +96,7 @@ describe('MCP lowTokens option', () => {
     expect(text).toMatch(/^Callers of alpha \(/);
     expect(text).toMatch(/gamma\|function\|src\/core\.ts:3\|id:n_[0-9a-f]{8}/);
     expect(text).not.toMatch(/^- gamma /m);
+    expectTokenBudget(text, 260);
   });
 
   it('cartograph_context lowTokens suppresses code snippets', async () => {
@@ -89,6 +104,7 @@ describe('MCP lowTokens option', () => {
 
     expect(text).toContain('## Code Context');
     expect(text).not.toContain('```typescript');
+    expectTokenBudget(text, 1_200);
   });
 
   it('cartograph_explore lowTokens switches to summary-only output', async () => {
@@ -97,6 +113,7 @@ describe('MCP lowTokens option', () => {
     expect(text).toContain('_Summary mode: source-code blocks suppressed');
     expect(text).toContain('defines:');
     expect(text).not.toContain('```typescript');
+    expectTokenBudget(text, 1_000);
   });
 
   it('cartograph_at_range lowTokens emits compact projected rows', async () => {
@@ -113,5 +130,35 @@ describe('MCP lowTokens option', () => {
     expect(text).toMatch(/alpha\|function\|src\/core\.ts:1/);
     expect(text).not.toContain('| Kind | Name | Lines | Signature |');
     expect(text).not.toContain('sig:');
+    expectTokenBudget(text, 220);
+  });
+
+  it('cartograph_node lowTokens caps batched symbols and keeps cards metadata-only', async () => {
+    const symbols = ['alpha', 'beta', 'gamma', 'delta', 'alpha', 'beta', 'gamma', 'delta', 'alpha', 'beta'];
+    const text = textOf(await handler.execute('cartograph_node', { symbols, lowTokens: true }));
+
+    expect(text).toMatch(/^# \d+ symbols? resolved/);
+    expect(text).toContain('omitted by lowTokens cap');
+    expect(text).not.toContain('```typescript');
+    expectTokenBudget(text, 700);
+  });
+
+  it('cartograph_files lowTokens defaults to summary output with shallow metadata-free rows', async () => {
+    const text = textOf(await handler.execute('cartograph_files', { lowTokens: true }));
+
+    expect(text).toContain('## Project Summary');
+    expect(text).toContain('| Directory | Files | Nodes |');
+    expect(text).not.toContain('## Project Structure');
+    expect(text).not.toContain('(typescript,');
+    expectTokenBudget(text, 260);
+  });
+
+  it('cartograph_imports lowTokens keeps the import audit bounded', async () => {
+    const text = textOf(await handler.execute('cartograph_imports', { lowTokens: true }));
+
+    expect(text).toContain('## Imports');
+    expect(text).toContain('src/consumer.ts:1');
+    expect(text).toContain('"./core"');
+    expectTokenBudget(text, 260);
   });
 });

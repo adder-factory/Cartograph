@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { projectPathField } from './_common-fields.js';
+import { projectPathField, lowTokensField } from './_common-fields.js';
 import type { ToolResult } from '../tool-types.js';
 import { getStringImports } from '../../db/queries-string-imports.js';
 import { getImportNodes } from '../../db/queries.js';
@@ -18,6 +18,7 @@ import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result
 
 /** Default `limit` when the caller omits it. */
 const DEFAULT_LIMIT = 200;
+const LOW_TOKEN_IMPORTS_LIMIT = 40;
 /** Hard ceiling on caller-supplied `limit` — keeps a single response bounded. */
 const MAX_LIMIT = 1000;
 
@@ -112,8 +113,9 @@ const importsSchema = z.object({
     .int()
     .min(1)
     .max(MAX_LIMIT)
-    .default(DEFAULT_LIMIT)
+    .optional()
     .describe('Maximum results (default: 200). Integer in [1, 1000]; out-of-range is rejected, not clamped.'),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
@@ -130,9 +132,9 @@ async function handleImports(ctx: ToolCtx, args: ImportsArgs): Promise<ToolResul
     language: args.language?.toLowerCase(),
   };
   const source = args.source;
-  // `limit` is already an integer in [1, 1000] — Zod's `.int().min().max()`
-  // rejected anything else at the dispatch boundary.
-  const limit = args.limit;
+  // `limit`, when present, is already an integer in [1, 1000] — Zod's
+  // `.int().min().max()` rejected anything else at the dispatch boundary.
+  const limit = args.limit ?? (args.lowTokens === true ? LOW_TOKEN_IMPORTS_LIMIT : DEFAULT_LIMIT);
 
   const hits: Hit[] = [];
   if (source === 'static' || source === 'all') {
@@ -487,7 +489,8 @@ export const IMPORTS_TOOL = defineTool({
   description:
     'Import statements graph data — every `from X` / `require(X)` / dynamic import in the project. ' +
     'Filter by resolution kind (`file`/`directory`/`bare`/`unresolvable`), missing-extension, dynamic shape, ' +
-    "or `source: 'literal'` for import-shaped strings. Use for migration audits (ESM rewrites, sed-scope checks).",
+    "or `source: 'literal'` for import-shaped strings. `lowTokens: true` lowers the default row cap. " +
+    'Use for migration audits (ESM rewrites, sed-scope checks).',
   schema: importsSchema,
   handle: handleImports,
 });

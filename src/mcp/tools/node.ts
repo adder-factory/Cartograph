@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { z } from 'zod';
-import { projectPathField, batchedSymbols, BATCHED_SYMBOLS_MAX } from './_common-fields.js';
+import { projectPathField, batchedSymbols, BATCHED_SYMBOLS_MAX, lowTokensField } from './_common-fields.js';
 import { getFileByPath } from '../../db/queries-files.js';
 import { getFileSummary } from '../../db/queries-file-summaries.js';
 import { getIssuesForNode } from '../../db/queries-history.js';
@@ -75,6 +75,7 @@ const MAX_INLINE_CALLERS = 10;
 const MAX_INLINE_CALLEES = 10;
 const MAX_INLINE_FINDINGS = 5;
 const MAX_INLINE_TEST_FILES = 5;
+const LOW_TOKEN_NODE_SYMBOLS = 8;
 
 // TYPE_LIKE_KINDS and TYPE_USAGE_EDGE_KINDS now live in shared.ts so
 // node.ts and callers.ts can't drift on which kinds carry type-usage
@@ -898,7 +899,15 @@ function renderTestsSection(cg: Cartograph, node: Node): string {
  * Build the header line for multi-symbol output, with counts of
  * resolved, not-found, and duplicate-merged entries.
  */
-function buildMultiSymbolHeader(nodesShown: number, notFound: number, dedupCount: number): string {
+interface MultiSymbolHeaderCounts {
+  nodesShown: number;
+  notFound: number;
+  dedupCount: number;
+  lowTokenOmitted: number;
+}
+
+function buildMultiSymbolHeader(counts: MultiSymbolHeaderCounts): string {
+  const { nodesShown, notFound, dedupCount, lowTokenOmitted } = counts;
   const parts: string[] = [];
   parts.push(`# ${nodesShown} symbol${nodesShown === 1 ? '' : 's'} resolved`);
   if (notFound > 0) {
@@ -907,6 +916,9 @@ function buildMultiSymbolHeader(nodesShown: number, notFound: number, dedupCount
   if (dedupCount > 0) {
     const plural = dedupCount === 1 ? '' : 's';
     parts.push(` (${dedupCount} duplicate input${plural} merged)`);
+  }
+  if (lowTokenOmitted > 0) {
+    parts.push(` (${lowTokenOmitted} omitted by lowTokens cap)`);
   }
   return parts.join('');
 }
@@ -917,6 +929,7 @@ interface ProcessSymbolArgs {
   includeCode: boolean;
   detail: DetailMode;
   flags: IncludeFlags;
+  lowTokens: boolean;
   /** F#12 slice 2: when set, fall back to the nested-function manifest
    *  if findSymbol misses. Off by default — callers explicitly opt in
    *  via the `deep:true` MCP arg. */
@@ -979,6 +992,7 @@ async function tryRenderManifestDeepView(args: {
         includeCode,
         detail,
         flags,
+        lowTokens: false,
       });
       return `${card}\n\n> ✓ Promoted from F#12 manifest (was a nested fn in \`${primary.parentName ?? '?'}\`).`;
     }
@@ -1108,7 +1122,7 @@ function inferFenceLanguage(filePath: string): string {
  * Preserves the legacy "no separator, no header" output for backward compatibility.
  */
 async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string }): Promise<ToolOutcome> {
-  const { ctx, cg, symbol, includeCode, detail, flags, deep } = args;
+  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, deep } = args;
   const match = findSymbol(cg, symbol, ctx.refIds);
   if (!match) {
     // A `n_` UID the current process can't resolve is a cache miss,
@@ -1130,7 +1144,7 @@ async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string })
     }
     return ok(textResult(symbolNotFound(cg, symbol)));
   }
-  const rendered = await renderOneNode({ cg, symbol, match, includeCode, detail, flags });
+  const rendered = await renderOneNode({ cg, symbol, match, includeCode, detail, flags, lowTokens });
   // The per-result stale-files note routes through the chokepoint's
   // `freshness` slot — it truncates the card body first, then appends
   // the note, so a long body can't push the stale warning off-budget.
@@ -1166,8 +1180,10 @@ function buildBatchFreshnessFooter(cg: Cartograph, notFound: number): string {
  * Process a multi-symbol request. Returns a ToolOutcome with all cards rendered
  * and merged, deduplicated by node ID, with a header summarizing the results.
  */
-async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: string[] }): Promise<ToolOutcome> {
-  const { ctx, cg, symbolList, includeCode, detail, flags, deep } = args;
+async function processMultipleSymbols(
+  args: ProcessSymbolArgs & { symbolList: string[]; lowTokenOmitted?: number },
+): Promise<ToolOutcome> {
+  const { ctx, cg, symbolList, includeCode, detail, flags, lowTokens, deep, lowTokenOmitted = 0 } = args;
   const seenIds = new Set<string>();
   const nodesShown: Node[] = [];
   const cards: string[] = [];
@@ -1175,7 +1191,17 @@ async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: st
   let index = 0;
   while (index < symbolList.length) {
     const symbol = symbolList[index++]!;
-    const result = await renderBatchSymbolCard({ ctx, cg, symbol, includeCode, detail, flags, deep, seenIds });
+    const result = await renderBatchSymbolCard({
+      ctx,
+      cg,
+      symbol,
+      includeCode,
+      detail,
+      flags,
+      lowTokens,
+      deep,
+      seenIds,
+    });
     if (result.kind === 'duplicate') continue;
     cards.push(result.card);
     if (result.kind === 'missing') {
@@ -1186,7 +1212,7 @@ async function processMultipleSymbols(args: ProcessSymbolArgs & { symbolList: st
   }
 
   const dedupCount = symbolList.length - notFound - seenIds.size;
-  const header = buildMultiSymbolHeader(nodesShown.length, notFound, dedupCount);
+  const header = buildMultiSymbolHeader({ nodesShown: nodesShown.length, notFound, dedupCount, lowTokenOmitted });
   const body = cards.join('\n\n---\n\n');
   // One freshness hint for the whole batch when anything missed —
   // per-card it would be noise; the single-symbol path gets it via
@@ -1220,7 +1246,7 @@ interface RenderBatchSymbolCardArgs extends ProcessSymbolArgs {
 }
 
 async function renderBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<BatchSymbolCardResult> {
-  const { ctx, cg, symbol, includeCode, detail, flags, seenIds } = args;
+  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, seenIds } = args;
   const match = findSymbol(cg, symbol, ctx.refIds);
   if (!match) return renderMissingBatchSymbolCard(args);
 
@@ -1231,7 +1257,7 @@ async function renderBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<B
   return {
     kind: 'found',
     node: match.node,
-    card: await renderOneNode({ cg, symbol, match, includeCode, detail, flags }),
+    card: await renderOneNode({ cg, symbol, match, includeCode, detail, flags, lowTokens }),
   };
 }
 
@@ -1274,6 +1300,7 @@ interface RenderOneNodeArgs {
   includeCode: boolean;
   detail: DetailMode;
   flags: IncludeFlags;
+  lowTokens: boolean;
 }
 
 /** Build the markdown card for one resolved match — header + details
@@ -1281,7 +1308,7 @@ interface RenderOneNodeArgs {
  *  code-omitted note. Pure renderer; the caller handles dedup, stale
  *  appendix, and final truncation. */
 async function renderOneNode(args: RenderOneNodeArgs): Promise<string> {
-  const { cg, match, includeCode, detail, flags } = args;
+  const { cg, match, includeCode, detail, flags, lowTokens } = args;
   let code: string | null = null;
   let staleWarning: string | null = null;
   if (includeCode) {
@@ -1290,7 +1317,9 @@ async function renderOneNode(args: RenderOneNodeArgs): Promise<string> {
     staleWarning = fetched.staleWarning;
   }
   const issues = getIssuesForNode(cg.queries, match.node.id);
-  const testAssertions = fetchTestAssertionsForFile(cg, match.node);
+  const testAssertions = lowTokens
+    ? { rows: [], fileLevelOnly: false, testFile: null }
+    : fetchTestAssertionsForFile(cg, match.node);
   const card = formatNodeDetails({
     node: match.node,
     code,
@@ -1306,7 +1335,7 @@ async function renderOneNode(args: RenderOneNodeArgs): Promise<string> {
   // column (`file_path`) used as the FK in `file_summaries`.
   // When no summary is cached yet, render nothing (no noisy placeholder).
   let fileSummaryBlock = '';
-  if (match.node.kind === 'file') {
+  if (!lowTokens && match.node.kind === 'file') {
     const fileSummaryRow = getFileSummary(cg.queries, match.node.filePath);
     if (fileSummaryRow) {
       fileSummaryBlock = `\n\n**Summary:** ${fileSummaryRow.summary}`;
@@ -1391,6 +1420,7 @@ const nodeSchema = z.object({
       'When the symbol is not found as a graph node, render an ad-hoc deep view (source slice + parent header) for ' +
         'nested functions inside mega-files (body > `largeFunctionThreshold`, default 500 LOC). Default: false.',
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
@@ -1401,21 +1431,24 @@ async function handleNode(ctx: ToolCtx, args: NodeArgs): Promise<ToolOutcome> {
   if (!Array.isArray(symbolList)) return symbolList;
 
   const cg = ctx.getCartograph(args.projectPath);
+  const lowTokens = args.lowTokens === true;
   const includeCode = args.code;
   const detail: DetailMode = args.detail;
   const flags = parseIncludeFlags(args);
   const deep = args.deep === true;
+  const effectiveSymbols = lowTokens ? symbolList.slice(0, LOW_TOKEN_NODE_SYMBOLS) : symbolList;
+  const lowTokenOmitted = symbolList.length - effectiveSymbols.length;
 
   // Single-symbol path — preserves the legacy "no separator, no
   // header" output exactly so existing tests / consumers see no
   // change. Multi-symbol path renders one card per resolved node
   // separated by horizontal rules.
-  const sharedArgs = { ctx, cg, includeCode, detail, flags, deep };
-  if (symbolList.length === 1) {
-    return processSingleSymbol({ ...sharedArgs, symbol: symbolList[0]! });
+  const sharedArgs = { ctx, cg, includeCode, detail, flags, lowTokens, deep };
+  if (effectiveSymbols.length === 1) {
+    return processSingleSymbol({ ...sharedArgs, symbol: effectiveSymbols[0]! });
   }
 
-  return processMultipleSymbols({ ...sharedArgs, symbolList });
+  return processMultipleSymbols({ ...sharedArgs, symbolList: effectiveSymbols, lowTokenOmitted });
 }
 
 export const NODE_TOOL = defineTool({
@@ -1426,6 +1459,7 @@ export const NODE_TOOL = defineTool({
     MAX_SYMBOLS +
     ". `code: true` adds body (`detail: 'preview'` truncates long bodies; `'full'` is verbatim). " +
     '`includeCallers`/`includeCallees`/`includeBiomarkers`/`includeTests` fold neighbor data in. ' +
+    '`lowTokens: true` caps batched symbols and drops file-summary/test-assertion extras. ' +
     "A `kind:'file'` node renders that file's cached LLM summary.",
   schema: nodeSchema,
   handle: handleNode,
