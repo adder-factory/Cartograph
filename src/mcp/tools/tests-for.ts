@@ -1037,7 +1037,10 @@ async function handleFilesMode(ctx: ToolCtx, args: TestsForArgs): Promise<ToolOu
     // whole public surface — flag it directly. `bfsTestImpactFromFile`
     // only inspects DEPENDENTS, so without this an `index.*` seed
     // never trips the barrel warning even though it is the worst case.
-    if (isBarrelFile(f)) inputBarrels.add(f);
+    if (isBarrelFile(f)) {
+      inputBarrels.add(f);
+      continue;
+    }
     if (isTest(f)) {
       affected.add(f);
       continue;

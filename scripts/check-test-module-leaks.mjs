@@ -13,7 +13,11 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const DEFAULT_CANARIES = ['__tests__/tool-surface-smoke.test.ts', '__tests__/mcp-node-multi.test.ts'];
+const DEFAULT_CANARIES = [
+  '__tests__/tool-surface-smoke.test.ts',
+  '__tests__/mcp-node-multi.test.ts',
+  '__tests__/mcp-tests-for.test.ts',
+];
 const MAX_CAPTURE_BYTES = 30 * 1024 * 1024;
 const FAILURE_SUMMARY_LINES = 30;
 const FAILURE_TAIL_LINES = 40;
