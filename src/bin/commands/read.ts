@@ -68,7 +68,11 @@ interface StatusRollupConfig {
   topHotspots: number;
   topBiomarkers: number;
   summaryBreakdown: boolean;
-  appendFeatureReadiness: (lines: string[], cg: any, options: { summaryBreakdown: boolean }) => void;
+  appendFeatureReadiness: (
+    lines: string[],
+    cg: any,
+    options: { summaryBreakdown: boolean; surface?: 'mcp' | 'cli' },
+  ) => void;
   appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
 }
@@ -326,7 +330,10 @@ function printStatusJson(args: {
   rollups: StatusRollupConfig;
 }): void {
   const jsonRollups: string[] = [];
-  args.rollups.appendFeatureReadiness(jsonRollups, args.cg, { summaryBreakdown: args.rollups.summaryBreakdown });
+  args.rollups.appendFeatureReadiness(jsonRollups, args.cg, {
+    summaryBreakdown: args.rollups.summaryBreakdown,
+    surface: 'cli',
+  });
   args.rollups.appendInlineHotspots(jsonRollups, args.cg, args.rollups.topHotspots);
   args.rollups.appendInlineBiomarkers(jsonRollups, args.cg, args.rollups.topBiomarkers);
   out(
@@ -467,7 +474,7 @@ function printSummaryCoverage(cg: any): void {
 
 function printStatusRollups(cg: any, rollups: StatusRollupConfig): void {
   const rollupLines: string[] = [];
-  rollups.appendFeatureReadiness(rollupLines, cg, { summaryBreakdown: rollups.summaryBreakdown });
+  rollups.appendFeatureReadiness(rollupLines, cg, { summaryBreakdown: rollups.summaryBreakdown, surface: 'cli' });
   rollups.appendInlineHotspots(rollupLines, cg, rollups.topHotspots);
   rollups.appendInlineBiomarkers(rollupLines, cg, rollups.topBiomarkers);
   if (rollupLines.length === 0) return;

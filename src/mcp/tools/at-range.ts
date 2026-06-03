@@ -33,6 +33,7 @@ import { getNodesAtRange, type NodeAtRange } from '../../db/queries-rtree.js';
 import { getFileByPath } from '../../db/queries-files.js';
 import { parseUnifiedDiff } from '../../compare/diff-parser.js';
 import * as path from 'node:path';
+import type { Node } from '../../types.js';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
@@ -249,6 +250,85 @@ function formatRowsCompact(nodes: NodeAtRange[], fields?: ReadonlyArray<AtRangeF
     .join('\n');
 }
 
+function toNodeAtRange(node: Node): NodeAtRange {
+  return {
+    id: node.id,
+    kind: node.kind,
+    name: node.name,
+    qualified_name: node.qualifiedName,
+    file_path: node.filePath,
+    start_line: node.startLine,
+    end_line: node.endLine,
+    signature: node.signature ?? null,
+  };
+}
+
+const FILE_CONTEXT_SIBLING_COUNT = 3;
+
+interface FileContextFallback {
+  nodes: NodeAtRange[];
+  note: string;
+}
+
+function buildFileContextFallback(args: {
+  cg: ReturnType<ToolCtx['getCartograph']>;
+  filePath: string;
+  startLine: number;
+  endLine: number;
+}): FileContextFallback | null {
+  const { cg, filePath, startLine, endLine } = args;
+  const fileSymbols = cg.queries.getNodesByFile(filePath);
+  const fileNode = fileSymbols.find((n) => n.kind === 'file');
+  if (!fileNode) return null;
+  if (fileNode.startLine > endLine || fileNode.endLine < startLine) return null;
+
+  const anchorLine = startLine;
+  const siblingCandidates = fileSymbols
+    .filter((n) => n.kind !== 'file' && n.kind !== 'import')
+    .map((n) => ({ node: n, distance: Math.abs(n.startLine - anchorLine) }))
+    .sort((a, b) => a.distance - b.distance || a.node.startLine - b.node.startLine)
+    .slice(0, FILE_CONTEXT_SIBLING_COUNT)
+    .map(({ node }) => node);
+
+  const nearestSymbols = siblingCandidates.map((n) => `${n.name} (${n.kind}) at line ${n.startLine}`).join(', ');
+  const siblings = siblingCandidates.length === 0 ? '' : ` Nearest symbols: ${nearestSymbols}.`;
+  return {
+    nodes: [toNodeAtRange(fileNode)],
+    note: `No symbol body overlaps this range; showing file-level context.${siblings}`,
+  };
+}
+
+interface ExactRangeProbe {
+  nodes: NodeAtRange[];
+  hitLimit: boolean;
+  contextNote?: string;
+}
+
+function probeExactRangeWithFileContext(
+  cg: ReturnType<ToolCtx['getCartograph']>,
+  rng: ValidatedRange,
+  limit: number,
+): ExactRangeProbe {
+  const fetched = getNodesAtRange(cg.queries, {
+    filePath: rng.file,
+    startLine: rng.startLine,
+    endLine: rng.endLine,
+    limit: limit + 1,
+  });
+  if (fetched.length > 0) {
+    return { nodes: fetched.slice(0, limit), hitLimit: fetched.length > limit };
+  }
+
+  const fallback = buildFileContextFallback({
+    cg,
+    filePath: rng.file,
+    startLine: rng.startLine,
+    endLine: rng.endLine,
+  });
+  if (!fallback) return { nodes: [], hitLimit: false };
+  return { nodes: fallback.nodes.slice(0, limit), hitLimit: fallback.nodes.length > limit, contextNote: fallback.note };
+}
+
 /** Arguments for {@link formatResults}. */
 interface FormatResultsArgs {
   nodes: NodeAtRange[];
@@ -259,6 +339,7 @@ interface FormatResultsArgs {
   compact?: boolean;
   /** Stage 6 #6.3 — restrict compact rows to a subset of fields. Only effective when `compact:true`. */
   fields?: ReadonlyArray<AtRangeFieldName>;
+  contextNote?: string;
 }
 
 /**
@@ -270,11 +351,12 @@ interface FormatResultsArgs {
  * range queries (e.g. PR-review hunks).
  */
 function formatResults(args: FormatResultsArgs): string {
-  const { nodes, filePath, startLine, endLine, compact = false, fields } = args;
+  const { nodes, filePath, startLine, endLine, compact = false, fields, contextNote } = args;
   const header = `## Symbols overlapping ${filePath}:${startLine}-${endLine}\n\n`;
-  if (compact) return header + formatRowsCompact(nodes, fields);
+  const note = contextNote ? `_${contextNote}_\n\n` : '';
+  if (compact) return header + note + formatRowsCompact(nodes, fields);
   const tableHeader = '| Kind | Name | Lines | Signature |\n' + '|------|------|-------|-----------|';
-  return header + tableHeader + '\n' + formatTableRows(nodes);
+  return header + note + tableHeader + '\n' + formatTableRows(nodes);
 }
 
 /**
@@ -330,10 +412,12 @@ async function handleAtRangeSingle(
 
   // Over-fetch by one so "exactly `limit` rows exist" can be told apart
   // from "more than `limit` rows exist" — `getNodesAtRange` does a plain
-  // `LIMIT ?` with no over-fetch of its own (audit-4 #2).
-  const fetched = getNodesAtRange(cg.queries, { filePath: indexedFilePath, startLine, endLine, limit: limit + 1 });
-  const hitsCapReached = fetched.length > limit;
-  const nodes = fetched.slice(0, limit);
+  // `LIMIT ?` with no over-fetch of its own (audit-4 #2). When no symbol
+  // body overlaps but the range is inside an indexed file, fall back to the
+  // file node so top-level/import/comment edits still return context.
+  const probed = probeExactRangeWithFileContext(cg, { file: indexedFilePath, startLine, endLine }, limit);
+  const hitsCapReached = probed.hitLimit;
+  const nodes = probed.nodes;
   if (nodes.length === 0) {
     // Distinguish "file not in index" from "file indexed but no symbols overlap this range".
     const indexed = getFileByPath(cg.queries, indexedFilePath);
@@ -363,6 +447,7 @@ async function handleAtRangeSingle(
     filePath: indexedFilePath,
     startLine,
     endLine,
+    ...(probed.contextNote ? { contextNote: probed.contextNote } : {}),
     ...(compact ? { compact: true } : {}),
     ...(fields ? { fields } : {}),
   });
@@ -386,6 +471,7 @@ interface RangeResult {
   startLine: number;
   endLine: number;
   nodes: NodeAtRange[];
+  contextNote?: string;
 }
 
 /** Validate every entry in the bulk-form `ranges` array. Returns the
@@ -433,8 +519,10 @@ function renderBulkRangeReport(args: RenderBulkRangeReportArgs): string {
     if (result.nodes.length === 0) {
       parts.push('_No symbols overlap this range._');
     } else if (compact) {
+      if (result.contextNote) parts.push(`_${result.contextNote}_`);
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
+      if (result.contextNote) parts.push(`_${result.contextNote}_`);
       parts.push(
         '| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|',
         formatTableRows(result.nodes),
@@ -467,18 +555,14 @@ async function handleAtRangeBulk(
   let anyHitLimit = false;
   for (const rng of validated) {
     // Over-fetch by one per range (audit-4 #2) — see `handleAtRangeSingle`.
-    const fetched = getNodesAtRange(cg.queries, {
-      filePath: rng.file,
-      startLine: rng.startLine,
-      endLine: rng.endLine,
-      limit: limit + 1,
-    });
-    if (fetched.length > limit) anyHitLimit = true;
+    const probed = probeExactRangeWithFileContext(cg, rng, limit);
+    if (probed.hitLimit) anyHitLimit = true;
     rangeResults.push({
       file: rng.file,
       startLine: rng.startLine,
       endLine: rng.endLine,
-      nodes: fetched.slice(0, limit),
+      nodes: probed.nodes,
+      ...(probed.contextNote ? { contextNote: probed.contextNote } : {}),
     });
   }
   const compact = args.compact === true;
@@ -525,20 +609,15 @@ interface DiffRangeResult extends RangeResult {
 function probeDiffRange(cg: ReturnType<ToolCtx['getCartograph']>, rng: ValidatedRange, limit: number): DiffRangeResult {
   // Over-fetch by one (audit-4 #2) so the "hit the per-range limit"
   // footer fires only when rows were genuinely truncated.
-  const exact = getNodesAtRange(cg.queries, {
-    filePath: rng.file,
-    startLine: rng.startLine,
-    endLine: rng.endLine,
-    limit: limit + 1,
-  });
-  if (exact.length > 0) {
+  const exact = probeExactRangeWithFileContext(cg, rng, limit);
+  if (exact.nodes.length > 0 && !exact.contextNote) {
     return {
       file: rng.file,
       startLine: rng.startLine,
       endLine: rng.endLine,
-      nodes: exact.slice(0, limit),
+      nodes: exact.nodes,
       fuzzed: false,
-      hitLimit: exact.length > limit,
+      hitLimit: exact.hitLimit,
     };
   }
   // Zero exact overlaps — retry with a modest expansion each side.
@@ -550,6 +629,19 @@ function probeDiffRange(cg: ReturnType<ToolCtx['getCartograph']>, rng: Validated
     endLine: fuzzEnd,
     limit: limit + 1,
   });
+  if (exact.contextNote) {
+    const fallbackNodes = exact.nodes;
+    const roomForFuzz = Math.max(0, limit - fallbackNodes.length);
+    return {
+      file: rng.file,
+      startLine: rng.startLine,
+      endLine: rng.endLine,
+      nodes: [...fallbackNodes, ...fuzzed.slice(0, roomForFuzz)],
+      fuzzed: roomForFuzz > 0 && fuzzed.length > 0,
+      hitLimit: fuzzed.length > roomForFuzz,
+      contextNote: exact.contextNote,
+    };
+  }
   return {
     file: rng.file,
     startLine: rng.startLine,
@@ -584,8 +676,10 @@ function renderDiffRangeReport(args: RenderDiffRangeReportArgs): string {
     if (result.nodes.length === 0) {
       parts.push('_No symbols overlap this range._');
     } else if (compact) {
+      if (result.contextNote) parts.push(`_${result.contextNote}_`);
       parts.push(formatRowsCompact(result.nodes, fields));
     } else {
+      if (result.contextNote) parts.push(`_${result.contextNote}_`);
       parts.push(
         '| Kind | Name | Lines | Signature |\n|------|------|-------|-----------|',
         formatTableRows(result.nodes),

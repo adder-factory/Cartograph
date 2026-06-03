@@ -265,7 +265,9 @@ export function buildGeneratedCommand(
   }
   const spec = zodSchemaToCommandSpec(schema);
   const commandName = opts.commandName ?? defaultCommandName(mod.definition.name);
-  const cmd = new Command(commandName).description(mod.definition.description);
+  const cmd = new Command(commandName)
+    .description(mod.definition.description)
+    .summary(oneLineSummary(mod.definition.description));
   const ctx: GenContext = { cmd, spec, mod, opts };
 
   // Pre-phase — collect the set of fields targeted by an aliasFlag.
@@ -325,6 +327,15 @@ export function buildGeneratedCommand(
     }),
   );
   return cmd;
+}
+
+function oneLineSummary(description: string): string {
+  const firstParagraph = description.split(/\n\s*\n/, 1)[0] ?? description;
+  const oneLine = firstParagraph.replaceAll(/\s+/g, ' ').trim();
+  const sentenceMatch = /^.*?[.!?](?:\s|$)/.exec(oneLine);
+  const sentence = sentenceMatch?.[0]?.trim() ?? oneLine;
+  const max = 120;
+  return sentence.length <= max ? sentence : `${sentence.slice(0, max - 1).trimEnd()}…`;
 }
 
 /**
@@ -657,6 +668,7 @@ function buildActionHandler(handler: ActionHandlerSpec): (...actionArgs: unknown
       return;
     }
     const finalArgs = parsed.data;
+    if (rejectBooleanLikePositionals({ handler, actionArgs, options, command })) return;
     foldLeadingPositionals(handler, actionArgs, finalArgs);
     foldAliasFallback(handler, options, finalArgs);
     await handler.runViaMcp(handler.mod.definition.name, finalArgs, projectPath);
@@ -713,6 +725,46 @@ function reportCoercionFailure(
   const where = issueField ? `${issueFlag ?? fallbackFlag}: ` : '';
   process.stderr.write(`\x1b[31m✗\x1b[0m ${where}${issue?.message ?? 'invalid argument'}\n`);
   process.exitCode = 1;
+}
+
+/**
+ * Commander booleans are value-less flags. A common mistake is
+ * `--include-tests false`; commander treats `false` as the next
+ * positional argument, so mode-router commands can silently ignore the
+ * intended boolean. Reject the two boolean-looking tokens for optional
+ * scalar positionals before they reach the MCP handler.
+ */
+function hasCliBooleanOption(handler: ActionHandlerSpec, options: Record<string, unknown>, command: Command): boolean {
+  return handler.forwarded.some((opt) => {
+    if (opt.kind !== 'boolean') return false;
+    const key = commanderKey(opt);
+    if (options[key] === undefined) return false;
+    return command.getOptionValueSource(key) === 'cli';
+  });
+}
+
+interface RejectBooleanLikePositionalsArgs {
+  handler: ActionHandlerSpec;
+  actionArgs: readonly unknown[];
+  options: Record<string, unknown>;
+  command: Command;
+}
+
+function rejectBooleanLikePositionals(args: RejectBooleanLikePositionalsArgs): boolean {
+  const { handler, actionArgs, options, command } = args;
+  if (!hasCliBooleanOption(handler, options, command)) return false;
+  for (let idx = 0; idx < handler.leadingPositionals.length; idx++) {
+    const opt = handler.leadingPositionals[idx]!;
+    if (opt.required || opt.kind === 'string-list') continue;
+    const value = actionArgs[idx];
+    if (value !== 'true' && value !== 'false') continue;
+    process.stderr.write(
+      `\x1b[31m✗\x1b[0m Unexpected positional "${value}". Boolean CLI flags are value-less; use --<flag> or --no-<flag> instead of passing ${value} as a value.\n`,
+    );
+    process.exitCode = 1;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -850,14 +902,13 @@ function registerOption(cmd: Command, opt: CliOptionSpec, short?: string): void 
       // `--<flag>` when only `--no-<flag>` is declared, so register
       // BOTH halves of the pair explicitly (the `graph` command's
       // hand-written `--no-compact` / `--compact` shape). The
-      // negating half carries the description + the stored `true`
-      // default; the positive half is bare. `getOptionValueSource`
+      // positive half carries the original description; the negating
+      // half says what the `--no-*` spelling actually does.
+      // `getOptionValueSource`
       // (in the action) distinguishes "user passed one" from "default".
-      cmd.option(negatedFlag(opt.flag), opt.description);
-      cmd.option(
-        flagSpec(opt, short, ''),
-        `Opt INTO ${opt.flag} (default: on; the negating ${negatedFlag(opt.flag)} is the usual form)`,
-      );
+      const bareFlag = opt.flag.replace(/^--/, '');
+      cmd.option(negatedFlag(opt.flag), `Set ${bareFlag} to false.`);
+      cmd.option(flagSpec(opt, short, ''), opt.description || `Set ${bareFlag} to true.`);
       return;
     }
     // Plain boolean → opt-IN value-less flag.

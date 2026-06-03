@@ -184,6 +184,7 @@ registerGeneratedCommand('cartograph_sql', {
 // `symbol` is the `[symbol]` positional; `-l` short flag preserved.
 registerGeneratedCommand('cartograph_coverage', {
   positionalFields: ['symbol'],
+  negatableFields: ['includeTests'],
   shortFlags: { limit: '-l' },
 });
 // `graph` — `start` as the `[start]` positional; `symbols` (batched
@@ -197,7 +198,7 @@ registerGeneratedCommand('cartograph_coverage', {
 registerGeneratedCommand('cartograph_graph', {
   positionalFields: ['start'],
   skipFields: ['symbols'],
-  negatableFields: ['compact'],
+  negatableFields: ['compact', 'includeTests'],
   flagDefaults: { direction: 'callers' },
   longFlagOverrides: { k: '--top-k' },
   shortFlags: { direction: '-d', limit: '-l', edgeKind: '-e', k: '-k' },

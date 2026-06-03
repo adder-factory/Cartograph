@@ -431,6 +431,10 @@ describe('buildReviewContext (integration)', () => {
     expect(sym.name).toBe('doFoo');
     expect(sym.callers.map((c) => c.name)).toContain('useFoo');
     expect(sym.callees.map((c) => c.name)).toContain('helper');
+    const helper = sym.callees.find((c) => c.name === 'helper');
+    expect(helper?.filePath).toBe('src/baz.ts');
+    expect(helper?.line).toBe(20);
+    expect(helper?.line).not.toBe(12);
   });
 
   it('FRICTION-5: fans out test-file callers to enclosing it/describe block (not file row :1)', () => {

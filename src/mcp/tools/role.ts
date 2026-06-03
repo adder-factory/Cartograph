@@ -162,8 +162,8 @@ function renderUnknownDiagnostic({ desc, signature }: RenderUnknownDiagnosticArg
     );
   } else {
     lines.push(
-      '  The classifier had no input — this symbol has no LLM summary, no docstring, and no test coverage. ' +
-        'Run `cartograph summarize` to generate a summary, then re-run `cartograph classify`.',
+      '  The classifier had no input — this symbol has no LLM summary, no docstring, and no mined test-derived classification text. ' +
+        'Run `cartograph admin summarize --all` to generate a summary, then re-run `cartograph admin classify`.',
     );
   }
   if (signatureLooksLikeHandler(signature)) {
@@ -252,7 +252,10 @@ function appendRoleModelLine(lines: string[], roleModel: string | null): void {
 
 function appendRoleInputLines(lines: string[], desc: SymbolDescription | undefined): void {
   if (!desc) {
-    lines.push(`- **Source:** NONE`, `- **Input:** NONE — no summary, no docstring, no test coverage`);
+    lines.push(
+      `- **Source:** NONE`,
+      `- **Input:** NONE — no summary, no docstring, no test-derived classification text`,
+    );
     return;
   }
   const preview = desc.text.length > 80 ? desc.text.slice(0, 80) + '...' : desc.text;

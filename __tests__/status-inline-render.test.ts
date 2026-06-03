@@ -328,11 +328,32 @@ describe('status inline rollups', () => {
     appendFeatureReadiness(lines, cg(), { summaryBreakdown: false });
     const text = lines.join('\n');
 
-    expect(text).toContain('run `cartograph summarize`');
+    expect(text).toContain("cartograph_admin({action: 'summarize'");
     expect(text).toContain('detached summarizer running');
     expect(text).toContain('**Embeddings:** 5 rows');
-    expect(text).toContain('run `cartograph coverage --mode load');
+    expect(text).toContain("cartograph_coverage({mode: 'load'");
     expect(text).toContain('**Roles:** 0 classified');
     expect(text).toContain('**Directory summaries:** 0');
+  });
+
+  it('renders CLI command hints when called from cartograph status', () => {
+    state.summaryCoverage = { summarised: 0, total: 3 };
+    state.weightedSummaryCoverage = { weightedRatio: null };
+    state.embeddingsTotal = 0;
+    state.coverageStats = { symbolsWithCoverage: 0, sources: [] };
+    state.roleCounts = new Map();
+    state.dirSummaries = [];
+    const lines: string[] = [];
+
+    appendFeatureReadiness(lines, cg(), { summaryBreakdown: false, surface: 'cli' });
+    const text = lines.join('\n');
+
+    expect(text).toContain('`cartograph admin summarize --all`');
+    expect(text).toContain('`cartograph admin embed`');
+    expect(text).toContain('`cartograph find --by name --mode semantic`');
+    expect(text).toContain('`cartograph coverage --mode load --report-path <lcov>`');
+    expect(text).toContain('`cartograph role`');
+    expect(text).not.toContain('cartograph_coverage');
+    expect(text).not.toContain('cartograph_find');
   });
 });

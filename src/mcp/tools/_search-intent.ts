@@ -149,7 +149,7 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
     if (hasNoIndexedContent) {
       return err(
         'mode=intent: no summaries, docstrings, or test names indexed — re-run `cartograph admin index` ' +
-          '(docstrings + test names are extracted automatically) and/or `cartograph summarize` to populate summaries.',
+          '(docstrings + test names are extracted automatically) and/or `cartograph admin summarize --all` to populate summaries.',
       );
     }
 

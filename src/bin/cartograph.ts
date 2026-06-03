@@ -41,7 +41,8 @@ import './version-check.js';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { errMsg } from '../errors.js';
-import { program } from './_cli-core.js';
+import { editDistance } from '../text-distance.js';
+import { program, error } from './_cli-core.js';
 export { program } from './_cli-core.js';
 
 // Command groups — each module is side-effecting: importing it
@@ -124,6 +125,34 @@ function isEntryPoint(): boolean {
   }
 }
 
+function topLevelCommandSuggestion(input: string): string | undefined {
+  let best: { name: string; dist: number } | undefined;
+  for (const command of program.commands) {
+    const name = command.name();
+    if (!name || name === 'help') continue;
+    const dist = editDistance(input, name);
+    if (!best || dist < best.dist) best = { name, dist };
+  }
+  if (!best) return undefined;
+  return best.dist <= Math.max(3, Math.ceil(input.length / 3)) ? best.name : undefined;
+}
+
+function rejectUnknownCommandHelp(): boolean {
+  const args = process.argv.slice(2);
+  if (!args.some((arg) => arg === '--help' || arg === '-h')) return false;
+  const firstCommand = args.find((arg) => arg !== '--help' && arg !== '-h' && !arg.startsWith('-'));
+  if (!firstCommand || firstCommand === 'help') return false;
+  const known = new Set(program.commands.map((command) => command.name()));
+  if (known.has(firstCommand)) return false;
+  const suggestion = topLevelCommandSuggestion(firstCommand);
+  error(
+    `Unknown command '${firstCommand}'.` +
+      (suggestion ? ` Did you mean ${suggestion}?` : ` Run 'cartograph --help' for available commands.`),
+  );
+  process.exitCode = 1;
+  return true;
+}
+
 if (isEntryPoint()) {
   if (process.argv.length === 2) {
     try {
@@ -133,7 +162,7 @@ if (isEntryPoint()) {
       process.stderr.write(`Installation failed: ${errMsg(err)}\n`);
       process.exit(1);
     }
-  } else {
+  } else if (!rejectUnknownCommandHelp()) {
     program.parse();
   }
 }

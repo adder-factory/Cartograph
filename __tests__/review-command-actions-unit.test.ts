@@ -47,6 +47,7 @@ function loadReviewCommandActions(): void {
       calls.push({ tool, args, projectPath });
     }),
     installFamilyActionAlias: vi.fn(),
+    attachUnknownActionHandler: vi.fn(),
   });
 }
 

@@ -146,13 +146,18 @@ function looksLikeFeatureRequest(task: string): boolean {
   ];
 
   const lowerTask = task.toLowerCase();
+  const hasKeyword = (keyword: string): boolean => {
+    if (keyword.includes(' ')) return lowerTask.includes(keyword);
+    const escapedKeyword = keyword.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+    return new RegExp(String.raw`\b${escapedKeyword}\b`).test(lowerTask);
+  };
 
   // If it's clearly a bug or exploration, not a feature
-  if (bugKeywords.some((k) => lowerTask.includes(k))) return false;
-  if (explorationKeywords.some((k) => lowerTask.includes(k))) return false;
+  if (bugKeywords.some((k) => hasKeyword(k))) return false;
+  if (explorationKeywords.some((k) => hasKeyword(k))) return false;
 
   // If it matches feature keywords, it's likely a feature request
-  return featureKeywords.some((k) => lowerTask.includes(k));
+  return featureKeywords.some((k) => hasKeyword(k));
 }
 
 /**

@@ -65,6 +65,7 @@ sessionCmd
 
 sessionCmd
   .command('macro_save')
+  .alias('macro-save')
   .description("Save a named macro recipe of tool steps (mirrors cartograph_session({action:'macro_save'}))")
   .option('-p, --project-path <path>', 'Project path')
   .option('-n, --name <name>', 'Macro name')
@@ -90,6 +91,7 @@ sessionCmd
 
 sessionCmd
   .command('macro_run')
+  .alias('macro-run')
   .description("Replay a saved macro recipe (mirrors cartograph_session({action:'macro_run'}))")
   .option('-p, --project-path <path>', 'Project path')
   .option('-n, --name <name>', 'Macro name to run')
@@ -115,6 +117,7 @@ sessionCmd
 
 sessionCmd
   .command('macro_list')
+  .alias('macro-list')
   .description("List saved macro recipes (mirrors cartograph_session({action:'macro_list'}))")
   .option('-p, --project-path <path>', 'Project path')
   .action(async (options: { projectPath?: string }) => {
@@ -123,6 +126,7 @@ sessionCmd
 
 sessionCmd
   .command('macro_delete')
+  .alias('macro-delete')
   .description("Delete a saved macro recipe (mirrors cartograph_session({action:'macro_delete'}))")
   .option('-p, --project-path <path>', 'Project path')
   .option('-n, --name <name>', 'Macro name to delete')

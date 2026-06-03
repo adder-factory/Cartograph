@@ -177,6 +177,63 @@ function gqmAddImportSourceFilesInto(args: GqmAddImportSourceFilesIntoArgs): voi
   }
 }
 
+export interface ResolvedFileImportDependent {
+  /** Importing file path. */
+  filePath: string;
+  /** Import-statement line in the importing file, when available. */
+  line?: number;
+}
+
+interface ResolvedImportRow {
+  importerFilePath: string;
+  spec: string;
+  line: number | null;
+}
+
+/**
+ * Resolve every file→import-node edge in reverse and return files whose
+ * import specifier resolves to `targetFilePath`.
+ *
+ * The persisted graph stores side-effect imports (`import './setup.js'`) as
+ * file→import-node edges; there is no incoming edge on the imported file's
+ * file node. Forward file-dependency queries already resolve the import-node
+ * specifier. This helper performs the same resolution in reverse so file-node
+ * callers and affected-test BFS can see those dependents too.
+ */
+function gqmCollectResolvedFileImportDependents(args: {
+  queries: QueryBuilder;
+  targetFilePath: string;
+  indexedFiles: ReadonlySet<string>;
+}): ResolvedFileImportDependent[] {
+  const { queries, targetFilePath, indexedFiles } = args;
+  const rows = queries.db
+    .prepare(
+      `
+      SELECT src.file_path AS importerFilePath, imp.name AS spec, imp.start_line AS line
+      FROM edges e
+      JOIN nodes src ON src.id = e.source AND src.kind = 'file'
+      JOIN nodes imp ON imp.id = e.target AND imp.kind = 'import'
+      WHERE e.kind = 'imports'
+    `,
+    )
+    .all() as ResolvedImportRow[];
+
+  const out = new Map<string, ResolvedFileImportDependent>();
+  for (const row of rows) {
+    if (row.importerFilePath === targetFilePath) continue;
+    const resolved = resolveRelativeSpec(row.importerFilePath, row.spec, indexedFiles);
+    if (resolved !== targetFilePath) continue;
+    const existing = out.get(row.importerFilePath);
+    const line = typeof row.line === 'number' && row.line > 0 ? row.line : undefined;
+    if (!existing || (line !== undefined && (existing.line === undefined || line < existing.line))) {
+      const dependent: ResolvedFileImportDependent = { filePath: row.importerFilePath };
+      if (line !== undefined) dependent.line = line;
+      out.set(row.importerFilePath, dependent);
+    }
+  }
+  return Array.from(out.values());
+}
+
 interface GqmAppendInternalOutgoingEdgesIntoArgs {
   queries: QueryBuilder;
   nodeId: string;
@@ -256,6 +313,11 @@ export class GraphQueryManager {
   getFileDependents(filePath: string): string[] {
     const nodes = this.queries.getNodesByFile(filePath);
     const dependents = new Set<string>();
+    const indexedFiles = new Set(getAllFilePaths(this.queries));
+
+    for (const dep of this.getResolvedFileImportDependents(filePath, indexedFiles)) {
+      dependents.add(dep.filePath);
+    }
 
     const fileNode = nodes.find((n) => n.kind === 'file');
     if (fileNode) {
@@ -268,6 +330,14 @@ export class GraphQueryManager {
     }
 
     return Array.from(dependents);
+  }
+
+  getResolvedFileImportDependents(filePath: string, indexedFiles?: ReadonlySet<string>): ResolvedFileImportDependent[] {
+    return gqmCollectResolvedFileImportDependents({
+      queries: this.queries,
+      targetFilePath: filePath,
+      indexedFiles: indexedFiles ?? new Set(getAllFilePaths(this.queries)),
+    });
   }
 
   getExportedSymbols(filePath: string): Node[] {

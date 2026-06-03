@@ -311,6 +311,40 @@ describe('handleAtRange — MCP handler', () => {
 
     cg.close();
   });
+
+  it('returns file-level context when an indexed top-level range has no symbol overlap', async () => {
+    const fsModule = await import('node:fs');
+    const pathModule = await import('node:path');
+    fsModule.mkdirSync(pathModule.join(testDir, 'src'));
+    fsModule.writeFileSync(
+      pathModule.join(testDir, 'src/a.ts'),
+      '// module banner\n\nexport function targetFn(): number {\n  return 1;\n}\n',
+    );
+
+    const { Cartograph } = await import('../src/index.js');
+    const { ToolHandler } = await import('../src/mcp/tools.js');
+
+    const cg = await Cartograph.init(testDir, { config: { llm: { endpoint: '' } } });
+    await cg.indexAll({ summarize: false });
+    const handler = new ToolHandler(cg);
+
+    try {
+      const result = await handler.execute('cartograph_at_range', {
+        file: 'src/a.ts',
+        startLine: 1,
+        endLine: 1,
+      });
+      expect(result.isError).toBeFalsy();
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain('No symbol body overlaps this range');
+      expect(text).toContain('file-level context');
+      expect(text).toContain('targetFn');
+      expect(text).not.toContain('No symbols overlap src/a.ts:1-1');
+    } finally {
+      handler.closeAll();
+      cg.close();
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -878,11 +912,12 @@ describe('handleAtRange — diff-form fuzz fallback for tight hunks', () => {
     }
   });
 
-  it('a hunk far from any symbol still reports no overlap (fuzz does not over-broaden)', async () => {
+  it('a hunk far from any symbol reports file context without over-broadening fuzz', async () => {
     const { cg, handler } = await setupProject();
     try {
       // Hunk at lines 1-3 — far above the def line (13); even ±8 fuzz
-      // (1-11) does not reach targetFn.
+      // (1-11) does not reach targetFn. The file-context fallback still
+      // gives the caller a module-level anchor and nearest-symbol hint.
       const diff =
         'diff --git a/src/a.ts b/src/a.ts\n' +
         'index 1111111..2222222 100644\n' +
@@ -896,7 +931,9 @@ describe('handleAtRange — diff-form fuzz fallback for tight hunks', () => {
       const result = await handler.execute('cartograph_at_range', { diff });
       expect(result.isError).toBeFalsy();
       const text = result.content[0]?.text ?? '';
-      expect(text).toContain('_No symbols overlap this range._');
+      expect(text).toContain('No symbol body overlaps this range');
+      expect(text).toContain('file-level context');
+      expect(text).toContain('targetFn');
       expect(text).not.toContain('near hunk');
     } finally {
       handler.closeAll();

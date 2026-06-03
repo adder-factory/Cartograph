@@ -96,16 +96,49 @@ interface CollectCallersForSourceArgs {
   minConfidence: NonNullable<Edge['confidence']> | null;
 }
 
+function makeResolvedFileImportEdge(source: Node, target: Node, line: number | undefined): Edge {
+  const edge: Edge = {
+    source: source.id,
+    target: target.id,
+    kind: 'imports',
+    confidence: 'EXTRACTED',
+    metadata: { resolvedFileImport: true },
+  };
+  if (line !== undefined) edge.line = line;
+  return edge;
+}
+
+function appendResolvedFileImportCallers(args: {
+  cg: Cartograph;
+  source: Node;
+  edgeKindFilter: string | undefined;
+  seen: Set<string>;
+  rows: Array<{ node: Node; edge: Edge }>;
+}): void {
+  const { cg, source, edgeKindFilter, seen, rows } = args;
+  if (source.kind !== 'file') return;
+  if (edgeKindFilter !== undefined && edgeKindFilter !== 'imports') return;
+
+  for (const dep of cg.internals.graphManager.getResolvedFileImportDependents(source.filePath)) {
+    const depFileNode = cg.queries.getNodesByFile(dep.filePath).find((n) => n.kind === 'file');
+    if (!depFileNode || seen.has(depFileNode.id)) continue;
+    seen.add(depFileNode.id);
+    rows.push({ node: depFileNode, edge: makeResolvedFileImportEdge(depFileNode, source, dep.line) });
+  }
+}
+
 function collectCallersForSource(args: CollectCallersForSourceArgs): Array<{ node: Node; edge: Edge }> {
   const { cg, source, edgeKindFilter, minConfidence } = args;
   const callRows = edgeKindFilter
     ? cg.internals.traverser.getCallers(source.id).filter((c) => c.edge.kind === edgeKindFilter)
     : cg.internals.traverser.getCallers(source.id);
 
-  if (!TYPE_LIKE_KINDS.has(source.kind)) return filterByConfidence(callRows, minConfidence);
-
   const seen = new Set<string>(callRows.map((r) => r.node.id));
   const merged = [...callRows];
+  appendResolvedFileImportCallers({ cg, source, edgeKindFilter, seen, rows: merged });
+
+  if (!TYPE_LIKE_KINDS.has(source.kind)) return filterByConfidence(merged, minConfidence);
+
   // Push the kind filter into SQL — saves walking structural
   // (`contains`) edges in JS on a popular type.
   for (const e of getIncomingEdges(cg.queries, source.id, TYPE_USAGE_EDGE_KINDS)) {
@@ -849,6 +882,7 @@ function collectCallers(args: CollectCallersArgs): CallersAccum {
       seen.add(c.node.id);
       rawRows.push({ node: c.node, edge: c.edge });
     }
+    appendResolvedFileImportCallers({ cg, source: node, edgeKindFilter, seen, rows: rawRows });
   }
   // Expand test-file file-row callers into per-call-site rows (FRICTION-D,
   // 2026-05-14). `seen` deliberately stays keyed by ORIGINAL node ids so

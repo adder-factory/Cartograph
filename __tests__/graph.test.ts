@@ -114,6 +114,18 @@ export { main };
 `,
     );
 
+    fs.writeFileSync(path.join(srcDir, 'setup.ts'), `globalThis.__cartographGraphSetup = true;\n`);
+    fs.writeFileSync(
+      path.join(srcDir, 'side-effect.ts'),
+      `
+import './setup.js';
+
+export function boot(): void {
+  console.log('boot');
+}
+`,
+    );
+
     // Initialize and index
     cg = Cartograph.initSync(testDir, {
       config: {
@@ -386,6 +398,14 @@ export { main };
       const dependents = cg.internals.graphManager.getFileDependents('src/utils.ts');
 
       expect(Array.isArray(dependents)).toBe(true);
+    });
+
+    it('should include side-effect importers as reverse file dependents', () => {
+      const dependencies = cg.internals.graphManager.getFileDependencies('src/side-effect.ts');
+      expect(dependencies).toContain('src/setup.ts');
+
+      const dependents = cg.internals.graphManager.getFileDependents('src/setup.ts');
+      expect(dependents).toContain('src/side-effect.ts');
     });
   });
 

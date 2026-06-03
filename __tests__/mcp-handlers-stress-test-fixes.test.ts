@@ -277,7 +277,7 @@ describe('Stress-test-fixes handler outputs', () => {
       expect(text).toMatch(/Embeddings.*\d+ rows/);
       expect(text).toContain("cartograph_find({by: 'name', mode: 'semantic'})");
       expect(text).toMatch(/Coverage.*\d+ symbols/);
-      expect(text).toContain('cartograph coverage --mode load --report-path <lcov>');
+      expect(text).toContain("cartograph_coverage({mode: 'load', reportPath: '<lcov>'})");
     });
   });
 

@@ -141,7 +141,7 @@ async function handleStatus(ctx: ToolCtx, args: StatusArgs): Promise<ToolOutcome
   appendPendingChanges(lines, changedFiles);
   appendStaleArtifacts(lines, cg);
   appendParseCacheStatus(lines, cg);
-  appendFeatureReadiness(lines, cg, { summaryBreakdown });
+  appendFeatureReadiness(lines, cg, { summaryBreakdown, surface: 'mcp' });
   await appendToolRegistryDrift(lines);
   await appendLlmProviders(lines, cg);
   appendServerConfig(lines, ctx);
@@ -1057,6 +1057,8 @@ type LensReading = { present: false } | { present: true; state: LensState; line:
  *  {@link appendFeatureReadiness} with a typed opts bag. */
 export interface LensOpts {
   summaryBreakdown: boolean;
+  /** Which caller is rendering user-facing action hints. */
+  surface?: 'mcp' | 'cli';
 }
 type ReadinessLens = (cg: Cartograph, opts: LensOpts) => LensReading;
 
@@ -1083,7 +1085,47 @@ function countReuseCachedRows(cg: Cartograph, storeTable: string, refsTable: str
   }
 }
 
-function readSummariesLens(cg: Cartograph, opts: { summaryBreakdown: boolean }): LensReading {
+function hintSurface(opts: LensOpts): NonNullable<LensOpts['surface']> {
+  return opts.surface ?? 'mcp';
+}
+
+function summarizeHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli'
+    ? '`cartograph admin summarize --all`'
+    : "`cartograph_admin({action: 'summarize', summarizeLimit: -1})`";
+}
+
+function agentSummaryBridgeHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli'
+    ? '`cartograph summaries pending` + `cartograph summaries save`'
+    : "`cartograph_summaries({action: 'pending'})` + `cartograph_summaries({action: 'save'})`";
+}
+
+function embedHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli' ? '`cartograph admin embed`' : "`cartograph_admin({action: 'embed'})`";
+}
+
+function semanticFindHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli'
+    ? '`cartograph find --by name --mode semantic`'
+    : "`cartograph_find({by: 'name', mode: 'semantic'})`";
+}
+
+function coverageLoadHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli'
+    ? '`cartograph coverage --mode load --report-path <lcov>`'
+    : "`cartograph_coverage({mode: 'load', reportPath: '<lcov>'})`";
+}
+
+function coverageReadHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli' ? '`cartograph coverage`' : '`cartograph_coverage`';
+}
+
+function roleReadHint(opts: LensOpts): string {
+  return hintSurface(opts) === 'cli' ? '`cartograph role`' : '`cartograph_role`';
+}
+
+function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
   const sumCov = safeCall(() => getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS));
   if (!sumCov || sumCov.total === 0) return { present: false };
   const pct = Math.round((sumCov.summarised / sumCov.total) * 100);
@@ -1115,10 +1157,9 @@ function readSummariesLens(cg: Cartograph, opts: { summaryBreakdown: boolean }):
   }
   let action = '';
   if (state === 'empty') {
-    action =
-      " — run `cartograph summarize` (or `cartograph_summaries({action: 'pending'})` + `cartograph_summaries({action: 'save'})`)";
+    action = ` — run ${summarizeHint(opts)} (or ${agentSummaryBridgeHint(opts)})`;
   } else if (state === 'partial') {
-    action = ` — ${pending} pending; run \`cartograph summarize\` to complete`;
+    action = ` — ${pending} pending; run ${summarizeHint(opts)} to complete`;
   }
   // Centrality-weighted view: complements the raw count with a quality
   // signal — agents read centrality-weighted as "is the SPINE covered",
@@ -1182,14 +1223,12 @@ function formatSummaryBreakdown(b: SummaryBreakdown): string {
   return lines.join('\n');
 }
 
-function readEmbeddingsLens(cg: Cartograph): LensReading {
+function readEmbeddingsLens(cg: Cartograph, opts: LensOpts): LensReading {
   const embTotal = safeCall(() => getEmbeddingsTotal(cg.queries));
   if (embTotal === undefined) return { present: false };
   const state: LensState = embTotal === 0 ? 'empty' : 'full';
   const action =
-    embTotal === 0
-      ? " — run `cartograph embed`; needed for `cartograph_find({by: 'name', mode: 'semantic'})` + hybrid retrieval"
-      : '';
+    embTotal === 0 ? ` — run ${embedHint(opts)}; needed for ${semanticFindHint(opts)} + hybrid retrieval` : '';
   // Phase 4 (migration 050) split embeddings into per-node refs + a
   // content-addressed store. Rows orphaned by node deletion / rename
   // remain in `embedding_store` for free reuse on revert/rename — surface
@@ -1201,43 +1240,42 @@ function readEmbeddingsLens(cg: Cartograph): LensReading {
   return { present: true, state, line: `**Embeddings:** ${embTotal} rows${reuseSuffix}${action}` };
 }
 
-function readCoverageLens(cg: Cartograph): LensReading {
+function readCoverageLens(cg: Cartograph, opts: LensOpts): LensReading {
   const covStats = safeCall(() => getCoverageStats(cg.queries));
   if (covStats === undefined) return { present: false };
   const state: LensState = covStats.symbolsWithCoverage === 0 ? 'empty' : 'full';
-  const action = formatCoverageAction(covStats);
+  const action = formatCoverageAction(covStats, opts);
   return { present: true, state, line: `**Coverage:** ${covStats.symbolsWithCoverage} symbols${action}` };
 }
 
 /** Render the trailing-text suffix for the coverage status line: a
  *  load-hint when no coverage rows exist, else a sources summary. */
-function formatCoverageAction(covStats: { symbolsWithCoverage: number; sources: string[] }): string {
+function formatCoverageAction(covStats: { symbolsWithCoverage: number; sources: string[] }, opts: LensOpts): string {
   if (covStats.symbolsWithCoverage === 0) {
-    return ' — run `cartograph coverage --mode load --report-path <lcov>`; needed for `cartograph_coverage`';
+    return ` — run ${coverageLoadHint(opts)}; needed for ${coverageReadHint(opts)}`;
   }
   const sourceCount = covStats.sources.length;
   const plural = sourceCount === 1 ? '' : 's';
   return ` (${sourceCount} source${plural}: ${covStats.sources.join(', ')})`;
 }
 
-function readRolesLens(cg: Cartograph): LensReading {
+function readRolesLens(cg: Cartograph, opts: LensOpts): LensReading {
   const roleCounts = safeCall(() => getRoleCounts(cg.queries));
   if (roleCounts === undefined) return { present: false };
   const roleTotal = Array.from(roleCounts.values()).reduce((a, b) => a + b, 0);
   const state: LensState = roleTotal === 0 ? 'empty' : 'full';
   const action =
     roleTotal === 0
-      ? ' — run `cartograph summarize` (classification runs as a side-effect of the summarisation pipeline); needed for `cartograph_role`'
+      ? ` — run ${summarizeHint(opts)} (classification runs as a side-effect of the summarisation pipeline); needed for ${roleReadHint(opts)}`
       : '';
   return { present: true, state, line: `**Roles:** ${roleTotal} classified${action}` };
 }
 
-function readDirectorySummariesLens(cg: Cartograph): LensReading {
+function readDirectorySummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
   const dirSummaries = safeCall(() => getAllDirectorySummaries(cg.queries).length);
   if (dirSummaries === undefined) return { present: false };
   const state: LensState = dirSummaries === 0 ? 'empty' : 'full';
-  const action =
-    dirSummaries === 0 ? ' — needs ≥3 summarised symbols per dir; run `cartograph summarize --directories`' : '';
+  const action = dirSummaries === 0 ? ` — needs ≥3 summarised symbols per dir; run ${summarizeHint(opts)}` : '';
   return { present: true, state, line: `**Directory summaries:** ${dirSummaries}${action}` };
 }
 

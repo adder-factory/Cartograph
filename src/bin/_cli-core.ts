@@ -66,14 +66,17 @@ export const program = new Command();
 // human operators see indexing advance instead of waiting blind.
 export const adminCmd = program
   .command('admin')
+  .summary('Project lifecycle, indexing, setup, doctor, and LLM admin commands')
   .description(
-    'Project lifecycle / index maintenance (mirrors cartograph_admin MCP tool). Subcommands: init / uninit / unlock / sync / index / embed-only / migrate / build-similarity-edges / prune-store / summarize / embed / classify / install-models / scip-export / scip-import.',
+    'Project lifecycle / index maintenance. Subcommands: init / uninit / sync / index / summarize / embed / classify / doctor / llm-plan / llm-apply / llm-tune / install-models / scip import/export.',
   );
 export const summariesCmd = program
   .command('summaries')
+  .summary('Pull and save agent-written symbol summaries')
   .description('Agent-bridge summaries — pending (pull) / save (persist). Mirrors cartograph_summaries MCP tool.');
 export const reviewCmd = program
   .command('review')
+  .summary('Diff, neighbor, risk, audit, and trust review helpers')
   .description(
     'Review / triage helpers (mirrors cartograph_review MCP tool). Subcommands: context (diff-driven structural review) / neighbors (semantic lookalikes) / risk (project-wide triage) / agent-audit (agent-prone biomarkers) / trust (readiness self-check).',
   );
@@ -81,7 +84,10 @@ export const reviewCmd = program
 // `llm setup` is the only remaining LLM provisioning command. Kept
 // as a subcommand under `llm` so the surface stays extensible (e.g.
 // future `llm test`, `llm list-models`) without renaming.
-export const llmCmd = program.command('llm').description('Local-LLM utilities: provider setup.');
+export const llmCmd = program
+  .command('llm')
+  .summary('Interactive local or cloud LLM provider setup')
+  .description('Local-LLM utilities: provider setup.');
 
 /**
  * cartograph session <action>
@@ -93,11 +99,14 @@ export const llmCmd = program.command('llm').description('Local-LLM utilities: p
  * Subcommands mirror the MCP action enum:
  *   create / resume / list / delete
  *   macro_save / macro_run / macro_list / macro_delete
+ *   (kebab-case aliases: macro-save / macro-run / macro-list /
+ *   macro-delete)
  */
 export const sessionCmd = program
   .command('session')
+  .summary('Create, list, resume, delete sessions and macros')
   .description(
-    'Agent session state + macros (mirrors cartograph_session MCP family). Subcommands: create / resume / list / delete / macro_save / macro_run / macro_list / macro_delete.',
+    'Agent session state + macros. Subcommands: create / resume / list / delete / macro_save / macro_run / macro_list / macro_delete; kebab aliases also work.',
   );
 
 // Version from package.json

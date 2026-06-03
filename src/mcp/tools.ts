@@ -804,6 +804,7 @@ export class ToolHandler {
       // prependBanner skips isError results, so we inline a direct prepend
       // that handles both success and error ToolResults.
       result = prependTextToResult(result, warnBanner);
+      result = { ...result, metadata: { ...result.metadata, warnings: validation.warnings } };
     }
     if (gate.freshnessMeta && !result.isError) {
       result = { ...result, metadata: { ...result.metadata, freshness: gate.freshnessMeta } };

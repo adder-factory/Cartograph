@@ -13,6 +13,7 @@ import {
   assignFloatArg as cliAssignFloatArg,
   runViaMCP as cliRunViaMCP,
   installFamilyActionAlias as cliInstallFamilyActionAlias,
+  attachUnknownActionHandler as cliAttachUnknownActionHandler,
 } from '../_cli-core.js';
 
 interface CommandLike {
@@ -41,6 +42,7 @@ export interface ReviewCommandDeps {
   assignFloatArg: AssignNumericArgFn;
   runViaMCP: RunViaMCPFn;
   installFamilyActionAlias: (group: any, family: string, disc: string) => void;
+  attachUnknownActionHandler: (group: any, family: string) => void;
 }
 
 const defaultReviewCommandDeps: ReviewCommandDeps = {
@@ -51,6 +53,7 @@ const defaultReviewCommandDeps: ReviewCommandDeps = {
   assignFloatArg: cliAssignFloatArg,
   runViaMCP: cliRunViaMCP,
   installFamilyActionAlias: cliInstallFamilyActionAlias,
+  attachUnknownActionHandler: cliAttachUnknownActionHandler,
 };
 
 interface ReviewContextOptions {
@@ -395,6 +398,7 @@ export function registerReviewCommands(deps: ReviewCommandDeps = defaultReviewCo
   registerReviewRiskCommand(deps);
   registerReviewAgentAuditCommand(deps);
   registerReviewTrustCommand(deps);
+  deps.attachUnknownActionHandler(deps.reviewCmd, 'review');
   registerSimilarCommand(deps);
 }
 

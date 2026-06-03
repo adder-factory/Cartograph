@@ -3,7 +3,14 @@
  * bin/cartograph.ts decomposition; side-effecting module: importing it
  * registers the commands on `summariesCmd`.
  */
-import { summariesCmd, error, assignIntArg, runViaMCP, installFamilyActionAlias } from '../_cli-core.js';
+import {
+  summariesCmd,
+  error,
+  assignIntArg,
+  runViaMCP,
+  installFamilyActionAlias,
+  attachUnknownActionHandler,
+} from '../_cli-core.js';
 import * as fs from 'node:fs';
 import { errMsg } from '../../errors.js';
 
@@ -44,6 +51,8 @@ summariesCmd
     args['modelHint'] = options.modelHint ?? 'agent-cli';
     await runViaMCP('cartograph_summaries', args, options.projectPath);
   });
+
+attachUnknownActionHandler(summariesCmd, 'summaries');
 
 summariesCmd
   .command('save [json-file]')

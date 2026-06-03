@@ -60,6 +60,7 @@ export interface ToolResult {
   isError?: boolean;
   metadata?: {
     freshness?: FreshnessMetadata;
+    warnings?: string[];
   };
 }
 

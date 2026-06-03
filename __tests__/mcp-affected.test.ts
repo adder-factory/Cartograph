@@ -28,9 +28,18 @@ describe('cartograph_affected', () => {
     // used by feature_envy / type-edge tests in this suite.
     fs.writeFileSync(path.join(dir, 'src', 'a.ts'), `export function alpha(): number { return 1; }\n`);
     fs.writeFileSync(path.join(dir, 'src', 'b.ts'), `export function beta(): number { return 2; }\n`);
+    fs.writeFileSync(path.join(dir, 'src', 'setup.ts'), `globalThis.__cartographSetup = true;\n`);
+    fs.writeFileSync(
+      path.join(dir, 'src', 'side.ts'),
+      `import './setup.js';\nexport function side(): number { return 3; }\n`,
+    );
     fs.writeFileSync(
       path.join(dir, 'src', 'a.test.ts'),
       `import { alpha } from './a.js';\nexport function checkAlpha(): number { return alpha(); }\n`,
+    );
+    fs.writeFileSync(
+      path.join(dir, 'src', 'side.test.ts'),
+      `import { side } from './side.js';\nexport function checkSide(): number { return side(); }\n`,
     );
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0' }));
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
@@ -51,6 +60,25 @@ describe('cartograph_affected', () => {
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/Affected test files/);
     expect(text).toMatch(/src\/a\.test\.ts/);
+  });
+
+  it('walks reverse dependents through side-effect imports', async () => {
+    const result = await handler.execute('cartograph_affected', {
+      files: ['src/setup.ts'],
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toMatch(/Affected test files/);
+    expect(text).toMatch(/src\/side\.test\.ts/);
+  });
+
+  it('surfaces side-effect importers as file-node graph callers', async () => {
+    const result = await handler.execute('cartograph_graph', {
+      start: 'src/setup.ts',
+      direction: 'callers',
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toMatch(/Callers of src\/setup\.ts/);
+    expect(text).toMatch(/src\/side\.ts/);
   });
 
   it('returns no tests when the changed file has no test dependents', async () => {

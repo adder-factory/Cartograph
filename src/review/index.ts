@@ -402,7 +402,7 @@ function buildAffectedSymbol({
     .getCallees(sym.id, 1)
     .filter((r) => r.edge.kind !== 'imports')
     .slice(0, opts.maxCalleesPerSymbol)
-    .map((r) => compact({ name: r.node.name, filePath: r.node.filePath, line: r.edge.line }));
+    .map((r) => compact({ name: r.node.name, filePath: r.node.filePath, line: r.node.startLine }));
 
   const impactCount = traverser.getImpactRadius(sym.id, 2).nodes.size;
   return toAffected(sym, { callers, callees, impactCount });

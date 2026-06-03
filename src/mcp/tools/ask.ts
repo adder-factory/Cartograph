@@ -733,7 +733,7 @@ export function buildAskOutput(result: AskResult, cited: CitedIdentifier[], askM
   const ro = result.rerankOutcome;
   if (ro?.kind === 'failed') {
     lines.unshift(
-      `> ⚠ Reranker unavailable — using cosine ordering. Check \`llm.rerankerLlm\` endpoint reachability via \`cartograph_admin doctor\`.`,
+      `> ⚠ Reranker unavailable — using cosine ordering. \`cartograph_admin doctor\` verifies the endpoint shape, but real rerank batches can still exceed the backend's batch/token limits. If doctor passes, increase the reranker \`llama-server --batch-size\` / \`--ubatch-size\` or reduce retrieval breadth.`,
       '',
     );
   }

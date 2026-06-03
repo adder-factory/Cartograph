@@ -171,6 +171,7 @@ const wideTool = defineTool({
     names: z.array(z.string()).optional().describe('variadic positional'),
     limit: z.number().int().min(1).max(100).default(20).describe('row cap'),
     compact: z.boolean().default(true).describe('compact rows (default on)'),
+    includeTests: z.boolean().optional().describe('include test files'),
     verbose: z.boolean().default(false).describe('chatty (default off)'),
     projectPath: z.string().optional().describe('project path'),
   }),
@@ -293,6 +294,50 @@ describe('buildGeneratedCommand — negatable booleans', () => {
     const cmd = buildGeneratedCommand(wideTool, run);
     await parse(cmd, ['--compact']);
     expect(run.mock.calls[0]?.[1]).toMatchObject({ compact: true });
+  });
+
+  it('can force an optional boolean to expose a --no- flag', async () => {
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const cmd = buildGeneratedCommand(wideTool, run, { negatableFields: ['includeTests'] });
+    const longs = cmd.options.map((o) => o.long);
+    expect(longs).toContain('--no-include-tests');
+    await parse(cmd, ['--no-include-tests']);
+    expect(run.mock.calls[0]?.[1]).toMatchObject({ includeTests: false });
+  });
+
+  it('describes --no flags as setting the field false', () => {
+    const cmd = buildGeneratedCommand(wideTool, vi.fn());
+    const noCompact = cmd.options.find((o) => o.long === '--no-compact');
+    const compact = cmd.options.find((o) => o.long === '--compact');
+    expect(noCompact?.description).toBe('Set compact to false.');
+    expect(compact?.description).toBe('compact rows (default on)');
+  });
+
+  it('rejects boolean-looking values swallowed as optional positionals', async () => {
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrWrites.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+    const cmd = buildGeneratedCommand(wideTool, run, {
+      positionalFields: ['dirPath'],
+      negatableFields: ['includeTests'],
+    });
+    await parse(cmd, ['--include-tests', 'false']);
+    expect(run).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(stderrWrites.join('')).toContain('Boolean CLI flags are value-less');
+  });
+
+  it('allows boolean-looking optional positionals when no boolean flag was passed', async () => {
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const cmd = buildGeneratedCommand(wideTool, run, {
+      positionalFields: ['dirPath'],
+      negatableFields: ['includeTests'],
+    });
+    await parse(cmd, ['false']);
+    expect(run).toHaveBeenCalledWith('cartograph_wide_demo', { dirPath: 'false', limit: 20 }, undefined);
   });
 });
 

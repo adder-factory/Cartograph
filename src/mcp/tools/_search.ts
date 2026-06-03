@@ -636,6 +636,27 @@ function reorderProdFirst(rawResults: SearchResult[], limit: number): SearchResu
   return [...prodHits, ...fixtureHits].slice(0, limit);
 }
 
+function canonicalToolNameLiteral(query: string): string | null {
+  const trimmed = query.trim();
+  return /^cartograph_[a-z0-9_]+$/.test(trimmed) ? trimmed : null;
+}
+
+function isCanonicalToolConstantHit(result: SearchResult, canonicalToolName: string): boolean {
+  const { node } = result;
+  if (node.kind !== 'constant') return false;
+  if (!node.name.endsWith('_TOOL')) return false;
+  return Boolean(node.signature?.includes(`name: '${canonicalToolName}'`));
+}
+
+function prioritizeCanonicalToolNameResults(query: string, results: SearchResult[]): SearchResult[] {
+  const canonicalToolName = canonicalToolNameLiteral(query);
+  if (!canonicalToolName) return results;
+  const toolHits = results.filter((r) => isCanonicalToolConstantHit(r, canonicalToolName));
+  if (toolHits.length === 0) return results;
+  const toolIds = new Set(toolHits.map((r) => r.node.id));
+  return [...toolHits, ...results.filter((r) => !toolIds.has(r.node.id))];
+}
+
 /**
  * Map a `CentralityFilter` op into the SQL `WHERE centrality <op> ?`
  * fragment. `>` / `>=` reject NULL-centrality nodes; `<` / `<=` keep
@@ -1071,7 +1092,8 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
         sortByCentrality: parsed.sortBy === 'centrality',
       })
     : searchNodes(cg.queries, query, compact({ limit: fetchLimit, kinds }));
-  const fullResults = reorderProdFirst(rawResults, limit);
+  const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
+  const fullResults = reorderProdFirst(rankedResults, limit);
   return { rawResults, fullResults };
 }
 

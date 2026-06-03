@@ -98,7 +98,7 @@ describe("cartograph_find({by: 'name', mode: 'intent'})", () => {
     const text = r.content[0]?.text ?? '';
     expect(text).toMatch(/no summaries, docstrings, or test names indexed/);
     expect(text).toMatch(/cartograph admin index/);
-    expect(text).toMatch(/cartograph summarize/);
+    expect(text).toMatch(/cartograph admin summarize --all/);
     expect(r.isError).toBe(true);
   });
 
