@@ -495,6 +495,55 @@ type McpRunner = typeof runViaMCP;
 
 let readCommandMcpRunner: McpRunner = runViaMCP;
 
+interface CommandLike {
+  command(name: string): CommandLike;
+  description(text: string): CommandLike;
+  option(...args: unknown[]): CommandLike;
+  action(fn: (...args: any[]) => unknown): CommandLike;
+}
+
+interface ReadCartographModule {
+  default: {
+    open: (projectPath: string) => Promise<any>;
+  };
+}
+
+export interface ReadCommandDeps {
+  program: CommandLike;
+  error: typeof error;
+  info: typeof info;
+  resolveProjectPath: typeof resolveProjectPath;
+  loadCartograph: () => Promise<ReadCartographModule>;
+  runViaMCP: typeof runViaMCP;
+  isInitialized: typeof isInitialized;
+  getAllFilesWithSymbolCount: typeof getAllFilesWithSymbolCount;
+  getFileSummaries: typeof getFileSummaries;
+  filterFilesByDir: typeof filterFilesByDir;
+  buildDirRollup: typeof buildDirRollup;
+  buildIndexedPathSets: typeof buildIndexedPathSets;
+  findAffectedTests: typeof findAffectedTests;
+  loadGitUtils: () => Promise<{ listChangedFilesSince: (projectPath: string, ref: string) => string[] | null }>;
+}
+
+const defaultReadCommandDeps: ReadCommandDeps = {
+  program,
+  error,
+  info,
+  resolveProjectPath,
+  loadCartograph: loadCartograph as () => Promise<ReadCartographModule>,
+  runViaMCP,
+  isInitialized,
+  getAllFilesWithSymbolCount,
+  getFileSummaries,
+  filterFilesByDir,
+  buildDirRollup,
+  buildIndexedPathSets,
+  findAffectedTests,
+  loadGitUtils: (() => import('../../git-utils.js')) as ReadCommandDeps['loadGitUtils'],
+};
+
+let activeReadCommandDeps: ReadCommandDeps = defaultReadCommandDeps;
+
 function setReadCommandMcpRunnerForTest(runner: McpRunner): () => void {
   const previous = readCommandMcpRunner;
   readCommandMcpRunner = runner;
@@ -648,7 +697,7 @@ async function deriveChangedFilesFromGit(
   projectPath: string,
   options: AffectedOptions,
 ): Promise<ChangedFilesResult | null> {
-  const { listChangedFilesSince } = await import('../../git-utils.js');
+  const { listChangedFilesSince } = await activeReadCommandDeps.loadGitUtils();
   const derived = listChangedFilesSince(projectPath, 'HEAD');
   if (derived === null) {
     if (!options.quiet) {
@@ -858,7 +907,7 @@ function printFlatFiles(
   out(chalk.bold(`\nFiles (${files.length}):\n`));
   const flatSummaries =
     files.length <= 80
-      ? getFileSummaries(
+      ? activeReadCommandDeps.getFileSummaries(
           queries,
           files.map((f) => f.path),
         )
@@ -904,7 +953,7 @@ function printGroupedFiles(files: FileListing, includeMetadata: boolean): void {
 }
 
 function printFileSummary(files: FileListing, maxDepth: number | undefined, dir: string | undefined): void {
-  const rollup = buildDirRollup(files, maxDepth, dir);
+  const rollup = activeReadCommandDeps.buildDirRollup(files, maxDepth, dir);
   out(chalk.bold(fileSummaryHeader(dir, rollup.totalFiles, rollup.totalSymbols)));
   for (const row of rollup.rows) {
     const label = row.dir === null ? '(root)' : `${row.dir}/`;
@@ -938,46 +987,51 @@ function trimTrailingSlashes(value: string | undefined): string | undefined {
  * cartograph_at_range MCP tool). Useful for PR-review ("what symbols
  * does this diff hunk touch?") and diff-overlay workflows.
  */
-program
-  .command('at-range [file] [startLine] [endLine]')
-  .description('List indexed symbols whose ranges overlap the given file:line span (R*Tree-backed, O(log n))')
-  .option('-p, --project-path <path>', 'Path to the project (defaults to current directory)')
-  .option('-l, --limit <n>', 'Maximum results (default 20)', '20')
-  .option(
-    '--diff <pathOrText>',
-    "Unified diff to query — accepts a file path, '-' for stdin, or the diff TEXT itself (the MCP `diff` param takes the text; this flag accepts either). Server parses hunks and queries each. Mutually exclusive with the positional file/startLine/endLine and --ranges.",
-  )
-  .option(
-    '--ranges <list>',
-    "Bulk mode — comma-separated `file:startLine-endLine` specs (e.g. 'src/a.ts:10-20,src/b.ts:5-9'). Queries up to 100 ranges in one call. Mutually exclusive with the positional file/startLine/endLine and --diff.",
-  )
-  .option(
-    '--compact',
-    'Emit terse pipe-delimited rows instead of a markdown table (saves 50-70% output tokens on chained range queries)',
-  )
-  .option(
-    '--fields <names>',
-    '(--compact only) Comma-separated subset of fields to emit: name,kind,path,line,endLine,signature. Default: all six.',
-  )
-  .action(
-    async (
-      file: string | undefined,
-      startLine: string | undefined,
-      endLine: string | undefined,
-      options: {
-        projectPath?: string;
-        limit?: string;
-        diff?: string;
-        ranges?: string;
-        compact?: boolean;
-        fields?: string;
+function registerAtRangeCommand(deps: ReadCommandDeps): void {
+  const { program, runViaMCP } = deps;
+  program
+    .command('at-range [file] [startLine] [endLine]')
+    .description('List indexed symbols whose ranges overlap the given file:line span (R*Tree-backed, O(log n))')
+    .option('-p, --project-path <path>', 'Path to the project (defaults to current directory)')
+    .option('-l, --limit <n>', 'Maximum results (default 20)', '20')
+    .option(
+      '--diff <pathOrText>',
+      "Unified diff to query — accepts a file path, '-' for stdin, or the diff TEXT itself (the MCP `diff` param takes the text; this flag accepts either). Server parses hunks and queries each. Mutually exclusive with the positional file/startLine/endLine and --ranges.",
+    )
+    .option(
+      '--ranges <list>',
+      "Bulk mode — comma-separated `file:startLine-endLine` specs (e.g. 'src/a.ts:10-20,src/b.ts:5-9'). Queries up to 100 ranges in one call. Mutually exclusive with the positional file/startLine/endLine and --diff.",
+    )
+    .option(
+      '--compact',
+      'Emit terse pipe-delimited rows instead of a markdown table (saves 50-70% output tokens on chained range queries)',
+    )
+    .option(
+      '--fields <names>',
+      '(--compact only) Comma-separated subset of fields to emit: name,kind,path,line,endLine,signature. Default: all six.',
+    )
+    .action(
+      async (
+        file: string | undefined,
+        startLine: string | undefined,
+        endLine: string | undefined,
+        options: {
+          projectPath?: string;
+          limit?: string;
+          diff?: string;
+          ranges?: string;
+          compact?: boolean;
+          fields?: string;
+        },
+      ) => {
+        const args = await buildAtRangeArgs({ file, startLine, endLine, options });
+        if (!args) return;
+        await runViaMCP('cartograph_at_range', args, options.projectPath);
       },
-    ) => {
-      const args = await buildAtRangeArgs({ file, startLine, endLine, options });
-      if (!args) return;
-      await runViaMCP('cartograph_at_range', args, options.projectPath);
-    },
-  );
+    );
+}
+
+registerAtRangeCommand(defaultReadCommandDeps);
 
 /**
  * cartograph ask <question> [path]
@@ -1157,96 +1211,117 @@ program
  * relative-score rendering as a CLI-only direct path; every other
  * combination delegates straight to the MCP family handler.
  */
-program
-  .command('find [query]')
-  .description(
-    'Find a thing in the codebase — symbol by name (--by name), regex content (--by content), env-var reads (--by env), or SQL table refs (--by sql). Mirrors cartograph_find MCP tool.',
-  )
-  .option('-p, --project-path <path>', 'Project path')
-  .option('-b, --by <axis>', "Axis: 'name' (default) | 'content' | 'env' | 'sql'", 'name')
-  // `--query <text>` aliases the `[query]` positional so the MCP
-  // shape `cartograph find --by name --query X` parses (mirrors the
-  // MCP arg name without changing the canonical positional form).
-  // The positional wins on conflict; an empty positional + a passed
-  // --query falls through to the existing query branches below.
-  .option('--query <text>', 'Alias for the [query] positional (mirrors MCP arg name)')
-  .option('-l, --limit <number>', 'Maximum results (default 10 for name, 50 for content, 30 for env/sql)')
-  .option('-k, --kind <kind>', '(--by name) Filter by node kind (function, class, etc.)')
-  .option('-m, --mode <m>', '(--by name) Search mode: exact (default) | fuzzy | semantic | intent', 'exact')
-  .option(
-    '-s, --symbol <name>',
-    '(--by name --mode semantic) Source symbol name for peer lookup; mutually exclusive with [query]',
-  )
-  .option('--same-language', '(--by name --mode semantic + symbol) Restrict to same language as source')
-  .option('--different-language', '(--by name --mode semantic + symbol) Restrict to a different language than source')
-  .option(
-    '--language-filter <lang>',
-    '(--by name --mode semantic + query / --mode intent) Restrict results to one language',
-  )
-  .option('-c, --case-sensitive', '(--by content) Case-sensitive regex (default: insensitive)')
-  .option('--path-filter <prefix>', '(--by content / --by name --mode intent) Restrict to files under this path prefix')
-  .option('--language <lang>', '(--by content) Restrict to one language (typescript / python / …)')
-  .option('--key <key>', '(--by env / --by sql) Specific env-var name or table name; omit for the top-N listing')
-  .option('--op <op>', '(--by sql) Filter by op (read | write | ddl)')
-  // Commander negation form: the destination key `includeTests` defaults
-  // to `true` and `--no-include-tests` flips it to `false`. Matches the
-  // codebase's other `--no-*` flags (--no-metadata, --no-dedupe-by-name,
-  // --no-permissions). Closes handoff #3: previously only `--include-tests`
-  // was registered (a plain boolean toggle that defaulted to `undefined`),
-  // so users couldn't ask for the filter-out behavior the help text claimed.
-  .option('--no-include-tests', '(--by env / --by sql) Hide test-only entries (default: keep them, ranked behind prod)')
-  .option(
-    '--since <call-id>',
-    'Delta mode: pass a `c_xxxxxxxx` UID to return only NEW rows (--by name + --mode exact, or --by content)',
-  )
-  .option('--allow-stale', 'Bypass the freshness gate; query the cached index even when stale')
-  .option('--compact', '(--by name --mode exact) Emit terse pipe-delimited rows (name|kind|path:line|sig:…|id:…)')
-  .option(
-    '--fields <fields>',
-    '(--by name --mode exact, with --compact) Comma-separated subset of fields (name,kind,path,line,signature,id)',
-  )
-  .action(
-    async (
-      query: string | undefined,
-      options: {
-        projectPath?: string;
-        by?: string;
-        query?: string;
-        limit?: string;
-        kind?: string;
-        mode?: string;
-        symbol?: string;
-        sameLanguage?: boolean;
-        differentLanguage?: boolean;
-        languageFilter?: string;
-        caseSensitive?: boolean;
-        pathFilter?: string;
-        language?: string;
-        key?: string;
-        op?: string;
-        includeTests?: boolean;
-        since?: string;
-        allowStale?: boolean;
-        compact?: boolean;
-        fields?: string;
+function registerFindCommand(deps: ReadCommandDeps): void {
+  const { program } = deps;
+  program
+    .command('find [query]')
+    .description(
+      'Find a thing in the codebase — symbol by name (--by name), regex content (--by content), env-var reads (--by env), or SQL table refs (--by sql). Mirrors cartograph_find MCP tool.',
+    )
+    .option('-p, --project-path <path>', 'Project path')
+    .option('-b, --by <axis>', "Axis: 'name' (default) | 'content' | 'env' | 'sql'", 'name')
+    // `--query <text>` aliases the `[query]` positional so the MCP
+    // shape `cartograph find --by name --query X` parses (mirrors the
+    // MCP arg name without changing the canonical positional form).
+    // The positional wins on conflict; an empty positional + a passed
+    // --query falls through to the existing query branches below.
+    .option('--query <text>', 'Alias for the [query] positional (mirrors MCP arg name)')
+    .option('-l, --limit <number>', 'Maximum results (default 10 for name, 50 for content, 30 for env/sql)')
+    .option('-k, --kind <kind>', '(--by name) Filter by node kind (function, class, etc.)')
+    .option('-m, --mode <m>', '(--by name) Search mode: exact (default) | fuzzy | semantic | intent', 'exact')
+    .option(
+      '-s, --symbol <name>',
+      '(--by name --mode semantic) Source symbol name for peer lookup; mutually exclusive with [query]',
+    )
+    .option('--same-language', '(--by name --mode semantic + symbol) Restrict to same language as source')
+    .option('--different-language', '(--by name --mode semantic + symbol) Restrict to a different language than source')
+    .option(
+      '--language-filter <lang>',
+      '(--by name --mode semantic + query / --mode intent) Restrict results to one language',
+    )
+    .option('-c, --case-sensitive', '(--by content) Case-sensitive regex (default: insensitive)')
+    .option(
+      '--path-filter <prefix>',
+      '(--by content / --by name --mode intent) Restrict to files under this path prefix',
+    )
+    .option('--language <lang>', '(--by content) Restrict to one language (typescript / python / …)')
+    .option('--key <key>', '(--by env / --by sql) Specific env-var name or table name; omit for the top-N listing')
+    .option('--op <op>', '(--by sql) Filter by op (read | write | ddl)')
+    // Commander negation form: the destination key `includeTests` defaults
+    // to `true` and `--no-include-tests` flips it to `false`. Matches the
+    // codebase's other `--no-*` flags (--no-metadata, --no-dedupe-by-name,
+    // --no-permissions). Closes handoff #3: previously only `--include-tests`
+    // was registered (a plain boolean toggle that defaulted to `undefined`),
+    // so users couldn't ask for the filter-out behavior the help text claimed.
+    .option(
+      '--no-include-tests',
+      '(--by env / --by sql) Hide test-only entries (default: keep them, ranked behind prod)',
+    )
+    .option(
+      '--since <call-id>',
+      'Delta mode: pass a `c_xxxxxxxx` UID to return only NEW rows (--by name + --mode exact, or --by content)',
+    )
+    .option('--allow-stale', 'Bypass the freshness gate; query the cached index even when stale')
+    .option('--compact', '(--by name --mode exact) Emit terse pipe-delimited rows (name|kind|path:line|sig:…|id:…)')
+    .option(
+      '--fields <fields>',
+      '(--by name --mode exact, with --compact) Comma-separated subset of fields (name,kind,path,line,signature,id)',
+    )
+    .action(
+      async (
+        query: string | undefined,
+        options: {
+          projectPath?: string;
+          by?: string;
+          query?: string;
+          limit?: string;
+          kind?: string;
+          mode?: string;
+          symbol?: string;
+          sameLanguage?: boolean;
+          differentLanguage?: boolean;
+          languageFilter?: string;
+          caseSensitive?: boolean;
+          pathFilter?: string;
+          language?: string;
+          key?: string;
+          op?: string;
+          includeTests?: boolean;
+          since?: string;
+          allowStale?: boolean;
+          compact?: boolean;
+          fields?: string;
+        },
+      ) => {
+        const restoreRunner = setReadCommandMcpRunnerForTest(deps.runViaMCP);
+        try {
+          await runFindCommand(query, options);
+        } finally {
+          restoreRunner();
+        }
       },
-    ) => {
-      await runFindCommand(query, options);
-    },
-  );
+    );
+}
+
+registerFindCommand(defaultReadCommandDeps);
 
 /**
  * cartograph digest [path]
  */
-program
-  .command('digest')
-  .description(
-    '"Land in a new repo" overview — hotspots, code health, entry points, recent churn, suggested next queries (mirrors cartograph_digest MCP tool)',
-  )
-  .option('-p, --project-path <path>', 'Project path')
-  .action(async (options: { projectPath?: string }) => {
-    await runViaMCP('cartograph_digest', {}, options.projectPath);
-  });
+function registerDigestCommand(deps: ReadCommandDeps): void {
+  const { program, runViaMCP } = deps;
+  program
+    .command('digest')
+    .description(
+      '"Land in a new repo" overview — hotspots, code health, entry points, recent churn, suggested next queries (mirrors cartograph_digest MCP tool)',
+    )
+    .option('-p, --project-path <path>', 'Project path')
+    .action(async (options: { projectPath?: string }) => {
+      await runViaMCP('cartograph_digest', {}, options.projectPath);
+    });
+}
+
+registerDigestCommand(defaultReadCommandDeps);
 
 /**
  * cartograph files [path]
@@ -1258,114 +1333,139 @@ program
  * MCP `cartograph_files` doesn't carry. The two surfaces share a
  * name but serve different audiences.
  */
-program
-  .command('files [dir]')
-  .description('Show project file structure from the index')
-  .option('-p, --project-path <path>', 'Project path')
-  .option('--dir <dir>', 'Filter to files under this directory')
-  .option('--pattern <glob>', 'Filter files matching this glob pattern')
-  .option('--format <format>', 'Output format (tree, flat, grouped, summary)', 'tree')
-  .option('--max-depth <number>', 'Maximum directory depth for tree format')
-  .option('--no-metadata', 'Hide file metadata (language, symbol count)')
-  .option('-j, --json', 'Output as JSON')
-  .action(
-    async (
-      dirArg: string | undefined,
-      options: {
-        projectPath?: string;
-        dir?: string;
-        pattern?: string;
-        format?: string;
-        maxDepth?: string;
-        metadata?: boolean;
-        json?: boolean;
-      },
-    ) => {
-      // Positional `dir` is sugar for --dir; --dir wins on conflict so an
-      // explicit flag still overrides a stray positional.
-      if (dirArg && !options.dir) options.dir = dirArg;
-      const projectPath = resolveProjectPath(options.projectPath);
+interface FilesCommandOptions {
+  projectPath?: string;
+  dir?: string;
+  pattern?: string;
+  format?: string;
+  maxDepth?: string;
+  metadata?: boolean;
+  json?: boolean;
+}
 
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
+function registerFilesCommand(deps: ReadCommandDeps): void {
+  const { program } = deps;
+  program
+    .command('files [dir]')
+    .description('Show project file structure from the index')
+    .option('-p, --project-path <path>', 'Project path')
+    .option('--dir <dir>', 'Filter to files under this directory')
+    .option('--pattern <glob>', 'Filter files matching this glob pattern')
+    .option('--format <format>', 'Output format (tree, flat, grouped, summary)', 'tree')
+    .option('--max-depth <number>', 'Maximum directory depth for tree format')
+    .option('--no-metadata', 'Hide file metadata (language, symbol count)')
+    .option('-j, --json', 'Output as JSON')
+    .action(async (dirArg: string | undefined, options: FilesCommandOptions) => runFilesCommand(deps, dirArg, options));
+}
 
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        // `nodeCount` corrected to a true symbol count by
-        // getAllFilesWithSymbolCount (drops the file's own `kind='file'`
-        // node) — the same shared correction the MCP `cartograph_files`
-        // handler uses, so CLI and MCP counts can't drift.
-        let files = getAllFilesWithSymbolCount(cg.queries);
+registerFilesCommand(defaultReadCommandDeps);
 
-        if (files.length === 0) {
-          info('No files indexed. Run "cartograph admin index" first.');
-          cg.close();
-          return;
-        }
+async function runFilesCommand(
+  deps: ReadCommandDeps,
+  dirArg: string | undefined,
+  options: FilesCommandOptions,
+): Promise<void> {
+  const effectiveOptions: FilesCommandOptions = options.dir || !dirArg ? options : { ...options, dir: dirArg };
+  const projectPath = deps.resolveProjectPath(effectiveOptions.projectPath);
 
-        // Filter by directory — SEGMENT-boundary match (shared with
-        // the MCP `cartograph_files`) so `--dir src/mcp/tools` does NOT
-        // also capture the sibling file `src/mcp/tools.ts`.
-        if (options.dir) {
-          files = filterFilesByDir(files, options.dir);
-        }
+  try {
+    if (!deps.isInitialized(projectPath)) {
+      deps.error(`Cartograph not initialized in ${projectPath}`);
+      process.exit(1);
+    }
 
-        // Filter by glob pattern. globToSafeRegex returns null only for a
-        // pathologically long (>1024-char) glob — treat that as "matches
-        // nothing" so the degenerate input can't fall through unfiltered.
-        if (options.pattern) {
-          const regexBody = globToSafeRegex(options.pattern);
-          const regex = regexBody === null ? /(?!)/ : new RegExp(regexBody);
-          files = files.filter((f) => regex.test(f.path));
-        }
+    const { cg, files: indexedFiles } = await openIndexedFiles(deps, projectPath);
+    const files = filterFilesForCli({
+      deps,
+      files: indexedFiles,
+      options: effectiveOptions,
+      close: () => cg.close(),
+    });
+    if (!files) return;
 
-        if (files.length === 0) {
-          info('No files found matching the criteria.');
-          cg.close();
-          return;
-        }
+    if (effectiveOptions.json) {
+      printFilesJson(files);
+      cg.close();
+      return;
+    }
 
-        // JSON output
-        if (options.json) {
-          const output = files.map((f) => ({
-            path: f.path,
-            language: f.language,
-            nodeCount: f.nodeCount,
-            size: f.size,
-          }));
-          out(JSON.stringify(output, null, 2));
-          cg.close();
-          return;
-        }
+    const outputOptions = parseFilesOutputOptions(effectiveOptions, () => cg.close());
+    if (!outputOptions) return;
 
-        const includeMetadata = options.metadata !== false;
-        // Validate --format against the four documented values so an
-        // unknown value errors cleanly instead of silently falling
-        // through to the `tree` default in the switch below.
-        const outputOptions = parseFilesOutputOptions(options, () => cg.close());
-        if (!outputOptions) return;
+    printFilesOutput({
+      files,
+      format: outputOptions.format,
+      includeMetadata: effectiveOptions.metadata !== false,
+      maxDepth: outputOptions.maxDepth,
+      dir: effectiveOptions.dir,
+      queries: cg.queries,
+    });
 
-        // Format output
-        printFilesOutput({
-          files,
-          format: outputOptions.format,
-          includeMetadata,
-          maxDepth: outputOptions.maxDepth,
-          dir: options.dir,
-          queries: cg.queries,
-        });
+    out();
+    cg.close();
+  } catch (err) {
+    deps.error(`Failed to list files: ${errMsg(err)}`);
+    process.exit(1);
+  }
+}
 
-        out();
-        cg.close();
-      } catch (err) {
-        error(`Failed to list files: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    },
-  );
+async function openIndexedFiles(deps: ReadCommandDeps, projectPath: string): Promise<{ cg: any; files: FileListing }> {
+  const { default: Cartograph } = await deps.loadCartograph();
+  const cg = await Cartograph.open(projectPath);
+  // `nodeCount` corrected to a true symbol count by
+  // getAllFilesWithSymbolCount (drops the file's own `kind='file'`
+  // node) — the same shared correction the MCP `cartograph_files`
+  // handler uses, so CLI and MCP counts can't drift.
+  return { cg, files: deps.getAllFilesWithSymbolCount(cg.queries) };
+}
+
+interface FilterFilesForCliArgs {
+  deps: ReadCommandDeps;
+  files: FileListing;
+  options: FilesCommandOptions;
+  close: () => void;
+}
+
+function filterFilesForCli({ deps, files, options, close }: FilterFilesForCliArgs): FileListing | null {
+  if (files.length === 0) {
+    deps.info('No files indexed. Run "cartograph admin index" first.');
+    close();
+    return null;
+  }
+
+  const filtered = filterFilesByPattern(deps, files, options);
+  if (filtered.length > 0) return filtered;
+
+  deps.info('No files found matching the criteria.');
+  close();
+  return null;
+}
+
+function filterFilesByPattern(deps: ReadCommandDeps, files: FileListing, options: FilesCommandOptions): FileListing {
+  let filtered = files;
+  // Filter by directory — SEGMENT-boundary match (shared with the MCP
+  // `cartograph_files`) so `--dir src/mcp/tools` does NOT also capture
+  // the sibling file `src/mcp/tools.ts`.
+  if (options.dir) filtered = deps.filterFilesByDir(filtered, options.dir);
+
+  // Filter by glob pattern. globToSafeRegex returns null only for a
+  // pathologically long (>1024-char) glob — treat that as "matches
+  // nothing" so the degenerate input can't fall through unfiltered.
+  if (!options.pattern) return filtered;
+  const regexBody = globToSafeRegex(options.pattern);
+  const regex = regexBody === null ? /(?!)/ : new RegExp(regexBody);
+  return filtered.filter((f) => regex.test(f.path));
+}
+
+function printFilesJson(files: FileListing): void {
+  const output = files.map((f) => ({
+    path: f.path,
+    language: f.language,
+    nodeCount: f.nodeCount,
+    size: f.size,
+  }));
+  out(JSON.stringify(output, null, 2));
+}
 
 interface RenderCliTreeArgs {
   node: FileTreeNode;
@@ -1455,91 +1555,114 @@ function printFileTree(args: PrintFileTreeArgs): void {
  * `cartograph_affected` tool doesn't surface. Designed for `git
  * diff --name-only | cartograph affected --stdin` pipeline use.
  */
-program
-  .command('affected [files...]')
-  .description('Find test files affected by changed source files (defaults to `git diff HEAD` when no files passed)')
-  .option('-p, --project-path <path>', 'Project path')
-  .option('--files <paths...>', 'Alias for positional file arguments — mirrors the MCP `files` param name')
-  .option('--stdin', 'Read file list from stdin (one per line)')
-  .option('-d, --depth <number>', 'Max dependency traversal depth', String(DEFAULT_DEPTH))
-  .option('-f, --filter <glob>', 'Custom glob filter for test files (e.g. "e2e/*.spec.ts")')
-  .option(
-    '--include-tests',
-    "Include test-file targets when walking the dependents graph (mirrors the MCP `includeTests` flag's surface; default off — affected reports only test files, and this surface keeps the canonical no-op behavior so a script can pass the flag uniformly across surfaces).",
-  )
-  .option('-j, --json', 'Output as JSON')
-  .option('-q, --quiet', 'Only output file paths, no decoration')
-  .action(
-    async (
-      fileArgs: string[],
-      options: {
-        projectPath?: string;
-        files?: string[];
-        stdin?: boolean;
-        depth?: string;
-        filter?: string;
-        includeTests?: boolean;
-        json?: boolean;
-        quiet?: boolean;
-      },
-    ) => {
-      const projectPath = resolveProjectPath(options.projectPath);
+function registerAffectedCommand(deps: ReadCommandDeps): void {
+  const {
+    program,
+    resolveProjectPath,
+    isInitialized,
+    error,
+    info,
+    loadCartograph,
+    buildIndexedPathSets,
+    findAffectedTests,
+  } = deps;
+  program
+    .command('affected [files...]')
+    .description('Find test files affected by changed source files (defaults to `git diff HEAD` when no files passed)')
+    .option('-p, --project-path <path>', 'Project path')
+    .option('--files <paths...>', 'Alias for positional file arguments — mirrors the MCP `files` param name')
+    .option('--stdin', 'Read file list from stdin (one per line)')
+    .option('-d, --depth <number>', 'Max dependency traversal depth', String(DEFAULT_DEPTH))
+    .option('-f, --filter <glob>', 'Custom glob filter for test files (e.g. "e2e/*.spec.ts")')
+    .option(
+      '--include-tests',
+      "Include test-file targets when walking the dependents graph (mirrors the MCP `includeTests` flag's surface; default off — affected reports only test files, and this surface keeps the canonical no-op behavior so a script can pass the flag uniformly across surfaces).",
+    )
+    .option('-j, --json', 'Output as JSON')
+    .option('-q, --quiet', 'Only output file paths, no decoration')
+    .action(
+      async (
+        fileArgs: string[],
+        options: {
+          projectPath?: string;
+          files?: string[];
+          stdin?: boolean;
+          depth?: string;
+          filter?: string;
+          includeTests?: boolean;
+          json?: boolean;
+          quiet?: boolean;
+        },
+      ) => {
+        const projectPath = resolveProjectPath(options.projectPath);
 
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
+        try {
+          if (!isInitialized(projectPath)) {
+            error(`Cartograph not initialized in ${projectPath}`);
+            process.exit(1);
+          }
+
+          const changed = await collectAffectedChangedFiles(fileArgs, options, projectPath);
+          if (!changed) return;
+
+          if (changed.changedFiles.length === 0) {
+            if (!options.quiet) info('No files provided. Use file arguments or --stdin.');
+            process.exit(0);
+          }
+
+          const { default: Cartograph } = await loadCartograph();
+          const cg = await Cartograph.open(projectPath);
+          const maxDepth = parseAffectedDepth(options, cg);
+          if (maxDepth === null) return;
+
+          const coreInput: AffectedCoreInput = {
+            files: changed.changedFiles,
+            depth: maxDepth,
+            customFilter: buildAffectedFilter(options.filter),
+            ...buildIndexedPathSets(cg.queries),
+          };
+          validateAffectedIndexedPaths({
+            changedFiles: changed.changedFiles,
+            derivedFromGit: changed.derivedFromGit,
+            coreInput,
+            cg,
+            quiet: options.quiet === true,
+          });
+
+          const { affectedTests, totalDependents, barrelsReached } = findAffectedTests(
+            cg.internals.graphManager,
+            coreInput,
+          );
+          const sortedTests = Array.from(affectedTests).sort((a, b) => a.localeCompare(b));
+
+          printAffectedOutput({
+            changedFiles: changed.changedFiles,
+            sortedTests,
+            totalDependents,
+            barrelsReached,
+            derivedFromGit: changed.derivedFromGit,
+            options,
+          });
+
+          cg.close();
+        } catch (err) {
+          error(`Affected analysis failed: ${errMsg(err)}`);
           process.exit(1);
         }
+      },
+    );
+}
 
-        const changed = await collectAffectedChangedFiles(fileArgs, options, projectPath);
-        if (!changed) return;
+export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
+  activeReadCommandDeps = deps;
+  registerAtRangeCommand(deps);
+  registerFindCommand(deps);
+  registerDigestCommand(deps);
+  registerFilesCommand(deps);
+  registerAffectedCommand(deps);
+}
 
-        if (changed.changedFiles.length === 0) {
-          if (!options.quiet) info('No files provided. Use file arguments or --stdin.');
-          process.exit(0);
-        }
-
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        const maxDepth = parseAffectedDepth(options, cg);
-        if (maxDepth === null) return;
-
-        const coreInput: AffectedCoreInput = {
-          files: changed.changedFiles,
-          depth: maxDepth,
-          customFilter: buildAffectedFilter(options.filter),
-          ...buildIndexedPathSets(cg.queries),
-        };
-        validateAffectedIndexedPaths({
-          changedFiles: changed.changedFiles,
-          derivedFromGit: changed.derivedFromGit,
-          coreInput,
-          cg,
-          quiet: options.quiet === true,
-        });
-
-        const { affectedTests, totalDependents, barrelsReached } = findAffectedTests(
-          cg.internals.graphManager,
-          coreInput,
-        );
-        const sortedTests = Array.from(affectedTests).sort((a, b) => a.localeCompare(b));
-
-        printAffectedOutput({
-          changedFiles: changed.changedFiles,
-          sortedTests,
-          totalDependents,
-          barrelsReached,
-          derivedFromGit: changed.derivedFromGit,
-          options,
-        });
-
-        cg.close();
-      } catch (err) {
-        error(`Affected analysis failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    },
-  );
+registerAffectedCommand(defaultReadCommandDeps);
 
 export const __readCommandInternals = {
   readDiffOption,

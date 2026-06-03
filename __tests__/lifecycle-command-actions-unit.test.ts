@@ -2,11 +2,22 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { registerLifecycleCommands } from '../src/bin/commands/lifecycle.js';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: string[] = [];
+const stdout: string[] = [];
 const stderr: string[] = [];
 let projectPath: string;
+const DEFAULT_TEST_VIEWER_PORT = 8765;
+
+function projectHasCartographDb(projectPath: string): boolean {
+  return fs.existsSync(path.join(projectPath, '.cartograph', 'cartograph.db'));
+}
+
+function localhostUrl(port: number): string {
+  return `http://localhost:${port}`;
+}
 
 class FakeCommand {
   constructor(private readonly name = 'program') {}
@@ -29,77 +40,89 @@ class FakeCommand {
   }
 }
 
-vi.mock('../src/bin/_cli-core.js', () => ({
-  program: new FakeCommand('program'),
-  llmCmd: new FakeCommand('llm'),
-  chalk: { bold: (s: string) => s, blue: (s: string) => s, dim: (s: string) => s, cyan: (s: string) => s },
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
-  error: vi.fn((message: string) => calls.push(`error:${message}`)),
-  info: vi.fn((message: string) => calls.push(`info:${message}`)),
-  assignIntArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  runViaMCP: vi.fn(async (tool: string, args: Record<string, unknown>, projectPath?: string) =>
-    calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
-  ),
-  loadCartograph: vi.fn(async () => ({ default: {} })),
-}));
-
-vi.mock('../src/mcp/index.js', () => ({
-  MCPServer: class {
-    constructor(private readonly opts: unknown) {
-      calls.push(`server:${JSON.stringify(opts)}`);
-    }
-    async start() {
-      calls.push('server.start');
-    }
-  },
-}));
-
-vi.mock('../src/installer/targets/registry.js', () => ({
-  getTarget: vi.fn((id: string) => (id === 'claude' ? { printConfig: (loc: string) => `config:${loc}` } : null)),
-  listTargetIds: vi.fn(() => ['claude', 'cursor']),
-}));
-
-vi.mock('../src/installer/index.js', () => ({
-  runInstallerWithOptions: vi.fn(async (opts: unknown) => calls.push(`install:${JSON.stringify(opts)}`)),
-}));
-
-vi.mock('../src/installer/llm-setup-cli.js', () => ({
-  runLlmSetupCli: vi.fn(async (pathArg?: string) => calls.push(`llm-setup:${pathArg ?? ''}`)),
-}));
-
-vi.mock('../src/mcp/tools.js', () => ({
-  ToolHandler: class {
-    async execute(tool: string) {
-      calls.push(`tool:${tool}`);
-      return { content: [{ text: 'playbook text' }], isError: false };
-    }
-    closeAll() {
-      calls.push('tool.closeAll');
-    }
-  },
-}));
-
-vi.mock('../src/viewer/server.js', () => ({
-  startViewerServer: vi.fn(async (_projectPath: string, opts?: { port?: number }) => ({
-    url: `http://localhost:${opts?.port ?? 8765}`,
-    close: vi.fn(async () => calls.push('viewer.close')),
-  })),
-  openInBrowser: vi.fn((url: string) => calls.push(`open:${url}`)),
-}));
-
-await import('../src/bin/commands/lifecycle.js');
+function loadLifecycleCommandActions(): void {
+  actions.clear();
+  registerLifecycleCommands({
+    program: new FakeCommand('program'),
+    llmCmd: new FakeCommand('llm'),
+    chalk: { bold: (s: string) => s, blue: (s: string) => s, dim: (s: string) => s, cyan: (s: string) => s },
+    resolveProjectPath: (pathArg?: string) => pathArg ?? projectPath,
+    error: (message: string) => calls.push(`error:${message}`),
+    info: (message: string) => calls.push(`info:${message}`),
+    writeStdout: (message = '') => stdout.push(message),
+    writeStderr: (message = '') => stderr.push(message),
+    assignIntArg: ({ args, key, raw }) => {
+      if (raw !== undefined) args[key] = Number(raw);
+      return true;
+    },
+    runViaMCP: async (tool: string, args: Record<string, unknown>, projectPath?: string) =>
+      calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
+    loadCartograph: async () => ({ default: { init: async () => ({ close: () => undefined }) } }),
+    isInitialized: projectHasCartographDb,
+    compact: (value: Record<string, unknown>) =>
+      Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)),
+    loadMcpServer: async () => ({
+      MCPServer: class {
+        constructor(private readonly opts: unknown) {
+          calls.push(`server:${JSON.stringify(opts)}`);
+        }
+        async start() {
+          calls.push('server.start');
+        }
+      },
+    }),
+    loadInstallerTargets: async () => ({
+      getTarget: (id: string) => (id === 'claude' ? { printConfig: (loc: string) => `config:${loc}` } : null),
+      listTargetIds: () => ['claude', 'cursor'],
+    }),
+    loadInstaller: async () => ({
+      runInstallerWithOptions: async (opts: unknown) => calls.push(`install:${JSON.stringify(opts)}`),
+    }),
+    loadLlmSetupCli: async () => ({
+      runLlmSetupCli: async (pathArg?: string) => calls.push(`llm-setup:${pathArg ?? ''}`),
+    }),
+    loadToolHandler: async () => ({
+      ToolHandler: class {
+        async execute(tool: string) {
+          calls.push(`tool:${tool}`);
+          return { content: [{ text: 'playbook text' }], isError: false };
+        }
+        closeAll() {
+          calls.push('tool.closeAll');
+        }
+      },
+    }),
+    loadViewerServer: async () => ({
+      startViewerServer: async (_projectPath: string, opts?: { port?: number }) => ({
+        url: localhostUrl(opts?.port ?? DEFAULT_TEST_VIEWER_PORT),
+        close: vi.fn(async () => calls.push('viewer.close')),
+      }),
+      openInBrowser: (url: string) => calls.push(`open:${url}`),
+    }),
+    loadDoctor: async () => ({
+      runDoctor: async () => ({ overallStatus: 'pass' }),
+      formatDoctorReport: () => 'doctor report',
+    }),
+    loadInstallModels: async () => ({
+      installRecommendedModels: async () => ({ downloaded: [], skipped: [] }),
+    }),
+    loadRecommendedModels: async () => ({ RECOMMENDED_MODELS: [], MINIMAL_MODELS: [] }),
+    loadRecommendedConfig: async () => ({
+      writeRecommendedLlmConfig: () => ({ configPath: '/repo/.cartograph/config.json' }),
+    }),
+  });
+}
 
 describe('lifecycle command action bodies', () => {
   beforeEach(() => {
     calls.length = 0;
+    stdout.length = 0;
     stderr.length = 0;
     process.exitCode = 0;
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-cli-'));
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
     fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
+    loadLifecycleCommandActions();
   });
 
   afterEach(() => {
@@ -118,13 +141,7 @@ describe('lifecycle command action bodies', () => {
     expect(calls).toContain('server.start');
     expect(calls.join('\n')).toContain('"disableWriteTools":true');
 
-    const originalErr = console.error;
-    console.error = (message?: unknown) => stderr.push(String(message));
-    try {
-      await actions.get('program:serve')!({});
-    } finally {
-      console.error = originalErr;
-    }
+    await actions.get('program:serve')!({});
     expect(stderr.join('\n')).toContain('Cartograph MCP Server');
     expect(stderr.join('\n')).toContain('Use --mcp flag');
   });
@@ -155,21 +172,14 @@ describe('lifecycle command action bodies', () => {
       trace: 'Error\n at src/a.ts:1',
     });
 
-    const originalLog = console.log;
-    const logs: string[] = [];
-    console.log = (message?: unknown) => logs.push(String(message));
-    try {
-      await actions.get('program:playbook')!();
-    } finally {
-      console.log = originalLog;
-    }
+    await actions.get('program:playbook')!();
 
     await actions.get('program:viewer [path]')!(projectPath, { port: '0', open: true });
 
     const text = calls.join('\n');
     expect(text).toContain(`llm-setup:${projectPath}`);
     expect(text).toContain('mcp:cartograph_trace_to_culprits');
-    expect(logs.join('\n')).toContain('playbook text');
+    expect(stdout.join('\n')).toContain('playbook text');
     expect(text).toContain('open:http://localhost:0');
   });
 });

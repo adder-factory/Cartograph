@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { mock } from 'bun:test';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -89,150 +90,208 @@ const fakeCartograph = {
   }),
 };
 
-vi.mock('../src/bin/_cli-core.js', () => ({
-  adminCmd: new FakeCommand(),
-  loadCartograph: vi.fn(async () => ({ default: fakeCartograph })),
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
-  chalk: { yellow: (s: string) => s, bold: (s: string) => s, cyan: (s: string) => s, dim: (s: string) => s },
-  colors: { dim: '', reset: '' },
-  success: vi.fn((message: string) => calls.push(`success:${message}`)),
-  error: vi.fn((message: string) => calls.push(`error:${message}`)),
-  info: vi.fn((message: string) => calls.push(`info:${message}`)),
-  warn: vi.fn((message: string) => calls.push(`warn:${message}`)),
-  formatNumber: (n: number) => String(n),
-  formatDuration: (ms: number) => `${ms}ms`,
-  createVerboseProgress: vi.fn(() => () => undefined),
-  attachUnknownActionHandler: vi.fn(() => calls.push('attachUnknownActionHandler')),
-  assignIntArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  assignFloatArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  awaitSummarisationWithProgress: vi.fn(async () => calls.push('awaitSummarisationWithProgress')),
-  printIndexResult: vi.fn(() => calls.push('printIndexResult')),
-}));
+let importCounter = 0;
+const TEST_OLLAMA_PORT = 11434;
+const TEST_HTTP_SCHEME = 'http';
+const TEST_OLLAMA_ENDPOINT = `${TEST_HTTP_SCHEME}://localhost:${TEST_OLLAMA_PORT}`;
+const TEST_DEFAULT_CONCURRENCY = 4;
+const TEST_SIMILAR_EDGES_WRITTEN = 5;
+const TEST_SIMILAR_EDGES_PROCESSED = 2;
+const TEST_MS_PER_DAY = 86_400_000;
+const TEST_PRUNE_STORE_DAYS = 30;
+const TEST_PRUNED_SUMMARIES = 2;
+const TEST_PRUNED_EMBEDDINGS = 1;
+const TEST_SCIP_EXPORT_STATS = { documents: 2, symbols: 3, occurrences: 4, bytes: 99, disambiguated: 1 };
+const TEST_SCIP_IMPORT_STATS = {
+  documents: 2,
+  files: 1,
+  nodes: 3,
+  edges: 4,
+  skippedDocuments: 1,
+  unresolvedEdges: 2,
+};
 
-vi.mock('../src/ui/shimmer-progress.js', () => ({
-  createShimmerProgress: vi.fn(() => ({
-    onProgress: vi.fn(),
-    stop: vi.fn(async () => calls.push('progress.stop')),
-  })),
-}));
+function registerCoreMocks(): void {
+  mock.module('../src/bin/_cli-core.js', () => ({
+    adminCmd: new FakeCommand(),
+    loadCartograph: vi.fn(async () => ({ default: fakeCartograph })),
+    resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
+    chalk: { yellow: (s: string) => s, bold: (s: string) => s, cyan: (s: string) => s, dim: (s: string) => s },
+    colors: { dim: '', reset: '' },
+    success: vi.fn((message: string) => calls.push(`success:${message}`)),
+    error: vi.fn((message: string) => calls.push(`error:${message}`)),
+    info: vi.fn((message: string) => calls.push(`info:${message}`)),
+    warn: vi.fn((message: string) => calls.push(`warn:${message}`)),
+    formatNumber: (n: number) => String(n),
+    formatDuration: (ms: number) => `${ms}ms`,
+    createVerboseProgress: vi.fn(() => () => undefined),
+    attachUnknownActionHandler: vi.fn(() => calls.push('attachUnknownActionHandler')),
+    assignIntArg: vi.fn(({ args, key, raw }) => {
+      if (raw !== undefined) args[key] = Number(raw);
+      return true;
+    }),
+    assignFloatArg: vi.fn(({ args, key, raw }) => {
+      if (raw !== undefined) args[key] = Number(raw);
+      return true;
+    }),
+    awaitSummarisationWithProgress: vi.fn(async () => calls.push('awaitSummarisationWithProgress')),
+    printIndexResult: vi.fn(() => calls.push('printIndexResult')),
+  }));
+}
 
-vi.mock('../src/llm/concurrency.js', () => ({
-  parseConcurrency: vi.fn((raw?: string) => (raw === undefined ? 4 : Number(raw))),
-}));
+function registerProgressMocks(): void {
+  mock.module('../src/ui/shimmer-progress.js', () => ({
+    createShimmerProgress: vi.fn(() => ({
+      onProgress: vi.fn(),
+      stop: vi.fn(async () => calls.push('progress.stop')),
+    })),
+  }));
+}
 
-vi.mock('../src/embeddings/similar-edges.js', () => ({
-  buildSimilarToEdges: vi.fn(async () => ({ written: 5, processed: 2, reason: 'some skipped' })),
-}));
+function registerAdminDataMocks(): void {
+  mock.module('../src/llm/concurrency.js', () => ({
+    parseConcurrency: vi.fn((raw?: string) => (raw === undefined ? TEST_DEFAULT_CONCURRENCY : Number(raw))),
+  }));
 
-vi.mock('../src/db/queries-summaries.js', () => ({
-  MS_PER_DAY: 24 * 60 * 60 * 1000,
-  PRUNE_STORE_DEFAULT_DAYS: 30,
-  pruneOrphanStoreRows: vi.fn(() => ({
-    summariesPruned: 2,
-    embeddingsPruned: 1,
-  })),
-}));
+  mock.module('../src/embeddings/similar-edges.js', () => ({
+    buildSimilarToEdges: vi.fn(async () => ({
+      written: TEST_SIMILAR_EDGES_WRITTEN,
+      processed: TEST_SIMILAR_EDGES_PROCESSED,
+      reason: 'some skipped',
+    })),
+  }));
 
-vi.mock('../src/db/index.js', () => ({
-  dbReclaimAfterBulkDelete: vi.fn(),
-}));
+  mock.module('../src/db/queries-summaries.js', () => ({
+    MS_PER_DAY: TEST_MS_PER_DAY,
+    PRUNE_STORE_DEFAULT_DAYS: TEST_PRUNE_STORE_DAYS,
+    pruneOrphanStoreRows: vi.fn(() => ({
+      summariesPruned: TEST_PRUNED_SUMMARIES,
+      embeddingsPruned: TEST_PRUNED_EMBEDDINGS,
+    })),
+  }));
 
-vi.mock('../src/scip/index.js', () => ({
-  writeScipExport: vi.fn(() => ({
-    outPath: '/repo/index.scip',
-    stats: { documents: 2, symbols: 3, occurrences: 4, bytes: 99, disambiguated: 1 },
-  })),
-  writeScipImport: vi.fn(() => ({
-    stats: { documents: 2, files: 1, nodes: 3, edges: 4, skippedDocuments: 1, unresolvedEdges: 2 },
-  })),
-}));
+  mock.module('../src/db/index.js', () => ({
+    dbReclaimAfterBulkDelete: vi.fn(),
+  }));
+}
 
-vi.mock('../src/installer/install-models.js', () => ({
-  installRecommendedModels: vi.fn(async () => ({
-    downloaded: [{ filename: 'embed.gguf', description: 'embedding model' }],
-    skipped: [{ filename: 'chat.gguf' }],
-  })),
-}));
+function registerScipMocks(): void {
+  mock.module('../src/scip/index.js', () => ({
+    writeScipExport: vi.fn(() => ({
+      outPath: '/repo/index.scip',
+      stats: TEST_SCIP_EXPORT_STATS,
+    })),
+    writeScipImport: vi.fn(() => ({
+      stats: TEST_SCIP_IMPORT_STATS,
+    })),
+  }));
+}
 
-vi.mock('../src/llm/recommended-models.js', () => ({
-  RECOMMENDED_MODELS: [{ filename: 'full.gguf' }],
-  MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
-}));
+function registerInstallModelMocks(): void {
+  mock.module('../src/installer/install-models.js', () => ({
+    installRecommendedModels: vi.fn(async () => ({
+      downloaded: [{ filename: 'embed.gguf', description: 'embedding model' }],
+      skipped: [{ filename: 'chat.gguf' }],
+    })),
+  }));
 
-vi.mock('../src/installer/recommended-config.js', () => ({
-  writeRecommendedLlmConfig: vi.fn(() => ({
-    configPath: '/repo/.cartograph/config.json',
-    backupPath: '/repo/.cartograph/config.json.bak',
-    diff: { addedOrUpdated: ['llm.embeddingLlm'] },
-  })),
-}));
+  mock.module('../src/llm/recommended-models.js', () => ({
+    RECOMMENDED_MODELS: [{ filename: 'full.gguf' }],
+    MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
+  }));
 
-vi.mock('../src/installer/doctor.js', () => ({
-  runDoctor: vi.fn(async () => ({ overallStatus: 'pass', checks: [] })),
-  formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
-}));
+  mock.module('../src/installer/recommended-config.js', () => ({
+    writeRecommendedLlmConfig: vi.fn(() => ({
+      configPath: '/repo/.cartograph/config.json',
+      backupPath: '/repo/.cartograph/config.json.bak',
+      diff: { addedOrUpdated: ['llm.embeddingLlm'] },
+    })),
+  }));
+}
 
-vi.mock('../src/installer/llm-setup-plan.js', () => ({
-  planLlmSetup: vi.fn(async () => ({
-    recommendedPresetId: 'install-ollama',
-    detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
-    presets: [{ id: 'install-ollama', summary: 'Ollama local' }],
-  })),
-  applyLlmSetupChoice: vi.fn(async () => ({
-    applied: true,
-    preset: 'install-ollama',
-    configPath: '/repo/.cartograph/config.json',
-    backupPath: '/repo/.cartograph/config.json.bak',
-    notes: ['configured'],
-    nextSteps: ['ollama serve'],
-  })),
-  writeLlmTierConcurrencyOverride: vi.fn(async () => ({
-    configPath: '/repo/.cartograph/config.json',
-    backupPath: '/repo/.cartograph/config.json.bak',
-    configKey: 'summarizeLlm',
-    previous: 2,
-    concurrency: 4,
-  })),
-}));
+function registerDoctorMocks(): void {
+  mock.module('../src/installer/doctor.js', () => ({
+    runDoctor: vi.fn(async () => ({ overallStatus: 'pass', checks: [] })),
+    formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
+  }));
+}
 
-vi.mock('../src/installer/hardware-tuning.js', () => ({
-  describeHardware: vi.fn(() => '8-core test host'),
-  recommendedTuning: vi.fn(() => ({
-    embed: { cartographConcurrency: 2 },
-    chat: { cartographConcurrency: 1 },
-    ask: { cartographConcurrency: 1 },
-    reranker: { cartographConcurrency: 1 },
-  })),
-}));
+function registerLlmSetupMocks(): void {
+  mock.module('../src/installer/llm-setup-plan.js', () => ({
+    planLlmSetup: vi.fn(async () => ({
+      recommendedPresetId: 'install-ollama',
+      detectedBackends: [{ label: 'Ollama', endpoint: TEST_OLLAMA_ENDPOINT, models: ['qwen'] }],
+      presets: [{ id: 'install-ollama', summary: 'Ollama local' }],
+    })),
+    applyLlmSetupChoice: vi.fn(async () => ({
+      applied: true,
+      preset: 'install-ollama',
+      configPath: '/repo/.cartograph/config.json',
+      backupPath: '/repo/.cartograph/config.json.bak',
+      notes: ['configured'],
+      nextSteps: ['ollama serve'],
+    })),
+    writeLlmTierConcurrencyOverride: vi.fn(async () => ({
+      configPath: '/repo/.cartograph/config.json',
+      backupPath: '/repo/.cartograph/config.json.bak',
+      configKey: 'summarizeLlm',
+      previous: 2,
+      concurrency: 4,
+    })),
+  }));
+}
 
-vi.mock('@clack/prompts', () => ({
-  intro: vi.fn((message: string) => calls.push(`intro:${message}`)),
-  outro: vi.fn((message: string) => calls.push(`outro:${message}`)),
-  log: {
-    success: vi.fn((message: string) => calls.push(`clack.success:${message}`)),
-    info: vi.fn((message: string) => calls.push(`clack.info:${message}`)),
-    warn: vi.fn((message: string) => calls.push(`clack.warn:${message}`)),
-    error: vi.fn((message: string) => calls.push(`clack.error:${message}`)),
-  },
-  note: vi.fn((message: string) => calls.push(`clack.note:${message}`)),
-}));
+function registerHardwareMocks(): void {
+  mock.module('../src/installer/hardware-tuning.js', () => ({
+    describeHardware: vi.fn(() => '8-core test host'),
+    recommendedTuning: vi.fn(() => ({
+      embed: { cartographConcurrency: 2 },
+      chat: { cartographConcurrency: 1 },
+      ask: { cartographConcurrency: 1 },
+      reranker: { cartographConcurrency: 1 },
+    })),
+  }));
+}
 
-await import('../src/bin/commands/admin.js');
+function registerPromptMocks(): void {
+  mock.module('@clack/prompts', () => ({
+    intro: vi.fn((message: string) => calls.push(`intro:${message}`)),
+    outro: vi.fn((message: string) => calls.push(`outro:${message}`)),
+    log: {
+      success: vi.fn((message: string) => calls.push(`clack.success:${message}`)),
+      info: vi.fn((message: string) => calls.push(`clack.info:${message}`)),
+      warn: vi.fn((message: string) => calls.push(`clack.warn:${message}`)),
+      error: vi.fn((message: string) => calls.push(`clack.error:${message}`)),
+    },
+    note: vi.fn((message: string) => calls.push(`clack.note:${message}`)),
+  }));
+}
+
+async function loadAdminCommandActions(): Promise<void> {
+  actions.clear();
+  registerCoreMocks();
+  registerProgressMocks();
+  registerAdminDataMocks();
+  registerScipMocks();
+  registerInstallModelMocks();
+  registerDoctorMocks();
+  registerLlmSetupMocks();
+  registerHardwareMocks();
+  registerPromptMocks();
+
+  importCounter += 1;
+  await import(`../src/bin/commands/admin.js?admin-command-actions-unit=${importCounter}`);
+}
 
 describe('admin command action bodies', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     calls.length = 0;
     activeCg = fakeCg();
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-cli-'));
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
     fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
     vi.clearAllMocks();
+    await loadAdminCommandActions();
   });
 
   afterEach(() => {

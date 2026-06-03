@@ -2,11 +2,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { registerReadCommands } from '../src/bin/commands/read.js';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: Array<{ tool: string; args: unknown; projectPath?: string }> = [];
 const stdout: string[] = [];
 let projectPath: string;
+
+function projectHasCartographDb(projectPath: string): boolean {
+  return fs.existsSync(path.join(projectPath, '.cartograph', 'cartograph.db'));
+}
 
 class FakeCommand {
   constructor(private readonly name = 'program') {}
@@ -52,78 +57,38 @@ const fakeCg = {
   close: vi.fn(),
 };
 
-vi.mock('../src/bin/_cli-core.js', () => ({
-  program: new FakeCommand(),
-  error: vi.fn((message: string) => stdout.push(`error:${message}`)),
-  success: vi.fn((message: string) => stdout.push(`success:${message}`)),
-  info: vi.fn((message: string) => stdout.push(`info:${message}`)),
-  warn: vi.fn((message: string) => stdout.push(`warn:${message}`)),
-  chalk: { bold: (s: string) => s, cyan: (s: string) => s, dim: (s: string) => s },
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
-  loadCartograph: vi.fn(async () => ({ default: { open: vi.fn(async () => fakeCg) } })),
-  assignIntArg: vi.fn(({ args, key, raw }) => {
-    if (raw !== undefined) args[key] = Number(raw);
-    return true;
-  }),
-  formatNumber: (n: number) => String(n),
-  runViaMCP: vi.fn(async (tool: string, args: unknown, projectPath?: string) =>
-    calls.push({ tool, args, projectPath }),
-  ),
-}));
-
-vi.mock('../src/mcp/tools/ask.js', () => ({
-  RETRIEVE_K_DEFAULT: 12,
-  RETRIEVE_K_MIN: 4,
-  RETRIEVE_K_MAX: 40,
-}));
-
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFilesWithSymbolCount: vi.fn(() => [
-    { path: 'src/a.ts', language: 'typescript', nodeCount: 2, size: 10 },
-    { path: 'test/a.test.ts', language: 'typescript', nodeCount: 1, size: 8 },
-  ]),
-}));
-
-vi.mock('../src/db/queries-file-summaries.js', () => ({
-  getFileSummaries: vi.fn(() => new Map([['src/a.ts', 'source file summary']])),
-}));
-
-vi.mock('../src/affected-core.js', () => ({
-  DEFAULT_DEPTH: 5,
-  buildIndexedPathSets: vi.fn(() => ({
-    allIndexedPaths: new Set(['src/a.ts', 'test/a.test.ts']),
-    testPaths: new Set(['test/a.test.ts']),
-  })),
-  findAffectedTests: vi.fn(() => ({
-    affectedTests: new Set(['test/a.test.ts']),
-    totalDependents: 2,
-    barrelsReached: ['src/index.ts'],
-  })),
-}));
-
-vi.mock('../src/mcp/tools/files.js', () => ({
-  filterFilesByDir: vi.fn((files: any[], dir: string) => files.filter((f) => f.path.startsWith(dir))),
-  buildDirRollup: vi.fn(() => ({ totalFiles: 1, totalSymbols: 2, rows: [{ dir: 'src', files: 1, symbols: 2 }] })),
-}));
-
-vi.mock('../src/db/queries-summaries.js', () => ({
-  getSummaryCoverage: vi.fn(() => null),
-  getWeightedSummaryCoverage: vi.fn(() => null),
-}));
-
-vi.mock('../src/llm/summarizer.js', () => ({
-  SUMMARIZABLE_KINDS: ['function'],
-}));
-
-vi.mock('../src/embeddings/hnsw-index.js', () => ({
-  isHnswAvailable: vi.fn(async () => false),
-}));
-
-vi.mock('../src/git-utils.js', () => ({
-  listChangedFilesSince: vi.fn(() => ['src/a.ts']),
-}));
-
-await import('../src/bin/commands/read.js');
+function loadReadCommandActions(): void {
+  actions.clear();
+  registerReadCommands({
+    program: new FakeCommand(),
+    error: (message: string) => stdout.push(`error:${message}`),
+    info: (message: string) => stdout.push(`info:${message}`),
+    resolveProjectPath: (pathArg?: string) => pathArg ?? projectPath,
+    loadCartograph: async () => ({ default: { open: async () => fakeCg } }),
+    runViaMCP: async (tool: string, args: unknown, projectPath?: string) => calls.push({ tool, args, projectPath }),
+    isInitialized: projectHasCartographDb,
+    getAllFilesWithSymbolCount: () => [
+      { path: 'src/a.ts', language: 'typescript', nodeCount: 2, size: 10 },
+      { path: 'test/a.test.ts', language: 'typescript', nodeCount: 1, size: 8 },
+    ],
+    getFileSummaries: () => new Map([['src/a.ts', 'source file summary']]),
+    filterFilesByDir: (files, dir) => files.filter((f) => f.path.startsWith(dir)),
+    buildDirRollup: () => ({ totalFiles: 1, totalSymbols: 2, rows: [{ dir: 'src', files: 1, symbols: 2 }] }),
+    buildIndexedPathSets: () => ({
+      allIndexedPaths: new Set(['src/a.ts', 'test/a.test.ts']),
+      testPaths: new Set(['test/a.test.ts']),
+    }),
+    findAffectedTests: () => ({
+      affectedTests: new Set(['test/a.test.ts']),
+      totalDependents: 2,
+      barrelsReached: ['src/index.ts'],
+    }),
+    loadGitUtils: async () => ({
+      listChangedFilesSince: () => ['src/a.ts'],
+      getCurrentHeadSha: () => 'HEAD',
+    }),
+  });
+}
 
 describe('read command action bodies', () => {
   beforeEach(() => {
@@ -133,6 +98,7 @@ describe('read command action bodies', () => {
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
     fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
     fakeCg.close.mockClear();
+    loadReadCommandActions();
   });
 
   afterEach(() => {
