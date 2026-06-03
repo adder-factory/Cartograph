@@ -17,3 +17,73 @@
   - See `NEXT_SESSION_GO.md` task 3.
 - [x] Improve unresolved refs explainability.
   - See `NEXT_SESSION_GO.md` task 4.
+- [x] Preserve side-effect import dependents for file-node graph and affected-test traversal.
+  - Repro: `cartograph_imports` reports `src/bin/cartograph.ts:57` imports `"./commands/generated.js"`, but `cartograph_graph({start: "generated.ts", direction: "callers", edgeKind: "imports"})` returns no callers and `cartograph affected src/bin/commands/generated.ts` reports 0 affected tests.
+  - Expected fix: resolved file imports, including side-effect imports, should create a reverse dependent path to the imported file node so `graph callers` and `affected` can find importers/tests. Add a regression using `src/bin/cartograph.ts` -> `src/bin/commands/generated.ts` and the CLI generator coverage tests.
+- [x] Fix review-context callee locations that mix callee files with call-site lines.
+  - Repro: pipe a diff touching `src/bin/commands/generated.ts:62` into `cartograph review context --diff -`; the callee list renders `registerGeneratedCommand` as `src/bin/_cli-core.ts:62` / `:6`, but the function definition is `src/bin/_cli-core.ts:897`.
+  - Expected fix: render callee definition locations from the target node start line, or label call-site lines separately so file/line pairs are not misleading.
+- [x] Add generated CLI negation support for boolean fields that need `false`.
+  - Repro: MCP `cartograph_coverage({mode: "ranked", includeTests: false})` is valid, but CLI `cartograph coverage --mode ranked --no-include-tests` exits with unknown option and `cartograph coverage --mode ranked --include-tests false` is silently ineffective.
+  - Additional repro: generated help text describes the positive behavior on negated flags (`context --help` shows `--no-code Include code snippets`, `graph --help` says `--no-compact Emit terse pipe-delimited...` even though `--no-compact` emits markdown).
+  - Expected fix: generated commands should expose `--no-include-tests` or equivalent for default-true optional booleans, reject stray boolean-looking positionals when they are ignored, and make generated `--no-*` help describe the false behavior.
+- [x] Fix `cartograph_role` unknown-reason wording when coverage exists.
+  - Repro: `cartograph role --symbol STATUS_TOOL` says the classifier had "no test coverage", while `cartograph coverage STATUS_TOOL --mode symbol` reports 100.0% LCOV coverage.
+  - Expected fix: distinguish classifier input evidence (`summary` / docstring / mined test-derived text) from LCOV/test coverage, or wire the actual coverage signal into the explanation.
+- [x] Prioritize canonical MCP tool names in exact name search.
+  - Repro: `cartograph_find({by: "name", query: "cartograph_status", mode: "exact", compact: true})` ranks helper symbols ahead of `STATUS_TOOL`, even though `STATUS_TOOL` has `defineTool({name: "cartograph_status"})`.
+  - Expected fix: exact matches against `defineTool.name` / canonical MCP tool names should rank the corresponding `*_TOOL` constant first, or be surfaced in a dedicated match bucket.
+- [x] Gate `cartograph_context` "Ask user" reminders to implementation/planning queries.
+  - Repro: `cartograph_context({task: "status MCP tool implementation", code: false, lowTokens: true})` returns a read-only lookup context but still appends `Ask user: UX preferences, edge cases, acceptance criteria`.
+  - Expected fix: suppress the acceptance-criteria reminder for lookup/explanation queries, or phrase it conditionally so it does not look like required next action for read-only exploration.
+- [x] Make `at-range` useful for module-level edits.
+  - Repro: `cartograph_at_range({file: "src/bin/commands/generated.ts", startLine: 62, endLine: 72})` returns "No symbols overlap" for top-level command registrations, while `review context` can at least identify the file node and nearest sibling.
+  - Expected fix: when no enclosing symbol exists, return the file/module node plus nearest siblings or a clear module-level edit hint.
+- [x] Harmonize unknown-argument handling across MCP tools.
+  - Repro: passing `allowStale` to `cartograph_changed_since` or `depth` to `cartograph_coverage` succeeds with a textual "Unknown argument ... was ignored" warning, while other invalid inputs fail schema validation.
+  - Expected fix: either reject unknown args consistently or expose ignored-argument warnings in structured metadata so agents can detect argument-shape mistakes.
+- [x] Align reranker doctor checks with real `ask` rerank request size.
+  - Repro: `cartograph_admin({action: "doctor"})` reports the reranker endpoint reachable, but `cartograph_ask({question: "...", retrieveK: 4})` can warn `Reranker unavailable` because `/v1/rerank` returns 500 for an input larger than the llama-server batch size.
+  - Expected fix: doctor should probe a representative rerank payload or `ask` should chunk/trim reranker inputs and surface a tuning hint that maps to the required `llama-server` batch-size settings.
+- [x] Make unknown command plus `--help` fail with suggestions.
+  - Repro: `cartograph changed_since --help` exits 0 and prints root help, while `cartograph changed_since` exits 1 with `Did you mean changed-since?`.
+  - Expected fix: unknown commands should use the same error/suggestion path even when `--help` is present, so typoed help probes do not look successful.
+- [x] Render status action hints per surface and use real CLI commands.
+  - Repro: CLI `cartograph status <tmp-project>` recommends nonexistent top-level commands such as `cartograph embed`, `cartograph summarize`, and `cartograph summarize --directories`; CLI `cartograph status --json` also includes MCP-shaped hints such as `cartograph_find(...)`, `cartograph_coverage`, and `cartograph_role`.
+  - Expected fix: CLI status output should recommend real CLI commands such as `cartograph admin embed` / `cartograph admin summarize`, avoid nonexistent flags, and reserve MCP tool names for MCP output.
+- [x] Make minimal model installs write a minimal LLM config, or flag missing configured tiers.
+  - Repro: `cartograph admin install-models --minimal --write-config -p <tmp-project>` skips only the minimal models but writes `summarizeLlm`, `localLlm`, `askLlm`, `embeddingLlm`, and `rerankerLlm`; the generated config can point `askLlm` at a missing 7B GGUF while `cartograph doctor <tmp-project>` still reports all checks passed.
+  - Expected fix: `--minimal --write-config` should write only tiers satisfied by the minimal install, or `doctor` should flag configured tier model paths/endpoints that were not installed.
+- [x] Clarify or fix `setup --no-models` for users bringing their own backend.
+  - Repro: `cartograph setup --no-models <tmp-project>` initializes the project, skips model installation, then doctor warns `config.json present but no llm block configured` and suggests `cartograph admin install-models --write-config`, which conflicts with choosing `--no-models`.
+  - Expected fix: provide a clear non-model config path for Ollama / existing models / cloud backends, or make the doctor remediation distinguish "install models" from "write backend config".
+- [x] Include `projectPath` in MCP `llm-plan` apply instructions.
+  - Repro: `cartograph_admin({action: "llm-plan", projectPath: "/Users/adderclaudedev/projects/cartograph"})` ends with `cartograph_admin({action: "llm-apply", preset: "<id>"})`, but `cartograph_admin({action: "llm-apply", preset: "skip"})` fails because `projectPath` is required.
+  - Expected fix: include the original `projectPath` in the example and next-step wording, or make `llm-apply` default to the current project consistently.
+- [x] Fix skip-preset guidance to name a real command.
+  - Repro: `cartograph admin llm-apply --preset skip` says `Re-run cartograph llm plan later when ready`, but `cartograph llm plan` is not registered.
+  - Expected fix: change the message to a real command such as `cartograph admin llm-plan` or `cartograph llm setup`.
+- [x] Make detected llama-server presets tier-aware.
+  - Repro: `cartograph admin llm-plan` offers presets such as `use-detected-llama-server-http---localhost-8080` with "All tiers -> http://localhost:8080 (1 model loaded)", but llama-server is one-model-per-process and applying one endpoint to every tier can route chat/ask/embed/rerank to the wrong model.
+  - Expected fix: infer tier mapping from detected llama-server models where possible, or suppress single-endpoint all-tier presets for one-model llama-server instances.
+- [x] Have doctor honor `CARTOGRAPH_MODELS_DIR`.
+  - Repro: `CARTOGRAPH_MODELS_DIR=/tmp/cartograph-audit-missing-models cartograph doctor --no-project-checks` still reports models under `~/.cartograph/models` even though `recommended-models.ts` documents the env override.
+  - Expected fix: have doctor use the shared model-directory constant/resolver from `recommended-models.ts` so the environment override is consistent.
+- [x] Adjust `doctor --no-project-checks` success wording.
+  - Repro: `cartograph doctor --no-project-checks <uninitialized-path>` can print all checks passed and `_cartograph is ready to use_` even when no `.cartograph/` exists at that path.
+  - Expected fix: when project checks are skipped, say only that global checks passed and explicitly note project readiness was not verified.
+- [x] Accept both project-check skip flag spellings on both doctor surfaces.
+  - Repro: top-level doctor supports `--no-project-checks` but rejects `--skip-project-checks`; admin doctor supports the MCP-shaped `--skipProjectChecks` concept but `cartograph admin doctor --no-project-checks` is rejected.
+  - Expected fix: accept both `--no-project-checks` and `--skip-project-checks` on top-level and admin doctor commands, with one canonical help spelling.
+- [x] Improve family alias error handling for `review` and `summaries`.
+  - Repro: `cartograph review --mode frobnicate` and `cartograph summaries --action frobnicate` fail with raw `unknown command 'frobnicate'`, while `admin frobnicate` and `session frobnicate` print styled valid-action lists.
+  - Expected fix: route bad `--mode` / `--action` alias rewrites through the family unknown-action handler and list valid values.
+- [x] Add kebab-case aliases for session macro actions.
+  - Repro: `cartograph session macro-save` fails and the valid action list only shows underscore forms such as `macro_save`, `macro_run`, `macro_list`, and `macro_delete`, while most CLI commands use kebab-case.
+  - Expected fix: support `macro-save`, `macro-run`, `macro-list`, and `macro-delete` aliases while keeping underscore aliases for MCP parity.
+- [x] Make top-level help easier to scan.
+  - Repro: `cartograph --help` renders a long ungrouped list where generated commands include multi-paragraph MCP descriptions; the admin summary also omits newer subcommands such as `doctor` and `llm-*`.
+  - Expected fix: group top-level commands by category, cap descriptions to one line in root help, and update family summaries to include all current subcommands.
+- [x] Improve PATH troubleshooting docs for source installs.
+  - Repro: in the audit shell, `cartograph --help` failed with `command not found`; `bun pm bin -g` also exited 1 because no global package manifest existed, while repo-local `bun src/bin/cartograph.ts --help` worked.
+  - Expected fix: document `bun link` verification, the repo-local `bun src/bin/cartograph.ts` fallback, and an alternative to relying only on `bun pm bin -g`.

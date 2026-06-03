@@ -18,10 +18,6 @@ const state = {
   throwSetMetadata: false,
 };
 
-vi.mock('../src/algo-hash.js', () => ({
-  computeAlgoHash: vi.fn(() => 'value-ref-algo-test'),
-}));
-
 vi.spyOn(dbIndex, 'getDatabasePath').mockImplementation(
   ((projectRoot: string) => `${projectRoot}/.cartograph/cartograph.db`) as never,
 );
@@ -118,7 +114,6 @@ describe('value-ref-edges hook orchestration', () => {
 
       await HOOK.afterIndexAll(ctx(root));
 
-      expect(VALUE_REF_EDGES_ALGO_VERSION).toBe('value-ref-algo-test');
       expect(state.refreshCalls).toHaveLength(1);
       expect(state.refreshCalls[0]!.hookName).toBe('value-ref-edges');
       expect(state.refreshCalls[0]!.options).toEqual({ scope: 'all' });
@@ -127,7 +122,7 @@ describe('value-ref-edges hook orchestration', () => {
         { source: 'file:src/a.ts', target: 'node:runTask', kind: 'references' },
         { source: 'file:src/b.js', target: 'node:otherTask', kind: 'references' },
       ]);
-      expect(state.metadata.get('last_mined_value_ref_edges_algo_version')).toBe('value-ref-algo-test');
+      expect(state.metadata.get('last_mined_value_ref_edges_algo_version')).toBe(VALUE_REF_EDGES_ALGO_VERSION);
       expect(state.calls.map((call) => call.name)).toContain('yieldToEventLoop');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
@@ -170,7 +165,7 @@ describe('value-ref-edges hook orchestration', () => {
       expect(state.refreshCalls[0]!.options).toEqual({ scope: 'all' });
 
       state.refreshCalls = [];
-      state.metadata.set('last_mined_value_ref_edges_algo_version', 'value-ref-algo-test');
+      state.metadata.set('last_mined_value_ref_edges_algo_version', VALUE_REF_EDGES_ALGO_VERSION);
       await HOOK.afterSync(ctx(root), { changedFilePaths: [], filesRemoved: 0 } as never);
       expect(state.refreshCalls).toEqual([]);
 
