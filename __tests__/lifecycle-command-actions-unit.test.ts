@@ -133,6 +133,7 @@ describe('lifecycle command action bodies', () => {
     await actions.get('program:serve')!({
       projectPath,
       mcp: true,
+      profile: 'review',
       writeTools: false,
       allowStaleDefault: true,
       disableTool: ['cartograph_ask'],
@@ -140,6 +141,7 @@ describe('lifecycle command action bodies', () => {
     });
     expect(calls).toContain('server.start');
     expect(calls.join('\n')).toContain('"disableWriteTools":true');
+    expect(calls.join('\n')).toContain('"profile":"review"');
 
     await actions.get('program:serve')!({});
     expect(stderr.join('\n')).toContain('Cartograph MCP Server');

@@ -49,6 +49,7 @@ import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok } from './_outcome.js';
 import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
+import { resolveMcpServerProfile } from '../profiles.js';
 
 // NOTE: `getToolModules` from './registry.js' is imported DYNAMICALLY
 // inside `appendToolRegistryDrift` — a static import here creates a
@@ -1607,7 +1608,7 @@ function formatLlmLine(args: FormatLlmLineArgs): string | null {
  * defaults.
  */
 function appendServerConfig(lines: string[], ctx: ToolCtx): void {
-  const serverLines: string[] = [];
+  const serverLines: string[] = [`- **Profile:** \`${resolveMcpServerProfile(ctx.options.profile)}\``];
   if (ctx.options.disableWriteTools) {
     serverLines.push('- **Write tools:** disabled (`--no-write-tools`)');
   }
@@ -1621,9 +1622,7 @@ function appendServerConfig(lines: string[], ctx: ToolCtx): void {
   if (ctx.options.disableStartupSync) {
     serverLines.push('- **Startup sync:** disabled (`--no-startup-sync`)');
   }
-  if (serverLines.length > 0) {
-    lines.push('', '### 🔧 Server config', ...serverLines);
-  }
+  lines.push('', '### 🔧 Server config', ...serverLines);
 }
 
 /** Per-kind node count breakdown — lists every kind that has at least one node.

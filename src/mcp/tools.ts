@@ -19,6 +19,7 @@ import { ProjectCache } from './tools/_project-cache.js';
 import { errMsg } from '../errors.js';
 import { errorResult } from './tools/_error-result.js';
 import { borrowedWorktreeBanner, detectBorrowedWorktreeIndex } from '../git-utils.js';
+import { mcpServerProfileToolSet, resolveMcpServerProfile, type McpServerProfile } from './profiles.js';
 import type { PendingFile } from '../sync/index.js';
 import {
   contentDriftCount,
@@ -94,6 +95,12 @@ function compactMcpToolDefinition(tool: ToolDefinition): ToolDefinition {
 // that pass `prop: undefined` literally. Adding `| undefined` lets
 // option spreads from MCPServerOptions type-check.
 export interface ToolHandlerOptions {
+  /**
+   * Named advertised-tool profile. `full` is the complete registry and
+   * preserves the default surface. Narrower profiles are allowlist
+   * filters that compose with `disableWriteTools` and `disabledTools`.
+   */
+  profile?: McpServerProfile | undefined;
   /**
    * When true, disable every tool flagged `isWriteTool` (admin,
    * embed, summarize, summaries, coverage). Sandboxed-agent setups
@@ -177,17 +184,30 @@ const PASS_THROUGH: FreshnessGateOutcome = Object.freeze({
  * "Tool disabled" — otherwise the agent has no way to learn which
  * actions (if any) are reachable via the readOnlyActions carve-out.
  */
-function toolHandlerIsDisabled(options: ToolHandlerOptions, name: string, args?: Record<string, unknown>): boolean {
-  if (options.disabledTools?.has(name)) return true;
-  if (!options.disableWriteTools) return false;
+type ToolDisabledReason = 'profile' | 'explicit' | 'write' | null;
+
+function toolHandlerDisabledReason(
+  options: ToolHandlerOptions,
+  name: string,
+  args?: Record<string, unknown>,
+): ToolDisabledReason {
+  if (options.disabledTools?.has(name)) return 'explicit';
   const mod = getToolModule(name);
-  if (!mod?.isWriteTool) return false;
+  const profile = resolveMcpServerProfile(options.profile);
+  const profileToolSet = mcpServerProfileToolSet(profile);
+  if (mod && profileToolSet && !profileToolSet.has(name)) return 'profile';
+  if (!options.disableWriteTools) return null;
+  if (!mod?.isWriteTool) return null;
   const carveOuts = mod.readOnlyActions;
-  if (!carveOuts || carveOuts.size === 0) return true;
-  if (!args) return false;
+  if (!carveOuts || carveOuts.size === 0) return 'write';
+  if (!args) return null;
   const action = args['action'];
-  if (typeof action !== 'string') return false;
-  return !carveOuts.has(action);
+  if (typeof action !== 'string') return null;
+  return carveOuts.has(action) ? null : 'write';
+}
+
+function toolHandlerIsDisabled(options: ToolHandlerOptions, name: string, args?: Record<string, unknown>): boolean {
+  return toolHandlerDisabledReason(options, name, args) !== null;
 }
 
 /**
@@ -224,9 +244,14 @@ interface PreFlightInvocation {
  */
 function formatDisabledMessage(options: ToolHandlerOptions, inv: PreFlightInvocation): string {
   const generic = `Tool \`${inv.toolName}\` is disabled by this MCP server's configuration.`;
+  const reason = toolHandlerDisabledReason(options, inv.toolName, inv.args);
+  if (reason === 'profile') {
+    const profile = resolveMcpServerProfile(options.profile);
+    return `Tool \`${inv.toolName}\` is not available in MCP server profile \`${profile}\`.`;
+  }
   // When disabledTools blocks the whole tool, no action is reachable —
   // don't advertise carve-outs that the operator has separately overridden.
-  if (options.disabledTools?.has(inv.toolName)) return generic;
+  if (reason === 'explicit') return generic;
   if (!options.disableWriteTools) return generic;
   const carveOuts = inv.mod?.readOnlyActions;
   if (!carveOuts || carveOuts.size === 0) return generic;

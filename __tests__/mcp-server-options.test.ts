@@ -1,7 +1,7 @@
 /**
- * MCP server-level configuration: disable write tools, disable named
- * tools, default `allowStale`. Covers the surface added so server
- * operators can scope what an agent is allowed to do.
+ * MCP server-level configuration: profiles, disable write tools,
+ * disable named tools, default `allowStale`. Covers the surface added
+ * so server operators can scope what an agent is allowed to do.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { getToolModules } from '../src/mcp/tools/registry.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -37,6 +38,78 @@ describe('MCP server-level options', () => {
   afterEach(() => {
     if (cg) cg.close();
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  describe('profiles', () => {
+    it('defaults to the full registered tool surface', () => {
+      const handler = new ToolHandler(cg);
+      const names = handler.getTools().map((t) => t.name);
+      const registered = getToolModules().map((m) => m.definition.name);
+      expect(names.sort()).toEqual(registered.sort());
+      handler.closeAll();
+    });
+
+    it('core keeps common coding-agent tools and hides non-core tools', async () => {
+      const handler = new ToolHandler(cg, { profile: 'core' });
+      const names = handler.getTools().map((t) => t.name);
+      expect(names).toContain('cartograph_find');
+      expect(names).toContain('cartograph_graph');
+      expect(names).toContain('cartograph_context');
+      expect(names).toContain('cartograph_compare_to_ref');
+      expect(names).toContain('cartograph_admin');
+      expect(names).not.toContain('cartograph_local_chat');
+      expect(names).not.toContain('cartograph_note');
+
+      const result = await handler.execute('cartograph_local_chat', { prompt: 'summarize' });
+      expect(result.content[0]?.text ?? '').toMatch(/profile `core`/);
+      handler.closeAll();
+    });
+
+    it('read-only profile matches the existing --no-write-tools advertised surface', () => {
+      const profileHandler = new ToolHandler(cg, { profile: 'read-only' });
+      const noWriteHandler = new ToolHandler(cg, { disableWriteTools: true });
+      const profileNames = profileHandler
+        .getTools()
+        .map((t) => t.name)
+        .sort();
+      const noWriteNames = noWriteHandler
+        .getTools()
+        .map((t) => t.name)
+        .sort();
+      expect(profileNames).toEqual(noWriteNames);
+      expect(profileNames).not.toContain('cartograph_admin');
+      expect(profileNames).not.toContain('cartograph_summaries');
+      profileHandler.closeAll();
+      noWriteHandler.closeAll();
+    });
+
+    it('review focuses diff, risk, test, and change-impact tools', () => {
+      const handler = new ToolHandler(cg, { profile: 'review' });
+      const names = handler.getTools().map((t) => t.name);
+      expect(names).toContain('cartograph_review');
+      expect(names).toContain('cartograph_affected');
+      expect(names).toContain('cartograph_tests_for');
+      expect(names).toContain('cartograph_compare_to_ref');
+      expect(names).toContain('cartograph_biomarkers');
+      expect(names).toContain('cartograph_graph');
+      expect(names).not.toContain('cartograph_explore');
+      expect(names).not.toContain('cartograph_ask');
+      handler.closeAll();
+    });
+
+    it('composes with disabledTools and disableWriteTools', () => {
+      const handler = new ToolHandler(cg, {
+        profile: 'core',
+        disableWriteTools: true,
+        disabledTools: new Set(['cartograph_find']),
+      });
+      const names = handler.getTools().map((t) => t.name);
+      expect(names).not.toContain('cartograph_find'); // explicit disable
+      expect(names).not.toContain('cartograph_admin'); // write-class filter
+      expect(names).not.toContain('cartograph_local_chat'); // profile filter
+      expect(names).toContain('cartograph_graph');
+      handler.closeAll();
+    });
   });
 
   describe('disableWriteTools', () => {
@@ -129,10 +202,20 @@ describe('MCP server-level options', () => {
   });
 
   describe('Server config section in status', () => {
-    it('omits the section when no server options are set', async () => {
+    it('shows the default full profile when no narrowing options are set', async () => {
       const handler = new ToolHandler(cg);
       const result = await handler.execute('cartograph_status', {});
-      expect(result.content[0]?.text ?? '').not.toMatch(/### Server config/);
+      const text = result.content[0]?.text ?? '';
+      expect(text).toMatch(/### .*Server config/);
+      expect(text).toMatch(/Profile.*`full`/);
+      handler.closeAll();
+    });
+
+    it('shows the active profile when a narrower profile is set', async () => {
+      const handler = new ToolHandler(cg, { profile: 'review' });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/Profile.*`review`/);
       handler.closeAll();
     });
 

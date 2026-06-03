@@ -9,6 +9,7 @@ import { describe, it, expect } from 'vitest';
 import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
 import { ToolHandler, tools } from '../src/mcp/tools.js';
+import { MCP_SERVER_PROFILE_NAMES, MCP_SERVER_PROFILE_TOOL_NAMES } from '../src/mcp/profiles.js';
 
 const MCP_TOOL_COUNT_BUDGET = 45;
 const MCP_TOOLS_LIST_CHAR_BUDGET = 65_000;
@@ -48,6 +49,13 @@ describe('MCP tool registry — single source of truth', () => {
 
     const readOnlyAdvertised = new ToolHandler(null, { disableWriteTools: true }).getTools();
     expect(readOnlyAdvertised.length).toBeLessThan(advertised.length);
+
+    for (const profile of MCP_SERVER_PROFILE_NAMES) {
+      const profiled = new ToolHandler(null, { profile }).getTools();
+      const profiledPayloadChars = JSON.stringify({ tools: profiled }).length;
+      expect(profiledPayloadChars).toBeLessThanOrEqual(payloadChars);
+      if (profile !== 'full') expect(profiled.length).toBeLessThan(advertised.length);
+    }
   });
 
   it('all main-line tools are registered (regression guard)', () => {
@@ -99,6 +107,16 @@ describe('MCP tool registry — single source of truth', () => {
       .map((m) => m.definition.name)
       .sort(byName);
     expect(actual).toEqual(expected);
+  });
+
+  it('profile allowlists only reference registered tools', () => {
+    const known = new Set(getToolModules().map((m) => m.definition.name));
+    for (const profile of MCP_SERVER_PROFILE_NAMES) {
+      const names = MCP_SERVER_PROFILE_TOOL_NAMES[profile];
+      if (!names) continue;
+      const unknown = names.filter((name) => !known.has(name));
+      expect(unknown, `${profile} profile has unknown tool name(s)`).toEqual([]);
+    }
   });
 
   it('cartograph_playbook returns the same playbook as the MCP initialize handshake', async () => {

@@ -492,9 +492,13 @@ That startup schema cost is separate from per-call output tokens, so `lowTokens:
 For focused or read-only agents, trim the advertised surface at server launch:
 
 ```bash
+cartograph serve --mcp --profile core
+cartograph serve --mcp --profile review
 cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_local_chat
 ```
+
+Profiles are advertised-tool filters: `full` is the default 36-tool surface, `core` keeps common coding-agent lookup and change-impact tools, `review` focuses diff/risk/test workflows, and `read-only` removes write-class tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
 
 In the same measurement, `--no-write-tools` reduced the list to 31 tools and about 13k estimated tokens. The registry test guards both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, and no more than 80 KB total for `tools/list` plus initialize instructions.
 
@@ -508,12 +512,12 @@ Re-run the benchmark with `bun run benchmark:tokens`. Token counts below are est
 |---|---:|---:|---:|---|
 | `find handleFind` | ~345 | ~172 | ~881 | ~50% less vs regular, ~80% less vs baseline |
 | `graph callers handleFind` | ~42 | ~37 | no fair grep equivalent | ~12% less vs regular |
-| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,691 | ~78% less vs regular, ~86% less vs baseline |
-| `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,691 | ~89% less vs regular, ~75% less vs baseline |
+| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,724 | ~78% less vs regular, ~86% less vs baseline |
+| `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,724 | ~89% less vs regular, ~75% less vs baseline |
 | `at_range` on `find.ts` dispatch lines | ~55 | ~25 | ~616 | ~55% less vs regular, ~96% less vs baseline |
 | `node` batch for find-tool symbols | ~617 | ~534 | ~327 | ~13% less vs regular, ~63% more vs baseline |
-| `files` project overview | ~3,746 | ~822 | ~8,791 | ~78% less vs regular, ~91% less vs baseline |
-| `imports` project audit | ~3,338 | ~671 | ~240,627 | ~80% less vs regular, ~100% less vs baseline |
+| `files` project overview | ~3,746 | ~822 | ~8,796 | ~78% less vs regular, ~91% less vs baseline |
+| `imports` project audit | ~3,338 | ~671 | ~240,791 | ~80% less vs regular, ~100% less vs baseline |
 
 Exact single-file text search can still be cheaper when you already know the file and string. Cartograph's savings show up when the agent needs structured context instead of raw matching source lines.
 
@@ -665,6 +669,8 @@ cartograph serve --mcp --project-path /absolute/path/to/project
 Useful server controls:
 
 ```bash
+cartograph serve --mcp --profile core
+cartograph serve --mcp --profile read-only
 cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --allow-stale-default
 cartograph serve --mcp --disable-tool cartograph_ask

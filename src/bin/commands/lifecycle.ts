@@ -18,6 +18,13 @@ import {
   runViaMCP as cliRunViaMCP,
   loadCartograph as cliLoadCartograph,
 } from '../_cli-core.js';
+import {
+  DEFAULT_MCP_SERVER_PROFILE,
+  MCP_SERVER_PROFILE_DESCRIPTION,
+  MCP_SERVER_PROFILE_NAMES,
+  isMcpServerProfile,
+  type McpServerProfile,
+} from '../../mcp/profiles.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -43,6 +50,16 @@ interface SetupCartographModule {
 interface DoctorResult {
   overallStatus: string;
   afterFix?: { overallStatus: string };
+}
+
+interface ServeCommandOptions {
+  projectPath?: string;
+  mcp?: boolean;
+  profile?: string;
+  writeTools?: boolean; // commander auto-inverts `--no-write-tools` → writeTools=false
+  allowStaleDefault?: boolean;
+  disableTool?: string[];
+  startupSync?: boolean; // commander auto-inverts `--no-startup-sync` → startupSync=false
 }
 
 interface LifecycleCommandDeps {
@@ -144,16 +161,56 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
     import('../../installer/recommended-config.js')) as LifecycleCommandDeps['loadRecommendedConfig'],
 };
 
+function resolveServeProfile(raw: string | undefined, error: (message: string) => void): McpServerProfile | null {
+  const profile = raw ?? DEFAULT_MCP_SERVER_PROFILE;
+  if (isMcpServerProfile(profile)) return profile;
+  error(`Invalid --profile "${profile}". Expected one of: ${MCP_SERVER_PROFILE_NAMES.join(', ')}`);
+  process.exit(1);
+  return null;
+}
+
+function writeServeMcpGuidance(deps: Pick<LifecycleCommandDeps, 'chalk' | 'writeStderr'>): void {
+  const { chalk, writeStderr } = deps;
+  writeStderr(chalk.bold('\nCartograph MCP Server\n'));
+  writeStderr(chalk.blue('ℹ') + ' Use --mcp flag to start the MCP server');
+  writeStderr(
+    chalk.blue('ℹ') + ` Use --profile <${MCP_SERVER_PROFILE_NAMES.join('|')}> to narrow the advertised tools`,
+  );
+  writeStderr('\nTo use with Claude Code, add to your MCP configuration:');
+  writeStderr(
+    chalk.dim(`
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+`),
+  );
+  writeStderr('Available tools:');
+  writeStderr(
+    chalk.cyan('  cartograph_find') + '      - Find symbols / regex / env / sql in one tool (by=name|content|env|sql)',
+  );
+  writeStderr(chalk.cyan('  cartograph_context') + '   - Build context for a task');
+  writeStderr(chalk.cyan('  cartograph_graph') + '     - Navigate the graph (callers / callees / impact / walk)');
+  writeStderr(chalk.cyan('  cartograph_node') + '      - Get symbol details');
+  writeStderr(chalk.cyan('  cartograph_files') + '     - Get project file structure');
+  writeStderr(chalk.cyan('  cartograph_status') + '    - Get index status');
+}
+
 /**
  * cartograph serve
  */
 function registerServeCommand(deps: LifecycleCommandDeps): void {
-  const { program, chalk, resolveProjectPath, error, writeStderr, loadMcpServer } = deps;
+  const { program, resolveProjectPath, error, loadMcpServer } = deps;
   program
     .command('serve')
     .description('Start Cartograph as an MCP server for AI assistants')
     .option('-p, --project-path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
     .option('--mcp', 'Run as MCP server (stdio transport)')
+    .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
     .option(
       '--no-write-tools',
       'Disable write-class tools (cartograph_admin / _summaries / _coverage / _session / _note). Use for sandboxed read-only agents and smaller MCP load context.',
@@ -170,70 +227,36 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
       '--no-startup-sync',
       'Skip the catch-up sync that normally runs once when the server opens its default project. Use only when boot-time sync cost is unacceptable (very large repos with frequent restarts).',
     )
-    .action(
-      async (options: {
-        projectPath?: string;
-        mcp?: boolean;
-        writeTools?: boolean; // commander auto-inverts `--no-write-tools` → writeTools=false
-        allowStaleDefault?: boolean;
-        disableTool?: string[];
-        startupSync?: boolean; // commander auto-inverts `--no-startup-sync` → startupSync=false
-      }) => {
-        const projectPath = options.projectPath ? resolveProjectPath(options.projectPath) : undefined;
+    .action(async (options: ServeCommandOptions) => {
+      const projectPath = options.projectPath ? resolveProjectPath(options.projectPath) : undefined;
 
-        try {
-          if (options.mcp) {
-            // Start MCP server - it handles initialization lazily based on rootUri from client
-            const { MCPServer } = await loadMcpServer();
-            const server = new MCPServer({
-              projectPath,
-              // commander's `--no-write-tools` makes `writeTools` false when set;
-              // omitted leaves it undefined which we treat as "writes enabled".
-              disableWriteTools: options.writeTools === false,
-              allowStaleDefault: options.allowStaleDefault === true,
-              disabledTools:
-                options.disableTool && options.disableTool.length > 0 ? new Set(options.disableTool) : undefined,
-              disableStartupSync: options.startupSync === false,
-            });
-            await server.start();
-            // Server will run until terminated
-          } else {
-            // Default: show info about MCP mode.
-            // Use stderr so stdout stays clean for any piped/stdio usage.
-            writeStderr(chalk.bold('\nCartograph MCP Server\n'));
-            writeStderr(chalk.blue('ℹ') + ' Use --mcp flag to start the MCP server');
-            writeStderr('\nTo use with Claude Code, add to your MCP configuration:');
-            writeStderr(
-              chalk.dim(`
-{
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-`),
-            );
-            writeStderr('Available tools:');
-            writeStderr(
-              chalk.cyan('  cartograph_find') +
-                '      - Find symbols / regex / env / sql in one tool (by=name|content|env|sql)',
-            );
-            writeStderr(chalk.cyan('  cartograph_context') + '   - Build context for a task');
-            writeStderr(
-              chalk.cyan('  cartograph_graph') + '     - Navigate the graph (callers / callees / impact / walk)',
-            );
-            writeStderr(chalk.cyan('  cartograph_node') + '      - Get symbol details');
-            writeStderr(chalk.cyan('  cartograph_files') + '     - Get project file structure');
-            writeStderr(chalk.cyan('  cartograph_status') + '    - Get index status');
-          }
-        } catch (err) {
-          error(`Failed to start server: ${errMsg(err)}`);
-          process.exit(1);
+      try {
+        if (options.mcp) {
+          const profile = resolveServeProfile(options.profile, error);
+          if (!profile) return;
+          // Start MCP server - it handles initialization lazily based on rootUri from client
+          const { MCPServer } = await loadMcpServer();
+          const server = new MCPServer({
+            projectPath,
+            profile,
+            // commander's `--no-write-tools` makes `writeTools` false when set;
+            // omitted leaves it undefined which we treat as "writes enabled".
+            disableWriteTools: options.writeTools === false,
+            allowStaleDefault: options.allowStaleDefault === true,
+            disabledTools:
+              options.disableTool && options.disableTool.length > 0 ? new Set(options.disableTool) : undefined,
+            disableStartupSync: options.startupSync === false,
+          });
+          await server.start();
+          // Server will run until terminated
+        } else {
+          writeServeMcpGuidance(deps);
         }
-      },
-    );
+      } catch (err) {
+        error(`Failed to start server: ${errMsg(err)}`);
+        process.exit(1);
+      }
+    });
 }
 
 /**

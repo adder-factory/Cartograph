@@ -78,23 +78,23 @@ Sonar notes:
 
 ## Task 1: MCP Serve Profiles
 
-- [ ] Add an MCP server profile option, likely
+- [x] Add an MCP server profile option, likely
   `cartograph serve --mcp --profile <full|core|read-only|review>`.
-- [ ] Make the default profile preserve current behavior (`full`) unless
+- [x] Make the default profile preserve current behavior (`full`) unless
   the user explicitly chooses another profile.
-- [ ] Implement profiles as advertised-tool filters, not as new MCP
+- [x] Implement profiles as advertised-tool filters, not as new MCP
   tools, so the registry count stays stable.
-- [ ] Define conservative initial profiles:
+- [x] Define conservative initial profiles:
   - `full`: current 36-tool surface.
   - `core`: focused coding-agent surface for common lookups and edits.
   - `read-only`: no write-class tools; should align with or build on
     existing `--no-write-tools`.
   - `review`: diff/risk/test/change-impact oriented surface.
-- [ ] Ensure profiles compose predictably with repeated
+- [x] Ensure profiles compose predictably with repeated
   `--disable-tool <name>` and `--no-write-tools`.
-- [ ] Update `cartograph_status` server-config output so agents can see
+- [x] Update `cartograph_status` server-config output so agents can see
   the active profile.
-- [ ] Add tests for profile filtering, composition, and MCP load-budget
+- [x] Add tests for profile filtering, composition, and MCP load-budget
   impact.
 
 Likely starting points:
