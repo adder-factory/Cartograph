@@ -1,4 +1,5 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as dbQueries from '../src/db/queries.js';
 import type { ExtractionResult, FileRecord, Node } from '../src/types.js';
 
 const calls: Array<{ name: string; value?: unknown }> = [];
@@ -6,13 +7,11 @@ let existingFile: FileRecord | null = null;
 let priorStructHash: string | null = null;
 let throwInsertNodes = false;
 
-vi.mock('../src/db/queries.js', () => ({
-  qbTransaction: vi.fn((_queries: unknown, fn: () => void) => {
-    calls.push({ name: 'txn:start' });
-    fn();
-    calls.push({ name: 'txn:end' });
-  }),
-}));
+vi.spyOn(dbQueries, 'qbTransaction').mockImplementation(((_queries: unknown, fn: () => void) => {
+  calls.push({ name: 'txn:start' });
+  fn();
+  calls.push({ name: 'txn:end' });
+}) as typeof dbQueries.qbTransaction);
 
 vi.mock('../src/db/queries-edges.js', () => ({
   insertEdges: vi.fn((_queries: unknown, edges: unknown) => calls.push({ name: 'insertEdges', value: edges })),
@@ -160,6 +159,10 @@ beforeEach(() => {
   priorStructHash = null;
   throwInsertNodes = false;
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('extraction store phase persistence', () => {

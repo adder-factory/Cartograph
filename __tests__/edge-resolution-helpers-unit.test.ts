@@ -1,7 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 const state = {
@@ -26,10 +27,8 @@ vi.mock('../src/db/queries-edges.js', () => ({
   insertEdges: vi.fn((_queries: unknown, edges: unknown[]) => state.inserted.push(edges)),
 }));
 
-vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.logs.push(message)),
-}));
+vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
+  state.logs.push(message)) as typeof errorModule.logDebug);
 
 const { collectTargets, lookupSymbolByNameInFile, refreshEdgesHook, resolveTargetFile, yieldToEventLoop } =
   await import('../src/index-hooks/edge-resolution-helpers.js');
@@ -47,6 +46,10 @@ beforeEach(() => {
   state.inserted = [];
   state.logs = [];
   vi.clearAllMocks();
+});
+
+afterAll(() => {
+  vi.restoreAllMocks();
 });
 
 describe('edge-resolution helper primitives', () => {
