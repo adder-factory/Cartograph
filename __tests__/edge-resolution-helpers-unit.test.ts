@@ -2,6 +2,9 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as edgeQueries from '../src/db/queries-edges.js';
+import * as fileQueries from '../src/db/queries-files.js';
+import * as searchQueries from '../src/db/queries-search.js';
 import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
@@ -12,21 +15,18 @@ const state = {
   logs: [] as string[],
 };
 
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => [...state.files.values()]),
-  getFileByPath: vi.fn((_queries: unknown, filePath: string) => state.files.get(filePath) ?? null),
-}));
-
-vi.mock('../src/db/queries-search.js', () => ({
-  getNodesByNameAndFile: vi.fn(
-    (_queries: unknown, name: string, filePath: string) => state.symbols.get(`${filePath}:${name}`) ?? [],
-  ),
-}));
-
-vi.mock('../src/db/queries-edges.js', () => ({
-  insertEdges: vi.fn((_queries: unknown, edges: unknown[]) => state.inserted.push(edges)),
-}));
-
+vi.spyOn(fileQueries, 'getAllFiles').mockImplementation((() => [
+  ...state.files.values(),
+]) as typeof fileQueries.getAllFiles);
+vi.spyOn(fileQueries, 'getFileByPath').mockImplementation(
+  ((_queries: unknown, filePath: string) => state.files.get(filePath) ?? null) as typeof fileQueries.getFileByPath,
+);
+vi.spyOn(searchQueries, 'getNodesByNameAndFile').mockImplementation(
+  ((_queries: unknown, name: string, filePath: string) =>
+    state.symbols.get(`${filePath}:${name}`) ?? []) as typeof searchQueries.getNodesByNameAndFile,
+);
+vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edges: unknown[]) =>
+  state.inserted.push(edges)) as typeof edgeQueries.insertEdges);
 vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
   state.logs.push(message)) as typeof errorModule.logDebug);
 
