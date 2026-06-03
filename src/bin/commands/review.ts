@@ -258,6 +258,16 @@ reviewCmd
     await runViaMCP('cartograph_review', args, options.projectPath);
   });
 
+reviewCmd
+  .command('trust')
+  .description(
+    "Readiness self-check for freshness, coverage, biomarkers, and LLMs (mirrors cartograph_review({mode: 'trust'}))",
+  )
+  .option('-p, --project-path <path>', 'Project path')
+  .action(async (options: { projectPath?: string }) => {
+    await runViaMCP('cartograph_review', { mode: 'trust' }, options.projectPath);
+  });
+
 // Note: the prior `cartograph search-fuzzy` command was retired in the
 // family-alignment pass — it's now `cartograph find [query] --by name
 // --mode fuzzy|semantic ...` (the unified `find` command, in

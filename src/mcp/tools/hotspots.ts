@@ -340,6 +340,9 @@ export function buildHotspotsCategorySpec(
       ? 'High churn, low centrality. Not depended on but always changing — refactor target / tooling-debt smell.'
       : 'High centrality, low churn. Stable critical code — changes here have outsized impact.';
   const preamble: string[] = [categoryRationale];
+  preamble.push(
+    'Why ranked here: category membership is computed from centrality and churn percentiles; rows are ordered by the category query score.',
+  );
   // `brittle` semantics require LOW churn. If the caller passed a high
   // `minCommits`, the SQL floor excludes most low-churn files BEFORE
   // categorisation. Any rows that survive may be comparatively low-churn
@@ -417,7 +420,10 @@ export function buildHotspotsRiskSpec(
 ): MarkdownTableSpec<HotspotsRiskTableRow> {
   return {
     title: `Hotspots (sortBy=${sortBy}, top ${rows.length})`,
-    preamble: ['High-risk files = high structural centrality × high git churn. Review these first.'],
+    preamble: [
+      'High-risk files = high structural centrality × high git churn. Review these first.',
+      `Why ranked here: sorted by ${sortBy === 'risk' ? 'risk score (centrality × churn)' : sortBy}.`,
+    ],
     emptyState:
       'No hotspots match the filter. Check `minCommits` (default 3 — excludes test fixtures and one-off files) and `minCentrality`.',
     columns: [

@@ -44,6 +44,7 @@ import { handleReviewContext } from './review-context.js';
 import { handleReviewNeighbors } from './review-neighbors.js';
 import { handleRiskReview } from './risk-review.js';
 import { handleAgentAuditReview } from './agent-audit-review.js';
+import { handleTrustReview } from './trust-review.js';
 
 /**
  * A review mode handler. `context` / `neighbors` are P6-converted and
@@ -72,8 +73,9 @@ const REVIEW_MODES: Record<string, ReviewModeHandler> = {
   neighbors: handleReviewNeighbors,
   risk: handleRiskReview,
   'agent-audit': handleAgentAuditReview,
+  trust: handleTrustReview,
 };
-const REVIEW_MODE_NAMES = ['context', 'neighbors', 'risk', 'agent-audit'] as const;
+const REVIEW_MODE_NAMES = ['context', 'neighbors', 'risk', 'agent-audit', 'trust'] as const;
 
 /**
  * Flat Zod schema for `cartograph_review`. `mode` selects the branch;
@@ -85,7 +87,7 @@ const reviewSchema = z.object({
     .enum(REVIEW_MODE_NAMES)
     .optional()
     .describe(
-      'Pick by input: `context` (default) for a diff, `neighbors` for changed files/symbols, `risk` for a no-input project-wide triage digest, `agent-audit` for the 16 agent-prone biomarkers grouped per-detector.',
+      'Pick by input: `context` (default) for a diff, `neighbors` for changed files/symbols, `risk` for a no-input project-wide triage digest, `agent-audit` for the 16 agent-prone biomarkers grouped per-detector, `trust` for freshness/coverage/LLM readiness.',
     ),
   // ─── mode='context' fields ───
   diff: z.string().optional().describe('(mode=context) Unified-diff text (e.g. `git diff` output).'),
@@ -224,7 +226,8 @@ export const REVIEW_TOOL = defineTool({
     "`'context'` (default): pass `diff` → per-hunk affected symbols + callers/callees + impact + co-change warnings. " +
     "`'neighbors'`: pass `files` or `symbols` → top-K lookalikes. " +
     "`'risk'`: no input → top biomarkers + hotspots + coverage gaps + dead-code. " +
-    "`'agent-audit'`: no input → the 16 agent-prone biomarkers.",
+    "`'agent-audit'`: no input → the 16 agent-prone biomarkers. " +
+    "`'trust'`: no input → freshness + coverage + biomarker + LLM readiness self-check.",
   schema: reviewSchema,
   handle: handleReview,
 });

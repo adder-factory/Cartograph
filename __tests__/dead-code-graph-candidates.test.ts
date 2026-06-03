@@ -37,7 +37,7 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         '',
         '// `initialize` is a constructor only in Ruby — in TS it is an',
         '// ordinary method and must NOT be skipped as a constructor.',
-        'export class Widget {',
+        'class Widget {',
         '  initialize(): void {}',
         '}',
         '',
@@ -62,6 +62,15 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         '',
         '// Not exported, no incoming edges of any kind — genuine orphan.',
         'class AbandonedBin {}',
+        '',
+        '// Framework-dispatched conventions: graph cannot prove these',
+        '// dead just because there are no in-repo callers.',
+        'function getServerSideProps(): unknown { return { props: {} }; }',
+        'function Get(_path: string): MethodDecorator { return () => undefined; }',
+        'class Controller {',
+        '  @Get("/status")',
+        '  status(): void {}',
+        '}',
       ].join('\n'),
     );
     fs.mkdirSync(path.join(testDir, 'src', 'db'), { recursive: true });
@@ -72,6 +81,7 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         '  hasLlm(): boolean { return false; }',
         '  getEffectiveLlmConfig(): null { return null; }',
         '  legacyLike(): string { return "candidate"; }',
+        '  private internalOnly(): string { return "candidate"; }',
         '}',
       ].join('\n'),
     );
@@ -82,6 +92,7 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         '  getPath(): string { return "/tmp/db.sqlite"; }',
         '  transaction<T>(fn: () => T): T { return fn(); }',
         '  localOnly(): number { return 1; }',
+        '  private localInternal(): number { return 2; }',
         '}',
       ].join('\n'),
     );
@@ -133,16 +144,25 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
     expect(cacheMethods).toEqual([]);
   });
 
-  it('suppresses exact public API shims but keeps nearby orphan methods visible', () => {
+  it('does not flag framework-dispatched conventions or decorated handlers', () => {
+    const candidates = findGraphCandidates({ queries: cg.queries, max: 50 });
+    const names = candidates.map((c) => c.name);
+    expect(names).not.toContain('getServerSideProps');
+    expect(names).not.toContain('status');
+  });
+
+  it('suppresses public API methods on exported containers but keeps private orphan methods visible', () => {
     const candidates = findGraphCandidates({ queries: cg.queries, max: 50 });
     const namesByPath = candidates.map((c) => `${c.filePath}:${c.name}`);
 
     expect(namesByPath).not.toContain('src/cartograph-llm-service.ts:hasLlm');
     expect(namesByPath).not.toContain('src/cartograph-llm-service.ts:getEffectiveLlmConfig');
+    expect(namesByPath).not.toContain('src/cartograph-llm-service.ts:legacyLike');
     expect(namesByPath).not.toContain('src/db/index.ts:getPath');
     expect(namesByPath).not.toContain('src/db/index.ts:transaction');
-    expect(namesByPath).toContain('src/cartograph-llm-service.ts:legacyLike');
-    expect(namesByPath).toContain('src/db/index.ts:localOnly');
+    expect(namesByPath).not.toContain('src/db/index.ts:localOnly');
+    expect(namesByPath).toContain('src/cartograph-llm-service.ts:internalOnly');
+    expect(namesByPath).toContain('src/db/index.ts:localInternal');
   });
 
   it('gates constructor names by language — TS `initialize` is kept, Ruby `initialize` is dropped', () => {

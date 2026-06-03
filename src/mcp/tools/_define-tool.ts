@@ -93,6 +93,8 @@ export interface DefineToolSpec<S extends ToolZodSchema> {
   readonly handle: (ctx: ToolCtx, args: z.infer<S>) => Promise<ToolResult | ToolOutcome> | ToolResult | ToolOutcome;
   /** Mirrors {@link ToolModule.bypassFreshnessGate}. */
   readonly bypassFreshnessGate?: boolean;
+  /** Mirrors {@link ToolModule.requiresFreshIndex}. */
+  readonly requiresFreshIndex?: boolean | ((args: Record<string, unknown>) => boolean);
   /** Mirrors {@link ToolModule.isWriteTool}. */
   readonly isWriteTool?: boolean;
   /** Mirrors {@link ToolModule.readOnlyActions}. */
@@ -389,6 +391,7 @@ export function defineTool<S extends ToolZodSchema>(spec: DefineToolSpec<S>): Zo
     handle,
     [ZOD_SCHEMA_KEY]: spec.schema,
     ...(spec.bypassFreshnessGate === undefined ? {} : { bypassFreshnessGate: spec.bypassFreshnessGate }),
+    ...(spec.requiresFreshIndex === undefined ? {} : { requiresFreshIndex: spec.requiresFreshIndex }),
     ...(spec.isWriteTool === undefined ? {} : { isWriteTool: spec.isWriteTool }),
     ...(spec.readOnlyActions === undefined ? {} : { readOnlyActions: spec.readOnlyActions }),
     ...(spec.bypassSchemaGuard === undefined ? {} : { bypassSchemaGuard: spec.bypassSchemaGuard }),

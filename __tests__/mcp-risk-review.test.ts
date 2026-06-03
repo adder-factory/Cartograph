@@ -77,6 +77,17 @@ describe('cartograph_risk_review MCP tool', () => {
     expect(text).toMatch(/min-severity: `error`/);
   });
 
+  it('mode=trust renders freshness, coverage, biomarker, dead-code, and LLM checks', async () => {
+    const r = await handler.execute('cartograph_review', { mode: 'trust' });
+    const text = r.content[0]?.text ?? '';
+    expect(text).toMatch(/# Trust self-check/);
+    expect(text).toMatch(/Freshness/);
+    expect(text).toMatch(/Coverage/);
+    expect(text).toMatch(/Cross-file biomarkers/);
+    expect(text).toMatch(/Dead-code signal/);
+    expect(text).toMatch(/Ask\/dead-code LLM/);
+  });
+
   it('degrades gracefully when coverage data is missing', async () => {
     const r = await handler.execute('cartograph_review', { mode: 'risk' });
     const text = r.content[0]?.text ?? '';

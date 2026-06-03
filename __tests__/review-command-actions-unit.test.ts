@@ -43,7 +43,8 @@ vi.mock('../src/bin/_cli-core.js', () => ({
   installFamilyActionAlias: vi.fn(),
 }));
 
-await import('../src/bin/commands/review.js');
+const reviewCommandModule = '../src/bin/commands/review.js?review-command-actions-unit';
+await import(reviewCommandModule);
 
 describe('review command action bodies', () => {
   beforeEach(() => {
@@ -52,7 +53,7 @@ describe('review command action bodies', () => {
     process.exitCode = 0;
   });
 
-  it('routes context, neighbors, risk, and agent-audit actions to cartograph_review', async () => {
+  it('routes context, neighbors, risk, agent-audit, and trust actions to cartograph_review', async () => {
     await actions.get('context [diff-file]')!(undefined, {
       diff: '@@ -1 +1 @@\n-old\n+new',
       maxCallersPerSymbol: '2',
@@ -79,6 +80,9 @@ describe('review command action bodies', () => {
     await actions.get('agent-audit')!({
       perDetectorLimit: '8',
       minSeverity: 'warning',
+      projectPath: '/repo',
+    });
+    await actions.get('trust')!({
       projectPath: '/repo',
     });
 
@@ -116,6 +120,11 @@ describe('review command action bodies', () => {
         tool: 'cartograph_review',
         projectPath: '/repo',
         args: { mode: 'agent-audit', perDetectorLimit: 8, minSeverity: 'warning' },
+      },
+      {
+        tool: 'cartograph_review',
+        projectPath: '/repo',
+        args: { mode: 'trust' },
       },
     ]);
   });

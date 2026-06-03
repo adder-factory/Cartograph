@@ -90,4 +90,16 @@ describe('Tooling-gaps #2: --allow-stale opt-in', () => {
     expect((result as any).metadata?.freshness?.blocked).not.toBe(true);
     expect((result as any).isError).not.toBe(true);
   });
+
+  it('fresh-required tools block any stale result unless allowStale is explicit', async () => {
+    const blocked = await handler.execute('cartograph_dead_code', { via: 'rule' });
+    const blockedText = blocked.content[0]?.text ?? '';
+    expect(blockedText).toMatch(/requires a fresh index/i);
+    expect((blocked as any).metadata?.freshness?.blocked).toBe(true);
+
+    const bypassed = await handler.execute('cartograph_dead_code', { via: 'rule', allowStale: true });
+    const bypassedText = bypassed.content[0]?.text ?? '';
+    expect(bypassedText).not.toMatch(/requires a fresh index/i);
+    expect((bypassed as any).metadata?.freshness?.blocked).not.toBe(true);
+  });
 });

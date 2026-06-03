@@ -608,4 +608,5 @@ export const GRAPH_TOOL = defineTool({
     'Multi-hop BFS (`hops > 1`) excludes test-file targets by default — pass `includeTests: true` to walk into them.',
   schema: graphSchema,
   handle: handleGraph,
+  requiresFreshIndex: (args) => args['direction'] === 'impact' || args['direction'] === 'both',
 });

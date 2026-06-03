@@ -294,8 +294,9 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // legacy alias for the current `metadata` flag.
   files: new Set(['path', 'includeMetadata']),
 
-  // `cartograph review` is four subcommands (`review context` /
-  // `review neighbors` / `review risk` / `review agent-audit`)
+  // `cartograph review` is a subcommand family (`review context` /
+  // `review neighbors` / `review risk` / `review agent-audit` /
+  // `review trust`)
   // reflecting the `mode` enum. All schema fields are mirrored on
   // that family surface, so no per-property carve-outs are needed.
 

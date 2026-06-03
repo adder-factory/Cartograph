@@ -223,7 +223,7 @@ async function toolHandlerPreFlightCheck(
   if (guardError) return guardError;
 
   const allowStale = toolHandlerResolveAllowStale(self.options, inv.args);
-  const gate = await toolHandlerRunFreshnessGate(cg, inv.mod, allowStale);
+  const gate = await toolHandlerRunFreshnessGate({ cg, mod: inv.mod, allowStale, args: inv.args });
   if (gate.blockResult) return gate.blockResult;
 
   // F#58 — surface a borrowed-worktree warning when the resolved
@@ -411,14 +411,38 @@ async function toolHandlerAttemptAutoSync(
  * the gate entirely so it doesn't deadlock the only way out of a
  * heavily-stale state.
  */
-async function toolHandlerRunFreshnessGate(
-  cg: Cartograph | null,
-  mod: ToolModule | undefined,
-  allowStale: boolean,
-): Promise<FreshnessGateOutcome> {
+interface FreshnessGateInput {
+  readonly cg: Cartograph | null;
+  readonly mod: ToolModule | undefined;
+  readonly allowStale: boolean;
+  readonly args: Record<string, unknown>;
+}
+
+async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<FreshnessGateOutcome> {
+  const { cg, mod, allowStale, args } = input;
   if (!cg || mod?.bypassFreshnessGate) return PASS_THROUGH;
   const f = cg.stats.getFreshness();
   if (!f) return PASS_THROUGH;
+
+  if (!allowStale && f.isStale && toolRequiresFreshIndex(mod, args)) {
+    if (shouldAutoSync(f)) {
+      const synced = await toolHandlerAttemptAutoSync(cg, f);
+      if (synced.freshnessMeta?.isStale !== true) {
+        return { blockResult: null, ...synced };
+      }
+    }
+    return {
+      blockResult: {
+        ...errorResult(
+          `This tool requires a fresh index because stale graph data can produce misleading results — ${describeDrift(f)}. ` +
+            `Call \`cartograph_admin({action: 'sync'})\` first, or pass \`allowStale: true\` if you intentionally want the cached view.`,
+        ),
+        metadata: { freshness: toFreshnessMetadata(f, { blocked: true }) },
+      },
+      banner: null,
+      freshnessMeta: null,
+    };
+  }
 
   if (!allowStale && f.isStale && shouldBlockOnHeavyDrift(f)) {
     return {
@@ -446,6 +470,12 @@ async function toolHandlerRunFreshnessGate(
   // `cartograph sync`" (CLI). Rewrite to MCP-side guidance so an agent
   // reading the banner from the MCP transport gets the right call.
   return { blockResult: null, banner: rewriteStaleBannerForMcp(f.banner), freshnessMeta: toFreshnessMetadata(f) };
+}
+
+function toolRequiresFreshIndex(mod: ToolModule | undefined, args: Record<string, unknown>): boolean {
+  const flag = mod?.requiresFreshIndex;
+  if (typeof flag === 'function') return flag(args);
+  return flag === true;
 }
 
 /** Rewrite the freshness.ts CLI hint suffix to point at the MCP tool

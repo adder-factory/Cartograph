@@ -692,6 +692,8 @@ function renderRankedFindingsTable(
     '',
     'Worst-severity first. The agent angle: pair this with `cartograph_graph({direction: "callers"})` on a flagged symbol to gauge how much code touches the unhealthy region before deciding whether to refactor it.',
     '',
+    'Why ranked here: rows are ordered by severity, detector metric, and centrality. Use `minSeverity`, `biomarker`, `minMetric`/`maxMetric`, or `minCentrality` to slice the signal.',
+    '',
     'Surface column: `full-pass` = re-evaluated by the last full project scan; `partial-rescan` = surfaced by a per-file rescan triggered by an edit since the last full pass (may be latent findings the edit re-exposed); `cached` = carried over from the last full pass, not re-evaluated this pass (file content unchanged).',
     '',
     tableHeader,

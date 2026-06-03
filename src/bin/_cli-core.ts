@@ -74,7 +74,7 @@ export const summariesCmd = program
 export const reviewCmd = program
   .command('review')
   .description(
-    'Review / triage helpers (mirrors cartograph_review MCP tool). Subcommands: context (diff-driven structural review) / neighbors (semantic lookalikes) / risk (project-wide triage) / agent-audit (agent-prone biomarkers).',
+    'Review / triage helpers (mirrors cartograph_review MCP tool). Subcommands: context (diff-driven structural review) / neighbors (semantic lookalikes) / risk (project-wide triage) / agent-audit (agent-prone biomarkers) / trust (readiness self-check).',
   );
 
 // `llm setup` is the only remaining LLM provisioning command. Kept

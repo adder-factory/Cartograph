@@ -327,7 +327,7 @@ export function findGraphCandidates(args: FindGraphCandidatesArgs): Node[] {
     const page = findOrphans(queries, pageSize, offset);
     if (page.length === 0) break;
     for (const node of page) {
-      if (shouldSkipGraphCandidate(node, includeTests, isExempt)) continue;
+      if (shouldSkipGraphCandidate({ queries, node, includeTests, isExempt })) continue;
       out.push(node);
       if (out.length >= max) break;
     }
@@ -337,11 +337,15 @@ export function findGraphCandidates(args: FindGraphCandidatesArgs): Node[] {
   return out;
 }
 
-function shouldSkipGraphCandidate(
-  node: Node,
-  includeTests: boolean,
-  isExempt: ((filePath: string) => boolean) | undefined,
-): boolean {
+interface GraphCandidateSkipArgs {
+  readonly queries: QueryBuilder;
+  readonly node: Node;
+  readonly includeTests: boolean;
+  readonly isExempt: ((filePath: string) => boolean) | undefined;
+}
+
+function shouldSkipGraphCandidate(args: GraphCandidateSkipArgs): boolean {
+  const { queries, node, includeTests, isExempt } = args;
   if (!SUSPECT_KINDS.has(node.kind)) return true;
   // A constructor is reached via `instantiates`, not `calls`, so it always
   // looks orphaned; the class node carries the real liveness signal.
@@ -350,8 +354,53 @@ function shouldSkipGraphCandidate(
   // includeTests because framework-dispatched cases are still live.
   if (isGoConventionLive(node)) return true;
   if (isPublicApiShim(node)) return true;
+  if (isDecoratedFrameworkHook(node)) return true;
+  if (isFrameworkConventionLive(node)) return true;
+  if (isPublicMemberOnExportedContainer(queries, node)) return true;
   if (!includeTests && isSuspicionExemptPath(node.filePath)) return true;
   return isExempt?.(node.filePath) === true;
+}
+
+function isDecoratedFrameworkHook(node: Node): boolean {
+  return (node.decorators?.length ?? 0) > 0 || (node.decoratorArgs?.length ?? 0) > 0;
+}
+
+const FRAMEWORK_DISPATCHED_NAMES: ReadonlySet<string> = new Set([
+  'action',
+  'componentDidMount',
+  'componentDidUpdate',
+  'componentWillUnmount',
+  'generateMetadata',
+  'generateStaticParams',
+  'getServerSideProps',
+  'getStaticPaths',
+  'getStaticProps',
+  'loader',
+  'middleware',
+  'render',
+]);
+
+function isFrameworkConventionLive(node: Node): boolean {
+  if (FRAMEWORK_DISPATCHED_NAMES.has(node.name)) return true;
+  if (node.filePath.startsWith('src/mcp/tools/') && /^handle[A-Z]/.test(node.name)) return true;
+  if (node.filePath.startsWith('src/bin/') && /^run[A-Z].*Command$/.test(node.name)) return true;
+  return false;
+}
+
+function isPublicMemberOnExportedContainer(queries: QueryBuilder, node: Node): boolean {
+  if (node.kind !== 'method') return false;
+  if (node.visibility === 'private' || node.visibility === 'protected') return false;
+  try {
+    const incoming = getIncomingEdges(queries, node.id, ['contains']);
+    for (const edge of incoming) {
+      const parent = queries.getNodeById(edge.source);
+      if (!parent) continue;
+      if (parent.isExported && CONTAINER_KINDS_FOR_INTERFACE_DISPATCH.has(parent.kind)) return true;
+    }
+  } catch {
+    /* Missing edge metadata should not suppress real candidates. */
+  }
+  return false;
 }
 
 interface JudgeResponse {

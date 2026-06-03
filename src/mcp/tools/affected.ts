@@ -483,4 +483,5 @@ export const AFFECTED_TOOL = defineTool({
     'When `files` is omitted, the changed set comes from `git diff HEAD` — a clean tree returns a friendly hint, not an error.',
   schema: affectedSchema,
   handle: handleAffected,
+  requiresFreshIndex: true,
 });

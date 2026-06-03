@@ -65,7 +65,10 @@ interface AppendBiomarkerLensArgs {
 
 function appendBiomarkerLens(args: AppendBiomarkerLensArgs): void {
   const { out, cg, topN, minCentrality } = args;
-  out.push(`## Biomarker findings (warning+ severity)`);
+  out.push(
+    `## Biomarker findings (warning+ severity)`,
+    `_Why ranked here: severity first, then detector metric, then centrality where available._`,
+  );
   const findingsOpts: {
     minSeverity?: 'info' | 'warning' | 'error';
     minCentrality?: number;
@@ -93,7 +96,10 @@ interface AppendHotspotLensArgs {
 
 function appendHotspotLens(args: AppendHotspotLensArgs): void {
   const { out, cg, topN, minCentrality } = args;
-  out.push(`## Hotspots (centrality × churn)`);
+  out.push(
+    `## Hotspots (centrality × churn)`,
+    `_Why ranked here: risk score = file centrality × git churn; higher scores mean a more likely bug/refactor hotspot._`,
+  );
   const hotspots = getHotspots(cg.queries, { limit: topN, minCentrality, sortBy: 'risk' });
   if (hotspots.length === 0) {
     out.push(
@@ -119,7 +125,10 @@ interface AppendCoverageGapLensArgs {
 
 function appendCoverageGapLens(args: AppendCoverageGapLensArgs): void {
   const { out, cg, topN, minCentrality, coverageSource } = args;
-  out.push(`## Coverage gaps (lowest-coverage first)`);
+  out.push(
+    `## Coverage gaps (lowest-coverage first)`,
+    `_Why ranked here: symbols at or below 50% coverage, ordered lowest coverage first and optionally filtered by centrality._`,
+  );
   const coverageOpts: {
     limit?: number;
     maxPct?: number;
@@ -152,7 +161,10 @@ function appendCoverageGapLens(args: AppendCoverageGapLensArgs): void {
  * opt-in.
  */
 function appendStructuralBridgeLens(out: string[], cg: Cartograph, topN: number): void {
-  out.push(`## Structural bridges (sampled Brandes betweenness)`);
+  out.push(
+    `## Structural bridges (sampled Brandes betweenness)`,
+    `_Why ranked here: sampled betweenness estimates symbols that sit on many shortest paths between subsystems._`,
+  );
   const bridges = getTopBetweennessNodes(cg.queries, topN);
   if (bridges.length === 0) {
     out.push(
@@ -169,7 +181,10 @@ function appendStructuralBridgeLens(out: string[], cg: Cartograph, topN: number)
 }
 
 function appendDeadCodeLens(out: string[], cg: Cartograph, topN: number): void {
-  out.push(`## Dead-code candidates (graph-only, no LLM judge)`);
+  out.push(
+    `## Dead-code candidates (graph-only, no LLM judge)`,
+    `_Why ranked here: static candidates have no incoming usage edges, are not exported, and are outside fixture/test/script paths._`,
+  );
   // Pass `isFixturePath` so fixture orphans (docs/test-beds/, ...) are
   // dropped INSIDE findGraphCandidates — they sort ahead of src/, so an
   // over-fetch-then-filter approach with this lens's small topN budget

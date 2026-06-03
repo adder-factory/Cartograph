@@ -135,6 +135,14 @@ export interface ToolModule {
    */
   readonly bypassFreshnessGate?: boolean;
   /**
+   * When true, any stale index is treated as unsafe for this read tool.
+   * The dispatcher refuses the call unless the user explicitly passes
+   * `allowStale: true`. Use for answers whose false-negative/false-
+   * positive risk is high when the graph lags disk: dead-code,
+   * affected-test discovery, tests-for, and impact graph traversal.
+   */
+  readonly requiresFreshIndex?: boolean | ((args: Record<string, unknown>) => boolean);
+  /**
    * When true, this tool mutates indexed state (runs the LLM, writes
    * embeddings, re-syncs files). Server operators can disable all
    * write tools at once via `MCPServerOptions.disableWriteTools` —

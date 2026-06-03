@@ -395,4 +395,5 @@ export const DEAD_CODE_TOOL = defineTool({
     'Always verify candidates against callers + tests before deleting.',
   schema: deadCodeSchema,
   handle: handleDeadCode,
+  requiresFreshIndex: true,
 });

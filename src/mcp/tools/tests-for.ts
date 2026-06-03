@@ -1146,4 +1146,5 @@ export const TESTS_FOR_TOOL = defineTool({
     'Returns empty for reflectively-invoked code.',
   schema: testsForSchema,
   handle: handleTestsFor,
+  requiresFreshIndex: true,
 });

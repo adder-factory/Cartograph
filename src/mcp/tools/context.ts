@@ -285,7 +285,13 @@ function formatContextRiskSignals(cg: Cartograph, nodes: Node[]): string {
 
   if (rows.length === 0) return '';
 
-  const lines: string[] = ['', '### Risk signals', ''];
+  const lines: string[] = [
+    '',
+    '### Risk signals',
+    '',
+    '_Why shown here: candidate symbols with biomarkers, ingested coverage, or file churn metadata._',
+    '',
+  ];
   for (const r of rows) {
     lines.push(formatRiskRow(r));
   }
