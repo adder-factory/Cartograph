@@ -128,6 +128,12 @@ export interface ToolHandlerOptions {
    */
   allowStaleDefault?: boolean | undefined;
   /**
+   * Default value injected into supported high-volume tool calls when
+   * the caller doesn't specify `lowTokens`. Explicit per-call
+   * `lowTokens: false` still wins. Unsupported tools are unchanged.
+   */
+  lowTokensDefault?: boolean | undefined;
+  /**
    * Mirrored from `MCPServerOptions.disableStartupSync` so the status
    * tool can surface the flag in its `🔧 Server config` section. The
    * tool dispatch path doesn't read this — the flag affects boot
@@ -217,6 +223,26 @@ function toolHandlerIsDisabled(options: ToolHandlerOptions, name: string, args?:
 function toolHandlerResolveAllowStale(options: ToolHandlerOptions, args: Record<string, unknown>): boolean {
   if (args['allowStale'] !== undefined) return args['allowStale'] === true;
   return options.allowStaleDefault === true;
+}
+
+function toolSupportsLowTokens(mod: ToolModule | undefined): boolean {
+  return mod?.definition.inputSchema.properties['lowTokens'] !== undefined;
+}
+
+/**
+ * Resolve `lowTokens` for one call: explicit per-call value wins over
+ * the server-wide default, and unsupported tools are left unchanged so
+ * they never see a synthetic unknown argument.
+ */
+function toolHandlerResolveLowTokensArgs(
+  options: ToolHandlerOptions,
+  mod: ToolModule | undefined,
+  args: Record<string, unknown>,
+): Record<string, unknown> {
+  if (args['lowTokens'] !== undefined) return args;
+  if (options.lowTokensDefault !== true) return args;
+  if (!toolSupportsLowTokens(mod)) return args;
+  return { ...args, lowTokens: true };
 }
 
 /**
@@ -744,18 +770,19 @@ export class ToolHandler {
       return preflight;
     }
     const { cg, gate } = preflight as { cg: Cartograph | null; gate: FreshnessGateOutcome };
+    const effectiveArgs = toolHandlerResolveLowTokensArgs(this.options, mod, args);
 
     // Every tool is `defineTool`-backed: `safeParse` does structural
     // validation, and a separate scan reports unknown (typo'd) args
     // that Zod would otherwise strip silently. See `validateToolArgs`.
-    const validation = validateToolArgs(mod!, args);
+    const validation = validateToolArgs(mod!, effectiveArgs);
     if (!validation.ok) {
       return errorResult(`Invalid arguments for \`${toolName}\`: ${validation.error}`);
     }
 
     let result: ToolResult;
     try {
-      result = await mod!.handle(this.makeCtx(opts), args);
+      result = await mod!.handle(this.makeCtx(opts), effectiveArgs);
     } catch (err) {
       return errorResult(`Tool execution failed: ${errMsg(err)}`);
     }

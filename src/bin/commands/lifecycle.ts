@@ -58,6 +58,7 @@ interface ServeCommandOptions {
   profile?: string;
   writeTools?: boolean; // commander auto-inverts `--no-write-tools` → writeTools=false
   allowStaleDefault?: boolean;
+  lowTokensDefault?: boolean;
   disableTool?: string[];
   startupSync?: boolean; // commander auto-inverts `--no-startup-sync` → startupSync=false
 }
@@ -176,6 +177,7 @@ function writeServeMcpGuidance(deps: Pick<LifecycleCommandDeps, 'chalk' | 'write
   writeStderr(
     chalk.blue('ℹ') + ` Use --profile <${MCP_SERVER_PROFILE_NAMES.join('|')}> to narrow the advertised tools`,
   );
+  writeStderr(chalk.blue('ℹ') + ' Use --low-tokens-default to compact supported high-volume tool results');
   writeStderr('\nTo use with Claude Code, add to your MCP configuration:');
   writeStderr(
     chalk.dim(`
@@ -220,6 +222,10 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
       'Default `allowStale: true` for tool calls that do not pass it explicitly. Useful in fast-iteration sessions.',
     )
     .option(
+      '--low-tokens-default',
+      'Default `lowTokens: true` for supported high-volume tool calls that do not pass it explicitly.',
+    )
+    .option(
       '--disable-tool <name...>',
       'Disable specific tools by name to narrow the advertised MCP surface. Repeatable: `--disable-tool cartograph_ask --disable-tool cartograph_dead_code`.',
     )
@@ -243,6 +249,7 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
             // omitted leaves it undefined which we treat as "writes enabled".
             disableWriteTools: options.writeTools === false,
             allowStaleDefault: options.allowStaleDefault === true,
+            lowTokensDefault: options.lowTokensDefault === true,
             disabledTools:
               options.disableTool && options.disableTool.length > 0 ? new Set(options.disableTool) : undefined,
             disableStartupSync: options.startupSync === false,

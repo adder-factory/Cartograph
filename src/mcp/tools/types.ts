@@ -40,7 +40,7 @@ export interface ToolCtx {
    * error propagate to `execute()`'s catch block.
    */
   readonly getCartograph: (projectPath?: string) => Cartograph;
-  /** Server-level options (profile, disabled tools, allowStaleDefault, etc.). */
+  /** Server-level options (profile, disabled tools, call defaults, etc.). */
   readonly options: ToolHandlerOptions;
   /**
    * The server's primary `Cartograph` instance (the one started from

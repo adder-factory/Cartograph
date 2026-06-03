@@ -78,6 +78,35 @@ describe('MCP lowTokens option', () => {
     expectTokenBudget(text, 220);
   });
 
+  it('server lowTokensDefault compacts supported tools when caller omits lowTokens', async () => {
+    const lowDefaultHandler = new ToolHandler(cg, { lowTokensDefault: true });
+    const text = textOf(await lowDefaultHandler.execute('cartograph_find', { by: 'name', query: 'alpha' }));
+
+    expect(text).toMatch(/^Search Results \(/);
+    expect(text).toMatch(/alpha\|function\|src\/core\.ts:1\|id:n_[0-9a-f]{8}/);
+    expect(text).not.toMatch(/^## Search Results/m);
+  });
+
+  it('explicit lowTokens false wins over the server lowTokensDefault', async () => {
+    const lowDefaultHandler = new ToolHandler(cg, { lowTokensDefault: true });
+    const text = textOf(
+      await lowDefaultHandler.execute('cartograph_find', { by: 'name', query: 'alpha', lowTokens: false }),
+    );
+
+    expect(text).toMatch(/^## Search Results/m);
+    expect(text).toMatch(/^### alpha/m);
+    expect(text).not.toMatch(/alpha\|function\|src\/core\.ts:1\|id:n_[0-9a-f]{8}/);
+  });
+
+  it('server lowTokensDefault leaves unsupported tools unchanged', async () => {
+    const lowDefaultHandler = new ToolHandler(cg, { lowTokensDefault: true });
+    const text = textOf(await lowDefaultHandler.execute('cartograph_status', {}));
+
+    expect(text).toMatch(/Server config/);
+    expect(text).toMatch(/Default `lowTokens`.*true/);
+    expect(text).not.toMatch(/Unknown argument.*lowTokens/);
+  });
+
   it('cartograph_find lowTokens does not inject exact-only compact args into fuzzy mode', async () => {
     const text = textOf(
       await handler.execute('cartograph_find', { by: 'name', mode: 'fuzzy', query: 'alpa', lowTokens: true }),

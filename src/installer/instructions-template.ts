@@ -42,7 +42,7 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 **The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
-For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, \`cartograph_at_range\`, \`cartograph_node\`, \`cartograph_files\`, and \`cartograph_imports\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
+For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, \`cartograph_at_range\`, \`cartograph_node\`, \`cartograph_files\`, and \`cartograph_imports\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 
 If you control the MCP server launch, \`cartograph serve --mcp --profile core\`, \`--profile read-only\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` also reduce the advertised tool list loaded at connection time.
 

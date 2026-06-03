@@ -95,6 +95,11 @@ interface MCPServerOptions {
    */
   allowStaleDefault?: boolean | undefined;
   /**
+   * Default `lowTokens: true` for supported high-volume tool calls
+   * that don't pass one. The caller's explicit arg always wins.
+   */
+  lowTokensDefault?: boolean | undefined;
+  /**
    * Skip the catch-up `sync()` that normally runs once after the
    * default project opens. The watcher catches LIVE filesystem
    * events, but doesn't backfill drift accumulated while the server
@@ -462,6 +467,7 @@ export class MCPServer {
       disableWriteTools: options.disableWriteTools,
       disabledTools: options.disabledTools,
       allowStaleDefault: options.allowStaleDefault,
+      lowTokensDefault: options.lowTokensDefault,
       disableStartupSync: options.disableStartupSync,
     });
   }

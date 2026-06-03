@@ -108,17 +108,17 @@ Likely starting points:
 
 ## Task 2: Low-Tokens Default
 
-- [ ] Add a server option such as
+- [x] Add a server option such as
   `cartograph serve --mcp --low-tokens-default`.
-- [ ] When enabled, supported high-volume tools behave as if
+- [x] When enabled, supported high-volume tools behave as if
   `lowTokens: true` was passed unless the caller explicitly passes
   `lowTokens: false`.
-- [ ] Keep unsupported tools unchanged.
-- [ ] Surface the active default in `cartograph_status` server-config
+- [x] Keep unsupported tools unchanged.
+- [x] Surface the active default in `cartograph_status` server-config
   output.
-- [ ] Add tests proving explicit per-call `lowTokens` wins over the
+- [x] Add tests proving explicit per-call `lowTokens` wins over the
   server default.
-- [ ] Update CLI help, README, playbook/server instructions, and
+- [x] Update CLI help, README, playbook/server instructions, and
   generated agent instructions.
 
 Likely starting points:

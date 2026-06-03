@@ -246,6 +246,14 @@ describe('MCP server-level options', () => {
       handler.closeAll();
     });
 
+    it('shows lowTokens default when set', async () => {
+      const handler = new ToolHandler(cg, { lowTokensDefault: true });
+      const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';
+      expect(text).toMatch(/Server config/);
+      expect(text).toMatch(/lowTokens.*true/);
+      handler.closeAll();
+    });
+
     it('shows startup-sync-disabled when disableStartupSync is set', async () => {
       const handler = new ToolHandler(cg, { disableStartupSync: true });
       const text = (await handler.execute('cartograph_status', {})).content[0]?.text ?? '';

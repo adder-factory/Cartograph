@@ -1619,6 +1619,9 @@ function appendServerConfig(lines: string[], ctx: ToolCtx): void {
   if (ctx.options.allowStaleDefault) {
     serverLines.push('- **Default `allowStale`:** true (`--allow-stale-default`)');
   }
+  if (ctx.options.lowTokensDefault) {
+    serverLines.push('- **Default `lowTokens`:** true (`--low-tokens-default`)');
+  }
   if (ctx.options.disableStartupSync) {
     serverLines.push('- **Startup sync:** disabled (`--no-startup-sync`)');
   }
