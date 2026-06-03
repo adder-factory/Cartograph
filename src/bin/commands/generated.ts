@@ -180,13 +180,10 @@ registerGeneratedCommand('cartograph_sql', {
   shortFlags: { limit: '-l' },
   commaSplitFields: ['tables'],
 });
-// `coverage` — `mode` discriminator stays flag-style (`--mode`);
-// `symbol` is the `[symbol]` positional; `-l` short flag preserved.
-registerGeneratedCommand('cartograph_coverage', {
-  positionalFields: ['symbol'],
-  negatableFields: ['includeTests'],
-  shortFlags: { limit: '-l' },
-});
+// `coverage` — pilot ToolContract command. Its CLI metadata lives next
+// to `COVERAGE_TOOL` so schema, flags, help examples, and tests can
+// read one source.
+registerGeneratedCommand('cartograph_coverage');
 // `graph` — `start` as the `[start]` positional; `symbols` (batched
 // form) has no CLI flag. `direction` defaults to `callers` CLI-side
 // (`flagDefaults`); the schema field `k` is exposed as `--top-k`

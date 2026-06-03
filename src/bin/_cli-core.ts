@@ -30,6 +30,7 @@ import { contentDriftCount } from '../freshness.js';
 import { SUMMARIZABLE_KINDS } from '../llm/summarizer.js';
 import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-generator.js';
 import { getToolModules } from '../mcp/tools/registry.js';
+import { getToolContract } from '../mcp/tools/_tool-contract.js';
 
 // Lazy-load heavy modules (Cartograph, runInstaller) to keep CLI startup fast.
 export async function loadCartograph(): Promise<typeof import('../index.js')> {
@@ -923,6 +924,7 @@ export function registerGeneratedCommand(
     throw new Error(`registerGeneratedCommand: unknown tool \`${toolName}\``);
   }
   const { parent, runViaMcp: customRunner, ...genOpts } = opts;
-  const cmd = buildGeneratedCommand(mod, customRunner ?? runViaMCP, genOpts);
+  const contractCli = getToolContract(mod)?.cli ?? {};
+  const cmd = buildGeneratedCommand(mod, customRunner ?? runViaMCP, { ...contractCli, ...genOpts });
   (parent ?? program).addCommand(cmd);
 }

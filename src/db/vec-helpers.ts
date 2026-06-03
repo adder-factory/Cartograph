@@ -28,6 +28,8 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
 
 /** Float32 = 4 bytes per element, used to derive embedding dim from BLOB length. */
 const FLOAT32_BYTES = 4;
+/** sqlite-vec stores vectors in fixed 1024-row chunks. */
+const VEC_CHUNK_CAPACITY = 1024;
 
 // ─── Typed-query infrastructure ───────────────────────────────────────────
 //
@@ -315,15 +317,25 @@ export function bootstrapVecTables(db: SqliteDatabase, vecLoaded: boolean): void
   if (!vecLoaded) return;
   const dims = discoverEmbeddingDims(db);
   for (const dim of dims) {
+    const table = { name: vecTableNameForDim(dim), sourceTable: 'embedding_store' as const, dim };
     ensureVecTable(db, dim);
-    backfillVecTable(db, dim);
+    if (vecTableNeedsRebuild(db, table)) {
+      rebuildVecTable(db, table);
+    } else {
+      backfillVecTable(db, dim);
+    }
   }
   // Stage 5 #C — also bootstrap the multi-vec chunk tables. Idempotent
   // and cheap when symbol_chunk_embeddings has no rows yet.
   const chunkDims = discoverChunkEmbeddingDims(db);
   for (const dim of chunkDims) {
+    const table = { name: vecChunkTableNameForDim(dim), sourceTable: 'symbol_chunk_embeddings' as const, dim };
     ensureChunkVecTable(db, dim);
-    backfillChunkVecTable(db, dim);
+    if (vecTableNeedsRebuild(db, table)) {
+      rebuildVecTable(db, table);
+    } else {
+      backfillChunkVecTable(db, dim);
+    }
   }
 }
 
@@ -382,6 +394,74 @@ function backfillVecTable(db: SqliteDatabase, dim: number): void {
         WHERE LENGTH(s.embedding) = ${byteLen}
           AND s.rowid NOT IN (SELECT rowid FROM ${name})`,
   );
+}
+
+type VecSourceTable = 'embedding_store' | 'symbol_chunk_embeddings';
+
+interface VecMirrorTable {
+  readonly name: string;
+  readonly sourceTable: VecSourceTable;
+  readonly dim: number;
+}
+
+function sourceRowsForDim(db: SqliteDatabase, sourceTable: VecSourceTable, dim: number): number | null {
+  const byteLen = dim * FLOAT32_BYTES;
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM ${sourceTable} WHERE LENGTH(embedding) = ?`).get(byteLen) as {
+      c: number;
+    };
+    return row.c;
+  } catch {
+    return null;
+  }
+}
+
+function countRows(db: SqliteDatabase, tableName: string): number | null {
+  try {
+    const row = db.prepare(`SELECT COUNT(*) AS c FROM ${tableName}`).get() as { c: number };
+    return row.c;
+  } catch {
+    return null;
+  }
+}
+
+function vecShadowChunkRows(db: SqliteDatabase, vecTableName: string): number | null {
+  return countRows(db, `${vecTableName}_vector_chunks00`);
+}
+
+/**
+ * Detect a vec0 mirror that needs drop+rebuild during bootstrap.
+ *
+ * A plain backfill is insufficient when vec0 has ghost rows or a stale
+ * chunk allocation: `NOT IN (SELECT rowid FROM vec)` can consider a
+ * source row present even though the row's shadow-table chunk pointer
+ * sits in old, bloated storage. Rebuild when the live row count differs
+ * from the source, or when chunk storage is far larger than a packed
+ * rebuild would need.
+ */
+function vecTableNeedsRebuild(db: SqliteDatabase, table: VecMirrorTable): boolean {
+  const sourceRows = sourceRowsForDim(db, table.sourceTable, table.dim);
+  const vecRows = countRows(db, table.name);
+  if (sourceRows === null || vecRows === null) return false;
+  if (sourceRows !== vecRows) return true;
+
+  const chunkRows = vecShadowChunkRows(db, table.name);
+  if (chunkRows === null) return false;
+  const packedChunks = Math.max(1, Math.ceil(Math.max(sourceRows, 1) / VEC_CHUNK_CAPACITY));
+  const toleratedChunks = Math.max(packedChunks * 4, packedChunks + 2);
+  return chunkRows > toleratedChunks;
+}
+
+function rebuildVecTable(db: SqliteDatabase, table: VecMirrorTable): void {
+  const name = table.name;
+  db.exec(`DROP TABLE IF EXISTS ${name}`);
+  if (table.sourceTable === 'embedding_store') {
+    ensureVecTable(db, table.dim);
+    backfillVecTable(db, table.dim);
+  } else {
+    ensureChunkVecTable(db, table.dim);
+    backfillChunkVecTable(db, table.dim);
+  }
 }
 
 /**
@@ -517,14 +597,11 @@ export function compactVecTables(db: SqliteDatabase, vecLoaded: boolean): void {
     try {
       // DROP frees every shadow-table page; the matching ensure+backfill
       // pair recreates a compact table from the live source rows.
-      db.exec(`DROP TABLE IF EXISTS ${name}`);
-      if (symbolMatch) {
-        ensureVecTable(db, dim);
-        backfillVecTable(db, dim);
-      } else {
-        ensureChunkVecTable(db, dim);
-        backfillChunkVecTable(db, dim);
-      }
+      rebuildVecTable(db, {
+        name,
+        sourceTable: symbolMatch ? 'embedding_store' : 'symbol_chunk_embeddings',
+        dim,
+      });
     } catch {
       // best-effort — a failed rebuild leaves the table dropped, which
       // bootstrapVecTables recreates on the next connection open.

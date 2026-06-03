@@ -20,7 +20,7 @@ import { handleCoverageRefresh } from './_coverage-refresh.js';
 import { buildCoverageTips } from './_coverage-tips.js';
 import type { RefIdCache } from './_id-cache.js';
 import { resolveSymbolToNode, symbolNotFound } from './symbol-resolver.js';
-import { defineTool } from './_define-tool.js';
+import { defineToolContract } from './_tool-contract.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 
 /** Milliseconds per day — used to bucket coverage `ingestedAt` ages. */
@@ -473,7 +473,7 @@ const coverageSchema = z.object({
 
 type CoverageArgs = z.infer<typeof coverageSchema>;
 
-export const COVERAGE_TOOL = defineTool({
+export const COVERAGE_TOOL = defineToolContract({
   name: 'cartograph_coverage',
   description:
     'Per-symbol coverage joined to the graph — composes with centrality/role/churn.\n\n' +
@@ -481,6 +481,22 @@ export const COVERAGE_TOOL = defineTool({
     "Useful query: `mode: 'ranked', maxPct: 0.5` for high-impact under-tested code; add `minCentrality` (start ~`0.0001`, most repos sit in `0.0001`–`0.01`) to focus on structurally critical symbols. " +
     "Onboarding: `mode: 'refresh'` after a test run, no path needed.",
   schema: coverageSchema,
+  cli: {
+    positionalFields: ['symbol'],
+    negatableFields: ['includeTests'],
+    flagDefaults: { via: 'auto' },
+    shortFlags: { limit: '-l' },
+    examples: [
+      'cartograph coverage',
+      'cartograph coverage --mode ranked --max-pct 0.5 --min-centrality 0.0001',
+      'cartograph coverage computeMetrics',
+      'cartograph coverage --mode load --report-path coverage/lcov.info',
+    ],
+    nextStepHints: [
+      'Run `cartograph coverage --mode refresh` after generating an lcov report.',
+      'Use `cartograph coverage --mode sources` to inspect ingested coverage labels.',
+    ],
+  },
   handle: handleCoverage,
   // mode='load' mutates indexed coverage rows. Mark the family as a
   // write tool — the read modes (symbol/ranked/stats) get hidden under
