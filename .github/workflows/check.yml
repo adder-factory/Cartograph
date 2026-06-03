@@ -1,17 +1,18 @@
-# Required CI gate — typecheck (tsgo) + biome lint/format + biomarker floor.
+# Required CI gate — typecheck (tsgo) + biome lint/format + serial leak canaries + biomarker floor.
 #
 # Runs on every push to `main` and every pull request. Fails the build on
-# any typecheck error, any biome lint diagnostic, any unformatted file, OR
-# any biomarker ERROR/WARNING finding (the project's 0-err/0-warn floor).
+# any typecheck error, any biome lint diagnostic, any unformatted file,
+# any module-cache leak caught by the serial canaries, OR any biomarker
+# ERROR/WARNING finding (the project's 0-err/0-warn floor).
 # The biomarker gate guards against structural-health drift: without it, CI
 # would gate only typecheck + biome and biomarker findings could accumulate
 # unnoticed.
 #
 # Still excludes `npm run test:fast` — the test suite has had intermittent
-# Bun bus-errors during full-suite (parallel-shard) `bun test`. The
-# biomarker gate is a SINGLE `bun … admin index` process (not parallel
-# shards) in serial biomarker mode, so it doesn't carry that risk; revisit
-# adding tests once the bus-error is diagnosed.
+# Bun bus-errors during full-suite (parallel-shard) `bun test`. The leak
+# canary and biomarker gate are serial processes, so they don't carry that
+# parallel-shard risk; revisit adding the full test suite once the bus-error
+# is diagnosed.
 #
 # Install path: `npm ci` (lockfile) for the native prebuilts (tsgo / biome /
 # usearch). The biomarker gate additionally needs the Bun runtime (bun:sqlite
@@ -32,11 +33,12 @@ concurrency:
 
 jobs:
   check:
-    name: typecheck + lint + format + biomarkers
+    name: typecheck + lint + format + leaks + biomarkers
     runs-on: ubuntu-latest
-    # Bumped from 10 → 15: the biomarker gate adds one structural index of
-    # the whole repo (serial mode, ~tens of seconds on a 2-core runner).
-    timeout-minutes: 15
+    # Bumped from 15 → 20: the leak canary adds a serial set of paired
+    # bun:test runs, and the biomarker gate adds one structural index of the
+    # whole repo (serial mode, ~tens of seconds on a 2-core runner).
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -58,6 +60,9 @@ jobs:
 
       - name: Lint + format check (biome)
         run: npm run check
+
+      - name: Module leak canaries
+        run: npm run test:leaks
 
       # Biomarker floor: 0 error / 0 warning. Indexes the repo structurally
       # (serial mode for determinism) and fails on any err/warn finding.
