@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: string[] = [];
 const stderr: string[] = [];
+let projectPath: string;
 
 class FakeCommand {
   constructor(private readonly name = 'program') {}
@@ -29,7 +33,7 @@ vi.mock('../src/bin/_cli-core.js', () => ({
   program: new FakeCommand('program'),
   llmCmd: new FakeCommand('llm'),
   chalk: { bold: (s: string) => s, blue: (s: string) => s, dim: (s: string) => s, cyan: (s: string) => s },
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? '/repo'),
+  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
   error: vi.fn((message: string) => calls.push(`error:${message}`)),
   info: vi.fn((message: string) => calls.push(`info:${message}`)),
   assignIntArg: vi.fn(({ args, key, raw }) => {
@@ -40,10 +44,6 @@ vi.mock('../src/bin/_cli-core.js', () => ({
     calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
   ),
   loadCartograph: vi.fn(async () => ({ default: {} })),
-}));
-
-vi.mock('../src/directory.js', () => ({
-  isInitialized: vi.fn(() => true),
 }));
 
 vi.mock('../src/mcp/index.js', () => ({
@@ -97,11 +97,18 @@ describe('lifecycle command action bodies', () => {
     calls.length = 0;
     stderr.length = 0;
     process.exitCode = 0;
+    projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-cli-'));
+    fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
+  });
+
+  afterEach(() => {
+    if (projectPath && fs.existsSync(projectPath)) fs.rmSync(projectPath, { recursive: true, force: true });
   });
 
   it('starts MCP serve and prints non-MCP serve guidance', async () => {
     await actions.get('program:serve')!({
-      projectPath: '/repo',
+      projectPath,
       mcp: true,
       writeTools: false,
       allowStaleDefault: true,
@@ -141,9 +148,9 @@ describe('lifecycle command action bodies', () => {
   });
 
   it('routes llm setup, trace-to-culprits, playbook, and viewer actions', async () => {
-    await actions.get('llm:setup [path]')!('/repo');
+    await actions.get('llm:setup [path]')!(projectPath);
     await actions.get('program:trace-to-culprits')!({
-      projectPath: '/repo',
+      projectPath,
       limit: '4',
       trace: 'Error\n at src/a.ts:1',
     });
@@ -157,10 +164,10 @@ describe('lifecycle command action bodies', () => {
       console.log = originalLog;
     }
 
-    await actions.get('program:viewer [path]')!('/repo', { port: '0', open: true });
+    await actions.get('program:viewer [path]')!(projectPath, { port: '0', open: true });
 
     const text = calls.join('\n');
-    expect(text).toContain('llm-setup:/repo');
+    expect(text).toContain(`llm-setup:${projectPath}`);
     expect(text).toContain('mcp:cartograph_trace_to_culprits');
     expect(logs.join('\n')).toContain('playbook text');
     expect(text).toContain('open:http://localhost:0');

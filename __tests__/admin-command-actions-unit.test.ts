@@ -1,11 +1,11 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: string[] = [];
-let initialized = true;
+let projectPath: string;
 
 class FakeCommand {
   constructor(private readonly name = 'admin') {}
@@ -92,7 +92,7 @@ const fakeCartograph = {
 vi.mock('../src/bin/_cli-core.js', () => ({
   adminCmd: new FakeCommand(),
   loadCartograph: vi.fn(async () => ({ default: fakeCartograph })),
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? '/repo'),
+  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
   chalk: { yellow: (s: string) => s, bold: (s: string) => s, cyan: (s: string) => s, dim: (s: string) => s },
   colors: { dim: '', reset: '' },
   success: vi.fn((message: string) => calls.push(`success:${message}`)),
@@ -113,11 +113,6 @@ vi.mock('../src/bin/_cli-core.js', () => ({
   }),
   awaitSummarisationWithProgress: vi.fn(async () => calls.push('awaitSummarisationWithProgress')),
   printIndexResult: vi.fn(() => calls.push('printIndexResult')),
-}));
-
-vi.mock('../src/directory.js', () => ({
-  getCartographDir: vi.fn((projectPath: string) => `${projectPath}/.cartograph`),
-  isInitialized: vi.fn(() => initialized),
 }));
 
 vi.mock('../src/ui/shimmer-progress.js', () => ({
@@ -233,15 +228,21 @@ await import('../src/bin/commands/admin.js');
 describe('admin command action bodies', () => {
   beforeEach(() => {
     calls.length = 0;
-    initialized = true;
     activeCg = fakeCg();
+    projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-cli-'));
+    fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
     vi.clearAllMocks();
   });
 
-  it('initializes and indexes a new project through the init action', async () => {
-    initialized = false;
+  afterEach(() => {
+    if (projectPath && fs.existsSync(projectPath)) fs.rmSync(projectPath, { recursive: true, force: true });
+  });
 
-    await actions.get('init [path]')!('/repo', { index: true, verbose: false });
+  it('initializes and indexes a new project through the init action', async () => {
+    fs.rmSync(path.join(projectPath, '.cartograph'), { recursive: true, force: true });
+
+    await actions.get('init [path]')!(projectPath, { index: true, verbose: false });
 
     expect(calls).toContain('Cartograph.init');
     expect(calls).toContain('progress.stop');
@@ -250,7 +251,7 @@ describe('admin command action bodies', () => {
   });
 
   it('uninitializes with --force without prompting', async () => {
-    await actions.get('uninit [path]')!('/repo', { force: true });
+    await actions.get('uninit [path]')!(projectPath, { force: true });
 
     expect(calls).toContain('Cartograph.openSync');
     expect(calls).toContain('uninitialize');
@@ -258,12 +259,12 @@ describe('admin command action bodies', () => {
   });
 
   it('runs quiet index, embed-only, sync, summarize, embed, and classify paths', async () => {
-    await actions.get('index [path]')!('/repo', { quiet: true, force: true, profile: false, parseWorkers: '2' });
-    await actions.get('embed-only [path]')!('/repo', { quiet: true });
-    await actions.get('sync [path]')!('/repo', { quiet: false });
-    await actions.get('summarize [path]')!('/repo', { quiet: true, concurrency: '2', all: true });
-    await actions.get('embed [path]')!('/repo', { quiet: false, concurrency: '3' });
-    await actions.get('classify [path]')!('/repo', { quiet: false, concurrency: '2' });
+    await actions.get('index [path]')!(projectPath, { quiet: true, force: true, profile: false, parseWorkers: '2' });
+    await actions.get('embed-only [path]')!(projectPath, { quiet: true });
+    await actions.get('sync [path]')!(projectPath, { quiet: false });
+    await actions.get('summarize [path]')!(projectPath, { quiet: true, concurrency: '2', all: true });
+    await actions.get('embed [path]')!(projectPath, { quiet: false, concurrency: '3' });
+    await actions.get('classify [path]')!(projectPath, { quiet: false, concurrency: '2' });
 
     const text = calls.join('\n');
     expect(text.match(/Cartograph.open/g)?.length).toBeGreaterThanOrEqual(6);
@@ -275,7 +276,7 @@ describe('admin command action bodies', () => {
   });
 
   it('runs migrate success branches for already-current and migrated schemas', async () => {
-    await actions.get('migrate [path]')!('/repo');
+    await actions.get('migrate [path]')!(projectPath);
     expect(calls.join('\n')).toContain('Schema already current');
 
     calls.length = 0;
@@ -288,22 +289,24 @@ describe('admin command action bodies', () => {
       return activeCg;
     });
 
-    await actions.get('migrate [path]')!('/repo');
+    await actions.get('migrate [path]')!(projectPath);
     expect(calls.join('\n')).toContain('Schema migrated to v99');
   });
 
   it('runs late admin commands: similarity, prune, SCIP, models, doctor, and LLM setup', async () => {
     let sizeCall = 0;
     activeCg = fakeCg({
-      projectRoot: '/repo',
+      projectRoot: projectPath,
       db: { getSchemaVersion: () => ({ version: 99 }), getSize: () => (sizeCall++ === 0 ? 4096 : 2048) },
     });
 
-    await actions.get('build-similarity-edges [path]')!('/repo', { k: '5', minScore: '0.8' });
-    await actions.get('prune-store [path]')!('/repo', { maxAgeDays: '7' });
-    await actions.get('scip-export [path]')!('/repo', { out: '/repo/index.scip' });
+    await actions.get('build-similarity-edges [path]')!(projectPath, { k: '5', minScore: '0.8' });
+    await actions.get('prune-store [path]')!(projectPath, { maxAgeDays: '7' });
+    await actions.get('scip-export [path]')!(projectPath, { out: '/repo/index.scip' });
 
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-admin-scip-'));
+    fs.mkdirSync(path.join(dir, '.cartograph'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.cartograph', 'cartograph.db'), '');
     const scipPath = path.join(dir, 'index.scip');
     fs.writeFileSync(scipPath, Buffer.from([1, 2, 3]));
     try {
@@ -312,12 +315,12 @@ describe('admin command action bodies', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
 
-    await actions.get('install-models')!({ minimal: true, writeConfig: true, projectPath: '/repo', dir: '/models' });
-    await actions.get('doctor [path]')!('/repo', { fix: true, skipProjectChecks: true });
+    await actions.get('install-models')!({ minimal: true, writeConfig: true, projectPath, dir: '/models' });
+    await actions.get('doctor [path]')!(projectPath, { fix: true, skipProjectChecks: true });
     await actions.get('llm-plan')!();
-    await actions.get('llm-apply')!({ preset: 'install-ollama', projectPath: '/repo' });
-    await actions.get('llm-tune [path]')!('/repo', {});
-    await actions.get('llm-tune [path]')!('/repo', { tier: 'chat', concurrency: '4' });
+    await actions.get('llm-apply')!({ preset: 'install-ollama', projectPath });
+    await actions.get('llm-tune [path]')!(projectPath, {});
+    await actions.get('llm-tune [path]')!(projectPath, { tier: 'chat', concurrency: '4' });
 
     const text = calls.join('\n');
     expect(text).toContain('success:Built similarity edges: 5 edges from 2 nodes.');

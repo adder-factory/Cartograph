@@ -1,8 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: Array<{ tool: string; args: unknown; projectPath?: string }> = [];
 const stdout: string[] = [];
+let projectPath: string;
 
 class FakeCommand {
   constructor(private readonly name = 'program') {}
@@ -55,7 +59,7 @@ vi.mock('../src/bin/_cli-core.js', () => ({
   info: vi.fn((message: string) => stdout.push(`info:${message}`)),
   warn: vi.fn((message: string) => stdout.push(`warn:${message}`)),
   chalk: { bold: (s: string) => s, cyan: (s: string) => s, dim: (s: string) => s },
-  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? '/repo'),
+  resolveProjectPath: vi.fn((pathArg?: string) => pathArg ?? projectPath),
   loadCartograph: vi.fn(async () => ({ default: { open: vi.fn(async () => fakeCg) } })),
   assignIntArg: vi.fn(({ args, key, raw }) => {
     if (raw !== undefined) args[key] = Number(raw);
@@ -65,10 +69,6 @@ vi.mock('../src/bin/_cli-core.js', () => ({
   runViaMCP: vi.fn(async (tool: string, args: unknown, projectPath?: string) =>
     calls.push({ tool, args, projectPath }),
   ),
-}));
-
-vi.mock('../src/directory.js', () => ({
-  isInitialized: vi.fn(() => true),
 }));
 
 vi.mock('../src/mcp/tools/ask.js', () => ({
@@ -129,7 +129,14 @@ describe('read command action bodies', () => {
   beforeEach(() => {
     calls.length = 0;
     stdout.length = 0;
+    projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-read-cli-'));
+    fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
     fakeCg.close.mockClear();
+  });
+
+  afterEach(() => {
+    if (projectPath && fs.existsSync(projectPath)) fs.rmSync(projectPath, { recursive: true, force: true });
   });
 
   it('routes at-range, find, and digest actions through MCP payloads', async () => {
@@ -137,28 +144,28 @@ describe('read command action bodies', () => {
       limit: '3',
       compact: true,
       fields: 'name,path',
-      projectPath: '/repo',
+      projectPath,
     });
     await actions.get('find [query]')!('needle', {
       by: 'content',
       limit: '7',
       caseSensitive: true,
-      projectPath: '/repo',
+      projectPath,
     });
-    await actions.get('digest')!({ projectPath: '/repo' });
+    await actions.get('digest')!({ projectPath });
 
     expect(calls).toEqual([
       {
         tool: 'cartograph_at_range',
-        projectPath: '/repo',
+        projectPath,
         args: { file: 'src/a.ts', startLine: 2, endLine: 4, limit: 3, compact: true, fields: ['name', 'path'] },
       },
       {
         tool: 'cartograph_find',
-        projectPath: '/repo',
+        projectPath,
         args: { by: 'content', query: 'needle', limit: 7, caseSensitive: true },
       },
-      { tool: 'cartograph_digest', projectPath: '/repo', args: {} },
+      { tool: 'cartograph_digest', projectPath, args: {} },
     ]);
   });
 
@@ -170,13 +177,13 @@ describe('read command action bodies', () => {
     }) as typeof process.stdout.write;
     try {
       await actions.get('files [dir]')!(undefined, {
-        projectPath: '/repo',
+        projectPath,
         dir: 'src',
         format: 'flat',
         metadata: true,
       });
       await actions.get('affected [files...]')!(['src/a.ts'], {
-        projectPath: '/repo',
+        projectPath,
         depth: '3',
         json: true,
       });

@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Parallel test runner — splits the suite into N shards (default 8)
 # and runs them concurrently via bun:test's --shard=K/N flag.
+# Each shard also runs with --isolate so file-level module mocks do
+# not leak between unrelated test files inside the same shard process.
 #
 # Requires bash 4+ (uses `mapfile` for the retry-failed-files step).
 # macOS ships bash 3.2; install GNU bash via `brew install bash`.
@@ -44,7 +46,7 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 run_shard() {
   # $1 = shard index, $2 = log path
-  bun test --shard="$1/$N" --timeout 30000 $PATTERN > "$2" 2>&1
+  bun test --isolate --shard="$1/$N" --timeout 30000 $PATTERN > "$2" 2>&1
 }
 
 shard_fails() {
@@ -94,7 +96,7 @@ if [ "$RETRY" -gt 0 ]; then
         passed=false
         while [ "$attempt" -lt "$RETRY" ]; do
           attempt=$((attempt+1))
-          bun test --timeout 30000 "$ff" >> "$log" 2>&1
+          bun test --isolate --timeout 30000 "$ff" >> "$log" 2>&1
           if [ "$?" -eq 0 ]; then
             passed=true
             echo "  -> $ff passed on attempt $attempt"
