@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { formatMcpLoadBudgetReport, MCP_LOAD_BUDGET_LIMITS, measureMcpLoadBudget } from '../src/mcp/load-budget.js';
+import {
+  formatMcpLoadBudgetCheckReport,
+  formatMcpLoadBudgetReport,
+  getMcpLoadBudgetViolations,
+  MCP_LOAD_BUDGET_LIMITS,
+  measureMcpLoadBudget,
+} from '../src/mcp/load-budget.js';
 import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 
@@ -41,5 +47,28 @@ describe('MCP load-budget measurement', () => {
     expect(narrowed.toolCount).toBeLessThan(full.toolCount);
     expect(narrowed.toolsList.chars).toBeLessThan(full.toolsList.chars);
     expect(narrowed.topSchemaContributors).toEqual([]);
+  });
+
+  it('formats pass/fail reports for CI budget checks', () => {
+    const report = measureMcpLoadBudget();
+    expect(getMcpLoadBudgetViolations(report)).toEqual([]);
+    expect(formatMcpLoadBudgetCheckReport(report)).toContain('Budget check: PASS');
+
+    const failing = {
+      ...report,
+      limits: {
+        ...report.limits,
+        combinedChars: report.combinedStartup.chars - 1,
+      },
+    };
+    const violations = getMcpLoadBudgetViolations(failing);
+    expect(violations).toEqual([
+      {
+        label: 'combined startup chars',
+        actual: report.combinedStartup.chars,
+        limit: report.combinedStartup.chars - 1,
+      },
+    ]);
+    expect(formatMcpLoadBudgetCheckReport(failing)).toContain('Budget check: FAIL');
   });
 });

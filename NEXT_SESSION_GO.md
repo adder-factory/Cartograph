@@ -48,6 +48,9 @@ Measured after Task 4:
 - `cartograph mcp-budget` / `bun run measure:mcp-load` now reports
   tool count, `tools/list`, initialize, combined startup load, on-demand
   full playbook size, and top schema contributors.
+- `bun run check:mcp-load` now prints the same MCP load report with an
+  explicit PASS/FAIL line and exits non-zero when hard limits are
+  exceeded.
 
 Verification already passed:
 
@@ -180,19 +183,28 @@ Likely starting points:
 - `README.md`
 - `__tests__/mcp-tool-registry.test.ts`
 
+## Task 5: MCP Load CI Visibility
+
+- [x] Add a CI-friendly MCP load-budget check around the shared
+  measurement helper.
+- [x] Print a clear budget report before failing so contributors see
+  the largest schema contributors.
+- [x] Wire the check into package scripts and README.
+- [x] Cover PASS and FAIL semantics in tests.
+
 ## Definition of Done
 
-- [ ] New behavior implemented and documented in README.
-- [ ] Playbook/server instructions updated.
-- [ ] Generated agent instructions updated.
-- [ ] CLI help updated and tested.
-- [ ] MCP and CLI remain aligned where applicable.
-- [ ] MCP load-budget guard still passes.
-- [ ] Focused tests pass.
-- [ ] `npm run typecheck` passes.
-- [ ] `bunx biome check ...` passes on edited files.
-- [ ] `bun run benchmark:tokens` rerun if token-result behavior changed.
-- [ ] Sonar run is green if code changed.
-- [ ] `cartograph_compare_to_ref({findingsDelta:true})` shows no
+- [x] New behavior implemented and documented in README.
+- [x] Playbook/server instructions updated.
+- [x] Generated agent instructions updated.
+- [x] CLI help updated and tested.
+- [x] MCP and CLI remain aligned where applicable.
+- [x] MCP load-budget guard still passes.
+- [x] Focused tests pass.
+- [x] `npm run typecheck` passes.
+- [x] `bunx biome check ...` passes on edited files.
+- [x] `bun run benchmark:tokens` rerun if token-result behavior changed.
+- [x] Sonar run is green if code changed.
+- [x] `cartograph_compare_to_ref({findingsDelta:true})` shows no
   introduced high-risk findings, or findings are explained.
-- [ ] Commit and push.
+- [x] Commit and push.

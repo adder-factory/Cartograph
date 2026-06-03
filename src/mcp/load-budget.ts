@@ -35,6 +35,12 @@ export interface McpLoadBudgetReport {
   topSchemaContributors: McpLoadContributor[];
 }
 
+export interface McpLoadBudgetViolation {
+  label: string;
+  actual: number;
+  limit: number;
+}
+
 export interface MeasureMcpLoadBudgetOptions {
   handlerOptions?: ToolHandlerOptions;
   topContributors?: number;
@@ -143,6 +149,32 @@ export function formatMcpLoadBudgetReport(report: McpLoadBudgetReport): string {
     );
   }
 
+  lines.push('');
+  return lines.join('\n');
+}
+
+export function getMcpLoadBudgetViolations(report: McpLoadBudgetReport): McpLoadBudgetViolation[] {
+  const checks = [
+    { label: 'tool count', actual: report.toolCount, limit: report.limits.toolCount },
+    { label: 'tools/list chars', actual: report.toolsList.chars, limit: report.limits.toolsListChars },
+    { label: 'combined startup chars', actual: report.combinedStartup.chars, limit: report.limits.combinedChars },
+  ];
+  return checks.filter((check) => check.actual > check.limit);
+}
+
+export function formatMcpLoadBudgetCheckReport(report: McpLoadBudgetReport): string {
+  const violations = getMcpLoadBudgetViolations(report);
+  const lines = [formatMcpLoadBudgetReport(report).trimEnd(), ''];
+
+  if (violations.length === 0) {
+    lines.push('Budget check: PASS', '');
+    return lines.join('\n');
+  }
+
+  lines.push('Budget check: FAIL');
+  for (const item of violations) {
+    lines.push(`- ${item.label}: ${formatNumber(item.actual)} > ${formatNumber(item.limit)}`);
+  }
   lines.push('');
   return lines.join('\n');
 }
