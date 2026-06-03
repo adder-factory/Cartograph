@@ -276,9 +276,7 @@ function applyGraphLowTokens(args: GraphArgs): GraphArgs {
   }
   if ((out.direction === 'callers' || out.direction === 'callees') && out.compact !== false) {
     out.compact = true;
-    if (out.fields === undefined) {
-      out.fields = LOW_TOKEN_GRAPH_FIELDS;
-    }
+    out.fields ??= LOW_TOKEN_GRAPH_FIELDS;
   }
   if (out.direction === 'similar' && out.k !== undefined && out.k > LOW_TOKEN_SIMILAR_K) {
     out.k = LOW_TOKEN_SIMILAR_K;

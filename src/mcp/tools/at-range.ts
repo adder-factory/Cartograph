@@ -150,9 +150,7 @@ function applyAtRangeLowTokens(args: AtRangeToolArgs): AtRangeToolArgs {
   }
   if (out.compact !== false) {
     out.compact = true;
-    if (out.fields === undefined) {
-      out.fields = LOW_TOKEN_AT_RANGE_FIELDS;
-    }
+    out.fields ??= LOW_TOKEN_AT_RANGE_FIELDS;
   }
   return out;
 }

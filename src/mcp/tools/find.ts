@@ -242,16 +242,12 @@ function applyFindLowTokens(args: FindArgs): FindArgs {
   if (args.lowTokens !== true) return args;
 
   const out: FindArgs = { ...args };
-  if (out.limit === undefined) {
-    out.limit = lowTokenLimitForAxis(out.by as FindAxis);
-  }
+  out.limit ??= lowTokenLimitForAxis(out.by as FindAxis);
 
   const effectiveMode = out.mode ?? 'exact';
   if (out.by === 'name' && effectiveMode === 'exact' && out.compact !== false) {
     out.compact = true;
-    if (out.fields === undefined) {
-      out.fields = LOW_TOKEN_FIND_FIELDS;
-    }
+    out.fields ??= LOW_TOKEN_FIND_FIELDS;
   }
   return out;
 }
