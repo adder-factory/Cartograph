@@ -57,10 +57,19 @@ shard_fails() {
 echo "=== running $N shards in parallel (pattern: $PATTERN) ==="
 START=$(date +%s)
 
+pids=()
+shard_status=()
 for i in $(seq 1 "$N"); do
   run_shard "$i" "$TMP_DIR/shard-$i.log" &
+  pids[$i]=$!
 done
-wait
+for i in $(seq 1 "$N"); do
+  if wait "${pids[$i]}"; then
+    shard_status[$i]=0
+  else
+    shard_status[$i]=$?
+  fi
+done
 
 # Retry pass — F#68 (2026-05-28). On macOS the bun:test process can
 # stall under load (the 8 parallel shards self-stress the box; under
@@ -76,7 +85,8 @@ if [ "$RETRY" -gt 0 ]; then
   for i in $(seq 1 "$N"); do
     log="$TMP_DIR/shard-$i.log"
     f=$(shard_fails "$log")
-    if [ "${f:-0}" -gt 0 ]; then
+    status="${shard_status[$i]:-0}"
+    if [ "${f:-0}" -gt 0 ] || [ "$status" -ne 0 ]; then
       # Extract failed file paths. bun:test prints `<path>:` headers
       # only for files with output (typically failed). Heuristic:
       # every `__tests__/X.test.ts:` header in the log is a file
@@ -84,7 +94,7 @@ if [ "$RETRY" -gt 0 ]; then
       failed_files=()
       mapfile -t failed_files < <(grep -oE "^__tests__/[^:]+\.test\.ts:" "$log" | tr -d ':' | sort -u)
       if [ "${#failed_files[@]}" -eq 0 ]; then
-        echo "=== shard $i had $f fails but no file headers to retry; skipping ==="
+        echo "=== shard $i exited $status with ${f:-0} fails but no file headers to retry; treating as failed ==="
         continue
       fi
       echo "=== retrying shard $i failed files in fresh processes (up to $RETRY attempts each): ${failed_files[*]} ==="
@@ -152,15 +162,19 @@ for i in $(seq 1 "$N"); do
     s=$(grep -oE "^ +[0-9]+ skip" "$log" | grep -oE "[0-9]+" | tail -1)
     summary=$(grep -E "^Ran " "$log" | tail -1)
   fi
+  status="${shard_status[$i]:-0}"
   total_pass=$((total_pass + ${p:-0}))
   total_fail=$((total_fail + ${f:-0}))
   total_skip=$((total_skip + ${s:-0}))
   marker="  ok "
-  if [ "${f:-0}" -gt 0 ]; then
+  if [ "${f:-0}" -gt 0 ] || { [ "$status" -ne 0 ] && ! $retry_won; }; then
     marker="  ✗  "
     exit_code=1
   elif $retry_won; then
     marker="  ↻  "  # flake survived via retry
+  fi
+  if [ "$status" -ne 0 ] && ! $retry_won; then
+    summary="${summary:-shard process exited $status before printing a summary}"
   fi
   printf "%s shard %d: pass=%-4s fail=%-3s skip=%-3s | %s\n" "$marker" "$i" "${p:-0}" "${f:-0}" "${s:-0}" "$summary"
 done
