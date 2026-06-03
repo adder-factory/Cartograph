@@ -15,3 +15,5 @@
   - See `NEXT_SESSION_GO.md` task 2.
 - [ ] Extract shared freshness-risk semantics.
   - See `NEXT_SESSION_GO.md` task 3.
+- [ ] Improve unresolved refs explainability.
+  - See `NEXT_SESSION_GO.md` task 4.

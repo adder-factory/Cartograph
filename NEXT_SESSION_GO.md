@@ -96,3 +96,29 @@ Likely starting points:
 - `__tests__/freshness.test.ts`
 - `__tests__/mcp-status-b14.test.ts`
 
+## Task 4: Unresolved Refs Explainability
+
+Problem: `cartograph_status` can show a large `Unresolved refs` count
+that is healthy but easy to misread as corruption. The current status
+line says it is intentional, but it does not give users a quick way to
+understand what the tail contains.
+
+Acceptance criteria:
+
+- Add a lightweight drilldown or status detail that buckets unresolved
+  refs by `reference_kind` and `language`.
+- Include a small sample of common unresolved names, preferably capped
+  and sorted by frequency.
+- Keep the existing corruption/degraded-edge warning separate from the
+  healthy unresolved-tail disclosure.
+- Avoid making normal unresolved refs look like failures; use an
+  informational tone and explain common causes such as builtins,
+  external APIs, property access, framework hooks, and dynamic dispatch.
+- Add focused tests for the rendering and threshold behavior.
+
+Likely starting points:
+
+- `src/mcp/tools/status.ts`
+- `src/db/queries-unresolved-refs.ts`
+- `__tests__/mcp-status.test.ts`
+- `__tests__/mcp-status-b14.test.ts`
