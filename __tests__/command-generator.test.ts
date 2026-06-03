@@ -155,6 +155,20 @@ describe('buildGeneratedCommand — family discriminator as positional', () => {
     expect(run).toHaveBeenCalledWith('cartograph_family_demo', { action: 'list', id: 7 }, undefined);
   });
 
+  it('validates an enum discriminator supplied as a positional before dispatch', async () => {
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrWrites.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+    const cmd = buildGeneratedCommand(familyTool, run, { discriminatorAsPositional: true });
+    await parse(cmd, ['sideways']);
+    expect(run).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(stderrWrites.join('')).toContain('--action');
+  });
+
   it('renders the discriminator as a --flag when discriminatorAsPositional is off', () => {
     const cmd = buildGeneratedCommand(familyTool, vi.fn());
     expect(cmd.options.map((o) => o.long)).toContain('--action');
@@ -383,6 +397,27 @@ describe('buildGeneratedCommand — longFlagOverrides', () => {
     expect(() => buildGeneratedCommand(flatTool, vi.fn(), { longFlagOverrides: { nope: '--x' } })).toThrow(
       /longFlagOverrides entry `nope`/,
     );
+  });
+});
+
+describe('buildGeneratedCommand — alias flag normalization', () => {
+  it('validates an alias flag targeting a positional field before dispatch', async () => {
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrWrites.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+    const cmd = buildGeneratedCommand(familyTool, run, {
+      discriminatorAsPositional: true,
+      aliasFlags: { action: 'action' },
+    });
+
+    await parse(cmd, ['--action', 'sideways']);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(stderrWrites.join('')).toContain('--action');
   });
 });
 

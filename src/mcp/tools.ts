@@ -13,8 +13,7 @@ import { getToolModule, tools as registryTools } from './tools/registry.js';
 import { RefIdCache } from './tools/_id-cache.js';
 import { CallIdCache } from './tools/_call-id-cache.js';
 import { checkSchemaCompat, formatSchemaMismatch } from './schema-guard.js';
-import { collectUnknownArgWarnings } from './tools/_unknown-arg-warnings.js';
-import { getZodSchema, formatZodError } from './tools/_define-tool.js';
+import { normalizeToolArgs } from './tools/_arg-normalizer.js';
 import { ProjectCache } from './tools/_project-cache.js';
 import { errMsg } from '../errors.js';
 import { errorResult } from './tools/_error-result.js';
@@ -772,10 +771,10 @@ export class ToolHandler {
     const { cg, gate } = preflight as { cg: Cartograph | null; gate: FreshnessGateOutcome };
     const effectiveArgs = toolHandlerResolveLowTokensArgs(this.options, mod, args);
 
-    // Every tool is `defineTool`-backed: `safeParse` does structural
-    // validation, and a separate scan reports unknown (typo'd) args
-    // that Zod would otherwise strip silently. See `validateToolArgs`.
-    const validation = validateToolArgs(mod!, effectiveArgs);
+    // Every tool is `defineTool`-backed: `normalizeToolArgs` does
+    // structural validation and reports unknown (typo'd) args that Zod
+    // would otherwise strip silently.
+    const validation = normalizeToolArgs(mod!, effectiveArgs);
     if (!validation.ok) {
       return errorResult(`Invalid arguments for \`${toolName}\`: ${validation.error}`);
     }
@@ -823,36 +822,6 @@ export class ToolHandler {
     if (!mod) return errorResult(`Unknown tool: ${toolName}`);
     return mod.handle(this.makeCtx(), args);
   }
-}
-
-/** Outcome of {@link validateToolArgs} — the shape `execute` consumes. */
-type ToolArgValidation = { ok: true; warnings?: string[] } | { ok: false; error: string };
-
-/**
- * Validate a tool call's raw args against the tool's schema.
- *
- * Structural validation (type / range / enum / required) is Zod's job:
- * every tool is `defineTool`-backed, so `getZodSchema` returns a schema
- * and `safeParse` rejects out-of-range numbers (the locked P3 decision)
- * with a `formatZodError` message. A module with no Zod schema (none
- * exist post-campaign — `defineTool` is the only tool factory) skips
- * structural validation but still gets the unknown-arg scan below.
- *
- * Unknown-argument warnings run regardless: Zod silently STRIPS keys it
- * doesn't declare, so without {@link collectUnknownArgWarnings} an agent
- * that passed a misspelled arg name would get no nudge. The warnings
- * are advisory — they never fail the call.
- */
-function validateToolArgs(mod: ToolModule, args: Record<string, unknown>): ToolArgValidation {
-  const zodSchema = getZodSchema(mod);
-  if (zodSchema) {
-    const parsed = zodSchema.safeParse(args ?? {});
-    if (!parsed.success) {
-      return { ok: false, error: formatZodError(parsed.error, args ?? {}) };
-    }
-  }
-  const warnings = collectUnknownArgWarnings(args, mod.definition.inputSchema);
-  return warnings.length > 0 ? { ok: true, warnings } : { ok: true };
 }
 
 /**
