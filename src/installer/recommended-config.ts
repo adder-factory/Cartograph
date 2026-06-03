@@ -44,6 +44,11 @@ export interface RecommendedConfigOptions {
   /** Whether to include the optional reranker block. Default true —
    *  the reranker GGUF is downloaded as part of the recommended set. */
   includeReranker?: boolean;
+  /** Whether to include the optional ask block. Default true — the
+   *  full GGUF set includes the 7B ask model. Minimal installs set
+   *  this false so ask falls back to `summarizeLlm` instead of writing
+   *  a config that points at an undownloaded file. */
+  includeAsk?: boolean;
 }
 
 /** Default llama-server ports for each tier. llama-server is
@@ -86,6 +91,7 @@ export function buildRecommendedLlmConfig(
 ): NonNullable<CartographConfig['llm']> {
   const dir = options.dir ?? MODELS_DIR_DEFAULT;
   const includeReranker = options.includeReranker ?? true;
+  const includeAsk = options.includeAsk ?? true;
 
   const cfg: NonNullable<CartographConfig['llm']> = {
     summarizeLlm: {
@@ -98,17 +104,20 @@ export function buildRecommendedLlmConfig(
       endpoint: ENDPOINT_SUMMARIZE,
       model: resolveRecommendedModelPath(RECOMMENDED_CHAT_SUMMARIZE, dir),
     },
-    askLlm: {
-      provider: 'openai-compat',
-      endpoint: ENDPOINT_ASK,
-      model: resolveRecommendedModelPath(RECOMMENDED_CHAT_ASK, dir),
-    },
     embeddingLlm: {
       provider: 'openai-compat',
       endpoint: ENDPOINT_EMBED,
       model: resolveRecommendedModelPath(RECOMMENDED_EMBED, dir),
     },
   };
+
+  if (includeAsk) {
+    cfg.askLlm = {
+      provider: 'openai-compat',
+      endpoint: ENDPOINT_ASK,
+      model: resolveRecommendedModelPath(RECOMMENDED_CHAT_ASK, dir),
+    };
+  }
 
   if (includeReranker) {
     cfg.rerankerLlm = {

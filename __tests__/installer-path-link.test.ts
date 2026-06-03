@@ -152,6 +152,12 @@ describe('runInstallerWithOptions PATH linking', () => {
     await runInstallerWithOptions({ location: 'global', target: 'none' });
 
     expect(eventMessages('spinner-stop')).toContain('Could not link cartograph globally');
-    expect(eventMessages('warn')[0]).toMatch(/Run from the Cartograph source checkout: bun link .*permission denied/);
+    const warning = eventMessages('warn')[0] ?? '';
+    expect(warning).toContain('Run from the Cartograph source checkout: `bun link`');
+    expect(warning).toContain('cartograph --version');
+    expect(warning).toContain('bun src/bin/cartograph.ts <command>');
+    expect(warning).toContain('bun pm bin -g');
+    expect(warning).toContain('dirname "$(command -v bun)"');
+    expect(warning).toContain('permission denied');
   });
 });

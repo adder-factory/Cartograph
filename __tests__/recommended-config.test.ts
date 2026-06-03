@@ -120,6 +120,19 @@ describe('mergeRecommendedLlmConfig (FRICTION-11)', () => {
     });
     expect(recommended.rerankerLlm).toBeUndefined();
   });
+
+  it('omits ask and reranker blocks for the minimal GGUF config', () => {
+    const recommended = buildRecommendedLlmConfig({
+      dir: '/tmp/models-test',
+      includeAsk: false,
+      includeReranker: false,
+    });
+    expect(recommended.embeddingLlm).toBeDefined();
+    expect(recommended.summarizeLlm).toBeDefined();
+    expect(recommended.localLlm).toBeDefined();
+    expect(recommended.askLlm).toBeUndefined();
+    expect(recommended.rerankerLlm).toBeUndefined();
+  });
 });
 
 describe('writeRecommendedLlmConfig (FRICTION-11)', () => {
@@ -190,6 +203,32 @@ describe('writeRecommendedLlmConfig (FRICTION-11)', () => {
     const written = JSON.parse(fs.readFileSync(result.configPath, 'utf-8'));
     const expected = buildRecommendedLlmConfig({ dir: modelsDir });
     expect(written.llm).toEqual(expected);
+  });
+
+  it('minimal write-config removes full-stack ask/reranker slots from a prior config', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        llm: {
+          askLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8082', model: '/missing/ask.gguf' },
+          rerankerLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8083', model: '/missing/rerank.gguf' },
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = writeRecommendedLlmConfig({
+      projectRoot: tempDir,
+      dir: path.join(tempDir, 'models'),
+      includeAsk: false,
+      includeReranker: false,
+    });
+    const written = JSON.parse(fs.readFileSync(result.configPath, 'utf-8'));
+    expect(written.llm.embeddingLlm).toBeDefined();
+    expect(written.llm.summarizeLlm).toBeDefined();
+    expect(written.llm.askLlm).toBeUndefined();
+    expect(written.llm.rerankerLlm).toBeUndefined();
   });
 });
 

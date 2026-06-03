@@ -107,7 +107,10 @@ function loadLifecycleCommandActions(): void {
       openInBrowser: (url: string) => calls.push(`open:${url}`),
     }),
     loadDoctor: async () => ({
-      runDoctor: async () => ({ overallStatus: 'pass' }),
+      runDoctor: async (opts: Record<string, unknown>) => {
+        calls.push(`doctor:${JSON.stringify(opts)}`);
+        return { overallStatus: 'pass' };
+      },
       formatDoctorReport: () => 'doctor report',
     }),
     loadInstallModels: async () => ({
@@ -115,7 +118,10 @@ function loadLifecycleCommandActions(): void {
     }),
     loadRecommendedModels: async () => ({ RECOMMENDED_MODELS: [], MINIMAL_MODELS: [] }),
     loadRecommendedConfig: async () => ({
-      writeRecommendedLlmConfig: () => ({ configPath: '/repo/.cartograph/config.json' }),
+      writeRecommendedLlmConfig: (opts: Record<string, unknown>) => {
+        calls.push(`writeRecommended:${JSON.stringify(opts)}`);
+        return { configPath: '/repo/.cartograph/config.json' };
+      },
     }),
   });
 }
@@ -203,5 +209,31 @@ describe('lifecycle command action bodies', () => {
     expect(stdout.join('\n')).toContain('playbook text');
     expect(stdout.join('\n')).toContain('budget:');
     expect(text).toContain('open:http://localhost:0');
+  });
+
+  it('passes minimal config options during setup --minimal', async () => {
+    await actions.get('program:setup [path]')!(projectPath, { minimal: true });
+
+    const text = calls.join('\n');
+    expect(text).toContain('writeRecommended:');
+    expect(text).toContain('"includeAsk":false');
+    expect(text).toContain('"includeReranker":false');
+    expect(text).toContain('doctor:{"projectPath":"');
+    expect(stdout.join('\n')).toContain('doctor report');
+  });
+
+  it('setup --no-models points at non-model config paths', async () => {
+    await actions.get('program:setup [path]')!(projectPath, { models: false });
+
+    const text = calls.join('\n');
+    expect(text).not.toContain('writeRecommended:');
+    expect(text).toContain('cartograph admin llm-plan');
+    expect(text).toContain('cartograph admin llm-apply');
+  });
+
+  it('accepts --skip-project-checks on top-level doctor as an alias', async () => {
+    await actions.get('program:doctor [path]')!(projectPath, { skipProjectChecks: true });
+
+    expect(calls.join('\n')).toContain(`doctor:{"projectPath":"${projectPath}","skipProjectChecks":true,"fix":false}`);
   });
 });

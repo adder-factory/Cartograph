@@ -408,12 +408,16 @@ describe('MCP admin formatter contracts', () => {
 
     const installConfig = await ADMIN_TOOL.handle(fakeCtx(cg), {
       action: 'install-models',
+      minimal: true,
       writeConfig: true,
       projectPath: '/repo',
       dir: '/models',
     } as any);
     expect(textOf(installConfig)).toContain('Updated `/repo/.cartograph/config.json`');
     expect(textOf(installConfig)).toContain('Added/updated');
+    expect(recommendedConfig.writeRecommendedLlmConfig).toHaveBeenCalledWith(
+      expect.objectContaining({ includeAsk: false, includeReranker: false }),
+    );
 
     const doctor = await ADMIN_TOOL.handle(fakeCtx(cg), {
       action: 'doctor',
@@ -431,6 +435,7 @@ describe('MCP admin formatter contracts', () => {
     expect(textOf(plan)).toContain('LLM setup plan');
     expect(textOf(plan)).toContain('Ollama');
     expect(textOf(plan)).toContain('ANTHROPIC_API_KEY');
+    expect(textOf(plan)).toContain('projectPath: "<absolute-project-path>"');
 
     const applyCtx = fakeCtx(cg);
     const applied = await ADMIN_TOOL.handle(applyCtx, {

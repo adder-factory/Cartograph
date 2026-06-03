@@ -13,10 +13,12 @@
  *   3. Project init — given path has a `.cartograph/` directory.
  *   4. Project config — `.cartograph/config.json` parses + carries an
  *      `llm` block if any LLM-driven feature will be used.
- *   5. Detected LLM backends — informational; lists every
+ *   5. Configured model files — local absolute `model` paths referenced
+ *      by configured OpenAI-compat tiers exist.
+ *   6. Detected LLM backends — informational; lists every
  *      OpenAI-compat backend found on common ports (llama-server :8080,
  *      Ollama :11434, mlx_lm :8000, LM Studio :1234, LocalAI :5000).
- *   6. Embedding endpoint — when the project config carries an
+ *   7. Embedding endpoint — when the project config carries an
  *      `embeddingLlm` block, probes its configured `endpoint` via
  *      `GET /v1/models`. Surfaces detected alternatives in the
  *      remediation line on failure.
@@ -33,7 +35,6 @@
  */
 
 import * as fsp from 'node:fs/promises';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   backendInstallHint,
@@ -45,6 +46,7 @@ import {
 import { describeHardware, recommendedTuning } from './hardware-tuning.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './default-endpoints.js';
 import { loadConfig } from '../config.js';
+import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -64,6 +66,8 @@ export interface DoctorResult {
   /** Worst status across all checks — `fail` if any failed, else
    *  `warn` if any warned, else `ok`. */
   overallStatus: CheckStatus;
+  /** True when project init/config checks were intentionally skipped. */
+  projectChecksSkipped?: boolean;
 }
 
 const ENGINES_BUN_MIN = '1.3.0';
@@ -108,37 +112,40 @@ function checkBunRuntime(): CheckResult {
   return { name: 'Bun runtime', status: 'ok', detail: `Bun ${version}` };
 }
 
-const MODELS_DIR_DEFAULT = path.join(os.homedir(), '.cartograph', 'models');
+function resolveModelsDir(): string {
+  return process.env['CARTOGRAPH_MODELS_DIR'] ?? MODELS_DIR_DEFAULT;
+}
 
 async function checkModels(): Promise<CheckResult> {
+  const modelsDir = resolveModelsDir();
   const modelsDirExists = await fsp
-    .access(MODELS_DIR_DEFAULT)
+    .access(modelsDir)
     .then(() => true)
     .catch(() => false);
   if (!modelsDirExists) {
     return {
       name: 'LLM models',
       status: 'warn',
-      detail: `${MODELS_DIR_DEFAULT} does not exist.`,
+      detail: `${modelsDir} does not exist.`,
       remediation:
         '`cartograph admin install-models` to download the recommended GGUF set (~7 GB), ' +
         'or `cartograph admin install-models --minimal` for the smallest viable subset (embed + 3B chat, ~2.1 GB).',
     };
   }
-  const entries = await fsp.readdir(MODELS_DIR_DEFAULT);
+  const entries = await fsp.readdir(modelsDir);
   const ggufs = entries.filter((f) => f.endsWith('.gguf'));
   if (ggufs.length === 0) {
     return {
       name: 'LLM models',
       status: 'warn',
-      detail: `${MODELS_DIR_DEFAULT} exists but contains no .gguf files.`,
+      detail: `${modelsDir} exists but contains no .gguf files.`,
       remediation: '`cartograph admin install-models` to download the recommended set.',
     };
   }
   return {
     name: 'LLM models',
     status: 'ok',
-    detail: `${ggufs.length} model${ggufs.length === 1 ? '' : 's'} present under ${MODELS_DIR_DEFAULT}`,
+    detail: `${ggufs.length} model${ggufs.length === 1 ? '' : 's'} present under ${modelsDir}`,
   };
 }
 
@@ -211,23 +218,99 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
   return { name: 'Project config', status: 'ok', detail: `${configPath} valid` };
 }
 
+const LLM_TIER_KEYS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
+const MAX_RENDERED_MISSING_MODEL_FILES = 4;
+
+interface ConfiguredModelFile {
+  readonly tier: (typeof LLM_TIER_KEYS)[number];
+  readonly modelPath: string;
+}
+
+function configuredModelFiles(llm: Record<string, unknown> | null): ConfiguredModelFile[] {
+  if (!llm) return [];
+  const out: ConfiguredModelFile[] = [];
+  for (const tier of LLM_TIER_KEYS) {
+    const block = llm[tier];
+    if (typeof block !== 'object' || block === null) continue;
+    const cfg = block as Record<string, unknown>;
+    if (cfg['provider'] !== 'openai-compat') continue;
+    const model = cfg['model'];
+    if (typeof model !== 'string' || model.length === 0) continue;
+    if (!path.isAbsolute(model)) continue;
+    out.push({ tier, modelPath: model });
+  }
+  return out;
+}
+
+async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): Promise<CheckResult | null> {
+  const configured = configuredModelFiles(llm);
+  if (configured.length === 0) return null;
+
+  const missing = (
+    await Promise.all(
+      configured.map(async (entry) => {
+        const exists = await fsp
+          .access(entry.modelPath)
+          .then(() => true)
+          .catch(() => false);
+        return exists ? null : entry;
+      }),
+    )
+  ).filter((entry): entry is ConfiguredModelFile => entry !== null);
+
+  if (missing.length === 0) {
+    return {
+      name: 'Configured model files',
+      status: 'ok',
+      detail: `${configured.length} configured local model file${configured.length === 1 ? '' : 's'} present.`,
+    };
+  }
+
+  const rendered = missing
+    .slice(0, MAX_RENDERED_MISSING_MODEL_FILES)
+    .map((m) => `${m.tier}: ${m.modelPath}`)
+    .join('; ');
+  const suffix =
+    missing.length > MAX_RENDERED_MISSING_MODEL_FILES
+      ? `; +${missing.length - MAX_RENDERED_MISSING_MODEL_FILES} more`
+      : '';
+  return {
+    name: 'Configured model files',
+    status: 'warn',
+    detail: `${missing.length} configured local model file${missing.length === 1 ? '' : 's'} missing: ${rendered}${suffix}`,
+    remediation:
+      'Install the missing GGUFs, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.',
+  };
+}
+
 /**
- * Probe what HTTP LLM backends are running on the machine, plus
- * (optionally) the user's configured `embeddingLlm.endpoint` if it
- * isn't already on the well-known-port list. Result feeds two
+ * Probe what HTTP LLM backends are running on the machine, plus any
+ * configured tier endpoints that are not already on the well-known
+ * port list. Result feeds two
  * downstream checks: the "configured endpoint reachable?" status,
  * and the informational "detected backends" line.
  */
-async function detectBackends(configuredEndpoint?: string): Promise<DetectedBackend[]> {
-  const extra = configuredEndpoint ? [configuredEndpoint] : [];
+async function detectBackends(configuredEndpoints: readonly string[] = []): Promise<DetectedBackend[]> {
   try {
-    return await scanForLlmBackends(extra);
+    return await scanForLlmBackends(configuredEndpoints);
   } catch {
     // The scanner swallows per-probe errors; a top-level throw here
     // would only happen on truly broken globalThis.fetch. Treat as
     // "no backends detected" rather than failing the whole doctor run.
     return [];
   }
+}
+
+function configuredEndpoints(llm: Record<string, unknown> | null): string[] {
+  if (!llm) return [];
+  const endpoints: string[] = [];
+  for (const tier of LLM_TIER_KEYS) {
+    const block = llm[tier];
+    if (typeof block !== 'object' || block === null) continue;
+    const endpoint = (block as Record<string, unknown>)['endpoint'];
+    if (typeof endpoint === 'string' && endpoint.length > 0) endpoints.push(endpoint);
+  }
+  return [...new Set(endpoints)];
 }
 
 /**
@@ -417,7 +500,11 @@ export async function runDoctor(opts: RunDoctorOptions = {}): Promise<DoctorResu
   return {
     ...initial,
     remediations: allRemediations,
-    afterFix: { checks: lastChecks, overallStatus: worstStatus(lastChecks) },
+    afterFix: {
+      checks: lastChecks,
+      overallStatus: worstStatus(lastChecks),
+      ...(opts.skipProjectChecks ? { projectChecksSkipped: true } : {}),
+    },
   };
 }
 
@@ -441,17 +528,26 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   const checks: CheckResult[] = [];
   checks.push(checkBunRuntime(), await checkModels());
 
-  // Read the project's embeddingLlm.endpoint (if any) so the scanner
-  // can also probe a non-default port the user has configured.
-  let embeddingLlm: Record<string, unknown> | null = null;
-  if (!opts.skipProjectChecks) {
+  // Read the project's llm block (if any) so the scanner can also
+  // probe non-default ports the user has configured, and so doctor
+  // can verify local GGUF paths referenced by configured tiers.
+  let llm: Record<string, unknown> | null = null;
+  if (opts.skipProjectChecks) {
+    checks.push({
+      name: 'Project checks',
+      status: 'ok',
+      detail: 'Skipped project init/config checks by request.',
+    });
+  } else {
     const projectPath = path.resolve(opts.projectPath ?? process.cwd());
     const initCheck = await checkProjectInit(projectPath);
     checks.push(initCheck);
     if (initCheck.status === 'ok') {
       const configCheck = await checkProjectConfig(projectPath);
       checks.push(configCheck);
-      embeddingLlm = await readEmbeddingLlmFromConfig(projectPath);
+      llm = await readLlmFromConfig(projectPath);
+      const modelFileCheck = await checkConfiguredModelFiles(llm);
+      if (modelFileCheck) checks.push(modelFileCheck);
     }
   }
 
@@ -459,9 +555,9 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   // configured-endpoint reachability check. Scanner is async and
   // probes 5+ ports in parallel with a 1s per-port timeout, so this
   // adds ~1s to the doctor run worst-case.
-  const configuredEndpoint = typeof embeddingLlm?.['endpoint'] === 'string' ? embeddingLlm['endpoint'] : undefined;
-  const detected = await detectBackends(configuredEndpoint);
+  const detected = await detectBackends(configuredEndpoints(llm));
   checks.push(detectedBackendsCheck(detected));
+  const embeddingLlm = llm?.['embeddingLlm'] as Record<string, unknown> | null | undefined;
   const reachability = checkEmbeddingReachability(embeddingLlm, detected);
   if (reachability) checks.push(reachability);
   // Informational tuning row — surfaces the hardware-aware
@@ -471,7 +567,11 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   // present (those win over the hardware default).
   checks.push(recommendedTuningCheck());
 
-  return { checks, overallStatus: worstStatus(checks) };
+  return {
+    checks,
+    overallStatus: worstStatus(checks),
+    ...(opts.skipProjectChecks ? { projectChecksSkipped: true } : {}),
+  };
 }
 
 /** Auto-apply fixes for gaps the doctor knows how to handle. Returns
@@ -536,7 +636,7 @@ async function applyModelInstallRemediation(): Promise<RemediationStep> {
   try {
     const { installRecommendedModels } = await import('./install-models.js');
     const { RECOMMENDED_MODELS } = await import('../llm/recommended-models.js');
-    const result = await installRecommendedModels({ models: RECOMMENDED_MODELS });
+    const result = await installRecommendedModels({ models: RECOMMENDED_MODELS, dir: resolveModelsDir() });
     return {
       check: 'LLM models',
       action: 'ran-install-models',
@@ -571,12 +671,11 @@ async function applyProjectConfigRemediation(projectPath: string): Promise<Remed
   }
 }
 
-/** Pull the parsed `embeddingLlm` block out of a project's config,
- *  returning null on missing / invalid JSON / missing block. The
- *  doctor's `checkProjectConfig` already reports parse failures; we
- *  silently no-op here so the embedding-reachability check skips
- *  cleanly in those cases. */
-async function readEmbeddingLlmFromConfig(projectPath: string): Promise<Record<string, unknown> | null> {
+/** Pull the parsed `llm` block out of a project's config, returning
+ *  null on missing / invalid JSON / missing block. The doctor's
+ *  `checkProjectConfig` already reports parse failures; we silently
+ *  no-op here so follow-on checks skip cleanly in those cases. */
+async function readLlmFromConfig(projectPath: string): Promise<Record<string, unknown> | null> {
   const configPath = path.join(projectPath, '.cartograph', 'config.json');
   const configExists = await fsp
     .access(configPath)
@@ -587,8 +686,7 @@ async function readEmbeddingLlmFromConfig(projectPath: string): Promise<Record<s
     const parsed = loadConfig(projectPath) as unknown as Record<string, unknown>;
     const llm = parsed['llm'] as Record<string, unknown> | undefined;
     if (!llm || typeof llm !== 'object') return null;
-    const embedding = llm['embeddingLlm'] as Record<string, unknown> | undefined;
-    return embedding && typeof embedding === 'object' ? embedding : null;
+    return llm;
   } catch {
     return null;
   }
@@ -608,6 +706,13 @@ const OVERALL_STATUS_BLURB: Record<DoctorResult['overallStatus'], string> = {
   fail: '_Doctor found blocking gaps. Fix the `✗` items above before using LLM-backed features._',
 };
 
+function overallStatusBlurb(result: DoctorResult): string {
+  if (result.overallStatus === 'ok' && result.projectChecksSkipped) {
+    return '_Checks completed. Project init/config checks were skipped._';
+  }
+  return OVERALL_STATUS_BLURB[result.overallStatus];
+}
+
 /** Render a DoctorResult as a Markdown report suitable for CLI + MCP
  *  output. Single source of truth for the user-facing wording.
  *  When `result.remediations` is set (i.e. `runDoctor({fix: true})`
@@ -616,7 +721,7 @@ const OVERALL_STATUS_BLURB: Record<DoctorResult['overallStatus'], string> = {
 export function formatDoctorReport(result: DoctorResultWithFix): string {
   const lines: string[] = ['## cartograph doctor', ''];
   appendCheckLines(lines, result.checks);
-  lines.push('', OVERALL_STATUS_BLURB[result.overallStatus]);
+  lines.push('', overallStatusBlurb(result));
   if (result.remediations !== undefined) appendFixOutcome(lines, result);
   return lines.join('\n');
 }

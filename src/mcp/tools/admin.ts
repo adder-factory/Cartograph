@@ -695,7 +695,7 @@ async function handleInstallModels(_ctx: ToolCtx, args: Record<string, unknown>)
       models: minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS,
     });
     const lines = formatInstallModelsResultLines(result);
-    const configLines = await installModelsConfigLines({ writeConfig, projectPath, dir });
+    const configLines = await installModelsConfigLines({ writeConfig, projectPath, dir, minimal });
     if (!configLines.ok) return configLines;
     lines.push(...configLines.value);
     return ok(textResult(lines.join('\n')));
@@ -740,6 +740,7 @@ async function installModelsConfigLines(args: {
   readonly writeConfig: boolean;
   readonly projectPath: string | undefined;
   readonly dir: string | undefined;
+  readonly minimal: boolean;
 }): Promise<InstallModelsConfigLinesResult> {
   if (!args.writeConfig) {
     return {
@@ -754,8 +755,14 @@ async function installModelsConfigLines(args: {
     return { ok: false, error: 'install-models with `writeConfig: true` requires `projectPath`.' };
   }
   const { writeRecommendedLlmConfig } = await import('../../installer/recommended-config.js');
-  const writeOpts: { projectRoot: string; dir?: string } = { projectRoot: args.projectPath };
+  const writeOpts: { projectRoot: string; dir?: string; includeAsk?: boolean; includeReranker?: boolean } = {
+    projectRoot: args.projectPath,
+  };
   if (args.dir) writeOpts.dir = args.dir;
+  if (args.minimal) {
+    writeOpts.includeAsk = false;
+    writeOpts.includeReranker = false;
+  }
   const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
   const lines = ['', `Updated \`${configPath}\`.`];
   if (backupPath) lines.push(`Backup written: \`${backupPath}\`.`);
@@ -812,7 +819,7 @@ async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Pro
     }
     lines.push(
       '',
-      'To apply a preset: `cartograph_admin({action: "llm-apply", preset: "<id>"})`. The agent can show this list to the user, take their pick, and call back.',
+      'To apply a preset: `cartograph_admin({action: "llm-apply", preset: "<id>", projectPath: "<absolute-project-path>"})`. The agent can show this list to the user, take their pick, and call back.',
     );
     return ok(textResult(lines.join('\n')));
   } catch (error_) {

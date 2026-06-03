@@ -58,6 +58,10 @@ describe('runDoctor — embedding endpoint reachability', () => {
     );
   }
 
+  async function writeLlmConfig(llm: Record<string, unknown>): Promise<void> {
+    await fsp.writeFile(path.join(projectPath, '.cartograph', 'config.json'), JSON.stringify({ llm }, null, 2));
+  }
+
   it('reports ok when configured openai-compat endpoint responds', async () => {
     const mock = startEmbeddingMock();
     servers.push(mock);
@@ -110,5 +114,61 @@ describe('runDoctor — embedding endpoint reachability', () => {
     const line = result.checks.find((c) => c.name === 'Detected LLM backends');
     expect(line).toBeDefined();
     expect(line!.status).toBe('ok'); // informational — always ok
+  });
+
+  it('honors CARTOGRAPH_MODELS_DIR for the LLM models check', async () => {
+    const modelsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cg-doctor-models-dir-'));
+    const prior = process.env.CARTOGRAPH_MODELS_DIR;
+    try {
+      process.env.CARTOGRAPH_MODELS_DIR = modelsDir;
+      await fsp.writeFile(path.join(modelsDir, 'custom.gguf'), '');
+
+      const result = await runDoctor({ projectPath, skipProjectChecks: true });
+      const modelsCheck = result.checks.find((c) => c.name === 'LLM models');
+      expect(modelsCheck).toBeDefined();
+      expect(modelsCheck!.status).toBe('ok');
+      expect(modelsCheck!.detail).toContain(modelsDir);
+    } finally {
+      if (prior === undefined) delete process.env.CARTOGRAPH_MODELS_DIR;
+      else process.env.CARTOGRAPH_MODELS_DIR = prior;
+      await fsp.rm(modelsDir, { recursive: true, force: true });
+    }
+  });
+
+  it('warns when a configured local model file is missing', async () => {
+    const existingModel = path.join(projectPath, 'embed.gguf');
+    const missingAskModel = path.join(projectPath, 'missing-ask.gguf');
+    await fsp.writeFile(existingModel, '');
+    await writeLlmConfig({
+      embeddingLlm: { provider: 'openai-compat', endpoint: 'http://localhost:1', model: existingModel },
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:2', model: missingAskModel },
+    });
+
+    const result = await runDoctor({ projectPath });
+    const filesCheck = result.checks.find((c) => c.name === 'Configured model files');
+    expect(filesCheck).toBeDefined();
+    expect(filesCheck!.status).toBe('warn');
+    expect(filesCheck!.detail).toContain('summarizeLlm');
+    expect(filesCheck!.detail).toContain(missingAskModel);
+    expect(filesCheck!.remediation).toContain('--minimal --write-config');
+  });
+
+  it('success wording is explicit when project checks are skipped', async () => {
+    const modelsDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cg-doctor-models-dir-'));
+    const prior = process.env.CARTOGRAPH_MODELS_DIR;
+    try {
+      process.env.CARTOGRAPH_MODELS_DIR = modelsDir;
+      await fsp.writeFile(path.join(modelsDir, 'custom.gguf'), '');
+
+      const { formatDoctorReport } = await import('../src/installer/doctor.js');
+      const result = await runDoctor({ projectPath, skipProjectChecks: true });
+      const text = formatDoctorReport(result);
+      expect(text).toContain('Project init/config checks were skipped');
+      expect(text).not.toContain('cartograph is ready to use');
+    } finally {
+      if (prior === undefined) delete process.env.CARTOGRAPH_MODELS_DIR;
+      else process.env.CARTOGRAPH_MODELS_DIR = prior;
+      await fsp.rm(modelsDir, { recursive: true, force: true });
+    }
   });
 });

@@ -130,7 +130,12 @@ export interface AdminCommandDeps {
   }>;
   loadRecommendedModels: () => Promise<{ RECOMMENDED_MODELS: readonly unknown[]; MINIMAL_MODELS: readonly unknown[] }>;
   loadRecommendedConfig: () => Promise<{
-    writeRecommendedLlmConfig: (opts: { projectRoot: string; dir?: string }) => {
+    writeRecommendedLlmConfig: (opts: {
+      projectRoot: string;
+      dir?: string;
+      includeAsk?: boolean;
+      includeReranker?: boolean;
+    }) => {
       configPath: string;
       backupPath?: string | null;
       diff: { addedOrUpdated: readonly string[] };
@@ -1594,8 +1599,14 @@ function registerInstallModelsCommand(deps: AdminCommandDeps): void {
         if (options.writeConfig) {
           const projectRoot = resolveProjectPath(options.projectPath);
           const { writeRecommendedLlmConfig } = await loadRecommendedConfig();
-          const writeOpts: { projectRoot: string; dir?: string } = { projectRoot };
+          const writeOpts: { projectRoot: string; dir?: string; includeAsk?: boolean; includeReranker?: boolean } = {
+            projectRoot,
+          };
           if (options.dir) writeOpts.dir = options.dir;
+          if (options.minimal) {
+            writeOpts.includeAsk = false;
+            writeOpts.includeReranker = false;
+          }
           const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
           if (backupPath) {
             info(`Backup written: ${backupPath}`);
@@ -1625,23 +1636,30 @@ function registerDoctorCommand(deps: AdminCommandDeps): void {
     .command('doctor [path]')
     .description("Diagnose install state (mirrors cartograph_admin MCP tool with action='doctor')")
     .option('--fix', 'Auto-apply fixable remediations')
+    .option('--no-project-checks', 'Skip project init/config checks')
     .option('--skip-project-checks', 'Skip project init/config checks')
-    .action(async (pathArg: string | undefined, options: { fix?: boolean; skipProjectChecks?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        const { runDoctor, formatDoctorReport } = await loadDoctor();
-        const result = await runDoctor({
-          projectPath,
-          fix: options.fix === true,
-          skipProjectChecks: options.skipProjectChecks === true,
-        });
-        writeStdout(`${formatDoctorReport(result)}\n`);
-        if (result.overallStatus === 'fail') process.exit(1);
-      } catch (err) {
-        error(`doctor failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
+    .action(
+      async (
+        pathArg: string | undefined,
+        options: { fix?: boolean; projectChecks?: boolean; skipProjectChecks?: boolean },
+      ) => {
+        const projectPath = resolveProjectPath(pathArg);
+        try {
+          const { runDoctor, formatDoctorReport } = await loadDoctor();
+          const skipProjectChecks = options.projectChecks === false || options.skipProjectChecks === true;
+          const result = await runDoctor({
+            projectPath,
+            fix: options.fix === true,
+            skipProjectChecks,
+          });
+          writeStdout(`${formatDoctorReport(result)}\n`);
+          if (result.overallStatus === 'fail') process.exit(1);
+        } catch (err) {
+          error(`doctor failed: ${errMsg(err)}`);
+          process.exit(1);
+        }
+      },
+    );
 }
 
 function registerLlmPlanCommand(deps: AdminCommandDeps): void {

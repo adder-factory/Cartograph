@@ -262,14 +262,20 @@ function fakeInstallLoaders(): Pick<
       MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
     })),
     loadRecommendedConfig: vi.fn(async () => ({
-      writeRecommendedLlmConfig: vi.fn(() => ({
-        configPath: '/repo/.cartograph/config.json',
-        backupPath: '/repo/.cartograph/config.json.bak',
-        diff: { addedOrUpdated: ['llm.embeddingLlm'] },
-      })),
+      writeRecommendedLlmConfig: vi.fn((opts) => {
+        calls.push(`writeRecommendedLlmConfig:${JSON.stringify(opts)}`);
+        return {
+          configPath: '/repo/.cartograph/config.json',
+          backupPath: '/repo/.cartograph/config.json.bak',
+          diff: { addedOrUpdated: ['llm.embeddingLlm'] },
+        };
+      }),
     })),
     loadDoctor: vi.fn(async () => ({
-      runDoctor: vi.fn(async () => ({ overallStatus: 'pass', checks: [] })),
+      runDoctor: vi.fn(async (opts) => {
+        calls.push(`runDoctor:${JSON.stringify(opts)}`);
+        return { overallStatus: 'pass', checks: [] };
+      }),
       formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
     })),
   };
@@ -433,7 +439,19 @@ describe('admin command action bodies', () => {
     expect(text).toContain('info:Imported SCIP index');
     expect(text).toContain('success:Downloaded 1 model');
     expect(text).toContain('success:Updated /repo/.cartograph/config.json');
+    expect(text).toContain('"includeAsk":false');
+    expect(text).toContain('"includeReranker":false');
+    expect(text).toContain('runDoctor:{"projectPath":"');
+    expect(text).toContain('"skipProjectChecks":true');
     expect(text).toContain('success:Applied preset install-ollama');
     expect(text).toContain('success:Updated /repo/.cartograph/config.json');
+  });
+
+  it('accepts --no-project-checks on admin doctor as an alias', async () => {
+    await actions.get('doctor [path]')!(projectPath, { projectChecks: false });
+
+    expect(calls.join('\n')).toContain(
+      `runDoctor:{"projectPath":"${projectPath}","fix":false,"skipProjectChecks":true}`,
+    );
   });
 });

@@ -158,7 +158,12 @@ async function maybeInstallGlobally(clack: ClackApi, useDefaults: boolean): Prom
     s.stop('Linked cartograph globally');
   } catch (err) {
     s.stop('Could not link cartograph globally');
-    clack.log.warn(`Run from the Cartograph source checkout: bun link (${errMsg(err)})`);
+    clack.log.warn(
+      `Run from the Cartograph source checkout: \`bun link\`, then verify with \`cartograph --version\`. ` +
+        `Until PATH is fixed, use the repo-local fallback \`bun src/bin/cartograph.ts <command>\`. ` +
+        `If Bun's global bin lookup fails, add \`$(bun pm bin -g 2>/dev/null || dirname "$(command -v bun)")\` to PATH. ` +
+        `(${errMsg(err)})`,
+    );
   }
 }
 

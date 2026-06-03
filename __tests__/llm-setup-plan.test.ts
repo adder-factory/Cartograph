@@ -12,10 +12,11 @@
  *     the on-disk write + backup path.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import * as scanBackends from '../src/installer/scan-backends.js';
 import {
   planLlmSetup,
   applyLlmSetupChoice,
@@ -57,6 +58,14 @@ describe('planLlmSetup', () => {
       expect(typeof p.requiresInstall).toBe('boolean');
       expect(Array.isArray(p.nextSteps)).toBe(true);
     }
+  });
+
+  it('skip preset guidance names existing commands', async () => {
+    const plan = await planLlmSetup();
+    const skip = plan.presets.find((p) => p.id === 'skip');
+    expect(skip).toBeDefined();
+    expect(skip!.description).toContain('cartograph admin llm-plan');
+    expect(skip!.description).not.toContain('cartograph llm plan');
   });
 
   it('cloudChatAvailable.claudeBin is null OR a string path', async () => {
@@ -102,6 +111,27 @@ describe('planLlmSetup', () => {
       },
     ];
     expect(chooseRecommendedPresetId(detected, presets)).toBe('install-llama-cpp');
+  });
+
+  it('does not advertise one detected llama-server process as all tiers', async () => {
+    const spy = vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([
+      {
+        kind: 'llama-server',
+        endpoint: 'http://localhost:8080',
+        models: ['jina-embeddings-v2-base-code'],
+      },
+    ]);
+    try {
+      const plan = await planLlmSetup();
+      const detected = plan.presets.find((p) => p.id.startsWith('use-detected-llama-server-'));
+      expect(detected).toBeDefined();
+      expect(detected!.summary).toContain('embeddingLlm');
+      expect(detected!.summary).not.toContain('All tiers');
+      expect(detected!.description).toContain('one loaded model per process');
+      expect(detected!.requiresInstall).toBe(false);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
 
@@ -190,7 +220,42 @@ describe('applyLlmSetupChoice', () => {
     expect(result.applied).toBe(false);
     expect(result.preset).toBe('skip');
     expect(result.configPath).toBeNull();
+    expect(result.notes.join('\n')).toContain('cartograph admin llm-plan');
+    expect(result.notes.join('\n')).not.toContain('cartograph llm plan');
     expect(fs.existsSync(path.join(projectRoot, '.cartograph', 'config.json'))).toBe(false);
+  });
+
+  it('detected llama-server apply writes only the matching standard tier', async () => {
+    const spy = vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([
+      {
+        kind: 'llama-server',
+        endpoint: 'http://localhost:8080',
+        models: ['jina-embeddings-v2-base-code'],
+      },
+    ]);
+    try {
+      const plan = await planLlmSetup();
+      const preset = plan.presets.find((p) => p.id.startsWith('use-detected-llama-server-'));
+      expect(preset).toBeDefined();
+
+      const result = await applyLlmSetupChoice({ projectRoot, preset: preset!.id });
+      expect(result.applied).toBe(true);
+      const written = readConfig() as unknown as {
+        llm: {
+          embeddingLlm?: { endpoint: string; model: string };
+          summarizeLlm?: unknown;
+          askLlm?: unknown;
+          rerankerLlm?: unknown;
+        };
+      };
+      expect(written.llm.embeddingLlm?.endpoint).toBe('http://localhost:8080');
+      expect(written.llm.embeddingLlm?.model).toBe('jina-embeddings-v2-base-code');
+      expect(written.llm.summarizeLlm).toBeUndefined();
+      expect(written.llm.askLlm).toBeUndefined();
+      expect(written.llm.rerankerLlm).toBeUndefined();
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('unknown preset id throws with the list of valid presets in the message', async () => {

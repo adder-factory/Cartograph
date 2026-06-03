@@ -248,7 +248,7 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
   presets.push({
     id: 'skip',
     label: 'Skip — configure later',
-    description: 'Write nothing. Re-run `cartograph llm setup` when ready.',
+    description: 'Write nothing. Re-run `cartograph admin llm-plan` or `cartograph llm setup` when ready.',
     summary: 'No config change.',
     nextSteps: [],
     requiresInstall: false,
@@ -260,7 +260,7 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
 function buildUseDetectedPreset(b: DetectedBackend): SetupPreset {
   const id: SetupPresetId = `use-detected-${b.kind}-${b.endpoint.replaceAll(/[^a-z0-9]/gi, '-')}`;
   const isOllama = b.kind === 'ollama';
-  const summary = `All tiers → ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'} loaded)`;
+  const llamaTier = b.kind === 'llama-server' ? llamaServerTierForEndpoint(b.endpoint) : null;
   const nextSteps: string[] = [];
   if (isOllama) {
     // Detect which recommended models the running Ollama is missing.
@@ -279,13 +279,123 @@ function buildUseDetectedPreset(b: DetectedBackend): SetupPreset {
   return {
     id,
     label: `Use detected ${backendLabel(b.kind)} at ${b.endpoint}`,
-    description: isOllama
-      ? 'Single endpoint, model auto-swap. Easiest path when Ollama is already installed.'
-      : 'Single endpoint. Ensure the backend has the relevant model(s) loaded for each tier you want to use.',
-    summary,
+    description: detectedPresetDescription(b.kind),
+    summary: detectedPresetSummary(b, llamaTier),
     nextSteps,
-    requiresInstall: nextSteps.length === 1, // only 'doctor' line → no install
+    requiresInstall: nextSteps.length > 1,
     detectedBackend: { kind: b.kind, endpoint: b.endpoint, models: b.models },
+  };
+}
+
+function detectedPresetDescription(kind: DetectedBackendKind): string {
+  switch (kind) {
+    case 'ollama':
+      return 'Single endpoint, model auto-swap. Easiest path when Ollama is already installed.';
+    case 'llama-server':
+      return 'llama-server serves one loaded model per process. This preset wires only the tier matching the detected port.';
+    default:
+      return 'Single endpoint. Ensure the backend has the relevant model(s) loaded for each tier you want to use.';
+  }
+}
+
+function detectedPresetSummary(b: DetectedBackend, llamaTier: LlamaServerTierInfo | null): string {
+  const modelCount = `${b.models.length} model${b.models.length === 1 ? '' : 's'} loaded`;
+  if (b.kind === 'ollama') return `All tiers → ${b.endpoint} (${modelCount})`;
+  if (llamaTier) {
+    return `${llamaTier.summaryTier} → ${b.endpoint} (${modelCount}); other tiers stay unconfigured/fallback`;
+  }
+  return `Single detected endpoint → ${b.endpoint} (${modelCount}); configure only the tier this backend serves`;
+}
+
+type LlamaServerDetectedTier = 'embeddingLlm' | 'summarizeLlm' | 'askLlm' | 'rerankerLlm';
+
+interface LlamaServerTierInfo {
+  readonly configTier: LlamaServerDetectedTier;
+  readonly summaryTier: string;
+}
+
+function llamaServerTierForEndpoint(endpoint: string): LlamaServerTierInfo | null {
+  switch (endpoint) {
+    case LLAMA_SERVER_EMBED_ENDPOINT:
+      return { configTier: 'embeddingLlm', summaryTier: 'embeddingLlm' };
+    case LLAMA_SERVER_SUMMARIZE_ENDPOINT:
+      return { configTier: 'summarizeLlm', summaryTier: 'summarizeLlm + localLlm' };
+    case LLAMA_SERVER_ASK_ENDPOINT:
+      return { configTier: 'askLlm', summaryTier: 'askLlm' };
+    case LLAMA_SERVER_RERANKER_ENDPOINT:
+      return { configTier: 'rerankerLlm', summaryTier: 'rerankerLlm' };
+    default:
+      return null;
+  }
+}
+
+function buildDetectedLlamaServerConfig(
+  endpoint: string,
+  models: ReadonlyArray<string>,
+): NonNullable<CartographConfig['llm']> | null {
+  const tier = llamaServerTierForEndpoint(endpoint);
+  if (!tier) return null;
+  const fallbackModel = models[0] ?? '<set model in config.json>';
+  const cfg: NonNullable<CartographConfig['llm']> = {};
+  switch (tier.configTier) {
+    case 'embeddingLlm':
+      cfg.embeddingLlm = { provider: 'openai-compat', endpoint, model: fallbackModel };
+      break;
+    case 'summarizeLlm':
+      cfg.summarizeLlm = { provider: 'openai-compat', endpoint, model: fallbackModel };
+      cfg.localLlm = { provider: 'openai-compat', endpoint, model: fallbackModel };
+      break;
+    case 'askLlm':
+      cfg.askLlm = { provider: 'openai-compat', endpoint, model: fallbackModel };
+      break;
+    case 'rerankerLlm':
+      cfg.rerankerLlm = { provider: 'openai-compat', endpoint, model: fallbackModel };
+      break;
+  }
+  return cfg;
+}
+
+function buildCloudOpenAiConfig(): NonNullable<CartographConfig['llm']> {
+  // Omit `endpoint` so the SDK defaults to api.openai.com.
+  // Omit `apiKey` so the SDK reads OPENAI_API_KEY from env (the
+  // standard OpenAI client convention — keeps the secret out of the
+  // committed config file).
+  return {
+    summarizeLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.summarize },
+    localLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.summarize },
+    askLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.ask },
+    embeddingLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.embed },
+  };
+}
+
+function buildCloudOpenAiCompatTemplateConfig(): NonNullable<CartographConfig['llm']> {
+  // Placeholder values are sentinels doctor will flag as unreachable
+  // so the user sees a concrete remediation instead of silent breakage.
+  return {
+    summarizeLlm: {
+      provider: 'openai-compat',
+      endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
+      apiKey: 'YOUR-KEY',
+      model: 'YOUR-CHAT-MODEL',
+    },
+    localLlm: {
+      provider: 'openai-compat',
+      endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
+      apiKey: 'YOUR-KEY',
+      model: 'YOUR-CHAT-MODEL',
+    },
+    askLlm: {
+      provider: 'openai-compat',
+      endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
+      apiKey: 'YOUR-KEY',
+      model: 'YOUR-ASK-MODEL',
+    },
+    embeddingLlm: {
+      provider: 'openai-compat',
+      endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
+      apiKey: 'YOUR-KEY',
+      model: 'YOUR-EMBED-MODEL',
+    },
   };
 }
 
@@ -476,7 +586,7 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
       configPath: null,
       backupPath: null,
       nextSteps: preset.nextSteps,
-      notes: ['User chose to skip. Re-run `cartograph llm plan` later when ready.'],
+      notes: ['User chose to skip. Re-run `cartograph admin llm-plan` or `cartograph llm setup` later when ready.'],
     };
   }
 
@@ -615,8 +725,11 @@ function buildConfigForPreset(
         ask: OLLAMA_RECOMMENDED_MODELS.ask,
       });
     }
-    // llama-server / mlx_lm / LM Studio / etc. — use the first loaded
-    // model as the universal model id. User edits per-tier if needed.
+    if (kind === 'llama-server') {
+      return buildDetectedLlamaServerConfig(endpoint, models);
+    }
+    // mlx_lm / LM Studio / etc. — use the first loaded model as the
+    // universal model id. User edits per-tier if needed.
     const fallbackModel = models[0] ?? '<set model in config.json>';
     return buildSingleEndpointConfig(endpoint, {
       embed: fallbackModel,
@@ -642,47 +755,10 @@ function buildConfigForPreset(
     });
   }
   if (id === 'cloud-openai') {
-    // Omit `endpoint` so the SDK defaults to api.openai.com.
-    // Omit `apiKey` so the SDK reads OPENAI_API_KEY from env (the
-    // standard OpenAI client convention — keeps the secret out of the
-    // committed config file).
-    return {
-      summarizeLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.summarize },
-      localLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.summarize },
-      askLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.ask },
-      embeddingLlm: { provider: 'openai-compat', model: CLOUD_OPENAI_MODELS.embed },
-    };
+    return buildCloudOpenAiConfig();
   }
   if (id === 'cloud-openai-compat') {
-    // Template config — user MUST hand-edit before it works. Placeholder
-    // values are sentinels doctor will flag as "endpoint not reachable"
-    // so the user sees a concrete remediation instead of silent breakage.
-    return {
-      summarizeLlm: {
-        provider: 'openai-compat',
-        endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
-        apiKey: 'YOUR-KEY',
-        model: 'YOUR-CHAT-MODEL',
-      },
-      localLlm: {
-        provider: 'openai-compat',
-        endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
-        apiKey: 'YOUR-KEY',
-        model: 'YOUR-CHAT-MODEL',
-      },
-      askLlm: {
-        provider: 'openai-compat',
-        endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
-        apiKey: 'YOUR-KEY',
-        model: 'YOUR-ASK-MODEL',
-      },
-      embeddingLlm: {
-        provider: 'openai-compat',
-        endpoint: OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
-        apiKey: 'YOUR-KEY',
-        model: 'YOUR-EMBED-MODEL',
-      },
-    };
+    return buildCloudOpenAiCompatTemplateConfig();
   }
   if (id === 'hybrid-claude-bridge' || id === 'hybrid-anthropic-api') {
     const base = buildRecommendedLlmConfig();
