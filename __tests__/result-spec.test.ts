@@ -1212,7 +1212,7 @@ describe('migrated-tool wording alignment (#32)', () => {
     expect(onText).toMatch(/test\/script paths INCLUDED/);
   });
 
-  it('dead-code static spec formatRow renders the canonical orphan bullet', () => {
+  it('dead-code static spec formatRow renders the canonical orphan bullet with graph evidence', () => {
     const fakeNode = {
       id: 'n1',
       name: 'foo',
@@ -1221,7 +1221,9 @@ describe('migrated-tool wording alignment (#32)', () => {
       startLine: 42,
     } as unknown as Node;
     const spec = buildDeadCodeStaticSpec({ candidates: [fakeNode], includeTests: false });
-    expect(spec.formatRow(fakeNode)).toBe('- `foo` (function) — src/foo.ts:42');
+    expect(spec.formatRow(fakeNode)).toBe(
+      '- `foo` (function) — src/foo.ts:42 — Graph evidence: no incoming usage edges; not exported; outside test/script paths.',
+    );
   });
 
   // ── dead-code (judge, heading-per-row card-list) ─────────────────
@@ -1229,7 +1231,7 @@ describe('migrated-tool wording alignment (#32)', () => {
   // Each card heading carries the verdict tier + confidence percent +
   // optional hedge phrase when a definite DEAD/LIVE pairs with low
   // confidence (the "false-clean heading" risk the hedge mitigates).
-  it("dead-code judge spec title + preamble mention 'Dead-code candidates' + 'LLM verdict'", () => {
+  it("dead-code judge spec title + preamble mention 'Dead-code candidates' + graph evidence + 'LLM verdict'", () => {
     const fakeCand: DeadCodeCandidate = {
       node: {
         id: 'n1',
@@ -1245,6 +1247,7 @@ describe('migrated-tool wording alignment (#32)', () => {
     const spec = buildDeadCodeJudgeSpec([fakeCand], 5);
     const allText = cardListSpecStrings(spec).join(' | ').toLowerCase();
     expect(allText).toMatch(/dead-code candidates/);
+    expect(allText).toMatch(/no incoming usage edges/);
     expect(allText).toMatch(/llm verdict/);
     expect(spec.title).toBe('Dead-code candidates (1 of 5 judged)');
   });
@@ -1284,7 +1287,7 @@ describe('migrated-tool wording alignment (#32)', () => {
     expect(spec.rowHeading(highDead)).not.toMatch(/low confidence/);
   });
 
-  it('dead-code judge spec rowBody emits file:line + optional > reason blockquote', () => {
+  it('dead-code judge spec rowBody emits file:line + graph evidence + optional > reason blockquote', () => {
     const withReason: DeadCodeCandidate = {
       node: { id: 'n1', name: 'foo', kind: 'function', filePath: 'src/a.ts', startLine: 5 } as unknown as Node,
       verdict: 'dead',
@@ -1293,8 +1296,15 @@ describe('migrated-tool wording alignment (#32)', () => {
     };
     const withoutReason: DeadCodeCandidate = { ...withReason, reason: '' };
     const spec = buildDeadCodeJudgeSpec([withReason], 1);
-    expect(spec.rowBody(withReason)).toEqual(['src/a.ts:5', '> Only call site is in a deleted test fixture.']);
-    expect(spec.rowBody(withoutReason)).toEqual(['src/a.ts:5']);
+    expect(spec.rowBody(withReason)).toEqual([
+      'src/a.ts:5',
+      'Graph evidence: no incoming usage edges; not exported; path filters already applied before judging.',
+      '> Only call site is in a deleted test fixture.',
+    ]);
+    expect(spec.rowBody(withoutReason)).toEqual([
+      'src/a.ts:5',
+      'Graph evidence: no incoming usage edges; not exported; path filters already applied before judging.',
+    ]);
   });
 
   it("dead-code judge spec rowBody drops ':line' segment when startLine is falsy", () => {
@@ -1311,7 +1321,10 @@ describe('migrated-tool wording alignment (#32)', () => {
       reason: '',
     };
     const spec = buildDeadCodeJudgeSpec([cand], 1);
-    expect(spec.rowBody(cand)).toEqual(['src/x.ts']);
+    expect(spec.rowBody(cand)).toEqual([
+      'src/x.ts',
+      'Graph evidence: no incoming usage edges; not exported; path filters already applied before judging.',
+    ]);
   });
 
   // ── dead-code (uncertain top, bullet-list) ───────────────────────

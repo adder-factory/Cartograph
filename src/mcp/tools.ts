@@ -818,12 +818,24 @@ function toFreshnessMetadata(
 ): import('./tool-types.js').FreshnessMetadata {
   const metadata: import('./tool-types.js').FreshnessMetadata = {
     isStale: f.isStale,
+    severity: f.severity,
     indexedSha: f.indexedSha,
     currentSha: f.currentSha,
     filesChanged: f.filesChanged,
+    contentDriftedFiles: f.contentDriftedFiles,
     commitsAhead: f.commitsAhead,
     breakdown: f.breakdown,
+    recommendedAction: freshnessRecommendedAction(f, extra),
   };
   if (extra) Object.assign(metadata, extra);
   return metadata;
+}
+
+function freshnessRecommendedAction(
+  f: import('../freshness.js').FreshnessInfo,
+  extra?: { autoSynced?: boolean; blocked?: boolean },
+): import('./tool-types.js').FreshnessMetadata['recommendedAction'] {
+  if (extra?.autoSynced || !f.isStale) return 'none';
+  if (extra?.blocked || shouldBlockOnHeavyDrift(f)) return 'sync_required';
+  return 'sync';
 }

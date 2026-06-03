@@ -84,6 +84,9 @@ describe('Tooling-gaps #2: --allow-stale opt-in', () => {
     // freshness metadata, so isStale alone is not enough.
     expect((result as any).metadata?.freshness).toBeDefined();
     expect((result as any).metadata?.freshness?.isStale).toBe(true);
+    expect((result as any).metadata?.freshness?.severity).toBe('very_stale');
+    expect((result as any).metadata?.freshness?.recommendedAction).toBe('sync_required');
+    expect((result as any).metadata?.freshness?.contentDriftedFiles).toBe(null);
     expect((result as any).metadata?.freshness?.blocked).not.toBe(true);
     expect((result as any).isError).not.toBe(true);
   });

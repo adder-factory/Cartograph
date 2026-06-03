@@ -172,9 +172,19 @@ interface FormatStaticDeadCodeArgs {
   readonly includeTests: boolean;
 }
 
+function graphEvidence(includeTests: boolean): string {
+  const pathScope = includeTests ? 'test/script paths included by request' : 'outside test/script paths';
+  return `Graph evidence: no incoming usage edges; not exported; ${pathScope}.`;
+}
+
+function judgeGraphEvidence(): string {
+  return 'Graph evidence: no incoming usage edges; not exported; path filters already applied before judging.';
+}
+
 /**
  * Build the static-dead-code H2 bullet-list spec — graph-only orphan
- * candidates rendered as `- \`name\` (kind) — file:line`. Title
+ * candidates rendered as `- \`name\` (kind) — file:line — evidence`.
+ * Title
  * interpolates `candidates.length`; preamble explains the rule-tier
  * coverage AND the path-class footprint via `includeTests`. The spec
  * OWNS all four user-facing wording surfaces (title + preamble +
@@ -192,15 +202,15 @@ export function buildDeadCodeStaticSpec(args: {
 }): MarkdownBulletListSpec<Node> {
   const { candidates, includeTests } = args;
   const pathNote = includeTests
-    ? 'no incoming calls, not exported; test/script paths INCLUDED'
-    : 'no incoming calls, not exported, not in test/script paths';
+    ? 'no incoming usage edges, not exported; test/script paths INCLUDED'
+    : 'no incoming usage edges, not exported, not in test/script paths';
   return {
     title: `Static dead-code candidates (${candidates.length}, no LLM judge)`,
     preamble: [
       `_These are graph-only orphans (${pathNote}). Framework hooks, dynamic dispatch, and reflective callers are NOT filtered out — for that, run \`via: 'llm'\`._`,
     ],
     rows: candidates,
-    formatRow: (c) => `- \`${c.name}\` (${c.kind}) — ${c.filePath}:${c.startLine}`,
+    formatRow: (c) => `- \`${c.name}\` (${c.kind}) — ${c.filePath}:${c.startLine} — ${graphEvidence(includeTests)}`,
     emptyState: '',
   };
 }
@@ -350,7 +360,9 @@ export function buildDeadCodeJudgeSpec(
 ): MarkdownCardListSpec<DeadCodeCandidate> {
   return {
     title: `Dead-code candidates (${rows.length} of ${totalCandidates} judged)`,
-    preamble: ['_Combines graph signal (no callers + not exported) with LLM verdict._'],
+    preamble: [
+      '_Combines graph signal (no incoming usage edges + not exported) with LLM verdict. Each row separates graph evidence from model rationale._',
+    ],
     rows,
     rowHeading: (c) => {
       const conf = `${(c.confidence * 100).toFixed(0)}%`;
@@ -361,7 +373,7 @@ export function buildDeadCodeJudgeSpec(
     },
     rowBody: (c) => {
       const loc = c.node.startLine ? `:${c.node.startLine}` : '';
-      const body: string[] = [`${c.node.filePath}${loc}`];
+      const body: string[] = [`${c.node.filePath}${loc}`, judgeGraphEvidence()];
       if (c.reason) body.push(`> ${c.reason}`);
       return body;
     },

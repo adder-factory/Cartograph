@@ -1,3 +1,5 @@
+import type { FreshnessSeverity } from '../freshness.js';
+
 /**
  * Shared MCP tool types.
  *
@@ -36,11 +38,17 @@ export interface ToolDefinition {
  */
 export interface FreshnessMetadata {
   isStale: boolean;
+  /** Bucketed trust level from FreshnessInfo. Lets clients style drift severity. */
+  severity: FreshnessSeverity;
   indexedSha: string | null;
   currentSha: string | null;
   filesChanged: number | null;
+  /** Git-independent count of indexed files whose content drifted on disk. */
+  contentDriftedFiles: number | null;
   commitsAhead: number | null;
   breakdown: { added: number; modified: number; deleted: number; total: number } | null;
+  /** One-word action hint for clients that render metadata apart from text. */
+  recommendedAction: 'none' | 'sync' | 'sync_required';
   /** True when execute() ran an inline sync before dispatching. */
   autoSynced?: boolean;
   /** True when execute() refused to dispatch because drift is too large. */

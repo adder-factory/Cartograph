@@ -52,7 +52,7 @@ const STALE_FILES_CHANGED = 10;
  * An in-sync repo whose index is old is still correct — `recent` (or
  * `fresh` if very young), never `stale` / `very_stale`.
  */
-type FreshnessSeverity = 'fresh' | 'recent' | 'stale' | 'very_stale';
+export type FreshnessSeverity = 'fresh' | 'recent' | 'stale' | 'very_stale';
 
 export interface FreshnessInfo {
   isStale: boolean;
