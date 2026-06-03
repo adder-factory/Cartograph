@@ -53,6 +53,7 @@ interface AtRangeOptions {
   ranges?: string;
   compact?: boolean;
   fields?: string;
+  lowTokens?: boolean;
 }
 
 interface StatusOptions {
@@ -93,6 +94,7 @@ interface FindOptions {
   allowStale?: boolean;
   compact?: boolean;
   fields?: string;
+  lowTokens?: boolean;
 }
 
 interface AffectedOptions {
@@ -176,6 +178,7 @@ async function buildAtRangeArgs(params: {
   if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '20', optionName: '--limit', opts: { min: 1 } }))
     return null;
   if (options.compact) args['compact'] = true;
+  if (options.lowTokens) args['lowTokens'] = true;
   if (options.fields) {
     args['fields'] = options.fields
       .split(',')
@@ -581,6 +584,7 @@ async function runFindContent(query: string | undefined, options: FindOptions): 
   if (options.language) args['language'] = options.language;
   if (options.since) args['since'] = options.since;
   if (options.allowStale) args['allowStale'] = true;
+  if (options.lowTokens) args['lowTokens'] = true;
   await readCommandMcpRunner('cartograph_find', args, options.projectPath);
 }
 
@@ -592,6 +596,7 @@ async function runFindEnvOrSql(by: 'env' | 'sql', options: FindOptions): Promise
   if (options.op) args['op'] = options.op;
   args['includeTests'] = options.includeTests;
   if (options.allowStale) args['allowStale'] = true;
+  if (options.lowTokens) args['lowTokens'] = true;
   await readCommandMcpRunner('cartograph_find', args, options.projectPath);
 }
 
@@ -620,6 +625,7 @@ async function runFindDelegatedNameMode(mode: string, query: string | undefined,
   if (options.languageFilter) args['languageFilter'] = options.languageFilter;
   if (options.pathFilter) args['pathFilter'] = options.pathFilter;
   if (options.allowStale) args['allowStale'] = true;
+  if (options.lowTokens) args['lowTokens'] = true;
   await readCommandMcpRunner('cartograph_find', args, options.projectPath);
 }
 
@@ -671,6 +677,7 @@ async function runFindExactName(query: string | undefined, options: FindOptions)
   if (fields) exactArgs['fields'] = fields;
   if (options.since) exactArgs['since'] = options.since;
   if (options.allowStale) exactArgs['allowStale'] = true;
+  if (options.lowTokens) exactArgs['lowTokens'] = true;
   await readCommandMcpRunner('cartograph_find', exactArgs, options.projectPath);
 }
 
@@ -844,10 +851,10 @@ type FileListing = ReturnType<typeof getAllFilesWithSymbolCount>;
 type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
 
 function parseFilesOutputOptions(
-  options: { format?: string; maxDepth?: string },
+  options: { format?: string; maxDepth?: string; lowTokens?: boolean },
   close: () => void,
 ): { format: FileListFormat; maxDepth: number | undefined } | null {
-  const format = (options.format || 'tree') as FileListFormat;
+  const format = (options.format ?? (options.lowTokens ? 'summary' : 'tree')) as FileListFormat;
   const validFormats: FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
   if (!validFormats.includes(format)) {
     error(`Invalid value for --format: "${format}" — valid values: ${validFormats.join(', ')}`);
@@ -855,7 +862,7 @@ function parseFilesOutputOptions(
     process.exitCode = 1;
     return null;
   }
-  if (!options.maxDepth) return { format, maxDepth: undefined };
+  if (!options.maxDepth) return { format, maxDepth: options.lowTokens ? 3 : undefined };
   const maxDepth = Number.parseInt(options.maxDepth, 10);
   if (!Number.isFinite(maxDepth)) {
     error(`Invalid value for --max-depth: "${options.maxDepth}" is not a number`);
@@ -1010,6 +1017,7 @@ function registerAtRangeCommand(deps: ReadCommandDeps): void {
       '--fields <names>',
       '(--compact only) Comma-separated subset of fields to emit: name,kind,path,line,endLine,signature. Default: all six.',
     )
+    .option('--low-tokens', 'Prefer compact projected rows plus a lower per-range cap')
     .action(
       async (
         file: string | undefined,
@@ -1022,6 +1030,7 @@ function registerAtRangeCommand(deps: ReadCommandDeps): void {
           ranges?: string;
           compact?: boolean;
           fields?: string;
+          lowTokens?: boolean;
         },
       ) => {
         const args = await buildAtRangeArgs({ file, startLine, endLine, options });
@@ -1262,6 +1271,7 @@ function registerFindCommand(deps: ReadCommandDeps): void {
       'Delta mode: pass a `c_xxxxxxxx` UID to return only NEW rows (--by name + --mode exact, or --by content)',
     )
     .option('--allow-stale', 'Bypass the freshness gate; query the cached index even when stale')
+    .option('--low-tokens', 'Prefer compact output: compact exact-name rows and lower default caps')
     .option('--compact', '(--by name --mode exact) Emit terse pipe-delimited rows (name|kind|path:line|sig:…|id:…)')
     .option(
       '--fields <fields>',
@@ -1291,6 +1301,7 @@ function registerFindCommand(deps: ReadCommandDeps): void {
           allowStale?: boolean;
           compact?: boolean;
           fields?: string;
+          lowTokens?: boolean;
         },
       ) => {
         const restoreRunner = setReadCommandMcpRunnerForTest(deps.runViaMCP);
@@ -1341,6 +1352,7 @@ interface FilesCommandOptions {
   maxDepth?: string;
   metadata?: boolean;
   json?: boolean;
+  lowTokens?: boolean;
 }
 
 function registerFilesCommand(deps: ReadCommandDeps): void {
@@ -1351,9 +1363,10 @@ function registerFilesCommand(deps: ReadCommandDeps): void {
     .option('-p, --project-path <path>', 'Project path')
     .option('--dir <dir>', 'Filter to files under this directory')
     .option('--pattern <glob>', 'Filter files matching this glob pattern')
-    .option('--format <format>', 'Output format (tree, flat, grouped, summary)', 'tree')
+    .option('--format <format>', 'Output format (tree, flat, grouped, summary)')
     .option('--max-depth <number>', 'Maximum directory depth for tree format')
     .option('--no-metadata', 'Hide file metadata (language, symbol count)')
+    .option('--low-tokens', 'Prefer compact output: defaults to summary format, no metadata, and shallow max depth')
     .option('-j, --json', 'Output as JSON')
     .action(async (dirArg: string | undefined, options: FilesCommandOptions) => runFilesCommand(deps, dirArg, options));
 }
@@ -1395,7 +1408,7 @@ async function runFilesCommand(
     printFilesOutput({
       files,
       format: outputOptions.format,
-      includeMetadata: effectiveOptions.metadata !== false,
+      includeMetadata: effectiveOptions.lowTokens ? false : effectiveOptions.metadata !== false,
       maxDepth: outputOptions.maxDepth,
       dir: effectiveOptions.dir,
       queries: cg.queries,

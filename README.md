@@ -276,7 +276,7 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 **The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
-For the smallest useful output, pass `lowTokens: true` to supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
+For the smallest useful output, pass `lowTokens: true` in MCP or `--low-tokens` in the CLI for supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
 
 | Tool | Use For |
 |------|----------|
@@ -485,7 +485,7 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 
 ### Token Savings Benchmark
 
-Supported high-volume MCP tools accept `lowTokens: true`: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. In a local measurement on this repository, `lowTokens: true` reduced representative MCP response output by about 57% versus regular Cartograph output, with source-heavy exploration cases saving roughly 78-89%.
+Supported high-volume tools accept `lowTokens: true` over MCP and `--low-tokens` on the matching CLI commands: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. In a local measurement on this repository, `lowTokens: true` reduced representative MCP response output by about 56% versus regular Cartograph output, with source-heavy exploration cases saving roughly 73-89%.
 
 Re-run the benchmark with `bun run benchmark:tokens`. Token counts below are estimated as characters / 4, so treat them as directional rather than tokenizer-exact:
 
@@ -493,7 +493,7 @@ Re-run the benchmark with `bun run benchmark:tokens`. Token counts below are est
 |---|---:|---:|---:|---|
 | `find handleFind` | ~345 | ~172 | ~881 | ~50% less vs regular, ~80% less vs baseline |
 | `graph callers handleFind` | ~42 | ~37 | no fair grep equivalent | ~12% less vs regular |
-| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,691 | ~78% less vs regular, ~86% less vs baseline |
+| `context` for `cartograph_find` dispatch | ~1,894 | ~503 | ~3,691 | ~73% less vs regular, ~86% less vs baseline |
 | `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,691 | ~89% less vs regular, ~75% less vs baseline |
 | `at_range` on `find.ts` dispatch lines | ~55 | ~25 | ~616 | ~55% less vs regular, ~96% less vs baseline |
 | `node` batch for find-tool symbols | ~617 | ~534 | ~327 | ~13% less vs regular, ~63% more vs baseline |

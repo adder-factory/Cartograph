@@ -899,7 +899,7 @@ describe('CLI behaviour parity (spawned)', () => {
       const help = runCli(cliEntry, repoRoot, ['at-range', '--help']);
       expect(help.code).toBe(0);
       expect(help.out).toContain('--ranges');
-      const { out, code } = runCli(cliEntry, repoRoot, ['at-range', '--ranges', 'src/mcp/tools/at-range.ts:549-567']);
+      const { out, code } = runCli(cliEntry, repoRoot, ['at-range', '--ranges', 'src/mcp/tools/at-range.ts:577-585']);
       expect(code).toBe(0);
       expect(out).toContain('renderDiffRangeReport');
     },
