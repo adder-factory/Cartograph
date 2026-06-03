@@ -32,19 +32,22 @@ Completed in the previous session:
 - Updated README, playbook/server instructions, generated agent
   instructions, and CLI `serve --help`.
 
-Measured after Task 3:
+Measured after Task 4:
 
 - Full MCP server: 36 tools.
 - Full `tools/list`: ~16,076 estimated tokens.
 - Compact initialize guide: ~447 estimated tokens.
 - Full MCP load including compact initialize guide: ~16,522 estimated
   tokens.
-- Full playbook remains available through `cartograph_playbook`: ~2,851
+- Full playbook remains available through `cartograph_playbook`: ~2,870
   estimated tokens.
 - With `--no-write-tools`: 31 tools, combined load ~13,584 estimated
   tokens.
 - Per-call `lowTokens` benchmark average: ~57% less output than regular
   Cartograph on the measured cases.
+- `cartograph mcp-budget` / `bun run measure:mcp-load` now reports
+  tool count, `tools/list`, initialize, combined startup load, on-demand
+  full playbook size, and top schema contributors.
 
 Verification already passed:
 
@@ -163,12 +166,12 @@ Likely starting points:
 
 ## Task 4: Budget Visibility
 
-- [ ] Add a small script or CLI diagnostic for MCP load budget, e.g.
+- [x] Add a small script or CLI diagnostic for MCP load budget, e.g.
   `scripts/measure-mcp-load.ts` or `cartograph mcp-budget`.
-- [ ] Report tool count, `tools/list` chars/tokens, initialize
+- [x] Report tool count, `tools/list` chars/tokens, initialize
   chars/tokens, combined load, and top schema contributors.
-- [ ] Wire it into docs and optionally package scripts.
-- [ ] Keep the existing registry test as the hard guard.
+- [x] Wire it into docs and optionally package scripts.
+- [x] Keep the existing registry test as the hard guard.
 
 Likely starting points:
 

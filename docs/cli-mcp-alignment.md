@@ -72,6 +72,10 @@ deprecated `--mode static|judge` alias.
   itself.
 - **`cartograph install`** — git-hooks installer; touches
   `.git/hooks/`. Interactive prompts.
+- **`cartograph mcp-budget`** — measures the MCP connection payload
+  before a session starts (`tools/list` + initialize instructions).
+  Exposing it through MCP would measure the surface only after the
+  context cost was already paid.
 - **`cartograph llm setup`** — interactive provider config wizard.
   Configures nllc GGUF models or Claude (claude-bridge / anthropic-api)
   and prompts on conflicts.

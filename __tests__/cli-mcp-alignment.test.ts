@@ -50,6 +50,12 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // expose via MCP (you'd already be inside an MCP session).
   'serve',
 
+  // `cartograph mcp-budget` is a CLI-side diagnostic for the MCP
+  // connection payload (`tools/list` + initialize instructions). It
+  // measures the server surface before a session starts, so exposing
+  // it as an MCP tool would miss the point.
+  'mcp_budget',
+
   // `cartograph viewer` boots the local HTTP viewer; no MCP mirror
   // because the viewer is a standalone web UI, not a tool call.
   'viewer',

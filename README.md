@@ -278,6 +278,8 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass `lowTokens: true` in MCP or `--low-tokens` in the CLI for supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Server operators can make this the default for supported MCP tools with `cartograph serve --mcp --low-tokens-default`; callers can still pass `lowTokens: false` for one regular response.
 
+If you control the MCP server launch, run `cartograph mcp-budget` to measure startup load. `cartograph serve --mcp --profile core`, `--profile read-only`, `--no-write-tools`, and repeated `--disable-tool <name>` reduce the advertised tool list loaded at connection time.
+
 | Tool | Use For |
 |------|----------|
 | `cartograph_find` | Find symbols by name / regex / env-var / SQL ref (`by:` slice + `mode:`) |
@@ -431,6 +433,7 @@ cartograph summaries               # Agent-bridge summary pull/save
 cartograph local-chat              # Delegate bulk prose to local LLM
 cartograph discover                # Find other .cartograph indexes
 cartograph playbook                # Print the MCP tool playbook
+cartograph mcp-budget              # Measure MCP tools/list + initialize load
 cartograph viewer                  # Open the local graph viewer
 ```
 
@@ -487,6 +490,8 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 
 MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. On this repository, the full 36-tool list serializes to about 64 KB, or roughly 16k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured MCP load context is about 66 KB, or 16.5k estimated tokens.
 
+Measure the current surface with `cartograph mcp-budget` or `bun run measure:mcp-load`. The report includes tool count, `tools/list`, initialize, combined startup load, the on-demand full playbook size, and the largest schema contributors. Pass `--profile`, `--no-write-tools`, `--disable-tool`, `--top`, or `--json` to inspect a specific server shape.
+
 That startup schema cost is separate from per-call output tokens, so `lowTokens: true` and `--low-tokens-default` reduce tool results but do not shrink the advertised tool list.
 
 For focused or read-only agents, trim the advertised surface at server launch:
@@ -512,12 +517,12 @@ Re-run the benchmark with `bun run benchmark:tokens`. Token counts below are est
 |---|---:|---:|---:|---|
 | `find handleFind` | ~345 | ~172 | ~881 | ~50% less vs regular, ~80% less vs baseline |
 | `graph callers handleFind` | ~42 | ~37 | no fair grep equivalent | ~12% less vs regular |
-| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,724 | ~78% less vs regular, ~86% less vs baseline |
-| `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,724 | ~89% less vs regular, ~75% less vs baseline |
+| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,752 | ~78% less vs regular, ~86% less vs baseline |
+| `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,752 | ~89% less vs regular, ~75% less vs baseline |
 | `at_range` on `find.ts` dispatch lines | ~55 | ~25 | ~616 | ~55% less vs regular, ~96% less vs baseline |
 | `node` batch for find-tool symbols | ~617 | ~534 | ~327 | ~13% less vs regular, ~63% more vs baseline |
-| `files` project overview | ~3,746 | ~822 | ~8,796 | ~78% less vs regular, ~91% less vs baseline |
-| `imports` project audit | ~3,338 | ~671 | ~240,785 | ~80% less vs regular, ~100% less vs baseline |
+| `files` project overview | ~3,745 | ~822 | ~8,817 | ~78% less vs regular, ~91% less vs baseline |
+| `imports` project audit | ~3,338 | ~671 | ~241,102 | ~80% less vs regular, ~100% less vs baseline |
 
 Exact single-file text search can still be cheaper when you already know the file and string. Cartograph's savings show up when the agent needs structured context instead of raw matching source lines.
 

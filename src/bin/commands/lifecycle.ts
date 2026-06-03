@@ -25,6 +25,7 @@ import {
   isMcpServerProfile,
   type McpServerProfile,
 } from '../../mcp/profiles.js';
+import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -61,6 +62,14 @@ interface ServeCommandOptions {
   lowTokensDefault?: boolean;
   disableTool?: string[];
   startupSync?: boolean; // commander auto-inverts `--no-startup-sync` → startupSync=false
+}
+
+interface McpBudgetCommandOptions {
+  profile?: string;
+  writeTools?: boolean; // commander auto-inverts `--no-write-tools` → writeTools=false
+  disableTool?: string[];
+  top?: string;
+  json?: boolean;
 }
 
 interface LifecycleCommandDeps {
@@ -102,6 +111,10 @@ interface LifecycleCommandDeps {
       }>;
       closeAll: () => void;
     };
+  }>;
+  loadMcpLoadBudget: () => Promise<{
+    measureMcpLoadBudget: (cg?: null, options?: MeasureMcpLoadBudgetOptions) => McpLoadBudgetReport;
+    formatMcpLoadBudgetReport: (report: McpLoadBudgetReport) => string;
   }>;
   loadViewerServer: () => Promise<{
     startViewerServer: (
@@ -153,6 +166,7 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   loadInstaller: (() => import('../../installer/index.js')) as LifecycleCommandDeps['loadInstaller'],
   loadLlmSetupCli: () => import('../../installer/llm-setup-cli.js'),
   loadToolHandler: () => import('../../mcp/tools.js'),
+  loadMcpLoadBudget: () => import('../../mcp/load-budget.js'),
   loadViewerServer: () => import('../../viewer/server.js'),
   loadDoctor: (() => import('../../installer/doctor.js')) as unknown as LifecycleCommandDeps['loadDoctor'],
   loadInstallModels: (() => import('../../installer/install-models.js')) as LifecycleCommandDeps['loadInstallModels'],
@@ -400,6 +414,50 @@ function registerPlaybookCommand(deps: LifecycleCommandDeps): void {
     });
 }
 
+function registerMcpBudgetCommand(deps: LifecycleCommandDeps): void {
+  const { program, assignIntArg, error, loadMcpLoadBudget, writeStdout } = deps;
+  program
+    .command('mcp-budget')
+    .description('Measure MCP tools/list and initialize payload size, including top schema contributors')
+    .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
+    .option(
+      '--no-write-tools',
+      'Measure with write-class tools disabled, matching `cartograph serve --mcp --no-write-tools`.',
+    )
+    .option(
+      '--disable-tool <name...>',
+      'Measure with specific tools disabled by name. Repeatable: `--disable-tool cartograph_ask --disable-tool cartograph_dead_code`.',
+    )
+    .option('--top <n>', 'Number of largest tool schemas to list (default 10; pass 0 to suppress)', '10')
+    .option('--json', 'Print structured JSON instead of a markdown report')
+    .action(async (options: McpBudgetCommandOptions) => {
+      const profile = resolveServeProfile(options.profile, error);
+      if (!profile) return;
+
+      const parsed: Record<string, unknown> = {};
+      if (!assignIntArg({ args: parsed, key: 'top', raw: options.top, optionName: '--top', opts: { min: 0 } })) {
+        return;
+      }
+
+      const handlerOptions: {
+        profile: McpServerProfile;
+        disableWriteTools?: boolean;
+        disabledTools?: Set<string>;
+      } = { profile };
+      if (options.writeTools === false) handlerOptions.disableWriteTools = true;
+      if (options.disableTool && options.disableTool.length > 0) {
+        handlerOptions.disabledTools = new Set(options.disableTool);
+      }
+
+      const { measureMcpLoadBudget, formatMcpLoadBudgetReport } = await loadMcpLoadBudget();
+      const report = measureMcpLoadBudget(null, {
+        handlerOptions,
+        topContributors: (parsed['top'] as number | undefined) ?? 10,
+      });
+      writeStdout(options.json ? JSON.stringify(report, null, 2) : formatMcpLoadBudgetReport(report));
+    });
+}
+
 function registerViewerCommand(deps: LifecycleCommandDeps): void {
   const { program, resolveProjectPath, isInitialized, error, info, loadViewerServer } = deps;
   program
@@ -591,6 +649,7 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
   registerLlmSetupCommand(deps);
   registerTraceToCulpritsCommand(deps);
   registerPlaybookCommand(deps);
+  registerMcpBudgetCommand(deps);
   registerViewerCommand(deps);
   registerDoctorCommand(deps);
   registerSetupCommand(deps);

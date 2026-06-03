@@ -45,6 +45,7 @@
     "check": "biome check",
     "check:fix": "biome check --write",
     "check:biomarkers": "bun scripts/check-biomarkers.mjs",
+    "measure:mcp-load": "bun scripts/measure-mcp-load.ts",
     "benchmark:tokens": "bun scripts/benchmark-token-savings.ts",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\""
   },

@@ -92,6 +92,13 @@ function loadLifecycleCommandActions(): void {
         }
       },
     }),
+    loadMcpLoadBudget: async () => ({
+      measureMcpLoadBudget: (_cg: null, opts: unknown) => {
+        calls.push(`mcp-budget:${JSON.stringify(opts)}`);
+        return { toolCount: 12 } as any;
+      },
+      formatMcpLoadBudgetReport: (report: unknown) => `budget:${JSON.stringify(report)}`,
+    }),
     loadViewerServer: async () => ({
       startViewerServer: async (_projectPath: string, opts?: { port?: number }) => ({
         url: localhostUrl(opts?.port ?? DEFAULT_TEST_VIEWER_PORT),
@@ -168,7 +175,7 @@ describe('lifecycle command action bodies', () => {
     expect(calls.join('\n')).toContain('"autoAllow":true');
   });
 
-  it('routes llm setup, trace-to-culprits, playbook, and viewer actions', async () => {
+  it('routes llm setup, trace-to-culprits, playbook, mcp-budget, and viewer actions', async () => {
     await actions.get('llm:setup [path]')!(projectPath);
     await actions.get('program:trace-to-culprits')!({
       projectPath,
@@ -177,13 +184,24 @@ describe('lifecycle command action bodies', () => {
     });
 
     await actions.get('program:playbook')!();
+    await actions.get('program:mcp-budget')!({
+      profile: 'review',
+      writeTools: false,
+      disableTool: ['cartograph_ask'],
+      top: '3',
+    });
 
     await actions.get('program:viewer [path]')!(projectPath, { port: '0', open: true });
 
     const text = calls.join('\n');
     expect(text).toContain(`llm-setup:${projectPath}`);
     expect(text).toContain('mcp:cartograph_trace_to_culprits');
+    expect(text).toContain('mcp-budget:');
+    expect(text).toContain('"profile":"review"');
+    expect(text).toContain('"disableWriteTools":true');
+    expect(text).toContain('"topContributors":3');
     expect(stdout.join('\n')).toContain('playbook text');
+    expect(stdout.join('\n')).toContain('budget:');
     expect(text).toContain('open:http://localhost:0');
   });
 });
