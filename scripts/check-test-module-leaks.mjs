@@ -35,16 +35,24 @@ function run(command, args, options = {}) {
   });
 }
 
-const rg = run('rg', ['-l', '^vi\\.mock\\(', '__tests__', '-g', '*.ts']);
-if (rg.status !== 0 && rg.status !== 1) {
-  process.stderr.write(rg.stderr || rg.stdout);
+function listTopLevelMockFiles() {
+  const rg = run('rg', ['-l', '^vi\\.mock\\(', '__tests__', '-g', '*.ts']);
+  if (!rg.error && (rg.status === 0 || rg.status === 1)) return rg.stdout;
+
+  // GitHub's ubuntu runners do not install ripgrep by default. `git grep`
+  // is available after checkout and is good enough for this tracked test set.
+  const gitGrep = run('git', ['grep', '-Il', '^vi[.]mock[(]', '--', '__tests__']);
+  if (!gitGrep.error && (gitGrep.status === 0 || gitGrep.status === 1)) return gitGrep.stdout;
+
+  process.stderr.write(rg.stderr || rg.stdout || rg.error?.message || 'failed to list top-level vi.mock() tests');
   process.exit(rg.status ?? 1);
 }
 
-const files = rg.stdout
+const files = listTopLevelMockFiles()
   .split('\n')
   .map((s) => s.trim())
   .filter(Boolean)
+  .filter((file) => file.endsWith('.ts'))
   .filter((file) => !canaries.includes(file));
 
 if (files.length === 0) {
