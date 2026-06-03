@@ -201,6 +201,14 @@ $ cartograph review risk --top-n 3
 - Coverage gaps: structurally important low-coverage symbols
 ```
 
+```bash
+$ cartograph review trust
+# Trust self-check
+- Freshness: whether the graph is current enough for broad analysis
+- Coverage: whether LCOV data is loaded
+- LLMs: whether ask, summary, and embedding tiers are configured
+```
+
 <details>
 <summary><strong>Manual Setup (Alternative)</strong></summary>
 
@@ -385,7 +393,7 @@ cartograph digest                  # "Land in a new repo" overview — hotspots,
 cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
 cartograph context <task>          # Build context for AI (--format, --max-nodes)
 cartograph affected [files...]     # Find test files affected by changes (see below)
-cartograph review <subcommand>     # context / neighbors / risk / agent-audit
+cartograph review <subcommand>     # context / neighbors / risk / agent-audit / trust
 cartograph serve --mcp             # Start MCP server
 ```
 
@@ -470,7 +478,7 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 | `cartograph_graph` | Callers, callees, blast radius, shortest paths, or embedding-similar symbols |
 | `cartograph_node` | One symbol's signature, summary, source preview, callers, callees, tests, or biomarkers |
 | `cartograph_context` | Task-shaped context when an agent needs relevant code for an implementation or bug |
-| `cartograph_review` | Diff review, sister implementations, risk triage, or agent-prone biomarker audit |
+| `cartograph_review` | Diff review, sister implementations, risk triage, trust self-checks, or agent-prone biomarker audit |
 
 ### Tool Families
 
@@ -491,7 +499,7 @@ The full 36-tool server is intentionally broader than the first six tools above,
 | Find symbols, regex content, env vars, or SQL refs | `cartograph find` | `cartograph_find` |
 | Trace callers, callees, impact, or symbol paths | `cartograph graph` | `cartograph_graph` |
 | Gather task-specific code context | `cartograph context` | `cartograph_context` |
-| Review a diff or inspect project risk | `cartograph review` | `cartograph_review` |
+| Review a diff, inspect project risk, or check analysis readiness | `cartograph review` | `cartograph_review` |
 | Check index health and project rollups | `cartograph status --verbose` | `cartograph_status({ verbose: true })` |
 | Find tests affected by source edits | `cartograph affected` | `cartograph_affected` |
 | Compare the final worktree to a ref | `cartograph compare-to-ref` | `cartograph_compare_to_ref` |
