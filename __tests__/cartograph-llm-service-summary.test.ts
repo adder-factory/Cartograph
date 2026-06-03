@@ -12,6 +12,11 @@ const state = {
   classifyCalls: [] as unknown[],
   phaseCalls: [] as string[],
   probeReachable: true,
+  chatCalls: [] as unknown[],
+  askCalls: [] as unknown[],
+  deadCodeCalls: [] as unknown[],
+  namingCalls: [] as unknown[],
+  changeCalls: [] as unknown[],
 };
 
 vi.mock('../src/llm/client.js', () => ({
@@ -22,7 +27,40 @@ vi.mock('../src/llm/client.js', () => ({
     async isReachable(): Promise<boolean> {
       return state.reachable;
     }
+
+    async chat(messages: unknown, options: unknown): Promise<{ text: string; durationMs: number }> {
+      state.chatCalls.push({ messages, options });
+      return { text: 'local chat reply', durationMs: 11 };
+    }
   },
+}));
+
+vi.mock('../src/llm/ask.js', () => ({
+  askWithCandidates: vi.fn(async (args: unknown) => {
+    state.askCalls.push(args);
+    return { answer: 'grounded answer', citations: [], context: [] };
+  }),
+}));
+
+vi.mock('../src/llm/dead-code.js', () => ({
+  judgeDeadCode: vi.fn(async (...args: unknown[]) => {
+    state.deadCodeCalls.push(args);
+    return { candidates: [], judged: [], errors: 0 };
+  }),
+}));
+
+vi.mock('../src/llm/naming.js', () => ({
+  checkNamingConvention: vi.fn(async (args: unknown) => {
+    state.namingCalls.push(args);
+    return { consistent: true, suggestion: '', reason: 'ok', examples: [], durationMs: 4 };
+  }),
+}));
+
+vi.mock('../src/llm/change-intent.js', () => ({
+  summarizeChange: vi.fn(async (args: unknown) => {
+    state.changeCalls.push(args);
+    return { intent: 'Adds useful behavior', durationMs: 6 };
+  }),
 }));
 
 vi.mock('../src/llm/summarizer.js', () => ({
@@ -105,7 +143,9 @@ vi.mock('../src/cartograph-llm-pass.js', () => ({
   }),
 }));
 
-const { CartographLlmService } = await import('../src/cartograph-llm-service.js');
+const { CartographLlmService, llmLocalChat, llmFindDeadCode, llmCheckNamingDrift, llmSummarizeChange } = await import(
+  '../src/cartograph-llm-service.js'
+);
 
 function resolved(overrides: Partial<ResolvedLlm> = {}): ResolvedLlm {
   return {
@@ -153,6 +193,11 @@ describe('CartographLlmService summarizeAll and classifyAll', () => {
     state.classifyCalls = [];
     state.phaseCalls = [];
     state.probeReachable = true;
+    state.chatCalls = [];
+    state.askCalls = [];
+    state.deadCodeCalls = [];
+    state.namingCalls = [];
+    state.changeCalls = [];
     vi.clearAllMocks();
   });
 
@@ -261,5 +306,133 @@ describe('CartographLlmService summarizeAll and classifyAll', () => {
     await svc.bgCtrl.start();
 
     expect(state.phaseCalls).toEqual(['structural', 'embed', 'neighbor', 'embed']);
+  });
+
+  it('delegates legacy config and embed facade methods', async () => {
+    const svc = service(resolved());
+    vi.spyOn(svc.config, 'hasLlm').mockReturnValue(true);
+    vi.spyOn(svc.config, 'getEffectiveLlmConfig').mockResolvedValue(resolved());
+    const embedAll = vi.spyOn(svc.embed, 'embedAll').mockResolvedValue({
+      candidates: 2,
+      generated: 1,
+      errors: 0,
+      skipped: 1,
+      durationMs: 9,
+    });
+
+    expect(await svc.resolveLlmConfig(true)).toMatchObject({ resolutionTrace: 'test-trace' });
+    expect(svc.hasLlm()).toBe(true);
+    expect(await svc.getEffectiveLlmConfig()).toMatchObject({ resolutionTrace: 'test-trace' });
+    expect(await svc.embedAll({ concurrency: 3 })).toMatchObject({ generated: 1, skipped: 1 });
+    expect(embedAll).toHaveBeenCalledWith({ concurrency: 3 });
+  });
+
+  it('routes ask through hybrid retrieval and askWithCandidates', async () => {
+    const svc = service(resolved());
+    vi.spyOn(svc, 'searchHybridWithOutcome').mockResolvedValue({
+      results: [],
+      rerankOutcome: { kind: 'skipped-no-config' },
+    });
+
+    const result = await svc.ask('Where is login handled?', { retrieveK: 4 });
+
+    expect(result.answer).toBe('grounded answer');
+    expect(result.rerankOutcome).toEqual({ kind: 'skipped-no-config' });
+    expect(state.askCalls).toHaveLength(1);
+    expect(state.askCalls[0]).toMatchObject({
+      projectRoot: '/tmp/cartograph-llm-summary',
+      question: 'Where is login handled?',
+      candidates: [],
+      options: { retrieveK: 4, useAskModel: true },
+    });
+  });
+
+  it('throws ask setup errors clearly', async () => {
+    await expect(service(null).ask('question')).rejects.toThrow(/No ask provider/);
+
+    state.reachable = false;
+    await expect(service(resolved()).ask('question')).rejects.toThrow(/Ask backend not reachable/);
+  });
+
+  it('runs local chat with optional system prompt, maxTokens, and local model reporting', async () => {
+    const svc = service(
+      resolved({
+        localLlm: {
+          provider: 'openai-compat',
+          endpoint: 'http://localhost:8084',
+          model: 'local-chat-model',
+        },
+      } as never),
+    );
+
+    const result = await llmLocalChat(svc, { system: 'be terse', prompt: 'summarize this', maxTokens: 40 });
+
+    expect(result).toEqual({ text: 'local chat reply', durationMs: 11, model: 'local-chat-model' });
+    expect(state.chatCalls).toHaveLength(1);
+    expect(state.chatCalls[0]).toMatchObject({
+      messages: [
+        { role: 'system', content: 'be terse' },
+        { role: 'user', content: 'summarize this' },
+      ],
+      options: { useLocalChat: true, maxTokens: 40 },
+    });
+  });
+
+  it('rejects local chat without provider, unreachable backend, or oversized prompt', async () => {
+    await expect(llmLocalChat(service(null), { prompt: 'x' })).rejects.toThrow(/No summarize provider/);
+
+    state.reachable = false;
+    await expect(llmLocalChat(service(resolved()), { prompt: 'x' })).rejects.toThrow(/Local backend not reachable/);
+
+    await expect(llmLocalChat(service(resolved()), { prompt: 'x'.repeat(64_001) })).rejects.toThrow(
+      /prompt exceeds 64000-char cap/,
+    );
+  });
+
+  it('delegates dead-code, naming, and change-intent LLM helpers', async () => {
+    const svc = service(resolved());
+
+    await expect(llmFindDeadCode(svc, { maxCandidates: 3 })).resolves.toMatchObject({ errors: 0 });
+    await expect(
+      llmCheckNamingDrift(svc, { name: 'fetchUser', kind: 'function', filePath: 'src/users.ts' }),
+    ).resolves.toMatchObject({ consistent: true });
+    await expect(
+      llmSummarizeChange(svc, {
+        name: 'fetchUser',
+        kind: 'function',
+        beforeBody: 'return oldUser;',
+        afterBody: 'return newUser;',
+      }),
+    ).resolves.toMatchObject({ intent: 'Adds useful behavior' });
+
+    expect(state.deadCodeCalls).toHaveLength(1);
+    expect(state.namingCalls).toHaveLength(1);
+    expect(state.changeCalls).toHaveLength(1);
+  });
+
+  it('throws dead-code, naming, and change-intent setup errors clearly', async () => {
+    await expect(llmFindDeadCode(service(null))).rejects.toThrow(/No summarize provider/);
+    await expect(
+      llmCheckNamingDrift(service(null), { name: 'fetchUser', kind: 'function', filePath: 'src/users.ts' }),
+    ).rejects.toThrow(/No summarize provider/);
+    await expect(
+      llmSummarizeChange(service(null), {
+        name: 'fetchUser',
+        kind: 'function',
+        beforeBody: '',
+        afterBody: 'return user;',
+      }),
+    ).rejects.toThrow(/No summarize provider/);
+
+    state.reachable = false;
+    await expect(llmFindDeadCode(service(resolved()))).rejects.toThrow(/Summarize backend not reachable/);
+    await expect(
+      llmSummarizeChange(service(resolved()), {
+        name: 'fetchUser',
+        kind: 'function',
+        beforeBody: '',
+        afterBody: 'return user;',
+      }),
+    ).rejects.toThrow(/Summarize backend not reachable/);
   });
 });

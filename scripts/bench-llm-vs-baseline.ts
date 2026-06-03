@@ -13,7 +13,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { performance } from 'node:perf_hooks';
-import { Cartograph } from '../src';
+import { Cartograph } from '../src/index.js';
 
 const PROJECT_ROOT = path.resolve(__dirname, '..');
 const CAP_SECONDS = Number(process.argv.find((a) => a.startsWith('--cap-seconds='))?.split('=')[1] ?? '120');

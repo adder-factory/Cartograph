@@ -15,7 +15,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { setSystemTime, spyOn, type Mock } from 'bun:test';
-import { createTextProgressFallback } from '../src/ui/shimmer-progress.js';
+import { createShimmerProgress, createTextProgressFallback } from '../src/ui/shimmer-progress.js';
 
 const START = new Date('2026-05-09T00:00:00Z');
 
@@ -119,5 +119,44 @@ describe('createTextProgressFallback (#41)', () => {
     expect(lines[1]).toContain('100/100');
     expect(lines[1]).toContain('(100%)');
     expect(lines[1]).not.toContain('eta');
+  });
+
+  it('uses the literal phase name when no friendly label exists', () => {
+    const progress = createTextProgressFallback();
+    progress.onProgress({ phase: 'custom-phase', current: 0, total: 0 });
+
+    expect(lines[0]).toContain('[custom-phase]');
+    expect(lines[0]).toContain('starting');
+  });
+
+  it('formats sub-second and minute-scale ETAs', () => {
+    const progress = createTextProgressFallback();
+    progress.onProgress({ phase: 'parsing', current: 0, total: 100 });
+
+    advance(10_000);
+    progress.onProgress({ phase: 'parsing', current: 99, total: 100 });
+    expect(lines.at(-1)).toContain('eta <1s');
+
+    advance(6_000);
+    progress.onProgress({ phase: 'resolving', current: 0, total: 100 });
+    advance(10_000);
+    progress.onProgress({ phase: 'resolving', current: 10, total: 100 });
+    expect(lines.at(-1)).toContain('eta 1m 30s');
+  });
+
+  it('createShimmerProgress falls back to text progress when stdout is not a TTY', async () => {
+    const originalIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: false });
+    try {
+      const progress = createShimmerProgress();
+      progress.onProgress({ phase: 'scanning', current: 3, total: 0 });
+      await progress.stop();
+    } finally {
+      Object.defineProperty(process.stdout, 'isTTY', { configurable: true, value: originalIsTTY });
+    }
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain('[Scanning files]');
+    expect(lines[0]).toContain('3 found');
   });
 });

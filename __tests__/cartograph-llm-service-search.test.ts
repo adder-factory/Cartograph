@@ -5,7 +5,9 @@ import type { ResolvedLlm } from '../src/llm/provider.js';
 const state = {
   ftsResults: [] as SearchResult[],
   embedVectors: [] as Float32Array[],
+  embedReachable: true,
   vecHits: [] as Array<{ nodeId: string; distance: number }>,
+  nodeEmbedding: null as Buffer | null,
   nodes: new Map<string, Node>(),
   rerankerRows: [] as Array<{
     id: string;
@@ -25,11 +27,22 @@ vi.mock('../src/db/queries-search.js', () => ({
 vi.mock('../src/llm/embedding-client.js', () => ({
   createEmbeddingClient: vi.fn(() => ({
     isConfigured: true,
-    isReachable: vi.fn(async () => true),
+    isReachable: vi.fn(async () => state.embedReachable),
     reachabilityError: vi.fn(() => null),
     listModels: vi.fn(async () => []),
     embed: vi.fn(async () => state.embedVectors),
   })),
+}));
+
+vi.mock('../src/db/queries-embeddings.js', () => ({
+  nodeExistsQuery: {},
+  getAllEmbeddings: vi.fn(() => []),
+  getEmbeddingForNode: vi.fn(() => state.nodeEmbedding),
+  getEmbeddingsCount: vi.fn(() => 0),
+  getEmbeddingsTotal: vi.fn(() => 0),
+  hasSymbolEmbedding: vi.fn(() => false),
+  getEmbeddableNodes: vi.fn(() => []),
+  upsertSymbolEmbedding: vi.fn(() => true),
 }));
 
 vi.mock('../src/db/vec-helpers.js', () => ({
@@ -54,7 +67,9 @@ vi.mock('../src/llm/reranker-client.js', () => ({
   },
 }));
 
-const { CartographLlmService } = await import('../src/cartograph-llm-service.js');
+const { CartographLlmService, llmFindImplementations, llmFindSimilar } = await import(
+  '../src/cartograph-llm-service.js'
+);
 
 function node(id: string, name: string, filePath = `${id}.ts`): Node {
   return {
@@ -75,6 +90,10 @@ function result(id: string, name: string, filePath?: string, score = 1): SearchR
   const n = node(id, name, filePath);
   state.nodes.set(id, n);
   return { node: n, score };
+}
+
+function vectorBuffer(values: number[]): Buffer {
+  return Buffer.from(new Float32Array(values).buffer);
 }
 
 function resolved(overrides: Partial<ResolvedLlm> = {}): ResolvedLlm {
@@ -123,7 +142,9 @@ describe('CartographLlmService searchHybridWithOutcome', () => {
   beforeEach(() => {
     state.ftsResults = [];
     state.embedVectors = [];
+    state.embedReachable = true;
     state.vecHits = [];
+    state.nodeEmbedding = null;
     state.nodes.clear();
     state.rerankerRows = [];
     state.rerankerScores = [];
@@ -227,5 +248,88 @@ describe('CartographLlmService searchHybridWithOutcome', () => {
 
     expect(out.rerankOutcome.kind).toBe('fired');
     expect(out.results.map((r) => r.node.id)).toEqual(['sem:b', 'sem:a']);
+  });
+});
+
+describe('CartographLlmService semantic helper functions', () => {
+  beforeEach(() => {
+    state.ftsResults = [];
+    state.embedVectors = [];
+    state.embedReachable = true;
+    state.vecHits = [];
+    state.nodeEmbedding = null;
+    state.nodes.clear();
+    state.rerankerRows = [];
+    state.rerankerScores = [];
+    state.rerankerThrows = null;
+    vi.clearAllMocks();
+  });
+
+  it('finds implementations through embedding + vec lookup and applies language filtering', async () => {
+    state.embedVectors = [new Float32Array([1, 0])];
+    state.vecHits = [
+      { nodeId: 'impl:ts', distance: 0.1 },
+      { nodeId: 'impl:py', distance: 0.2 },
+      { nodeId: 'impl:missing', distance: 0.3 },
+    ];
+    state.nodes.set('impl:ts', node('impl:ts', 'parseThing', 'src/parser.ts'));
+    state.nodes.set('impl:py', {
+      ...node('impl:py', 'parseThing', 'parser.py'),
+      language: 'python',
+    });
+    const svc = service(resolved());
+
+    const out = await llmFindImplementations(svc, 'parse thing', { limit: 2, languageFilter: 'typescript' });
+
+    expect(out.map((r) => r.node.id)).toEqual(['impl:ts']);
+    expect(out[0]!.score).toBeCloseTo(0.9);
+  });
+
+  it('returns an empty implementation list without embedding config, reachability, or query vector', async () => {
+    await expect(llmFindImplementations(service(resolved({ embeddingLlm: undefined })), 'anything')).resolves.toEqual(
+      [],
+    );
+
+    state.embedReachable = false;
+    await expect(llmFindImplementations(service(resolved()), 'anything')).resolves.toEqual([]);
+
+    state.embedReachable = true;
+    state.embedVectors = [];
+    await expect(llmFindImplementations(service(resolved()), 'anything')).resolves.toEqual([]);
+  });
+
+  it('finds similar symbols from a source node embedding and filters by language relationship', async () => {
+    state.nodeEmbedding = vectorBuffer([1, 0]);
+    state.vecHits = [
+      { nodeId: 'source', distance: 0.01 },
+      { nodeId: 'same-lang', distance: 0.2 },
+      { nodeId: 'other-lang', distance: 0.3 },
+      { nodeId: 'missing', distance: 0.4 },
+    ];
+    state.nodes.set('source', node('source', 'sourceNode', 'src/source.ts'));
+    state.nodes.set('same-lang', node('same-lang', 'sameLanguage', 'src/same.ts'));
+    state.nodes.set('other-lang', {
+      ...node('other-lang', 'otherLanguage', 'src/other.py'),
+      language: 'python',
+    });
+    const svc = service(resolved());
+
+    const sameLanguage = await llmFindSimilar(svc, 'source', { sameLanguage: true, limit: 5 });
+    const differentLanguage = await llmFindSimilar(svc, 'source', { differentLanguage: true, limit: 5 });
+
+    expect(sameLanguage.map((r) => r.node.id)).toEqual(['same-lang']);
+    expect(differentLanguage.map((r) => r.node.id)).toEqual(['other-lang']);
+    expect(differentLanguage[0]!.score).toBeCloseTo(0.7);
+  });
+
+  it('returns an empty similar list when prerequisites are missing', async () => {
+    const svc = service(resolved());
+
+    await expect(llmFindSimilar(service(resolved({ embeddingLlm: undefined })), 'source')).resolves.toEqual([]);
+    await expect(llmFindSimilar(svc, 'missing-node')).resolves.toEqual([]);
+
+    state.nodes.set('source', node('source', 'sourceNode', 'src/source.ts'));
+    state.nodeEmbedding = null;
+    await expect(llmFindSimilar(svc, 'source')).resolves.toEqual([]);
   });
 });

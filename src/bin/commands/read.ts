@@ -280,16 +280,12 @@ async function printAskAnnotations(
 }
 
 async function buildStatusRollupConfig(options: StatusOptions): Promise<StatusRollupConfig> {
-  const { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots, parseInlineTopN } = await import(
+  const { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots, resolveStatusRollups } = await import(
     '../../mcp/tools/status.js'
   );
-  const verbose = options.verbose === true;
-  const rawTopHotspots = parseInlineTopN(options.topHotspots);
-  const rawTopBiomarkers = parseInlineTopN(options.topBiomarkers);
+  const rollups = resolveStatusRollups(options);
   return {
-    topHotspots: verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots,
-    topBiomarkers: verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers,
-    summaryBreakdown: options.summaryBreakdown === true || verbose,
+    ...rollups,
     appendFeatureReadiness,
     appendInlineHotspots,
     appendInlineBiomarkers,

@@ -163,7 +163,7 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
 /**
  * Helper to escape LIKE special characters.
  */
-function escapeLike(s: string): string {
+export function escapeLike(s: string): string {
   const backslash = String.fromCodePoint(92);
   return s
     .replaceAll(backslash, backslash + backslash)

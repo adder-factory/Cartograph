@@ -77,6 +77,11 @@ function vectorBuffer(values: number[]): Buffer {
   return Buffer.from(new Float32Array(values).buffer);
 }
 
+function slicedVectorBuffer(prefix: number[], values: number[], suffix: number[]): Buffer {
+  const all = new Float32Array([...prefix, ...values, ...suffix]);
+  return Buffer.from(all.buffer).subarray(prefix.length * 4, (prefix.length + values.length) * 4);
+}
+
 function dbWithRows(rows: unknown[]): SqliteDatabase {
   return {
     prepare(sql: string) {
@@ -170,8 +175,34 @@ describe('HnswIndex', () => {
     expect(modelAHits[0]!.distance).toBeCloseTo(0.1);
     expect(modelAHits[1]!.distance).toBeCloseTo(0.3);
     expect(native.searchCalls[0]).toMatchObject({ k: 3, threads: 0, dim: 2 });
+
+    const unfilteredHits = idx!.query(new Float32Array([1, 0]), 4);
+    expect(unfilteredHits.map((h) => h.nodeId)).toEqual(['node:a', 'node:b', 'node:c']);
+    expect(unfilteredHits.map((h) => h.distance)).toEqual([
+      expect.closeTo(0.1),
+      expect.closeTo(0.2),
+      expect.closeTo(0.3),
+    ]);
+    expect(native.searchCalls.at(-1)).toMatchObject({ k: 3, threads: 0, dim: 2 });
+
     expect(idx!.query(new Float32Array([1, 0]), 2, 'missing-model')).toEqual([]);
     expect(idx!.query(new Float32Array([1, 0, 0]), 2)).toEqual([]);
+  });
+
+  it('packs sliced embedding buffers using their byte offset and byte length', async () => {
+    const idx = await HnswIndex.create(2);
+
+    await idx!.build([
+      {
+        rowid: 7,
+        node_id: 'node:sliced',
+        embedding_model: 'model-a',
+        embedding: slicedVectorBuffer([99, 98], [1.25, -2.5], [97]),
+      },
+    ]);
+
+    expect([...fakeUsearch.instances[0]!.addedKeys].map(String)).toEqual(['7']);
+    expect([...fakeUsearch.instances[0]!.addedVectors]).toEqual([1.25, -2.5]);
   });
 
   it('returns a non-built result and clears readiness when no rows match the index dimension', async () => {
@@ -185,6 +216,20 @@ describe('HnswIndex', () => {
     expect(idx!.size()).toBe(0);
     expect(idx!.query(new Float32Array([1, 0, 0, 0]), 1)).toEqual([]);
     expect(() => idx!.persist('/tmp/hnsw.bin')).toThrow(/before build\/load/);
+  });
+
+  it('drops a previously built index when a rebuild has no rows at the configured dimension', async () => {
+    const idx = await HnswIndex.create(2);
+    await idx!.build([{ rowid: 1, node_id: 'node:a', embedding_model: 'm', embedding: vectorBuffer([1, 0]) }]);
+
+    const result = await idx!.build([
+      { rowid: 2, node_id: 'wrong-dim', embedding_model: 'm', embedding: vectorBuffer([1, 0, 0]) },
+    ]);
+
+    expect(result).toEqual({ built: false, rowCount: 0, reason: 'no embeddings at this dim' });
+    expect(idx!.isReady()).toBe(false);
+    expect(idx!.size()).toBe(0);
+    expect(idx!.query(new Float32Array([1, 0]), 1)).toEqual([]);
   });
 
   it('loads graph data from disk and repopulates metadata from embedding store references', async () => {
@@ -223,6 +268,8 @@ describe('HnswIndex', () => {
     );
     expect(emptyMeta!.isReady()).toBe(true);
     expect(emptyMeta!.size()).toBe(0);
+    expect(emptyMeta!.query(new Float32Array([1, 0]), 1)).toEqual([]);
+    expect(fakeUsearch.instances.at(-1)!.searchCalls).toHaveLength(0);
   });
 });
 
@@ -236,5 +283,42 @@ describe('HNSW embedding rowset helpers', () => {
     expect(
       discoverEmbeddingDims(dbWithRows([{ bytes: 8 }, { bytes: 12 }, { bytes: 0 }, { bytes: 10 }, { bytes: 16 }])),
     ).toEqual([2, 3, 4]);
+  });
+
+  it('passes the expected byte length into dimension-scoped rowset signatures', () => {
+    const getCalls: unknown[] = [];
+    const preparedSql: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        preparedSql.push(sql);
+        return {
+          get(arg?: unknown) {
+            getCalls.push(arg);
+            return { c: 3, m: 99 };
+          },
+        };
+      },
+    } as unknown as SqliteDatabase;
+
+    expect(computeRowsetSignature(db, 3)).toEqual({ rowCount: 3, maxRowid: 99 });
+    expect(getCalls).toEqual([12]);
+    expect(preparedSql[0]).toContain('LENGTH(embedding) = ?');
+  });
+
+  it('queries only symbol-grain embeddings when discovering dimensions', () => {
+    const preparedSql: string[] = [];
+    const db = {
+      prepare(sql: string) {
+        preparedSql.push(sql);
+        return {
+          all() {
+            return [{ bytes: 4 }, { bytes: 6 }, { bytes: 20 }];
+          },
+        };
+      },
+    } as unknown as SqliteDatabase;
+
+    expect(discoverEmbeddingDims(db)).toEqual([1, 5]);
+    expect(preparedSql[0]).toContain("grain = 'symbol'");
   });
 });

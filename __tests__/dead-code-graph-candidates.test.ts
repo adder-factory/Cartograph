@@ -64,6 +64,27 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         'class AbandonedBin {}',
       ].join('\n'),
     );
+    fs.mkdirSync(path.join(testDir, 'src', 'db'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, 'src', 'cartograph-llm-service.ts'),
+      [
+        'export class CartographLlmService {',
+        '  hasLlm(): boolean { return false; }',
+        '  getEffectiveLlmConfig(): null { return null; }',
+        '  legacyLike(): string { return "candidate"; }',
+        '}',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'src', 'db', 'index.ts'),
+      [
+        'export class DatabaseConnection {',
+        '  getPath(): string { return "/tmp/db.sqlite"; }',
+        '  transaction<T>(fn: () => T): T { return fn(); }',
+        '  localOnly(): number { return 1; }',
+        '}',
+      ].join('\n'),
+    );
     // Ruby class — `initialize` IS the constructor here.
     fs.writeFileSync(
       path.join(testDir, 'lib', 'box.rb'),
@@ -110,6 +131,18 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
       .filter((c) => c.filePath.endsWith('src/box.ts') && (c.name === 'get' || c.name === 'delete'))
       .map((c) => c.name);
     expect(cacheMethods).toEqual([]);
+  });
+
+  it('suppresses exact public API shims but keeps nearby orphan methods visible', () => {
+    const candidates = findGraphCandidates({ queries: cg.queries, max: 50 });
+    const namesByPath = candidates.map((c) => `${c.filePath}:${c.name}`);
+
+    expect(namesByPath).not.toContain('src/cartograph-llm-service.ts:hasLlm');
+    expect(namesByPath).not.toContain('src/cartograph-llm-service.ts:getEffectiveLlmConfig');
+    expect(namesByPath).not.toContain('src/db/index.ts:getPath');
+    expect(namesByPath).not.toContain('src/db/index.ts:transaction');
+    expect(namesByPath).toContain('src/cartograph-llm-service.ts:legacyLike');
+    expect(namesByPath).toContain('src/db/index.ts:localOnly');
   });
 
   it('gates constructor names by language — TS `initialize` is kept, Ruby `initialize` is dropped', () => {

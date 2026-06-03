@@ -123,6 +123,7 @@ const {
   buildStatusInlineBiomarkersSpec,
   buildStatusInlineHotspotsSpec,
   parseInlineTopN,
+  resolveStatusRollups,
 } = await import('../src/mcp/tools/status.js');
 
 function cg(overrides: Record<string, unknown> = {}) {
@@ -245,6 +246,16 @@ describe('status inline rollups', () => {
     expect([undefined, null, -1, 0, Number.NaN, 'nope'].map(parseInlineTopN)).toEqual([0, 0, 0, 0, 0, 0]);
     expect(parseInlineTopN('1.9')).toBe(1);
     expect(parseInlineTopN(99)).toBe(30);
+    expect(resolveStatusRollups({ verbose: true })).toEqual({
+      topHotspots: 5,
+      topBiomarkers: 5,
+      summaryBreakdown: true,
+    });
+    expect(resolveStatusRollups({ verbose: true, topHotspots: 1, topBiomarkers: 0, summaryBreakdown: false })).toEqual({
+      topHotspots: 1,
+      topBiomarkers: 5,
+      summaryBreakdown: false,
+    });
 
     const hotspot = buildStatusInlineHotspotsSpec(
       [{ filePath: 'src/a.ts', commitCount: 3, loc: null, fileCentrality: 0.1, riskScore: 0.2 }],

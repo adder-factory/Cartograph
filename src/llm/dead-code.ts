@@ -85,6 +85,52 @@ const GO_INTERFACE_METHOD_NAMES: ReadonlySet<string> = new Set([
 const GO_TEST_NAME_PREFIXES = ['Test', 'Benchmark', 'Example', 'Fuzz'];
 
 /**
+ * Exact public/back-compat shims intentionally kept out of graph-only
+ * dead-code reports. These methods are reachable by external consumers
+ * through the package API, so an in-repo incoming-edge check cannot
+ * prove them dead. Keep the list small and delete entries with the
+ * major release that removes the deprecated surface.
+ */
+export const PUBLIC_API_SHIM_ALLOWLIST: ReadonlyArray<{
+  readonly filePath: string;
+  readonly kind: string;
+  readonly name: string;
+  readonly reason: string;
+}> = [
+  {
+    filePath: 'src/cartograph-llm-service.ts',
+    kind: 'method',
+    name: 'hasLlm',
+    reason: 'Deprecated CartographLlmService delegator kept for compatibility; prefer cg.llm.config.hasLlm().',
+  },
+  {
+    filePath: 'src/cartograph-llm-service.ts',
+    kind: 'method',
+    name: 'getEffectiveLlmConfig',
+    reason:
+      'Deprecated CartographLlmService delegator kept for compatibility; prefer cg.llm.config.getEffectiveLlmConfig().',
+  },
+  {
+    filePath: 'src/db/index.ts',
+    kind: 'method',
+    name: 'getPath',
+    reason: 'DatabaseConnection public accessor used by embedders and diagnostics.',
+  },
+  {
+    filePath: 'src/db/index.ts',
+    kind: 'method',
+    name: 'transaction',
+    reason: 'DatabaseConnection public transaction wrapper used by embedders and tests.',
+  },
+];
+
+export function isPublicApiShim(node: Pick<Node, 'filePath' | 'kind' | 'name'>): boolean {
+  return PUBLIC_API_SHIM_ALLOWLIST.some(
+    (entry) => entry.filePath === node.filePath && entry.kind === node.kind && entry.name === node.name,
+  );
+}
+
+/**
  * Go-specific liveness conventions the graph resolver can't observe.
  * Returns true when the symbol is structurally orphan but live by Go
  * convention (program entry, package init, test framework discovery,
@@ -303,6 +349,7 @@ function shouldSkipGraphCandidate(
   // Go conventions the resolver can't see are skipped regardless of
   // includeTests because framework-dispatched cases are still live.
   if (isGoConventionLive(node)) return true;
+  if (isPublicApiShim(node)) return true;
   if (!includeTests && isSuspicionExemptPath(node.filePath)) return true;
   return isExempt?.(node.filePath) === true;
 }

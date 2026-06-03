@@ -113,22 +113,7 @@ async function handleStatus(ctx: ToolCtx, args: StatusArgs): Promise<ToolOutcome
   const sourceLabel =
     args.projectPath === undefined ? '(default — server CWD at startup)' : '(from `projectPath` argument)';
 
-  // `verbose: true` is the one-call onboarding shortcut — it
-  // pre-fills the three composite-rollup flags with sensible
-  // defaults. Caller-supplied values still win: an explicit non-zero
-  // number or explicit boolean overrides the verbose default. We only
-  // fill in when the caller left the slot unset (numeric 0 / missing
-  // boolean).
-  const verbose = args.verbose === true;
-  const rawTopHotspots = parseInlineTopN(args.topHotspots);
-  const rawTopBiomarkers = parseInlineTopN(args.topBiomarkers);
-
-  const topHotspots = verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots;
-  const topBiomarkers = verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers;
-  // `summaryBreakdown` distinguishes "caller passed false" from "caller
-  // omitted it" so an explicit `false` wins over the verbose default,
-  // matching the precedence on the numeric flags above.
-  const summaryBreakdown = typeof args.summaryBreakdown === 'boolean' ? args.summaryBreakdown : verbose;
+  const { topHotspots, topBiomarkers, summaryBreakdown } = resolveStatusRollups(args);
 
   const lines: string[] = [];
   appendHeaderAndCounts({ lines, projectRoot, sourceLabel, stats });
@@ -185,6 +170,35 @@ export function parseInlineTopN(raw: unknown): number {
   const n = typeof raw === 'number' ? Math.floor(raw) : Math.floor(Number(raw));
   if (!Number.isFinite(n) || n <= 0) return 0;
   return clamp(n, 1, MAX_INLINE_TOP_N);
+}
+
+export interface StatusRollupInput {
+  readonly verbose?: boolean | undefined;
+  readonly topHotspots?: unknown;
+  readonly topBiomarkers?: unknown;
+  readonly summaryBreakdown?: boolean | undefined;
+}
+
+export interface ResolvedStatusRollups {
+  readonly topHotspots: number;
+  readonly topBiomarkers: number;
+  readonly summaryBreakdown: boolean;
+}
+
+/**
+ * Resolve the status rollup switches shared by MCP `cartograph_status`
+ * and CLI `cartograph status`. `verbose: true` supplies onboarding
+ * defaults, while explicit caller values still win.
+ */
+export function resolveStatusRollups(input: StatusRollupInput): ResolvedStatusRollups {
+  const verbose = input.verbose === true;
+  const rawTopHotspots = parseInlineTopN(input.topHotspots);
+  const rawTopBiomarkers = parseInlineTopN(input.topBiomarkers);
+  return {
+    topHotspots: verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots,
+    topBiomarkers: verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers,
+    summaryBreakdown: typeof input.summaryBreakdown === 'boolean' ? input.summaryBreakdown : verbose,
+  };
 }
 
 /**

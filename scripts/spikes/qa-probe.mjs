@@ -1,17 +1,40 @@
-// Smoke test the FIXED QaClient (post 2026-05-10 positional-arg patch).
-import { QaClient } from '../../src/llm/qa-client.js';
+#!/usr/bin/env node
+/**
+ * Smoke test the current RAG Q&A surface against an indexed project.
+ *
+ * Usage:
+ *   node scripts/spikes/qa-probe.mjs [project-path]
+ *
+ * Run `npm run build` first; spike scripts use `dist/` to match the
+ * production Node runtime path.
+ */
 
-const qa = new QaClient({ provider: 'local' });
+import fs from 'node:fs';
+import path from 'node:path';
+import process from 'node:process';
 
-const cases = [
-  ['What color is the sky?', 'The sky is blue during the day.'],
-  ['Where does the HNSW index live?', 'Cartograph builds a SQLite knowledge graph of every symbol in the workspace. The HNSW approximate-KNN index lives in the .cartograph directory and gives O(log N) similarity queries.'],
-  ['What does Cartograph build?', 'Cartograph builds a SQLite knowledge graph of every symbol in the workspace.'],
-  ['What language is the codebase?', 'The codebase is written in TypeScript with optional Rust extensions.'],
+const target = path.resolve(process.argv[2] ?? process.cwd());
+if (!fs.existsSync(path.join(target, '.cartograph'))) {
+  console.error(`qa-probe: ${target} is not initialized. Run \`cartograph setup ${target}\` first.`);
+  process.exit(1);
+}
+
+const { Cartograph } = await import('../../dist/index.js');
+const cg = await Cartograph.open(target, { autoMigrate: true });
+
+const questions = [
+  'Where does the HNSW index live?',
+  'What does Cartograph build?',
+  'How does status report LLM backend reachability?',
 ];
 
-for (const [q, ctx] of cases) {
-  const r = await qa.answer(q, ctx);
-  console.log(`Q: ${q}`);
-  console.log(`   → "${r.answer}" (score=${r.score.toFixed(3)})`);
+try {
+  for (const question of questions) {
+    const result = await cg.llm.ask(question, { retrieveK: 4, maxTokens: 200 });
+    console.log(`Q: ${question}`);
+    console.log(`   ${result.answer.replace(/\s+/g, ' ').trim()}`);
+    console.log(`   citations=${result.citations.length} retrieve=${result.retrieveMs}ms chat=${result.chatMs}ms`);
+  }
+} finally {
+  cg.close();
 }

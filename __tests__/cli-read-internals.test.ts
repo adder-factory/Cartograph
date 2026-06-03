@@ -299,7 +299,7 @@ describe('read command internals', () => {
     });
     expect(verboseRollups.topHotspots).toBe(5);
     expect(verboseRollups.topBiomarkers).toBe(5);
-    expect(verboseRollups.summaryBreakdown).toBe(true);
+    expect(verboseRollups.summaryBreakdown).toBe(false);
 
     const cappedRollups = await read.buildStatusRollupConfig({ topHotspots: '999', topBiomarkers: '-2' });
     expect(cappedRollups.topHotspots).toBe(30);
