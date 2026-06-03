@@ -1,5 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as dbQueries from '../src/db/queries.js';
+import * as edgeQueries from '../src/db/queries-edges.js';
+import * as fileQueries from '../src/db/queries-files.js';
+import * as nestedFunctionQueries from '../src/db/queries-nested-functions.js';
+import * as parseCacheQueries from '../src/db/queries-parse-cache.js';
+import * as unresolvedRefsQueries from '../src/db/queries-unresolved-refs.js';
+import * as profileModule from '../src/extraction/profile.js';
+import * as frameworkResolvers from '../src/resolution/frameworks/index.js';
 import type { ExtractionResult, FileRecord, Node } from '../src/types.js';
 
 const calls: Array<{ name: string; value?: unknown }> = [];
@@ -13,90 +20,87 @@ vi.spyOn(dbQueries, 'qbTransaction').mockImplementation(((_queries: unknown, fn:
   calls.push({ name: 'txn:end' });
 }) as typeof dbQueries.qbTransaction);
 
-vi.mock('../src/db/queries-edges.js', () => ({
-  insertEdges: vi.fn((_queries: unknown, edges: unknown) => calls.push({ name: 'insertEdges', value: edges })),
-}));
-
-vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => []),
-  getFilesNeedingReextract: vi.fn(() => []),
-  getFileByPath: vi.fn((_queries: unknown, filePath: string) => {
-    calls.push({ name: 'getFileByPath', value: filePath });
-    return existingFile;
-  }),
-  reconcileFileNodeCounts: vi.fn(),
-  removeFileFromIndex: vi.fn(),
-  removeFileFromIndexInTx: vi.fn((_queries: unknown, filePath: string) =>
-    calls.push({ name: 'removeFileFromIndexInTx', value: filePath }),
-  ),
-  upsertFile: vi.fn((_queries: unknown, record: unknown) => calls.push({ name: 'upsertFile', value: record })),
-}));
-
-vi.mock('../src/db/queries-unresolved-refs.js', () => ({
-  insertUnresolvedRefsBatch: vi.fn((_queries: unknown, refs: unknown) =>
-    calls.push({ name: 'insertUnresolvedRefsBatch', value: refs }),
-  ),
-}));
-
-vi.mock('../src/db/queries-nested-functions.js', () => ({
-  upsertNestedFunctionsForFile: vi.fn((_queries: unknown, filePath: string, manifest: unknown) =>
-    calls.push({ name: 'upsertNestedFunctionsForFile', value: { filePath, manifest } }),
-  ),
-}));
-
-vi.mock('../src/db/queries-parse-cache.js', () => ({
-  evictParseCacheIfOversized: vi.fn(),
-  getCachedParse: vi.fn(() => null),
-  getLatestStructHashForFile: vi.fn(() => priorStructHash),
-  putCachedParse: vi.fn((entry: unknown) => calls.push({ name: 'putCachedParse', value: entry })),
-}));
-
-vi.mock('../src/extraction/profile.js', () => ({
-  profile: vi.fn((_label: string, fn: () => unknown) => fn()),
-  profileTagged: vi.fn((args: { fn: () => unknown }) => args.fn()),
-  profileAsyncTagged: vi.fn((args: { fn: () => Promise<unknown> }) => args.fn()),
-  flushProfileReport: vi.fn(),
-  snapshotProfileDelta: vi.fn(() => []),
-  mergeProfileEntries: vi.fn(),
-}));
-
-vi.mock('../src/resolution/frameworks/index.js', () => ({
-  getAllFrameworkResolvers: vi.fn(() => [
-    {
-      name: 'bun',
-      languages: ['typescript'],
-      anchors: ['Bun.serve'],
-      detect: () => true,
-      resolve: () => null,
-      extract: () => ({
-        nodes: [node('framework:route', 'route')],
-        references: [{ fromNodeId: 'framework:route', referenceName: 'handler', referenceKind: 'calls' }],
-      }),
-    },
-    {
-      name: 'wrong-language',
-      languages: ['python'],
-      anchors: ['Py.route'],
-      detect: () => true,
-      resolve: () => null,
-      extractNodes: () => [node('wrong:language', 'wrongLanguage')],
-    },
-    {
-      name: 'missing-anchor',
-      languages: ['typescript'],
-      anchors: ['Never.Here'],
-      detect: () => true,
-      resolve: () => null,
-      extractNodes: () => [node('missing:anchor', 'missingAnchor')],
-    },
-    {
-      name: 'legacy',
-      detect: () => true,
-      resolve: () => null,
-      extractNodes: () => [node('framework:route', 'duplicateRoute'), node('legacy:node', 'legacyNode')],
-    },
-  ]),
-}));
+vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edges: unknown) =>
+  calls.push({ name: 'insertEdges', value: edges })) as never);
+vi.spyOn(fileQueries, 'getAllFiles').mockImplementation((() => []) as typeof fileQueries.getAllFiles);
+vi.spyOn(fileQueries, 'getFilesNeedingReextract').mockImplementation(
+  (() => []) as typeof fileQueries.getFilesNeedingReextract,
+);
+vi.spyOn(fileQueries, 'getFileByPath').mockImplementation(((_queries: unknown, filePath: string) => {
+  calls.push({ name: 'getFileByPath', value: filePath });
+  return existingFile;
+}) as typeof fileQueries.getFileByPath);
+vi.spyOn(fileQueries, 'reconcileFileNodeCounts').mockImplementation(() => undefined);
+vi.spyOn(fileQueries, 'removeFileFromIndex').mockImplementation(() => undefined);
+vi.spyOn(fileQueries, 'removeFileFromIndexInTx').mockImplementation(((_queries: unknown, filePath: string) =>
+  calls.push({ name: 'removeFileFromIndexInTx', value: filePath })) as typeof fileQueries.removeFileFromIndexInTx);
+vi.spyOn(fileQueries, 'upsertFile').mockImplementation(((_queries: unknown, record: unknown) =>
+  calls.push({ name: 'upsertFile', value: record })) as typeof fileQueries.upsertFile);
+vi.spyOn(unresolvedRefsQueries, 'insertUnresolvedRefsBatch').mockImplementation(((_queries: unknown, refs: unknown) =>
+  calls.push({
+    name: 'insertUnresolvedRefsBatch',
+    value: refs,
+  })) as typeof unresolvedRefsQueries.insertUnresolvedRefsBatch);
+vi.spyOn(nestedFunctionQueries, 'upsertNestedFunctionsForFile').mockImplementation(((
+  _queries: unknown,
+  filePath: string,
+  manifest: unknown,
+) =>
+  calls.push({
+    name: 'upsertNestedFunctionsForFile',
+    value: { filePath, manifest },
+  })) as typeof nestedFunctionQueries.upsertNestedFunctionsForFile);
+vi.spyOn(parseCacheQueries, 'evictParseCacheIfOversized').mockImplementation(() => undefined);
+vi.spyOn(parseCacheQueries, 'getCachedParse').mockImplementation(
+  (() => null) as typeof parseCacheQueries.getCachedParse,
+);
+vi.spyOn(parseCacheQueries, 'getLatestStructHashForFile').mockImplementation(
+  (() => priorStructHash) as typeof parseCacheQueries.getLatestStructHashForFile,
+);
+vi.spyOn(parseCacheQueries, 'putCachedParse').mockImplementation(((entry: unknown) =>
+  calls.push({ name: 'putCachedParse', value: entry })) as typeof parseCacheQueries.putCachedParse);
+vi.spyOn(profileModule, 'profile').mockImplementation(((_label: string, fn: () => unknown) => fn()) as never);
+vi.spyOn(profileModule, 'profileTagged').mockImplementation(((args: { fn: () => unknown }) => args.fn()) as never);
+vi.spyOn(profileModule, 'profileAsyncTagged').mockImplementation(((args: { fn: () => Promise<unknown> }) =>
+  args.fn()) as never);
+vi.spyOn(profileModule, 'flushProfileReport').mockImplementation(() => undefined);
+vi.spyOn(profileModule, 'snapshotProfileDelta').mockImplementation(() => []);
+vi.spyOn(profileModule, 'mergeProfileEntries').mockImplementation(() => []);
+vi.spyOn(frameworkResolvers, 'getAllFrameworkResolvers').mockImplementation(() => [
+  {
+    name: 'bun',
+    languages: ['typescript'],
+    anchors: ['Bun.serve'],
+    detect: () => true,
+    resolve: () => null,
+    extract: () => ({
+      nodes: [node('framework:route', 'route')],
+      references: [{ fromNodeId: 'framework:route', referenceName: 'handler', referenceKind: 'calls' }],
+    }),
+  },
+  {
+    name: 'wrong-language',
+    languages: ['python'],
+    anchors: ['Py.route'],
+    detect: () => true,
+    resolve: () => null,
+    extractNodes: () => [node('wrong:language', 'wrongLanguage')],
+  },
+  {
+    name: 'missing-anchor',
+    languages: ['typescript'],
+    anchors: ['Never.Here'],
+    detect: () => true,
+    resolve: () => null,
+    extractNodes: () => [node('missing:anchor', 'missingAnchor')],
+  },
+  {
+    name: 'legacy',
+    detect: () => true,
+    resolve: () => null,
+    extractNodes: () => [node('framework:route', 'duplicateRoute'), node('legacy:node', 'legacyNode')],
+  },
+]);
 
 const { eoStoreExtractionResult, eoTryStoreResult } = await import('../src/extraction/extraction-phases.js');
 
