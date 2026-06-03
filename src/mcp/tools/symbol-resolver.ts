@@ -49,6 +49,16 @@ const SUGGESTION_LIMIT = 5;
 const SUGGESTION_RENDER_LIMIT = 4;
 
 /**
+ * Candidate rows in an ambiguity banner. A few symbols (`node`,
+ * `constructor`, `execute`) can have very large exact-match sets; cap
+ * the visible list so the disambiguation stays useful without turning
+ * a node lookup into a full search dump.
+ */
+const DISAMBIGUATION_CANDIDATE_RENDER_LIMIT = 20;
+
+type SymbolRefIds = Pick<RefIdCache, 'resolve'> & Partial<Pick<RefIdCache, 'mint'>>;
+
+/**
  * The set of `NodeKind` prefixes a raw node id can carry. `generateNodeId`
  * (`extraction/tree-sitter-helpers.ts`) mints ids as `${kind}:${hash}`
  * where `hash` is 32 lowercase hex chars; the cache UID for the
@@ -405,11 +415,15 @@ function pickWithPolicy(
  * the banner is part of the structural fix #30 closes (silent picks
  * lead to wrong-symbol downstream actions).
  */
-function pickFromMultipleExactMatches(
-  exactMatches: ReadonlyArray<{ node: Node }>,
-  symbol: string,
-  cg?: Cartograph,
-): { node: Node; note: string } {
+interface PickFromMultipleExactMatchesArgs {
+  exactMatches: ReadonlyArray<{ node: Node }>;
+  symbol: string;
+  cg?: Cartograph;
+  refIds?: SymbolRefIds;
+}
+
+function pickFromMultipleExactMatches(args: PickFromMultipleExactMatchesArgs): { node: Node; note: string } {
+  const { exactMatches, symbol, cg, refIds } = args;
   // Tier #1: Filter to non-fixture nodes
   const nonFixtureMatches = exactMatches.filter((m) => !isFixturePath(m.node.filePath));
   let candidates = nonFixtureMatches.length > 0 ? nonFixtureMatches : exactMatches;
@@ -425,12 +439,117 @@ function pickFromMultipleExactMatches(
 
   // Tier #3: dispatch via the policy registry.
   const { node: picked, policy } = pickWithPolicy(candidates, cg);
-  const others = exactMatches
-    .filter((m) => m.node.id !== picked.id)
-    .map((r) => `${r.node.name} (${r.node.kind}) at ${r.node.filePath}:${r.node.startLine}`);
   const policySuffix = policy ? ` (disambiguation policy: ${policy.name})` : '';
-  const note = `\n\n> **Note:** ${exactMatches.length} symbols named "${symbol}". Showing results for \`${picked.filePath}:${picked.startLine}\`${policySuffix}. Others: ${others.join(', ')}`;
+  const note = buildPickedDisambiguationNote({
+    symbol,
+    matches: exactMatches.map((m) => m.node),
+    picked,
+    policySuffix,
+    ...(refIds ? { refIds } : {}),
+  });
   return { node: picked, note };
+}
+
+function stableCandidateId(node: Node, refIds?: SymbolRefIds): string {
+  return refIds?.mint ? refIds.mint(node.id) : node.id;
+}
+
+function inlineCode(s: string): string {
+  return s.replaceAll('`', "'");
+}
+
+function candidateContext(node: Node): string {
+  if (node.qualifiedName && node.qualifiedName !== node.name) {
+    return ` — context: \`${inlineCode(node.qualifiedName)}\``;
+  }
+  if (node.signature) {
+    return ` — signature: \`${inlineCode(node.signature)}\``;
+  }
+  return '';
+}
+
+function orderCandidatesForDisplay(nodes: ReadonlyArray<Node>, picked?: Node): Node[] {
+  const pickedId = picked?.id ?? null;
+  const rest = nodes
+    .filter((node) => node.id !== pickedId)
+    .sort((a, b) => {
+      const pathCmp = a.filePath.localeCompare(b.filePath);
+      if (pathCmp !== 0) return pathCmp;
+      if (a.startLine !== b.startLine) return a.startLine - b.startLine;
+      return a.kind.localeCompare(b.kind);
+    });
+  return picked ? [picked, ...rest] : rest;
+}
+
+function renderDisambiguationCandidates(args: { matches: ReadonlyArray<Node>; refIds?: SymbolRefIds; picked?: Node }): {
+  lines: string[];
+  firstId: string | null;
+} {
+  const ordered = orderCandidatesForDisplay(args.matches, args.picked);
+  const shown = ordered.slice(0, DISAMBIGUATION_CANDIDATE_RENDER_LIMIT);
+  const header =
+    args.matches.length > shown.length
+      ? `**Candidates** (showing ${shown.length} of ${args.matches.length}):`
+      : '**Candidates:**';
+  const lines = [header];
+  let firstId: string | null = null;
+  for (const node of shown) {
+    const id = stableCandidateId(node, args.refIds);
+    firstId ??= id;
+    const loc = node.startLine ? `${node.filePath}:${node.startLine}` : node.filePath;
+    const selected = args.picked?.id === node.id ? ' — selected' : '';
+    lines.push(`- [id: \`${id}\`] \`${node.name}\` (${node.kind}) — \`${loc}\`${candidateContext(node)}${selected}`);
+  }
+  if (args.matches.length > shown.length) {
+    lines.push(`- _…and ${args.matches.length - shown.length} more exact matches_`);
+  }
+  return { lines, firstId };
+}
+
+function followUpLine(id: string | null): string {
+  if (!id) return '';
+  return `Follow-up: \`cartograph_node({symbol: ${JSON.stringify(id)}})\` to inspect a candidate by id.`;
+}
+
+function buildPickedDisambiguationNote(args: {
+  symbol: string;
+  matches: ReadonlyArray<Node>;
+  picked: Node;
+  policySuffix: string;
+  refIds?: SymbolRefIds;
+}): string {
+  const { lines: candidateLines, firstId } = renderDisambiguationCandidates({
+    matches: args.matches,
+    picked: args.picked,
+    ...(args.refIds ? { refIds: args.refIds } : {}),
+  });
+  const lines = [
+    `> **Note:** ${args.matches.length} symbols named "${args.symbol}". Showing results for \`${args.picked.filePath}:${args.picked.startLine}\`${args.policySuffix}.`,
+    '',
+    ...candidateLines,
+  ];
+  const followUp = followUpLine(firstId);
+  if (followUp) lines.push('', followUp);
+  return `\n\n${lines.join('\n')}`;
+}
+
+function buildAggregatedDisambiguationNote(
+  symbol: string,
+  matches: ReadonlyArray<Node>,
+  refIds?: SymbolRefIds,
+): string {
+  const { lines: candidateLines, firstId } = renderDisambiguationCandidates({
+    matches,
+    ...(refIds ? { refIds } : {}),
+  });
+  const lines = [
+    `> **Note:** Aggregated results across ${matches.length} symbols named "${symbol}".`,
+    '',
+    ...candidateLines,
+  ];
+  const followUp = followUpLine(firstId);
+  if (followUp) lines.push('', followUp);
+  return `\n\n${lines.join('\n')}`;
 }
 
 /**
@@ -544,7 +663,7 @@ export interface ResolvedSymbol {
 export function resolveSymbolToNode(
   cg: Cartograph,
   symbol: string,
-  refIds: { resolve: (uid: string) => string | null } | undefined,
+  refIds: SymbolRefIds | undefined,
 ): ResolvedSymbol | null {
   if (refIds && RefIdCache.isUid(symbol)) {
     const fromUid = refIds.resolve(symbol);
@@ -596,11 +715,7 @@ export function buildFuzzyBanner(symbol: string, node: Node): string {
   );
 }
 
-export function resolveSymbolToNodeId(
-  cg: Cartograph,
-  symbol: string,
-  refIds: { resolve: (uid: string) => string | null } | undefined,
-): string | null {
+export function resolveSymbolToNodeId(cg: Cartograph, symbol: string, refIds: SymbolRefIds | undefined): string | null {
   const resolved = resolveSymbolToNode(cg, symbol, refIds);
   return resolved ? resolved.node.id : null;
 }
@@ -612,11 +727,7 @@ export function resolveSymbolToNodeId(
  * the caller should fall through to FTS name resolution. Behaviour is identical
  * to the inline blocks it replaces — same order, same fall-through semantics.
  */
-function resolveSymbolShortcut(
-  cg: Cartograph,
-  symbol: string,
-  refIds: { resolve: (uid: string) => string | null } | undefined,
-): Node | null {
+function resolveSymbolShortcut(cg: Cartograph, symbol: string, refIds: SymbolRefIds | undefined): Node | null {
   // #15: short-id shortcut — if the agent passed an `n_xxxxxxxx`
   // UID minted by a prior tabular response, look up the original
   // node id directly. Skips the FTS round-trip and the
@@ -675,7 +786,7 @@ function resolveSymbolViaSearch(cg: Cartograph, symbol: string): { node: Node; n
     return { node: exactMatches[0]!.node, note: '' };
   }
   if (exactMatches.length > 1) {
-    return pickFromMultipleExactMatches(exactMatches, symbol, cg);
+    return pickFromMultipleExactMatches({ exactMatches, symbol, cg });
   }
 
   // No exact match — fall back to the top fuzzy result with a "did
@@ -692,11 +803,7 @@ function resolveSymbolViaSearch(cg: Cartograph, symbol: string): { node: Node; n
   return fuzzyFallbackResult(cg, symbol, results[0].node);
 }
 
-export function findSymbol(
-  cg: Cartograph,
-  symbol: string,
-  refIds?: { resolve: (uid: string) => string | null },
-): { node: Node; note: string } | null {
+export function findSymbol(cg: Cartograph, symbol: string, refIds?: SymbolRefIds): { node: Node; note: string } | null {
   const shortcut = resolveSymbolShortcut(cg, symbol, refIds);
   if (shortcut) return { node: shortcut, note: '' };
 
@@ -716,11 +823,12 @@ export function findSymbol(
     const exact = getNodesByName(cg.queries, symbol);
     if (exact.length === 1) return { node: exact[0]!, note: '' };
     if (exact.length > 1) {
-      return pickFromMultipleExactMatches(
-        exact.map((node) => ({ node })),
+      return pickFromMultipleExactMatches({
+        exactMatches: exact.map((node) => ({ node })),
         symbol,
         cg,
-      );
+        ...(refIds ? { refIds } : {}),
+      });
     }
     // exact.length === 0 → fall through to FTS — the index has no row
     // by that bare name, so a fuzzy / qualified-form match may still
@@ -735,16 +843,12 @@ export function findSymbol(
  * Find ALL symbols matching a name. Used by callers/callees/impact to aggregate
  * results across all matching symbols (e.g., multiple classes with an `execute` method).
  */
-export function findAllSymbols(
-  cg: Cartograph,
-  symbol: string,
-  refIds?: { resolve: (uid: string) => string | null },
-): { nodes: Node[]; note: string } {
+export function findAllSymbols(cg: Cartograph, symbol: string, refIds?: SymbolRefIds): { nodes: Node[]; note: string } {
   const shortcut = resolveAllSymbolsShortcut(cg, symbol, refIds);
   if (shortcut) return shortcut;
 
   if (!symbol.includes('.')) {
-    const exact = lookupAllByExactName(cg, symbol);
+    const exact = lookupAllByExactName(cg, symbol, refIds);
     if (exact) return exact;
     // null → fall through to FTS-backed search. The
     // FTS path's own exact-match filter (matchesSymbol) will still
@@ -755,13 +859,13 @@ export function findAllSymbols(
     // here and at least get FTS-ranked exact matches.
   }
 
-  return resolveAllViaFtsExactFilter(cg, symbol);
+  return resolveAllViaFtsExactFilter(cg, symbol, refIds);
 }
 
 function resolveAllSymbolsShortcut(
   cg: Cartograph,
   symbol: string,
-  refIds?: { resolve: (uid: string) => string | null },
+  refIds?: SymbolRefIds,
 ): { nodes: Node[]; note: string } | null {
   // #15: short-id shortcut — same as findSymbol. UID always
   // resolves to a single node (or empty when evicted).
@@ -811,12 +915,15 @@ function lookupFileNode(cg: Cartograph, symbol: string): Node | null {
  * `Node`). Returns null when the index has no rows by that name (caller
  * falls through to FTS).
  */
-function lookupAllByExactName(cg: Cartograph, symbol: string): { nodes: Node[]; note: string } | null {
+function lookupAllByExactName(
+  cg: Cartograph,
+  symbol: string,
+  refIds?: SymbolRefIds,
+): { nodes: Node[]; note: string } | null {
   const exact = getNodesByName(cg.queries, symbol);
   if (exact.length === 0) return null;
   if (exact.length === 1) return { nodes: [exact[0]!], note: '' };
-  const locations = exact.map((n) => `${n.kind} at ${n.filePath}:${n.startLine}`);
-  const note = `\n\n> **Note:** Aggregated results across ${exact.length} symbols named "${symbol}": ${locations.join(', ')}`;
+  const note = buildAggregatedDisambiguationNote(symbol, exact, refIds);
   return { nodes: exact, note };
 }
 
@@ -825,7 +932,11 @@ function lookupAllByExactName(cg: Cartograph, symbol: string): { nodes: Node[]; 
  * nothing OR when no FTS row passes the exact-match filter (caller surfaces
  * a clean "not found" with did-you-mean suggestions).
  */
-function resolveAllViaFtsExactFilter(cg: Cartograph, symbol: string): { nodes: Node[]; note: string } {
+function resolveAllViaFtsExactFilter(
+  cg: Cartograph,
+  symbol: string,
+  refIds?: SymbolRefIds,
+): { nodes: Node[]; note: string } {
   const results = searchNodes(cg.queries, symbol, { limit: 50 });
   if (results.length === 0) return { nodes: [], note: '' };
 
@@ -833,7 +944,7 @@ function resolveAllViaFtsExactFilter(cg: Cartograph, symbol: string): { nodes: N
   if (exactMatches.length === 0) return { nodes: [], note: '' };
   if (exactMatches.length === 1) return { nodes: [exactMatches[0]!.node], note: '' };
 
-  const locations = exactMatches.map((r) => `${r.node.kind} at ${r.node.filePath}:${r.node.startLine}`);
-  const note = `\n\n> **Note:** Aggregated results across ${exactMatches.length} symbols named "${symbol}": ${locations.join(', ')}`;
-  return { nodes: exactMatches.map((r) => r.node), note };
+  const nodes = exactMatches.map((r) => r.node);
+  const note = buildAggregatedDisambiguationNote(symbol, nodes, refIds);
+  return { nodes, note };
 }

@@ -33,6 +33,8 @@ const state = {
   dirSummaries: undefined as unknown[] | undefined,
   reuseRows: 0,
   unresolvedRefs: 0,
+  unresolvedBuckets: [] as Array<{ referenceKind: string; language: string; count: number }>,
+  unresolvedSamples: [] as Array<{ referenceName: string; referenceKind: string; language: string; count: number }>,
 };
 
 vi.mock('../src/db/queries-history.js', () => ({
@@ -114,6 +116,19 @@ vi.mock('../src/db/queries-directory-summaries.js', () => ({
   getAllDirectorySummaries: vi.fn(() => state.dirSummaries),
 }));
 
+vi.mock('../src/db/queries-unresolved-refs.js', () => ({
+  insertUnresolvedRefsBatch: vi.fn(),
+  getUnresolvedReferences: vi.fn(() => []),
+  getUnresolvedReferencesCount: vi.fn(() => state.unresolvedRefs),
+  getUnresolvedReferenceBuckets: vi.fn(() => state.unresolvedBuckets),
+  getCommonUnresolvedReferenceNames: vi.fn(() => state.unresolvedSamples),
+  getUnresolvedReferencesBatch: vi.fn(() => []),
+  getUnresolvedReferencesByFiles: vi.fn(() => []),
+  getUnresolvedReferencesByDefiningFiles: vi.fn(() => []),
+  reconstructCrossFileRefsToFile: vi.fn(),
+  deleteSpecificResolvedReferences: vi.fn(),
+}));
+
 const {
   STATUS_BIOMARKERS_CLEAN_NOTE,
   STATUS_BIOMARKERS_PENDING_NOTE,
@@ -161,6 +176,8 @@ describe('status inline rollups', () => {
     state.dirSummaries = undefined;
     state.reuseRows = 0;
     state.unresolvedRefs = 0;
+    state.unresolvedBuckets = [];
+    state.unresolvedSamples = [];
     vi.clearAllMocks();
   });
 
@@ -298,6 +315,14 @@ describe('status inline rollups', () => {
     state.dirSummaries = [{ path: 'src' }];
     state.reuseRows = 2;
     state.unresolvedRefs = 1_500;
+    state.unresolvedBuckets = [
+      { referenceKind: 'calls', language: 'typescript', count: 1000 },
+      { referenceKind: 'field_access', language: 'typescript', count: 500 },
+    ];
+    state.unresolvedSamples = [
+      { referenceName: 'console.log', referenceKind: 'calls', language: 'typescript', count: 900 },
+      { referenceName: 'props.value', referenceKind: 'field_access', language: 'typescript', count: 500 },
+    ];
     const lines: string[] = [];
 
     appendFeatureReadiness(lines, cg({ llm: { bgCtrl: { progress: { phase: 'summarise', done: 1, total: 4 } } } }), {
@@ -316,7 +341,9 @@ describe('status inline rollups', () => {
     expect(text).toContain('**Coverage:** 7 symbols (2 sources: unit, integration)');
     expect(text).toContain('**Roles:** 5 classified');
     expect(text).toContain('**Directory summaries:** 1');
-    expect(text).toContain('**Unresolved refs:** 1500');
+    expect(text).toContain('**Unresolved refs:** 1,500');
+    expect(text).toContain('by kind/language: calls/typescript: 1,000');
+    expect(text).toContain('common names: `console.log` (900 calls/typescript)');
   });
 
   it('renders empty readiness actions and detached summarizer state', () => {

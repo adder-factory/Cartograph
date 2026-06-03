@@ -266,6 +266,7 @@ interface FormatGroupedCallersOpts {
   cg: Cartograph;
   symbol: string;
   matches: Node[];
+  matchesNote?: string;
   limit: number;
   edgeKindFilter: string | undefined;
   minConfidence: NonNullable<Edge['confidence']> | null;
@@ -325,7 +326,7 @@ export function buildCallersGroupSpec(args: BuildCallersGroupSpecArgs): Markdown
 }
 
 function formatGroupedCallers(opts: FormatGroupedCallersOpts): { text: string; hasMore: boolean } {
-  const { cg, symbol, matches, limit, edgeKindFilter, minConfidence, refIds } = opts;
+  const { cg, symbol, matches, matchesNote, limit, edgeKindFilter, minConfidence, refIds } = opts;
   const perSymbol = matches.map((node) => ({
     node,
     // Expand test-file file-row callers into per-call-site rows so the
@@ -343,6 +344,8 @@ function formatGroupedCallers(opts: FormatGroupedCallersOpts): { text: string; h
     `> **Note:** "${symbol}" resolves to multiple symbols. Callers are grouped per source so you can tell which definition each caller targets. Up to ${perSourceLimit} callers shown per source — the aggregate may exceed the \`limit\` argument when many sources have many callers.`,
     '',
   ];
+  const candidateNote = matchesNote?.replace(/^\n+/, '').trim();
+  if (candidateNote) lines.push(candidateNote, '');
   let hasMore = false;
   for (const { node, callers } of perSymbol) {
     lines.push(renderMarkdownBulletList(buildCallersGroupSpec({ node, callers, perSourceLimit, refIds })));
@@ -518,12 +521,17 @@ interface BatchedSectionResult {
 }
 
 /** @internal Render the multi-match branch for one batched symbol. */
-function formatBatchedMultiMatch(args: FormatBatchedSectionArgs, matches: Node[]): BatchedSectionResult {
+function formatBatchedMultiMatch(
+  args: FormatBatchedSectionArgs,
+  matches: Node[],
+  matchesNote: string,
+): BatchedSectionResult {
   const { ctx, cg, sym, perSymbolLimit, edgeKindFilter, minConfidence } = args;
   const grouped = formatGroupedCallers({
     cg,
     symbol: sym,
     matches,
+    ...(matchesNote ? { matchesNote } : {}),
     limit: perSymbolLimit,
     edgeKindFilter,
     minConfidence,
@@ -651,7 +659,7 @@ function formatBatchedSection(args: FormatBatchedSectionArgs): BatchedSectionRes
     };
   }
   if (allMatches.nodes.length > 1) {
-    return formatBatchedMultiMatch(args, allMatches.nodes);
+    return formatBatchedMultiMatch(args, allMatches.nodes, allMatches.note);
   }
   return formatBatchedSingleMatch(args, allMatches.nodes);
 }
@@ -743,6 +751,7 @@ export async function handleCallers(ctx: ToolCtx, args: Record<string, unknown>)
       cg,
       symbol,
       matches: allMatches.nodes,
+      ...(allMatches.note ? { matchesNote: allMatches.note } : {}),
       limit,
       edgeKindFilter,
       minConfidence,

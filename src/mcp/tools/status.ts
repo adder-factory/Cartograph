@@ -26,6 +26,13 @@ import { logWarn } from '../../errors.js';
 import { getParseCacheStats } from '../../db/queries-parse-cache.js';
 import { getHotspots } from '../../db/queries-history.js';
 import { getFindingsRanked, getFindingsStats } from '../../db/queries-findings.js';
+import {
+  getCommonUnresolvedReferenceNames,
+  getUnresolvedReferenceBuckets,
+  getUnresolvedReferencesCount,
+  type UnresolvedRefBucket,
+  type UnresolvedRefNameSample,
+} from '../../db/queries-unresolved-refs.js';
 import { areBiomarkersPending } from './biomarkers.js';
 import { classifyChangedFiles, realModifiedCount, type ChangedFiles } from '../../changed-files-classify.js';
 import { shortSha, isShallowClone } from '../../git-utils.js';
@@ -35,6 +42,7 @@ import { projectPathField } from './_common-fields.js';
 import { detectModuleFormat, formatModuleFormatLine } from '../../module-format.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
 import type Cartograph from '../../index.js';
+import { contentDriftCount, hasFreshnessRisk } from '../../freshness.js';
 import { DEGENERATE_EDGE_UREF_FLOOR } from '../../resolution/types.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
@@ -766,7 +774,7 @@ function appendFreshness(
   // in `__tests__/change-oracle.test.ts` pins their equivalence — if a
   // future maintainer changes one path, that test breaks. No separate
   // Oracle call is needed here.
-  const contentDrifted = freshness.contentDriftedFiles ?? 0;
+  const contentDrifted = contentDriftCount(freshness);
   if (contentDrifted > 0 && uncommittedCount === 0) {
     lines.push(formatIndexDriftLine(contentDrifted));
     rendered = true;
@@ -781,7 +789,7 @@ function appendFreshness(
   // pressure: `cartograph_changed_since` won't show those files (they
   // have no on-disk drift), so pointing the reader at it would be
   // misleading.
-  if (rendered && (freshness.isStale || uncommittedCount > 0 || pendingPathDriftCount > 0 || contentDrifted > 0)) {
+  if (rendered && (hasFreshnessRisk(freshness) || uncommittedCount > 0 || pendingPathDriftCount > 0)) {
     lines.push(
       '_For the per-file content-hash list (path-by-path drift, not ' +
         'commit-count), run `cartograph_changed_since`._',
@@ -1246,16 +1254,35 @@ function readDirectorySummariesLens(cg: Cartograph): LensReading {
 // "every resolved-reference edge is missing AND the table is heavy"
 // (corruption). A future tune to one is not a tune to the other.
 const UNRESOLVED_REFS_NOTABLE_THRESHOLD = 1000;
+const UNRESOLVED_REFS_BUCKET_LIMIT = 4;
+const UNRESOLVED_REFS_SAMPLE_LIMIT = 5;
+
+function formatUnresolvedBucket(row: UnresolvedRefBucket): string {
+  return `${row.referenceKind}/${row.language}: ${row.count.toLocaleString()}`;
+}
+
+function formatUnresolvedNameSample(row: UnresolvedRefNameSample): string {
+  return `\`${row.referenceName}\` (${row.count.toLocaleString()} ${row.referenceKind}/${row.language})`;
+}
+
 function readUnresolvedRefsLens(cg: Cartograph): LensReading {
-  const count = safeCall(() => {
-    const row = cg.queries.db.prepare(`SELECT COUNT(*) AS n FROM unresolved_refs`).get() as { n: number } | undefined;
-    return row?.n ?? 0;
-  });
+  const count = safeCall(() => getUnresolvedReferencesCount(cg.queries));
   if (count === undefined || count < UNRESOLVED_REFS_NOTABLE_THRESHOLD) return { present: false };
+  const buckets = safeCall(() => getUnresolvedReferenceBuckets(cg.queries, UNRESOLVED_REFS_BUCKET_LIMIT)) ?? [];
+  const samples = safeCall(() => getCommonUnresolvedReferenceNames(cg.queries, UNRESOLVED_REFS_SAMPLE_LIMIT)) ?? [];
+  let line =
+    `**Unresolved refs:** ${count.toLocaleString()} ` +
+    '(informational — expected for builtins, external APIs, property access, framework hooks, and dynamic dispatch; not a corruption signal by itself)';
+  if (buckets.length > 0) {
+    line += `\n    by kind/language: ${buckets.map(formatUnresolvedBucket).join(', ')}`;
+  }
+  if (samples.length > 0) {
+    line += `\n    common names: ${samples.map(formatUnresolvedNameSample).join(', ')}`;
+  }
   return {
     present: true,
     state: 'info',
-    line: `**Unresolved refs:** ${count} (intentional — cross-language stdlib calls, framework hooks, dynamic dispatch)`,
+    line,
   };
 }
 

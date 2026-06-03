@@ -142,6 +142,12 @@ const reviewSchema = z.object({
     .string()
     .optional()
     .describe('(mode=risk) Restrict the coverage-gap lens to one coverage source label.'),
+  pathFilter: z
+    .string()
+    .optional()
+    .describe(
+      '(mode=risk) Restrict biomarker, hotspot, coverage-gap, and dead-code lenses to files whose project-relative path starts with this prefix.',
+    ),
   // ─── mode='neighbors' fields ───
   files: z.array(z.string()).optional().describe('(mode=neighbors) Changed file paths (relative to project root).'),
   symbols: batchedSymbols
@@ -192,7 +198,8 @@ function inferReviewMode(args: ReviewArgs): (typeof REVIEW_MODE_NAMES)[number] {
     args.limit !== undefined ||
     args.topN !== undefined ||
     args.minCentrality !== undefined ||
-    args.coverageSource !== undefined
+    args.coverageSource !== undefined ||
+    args.pathFilter !== undefined
   ) {
     return 'risk';
   }

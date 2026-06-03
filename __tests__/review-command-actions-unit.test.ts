@@ -77,6 +77,7 @@ describe('review command action bodies', () => {
       topN: '5',
       minCentrality: '0.25',
       coverageSource: 'unit',
+      pathFilter: 'src/freshness/',
       projectPath: '/repo',
     });
     await actions.get('agent-audit')!({
@@ -122,7 +123,14 @@ describe('review command action bodies', () => {
       {
         tool: 'cartograph_review',
         projectPath: '/repo',
-        args: { mode: 'risk', limit: 4, topN: 5, minCentrality: 0.25, coverageSource: 'unit' },
+        args: {
+          mode: 'risk',
+          limit: 4,
+          topN: 5,
+          minCentrality: 0.25,
+          coverageSource: 'unit',
+          pathFilter: 'src/freshness/',
+        },
       },
       {
         tool: 'cartograph_review',

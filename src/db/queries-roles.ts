@@ -24,6 +24,7 @@ import type { Node } from '../types.js';
 import { type QueryBuilder, type NodeRow, rowToNode } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 import { FRAMEWORK_IMPORT_PREFIXES } from '../llm/role-labeler.js';
+import { prefixLikePattern } from './sql-like.js';
 
 // ─── Zod schemas ──────────────────────────────────────────────────────────
 
@@ -206,9 +207,10 @@ const sampleSiblingNamesQuery = defineQuery({
  * many edge kinds {@link ORPHAN_LIVENESS_EDGE_KINDS} grows to.
  */
 const findOrphanedSymbolsQuery = defineQuery({
-  sql: `SELECT n.* FROM nodes n
+  sql: String.raw`SELECT n.* FROM nodes n
      WHERE n.is_exported = 0
        AND n.kind IN ('function', 'method', 'class', 'component')
+       AND n.file_path LIKE @pathLike ESCAPE '\'
        AND NOT EXISTS (
          SELECT 1 FROM edges e
          WHERE e.target = n.id
@@ -218,6 +220,7 @@ const findOrphanedSymbolsQuery = defineQuery({
      LIMIT @limit OFFSET @offset`,
   params: z.object({
     livenessKinds: z.string(),
+    pathLike: z.string(),
     limit: z.number(),
     offset: z.number(),
   }),
@@ -298,7 +301,10 @@ declare module './queries.js' {
       { kind: string; excludeName: string; excludeFile: string; limit: number },
       { name: string }
     >;
-    findOrphanedSymbols?: TypedQuery<{ livenessKinds: string; limit: number; offset: number }, NodeRow>;
+    findOrphanedSymbols?: TypedQuery<
+      { livenessKinds: string; pathLike: string; limit: number; offset: number },
+      NodeRow
+    >;
     getRoleCounts?: TypedQuery<Record<string, never>, { role: string; n: number }>;
     getUnclassifiedNodeCount?: TypedQuery<Record<string, never>, { n: number }>;
     getUnclassifiedTargetNodeCount?: TypedQuery<{ targetKinds: string }, { n: number }>;
@@ -583,10 +589,18 @@ const ORPHAN_LIVENESS_EDGE_KINDS = [
  * `offset` lets the caller paginate when in-memory post-filters
  * (e.g. exempt-path patterns) eat the early pages.
  */
-export function findOrphanedSymbols(qb: QueryBuilder, limit = 200, offset = 0): Node[] {
+export interface FindOrphanedSymbolsOptions {
+  limit?: number;
+  offset?: number;
+  pathFilter?: string;
+}
+
+export function findOrphanedSymbols(qb: QueryBuilder, options: FindOrphanedSymbolsOptions = {}): Node[] {
+  const { limit = 200, offset = 0, pathFilter } = options;
   qb.queries.findOrphanedSymbols ??= findOrphanedSymbolsQuery(qb.db);
   const rows = qb.queries.findOrphanedSymbols.all({
     livenessKinds: JSON.stringify(ORPHAN_LIVENESS_EDGE_KINDS),
+    pathLike: prefixLikePattern(pathFilter),
     limit,
     offset,
   });

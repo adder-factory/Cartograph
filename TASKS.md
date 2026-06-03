@@ -9,11 +9,11 @@
 
 ## Next Session: Cartograph Friction
 
-- [ ] Improve ambiguous symbol disambiguation UX.
+- [x] Improve ambiguous symbol disambiguation UX.
   - See `NEXT_SESSION_GO.md` task 1.
-- [ ] Add task-scoped review filters.
+- [x] Add task-scoped review filters.
   - See `NEXT_SESSION_GO.md` task 2.
-- [ ] Extract shared freshness-risk semantics.
+- [x] Extract shared freshness-risk semantics.
   - See `NEXT_SESSION_GO.md` task 3.
-- [ ] Improve unresolved refs explainability.
+- [x] Improve unresolved refs explainability.
   - See `NEXT_SESSION_GO.md` task 4.

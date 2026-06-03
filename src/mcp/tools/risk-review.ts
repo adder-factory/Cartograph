@@ -31,16 +31,18 @@ export async function handleRiskReview(ctx: ToolCtx, args: Record<string, unknow
   const topN = clampInt(numArg(args['topN'] ?? args['limit'], DEFAULT_TOP_N), 1, MAX_TOP_N);
   const minCentrality = numArg(args['minCentrality'], DEFAULT_MIN_CENTRALITY);
   const coverageSource = args['coverageSource'] as string | undefined;
+  const pathFilter = parsePathFilter(args['pathFilter']);
 
   const lines: string[] = [`# Risk review (top ${topN} per lens)`];
   if (minCentrality > DEFAULT_MIN_CENTRALITY) lines.push(`_minCentrality filter: ≥ ${minCentrality}_`);
+  if (pathFilter) lines.push(`_pathFilter: \`${pathFilter}\`_`);
   lines.push('');
 
-  appendBiomarkerLens({ out: lines, cg, topN, minCentrality });
-  appendHotspotLens({ out: lines, cg, topN, minCentrality });
-  appendCoverageGapLens({ out: lines, cg, topN, minCentrality, coverageSource });
+  appendBiomarkerLens({ out: lines, cg, topN, minCentrality, pathFilter });
+  appendHotspotLens({ out: lines, cg, topN, minCentrality, pathFilter });
+  appendCoverageGapLens({ out: lines, cg, topN, minCentrality, coverageSource, pathFilter });
   appendStructuralBridgeLens(lines, cg, topN);
-  appendDeadCodeLens(lines, cg, topN);
+  appendDeadCodeLens({ out: lines, cg, topN, pathFilter });
 
   lines.push(
     `---`,
@@ -48,6 +50,10 @@ export async function handleRiskReview(ctx: ToolCtx, args: Record<string, unknow
   );
 
   return textResult(truncateOutput(lines.join('\n')));
+}
+
+function parsePathFilter(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.trim().length > 0 ? raw.trim() : undefined;
 }
 
 function severityEmoji(sev: string): string {
@@ -61,10 +67,11 @@ interface AppendBiomarkerLensArgs {
   cg: Cartograph;
   topN: number;
   minCentrality: number;
+  pathFilter: string | undefined;
 }
 
 function appendBiomarkerLens(args: AppendBiomarkerLensArgs): void {
-  const { out, cg, topN, minCentrality } = args;
+  const { out, cg, topN, minCentrality, pathFilter } = args;
   out.push(
     `## Biomarker findings (warning+ severity)`,
     `_Why ranked here: severity first, then detector metric, then centrality where available._`,
@@ -72,9 +79,11 @@ function appendBiomarkerLens(args: AppendBiomarkerLensArgs): void {
   const findingsOpts: {
     minSeverity?: 'info' | 'warning' | 'error';
     minCentrality?: number;
+    pathFilter?: string;
     limit?: number;
   } = { minSeverity: 'warning', limit: topN };
   if (minCentrality > DEFAULT_MIN_CENTRALITY) findingsOpts.minCentrality = minCentrality;
+  if (pathFilter) findingsOpts.pathFilter = pathFilter;
   const findings = getFindingsRanked(cg.queries, findingsOpts);
   if (findings.length === 0) {
     out.push(`_No biomarker findings above the threshold._`);
@@ -92,15 +101,18 @@ interface AppendHotspotLensArgs {
   cg: Cartograph;
   topN: number;
   minCentrality: number;
+  pathFilter: string | undefined;
 }
 
 function appendHotspotLens(args: AppendHotspotLensArgs): void {
-  const { out, cg, topN, minCentrality } = args;
+  const { out, cg, topN, minCentrality, pathFilter } = args;
   out.push(
     `## Hotspots (centrality × churn)`,
     `_Why ranked here: risk score = file centrality × git churn; higher scores mean a more likely bug/refactor hotspot._`,
   );
-  const hotspots = getHotspots(cg.queries, { limit: topN, minCentrality, sortBy: 'risk' });
+  const hotspotOpts: Parameters<typeof getHotspots>[1] = { limit: topN, minCentrality, sortBy: 'risk' };
+  if (pathFilter) hotspotOpts.pathFilter = pathFilter;
+  const hotspots = getHotspots(cg.queries, hotspotOpts);
   if (hotspots.length === 0) {
     out.push(
       `_No hotspot data — needs git history + centrality (run \`cartograph_admin({action: 'index'})\` if you haven't)._`,
@@ -121,10 +133,11 @@ interface AppendCoverageGapLensArgs {
   topN: number;
   minCentrality: number;
   coverageSource: string | undefined;
+  pathFilter: string | undefined;
 }
 
 function appendCoverageGapLens(args: AppendCoverageGapLensArgs): void {
-  const { out, cg, topN, minCentrality, coverageSource } = args;
+  const { out, cg, topN, minCentrality, coverageSource, pathFilter } = args;
   out.push(
     `## Coverage gaps (lowest-coverage first)`,
     `_Why ranked here: symbols at or below 50% coverage, ordered lowest coverage first and optionally filtered by centrality._`,
@@ -134,9 +147,11 @@ function appendCoverageGapLens(args: AppendCoverageGapLensArgs): void {
     maxPct?: number;
     minCentrality?: number;
     source?: string;
+    pathFilter?: string;
   } = { limit: topN, maxPct: COVERAGE_GAP_MAX_PCT };
   if (minCentrality > DEFAULT_MIN_CENTRALITY) coverageOpts.minCentrality = minCentrality;
   if (coverageSource) coverageOpts.source = coverageSource;
+  if (pathFilter) coverageOpts.pathFilter = pathFilter;
   const lowCov = getCoverageRanked(cg.queries, coverageOpts);
   if (lowCov.length === 0) {
     out.push(`_No coverage data — run \`cartograph coverage --mode load --report-path <lcov>\` first._`);
@@ -180,7 +195,15 @@ function appendStructuralBridgeLens(out: string[], cg: Cartograph, topN: number)
   out.push('');
 }
 
-function appendDeadCodeLens(out: string[], cg: Cartograph, topN: number): void {
+interface AppendDeadCodeLensArgs {
+  out: string[];
+  cg: Cartograph;
+  topN: number;
+  pathFilter: string | undefined;
+}
+
+function appendDeadCodeLens(args: AppendDeadCodeLensArgs): void {
+  const { out, cg, topN, pathFilter } = args;
   out.push(
     `## Dead-code candidates (graph-only, no LLM judge)`,
     `_Why ranked here: static candidates have no incoming usage edges, are not exported, and are outside fixture/test/script paths._`,
@@ -189,7 +212,7 @@ function appendDeadCodeLens(out: string[], cg: Cartograph, topN: number): void {
   // dropped INSIDE findGraphCandidates — they sort ahead of src/, so an
   // over-fetch-then-filter approach with this lens's small topN budget
   // filled entirely with fixtures and reported a false "none".
-  const dead = findGraphCandidates({ queries: cg.queries, max: topN, isExempt: isFixturePath });
+  const dead = findGraphCandidates({ queries: cg.queries, max: topN, isExempt: isFixturePath, pathFilter });
   if (dead.length === 0) {
     out.push(
       `_No orphaned symbols matching the static heuristic (no callers, not exported, not in test/script paths)._`,

@@ -23,6 +23,7 @@ import type { QueryBuilder } from './queries.js';
 import { defineQuery, defineDynamicQuery, type TypedQuery, type DynamicTypedQuery } from './typed-query.js';
 import { logWarn } from '../errors.js';
 import { CROSS_FILE_BIOMARKERS } from '../biomarkers/types.js';
+import { escapeLike, prefixLikePattern } from './sql-like.js';
 
 // ─── Zod schemas ──────────────────────────────────────────────────────────
 
@@ -466,6 +467,7 @@ const FindingsRankedParamsSchema = z.object({
   minMetric: z.number().optional(),
   maxMetric: z.number().optional(),
   excludeFile: z.string().optional(),
+  pathFilter: z.string().optional(),
   limit: z.number(),
 });
 type FindingsRankedParams = z.infer<typeof FindingsRankedParamsSchema>;
@@ -516,13 +518,12 @@ const getFindingsRankedQuery = defineDynamicQuery({
       // Literal prefix exclusion via LIKE with explicit ESCAPE — paths
       // can contain `_` so we escape `_`/`%`/`\`. GLOB has no escape
       // syntax for its `*`/`?` metachars.
-      const backslash = String.fromCodePoint(92);
-      const escaped = p.excludeFile
-        .replaceAll(backslash, backslash + backslash)
-        .replaceAll('_', backslash + '_')
-        .replaceAll('%', backslash + '%');
       where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
-      bindings['excludeLike'] = escaped + '%';
+      bindings['excludeLike'] = `${escapeLike(p.excludeFile)}%`;
+    }
+    if (p.pathFilter !== undefined && p.pathFilter.length > 0) {
+      where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
+      bindings['pathLike'] = prefixLikePattern(p.pathFilter);
     }
     const sql =
       `SELECT n.id AS node_id, n.name, n.kind, n.file_path,
@@ -594,6 +595,7 @@ export function getFindingsRanked(
     minMetric?: number;
     maxMetric?: number;
     excludeFile?: string;
+    pathFilter?: string;
     limit?: number;
   } = {},
 ): Array<RankedFinding> {
@@ -605,6 +607,7 @@ export function getFindingsRanked(
     minMetric: options.minMetric,
     maxMetric: options.maxMetric,
     excludeFile: options.excludeFile,
+    pathFilter: options.pathFilter,
     limit: options.limit ?? 50,
   });
   return rows.map(mapFindingsRow);

@@ -16,7 +16,7 @@ import { type LlmClient, LlmEndpointError, BATCH_PARSE_FAILURE_LOG_CHARS, type R
 import type { Node } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getSymbolDescriptions, type SymbolDescription } from '../db/queries-summaries.js';
-import { findOrphanedSymbols } from '../db/queries-roles.js';
+import { findOrphanedSymbols, type FindOrphanedSymbolsOptions } from '../db/queries-roles.js';
 import { getIncomingEdges, getOutgoingEdges } from '../db/queries-edges.js';
 import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
@@ -275,6 +275,8 @@ export interface FindGraphCandidatesArgs {
    * their orphans are kept as candidates.
    */
   readonly includeTests?: boolean;
+  /** Literal project-relative file-path prefix to keep. */
+  readonly pathFilter?: string | undefined;
   /**
    * Test-only: override the orphan-source. Production callers omit
    * this and the function uses the imported `findOrphanedSymbols`.
@@ -293,7 +295,7 @@ export interface FindGraphCandidatesArgs {
    * lets the test pass a closure DIRECTLY — no module-registry
    * mutation, no cross-file leak.
    */
-  readonly _findOrphanedSymbolsForTest?: (queries: QueryBuilder, limit: number, offset: number) => Node[];
+  readonly _findOrphanedSymbolsForTest?: (queries: QueryBuilder, options?: FindOrphanedSymbolsOptions) => Node[];
 }
 
 /**
@@ -318,23 +320,52 @@ export interface FindGraphCandidatesArgs {
  * symbols); when true their orphans are kept as candidates.
  */
 export function findGraphCandidates(args: FindGraphCandidatesArgs): Node[] {
-  const { queries, max, isExempt, includeTests = false } = args;
+  const { queries, max, isExempt, includeTests = false, pathFilter } = args;
   const findOrphans = args._findOrphanedSymbolsForTest ?? findOrphanedSymbols;
   const out: Node[] = [];
   const pageSize = Math.max(max * FIND_GRAPH_PAGE_MULTIPLIER, FIND_GRAPH_PAGE_FLOOR);
   let offset = 0;
   while (out.length < max && offset < FIND_GRAPH_SCAN_LIMIT) {
-    const page = findOrphans(queries, pageSize, offset);
+    const page = fetchGraphCandidatePage(findOrphans, { queries, pageSize, offset, pathFilter });
     if (page.length === 0) break;
-    for (const node of page) {
-      if (shouldSkipGraphCandidate({ queries, node, includeTests, isExempt })) continue;
-      out.push(node);
-      if (out.length >= max) break;
-    }
-    if (page.length < pageSize) break;
+    appendGraphCandidateSurvivors({ out, page, queries, includeTests, isExempt, max });
+    if (out.length >= max || page.length < pageSize) break;
     offset += pageSize;
   }
   return out;
+}
+
+type OrphanFinder = NonNullable<FindGraphCandidatesArgs['_findOrphanedSymbolsForTest']>;
+
+interface FetchGraphCandidatePageArgs {
+  readonly queries: QueryBuilder;
+  readonly pageSize: number;
+  readonly offset: number;
+  readonly pathFilter: string | undefined;
+}
+
+function fetchGraphCandidatePage(findOrphans: OrphanFinder, args: FetchGraphCandidatePageArgs): Node[] {
+  const findOpts: FindOrphanedSymbolsOptions = { limit: args.pageSize, offset: args.offset };
+  if (args.pathFilter) findOpts.pathFilter = args.pathFilter;
+  return findOrphans(args.queries, findOpts);
+}
+
+interface AppendGraphCandidateSurvivorsArgs {
+  readonly out: Node[];
+  readonly page: ReadonlyArray<Node>;
+  readonly queries: QueryBuilder;
+  readonly includeTests: boolean;
+  readonly isExempt: ((filePath: string) => boolean) | undefined;
+  readonly max: number;
+}
+
+function appendGraphCandidateSurvivors(args: AppendGraphCandidateSurvivorsArgs): void {
+  const { out, page, queries, includeTests, isExempt, max } = args;
+  for (const node of page) {
+    if (shouldSkipGraphCandidate({ queries, node, includeTests, isExempt })) continue;
+    out.push(node);
+    if (out.length >= max) break;
+  }
 }
 
 interface GraphCandidateSkipArgs {

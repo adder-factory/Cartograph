@@ -25,13 +25,15 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import type { Node } from '../src/types.js';
 import type { QueryBuilder } from '../src/db/queries.js';
 import { findGraphCandidates } from '../src/llm/dead-code.js';
+import type { FindOrphanedSymbolsOptions } from '../src/db/queries-roles.js';
 
 // Mutable stream the test populates per-case. The injected
 // `_findOrphanedSymbolsForTest` closure reads from this.
 const orphanStream = { pages: [] as Node[], pageCalls: 0 };
 
-function stubFindOrphanedSymbols(_qb: QueryBuilder, limit: number, offset: number): Node[] {
+function stubFindOrphanedSymbols(_qb: QueryBuilder, options: FindOrphanedSymbolsOptions = {}): Node[] {
   orphanStream.pageCalls++;
+  const { limit = 200, offset = 0 } = options;
   return orphanStream.pages.slice(offset, offset + limit);
 }
 

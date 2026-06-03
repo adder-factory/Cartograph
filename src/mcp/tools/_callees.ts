@@ -39,6 +39,7 @@ interface FormatGroupedCalleesOpts {
   cg: Cartograph;
   symbol: string;
   matches: Node[];
+  matchesNote?: string;
   limit: number;
   edgeKindFilter: string | undefined;
   minConfidence: NonNullable<Edge['confidence']> | null;
@@ -108,7 +109,7 @@ function formatCalleeLines(args: FormatCalleeLinesArgs): { rendered: string; has
 }
 
 function formatGroupedCallees(opts: FormatGroupedCalleesOpts): { text: string; hasMore: boolean } {
-  const { cg, symbol, matches, limit, edgeKindFilter, minConfidence, refIds } = opts;
+  const { cg, symbol, matches, matchesNote, limit, edgeKindFilter, minConfidence, refIds } = opts;
   const threshold = minConfidence ? CONFIDENCE_RANK[minConfidence] : 0;
   const perSymbol = matches.map((node) => {
     const raw = edgeKindFilter
@@ -127,6 +128,8 @@ function formatGroupedCallees(opts: FormatGroupedCalleesOpts): { text: string; h
     `> **Note:** "${symbol}" resolves to multiple symbols. Callees are grouped per source. Up to ${perSourceLimit} callees shown per source — the aggregate may exceed the \`limit\` argument when many sources have many callees.`,
     '',
   ];
+  const candidateNote = matchesNote?.replace(/^\n+/, '').trim();
+  if (candidateNote) lines.push(candidateNote, '');
 
   let hasMore = false;
   for (const { node, callees } of perSymbol) {
@@ -369,7 +372,7 @@ function buildBatchedSymbolSection(args: BuildBatchedSymbolSectionArgs): BuildBa
   }
 
   if (allMatches.nodes.length > 1) {
-    return buildMultiMatchBatchedSymbolSection(args, allMatches.nodes);
+    return buildMultiMatchBatchedSymbolSection(args, allMatches.nodes, allMatches.note);
   }
 
   return buildSingleMatchBatchedSymbolSection(args, allMatches);
@@ -378,12 +381,14 @@ function buildBatchedSymbolSection(args: BuildBatchedSymbolSectionArgs): BuildBa
 function buildMultiMatchBatchedSymbolSection(
   args: BuildBatchedSymbolSectionArgs,
   matches: ReadonlyArray<Node>,
+  matchesNote: string,
 ): BuildBatchedSymbolSectionResult {
   const { ctx, cg, sym, perSymbolLimit, edgeKindFilter, minConfidence } = args;
   const grouped = formatGroupedCallees({
     cg,
     symbol: sym,
     matches: [...matches],
+    ...(matchesNote ? { matchesNote } : {}),
     limit: perSymbolLimit,
     edgeKindFilter,
     minConfidence,
@@ -645,6 +650,7 @@ export async function handleCallees(ctx: ToolCtx, args: Record<string, unknown>)
       cg,
       symbol,
       matches: allMatches.nodes,
+      ...(allMatches.note ? { matchesNote: allMatches.note } : {}),
       limit,
       edgeKindFilter,
       minConfidence,

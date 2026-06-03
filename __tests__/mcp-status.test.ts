@@ -13,6 +13,15 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 
+const BELOW_UNRESOLVED_INFO_THRESHOLD = 999;
+const CONSOLE_REF_COUNT = 600;
+const PROPS_VALUE_REF_COUNT = 200;
+const REQUEST_REF_COUNT = 100;
+const USE_EFFECT_REF_COUNT = 50;
+const WINDOW_REF_COUNT = 30;
+const DISPATCH_REF_COUNT = 20;
+const DEGRADED_REF_COUNT = 1100;
+
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-status-'));
 }
@@ -28,6 +37,46 @@ async function makeProject(dir: string, file: string): Promise<Cartograph> {
   const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
   await cg.indexAll({ summarize: false });
   return cg;
+}
+
+interface UnresolvedRefSeed {
+  name: string;
+  kind: string;
+  language: string;
+  count: number;
+}
+
+function findFixtureNodeId(cg: Cartograph): string {
+  const row = cg.queries.db.prepare(`SELECT id FROM nodes WHERE kind = 'function' LIMIT 1`).get() as
+    | { id: string }
+    | undefined;
+  if (!row) throw new Error('status fixture missing function node');
+  return row.id;
+}
+
+function seedUnresolvedRefs(
+  cg: Cartograph,
+  specs: ReadonlyArray<UnresolvedRefSeed>,
+  opts = { keepEdgesHealthy: false },
+): void {
+  const nodeId = findFixtureNodeId(cg);
+  cg.queries.db.transaction(() => {
+    if (opts.keepEdgesHealthy) {
+      cg.queries.db
+        .prepare(`INSERT OR IGNORE INTO edges (source, target, kind) VALUES (?, ?, 'calls')`)
+        .run(nodeId, nodeId);
+    }
+    const insertRef = cg.queries.db.prepare(
+      `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language)
+       VALUES (?, ?, ?, ?, 0, 'src/a.ts', ?)`,
+    );
+    let line = 1;
+    for (const spec of specs) {
+      for (let i = 0; i < spec.count; i++) {
+        insertRef.run(nodeId, spec.name, spec.kind, line++, spec.language);
+      }
+    }
+  })();
 }
 
 describe('cartograph_status — project-root surfacing', () => {
@@ -171,6 +220,60 @@ describe('cartograph_status — project-root surfacing', () => {
     expect(text).toMatch(/reuse-cached/);
   });
 
+  it('omits unresolved-ref detail below the notable informational threshold', async () => {
+    const dir = tempDir();
+    dirs.push(dir);
+    const cg = await makeProject(dir, 'a.ts');
+    cgs.push(cg);
+    handler = new ToolHandler(cg);
+
+    seedUnresolvedRefs(cg, [
+      { name: 'console.log', kind: 'calls', language: 'typescript', count: BELOW_UNRESOLVED_INFO_THRESHOLD },
+    ]);
+
+    const result = await handler.execute('cartograph_status', {});
+    const text = result.content[0]?.text ?? '';
+    expect(text).not.toContain('Unresolved refs');
+  });
+
+  it('explains a notable healthy unresolved-ref tail with buckets and capped common-name samples', async () => {
+    const dir = tempDir();
+    dirs.push(dir);
+    const cg = await makeProject(dir, 'a.ts');
+    cgs.push(cg);
+    handler = new ToolHandler(cg);
+
+    seedUnresolvedRefs(
+      cg,
+      [
+        { name: 'console.log', kind: 'calls', language: 'typescript', count: CONSOLE_REF_COUNT },
+        { name: 'props.value', kind: 'field_access', language: 'typescript', count: PROPS_VALUE_REF_COUNT },
+        { name: 'Request', kind: 'type_of', language: 'python', count: REQUEST_REF_COUNT },
+        { name: 'useEffect', kind: 'calls', language: 'typescript', count: USE_EFFECT_REF_COUNT },
+        { name: 'window', kind: 'references', language: 'typescript', count: WINDOW_REF_COUNT },
+        { name: 'dispatch', kind: 'calls', language: 'typescript', count: DISPATCH_REF_COUNT },
+      ],
+      { keepEdgesHealthy: true },
+    );
+
+    const result = await handler.execute('cartograph_status', {});
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('🔵 **Unresolved refs:** 1,000');
+    expect(text).toContain('informational');
+    expect(text).toContain('builtins, external APIs, property access, framework hooks, and dynamic dispatch');
+    expect(text).toContain('by kind/language: calls/typescript: 670');
+    expect(text).toContain('field_access/typescript: 200');
+    expect(text).toContain('type_of/python: 100');
+    expect(text).toContain('references/typescript: 30');
+    expect(text).toContain('common names: `console.log` (600 calls/typescript)');
+    expect(text).toContain('`props.value` (200 field_access/typescript)');
+    expect(text).toContain('`Request` (100 type_of/python)');
+    expect(text).toContain('`useEffect` (50 calls/typescript)');
+    expect(text).toContain('`window` (30 references/typescript)');
+    expect(text).not.toContain('`dispatch`');
+    expect(text).not.toContain('reference resolution incomplete');
+  });
+
   // Regression: a "🟢 in sync with HEAD" banner alongside an
   // `unresolved_refs` table heavy with refs and zero `calls` / `imports`
   // edges is the live 2026-05-19 bug. Status must surface the integrity
@@ -187,18 +290,10 @@ describe('cartograph_status — project-root surfacing', () => {
     // insert > DEGENERATE_EDGE_UREF_FLOOR (1000) synthetic unresolved
     // refs that target nothing in particular. The fromNodeId points at
     // a real node so the FK is happy. Same shape the live bug presents.
-    const someNode = cg.queries.db.prepare(`SELECT id FROM nodes WHERE kind = 'function' LIMIT 1`).get() as
-      | { id: string }
-      | undefined;
-    expect(someNode).toBeDefined();
-    cg.queries.db.transaction(() => {
-      cg.queries.db.exec(`DELETE FROM edges WHERE kind IN ('calls', 'imports')`);
-      const insertRef = cg.queries.db.prepare(
-        `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language)
-         VALUES (?, 'NeverGonnaResolve', 'calls', ?, 0, 'src/a.ts', 'typescript')`,
-      );
-      for (let i = 0; i < 1100; i++) insertRef.run(someNode!.id, i);
-    })();
+    cg.queries.db.exec(`DELETE FROM edges WHERE kind IN ('calls', 'imports')`);
+    seedUnresolvedRefs(cg, [
+      { name: 'NeverGonnaResolve', kind: 'calls', language: 'typescript', count: DEGRADED_REF_COUNT },
+    ]);
 
     const result = await handler.execute('cartograph_status', {});
     const text = result.content[0]?.text ?? '';

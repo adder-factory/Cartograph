@@ -20,6 +20,15 @@ import { errMsg } from '../errors.js';
 import { errorResult } from './tools/_error-result.js';
 import { borrowedWorktreeBanner, detectBorrowedWorktreeIndex } from '../git-utils.js';
 import type { PendingFile } from '../sync/index.js';
+import {
+  contentDriftCount,
+  describeFreshnessRisk,
+  freshnessRecommendedAction,
+  freshnessSyncCandidateCount,
+  hasFreshnessRisk,
+  isHeavyFreshnessRisk,
+  type FreshnessInfo,
+} from '../freshness.js';
 
 // Re-export shared types so existing consumers (`import { ToolDefinition,
 // ToolResult } from './tools'`) keep working unchanged.
@@ -374,7 +383,7 @@ function computeWorktreeBanner(self: ToolHandler, cg: Cartograph | null, args: R
  */
 async function toolHandlerAttemptAutoSync(
   cg: Cartograph,
-  f: import('../freshness.js').FreshnessInfo,
+  f: FreshnessInfo,
 ): Promise<{ banner: string | null; freshnessMeta: import('./tool-types.js').FreshnessMetadata | null }> {
   try {
     let timeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -435,7 +444,7 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
     return {
       blockResult: {
         ...errorResult(
-          `This tool requires a fresh index because stale graph data can produce misleading results — ${describeDrift(f)}. ` +
+          `This tool requires a fresh index because stale graph data can produce misleading results — ${describeFreshnessRisk(f)}. ` +
             `Call \`cartograph_admin({action: 'sync'})\` first, or pass \`allowStale: true\` if you intentionally want the cached view.`,
         ),
         metadata: { freshness: toFreshnessMetadata(f, { blocked: true }) },
@@ -449,7 +458,7 @@ async function toolHandlerRunFreshnessGate(input: FreshnessGateInput): Promise<F
     return {
       blockResult: {
         ...errorResult(
-          `Index too stale to safely query — ${describeDrift(f)}. ` +
+          `Index too stale to safely query — ${describeFreshnessRisk(f)}. ` +
             `Refusing to serve potentially-wrong results. Call ` +
             `\`cartograph_admin({action: 'sync'})\` first (or run \`cartograph admin sync\` ` +
             `from the shell), or pass \`allowStale: true\` to query the cached view anyway.`,
@@ -823,47 +832,21 @@ const AUTO_SYNC_TIMEOUT_MS = 10_000;
 const BLOCK_MAX_FILES = 100;
 const BLOCK_MAX_COMMITS = 20;
 
-function contentDriftCount(f: import('../freshness.js').FreshnessInfo): number {
-  return f.contentDriftedFiles ?? 0;
-}
-
-function hasFreshnessRisk(f: import('../freshness.js').FreshnessInfo): boolean {
-  return f.isStale || contentDriftCount(f) > 0;
-}
-
 function metadataHasFreshnessRisk(meta: import('./tool-types.js').FreshnessMetadata | null): boolean {
   return meta?.recommendedAction === 'sync' || meta?.recommendedAction === 'sync_required';
 }
 
-function freshnessSyncCandidateCount(f: import('../freshness.js').FreshnessInfo): number | null {
-  if (f.filesChanged != null && f.filesChanged > 0) return f.filesChanged;
-  const drifted = contentDriftCount(f);
-  return drifted > 0 ? drifted : null;
-}
-
-function shouldAutoSync(f: import('../freshness.js').FreshnessInfo): boolean {
+function shouldAutoSync(f: FreshnessInfo): boolean {
   const candidates = freshnessSyncCandidateCount(f);
   if (candidates == null) return false;
   return candidates <= AUTO_SYNC_MAX_FILES;
 }
 
-function shouldBlockOnHeavyDrift(f: import('../freshness.js').FreshnessInfo): boolean {
-  if (f.filesChanged != null && f.filesChanged > BLOCK_MAX_FILES) return true;
-  if (contentDriftCount(f) > BLOCK_MAX_FILES) return true;
-  if (f.commitsAhead != null && f.commitsAhead > BLOCK_MAX_COMMITS) return true;
-  return false;
+function shouldBlockOnHeavyDrift(f: FreshnessInfo): boolean {
+  return isHeavyFreshnessRisk(f, { maxFiles: BLOCK_MAX_FILES, maxCommits: BLOCK_MAX_COMMITS });
 }
 
-function describeDrift(f: import('../freshness.js').FreshnessInfo): string {
-  const bits: string[] = [];
-  if (f.commitsAhead != null) bits.push(`${f.commitsAhead} commits ahead`);
-  if (f.filesChanged != null && f.filesChanged > 0) bits.push(`${f.filesChanged} files changed`);
-  const drifted = contentDriftCount(f);
-  if (drifted > 0) bits.push(`${drifted} content-drifted file${drifted === 1 ? '' : 's'}`);
-  return bits.length > 0 ? bits.join(', ') : 'large drift';
-}
-
-function freshnessRiskBannerForMcp(f: import('../freshness.js').FreshnessInfo): string | null {
+function freshnessRiskBannerForMcp(f: FreshnessInfo): string | null {
   const rewritten = rewriteStaleBannerForMcp(f.banner);
   if (rewritten) return rewritten;
   const drifted = contentDriftCount(f);
@@ -875,7 +858,7 @@ function freshnessRiskBannerForMcp(f: import('../freshness.js').FreshnessInfo): 
 }
 
 function toFreshnessMetadata(
-  f: import('../freshness.js').FreshnessInfo,
+  f: FreshnessInfo,
   extra?: { autoSynced?: boolean; blocked?: boolean },
 ): import('./tool-types.js').FreshnessMetadata {
   const metadata: import('./tool-types.js').FreshnessMetadata = {
@@ -891,14 +874,4 @@ function toFreshnessMetadata(
   };
   if (extra) Object.assign(metadata, extra);
   return metadata;
-}
-
-function freshnessRecommendedAction(
-  f: import('../freshness.js').FreshnessInfo,
-  extra?: { autoSynced?: boolean; blocked?: boolean },
-): import('./tool-types.js').FreshnessMetadata['recommendedAction'] {
-  if (extra?.blocked || shouldBlockOnHeavyDrift(f)) return 'sync_required';
-  if (hasFreshnessRisk(f)) return 'sync';
-  if (extra?.autoSynced) return 'none';
-  return 'none';
 }

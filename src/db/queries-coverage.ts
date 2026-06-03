@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, defineDynamicQuery, type TypedQuery, type DynamicTypedQuery } from './typed-query.js';
+import { prefixLikePattern } from './sql-like.js';
 
 const COVERAGE_DEFAULT_RANK_LIMIT = 50;
 
@@ -170,6 +171,7 @@ const CoverageRankedParamsSchema = z.object({
   minCentrality: z.number().optional(),
   maxPct: z.number().optional(),
   kinds: z.array(z.string()).optional(),
+  pathFilter: z.string().optional(),
   limit: z.number(),
   source: z.string().optional(),
 });
@@ -208,6 +210,10 @@ const getCoverageRankedQuery = defineDynamicQuery({
     if (p.kinds && p.kinds.length > 0) {
       where.push('n.kind IN (SELECT value FROM json_each(@kinds))');
       bindings['kinds'] = JSON.stringify(p.kinds);
+    }
+    if (p.pathFilter !== undefined && p.pathFilter.length > 0) {
+      where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
+      bindings['pathLike'] = prefixLikePattern(p.pathFilter);
     }
     const sql =
       `SELECT n.id AS node_id, n.name, n.kind, n.file_path,
@@ -413,6 +419,7 @@ export function getCoverageRanked(
     minCentrality?: number;
     maxPct?: number;
     kinds?: ReadonlyArray<string> | undefined;
+    pathFilter?: string;
     limit?: number;
     source?: string;
   } = {},
@@ -431,6 +438,7 @@ export function getCoverageRanked(
     minCentrality: options.minCentrality,
     maxPct: options.maxPct,
     kinds: options.kinds ? Array.from(options.kinds) : undefined,
+    pathFilter: options.pathFilter,
     limit: options.limit ?? COVERAGE_DEFAULT_RANK_LIMIT,
     source: options.source,
   });

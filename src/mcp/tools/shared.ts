@@ -17,7 +17,7 @@
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type Cartograph from '../../index.js';
-import { getStaleFiles } from '../../freshness.js';
+import { contentDriftCount, getStaleFiles } from '../../freshness.js';
 import { hasUncommittedChanges } from '../../git-utils.js';
 import { getFileByPath } from '../../db/queries-files.js';
 import { err, type ToolOutcome } from './_outcome.js';
@@ -481,7 +481,7 @@ export function freshnessHintForEmptyResult(cg: Cartograph): string {
   if (hasUncommittedChanges(cg.projectRoot)) {
     return "\n\n> ⚠ Uncommitted changes on disk — a file you just created or edited may not be indexed yet. Run `cartograph_admin({action: 'sync'})` and retry if you expected a match.";
   }
-  const drifted = f.contentDriftedFiles ?? 0;
+  const drifted = contentDriftCount(f);
   if (drifted > 0) {
     return (
       `\n\n> ⚠ Index content drift (${drifted} file${drifted === 1 ? '' : 's'} content-drifted on disk vs the index) — ` +

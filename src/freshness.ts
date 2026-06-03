@@ -54,6 +54,8 @@ const STALE_FILES_CHANGED = 10;
  */
 export type FreshnessSeverity = 'fresh' | 'recent' | 'stale' | 'very_stale';
 
+export type FreshnessRecommendedAction = 'none' | 'sync' | 'sync_required';
+
 export interface FreshnessInfo {
   /** HEAD-level staleness only. Per-file disk-vs-index drift lives in `contentDriftedFiles`. */
   isStale: boolean;
@@ -106,6 +108,71 @@ export function classifyFreshness(opts: {
   if (fc > STALE_FILES_CHANGED) return 'stale';
   if (opts.isStale && opts.ageMs > DAY_MS) return 'stale';
   return 'recent';
+}
+
+/** Git-independent drift count normalized to 0 for callers that only
+ * need to decide whether drift exists. */
+export function contentDriftCount(freshness: FreshnessInfo): number {
+  return freshness.contentDriftedFiles ?? 0;
+}
+
+/** True when either HEAD-level staleness or disk-vs-index content drift
+ * means reads may be answering from an out-of-date graph. */
+export function hasFreshnessRisk(freshness: FreshnessInfo): boolean {
+  return freshness.isStale || contentDriftCount(freshness) > 0;
+}
+
+/** Count files an inline sync could plausibly refresh. HEAD-drift file
+ * counts win; clean-git content drift is the fallback. */
+export function freshnessSyncCandidateCount(freshness: FreshnessInfo): number | null {
+  if (freshness.filesChanged != null && freshness.filesChanged > 0) return freshness.filesChanged;
+  const drifted = contentDriftCount(freshness);
+  return drifted > 0 ? drifted : null;
+}
+
+export interface FreshnessHeavyDriftOptions {
+  readonly maxFiles?: number;
+  readonly maxCommits?: number;
+}
+
+/** Heavy drift is the safety boundary used by query-time gates: too many
+ * changed/content-drifted files or too many commits ahead. Age alone is
+ * represented by `severity`, but does not force the MCP hard block. */
+export function isHeavyFreshnessRisk(freshness: FreshnessInfo, opts: FreshnessHeavyDriftOptions = {}): boolean {
+  const maxFiles = opts.maxFiles ?? VERY_STALE_FILES_CHANGED;
+  const maxCommits = opts.maxCommits ?? VERY_STALE_COMMITS_AHEAD;
+  if (freshness.filesChanged != null && freshness.filesChanged > maxFiles) return true;
+  if (contentDriftCount(freshness) > maxFiles) return true;
+  if (freshness.commitsAhead != null && freshness.commitsAhead > maxCommits) return true;
+  return false;
+}
+
+export interface FreshnessRecommendedActionOptions extends FreshnessHeavyDriftOptions {
+  readonly autoSynced?: boolean;
+  readonly blocked?: boolean;
+}
+
+/** One-word action hint shared by MCP metadata and other UI surfaces. */
+export function freshnessRecommendedAction(
+  freshness: FreshnessInfo,
+  opts: FreshnessRecommendedActionOptions = {},
+): FreshnessRecommendedAction {
+  if (opts.blocked || isHeavyFreshnessRisk(freshness, opts)) return 'sync_required';
+  if (hasFreshnessRisk(freshness)) return 'sync';
+  if (opts.autoSynced) return 'none';
+  return 'none';
+}
+
+/** Compact drift summary for blocking/error messages. */
+export function describeFreshnessRisk(freshness: FreshnessInfo): string {
+  const bits: string[] = [];
+  if (freshness.commitsAhead != null) bits.push(`${freshness.commitsAhead} commits ahead`);
+  if (freshness.filesChanged != null && freshness.filesChanged > 0) {
+    bits.push(`${freshness.filesChanged} files changed`);
+  }
+  const drifted = contentDriftCount(freshness);
+  if (drifted > 0) bits.push(`${drifted} content-drifted file${drifted === 1 ? '' : 's'}`);
+  return bits.length > 0 ? bits.join(', ') : 'large drift';
 }
 
 function formatRelativeAge(ms: number): string {

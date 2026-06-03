@@ -61,6 +61,8 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
         '\n',
       ) + '\n',
     );
+    fs.writeFileSync(path.join(dir, 'src', 'sync-a.ts'), 'export function sync(): string { return "a"; }\n');
+    fs.writeFileSync(path.join(dir, 'src', 'sync-b.ts'), 'export function sync(): string { return "b"; }\n');
     fs.writeFileSync(path.join(dir, '.gitignore'), '.cartograph/\n');
     git(dir, 'init', '-q');
     git(dir, 'config', 'user.email', 't@t');
@@ -92,6 +94,29 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
     expect(text).not.toMatch(/^# \d+ symbol/m);
     // No horizontal rule (single card).
     expect(text).not.toMatch(/^---$/m);
+  });
+
+  it('ambiguous sync node lookup lists stable candidate ids and a follow-up example', async () => {
+    const result = await handler.execute('cartograph_node', { symbol: 'sync' });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('2 symbols named "sync"');
+    expect(text).toContain('**Candidates:**');
+    expect(text).toMatch(/\[id: `n_[0-9a-f]{8}`\] `sync` \(function\) — `src\/sync-a\.ts:1`/);
+    expect(text).toMatch(/\[id: `n_[0-9a-f]{8}`\] `sync` \(function\) — `src\/sync-b\.ts:1`/);
+    expect(text).toMatch(/cartograph_node\(\{symbol: "n_[0-9a-f]{8}"\}\)/);
+  });
+
+  it('ambiguous sync graph lookup surfaces the same candidate ids', async () => {
+    const result = await handler.execute('cartograph_graph', { start: 'sync', direction: 'callers' });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('"sync" resolves to multiple symbols');
+    expect(text).toContain('Aggregated results across 2 symbols named "sync"');
+    expect(text).toContain('**Candidates:**');
+    expect(text).toMatch(/\[id: `n_[0-9a-f]{8}`\] `sync` \(function\) — `src\/sync-a\.ts:1`/);
+    expect(text).toMatch(/\[id: `n_[0-9a-f]{8}`\] `sync` \(function\) — `src\/sync-b\.ts:1`/);
+    expect(text).toMatch(/cartograph_node\(\{symbol: "n_[0-9a-f]{8}"\}\)/);
   });
 
   it('code preview truncates long bodies and full detail renders the complete body', async () => {

@@ -12,7 +12,15 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { searchNodes } from '../src/db/queries-search.js';
-import { isFileStale, getStaleFiles } from '../src/freshness.js';
+import {
+  describeFreshnessRisk,
+  freshnessRecommendedAction,
+  freshnessSyncCandidateCount,
+  getStaleFiles,
+  hasFreshnessRisk,
+  isFileStale,
+  isHeavyFreshnessRisk,
+} from '../src/freshness.js';
 import { appendFindings } from '../src/db/queries-findings.js';
 import { getStaleArtifactsCount } from '../src/db/queries-metadata.js';
 
@@ -584,6 +592,18 @@ describe('Freshness Gate', () => {
       expect(f!.contentDriftedFiles).toBe(1);
     });
 
+    it('shared freshness-risk helpers treat clean-git content drift as sync risk', () => {
+      forceCleanGitContentDrift(['src/a.ts']);
+
+      const f = cg.stats.getFreshness()!;
+      expect(f.isStale).toBe(false);
+      expect(hasFreshnessRisk(f)).toBe(true);
+      expect(freshnessSyncCandidateCount(f)).toBe(1);
+      expect(isHeavyFreshnessRisk(f)).toBe(false);
+      expect(freshnessRecommendedAction(f)).toBe('sync');
+      expect(describeFreshnessRisk(f)).toBe('1 content-drifted file');
+    });
+
     it('empty-result freshness hint warns on clean-git content drift', async () => {
       // Simulate the index lagging disk while git stays clean: the file
       // content is unchanged, but the indexed content_hash is wrong and the
@@ -640,6 +660,10 @@ describe('Freshness Gate', () => {
       const f = cg.stats.getFreshness();
       expect(f!.isStale).toBe(false);
       expect(f!.contentDriftedFiles).toBe(102);
+      expect(hasFreshnessRisk(f!)).toBe(true);
+      expect(freshnessSyncCandidateCount(f!)).toBe(102);
+      expect(isHeavyFreshnessRisk(f!)).toBe(true);
+      expect(freshnessRecommendedAction(f!)).toBe('sync_required');
 
       const { ToolHandler } = await import('../src/mcp/tools.js');
       const handler = new ToolHandler(cg);

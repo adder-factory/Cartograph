@@ -1,4 +1,4 @@
-import type { FreshnessSeverity } from '../freshness.js';
+import type { FreshnessRecommendedAction, FreshnessSeverity } from '../freshness.js';
 
 /**
  * Shared MCP tool types.
@@ -48,7 +48,7 @@ export interface FreshnessMetadata {
   commitsAhead: number | null;
   breakdown: { added: number; modified: number; deleted: number; total: number } | null;
   /** One-word action hint for clients that render metadata apart from text. */
-  recommendedAction: 'none' | 'sync' | 'sync_required';
+  recommendedAction: FreshnessRecommendedAction;
   /** True when execute() ran an inline sync before dispatching. */
   autoSynced?: boolean;
   /** True when execute() refused to dispatch because drift is too large. */

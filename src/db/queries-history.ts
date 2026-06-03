@@ -14,6 +14,7 @@
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
+import { prefixLikePattern } from './sql-like.js';
 
 // ── getHotspots tunables ───────────────────────────────────────────────────
 // (Lifted above the typed-query block so the module-level `defineQuery`
@@ -27,6 +28,7 @@ const HOTSPOTS_ORDER_BY: Readonly<Record<HotspotSort, string>> = {
   centrality: 'fileCentrality DESC',
   churn: 'commitCount DESC',
 };
+const SQL_LIKE_ESCAPE_CLAUSE = String.raw`ESCAPE '\'`;
 /** Convert `Date.now()` ms → seconds for `last_touched_ts` comparison. */
 const MS_PER_SECOND = 1000;
 /** `recencyDays * SECONDS_PER_DAY` → cutoff seconds for the recency filter. */
@@ -201,7 +203,10 @@ function buildHotspotsSelectBody(orderBy: string, recencyClause: string): string
       FROM nodes WHERE centrality IS NOT NULL
       GROUP BY file_path
     ) n_agg ON n_agg.file_path = f.path
-    WHERE f.commit_count >= @minCommits AND COALESCE(n_agg.fc, 0.0) >= @minCentrality ${recencyClause}
+    WHERE f.commit_count >= @minCommits
+      AND COALESCE(n_agg.fc, 0.0) >= @minCentrality
+      AND f.path LIKE @pathLike ${SQL_LIKE_ESCAPE_CLAUSE}
+      ${recencyClause}
     ORDER BY ${orderBy}
     LIMIT @limit
   `;
@@ -250,7 +255,10 @@ function buildCategorizedHotspotsSelectBody(recencyClause: string): string {
         )
       GROUP BY tgt.file_path
     ) dep ON dep.fp = f.path
-    WHERE f.commit_count >= @minCommits AND COALESCE(n_agg.fc, 0.0) >= @minCentrality ${recencyClause}
+    WHERE f.commit_count >= @minCommits
+      AND COALESCE(n_agg.fc, 0.0) >= @minCentrality
+      AND f.path LIKE @pathLike ${SQL_LIKE_ESCAPE_CLAUSE}
+      ${recencyClause}
   `;
 }
 
@@ -264,6 +272,7 @@ const HOTSPOT_RECENCY_CLAUSE = 'AND f.last_touched_ts IS NOT NULL AND f.last_tou
 const HotspotsAllParamsSchema = z.object({
   minCommits: z.number(),
   minCentrality: z.number(),
+  pathLike: z.string(),
   limit: z.number(),
 });
 
@@ -304,6 +313,7 @@ const hotspotsWithRecencyQueries = {
 const CategorizedHotspotsAllParamsSchema = z.object({
   minCommits: z.number(),
   minCentrality: z.number(),
+  pathLike: z.string(),
 });
 
 const CategorizedHotspotsWithRecencyParamsSchema = CategorizedHotspotsAllParamsSchema.extend({
@@ -544,6 +554,7 @@ export function getHotspots(
     minCentrality?: number;
     sortBy?: HotspotSort;
     recencyDays?: number;
+    pathFilter?: string;
   } = {},
 ): Array<{
   filePath: string;
@@ -563,6 +574,7 @@ export function getHotspots(
   const minCentrality = opts.minCentrality ?? 0;
   const hasRecency = opts.recencyDays !== undefined && opts.recencyDays > 0;
   const recencyCutoff = computeRecencyCutoff(hasRecency, opts.recencyDays);
+  const pathLike = prefixLikePattern(opts.pathFilter);
 
   if (recencyCutoff !== null) {
     // Six prepared statements total (3 sortBy × 2 recency variants);
@@ -572,14 +584,14 @@ export function getHotspots(
       | 'hotspotsWithRecencyCentrality'
       | 'hotspotsWithRecencyChurn';
     qb.queries[regKey] ??= hotspotsWithRecencyQueries[sortBy](qb.db);
-    return qb.queries[regKey].all({ minCommits, minCentrality, recencyCutoff, limit });
+    return qb.queries[regKey].all({ minCommits, minCentrality, pathLike, recencyCutoff, limit });
   }
   const regKey = `hotspotsAll${sortBy.charAt(0).toUpperCase() + sortBy.slice(1)}` as
     | 'hotspotsAllRisk'
     | 'hotspotsAllCentrality'
     | 'hotspotsAllChurn';
   qb.queries[regKey] ??= hotspotsAllQueries[sortBy](qb.db);
-  return qb.queries[regKey].all({ minCommits, minCentrality, limit });
+  return qb.queries[regKey].all({ minCommits, minCentrality, pathLike, limit });
 }
 
 /** A single row returned by the hotspot family of queries. */
@@ -700,6 +712,7 @@ export function getCategorizedHotspots(
     minCommits?: number;
     minCentrality?: number;
     recencyDays?: number;
+    pathFilter?: string;
     limitPerCategory?: number;
   } = {},
 ): {
@@ -711,18 +724,20 @@ export function getCategorizedHotspots(
   const minCentrality = opts.minCentrality ?? 0;
   const hasRecency = opts.recencyDays !== undefined && opts.recencyDays > 0;
   const recencyCutoff = computeRecencyCutoff(hasRecency, opts.recencyDays);
+  const pathLike = prefixLikePattern(opts.pathFilter);
 
   // Fetch all qualifying rows — no LIMIT because categorization requires
   // the full dataset to compute data-driven percentile thresholds.
   let all: HotspotRow[];
   if (recencyCutoff === null) {
     qb.queries.categorizedHotspotsAll ??= categorizedHotspotsAllQuery(qb.db);
-    all = qb.queries.categorizedHotspotsAll.all({ minCommits, minCentrality });
+    all = qb.queries.categorizedHotspotsAll.all({ minCommits, minCentrality, pathLike });
   } else {
     qb.queries.categorizedHotspotsWithRecency ??= categorizedHotspotsWithRecencyQuery(qb.db);
     all = qb.queries.categorizedHotspotsWithRecency.all({
       minCommits,
       minCentrality,
+      pathLike,
       recencyCutoff,
     });
   }

@@ -82,6 +82,32 @@ const ReconstructRowSchema = z.object({
 
 type ReconstructRow = z.infer<typeof ReconstructRowSchema>;
 
+const UnresolvedRefBucketRowSchema = z.object({
+  referenceKind: z.string(),
+  language: z.string(),
+  count: z.number(),
+});
+
+export interface UnresolvedRefBucket {
+  referenceKind: string;
+  language: string;
+  count: number;
+}
+
+const UnresolvedRefNameSampleRowSchema = z.object({
+  referenceName: z.string(),
+  referenceKind: z.string(),
+  language: z.string(),
+  count: z.number(),
+});
+
+export interface UnresolvedRefNameSample {
+  referenceName: string;
+  referenceKind: string;
+  language: string;
+  count: number;
+}
+
 // ─── Typed query definitions (module-level; bound per-DB lazily) ──────────
 
 const insertUnresolvedQuery = defineQuery({
@@ -108,6 +134,33 @@ const getUnresolvedBatchQuery = defineQuery({
   sql: 'SELECT * FROM unresolved_refs LIMIT @limit OFFSET @offset',
   params: z.object({ limit: z.number(), offset: z.number() }),
   row: UnresolvedRefRowSchema,
+});
+
+const getUnresolvedBucketsQuery = defineQuery({
+  sql: `SELECT
+         reference_kind AS referenceKind,
+         COALESCE(NULLIF(language, ''), 'unknown') AS language,
+         COUNT(*) AS count
+       FROM unresolved_refs
+       GROUP BY reference_kind, COALESCE(NULLIF(language, ''), 'unknown')
+       ORDER BY count DESC, referenceKind ASC, language ASC
+       LIMIT @limit`,
+  params: z.object({ limit: z.number() }),
+  row: UnresolvedRefBucketRowSchema,
+});
+
+const getCommonUnresolvedNamesQuery = defineQuery({
+  sql: `SELECT
+         reference_name AS referenceName,
+         reference_kind AS referenceKind,
+         COALESCE(NULLIF(language, ''), 'unknown') AS language,
+         COUNT(*) AS count
+       FROM unresolved_refs
+       GROUP BY reference_name, reference_kind, COALESCE(NULLIF(language, ''), 'unknown')
+       ORDER BY count DESC, referenceName ASC, referenceKind ASC, language ASC
+       LIMIT @limit`,
+  params: z.object({ limit: z.number() }),
+  row: UnresolvedRefNameSampleRowSchema,
 });
 
 /**
@@ -190,6 +243,8 @@ declare module './queries.js' {
     getAllUnresolved?: TypedQuery<Record<string, never>, UnresolvedRefRow>;
     getUnresolvedCount?: TypedQuery<Record<string, never>, { count: number }>;
     getUnresolvedBatch?: TypedQuery<{ limit: number; offset: number }, UnresolvedRefRow>;
+    getUnresolvedBuckets?: TypedQuery<{ limit: number }, UnresolvedRefBucket>;
+    getCommonUnresolvedNames?: TypedQuery<{ limit: number }, UnresolvedRefNameSample>;
     reconstructCrossFileRefs?: TypedQuery<{ filePath: string }, ReconstructRow>;
     deleteSpecificResolved?: TypedQuery<{ fromNodeId: string; referenceName: string; referenceKind: string }, never>;
     getUnresolvedByFiles?: TypedQuery<{ filePathsJson: string }, UnresolvedRefRow>;
@@ -250,6 +305,18 @@ export function getUnresolvedReferencesCount(qb: QueryBuilder): number {
   qb.queries.getUnresolvedCount ??= getUnresolvedCountQuery(qb.db);
   const row = qb.queries.getUnresolvedCount.get({});
   return row?.count ?? 0;
+}
+
+export function getUnresolvedReferenceBuckets(qb: QueryBuilder, limit: number): UnresolvedRefBucket[] {
+  if (limit <= 0) return [];
+  qb.queries.getUnresolvedBuckets ??= getUnresolvedBucketsQuery(qb.db);
+  return qb.queries.getUnresolvedBuckets.all({ limit });
+}
+
+export function getCommonUnresolvedReferenceNames(qb: QueryBuilder, limit: number): UnresolvedRefNameSample[] {
+  if (limit <= 0) return [];
+  qb.queries.getCommonUnresolvedNames ??= getCommonUnresolvedNamesQuery(qb.db);
+  return qb.queries.getCommonUnresolvedNames.all({ limit });
 }
 
 /**

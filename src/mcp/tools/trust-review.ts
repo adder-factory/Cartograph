@@ -1,5 +1,6 @@
 import type { ToolResult } from '../tool-types.js';
 import type Cartograph from '../../index.js';
+import { contentDriftCount, hasFreshnessRisk } from '../../freshness.js';
 import { getCoverageStats, listCoverageSources } from '../../db/queries-coverage.js';
 import { findGraphCandidates } from '../../llm/dead-code.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
@@ -71,7 +72,7 @@ function freshnessCheck(cg: Cartograph): TrustCheck {
       action: 'Run `cartograph_admin({action: "sync"})` or `cartograph_admin({action: "index"})`.',
     };
   }
-  const drifted = freshness.contentDriftedFiles ?? 0;
+  const drifted = contentDriftCount(freshness);
   if (freshness.severity === 'very_stale') {
     return {
       state: 'blocked',
@@ -80,7 +81,7 @@ function freshnessCheck(cg: Cartograph): TrustCheck {
       action: 'Run `cartograph_admin({action: "sync"})` before high-risk tools.',
     };
   }
-  if (freshness.isStale || drifted > 0) {
+  if (hasFreshnessRisk(freshness)) {
     return {
       state: 'warn',
       label: 'Freshness',

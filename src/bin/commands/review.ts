@@ -251,6 +251,7 @@ interface ReviewRiskOptions {
   limit?: string;
   minCentrality?: string;
   coverageSource?: string;
+  pathFilter?: string;
 }
 
 function assignReviewRiskArgs(
@@ -287,10 +288,12 @@ function registerReviewRiskCommand(deps: ReviewCommandDeps): void {
     .option('--limit <n>', 'Alias of --top-n (MCP arg mirror); --top-n wins when both are set')
     .option('--min-centrality <n>', 'Minimum centrality (0–1, default 0)')
     .option('--coverage-source <s>', 'Coverage source key (e.g. unit, e2e)')
+    .option('--path-filter <prefix>', 'Project-relative file path prefix for risk lenses')
     .action(async (options: ReviewRiskOptions) => {
       const args: Record<string, unknown> = { mode: 'risk' };
       if (!assignReviewRiskArgs(args, options, deps)) return;
       if (options.coverageSource) args['coverageSource'] = options.coverageSource;
+      if (options.pathFilter) args['pathFilter'] = options.pathFilter;
       await runViaMCP('cartograph_review', args, options.projectPath);
     });
 }

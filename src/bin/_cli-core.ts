@@ -26,6 +26,7 @@ import { isInitialized } from '../directory.js';
 import { compact } from '../utils.js';
 import { errMsg } from '../errors.js';
 import { getSummaryCoverage } from '../db/queries-summaries.js';
+import { contentDriftCount } from '../freshness.js';
 import { SUMMARIZABLE_KINDS } from '../llm/summarizer.js';
 import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-generator.js';
 import { getToolModules } from '../mcp/tools/registry.js';
@@ -802,7 +803,8 @@ export async function runViaMCPCapture(
       text = text.replace(invalidArgsPrefix, '');
       text = `${chalk.red('✗')} ${text}`;
     }
-    const drifted = cg.stats.getFreshness()?.contentDriftedFiles ?? null;
+    const freshness = cg.stats.getFreshness();
+    const drifted = freshness && freshness.contentDriftedFiles !== null ? contentDriftCount(freshness) : null;
     return { text, exitCode, contentDriftedFiles: drifted };
   } finally {
     cg.close();

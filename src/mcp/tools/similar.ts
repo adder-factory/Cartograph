@@ -280,6 +280,8 @@ export async function handleSimilar(ctx: ToolCtx, args: Record<string, unknown>)
       sections.push(`### ${symbol}\n\n${notFoundMessage(cg, symbol)}\n`);
       continue;
     }
+    const candidateNote = matches.note.replace(/^\n+/, '').trim();
+    if (candidateNote) sections.push(candidateNote, '');
     for (const source of matches.nodes) {
       if (seenSourceIds.has(source.id)) continue;
       seenSourceIds.add(source.id);
