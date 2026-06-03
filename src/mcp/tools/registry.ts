@@ -34,6 +34,7 @@ import type { ToolDefinition } from '../tool-types.js';
 import { allowStaleProperty } from '../tool-types.js';
 import type { ToolModule } from './types.js';
 import { getZodSchema, reattachZodSchema } from './_define-tool.js';
+import { getToolContract, reattachToolContract } from './_tool-contract.js';
 
 import { ADMIN_TOOL } from './admin.js';
 import { AT_RANGE_TOOL } from './at-range.js';
@@ -98,6 +99,7 @@ function withAllowStale(mod: ToolModule): ToolModule {
   // the wrapped module through the Zod validation path. Legacy modules
   // return `undefined` here and `reattachZodSchema` is then a no-op.
   const zodSchema = getZodSchema(mod);
+  const toolContract = getToolContract(mod);
   const wrapped: ToolModule = {
     ...mod,
     definition: {
@@ -111,7 +113,7 @@ function withAllowStale(mod: ToolModule): ToolModule {
       },
     },
   };
-  return reattachZodSchema(wrapped, zodSchema);
+  return reattachToolContract(reattachZodSchema(wrapped, zodSchema), toolContract);
 }
 
 const ENTRIES: ToolModule[] = [

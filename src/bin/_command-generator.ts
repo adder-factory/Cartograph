@@ -237,6 +237,17 @@ export interface GenerateCommandOptions {
    * universal split.
    */
   readonly commaSplitFields?: readonly string[];
+  /**
+   * Example invocations appended to generated `--help`. These are CLI
+   * presentation metadata, so they live alongside the other generated
+   * command contract options instead of in the MCP Zod schema.
+   */
+  readonly examples?: readonly string[];
+  /**
+   * Follow-up guidance appended to generated `--help`. Kept structured
+   * so tests can prove generated help text is contract-derived.
+   */
+  readonly nextStepHints?: readonly string[];
 }
 
 /** Field always routed to `runViaMCP`'s `projectPath` argument
@@ -268,6 +279,7 @@ export function buildGeneratedCommand(
   const cmd = new Command(commandName)
     .description(mod.definition.description)
     .summary(oneLineSummary(mod.definition.description));
+  appendContractHelp(cmd, opts);
   const ctx: GenContext = { cmd, spec, mod, opts };
 
   // Pre-phase — collect the set of fields targeted by an aliasFlag.
@@ -336,6 +348,19 @@ function oneLineSummary(description: string): string {
   const sentence = sentenceMatch?.[0]?.trim() ?? oneLine;
   const max = 120;
   return sentence.length <= max ? sentence : `${sentence.slice(0, max - 1).trimEnd()}…`;
+}
+
+function appendContractHelp(cmd: Command, opts: GenerateCommandOptions): void {
+  const sections: string[] = [];
+  if (opts.examples?.length) {
+    sections.push(['Examples:', ...opts.examples.map((example) => `  ${example}`)].join('\n'));
+  }
+  if (opts.nextStepHints?.length) {
+    sections.push(['Next steps:', ...opts.nextStepHints.map((hint) => `  ${hint}`)].join('\n'));
+  }
+  if (sections.length > 0) {
+    cmd.addHelpText('after', `\n${sections.join('\n\n')}`);
+  }
 }
 
 /**

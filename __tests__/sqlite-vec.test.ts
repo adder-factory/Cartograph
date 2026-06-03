@@ -189,6 +189,39 @@ describe('vec-helpers — bootstrap + mirror + KNN', () => {
     expect(count.c).toBe(1);
   });
 
+  it('bootstrapVecTables rebuilds a stale vec0 mirror instead of only backfilling', () => {
+    const model = 'fake-model';
+    for (let i = 1; i <= 3; i++) {
+      upsertSymbolEmbedding({
+        qb: queries,
+        nodeId: `n${i}`,
+        embedding: vectorToBytes(unitVec(i)),
+        model,
+        summaryHashAtEmbed: '',
+      });
+    }
+    const name = vecTableNameForDim(DIM);
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get() as { c: number }).c).toBe(3);
+
+    // Simulate a historical/bloated vec0 mirror: a rowid that has no
+    // canonical embedding_store row. Startup bootstrap used to only run
+    // INSERT ... WHERE rowid NOT IN (vec), which never deleted this ghost.
+    mirrorEmbeddingToVec({
+      db,
+      vecLoaded: true,
+      rowid: 9000n,
+      embedding: vectorToBytes(unitVec(99)),
+      dim: DIM,
+    });
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get() as { c: number }).c).toBe(4);
+
+    bootstrapVecTables(db, true);
+
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${name}`).get() as { c: number }).c).toBe(3);
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${name} WHERE rowid = 9000`).get() as { c: number }).c).toBe(0);
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${name}_vector_chunks00`).get() as { c: number }).c).toBe(1);
+  });
+
   it('upsertSymbolEmbedding mirrors into the dim-matching vec0 table', () => {
     upsertSymbolEmbedding({
       qb: queries,
