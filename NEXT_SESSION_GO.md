@@ -1,77 +1,71 @@
 # Next Session: `go`
 
 When the user says exactly `go`, read this file and start the first
-unchecked task below. The repo is already clean and pushed at the time
-of this handoff; do not redo the completed low-token/MCP-load work
-unless a new test failure points back to it.
+unchecked task below.
+
+The goal of the next session is not another one-off friction sweep. The
+goal is to reduce the structural causes of the bugs found in the
+MCP/CLI/Sonar work: duplicated contracts, CLI/MCP drift, implicit
+installer states, subtle graph invariants, partial test mocks, and CI
+portability gaps.
 
 ## Current State
 
 - Branch: `main`
-- Latest completed implementation commit before this handoff:
-  `7f29e93 Reduce MCP load context`
+- Latest verified code/CI commit before this handoff update:
+  `9baef95 ci: bump checkout and setup-node actions`
 - Worktree at handoff: clean, `main...origin/main`
 - Cartograph is initialized in this repo; use Cartograph MCP tools for
   code exploration before broad file reads.
+- Latest GitHub Actions run:
+  - Run `26917926526`
+  - Status: success
+  - Passed: checkout/setup-node v6, install, typecheck, Biome, module
+    leak canaries, biomarker floor
+- Latest Sonar run after source/test changes:
+  - CE task `4e39e8ca-ba00-4f23-b5dc-3e80678edccf`
+  - Analysis `59db8bcc-dc47-4b2e-bcd7-e9ef748ed8e7`
+  - Quality gate `OK`
+  - Open/confirmed issues `0`
+  - Coverage `90.0%`
+  - New coverage `91.0%`
+  - New violations `0`
+  - Note: the final commit after that Sonar run only changed
+    `.github/workflows/check.yml`, outside Sonar source/test scope.
 
-Completed in the previous session:
+Recent relevant commits:
 
-- Added `lowTokens` support for high-volume MCP tools:
-  `find`, `graph`, `context`, `explore`, `at_range`, `node`, `files`,
-  and `imports`.
-- Added matching `--low-tokens` CLI flags where needed and verified
-  CLI/MCP alignment.
-- Added `bun run benchmark:tokens` and README benchmark table.
-- Reduced MCP startup/load context by compacting advertised
-  `tools/list` descriptions only; full internal schemas and CLI help
-  remain intact.
-- Added a registry budget guard:
-  - max 45 advertised MCP tools
-  - max 65 KB serialized `tools/list`
-  - max 80 KB combined `tools/list` + initialize instructions
-- Updated README, playbook/server instructions, generated agent
-  instructions, and CLI `serve --help`.
+- `9baef95 ci: bump checkout and setup-node actions`
+- `e0dc0ba test: remove remaining partial leak mocks`
+- `a7973b2 test: preserve exports in leak canary mocks`
+- `dd5f1d6 ci: make leak canary discovery portable`
+- `8a00c9d ci: run module leak canaries`
+- `6943a08 fix(tests-for): guard barrel traversal regressions`
+- `e913b84 fix(installer): improve doctor and setup guidance`
+- `cb9f14a fix(cli-mcp): smooth tool surface frictions`
 
-Measured after Task 4:
+## Why We Had So Many Bugs
 
-- Full MCP server: 36 tools.
-- Full `tools/list`: ~16,076 estimated tokens.
-- Compact initialize guide: ~447 estimated tokens.
-- Full MCP load including compact initialize guide: ~16,522 estimated
-  tokens.
-- Full playbook remains available through `cartograph_playbook`: ~2,870
-  estimated tokens.
-- With `--no-write-tools`: 31 tools, combined load ~13,584 estimated
-  tokens.
-- Per-call `lowTokens` benchmark average: ~57% less output than regular
-  Cartograph on the measured cases.
-- `cartograph mcp-budget` / `bun run measure:mcp-load` now reports
-  tool count, `tools/list`, initialize, combined startup load, on-demand
-  full playbook size, and top schema contributors.
-- `bun run check:mcp-load` now prints the same MCP load report with an
-  explicit PASS/FAIL line and exits non-zero when hard limits are
-  exceeded.
+The failures were mostly structural, not isolated mistakes:
 
-Verification already passed:
-
-- `npm run typecheck`
-- `bun test --timeout 30000 __tests__/mcp-low-tokens.test.ts __tests__/cli-mcp-alignment.test.ts __tests__/cli-read-internals.test.ts __tests__/mcp-tool-registry.test.ts`
-- `bun test --timeout 30000 __tests__/mcp-tool-registry.test.ts __tests__/mcp-server-options.test.ts __tests__/mcp-server-coverage.test.ts`
-- `bunx biome check src/mcp/tools.ts __tests__/mcp-tool-registry.test.ts src/bin/commands/lifecycle.ts src/mcp/server-instructions.ts src/installer/instructions-template.ts README.md`
-- `bun run benchmark:tokens`
-- `cartograph_compare_to_ref({ref:"HEAD", includeBiomarkers:true, findingsDelta:true})`
-- Sonar scanner submitted successfully; CE `SUCCESS`, quality gate `OK`,
-  and `new_open_confirmed_issues_since_2026-06-03=0`.
-
-Sonar notes:
-
-- Use `SONAR_TOKEN` from the environment without printing it.
-- This SonarQube 26.5 server accepted current APIs:
-  - `/api/ce/task?id=...`
-  - `/api/qualitygates/project_status?analysisId=...`
-  - `/api/issues/search?...&issueStatuses=OPEN,CONFIRMED`
-- Do not use deprecated `statuses`; do not assume `/api/v2/...` exists
-  here because it returned 404 in the previous session.
+- MCP schemas, generated CLI flags, hand-written command families, help
+  text, aliases, defaults, examples, and validation are not all derived
+  from one authoritative contract.
+- CLI and MCP argument handling have overlapping but separate paths,
+  which allowed drift in boolean negation, unknown-argument handling,
+  enum/action errors, and output hints.
+- Installer/doctor behavior has many implicit valid states:
+  uninitialized, initialized without LLM config, no-models setup,
+  minimal models, full models, detected local backend, cloud backend,
+  skip-project-checks, and env model dir override.
+- Graph-facing tools depend on subtle invariants around file nodes,
+  side-effect imports, barrels, reverse dependencies, affected tests,
+  symbol mode, and file mode.
+- Several tests used partial top-level `vi.mock()` calls for shared
+  modules. That passed in some local orders but poisoned later MCP
+  canaries in CI.
+- CI scripts assumed local tools such as `rg`; GitHub runners did not
+  provide them.
 
 ## Start Here
 
@@ -79,132 +73,202 @@ Sonar notes:
 2. Confirm the repo is clean and inspect any newer user changes before
    editing.
 3. Use Cartograph for project-aware exploration.
-4. Work the unchecked tasks below in order.
-5. Keep edits scoped, update docs/playbook/help with each behavior
-   change, and run focused tests after each task.
+4. Work the unchecked tasks below in order unless the user redirects.
+5. Keep edits scoped and add contract tests with each behavior change.
 6. Before reporting done, run `cartograph_compare_to_ref`.
-7. If code changed, run typecheck, Biome, relevant tests, benchmark if
-   token behavior changed, Sonar, then commit and push.
+7. If code changed, run focused tests, `npm run typecheck`, Biome,
+   `npm run test:leaks` when test/mocking/tool-surface code changed,
+   Sonar when source/test behavior changed, then commit and push.
 
-## Task 1: MCP Serve Profiles
+## Task 1: Canonical Tool Contract
 
-- [x] Add an MCP server profile option, likely
-  `cartograph serve --mcp --profile <full|core|read-only|review>`.
-- [x] Make the default profile preserve current behavior (`full`) unless
-  the user explicitly chooses another profile.
-- [x] Implement profiles as advertised-tool filters, not as new MCP
-  tools, so the registry count stays stable.
-- [x] Define conservative initial profiles:
-  - `full`: current 36-tool surface.
-  - `core`: focused coding-agent surface for common lookups and edits.
-  - `read-only`: no write-class tools; should align with or build on
-    existing `--no-write-tools`.
-  - `review`: diff/risk/test/change-impact oriented surface.
-- [x] Ensure profiles compose predictably with repeated
-  `--disable-tool <name>` and `--no-write-tools`.
-- [x] Update `cartograph_status` server-config output so agents can see
-  the active profile.
-- [x] Add tests for profile filtering, composition, and MCP load-budget
-  impact.
+- [ ] Identify the current canonical-ish tool definition path and where
+  CLI metadata is generated from it.
+- [ ] Design a single `ToolContract` shape that can drive:
+  - MCP input schema
+  - CLI flags and aliases
+  - CLI help text
+  - default values
+  - boolean negation text and behavior
+  - examples and next-step hints
+  - generated CLI/MCP parity tests
+- [ ] Move one low-risk generated command family onto the contract shape
+  as a pilot, preferably a read-only tool with booleans and enums.
+- [ ] Add tests proving generated CLI flags, MCP schema, defaults, and
+  help snippets come from the same source.
+- [ ] Document the contract shape for future tools.
 
 Likely starting points:
 
+- `src/mcp/tool-types.ts`
+- `src/mcp/tools.ts`
+- `src/bin/_command-generator.ts`
+- `src/bin/commands/generated.ts`
+- `__tests__/command-generator.test.ts`
+- `__tests__/cli-mcp-alignment.test.ts`
+
+## Task 2: Shared Argument Normalization
+
+- [ ] Inventory where MCP and CLI currently handle aliases, defaults,
+  booleans, negation, enum validation, and unknown arguments.
+- [ ] Add or extract one shared normalization pipeline:
+  `raw args -> aliases -> boolean negation -> defaults -> validation -> normalized args`.
+- [ ] Make generated CLI and MCP tools use the same normalization where
+  feasible.
+- [ ] Standardize unknown-argument behavior:
+  either schema rejection or structured warning, but not silent drift.
+- [ ] Add contract tests for:
+  - `includeTests: false` style booleans
+  - `--no-*` CLI flags
+  - invalid enum/action values
+  - ignored/unknown argument reporting
+  - explicit call values overriding defaults
+
+Likely starting points:
+
+- `src/bin/_cli-core.ts`
+- `src/bin/_command-generator.ts`
+- `src/mcp/tools.ts`
+- `src/mcp/tool-types.ts`
+- `__tests__/cli-mcp-alignment.test.ts`
+- `__tests__/command-generator.test.ts`
+
+## Task 3: Generated Tool-Surface Contract Matrix
+
+- [ ] Turn the existing CLI/MCP parity checks into an explicit generated
+  matrix for every registered tool.
+- [ ] For each tool, cover:
+  - MCP minimal valid call
+  - CLI `--help`
+  - CLI/MCP default parity
+  - invalid enum/action error shape
+  - unknown argument behavior
+  - JSON/text output sanity where applicable
+- [ ] Keep the test output readable so failures point to the exact tool,
+  field, and surface.
+- [ ] Decide whether the matrix belongs in existing tests or a new
+  focused `tool-contract` test file.
+
+Likely starting points:
+
+- `__tests__/tool-surface-smoke.test.ts`
+- `__tests__/cli-mcp-alignment.test.ts`
+- `__tests__/command-generator.test.ts`
+- `src/mcp/tools.ts`
+- `src/bin/_command-generator.ts`
+
+## Task 4: Installer/Doctor State Machine
+
+- [ ] Define explicit installer/doctor states:
+  - uninitialized
+  - initialized without LLM config
+  - setup with `--no-models`
+  - minimal models
+  - full models
+  - detected local backend
+  - cloud/OpenAI-compatible backend
+  - skip project checks
+  - env model dir override
+- [ ] Encode the expected checks, statuses, and remediation messages for
+  each state.
+- [ ] Add table-driven tests for CLI and MCP admin surfaces.
+- [ ] Make doctor output avoid contradictory guidance, especially around
+  bring-your-own-backend and no-model workflows.
+
+Likely starting points:
+
+- `src/installer/doctor.ts`
+- `src/installer/index.ts`
+- `src/installer/llm-setup-plan.ts`
+- `src/installer/recommended-config.ts`
+- `src/bin/commands/admin.ts`
 - `src/bin/commands/lifecycle.ts`
-- `src/mcp/index.ts`
-- `src/mcp/tools.ts`
-- `src/mcp/tools/status.ts`
-- `__tests__/mcp-server-options.test.ts`
-- `__tests__/mcp-tool-registry.test.ts`
+- `src/mcp/tools/admin.ts`
+- `__tests__/doctor-embedding-reachability.test.ts`
+- `__tests__/llm-setup-plan.test.ts`
+- `__tests__/recommended-config.test.ts`
+- `__tests__/admin-command-actions-unit.test.ts`
+- `__tests__/lifecycle-command-actions-unit.test.ts`
 
-## Task 2: Low-Tokens Default
+## Task 5: Graph Invariant Suite
 
-- [x] Add a server option such as
-  `cartograph serve --mcp --low-tokens-default`.
-- [x] When enabled, supported high-volume tools behave as if
-  `lowTokens: true` was passed unless the caller explicitly passes
-  `lowTokens: false`.
-- [x] Keep unsupported tools unchanged.
-- [x] Surface the active default in `cartograph_status` server-config
-  output.
-- [x] Add tests proving explicit per-call `lowTokens` wins over the
-  server default.
-- [x] Update CLI help, README, playbook/server instructions, and
-  generated agent instructions.
+- [ ] Add a small invariant fixture for graph/file/test relationships.
+- [ ] Assert these invariants:
+  - resolved imports create reverse dependent paths
+  - side-effect imports still count as dependencies
+  - barrels are capped and warned in file mode
+  - symbol mode avoids barrel fanout
+  - `affected` and `tests_for` agree on common fixture paths
+  - definition locations and call-site locations are not mixed
+- [ ] Keep the fixtures small enough for fast local and CI runs.
 
 Likely starting points:
 
-- `src/mcp/tools.ts`
-- `src/mcp/tools/find.ts`
+- `src/graph/queries.ts`
+- `src/mcp/tools/tests-for.ts`
+- `src/mcp/tools/affected.ts` or affected-test implementation files
 - `src/mcp/tools/graph.ts`
-- `src/mcp/tools/context.ts`
-- `src/mcp/tools/explore.ts`
 - `src/mcp/tools/at-range.ts`
-- `src/mcp/tools/node.ts`
-- `src/mcp/tools/files.ts`
-- `src/mcp/tools/imports.ts`
-- `src/bin/commands/lifecycle.ts`
-- `src/mcp/tools/status.ts`
-- `__tests__/mcp-low-tokens.test.ts`
-- `__tests__/mcp-server-options.test.ts`
+- `src/review/index.ts`
+- `__tests__/graph.test.ts`
+- `__tests__/mcp-affected.test.ts`
+- `__tests__/mcp-tests-for.test.ts`
+- `__tests__/at-range.test.ts`
+- `__tests__/review-context.test.ts`
 
-## Task 3: Shorter Initialize Playbook
+## Task 6: Mock Hygiene Guardrail
 
-- [x] Reduce `SERVER_INSTRUCTIONS` startup text further while keeping
-  enough guidance for correct first-tool selection.
-- [x] Move detailed guidance behind `cartograph_playbook` if needed,
-  or split a compact initialize instruction from the full playbook.
-- [x] Keep `cartograph_playbook` useful as the complete guide.
-- [x] Update tests that assert playbook/initialize equivalence if the
-  surfaces intentionally diverge.
-- [x] Re-measure combined MCP load context and tighten the regression
-  budget if practical.
-
-Likely starting points:
-
-- `src/mcp/server-instructions.ts`
-- `src/mcp/tools/playbook.ts`
-- `src/index.ts`
-- `__tests__/mcp-tool-registry.test.ts`
-- `__tests__/mcp-server-coverage.test.ts`
-
-## Task 4: Budget Visibility
-
-- [x] Add a small script or CLI diagnostic for MCP load budget, e.g.
-  `scripts/measure-mcp-load.ts` or `cartograph mcp-budget`.
-- [x] Report tool count, `tools/list` chars/tokens, initialize
-  chars/tokens, combined load, and top schema contributors.
-- [x] Wire it into docs and optionally package scripts.
-- [x] Keep the existing registry test as the hard guard.
+- [ ] Keep `npm run test:leaks` in CI.
+- [ ] Add a lightweight static rule or script warning for partial
+  top-level mocks of shared source modules.
+- [ ] Preferred policy:
+  - use `vi.spyOn(realModule, ...)`
+  - avoid `vi.mock('../src/shared-module', () => ({ onlyOneExport }))`
+  - if a full module mock is unavoidable, preserve every real export or
+    isolate the test process deliberately
+- [ ] Audit the remaining top-level `vi.mock()` tests and convert any
+  shared-module partial mocks that are likely to poison MCP canaries.
 
 Likely starting points:
 
-- `scripts/benchmark-token-savings.ts`
+- `scripts/check-test-module-leaks.mjs`
+- `__tests__/edge-resolution-helpers-unit.test.ts`
+- `__tests__/extraction-store-phases-unit.test.ts`
+- `__tests__/value-ref-edges-hook-unit.test.ts`
+- `__tests__/cochange-hook-unit.test.ts`
+- `__tests__/watcher.test.ts`
+
+## Task 7: CI Portability Rule
+
+- [ ] Add a short repo convention for scripts used in CI:
+  nonstandard tools must either be installed by the workflow or have a
+  fallback.
+- [ ] Add a smoke test or script self-check for CI scripts that depend on
+  local-only binaries.
+- [ ] Keep `rg` as the preferred local path, but fall back to `git grep`
+  or Node APIs where appropriate.
+
+Likely starting points:
+
+- `scripts/check-test-module-leaks.mjs`
+- `.github/workflows/check.yml`
 - `package.json`
 - `README.md`
-- `__tests__/mcp-tool-registry.test.ts`
-
-## Task 5: MCP Load CI Visibility
-
-- [x] Add a CI-friendly MCP load-budget check around the shared
-  measurement helper.
-- [x] Print a clear budget report before failing so contributors see
-  the largest schema contributors.
-- [x] Wire the check into package scripts and README.
-- [x] Cover PASS and FAIL semantics in tests.
 
 ## Definition of Done
 
-- [x] New behavior implemented and documented in README.
-- [x] Playbook/server instructions updated.
-- [x] Generated agent instructions updated.
-- [x] CLI help updated and tested.
-- [x] MCP and CLI remain aligned where applicable.
-- [x] MCP load-budget guard still passes.
-- [x] Focused tests pass.
-- [x] `npm run typecheck` passes.
-- [x] `bunx biome check ...` passes on edited files.
-- [x] `bun run benchmark:tokens` rerun if token-result behavior changed.
-- [x] Sonar run is green if code changed.
-- [x] `cartograph_compare_to_ref({findingsDelta:true})` shows no
+- [ ] Structural changes implemented with focused tests.
+- [ ] CLI/MCP contracts are harder to drift.
+- [ ] Installer/doctor states are explicit and table-tested.
+- [ ] Graph invariants are covered by small fixtures.
+- [ ] Partial top-level mocks are either removed or guarded.
+- [ ] CI scripts are portable on GitHub runners.
+- [ ] `npm run typecheck` passes.
+- [ ] `bunx biome check ...` passes on edited files.
+- [ ] Relevant focused tests pass.
+- [ ] `npm run test:leaks` passes if test/mocking/tool-surface code changed.
+- [ ] GitHub Actions is green after push.
+- [ ] Sonar quality gate is green if source/test behavior changed.
+- [ ] `cartograph_compare_to_ref({findingsDelta:true})` shows no
   introduced high-risk findings, or findings are explained.
-- [x] Commit and push.
+- [ ] Commit and push.
