@@ -1,124 +1,191 @@
 # Next Session: `go`
 
-When the user says exactly `go`, start this task list. Do not re-open
-the completed clean-git content-drift fix unless a new test failure
-points back to it.
+When the user says exactly `go`, read this file and start the first
+unchecked task below. The repo is already clean and pushed at the time
+of this handoff; do not redo the completed low-token/MCP-load work
+unless a new test failure points back to it.
 
 ## Current State
 
-- The active patch fixes the clean-git `contentDriftedFiles > 0`
-  freshness bug and adds regression coverage.
-- Verification already passed before this handoff:
-  - `npm test` passed: 4,932 pass, 0 fail, 18 skip.
-  - `npm run typecheck` passed.
-  - `biome check` passed on edited TS/test files.
-  - `git diff --check` passed.
-  - `cartograph_compare_to_ref` reported 0 introduced biomarker findings.
+- Branch: `main`
+- Latest completed implementation commit before this handoff:
+  `7f29e93 Reduce MCP load context`
+- Worktree at handoff: clean, `main...origin/main`
+- Cartograph is initialized in this repo; use Cartograph MCP tools for
+  code exploration before broad file reads.
+
+Completed in the previous session:
+
+- Added `lowTokens` support for high-volume MCP tools:
+  `find`, `graph`, `context`, `explore`, `at_range`, `node`, `files`,
+  and `imports`.
+- Added matching `--low-tokens` CLI flags where needed and verified
+  CLI/MCP alignment.
+- Added `bun run benchmark:tokens` and README benchmark table.
+- Reduced MCP startup/load context by compacting advertised
+  `tools/list` descriptions only; full internal schemas and CLI help
+  remain intact.
+- Added a registry budget guard:
+  - max 45 advertised MCP tools
+  - max 65 KB serialized `tools/list`
+  - max 80 KB combined `tools/list` + initialize instructions
+- Updated README, playbook/server instructions, generated agent
+  instructions, and CLI `serve --help`.
+
+Measured after commit `7f29e93`:
+
+- Full MCP server: 36 tools.
+- Full `tools/list`: ~16,076 estimated tokens.
+- Full MCP load including initialize playbook: ~18,880 estimated tokens.
+- With `--no-write-tools`: 31 tools, combined load ~15,941 estimated
+  tokens.
+- Per-call `lowTokens` benchmark average: ~57% less output than regular
+  Cartograph on the measured cases.
+
+Verification already passed:
+
+- `npm run typecheck`
+- `bun test --timeout 30000 __tests__/mcp-low-tokens.test.ts __tests__/cli-mcp-alignment.test.ts __tests__/cli-read-internals.test.ts __tests__/mcp-tool-registry.test.ts`
+- `bun test --timeout 30000 __tests__/mcp-tool-registry.test.ts __tests__/mcp-server-options.test.ts __tests__/mcp-server-coverage.test.ts`
+- `bunx biome check src/mcp/tools.ts __tests__/mcp-tool-registry.test.ts src/bin/commands/lifecycle.ts src/mcp/server-instructions.ts src/installer/instructions-template.ts README.md`
+- `bun run benchmark:tokens`
+- `cartograph_compare_to_ref({ref:"HEAD", includeBiomarkers:true, findingsDelta:true})`
+- Sonar scanner submitted successfully; CE `SUCCESS`, quality gate `OK`,
+  and `new_open_confirmed_issues_since_2026-06-03=0`.
+
+Sonar notes:
+
+- Use `SONAR_TOKEN` from the environment without printing it.
+- This SonarQube 26.5 server accepted current APIs:
+  - `/api/ce/task?id=...`
+  - `/api/qualitygates/project_status?analysisId=...`
+  - `/api/issues/search?...&issueStatuses=OPEN,CONFIRMED`
+- Do not use deprecated `statuses`; do not assume `/api/v2/...` exists
+  here because it returned 404 in the previous session.
 
 ## Start Here
 
-1. Run `git status --short` and read this file plus `TASKS.md`.
-2. Use Cartograph for code exploration because `.cartograph/` exists.
-3. Work the tasks below in order, one patch at a time.
-4. After each task, run focused tests plus `npm run typecheck`.
-5. Before reporting done, run `cartograph_compare_to_ref`.
+1. Run `git status --short --branch`.
+2. Confirm the repo is clean and inspect any newer user changes before
+   editing.
+3. Use Cartograph for project-aware exploration.
+4. Work the unchecked tasks below in order.
+5. Keep edits scoped, update docs/playbook/help with each behavior
+   change, and run focused tests after each task.
+6. Before reporting done, run `cartograph_compare_to_ref`.
+7. If code changed, run typecheck, Biome, relevant tests, benchmark if
+   token behavior changed, Sonar, then commit and push.
 
-## Task 1: Symbol Disambiguation UX
+## Task 1: MCP Serve Profiles
 
-Problem: common symbol names such as `sync` currently resolve to one
-candidate while mentioning alternatives. The tool output should make
-the next step obvious without manual file reads.
-
-Acceptance criteria:
-
-- Ambiguous symbol lookups show a compact candidate list with stable
-  node id, name, kind, file, line, and enough context to choose.
-- The output includes an explicit follow-up example using the stable
-  node id, such as `cartograph_node({symbol: "n_xxxxxxxx"})`.
-- Apply this where ambiguity is most painful first, likely symbol
-  resolution paths used by `cartograph_node` and graph navigation.
-- Add regression tests for an ambiguous name such as `sync`.
+- [ ] Add an MCP server profile option, likely
+  `cartograph serve --mcp --profile <full|core|read-only|review>`.
+- [ ] Make the default profile preserve current behavior (`full`) unless
+  the user explicitly chooses another profile.
+- [ ] Implement profiles as advertised-tool filters, not as new MCP
+  tools, so the registry count stays stable.
+- [ ] Define conservative initial profiles:
+  - `full`: current 36-tool surface.
+  - `core`: focused coding-agent surface for common lookups and edits.
+  - `read-only`: no write-class tools; should align with or build on
+    existing `--no-write-tools`.
+  - `review`: diff/risk/test/change-impact oriented surface.
+- [ ] Ensure profiles compose predictably with repeated
+  `--disable-tool <name>` and `--no-write-tools`.
+- [ ] Update `cartograph_status` server-config output so agents can see
+  the active profile.
+- [ ] Add tests for profile filtering, composition, and MCP load-budget
+  impact.
 
 Likely starting points:
 
-- `src/mcp/tools/symbol-resolver.ts`
+- `src/bin/commands/lifecycle.ts`
+- `src/mcp/index.ts`
+- `src/mcp/tools.ts`
+- `src/mcp/tools/status.ts`
+- `__tests__/mcp-server-options.test.ts`
+- `__tests__/mcp-tool-registry.test.ts`
+
+## Task 2: Low-Tokens Default
+
+- [ ] Add a server option such as
+  `cartograph serve --mcp --low-tokens-default`.
+- [ ] When enabled, supported high-volume tools behave as if
+  `lowTokens: true` was passed unless the caller explicitly passes
+  `lowTokens: false`.
+- [ ] Keep unsupported tools unchanged.
+- [ ] Surface the active default in `cartograph_status` server-config
+  output.
+- [ ] Add tests proving explicit per-call `lowTokens` wins over the
+  server default.
+- [ ] Update CLI help, README, playbook/server instructions, and
+  generated agent instructions.
+
+Likely starting points:
+
+- `src/mcp/tools.ts`
+- `src/mcp/tools/find.ts`
+- `src/mcp/tools/graph.ts`
+- `src/mcp/tools/context.ts`
+- `src/mcp/tools/explore.ts`
+- `src/mcp/tools/at-range.ts`
 - `src/mcp/tools/node.ts`
-- `src/mcp/tools.ts`
-- `__tests__/mcp-node-multi.test.ts`
-
-## Task 2: Task-Scoped Review Filters
-
-Problem: `cartograph_review mode=risk` is useful but too broad for
-focused work. A freshness task should be able to reduce unrelated
-hotspot, dead-code, and coverage noise.
-
-Acceptance criteria:
-
-- Add a simple scoped filter first, preferably `pathFilter` for
-  `mode: "risk"`.
-- Apply it consistently to risk lenses where path filtering is
-  meaningful: biomarkers, hotspots, coverage gaps, and dead-code
-  candidates.
-- Document the new argument in the tool schema description.
-- Add tests showing unrelated paths are excluded.
-
-Likely starting points:
-
-- `src/mcp/tools/review.ts`
-- `src/mcp/tools/review-risk.ts` or adjacent review modules
-- `__tests__/mcp-risk-review.test.ts`
-
-## Task 3: Shared Freshness-Risk Helper
-
-Problem: freshness-risk semantics now include
-`contentDriftedFiles > 0`, but related logic is still spread across
-MCP gating, metadata, status rendering, empty-result hints, and CLI
-generated wrappers.
-
-Acceptance criteria:
-
-- Extract a small shared helper for "has freshness risk" and
-  "recommended action" semantics.
-- Preserve current behavior for `isStale`, `contentDriftedFiles`,
-  heavy drift, `allowStale`, and auto-sync metadata.
-- Update MCP gating and empty-result hints to use the helper.
-- Update status/CLI surfaces only where the helper clearly reduces
-  duplicated logic without changing user-visible behavior.
-- Add or adjust focused regression tests around clean-git content drift.
-
-Likely starting points:
-
-- `src/freshness.ts`
-- `src/mcp/tools.ts`
-- `src/mcp/tools/shared.ts`
+- `src/mcp/tools/files.ts`
+- `src/mcp/tools/imports.ts`
+- `src/bin/commands/lifecycle.ts`
 - `src/mcp/tools/status.ts`
-- `src/bin/commands/generated.ts`
-- `__tests__/freshness.test.ts`
-- `__tests__/mcp-status-b14.test.ts`
+- `__tests__/mcp-low-tokens.test.ts`
+- `__tests__/mcp-server-options.test.ts`
 
-## Task 4: Unresolved Refs Explainability
+## Task 3: Shorter Initialize Playbook
 
-Problem: `cartograph_status` can show a large `Unresolved refs` count
-that is healthy but easy to misread as corruption. The current status
-line says it is intentional, but it does not give users a quick way to
-understand what the tail contains.
-
-Acceptance criteria:
-
-- Add a lightweight drilldown or status detail that buckets unresolved
-  refs by `reference_kind` and `language`.
-- Include a small sample of common unresolved names, preferably capped
-  and sorted by frequency.
-- Keep the existing corruption/degraded-edge warning separate from the
-  healthy unresolved-tail disclosure.
-- Avoid making normal unresolved refs look like failures; use an
-  informational tone and explain common causes such as builtins,
-  external APIs, property access, framework hooks, and dynamic dispatch.
-- Add focused tests for the rendering and threshold behavior.
+- [ ] Reduce `SERVER_INSTRUCTIONS` startup text further while keeping
+  enough guidance for correct first-tool selection.
+- [ ] Move detailed guidance behind `cartograph_playbook` if needed,
+  or split a compact initialize instruction from the full playbook.
+- [ ] Keep `cartograph_playbook` useful as the complete guide.
+- [ ] Update tests that assert playbook/initialize equivalence if the
+  surfaces intentionally diverge.
+- [ ] Re-measure combined MCP load context and tighten the regression
+  budget if practical.
 
 Likely starting points:
 
-- `src/mcp/tools/status.ts`
-- `src/db/queries-unresolved-refs.ts`
-- `__tests__/mcp-status.test.ts`
-- `__tests__/mcp-status-b14.test.ts`
+- `src/mcp/server-instructions.ts`
+- `src/mcp/tools/playbook.ts`
+- `src/index.ts`
+- `__tests__/mcp-tool-registry.test.ts`
+- `__tests__/mcp-server-coverage.test.ts`
+
+## Task 4: Budget Visibility
+
+- [ ] Add a small script or CLI diagnostic for MCP load budget, e.g.
+  `scripts/measure-mcp-load.ts` or `cartograph mcp-budget`.
+- [ ] Report tool count, `tools/list` chars/tokens, initialize
+  chars/tokens, combined load, and top schema contributors.
+- [ ] Wire it into docs and optionally package scripts.
+- [ ] Keep the existing registry test as the hard guard.
+
+Likely starting points:
+
+- `scripts/benchmark-token-savings.ts`
+- `package.json`
+- `README.md`
+- `__tests__/mcp-tool-registry.test.ts`
+
+## Definition of Done
+
+- [ ] New behavior implemented and documented in README.
+- [ ] Playbook/server instructions updated.
+- [ ] Generated agent instructions updated.
+- [ ] CLI help updated and tested.
+- [ ] MCP and CLI remain aligned where applicable.
+- [ ] MCP load-budget guard still passes.
+- [ ] Focused tests pass.
+- [ ] `npm run typecheck` passes.
+- [ ] `bunx biome check ...` passes on edited files.
+- [ ] `bun run benchmark:tokens` rerun if token-result behavior changed.
+- [ ] Sonar run is green if code changed.
+- [ ] `cartograph_compare_to_ref({findingsDelta:true})` shows no
+  introduced high-risk findings, or findings are explained.
+- [ ] Commit and push.
