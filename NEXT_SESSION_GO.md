@@ -32,12 +32,16 @@ Completed in the previous session:
 - Updated README, playbook/server instructions, generated agent
   instructions, and CLI `serve --help`.
 
-Measured after commit `7f29e93`:
+Measured after Task 3:
 
 - Full MCP server: 36 tools.
 - Full `tools/list`: ~16,076 estimated tokens.
-- Full MCP load including initialize playbook: ~18,880 estimated tokens.
-- With `--no-write-tools`: 31 tools, combined load ~15,941 estimated
+- Compact initialize guide: ~447 estimated tokens.
+- Full MCP load including compact initialize guide: ~16,522 estimated
+  tokens.
+- Full playbook remains available through `cartograph_playbook`: ~2,851
+  estimated tokens.
+- With `--no-write-tools`: 31 tools, combined load ~13,584 estimated
   tokens.
 - Per-call `lowTokens` benchmark average: ~57% less output than regular
   Cartograph on the measured cases.
@@ -139,14 +143,14 @@ Likely starting points:
 
 ## Task 3: Shorter Initialize Playbook
 
-- [ ] Reduce `SERVER_INSTRUCTIONS` startup text further while keeping
+- [x] Reduce `SERVER_INSTRUCTIONS` startup text further while keeping
   enough guidance for correct first-tool selection.
-- [ ] Move detailed guidance behind `cartograph_playbook` if needed,
+- [x] Move detailed guidance behind `cartograph_playbook` if needed,
   or split a compact initialize instruction from the full playbook.
-- [ ] Keep `cartograph_playbook` useful as the complete guide.
-- [ ] Update tests that assert playbook/initialize equivalence if the
+- [x] Keep `cartograph_playbook` useful as the complete guide.
+- [x] Update tests that assert playbook/initialize equivalence if the
   surfaces intentionally diverge.
-- [ ] Re-measure combined MCP load context and tighten the regression
+- [x] Re-measure combined MCP load context and tighten the regression
   budget if practical.
 
 Likely starting points:

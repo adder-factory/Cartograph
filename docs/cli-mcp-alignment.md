@@ -122,8 +122,9 @@ the parent-command mounting (`adminCmd` / `summariesCmd` /
 
 ### Playbook coverage
 
-Every public tool should appear in `src/mcp/server-instructions.ts`
-(the MCP `initialize` payload — what an agent sees on connect):
+Every public tool should appear in the full playbook exported from
+`src/mcp/server-instructions.ts` (returned by `cartograph_playbook`;
+the MCP `initialize` payload is intentionally compact):
 
 ```bash
 for tool in $(grep -E "^\s*name:\s*'cartograph_" src/mcp/tools/*.ts \

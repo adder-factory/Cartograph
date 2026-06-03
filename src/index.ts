@@ -40,7 +40,7 @@ import {
   type IndexHookOutcome,
 } from './index-hooks/registry.js';
 import { HookWorkerClient } from './index-hooks/hook-worker-client.js';
-import { SERVER_INSTRUCTIONS } from './mcp/server-instructions.js';
+import { FULL_PLAYBOOK } from './mcp/server-instructions.js';
 
 // Re-export types for consumers
 export * from './types.js';
@@ -754,13 +754,14 @@ export class Cartograph extends CartographCore {
   /**
    * Return the cartograph tool playbook — which tool for which
    * question, common chains, anti-patterns, tier discipline.
-   * Identical to the payload the MCP `initialize` handshake sends to
-   * connecting clients, but exposed here for programmatic consumers
-   * (tests, scripts, agents that drive the API without an MCP
-   * transport). Static — doesn't depend on an open project.
+   * Identical to the `cartograph_playbook` tool body and exposed here
+   * for programmatic consumers (tests, scripts, agents that drive the
+   * API without an MCP transport). Static — doesn't depend on an open
+   * project. The MCP `initialize` handshake sends a shorter startup
+   * guide to reduce connection-time context.
    */
   static getInstructions(): string {
-    return SERVER_INSTRUCTIONS;
+    return FULL_PLAYBOOK;
   }
 
   // ===========================================================================

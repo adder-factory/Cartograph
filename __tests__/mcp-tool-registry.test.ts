@@ -6,14 +6,14 @@
  * with the wrong shape).
  */
 import { describe, it, expect } from 'vitest';
-import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
+import { FULL_PLAYBOOK, SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
 import { ToolHandler, tools } from '../src/mcp/tools.js';
 import { MCP_SERVER_PROFILE_NAMES, MCP_SERVER_PROFILE_TOOL_NAMES } from '../src/mcp/profiles.js';
 
 const MCP_TOOL_COUNT_BUDGET = 45;
 const MCP_TOOLS_LIST_CHAR_BUDGET = 65_000;
-const MCP_LOAD_CONTEXT_CHAR_BUDGET = 80_000;
+const MCP_LOAD_CONTEXT_CHAR_BUDGET = 68_000;
 
 const byName = (a: string, b: string): number => a.localeCompare(b);
 
@@ -119,22 +119,27 @@ describe('MCP tool registry — single source of truth', () => {
     }
   });
 
-  it('cartograph_playbook returns the same playbook as the MCP initialize handshake', async () => {
+  it('cartograph_playbook returns the full playbook while initialize stays compact', async () => {
     // Playbook is the one tool that needs no project bound — agents
     // calling it before opening a Cartograph (or in tests/scripts that
-    // bypass the MCP `initialize` handshake) should still see the
-    // playbook. The body must be byte-identical to what the public
-    // `Cartograph.getInstructions()` API returns, so consumers don't
-    // get drift between the two surfaces.
+    // want more than the compact MCP `initialize` guide) should still
+    // see the complete playbook. The body must be byte-identical to
+    // what the public `Cartograph.getInstructions()` API returns, so
+    // consumers don't get drift between those two full-guide surfaces.
     const Cartograph = (await import('../src/index.js')).default;
     const handler = new ToolHandler(null);
     const result = await handler.execute('cartograph_playbook', {});
     expect(result.isError).toBeFalsy();
     const text = result.content[0]?.text ?? '';
     expect(text).toBe(Cartograph.getInstructions());
+    expect(text).toBe(FULL_PLAYBOOK);
+    expect(text).not.toBe(SERVER_INSTRUCTIONS);
+    expect(SERVER_INSTRUCTIONS.length).toBeLessThan(FULL_PLAYBOOK.length / 4);
     expect(text.length).toBeGreaterThan(1000);
     expect(text).toMatch(/cartograph_context/);
     expect(text).toMatch(/cartograph_playbook/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/compact startup guide/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/cartograph_playbook/);
   });
 
   it('execute() reports unknown-tool errors', async () => {

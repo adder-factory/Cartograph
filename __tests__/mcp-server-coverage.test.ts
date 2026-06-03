@@ -5,6 +5,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPServer, parseDebounceEnv, StdioTransport } from '../src/mcp/index.js';
+import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { ErrorCodes, type JsonRpcNotification, type JsonRpcRequest } from '../src/mcp/transport.js';
 
 type RpcMessage = JsonRpcRequest | JsonRpcNotification;
@@ -215,6 +216,10 @@ describe('MCPServer JSON-RPC request handling', () => {
       expect(init.protocolVersion).toBe('2024-11-05');
       expect(init.capabilities).toEqual({ tools: {} });
       expect(init.serverInfo.name).toBe('cartograph');
+      expect(init.instructions.startsWith(SERVER_INSTRUCTIONS)).toBe(true);
+      expect(init.instructions).toContain('compact startup guide');
+      expect(init.instructions).toContain('cartograph_playbook');
+      expect(init.instructions).not.toContain('Which cartograph tool fits this question?');
       expect(init.instructions).toContain('Cartograph setup warning');
       expect(init.instructions).toContain(root);
     });

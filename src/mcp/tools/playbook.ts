@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { SERVER_INSTRUCTIONS } from '../server-instructions.js';
+import { FULL_PLAYBOOK } from '../server-instructions.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
@@ -8,9 +8,10 @@ import { type ToolOutcome, ok } from './_outcome.js';
 /**
  * `cartograph_playbook` — return the agent-facing tool playbook.
  *
- * Static body, no project lookup, no I/O. Identical to the payload
- * that `initialize` sends but callable on demand for tests, scripts,
- * and agents that bypass the handshake.
+ * Static body, no project lookup, no I/O. The initialize handshake
+ * sends a compact startup guide; this tool returns the complete
+ * playbook on demand for tests, scripts, and agents that want the
+ * full map.
  */
 
 /**
@@ -28,16 +29,16 @@ type PlaybookArgs = z.infer<typeof playbookSchema>;
 // produces is `ok(...)`. The bare-`textResult` payload drops straight
 // into the success arm; no envelope spec needed.
 async function handlePlaybook(_ctx: ToolCtx, _args: PlaybookArgs): Promise<ToolOutcome> {
-  return ok(textResult(SERVER_INSTRUCTIONS));
+  return ok(textResult(FULL_PLAYBOOK));
 }
 
 export const PLAYBOOK_TOOL = defineTool({
   name: 'cartograph_playbook',
   description:
     'Return the cartograph tool playbook — which tool for which question, common chains, anti-patterns, tier discipline.\n\n' +
-    'Identical to the MCP `initialize` payload but callable on demand. ' +
+    'More detailed than the compact MCP `initialize` startup guide. ' +
     "Use when scoping multi-tool work or unsure of a tool's shape. " +
-    'For programmatic clients that bypass the handshake, this is how you fetch the same guidance.',
+    'For programmatic clients that bypass the handshake, this is how you fetch complete guidance.',
   schema: playbookSchema,
   handle: handlePlaybook,
   // Pure-docs surface — no DB access at all. Always callable, even

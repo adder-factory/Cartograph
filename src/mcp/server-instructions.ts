@@ -1,20 +1,45 @@
 /**
- * Server-level instructions emitted in the MCP `initialize` response.
+ * Compact instructions emitted in the MCP `initialize` response.
  *
- * MCP clients (Claude Code, Cursor, opencode, LangChain, OpenAI Agent
- * SDK, …) surface this text in the agent's system prompt automatically,
- * giving the agent a high-level playbook for the cartograph toolset
- * before it sees individual tool descriptions. Also returned verbatim by
+ * MCP clients place this text into the model's startup context before
+ * any tool call runs, so keep it as a short first-tool-selection guide.
+ * The complete playbook remains available through `FULL_PLAYBOOK` and
  * `cartograph_playbook`.
+ */
+export const SERVER_INSTRUCTIONS = `# Cartograph — compact startup guide
+
+Cartograph is an indexed code graph. Use it before broad file reads, then
+open files directly only when you need exact current source.
+
+Start with:
+- \`cartograph_status\` for index health, freshness, active server profile, and LLM readiness.
+- \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
+- \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
+- \`cartograph_node\` for one symbol's metadata; use \`code: true\` only when source is needed.
+- \`cartograph_context\` for task-shaped implementation context; it may return source.
+- \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_compare_to_ref\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for review, diff, final self-check, and test selection.
+- \`cartograph_playbook\` for the full tool map, edge directions, common chains, and anti-patterns.
+
+Token discipline:
+- Metadata tools are cheap. Source-heavy modes are \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
+- Pass \`lowTokens: true\` on supported high-volume tools, or rely on server \`--low-tokens-default\`; pass \`lowTokens: false\` for one regular response.
+- Server launch flags such as \`--profile core|read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` shrink the advertised tool surface; call \`cartograph_status\` to confirm them.
+
+Freshness:
+- The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional.
+- End edit-touching turns with \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done.
+`;
+
+/**
+ * Complete playbook returned by `cartograph_playbook` and
+ * `Cartograph.getInstructions()`.
  *
  * Scope discipline — this is the WHICH-TOOL-FOR-WHICH-QUESTION map plus
  * cross-tool knowledge (delegation policy, edge orientations, common
  * chains, anti-patterns, tier discipline). Per-flag reference detail
- * lives in each tool's input-schema description, published in the SAME
- * handshake — do not duplicate it here, or every session pays for the
- * same prose twice. Keep it tight; the agent reads this every session.
+ * lives in each tool's input-schema description.
  */
-export const SERVER_INSTRUCTIONS = `# Cartograph — code intelligence over an indexed knowledge graph
+export const FULL_PLAYBOOK = `# Cartograph — code intelligence over an indexed knowledge graph
 
 Cartograph is a SQLite knowledge graph of every symbol, edge, and file in
 the workspace — a structural reference manual you consult BEFORE writing

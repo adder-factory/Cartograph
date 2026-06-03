@@ -485,7 +485,7 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 
 ### MCP Load Context
 
-MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list`; on this repository, the full 36-tool list serializes to about 64 KB, or roughly 16k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the initialize playbook, the measured MCP load context is under 20k estimated tokens.
+MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. On this repository, the full 36-tool list serializes to about 64 KB, or roughly 16k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured MCP load context is about 66 KB, or 16.5k estimated tokens.
 
 That startup schema cost is separate from per-call output tokens, so `lowTokens: true` and `--low-tokens-default` reduce tool results but do not shrink the advertised tool list.
 
@@ -500,7 +500,7 @@ cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_l
 
 Profiles are advertised-tool filters: `full` is the default 36-tool surface, `core` keeps common coding-agent lookup and change-impact tools, `review` focuses diff/risk/test workflows, and `read-only` removes write-class tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
 
-In the same measurement, `--no-write-tools` reduced the list to 31 tools and about 13k estimated tokens. The registry test guards both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, and no more than 80 KB total for `tools/list` plus initialize instructions.
+In the same measurement, `--no-write-tools` reduced the list to 31 tools and about 13.6k estimated tokens including initialize instructions. The registry test guards both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, and no more than 68 KB total for `tools/list` plus initialize instructions.
 
 ### Token Savings Benchmark
 
