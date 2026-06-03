@@ -53,6 +53,7 @@ import { z } from 'zod';
 import type { ToolModule } from '../mcp/tools/types.js';
 import { getZodSchema } from '../mcp/tools/_define-tool.js';
 import { type CliOptionSpec, type CommandSpec, zodSchemaToCommandSpec } from '../mcp/tools/_zod-to-cli.js';
+import { normalizeArgs } from '../mcp/tools/_arg-normalizer.js';
 export type { CommandSpec } from '../mcp/tools/_zod-to-cli.js';
 
 /**
@@ -305,6 +306,7 @@ export function buildGeneratedCommand(
   // handler reads them in `applyAliasFlags` and folds the value into
   // the matching positional / forwarded slot when that slot is empty.
   const aliasEntries = registerAliasFlags(ctx, layout);
+  const normalizationSpecs = buildNormalizationSpecs(forwarded, layout.leadingPositionals, aliasEntries);
   // Phase 3 — the `.action()` that coerces CLI strings to the schema's
   // types, folds in the positionals, and calls `runViaMcp`.
   // Validate every commaSplitFields entry names a real string-list
@@ -330,7 +332,8 @@ export function buildGeneratedCommand(
       mod,
       runViaMcp,
       forwarded,
-      coercionSchema: buildCoercionSchema(forwarded),
+      normalizationSpecs,
+      normalizationSchema: buildCoercionSchema(normalizationSpecs),
       leadingPositionals: layout.leadingPositionals,
       joinedVariadicName: layout.joinedVariadicName,
       hasProjectPath: hasProjectPathField(spec),
@@ -656,8 +659,10 @@ interface ActionHandlerSpec {
   readonly runViaMcp: RunViaMcp;
   /** Specs registered as `--<flag>` options — forwarded into `args`. */
   readonly forwarded: readonly CliOptionSpec[];
-  /** CLI-local coercion schema built from {@link forwarded}. */
-  readonly coercionSchema: z.ZodObject<z.ZodRawShape>;
+  /** Every CLI-reachable field, after options / positionals / aliases are folded. */
+  readonly normalizationSpecs: readonly CliOptionSpec[];
+  /** CLI-local coercion schema built from {@link normalizationSpecs}. */
+  readonly normalizationSchema: z.ZodObject<z.ZodRawShape>;
   /** Positionals in CLI order — folded into `args` by index. */
   readonly leadingPositionals: readonly CliOptionSpec[];
   /** Joined-variadic field name, or `undefined`. */
@@ -673,9 +678,10 @@ interface ActionHandlerSpec {
 }
 
 /**
- * Phase 3 — build the commander `.action()` callback. It coerces the
- * collected CLI strings through the {@link ActionHandlerSpec.coercionSchema},
- * folds in the positionals, and forwards the typed `args` to `runViaMcp`.
+ * Phase 3 — build the commander `.action()` callback. It folds
+ * positionals and alias flags into the raw arg bag, coerces the
+ * collected CLI strings through the shared normalizer, then forwards
+ * typed `args` to `runViaMcp`.
  *
  * Commander hands positional args first, then the options object, then
  * the Command — so a positional arrives at its index in
@@ -687,17 +693,41 @@ function buildActionHandler(handler: ActionHandlerSpec): (...actionArgs: unknown
     const command = actionArgs.at(-1) as Command;
     const projectPath = readProjectPath(handler, options);
     const raw = collectForwardedRawArgs(handler, options, command);
-    const parsed = handler.coercionSchema.safeParse(raw);
-    if (!parsed.success) {
-      reportCoercionFailure(handler.forwarded, parsed.error.issues[0]);
+    if (rejectBooleanLikePositionals({ handler, actionArgs, options, command })) return;
+    foldLeadingPositionals(handler, actionArgs, raw);
+    foldAliasFallback(handler, options, raw);
+    const parsed = normalizeArgs({
+      rawArgs: raw,
+      schema: handler.normalizationSchema,
+      warnUnknownArgs: false,
+    });
+    if (!parsed.ok) {
+      reportCoercionFailure(handler.normalizationSpecs, parsed.zodError?.issues[0]);
       return;
     }
     const finalArgs = parsed.data;
-    if (rejectBooleanLikePositionals({ handler, actionArgs, options, command })) return;
-    foldLeadingPositionals(handler, actionArgs, finalArgs);
-    foldAliasFallback(handler, options, finalArgs);
     await handler.runViaMcp(handler.mod.definition.name, finalArgs, projectPath);
   };
+}
+
+function buildNormalizationSpecs(
+  forwarded: readonly CliOptionSpec[],
+  leadingPositionals: readonly CliOptionSpec[],
+  aliasEntries: readonly AliasFlagEntry[],
+): CliOptionSpec[] {
+  const out: CliOptionSpec[] = [];
+  const seen = new Set<string>();
+  const add = (spec: CliOptionSpec): void => {
+    if (seen.has(spec.name)) return;
+    seen.add(spec.name);
+    out.push(spec);
+  };
+  forwarded.forEach(add);
+  leadingPositionals.forEach(add);
+  aliasEntries.forEach((entry) => {
+    add(entry.field);
+  });
+  return out;
 }
 
 function readProjectPath(handler: ActionHandlerSpec, options: Record<string, unknown>): string | undefined {
@@ -817,10 +847,9 @@ function foldLeadingPositionals(
  * Alias-flag fallback. Folds each alias's value into the matching
  * field slot when that slot is still empty (the primary surface —
  * positional, `--flag`, or discriminator — wins on conflict so
- * the canonical CLI shape is unaffected). Done AFTER coercion so
- * an alias targeting a skipped / non-forwarded field still
- * reaches the MCP `args` payload; the MCP schema's own validation
- * catches an out-of-shape value.
+ * the canonical CLI shape is unaffected). Done before shared
+ * normalization so aliases for skipped / positional fields still get
+ * the same validation and coercion as primary fields.
  */
 function foldAliasFallback(
   handler: ActionHandlerSpec,
