@@ -38,6 +38,19 @@ export const projectPathField = z
 export const nonEmptyString = z.string().trim().min(1, { error: 'must be a non-empty string' });
 
 /**
+ * Shared opt-in for agent callers that want the smallest useful MCP
+ * response. Each tool maps this onto its own existing token-control
+ * knobs (compact rows, field projection, lower caps, no source bodies)
+ * without changing the default human-readable surface.
+ */
+export const lowTokensField = z
+  .boolean()
+  .optional()
+  .describe(
+    'When true, prefer the smallest useful agent output for this tool: compact rows, narrower fields, lower caps, or source suppression where supported.',
+  );
+
+/**
  * Per-call cap on every batched-symbols field. 20 was the
  * historical limit picked by `cartograph_node` and adopted ad-hoc by
  * `cartograph_graph` / `cartograph_role` / `cartograph_biomarkers`

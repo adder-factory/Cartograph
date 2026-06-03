@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { projectPathField, nonEmptyString } from './_common-fields.js';
+import { lowTokensField, projectPathField, nonEmptyString } from './_common-fields.js';
 import { getOutgoingEdges } from '../../db/queries-edges.js';
 import { existsSync, readFileSync } from 'node:fs';
 import type { Node, Subgraph } from '../../types.js';
@@ -251,10 +251,13 @@ const exploreSchema = z.object({
     .describe(
       'Delta mode: pass a `c_xxxxxxxx` UID from a prior call to render ONLY new rows, paging both the source set and the relationship map. Each response ends with a fresh `> _call: c_xxxxxxxx_` marker.',
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
 type ExploreArgs = z.infer<typeof exploreSchema>;
+
+const LOW_TOKEN_MAX_FILES = 6;
 
 async function handleExplore(ctx: ToolCtx, args: ExploreArgs): Promise<ToolOutcome> {
   const query = args.query;
@@ -262,8 +265,9 @@ async function handleExplore(ctx: ToolCtx, args: ExploreArgs): Promise<ToolOutco
   const cg = ctx.getCartograph(args.projectPath);
   // `maxFiles` is already an integer in [1, MAX_MAX_FILES] — Zod's
   // `.int().min().max()` rejected anything else at the dispatch boundary.
-  const maxFiles = args.maxFiles;
-  const summary = args.summary;
+  const lowTokens = args.lowTokens === true;
+  const maxFiles = lowTokens ? Math.min(args.maxFiles, LOW_TOKEN_MAX_FILES) : args.maxFiles;
+  const summary = lowTokens || args.summary;
 
   const subgraph = await cg.internals.contextBuilder.findRelevantContext(query, {
     searchLimit: DEFAULT_SEARCH_LIMIT,
@@ -953,7 +957,7 @@ export const EXPLORE_TOOL = defineTool({
     'Takes SPECIFIC symbol/file names or short code terms, NOT natural-language sentences. ' +
     'Good: `"readAgentsFromDirectory createClaudeSession chat-manager agents.ts"`; ' +
     'bad: `"how are agent prompts loaded"`. ' +
-    'Token control: `summary: true` keeps only the relationship map and per-file `defines:`/`references:` headers; ' +
+    'Token control: `lowTokens: true` sets summary mode and a smaller file cap; `summary: true` keeps only the relationship map and per-file `defines:`/`references:` headers; ' +
     '`since: c_xxxxxxxx` pages new rows vs a prior call.',
   schema: exploreSchema,
   handle: handleExplore,

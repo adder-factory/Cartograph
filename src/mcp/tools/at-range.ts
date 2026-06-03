@@ -22,7 +22,7 @@
  */
 
 import { z } from 'zod';
-import { projectPathField } from './_common-fields.js';
+import { lowTokensField, projectPathField } from './_common-fields.js';
 import { numArg } from '../../utils.js';
 import { type AtRangeFieldName, textResult, validateStringOutcome } from './shared.js';
 import { renderToolResponse } from './_response.js';
@@ -131,10 +131,31 @@ const atRangeSchema = z.object({
     .describe(
       "Restrict compact rows to a subset of fields; only effective when `compact: true`. Default: all six columns. E.g. `['name', 'kind']`.",
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
 type AtRangeToolArgs = z.infer<typeof atRangeSchema>;
+type AtRangeCompactField = NonNullable<AtRangeToolArgs['fields']>[number];
+
+const LOW_TOKEN_AT_RANGE_FIELDS: AtRangeCompactField[] = ['name', 'kind', 'path', 'line'];
+const LOW_TOKEN_AT_RANGE_LIMIT = 10;
+
+function applyAtRangeLowTokens(args: AtRangeToolArgs): AtRangeToolArgs {
+  if (args.lowTokens !== true) return args;
+
+  const out: AtRangeToolArgs = { ...args };
+  if (out.limit > LOW_TOKEN_AT_RANGE_LIMIT) {
+    out.limit = LOW_TOKEN_AT_RANGE_LIMIT;
+  }
+  if (out.compact !== false) {
+    out.compact = true;
+    if (out.fields === undefined) {
+      out.fields = LOW_TOKEN_AT_RANGE_FIELDS;
+    }
+  }
+  return out;
+}
 
 /**
  * Validate that a file path is within the project root. Returns null if valid,
@@ -712,6 +733,7 @@ async function handleAtRangeDiff(
 }
 
 export async function handleAtRange(ctx: ToolCtx, args: AtRangeToolArgs): Promise<ToolOutcome> {
+  args = applyAtRangeLowTokens(args);
   const cg = ctx.getCartograph(args.projectPath);
   // `limit` is Zod-validated to an integer in [1, 200] (default 20) —
   // the old `clampInt(numArg(...))` is dead code.
@@ -745,7 +767,7 @@ export const AT_RANGE_TOOL = defineTool({
   description:
     'Line-range → symbol lookup, smallest-enclosing first. R*Tree, O(log n).\n\n' +
     'Inputs: single (`file`+`startLine`+`endLine`), bulk (`ranges: [...]` up to 100), or `diff: <unified-diff>`. ' +
-    '`compact: true` + `fields: [...]` for terse rows.',
+    '`compact: true` + `fields: [...]` for terse rows; `lowTokens: true` applies compact projected rows plus a lower per-range cap.',
   schema: atRangeSchema,
   handle: handleAtRange,
 });

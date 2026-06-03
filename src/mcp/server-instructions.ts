@@ -27,12 +27,13 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 
 - **Metadata-only tools** — \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_node\` (without \`code: true\`), \`cartograph_at_range\`, \`cartograph_biomarkers\`, \`cartograph_role\`, \`cartograph_status\`, \`cartograph_coverage\`, \`cartograph_tests_for\`, \`cartograph_affected\`, \`cartograph_hotspots\` — return compact structured data. **Answer with these directly in the main session.**
 - **Source-dumping tools** — \`cartograph_explore\`, \`cartograph_context\`, and \`cartograph_node({code: true})\` — return full source sections. If you are an orchestrator that can spawn sub-agents, **delegate these to an Explore sub-agent** whose context is disposable, and keep only its distilled answer. If you ARE that sub-agent (or a host with no spawn affordance), use them directly — they are then your primary tools.
+- **Maximum token savings** — pass \`lowTokens: true\` on supported high-volume tools (\`find\`, \`graph\`, \`context\`, \`explore\`, \`at_range\`) to apply compact rows, field projection, lower caps, or source suppression in one switch.
 
 ## When to use which tool (question → tool)
 
-- **"What's the deal with this task / feature / bug?"** → \`cartograph_context\` (source-heavy — orchestrators delegate; composes 5+ queries into one answer; \`explain: true\` appends a per-candidate score trace).
-- **"Find a thing by name / regex / env-var / SQL table"** → \`cartograph_find({by})\` — \`by: 'name'\` (\`mode\`: exact/fuzzy/semantic/intent; \`compact\`/\`fields\` cut tokens), \`by: 'content'\` (regex + enclosing-symbol attribution), \`by: 'env'|'sql'\` (string-literal refs in non-AST domains). Replaced \`cartograph_search\`/\`_grep\`/\`_string_refs\` (2026-05-11).
-- **"What calls this / what does it call / blast radius / multi-hop walk?"** → \`cartograph_graph({start, direction})\` — \`direction\`: callers/callees/impact/both/similar; \`hops > 1\` switches to BFS. \`compact\`/\`fields\`/\`since\` cut output tokens 40-80%. Replaced \`cartograph_callers\`/\`_callees\`/\`_impact\`/\`_walk\`/\`_similar\`.
+- **"What's the deal with this task / feature / bug?"** → \`cartograph_context\` (source-heavy by default — use \`lowTokens: true\` for no-code outline mode; orchestrators delegate; composes 5+ queries into one answer; \`explain: true\` appends a per-candidate score trace).
+- **"Find a thing by name / regex / env-var / SQL table"** → \`cartograph_find({by})\` — \`by: 'name'\` (\`mode\`: exact/fuzzy/semantic/intent; \`compact\`/\`fields\` or \`lowTokens\` cut tokens), \`by: 'content'\` (regex + enclosing-symbol attribution), \`by: 'env'|'sql'\` (string-literal refs in non-AST domains). Replaced \`cartograph_search\`/\`_grep\`/\`_string_refs\` (2026-05-11).
+- **"What calls this / what does it call / blast radius / multi-hop walk?"** → \`cartograph_graph({start, direction})\` — \`direction\`: callers/callees/impact/both/similar; \`hops > 1\` switches to BFS. \`compact\`/\`fields\`/\`since\`/\`lowTokens\` cut output tokens 40-80%. Replaced \`cartograph_callers\`/\`_callees\`/\`_impact\`/\`_walk\`/\`_similar\`.
 - **"Show me this symbol's source / signature / docstring"** → \`cartograph_node\` (source-heavy with \`code: true\` — orchestrators delegate THAT mode; \`symbols: [...]\` up to 20; fold in callers/callees/biomarkers/tests).
 - **"Which symbols overlap this line range / diff hunk?"** → \`cartograph_at_range\` (one hunk, \`ranges: [...]\` up to 100, or \`diff:\` raw unified diff).
 - **"Is this risky / complex / nested / large?"** → \`cartograph_biomarkers\` (structured findings instead of reading 200 lines of source; \`mode: 'symbol', symbols: [...]\` batches up to 20).
@@ -40,7 +41,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"What's dead / unreachable?"** → \`cartograph_dead_code\` (\`via\`: auto/rule/llm).
 - **"Which tests cover this symbol?"** → \`cartograph_tests_for\`; **"I edited X — what should I re-run?"** → \`cartograph_affected\` (omit \`files\` to derive from \`git diff HEAD\`).
 - **"What's in directory X?"** → \`cartograph_files\` (tree/flat/grouped/summary).
-- **"Survey an unfamiliar topic / module"** → \`cartograph_explore\` (source-heavy — orchestrators delegate; genuine "I'm new here" surveys only).
+- **"Survey an unfamiliar topic / module"** → \`cartograph_explore\` (source-heavy by default — use \`lowTokens: true\` for summary-only file headers; orchestrators delegate; genuine "I'm new here" surveys only).
 - **"Where do I start in a new repo?"** → \`cartograph_digest\` (composite overview) or \`cartograph_entry_points\` (routes / cli / mcp_tools / public_exports).
 - **"What's churning / risky now?"** → \`cartograph_hotspots\` (churn × centrality), \`cartograph_history\` (cochange), \`cartograph_review({mode: 'risk'})\` (composed triage).
 - **"What changed since when?"** → \`cartograph_changed_since\` (content drift) or \`cartograph_blame\` (per-symbol git blame).

@@ -47,7 +47,7 @@
  */
 
 import { z } from 'zod';
-import { projectPathField, batchedSymbols } from './_common-fields.js';
+import { lowTokensField, projectPathField, batchedSymbols } from './_common-fields.js';
 import { validateStringOutcome } from './shared.js';
 import type { ToolCtx } from './types.js';
 import type { RefIdCache } from './_id-cache.js';
@@ -230,6 +230,7 @@ const graphSchema = z.object({
         'set on multi-hop walks (`hops > 1`). Default `true` for one-hop `direction: callers | callees`, `false` for ' +
         '`hops > 1` BFS walks. When the START symbol is itself in a test file, test-file traversal stays on regardless.',
     ),
+  lowTokens: lowTokensField,
   // ── Similar-only knobs (direction: 'similar' only) ─────────────────
   // Folded in 2026-05-14 (FRICTION-46) when the standalone
   // cartograph_similar tool was retired. Ignored for other directions;
@@ -259,6 +260,31 @@ const graphSchema = z.object({
 });
 
 type GraphArgs = z.infer<typeof graphSchema>;
+type GraphCompactField = NonNullable<GraphArgs['fields']>[number];
+
+const LOW_TOKEN_GRAPH_FIELDS: GraphCompactField[] = ['name', 'kind', 'path', 'line', 'id'];
+const LOW_TOKEN_GRAPH_LIMIT = 10;
+const LOW_TOKEN_WALK_MAX_NODES = 20;
+const LOW_TOKEN_SIMILAR_K = 5;
+
+function applyGraphLowTokens(args: GraphArgs): GraphArgs {
+  if (args.lowTokens !== true) return args;
+
+  const out: GraphArgs = { ...args };
+  if (out.limit > LOW_TOKEN_GRAPH_LIMIT) {
+    out.limit = LOW_TOKEN_GRAPH_LIMIT;
+  }
+  if ((out.direction === 'callers' || out.direction === 'callees') && out.compact !== false) {
+    out.compact = true;
+    if (out.fields === undefined) {
+      out.fields = LOW_TOKEN_GRAPH_FIELDS;
+    }
+  }
+  if (out.direction === 'similar' && out.k !== undefined && out.k > LOW_TOKEN_SIMILAR_K) {
+    out.k = LOW_TOKEN_SIMILAR_K;
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Dispatch helpers
@@ -286,6 +312,7 @@ function forwardCallersOrCalleesArgs(args: GraphArgs): Record<string, unknown> {
   delete out['rankBy'];
   delete out['maxNodes'];
   delete out['start'];
+  delete out['lowTokens'];
   return out;
 }
 
@@ -312,6 +339,7 @@ function forwardImpactArgs(args: GraphArgs): Record<string, unknown> {
   delete out['symbols'];
   delete out['edgeKind'];
   delete out['start'];
+  delete out['lowTokens'];
   return out;
 }
 
@@ -328,6 +356,7 @@ function forwardWalkArgs(args: GraphArgs): Record<string, unknown> {
   delete out['since'];
   delete out['fields'];
   delete out['minConfidence'];
+  delete out['lowTokens'];
   return out;
 }
 
@@ -465,6 +494,9 @@ async function runBfsWalk(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> {
   if (walkArgs['includeTests'] === undefined) {
     walkArgs['includeTests'] = false;
   }
+  if (args.lowTokens === true && walkArgs['maxNodes'] === undefined) {
+    walkArgs['maxNodes'] = LOW_TOKEN_WALK_MAX_NODES;
+  }
   const outcome = await handleWalk(ctx, walkArgs);
   if (!outcome.ok) return outcome;
   const rewritten = outcome.value.content.map((part) =>
@@ -480,6 +512,7 @@ async function runBfsWalk(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> {
 // ---------------------------------------------------------------------------
 
 async function handleGraph(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> {
+  args = applyGraphLowTokens(args);
   // `direction` is a required `z.enum` and `hops` carries a `.default(1)`,
   // so `safeParse` already supplied / validated both.
   const direction = args.direction as GraphDirection;
@@ -514,6 +547,7 @@ async function handleGraph(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> 
     if (similarArgs['start'] !== undefined && similarArgs['symbol'] === undefined) {
       similarArgs['symbol'] = similarArgs['start'];
     }
+    delete similarArgs['lowTokens'];
     return handleSimilar(ctx, similarArgs);
   }
 
@@ -604,7 +638,7 @@ export const GRAPH_TOOL = defineTool({
     '`direction`: `callers` (incoming) | `callees` (outgoing) | `impact`/`both` (bidirectional blast radius) | `similar` | `path` (shortest `start`→`to` route). ' +
     '`hops`: 1 (default) = one-hop slice; >1 = BFS walk with depth + via-parent. ' +
     'Batched form: `symbols: [...]` up to 20 (callers/callees one-hop, or similar peers). ' +
-    '`edgeKind` filters edges; `compact`/`fields`/`since`/`includeRoles`/`minConfidence` for token control. ' +
+    '`edgeKind` filters edges; `compact`/`fields`/`since`/`includeRoles`/`minConfidence`/`lowTokens` for token control. ' +
     'Multi-hop BFS (`hops > 1`) excludes test-file targets by default — pass `includeTests: true` to walk into them.',
   schema: graphSchema,
   handle: handleGraph,

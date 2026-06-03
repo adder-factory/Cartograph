@@ -49,7 +49,7 @@
  */
 
 import { z } from 'zod';
-import { projectPathField } from './_common-fields.js';
+import { lowTokensField, projectPathField } from './_common-fields.js';
 import { validateStringOutcome } from './shared.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
@@ -215,10 +215,46 @@ const findSchema = z.object({
     .describe(
       '(name/exact only) Restrict compact rows to a subset of fields; only effective with `compact: true`. Default: name|kind|path|line|signature (plus `id` when a refId cache is active).',
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
 type FindArgs = z.infer<typeof findSchema>;
+type FindCompactField = NonNullable<FindArgs['fields']>[number];
+
+const LOW_TOKEN_FIND_FIELDS: FindCompactField[] = ['name', 'kind', 'path', 'line', 'id'];
+const LOW_TOKEN_NAME_LIMIT = 8;
+const LOW_TOKEN_CONTENT_LIMIT = 20;
+const LOW_TOKEN_REFS_LIMIT = 15;
+
+function lowTokenLimitForAxis(by: FindAxis): number {
+  if (by === 'content') return LOW_TOKEN_CONTENT_LIMIT;
+  if (by === 'env' || by === 'sql') return LOW_TOKEN_REFS_LIMIT;
+  return LOW_TOKEN_NAME_LIMIT;
+}
+
+/**
+ * Map the shared `lowTokens` switch onto this tool's existing knobs.
+ * Exact name search can use compact rows + projection; other axes keep
+ * their established output shape and only reduce the default row cap.
+ */
+function applyFindLowTokens(args: FindArgs): FindArgs {
+  if (args.lowTokens !== true) return args;
+
+  const out: FindArgs = { ...args };
+  if (out.limit === undefined) {
+    out.limit = lowTokenLimitForAxis(out.by as FindAxis);
+  }
+
+  const effectiveMode = out.mode ?? 'exact';
+  if (out.by === 'name' && effectiveMode === 'exact' && out.compact !== false) {
+    out.compact = true;
+    if (out.fields === undefined) {
+      out.fields = LOW_TOKEN_FIND_FIELDS;
+    }
+  }
+  return out;
+}
 
 // ---------------------------------------------------------------------------
 // Per-axis forwarders
@@ -228,6 +264,7 @@ type FindArgs = z.infer<typeof findSchema>;
 function forwardNameArgs(args: FindArgs): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
   delete out['by'];
+  delete out['lowTokens'];
   // `pathFilter` IS honoured by `mode: 'intent'` — pass through unchanged.
   // Strip the axis-foreign knobs that name-search doesn't read.
   delete out['caseSensitive']; // grep-only
@@ -240,6 +277,7 @@ function forwardNameArgs(args: FindArgs): Record<string, unknown> {
 function forwardContentArgs(args: FindArgs): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
   delete out['by'];
+  delete out['lowTokens'];
   // `_grep` reads `args['pattern']`. The merged tool names this `query`
   // for vocabulary consistency with `by:'name'`. Rewrite at the boundary
   // so the backend stays unchanged.
@@ -265,6 +303,7 @@ function forwardContentArgs(args: FindArgs): Record<string, unknown> {
 function forwardRefsArgs(args: FindArgs): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
   delete out['by'];
+  delete out['lowTokens'];
   delete out['query']; // axis sets handle no query
   delete out['mode'];
   delete out['kind'];
@@ -451,6 +490,7 @@ function rejectIncompatibleKnobs(by: FindAxis, args: FindArgs): ToolOutcome | nu
 }
 
 async function handleFind(ctx: ToolCtx, args: FindArgs): Promise<ToolOutcome> {
+  args = applyFindLowTokens(args);
   // `by` is a required `z.enum` — `safeParse` already rejected a
   // missing / unknown value (and the `.superRefine` adds the
   // sibling-mode redirect), so the axis is a known `FindAxis` here.
@@ -509,6 +549,7 @@ export const FIND_TOOL = defineTool({
     "`'env'` / `'sql'` (string-literal cross-references; `key` filters to one var/table). " +
     "`mode` is `by: 'name'` only; `caseSensitive` is `by: 'content'`; `key` is `by: 'env'|'sql'`; `op: read|write|ddl` is `by: 'sql'`. " +
     "On `by: 'name'`: `compact` + `fields` give terse rows; `since: 'c_xxxxxxxx'` gives new-only rows vs a prior call (mode='exact'). " +
+    '`lowTokens: true` applies compact exact-name rows and lower default caps. ' +
     'Multi-word bare-identifier queries under mode=\'exact\' route to an "Exact match union" view (per-token group), not an empty FTS-AND; `Foo OR Bar` auto-recovers to that view (FTS5 boolean operators stripped, with a one-line note).',
   schema: findSchema,
   handle: handleFind,

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { projectPathField, nonEmptyString } from './_common-fields.js';
+import { lowTokensField, projectPathField, nonEmptyString } from './_common-fields.js';
 import type { ToolResult } from '../tool-types.js';
 import { getNodeCoverage } from '../../db/queries-coverage.js';
 import { getFindingsForNode } from '../../db/queries-findings.js';
@@ -459,10 +459,13 @@ const contextSchema = z.object({
     .describe(
       'Append a "Score trace" section showing each candidate\'s score after every retrieval pass — use to diagnose why a symbol ranked where it did. Default false.',
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
 type ContextArgs = z.infer<typeof contextSchema>;
+
+const LOW_TOKEN_CONTEXT_MAX_NODES = 8;
 
 async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutcome> {
   const task = args.task;
@@ -474,12 +477,14 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   const cg = ctx.getCartograph(args.projectPath);
   // `maxNodes` is already a positive integer — Zod's `.int().min(1)`
   // rejected anything else at the dispatch boundary. No `numArg` needed.
-  const maxNodes = args.maxNodes;
+  const lowTokens = args.lowTokens === true;
+  const maxNodes = lowTokens ? Math.min(args.maxNodes, LOW_TOKEN_CONTEXT_MAX_NODES) : args.maxNodes;
   // `code` is the canonical key (defaults to true via the `!== false`
   // fallthrough); the legacy `includeCode` alias is consulted only when
   // `code` was not sent. `code` carries no Zod `.default` precisely so
   // "omitted" stays distinguishable from an explicit `code: true`.
-  const includeCode = (args.code ?? args.includeCode) !== false;
+  const codePreference = args.code ?? args.includeCode;
+  const includeCode = codePreference === undefined ? !lowTokens : codePreference !== false;
   // `explain` opts into the per-candidate score-trace section.
   const explain = args.explain;
 
@@ -522,7 +527,7 @@ export const CONTEXT_TOOL = defineTool({
   description:
     'Primary tool — natural-language `task` → entry points + related symbols + key code in one call. ' +
     'Often enough to understand a feature or bug without further calls; takes free-form text (e.g. "how does session login work"). ' +
-    'Returns CODE context — for new features still clarify UX/behavior with the user.',
+    'Returns CODE context by default; `lowTokens: true` suppresses code snippets and caps breadth. For new features still clarify UX/behavior with the user.',
   schema: contextSchema,
   handle: handleContext,
 });

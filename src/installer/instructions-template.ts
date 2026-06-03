@@ -42,6 +42,8 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 **The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
+For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_at_range\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
+
 | Tool | Use For |
 |------|---------|
 | \`cartograph_find\` | Find symbols by name / regex / env-var / SQL ref (\`by:\` slice + \`mode:\`) |

@@ -20,6 +20,7 @@
   <a href="#configure-agents">Configure Agents</a> ·
   <a href="#initialize-a-project">Initialize</a> ·
   <a href="#mcp-tools">MCP Tools</a> ·
+  <a href="#token-savings-benchmark">Benchmarks</a> ·
   <a href="#cli-reference">CLI</a> ·
   <a href="#supported-languages--file-formats">Languages</a>
 </p>
@@ -275,6 +276,8 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 **The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
+For the smallest useful output, pass `lowTokens: true` to supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, and `cartograph_at_range`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool.
+
 | Tool | Use For |
 |------|----------|
 | `cartograph_find` | Find symbols by name / regex / env-var / SQL ref (`by:` slice + `mode:`) |
@@ -479,6 +482,22 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 | `cartograph_node` | One symbol's signature, summary, source preview, callers, callees, tests, or biomarkers |
 | `cartograph_context` | Task-shaped context when an agent needs relevant code for an implementation or bug |
 | `cartograph_review` | Diff review, sister implementations, risk triage, trust self-checks, or agent-prone biomarker audit |
+
+### Token Savings Benchmark
+
+Supported high-volume MCP tools accept `lowTokens: true`: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, and `cartograph_at_range`. In a local measurement on this repository, `lowTokens: true` reduced representative MCP response output by about 85% versus regular Cartograph output.
+
+Token counts below are estimated as characters / 4, so treat them as directional rather than tokenizer-exact:
+
+| Case | Regular Cartograph | `lowTokens: true` | `rg` / grep-style baseline | Savings |
+|---|---:|---:|---:|---|
+| `find handleFind` | ~345 | ~172 | ~654 | ~50% vs regular, ~74% vs `rg` |
+| `graph callers handleFind` | ~42 | ~37 | no fair grep equivalent | ~13% vs regular |
+| `context` for `cartograph_find` dispatch | ~2,057 | ~435 | ~25,447 broad `rg` | ~79% vs regular, ~98% vs broad `rg` |
+| `explore handleFind/findSchema/forwardNameArgs` | ~8,746 | ~937 | ~25,447 broad `rg` | ~89% vs regular, ~96% vs broad `rg` |
+| `at_range` on `find.ts` dispatch lines | ~108 | ~54 | ~516 raw line slice | ~50% vs regular, ~90% vs raw source |
+
+Exact single-file text search can still be cheaper when you already know the file and string. Cartograph's savings show up when the agent needs structured context instead of raw matching source lines.
 
 ### Tool Families
 
