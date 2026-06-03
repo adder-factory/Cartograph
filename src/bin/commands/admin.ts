@@ -5,31 +5,34 @@
  */
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { getCartographDir, isInitialized } from '../../directory.js';
-import { createShimmerProgress } from '../../ui/shimmer-progress.js';
-import { formatBytes } from '../../utils.js';
+import { getCartographDir as defaultGetCartographDir, isInitialized as defaultIsInitialized } from '../../directory.js';
+import { createShimmerProgress as defaultCreateShimmerProgress } from '../../ui/shimmer-progress.js';
+import { formatBytes as defaultFormatBytes } from '../../utils.js';
 import { errMsg } from '../../errors.js';
-import { writeScipExport, writeScipImport } from '../../scip/index.js';
-import { parseConcurrency } from '../../llm/concurrency.js';
+import {
+  writeScipExport as defaultWriteScipExport,
+  writeScipImport as defaultWriteScipImport,
+} from '../../scip/index.js';
+import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
 import {
-  adminCmd,
-  loadCartograph,
-  resolveProjectPath,
-  chalk,
-  colors,
-  success,
-  error,
-  info,
-  warn,
-  formatNumber,
-  formatDuration,
-  createVerboseProgress,
-  attachUnknownActionHandler,
-  assignIntArg,
-  assignFloatArg,
-  awaitSummarisationWithProgress,
-  printIndexResult,
+  adminCmd as cliAdminCmd,
+  loadCartograph as cliLoadCartograph,
+  resolveProjectPath as cliResolveProjectPath,
+  chalk as cliChalk,
+  colors as cliColors,
+  success as cliSuccess,
+  error as cliError,
+  info as cliInfo,
+  warn as cliWarn,
+  formatNumber as cliFormatNumber,
+  formatDuration as cliFormatDuration,
+  createVerboseProgress as cliCreateVerboseProgress,
+  attachUnknownActionHandler as cliAttachUnknownActionHandler,
+  assignIntArg as cliAssignIntArg,
+  assignFloatArg as cliAssignFloatArg,
+  awaitSummarisationWithProgress as cliAwaitSummarisationWithProgress,
+  printIndexResult as cliPrintIndexResult,
   type IndexResult,
 } from '../_cli-core.js';
 
@@ -42,17 +45,211 @@ interface AdminIndexOptions {
   parseWorkers?: string;
 }
 
-type LoadedCartographModule = Awaited<ReturnType<typeof loadCartograph>>;
-type AdminIndexGraph = Awaited<ReturnType<LoadedCartographModule['default']['open']>>;
 type ClackPrompts = typeof import('@clack/prompts');
+
+interface CommandLike {
+  command(name: string): CommandLike;
+  description(text: string): CommandLike;
+  option(...args: unknown[]): CommandLike;
+  requiredOption(...args: unknown[]): CommandLike;
+  action(fn: (...args: any[]) => unknown): CommandLike;
+}
+
+interface AssignNumericArgInput {
+  args: Record<string, unknown>;
+  key: string;
+  raw: string | undefined;
+  optionName: string;
+  opts?: { min?: number; max?: number };
+}
+
+type LoadedCartographModule = Awaited<ReturnType<typeof cliLoadCartograph>>;
+type AdminIndexGraph = Awaited<ReturnType<LoadedCartographModule['default']['open']>>;
+
+export interface AdminCommandDeps {
+  adminCmd: CommandLike;
+  loadCartograph: () => Promise<{ default: any }>;
+  resolveProjectPath: (pathArg?: string) => string;
+  chalk: typeof cliChalk;
+  colors: typeof cliColors;
+  success: (message: string) => void;
+  error: (message: string) => void;
+  info: (message: string) => void;
+  warn: (message: string) => void;
+  formatNumber: (n: number) => string;
+  formatDuration: (ms: number) => string;
+  formatBytes: (bytes: number) => string;
+  createVerboseProgress: typeof cliCreateVerboseProgress;
+  createShimmerProgress: typeof defaultCreateShimmerProgress;
+  attachUnknownActionHandler: (group: any, family: string) => void;
+  assignIntArg: (args: AssignNumericArgInput) => boolean;
+  assignFloatArg: (args: AssignNumericArgInput) => boolean;
+  awaitSummarisationWithProgress: typeof cliAwaitSummarisationWithProgress;
+  printIndexResult: typeof cliPrintIndexResult;
+  getCartographDir: (projectPath: string) => string;
+  isInitialized: (projectPath: string) => boolean;
+  parseConcurrency: (raw: string | undefined) => number;
+  writeScipExport: typeof defaultWriteScipExport;
+  writeScipImport: typeof defaultWriteScipImport;
+  writeStdout: (message: string) => void;
+  writeStderr: (message: string) => void;
+  loadClack: () => Promise<any>;
+  loadReadline: () => Promise<{ createInterface: (...args: any[]) => any }>;
+  loadParseCache: () => Promise<{ clearParseCache: (queries: unknown, language?: string) => number }>;
+  loadDetachedSummarize: () => Promise<{
+    spawnDetachedSummarize: (projectPath: string) => { spawned: boolean; pid?: number; reason?: string };
+  }>;
+  loadSimilarEdges: () => Promise<{
+    buildSimilarToEdges: (
+      cg: any,
+      options: { k: number; minScore: number },
+    ) => Promise<{
+      written: number;
+      processed: number;
+      reason?: string;
+    }>;
+  }>;
+  loadSummaryQueries: () => Promise<{
+    MS_PER_DAY: number;
+    PRUNE_STORE_DEFAULT_DAYS: number;
+    pruneOrphanStoreRows: (
+      queries: unknown,
+      options: { maxAgeMs: number },
+    ) => { summariesPruned: number; embeddingsPruned: number };
+  }>;
+  loadDbIndex: () => Promise<{ dbReclaimAfterBulkDelete: (db: any) => void }>;
+  loadInstallModels: () => Promise<{
+    installRecommendedModels: (opts: {
+      dir?: string;
+      models: readonly unknown[];
+      onProgress: (progress: { model: { filename: string }; downloaded: number; total: number }) => void;
+    }) => Promise<{
+      downloaded: Array<{ filename: string; description: string }>;
+      skipped: Array<{ filename: string }>;
+    }>;
+  }>;
+  loadRecommendedModels: () => Promise<{ RECOMMENDED_MODELS: readonly unknown[]; MINIMAL_MODELS: readonly unknown[] }>;
+  loadRecommendedConfig: () => Promise<{
+    writeRecommendedLlmConfig: (opts: { projectRoot: string; dir?: string }) => {
+      configPath: string;
+      backupPath?: string | null;
+      diff: { addedOrUpdated: readonly string[] };
+    };
+  }>;
+  loadDoctor: () => Promise<{
+    runDoctor: (opts: Record<string, unknown>) => Promise<{ overallStatus: string }>;
+    formatDoctorReport: (result: unknown) => string;
+  }>;
+  loadLlmSetupPlan: () => Promise<{
+    planLlmSetup: () => Promise<{
+      recommendedPresetId: string;
+      detectedBackends: ReadonlyArray<{ label: string; endpoint: string; models: readonly string[] }>;
+      presets: ReadonlyArray<{ id: string; summary: string }>;
+    }>;
+    applyLlmSetupChoice: (opts: { projectRoot: string; preset: any }) => Promise<{
+      applied: boolean;
+      preset: string;
+      configPath: string;
+      backupPath?: string | null;
+      notes: readonly string[];
+      nextSteps: readonly string[];
+    }>;
+    writeLlmTierConcurrencyOverride: (opts: { projectRoot: string; tier: any; concurrency: number }) => Promise<{
+      configPath: string;
+      backupPath?: string | null;
+      configKey: string;
+      previous?: number;
+      concurrency: number;
+    }>;
+  }>;
+  loadHardwareTuning: () => Promise<{
+    describeHardware: () => string;
+    recommendedTuning: () => {
+      embed: { cartographConcurrency: number };
+      chat: { cartographConcurrency: number };
+      ask: { cartographConcurrency: number };
+      reranker: { cartographConcurrency: number };
+    };
+  }>;
+}
+
+const defaultAdminCommandDeps: AdminCommandDeps = {
+  adminCmd: cliAdminCmd,
+  loadCartograph: cliLoadCartograph as () => Promise<{ default: any }>,
+  resolveProjectPath: cliResolveProjectPath,
+  chalk: cliChalk,
+  colors: cliColors,
+  success: cliSuccess,
+  error: cliError,
+  info: cliInfo,
+  warn: cliWarn,
+  formatNumber: cliFormatNumber,
+  formatDuration: cliFormatDuration,
+  formatBytes: defaultFormatBytes,
+  createVerboseProgress: cliCreateVerboseProgress,
+  createShimmerProgress: defaultCreateShimmerProgress,
+  attachUnknownActionHandler: cliAttachUnknownActionHandler,
+  assignIntArg: cliAssignIntArg,
+  assignFloatArg: cliAssignFloatArg,
+  awaitSummarisationWithProgress: cliAwaitSummarisationWithProgress,
+  printIndexResult: cliPrintIndexResult,
+  getCartographDir: defaultGetCartographDir,
+  isInitialized: defaultIsInitialized,
+  parseConcurrency: defaultParseConcurrency,
+  writeScipExport: defaultWriteScipExport,
+  writeScipImport: defaultWriteScipImport,
+  writeStdout: (message: string) => {
+    process.stdout.write(message);
+  },
+  writeStderr: (message: string) => {
+    process.stderr.write(message);
+  },
+  loadClack: () => import('@clack/prompts'),
+  loadReadline: () => import('node:readline'),
+  loadParseCache: (() => import('../../db/queries-parse-cache.js')) as AdminCommandDeps['loadParseCache'],
+  loadDetachedSummarize: (() => import('../../llm/detached-summarize.js')) as AdminCommandDeps['loadDetachedSummarize'],
+  loadSimilarEdges: (() => import('../../embeddings/similar-edges.js')) as AdminCommandDeps['loadSimilarEdges'],
+  loadSummaryQueries: (() => import('../../db/queries-summaries.js')) as AdminCommandDeps['loadSummaryQueries'],
+  loadDbIndex: (() => import('../../db/index.js')) as AdminCommandDeps['loadDbIndex'],
+  loadInstallModels: (() => import('../../installer/install-models.js')) as AdminCommandDeps['loadInstallModels'],
+  loadRecommendedModels: (() => import('../../llm/recommended-models.js')) as AdminCommandDeps['loadRecommendedModels'],
+  loadRecommendedConfig: (() =>
+    import('../../installer/recommended-config.js')) as unknown as AdminCommandDeps['loadRecommendedConfig'],
+  loadDoctor: (() => import('../../installer/doctor.js')) as AdminCommandDeps['loadDoctor'],
+  loadLlmSetupPlan: (() =>
+    import('../../installer/llm-setup-plan.js')) as unknown as AdminCommandDeps['loadLlmSetupPlan'],
+  loadHardwareTuning: () => import('../../installer/hardware-tuning.js'),
+};
+
+let activeAdminCommandDeps: AdminCommandDeps = defaultAdminCommandDeps;
 
 const PHASE_PERCENT_SCALE = 100;
 const PHASE_LABEL_WIDTH = 14;
 const PHASE_DURATION_WIDTH = 8;
 const PHASE_PERCENT_WIDTH = 2;
 const POST_HOOK_LABEL_WIDTH = 12;
+const BYTES_PER_MIB = 1024 * 1024;
+
+function bytesToMiBText(bytes: number): string {
+  return (bytes / BYTES_PER_MIB).toFixed(0);
+}
+
+function removeLockFileIfPresent(lockPath: string): boolean {
+  if (!fs.existsSync(lockPath)) return false;
+  fs.unlinkSync(lockPath);
+  return true;
+}
+
+function readExistingScipFile(inPath: string, error: (message: string) => void): Buffer | null {
+  if (!fs.existsSync(inPath)) {
+    error(`SCIP file not found: ${inPath}`);
+    process.exit(1);
+  }
+  return fs.readFileSync(inPath);
+}
 
 function parseParseWorkers(raw: string | undefined): number | undefined {
+  const { error } = activeAdminCommandDeps;
   if (raw === undefined) return undefined;
   const n = Number.parseInt(raw, 10);
   if (!Number.isInteger(n) || n < 1) {
@@ -63,6 +260,7 @@ function parseParseWorkers(raw: string | undefined): number | undefined {
 }
 
 function parseConcurrencyOption(raw: string | undefined): number {
+  const { error, parseConcurrency } = activeAdminCommandDeps;
   if (raw === undefined) return parseConcurrency(undefined);
   if (!/^\d+$/.test(raw.trim())) {
     error('--concurrency must be a positive integer');
@@ -89,6 +287,7 @@ function indexAllOptions(
 }
 
 function phaseTimingLines(result: IndexResult): string[] {
+  const { formatDuration } = activeAdminCommandDeps;
   const p = result.profile;
   if (!p) return [];
   const fmt = (label: string, ms: number | undefined): string => {
@@ -116,6 +315,7 @@ function parseEagerLimit(
   options: { quiet?: boolean; limit?: string; all?: boolean },
   onInvalid?: () => void,
 ): number | undefined {
+  const { error } = activeAdminCommandDeps;
   if (options.all) return Number.POSITIVE_INFINITY;
   if (options.limit === undefined) return undefined;
   const parsed = Number(options.limit);
@@ -132,6 +332,7 @@ function printInstallModelResults(result: {
   downloaded: Array<{ filename: string; description: string }>;
   skipped: Array<{ filename: string }>;
 }): void {
+  const { success, info } = activeAdminCommandDeps;
   if (result.downloaded.length > 0) {
     success(`Downloaded ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}:`);
     for (const m of result.downloaded) info(`  ${m.filename} — ${m.description}`);
@@ -146,6 +347,7 @@ function printSyncResult(
   clack: typeof import('@clack/prompts'),
   result: { filesAdded: number; filesModified: number; filesRemoved: number; nodesUpdated: number; durationMs: number },
 ): void {
+  const { formatNumber, formatDuration } = activeAdminCommandDeps;
   const totalChanges = result.filesAdded + result.filesModified + result.filesRemoved;
   if (totalChanges === 0) {
     clack.log.info('Already up to date');
@@ -180,6 +382,7 @@ function printSummarizeDetails(
     } | null;
   },
 ): void {
+  const { formatNumber, formatDuration } = activeAdminCommandDeps;
   const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
   clack.log.success(`Summarised ${formatNumber(result.generated)} new symbols in ${formatDuration(result.durationMs)}`);
   const details: string[] = [];
@@ -210,6 +413,7 @@ function printSummarizeEmbedDetails(
     | null
     | undefined,
 ): void {
+  const { formatNumber, formatDuration } = activeAdminCommandDeps;
   if (!embed) return;
   if (embed.failed) {
     clack.log.warn(
@@ -232,133 +436,163 @@ function printSummarizeEmbedDetails(
 /**
  * cartograph admin init [path]
  */
-adminCmd
-  .command('init [path]')
-  .description(
-    "Initialize Cartograph in a project directory — creates .cartograph/ and ensures the project .gitignore excludes it (mirrors cartograph_admin MCP tool with action='init')",
-  )
-  .option('-i, --index', 'Run initial indexing after initialization')
-  .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-  .action(async (pathArg: string | undefined, options: { index?: boolean; verbose?: boolean }) => {
-    const projectPath = path.resolve(pathArg || process.cwd());
-    const clack = await import('@clack/prompts');
+function registerInitCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    colors,
+    createShimmerProgress,
+    createVerboseProgress,
+    isInitialized,
+    loadCartograph,
+    loadClack,
+    printIndexResult,
+    writeStdout,
+  } = deps;
+  adminCmd
+    .command('init [path]')
+    .description(
+      "Initialize Cartograph in a project directory — creates .cartograph/ and ensures the project .gitignore excludes it (mirrors cartograph_admin MCP tool with action='init')",
+    )
+    .option('-i, --index', 'Run initial indexing after initialization')
+    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
+    .action(async (pathArg: string | undefined, options: { index?: boolean; verbose?: boolean }) => {
+      const projectPath = path.resolve(pathArg || process.cwd());
+      const clack = await loadClack();
 
-    clack.intro('Initializing Cartograph');
+      clack.intro('Initializing Cartograph');
 
-    try {
-      if (isInitialized(projectPath)) {
-        clack.log.warn(`Already initialized in ${projectPath}`);
-        clack.log.info('Use "cartograph admin index" to re-index or "cartograph admin sync" to update');
-        clack.outro('');
-        return;
-      }
-
-      const { default: Cartograph } = await loadCartograph();
-      const cg = await Cartograph.init(projectPath, { index: false });
-      clack.log.success(`Initialized in ${projectPath}`);
-
-      if (options.index) {
-        let result: IndexResult;
-
-        if (options.verbose) {
-          result = await cg.indexAll({
-            onProgress: createVerboseProgress(),
-            verbose: true,
-          });
-        } else {
-          process.stdout.write(`${colors.dim}│${colors.reset}\n`);
-          const progress = createShimmerProgress();
-          result = await cg.indexAll({
-            onProgress: progress.onProgress,
-          });
-          await progress.stop();
+      try {
+        if (isInitialized(projectPath)) {
+          clack.log.warn(`Already initialized in ${projectPath}`);
+          clack.log.info('Use "cartograph admin index" to re-index or "cartograph admin sync" to update');
+          clack.outro('');
+          return;
         }
 
-        printIndexResult(clack, result, projectPath);
-      } else {
-        clack.log.info('Run "cartograph admin index" to index the project');
-      }
+        const { default: Cartograph } = await loadCartograph();
+        const cg = await Cartograph.init(projectPath, { index: false });
+        clack.log.success(`Initialized in ${projectPath}`);
 
-      clack.outro('Done');
-      cg.close();
-    } catch (err) {
-      clack.log.error(`Failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+        if (options.index) {
+          let result: IndexResult;
+
+          if (options.verbose) {
+            result = await cg.indexAll({
+              onProgress: createVerboseProgress(),
+              verbose: true,
+            });
+          } else {
+            writeStdout(`${colors.dim}│${colors.reset}\n`);
+            const progress = createShimmerProgress();
+            result = await cg.indexAll({
+              onProgress: progress.onProgress,
+            });
+            await progress.stop();
+          }
+
+          printIndexResult(clack, result, projectPath);
+        } else {
+          clack.log.info('Run "cartograph admin index" to index the project');
+        }
+
+        clack.outro('Done');
+        cg.close();
+      } catch (err) {
+        clack.log.error(`Failed: ${errMsg(err)}`);
+        process.exit(1);
+      }
+    });
+}
 
 /**
  * cartograph admin uninit [path]
  */
-adminCmd
-  .command('uninit [path]')
-  .description(
-    "Remove Cartograph from a project, deletes .cartograph/ directory (mirrors cartograph_admin MCP tool with action='uninit')",
-  )
-  .option('-f, --force', 'Skip confirmation prompt')
-  .action(async (pathArg: string | undefined, options: { force?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+function registerUninitCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    chalk,
+    error,
+    info,
+    isInitialized,
+    loadCartograph,
+    loadReadline,
+    resolveProjectPath,
+    success,
+    warn,
+  } = deps;
+  adminCmd
+    .command('uninit [path]')
+    .description(
+      "Remove Cartograph from a project, deletes .cartograph/ directory (mirrors cartograph_admin MCP tool with action='uninit')",
+    )
+    .option('-f, --force', 'Skip confirmation prompt')
+    .action(async (pathArg: string | undefined, options: { force?: boolean }) => {
+      const projectPath = resolveProjectPath(pathArg);
 
-    try {
-      if (!isInitialized(projectPath)) {
-        warn(`Cartograph is not initialized in ${projectPath}`);
-        return;
-      }
-
-      if (!options.force) {
-        // Confirm with user
-        const readline = await import('node:readline');
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const answer = await new Promise<string>((resolve) => {
-          rl.question(chalk.yellow('⚠ This will permanently delete all Cartograph data. Continue? (y/N) '), resolve);
-        });
-        rl.close();
-
-        if (answer.toLowerCase() !== 'y') {
-          info('Cancelled');
+      try {
+        if (!isInitialized(projectPath)) {
+          warn(`Cartograph is not initialized in ${projectPath}`);
           return;
         }
+
+        if (!options.force) {
+          const readline = await loadReadline();
+          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+          const answer = await new Promise<string>((resolve) => {
+            rl.question(chalk.yellow('⚠ This will permanently delete all Cartograph data. Continue? (y/N) '), resolve);
+          });
+          rl.close();
+
+          if (answer.toLowerCase() !== 'y') {
+            info('Cancelled');
+            return;
+          }
+        }
+
+        const { default: Cartograph } = await loadCartograph();
+        const cg = Cartograph.openSync(projectPath);
+        await cg.uninitialize();
+
+        success(`Removed Cartograph from ${projectPath}`);
+      } catch (err) {
+        error(`Failed to uninitialize: ${errMsg(err)}`);
+        process.exit(1);
       }
-
-      const { default: Cartograph } = await loadCartograph();
-      const cg = Cartograph.openSync(projectPath);
-      await cg.uninitialize();
-
-      success(`Removed Cartograph from ${projectPath}`);
-    } catch (err) {
-      error(`Failed to uninitialize: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin index [path]
  */
-adminCmd
-  .command('index [path]')
-  .description("Index all files in the project (mirrors cartograph_admin MCP tool with action='index')")
-  .option('-f, --force', 'Force full re-index even if already indexed')
-  .option('-q, --quiet', 'Suppress progress output')
-  .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-  .option('--profile', 'Print per-phase timings (scan / parse+store / resolve / postHooks / maintenance)')
-  .option(
-    '--clear-parse-cache [language]',
-    'Wipe the per-file parse cache before reindexing. ' +
-      '`--force` alone preserves it intentionally so re-extracts replay; ' +
-      'use this when the extractor itself changed and the schema-version ' +
-      'envelope (PAYLOAD_VERSION) was not bumped to match. ' +
-      'Pass a language (e.g. `--clear-parse-cache=typescript`) to drop ' +
-      "only that language's entries — much faster when one extractor changed.",
-  )
-  .option(
-    '--parse-workers <n>',
-    'Parse-worker pool size. Default: CPU count − 1, floored at 1, ' +
-      'capped at 16. Lower it on memory-constrained CI runners; raise ' +
-      'it on big monorepos. Bench with --profile before settling on a value.',
-  )
-  .action(runAdminIndexCommand);
+function registerIndexCommand(deps: AdminCommandDeps): void {
+  const { adminCmd } = deps;
+  adminCmd
+    .command('index [path]')
+    .description("Index all files in the project (mirrors cartograph_admin MCP tool with action='index')")
+    .option('-f, --force', 'Force full re-index even if already indexed')
+    .option('-q, --quiet', 'Suppress progress output')
+    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
+    .option('--profile', 'Print per-phase timings (scan / parse+store / resolve / postHooks / maintenance)')
+    .option(
+      '--clear-parse-cache [language]',
+      'Wipe the per-file parse cache before reindexing. ' +
+        '`--force` alone preserves it intentionally so re-extracts replay; ' +
+        'use this when the extractor itself changed and the schema-version ' +
+        'envelope (PAYLOAD_VERSION) was not bumped to match. ' +
+        'Pass a language (e.g. `--clear-parse-cache=typescript`) to drop ' +
+        "only that language's entries — much faster when one extractor changed.",
+    )
+    .option(
+      '--parse-workers <n>',
+      'Parse-worker pool size. Default: CPU count − 1, floored at 1, ' +
+        'capped at 16. Lower it on memory-constrained CI runners; raise ' +
+        'it on big monorepos. Bench with --profile before settling on a value.',
+    )
+    .action(runAdminIndexCommand);
+}
 
 async function runAdminIndexCommand(pathArg: string | undefined, options: AdminIndexOptions): Promise<void> {
+  const { error, info, isInitialized, loadCartograph, resolveProjectPath } = activeAdminCommandDeps;
   const projectPath = resolveProjectPath(pathArg);
 
   // Parse --parse-workers once: a positive integer overrides the
@@ -404,7 +638,7 @@ async function runQuietIndex(
   if (options.profile && result.profile) {
     // Quiet+profile is the scripted use case (CI bench, etc.) —
     // emit a single compact JSON line so it parses cleanly.
-    process.stdout.write(JSON.stringify(result.profile) + '\n');
+    activeAdminCommandDeps.writeStdout(JSON.stringify(result.profile) + '\n');
   }
   cg.close();
 }
@@ -416,7 +650,8 @@ async function runInteractiveIndex(args: {
   parseWorkers: number | undefined;
 }): Promise<void> {
   const { cg, projectPath, options, parseWorkers } = args;
-  const clack = await import('@clack/prompts');
+  const { printIndexResult } = activeAdminCommandDeps;
+  const clack = await activeAdminCommandDeps.loadClack();
   clack.intro('Indexing project');
 
   await prepareInteractiveIndex(cg, clack, options);
@@ -459,7 +694,7 @@ async function clearParseCacheIfRequested(
   clearParseCacheOption: boolean | string | undefined,
 ): Promise<{ count: number; lang: string | undefined } | null> {
   if (!clearParseCacheOption) return null;
-  const { clearParseCache } = await import('../../db/queries-parse-cache.js');
+  const { clearParseCache } = await activeAdminCommandDeps.loadParseCache();
   const lang = typeof clearParseCacheOption === 'string' ? clearParseCacheOption : undefined;
   return { count: clearParseCache(cg.queries, lang), lang };
 }
@@ -473,6 +708,7 @@ async function runIndexWithProgress(
   // After base indexing the CLI hands it to a detached process
   // (see below), so the in-process background pass must not also
   // fire. Without this both would run and double the GPU load.
+  const { colors, createShimmerProgress, createVerboseProgress, writeStdout } = activeAdminCommandDeps;
   if (options.verbose) {
     return cg.indexAll({
       onProgress: createVerboseProgress(),
@@ -481,7 +717,7 @@ async function runIndexWithProgress(
     });
   }
 
-  process.stdout.write(`${colors.dim}│${colors.reset}\n`);
+  writeStdout(`${colors.dim}│${colors.reset}\n`);
   const progress = createShimmerProgress();
   const result = await cg.indexAll({
     onProgress: progress.onProgress,
@@ -518,7 +754,7 @@ async function reportBackgroundSummaryStatus(
     return;
   }
 
-  const { spawnDetachedSummarize } = await import('../../llm/detached-summarize.js');
+  const { spawnDetachedSummarize } = await activeAdminCommandDeps.loadDetachedSummarize();
   const detached = spawnDetachedSummarize(projectPath);
   if (detached.spawned) {
     clack.log.success(
@@ -545,142 +781,173 @@ async function reportBackgroundSummaryStatus(
  * NO call graph, NO classify roles. Use `admin index` to backfill
  * those later when needed.
  */
-adminCmd
-  .command('embed-only [path]')
-  .description('Fast-lane index: skip reference resolution + postHooks; embed only (Stage 4 #9)')
-  .option('-q, --quiet', 'Suppress progress output')
-  .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-  .action(async (pathArg: string | undefined, options: { quiet?: boolean; verbose?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+function registerEmbedOnlyCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    colors,
+    createShimmerProgress,
+    createVerboseProgress,
+    error,
+    info,
+    isInitialized,
+    loadCartograph,
+    loadClack,
+    printIndexResult,
+    resolveProjectPath,
+    writeStdout,
+  } = deps;
+  adminCmd
+    .command('embed-only [path]')
+    .description('Fast-lane index: skip reference resolution + postHooks; embed only (Stage 4 #9)')
+    .option('-q, --quiet', 'Suppress progress output')
+    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean; verbose?: boolean }) => {
+      const projectPath = resolveProjectPath(pathArg);
 
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
-        info('Run "cartograph admin init" first');
-        process.exit(1);
-      }
-
-      const { default: Cartograph } = await loadCartograph();
-      const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-      if (options.quiet) {
-        const result = await cg.indexAll({ summarize: false, embedOnly: true });
-        if (!result.success) process.exit(1);
-        try {
-          await cg.llm.embed.embedAll();
-        } catch (err) {
-          error(`Embed pass failed: ${errMsg(err)}`);
-          cg.close();
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          info('Run "cartograph admin init" first');
           process.exit(1);
         }
+
+        const { default: Cartograph } = await loadCartograph();
+        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+        if (options.quiet) {
+          const result = await cg.indexAll({ summarize: false, embedOnly: true });
+          if (!result.success) process.exit(1);
+          try {
+            await cg.llm.embed.embedAll();
+          } catch (err) {
+            error(`Embed pass failed: ${errMsg(err)}`);
+            cg.close();
+            process.exit(1);
+          }
+          cg.close();
+          return;
+        }
+
+        const clack = await loadClack();
+        clack.intro('Embed-only indexing (skip resolution + postHooks)');
+
+        let result: IndexResult;
+        if (options.verbose) {
+          result = await cg.indexAll({
+            onProgress: createVerboseProgress(),
+            verbose: true,
+            embedOnly: true,
+            summarize: false,
+          });
+        } else {
+          writeStdout(`${colors.dim}│${colors.reset}\n`);
+          const progress = createShimmerProgress();
+          result = await cg.indexAll({
+            onProgress: progress.onProgress,
+            embedOnly: true,
+            summarize: false,
+          });
+          await progress.stop();
+        }
+        printIndexResult(clack, result, projectPath);
+
+        // Embed pass — run synchronously so the CLI returns when embeddings
+        // are persisted (the bgCtrl path is skipped because embedOnly
+        // disables the auto-summarization trigger).
+        try {
+          clack.log.info('Running embed pass…');
+          const embedResult = await cg.llm.embed.embedAll({});
+          clack.log.success(
+            `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
+              `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
+          );
+        } catch (err) {
+          clack.log.warn(`Embed pass skipped: ${errMsg(err)}`);
+        }
+
+        clack.outro('Done');
         cg.close();
-        return;
-      }
-
-      const clack = await import('@clack/prompts');
-      clack.intro('Embed-only indexing (skip resolution + postHooks)');
-
-      let result: IndexResult;
-      if (options.verbose) {
-        result = await cg.indexAll({
-          onProgress: createVerboseProgress(),
-          verbose: true,
-          embedOnly: true,
-          summarize: false,
-        });
-      } else {
-        process.stdout.write(`${colors.dim}│${colors.reset}\n`);
-        const progress = createShimmerProgress();
-        result = await cg.indexAll({
-          onProgress: progress.onProgress,
-          embedOnly: true,
-          summarize: false,
-        });
-        await progress.stop();
-      }
-      printIndexResult(clack, result, projectPath);
-
-      // Embed pass — run synchronously so the CLI returns when embeddings
-      // are persisted (the bgCtrl path is skipped because embedOnly
-      // disables the auto-summarization trigger).
-      try {
-        clack.log.info('Running embed pass…');
-        const embedResult = await cg.llm.embed.embedAll({});
-        clack.log.success(
-          `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
-            `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
-        );
       } catch (err) {
-        clack.log.warn(`Embed pass skipped: ${errMsg(err)}`);
+        error(`Failed to embed-only index: ${errMsg(err)}`);
+        process.exit(1);
       }
-
-      clack.outro('Done');
-      cg.close();
-    } catch (err) {
-      error(`Failed to embed-only index: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin sync [path]
  */
-adminCmd
-  .command('sync [path]')
-  .description("Sync changes since last index (mirrors cartograph_admin MCP tool with action='sync')")
-  .option('-q, --quiet', 'Suppress output (for git hooks)')
-  .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
+function registerSyncCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    awaitSummarisationWithProgress,
+    colors,
+    createShimmerProgress,
+    error,
+    isInitialized,
+    loadCartograph,
+    loadClack,
+    resolveProjectPath,
+    writeStderr,
+    writeStdout,
+  } = deps;
+  adminCmd
+    .command('sync [path]')
+    .description("Sync changes since last index (mirrors cartograph_admin MCP tool with action='sync')")
+    .option('-q, --quiet', 'Suppress output (for git hooks)')
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
+      const projectPath = resolveProjectPath(pathArg);
 
-    try {
-      if (!isInitialized(projectPath)) {
+      try {
+        if (!isInitialized(projectPath)) {
+          if (!options.quiet) {
+            error(`Cartograph not initialized in ${projectPath}`);
+          }
+          process.exit(1);
+        }
+
+        const { default: Cartograph } = await loadCartograph();
+        // Write path (admin sync): opt in to auto-migration.
+        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+        if (options.quiet) {
+          // Quiet mode (git hooks, scripts): skip summarisation so the
+          // hook stays fast. The next interactive sync/index picks up
+          // any new symbols.
+          await cg.sync({ summarize: false });
+          cg.close();
+          return;
+        }
+
+        const clack = await loadClack();
+        clack.intro('Syncing Cartograph');
+
+        writeStdout(`${colors.dim}│${colors.reset}\n`);
+        const progress = createShimmerProgress();
+
+        const result = await cg.sync({
+          onProgress: progress.onProgress,
+        });
+
+        await progress.stop();
+
+        printSyncResult(clack, result);
+
+        // Await any background summarisation kicked off by sync() so
+        // the work persists before exit.
+        await awaitSummarisationWithProgress(cg, clack);
+
+        clack.outro('Done');
+        cg.close();
+      } catch (err) {
         if (!options.quiet) {
-          error(`Cartograph not initialized in ${projectPath}`);
+          error(`Failed to sync: ${errMsg(err)}`);
+          if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
         }
         process.exit(1);
       }
-
-      const { default: Cartograph } = await loadCartograph();
-      // Write path (admin sync): opt in to auto-migration.
-      const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-      if (options.quiet) {
-        // Quiet mode (git hooks, scripts): skip summarisation so the
-        // hook stays fast. The next interactive sync/index picks up
-        // any new symbols.
-        await cg.sync({ summarize: false });
-        cg.close();
-        return;
-      }
-
-      const clack = await import('@clack/prompts');
-      clack.intro('Syncing Cartograph');
-
-      process.stdout.write(`${colors.dim}│${colors.reset}\n`);
-      const progress = createShimmerProgress();
-
-      const result = await cg.sync({
-        onProgress: progress.onProgress,
-      });
-
-      await progress.stop();
-
-      printSyncResult(clack, result);
-
-      // Await any background summarisation kicked off by sync() so
-      // the work persists before exit.
-      await awaitSummarisationWithProgress(cg, clack);
-
-      clack.outro('Done');
-      cg.close();
-    } catch (err) {
-      if (!options.quiet) {
-        error(`Failed to sync: ${errMsg(err)}`);
-        if (process.env['CG_DEBUG']) console.error(err);
-      }
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin summarize [path]
@@ -694,91 +961,94 @@ adminCmd
  * cold cache, and the CLI streams per-symbol progress. The MCP
  * version returns a single completion blob.
  */
-adminCmd
-  .command('summarize [path]')
-  .description('Generate one-line LLM summaries for indexed symbols (requires config.llm)')
-  .option('-q, --quiet', 'Suppress output')
-  .option('-c, --concurrency <n>', 'Concurrent LLM requests')
-  .option(
-    '--limit <n>',
-    'Cap eager summary generations this pass; the importance-ordered tail defers to on-demand summarisation. `0` = ad-hoc only (summarise nothing eagerly). Overrides config.llm.summarizeEagerLimit',
-  )
-  .option(
-    '--all',
-    'Summarize every eligible symbol — uncapped full pass (overrides config.llm.summarizeEagerLimit and --limit)',
-  )
-  .action(
-    async (
-      pathArg: string | undefined,
-      options: { quiet?: boolean; concurrency?: string; limit?: string; all?: boolean },
-    ) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        // Write path (summarize): opt in to auto-migration.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-        const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
-        if (!llmConfig) {
-          if (!options.quiet) {
-            error(
-              'No LLM available. Add config.llm to .cartograph/config.json (run `cartograph admin install-models --write-config` for the recommended stack — llama-server HTTP for every tier — or set provider: "anthropic-api" for Claude).',
-            );
+function registerSummarizeCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, createShimmerProgress, error, isInitialized, loadCartograph, loadClack, resolveProjectPath } = deps;
+  adminCmd
+    .command('summarize [path]')
+    .description('Generate one-line LLM summaries for indexed symbols (requires config.llm)')
+    .option('-q, --quiet', 'Suppress output')
+    .option('-c, --concurrency <n>', 'Concurrent LLM requests')
+    .option(
+      '--limit <n>',
+      'Cap eager summary generations this pass; the importance-ordered tail defers to on-demand summarisation. `0` = ad-hoc only (summarise nothing eagerly). Overrides config.llm.summarizeEagerLimit',
+    )
+    .option(
+      '--all',
+      'Summarize every eligible symbol — uncapped full pass (overrides config.llm.summarizeEagerLimit and --limit)',
+    )
+    .action(
+      async (
+        pathArg: string | undefined,
+        options: { quiet?: boolean; concurrency?: string; limit?: string; all?: boolean },
+      ) => {
+        const projectPath = resolveProjectPath(pathArg);
+        try {
+          if (!isInitialized(projectPath)) {
+            if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+            process.exit(1);
           }
+          const { default: Cartograph } = await loadCartograph();
+          // Write path (summarize): opt in to auto-migration.
+          const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+          const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
+          if (!llmConfig) {
+            if (!options.quiet) {
+              error(
+                'No LLM available. Add config.llm to .cartograph/config.json (run `cartograph admin install-models --write-config` for the recommended stack — llama-server HTTP for every tier — or set provider: "anthropic-api" for Claude).',
+              );
+            }
+            cg.close();
+            process.exit(1);
+          }
+
+          // Match the MCP `cartograph_admin({action: 'summarize'})` clamp [1, 16] so both
+          // surfaces enforce the same upper bound. Local LLMs and rate-
+          // limited cloud endpoints both work poorly past ~8 concurrent.
+          const concurrency = parseConcurrencyOption(options.concurrency);
+
+          // Lever C — eager-summary cap. `--all` wins, then `--limit`,
+          // else undefined so the service falls back to
+          // config.llm.summarizeEagerLimit (then the built-in default).
+          const eagerLimit = parseEagerLimit(options, () => cg.close());
+
+          // Conditional spread — `exactOptionalPropertyTypes` rejects an
+          // explicit `eagerLimit: undefined` (let the service default it).
+          const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
+
+          if (options.quiet) {
+            await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });
+            cg.close();
+            return;
+          }
+
+          const clack = await loadClack();
+          clack.intro('Summarising indexed symbols');
+
+          const progress = createShimmerProgress();
+          progress.onProgress({ phase: 'parsing', current: 0, total: 0 });
+
+          const result = await cg.llm.summarizeAll({
+            concurrency,
+            ...eagerLimitOpt,
+            onProgress: (done: number, total: number) => {
+              progress.onProgress({ phase: 'parsing', current: done, total });
+            },
+          });
+
+          await progress.stop();
+
+          printSummarizeDetails(clack, result);
+
+          clack.outro('Done');
           cg.close();
+        } catch (err) {
+          if (!options.quiet) error(`Failed to summarise: ${errMsg(err)}`);
           process.exit(1);
         }
-
-        // Match the MCP `cartograph_admin({action: 'summarize'})` clamp [1, 16] so both
-        // surfaces enforce the same upper bound. Local LLMs and rate-
-        // limited cloud endpoints both work poorly past ~8 concurrent.
-        const concurrency = parseConcurrencyOption(options.concurrency);
-
-        // Lever C — eager-summary cap. `--all` wins, then `--limit`,
-        // else undefined so the service falls back to
-        // config.llm.summarizeEagerLimit (then the built-in default).
-        const eagerLimit = parseEagerLimit(options, () => cg.close());
-
-        // Conditional spread — `exactOptionalPropertyTypes` rejects an
-        // explicit `eagerLimit: undefined` (let the service default it).
-        const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
-
-        if (options.quiet) {
-          await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });
-          cg.close();
-          return;
-        }
-
-        const clack = await import('@clack/prompts');
-        clack.intro('Summarising indexed symbols');
-
-        const progress = createShimmerProgress();
-        progress.onProgress({ phase: 'parsing', current: 0, total: 0 });
-
-        const result = await cg.llm.summarizeAll({
-          concurrency,
-          ...eagerLimitOpt,
-          onProgress: (done, total) => {
-            progress.onProgress({ phase: 'parsing', current: done, total });
-          },
-        });
-
-        await progress.stop();
-
-        printSummarizeDetails(clack, result);
-
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        if (!options.quiet) error(`Failed to summarise: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    },
-  );
+      },
+    );
+}
 
 /**
  * cartograph admin embed [path]
@@ -794,50 +1064,62 @@ adminCmd
  * same reason as `summarize` — embedding cold-cache runs take
  * minutes and the CLI streams per-symbol progress.
  */
-adminCmd
-  .command('embed [path]')
-  .description('Generate embeddings for every indexed symbol (requires embedding provider)')
-  .option('-q, --quiet', 'Suppress output')
-  .option('-c, --concurrency <n>', 'Concurrent embedding requests')
-  .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+function registerEmbedCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    error,
+    formatDuration,
+    formatNumber,
+    isInitialized,
+    loadCartograph,
+    loadClack,
+    resolveProjectPath,
+  } = deps;
+  adminCmd
+    .command('embed [path]')
+    .description('Generate embeddings for every indexed symbol (requires embedding provider)')
+    .option('-q, --quiet', 'Suppress output')
+    .option('-c, --concurrency <n>', 'Concurrent embedding requests')
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        // Write path (embed): opt in to auto-migration.
+        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+        // Clamped to [1, 16] — typical embedding endpoints rate-limit
+        // around 4–8 concurrent requests; anything higher just queues.
+        const concurrency = parseConcurrencyOption(options.concurrency);
+
+        if (options.quiet) {
+          await cg.llm.embed.embedAll({ concurrency });
+          cg.close();
+          return;
+        }
+
+        const clack = await loadClack();
+        clack.intro('Embedding indexed symbols');
+        const result = await cg.llm.embed.embedAll({ concurrency });
+        const counters: string[] = [];
+        if (result.errors > 0) counters.push(`${formatNumber(result.errors)} errors`);
+        if (result.skipped > 0)
+          counters.push(`${formatNumber(result.skipped)} skipped — too large for embed server's batch size`);
+        clack.log.success(
+          `Embedded ${formatNumber(result.generated)} new vectors in ${formatDuration(result.durationMs)}` +
+            (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
+        );
+        clack.outro('Done');
+        cg.close();
+      } catch (err) {
+        if (!options.quiet) error(`Failed to embed: ${errMsg(err)}`);
         process.exit(1);
       }
-      const { default: Cartograph } = await loadCartograph();
-      // Write path (embed): opt in to auto-migration.
-      const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-      // Clamped to [1, 16] — typical embedding endpoints rate-limit
-      // around 4–8 concurrent requests; anything higher just queues.
-      const concurrency = parseConcurrencyOption(options.concurrency);
-
-      if (options.quiet) {
-        await cg.llm.embed.embedAll({ concurrency });
-        cg.close();
-        return;
-      }
-
-      const clack = await import('@clack/prompts');
-      clack.intro('Embedding indexed symbols');
-      const result = await cg.llm.embed.embedAll({ concurrency });
-      const counters: string[] = [];
-      if (result.errors > 0) counters.push(`${formatNumber(result.errors)} errors`);
-      if (result.skipped > 0)
-        counters.push(`${formatNumber(result.skipped)} skipped — too large for embed server's batch size`);
-      clack.log.success(
-        `Embedded ${formatNumber(result.generated)} new vectors in ${formatDuration(result.durationMs)}` +
-          (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
-      );
-      clack.outro('Done');
-      cg.close();
-    } catch (err) {
-      if (!options.quiet) error(`Failed to embed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin classify [path]
@@ -857,84 +1139,98 @@ adminCmd
  * CLI streams per-symbol progress for what can be a multi-minute
  * cold-cache run on large codebases.
  */
-adminCmd
-  .command('classify [path]')
-  .description('Assign roles via the LLM (cascade input: summary if present, else docstring; requires config.llm)')
-  .option('-q, --quiet', 'Suppress output')
-  .option('-c, --concurrency <n>', 'Concurrent LLM requests')
-  .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+function registerClassifyCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    error,
+    formatDuration,
+    formatNumber,
+    isInitialized,
+    loadCartograph,
+    loadClack,
+    resolveProjectPath,
+  } = deps;
+  adminCmd
+    .command('classify [path]')
+    .description('Assign roles via the LLM (cascade input: summary if present, else docstring; requires config.llm)')
+    .option('-q, --quiet', 'Suppress output')
+    .option('-c, --concurrency <n>', 'Concurrent LLM requests')
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        // Write path (classify): opt in to auto-migration.
+        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+        // Clamped to [1, 16] — same band as summarize/embed; classifier
+        // chat calls are short and per-symbol, so concurrency speeds the
+        // happy path but local LLMs queue past ~8 anyway.
+        const concurrency = parseConcurrencyOption(options.concurrency);
+
+        if (options.quiet) {
+          await cg.llm.classifyAll({ concurrency });
+          cg.close();
+          return;
+        }
+
+        const clack = await loadClack();
+        clack.intro('Classifying symbol roles');
+        const result = await cg.llm.classifyAll({ concurrency });
+        clack.log.success(
+          `Classified ${formatNumber(result.classified)} symbols in ${formatDuration(result.durationMs)}` +
+            (result.errors > 0 ? ` (${formatNumber(result.errors)} errors)` : ''),
+        );
+        if (result.candidates === 0) {
+          clack.log.info(
+            'No candidates — every symbol with a description (summary or docstring) already has a role from the active model.',
+          );
+        }
+        clack.outro('Done');
+        cg.close();
+      } catch (err) {
+        if (!options.quiet) error(`Failed to classify: ${errMsg(err)}`);
         process.exit(1);
       }
-      const { default: Cartograph } = await loadCartograph();
-      // Write path (classify): opt in to auto-migration.
-      const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-      // Clamped to [1, 16] — same band as summarize/embed; classifier
-      // chat calls are short and per-symbol, so concurrency speeds the
-      // happy path but local LLMs queue past ~8 anyway.
-      const concurrency = parseConcurrencyOption(options.concurrency);
-
-      if (options.quiet) {
-        await cg.llm.classifyAll({ concurrency });
-        cg.close();
-        return;
-      }
-
-      const clack = await import('@clack/prompts');
-      clack.intro('Classifying symbol roles');
-      const result = await cg.llm.classifyAll({ concurrency });
-      clack.log.success(
-        `Classified ${formatNumber(result.classified)} symbols in ${formatDuration(result.durationMs)}` +
-          (result.errors > 0 ? ` (${formatNumber(result.errors)} errors)` : ''),
-      );
-      if (result.candidates === 0) {
-        clack.log.info(
-          'No candidates — every symbol with a description (summary or docstring) already has a role from the active model.',
-        );
-      }
-      clack.outro('Done');
-      cg.close();
-    } catch (err) {
-      if (!options.quiet) error(`Failed to classify: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin unlock [path]
  */
-adminCmd
-  .command('unlock [path]')
-  .description(
-    "Remove a stale lock file that is blocking indexing (mirrors cartograph_admin MCP tool with action='unlock')",
-  )
-  .action(async (pathArg: string | undefined) => {
-    const projectPath = resolveProjectPath(pathArg);
+function registerUnlockCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, getCartographDir, info, isInitialized, resolveProjectPath, success } = deps;
+  adminCmd
+    .command('unlock [path]')
+    .description(
+      "Remove a stale lock file that is blocking indexing (mirrors cartograph_admin MCP tool with action='unlock')",
+    )
+    .action(async (pathArg: string | undefined) => {
+      const projectPath = resolveProjectPath(pathArg);
 
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
-        return;
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          return;
+        }
+
+        const lockPath = path.join(getCartographDir(projectPath), 'cartograph.lock');
+
+        if (!removeLockFileIfPresent(lockPath)) {
+          info('No lock file found — nothing to do');
+          return;
+        }
+
+        success('Removed lock file. You can now run indexing again.');
+      } catch (err) {
+        error(`Failed to remove lock: ${errMsg(err)}`);
+        process.exit(1);
       }
-
-      const lockPath = path.join(getCartographDir(projectPath), 'cartograph.lock');
-
-      if (!fs.existsSync(lockPath)) {
-        info('No lock file found — nothing to do');
-        return;
-      }
-
-      fs.unlinkSync(lockPath);
-      success('Removed lock file. You can now run indexing again.');
-    } catch (err) {
-      error(`Failed to remove lock: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin migrate [path]
@@ -944,47 +1240,50 @@ adminCmd
  * schema vN is behind this binary's vM" — opens the DB with
  * autoMigrate=true, which runs migrations once and exits.
  */
-adminCmd
-  .command('migrate [path]')
-  .description(
-    'Apply forward schema migrations on the project DB (mirrors cartograph_admin MCP tool with action=\'migrate\'). Use after a read-style command fails with "Database schema vN is behind".',
-  )
-  .action(async (pathArg: string | undefined) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
+function registerMigrateCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, success } = deps;
+  adminCmd
+    .command('migrate [path]')
+    .description(
+      'Apply forward schema migrations on the project DB (mirrors cartograph_admin MCP tool with action=\'migrate\'). Use after a read-style command fails with "Database schema vN is behind".',
+    )
+    .action(async (pathArg: string | undefined) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        // Two-phase open lets us distinguish "already current" from
+        // "migrated this run" without a separate version probe: the
+        // default open() throws when the DB is behind, so success means
+        // already-current. On the throw we re-open with autoMigrate=true
+        // to actually run the migrations.
+        let migratedThisRun = false;
+        let cg: Awaited<ReturnType<typeof Cartograph.open>>;
+        try {
+          cg = await Cartograph.open(projectPath);
+        } catch {
+          cg = await Cartograph.open(projectPath, { autoMigrate: true });
+          migratedThisRun = true;
+        }
+        const v = cg.db.getSchemaVersion();
+        cg.close();
+        if (migratedThisRun) {
+          success(`Schema migrated to v${v?.version ?? '?'}.`);
+          info(
+            'Restart any MCP server still bound to the old schema (its tools will return "stale code, restart" until you do).',
+          );
+        } else {
+          success(`Schema already current (v${v?.version ?? '?'}). Nothing to migrate.`);
+        }
+      } catch (err) {
+        error(`Failed to migrate: ${errMsg(err)}`);
         process.exit(1);
       }
-      const { default: Cartograph } = await loadCartograph();
-      // Two-phase open lets us distinguish "already current" from
-      // "migrated this run" without a separate version probe: the
-      // default open() throws when the DB is behind, so success means
-      // already-current. On the throw we re-open with autoMigrate=true
-      // to actually run the migrations.
-      let migratedThisRun = false;
-      let cg: Awaited<ReturnType<typeof Cartograph.open>>;
-      try {
-        cg = await Cartograph.open(projectPath);
-      } catch {
-        cg = await Cartograph.open(projectPath, { autoMigrate: true });
-        migratedThisRun = true;
-      }
-      const v = cg.db.getSchemaVersion();
-      cg.close();
-      if (migratedThisRun) {
-        success(`Schema migrated to v${v?.version ?? '?'}.`);
-        info(
-          'Restart any MCP server still bound to the old schema (its tools will return "stale code, restart" until you do).',
-        );
-      } else {
-        success(`Schema already current (v${v?.version ?? '?'}). Nothing to migrate.`);
-      }
-    } catch (err) {
-      error(`Failed to migrate: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin build-similarity-edges [path]
@@ -993,57 +1292,71 @@ adminCmd
  * an embedding, finds its k nearest neighbors and creates edges when
  * similarity exceeds the threshold.
  */
-adminCmd
-  .command('build-similarity-edges [path]')
-  .option('--k <number>', `Number of nearest neighbors to find (default ${DEFAULT_SIMILAR_K})`)
-  .option('--min-score <number>', `Minimum similarity threshold 0..1 (default ${DEFAULT_SIMILAR_MIN_SCORE})`)
-  .description(
-    "Build similar_to edges from embeddings (mirrors cartograph_admin MCP tool with action='build-similarity-edges')",
-  )
-  .action(async (pathArg: string | undefined, opts) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
+function registerBuildSimilarityEdgesCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    assignFloatArg,
+    assignIntArg,
+    error,
+    info,
+    isInitialized,
+    loadCartograph,
+    loadSimilarEdges,
+    resolveProjectPath,
+    success,
+  } = deps;
+  adminCmd
+    .command('build-similarity-edges [path]')
+    .option('--k <number>', `Number of nearest neighbors to find (default ${DEFAULT_SIMILAR_K})`)
+    .option('--min-score <number>', `Minimum similarity threshold 0..1 (default ${DEFAULT_SIMILAR_MIN_SCORE})`)
+    .description(
+      "Build similar_to edges from embeddings (mirrors cartograph_admin MCP tool with action='build-similarity-edges')",
+    )
+    .action(async (pathArg: string | undefined, opts) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        const cg = await Cartograph.open(projectPath);
+        const { buildSimilarToEdges } = await loadSimilarEdges();
+        // Route --k / --min-score through the shared validators so bad
+        // input (NaN, negative, out-of-range) is rejected with a clean
+        // error instead of being silently coerced to the default / clamped.
+        const o = opts as Record<string, string | undefined>;
+        const parsed: Record<string, unknown> = {};
+        if (!assignIntArg({ args: parsed, key: 'k', raw: o['k'], optionName: '--k', opts: { min: 1, max: 100 } })) {
+          cg.close();
+          return;
+        }
+        if (
+          !assignFloatArg({
+            args: parsed,
+            key: 'minScore',
+            raw: o['minScore'],
+            optionName: '--min-score',
+            opts: { min: 0, max: 1 },
+          })
+        ) {
+          cg.close();
+          return;
+        }
+        const k = (parsed['k'] as number | undefined) ?? DEFAULT_SIMILAR_K;
+        const minScore = (parsed['minScore'] as number | undefined) ?? DEFAULT_SIMILAR_MIN_SCORE;
+        const result = await buildSimilarToEdges(cg, { k, minScore });
+        cg.close();
+        success(`Built similarity edges: ${result.written} edges from ${result.processed} nodes.`);
+        if (result.reason) {
+          info(`Note: ${result.reason}`);
+        }
+      } catch (err) {
+        error(`Failed to build similarity edges: ${errMsg(err)}`);
         process.exit(1);
       }
-      const { default: Cartograph } = await loadCartograph();
-      const cg = await Cartograph.open(projectPath);
-      const { buildSimilarToEdges } = await import('../../embeddings/similar-edges.js');
-      // Route --k / --min-score through the shared validators so bad
-      // input (NaN, negative, out-of-range) is rejected with a clean
-      // error instead of being silently coerced to the default / clamped.
-      const o = opts as Record<string, string | undefined>;
-      const parsed: Record<string, unknown> = {};
-      if (!assignIntArg({ args: parsed, key: 'k', raw: o['k'], optionName: '--k', opts: { min: 1, max: 100 } })) {
-        cg.close();
-        return;
-      }
-      if (
-        !assignFloatArg({
-          args: parsed,
-          key: 'minScore',
-          raw: o['minScore'],
-          optionName: '--min-score',
-          opts: { min: 0, max: 1 },
-        })
-      ) {
-        cg.close();
-        return;
-      }
-      const k = (parsed['k'] as number | undefined) ?? DEFAULT_SIMILAR_K;
-      const minScore = (parsed['minScore'] as number | undefined) ?? DEFAULT_SIMILAR_MIN_SCORE;
-      const result = await buildSimilarToEdges(cg, { k, minScore });
-      cg.close();
-      success(`Built similarity edges: ${result.written} edges from ${result.processed} nodes.`);
-      if (result.reason) {
-        info(`Note: ${result.reason}`);
-      }
-    } catch (err) {
-      error(`Failed to build similarity edges: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin prune-store [path]
@@ -1060,71 +1373,84 @@ adminCmd
  * `dbRunMaintenance` returns the freed pages to the OS so the DB
  * file actually shrinks.
  */
-adminCmd
-  .command('prune-store [path]')
-  .description(
-    "Evict cold orphan summary_store/embedding_store rows (mirrors cartograph_admin MCP tool with action='prune-store')",
-  )
-  .option(
-    '--max-age-days <number>',
-    'Evict orphans older than this many days (default uses PRUNE_STORE_DEFAULT_DAYS; 0 = evict every orphan now)',
-  )
-  .action(async (pathArg: string | undefined, opts) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
-        process.exit(1);
-      }
-      const { pruneOrphanStoreRows, MS_PER_DAY, PRUNE_STORE_DEFAULT_DAYS } = await import(
-        '../../db/queries-summaries.js'
-      );
-      const raw = (opts as Record<string, string>)['maxAgeDays'];
-      const maxAgeDays = raw === undefined ? PRUNE_STORE_DEFAULT_DAYS : Number.parseFloat(raw);
-      if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
-        error(`--max-age-days must be a non-negative number. Got '${raw}'.`);
-        process.exit(1);
-      }
-      const { default: Cartograph } = await loadCartograph();
-      // Write path: opt in to auto-migration so a cold project that's
-      // never touched the new prune-store action still picks up
-      // migration 053 on first run.
-      const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+function registerPruneStoreCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    error,
+    formatBytes,
+    formatNumber,
+    info,
+    isInitialized,
+    loadCartograph,
+    loadDbIndex,
+    loadSummaryQueries,
+    resolveProjectPath,
+    success,
+  } = deps;
+  adminCmd
+    .command('prune-store [path]')
+    .description(
+      "Evict cold orphan summary_store/embedding_store rows (mirrors cartograph_admin MCP tool with action='prune-store')",
+    )
+    .option(
+      '--max-age-days <number>',
+      'Evict orphans older than this many days (default uses PRUNE_STORE_DEFAULT_DAYS; 0 = evict every orphan now)',
+    )
+    .action(async (pathArg: string | undefined, opts) => {
+      const projectPath = resolveProjectPath(pathArg);
       try {
-        const { dbReclaimAfterBulkDelete } = await import('../../db/index.js');
-        const sizeBefore = cg.db.getSize();
-        const result = pruneOrphanStoreRows(cg.queries, {
-          maxAgeMs: maxAgeDays * MS_PER_DAY,
-        });
-        const totalPruned = result.summariesPruned + result.embeddingsPruned;
-        // Deleting rows only moves pages to the freelist — the file
-        // still occupies the same disk. Reclaim the freelist AND
-        // truncate the WAL so the prune actually shrinks the DB.
-        // Skipped when nothing was deleted (no freelist to reclaim).
-        if (totalPruned > 0) {
-          dbReclaimAfterBulkDelete(cg.db);
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
         }
-        const sizeAfter = cg.db.getSize();
-        success(
-          `Pruned ${formatNumber(result.summariesPruned)} summary_store + ` +
-            `${formatNumber(result.embeddingsPruned)} embedding_store row(s) ` +
-            `older than ${maxAgeDays} day(s).`,
-        );
-        if (totalPruned > 0) {
-          const reclaimed = sizeBefore - sizeAfter;
-          info(
-            `Database: ${formatBytes(sizeBefore)} → ${formatBytes(sizeAfter)} ` +
-              `(reclaimed ${formatBytes(Math.max(0, reclaimed))}).`,
+        const { pruneOrphanStoreRows, MS_PER_DAY, PRUNE_STORE_DEFAULT_DAYS } = await loadSummaryQueries();
+        const raw = (opts as Record<string, string>)['maxAgeDays'];
+        const maxAgeDays = raw === undefined ? PRUNE_STORE_DEFAULT_DAYS : Number.parseFloat(raw);
+        if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
+          error(`--max-age-days must be a non-negative number. Got '${raw}'.`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        // Write path: opt in to auto-migration so a cold project that's
+        // never touched the new prune-store action still picks up
+        // migration 053 on first run.
+        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
+        try {
+          const { dbReclaimAfterBulkDelete } = await loadDbIndex();
+          const sizeBefore = cg.db.getSize();
+          const result = pruneOrphanStoreRows(cg.queries, {
+            maxAgeMs: maxAgeDays * MS_PER_DAY,
+          });
+          const totalPruned = result.summariesPruned + result.embeddingsPruned;
+          // Deleting rows only moves pages to the freelist — the file
+          // still occupies the same disk. Reclaim the freelist AND
+          // truncate the WAL so the prune actually shrinks the DB.
+          // Skipped when nothing was deleted (no freelist to reclaim).
+          if (totalPruned > 0) {
+            dbReclaimAfterBulkDelete(cg.db);
+          }
+          const sizeAfter = cg.db.getSize();
+          success(
+            `Pruned ${formatNumber(result.summariesPruned)} summary_store + ` +
+              `${formatNumber(result.embeddingsPruned)} embedding_store row(s) ` +
+              `older than ${maxAgeDays} day(s).`,
           );
+          if (totalPruned > 0) {
+            const reclaimed = sizeBefore - sizeAfter;
+            info(
+              `Database: ${formatBytes(sizeBefore)} → ${formatBytes(sizeAfter)} ` +
+                `(reclaimed ${formatBytes(Math.max(0, reclaimed))}).`,
+            );
+          }
+        } finally {
+          cg.close();
         }
-      } finally {
-        cg.close();
+      } catch (err) {
+        error(`Failed to prune store: ${errMsg(err)}`);
+        process.exit(1);
       }
-    } catch (err) {
-      error(`Failed to prune store: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin scip-export [path]
@@ -1132,36 +1458,39 @@ adminCmd
  * Export the cartograph index to a SCIP protobuf file.
  * Mirrors cartograph_admin({action: 'scip-export'}).
  */
-adminCmd
-  .command('scip-export [path]')
-  .description(
-    "Export the cartograph index to a SCIP protobuf file (mirrors cartograph_admin MCP tool with action='scip-export')",
-  )
-  .option('-o, --out <file>', 'Output .scip file path (default: <project>/index.scip)')
-  .action(async (pathArg: string | undefined, options: { out?: string }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
+function registerScipExportCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, writeScipExport } = deps;
+  adminCmd
+    .command('scip-export [path]')
+    .description(
+      "Export the cartograph index to a SCIP protobuf file (mirrors cartograph_admin MCP tool with action='scip-export')",
+    )
+    .option('-o, --out <file>', 'Output .scip file path (default: <project>/index.scip)')
+    .action(async (pathArg: string | undefined, options: { out?: string }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        const cg = await Cartograph.open(projectPath);
+        const outPath = options.out ?? path.join(projectPath, 'index.scip');
+        const result = writeScipExport(cg.queries, cg.projectRoot, outPath);
+        cg.close();
+        info(`Exported SCIP index → ${result.outPath}`);
+        info(
+          `${result.stats.documents} documents, ${result.stats.symbols} symbols, ${result.stats.occurrences} occurrences (${result.stats.bytes} bytes)`,
+        );
+        if (result.stats.disambiguated > 0) {
+          info(`${result.stats.disambiguated} symbol(s) disambiguated (name collision)`);
+        }
+      } catch (err) {
+        error(`SCIP export failed: ${errMsg(err)}`);
         process.exit(1);
       }
-      const { default: Cartograph } = await loadCartograph();
-      const cg = await Cartograph.open(projectPath);
-      const outPath = options.out ?? path.join(projectPath, 'index.scip');
-      const result = writeScipExport(cg.queries, cg.projectRoot, outPath);
-      cg.close();
-      info(`Exported SCIP index → ${result.outPath}`);
-      info(
-        `${result.stats.documents} documents, ${result.stats.symbols} symbols, ${result.stats.occurrences} occurrences (${result.stats.bytes} bytes)`,
-      );
-      if (result.stats.disambiguated > 0) {
-        info(`${result.stats.disambiguated} symbol(s) disambiguated (name collision)`);
-      }
-    } catch (err) {
-      error(`SCIP export failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin scip-import [path]
@@ -1169,44 +1498,44 @@ adminCmd
  * Import a SCIP protobuf index into the cartograph graph (per-file replace).
  * Mirrors cartograph_admin({action: 'scip-import'}).
  */
-adminCmd
-  .command('scip-import [path]')
-  .description(
-    "Import a SCIP protobuf index into the cartograph graph — per-file replace (mirrors cartograph_admin MCP tool with action='scip-import')",
-  )
-  .option('-i, --in <file>', 'Input .scip file path (default: <project>/index.scip)')
-  .action(async (pathArg: string | undefined, options: { in?: string }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      if (!isInitialized(projectPath)) {
-        error(`Cartograph not initialized in ${projectPath}`);
+function registerScipImportCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, writeScipImport } = deps;
+  adminCmd
+    .command('scip-import [path]')
+    .description(
+      "Import a SCIP protobuf index into the cartograph graph — per-file replace (mirrors cartograph_admin MCP tool with action='scip-import')",
+    )
+    .option('-i, --in <file>', 'Input .scip file path (default: <project>/index.scip)')
+    .action(async (pathArg: string | undefined, options: { in?: string }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        if (!isInitialized(projectPath)) {
+          error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const inPath = options.in ?? path.join(projectPath, 'index.scip');
+        const bytes = readExistingScipFile(inPath, error);
+        if (!bytes) return;
+        const { default: Cartograph } = await loadCartograph();
+        const cg = await Cartograph.open(projectPath);
+        const result = writeScipImport(cg.queries, cg.projectRoot, bytes);
+        cg.close();
+        info(`Imported SCIP index ← ${inPath}`);
+        info(
+          `${result.stats.documents} documents, ${result.stats.files} files, ${result.stats.nodes} nodes, ${result.stats.edges} edges`,
+        );
+        if (result.stats.skippedDocuments > 0) {
+          info(`${result.stats.skippedDocuments} document(s) skipped (unsafe path)`);
+        }
+        if (result.stats.unresolvedEdges > 0) {
+          info(`${result.stats.unresolvedEdges} edge(s) dropped (target symbol had no definition)`);
+        }
+      } catch (err) {
+        error(`SCIP import failed: ${errMsg(err)}`);
         process.exit(1);
       }
-      const inPath = options.in ?? path.join(projectPath, 'index.scip');
-      if (!fs.existsSync(inPath)) {
-        error(`SCIP file not found: ${inPath}`);
-        process.exit(1);
-      }
-      const { default: Cartograph } = await loadCartograph();
-      const cg = await Cartograph.open(projectPath);
-      const bytes = fs.readFileSync(inPath);
-      const result = writeScipImport(cg.queries, cg.projectRoot, bytes);
-      cg.close();
-      info(`Imported SCIP index ← ${inPath}`);
-      info(
-        `${result.stats.documents} documents, ${result.stats.files} files, ${result.stats.nodes} nodes, ${result.stats.edges} edges`,
-      );
-      if (result.stats.skippedDocuments > 0) {
-        info(`${result.stats.skippedDocuments} document(s) skipped (unsafe path)`);
-      }
-      if (result.stats.unresolvedEdges > 0) {
-        info(`${result.stats.unresolvedEdges} edge(s) dropped (target symbol had no definition)`);
-      }
-    } catch (err) {
-      error(`SCIP import failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * cartograph admin install-models [--dir <path>]
@@ -1217,191 +1546,222 @@ adminCmd
  *
  * Mirrors cartograph_admin({action: 'install-models'}).
  */
-adminCmd
-  .command('install-models')
-  .description(
-    "Download the recommended GGUF set into ~/.cartograph/models/ (mirrors cartograph_admin MCP tool with action='install-models').",
-  )
-  .option('--dir <path>', 'Directory to install GGUFs into (overrides ~/.cartograph/models)')
-  .option(
-    '--minimal',
-    'Only install the smallest viable subset (embed + 3B chat, ~2.1 GB) instead of the full ~7 GB set.',
-  )
-  .option(
-    '--write-config',
-    'After download, merge the recommended LLM block into .cartograph/config.json (creates a .bak.<timestamp> first). Default off for back-compat.',
-  )
-  .option('-p, --project-path <path>', 'Project root for --write-config (default: cwd)')
-  .action(async (options: { dir?: string; minimal?: boolean; writeConfig?: boolean; projectPath?: string }) => {
-    try {
-      const { installRecommendedModels } = await import('../../installer/install-models.js');
-      const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await import('../../llm/recommended-models.js');
-      const installOpts = options.dir ? { dir: options.dir } : {};
-      const result = await installRecommendedModels({
-        ...installOpts,
-        models: options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS,
-        onProgress: ({ model, downloaded, total }) => {
-          const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
-          const pct = total > 0 ? ((downloaded / total) * 100).toFixed(0) : '?';
-          process.stderr.write(`\r${model.filename}: ${mb(downloaded)}/${total > 0 ? mb(total) : '?'} MB (${pct}%)   `);
-        },
-      });
-      process.stderr.write('\n');
-      printInstallModelResults(result);
+function registerInstallModelsCommand(deps: AdminCommandDeps): void {
+  const {
+    adminCmd,
+    error,
+    info,
+    loadInstallModels,
+    loadRecommendedConfig,
+    loadRecommendedModels,
+    resolveProjectPath,
+    success,
+    writeStderr,
+  } = deps;
+  adminCmd
+    .command('install-models')
+    .description(
+      "Download the recommended GGUF set into ~/.cartograph/models/ (mirrors cartograph_admin MCP tool with action='install-models').",
+    )
+    .option('--dir <path>', 'Directory to install GGUFs into (overrides ~/.cartograph/models)')
+    .option(
+      '--minimal',
+      'Only install the smallest viable subset (embed + 3B chat, ~2.1 GB) instead of the full ~7 GB set.',
+    )
+    .option(
+      '--write-config',
+      'After download, merge the recommended LLM block into .cartograph/config.json (creates a .bak.<timestamp> first). Default off for back-compat.',
+    )
+    .option('-p, --project-path <path>', 'Project root for --write-config (default: cwd)')
+    .action(async (options: { dir?: string; minimal?: boolean; writeConfig?: boolean; projectPath?: string }) => {
+      try {
+        const { installRecommendedModels } = await loadInstallModels();
+        const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await loadRecommendedModels();
+        const installOpts = options.dir ? { dir: options.dir } : {};
+        const result = await installRecommendedModels({
+          ...installOpts,
+          models: options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS,
+          onProgress: ({ model, downloaded, total }) => {
+            const pct = total > 0 ? ((downloaded / total) * PHASE_PERCENT_SCALE).toFixed(0) : '?';
+            writeStderr(
+              `\r${model.filename}: ${bytesToMiBText(downloaded)}/${total > 0 ? bytesToMiBText(total) : '?'} MB (${pct}%)   `,
+            );
+          },
+        });
+        writeStderr('\n');
+        printInstallModelResults(result);
 
-      if (options.writeConfig) {
-        const projectRoot = resolveProjectPath(options.projectPath);
-        const { writeRecommendedLlmConfig } = await import('../../installer/recommended-config.js');
-        const writeOpts: { projectRoot: string; dir?: string } = { projectRoot };
-        if (options.dir) writeOpts.dir = options.dir;
-        const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
-        if (backupPath) {
-          info(`Backup written: ${backupPath}`);
+        if (options.writeConfig) {
+          const projectRoot = resolveProjectPath(options.projectPath);
+          const { writeRecommendedLlmConfig } = await loadRecommendedConfig();
+          const writeOpts: { projectRoot: string; dir?: string } = { projectRoot };
+          if (options.dir) writeOpts.dir = options.dir;
+          const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
+          if (backupPath) {
+            info(`Backup written: ${backupPath}`);
+          }
+          success(`Updated ${configPath}`);
+          if (diff.addedOrUpdated.length > 0) {
+            info(`  added/updated: ${diff.addedOrUpdated.join(', ')}`);
+          }
+        } else {
+          info(
+            'Next: re-run with `--write-config` to merge the recommended LLM block into .cartograph/config.json, or set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` by hand.',
+          );
         }
-        success(`Updated ${configPath}`);
-        if (diff.addedOrUpdated.length > 0) {
-          info(`  added/updated: ${diff.addedOrUpdated.join(', ')}`);
-        }
-      } else {
-        info(
-          'Next: re-run with `--write-config` to merge the recommended LLM block into .cartograph/config.json, or set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` by hand.',
-        );
+      } catch (err) {
+        error(`install-models failed: ${errMsg(err)}`);
+        process.exit(1);
       }
-    } catch (err) {
-      error(`install-models failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 /**
  * MCP-parity aliases for installer/LLM admin actions.
  */
-adminCmd
-  .command('doctor [path]')
-  .description("Diagnose install state (mirrors cartograph_admin MCP tool with action='doctor')")
-  .option('--fix', 'Auto-apply fixable remediations')
-  .option('--skip-project-checks', 'Skip project init/config checks')
-  .action(async (pathArg: string | undefined, options: { fix?: boolean; skipProjectChecks?: boolean }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      const { runDoctor, formatDoctorReport } = await import('../../installer/doctor.js');
-      const result = await runDoctor({
-        projectPath,
-        fix: options.fix === true,
-        skipProjectChecks: options.skipProjectChecks === true,
-      });
-      console.log(formatDoctorReport(result));
-      if (result.overallStatus === 'fail') process.exit(1);
-    } catch (err) {
-      error(`doctor failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+function registerDoctorCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, loadDoctor, resolveProjectPath, writeStdout } = deps;
+  adminCmd
+    .command('doctor [path]')
+    .description("Diagnose install state (mirrors cartograph_admin MCP tool with action='doctor')")
+    .option('--fix', 'Auto-apply fixable remediations')
+    .option('--skip-project-checks', 'Skip project init/config checks')
+    .action(async (pathArg: string | undefined, options: { fix?: boolean; skipProjectChecks?: boolean }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        const { runDoctor, formatDoctorReport } = await loadDoctor();
+        const result = await runDoctor({
+          projectPath,
+          fix: options.fix === true,
+          skipProjectChecks: options.skipProjectChecks === true,
+        });
+        writeStdout(`${formatDoctorReport(result)}\n`);
+        if (result.overallStatus === 'fail') process.exit(1);
+      } catch (err) {
+        error(`doctor failed: ${errMsg(err)}`);
+        process.exit(1);
+      }
+    });
+}
 
-adminCmd
-  .command('llm-plan')
-  .description("Print agent-friendly LLM setup presets (mirrors cartograph_admin MCP tool with action='llm-plan')")
-  .action(async () => {
-    try {
-      const { planLlmSetup } = await import('../../installer/llm-setup-plan.js');
-      const plan = await planLlmSetup();
-      console.log(`Recommended preset: ${plan.recommendedPresetId}`);
-      console.log('');
-      console.log('Detected backends:');
-      if (plan.detectedBackends.length === 0) {
-        console.log('- none');
-      } else {
-        for (const b of plan.detectedBackends) {
-          console.log(`- ${b.label} at ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'})`);
+function registerLlmPlanCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, loadLlmSetupPlan, writeStdout } = deps;
+  adminCmd
+    .command('llm-plan')
+    .description("Print agent-friendly LLM setup presets (mirrors cartograph_admin MCP tool with action='llm-plan')")
+    .action(async () => {
+      try {
+        const { planLlmSetup } = await loadLlmSetupPlan();
+        const plan = await planLlmSetup();
+        writeStdout(`Recommended preset: ${plan.recommendedPresetId}\n`);
+        writeStdout('\n');
+        writeStdout('Detected backends:\n');
+        if (plan.detectedBackends.length === 0) {
+          writeStdout('- none\n');
+        } else {
+          for (const b of plan.detectedBackends) {
+            writeStdout(
+              `- ${b.label} at ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'})\n`,
+            );
+          }
         }
+        writeStdout('\n');
+        writeStdout('Available presets:\n');
+        for (const preset of plan.presets) {
+          writeStdout(`- ${preset.id} — ${preset.summary}\n`);
+        }
+      } catch (err) {
+        error(`llm-plan failed: ${errMsg(err)}`);
+        process.exit(1);
       }
-      console.log('');
-      console.log('Available presets:');
-      for (const preset of plan.presets) {
-        console.log(`- ${preset.id} — ${preset.summary}`);
-      }
-    } catch (err) {
-      error(`llm-plan failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
-adminCmd
-  .command('llm-apply')
-  .description(
-    "Apply an LLM setup preset non-interactively (mirrors cartograph_admin MCP tool with action='llm-apply')",
-  )
-  .requiredOption('--preset <id>', 'Preset id returned by `cartograph admin llm-plan`')
-  .option('-p, --project-path <path>', 'Project root to write config for (default: cwd)')
-  .action(async (options: { preset: string; projectPath?: string }) => {
-    const projectRoot = resolveProjectPath(options.projectPath);
-    try {
-      const { applyLlmSetupChoice } = await import('../../installer/llm-setup-plan.js');
-      const result = await applyLlmSetupChoice({
-        projectRoot,
-        preset: options.preset as Parameters<typeof applyLlmSetupChoice>[0]['preset'],
-      });
-      if (result.applied) {
-        success(`Applied preset ${result.preset}: ${result.configPath}`);
+function registerLlmApplyCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, info, loadLlmSetupPlan, resolveProjectPath, success, writeStdout } = deps;
+  adminCmd
+    .command('llm-apply')
+    .description(
+      "Apply an LLM setup preset non-interactively (mirrors cartograph_admin MCP tool with action='llm-apply')",
+    )
+    .requiredOption('--preset <id>', 'Preset id returned by `cartograph admin llm-plan`')
+    .option('-p, --project-path <path>', 'Project root to write config for (default: cwd)')
+    .action(async (options: { preset: string; projectPath?: string }) => {
+      const projectRoot = resolveProjectPath(options.projectPath);
+      try {
+        const { applyLlmSetupChoice } = await loadLlmSetupPlan();
+        const result = await applyLlmSetupChoice({
+          projectRoot,
+          preset: options.preset,
+        });
+        if (result.applied) {
+          success(`Applied preset ${result.preset}: ${result.configPath}`);
+          if (result.backupPath) info(`Backup written: ${result.backupPath}`);
+        } else {
+          info(`Preset ${result.preset}: no config written`);
+        }
+        if (result.notes.length > 0) {
+          for (const note of result.notes) info(note);
+        }
+        if (result.nextSteps.length > 0) {
+          info('Next steps:');
+          for (const step of result.nextSteps) writeStdout(`  ${step}\n`);
+        }
+      } catch (err) {
+        error(`llm-apply failed: ${errMsg(err)}`);
+        process.exit(1);
+      }
+    });
+}
+
+function registerLlmTuneCommand(deps: AdminCommandDeps): void {
+  const { adminCmd, error, info, loadHardwareTuning, loadLlmSetupPlan, resolveProjectPath, success, writeStdout } =
+    deps;
+  adminCmd
+    .command('llm-tune [path]')
+    .description(
+      "Inspect or override LLM concurrency tuning (mirrors cartograph_admin MCP tool with action='llm-tune')",
+    )
+    .option('--tier <name>', 'Tier to override: embed, chat, ask, reranker')
+    .option('--concurrency <n>', 'Positive integer concurrency override for --tier')
+    .action(async (pathArg: string | undefined, options: { tier?: string; concurrency?: string }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      try {
+        const { describeHardware, recommendedTuning } = await loadHardwareTuning();
+        const tuning = recommendedTuning();
+        if (!options.tier) {
+          writeStdout(`Detected: ${describeHardware()}\n`);
+          writeStdout(`embed: ${tuning.embed.cartographConcurrency}\n`);
+          writeStdout(`chat: ${tuning.chat.cartographConcurrency}\n`);
+          writeStdout(`ask: ${tuning.ask.cartographConcurrency}\n`);
+          writeStdout(`reranker: ${tuning.reranker.cartographConcurrency}\n`);
+          return;
+        }
+        const tiers = new Set(['embed', 'chat', 'ask', 'reranker']);
+        if (!tiers.has(options.tier)) {
+          error('--tier must be one of embed, chat, ask, reranker');
+          process.exit(1);
+        }
+        const n = Number.parseInt(options.concurrency ?? '', 10);
+        if (!Number.isInteger(n) || n < 1) {
+          error('--concurrency must be a positive integer when --tier is set');
+          process.exit(1);
+        }
+        const { writeLlmTierConcurrencyOverride } = await loadLlmSetupPlan();
+        const result = await writeLlmTierConcurrencyOverride({
+          projectRoot: projectPath,
+          tier: options.tier,
+          concurrency: n,
+        });
+        success(`Updated ${result.configPath}`);
         if (result.backupPath) info(`Backup written: ${result.backupPath}`);
-      } else {
-        info(`Preset ${result.preset}: no config written`);
-      }
-      if (result.notes.length > 0) {
-        for (const note of result.notes) info(note);
-      }
-      if (result.nextSteps.length > 0) {
-        info('Next steps:');
-        for (const step of result.nextSteps) console.log(`  ${step}`);
-      }
-    } catch (err) {
-      error(`llm-apply failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
-
-adminCmd
-  .command('llm-tune [path]')
-  .description("Inspect or override LLM concurrency tuning (mirrors cartograph_admin MCP tool with action='llm-tune')")
-  .option('--tier <name>', 'Tier to override: embed, chat, ask, reranker')
-  .option('--concurrency <n>', 'Positive integer concurrency override for --tier')
-  .action(async (pathArg: string | undefined, options: { tier?: string; concurrency?: string }) => {
-    const projectPath = resolveProjectPath(pathArg);
-    try {
-      const { describeHardware, recommendedTuning } = await import('../../installer/hardware-tuning.js');
-      const tuning = recommendedTuning();
-      if (!options.tier) {
-        console.log(`Detected: ${describeHardware()}`);
-        console.log(`embed: ${tuning.embed.cartographConcurrency}`);
-        console.log(`chat: ${tuning.chat.cartographConcurrency}`);
-        console.log(`ask: ${tuning.ask.cartographConcurrency}`);
-        console.log(`reranker: ${tuning.reranker.cartographConcurrency}`);
-        return;
-      }
-      const tiers = new Set(['embed', 'chat', 'ask', 'reranker']);
-      if (!tiers.has(options.tier)) {
-        error('--tier must be one of embed, chat, ask, reranker');
+        info(`llm.${result.configKey}.concurrency: ${result.previous ?? '(unset)'} → ${result.concurrency}`);
+      } catch (err) {
+        error(`llm-tune failed: ${errMsg(err)}`);
         process.exit(1);
       }
-      const n = Number.parseInt(options.concurrency ?? '', 10);
-      if (!Number.isInteger(n) || n < 1) {
-        error('--concurrency must be a positive integer when --tier is set');
-        process.exit(1);
-      }
-      const { writeLlmTierConcurrencyOverride } = await import('../../installer/llm-setup-plan.js');
-      const result = await writeLlmTierConcurrencyOverride({
-        projectRoot: projectPath,
-        tier: options.tier as Parameters<typeof writeLlmTierConcurrencyOverride>[0]['tier'],
-        concurrency: n,
-      });
-      success(`Updated ${result.configPath}`);
-      if (result.backupPath) info(`Backup written: ${result.backupPath}`);
-      info(`llm.${result.configKey}.concurrency: ${result.previous ?? '(unset)'} → ${result.concurrency}`);
-    } catch (err) {
-      error(`llm-tune failed: ${errMsg(err)}`);
-      process.exit(1);
-    }
-  });
+    });
+}
 
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
@@ -1410,7 +1770,31 @@ adminCmd
 // dependencies + runtime architecture" + the `recommended-config`
 // helper for setup guidance.
 
-attachUnknownActionHandler(adminCmd, 'admin');
+export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminCommandDeps): void {
+  activeAdminCommandDeps = deps;
+  registerInitCommand(deps);
+  registerUninitCommand(deps);
+  registerIndexCommand(deps);
+  registerEmbedOnlyCommand(deps);
+  registerSyncCommand(deps);
+  registerSummarizeCommand(deps);
+  registerEmbedCommand(deps);
+  registerClassifyCommand(deps);
+  registerUnlockCommand(deps);
+  registerMigrateCommand(deps);
+  registerBuildSimilarityEdgesCommand(deps);
+  registerPruneStoreCommand(deps);
+  registerScipExportCommand(deps);
+  registerScipImportCommand(deps);
+  registerInstallModelsCommand(deps);
+  registerDoctorCommand(deps);
+  registerLlmPlanCommand(deps);
+  registerLlmApplyCommand(deps);
+  registerLlmTuneCommand(deps);
+  deps.attachUnknownActionHandler(deps.adminCmd, 'admin');
+}
+
+registerAdminCommands();
 
 export const __adminCommandInternals = {
   parseParseWorkers,
