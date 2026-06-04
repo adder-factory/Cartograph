@@ -512,18 +512,20 @@ In the same measurement, `--no-write-tools` and `--profile read-only` reduced th
 
 Supported high-volume tools accept `lowTokens: true` over MCP and `--low-tokens` on the matching CLI commands: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. MCP servers can also launch with `--low-tokens-default` so supported tools behave as if `lowTokens: true` was passed unless a call explicitly passes `lowTokens: false`. In a local measurement on this repository, `lowTokens: true` reduced representative MCP response output by about 57% versus regular Cartograph output, with source-heavy exploration cases saving roughly 78-89%.
 
-Re-run the benchmark with `bun run benchmark:tokens`. Token counts below are estimated as characters / 4, so treat them as directional rather than tokenizer-exact:
+Re-run the benchmark with `bun run benchmark:tokens`. Lower is better; counts are estimated as characters / 4, so treat them as directional rather than tokenizer-exact:
 
-| Case | Regular Cartograph | `lowTokens: true` | `rg` / grep-style baseline | Savings |
-|---|---:|---:|---:|---|
-| `find handleFind` | ~345 | ~172 | ~881 | ~50% less vs regular, ~80% less vs baseline |
-| `graph callers handleFind` | ~42 | ~37 | no fair grep equivalent | ~12% less vs regular |
-| `context` for `cartograph_find` dispatch | ~2,307 | ~513 | ~3,752 | ~78% less vs regular, ~86% less vs baseline |
-| `explore handleFind/findSchema/forwardNameArgs` | ~8,750 | ~937 | ~3,752 | ~89% less vs regular, ~75% less vs baseline |
-| `at_range` on `find.ts` dispatch lines | ~55 | ~25 | ~616 | ~55% less vs regular, ~96% less vs baseline |
-| `node` batch for find-tool symbols | ~617 | ~534 | ~327 | ~13% less vs regular, ~63% more vs baseline |
-| `files` project overview | ~3,745 | ~822 | ~8,817 | ~78% less vs regular, ~91% less vs baseline |
-| `imports` project audit | ~3,338 | ~671 | ~241,102 | ~80% less vs regular, ~100% less vs baseline |
+| Scenario | Regular | Low-token | Baseline | vs Regular | vs Baseline |
+|---|---:|---:|---:|---:|---:|
+| Symbol lookup: `find handleFind` | ~345 | ~172 | ~881 | -50% | -80% |
+| Call graph: `graph callers handleFind` | ~42 | ~37 | N/A | -12% | N/A |
+| Dispatch context: `cartograph_find` | ~2,307 | ~513 | ~3,752 | -78% | -86% |
+| Topic survey: find internals | ~8,750 | ~937 | ~3,752 | -89% | -75% |
+| Range lookup: `find.ts` dispatch | ~55 | ~25 | ~616 | -55% | -96% |
+| Node batch: find-tool symbols | ~617 | ~534 | ~327 | -13% | +63% |
+| File overview: project tree | ~3,745 | ~822 | ~8,817 | -78% | -91% |
+| Import audit: whole project | ~3,338 | ~671 | ~241,102 | -80% | -99.7% |
+
+`Baseline` is the closest `rg` / grep-style text query used by the benchmark. `N/A` means there is no fair text-only equivalent.
 
 Exact single-file text search can still be cheaper when you already know the file and string. Cartograph's savings show up when the agent needs structured context instead of raw matching source lines.
 
