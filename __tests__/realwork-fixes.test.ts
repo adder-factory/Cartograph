@@ -222,9 +222,10 @@ describe('Real-work fixes', () => {
       // The warning makes that explicit; emitting SOMETHING is still
       // strictly better than omitting the body and forcing a Read
       // fallback (which is the pre-2026-05-14 regression we closed).
-      expect(text).toContain('source from indexed snapshot');
+      expect(text).toContain('stale source slice');
       expect(text).toContain('modified since last index');
-      expect(text).toContain('line numbers below may not match');
+      expect(text).toContain('indexed line range');
+      expect(text).toContain('liveSource: true');
       expect(text).toContain('cartograph admin sync');
       // Sanity: header location + signature still present.
       expect(text).toContain('GenerateHandler');
@@ -252,7 +253,7 @@ describe('Real-work fixes', () => {
       expect(text).toMatch(/```[a-z]*\n[\s\S]+\n```/);
       // Warning must appear ABOVE the code fence so the agent sees
       // the staleness caveat before reading the body.
-      const warnIdx = text.indexOf('source from indexed snapshot');
+      const warnIdx = text.indexOf('stale source slice');
       const fenceIdx = text.indexOf('```');
       expect(warnIdx).toBeGreaterThan(-1);
       expect(fenceIdx).toBeGreaterThan(-1);

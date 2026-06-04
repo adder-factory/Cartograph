@@ -16,17 +16,19 @@ Start with:
 - \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
 - \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
 - \`cartograph_node\` for one symbol's metadata; use \`code: true\` only when source is needed.
-- \`cartograph_context\` for task-shaped implementation context; it may return source.
+- \`cartograph_context({format: "plan"})\` for a low-token route plan and suggested next MCP calls; default \`cartograph_context\` may return source.
 - \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_compare_to_ref\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for review, diff, final self-check, and test selection.
+- \`cartograph_affected({includeCommands: true})\` after edits when you want affected tests plus package-script verification commands.
+- \`cartograph_session({action: "audit"})\` to review a session's tool-use pattern and missed close-out steps.
 - \`cartograph_playbook\` for the full tool map, edge directions, common chains, and anti-patterns.
 
 Token discipline:
 - Metadata tools are cheap. Source-heavy modes are \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
 - Pass \`lowTokens: true\` on supported high-volume tools, or rely on server \`--low-tokens-default\`; pass \`lowTokens: false\` for one regular response.
-- Server launch flags such as \`--profile core|read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` shrink the advertised tool surface; read-only profiles also block mutating branches of mixed tools. Call \`cartograph_status\` to confirm them.
+- The default server profile is \`core\` to keep the advertised tool surface small. Use \`--profile full\` for the complete toolbox, or \`--profile read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` for narrower surfaces. Call \`cartograph_status\` to confirm the active shape.
 
 Freshness:
-- The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional.
+- The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional. For \`cartograph_node({code: true})\`, pass \`liveSource: true\` to explicitly read a stale file's current disk slice using indexed line ranges.
 - End edit-touching turns with \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done.
 `;
 
@@ -53,19 +55,21 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **Metadata-only tools** — \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_node\` (without \`code: true\`), \`cartograph_at_range\`, \`cartograph_biomarkers\`, \`cartograph_status\`, \`cartograph_coverage\`, \`cartograph_tests_for\`, \`cartograph_affected\`, \`cartograph_hotspots\` — return compact structured data. **Answer with these directly in the main session.**
 - **Source-dumping tools** — \`cartograph_explore\`, \`cartograph_context\`, and \`cartograph_node({code: true})\` — return full source sections. If you are an orchestrator that can spawn sub-agents, **delegate these to an Explore sub-agent** whose context is disposable, and keep only its distilled answer. If you ARE that sub-agent (or a host with no spawn affordance), use them directly — they are then your primary tools.
 - **Maximum token savings** — pass \`lowTokens: true\` on supported high-volume tools (\`find\`, \`graph\`, \`context\`, \`explore\`, \`at_range\`, \`node\`, \`files\`, \`imports\`) to apply compact rows, field projection, lower caps, or source suppression in one switch. Servers launched with \`--low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
-- **MCP load context** — the advertised tool list itself costs context before any call runs. Operators can measure it with \`cartograph mcp-budget\` or \`bun run measure:mcp-load\`, then start focused servers with \`--profile core|read-only|review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\`; read-only/write-disabled servers keep safe mixed-tool branches visible and reject mutating branches. \`--low-tokens-default\` reduces per-call output after connection but not \`tools/list\`.
+- **Route before reading source** — \`cartograph_context({format: "plan"})\` returns entry symbols plus concrete next MCP calls in text and \`metadata.nextActions\`. Use it in the main session before escalating to source-heavy context/explore/node calls.
+- **MCP load context** — the advertised tool list itself costs context before any call runs. Operators can measure it with \`cartograph mcp-budget\` or \`bun run measure:mcp-load\`. The default profile is \`core\`; use \`--profile full\` for the complete toolbox, or start narrower servers with \`--profile read-only|review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\`. Read-only/write-disabled servers keep safe mixed-tool branches visible and reject mutating branches. \`--low-tokens-default\` reduces per-call output after connection but not \`tools/list\`.
 
 ## When to use which tool (question → tool)
 
+- **"What's the route for this task / feature / bug?"** → \`cartograph_context({format: "plan"})\` (low-token route plan with suggested next MCP calls and \`metadata.nextActions\`).
 - **"What's the deal with this task / feature / bug?"** → \`cartograph_context\` (source-heavy by default — use \`lowTokens: true\` for no-code outline mode; orchestrators delegate; composes 5+ queries into one answer; \`explain: true\` appends a per-candidate score trace).
 - **"Find a thing by name / regex / env-var / SQL table"** → \`cartograph_find({by})\` — \`by: 'name'\` (\`mode\`: exact/fuzzy/semantic/intent; \`compact\`/\`fields\` or \`lowTokens\` cut tokens), \`by: 'content'\` (regex + enclosing-symbol attribution), \`by: 'env'|'sql'\` (string-literal refs in non-AST domains). Replaced \`cartograph_search\`/\`_grep\`/\`_string_refs\` (2026-05-11).
 - **"What calls this / what does it call / blast radius / multi-hop walk?"** → \`cartograph_graph({start, direction})\` — \`direction\`: callers/callees/impact/both/similar; \`hops > 1\` switches to BFS. \`compact\`/\`fields\`/\`since\`/\`lowTokens\` cut output tokens 40-80%. Replaced \`cartograph_callers\`/\`_callees\`/\`_impact\`/\`_walk\`/\`_similar\`.
-- **"Show me this symbol's source / signature / docstring"** → \`cartograph_node\` (source-heavy with \`code: true\` — orchestrators delegate THAT mode; \`symbols: [...]\` up to 20; \`lowTokens\` caps batched output; fold in callers/callees/biomarkers/tests).
+- **"Show me this symbol's source / signature / docstring"** → \`cartograph_node\` (source-heavy with \`code: true\` — orchestrators delegate THAT mode; \`symbols: [...]\` up to 20; \`lowTokens\` caps batched output; fold in callers/callees/biomarkers/tests; \`liveSource: true\` explicitly reads current disk slices for stale files).
 - **"Which symbols overlap this line range / diff hunk?"** → \`cartograph_at_range\` (one hunk, \`ranges: [...]\` up to 100, or \`diff:\` raw unified diff).
 - **"Is this risky / complex / nested / large?"** → \`cartograph_biomarkers\` (structured findings instead of reading 200 lines of source; \`mode: 'symbol', symbols: [...]\` batches up to 20).
 - **"Is this tested? What's covered?"** → \`cartograph_coverage\` (\`mode: 'refresh'\` auto-discovers an lcov report).
 - **"What's dead / unreachable?"** → \`cartograph_dead_code\` (\`via\`: auto/rule/llm).
-- **"Which tests cover this symbol?"** → \`cartograph_tests_for\`; **"I edited X — what should I re-run?"** → \`cartograph_affected\` (omit \`files\` to derive from \`git diff HEAD\`).
+- **"Which tests cover this symbol?"** → \`cartograph_tests_for\`; **"I edited X — what should I re-run?"** → \`cartograph_affected\` (omit \`files\` to derive from \`git diff HEAD\`; add \`includeCommands: true\` for package-script verification commands).
 - **"What's in directory X?"** → \`cartograph_files\` (tree/flat/grouped/summary; \`lowTokens\` defaults to summary).
 - **"Survey an unfamiliar topic / module"** → \`cartograph_explore\` (source-heavy by default — use \`lowTokens: true\` for summary-only file headers; orchestrators delegate; genuine "I'm new here" surveys only).
 - **"Where do I start in a new repo?"** → \`cartograph_digest\` (composite overview) or \`cartograph_entry_points\` (routes / cli / mcp_tools / public_exports).
@@ -80,6 +84,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` (read-only escape hatch; \`schema: true\` first).
 - **"What other cartograph indices are on this machine?"** → \`cartograph_discover\`.
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
+- **"Did this agent navigate efficiently?"** → \`cartograph_session({action: "audit"})\` (tool-use findings, repeated calls, missing test-selection/self-check steps).
 
 ## Edge orientations (which direction each edge flows)
 
@@ -90,7 +95,8 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 ## Common chains
 
 - **End-of-task self-report** (after ANY edit-touching turn): \`cartograph_compare_to_ref({findingsDelta: true})\` — surfaces the +/-/~ symbol delta + any new biomarker findings before you report "done".
-- **Onboard to a topic**: \`cartograph_context\` first; still unclear? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
+- **Route a task cheaply**: \`cartograph_context({format: "plan"})\` → follow the top \`metadata.nextActions\` call → escalate to source only when the target is clear.
+- **Onboard to a topic**: \`cartograph_context({format: "plan"})\` first; still unclear? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
 - **Onboard to a new repo**: \`cartograph_digest\` → \`cartograph_entry_points\`.
 - **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'trust'})\` before relying on broad graph answers; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
 - **Refactor planning**: \`cartograph_find\` → \`cartograph_biomarkers\` (Code Health) → \`cartograph_coverage\` (tests) → \`cartograph_graph({direction: 'impact'})\` (blast radius) → \`cartograph_propose_rename\`.
@@ -112,12 +118,12 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 
 ## Freshness & limitations
 
-- A file edited since indexing still renders its indexed-snapshot body, prefixed with \`⚠ source from indexed snapshot\` / \`⚠ Stale results\` (line numbers may be off). Run \`cartograph_admin({action: 'sync'})\` and retry — the watcher normally catches up within ~1s, but startup drift and rapid-edit windows can lag.
+- A file edited since indexing may render a stale source slice from current disk using indexed line ranges, prefixed with \`⚠ stale source slice\` / \`⚠ Stale results\` (symbol boundaries may be off). Pass \`liveSource: true\` to make that choice explicit, or run \`cartograph_admin({action: 'sync'})\` and retry — the watcher normally catches up within ~1s, but startup drift and rapid-edit windows can lag.
 - Cross-file resolution is best-effort name matching — ambiguous calls return \`EXTRACTED\`/\`INFERRED\`/\`AMBIGUOUS\` candidates; pass \`minConfidence\` to filter.
 - No live correctness validation — that's the compiler / tests / linter's job; cartograph supplies the structural context they lack.
 - \`cartograph_find({mode: 'intent'})\` and \`cartograph_role\` read a \`summary > docstring > test-derived\` cascade; right after \`index --force\` summaries/biomarkers may be pending (the tools say so explicitly — retry once the post-sync pass completes).
 
 ## Cross-call state & extending
 
-\`cartograph_session({action})\` creates/resumes sessions and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs. Adding a tool / detector / resolver to cartograph itself? The structural patterns are documented in \`CLAUDE.md\`.
+\`cartograph_session({action})\` creates/resumes/lists/deletes sessions, audits prior tool-use patterns, and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs. Adding a tool / detector / resolver to cartograph itself? The structural patterns are documented in \`CLAUDE.md\`.
 `;

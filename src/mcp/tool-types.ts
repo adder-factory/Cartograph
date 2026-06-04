@@ -55,12 +55,24 @@ export interface FreshnessMetadata {
   blocked?: boolean;
 }
 
+export interface NextAction {
+  /** MCP tool name to call next. */
+  tool: string;
+  /** Concrete argument object for the suggested call. */
+  args: Record<string, unknown>;
+  /** Short explanation of why this call is useful. */
+  reason?: string;
+  /** Lower numbers should be attempted first. */
+  priority?: number;
+}
+
 export interface ToolResult {
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
   metadata?: {
     freshness?: FreshnessMetadata;
     warnings?: string[];
+    nextActions?: NextAction[];
   };
 }
 

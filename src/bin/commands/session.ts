@@ -40,6 +40,22 @@ sessionCmd
   });
 
 sessionCmd
+  .command('audit [id]')
+  .description(
+    "Audit a prior session's tool-use pattern, repeated calls, and missed close-out steps (mirrors cartograph_session({action:'audit'}))",
+  )
+  .option('-p, --project-path <path>', 'Project path')
+  .option('--id <id>', 'Session id to audit (alternative to the positional id)')
+  .option('-l, --label <label>', 'Session label to audit (alternative to --id)')
+  .action(async (idArg: string | undefined, options: { projectPath?: string; id?: string; label?: string }) => {
+    const id = options.id ?? idArg;
+    const args: Record<string, unknown> = { action: 'audit' };
+    if (id) args['id'] = id;
+    if (options.label) args['label'] = options.label;
+    await runViaMCP('cartograph_session', args, options.projectPath);
+  });
+
+sessionCmd
   .command('list')
   .description("List recent sessions, newest first (mirrors cartograph_session({action:'list'}))")
   .option('-p, --project-path <path>', 'Project path')

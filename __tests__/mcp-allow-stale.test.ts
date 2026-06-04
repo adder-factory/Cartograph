@@ -53,7 +53,7 @@ describe('Tooling-gaps #2: --allow-stale opt-in', () => {
     git(testDir, 'add', '.');
     git(testDir, 'commit', '-q', '-m', 'massive drift');
 
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

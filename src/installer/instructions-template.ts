@@ -44,15 +44,20 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, \`cartograph_at_range\`, \`cartograph_node\`, \`cartograph_files\`, and \`cartograph_imports\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 
-If you control the MCP server launch, run \`cartograph mcp-budget\` to measure startup load. \`cartograph serve --mcp --profile core\`, \`--profile read-only\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` reduce the advertised tool list loaded at connection time.
+Use \`cartograph_context({format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_affected({includeCommands: true})\` for affected tests plus package-script verification commands, then \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
+
+If you control the MCP server launch, run \`cartograph mcp-budget\` to measure startup load. The default MCP profile is \`core\`; use \`--profile full\` for the complete toolbox, or \`--profile read-only\`, \`--profile review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` for narrower surfaces.
 
 | Tool | Use For |
 |------|---------|
 | \`cartograph_find\` | Find symbols by name / regex / env-var / SQL ref (\`by:\` slice + \`mode:\`) |
 | \`cartograph_graph({direction: 'callers'\\|'callees'})\` | Trace call flow |
 | \`cartograph_graph({direction: 'impact'})\` | Check what's affected before editing |
-| \`cartograph_node\` | A single symbol's details (omit \`code: true\` to stay metadata-only) |
+| \`cartograph_context({format: "plan"})\` | Plan the route and next MCP calls before source-heavy exploration |
+| \`cartograph_node\` | A single symbol's details (omit \`code: true\` to stay metadata-only; use \`liveSource: true\` for stale live slices) |
 | \`cartograph_at_range\` | Symbols overlapping a file:line span (PR-review hunks) |
+| \`cartograph_affected({includeCommands: true})\` | Affected tests plus verification commands after edits |
+| \`cartograph_session({action: "audit"})\` | Review a session's tool-use pattern and missed close-out calls |
 | \`cartograph_biomarkers\` / \`cartograph_status\` | Risk findings per symbol / index health |
 
 ### If \`.cartograph/\` does NOT exist

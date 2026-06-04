@@ -567,22 +567,45 @@ interface FetchNodeCodeResult {
  */
 async function fetchNodeCode(
   cg: ReturnType<ToolCtx['getCartograph']>,
-  nodeId: string,
-  filePath: string,
+  node: Node,
+  liveSource: boolean,
 ): Promise<FetchNodeCodeResult> {
-  const fileRec = getFileByPath(cg.queries, filePath);
+  const fileRec = getFileByPath(cg.queries, node.filePath);
   const stale = fileRec ? isFileStale(cg.projectRoot, fileRec) : false;
-  const code = await cg.internals.contextBuilder.getCode(nodeId);
+  if (stale && liveSource) {
+    const liveCode = readLiveNodeCodeOrNull(cg.projectRoot, node);
+    if (liveCode !== null) {
+      return {
+        code: liveCode,
+        staleWarning:
+          `live source from disk — \`${node.filePath}\` modified since last index. ` +
+          'The body below uses the indexed line range as an approximate slice; run `cartograph admin sync` to refresh symbol boundaries.',
+      };
+    }
+  }
+  const code = await cg.internals.contextBuilder.getCode(node.id);
   if (stale) {
     return {
       code,
       staleWarning:
-        `source from indexed snapshot — \`${filePath}\` modified since last index, ` +
-        'so line numbers below may not match the current file. ' +
-        'Run `cartograph admin sync` to refresh.',
+        `stale source slice — \`${node.filePath}\` modified since last index. ` +
+        'The body below is read from the current file using the indexed line range, so symbol boundaries may be approximate. ' +
+        'Pass `liveSource: true` to make that choice explicit, or run `cartograph admin sync` to refresh.',
     };
   }
   return { code, staleWarning: null };
+}
+
+function readLiveNodeCodeOrNull(projectRoot: string, node: Node): string | null {
+  if (typeof node.startLine !== 'number' || typeof node.endLine !== 'number') return null;
+  if (node.startLine < 1 || node.endLine < node.startLine) return null;
+  try {
+    const abs = path.isAbsolute(node.filePath) ? node.filePath : path.join(projectRoot, node.filePath);
+    const lines = fs.readFileSync(abs, 'utf8').split('\n');
+    return lines.slice(node.startLine - 1, node.endLine).join('\n');
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -930,6 +953,7 @@ interface ProcessSymbolArgs {
   detail: DetailMode;
   flags: IncludeFlags;
   lowTokens: boolean;
+  liveSource: boolean;
   /** F#12 slice 2: when set, fall back to the nested-function manifest
    *  if findSymbol misses. Off by default — callers explicitly opt in
    *  via the `deep:true` MCP arg. */
@@ -964,8 +988,9 @@ async function tryRenderManifestDeepView(args: {
   includeCode: boolean;
   detail: DetailMode;
   flags: IncludeFlags;
+  liveSource: boolean;
 }): Promise<string | null> {
-  const { cg, symbol, includeCode, detail, flags } = args;
+  const { cg, symbol, includeCode, detail, flags, liveSource } = args;
   // Manifest names are bare identifiers; reject anything that wouldn't
   // be a single name token. Matches the same gate the find-empty
   // probe applies — keeps `kind:foo` and similar shapes from hitting
@@ -992,6 +1017,7 @@ async function tryRenderManifestDeepView(args: {
         includeCode,
         detail,
         flags,
+        liveSource,
         lowTokens: false,
       });
       return `${card}\n\n> ✓ Promoted from F#12 manifest (was a nested fn in \`${primary.parentName ?? '?'}\`).`;
@@ -1122,7 +1148,7 @@ function inferFenceLanguage(filePath: string): string {
  * Preserves the legacy "no separator, no header" output for backward compatibility.
  */
 async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string }): Promise<ToolOutcome> {
-  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, deep } = args;
+  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, liveSource, deep } = args;
   const match = findSymbol(cg, symbol, ctx.refIds);
   if (!match) {
     // A `n_` UID the current process can't resolve is a cache miss,
@@ -1139,12 +1165,12 @@ async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string })
     // Without `deep` the standard "not found" message wins so the
     // default surface stays unchanged.
     if (deep) {
-      const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags });
+      const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags, liveSource });
       if (manifest !== null) return ok(textResult(manifest));
     }
     return ok(textResult(symbolNotFound(cg, symbol)));
   }
-  const rendered = await renderOneNode({ cg, symbol, match, includeCode, detail, flags, lowTokens });
+  const rendered = await renderOneNode({ cg, symbol, match, includeCode, detail, flags, liveSource, lowTokens });
   // The per-result stale-files note routes through the chokepoint's
   // `freshness` slot — it truncates the card body first, then appends
   // the note, so a long body can't push the stale warning off-budget.
@@ -1183,7 +1209,7 @@ function buildBatchFreshnessFooter(cg: Cartograph, notFound: number): string {
 async function processMultipleSymbols(
   args: ProcessSymbolArgs & { symbolList: string[]; lowTokenOmitted?: number },
 ): Promise<ToolOutcome> {
-  const { ctx, cg, symbolList, includeCode, detail, flags, lowTokens, deep, lowTokenOmitted = 0 } = args;
+  const { ctx, cg, symbolList, includeCode, detail, flags, lowTokens, liveSource, deep, lowTokenOmitted = 0 } = args;
   const seenIds = new Set<string>();
   const nodesShown: Node[] = [];
   const cards: string[] = [];
@@ -1199,6 +1225,7 @@ async function processMultipleSymbols(
       detail,
       flags,
       lowTokens,
+      liveSource,
       deep,
       seenIds,
     });
@@ -1257,7 +1284,16 @@ async function renderBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<B
   return {
     kind: 'found',
     node: match.node,
-    card: await renderOneNode({ cg, symbol, match, includeCode, detail, flags, lowTokens }),
+    card: await renderOneNode({
+      cg,
+      symbol,
+      match,
+      includeCode,
+      detail,
+      flags,
+      liveSource: args.liveSource,
+      lowTokens,
+    }),
   };
 }
 
@@ -1269,7 +1305,14 @@ async function renderMissingBatchSymbolCard(args: RenderBatchSymbolCardArgs): Pr
   // same `---` separator as graph-node cards. Slice 3 also bumps
   // hit_count + popularity inside `tryRenderManifestDeepView`.
   if (deep && !isUnresolvedUid(symbol, ctx.refIds)) {
-    const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags });
+    const manifest = await tryRenderManifestDeepView({
+      cg,
+      symbol,
+      includeCode,
+      detail,
+      flags,
+      liveSource: args.liveSource,
+    });
     if (manifest !== null) return { kind: 'manifest', card: manifest };
   }
 
@@ -1300,6 +1343,7 @@ interface RenderOneNodeArgs {
   includeCode: boolean;
   detail: DetailMode;
   flags: IncludeFlags;
+  liveSource: boolean;
   lowTokens: boolean;
 }
 
@@ -1308,11 +1352,11 @@ interface RenderOneNodeArgs {
  *  code-omitted note. Pure renderer; the caller handles dedup, stale
  *  appendix, and final truncation. */
 async function renderOneNode(args: RenderOneNodeArgs): Promise<string> {
-  const { cg, match, includeCode, detail, flags, lowTokens } = args;
+  const { cg, match, includeCode, detail, flags, liveSource, lowTokens } = args;
   let code: string | null = null;
   let staleWarning: string | null = null;
   if (includeCode) {
-    const fetched = await fetchNodeCode(cg, match.node.id, match.node.filePath);
+    const fetched = await fetchNodeCode(cg, match.node, liveSource);
     code = fetched.code;
     staleWarning = fetched.staleWarning;
   }
@@ -1420,6 +1464,12 @@ const nodeSchema = z.object({
       'When the symbol is not found as a graph node, render an ad-hoc deep view (source slice + parent header) for ' +
         'nested functions inside mega-files (body > `largeFunctionThreshold`, default 500 LOC). Default: false.',
     ),
+  liveSource: z
+    .boolean()
+    .default(false)
+    .describe(
+      'When `code: true` and the file is stale, explicitly return a live disk slice using the indexed line range. Default false.',
+    ),
   lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
@@ -1436,6 +1486,7 @@ async function handleNode(ctx: ToolCtx, args: NodeArgs): Promise<ToolOutcome> {
   const detail: DetailMode = args.detail;
   const flags = parseIncludeFlags(args);
   const deep = args.deep === true;
+  const liveSource = args.liveSource === true;
   const effectiveSymbols = lowTokens ? symbolList.slice(0, LOW_TOKEN_NODE_SYMBOLS) : symbolList;
   const lowTokenOmitted = symbolList.length - effectiveSymbols.length;
 
@@ -1443,7 +1494,7 @@ async function handleNode(ctx: ToolCtx, args: NodeArgs): Promise<ToolOutcome> {
   // header" output exactly so existing tests / consumers see no
   // change. Multi-symbol path renders one card per resolved node
   // separated by horizontal rules.
-  const sharedArgs = { ctx, cg, includeCode, detail, flags, lowTokens, deep };
+  const sharedArgs = { ctx, cg, includeCode, detail, flags, lowTokens, liveSource, deep };
   if (effectiveSymbols.length === 1) {
     return processSingleSymbol({ ...sharedArgs, symbol: effectiveSymbols[0]! });
   }
@@ -1460,6 +1511,7 @@ export const NODE_TOOL = defineTool({
     ". `code: true` adds body (`detail: 'preview'` truncates long bodies; `'full'` is verbatim). " +
     '`includeCallers`/`includeCallees`/`includeBiomarkers`/`includeTests` fold neighbor data in. ' +
     '`lowTokens: true` caps batched symbols and drops file-summary/test-assertion extras. ' +
+    '`liveSource: true` reads stale files from disk using indexed line ranges when `code: true`. ' +
     "A `kind:'file'` node renders that file's cached LLM summary.",
   schema: nodeSchema,
   handle: handleNode,

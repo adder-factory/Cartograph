@@ -39,21 +39,27 @@ describe('MCP tool registry — single source of truth', () => {
     const advertised = handler.getTools();
     const payloadChars = JSON.stringify({ tools: advertised }).length;
     const loadContextChars = payloadChars + JSON.stringify({ instructions: SERVER_INSTRUCTIONS }).length;
+    const fullAdvertised = new ToolHandler(null, { profile: 'full' }).getTools();
+    const fullPayloadChars = JSON.stringify({ tools: fullAdvertised }).length;
+    const fullLoadContextChars = fullPayloadChars + JSON.stringify({ instructions: SERVER_INSTRUCTIONS }).length;
 
     expect(advertised.length).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolCount);
     expect(payloadChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolsListChars);
     expect(loadContextChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.combinedChars);
     expect(payloadChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_TARGETS.toolsListChars);
     expect(loadContextChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_TARGETS.combinedChars);
+    expect(fullAdvertised.length).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolCount);
+    expect(fullPayloadChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolsListChars);
+    expect(fullLoadContextChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.combinedChars);
 
-    const readOnlyAdvertised = new ToolHandler(null, { disableWriteTools: true }).getTools();
-    expect(readOnlyAdvertised.length).toBeLessThan(advertised.length);
+    const readOnlyAdvertised = new ToolHandler(null, { profile: 'full', disableWriteTools: true }).getTools();
+    expect(readOnlyAdvertised.length).toBeLessThan(fullAdvertised.length);
 
     for (const profile of MCP_SERVER_PROFILE_NAMES) {
       const profiled = new ToolHandler(null, { profile }).getTools();
       const profiledPayloadChars = JSON.stringify({ tools: profiled }).length;
-      expect(profiledPayloadChars).toBeLessThanOrEqual(payloadChars);
-      if (profile !== 'full') expect(profiled.length).toBeLessThan(advertised.length);
+      expect(profiledPayloadChars).toBeLessThanOrEqual(fullPayloadChars);
+      if (profile !== 'full') expect(profiled.length).toBeLessThan(fullAdvertised.length);
     }
   });
 

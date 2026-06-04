@@ -136,6 +136,17 @@ describe('MCP lowTokens option', () => {
     expectTokenBudget(text, 1_200);
   });
 
+  it('cartograph_context format:plan emits route calls and nextActions metadata', async () => {
+    const result = await handler.execute('cartograph_context', { task: 'alpha', format: 'plan', maxNodes: 5 });
+    const text = textOf(result);
+
+    expect(text).toContain('## Context route plan');
+    expect(text).toContain('cartograph_node');
+    expect(text).toContain('cartograph_tests_for');
+    expect(text).not.toContain('```typescript');
+    expect(result.metadata?.nextActions?.some((action) => action.tool === 'cartograph_node')).toBe(true);
+  });
+
   it('cartograph_explore lowTokens switches to summary-only output', async () => {
     const text = textOf(await handler.execute('cartograph_explore', { query: 'alpha', lowTokens: true }));
 

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { lowTokensField, projectPathField, nonEmptyString } from './_common-fields.js';
-import type { ToolResult } from '../tool-types.js';
+import type { NextAction, ToolResult } from '../tool-types.js';
 import { getNodeCoverage } from '../../db/queries-coverage.js';
 import { getFindingsForNode } from '../../db/queries-findings.js';
 import { compareSeverity } from '../../biomarkers/types.js';
@@ -368,12 +368,153 @@ interface FormatContextResponseArgs {
   cg: ReturnType<ToolCtx['getCartograph']>;
   task: string;
   context: import('../../types.js').TaskContext;
-  format: 'markdown' | 'json';
+  format: ContextFormat;
+}
+
+type ContextFormat = 'markdown' | 'json' | 'plan';
+
+const PLAN_ACTION_NODE_LIMIT = 3;
+const PLAN_RENDER_NODE_LIMIT = 8;
+const PLAN_SEMANTIC_FIND_LIMIT = 10;
+const PLAN_IMPACT_HOPS = 2;
+const PLAN_IMPACT_MAX_NODES = 50;
+const PLAN_PRIORITY_PRIMARY = 1;
+const PLAN_PRIORITY_IMPACT = 2;
+const PLAN_PRIORITY_TESTS = 3;
+const PLAN_PRIORITY_SKIM = 4;
+const PLAN_PRIORITY_FINAL_CHECK = 99;
+
+function attachNextActions(result: ToolResult, nextActions: NextAction[]): ToolResult {
+  if (nextActions.length === 0) return result;
+  return {
+    ...result,
+    metadata: {
+      ...result.metadata,
+      nextActions,
+    },
+  };
+}
+
+function topContextNodes(context: import('../../types.js').TaskContext, limit: number): Node[] {
+  return Array.from(context.subgraph.nodes.values()).slice(0, limit);
+}
+
+function buildContextNextActions(context: import('../../types.js').TaskContext, task: string): NextAction[] {
+  const nodes = topContextNodes(context, PLAN_ACTION_NODE_LIMIT);
+  if (nodes.length === 0) {
+    return [
+      {
+        tool: 'cartograph_find',
+        args: { by: 'name', mode: 'semantic', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+        reason: 'Try a broader semantic symbol search because context found no entry symbols.',
+        priority: PLAN_PRIORITY_PRIMARY,
+      },
+      {
+        tool: 'cartograph_files',
+        args: { format: 'summary', lowTokens: true },
+        reason: 'Re-orient around indexed directory structure before trying content search.',
+        priority: PLAN_PRIORITY_IMPACT,
+      },
+    ];
+  }
+
+  const primary = nodes[0]!;
+  const rest = nodes.slice(1);
+  const actions: NextAction[] = [
+    {
+      tool: 'cartograph_node',
+      args: {
+        symbol: primary.id,
+        includeCallers: true,
+        includeCallees: true,
+        includeBiomarkers: true,
+        includeTests: true,
+      },
+      reason: `Inspect the leading candidate \`${primary.name}\` with local risk and test signals.`,
+      priority: PLAN_PRIORITY_PRIMARY,
+    },
+    {
+      tool: 'cartograph_graph',
+      args: {
+        start: primary.id,
+        direction: 'impact',
+        hops: PLAN_IMPACT_HOPS,
+        includeTests: false,
+        maxNodes: PLAN_IMPACT_MAX_NODES,
+        lowTokens: true,
+      },
+      reason: `Map the blast radius around \`${primary.name}\` before editing.`,
+      priority: PLAN_PRIORITY_IMPACT,
+    },
+    {
+      tool: 'cartograph_tests_for',
+      args: { symbol: primary.id },
+      reason: `Find tests that directly or transitively cover \`${primary.name}\`.`,
+      priority: PLAN_PRIORITY_TESTS,
+    },
+  ];
+
+  if (rest.length > 0) {
+    actions.push({
+      tool: 'cartograph_node',
+      args: { symbols: rest.map((n) => n.id), lowTokens: true },
+      reason: 'Skim adjacent candidate symbols without pulling source bodies.',
+      priority: PLAN_PRIORITY_SKIM,
+    });
+  }
+  actions.push({
+    tool: 'cartograph_compare_to_ref',
+    args: { findingsDelta: true },
+    reason: 'Run this before reporting done after code edits.',
+    priority: PLAN_PRIORITY_FINAL_CHECK,
+  });
+  return actions;
+}
+
+function renderContextPlan(args: {
+  task: string;
+  context: import('../../types.js').TaskContext;
+  nextActions: NextAction[];
+}): string {
+  const { task, context, nextActions } = args;
+  const nodes = topContextNodes(context, PLAN_RENDER_NODE_LIMIT);
+  const entryLines =
+    nodes.length === 0
+      ? ['_No relevant symbols were found. Start with the fallback calls below._', '']
+      : [
+          '### Entry symbols',
+          '',
+          ...nodes.map((n) => {
+            const loc = n.startLine ? `:${n.startLine}` : '';
+            return `- \`${n.name}\` (${n.kind}) — ${n.filePath}${loc}`;
+          }),
+          '',
+        ];
+
+  return [
+    `## Context route plan`,
+    '',
+    `**Query:** ${task}`,
+    '',
+    ...entryLines,
+    '### Next MCP calls',
+    '',
+    '```json',
+    JSON.stringify(nextActions, null, 2),
+    '```',
+    '',
+    '### Route notes',
+    '',
+    '- Start with the priority-1 call, then widen only if the caller/callee map shows real blast radius.',
+    '- Use preview or low-token calls until you know the edit target.',
+    '- After edits, choose tests with `cartograph_affected({includeCommands: true})` or `cartograph_tests_for`.',
+  ].join('\n');
 }
 
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   const { cg, task, context, format } = args;
+  const nextActions = buildContextNextActions(context, task);
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
   // so programmatic consumers can iterate nodes. The score trace is included
@@ -393,9 +534,12 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       relatedFiles: context.relatedFiles,
       stats: context.stats,
     };
-    return textResult(JSON.stringify(serializable, null, 2));
+    return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
   }
   const nodes = [...context.subgraph.nodes.values()];
+  if (format === 'plan') {
+    return attachNextActions(textResult(renderContextPlan({ task, context, nextActions })), nextActions);
+  }
   // No-match guard (audit-4 #5): a 0-node subgraph would otherwise
   // render a bare `## Code Context` + `**Query:**` stub with no
   // "nothing found" line and no freshness hint — leaving the agent
@@ -405,13 +549,16 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
     // Empty-result branch: the `## Code Context` stub is the message;
     // the chokepoint appends the index-freshness hint so the agent
     // can tell a stale index from a genuine miss (audit-4 #5).
-    return renderToolResponse({
-      body: '',
-      empty: {
-        message: `## Code Context\n\n**Query:** ${task}\n\n` + `No relevant code found for "${task}".`,
-        freshness: { cg },
-      },
-    });
+    return attachNextActions(
+      renderToolResponse({
+        body: '',
+        empty: {
+          message: `## Code Context\n\n**Query:** ${task}\n\n` + `No relevant code found for "${task}".`,
+          freshness: { cg },
+        },
+      }),
+      nextActions,
+    );
   }
   const isFeatureQuery = looksLikeFeatureRequest(task);
   const reminder = isFeatureQuery ? '\n\n⚠️ **Ask user:** UX preferences, edge cases, acceptance criteria' : '';
@@ -434,7 +581,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   // on top of an already-large markdown body) then appends the
   // stale-files note for the result nodes — note placement is owned
   // by the chokepoint so it survives truncation.
-  return renderToolResponse({ body, freshness: { cg, nodes } });
+  return attachNextActions(renderToolResponse({ body, freshness: { cg, nodes } }), nextActions);
 }
 
 /**
@@ -453,10 +600,10 @@ const contextSchema = z.object({
   code: z.boolean().optional().describe('Include code snippets for key symbols (default: true)'),
   includeCode: z.boolean().optional().describe('Deprecated alias for `code`.'),
   format: z
-    .enum(['markdown', 'json'])
+    .enum(['markdown', 'json', 'plan'])
     .optional()
     .describe(
-      'Output format: `markdown` (default) human-readable report with risk signals, or `json` raw TaskContext.',
+      'Output format: `markdown` (default) human-readable report with risk signals, `json` raw TaskContext, or `plan` for a low-token route plan with suggested next MCP calls.',
     ),
   explain: z
     .boolean()
@@ -472,6 +619,16 @@ type ContextArgs = z.infer<typeof contextSchema>;
 
 const LOW_TOKEN_CONTEXT_MAX_NODES = 8;
 
+function shouldContextIncludeCode(args: {
+  format: ContextFormat;
+  codePreference: boolean | undefined;
+  lowTokens: boolean;
+}): boolean {
+  if (args.format === 'plan') return false;
+  if (args.codePreference === undefined) return !args.lowTokens;
+  return args.codePreference !== false;
+}
+
 async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutcome> {
   const task = args.task;
 
@@ -480,6 +637,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   if (sessionId) markSessionConsulted(sessionId);
 
   const cg = ctx.getCartograph(args.projectPath);
+  const format: ContextFormat = args.format ?? 'markdown';
   // `maxNodes` is already a positive integer — Zod's `.int().min(1)`
   // rejected anything else at the dispatch boundary. No `numArg` needed.
   const lowTokens = args.lowTokens === true;
@@ -489,7 +647,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   // `code` was not sent. `code` carries no Zod `.default` precisely so
   // "omitted" stays distinguishable from an explicit `code: true`.
   const codePreference = args.code ?? args.includeCode;
-  const includeCode = codePreference === undefined ? !lowTokens : codePreference !== false;
+  const includeCode = shouldContextIncludeCode({ format, codePreference, lowTokens });
   // `explain` opts into the per-candidate score-trace section.
   const explain = args.explain;
 
@@ -523,7 +681,6 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
 
   // Format passthrough — `markdown` (default) emits the enriched markdown
   // report; `json` returns the structured TaskContext for programmatic consumers.
-  const format = args.format ?? 'markdown';
   return ok(formatContextResponse({ cg, task, context, format }));
 }
 

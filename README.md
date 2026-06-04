@@ -278,15 +278,20 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass `lowTokens: true` in MCP or `--low-tokens` in the CLI for supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Server operators can make this the default for supported MCP tools with `cartograph serve --mcp --low-tokens-default`; callers can still pass `lowTokens: false` for one regular response.
 
-If you control the MCP server launch, run `cartograph mcp-budget` to measure startup load. `cartograph serve --mcp --profile core`, `--profile read-only`, `--no-write-tools`, and repeated `--disable-tool <name>` reduce the advertised tool list loaded at connection time.
+Use `cartograph_context({format: "plan"})` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use `cartograph_affected({includeCommands: true})` for affected tests plus package-script verification commands, then `cartograph_compare_to_ref({findingsDelta: true})` before reporting done. If a stale `cartograph_node({code: true})` result is intentional, pass `liveSource: true` to read the current file from disk using indexed line ranges.
+
+If you control the MCP server launch, run `cartograph mcp-budget` to measure startup load. The default MCP profile is `core`; use `--profile full` for the complete toolbox, or `--profile read-only`, `--profile review`, `--no-write-tools`, and repeated `--disable-tool <name>` for narrower surfaces.
 
 | Tool | Use For |
 |------|----------|
 | `cartograph_find` | Find symbols by name / regex / env-var / SQL ref (`by:` slice + `mode:`) |
 | `cartograph_graph({direction: 'callers'\|'callees'})` | Trace call flow |
 | `cartograph_graph({direction: 'impact'})` | Check what's affected before editing |
-| `cartograph_node` | A single symbol's details (omit `code: true` to stay metadata-only) |
+| `cartograph_context({format: "plan"})` | Plan the route and next MCP calls before source-heavy exploration |
+| `cartograph_node` | A single symbol's details (omit `code: true` to stay metadata-only; use `liveSource: true` for stale live slices) |
 | `cartograph_at_range` | Symbols overlapping a file:line span (PR-review hunks) |
+| `cartograph_affected({includeCommands: true})` | Affected tests plus verification commands after edits |
+| `cartograph_session({action: "audit"})` | Review a session's tool-use pattern and missed close-out calls |
 | `cartograph_biomarkers` / `cartograph_status` | Risk findings per symbol / index health |
 
 ### If `.cartograph/` does NOT exist
@@ -446,6 +451,7 @@ cartograph affected                                  # Derive changed files from
 cartograph affected src/utils.ts src/api.ts         # Pass files as arguments
 git diff --name-only | cartograph affected --stdin   # Pipe from git diff
 cartograph affected src/auth.ts --filter "e2e/*"     # Custom test file pattern
+cartograph affected --include-commands              # Include package-script verification commands
 ```
 
 | Option | Description | Default |
@@ -455,6 +461,7 @@ cartograph affected src/auth.ts --filter "e2e/*"     # Custom test file pattern
 | `--stdin` | Read file list from stdin | `false` |
 | `-d, --depth <n>` | Max dependency traversal depth | `5` |
 | `-f, --filter <glob>` | Custom glob to identify test files | auto-detect |
+| `--include-commands` | Include package-script verification commands for affected tests plus `typecheck` / `lint` when present | `false` |
 | `--include-tests` | Include test-file targets while walking dependents; affected output still reports tests | `false` |
 | `-j, --json` | Output as JSON | `false` |
 | `-q, --quiet` | Output file paths only | `false` |
@@ -475,7 +482,7 @@ fi
 
 ## MCP Tools
 
-When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible AI assistant. Most sessions start with the same small set:
+When running as an MCP server, Cartograph defaults to the compressed `core` profile for MCP-compatible AI assistants. The opt-in `full` profile exposes all 36 registered tools. Most sessions start with the same small set:
 
 | Start With | Use It When You Need |
 |---|---|
@@ -483,20 +490,32 @@ When running as an MCP server, Cartograph exposes 36 tools to any MCP-compatible
 | `cartograph_find` | Symbols, regex content, env-var reads, or SQL references |
 | `cartograph_graph` | Callers, callees, blast radius, shortest paths, or embedding-similar symbols |
 | `cartograph_node` | One symbol's signature, summary, source preview, callers, callees, tests, or biomarkers |
-| `cartograph_context` | Task-shaped context when an agent needs relevant code for an implementation or bug |
+| `cartograph_context({format: "plan"})` | Low-token route plan with concrete next MCP calls before source-heavy context |
 | `cartograph_review` | Diff review, sister implementations, risk triage, trust self-checks, or agent-prone biomarker audit |
+
+For edit sessions, a compact default chain is:
+
+```text
+cartograph_context({format: "plan"})
+→ follow the top next action
+→ cartograph_affected({includeCommands: true})
+→ cartograph_compare_to_ref({findingsDelta: true})
+```
+
+Use `cartograph_session({action: "audit"})` to review a prior session's tool-use pattern, repeated calls, and missed close-out steps. Use `cartograph_node({code: true, liveSource: true})` only when a stale source warning is intentional and you want the current disk slice using indexed line ranges.
 
 ### MCP Load Context
 
-MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. On this repository, the full 36-tool list serializes to about 62 KB, or roughly 15.5k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured MCP load context is about 64 KB, or 16k estimated tokens.
+MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. The default `core` profile advertises the common coding-agent tools. On this repository, the default core 22-tool list currently serializes to 43,487 chars, or about 10.9k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured core startup load is 45,820 chars, or about 11.5k estimated tokens. The opt-in full 36-tool profile is 62,551 `tools/list` chars and 64,884 combined startup chars, or about 16.2k estimated tokens.
 
 Measure the current surface with `cartograph mcp-budget` or `bun run measure:mcp-load`. The report includes tool count, `tools/list`, initialize, combined startup load, the on-demand full playbook size, and the largest schema contributors. Pass `--profile`, `--no-write-tools`, `--disable-tool`, `--top`, or `--json` to inspect a specific server shape. For CI, run `bun run check:mcp-load`; it prints the same budget report plus PASS/FAIL and exits non-zero when either the hard guard or the smaller release target is exceeded. Before a release or quarterly tool-surface audit, run `bun run check:release` for typecheck, formatting/lint, MCP load, biomarkers, and the fast test suite.
 
 That startup schema cost is separate from per-call output tokens, so `lowTokens: true` and `--low-tokens-default` reduce tool results but do not shrink the advertised tool list.
 
-For focused or read-only agents, trim the advertised surface at server launch:
+For power-user, focused, or read-only agents, choose the advertised surface at server launch:
 
 ```bash
+cartograph serve --mcp --profile full
 cartograph serve --mcp --profile core
 cartograph serve --mcp --profile read-only
 cartograph serve --mcp --profile review
@@ -504,9 +523,9 @@ cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_local_chat
 ```
 
-Profiles are advertised-tool filters: `full` is the default 36-tool surface, `core` keeps common coding-agent lookup and change-impact tools, `review` focuses diff/risk/test workflows, and `read-only` advertises read-capable tools while blocking mutating branches of mixed tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
+Profiles are advertised-tool filters: `core` is the default common coding-agent lookup and change-impact surface, `full` exposes every registered tool, `review` focuses diff/risk/test workflows, and `read-only` advertises read-capable tools while blocking mutating branches of mixed tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
 
-In the same measurement, `--no-write-tools` and `--profile read-only` reduced the list to 35 tools and about 15.0k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
+In the same measurement, `--profile full --no-write-tools` and `--profile read-only` reduced the full list to 35 tools and about 15.0k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
 
 ### Token Savings Benchmark
 
@@ -539,7 +558,7 @@ Exact single-file text search can still be cheaper when you already know the fil
 | History & Refactors | `cartograph_blame`, `cartograph_history`, `cartograph_propose_rename`, `cartograph_imports`, `cartograph_sql` | `cartograph blame`, `cartograph propose-rename` |
 | Operations | `cartograph_status`, `cartograph_admin`, `cartograph_playbook`, `cartograph_session`, `cartograph_note`, `cartograph_summaries`, `cartograph_role`, `cartograph_discover` | [`cartograph status`](#terminal-examples), `cartograph playbook` |
 
-The full 36-tool server is intentionally broader than the first six tools above, but the families keep related workflows close together. Call `cartograph_playbook` or run `cartograph playbook` for the complete tool contract, argument shapes, and selection guidance.
+The opt-in full 36-tool server is intentionally broader than the first six tools above, but the families keep related workflows close together. Call `cartograph_playbook` or run `cartograph playbook` for the complete tool contract, argument shapes, and selection guidance.
 
 ### CLI / MCP Pairings
 
@@ -547,11 +566,12 @@ The full 36-tool server is intentionally broader than the first six tools above,
 |---|---|---|
 | Find symbols, regex content, env vars, or SQL refs | `cartograph find` | `cartograph_find` |
 | Trace callers, callees, impact, or symbol paths | `cartograph graph` | `cartograph_graph` |
-| Gather task-specific code context | `cartograph context` | `cartograph_context` |
+| Gather task-specific code context | `cartograph context --format plan` | `cartograph_context({format: "plan"})` |
 | Review a diff, inspect project risk, or check analysis readiness | `cartograph review` | `cartograph_review` |
 | Check index health and project rollups | `cartograph status --verbose` | `cartograph_status({ verbose: true })` |
-| Find tests affected by source edits | `cartograph affected` | `cartograph_affected` |
+| Find tests affected by source edits | `cartograph affected --include-commands` | `cartograph_affected({includeCommands: true})` |
 | Compare the final worktree to a ref | `cartograph compare-to-ref` | `cartograph_compare_to_ref` |
+| Audit a prior agent session | `cartograph session audit` | `cartograph_session({action: "audit"})` |
 
 ### Example Agent Prompts
 
@@ -677,8 +697,10 @@ cartograph serve --mcp --project-path /absolute/path/to/project
 Useful server controls:
 
 ```bash
+cartograph serve --mcp --profile full
 cartograph serve --mcp --profile core
 cartograph serve --mcp --profile read-only
+cartograph serve --mcp --profile review
 cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --allow-stale-default
 cartograph serve --mcp --low-tokens-default

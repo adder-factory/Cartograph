@@ -26,7 +26,7 @@ describe('cartograph_sql', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'x', version: '0.0.0' }));
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

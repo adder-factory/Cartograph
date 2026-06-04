@@ -69,7 +69,7 @@ describe('MCP LLM-routing visibility', () => {
           },
         },
       });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       expect(text).toMatch(/### .*LLM providers/);
@@ -97,7 +97,7 @@ describe('MCP LLM-routing visibility', () => {
           },
         },
       });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       expect(text).toMatch(/### .*LLM providers/);
@@ -126,7 +126,7 @@ describe('MCP LLM-routing visibility', () => {
           },
         },
       });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       expect(text).toContain('**Summarize model:**');
@@ -159,7 +159,7 @@ describe('MCP LLM-routing visibility', () => {
           },
         },
       });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       const askLine = text.split('\n').find((l) => l.startsWith('- **Ask model:**'));
@@ -173,7 +173,7 @@ describe('MCP LLM-routing visibility', () => {
       fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
       fs.writeFileSync(path.join(tempDir, 'src/x.ts'), `export function x(): void {}\n`);
       cg = await Cartograph.init(tempDir, { config: { llm: { enabled: false } }, index: true });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       expect(text).toMatch(/### .*LLM providers/);
@@ -189,7 +189,7 @@ describe('MCP LLM-routing visibility', () => {
       fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
       fs.writeFileSync(path.join(tempDir, 'src/x.ts'), `export function thing(): void {}\n`);
       cg = await Cartograph.init(tempDir, { index: true });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(
         await handler.runHandler('cartograph_find', { by: 'name', mode: 'semantic', symbol: 'thing' }),
@@ -216,7 +216,7 @@ describe('MCP LLM-routing visibility', () => {
           },
         },
       });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(
         await handler.runHandler('cartograph_find', { by: 'name', mode: 'semantic', symbol: 'thing' }),
@@ -235,7 +235,7 @@ describe('MCP LLM-routing visibility', () => {
       fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
       fs.writeFileSync(path.join(tempDir, 'src/x.ts'), `export function x(): void {}\n`);
       cg = await Cartograph.init(tempDir, { index: true });
-      handler = new ToolHandler(cg);
+      handler = new ToolHandler(cg, { profile: 'full' });
 
       const text = textOf(await handler.runHandler('cartograph_status', {}));
       // Post-spike (Slice "drop NodeSqliteAdapter") `bun:sqlite +

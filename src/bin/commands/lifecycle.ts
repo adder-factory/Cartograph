@@ -214,9 +214,15 @@ function writeServeMcpGuidance(deps: Pick<LifecycleCommandDeps, 'chalk' | 'write
   writeStderr(
     chalk.cyan('  cartograph_find') + '      - Find symbols / regex / env / sql in one tool (by=name|content|env|sql)',
   );
-  writeStderr(chalk.cyan('  cartograph_context') + '   - Build context for a task');
+  writeStderr(
+    chalk.cyan('  cartograph_context') + '   - Build context for a task; use format=plan for route-first guidance',
+  );
   writeStderr(chalk.cyan('  cartograph_graph') + '     - Navigate the graph (callers / callees / impact / walk)');
-  writeStderr(chalk.cyan('  cartograph_node') + '      - Get symbol details');
+  writeStderr(
+    chalk.cyan('  cartograph_node') + '      - Get symbol details; liveSource handles intentional stale slices',
+  );
+  writeStderr(chalk.cyan('  cartograph_affected') + '  - Find affected tests; includeCommands suggests verification');
+  writeStderr(chalk.cyan('  cartograph_session') + '   - Resume/audit sessions and manage macros');
   writeStderr(chalk.cyan('  cartograph_files') + '     - Get project file structure');
   writeStderr(chalk.cyan('  cartograph_status') + '    - Get index status');
 }

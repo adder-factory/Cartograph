@@ -9,10 +9,10 @@
 export const MCP_SERVER_PROFILE_NAMES = ['full', 'core', 'read-only', 'review'] as const;
 export type McpServerProfile = (typeof MCP_SERVER_PROFILE_NAMES)[number];
 
-export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'full';
+export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'core';
 
 export const MCP_SERVER_PROFILE_DESCRIPTION =
-  'MCP advertised-tool profile: full (current complete surface), core (common coding-agent lookups), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default full.';
+  'MCP advertised-tool profile: core (default common coding-agent lookups), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
 
 const CORE_PROFILE_TOOLS = [
   'cartograph_admin',

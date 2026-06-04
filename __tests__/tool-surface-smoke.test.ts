@@ -315,7 +315,7 @@ beforeAll(async () => {
   }
 
   cg = await Cartograph.init(tempDir, { index: true });
-  handler = new ToolHandler(cg);
+  handler = new ToolHandler(cg, { profile: 'full' });
 }, 120_000);
 
 afterAll(() => {
