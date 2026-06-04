@@ -5,8 +5,8 @@
  *   1. Batch `getNodesByIds` collapses graph-traversal N+1 reads.
  *   2. `insertNode` invalidates the LRU cache so INSERT OR REPLACE
  *      doesn't serve a stale cached row on next `getNodeById`.
- *   3. `runMaintenance` runs `PRAGMA optimize` + `wal_checkpoint(PASSIVE)`
- *      after indexAll/sync without throwing.
+ *   3. `runMaintenance` runs `PRAGMA optimize`, freelist reclaim, and a
+ *      bounded WAL truncate after indexAll/sync without throwing.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -142,10 +142,12 @@ describe('insertNode cache invalidation', () => {
 describe('runMaintenance', () => {
   let dir: string;
   let db: DatabaseConnection;
+  let dbPath: string;
 
   beforeEach(() => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'db-perf-maint-'));
-    db = DatabaseConnection.initialize(path.join(dir, 'test.db'));
+    dbPath = path.join(dir, 'test.db');
+    db = DatabaseConnection.initialize(dbPath);
   });
 
   afterEach(() => {
@@ -162,6 +164,23 @@ describe('runMaintenance', () => {
     seedFile(db.getDb(), 'a.ts');
     q.insertNodes([makeNode('n1'), makeNode('n2')]);
     expect(() => dbRunMaintenance(db)).not.toThrow();
+  });
+
+  it('truncates the WAL after write-heavy maintenance', () => {
+    const walPath = `${dbPath}-wal`;
+    const sql = db.getDb();
+    sql.exec('CREATE TABLE _wal_bloat (b BLOB)');
+    const stmt = sql.prepare('INSERT INTO _wal_bloat VALUES (?)');
+    for (let i = 0; i < 16; i++) stmt.run(Buffer.alloc(64 * 1024));
+
+    const before = fs.statSync(walPath).size;
+    expect(before).toBeGreaterThan(0);
+
+    dbRunMaintenance(db);
+
+    const after = fs.existsSync(walPath) ? fs.statSync(walPath).size : 0;
+    expect(after).toBeLessThan(before);
+    expect(after).toBeLessThan(64 * 1024);
   });
 
   it('swallows failures rather than propagating (best-effort)', () => {

@@ -837,13 +837,13 @@ export class Cartograph extends CartographCore {
         await cgSyncResolveReferences(this, syncResult, options.onProgress);
         await cgRunHookPhase(this, 'sync', syncResult);
         // Run maintenance on every sync, including no-op syncs. It is
-        // cheap in steady state (PRAGMA optimize / passive checkpoint /
-        // an incremental_vacuum over a small freelist), and the one-time
-        // legacy-DB full VACUUM in dbReclaimFreePages is self-gated on
-        // the freelist ratio. Gating this behind a changed-files check
-        // meant a clean-tree (no-op) sync never reclaimed pages, so a
-        // bloated legacy auto_vacuum=0 DB could never self-heal on a
-        // repo with no pending edits.
+        // cheap in steady state (PRAGMA optimize / incremental_vacuum
+        // over a small freelist / short-timeout WAL truncate), and the
+        // one-time legacy-DB full VACUUM in dbReclaimFreePages is
+        // self-gated on the freelist ratio. Gating this behind a
+        // changed-files check meant a clean-tree (no-op) sync never
+        // reclaimed pages, so a bloated legacy auto_vacuum=0 DB could
+        // never self-heal on a repo with no pending edits.
         dbRunMaintenance(this.db);
         return syncResult;
       } finally {

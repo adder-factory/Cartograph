@@ -291,15 +291,47 @@ function dbReclaimFreePages(conn: DatabaseConnection): void {
 }
 
 /**
+ * WAL truncate checkpoints can wait on active readers. Keep the
+ * maintenance pass bounded — if another process is reading, skip the
+ * truncation and let a later pass pick it up.
+ */
+const WAL_TRUNCATE_BUSY_TIMEOUT_MS = 250;
+
+function dbCheckpointWal(
+  conn: DatabaseConnection,
+  mode: 'PASSIVE' | 'TRUNCATE',
+  opts: { busyTimeoutMs?: number } = {},
+): void {
+  const db = conn.getDb();
+  if (opts.busyTimeoutMs === undefined) {
+    db.exec(`PRAGMA wal_checkpoint(${mode})`);
+    return;
+  }
+
+  const priorBusyTimeout = readPragmaInt(db, 'busy_timeout');
+  try {
+    db.pragma(`busy_timeout = ${Math.max(0, Math.floor(opts.busyTimeoutMs))}`);
+    db.exec(`PRAGMA wal_checkpoint(${mode})`);
+  } finally {
+    db.pragma(`busy_timeout = ${priorBusyTimeout}`);
+  }
+}
+
+/**
  * Lightweight maintenance to run after bulk writes (indexAll, sync):
- * `PRAGMA optimize`, a passive WAL checkpoint, then a freelist reclaim
- * (`dbReclaimFreePages`). Every step is best-effort — failures are
- * swallowed and never load-bearing.
+ * `PRAGMA optimize`, a freelist reclaim (`dbReclaimFreePages`), then a
+ * bounded WAL truncate checkpoint. Every step is best-effort — failures
+ * are swallowed and never load-bearing.
  *
  * The reclaim is cheap in steady state (`incremental_vacuum` over a
  * small freelist). The one heavy case is the first run against a
  * pre-existing legacy DB bloated with dead pages — a single full VACUUM
  * compacts it and converts it to incremental for good.
+ *
+ * The final TRUNCATE checkpoint is what keeps the on-disk `*.db-wal`
+ * from staying large after post-hook write storms. It is attempted with
+ * a short busy timeout so a long-lived reader cannot make routine sync
+ * or index completion hang.
  */
 export function dbRunMaintenance(conn: DatabaseConnection): void {
   try {
@@ -308,12 +340,12 @@ export function dbRunMaintenance(conn: DatabaseConnection): void {
     /* ignore */
   }
   try {
-    conn.getDb().exec('PRAGMA wal_checkpoint(PASSIVE)');
+    dbReclaimFreePages(conn);
   } catch {
     /* ignore */
   }
   try {
-    dbReclaimFreePages(conn);
+    dbCheckpointWal(conn, 'TRUNCATE', { busyTimeoutMs: WAL_TRUNCATE_BUSY_TIMEOUT_MS });
   } catch {
     /* ignore */
   }
@@ -321,13 +353,9 @@ export function dbRunMaintenance(conn: DatabaseConnection): void {
 
 /**
  * Aggressively reclaim disk after a bulk DELETE (e.g. `prune-store`
- * evicting tens of thousands of orphan embedding rows).
- *
- * `dbRunMaintenance` alone is insufficient here: its PASSIVE checkpoint
- * runs *before* the freelist reclaim, so the pages that
- * `incremental_vacuum` shuffles end up parked in the WAL and never get
- * folded back into the main file — the `.db` shrinks but the `.db-wal`
- * balloons to match. This helper sequences the steps correctly:
+ * evicting tens of thousands of orphan embedding rows). This is the
+ * reclaim-only subset of `dbRunMaintenance`, for call sites that do not
+ * need a planner-stats refresh:
  *
  *   1. `incremental_vacuum` — return the freelist to the OS (auto_vacuum
  *      DBs). For a legacy auto_vacuum=0 DB this falls through to the
@@ -347,7 +375,7 @@ export function dbReclaimAfterBulkDelete(conn: DatabaseConnection): void {
     /* ignore */
   }
   try {
-    conn.getDb().exec('PRAGMA wal_checkpoint(TRUNCATE)');
+    dbCheckpointWal(conn, 'TRUNCATE', { busyTimeoutMs: WAL_TRUNCATE_BUSY_TIMEOUT_MS });
   } catch {
     /* ignore */
   }
