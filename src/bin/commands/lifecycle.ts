@@ -234,7 +234,7 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
     .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
     .option(
       '--no-write-tools',
-      'Disable write-class tools (cartograph_admin / _summaries / _coverage / _session / _note). Use for sandboxed read-only agents and smaller MCP load context.',
+      'Disable write-class tools and mutating branches of mixed tools. Read-only branches stay available for sandboxed agents and smaller MCP load context.',
     )
     .option(
       '--allow-stale-default',
@@ -427,7 +427,7 @@ function registerMcpBudgetCommand(deps: LifecycleCommandDeps): void {
     .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
     .option(
       '--no-write-tools',
-      'Measure with write-class tools disabled, matching `cartograph serve --mcp --no-write-tools`.',
+      'Measure with write-class tools and mutating mixed-tool branches disabled, matching `cartograph serve --mcp --no-write-tools`.',
     )
     .option(
       '--disable-tool <name...>',
