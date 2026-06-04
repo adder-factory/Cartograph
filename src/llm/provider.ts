@@ -8,8 +8,8 @@
  *     1. openai-compat — HTTP via the `openai` npm SDK with baseURL
  *                        override (llama-server / Ollama / mlx_lm /
  *                        cloud OpenAI-compat); needs `endpoint`
- *                        (local) or `apiKey` (cloud); model = backend
- *                        identifier
+ *                        (local) or `apiKey` / `OPENAI_API_KEY`
+ *                        (cloud); model = backend identifier
  *     2. claude-bridge — `claude` CLI subprocess
  *     3. anthropic-api — Anthropic HTTPS; needs ANTHROPIC_API_KEY
  *     4. (none)        — LLM chat features off
@@ -17,7 +17,8 @@
  *   embeddingLlm:
  *     1. openai-compat — HTTP via the `openai` npm SDK with baseURL
  *                        override; needs `endpoint` (local) or
- *                        `apiKey` (cloud); model = backend identifier
+ *                        `apiKey` / `OPENAI_API_KEY` (cloud);
+ *                        model = backend identifier
  *     2. (none)        — semantic search degrades to FTS-only
  *
  *   rerankerLlm:
@@ -208,12 +209,19 @@ async function resolveChatAnthropicApi(c: {
   };
 }
 
+function resolveOpenAiCompatApiKey(
+  configuredApiKey: string | undefined,
+  endpoint: string | undefined,
+): string | undefined {
+  return configuredApiKey ?? (endpoint ? undefined : process.env['OPENAI_API_KEY']);
+}
+
 /** Resolve openai-compat HTTP chat configuration. Requires `model`
- *  AND either `endpoint` (for local backends) OR `apiKey` (for cloud
- *  OpenAI / together.ai / fireworks.ai). The backend client itself
- *  re-validates these on construction; we drop early here so the
- *  trace line surfaces the misconfiguration in the resolver report
- *  instead of failing on first call. */
+ *  AND either `endpoint` (for local backends) OR `apiKey` /
+ *  `OPENAI_API_KEY` (for cloud OpenAI / together.ai / fireworks.ai).
+ *  The backend client itself re-validates these on construction; we
+ *  drop early here so the trace line surfaces the misconfiguration in
+ *  the resolver report instead of failing on first call. */
 async function resolveChatOpenAiCompat(c: {
   model?: string;
   askModel?: string;
@@ -226,9 +234,10 @@ async function resolveChatOpenAiCompat(c: {
     logWarn('resolveLlmProviders: summarizeLlm.provider="openai-compat" requires `model`; chat disabled.');
     return null;
   }
-  if (!c.endpoint && !c.apiKey) {
+  const apiKey = resolveOpenAiCompatApiKey(c.apiKey, c.endpoint);
+  if (!c.endpoint && !apiKey) {
     logWarn(
-      `resolveLlmProviders: summarizeLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server) or \`apiKey\` (cloud OpenAI-compat). Neither set; chat disabled.`,
+      `resolveLlmProviders: summarizeLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server), \`apiKey\`, or OPENAI_API_KEY (cloud OpenAI-compat). None set; chat disabled.`,
     );
     return null;
   }
@@ -238,7 +247,7 @@ async function resolveChatOpenAiCompat(c: {
       model: c.model,
       askModel: c.askModel,
       endpoint: c.endpoint,
-      apiKey: c.apiKey,
+      apiKey,
       timeoutMs: c.timeoutMs,
       summaryBatchSize: c.summaryBatchSize,
     }),
@@ -379,13 +388,13 @@ function resolveEmbeddings(llm: NonNullable<CartographConfig['llm']>): Resolved<
     // (llama-server / Ollama / mlx_lm / cloud OpenAI-compat).
     // `model` is REQUIRED; `endpoint` is required for local backends
     // (omit only when using cloud OpenAI's default base URL with an
-    // apiKey).
+    // apiKey or OPENAI_API_KEY).
     if (!e.model) return null;
     const endpoint = (e as { endpoint?: string }).endpoint;
-    const apiKey = (e as { apiKey?: string }).apiKey;
+    const apiKey = resolveOpenAiCompatApiKey((e as { apiKey?: string }).apiKey, endpoint);
     if (!endpoint && !apiKey) {
       logWarn(
-        `resolveLlmProviders: embeddingLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server) or \`apiKey\` (cloud OpenAI-compat). Neither set; embedding disabled.`,
+        `resolveLlmProviders: embeddingLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server), \`apiKey\`, or OPENAI_API_KEY (cloud OpenAI-compat). None set; embedding disabled.`,
       );
       return null;
     }

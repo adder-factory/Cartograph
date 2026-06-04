@@ -1592,6 +1592,82 @@ function main(): void {
       expect(legacyCallers.some((c) => c.node.filePath === 'src/main.ts')).toBe(false);
     });
 
+    it('reloads tsconfig path aliases across sync without restarting', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src/utils'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'src/legacy'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'src/utils/format.ts'), `export function pickMe(): number { return 1; }\n`);
+      fs.writeFileSync(path.join(tempDir, 'src/legacy/format.ts'), `export function pickMe(): number { return 99; }\n`);
+      fs.writeFileSync(
+        path.join(tempDir, 'src/main.ts'),
+        `import { pickMe } from '@utils/format';\nexport function go(): number { return pickMe(); }\n`,
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'tsconfig.json'),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: './src',
+            paths: { '@utils/*': ['utils/*'] },
+          },
+        }),
+      );
+
+      cg = await Cartograph.init(tempDir, { index: true });
+      cg.internals.resolver.resolveAndPersist(getUnresolvedReferences(cg.queries));
+
+      fs.writeFileSync(
+        path.join(tempDir, 'tsconfig.json'),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: './src',
+            paths: { '@utils/*': ['legacy/*'] },
+          },
+        }),
+      );
+      const syncResult = await cg.sync({ summarize: false });
+      expect(syncResult.changedFilePaths).toContain('src/main.ts');
+
+      const all = getNodesByKind(cg.queries, 'function').filter((n) => n.name === 'pickMe');
+      const utilsNode = all.find((n) => n.filePath === 'src/utils/format.ts');
+      const legacyNode = all.find((n) => n.filePath === 'src/legacy/format.ts');
+      expect(utilsNode).toBeDefined();
+      expect(legacyNode).toBeDefined();
+
+      const utilsCallers = cg.internals.traverser.getCallers(utilsNode!.id);
+      const legacyCallers = cg.internals.traverser.getCallers(legacyNode!.id);
+      expect(legacyCallers.some((c) => c.node.filePath === 'src/main.ts')).toBe(true);
+      expect(utilsCallers.some((c) => c.node.filePath === 'src/main.ts')).toBe(false);
+    });
+
+    it('resolves aliases inherited from an extended tsconfig', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src/shared'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src/shared/format.ts'),
+        `export function inheritedPick(): number { return 1; }\n`,
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'src/main.ts'),
+        `import { inheritedPick } from '@shared/format';\nexport function go(): number { return inheritedPick(); }\n`,
+      );
+      fs.writeFileSync(
+        path.join(tempDir, 'tsconfig.base.json'),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: './src',
+            paths: { '@shared/*': ['shared/*'] },
+          },
+        }),
+      );
+      fs.writeFileSync(path.join(tempDir, 'tsconfig.json'), JSON.stringify({ extends: './tsconfig.base.json' }));
+
+      cg = await Cartograph.init(tempDir, { index: true });
+      cg.internals.resolver.resolveAndPersist(getUnresolvedReferences(cg.queries));
+
+      const target = getNodesByKind(cg.queries, 'function').find((n) => n.name === 'inheritedPick');
+      expect(target).toBeDefined();
+      const callers = cg.internals.traverser.getCallers(target!.id);
+      expect(callers.some((c) => c.node.filePath === 'src/main.ts')).toBe(true);
+    });
+
     it('falls back gracefully when tsconfig is absent', async () => {
       fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
       fs.writeFileSync(path.join(tempDir, 'src/a.ts'), `export function aFn(): void {}\n`);

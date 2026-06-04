@@ -178,7 +178,7 @@ describe('applyLlmSetupChoice', () => {
     expect(written.llm.askLlm.endpoint).toBe('http://localhost:8082');
   });
 
-  it('cloud-openai writes a config WITHOUT endpoint or apiKey (SDK reads OPENAI_API_KEY)', async () => {
+  it('cloud-openai writes a config WITHOUT endpoint or apiKey (provider resolves OPENAI_API_KEY)', async () => {
     const result = await applyLlmSetupChoice({ projectRoot, preset: 'cloud-openai' });
     expect(result.applied).toBe(true);
     const written = readConfig() as unknown as {

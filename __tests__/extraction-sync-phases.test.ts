@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as changeOracle from '../src/change-oracle/index.js';
 import * as fileQueries from '../src/db/queries-files.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
 import { hashContent, type ExtractionOrchestratorState, type SyncState } from '../src/extraction/index.js';
 import * as freshness from '../src/freshness.js';
 import type { FileRecord } from '../src/types.js';
@@ -37,6 +38,21 @@ vi.spyOn(fileQueries, 'upsertFile').mockImplementation((() => {}) as never);
 vi.spyOn(changeOracle, 'whatChanged').mockImplementation((() => oracle) as never);
 
 vi.spyOn(freshness, 'findVanishedFiles').mockImplementation((() => vanished) as never);
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(((_queries: unknown, key: string) => {
+  if (key === 'path_alias_config_signature') return 'alias:none';
+  if (key === 'nested_function_extraction_config_signature') {
+    return JSON.stringify({ largeFunctionThreshold: 500, nestedPromotionThreshold: 5 });
+  }
+  if (key === 'source_set_config_signature') {
+    return JSON.stringify({
+      exclude: [],
+      include: ['**/*.ts', '**/*.py'],
+      indexSubmodules: true,
+      maxFileSize: 1_000_000,
+    });
+  }
+  return null;
+}) as never);
 
 const { eoApplySyncChanges, eoCollectFullScanChanges, eoCollectGitChanges } = await import(
   '../src/extraction/extraction-phases.js'

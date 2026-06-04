@@ -269,6 +269,9 @@ END;
 -- source-only and target-only lookups via SQLite's left-prefix scan.
 CREATE INDEX IF NOT EXISTS idx_edges_kind ON edges(kind);
 CREATE INDEX IF NOT EXISTS idx_edges_source_kind ON edges(source, kind);
+CREATE INDEX IF NOT EXISTS idx_edges_source_kind_similar_to
+    ON edges(source, kind)
+    WHERE kind = 'similar_to';
 CREATE INDEX IF NOT EXISTS idx_edges_target_kind ON edges(target, kind);
 
 -- Uniqueness for (source, target, kind, line, col). The id column is an

@@ -61,10 +61,10 @@ const TABLES_WITH_FILE_PATH_FK: readonly string[] = [
 ];
 
 function hasFilesTable(db: import('../sqlite-adapter.js').SqliteDatabase): boolean {
-  const hasFiles = db.prepare("SELECT 1 AS one FROM sqlite_master WHERE type='table' AND name='files'").get() as
-    | { one: number }
-    | undefined;
-  return hasFiles !== undefined;
+  const rows = db
+    .prepare("SELECT COUNT(*) AS c FROM sqlite_master WHERE type='table' AND name='files'")
+    .all() as Array<{ c: number }>;
+  return (rows[0]?.c ?? 0) > 0;
 }
 
 function getRefTableRow(db: import('../sqlite-adapter.js').SqliteDatabase, tableName: string): ObjectRowWithSql | null {
@@ -79,10 +79,9 @@ function tableAlreadyHasFilePathFk(sql: string): boolean {
   return /FOREIGN\s+KEY\s*\(\s*file_path\s*\)\s+REFERENCES\s+files/i.test(sql);
 }
 
-function logSkippedRefTableMigration(tableName: string, err: unknown): void {
-  if (!process.env['CARTOGRAPH_DEBUG_MIGRATIONS']) return;
-  const msg = err instanceof Error ? err.message : String(err);
-  console.warn(`[migration 055] skipped ${tableName}: ${msg}`);
+function tableHasFilePathFk(db: import('../sqlite-adapter.js').SqliteDatabase, tableName: string): boolean {
+  const fkList = db.prepare(`PRAGMA foreign_key_list("${tableName}")`).all() as Array<{ table: string; from: string }>;
+  return fkList.some((fk) => fk.table === 'files' && fk.from === 'file_path');
 }
 
 export const MIGRATION: MigrationModule = {
@@ -105,13 +104,18 @@ export const MIGRATION: MigrationModule = {
       try {
         addFilePathFk(db, row);
       } catch (err) {
-        // Same defensive cleanup pattern as migration 054.
         try {
           db.exec(`DROP TABLE IF EXISTS "${tableName}${TEMP_SUFFIX}"`);
         } catch {
           // Best-effort.
         }
-        logSkippedRefTableMigration(tableName, err);
+        throw err;
+      }
+
+      // Post-verify — this migration is part of the same FK-rebuild
+      // family as 064, and should fail loudly if the rebuild no-ops.
+      if (!tableHasFilePathFk(db, tableName)) {
+        throw new Error(`migration 055: ${tableName}.file_path FK still absent after rebuild`);
       }
     }
   },

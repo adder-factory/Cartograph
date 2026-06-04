@@ -89,13 +89,47 @@ describe('runDoctor — embedding endpoint reachability', () => {
   });
 
   it('reports warn when openai-compat provider has no endpoint set', async () => {
-    await writeConfig({ provider: 'openai-compat', model: 'jina' });
+    const prior = process.env.OPENAI_API_KEY;
+    try {
+      delete process.env.OPENAI_API_KEY;
+      await writeConfig({ provider: 'openai-compat', model: 'jina' });
+
+      const result = await runDoctor({ projectPath });
+      const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
+      expect(embCheck).toBeDefined();
+      expect(embCheck!.status).toBe('warn');
+      expect(embCheck!.detail).toMatch(/not set/);
+    } finally {
+      if (prior === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prior;
+    }
+  });
+
+  it('reports ok for endpoint-less cloud OpenAI config when OPENAI_API_KEY is set', async () => {
+    const prior = process.env.OPENAI_API_KEY;
+    try {
+      process.env.OPENAI_API_KEY = 'sk-test';
+      await writeConfig({ provider: 'openai-compat', model: 'text-embedding-3-small' });
+
+      const result = await runDoctor({ projectPath });
+      const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
+      expect(embCheck).toBeDefined();
+      expect(embCheck!.status).toBe('ok');
+      expect(embCheck!.detail).toContain('OPENAI_API_KEY');
+    } finally {
+      if (prior === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = prior;
+    }
+  });
+
+  it('reports ok for endpoint-less cloud OpenAI config with configured apiKey', async () => {
+    await writeConfig({ provider: 'openai-compat', model: 'text-embedding-3-small', apiKey: 'sk-configured' });
 
     const result = await runDoctor({ projectPath });
     const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
     expect(embCheck).toBeDefined();
-    expect(embCheck!.status).toBe('warn');
-    expect(embCheck!.detail).toMatch(/not set/);
+    expect(embCheck!.status).toBe('ok');
+    expect(embCheck!.detail).toContain('configured apiKey');
   });
 
   it('skips the reachability check when provider is something other than `openai-compat`', async () => {

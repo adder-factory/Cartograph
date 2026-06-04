@@ -57,15 +57,8 @@ import {
   OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
 } from './default-endpoints.js';
 import type { CartographConfig } from '../types.js';
-
-/** Canonical Ollama model ids that match the recommended GGUF tiers.
- *  Kept in this module so the interactive wizard + the agent-driven
- *  applier read the same source. */
-export const OLLAMA_RECOMMENDED_MODELS = {
-  embed: 'nomic-embed-text',
-  summarize: 'qwen2.5-coder:3b',
-  ask: 'qwen2.5-coder:7b',
-} as const;
+import { LLAMA_SERVER_RERANK_FLAG, MLX_RECOMMENDED_MODELS, OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
+export { OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
 
 /** Each preset the agent can apply. `description` is rendered to the
  *  user; `nextSteps` is what they (or their agent) must run AFTER
@@ -438,7 +431,7 @@ function buildInstallLlamaCppPreset(
       `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_EMBED)} --port 8080 --embeddings --parallel ${tuning.embed.llamaServerParallel} --batch-size 512 --ubatch-size 512 &`,
       `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_SUMMARIZE)} --port 8081 --parallel ${tuning.chat.llamaServerParallel} &`,
       `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_ASK)} --port 8082 --parallel ${tuning.ask.llamaServerParallel} &`,
-      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_RERANKER)} --port 8083 --reranking --parallel ${tuning.reranker.llamaServerParallel} &`,
+      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_RERANKER)} --port 8083 ${LLAMA_SERVER_RERANK_FLAG} --parallel ${tuning.reranker.llamaServerParallel} &`,
       'cartograph doctor   # verify',
     ],
     requiresInstall: true,
@@ -490,7 +483,7 @@ function buildInstallMlxPreset(): SetupPreset {
     summary: `All tiers → ${MLX_DEFAULT_ENDPOINT} (one mlx_lm.server per tier — hand-edit endpoints for separate ports)`,
     nextSteps: [
       backendInstallHint('mlx_lm'),
-      'python -m mlx_lm.server --model nomic-embed-text --port 8000 &',
+      `python -m mlx_lm.server --model ${MLX_RECOMMENDED_MODELS.embed} --port 8000 &`,
       '# Edit .cartograph/config.json to point each tier at the port serving its model.',
       'cartograph doctor   # verify',
     ],
@@ -749,9 +742,9 @@ function buildConfigForPreset(
   }
   if (id === 'install-mlx') {
     return buildSingleEndpointConfig(MLX_DEFAULT_ENDPOINT, {
-      embed: 'nomic-embed-text',
-      summarize: 'qwen2.5-coder-3b',
-      ask: 'qwen2.5-coder-7b',
+      embed: MLX_RECOMMENDED_MODELS.embed,
+      summarize: MLX_RECOMMENDED_MODELS.summarize,
+      ask: MLX_RECOMMENDED_MODELS.ask,
     });
   }
   if (id === 'cloud-openai') {

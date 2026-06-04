@@ -196,6 +196,12 @@ const clearParseCacheByLangQuery = defineQuery({
   row: z.never(),
 });
 
+const clearParseCacheByFilePathQuery = defineQuery({
+  sql: 'DELETE FROM parse_cache WHERE file_path = @filePath',
+  params: z.object({ filePath: z.string() }),
+  row: z.never(),
+});
+
 const clearParseCacheAllQuery = defineQuery({
   sql: 'DELETE FROM parse_cache',
   params: NoParams,
@@ -235,6 +241,7 @@ declare module './queries.js' {
     parseCacheCount?: TypedQuery<Record<string, never>, { n: number }>;
     evictParseCache?: TypedQuery<{ dropCount: number }, never>;
     clearParseCacheByLang?: TypedQuery<{ language: string }, never>;
+    clearParseCacheByFilePath?: TypedQuery<{ filePath: string }, never>;
     clearParseCacheAll?: TypedQuery<Record<string, never>, never>;
     getParseCacheStats?: TypedQuery<
       { currentVersion: string },
@@ -398,6 +405,19 @@ export function clearParseCache(qb: QueryBuilder, language?: string): number {
   qb.queries.clearParseCacheAll ??= clearParseCacheAllQuery(qb.db);
   const info = qb.queries.clearParseCacheAll.run({});
   return info.changes;
+}
+
+/** Drop cached parse results for specific file paths only. */
+export function clearParseCacheForFiles(qb: QueryBuilder, filePaths: Iterable<string>): number {
+  qb.queries.clearParseCacheByFilePath ??= clearParseCacheByFilePathQuery(qb.db);
+  const stmt = qb.queries.clearParseCacheByFilePath;
+  let changes = 0;
+  qb.db.transaction(() => {
+    for (const filePath of filePaths) {
+      changes += stmt.run({ filePath }).changes;
+    }
+  })();
+  return changes;
 }
 
 /**

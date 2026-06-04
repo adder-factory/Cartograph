@@ -68,12 +68,30 @@ describe('edge-resolution helper primitives', () => {
     try {
       fs.mkdirSync(path.join(root, 'src', 'lib'), { recursive: true });
       fs.writeFileSync(path.join(root, 'src', 'target.ts'), 'export const target = 1;');
+      fs.writeFileSync(path.join(root, 'src', 'module.mts'), 'export const moduleTarget = 1;');
       fs.writeFileSync(path.join(root, 'src', 'lib', 'index.tsx'), 'export const lib = 1;');
 
       expect(resolveTargetFile('src', './target.js', root)).toBe('src/target.ts');
+      expect(resolveTargetFile('src', './module.mjs', root)).toBe('src/module.mts');
       expect(resolveTargetFile('src', './lib', root)).toBe(path.join('src', 'lib', 'index.tsx'));
       expect(resolveTargetFile('src', 'react', root)).toBeNull();
       expect(resolveTargetFile('src', './missing', root)).toBeNull();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves aliased module specifiers through tsconfig paths', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-edge-resolution-alias-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, 'tsconfig.json'),
+        JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@/*': ['src/*'] } } }),
+      );
+      fs.writeFileSync(path.join(root, 'src', 'aliased.ts'), 'export const aliased = 1;');
+
+      expect(resolveTargetFile('src', '@/aliased', root)).toBe('src/aliased.ts');
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }

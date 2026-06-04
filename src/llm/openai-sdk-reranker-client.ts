@@ -44,6 +44,11 @@ import { LlmEndpointError } from './client.js';
 import { logWarn } from '../errors.js';
 import { backendLabel, scanForLlmBackends, type DetectedBackendKind } from '../installer/scan-backends.js';
 import type { RerankerProviderConfig } from './reranker-client.js';
+import {
+  assertOpenAiCompatEndpointOrApiKey,
+  normaliseOpenAiCompatFetchBaseUrl,
+  resolveOpenAiCompatTimeout,
+} from './openai-compat-http.js';
 
 /** Default per-request timeout. Rerank is typically sub-second on a
  *  local backend; 60s gives headroom for cold-start model loads on
@@ -91,15 +96,6 @@ interface RerankResponse {
   readonly results?: ReadonlyArray<RerankResultEntry>;
 }
 
-/** Strip a trailing slash + `/v1` suffix so we can reliably append
- *  `/v1/rerank`. Mirrors the embedding client's normaliseBaseUrl
- *  shape but keeps the bare base URL (we build the full path
- *  ourselves rather than relying on the SDK to append). */
-function normaliseBaseUrl(endpoint: string): string {
-  const stripped = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
-  return stripped.endsWith('/v1') ? stripped.slice(0, -3) : stripped;
-}
-
 export class OpenAiSdkRerankerClient {
   private readonly cfg: RerankerProviderConfig;
   private readonly baseUrl: string;
@@ -110,19 +106,13 @@ export class OpenAiSdkRerankerClient {
     if (cfg.provider !== 'openai-compat') {
       throw new LlmEndpointError(`OpenAiSdkRerankerClient requires provider='openai-compat', got '${cfg.provider}'`);
     }
-    if (!cfg.endpoint && !cfg.apiKey) {
-      throw new LlmEndpointError(
-        'openai-compat reranker requires either `endpoint` (for local backends like ' +
-          'llama-server) or `apiKey` (for cloud Cohere / Jina / Voyage). Neither is set in ' +
-          'rerankerLlm config.',
-      );
-    }
+    assertOpenAiCompatEndpointOrApiKey(cfg, 'reranker', 'rerankerLlm config');
     if (!cfg.model || cfg.model.length === 0) {
       throw new LlmEndpointError('openai-compat reranker requires `model` to be set in rerankerLlm config.');
     }
     this.cfg = cfg;
-    this.baseUrl = cfg.endpoint ? normaliseBaseUrl(cfg.endpoint) : COHERE_DEFAULT_ENDPOINT;
-    this.timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
+    this.baseUrl = cfg.endpoint ? normaliseOpenAiCompatFetchBaseUrl(cfg.endpoint) : COHERE_DEFAULT_ENDPOINT;
+    this.timeoutMs = resolveOpenAiCompatTimeout(cfg.timeoutMs, DEFAULT_TIMEOUT_MS);
   }
 
   /**

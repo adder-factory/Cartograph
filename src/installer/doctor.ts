@@ -45,6 +45,7 @@ import {
 } from './scan-backends.js';
 import { describeHardware, recommendedTuning } from './hardware-tuning.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './default-endpoints.js';
+import { LLAMA_SERVER_RERANK_FLAG } from './llm-setup-catalog.js';
 import { loadConfig } from '../config.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
 
@@ -357,28 +358,17 @@ function checkEmbeddingReachability(
   if (!embeddingLlm || typeof embeddingLlm !== 'object') return null;
   if (embeddingLlm['provider'] !== 'openai-compat') return null;
   const endpoint = typeof embeddingLlm['endpoint'] === 'string' ? embeddingLlm['endpoint'] : null;
-  if (!endpoint) {
-    return {
-      name: 'Embedding endpoint',
-      status: 'warn',
-      detail: 'embeddingLlm.endpoint is not set.',
-      remediation: `Add an \`endpoint\` field to \`embeddingLlm\` (e.g. \`"${LLAMA_SERVER_DEFAULT_ENDPOINT}"\` for llama-server). Run \`cartograph admin install-models --write-config\` to auto-wire the recommended stack.`,
-    };
-  }
+  if (!endpoint) return checkEndpointlessOpenAiEmbedding(embeddingLlm);
 
   // Normalise to the bare base-URL shape the scanner returns. Shared
   // `normaliseEndpoint` keeps the two sides from drifting.
   const base = normaliseEndpoint(endpoint);
   const match = detected.find((d) => d.endpoint === base);
   if (match) {
-    let modelInfo = 'no models loaded';
-    if (match.models.length > 0) {
-      modelInfo = `${match.models.length} model${match.models.length === 1 ? '' : 's'} loaded`;
-    }
     return {
       name: 'Embedding endpoint',
       status: 'ok',
-      detail: `${backendLabel(match.kind)} reachable at ${base} (${modelInfo}).`,
+      detail: `${backendLabel(match.kind)} reachable at ${base} (${loadedModelSummary(match)}).`,
     };
   }
 
@@ -398,6 +388,31 @@ function checkEmbeddingReachability(
     detail: `embeddingLlm.endpoint=${endpoint} is not responding to GET /v1/models.`,
     remediation: alternatives,
   };
+}
+
+function checkEndpointlessOpenAiEmbedding(embeddingLlm: Record<string, unknown>): CheckResult {
+  const configuredApiKey = typeof embeddingLlm['apiKey'] === 'string' && embeddingLlm['apiKey'].length > 0;
+  const envApiKey = typeof process.env['OPENAI_API_KEY'] === 'string' && process.env['OPENAI_API_KEY'].length > 0;
+  if (configuredApiKey || envApiKey) {
+    return {
+      name: 'Embedding endpoint',
+      status: 'ok',
+      detail: `No embeddingLlm.endpoint set; OpenAI SDK default endpoint will be used with ${
+        configuredApiKey ? 'configured apiKey' : 'OPENAI_API_KEY'
+      }.`,
+    };
+  }
+  return {
+    name: 'Embedding endpoint',
+    status: 'warn',
+    detail: 'embeddingLlm.endpoint is not set.',
+    remediation: `Add an \`endpoint\` field to \`embeddingLlm\` (e.g. \`"${LLAMA_SERVER_DEFAULT_ENDPOINT}"\` for llama-server), or set \`OPENAI_API_KEY\` to use the OpenAI SDK default endpoint. Run \`cartograph admin install-models --write-config\` to auto-wire the recommended stack.`,
+  };
+}
+
+function loadedModelSummary(match: DetectedBackend): string {
+  if (match.models.length === 0) return 'no models loaded';
+  return `${match.models.length} model${match.models.length === 1 ? '' : 's'} loaded`;
 }
 
 /** Informational check listing every OpenAI-compat backend the
@@ -439,7 +454,7 @@ function recommendedTuningCheck(): CheckResult {
     `  embed :8080     → --parallel ${t.embed.llamaServerParallel}  (cartograph drives ${t.embed.cartographConcurrency} concurrent batches)`,
     `  chat  :8081     → --parallel ${t.chat.llamaServerParallel}  (cartograph drives ${t.chat.cartographConcurrency})`,
     `  ask   :8082     → --parallel ${t.ask.llamaServerParallel}  (cartograph drives ${t.ask.cartographConcurrency})`,
-    `  rerank :8083 (with --reranking) → --parallel ${t.reranker.llamaServerParallel}  (cartograph drives ${t.reranker.cartographConcurrency})`,
+    `  rerank :8083 (with ${LLAMA_SERVER_RERANK_FLAG}) → --parallel ${t.reranker.llamaServerParallel}  (cartograph drives ${t.reranker.cartographConcurrency})`,
     'Increase `--parallel N` on your llama-server startup to saturate every slot; cartograph auto-matches outbound concurrency.',
   ].join('\n');
   return { name: 'Recommended tuning', status: 'ok', detail: lines };

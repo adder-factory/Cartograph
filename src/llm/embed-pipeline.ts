@@ -17,7 +17,7 @@
  */
 
 import type { Cartograph } from '../index.js';
-import { getAllEmbeddings, getEmbeddingsCount } from '../db/queries-embeddings.js';
+import { getAllEmbeddings, getEmbeddingsSignature } from '../db/queries-embeddings.js';
 import { createEmbeddingClient } from './embedding-client.js';
 import { embedAllNodes, EmbeddingCache, type EmbeddingFetcher } from './embeddings.js';
 import type { HnswIndex } from '../embeddings/hnsw-index.js';
@@ -88,7 +88,7 @@ export class EmbedPipeline {
   ) {
     this.embeddingFetcher = {
       getAllEmbeddings: (model) => getAllEmbeddings(cg.queries, model),
-      getEmbeddingsCount: (model) => getEmbeddingsCount(cg.queries, model),
+      getEmbeddingsSignature: (model) => getEmbeddingsSignature(cg.queries, model),
     };
   }
 

@@ -6,13 +6,15 @@
  * behaviour:
  *   - null config → null result (unchanged).
  *   - ANTHROPIC_API_KEY env var is still used by the anthropic-api provider.
- *   - Per-project openai-compat config is used as-is (no env override needed).
+ *   - OPENAI_API_KEY is used only for cloud-default openai-compat configs
+ *     that omit endpoint.
+ *   - Per-project openai-compat endpoint config is used as-is.
  */
 import { describe, it, expect } from 'vitest';
 import { resolveLlmProviders } from '../src/llm/provider.js';
 import type { CartographConfig } from '../src/types.js';
 
-describe('LLM provider resolution — no env-var synthesis', () => {
+describe('LLM provider resolution env fallbacks', () => {
   it('returns null when neither config nor env supply LLM settings', async () => {
     const cfg: CartographConfig = { include: [], exclude: [] };
     expect(await resolveLlmProviders(cfg)).toBeNull();
@@ -60,18 +62,90 @@ describe('LLM provider resolution — no env-var synthesis', () => {
     expect(resolved?.embeddingLlm?.provider).toBe('openai-compat');
   });
 
-  it('openai-compat summarizeLlm without endpoint OR apiKey returns null with warning', async () => {
-    // Symmetric with the embedding side: model alone isn't enough,
-    // need either endpoint (local backend URL) or apiKey (cloud).
-    const cfg: CartographConfig = {
-      include: [],
-      exclude: [],
-      llm: {
-        summarizeLlm: { provider: 'openai-compat', model: 'qwen2.5:7b' },
-      },
-    };
-    const resolved = await resolveLlmProviders(cfg);
-    expect(resolved).toBeNull();
+  it('openai-compat summarizeLlm without endpoint OR apiKey uses OPENAI_API_KEY for cloud default', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-openai-env';
+    try {
+      const cfg: CartographConfig = {
+        include: [],
+        exclude: [],
+        llm: {
+          summarizeLlm: { provider: 'openai-compat', model: 'gpt-4.1-mini' },
+        },
+      };
+      const resolved = await resolveLlmProviders(cfg);
+      expect(resolved?.summarizeLlm?.provider).toBe('openai-compat');
+      expect((resolved?.summarizeLlm as { apiKey?: string })?.apiKey).toBe('sk-openai-env');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat summarizeLlm without endpoint OR apiKey returns null when OPENAI_API_KEY is unset', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const cfg: CartographConfig = {
+        include: [],
+        exclude: [],
+        llm: {
+          summarizeLlm: { provider: 'openai-compat', model: 'qwen2.5:7b' },
+        },
+      };
+      const resolved = await resolveLlmProviders(cfg);
+      expect(resolved).toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat endpoint configs do not inherit OPENAI_API_KEY', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-should-not-be-used-for-local';
+    try {
+      const cfg: CartographConfig = {
+        include: [],
+        exclude: [],
+        llm: {
+          summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:11434', model: 'qwen2.5:7b' },
+          embeddingLlm: {
+            provider: 'openai-compat',
+            endpoint: 'http://localhost:8080',
+            model: 'nomic-embed-text',
+          },
+        },
+      };
+      const resolved = await resolveLlmProviders(cfg);
+      expect(resolved?.summarizeLlm?.provider).toBe('openai-compat');
+      expect((resolved?.summarizeLlm as { apiKey?: string })?.apiKey).toBeUndefined();
+      expect(resolved?.embeddingLlm?.provider).toBe('openai-compat');
+      expect((resolved?.embeddingLlm as { apiKey?: string })?.apiKey).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat embeddingLlm without endpoint OR apiKey uses OPENAI_API_KEY for cloud default', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-openai-env';
+    try {
+      const cfg: CartographConfig = {
+        include: [],
+        exclude: [],
+        llm: {
+          embeddingLlm: { provider: 'openai-compat', model: 'text-embedding-3-small' },
+        },
+      };
+      const resolved = await resolveLlmProviders(cfg);
+      expect(resolved?.embeddingLlm?.provider).toBe('openai-compat');
+      expect((resolved?.embeddingLlm as { apiKey?: string })?.apiKey).toBe('sk-openai-env');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
   });
 
   it('openai-compat summarizeLlm with endpoint+model resolves successfully (parity with embedding side)', async () => {

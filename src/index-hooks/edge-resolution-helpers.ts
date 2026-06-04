@@ -2,8 +2,7 @@
  * Shared helpers used by both `dynamic-import-edges.ts` and
  * `re-export-edges.ts`. Extracted from the two files to eliminate
  * exact clones (`collectTargets`, `lookupSymbolByNameInFile`,
- * `resolveTargetFile`, `existsAsFile`, `FileTarget`, `MODULE_EXTENSIONS`,
- * `refreshEdgesHook`).
+ * `resolveTargetFile`, `existsAsFile`, `FileTarget`, `refreshEdgesHook`).
  */
 
 import * as fs from 'node:fs';
@@ -13,16 +12,14 @@ import { getAllFiles, getFileByPath } from '../db/queries-files.js';
 import { getNodesByNameAndFile } from '../db/queries-search.js';
 import { insertEdges } from '../db/queries-edges.js';
 import { logDebug, errMsg } from '../errors.js';
+import { resolveImportPath } from '../resolution/import-resolver.js';
+import { loadProjectAliases, type AliasMap } from '../resolution/path-aliases.js';
+import type { ResolutionContext } from '../resolution/types.js';
 
 export interface FileTarget {
   path: string;
   language: string;
 }
-
-/** Module suffixes to try when resolving `import './foo'` to a real
- *  source file. Order matters — `.ts` wins over `.js` because we
- *  index the source-tree, not the build output. */
-const MODULE_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs'];
 
 export function collectTargets(
   ctx: IndexHookContext,
@@ -60,25 +57,53 @@ export function lookupSymbolByNameInFile(ctx: IndexHookContext, name: string, fi
 }
 
 /**
- * Resolve a relative TS/JS module specifier to a project-relative
+ * Resolve a TS/JS module specifier to a project-relative
  * file path. Returns null when no matching source file exists.
  *
- * Tries each `MODULE_EXTENSIONS` value plus the `/index.<ext>`
- * variant for directory imports. Skips package imports
- * (specifiers that don't start with `.`) — we don't follow into
- * `node_modules`.
+ * Uses the main import resolver so dynamic-import and re-export hooks
+ * follow the same NodeNext suffix, directory-index, fallback-alias,
+ * and tsconfig-path policy as ordinary import resolution.
  */
 export function resolveTargetFile(fromDir: string, importPath: string, projectRoot: string): string | null {
-  if (!importPath.startsWith('.')) return null;
-  const cleaned = importPath.replace(/\.[mc]?js$/, '').replace(/\.[mc]?ts$/, '');
-  const baseRel = path.normalize(path.join(fromDir, cleaned));
-  for (const ext of MODULE_EXTENSIONS) {
-    const direct = baseRel + ext;
-    if (existsAsFile(path.join(projectRoot, direct))) return direct;
-    const indexed = path.join(baseRel, 'index' + ext);
-    if (existsAsFile(path.join(projectRoot, indexed))) return indexed;
+  const fromFile = normalizeProjectPath(path.join(fromDir, '__index_hook_importer__.ts'));
+  return resolveImportPath({
+    importPath,
+    fromFile,
+    language: 'typescript',
+    context: buildHookResolutionContext(projectRoot),
+  });
+}
+
+function buildHookResolutionContext(projectRoot: string): ResolutionContext {
+  let aliases: AliasMap | null | undefined;
+  return {
+    getNodesInFile: () => [],
+    getNodesByName: () => [],
+    getNodesByQualifiedName: () => [],
+    getNodesByKind: () => [],
+    fileExists: (filePath) => existsAsFile(path.join(projectRoot, filePath)),
+    readFile: (filePath) => readFileSafe(path.join(projectRoot, filePath)),
+    getProjectRoot: () => projectRoot,
+    getAllFiles: () => [],
+    getNodesByLowerName: () => [],
+    getImportMappings: () => [],
+    getProjectAliases: () => {
+      if (aliases === undefined) aliases = loadProjectAliases(projectRoot);
+      return aliases;
+    },
+  };
+}
+
+function normalizeProjectPath(filePath: string): string {
+  return filePath.replaceAll('\\', '/');
+}
+
+function readFileSafe(absPath: string): string | null {
+  try {
+    return fs.readFileSync(absPath, 'utf8');
+  } catch {
+    return null;
   }
-  return null;
 }
 
 function existsAsFile(absPath: string): boolean {

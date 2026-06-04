@@ -54,6 +54,7 @@ import { installRecommendedModels, type InstallModelsResult } from './install-mo
 import { buildRecommendedLlmConfig } from './recommended-config.js';
 import { OLLAMA_DEFAULT_ENDPOINT, MLX_DEFAULT_ENDPOINT } from './default-endpoints.js';
 import { buildSingleEndpointConfig } from './build-endpoint-config.js';
+import { LLAMA_SERVER_RERANK_FLAG, MLX_RECOMMENDED_MODELS, OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
 import {
   scanForLlmBackends,
   backendLabel,
@@ -102,17 +103,6 @@ async function probeEnvironment(modelsDir: string = MODELS_DIR_DEFAULT): Promise
     presentModels,
   };
 }
-
-/** Models the wizard's Ollama auto-pull path will try to fetch. Ollama
- *  uses short model ids, not GGUF paths — these are the canonical
- *  drop-in equivalents to the recommended GGUFs. Reranker is omitted
- *  because Ollama doesn't expose `/v1/rerank` today — users wanting
- *  rerank pick the install-llama-cpp preset instead. */
-const OLLAMA_RECOMMENDED_MODELS: Record<'embed' | 'summarize' | 'ask', string> = {
-  embed: 'nomic-embed-text',
-  summarize: 'qwen2.5-coder:3b',
-  ask: 'qwen2.5-coder:7b',
-};
 
 type SetupChoice =
   | { kind: 'detected'; backend: DetectedBackend }
@@ -445,7 +435,7 @@ async function runInstallLlamaCppPath(clack: ClackPrompts): Promise<NonNullable<
       `  llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_EMBED)} --port 8080 --embeddings\n` +
       `  llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_SUMMARIZE)} --port 8081\n` +
       `  llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_ASK)} --port 8082\n` +
-      `  llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_RERANKER)} --port 8083 --rerank\n` +
+      `  llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_RERANKER)} --port 8083 ${LLAMA_SERVER_RERANK_FLAG}\n` +
       `Then re-run \`cartograph doctor\` to verify.`,
     'Next steps',
   );
@@ -459,15 +449,15 @@ async function runInstallMlxPath(clack: ClackPrompts): Promise<NonNullable<Carto
   printInstallGuide(clack, 'mlx_lm');
   clack.note(
     `mlx_lm.server is one-model-per-process; start one per tier you need (or run a model swap manually). Example:\n` +
-      `  python -m mlx_lm.server --model nomic-embed-text --port 8000\n` +
+      `  python -m mlx_lm.server --model ${MLX_RECOMMENDED_MODELS.embed} --port 8000\n` +
       `Then point each *Llm.endpoint in .cartograph/config.json at the port serving its model. ` +
       `The wizard has written a starter config targeting :8000 for the embedding tier; hand-edit for the others.`,
     'Next steps',
   );
   return buildSingleEndpointConfig(MLX_DEFAULT_ENDPOINT, {
-    embed: 'nomic-embed-text',
-    summarize: 'qwen2.5-coder-3b',
-    ask: 'qwen2.5-coder-7b',
+    embed: MLX_RECOMMENDED_MODELS.embed,
+    summarize: MLX_RECOMMENDED_MODELS.summarize,
+    ask: MLX_RECOMMENDED_MODELS.ask,
   });
 }
 

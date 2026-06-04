@@ -26,10 +26,9 @@ const DEFAULT_OPTIONS: Required<TraversalOptions> = {
 };
 
 /**
- * Hard cap on `findPath`'s BFS queue — each queue entry clones the full path
- * array, so on a dense graph the queue can balloon into millions of entries
- * before either finding a path or exhausting the search. This bounds the
- * worst-case memory footprint of a single findPath call.
+ * Hard cap on `findPath`'s BFS queue. Even with parent pointers rather
+ * than per-entry path clones, a dense graph can still create a very
+ * large frontier before either finding a path or exhausting the search.
  */
 const FIND_PATH_MAX_QUEUE = 100_000;
 
@@ -99,10 +98,16 @@ interface TraversalGraphOpts {
   visited: Set<string>;
 }
 
+interface PathQueueEntry {
+  node: Node;
+  edge: Edge | null;
+  parentIndex: number;
+}
+
 /** BFS frontier state for findPath. */
 interface PathFrontier {
-  path: Array<{ node: Node; edge: Edge | null }>;
-  queue: Array<{ nodeId: string; path: Array<{ node: Node; edge: Edge | null }> }>;
+  parentIndex: number;
+  queue: PathQueueEntry[];
 }
 
 /** Argument bundle for {@link GraphTraverser.getImpactRecursive} and its two
@@ -379,7 +384,7 @@ function traverserGetTypeRelativesRecursive(
 }
 
 /** Expand BFS frontier from `nodeId` in findPath: batch-resolve unvisited
- *  targets and queue successor paths. */
+ *  targets and queue successor parent links. */
 interface TraverserExpandPathFrontierArgs {
   opts: TraversalGraphOpts;
   nodeId: string;
@@ -390,7 +395,7 @@ interface TraverserExpandPathFrontierArgs {
 function traverserExpandPathFrontier(args: TraverserExpandPathFrontierArgs): void {
   const { opts, nodeId, frontier, edgeKinds } = args;
   const { queries, visited } = opts;
-  const { path, queue } = frontier;
+  const { parentIndex, queue } = frontier;
   const outgoingEdges = getOutgoingEdges(queries, nodeId, edgeKinds.length > 0 ? edgeKinds : undefined);
   if (outgoingEdges.length === 0) return;
 
@@ -401,8 +406,17 @@ function traverserExpandPathFrontier(args: TraverserExpandPathFrontierArgs): voi
     if (visited.has(edge.target)) continue;
     const nextNode = nextNodes.get(edge.target);
     if (!nextNode) continue;
-    queue.push({ nodeId: edge.target, path: [...path, { node: nextNode, edge }] });
+    queue.push({ node: nextNode, edge, parentIndex });
   }
+}
+
+function reconstructPath(queue: PathQueueEntry[], index: number): Array<{ node: Node; edge: Edge | null }> {
+  const reversed: Array<{ node: Node; edge: Edge | null }> = [];
+  for (let i = index; i >= 0; i = queue[i]!.parentIndex) {
+    const entry = queue[i]!;
+    reversed.push({ node: entry.node, edge: entry.edge });
+  }
+  return reversed.reverse();
 }
 
 // ---------------------------------------------------------------------------
@@ -433,8 +447,9 @@ export class GraphTraverser {
     const queue: TraversalStep[] = [{ node: startNode, edge: null, depth: 0 }];
     if (opts.includeStart) nodes.set(startNode.id, startNode);
 
-    while (queue.length > 0 && nodes.size < opts.limit) {
-      const { node, edge, depth } = queue.shift()!;
+    let queueIndex = 0;
+    while (queueIndex < queue.length && nodes.size < opts.limit) {
+      const { node, edge, depth } = queue[queueIndex++]!;
       if (visited.has(node.id)) continue;
       visited.add(node.id);
       if (edge) edges.push(edge);
@@ -564,18 +579,19 @@ export class GraphTraverser {
     if (!fromNode || !toNode) return null;
 
     const visited = new Set<string>();
-    const queue: Array<{ nodeId: string; path: Array<{ node: Node; edge: Edge | null }> }> = [
-      { nodeId: fromId, path: [{ node: fromNode, edge: null }] },
-    ];
+    const queue: PathQueueEntry[] = [{ node: fromNode, edge: null, parentIndex: -1 }];
     const opts: TraversalGraphOpts = { queries: this.queries, nodes: new Map(), edges: [], visited };
 
-    while (queue.length > 0) {
+    let queueIndex = 0;
+    while (queueIndex < queue.length) {
       if (queue.length > FIND_PATH_MAX_QUEUE) return null;
-      const { nodeId, path } = queue.shift()!;
-      if (nodeId === toId) return path;
+      const entry = queue[queueIndex]!;
+      const nodeId = entry.node.id;
+      if (nodeId === toId) return reconstructPath(queue, queueIndex);
+      queueIndex++;
       if (visited.has(nodeId)) continue;
       visited.add(nodeId);
-      traverserExpandPathFrontier({ opts, nodeId, frontier: { path, queue }, edgeKinds });
+      traverserExpandPathFrontier({ opts, nodeId, frontier: { parentIndex: queueIndex - 1, queue }, edgeKinds });
     }
     return null;
   }

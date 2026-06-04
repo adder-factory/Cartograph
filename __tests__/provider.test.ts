@@ -140,17 +140,43 @@ describe('resolveLlmProviders', () => {
     expect((r?.embeddingLlm as { endpoint?: string }).endpoint).toBeUndefined();
   });
 
-  it('openai-compat embedding without endpoint AND apiKey returns null with a clear warning', async () => {
-    const r = await resolveLlmProviders(
-      baseConfig({
-        embeddingLlm: {
-          provider: 'openai-compat',
-          model: 'nomic-embed-text',
-          // No endpoint, no apiKey — can't reach any backend.
-        },
-      }),
-    );
-    expect(r?.embeddingLlm).toBeFalsy();
+  it('openai-compat embedding without endpoint AND apiKey uses OPENAI_API_KEY when present', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-from-env';
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          embeddingLlm: {
+            provider: 'openai-compat',
+            model: 'text-embedding-3-small',
+          },
+        }),
+      );
+      expect(r?.embeddingLlm?.provider).toBe('openai-compat');
+      expect((r?.embeddingLlm as { apiKey?: string }).apiKey).toBe('sk-from-env');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat embedding without endpoint AND apiKey returns null when OPENAI_API_KEY is absent', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          embeddingLlm: {
+            provider: 'openai-compat',
+            model: 'nomic-embed-text',
+          },
+        }),
+      );
+      expect(r?.embeddingLlm).toBeFalsy();
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
   });
 
   it('unknown embedding provider returns null (not silently coerced)', async () => {
@@ -224,17 +250,43 @@ describe('resolveLlmProviders', () => {
     expect(r?.resolutionTrace).toContain('chat=openai-compat');
   });
 
-  it('openai-compat summarizeLlm without model OR endpoint+apiKey returns null with warning', async () => {
-    const r = await resolveLlmProviders(
-      baseConfig({
-        // Missing both endpoint and apiKey — resolver should drop.
-        summarizeLlm: {
-          provider: 'openai-compat',
-          model: 'qwen',
-        },
-      }),
-    );
-    expect(r).toBeNull();
+  it('openai-compat summarizeLlm without endpoint+apiKey uses OPENAI_API_KEY when present', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    process.env.OPENAI_API_KEY = 'sk-from-env';
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            model: 'gpt-compatible',
+          },
+        }),
+      );
+      expect(r?.summarizeLlm?.provider).toBe('openai-compat');
+      expect(r?.summarizeLlm?.apiKey).toBe('sk-from-env');
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat summarizeLlm without endpoint+apiKey returns null when OPENAI_API_KEY is absent', async () => {
+    const saved = process.env.OPENAI_API_KEY;
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            model: 'qwen',
+          },
+        }),
+      );
+      expect(r).toBeNull();
+    } finally {
+      if (saved === undefined) delete process.env.OPENAI_API_KEY;
+      else process.env.OPENAI_API_KEY = saved;
+    }
   });
 
   it('openai-compat summarizeLlm without model returns null even when endpoint is set', async () => {

@@ -13,9 +13,9 @@
  *
  * Scope deliberately small for v1:
  *   - reads tsconfig.json, then jsconfig.json
- *   - honours top-level `compilerOptions.baseUrl` and `compilerOptions.paths`
+ *   - honours `compilerOptions.baseUrl` and `compilerOptions.paths`
+ *   - follows `extends` chains for shared alias config
  *   - supports `*` wildcard (the only TS-supported wildcard)
- *   - does NOT follow `extends` chains yet (most projects don't need it)
  *   - does NOT read Vite/webpack/Rollup configs (separate follow-up)
  *
  * The file is parsed as JSON-with-comments-tolerant — tsconfigs in the
@@ -24,8 +24,11 @@
  */
 
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { logDebug } from '../errors.js';
+
+const MAX_EXTENDS_DEPTH = 8;
 
 /** A single alias pattern from `compilerOptions.paths`. */
 interface AliasPattern {
@@ -139,10 +142,24 @@ function consumeJsonStringChar(
 }
 
 interface RawTsconfig {
+  extends?: string;
   compilerOptions?: {
     baseUrl?: string;
     paths?: Record<string, string[]>;
   };
+}
+
+interface ResolvedTsconfigAliases {
+  usedFile: string;
+  chain: string[];
+  baseUrl: string;
+  paths?: Record<string, unknown>;
+}
+
+interface TsconfigResolveContext {
+  projectRoot: string;
+  seen: Set<string>;
+  depth: number;
 }
 
 function readTsconfigLike(filePath: string): RawTsconfig | null {
@@ -180,20 +197,15 @@ function splitWildcard(pattern: string): {
 export function loadProjectAliases(projectRoot: string): AliasMap | null {
   const found = findFirstTsconfigLike(projectRoot);
   if (!found) return null;
-  const { raw, usedFile } = found;
 
-  const co = raw.compilerOptions ?? {};
-  const baseUrl = path.resolve(projectRoot, co.baseUrl ?? '.');
-
-  const paths = co.paths;
-  if (!paths || typeof paths !== 'object') {
+  if (!found.paths || typeof found.paths !== 'object') {
     // baseUrl alone isn't an "alias" per se; with no paths we'd just
     // be redirecting the whole tree. Skip — the existing resolver
     // already handles relative imports.
     return null;
   }
 
-  const patterns = buildAliasPatterns(paths);
+  const patterns = buildAliasPatterns(found.paths);
   if (patterns.length === 0) return null;
 
   // Specificity sort: longer prefix first; literal patterns before
@@ -202,24 +214,137 @@ export function loadProjectAliases(projectRoot: string): AliasMap | null {
   patterns.sort(compareAliasSpecificity);
 
   logDebug('path-aliases loaded', {
-    file: usedFile,
-    baseUrl,
+    file: found.usedFile,
+    chain: found.chain,
+    baseUrl: found.baseUrl,
     patternCount: patterns.length,
   });
 
-  return { baseUrl, patterns };
+  return { baseUrl: found.baseUrl, patterns };
+}
+
+/**
+ * Semantic fingerprint for the alias inputs the resolver actually uses.
+ *
+ * Mirrors {@link loadProjectAliases}: first parsed `tsconfig.json`, then
+ * `jsconfig.json`; only `compilerOptions.baseUrl` and `paths` matter. This
+ * deliberately ignores JSONC comments, whitespace, unrelated compiler options,
+ * and raw object insertion order so harmless config formatting does not queue a
+ * project-wide JS/TS re-extract.
+ */
+export function projectAliasConfigFingerprint(projectRoot: string): string {
+  const found = findFirstTsconfigLike(projectRoot);
+  if (!found) return 'alias:none';
+  const paths = found.paths && typeof found.paths === 'object' ? normalizePathsForFingerprint(found.paths) : null;
+  if (!paths || Object.keys(paths).length === 0) return 'alias:none';
+  return JSON.stringify({
+    baseUrl: normalizeBaseUrlForFingerprint(projectRoot, found.baseUrl),
+    paths,
+  });
 }
 
 /** Probe `tsconfig.json` then `jsconfig.json` and return the first that parses. */
-function findFirstTsconfigLike(projectRoot: string): { raw: RawTsconfig; usedFile: string } | null {
+function findFirstTsconfigLike(projectRoot: string): ResolvedTsconfigAliases | null {
   const candidates = ['tsconfig.json', 'jsconfig.json'];
   for (const name of candidates) {
     const p = path.join(projectRoot, name);
     if (!fs.existsSync(p)) continue;
-    const raw = readTsconfigLike(p);
-    if (raw) return { raw, usedFile: name };
+    const resolved = resolveTsconfigAliases(p, { projectRoot, seen: new Set(), depth: 0 });
+    if (resolved) return { ...resolved, usedFile: name };
   }
   return null;
+}
+
+function resolveTsconfigAliases(
+  filePath: string,
+  ctx: TsconfigResolveContext,
+): Omit<ResolvedTsconfigAliases, 'usedFile'> | null {
+  const normalizedPath = path.resolve(filePath);
+  if (ctx.seen.has(normalizedPath) || ctx.depth > MAX_EXTENDS_DEPTH) return null;
+
+  const raw = readTsconfigLike(normalizedPath);
+  if (!raw) return null;
+
+  const nextCtx: TsconfigResolveContext = {
+    projectRoot: ctx.projectRoot,
+    seen: new Set(ctx.seen).add(normalizedPath),
+    depth: ctx.depth + 1,
+  };
+
+  const inherited = resolveExtendedAliases(raw.extends, normalizedPath, nextCtx);
+  const configDir = path.dirname(normalizedPath);
+  const co = raw.compilerOptions ?? {};
+  const inheritedBaseUrl = inherited?.baseUrl ?? configDir;
+  const baseUrl = typeof co.baseUrl === 'string' ? path.resolve(configDir, co.baseUrl) : inheritedBaseUrl;
+  const paths = co.paths && typeof co.paths === 'object' ? co.paths : inherited?.paths;
+
+  const resolved: Omit<ResolvedTsconfigAliases, 'usedFile'> = {
+    chain: [...(inherited?.chain ?? []), normalizeConfigPath(ctx.projectRoot, normalizedPath)],
+    baseUrl,
+  };
+  if (paths !== undefined) resolved.paths = paths;
+  return resolved;
+}
+
+function resolveExtendedAliases(
+  extendsValue: string | undefined,
+  filePath: string,
+  ctx: TsconfigResolveContext,
+): Omit<ResolvedTsconfigAliases, 'usedFile'> | null {
+  if (!extendsValue || typeof extendsValue !== 'string') return null;
+  const extendedPath = resolveExtendsPath(extendsValue, path.dirname(filePath));
+  if (!extendedPath) return null;
+  return resolveTsconfigAliases(extendedPath, ctx);
+}
+
+function resolveExtendsPath(extendsValue: string, fromDir: string): string | null {
+  const raw = extendsValue.trim();
+  if (!raw) return null;
+  if (raw.startsWith('.') || path.isAbsolute(raw)) return resolveTsconfigCandidate(path.resolve(fromDir, raw));
+
+  const requireFromConfig = createRequire(path.join(fromDir, 'tsconfig.json'));
+  for (const specifier of [raw, `${raw}/tsconfig.json`]) {
+    try {
+      return requireFromConfig.resolve(specifier);
+    } catch {
+      // Try the next package-style shape.
+    }
+  }
+  return null;
+}
+
+function resolveTsconfigCandidate(candidate: string): string | null {
+  for (const filePath of [candidate, `${candidate}.json`, path.join(candidate, 'tsconfig.json')]) {
+    if (fs.existsSync(filePath)) return filePath;
+  }
+  return null;
+}
+
+function normalizeConfigPath(projectRoot: string, filePath: string): string {
+  const relative = path.relative(projectRoot, filePath).replaceAll('\\', '/');
+  return relative === '' ? path.basename(filePath) : relative;
+}
+
+function normalizePathsForFingerprint(paths: Record<string, unknown>): Record<string, string[]> {
+  const out: Record<string, string[]> = {};
+  for (const key of Object.keys(paths).sort((a, b) => a.localeCompare(b))) {
+    const targets = paths[key];
+    if (!Array.isArray(targets)) continue;
+    const filtered = targets
+      .filter((target): target is string => typeof target === 'string')
+      .map(normalizeAliasTargetForFingerprint);
+    if (filtered.length > 0) out[key] = filtered;
+  }
+  return out;
+}
+
+function normalizeBaseUrlForFingerprint(projectRoot: string, baseUrl: string): string {
+  const relative = path.relative(projectRoot, baseUrl).replaceAll('\\', '/');
+  return relative === '' ? '.' : relative;
+}
+
+function normalizeAliasTargetForFingerprint(target: string): string {
+  return path.posix.normalize(target.replaceAll('\\', '/'));
 }
 
 /** Convert the `compilerOptions.paths` map into a list of {@link AliasPattern}. */
