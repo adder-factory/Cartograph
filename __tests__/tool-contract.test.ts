@@ -5,12 +5,18 @@
  * presentation metadata lives beside the MCP tool definition instead
  * of in `src/bin/commands/generated.ts`.
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as path from 'node:path';
 import type { Command } from 'commander';
 import { getToolModules } from '../src/mcp/tools/registry.js';
 import { getToolContract } from '../src/mcp/tools/_tool-contract.js';
+import { buildGeneratedCommand, type RunViaMcp } from '../src/bin/_command-generator.js';
+
+afterEach(() => {
+  process.exitCode = 0;
+  vi.restoreAllMocks();
+});
 
 function coverageModule() {
   const mod = getToolModules().find((m) => m.definition.name === 'cartograph_coverage');
@@ -30,6 +36,11 @@ function runCliHelp(command: string): string {
     cwd: repoRoot,
     encoding: 'utf-8',
   });
+}
+
+async function parse(cmd: Command, argv: string[]): Promise<void> {
+  cmd.exitOverride();
+  await cmd.parseAsync(argv, { from: 'user' });
 }
 
 describe('ToolContract pilot: cartograph_coverage', () => {
@@ -70,5 +81,40 @@ describe('ToolContract pilot: cartograph_coverage', () => {
     expect(help).toContain('cartograph coverage --mode ranked --max-pct 0.5 --min-centrality 0.0001');
     expect(help).toContain('Next steps:');
     expect(help).toContain('cartograph coverage --mode refresh');
+  });
+
+  it('normalizes contract CLI booleans, defaults, and explicit overrides before dispatch', async () => {
+    const mod = coverageModule();
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const cmd = buildGeneratedCommand(mod, run, getToolContract(mod)?.cli);
+
+    await parse(cmd, ['MySymbol', '--no-include-tests', '--limit', '7']);
+    expect(run).toHaveBeenCalledWith(
+      'cartograph_coverage',
+      { symbol: 'MySymbol', includeTests: false, limit: 7, via: 'auto' },
+      undefined,
+    );
+
+    await parse(cmd, ['--via', 'rule']);
+    expect(run.mock.calls.at(-1)?.[1]).toMatchObject({ via: 'rule' });
+  });
+
+  it('rejects invalid enum values and unknown generated CLI options before dispatch', async () => {
+    const mod = coverageModule();
+    const run = vi.fn<RunViaMcp>().mockResolvedValue();
+    const cmd = buildGeneratedCommand(mod, run, getToolContract(mod)?.cli);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk: unknown) => {
+      stderrWrites.push(typeof chunk === 'string' ? chunk : String(chunk));
+      return true;
+    });
+
+    await parse(cmd, ['--via', 'sideways']);
+    expect(run).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(stderrWrites.join('')).toContain('--via');
+
+    process.exitCode = 0;
+    await expect(parse(cmd, ['--includeTest'])).rejects.toThrow(/unknown option/i);
   });
 });

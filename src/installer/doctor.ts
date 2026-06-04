@@ -116,7 +116,25 @@ function resolveModelsDir(): string {
   return process.env['CARTOGRAPH_MODELS_DIR'] ?? MODELS_DIR_DEFAULT;
 }
 
-async function checkModels(): Promise<CheckResult> {
+async function checkModels(llm: Record<string, unknown> | null): Promise<CheckResult> {
+  if (hasConfiguredLlmTier(llm)) {
+    const localModelFiles = configuredModelFiles(llm);
+    if (localModelFiles.length === 0) {
+      return {
+        name: 'LLM models',
+        status: 'ok',
+        detail: 'Current LLM config uses backend model IDs; no local GGUF model directory is required.',
+      };
+    }
+    return {
+      name: 'LLM models',
+      status: 'ok',
+      detail: `${localModelFiles.length} configured local model file path${
+        localModelFiles.length === 1 ? '' : 's'
+      } will be checked from config.`,
+    };
+  }
+
   const modelsDir = resolveModelsDir();
   const modelsDirExists = await fsp
     .access(modelsDir)
@@ -147,6 +165,14 @@ async function checkModels(): Promise<CheckResult> {
     status: 'ok',
     detail: `${ggufs.length} model${ggufs.length === 1 ? '' : 's'} present under ${modelsDir}`,
   };
+}
+
+function hasConfiguredLlmTier(llm: Record<string, unknown> | null): boolean {
+  if (!llm) return false;
+  return LLM_TIER_KEYS.some((tier) => {
+    const block = llm[tier];
+    return typeof block === 'object' && block !== null;
+  });
 }
 
 async function checkProjectInit(projectPath: string): Promise<CheckResult> {
@@ -526,7 +552,7 @@ function isAutoFixable(name: string, status: CheckStatus): boolean {
  *  added. */
 async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   const checks: CheckResult[] = [];
-  checks.push(checkBunRuntime(), await checkModels());
+  checks.push(checkBunRuntime());
 
   // Read the project's llm block (if any) so the scanner can also
   // probe non-default ports the user has configured, and so doctor
@@ -550,6 +576,7 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
       if (modelFileCheck) checks.push(modelFileCheck);
     }
   }
+  checks.push(await checkModels(llm));
 
   // Scan + emit the informational "detected backends" line + the
   // configured-endpoint reachability check. Scanner is async and
