@@ -394,9 +394,8 @@ export const MIGRATION: MigrationModule = {
       db.exec('VACUUM');
     } catch {
       // VACUUM cannot run inside a transaction; the migration runner
-      // wraps us in one. The post-migration `PRAGMA optimize` /
-      // `wal_checkpoint(PASSIVE)` calls in src/db/index.ts pick up
-      // most of the benefit anyway.
+      // wraps us in one. The post-migration maintenance pass in
+      // src/db/index.ts picks up most of the benefit anyway.
     }
   },
 };
