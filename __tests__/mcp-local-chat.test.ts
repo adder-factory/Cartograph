@@ -55,7 +55,7 @@ describe('cartograph_local_chat', () => {
       },
     });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(async () => {
@@ -117,7 +117,7 @@ describe('cartograph_local_chat', () => {
       fs.writeFileSync(path.join(dir2, 'package.json'), JSON.stringify({ name: 'y', version: '0.0.0' }));
       // No llm config at all.
       const cg2 = await Cartograph.init(dir2, {});
-      const handler2 = new ToolHandler(cg2);
+      const handler2 = new ToolHandler(cg2, { profile: 'full' });
       try {
         const result = await handler2.execute('cartograph_local_chat', { prompt: 'hi' });
         const text = result.content[0]?.text ?? '';

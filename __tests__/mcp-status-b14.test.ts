@@ -31,7 +31,7 @@ describe('cartograph_status B14 — Pending Changes section', () => {
     fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
     fs.writeFileSync(path.join(tempDir, 'src/a.ts'), 'export function alpha() {}\n');
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -181,7 +181,7 @@ describe('cartograph_status B14 — LLM Enrichment hint when no LLM', () => {
     // Empty LLM config — explicit "no provider" so the auto-detect
     // path can't accidentally pick up Ollama from the dev machine.
     cg = await Cartograph.init(tempDir, { config: { llm: { endpoint: '' } }, index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

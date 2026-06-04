@@ -141,9 +141,11 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
     const result = await handler.execute('cartograph_node', { symbol: 'alpha', code: true, allowStale: true });
     const text = result.content[0]?.text ?? '';
 
-    expect(text).toContain('source from indexed snapshot');
+    expect(text).toContain('stale source slice');
     expect(text).toContain('modified since last index');
-    expect(text).toContain('Run `cartograph admin sync`');
+    expect(text).toContain('indexed line range');
+    expect(text).toContain('Pass `liveSource: true`');
+    expect(text).toContain('run `cartograph admin sync`');
     expect(text).toContain('return 1');
   });
 

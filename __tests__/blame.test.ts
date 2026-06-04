@@ -99,7 +99,7 @@ describe('cartograph_blame', () => {
   });
 
   it('surfaces the line-range timeline with earliest, most-recent, and author rollup', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'alpha' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -123,7 +123,7 @@ describe('cartograph_blame', () => {
     fs.writeFileSync(path.join(dir, 'src', 'fresh.ts'), `export function brandNew(): number {\n  return 99;\n}\n`);
     await cg.sync({ summarize: false });
 
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'brandNew' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -131,7 +131,7 @@ describe('cartograph_blame', () => {
   });
 
   it('respects perCommitPeers=0 to disable the per-commit peer trail', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'alpha', perCommitPeers: 0 });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -139,7 +139,7 @@ describe('cartograph_blame', () => {
   });
 
   it('returns "not found" when the symbol does not exist', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'doesNotExist' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -167,7 +167,7 @@ describe('cartograph_blame', () => {
       .mockReturnValue('2000-01-01T00:00:00+00:00');
 
     try {
-      const handler = new ToolHandler(cg);
+      const handler = new ToolHandler(cg, { profile: 'full' });
       const result = await handler.execute('cartograph_blame', { symbol: 'alpha' });
       handler.closeAll();
       const text = result.content[0]?.text ?? '';
@@ -187,7 +187,7 @@ describe('cartograph_blame', () => {
     // `matchesSymbol` rejects the approximate hit, so `resolveSymbolToNode`
     // flags it `fuzzy` and blame must surface the banner so the agent
     // knows the L-range belongs to a guessed symbol, not `alph` (#20).
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'alph' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -200,7 +200,7 @@ describe('cartograph_blame', () => {
   });
 
   it('does NOT print a fuzzy-fallback banner on an exact symbol match', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'alpha' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -212,7 +212,7 @@ describe('cartograph_blame', () => {
   it('does NOT append rename warning when file has never been renamed', async () => {
     // The main fixture (dir / cg) has no renames — alpha has always
     // been in src/a.ts. Blame should not emit a rename warning.
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_blame', { symbol: 'alpha' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -258,7 +258,7 @@ describe('cartograph_blame', () => {
       subCg = await Cartograph.init(subDir, { config: { llm: { endpoint: '' } } });
       await subCg.indexAll({ summarize: false });
 
-      const handler = new ToolHandler(subCg);
+      const handler = new ToolHandler(subCg, { profile: 'full' });
       const result = await handler.execute('cartograph_blame', { symbol: 'lateAddition' });
       handler.closeAll();
       const text = result.content[0]?.text ?? '';

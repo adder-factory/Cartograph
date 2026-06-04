@@ -61,7 +61,7 @@ describe('symbol-resolver — cartograph_node ↔ cartograph_biomarkers parity',
     git(dir, 'commit', '-q', '-m', 'init');
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

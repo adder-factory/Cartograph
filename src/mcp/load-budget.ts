@@ -107,7 +107,7 @@ export function measureMcpLoadBudget(
       .slice(0, topContributors);
 
     return {
-      profile: options.handlerOptions?.profile ?? 'full',
+      profile: resolveMcpServerProfile(options.handlerOptions?.profile),
       writeTools: reportWriteToolsEnabled(options.handlerOptions),
       disabledTools: sortedDisabledTools(options.handlerOptions?.disabledTools),
       toolCount: tools.length,

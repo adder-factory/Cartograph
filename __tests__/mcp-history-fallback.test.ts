@@ -66,7 +66,7 @@ describe.skipIf(!HAS_GIT)('cartograph_history file-level fallback (#22)', () => 
 
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -209,7 +209,7 @@ describe.skipIf(!HAS_GIT)('cartograph_history — no-issue-tagged wording is una
 
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -283,7 +283,7 @@ describe.skipIf(!HAS_GIT)('cartograph_history — ambiguous file name picks the 
 
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

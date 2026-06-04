@@ -47,7 +47,7 @@ describe('cartograph_discover', () => {
     await projectACg.indexAll({ summarize: false });
     projectBCg = await Cartograph.init(path.join(monorepo, 'packages', 'b'), { config: { llm: { endpoint: '' } } });
     await projectBCg.indexAll({ summarize: false });
-    handler = new ToolHandler(projectACg); // any cg works as the host
+    handler = new ToolHandler(projectACg, { profile: 'full' }); // any cg works as the host
   });
 
   afterEach(() => {

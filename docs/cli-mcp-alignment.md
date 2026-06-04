@@ -166,6 +166,33 @@ When adding a new MCP tool:
 
 Run the verification recipes above to confirm no drift.
 
+## How to extend an existing tool family
+
+When adding a mode or option to a compressed tool instead of adding a
+new public tool name:
+
+1. **Schema/help**: update the tool's Zod schema description. Generated
+   CLI commands mirror new schema fields automatically; hand-written
+   commands must add the matching `.option(...)` and output behavior.
+2. **Playbook/startup guide**: update `src/mcp/server-instructions.ts`
+   so both `SERVER_INSTRUCTIONS` and `FULL_PLAYBOOK` mention the new
+   route when it changes agent workflow.
+3. **Installer instructions + README**: update
+   `src/installer/instructions-template.ts` and `README.md` when the
+   feature changes first-use guidance or human CLI usage.
+4. **Help parity**: for family commands such as `session`, update the
+   parent-command description in `src/bin/_cli-core.ts` and add any
+   new subcommand in `src/bin/commands/<family>.ts`.
+5. **Load budget**: run `cartograph mcp-budget` or
+   `bun run check:mcp-load`; extra schema text counts against the MCP
+   startup payload even when no new tool name was added.
+
+Recent example: `cartograph_context({format: "plan"})`,
+`cartograph_affected({includeCommands: true})`,
+`cartograph_node({liveSource: true})`, and
+`cartograph_session({action: "audit"})` were added as family
+extensions to avoid expanding the top-level MCP tool count.
+
 ### Release audit guardrails
 
 Before a release or quarterly tool-surface audit, run:

@@ -1,10 +1,11 @@
 /**
  * `cartograph_session({action})` — agent session state + macros (#13).
  *
- * Eight actions on the consolidated family pattern from #7:
+ * Nine actions on the consolidated family pattern from #7:
  *
  *   - `create  ({label})`            → mint a labelled session row
  *   - `resume  ({id?, label?})`      → render compact summary of prior calls
+ *   - `audit   ({id?, label?})`      → review a session's tool-use pattern
  *   - `list    ({limit?})`           → recent sessions, newest first
  *   - `delete  ({id?, label?})`      → drop a session row + its tool calls
  *   - `macro_save  ({name, steps})`  → store a recipe of {tool,args} steps
@@ -147,6 +148,212 @@ function formatResumeReport(session: SessionRow, calls: ReturnType<typeof callsF
       RESUME_RESULT_SNIPPET_TRUNCATE_AT,
     );
     lines.push(`${c.step}. **${c.toolName}** \`${argSnippet}\` — ${summarySnippet} _(${c.durationMs}ms)_`);
+  }
+  return lines.join('\n');
+}
+
+/* ---------- audit ---------- */
+
+type SessionCall = ReturnType<typeof callsForSession>[number];
+
+interface AuditFinding {
+  severity: 'warning' | 'info';
+  text: string;
+}
+
+function handleAudit(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome {
+  const id = typeof args['id'] === 'string' ? args['id'] : undefined;
+  const label = typeof args['label'] === 'string' ? args['label'] : undefined;
+  const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
+  const session = lookupAuditSession(cg, id, label);
+  if (!session) {
+    const lookupLabel = auditLookupLabel(id, label);
+    return err(
+      `No session matched ${lookupLabel}. ` +
+        `Use \`cartograph_session({action: 'list'})\` to see recent sessions with recorded calls.`,
+    );
+  }
+  const calls = callsForSession(cg.queries, session.id);
+  return ok(textResult(truncateOutput(formatAuditReport(session, calls))));
+}
+
+function auditLookupLabel(id: string | undefined, label: string | undefined): string {
+  if (id) return `id=${id}`;
+  if (label) return `label=${label}`;
+  return 'latest non-empty session';
+}
+
+function lookupAuditSession(
+  cg: ReturnType<ToolCtx['getCartograph']>,
+  id: string | undefined,
+  label: string | undefined,
+): SessionRow | null {
+  if (id || label) return lookupSession(cg, id, label);
+  return recentSessions(cg.queries, 20).find((s) => s.toolCount > 0) ?? null;
+}
+
+function parseArgsJson(argsJson: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(argsJson) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function findRepeatedCalls(calls: ReadonlyArray<SessionCall>): AuditFinding[] {
+  const byKey = new Map<string, { call: SessionCall; count: number }>();
+  for (const call of calls) {
+    const key = `${call.toolName}\n${call.argsJson}`;
+    const existing = byKey.get(key);
+    if (existing) {
+      existing.count++;
+    } else {
+      byKey.set(key, { call, count: 1 });
+    }
+  }
+  return [...byKey.values()]
+    .filter((entry) => entry.count > 1)
+    .slice(0, 5)
+    .map(({ call, count }) => ({
+      severity: 'info',
+      text:
+        `Repeated equivalent call: \`${call.toolName}\` with the same args ran ${count} times. ` +
+        'Reuse the prior result or a `since` cursor when the tool supports it.',
+    }));
+}
+
+function sourceHeavyFinding(call: SessionCall): AuditFinding | null {
+  const args = parseArgsJson(call.argsJson);
+  if (call.toolName === 'cartograph_context') {
+    const askedForCode = args['code'] !== false && args['includeCode'] !== false;
+    if (askedForCode && args['lowTokens'] !== true && args['format'] !== 'plan') {
+      return {
+        severity: 'warning',
+        text:
+          `Source-heavy context call at step ${call.step}: \`cartograph_context\` included code in the main path. ` +
+          'Use `lowTokens: true` or `format: "plan"` first when routing a large investigation.',
+      };
+    }
+  }
+  if (call.toolName === 'cartograph_explore' && args['summary'] !== true && args['lowTokens'] !== true) {
+    return {
+      severity: 'warning',
+      text:
+        `Source-heavy exploration at step ${call.step}: \`cartograph_explore\` returned source blocks. ` +
+        'Use `summary: true` or `lowTokens: true` until the target files are clear.',
+    };
+  }
+  if (call.toolName === 'cartograph_node' && args['code'] === true && args['detail'] === 'full') {
+    return {
+      severity: 'info',
+      text:
+        `Full source body requested at step ${call.step}. ` +
+        'Prefer `detail: "preview"` while scouting, then fetch full only for the edit target.',
+    };
+  }
+  return null;
+}
+
+function buildAuditFindings(calls: ReadonlyArray<SessionCall>): AuditFinding[] {
+  const findings: AuditFinding[] = [];
+  for (const call of calls) {
+    const sourceHeavy = sourceHeavyFinding(call);
+    if (sourceHeavy) findings.push(sourceHeavy);
+    if (call.durationMs >= 2_000) {
+      findings.push({
+        severity: 'info',
+        text: `Slow call at step ${call.step}: \`${call.toolName}\` took ${call.durationMs}ms.`,
+      });
+    }
+    if (/error|failed|exception/i.test(call.resultSummary)) {
+      findings.push({
+        severity: 'warning',
+        text: `Error-like result at step ${call.step}: \`${call.toolName}\` summary was "${call.resultSummary}".`,
+      });
+    }
+  }
+  findings.push(...findRepeatedCalls(calls));
+
+  if (calls.length > 0 && !calls.some((c) => c.toolName === 'cartograph_compare_to_ref')) {
+    findings.push({
+      severity: 'info',
+      text:
+        'No end-of-task self-check recorded. Before reporting done after edits, call ' +
+        '`cartograph_compare_to_ref({findingsDelta: true})`.',
+    });
+  }
+  if (
+    calls.length > 0 &&
+    !calls.some((c) => c.toolName === 'cartograph_affected' || c.toolName === 'cartograph_tests_for')
+  ) {
+    findings.push({
+      severity: 'info',
+      text: 'No test-selection call recorded. For code edits, use `cartograph_affected` or `cartograph_tests_for` before choosing verification.',
+    });
+  }
+
+  return findings.slice(0, 12);
+}
+
+function formatToolCounts(calls: ReadonlyArray<SessionCall>): string {
+  const counts = new Map<string, number>();
+  for (const call of calls) counts.set(call.toolName, (counts.get(call.toolName) ?? 0) + 1);
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 8)
+    .map(([name, count]) => `\`${name}\` ×${count}`)
+    .join(', ');
+}
+
+function suggestedAuditActions(calls: ReadonlyArray<SessionCall>): string[] {
+  const actions: string[] = [];
+  if (!calls.some((c) => c.toolName === 'cartograph_compare_to_ref')) {
+    actions.push('`cartograph_compare_to_ref({findingsDelta: true})`');
+  }
+  if (!calls.some((c) => c.toolName === 'cartograph_affected' || c.toolName === 'cartograph_tests_for')) {
+    actions.push(
+      '`cartograph_affected({includeCommands: true})` after edits, or `cartograph_tests_for({symbol})` for one target.',
+    );
+  }
+  if (calls.some((c) => c.toolName === 'cartograph_context' && parseArgsJson(c.argsJson)['format'] !== 'plan')) {
+    actions.push('`cartograph_context({task, format: "plan"})` for the next broad route decision.');
+  }
+  return actions;
+}
+
+function formatAuditReport(session: SessionRow, calls: ReadonlyArray<SessionCall>): string {
+  const labelPrefix = session.label ? `\`${session.label}\` ` : '';
+  const lines: string[] = [
+    `## Session audit ${labelPrefix}(${session.id})`,
+    '',
+    `- **started:** ${fmtTs(session.startedTs)}  •  ` +
+      `**last activity:** ${fmtTs(session.lastActivityTs)}  •  ` +
+      `**calls:** ${calls.length}`,
+  ];
+  if (calls.length === 0) {
+    lines.push('', '_No tool calls recorded under this session._');
+    return lines.join('\n');
+  }
+
+  const counts = formatToolCounts(calls);
+  if (counts) lines.push(`- **top tools:** ${counts}`);
+
+  const findings = buildAuditFindings(calls);
+  lines.push('', '### Findings', '');
+  if (findings.length === 0) {
+    lines.push('_No risky navigation patterns detected._');
+  } else {
+    for (const f of findings) {
+      const prefix = f.severity === 'warning' ? 'warning' : 'info';
+      lines.push(`- **${prefix}:** ${f.text}`);
+    }
+  }
+
+  const actions = suggestedAuditActions(calls);
+  if (actions.length > 0) {
+    lines.push('', '### Suggested next actions', '');
+    for (const action of actions.slice(0, 5)) lines.push(`- ${action}`);
   }
   return lines.join('\n');
 }
@@ -443,12 +650,15 @@ function handleMacroDelete(ctx: ToolCtx, args: Record<string, unknown>): ToolOut
  */
 const sessionSchema = z.object({
   action: z
-    .enum(['create', 'resume', 'list', 'delete', 'macro_save', 'macro_run', 'macro_list', 'macro_delete'])
+    .enum(['create', 'resume', 'audit', 'list', 'delete', 'macro_save', 'macro_run', 'macro_list', 'macro_delete'])
     .describe(
-      'Sessions: `create` / `resume` / `list` / `delete`. Macros: `macro_save` / `macro_run` / `macro_list` / `macro_delete`.',
+      'Sessions: `create` / `resume` / `audit` / `list` / `delete`. Macros: `macro_save` / `macro_run` / `macro_list` / `macro_delete`.',
     ),
-  id: z.string().optional().describe('(resume / delete) Session id from create.'),
-  label: z.string().optional().describe('(create) Human label. (resume / delete) Look up by label when id is unknown.'),
+  id: z.string().optional().describe('(resume / audit / delete) Session id from create.'),
+  label: z
+    .string()
+    .optional()
+    .describe('(create) Human label. (resume / audit / delete) Look up by label when id is unknown.'),
   name: z
     .string()
     .optional()
@@ -495,6 +705,8 @@ async function handleSession(ctx: ToolCtx, args: SessionArgs): Promise<ToolOutco
       return handleCreate(ctx, raw);
     case 'resume':
       return handleResume(ctx, raw);
+    case 'audit':
+      return handleAudit(ctx, raw);
     case 'list':
       return handleList(ctx, raw);
     case 'delete':
@@ -514,11 +726,11 @@ export const SESSION_TOOL = defineTool({
   name: 'cartograph_session',
   description:
     'Session state + tool-call macros — resume investigations and replay recipes.\n\n' +
-    'Sessions: `create` / `resume` (id or label) / `list` / `delete` (id or label). ' +
+    'Sessions: `create` / `resume` (id or label) / `audit` (id, label, or latest non-empty) / `list` / `delete` (id or label). ' +
     'Macros: `macro_save` (`{name, steps}`) / `macro_run` (substitutes `${0}`/`${1}`/… from runtime args) / `macro_list` / `macro_delete`.',
   schema: sessionSchema,
   handle: handleSession,
   bypassFreshnessGate: true,
   isWriteTool: true,
-  readOnlyActions: new Set(['list', 'resume', 'macro_list']),
+  readOnlyActions: new Set(['list', 'resume', 'audit', 'macro_list']),
 });

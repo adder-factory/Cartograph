@@ -45,7 +45,7 @@ async function makeFixture(): Promise<{ dir: string; cg: Cartograph; handler: To
     .prepare(`UPDATE nodes SET role = 'business_logic', role_model = 'test:v1' WHERE id = ?`)
     .run(betaRow.id);
 
-  const handler = new ToolHandler(cg);
+  const handler = new ToolHandler(cg, { profile: 'full' });
   return { dir, cg, handler, betaId: betaRow.id };
 }
 

@@ -40,7 +40,7 @@ describe('cartograph_coverage family (#7-2)', () => {
     git(dir, 'commit', '-q', '-m', 'init');
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

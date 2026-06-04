@@ -41,8 +41,25 @@ describe('MCP server-level options', () => {
   });
 
   describe('profiles', () => {
-    it('defaults to the full registered tool surface', () => {
+    it('defaults to the compressed core tool surface', () => {
       const handler = new ToolHandler(cg);
+      const explicitCoreHandler = new ToolHandler(cg, { profile: 'core' });
+      const names = handler.getTools().map((t) => t.name);
+      const explicitCoreNames = explicitCoreHandler.getTools().map((t) => t.name);
+      expect(names.sort()).toEqual(explicitCoreNames.sort());
+      expect(names).toContain('cartograph_find');
+      expect(names).toContain('cartograph_graph');
+      expect(names).toContain('cartograph_context');
+      expect(names).toContain('cartograph_compare_to_ref');
+      expect(names).toContain('cartograph_admin');
+      expect(names).not.toContain('cartograph_local_chat');
+      expect(names).not.toContain('cartograph_note');
+      handler.closeAll();
+      explicitCoreHandler.closeAll();
+    });
+
+    it('full profile exposes the complete registered tool surface', () => {
+      const handler = new ToolHandler(cg, { profile: 'full' });
       const names = handler.getTools().map((t) => t.name);
       const registered = getToolModules().map((m) => m.definition.name);
       expect(names.sort()).toEqual(registered.sort());
@@ -65,9 +82,9 @@ describe('MCP server-level options', () => {
       handler.closeAll();
     });
 
-    it('read-only profile matches the existing --no-write-tools advertised surface', () => {
+    it('read-only profile matches full profile with --no-write-tools', () => {
       const profileHandler = new ToolHandler(cg, { profile: 'read-only' });
-      const noWriteHandler = new ToolHandler(cg, { disableWriteTools: true });
+      const noWriteHandler = new ToolHandler(cg, { profile: 'full', disableWriteTools: true });
       const profileNames = profileHandler
         .getTools()
         .map((t) => t.name)
@@ -130,7 +147,7 @@ describe('MCP server-level options', () => {
 
   describe('disableWriteTools', () => {
     it('hides pure write tools but keeps mixed tools with read-only branches in tools/list', () => {
-      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const handler = new ToolHandler(cg, { profile: 'full', disableWriteTools: true });
       const names = handler.getTools().map((t) => t.name);
       expect(names).not.toContain('cartograph_admin');
       expect(names).toContain('cartograph_coverage');
@@ -145,7 +162,7 @@ describe('MCP server-level options', () => {
     });
 
     it('hides cartograph_admin under --no-write-tools (every action mutates state)', () => {
-      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const handler = new ToolHandler(cg, { profile: 'full', disableWriteTools: true });
       const names = handler.getTools().map((t) => t.name);
       // cartograph_admin has no readOnlyActions carve-out — every action
       // mutates state, so the whole tool is hidden under --no-write-tools.
@@ -157,7 +174,7 @@ describe('MCP server-level options', () => {
     });
 
     it('rejects all admin actions with a clean error under --no-write-tools', async () => {
-      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const handler = new ToolHandler(cg, { profile: 'full', disableWriteTools: true });
       const result = await handler.execute('cartograph_admin', { action: 'sync' });
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/disabled by this MCP server/);
@@ -165,7 +182,7 @@ describe('MCP server-level options', () => {
     });
 
     it('allows read-only branches of mixed write tools and blocks their write branches', async () => {
-      const handler = new ToolHandler(cg, { disableWriteTools: true });
+      const handler = new ToolHandler(cg, { profile: 'full', disableWriteTools: true });
 
       const noteList = await handler.execute('cartograph_note', { action: 'list' });
       expect(noteList.content[0]?.text ?? '').not.toMatch(/disabled by this MCP server/);
@@ -200,6 +217,7 @@ describe('MCP server-level options', () => {
   describe('disabledTools (per-name)', () => {
     it('disables a specific named tool', async () => {
       const handler = new ToolHandler(cg, {
+        profile: 'full',
         disabledTools: new Set(['cartograph_dead_code']),
       });
       expect(handler.getTools().map((t) => t.name)).not.toContain('cartograph_dead_code');
@@ -228,6 +246,7 @@ describe('MCP server-level options', () => {
 
     it('composes with disableWriteTools (either rule disables)', () => {
       const handler = new ToolHandler(cg, {
+        profile: 'full',
         disableWriteTools: true,
         disabledTools: new Set(['cartograph_explore']),
       });
@@ -240,12 +259,12 @@ describe('MCP server-level options', () => {
   });
 
   describe('Server config section in status', () => {
-    it('shows the default full profile when no narrowing options are set', async () => {
+    it('shows the default core profile when no narrowing options are set', async () => {
       const handler = new ToolHandler(cg);
       const result = await handler.execute('cartograph_status', {});
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/### .*Server config/);
-      expect(text).toMatch(/Profile.*`full`/);
+      expect(text).toMatch(/Profile.*`core`/);
       handler.closeAll();
     });
 

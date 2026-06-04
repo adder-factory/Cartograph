@@ -270,8 +270,9 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // reflecting the `mode` enum. All schema fields are mirrored on
   // that family surface, so no per-property carve-outs are needed.
 
-  // `cartograph session` is a subcommand tree (create / resume / list
-  // / delete / macro_save / macro_run / macro_list / macro_delete).
+  // `cartograph session` is a subcommand tree (create / resume /
+  // audit / list / delete / macro_save / macro_run / macro_list /
+  // macro_delete).
   // `action` is the subcommand axis.
   session: new Set(['action']),
 

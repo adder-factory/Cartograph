@@ -62,6 +62,26 @@ describe('cartograph_affected', () => {
     expect(text).toMatch(/src\/a\.test\.ts/);
   });
 
+  it('includeCommands appends package-script verification commands', async () => {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({
+        name: 'x',
+        version: '0.0.0',
+        scripts: { test: 'vitest run', typecheck: 'tsc --noEmit' },
+      }),
+    );
+    const result = await handler.execute('cartograph_affected', {
+      files: ['src/a.ts'],
+      includeCommands: true,
+    });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toContain('### Verification commands');
+    expect(text).toContain('npm test -- src/a.test.ts');
+    expect(text).toContain('npm run typecheck');
+  });
+
   it('walks reverse dependents through side-effect imports', async () => {
     const result = await handler.execute('cartograph_affected', {
       files: ['src/setup.ts'],

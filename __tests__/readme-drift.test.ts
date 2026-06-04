@@ -31,7 +31,7 @@ describe('README drift guard', () => {
     const toolCount = getToolModules().length;
     const languageCount = getSupportedLanguages().length;
 
-    expect(readme).toContain(`exposes ${toolCount} tools`);
+    expect(readme).toContain(`exposes all ${toolCount} registered tools`);
     expect(readme).toContain(`full ${toolCount}-tool server`);
     expect(readme).toContain(`supports **${languageCount} language modes**`);
   });

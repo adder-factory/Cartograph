@@ -94,20 +94,20 @@ export const llmCmd = program
  * cartograph session <action>
  *
  * Mirrors the `cartograph_session({action})` MCP family. Lets a CLI-driven
- * agent create/resume/list sessions and manage macros without going through
+ * agent create/resume/audit/list sessions and manage macros without going through
  * the MCP server. Same family pattern as `admin <action>` / `note <action>`.
  *
  * Subcommands mirror the MCP action enum:
- *   create / resume / list / delete
+ *   create / resume / audit / list / delete
  *   macro_save / macro_run / macro_list / macro_delete
  *   (kebab-case aliases: macro-save / macro-run / macro-list /
  *   macro-delete)
  */
 export const sessionCmd = program
   .command('session')
-  .summary('Create, list, resume, delete sessions and macros')
+  .summary('Create, list, resume, audit, delete sessions and macros')
   .description(
-    'Agent session state + macros. Subcommands: create / resume / list / delete / macro_save / macro_run / macro_list / macro_delete; kebab aliases also work.',
+    'Agent session state + macros. Subcommands: create / resume / audit / list / delete / macro_save / macro_run / macro_list / macro_delete; kebab aliases also work.',
   );
 
 // Version from package.json
@@ -801,7 +801,11 @@ export async function runViaMCPCapture(
   const cg = await Cartograph.open(projectPath, { autoMigrate });
   try {
     const { ToolHandler } = await import('../mcp/tools.js');
-    const handler = new ToolHandler(cg);
+    // CLI commands are an explicit terminal surface, not an MCP
+    // advertised-tool list. Use the full profile so commands like
+    // `coverage` and `role` remain callable even though the MCP server
+    // defaults to the compressed `core` profile.
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute(toolName, args);
     handler.closeAll();
     let text = result.content[0]?.text ?? '';
@@ -856,7 +860,11 @@ export async function runViaMCP(
   let exitCode = 0;
   try {
     const { ToolHandler } = await import('../mcp/tools.js');
-    const handler = new ToolHandler(cg);
+    // CLI commands are an explicit terminal surface, not an MCP
+    // advertised-tool list. Use the full profile so commands like
+    // `coverage` and `role` remain callable even though the MCP server
+    // defaults to the compressed `core` profile.
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute(toolName, args);
     handler.closeAll();
     const text = result.content[0]?.text ?? '';

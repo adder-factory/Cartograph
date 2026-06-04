@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { appendToolCall, insertSession } from '../src/db/queries-trace.js';
 
 function textOf(result: { content: Array<{ type: string; text: string }> }): string {
   return result.content[0]!.text;
@@ -104,6 +105,37 @@ describe('cartograph_session family (#13)', () => {
     it('delete errors when the session is unknown', async () => {
       const text = textOf(await handler.runHandler('cartograph_session', { action: 'delete', label: 'never-existed' }));
       expect(text).toMatch(/No session matched/);
+    });
+
+    it('audit flags source-heavy sessions and missing close-out calls', async () => {
+      const sessionId = 'audit-session';
+      const ts = Date.now();
+      insertSession({ qb: cg.queries, id: sessionId, startedTs: ts, label: 'audit-me' });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 1,
+        ts: ts + 1,
+        toolName: 'cartograph_context',
+        argsJson: JSON.stringify({ task: 'alpha' }),
+        resultSummary: 'ok',
+        durationMs: 2_500,
+      });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 2,
+        ts: ts + 2,
+        toolName: 'cartograph_node',
+        argsJson: JSON.stringify({ symbol: 'alpha', code: true, detail: 'full' }),
+        resultSummary: 'ok',
+        durationMs: 12,
+      });
+
+      const text = textOf(await handler.runHandler('cartograph_session', { action: 'audit', label: 'audit-me' }));
+
+      expect(text).toContain('Session audit `audit-me`');
+      expect(text).toContain('Source-heavy context call');
+      expect(text).toContain('No end-of-task self-check recorded');
+      expect(text).toContain('No test-selection call recorded');
     });
   });
 

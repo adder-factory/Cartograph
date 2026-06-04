@@ -17,6 +17,7 @@ describe('MCP load-budget measurement', () => {
     const initializeChars = JSON.stringify({ instructions: SERVER_INSTRUCTIONS }).length;
 
     expect(report.toolCount).toBe(tools.length);
+    expect(report.profile).toBe('core');
     expect(report.toolsList.chars).toBe(toolsListChars);
     expect(report.initialize.chars).toBe(initializeChars);
     expect(report.combinedStartup.chars).toBe(toolsListChars + initializeChars);
@@ -31,7 +32,7 @@ describe('MCP load-budget measurement', () => {
   });
 
   it('measures narrowed advertised surfaces', () => {
-    const full = measureMcpLoadBudget();
+    const full = measureMcpLoadBudget(null, { handlerOptions: { profile: 'full' } });
     const narrowed = measureMcpLoadBudget(null, {
       handlerOptions: {
         profile: 'review',

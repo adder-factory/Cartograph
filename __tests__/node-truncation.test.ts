@@ -115,6 +115,32 @@ describe('cartograph_node smart truncation', () => {
     expect(text).not.toMatch(/Showing first \d+ of \d+ lines/);
   });
 
+  it('liveSource:true labels current stale file contents as a live disk slice', async () => {
+    fs.writeFileSync(path.join(dir, 'src', 'small.ts'), 'export function smallFn() {\n  return 2;\n}\n');
+    const future = new Date(Date.now() + 60_000);
+    fs.utimesSync(path.join(dir, 'src', 'small.ts'), future, future);
+    cg.stats.invalidateFreshness();
+
+    const indexed = await handler.execute('cartograph_node', {
+      symbol: 'smallFn',
+      code: true,
+      allowStale: true,
+    });
+    const indexedText = indexed.content[0]?.text ?? '';
+    expect(indexedText).toContain('return 2;');
+    expect(indexedText).toContain('stale source slice');
+
+    const live = await handler.execute('cartograph_node', {
+      symbol: 'smallFn',
+      code: true,
+      liveSource: true,
+      allowStale: true,
+    });
+    const liveText = live.content[0]?.text ?? '';
+    expect(liveText).toContain('return 2;');
+    expect(liveText).toContain('live source from disk');
+  });
+
   it('rejects unknown detail value (Zod schema enforces enum)', async () => {
     // Pre-D1 the handler used a forgiving `=== 'full' ? 'full' : 'preview'`
     // ternary, so `detail: 'banana'` silently fell through to preview.

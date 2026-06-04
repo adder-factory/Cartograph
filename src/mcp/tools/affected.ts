@@ -14,6 +14,14 @@ import { projectPathField } from './_common-fields.js';
 import { errMsg } from '../../errors.js';
 import { globToSafeRegex } from '../../utils.js';
 import { editDistance } from '../../text-distance.js';
+import {
+  type PackageManager,
+  detectPackageManager,
+  packageJsonExists,
+  packageScriptCommand,
+  readPackageScripts,
+  shellQuote,
+} from '../../package-scripts.js';
 import { textResult } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import type { ToolCtx } from './types.js';
@@ -71,6 +79,12 @@ const affectedSchema = z.object({
     .describe(
       'Custom glob overriding the default test-file detection. ' +
         'When omitted, common test paths are matched: .spec. / .test. / __tests__/ / tests/ / e2e/ / spec/.',
+    ),
+  includeCommands: z
+    .boolean()
+    .default(false)
+    .describe(
+      'Include conservative shell commands for re-running the affected tests plus common package scripts (`typecheck`, `lint`) when package.json exposes them. Default false.',
     ),
   projectPath: projectPathField,
 });
@@ -363,6 +377,100 @@ interface FormatResultArgs {
   result: AffectedTestsResult;
   missingInputs: string[];
   derivedFromGit: boolean;
+  includeCommands: boolean;
+  projectRoot: string;
+}
+
+interface PackageScriptInfo {
+  manager: PackageManager;
+  scripts: Record<string, string>;
+  packageJsonFound: boolean;
+}
+
+function readPackageScriptInfo(projectRoot: string): PackageScriptInfo {
+  const scripts = readPackageScripts(projectRoot);
+  return {
+    manager: detectPackageManager(projectRoot),
+    scripts,
+    packageJsonFound: packageJsonExists(projectRoot),
+  };
+}
+
+function directTestCommand(manager: PackageManager, tests: string[]): string | null {
+  if (tests.length === 0) return null;
+  if (manager === 'bun') return `bun test ${tests.map(shellQuote).join(' ')}`;
+  return null;
+}
+
+function buildVerificationCommands(projectRoot: string, affectedTests: string[]): string | null {
+  const pkg = readPackageScriptInfo(projectRoot);
+  const commands: string[] = [];
+  if (affectedTests.length > 0) {
+    if (pkg.scripts['test']) {
+      commands.push(packageScriptCommand(pkg.manager, 'test', affectedTests));
+    } else {
+      const direct = directTestCommand(pkg.manager, affectedTests);
+      if (direct) commands.push(direct);
+    }
+  }
+  for (const script of ['typecheck', 'lint']) {
+    if (pkg.scripts[script]) commands.push(packageScriptCommand(pkg.manager, script));
+  }
+
+  if (commands.length === 0) {
+    const reason = pkg.packageJsonFound
+      ? 'No `test`, `typecheck`, or `lint` package scripts were found.'
+      : 'No package.json was found.';
+    return `### Verification commands\n\n_${reason} Use the project-specific test command for the files above._`;
+  }
+
+  return ['### Verification commands', '', '```sh', ...commands, '```'].join('\n');
+}
+
+function appendDerivedChangedFiles(lines: string[], files: string[], derivedFromGit: boolean): void {
+  if (!derivedFromGit) return;
+  for (const f of files) lines.push(`> changed: \`${f}\``);
+  lines.push('');
+}
+
+function appendAffectedTestRows(lines: string[], footers: string[], sorted: string[]): void {
+  if (sorted.length === 0) {
+    lines.push('_No test files affected by the input set._');
+    return;
+  }
+
+  // Cap the rendered rows. An edited leaf module re-exported through
+  // a barrel can pull in ~half the suite — dumping every row uncapped
+  // buries the signal. Show the first N (sorted) with a count footer.
+  const shown = sorted.slice(0, DEFAULT_ROW_LIMIT);
+  for (const t of shown) lines.push(`- \`${t}\``);
+  if (sorted.length <= DEFAULT_ROW_LIMIT) return;
+  footers.push(
+    `_Showing first ${shown.length} of ${sorted.length} affected test files (sorted). Pass a custom \`filter\` glob or narrow your input set to see fewer._`,
+  );
+}
+
+function appendMissingInputFooters(footers: string[], missingInputs: string[]): void {
+  if (missingInputs.length === 0) return;
+  footers.push(missingInputs.map((m) => `> ⚠ Input file not indexed: \`${m}\``).join('\n'));
+}
+
+function appendVerificationFooter(
+  footers: string[],
+  args: { includeCommands: boolean; projectRoot: string; affectedTests: string[] },
+): void {
+  if (!args.includeCommands) return;
+  const verification = buildVerificationCommands(args.projectRoot, args.affectedTests);
+  if (verification) footers.push(verification);
+}
+
+function appendBarrelFooter(footers: string[], barrelsReached: string[]): void {
+  if (barrelsReached.length === 0) return;
+  const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
+  footers.push(
+    `> ⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
+      `Narrow with \`cartograph_tests_for\` for symbol-level test discovery.`,
+  );
 }
 
 /**
@@ -376,7 +484,7 @@ interface FormatResultArgs {
  * them off the budget).
  */
 function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: string[] } {
-  const { files, result, missingInputs, derivedFromGit } = fmtArgs;
+  const { files, result, missingInputs, derivedFromGit, includeCommands, projectRoot } = fmtArgs;
   const sorted = Array.from(result.affectedTests).sort((a, b) => Number(a > b) - Number(a < b));
   const lines: string[] = [];
   const sourceLabel = derivedFromGit ? ' (from `git diff HEAD`)' : '';
@@ -387,44 +495,21 @@ function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: st
   // Friction-Y: when the set came from git, show the agent which
   // files cartograph treated as changed so it can spot drift between
   // "what I think I edited" and "what git sees as changed."
-  if (derivedFromGit) {
-    for (const f of files) lines.push(`> changed: \`${f}\``);
-    lines.push('');
-  }
+  appendDerivedChangedFiles(lines, files, derivedFromGit);
   const footers: string[] = [];
-  if (sorted.length === 0) {
-    lines.push('_No test files affected by the input set._');
-  } else {
-    // Cap the rendered rows. An edited leaf module re-exported through
-    // a barrel can pull in ~half the suite — dumping every row uncapped
-    // buries the signal. Show the first N (sorted) with a count footer.
-    const shown = sorted.slice(0, DEFAULT_ROW_LIMIT);
-    for (const t of shown) lines.push(`- \`${t}\``);
-    if (sorted.length > DEFAULT_ROW_LIMIT) {
-      footers.push(
-        `_Showing first ${shown.length} of ${sorted.length} affected test files (sorted). Pass a custom \`filter\` glob or narrow your input set to see fewer._`,
-      );
-    }
-  }
+  appendAffectedTestRows(lines, footers, sorted);
   // F-H: surface unindexed inputs before the traversal stats so the
   // agent sees them BEFORE the "we found nothing" footer. Each missing
   // input gets its own line — three typos in a 10-file input set is a
   // helpful signal, not noise.
-  if (missingInputs.length > 0) {
-    footers.push(missingInputs.map((m) => `> ⚠ Input file not indexed: \`${m}\``).join('\n'));
-  }
+  appendMissingInputFooters(footers, missingInputs);
+  appendVerificationFooter(footers, { includeCommands, projectRoot, affectedTests: sorted });
   footers.push(`_Traversed ${result.totalDependents} dependents total._`);
   // Barrel hint: when the BFS passed through a public-API barrel the
   // blast radius is the project's whole public surface and a file-level
   // answer stops being actionable. Point the agent at the symbol-level
   // tool instead.
-  if (result.barrelsReached.length > 0) {
-    const barrelList = result.barrelsReached.map((b) => `\`${b}\``).join(', ');
-    footers.push(
-      `> ⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-        `Narrow with \`cartograph_tests_for\` for symbol-level test discovery.`,
-    );
-  }
+  appendBarrelFooter(footers, result.barrelsReached);
   return { body: lines.join('\n'), footers };
 }
 
@@ -466,6 +551,8 @@ async function handleAffected(ctx: ToolCtx, args: AffectedToolArgs): Promise<Too
           result,
           missingInputs: parsed.missingInputs,
           derivedFromGit: parsed.derivedFromGit,
+          includeCommands: args.includeCommands,
+          projectRoot: cg.projectRoot,
         }),
       ),
     );
