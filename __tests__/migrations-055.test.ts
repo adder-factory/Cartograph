@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { createDatabase, type SqliteDatabase } from '../src/db/sqlite-adapter.js';
 import { DatabaseConnection } from '../src/db/index.js';
+import { MIGRATION as MIG_055 } from '../src/db/migrations/055-refs-file-path-fk.js';
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-mig-055-'));
@@ -75,6 +77,39 @@ function seedNode(db: ReturnType<DatabaseConnection['getDb']>): void {
   ).run('n_seed', 's', 's', 'function', 'typescript', 'src/a.ts', 1, 2, 0, 0, 0, '');
 }
 
+function legacyRefsDb(dir: string, name: string): SqliteDatabase {
+  const { db } = createDatabase(path.join(dir, name));
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec(
+    `CREATE TABLE files (
+       path TEXT PRIMARY KEY,
+       content_hash TEXT NOT NULL,
+       language TEXT NOT NULL,
+       size INTEGER NOT NULL,
+       modified_at INTEGER NOT NULL,
+       indexed_at INTEGER NOT NULL
+     ) STRICT`,
+  );
+  db.exec(
+    `CREATE TABLE unresolved_refs (
+       id INTEGER PRIMARY KEY AUTOINCREMENT,
+       from_node_id TEXT NOT NULL,
+       reference_name TEXT NOT NULL,
+       reference_kind TEXT NOT NULL,
+       line INTEGER NOT NULL,
+       col INTEGER NOT NULL,
+       file_path TEXT NOT NULL,
+       language TEXT NOT NULL
+     ) STRICT`,
+  );
+  return db;
+}
+
+function hasFilePathFk(db: SqliteDatabase, tableName: string): boolean {
+  const fks = db.prepare(`PRAGMA foreign_key_list("${tableName}")`).all() as Array<{ table: string; from: string }>;
+  return fks.some((fk) => fk.table === 'files' && fk.from === 'file_path');
+}
+
 describe('Migration 055 — file_path FK on *_refs tables', () => {
   let dir: string;
   beforeEach(() => {
@@ -96,6 +131,61 @@ describe('Migration 055 — file_path FK on *_refs tables', () => {
       }
     } finally {
       dbConn.close();
+    }
+  });
+
+  it('adds the file_path FK to an upgraded unresolved_refs table that lacks it', () => {
+    const db = legacyRefsDb(dir, 'legacy-unresolved.db');
+    try {
+      expect(hasFilePathFk(db, 'unresolved_refs')).toBe(false);
+      seedFile(db as ReturnType<DatabaseConnection['getDb']>, 'src/a.ts');
+      db.prepare(
+        `INSERT INTO unresolved_refs (from_node_id, reference_name, reference_kind, line, col, file_path, language)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run('n_seed', 'foo', 'calls', 1, 0, 'src/a.ts', 'typescript');
+
+      MIG_055.up(db);
+
+      expect(hasFilePathFk(db, 'unresolved_refs')).toBe(true);
+      db.prepare(`DELETE FROM files WHERE path = ?`).run('src/a.ts');
+      expect((db.prepare('SELECT COUNT(*) AS n FROM unresolved_refs').get() as { n: number }).n).toBe(0);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('throws instead of silently recording success when a ref-table rebuild fails', () => {
+    const db = legacyRefsDb(dir, 'legacy-rebuild-fail.db');
+    try {
+      db.exec('CREATE TABLE unresolved_refs__fk_tmp (id INTEGER PRIMARY KEY)');
+      expect(() => MIG_055.up(db)).toThrow();
+      expect(db.prepare("SELECT 1 AS one FROM sqlite_master WHERE name='unresolved_refs__fk_tmp'").get()).toBeNull();
+      expect(hasFilePathFk(db, 'unresolved_refs')).toBe(false);
+    } finally {
+      db.close();
+    }
+  });
+
+  it('skips partial fixtures that have ref tables but no files table', () => {
+    const { db } = createDatabase(path.join(dir, 'partial-no-files.db'));
+    try {
+      db.exec(
+        `CREATE TABLE unresolved_refs (
+           id INTEGER PRIMARY KEY AUTOINCREMENT,
+           from_node_id TEXT NOT NULL,
+           reference_name TEXT NOT NULL,
+           reference_kind TEXT NOT NULL,
+           line INTEGER NOT NULL,
+           col INTEGER NOT NULL,
+           file_path TEXT NOT NULL,
+           language TEXT NOT NULL
+         ) STRICT`,
+      );
+
+      expect(() => MIG_055.up(db)).not.toThrow();
+      expect(hasFilePathFk(db, 'unresolved_refs')).toBe(false);
+    } finally {
+      db.close();
     }
   });
 

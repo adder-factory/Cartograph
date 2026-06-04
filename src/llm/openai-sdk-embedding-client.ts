@@ -31,6 +31,13 @@ import { LlmEndpointError } from './client.js';
 import { scanForLlmBackends } from '../installer/scan-backends.js';
 import { buildReachabilityError } from './reachability-helpers.js';
 import { logWarn } from '../errors.js';
+import {
+  assertOpenAiCompatEndpointOrApiKey,
+  createOpenAiCompatSdkClient,
+  openAiApiErrorToEndpointError,
+  probeOpenAiCompatModels,
+  resolveOpenAiCompatTimeout,
+} from './openai-compat-http.js';
 
 /** Default per-request timeout. Embeddings normally complete sub-second
  *  locally; 60s gives comfortable headroom for cold-start model loads
@@ -49,17 +56,6 @@ const MAX_INPUT_CHARS = 8000;
  *  in parallel inside one request, so 64 ≈ 4 internal batches. */
 const HTTP_BATCH_SIZE = 64;
 
-/** Strip a trailing slash from `baseURL` so callers can pass either
- *  `http://localhost:8080` or `http://localhost:8080/` without
- *  artefacts in the SDK's URL construction. */
-function normaliseBaseUrl(endpoint: string): string {
-  // The OpenAI SDK appends `/v1/embeddings` itself. We pass the base
-  // URL ending in `/v1` per the SDK convention (matches how Ollama,
-  // llama-server, mlx_lm document their endpoints).
-  const stripped = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
-  return stripped.endsWith('/v1') ? stripped : `${stripped}/v1`;
-}
-
 /**
  * HTTP embedding client with the same public surface as the deprecated
  * in-process `LocalEmbeddingClient`. Routed via the `embedding-client.ts`
@@ -76,27 +72,9 @@ export class OpenAiSdkEmbeddingClient {
     // `endpoint` is REQUIRED for local-backend configs; cloud OpenAI
     // users can omit it (SDK defaults to api.openai.com) but they
     // must set `apiKey`. Either an endpoint OR an apiKey must be set.
-    if (!cfg.endpoint && !cfg.apiKey) {
-      throw new LlmEndpointError(
-        `openai-compat embedding requires either \`endpoint\` (for local backends like ` +
-          `llama-server / Ollama / mlx_lm) or \`apiKey\` (for cloud OpenAI / together.ai / ` +
-          `fireworks.ai). Neither is set in embeddingLlm config.`,
-      );
-    }
-    this.timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
-    // The SDK requires SOME value for `apiKey`; local backends ignore
-    // it but the SDK validates it's non-empty. Use a literal sentinel
-    // when the caller didn't set one.
-    this.client = new OpenAI({
-      ...(cfg.endpoint ? { baseURL: normaliseBaseUrl(cfg.endpoint) } : {}),
-      apiKey: cfg.apiKey ?? 'unused-local-backend',
-      timeout: this.timeoutMs,
-      // No retries by default — cartograph's higher layers (e.g.
-      // `embed-pipeline.ts`) already handle batch-level retry via the
-      // per-row fallback path. SDK retries would multiply latency on
-      // transient backend hiccups.
-      maxRetries: 0,
-    });
+    assertOpenAiCompatEndpointOrApiKey(cfg, 'embedding', 'embeddingLlm config');
+    this.timeoutMs = resolveOpenAiCompatTimeout(cfg.timeoutMs, DEFAULT_TIMEOUT_MS);
+    this.client = createOpenAiCompatSdkClient(cfg, this.timeoutMs);
   }
 
   get isConfigured(): boolean {
@@ -153,7 +131,7 @@ export class OpenAiSdkEmbeddingClient {
     try {
       // models.list returns a paginator; awaiting it performs the request and
       // parses the body — that alone confirms 2xx + reachability.
-      await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
+      await probeOpenAiCompatModels(this.client, this.timeoutMs);
       this.lastReachabilityError = null;
       return true;
     } catch (err) {
@@ -241,10 +219,7 @@ export class OpenAiSdkEmbeddingClient {
       // (`APIConnectionError`, `RateLimitError`, etc.); they all
       // carry a numeric `status` (or undefined for connection errors).
       if (err instanceof OpenAI.APIError) {
-        throw new LlmEndpointError(
-          `embedding endpoint returned ${err.status ?? 'connection error'}: ${err.message}`,
-          typeof err.status === 'number' ? err.status : undefined,
-        );
+        throw openAiApiErrorToEndpointError('embedding', err);
       }
       if (err instanceof LlmEndpointError) throw err;
       // Other errors (abort, network failure outside the SDK's

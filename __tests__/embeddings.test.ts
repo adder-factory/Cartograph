@@ -9,6 +9,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { getSummaryCoverage } from '../src/db/queries-summaries.js';
+import { getEmbeddingsSignature, upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -188,6 +189,31 @@ describe('embedding helpers', () => {
 
     // Hit again — count matches, no refetch.
     cache.get(fetcher, 'm');
+    expect(fetchCalls).toBe(2);
+  });
+
+  it('EmbeddingCache notices same-count rewrites via getEmbeddingsSignature', () => {
+    const vA = vectorToBytes(l2(Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0])));
+    const vB = vectorToBytes(l2(Float32Array.from([0, 1, 0, 0, 0, 0, 0, 0])));
+    const store: Array<{ nodeId: string; embedding: Buffer }> = [{ nodeId: 'a', embedding: vA }];
+    let version = 1;
+    let fetchCalls = 0;
+    const fetcher = {
+      getAllEmbeddings: (_model: string) => {
+        fetchCalls++;
+        return store.slice();
+      },
+      getEmbeddingsCount: (_model: string) => store.length,
+      getEmbeddingsSignature: (_model: string) => `${store.length}:${version}`,
+    };
+
+    const cache = new EmbeddingCache();
+    expect(cache.get(fetcher, 'm').ids).toEqual(['a']);
+    expect(fetchCalls).toBe(1);
+
+    store[0] = { nodeId: 'b', embedding: vB };
+    version++;
+    expect(cache.get(fetcher, 'm').ids).toEqual(['b']);
     expect(fetchCalls).toBe(2);
   });
 
@@ -388,6 +414,31 @@ export class TokenStore {
       await cg.llm.summarizeAll();
       // chat shouldn't fire again; embed pass not invoked here directly.
       expect(chatSpy.mock.calls.length + fakeEmbed.embedCalls).toBe(callsAfterFirst);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('getEmbeddingsSignature reads canonical embedding tables and notices same-count rewrites', async () => {
+    const cg = await Cartograph.init(tempDir, { index: true });
+    try {
+      const hit = searchNodes(cg.queries, 'authenticateUser', { limit: 1 })[0];
+      expect(hit).toBeDefined();
+
+      const nodeId = hit!.node.id;
+      const vA = vectorToBytes(l2(Float32Array.from([1, 0, 0, 0, 0, 0, 0, 0])));
+      const vB = vectorToBytes(l2(Float32Array.from([0, 1, 0, 0, 0, 0, 0, 0])));
+
+      expect(
+        upsertSymbolEmbedding({ qb: cg.queries, nodeId, embedding: vA, model: 'test-model', summaryHashAtEmbed: '' }),
+      ).toBe(true);
+      const first = getEmbeddingsSignature(cg.queries, 'test-model');
+      expect(first).toContain('1:');
+
+      expect(
+        upsertSymbolEmbedding({ qb: cg.queries, nodeId, embedding: vB, model: 'test-model', summaryHashAtEmbed: '' }),
+      ).toBe(true);
+      expect(getEmbeddingsSignature(cg.queries, 'test-model')).not.toBe(first);
     } finally {
       cg.close();
     }

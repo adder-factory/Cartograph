@@ -611,11 +611,17 @@ interface CachedEmbeddings {
   dim: number;
   model: string;
   /** Row count in `symbol_embeddings` for `model` at last build.
-   *  Compared against a fresh count on each {@link EmbeddingCache.get}
-   *  so out-of-process writes (agent-bridge `save_summaries` →
-   *  external embed pass) don't pin the cache at "empty". Same-count-
-   *  different-row edits still need indexAll/sync to invalidate. */
+   *  Legacy fallback when the fetcher cannot provide a rowset
+   *  signature. */
   dbCount: number;
+  /** Count + metadata signature for the loaded rowset. Detects
+   *  same-count rewrites from out-of-process embedding passes. */
+  dbSignature: string | null;
+}
+
+interface EmbeddingFreshness {
+  count: number | undefined;
+  signature: string | undefined;
 }
 
 export interface EmbeddingFetcher {
@@ -623,6 +629,24 @@ export interface EmbeddingFetcher {
   /** Optional — when present, the cache uses it for sub-millisecond
    *  freshness checks instead of relying on explicit `invalidate()`. */
   getEmbeddingsCount?(model: string): number;
+  /** Optional stronger freshness check. Prefer this over row count
+   *  when available because same-count rewrites can still change the
+   *  embedding matrix. */
+  getEmbeddingsSignature?(model: string): string;
+}
+
+function readEmbeddingFreshness(fetcher: EmbeddingFetcher, model: string): EmbeddingFreshness {
+  const signature = fetcher.getEmbeddingsSignature?.(model);
+  return {
+    count: signature === undefined ? fetcher.getEmbeddingsCount?.(model) : undefined,
+    signature,
+  };
+}
+
+function cachedEmbeddingsAreFresh(cached: CachedEmbeddings, freshness: EmbeddingFreshness): boolean {
+  if (freshness.signature !== undefined) return cached.dbSignature === freshness.signature;
+  if (freshness.count !== undefined) return cached.dbCount === freshness.count;
+  return true;
 }
 
 export class EmbeddingCache {
@@ -634,16 +658,18 @@ export class EmbeddingCache {
    * must not mutate it.
    */
   get(fetcher: EmbeddingFetcher, model: string): CachedEmbeddings {
-    const dbCount = fetcher.getEmbeddingsCount?.(model);
-    if (this.cached?.model === model) {
-      // When the fetcher can't tell us the row count, fall back to
-      // the legacy "trust the cache until invalidate()" behaviour.
-      const fresh = dbCount === undefined || this.cached.dbCount === dbCount;
-      if (fresh) return this.cached;
-    }
+    const freshness = readEmbeddingFreshness(fetcher, model);
+    if (this.cached?.model === model && cachedEmbeddingsAreFresh(this.cached, freshness)) return this.cached;
     const rows = fetcher.getAllEmbeddings(model);
     if (rows.length === 0) {
-      this.cached = { matrix: new Float32Array(0), ids: [], dim: 0, model, dbCount: dbCount ?? 0 };
+      this.cached = {
+        matrix: new Float32Array(0),
+        ids: [],
+        dim: 0,
+        model,
+        dbCount: freshness.count ?? 0,
+        dbSignature: freshness.signature ?? null,
+      };
       return this.cached;
     }
     const firstVec = bytesToVector(rows[0]!.embedding);
@@ -663,7 +689,14 @@ export class EmbeddingCache {
     }
     const allKept = written === rows.length;
     const matrix = allKept ? buf : buf.slice(0, written * dim);
-    this.cached = { matrix, ids, dim, model, dbCount: dbCount ?? rows.length };
+    this.cached = {
+      matrix,
+      ids,
+      dim,
+      model,
+      dbCount: freshness.count ?? rows.length,
+      dbSignature: freshness.signature ?? null,
+    };
     return this.cached;
   }
 

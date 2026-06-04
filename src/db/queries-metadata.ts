@@ -35,6 +35,9 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
 export type MetadataKey =
   | 'index_timestamp'
   | 'index_head_sha'
+  | 'path_alias_config_signature'
+  | 'nested_function_extraction_config_signature'
+  | 'source_set_config_signature'
   | 'extraction_logic_version'
   | 'last_mined_cochange_head'
   | 'last_mined_churn_head'

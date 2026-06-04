@@ -93,6 +93,11 @@ import {
   scanDirectoryAsync,
   type getGitChangedFiles,
 } from './index.js';
+import {
+  applyConfigFingerprintInvalidationPlan,
+  computeConfigFingerprintInvalidationPlan,
+  stampConfigFingerprints,
+} from './config-fingerprints.js';
 
 export interface EoIndexCounters {
   filesIndexed: number;
@@ -147,6 +152,7 @@ export function eoFinalIndexResult(args: {
 /** Stamp the freshness metadata (index_timestamp + index_head_sha). */
 export function eoStampFreshness(st: ExtractionOrchestratorState): void {
   setMetadata(st.queries, 'index_timestamp', String(Date.now()));
+  stampConfigFingerprints({ qb: st.queries, rootDir: st.rootDir, config: st.config, hashContent });
   const sha = getCurrentHeadSha(st.rootDir);
   if (sha) {
     setMetadata(st.queries, 'index_head_sha', sha);
@@ -288,11 +294,18 @@ export function eoApplySyncChanges(
   gitChanges: ReturnType<typeof getGitChangedFiles> extends { changes: infer C } | null ? C | null : never,
   state: SyncState,
 ): void {
-  if (gitChanges) {
+  const configInvalidation = computeConfigFingerprintInvalidationPlan({
+    qb: st.queries,
+    rootDir: st.rootDir,
+    config: st.config,
+    hashContent,
+  });
+  if (gitChanges && !configInvalidation.forceFullScan) {
     eoApplySyncedGitChanges(st, gitChanges, state);
   } else {
     eoApplySyncedFullScan(st, state);
   }
+  applyConfigFingerprintInvalidationPlan({ qb: st.queries, rootDir: st.rootDir, state, plan: configInvalidation });
 }
 
 /**
@@ -1506,7 +1519,16 @@ function eoQueueIfChanged(args: EoQueueIfChangedArgs): void {
     return;
   }
   let content: string;
+  let stats: fs.Stats;
   try {
+    stats = fs.statSync(fullPath);
+    if (stats.size > st.config.maxFileSize) {
+      if (tracked) {
+        removeFileFromIndex(st.queries, filePath);
+        state.filesRemoved++;
+      }
+      return;
+    }
     content = fs.readFileSync(fullPath, 'utf-8');
   } catch (error) {
     logDebug('Skipping unreadable file during sync', { filePath, error: String(error) });

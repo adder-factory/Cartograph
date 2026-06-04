@@ -96,6 +96,7 @@ import { MIGRATION as MIG_068 } from './068-nodes-betweenness.js';
 import { MIGRATION as MIG_069 } from './069-nested-function-manifest.js';
 import { MIGRATION as MIG_070 } from './070-nodes-decorator-args.js';
 import { MIGRATION as MIG_071 } from './071-nodes-name-nocase-index.js';
+import { MIGRATION as MIG_072 } from './072-unresolved-from-name-index.js';
 
 interface ModuleRef {
   /**
@@ -187,6 +188,7 @@ const REGISTERED_MODULES: readonly ModuleRef[] = [
   { filename: '069-nested-function-manifest.ts', module: MIG_069 },
   { filename: '070-nodes-decorator-args.ts', module: MIG_070 },
   { filename: '071-nodes-name-nocase-index.ts', module: MIG_071 },
+  { filename: '072-unresolved-from-name-index.ts', module: MIG_072 },
 ];
 
 /** Strict 3-digit prefix on each migration filename. */

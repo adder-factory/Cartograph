@@ -44,20 +44,18 @@ import { LlmEndpointError } from './client.js';
 import { scanForLlmBackends } from '../installer/scan-backends.js';
 import { buildReachabilityError } from './reachability-helpers.js';
 import { logWarn } from '../errors.js';
+import {
+  assertOpenAiCompatEndpointOrApiKey,
+  createOpenAiCompatSdkClient,
+  openAiApiErrorToEndpointError,
+  probeOpenAiCompatModels,
+  resolveOpenAiCompatTimeout,
+} from './openai-compat-http.js';
 
 /** Default per-request timeout. Chat completions can run several
  *  seconds on a local model + long-context prompts; 5 minutes gives
  *  comfortable headroom. Override via `cfg.timeoutMs`. */
 const DEFAULT_TIMEOUT_MS = 300_000;
-
-/** Strip a trailing slash from `baseURL` so callers can pass either
- *  `http://localhost:8080` or `http://localhost:8080/` without
- *  artefacts. The OpenAI SDK appends `/v1/chat/completions` itself
- *  (we pass the base URL with `/v1` per the SDK convention). */
-function normaliseBaseUrl(endpoint: string): string {
-  const stripped = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;
-  return stripped.endsWith('/v1') ? stripped : `${stripped}/v1`;
-}
 
 function mapMessage(m: ChatMessage): OpenAI.Chat.ChatCompletionMessageParam {
   if (m.role === 'system') return { role: 'system', content: m.content };
@@ -105,27 +103,12 @@ export class OpenAiSdkChatBackend implements ChatBackend {
     // `endpoint` is REQUIRED for local-backend configs; cloud OpenAI
     // users can omit it (SDK defaults to api.openai.com) but they
     // must set `apiKey`. Either an endpoint OR an apiKey must be set.
-    if (!cfg.endpoint && !cfg.apiKey) {
-      throw new LlmEndpointError(
-        `openai-compat chat requires either \`endpoint\` (for local backends like ` +
-          `llama-server / Ollama / mlx_lm) or \`apiKey\` (for cloud OpenAI / together.ai / ` +
-          `fireworks.ai). Neither is set in summarizeLlm/askLlm/localLlm config.`,
-      );
-    }
+    assertOpenAiCompatEndpointOrApiKey(cfg, 'chat', 'summarizeLlm/askLlm/localLlm config');
     if (!cfg.model || cfg.model.length === 0) {
       throw new LlmEndpointError('openai-compat chat requires `model` to be set in the config block.');
     }
-    this.timeoutMs = cfg.timeoutMs && cfg.timeoutMs > 0 ? cfg.timeoutMs : DEFAULT_TIMEOUT_MS;
-    this.client = new OpenAI({
-      ...(cfg.endpoint ? { baseURL: normaliseBaseUrl(cfg.endpoint) } : {}),
-      apiKey: cfg.apiKey ?? 'unused-local-backend',
-      timeout: this.timeoutMs,
-      // No SDK-level retries — cartograph's batch callers (summarizer,
-      // classifier, dead-code judge) handle retry / fallback at the
-      // batch boundary. SDK retries would multiply latency on
-      // transient backend hiccups + double-bill cloud providers.
-      maxRetries: 0,
-    });
+    this.timeoutMs = resolveOpenAiCompatTimeout(cfg.timeoutMs, DEFAULT_TIMEOUT_MS);
+    this.client = createOpenAiCompatSdkClient(cfg, this.timeoutMs);
   }
 
   /**
@@ -166,7 +149,7 @@ export class OpenAiSdkChatBackend implements ChatBackend {
   async isReachable(): Promise<boolean> {
     try {
       // Awaiting list() performs the request and parses the body — that alone confirms 2xx + reachability.
-      await this.client.models.list({ timeout: Math.min(this.timeoutMs, 5_000) });
+      await probeOpenAiCompatModels(this.client, this.timeoutMs);
       this.lastReachabilityError = null;
       return true;
     } catch (err) {
@@ -217,10 +200,5 @@ function buildChatResult(res: OpenAI.Chat.ChatCompletion, durationMs: number): C
 }
 
 function toChatEndpointError(err: Error & { status?: unknown }): LlmEndpointError {
-  const statusLabel =
-    typeof err.status === 'number' || typeof err.status === 'string' ? err.status : 'connection error';
-  return new LlmEndpointError(
-    `chat endpoint returned ${statusLabel}: ${err.message}`,
-    typeof err.status === 'number' ? err.status : undefined,
-  );
+  return openAiApiErrorToEndpointError('chat', err);
 }

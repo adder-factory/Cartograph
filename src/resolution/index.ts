@@ -600,7 +600,8 @@ interface ResolverCaches {
   knownFiles: Set<string> | null;
   cachesWarmed: boolean;
   // tsconfig/jsconfig path-alias map. `undefined` = not yet computed,
-  // `null` = computed and absent. Immutable once set.
+  // `null` = computed and absent. Reset on resolver cache clear so a
+  // long-lived MCP session observes tsconfig/jsconfig path changes.
   projectAliases: AliasMap | null | undefined;
 }
 
@@ -988,6 +989,7 @@ export class ReferenceResolver {
     this.caches.qualifiedNameCache.clear();
     this.caches.knownNames = null;
     this.caches.knownFiles = null;
+    this.caches.projectAliases = undefined;
     this.caches.cachesWarmed = false;
   }
 

@@ -147,6 +147,12 @@ const getFilesNeedingReextractQuery = defineQuery({
   row: PathOnlyRowSchema,
 });
 
+const markFileNeedReextractQuery = defineQuery({
+  sql: 'UPDATE files SET needs_reextract = 1 WHERE path = @path',
+  params: z.object({ path: z.string() }),
+  row: z.never(),
+});
+
 const updateFileLocQuery = defineQuery({
   sql: 'UPDATE files SET loc = @loc WHERE path = @path',
   params: z.object({ path: z.string(), loc: z.number() }),
@@ -183,6 +189,7 @@ declare module './queries.js' {
     getAllFiles?: TypedQuery<Record<string, never>, FileRow>;
     getAllFilePaths?: TypedQuery<Record<string, never>, { path: string }>;
     getFilesNeedingReextract?: TypedQuery<Record<string, never>, { path: string }>;
+    markFileNeedReextract?: TypedQuery<{ path: string }, never>;
     updateFileLoc?: TypedQuery<{ path: string; loc: number }, never>;
     findDriftedFiles?: TypedQuery<Record<string, never>, { path: string }>;
     markDriftedFilesNeedReextract?: TypedQuery<Record<string, never>, never>;
@@ -377,6 +384,23 @@ export function getAllFilePaths(qb: QueryBuilder): string[] {
 export function getFilesNeedingReextract(qb: QueryBuilder): string[] {
   qb.queries.getFilesNeedingReextract ??= getFilesNeedingReextractQuery(qb.db);
   return qb.queries.getFilesNeedingReextract.all({}).map((r) => r.path);
+}
+
+/**
+ * Durably mark tracked files for forced re-extraction.
+ *
+ * Used when a non-source input changes extraction output (for example
+ * tsconfig path aliases or nested-function thresholds). The in-memory sync
+ * queue handles the current run; this DB flag makes the heal survive process
+ * exit or an interrupted sync and is cleared by the normal `upsertFile` path
+ * once the file is successfully re-extracted.
+ */
+export function markFilesNeedReextract(qb: QueryBuilder, paths: Iterable<string>): void {
+  qb.queries.markFileNeedReextract ??= markFileNeedReextractQuery(qb.db);
+  const stmt = qb.queries.markFileNeedReextract;
+  qb.db.transaction(() => {
+    for (const path of paths) stmt.run({ path });
+  })();
 }
 
 /** Bulk LOC update — used during indexAll to refresh LOC for every indexed file. */

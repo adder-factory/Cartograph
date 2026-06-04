@@ -40,6 +40,21 @@ const CountRowSchema = z.object({ c: z.number() });
 
 const OkRowSchema = z.object({ ok: z.number() });
 
+const EmbeddingsSignatureRowSchema = z.object({
+  c: z.number(),
+  max_generated_at: z.number(),
+  max_last_ref_at: z.number(),
+  byte_sum: z.number(),
+  min_node_id: z.string(),
+  max_node_id: z.string(),
+  min_source_hash: z.string(),
+  max_source_hash: z.string(),
+  min_summary_hash: z.string(),
+  max_summary_hash: z.string(),
+  min_embedding_hex: z.string(),
+  max_embedding_hex: z.string(),
+});
+
 const EmbeddableNodeRowSchema = z.object({
   node_id: z.string(),
   name: z.string(),
@@ -74,6 +89,30 @@ const getEmbeddingsCountQuery = defineQuery({
         WHERE embedding_model = @embeddingModel AND grain = 'symbol'`,
   params: z.object({ embeddingModel: z.string() }),
   row: CountRowSchema,
+});
+
+const getEmbeddingsSignatureQuery = defineQuery({
+  sql: `SELECT
+          COUNT(*) AS c,
+          COALESCE(MAX(s.generated_at), 0) AS max_generated_at,
+          COALESCE(MAX(s.last_ref_at), 0) AS max_last_ref_at,
+          COALESCE(SUM(LENGTH(s.embedding)), 0) AS byte_sum,
+          COALESCE(MIN(r.node_id), '') AS min_node_id,
+          COALESCE(MAX(r.node_id), '') AS max_node_id,
+          COALESCE(MIN(r.body_hash), '') AS min_source_hash,
+          COALESCE(MAX(r.body_hash), '') AS max_source_hash,
+          COALESCE(MIN(r.summary_hash_at_embed), '') AS min_summary_hash,
+          COALESCE(MAX(r.summary_hash_at_embed), '') AS max_summary_hash,
+          COALESCE(HEX(MIN(s.embedding)), '') AS min_embedding_hex,
+          COALESCE(HEX(MAX(s.embedding)), '') AS max_embedding_hex
+        FROM embedding_refs r
+        JOIN embedding_store s
+          ON s.body_hash = r.body_hash
+         AND s.model = r.model
+         AND s.grain = r.grain
+       WHERE r.model = @embeddingModel AND r.grain = 'symbol'`,
+  params: z.object({ embeddingModel: z.string() }),
+  row: EmbeddingsSignatureRowSchema,
 });
 
 const getEmbeddingsTotalQuery = defineQuery({
@@ -177,6 +216,23 @@ declare module './queries.js' {
     getAllEmbeddings?: TypedQuery<{ embeddingModel: string }, { node_id: string; embedding: Buffer | Uint8Array }>;
     getEmbeddingForNode?: TypedQuery<{ nodeId: string; embeddingModel: string }, { embedding: Buffer | Uint8Array }>;
     getEmbeddingsCount?: TypedQuery<{ embeddingModel: string }, { c: number }>;
+    getEmbeddingsSignature?: TypedQuery<
+      { embeddingModel: string },
+      {
+        c: number;
+        max_generated_at: number;
+        max_last_ref_at: number;
+        byte_sum: number;
+        min_node_id: string;
+        max_node_id: string;
+        min_source_hash: string;
+        max_source_hash: string;
+        min_summary_hash: string;
+        max_summary_hash: string;
+        min_embedding_hex: string;
+        max_embedding_hex: string;
+      }
+    >;
     getEmbeddingsTotal?: TypedQuery<Record<string, never>, { c: number }>;
     hasSymbolEmbeddingWithModel?: TypedQuery<{ nodeId: string; embeddingModel: string }, { ok: number }>;
     hasSymbolEmbeddingAny?: TypedQuery<{ nodeId: string }, { ok: number }>;
@@ -272,6 +328,32 @@ export function getEmbeddingsCount(qb: QueryBuilder, embeddingModel: string): nu
   qb.queries.getEmbeddingsCount ??= getEmbeddingsCountQuery(qb.db);
   const row = qb.queries.getEmbeddingsCount.get({ embeddingModel });
   return row?.c ?? 0;
+}
+
+/**
+ * Cheap rowset signature for {@link EmbeddingCache} freshness checks.
+ * Stronger than row count alone: same-count rewrites typically change
+ * generated_at, ref timestamps, node/source/summary bounds, byte totals,
+ * or the min/max embedding blob sentinels.
+ */
+export function getEmbeddingsSignature(qb: QueryBuilder, embeddingModel: string): string {
+  qb.queries.getEmbeddingsSignature ??= getEmbeddingsSignatureQuery(qb.db);
+  const row = qb.queries.getEmbeddingsSignature.get({ embeddingModel });
+  if (!row) return '0:0:0:0::::::::';
+  return [
+    row.c,
+    row.max_generated_at,
+    row.max_last_ref_at,
+    row.byte_sum,
+    row.min_node_id,
+    row.max_node_id,
+    row.min_source_hash,
+    row.max_source_hash,
+    row.min_summary_hash,
+    row.max_summary_hash,
+    row.min_embedding_hex,
+    row.max_embedding_hex,
+  ].join(':');
 }
 
 /**
