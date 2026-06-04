@@ -1,7 +1,8 @@
-# Required CI gate — typecheck (tsgo) + biome lint/format + serial leak canaries + biomarker floor.
+# Required CI gate — portability + typecheck (tsgo) + biome lint/format + mock hygiene + serial leak canaries + biomarker floor.
 #
 # Runs on every push to `main` and every pull request. Fails the build on
-# any typecheck error, any biome lint diagnostic, any unformatted file,
+# any CI script portability issue, any typecheck error, any biome lint
+# diagnostic, any unformatted file, any unguarded partial source-module mock,
 # any module-cache leak caught by the serial canaries, OR any biomarker
 # ERROR/WARNING finding (the project's 0-err/0-warn floor).
 # The biomarker gate guards against structural-health drift: without it, CI
@@ -33,7 +34,7 @@ concurrency:
 
 jobs:
   check:
-    name: typecheck + lint + format + leaks + biomarkers
+    name: portability + typecheck + lint + format + mock hygiene + leaks + biomarkers
     runs-on: ubuntu-latest
     # Bumped from 15 → 20: the leak canary adds a serial set of paired
     # bun:test runs, and the biomarker gate adds one structural index of the
@@ -55,11 +56,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: CI script portability
+        run: npm run check:ci-portability
+
       - name: Typecheck (tsgo)
         run: npm run typecheck
 
       - name: Lint + format check (biome)
         run: npm run check
+
+      - name: Test mock hygiene
+        run: npm run test:mock-hygiene
 
       - name: Module leak canaries
         run: npm run test:leaks

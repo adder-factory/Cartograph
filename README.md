@@ -845,6 +845,10 @@ Cartograph indexes plain language structure first, then adds framework-aware nod
 
 Want to add another language? See [`docs/ADDING-A-LANGUAGE.md`](docs/ADDING-A-LANGUAGE.md) — it walks through sourcing a tree-sitter grammar, probing the AST, choosing between the OO and self-contained extractor patterns, and the worked examples in the existing extractors.
 
+## Development Checks
+
+Scripts used by `.github/workflows/check.yml` must run on a stock GitHub runner after the workflow's setup steps. Nonstandard tools must either be installed by the workflow or have a fallback. Keep fast tools such as `rg` as the preferred local path, but pair them with `git grep` or a Node filesystem traversal before calling the script from CI. Run `npm run check:ci-portability` to verify the current CI entrypoints.
+
 ## Troubleshooting
 
 **"Cartograph not initialized"** — Run `cartograph admin init` in your project directory first.
