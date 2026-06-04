@@ -30,7 +30,7 @@ import { errMsg, logDebug } from '../errors.js';
 import { TraceLogger } from '../trace/logger.js';
 import { runStartupSync } from './startup-sync.js';
 import { checkSchemaCompat, formatSchemaMismatch } from './schema-guard.js';
-import type { McpServerProfile } from './profiles.js';
+import { resolveMcpServerProfile, type McpServerProfile } from './profiles.js';
 
 /**
  * Convert a file:// URI to a filesystem path.
@@ -83,8 +83,9 @@ interface MCPServerOptions {
   /** Named advertised-tool profile. Defaults to `full`. */
   profile?: McpServerProfile | undefined;
   /**
-   * Disable every write-class tool (sync, embed, summarize). Sandboxed-
-   * agent setups use this to keep the agent read-only on the graph.
+   * Disable every write-class tool/branch (sync, embed, summarize).
+   * Sandboxed-agent setups use this to keep the agent read-only on the
+   * graph. `profile: 'read-only'` implies the same execution gate.
    */
   disableWriteTools?: boolean | undefined;
   /** Disable specific tools by name. Composes with `disableWriteTools`. */
@@ -460,7 +461,7 @@ export class MCPServer {
       noDefaultProjectPreamble: null,
     };
     this.transport = new StdioTransport();
-    this.disableTrace = options.disableWriteTools === true;
+    this.disableTrace = options.disableWriteTools === true || resolveMcpServerProfile(options.profile) === 'read-only';
     this.disableStartupSync = options.disableStartupSync === true;
     this.toolHandler = new ToolHandler(null, {
       profile: options.profile,

@@ -255,4 +255,5 @@ export const NOTE_TOOL = defineTool({
   handle: handleNote,
   bypassFreshnessGate: true,
   isWriteTool: true,
+  readOnlyActions: new Set(['list']),
 });

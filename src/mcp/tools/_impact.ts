@@ -8,7 +8,7 @@
  * concentration rollup + per-source breakdown) instead of a flat BFS.
  */
 import type { ToolResult } from '../tool-types.js';
-import type { Edge, Node, Subgraph } from '../../types.js';
+import type { Edge, EdgeKind, Node, Subgraph } from '../../types.js';
 import { clamp, isTestPath, numArg } from '../../utils.js';
 import { textResult, validateStringOutcome } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
@@ -372,6 +372,9 @@ interface AggregateImpactAcrossMatchesArgs {
    *  false for prod-symbol starts; forced true when the start lives
    *  in a test file). */
   includeTests: boolean;
+  /** Explicit edge-kind filter forwarded from `cartograph_graph`. Omitted
+   *  preserves the legacy all-impact-edges traversal. */
+  edgeKind: EdgeKind | undefined;
 }
 
 function aggregateImpactAcrossMatches(args: AggregateImpactAcrossMatchesArgs): {
@@ -379,14 +382,18 @@ function aggregateImpactAcrossMatches(args: AggregateImpactAcrossMatchesArgs): {
   mergedEdges: Edge[];
   perSource: Array<{ node: Node; nodes: Map<string, Node> }>;
 } {
-  const { cg, matches, depth, confidenceThreshold, includeTests } = args;
+  const { cg, matches, depth, confidenceThreshold, includeTests, edgeKind } = args;
   const mergedNodes = new Map<string, Node>();
   const mergedEdges: Edge[] = [];
   const seenEdges = new Set<string>();
   const perSource: Array<{ node: Node; nodes: Map<string, Node> }> = [];
 
   for (const node of matches) {
-    const impact = cg.internals.traverser.getImpactRadius(node.id, depth);
+    const impact = cg.internals.traverser.getImpactRadius(
+      node.id,
+      depth,
+      edgeKind === undefined ? undefined : [edgeKind],
+    );
     const confidenceFiltered = filterImpactByConfidence(impact, node.id, confidenceThreshold);
     // Apply the test-file filter AFTER the confidence pass so the
     // root is preserved in both stages (filterImpactByConfidence keeps
@@ -418,11 +425,13 @@ interface BuildImpactResponseArgs {
    *  match lives in a test file — the inverse "what does my test
    *  impact" case stays usable). Explicit caller `includeTests` wins. */
   includeTests: boolean;
+  /** Explicit edge-kind filter forwarded from `cartograph_graph`. */
+  edgeKind: EdgeKind | undefined;
 }
 
 /** Aggregate, format, and wrap the impact result. Extracted from {@link handleImpact}. */
 function buildImpactResponse(args: BuildImpactResponseArgs): ToolResult {
-  const { cg, symbol, allMatches, depth, confidenceThreshold, includeTests } = args;
+  const { cg, symbol, allMatches, depth, confidenceThreshold, includeTests, edgeKind } = args;
   // #8 confidence filter: drop edges below threshold AND prune nodes that
   // become unreachable from the root along surviving edges.
   // FRICTION-8 (impact path): also drop test-file targets unless the
@@ -433,6 +442,7 @@ function buildImpactResponse(args: BuildImpactResponseArgs): ToolResult {
     depth,
     confidenceThreshold,
     includeTests,
+    edgeKind,
   });
   const mergedImpact = { nodes: mergedNodes, edges: mergedEdges, roots: allMatches.nodes.map((n) => n.id) };
   const multiSource = perSource.length > 1;
@@ -488,7 +498,9 @@ export async function handleImpact(ctx: ToolCtx, args: Record<string, unknown>):
     includeTests = allMatches.nodes.some((n) => isTestPath(n.filePath));
   }
 
-  return ok(buildImpactResponse({ cg, symbol, allMatches, depth, confidenceThreshold, includeTests }));
+  const edgeKind = typeof args['edgeKind'] === 'string' ? (args['edgeKind'] as EdgeKind) : undefined;
+
+  return ok(buildImpactResponse({ cg, symbol, allMatches, depth, confidenceThreshold, includeTests, edgeKind }));
 }
 
 // IMPACT_TOOL export removed in the 2026-05-11 four-tool merge. The public

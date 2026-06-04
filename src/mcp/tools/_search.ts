@@ -1001,7 +1001,7 @@ function renderMultiNameUnion(args: RenderMultiNameUnionArgs): string {
  * response).
  *
  * Honours `kind` (per-token filter), `compact` + `fields` (per-row
- * shape), and `pathFilter` (post-filters every group's hits). Delta
+ * shape), and `pathFilter` (prefix-filters every group's hits). Delta
  * mode (`since`) is NOT plumbed through this path — multi-name lookups
  * are read-only "give me everything" queries and the call-id machinery
  * is tuned for repeated single-query pagination; threading it through
@@ -1053,6 +1053,7 @@ interface FetchExactSearchResultsArgs {
   cg: import('../../index.js').default;
   query: string;
   kind: string | undefined;
+  pathFilter: string | undefined;
   limit: number;
 }
 
@@ -1071,7 +1072,7 @@ interface ExactSearchResults {
  * doesn't roll into the parent's cyclomatic count.
  */
 function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearchResults {
-  const { cg, query, kind, limit } = args;
+  const { cg, query, kind, pathFilter, limit } = args;
   // Over-fetch a wider candidate set so the post-fetch prod/test re-rank
   // can pull a real prod hit ahead of test-bed/fixture noise.
   const fetchLimit = Math.min(limit * SEARCH_OVERFETCH_MULTIPLIER, MAX_SEARCH_LIMIT);
@@ -1082,16 +1083,21 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
   // rows ordered like `../...js`. When the query is centrality-only
   // (no text / no graph qualifiers), push the predicate into SQL.
   const parsed = parseQuery(query);
-  const rawResults = shouldUseCentralityFastPath(parsed)
-    ? runCentralityOnlySearch({
-        cg,
-        cf: parsed.centralityFilter!,
-        kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
-        languages: parsed.languages.length > 0 ? parsed.languages : undefined,
-        limit: fetchLimit,
-        sortByCentrality: parsed.sortBy === 'centrality',
-      })
-    : searchNodes(cg.queries, query, compact({ limit: fetchLimit, kinds }));
+  const rawResults =
+    shouldUseCentralityFastPath(parsed) && pathFilter === undefined
+      ? runCentralityOnlySearch({
+          cg,
+          cf: parsed.centralityFilter!,
+          kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
+          languages: parsed.languages.length > 0 ? parsed.languages : undefined,
+          limit: fetchLimit,
+          sortByCentrality: parsed.sortBy === 'centrality',
+        })
+      : searchNodes(
+          cg.queries,
+          query,
+          compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
+        );
   const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
   const fullResults = reorderProdFirst(rankedResults, limit);
   return { rawResults, fullResults };
@@ -1206,6 +1212,7 @@ export async function handleFindByName(ctx: ToolCtx, args: Record<string, unknow
 
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
   const kind = args['kind'] as string | undefined;
+  const pathFilter = args['pathFilter'] as string | undefined;
   const requestedLimit = numArg(args['limit'], DEFAULT_SEARCH_LIMIT);
   const limit = clamp(requestedLimit, 1, MAX_SEARCH_LIMIT);
   // Surface an over-max clamp (audit-4 #9): a `--limit` above the
@@ -1218,7 +1225,7 @@ export async function handleFindByName(ctx: ToolCtx, args: Record<string, unknow
       ? `> Requested limit ${Math.floor(requestedLimit)} exceeds the max of ${MAX_SEARCH_LIMIT} for by='name'; showing ${MAX_SEARCH_LIMIT}.`
       : '';
 
-  const { rawResults, fullResults } = fetchExactSearchResults({ cg, query, kind, limit });
+  const { rawResults, fullResults } = fetchExactSearchResults({ cg, query, kind, pathFilter, limit });
   if (fullResults.length === 0) return ok(buildEmptyResultsResponse(cg, query, kind));
 
   // Delta-mode (#16): when the agent passes `since=c_xxxx`, filter

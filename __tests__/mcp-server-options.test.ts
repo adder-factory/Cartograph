@@ -78,9 +78,25 @@ describe('MCP server-level options', () => {
         .sort();
       expect(profileNames).toEqual(noWriteNames);
       expect(profileNames).not.toContain('cartograph_admin');
-      expect(profileNames).not.toContain('cartograph_summaries');
+      expect(profileNames).toContain('cartograph_coverage');
+      expect(profileNames).toContain('cartograph_note');
+      expect(profileNames).toContain('cartograph_role');
+      expect(profileNames).toContain('cartograph_session');
+      expect(profileNames).toContain('cartograph_summaries');
       profileHandler.closeAll();
       noWriteHandler.closeAll();
+    });
+
+    it('read-only profile enforces the write gate for mixed tools it advertises', async () => {
+      const handler = new ToolHandler(cg, { profile: 'read-only' });
+      const readResult = await handler.execute('cartograph_role', {});
+      expect(readResult.content[0]?.text ?? '').not.toMatch(/disabled by this MCP server/);
+
+      const writeResult = await handler.execute('cartograph_role', { symbol: 'alpha' });
+      const text = writeResult.content[0]?.text ?? '';
+      expect(text).toMatch(/read-only write gate/);
+      expect(text).toMatch(/role.*list-by-role|list-by-role.*role/);
+      handler.closeAll();
     });
 
     it('review focuses diff, risk, test, and change-impact tools', () => {
@@ -113,14 +129,15 @@ describe('MCP server-level options', () => {
   });
 
   describe('disableWriteTools', () => {
-    it('hides pure write tools from tools/list', () => {
+    it('hides pure write tools but keeps mixed tools with read-only branches in tools/list', () => {
       const handler = new ToolHandler(cg, { disableWriteTools: true });
       const names = handler.getTools().map((t) => t.name);
-      // cartograph_summaries is a write surface (its 'save' action
-      // persists LLM-generated summaries) — must be hidden.
-      expect(names).not.toContain('cartograph_summaries');
-      // cartograph_note (write action — persists user notes).
-      expect(names).not.toContain('cartograph_note');
+      expect(names).not.toContain('cartograph_admin');
+      expect(names).toContain('cartograph_coverage');
+      expect(names).toContain('cartograph_note');
+      expect(names).toContain('cartograph_role');
+      expect(names).toContain('cartograph_session');
+      expect(names).toContain('cartograph_summaries');
       // Read-class tools still listed.
       expect(names).toContain('cartograph_find');
       expect(names).toContain('cartograph_status');
@@ -144,6 +161,30 @@ describe('MCP server-level options', () => {
       const result = await handler.execute('cartograph_admin', { action: 'sync' });
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/disabled by this MCP server/);
+      handler.closeAll();
+    });
+
+    it('allows read-only branches of mixed write tools and blocks their write branches', async () => {
+      const handler = new ToolHandler(cg, { disableWriteTools: true });
+
+      const noteList = await handler.execute('cartograph_note', { action: 'list' });
+      expect(noteList.content[0]?.text ?? '').not.toMatch(/disabled by this MCP server/);
+
+      const noteAdd = await handler.execute('cartograph_note', { action: 'add', text: 'remember this' });
+      expect(noteAdd.content[0]?.text ?? '').toMatch(/read-only write gate/);
+      expect(noteAdd.content[0]?.text ?? '').toMatch(/actions: list/);
+
+      const coverageRead = await handler.execute('cartograph_coverage', { mode: 'ranked' });
+      expect(coverageRead.content[0]?.text ?? '').not.toMatch(/disabled by this MCP server/);
+
+      const coverageWrite = await handler.execute('cartograph_coverage', { mode: 'refresh' });
+      expect(coverageWrite.content[0]?.text ?? '').toMatch(/read-only write gate/);
+
+      const roleRead = await handler.execute('cartograph_role', { role: 'util' });
+      expect(roleRead.content[0]?.text ?? '').not.toMatch(/disabled by this MCP server/);
+
+      const roleWrite = await handler.execute('cartograph_role', { symbol: 'alpha' });
+      expect(roleWrite.content[0]?.text ?? '').toMatch(/read-only write gate/);
       handler.closeAll();
     });
 
@@ -191,10 +232,7 @@ describe('MCP server-level options', () => {
         disabledTools: new Set(['cartograph_explore']),
       });
       const names = handler.getTools().map((t) => t.name);
-      // cartograph_summaries has no per-action carve-outs, so the category
-      // rule hides it. cartograph_admin survives because it declares
-      // readOnlyActions — covered by the dedicated test above.
-      expect(names).not.toContain('cartograph_summaries'); // disabled by category
+      expect(names).toContain('cartograph_summaries'); // pending action is read-only
       expect(names).not.toContain('cartograph_explore'); // disabled by name
       expect(names).toContain('cartograph_find'); // neither rule applies
       handler.closeAll();

@@ -789,7 +789,7 @@ async function handleBiomarkers(ctx: ToolCtx, args: BiomarkersArgs): Promise<Too
     const hasSingle = args.symbol != null;
     const hasBatch = Array.isArray(args.symbols);
     if (hasSingle && hasBatch) {
-      return ok(textResult('Pass either `symbol` or `symbols`, not both.'));
+      return err('Pass either `symbol` or `symbols`, not both.');
     }
     if (hasBatch) {
       const capped = (args.symbols ?? []).slice(0, 20);

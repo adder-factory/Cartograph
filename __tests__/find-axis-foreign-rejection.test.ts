@@ -71,6 +71,12 @@ describe('cartograph_find — axis-foreign arg rejection (structural fix B)', ()
     expect(r.content[0]?.text).toMatch(/`key` must be a non-empty string/);
   });
 
+  it('rejects `since` on by:sql instead of silently dropping it', async () => {
+    const r = await handler.execute('cartograph_find', { by: 'sql', since: 'c_deadbeef' });
+    expect(r.isError).toBe(true);
+    expect(r.content[0]?.text).toMatch(/`since` is not honoured for `by: 'sql'`/);
+  });
+
   // ── semantic-only knobs on the wrong mode ─────────────────────────
 
   it('rejects `symbol` with mode:exact', async () => {
@@ -87,7 +93,7 @@ describe('cartograph_find — axis-foreign arg rejection (structural fix B)', ()
       sameLanguage: true,
     });
     expect(r.isError).toBe(true);
-    expect(r.content[0]?.text).toMatch(/language-filter args.*require `mode: 'semantic'`/);
+    expect(r.content[0]?.text).toMatch(/source-symbol language args.*require `mode: 'semantic'`/);
   });
 
   // ── exact-only knobs on the wrong mode ────────────────────────────

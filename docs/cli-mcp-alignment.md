@@ -8,9 +8,13 @@ command has a corresponding MCP tool, with a small set of explicit
 exceptions documented below.
 
 This document is the source of truth for that mapping. Last
-re-verified **2026-05-15**. The mapping is also test-enforced —
+re-verified **2026-06-04**. The mapping is also test-enforced —
 `__tests__/cli-mcp-alignment.test.ts` fails if a tool gains/loses a
 CLI mirror.
+Branch-specific argument consumption is test-enforced in
+`__tests__/tool-surface-smoke.test.ts` with strict consumed-arg
+tracking; add a matrix case there when a tool gains a new mode/action
+branch whose arguments are not covered by the generic smoke call.
 
 The graph-navigation and find surfaces are mode-discriminated: the
 pre-2026-05-11 `callers` / `callees` / `impact` / `walk` tools are
@@ -41,13 +45,16 @@ family subcommand under `admin <action>` / `summaries <action>` /
 ```
 admin (init / uninit / index / sync / unlock / migrate /
        build-similarity-edges / embed-only / prune-store /
-       summarize / embed / classify / install-models)
+       summarize / embed / classify / scip-export / scip-import /
+       install-models / doctor / llm-plan / llm-apply / llm-tune)
 affected, ask, at-range, biomarkers, blame, changed-since,
 compare-to-ref, context, coverage, dead-code, deps, digest,
 discover, entry-points, explore, files, find, graph, history,
 hotspots, imports, local-chat, module, node, note, playbook,
-propose-rename, review (context / neighbors / risk),
-role, sql, status, summaries (pending / save),
+propose-rename, review (context / neighbors / risk / agent-audit / trust),
+role, session (create / resume / list / delete / macro_save /
+macro_run / macro_list / macro_delete), sql, status,
+summaries (pending / save),
 tests-for, trace-to-culprits
 ```
 
@@ -59,15 +66,11 @@ standalone MCP tool; it routes through `cartograph_graph({direction:
 axis — `rule` / `llm` / `auto` (default). `dead-code` also accepts the
 deprecated `--mode static|judge` alias.
 
-### MCP-only by design
-
-- **`cartograph_session`** — agent session state and saved tool
-  macros across MCP calls. CLI invocations are one-shot processes;
-  sessions span multiple MCP calls within one server lifecycle, so
-  this isn't meaningful at the CLI.
-
 ### CLI-only by design
 
+- **`cartograph doctor`** — human-discoverability shortcut. The MCP
+  mirror is `cartograph_admin({action: 'doctor'})`, and the nested CLI
+  form `cartograph admin doctor` exists for admin-family parity.
 - **`cartograph serve`** — IS the MCP server; can't run via MCP
   itself.
 - **`cartograph install`** — git-hooks installer; touches
@@ -77,8 +80,8 @@ deprecated `--mode static|judge` alias.
   Exposing it through MCP would measure the surface only after the
   context cost was already paid.
 - **`cartograph llm setup`** — interactive provider config wizard.
-  Configures nllc GGUF models or Claude (claude-bridge / anthropic-api)
-  and prompts on conflicts.
+  Configures OpenAI-compatible local/cloud providers and prompts on
+  conflicts.
 - **`cartograph viewer`** — web UI; HTTP server on a port. Out of
   MCP scope.
 
@@ -89,10 +92,11 @@ splits into discrete actions. Adding a new subcommand goes under
 the existing parent — **don't add a top-level shortcut**.
 
 ```
-admin     <init|uninit|index|sync|unlock|migrate|build-similarity-edges|embed-only|prune-store|summarize|embed|classify|install-models>
+admin     <init|uninit|index|sync|unlock|migrate|build-similarity-edges|embed-only|prune-store|summarize|embed|classify|scip-export|scip-import|install-models|doctor|llm-plan|llm-apply|llm-tune>
 summaries <pending|save>
-review    <context|neighbors|risk>
+review    <context|neighbors|risk|agent-audit|trust>
 note      <add|list|delete>
+session   <create|resume|list|delete|macro_save|macro_run|macro_list|macro_delete>
 llm       <setup>
 ```
 
@@ -162,6 +166,19 @@ When adding a new MCP tool:
 
 Run the verification recipes above to confirm no drift.
 
+### Release audit guardrails
+
+Before a release or quarterly tool-surface audit, run:
+
+```sh
+bun run check:release
+```
+
+That bundles typecheck, Biome, the MCP load-budget target,
+biomarker checks, and the fast test suite. The smaller MCP release
+target intentionally fails before the hard startup-size ceiling so
+schema/help growth is caught while there is still room to trim.
+
 ### Per-property exemption shape (#31 closed 2026-05-22)
 
 `__tests__/cli-mcp-alignment.test.ts` walks every MCP tool's
@@ -190,6 +207,12 @@ fields the schema still exposes'`) catches stale exemptions — a
 renamed schema field with the old name still in the exception list
 fails loudly instead of silently masking a NEW gap on a same-name
 field elsewhere.
+
+For branch-specific fields, the consumed-args matrix is the second
+line of defense. It runs representative read-safe calls under
+`CARTOGRAPH_STRICT_UNREAD_ARGS=1`, so a handler that accepts an
+argument on a branch but never reads it fails the test instead of
+shipping a silent no-op.
 
 ## Renames
 

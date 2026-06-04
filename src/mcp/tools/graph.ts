@@ -335,7 +335,6 @@ function forwardImpactArgs(args: GraphArgs): Record<string, unknown> {
   delete out['since'];
   delete out['includeRoles'];
   delete out['symbols'];
-  delete out['edgeKind'];
   delete out['start'];
   delete out['lowTokens'];
   return out;

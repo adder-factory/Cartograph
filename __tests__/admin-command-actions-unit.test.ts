@@ -454,4 +454,29 @@ describe('admin command action bodies', () => {
       `runDoctor:{"projectPath":"${projectPath}","fix":false,"skipProjectChecks":true}`,
     );
   });
+
+  it('uses the post-fix doctor status for admin doctor --fix exit handling', async () => {
+    const deps = fakeAdminDeps();
+    deps.loadDoctor = vi.fn(async () => ({
+      runDoctor: vi.fn(async (opts) => {
+        calls.push(`runDoctor:${JSON.stringify(opts)}`);
+        return { overallStatus: 'fail', afterFix: { overallStatus: 'pass' } };
+      }),
+      formatDoctorReport: vi.fn(() => '# Doctor\n\nFixed.'),
+    }));
+    actions.clear();
+    registerAdminCommands(deps);
+
+    const originalExit = process.exit;
+    const exitSpy = vi.fn((code?: number) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit;
+    process.exit = exitSpy;
+    try {
+      await expect(actions.get('doctor [path]')!(projectPath, { fix: true })).resolves.toBeUndefined();
+      expect(exitSpy).not.toHaveBeenCalled();
+    } finally {
+      process.exit = originalExit;
+    }
+  });
 });

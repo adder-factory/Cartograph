@@ -1646,9 +1646,12 @@ function formatLlmLine(args: FormatLlmLineArgs): string | null {
  * defaults.
  */
 function appendServerConfig(lines: string[], ctx: ToolCtx): void {
-  const serverLines: string[] = [`- **Profile:** \`${resolveMcpServerProfile(ctx.options.profile)}\``];
+  const profile = resolveMcpServerProfile(ctx.options.profile);
+  const serverLines: string[] = [`- **Profile:** \`${profile}\``];
   if (ctx.options.disableWriteTools) {
     serverLines.push('- **Write tools:** disabled (`--no-write-tools`)');
+  } else if (profile === 'read-only') {
+    serverLines.push('- **Write tools:** disabled (`profile: read-only`)');
   }
   if (ctx.options.disabledTools && ctx.options.disabledTools.size > 0) {
     const list = [...ctx.options.disabledTools].sort((a, b) => a.localeCompare(b)).join(', ');

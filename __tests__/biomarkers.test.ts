@@ -1663,6 +1663,16 @@ describe('cartograph_biomarkers: F-D — minCentrality empty hint', () => {
     expect(bannerCount + noMatchCount).toBeGreaterThanOrEqual(1);
   });
 
+  it('mode=symbol errors when both symbol and symbols are supplied', async () => {
+    const result = await handler.execute('cartograph_biomarkers', {
+      mode: 'symbol',
+      symbol: 'gnarlyOne',
+      symbols: ['gnarlyOne'],
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0]?.text).toMatch(/either `symbol` or `symbols`/);
+  });
+
   // Friction #16 regression: pre-structural-fix-A, mode='symbol' silently
   // truncated `symbols: [...22 entries]` to the first 20 with no warning.
   // The shared `batchedSymbols` field locks `.max(20)` at the Zod

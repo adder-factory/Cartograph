@@ -114,6 +114,7 @@ interface ImpactRecOpts {
   nodes: Map<string, Node>;
   edges: Edge[];
   visited: Set<string>;
+  edgeKinds: EdgeKind[] | undefined;
 }
 
 /**
@@ -294,7 +295,8 @@ function traverserGetImpactRecursive(queries: QueryBuilder, args: ImpactRecOpts)
  * callers of contained methods appear in the impact set.
  */
 function traverserExpandImpactContainerChildren(queries: QueryBuilder, args: ImpactRecOpts): void {
-  const { nodeId, maxDepth, currentDepth, nodes, edges, visited } = args;
+  const { nodeId, maxDepth, currentDepth, nodes, edges, visited, edgeKinds } = args;
+  if (edgeKinds !== undefined && !edgeKinds.includes('contains')) return;
   const focalNode = queries.getNodeById(nodeId);
   if (!focalNode || !CONTAINER_KINDS_FOR_IMPACT.has(focalNode.kind)) return;
   const containsEdges = getOutgoingEdges(queries, nodeId, ['contains']);
@@ -305,14 +307,22 @@ function traverserExpandImpactContainerChildren(queries: QueryBuilder, args: Imp
     if (!childNode || visited.has(childNode.id)) continue;
     nodes.set(childNode.id, childNode);
     edges.push(edge);
-    traverserGetImpactRecursive(queries, { nodeId: childNode.id, maxDepth, currentDepth, nodes, edges, visited });
+    traverserGetImpactRecursive(queries, {
+      nodeId: childNode.id,
+      maxDepth,
+      currentDepth,
+      nodes,
+      edges,
+      visited,
+      edgeKinds,
+    });
   }
 }
 
 /** Walk all incoming edges (things that depend on this node) one level out. */
 function traverserExpandImpactDependents(queries: QueryBuilder, args: ImpactRecOpts): void {
-  const { nodeId, maxDepth, currentDepth, nodes, edges, visited } = args;
-  const incomingEdges = getIncomingEdges(queries, nodeId);
+  const { nodeId, maxDepth, currentDepth, nodes, edges, visited, edgeKinds } = args;
+  const incomingEdges = getIncomingEdges(queries, nodeId, edgeKinds);
   if (incomingEdges.length === 0) return;
   const sources = queries.getNodesByIds(incomingEdges.map((e) => e.source));
   for (const edge of incomingEdges) {
@@ -327,6 +337,7 @@ function traverserExpandImpactDependents(queries: QueryBuilder, args: ImpactRecO
       nodes,
       edges,
       visited,
+      edgeKinds,
     });
   }
 }
@@ -532,7 +543,7 @@ export class GraphTraverser {
    * Calculate the impact radius of a node.
    * Returns all nodes that could be affected by changes to this node.
    */
-  getImpactRadius(nodeId: string, maxDepth: number = 3): Subgraph {
+  getImpactRadius(nodeId: string, maxDepth: number = 3, edgeKinds?: EdgeKind[]): Subgraph {
     const focalNode = this.queries.getNodeById(nodeId);
     if (!focalNode) return { nodes: new Map(), edges: [], roots: [] };
 
@@ -540,7 +551,7 @@ export class GraphTraverser {
     const edges: Edge[] = [];
     const visited = new Set<string>();
     nodes.set(focalNode.id, focalNode);
-    traverserGetImpactRecursive(this.queries, { nodeId, maxDepth, currentDepth: 0, nodes, edges, visited });
+    traverserGetImpactRecursive(this.queries, { nodeId, maxDepth, currentDepth: 0, nodes, edges, visited, edgeKinds });
     return { nodes, edges, roots: [nodeId] };
   }
 

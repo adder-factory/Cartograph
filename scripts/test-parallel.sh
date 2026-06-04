@@ -54,6 +54,12 @@ shard_fails() {
   grep -oE "^ +[0-9]+ fail" "$1" | grep -oE "[0-9]+" | tail -1 || echo 0
 }
 
+retry_won_shard() {
+  # $1 = shard index. `retried` contains shards whose failed files all
+  # passed in fresh per-file processes.
+  [[ " ${retried[*]:-} " == *" $1 "* ]]
+}
+
 echo "=== running $N shards in parallel (pattern: $PATTERN) ==="
 START=$(date +%s)
 
@@ -136,7 +142,7 @@ for i in $(seq 1 "$N"); do
   log="$TMP_DIR/shard-$i.log"
   first_log="$TMP_DIR/shard-$i.log.first"
   retry_won=false
-  if [[ " ${retried[*]:-} " == *" $i "* ]]; then
+  if retry_won_shard "$i"; then
     retry_won=true
   fi
   # Whenever a retry was attempted (won or not), the ORIGINAL shard
@@ -190,10 +196,28 @@ if [ "$exit_code" -ne 0 ]; then
   echo "=== failed shards (first 50 lines of each) ==="
   for i in $(seq 1 "$N"); do
     log="$TMP_DIR/shard-$i.log"
-    f=$(grep -oE "^ +[0-9]+ fail" "$log" | grep -oE "[0-9]+" | tail -1)
-    if [ "${f:-0}" -gt 0 ]; then
+    first_log="$TMP_DIR/shard-$i.log.first"
+    status="${shard_status[$i]:-0}"
+    failed=false
+    if [ -f "$first_log" ]; then
+      if ! retry_won_shard "$i"; then
+        failed=true
+      fi
+    else
+      f=$(grep -oE "^ +[0-9]+ fail" "$log" | grep -oE "[0-9]+" | tail -1)
+      if [ "${f:-0}" -gt 0 ] || [ "$status" -ne 0 ]; then
+        failed=true
+      fi
+    fi
+
+    if $failed; then
       echo "--- shard $i ---"
-      grep -E "^\(fail\)|^error: |TypeError" "$log" | head -10
+      if [ -f "$first_log" ]; then
+        echo "(original shard summary)"
+        grep -E "^ +[0-9]+ (pass|fail|skip)|^Ran " "$first_log" | tail -4
+        echo "(retry failures)"
+      fi
+      grep -B1 -E "^\(fail\)|^error: |TypeError|Expected|Received" "$log" | head -50
     fi
   done
 fi

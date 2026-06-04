@@ -36,10 +36,12 @@ describe('cartograph_find by=name family (post-2026-05-11 merge)', () => {
   beforeEach(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-search-fam-'));
     fs.mkdirSync(path.join(dir, 'src'));
+    fs.mkdirSync(path.join(dir, 'lib'));
     fs.writeFileSync(
       path.join(dir, 'src', 'a.ts'),
       'export function alpha(): number { return 1; }\nexport class Apex { value = 1; }\n',
     );
+    fs.writeFileSync(path.join(dir, 'lib', 'a.ts'), 'export function alpha(): number { return 2; }\n');
     fs.writeFileSync(path.join(dir, '.gitignore'), '.cartograph/\n');
     git(dir, 'init', '-q');
     git(dir, 'config', 'user.email', 't@t');
@@ -86,6 +88,41 @@ describe('cartograph_find by=name family (post-2026-05-11 merge)', () => {
     const def = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
     const exact = await handler.execute('cartograph_find', { by: 'name', query: 'alpha', mode: 'exact' });
     expect(exact.content[0]?.text ?? '').toBe(def.content[0]?.text ?? '');
+  });
+
+  it("mode='exact' honors top-level pathFilter", async () => {
+    const result = await handler.execute('cartograph_find', {
+      by: 'name',
+      query: 'alpha',
+      mode: 'exact',
+      pathFilter: 'lib/',
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('lib/a.ts');
+    expect(text).not.toContain('src/a.ts');
+  });
+
+  it("mode='exact' treats top-level pathFilter as a prefix, not a substring", async () => {
+    const result = await handler.execute('cartograph_find', {
+      by: 'name',
+      query: 'alpha',
+      mode: 'exact',
+      pathFilter: 'a.ts',
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).not.toContain('lib/a.ts');
+    expect(text).not.toContain('src/a.ts');
+  });
+
+  it('keeps inline rich-query path: as a substring filter', async () => {
+    const result = await handler.execute('cartograph_find', {
+      by: 'name',
+      query: 'alpha path:a.ts',
+      mode: 'exact',
+    });
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('lib/a.ts');
+    expect(text).toContain('src/a.ts');
   });
 
   it('invalid `mode` returns a discoverable error', async () => {
@@ -177,6 +214,13 @@ describe('cartograph_find by=name family (post-2026-05-11 merge)', () => {
     // markdown shape must be byte-identical to the no-args call.
     const defaultCall = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
     const withFields = await handler.execute('cartograph_find', { by: 'name', query: 'alpha', fields: ['name'] });
+    expect(withFields.content[0]?.text ?? '').toBe(defaultCall.content[0]?.text ?? '');
+  });
+
+  it('default (no compact) shape also ignores fields that omit name', async () => {
+    const defaultCall = await handler.execute('cartograph_find', { by: 'name', query: 'alpha' });
+    const withFields = await handler.execute('cartograph_find', { by: 'name', query: 'alpha', fields: ['kind'] });
+    expect(withFields.isError).toBeFalsy();
     expect(withFields.content[0]?.text ?? '').toBe(defaultCall.content[0]?.text ?? '');
   });
 });

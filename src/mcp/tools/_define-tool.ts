@@ -99,6 +99,10 @@ export interface DefineToolSpec<S extends ToolZodSchema> {
   readonly isWriteTool?: boolean;
   /** Mirrors {@link ToolModule.readOnlyActions}. */
   readonly readOnlyActions?: ReadonlySet<string>;
+  /** Mirrors {@link ToolModule.isReadOnlyCall}. */
+  readonly isReadOnlyCall?: (args: Record<string, unknown>) => boolean;
+  /** Mirrors {@link ToolModule.readOnlyCallDescription}. */
+  readonly readOnlyCallDescription?: string;
   /** Mirrors {@link ToolModule.bypassSchemaGuard}. */
   readonly bypassSchemaGuard?: boolean;
 }
@@ -394,6 +398,8 @@ export function defineTool<S extends ToolZodSchema>(spec: DefineToolSpec<S>): Zo
     ...(spec.requiresFreshIndex === undefined ? {} : { requiresFreshIndex: spec.requiresFreshIndex }),
     ...(spec.isWriteTool === undefined ? {} : { isWriteTool: spec.isWriteTool }),
     ...(spec.readOnlyActions === undefined ? {} : { readOnlyActions: spec.readOnlyActions }),
+    ...(spec.isReadOnlyCall === undefined ? {} : { isReadOnlyCall: spec.isReadOnlyCall }),
+    ...(spec.readOnlyCallDescription === undefined ? {} : { readOnlyCallDescription: spec.readOnlyCallDescription }),
     ...(spec.bypassSchemaGuard === undefined ? {} : { bypassSchemaGuard: spec.bypassSchemaGuard }),
   };
   // Make the marker non-enumerable AFTER construction so the object
