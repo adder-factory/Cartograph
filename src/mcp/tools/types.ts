@@ -165,6 +165,19 @@ export interface ToolModule {
    */
   readonly readOnlyActions?: ReadonlySet<string>;
   /**
+   * General read-only carve-out for mixed read/write tools whose safe
+   * branch is not expressible as `args.action` alone (for example a
+   * `mode` discriminator, or the absence of a write-triggering field).
+   *
+   * When `isWriteTool` is true and `--no-write-tools` is active, calls
+   * for which this predicate returns true are allowed. The listing path
+   * calls the disabled check without args; declaring this predicate keeps
+   * the tool visible so callers can discover its read-only shapes.
+   */
+  readonly isReadOnlyCall?: (args: Record<string, unknown>) => boolean;
+  /** Human-facing summary of the safe argument shape for disabled-call errors. */
+  readonly readOnlyCallDescription?: string;
+  /**
    * When true, the schema-compat guard (B4) is skipped for this tool.
    * Use ONLY for diagnostic / docs surfaces an operator needs to call
    * AFTER hitting the guard's "stale code, restart" block — without

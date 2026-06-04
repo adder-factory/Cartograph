@@ -48,6 +48,7 @@
     "check:biomarkers": "bun scripts/check-biomarkers.mjs",
     "check:ci-portability": "node scripts/check-ci-portability.mjs",
     "check:mcp-load": "bun scripts/check-mcp-load-budget.ts",
+    "check:release": "bash scripts/release-audit.sh",
     "measure:mcp-load": "bun scripts/measure-mcp-load.ts",
     "benchmark:tokens": "bun scripts/benchmark-token-savings.ts",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\""

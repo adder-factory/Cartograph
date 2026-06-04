@@ -173,6 +173,54 @@ export function beta(x: number): number {
     }
   });
 
+  it('honors includeTests:false in ranked coverage results', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'prod.ts'), `export function prodFn(): number { return 1; }\n`);
+    fs.writeFileSync(path.join(dir, 'src', 'prod.test.ts'), `export function testHelper(): number { return 2; }\n`);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-ranked-tests', version: '0.0.0' }));
+    const lcov = ['SF:src/prod.ts', 'DA:1,1', 'end_of_record', 'SF:src/prod.test.ts', 'DA:1,1', 'end_of_record'].join(
+      '\n',
+    );
+    const lcovPath = path.join(dir, 'lcov.info');
+    fs.writeFileSync(lcovPath, lcov);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      await cg.ingestCoverage(lcovPath);
+
+      const withTests = getCoverageRanked(cg.queries, { kinds: ['function'], includeTests: true, limit: 10 });
+      expect(withTests.map((r) => r.name).toSorted(byName)).toEqual(['prodFn', 'testHelper']);
+
+      const prodOnly = getCoverageRanked(cg.queries, { kinds: ['function'], includeTests: false, limit: 10 });
+      expect(prodOnly.map((r) => r.name)).toEqual(['prodFn']);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('honors pathFilter in ranked coverage results', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.mkdirSync(path.join(dir, 'lib'));
+    fs.writeFileSync(path.join(dir, 'src', 'prod.ts'), `export function prodFn(): number { return 1; }\n`);
+    fs.writeFileSync(path.join(dir, 'lib', 'libFn.ts'), `export function libFn(): number { return 2; }\n`);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-ranked-path', version: '0.0.0' }));
+    const lcov = ['SF:src/prod.ts', 'DA:1,1', 'end_of_record', 'SF:lib/libFn.ts', 'DA:1,1', 'end_of_record'].join('\n');
+    const lcovPath = path.join(dir, 'lcov.info');
+    fs.writeFileSync(lcovPath, lcov);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      await cg.ingestCoverage(lcovPath);
+
+      const ranked = getCoverageRanked(cg.queries, { kinds: ['function'], pathFilter: 'lib/', limit: 10 });
+      expect(ranked.map((r) => r.name)).toEqual(['libFn']);
+    } finally {
+      cg.close();
+    }
+  });
+
   it('re-applies coverage after a sync re-extracts an edited file (FRICTION-6)', async () => {
     // Re-extraction mints new node ids → node_coverage rows cascade-
     // delete. The coverage-reapply index hook must re-derive them from

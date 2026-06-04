@@ -6,7 +6,7 @@
  * with the wrong shape).
  */
 import { describe, it, expect } from 'vitest';
-import { MCP_LOAD_BUDGET_LIMITS } from '../src/mcp/load-budget.js';
+import { MCP_LOAD_BUDGET_LIMITS, MCP_LOAD_BUDGET_TARGETS } from '../src/mcp/load-budget.js';
 import { FULL_PLAYBOOK, SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
 import { ToolHandler, tools } from '../src/mcp/tools.js';
@@ -43,6 +43,8 @@ describe('MCP tool registry — single source of truth', () => {
     expect(advertised.length).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolCount);
     expect(payloadChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.toolsListChars);
     expect(loadContextChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_LIMITS.combinedChars);
+    expect(payloadChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_TARGETS.toolsListChars);
+    expect(loadContextChars).toBeLessThanOrEqual(MCP_LOAD_BUDGET_TARGETS.combinedChars);
 
     const readOnlyAdvertised = new ToolHandler(null, { disableWriteTools: true }).getTools();
     expect(readOnlyAdvertised.length).toBeLessThan(advertised.length);
@@ -113,6 +115,7 @@ describe('MCP tool registry — single source of truth', () => {
       if (!names) continue;
       const unknown = names.filter((name) => !known.has(name));
       expect(unknown, `${profile} profile has unknown tool name(s)`).toEqual([]);
+      expect(new Set(names).size, `${profile} profile has duplicate tool name(s)`).toBe(names.length);
     }
   });
 

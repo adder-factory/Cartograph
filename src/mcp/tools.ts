@@ -52,8 +52,10 @@ export const tools: ToolDefinition[] = registryTools.slice();
 import { getExploreBudget } from './tools/explore-budget.js';
 export { getExploreBudget } from './tools/explore-budget.js';
 
-const MCP_TOOL_DESCRIPTION_MAX_CHARS = 260;
-const MCP_SCHEMA_DESCRIPTION_MAX_CHARS = 120;
+// Keep the handshake-published `tools/list` payload comfortably below
+// the load-budget guard while preserving enough field help for agents.
+const MCP_TOOL_DESCRIPTION_MAX_CHARS = 240;
+const MCP_SCHEMA_DESCRIPTION_MAX_CHARS = 110;
 const TRUNCATED_DESCRIPTION_SUFFIX = '...';
 
 function compactMcpDescription(text: string, maxChars: number): string {
@@ -106,13 +108,12 @@ export interface ToolHandlerOptions {
    * use this to keep the agent read-only on the graph — write-class
    * ops would fail with a clean error instead of running.
    *
-   * Per-action carve-out: a write-flagged family tool can declare
-   * `ToolModule.readOnlyActions` listing its purely-readable actions.
-   * Those actions still execute under `--no-write-tools` and the tool
-   * stays visible in the `tools/list` response so the agent can
-   * discover them; every other action on the same tool is blocked
-   * with a message that names the reachable actions. (No current tool
-   * declares this set — preserved for future families.)
+   * Read-only carve-outs: a write-flagged family tool can declare
+   * `ToolModule.readOnlyActions` or `ToolModule.isReadOnlyCall` for
+   * purely-readable branches. Those calls still execute under
+   * `--no-write-tools` and the tool stays visible in `tools/list` so
+   * agents can discover the safe branch; every write branch is blocked
+   * with a message naming the reachable shape.
    */
   disableWriteTools?: boolean | undefined;
   /**
@@ -177,12 +178,13 @@ const PASS_THROUGH: FreshnessGateOutcome = Object.freeze({
 /**
  * True when the named tool is disabled by server config.
  *
- * Per-action carve-out: when `disableWriteTools` would otherwise block
+ * Read-only carve-out: when `disableWriteTools` would otherwise block
  * a tool flagged `isWriteTool: true`, we let the call through if the
- * module declares `readOnlyActions` AND the caller's `args.action`
- * sits in that set. The listing path (`getTools()`) calls this without
- * `args` — when the module has any read-only carve-outs we expose the
- * tool so the sandboxed agent can discover its read-only surface.
+ * module declares `readOnlyActions` and the caller's `args.action`
+ * sits in that set, or if `isReadOnlyCall(args)` returns true. The
+ * listing path (`getTools()`) calls this without `args` — when the
+ * module has any read-only carve-out we expose the tool so the
+ * sandboxed agent can discover its read-only surface.
  *
  * Calls that omit / mistype `action` fall through to the handler's
  * own dispatch error rather than getting masked behind a generic
@@ -190,6 +192,22 @@ const PASS_THROUGH: FreshnessGateOutcome = Object.freeze({
  * actions (if any) are reachable via the readOnlyActions carve-out.
  */
 type ToolDisabledReason = 'profile' | 'explicit' | 'write' | null;
+
+function toolHasReadOnlyCarveOut(mod: ToolModule | undefined): boolean {
+  if (!mod) return false;
+  if (mod.readOnlyActions && mod.readOnlyActions.size > 0) return true;
+  return typeof mod.isReadOnlyCall === 'function';
+}
+
+function toolHandlerWriteToolsDisabled(options: ToolHandlerOptions): boolean {
+  return options.disableWriteTools === true || resolveMcpServerProfile(options.profile) === 'read-only';
+}
+
+function toolCallMatchesReadOnlyCarveOut(mod: ToolModule, args: Record<string, unknown>): boolean {
+  const action = args['action'];
+  if (typeof action === 'string' && mod.readOnlyActions?.has(action)) return true;
+  return mod.isReadOnlyCall?.(args) === true;
+}
 
 function toolHandlerDisabledReason(
   options: ToolHandlerOptions,
@@ -201,14 +219,11 @@ function toolHandlerDisabledReason(
   const profile = resolveMcpServerProfile(options.profile);
   const profileToolSet = mcpServerProfileToolSet(profile);
   if (mod && profileToolSet && !profileToolSet.has(name)) return 'profile';
-  if (!options.disableWriteTools) return null;
+  if (!toolHandlerWriteToolsDisabled(options)) return null;
   if (!mod?.isWriteTool) return null;
-  const carveOuts = mod.readOnlyActions;
-  if (!carveOuts || carveOuts.size === 0) return 'write';
+  if (!toolHasReadOnlyCarveOut(mod)) return 'write';
   if (!args) return null;
-  const action = args['action'];
-  if (typeof action !== 'string') return null;
-  return carveOuts.has(action) ? null : 'write';
+  return toolCallMatchesReadOnlyCarveOut(mod, args) ? null : 'write';
 }
 
 function toolHandlerIsDisabled(options: ToolHandlerOptions, name: string, args?: Record<string, unknown>): boolean {
@@ -262,8 +277,8 @@ interface PreFlightInvocation {
 }
 
 /**
- * Build the disabled-tool error. When a write-flagged family tool has
- * `readOnlyActions` declared, list the still-reachable actions so the
+ * Build the disabled-tool error. When a write-flagged family tool has a
+ * read-only carve-out, list the still-reachable actions/shape so the
  * sandboxed agent discovers them instead of bouncing off a generic
  * "Tool disabled" wall.
  */
@@ -277,15 +292,20 @@ function formatDisabledMessage(options: ToolHandlerOptions, inv: PreFlightInvoca
   // When disabledTools blocks the whole tool, no action is reachable —
   // don't advertise carve-outs that the operator has separately overridden.
   if (reason === 'explicit') return generic;
-  if (!options.disableWriteTools) return generic;
+  if (!toolHandlerWriteToolsDisabled(options)) return generic;
   const carveOuts = inv.mod?.readOnlyActions;
-  if (!carveOuts || carveOuts.size === 0) return generic;
+  const shape = inv.mod?.readOnlyCallDescription;
+  const parts: string[] = [];
+  if (carveOuts && carveOuts.size > 0) {
+    parts.push(`actions: ${[...carveOuts].sort((a, b) => a.localeCompare(b)).join(', ')}`);
+  }
+  if (shape) parts.push(shape);
+  if (parts.length === 0) return generic;
   const action = inv.args['action'];
-  const actionLabel = typeof action === 'string' ? `\`${action}\`` : '<missing>';
-  const allowed = [...carveOuts].sort((a, b) => a.localeCompare(b)).join(', ');
+  const actionLabel = typeof action === 'string' ? ` action \`${action}\`` : '';
   return (
-    `Tool \`${inv.toolName}\` action ${actionLabel} is disabled by this MCP server's configuration ` +
-    `(--no-write-tools). Read-only actions still reachable: ${allowed}.`
+    `Tool \`${inv.toolName}\`${actionLabel} is disabled by this MCP server's configuration ` +
+    `(read-only write gate). Read-only shape still reachable: ${parts.join('; ')}.`
   );
 }
 

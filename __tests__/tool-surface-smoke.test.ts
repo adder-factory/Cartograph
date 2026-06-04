@@ -55,6 +55,7 @@ import type { ToolDefinition, ToolResult } from '../src/mcp/tool-types.js';
 // ── safety lists ───────────────────────────────────────────────
 
 const TRACK_CONSUMED_ARGS_ENV = 'CARTOGRAPH_TRACK_CONSUMED_ARGS';
+const STRICT_UNREAD_ARGS_ENV = 'CARTOGRAPH_STRICT_UNREAD_ARGS';
 
 /**
  * `cartograph_admin` actions that mutate or destroy the index, take
@@ -241,6 +242,21 @@ async function withoutConsumedArgTracking<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+async function withStrictConsumedArgTracking<T>(fn: () => Promise<T>): Promise<T> {
+  const originalTrack = process.env[TRACK_CONSUMED_ARGS_ENV];
+  const originalStrict = process.env[STRICT_UNREAD_ARGS_ENV];
+  process.env[TRACK_CONSUMED_ARGS_ENV] = '1';
+  process.env[STRICT_UNREAD_ARGS_ENV] = '1';
+  try {
+    return await fn();
+  } finally {
+    if (originalTrack === undefined) delete process.env[TRACK_CONSUMED_ARGS_ENV];
+    else process.env[TRACK_CONSUMED_ARGS_ENV] = originalTrack;
+    if (originalStrict === undefined) delete process.env[STRICT_UNREAD_ARGS_ENV];
+    else process.env[STRICT_UNREAD_ARGS_ENV] = originalStrict;
+  }
+}
+
 // ── fixture repo ───────────────────────────────────────────────
 
 let tempDir: string;
@@ -415,7 +431,86 @@ describe('MCP tool surface — numeric property fuzz', () => {
   }
 });
 
-// ── 3. CLI: every commander command spawned with --help ────────
+// ── 3. STRICT BRANCH MATRIX: supplied args must be read ─────────
+
+const BRANCH_ARG_CONSUMPTION_CASES: ReadonlyArray<{
+  name: string;
+  tool: string;
+  args: Record<string, unknown>;
+}> = [
+  {
+    name: 'find exact consumes filters, compact projection, and limit',
+    tool: 'cartograph_find',
+    args: {
+      by: 'name',
+      mode: 'exact',
+      query: 'fixtureAlpha',
+      kind: 'function',
+      pathFilter: 'src/',
+      compact: true,
+      fields: ['name', 'path', 'line'],
+      limit: 5,
+    },
+  },
+  {
+    name: 'find content consumes grep filters',
+    tool: 'cartograph_find',
+    args: {
+      by: 'content',
+      query: 'fixtureAlpha',
+      pathFilter: 'src/',
+      language: 'typescript',
+      caseSensitive: true,
+      limit: 5,
+    },
+  },
+  {
+    name: 'find env consumes includeTests and key filters',
+    tool: 'cartograph_find',
+    args: { by: 'env', key: 'FIXTURE_ENV', includeTests: false, limit: 5 },
+  },
+  {
+    name: 'find sql consumes includeTests and operation filters',
+    tool: 'cartograph_find',
+    args: { by: 'sql', key: 'fixture_table', op: 'read', includeTests: false, limit: 5 },
+  },
+  {
+    name: 'graph impact consumes edgeKind',
+    tool: 'cartograph_graph',
+    args: { direction: 'impact', start: 'fixtureAlpha', edgeKind: 'calls', hops: 1, limit: 5 },
+  },
+  {
+    name: 'coverage ranked consumes path and test filters',
+    tool: 'cartograph_coverage',
+    args: { mode: 'ranked', pathFilter: 'src/', includeTests: false, maxPct: 1, limit: 5 },
+  },
+  {
+    name: 'role list consumes role and limit',
+    tool: 'cartograph_role',
+    args: { role: 'util', limit: 5 },
+  },
+  {
+    name: 'review risk consumes pathFilter',
+    tool: 'cartograph_review',
+    args: { mode: 'risk', pathFilter: 'src/', topN: 3 },
+  },
+];
+
+describe('MCP tool surface — strict branch argument consumption', () => {
+  for (const c of BRANCH_ARG_CONSUMPTION_CASES) {
+    it(c.name, async () => {
+      const result = await withStrictConsumedArgTracking(() => handler.runHandler(c.tool, c.args));
+      assertWellFormed(c.tool, result);
+      const text = result.content[0]?.text ?? '';
+      expect(
+        text,
+        `${c.tool}: strict branch arg matrix hit a generic crash envelope. args=${JSON.stringify(c.args)}\n${text}`,
+      ).not.toMatch(/Tool execution failed|never read provided arg/);
+    }, 60_000);
+  }
+});
+
+// ── 4. CLI: every commander command spawned with --help ────────
 
 describe('CLI surface — every command responds to --help', () => {
   const repoRoot = path.join(__dirname, '..');

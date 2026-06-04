@@ -117,6 +117,21 @@ describe("cartograph_find({by: 'name', mode: 'intent'})", () => {
     expect(text).not.toMatch(/\(class\)/);
   });
 
+  it('accepts languageFilter in intent mode', async () => {
+    seedSummaries(cg.db.getDb());
+
+    const r = await handler.execute('cartograph_find', {
+      by: 'name',
+      mode: 'intent',
+      query: 'JWT signature',
+      languageFilter: 'typescript',
+      limit: 10,
+    });
+    const text = r.content[0]?.text ?? '';
+    expect(r.isError).toBeFalsy();
+    expect(text).toMatch(/verifyJwt/);
+  });
+
   it('returns no-match message for a query with no hits', async () => {
     seedSummaries(cg.db.getDb());
 

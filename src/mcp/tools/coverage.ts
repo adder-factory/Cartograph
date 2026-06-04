@@ -299,7 +299,12 @@ function handleCoverageRanked(cg: Cartograph, args: CoverageArgs): ToolOutcome {
   const maxPct = args.maxPct;
   const source = args.source;
   const kinds = args.kinds;
-  const rows = getCoverageRanked(cg.queries, compact({ limit, minCentrality, maxPct, kinds, source }));
+  const includeTests = args.includeTests;
+  const pathFilter = args.pathFilter;
+  const rows = getCoverageRanked(
+    cg.queries,
+    compact({ limit, minCentrality, maxPct, kinds, source, pathFilter, includeTests }),
+  );
   if (rows.length === 0) {
     // Distinguish "coverage was never ingested" from "coverage exists
     // but the filter excluded every row". The first warrants the
@@ -464,6 +469,10 @@ const coverageSchema = z.object({
     .max(COVERAGE_RANKED_LIMIT_MAX)
     .optional()
     .describe("For mode='ranked': max rows (default 30; integer in [1, 200], out-of-range rejected)."),
+  pathFilter: z
+    .string()
+    .optional()
+    .describe("For mode='ranked': only include symbols whose project-relative file path starts with this prefix."),
   includeTests: z
     .boolean()
     .optional()
@@ -498,8 +507,12 @@ export const COVERAGE_TOOL = defineToolContract({
     ],
   },
   handle: handleCoverage,
-  // mode='load' mutates indexed coverage rows. Mark the family as a
-  // write tool — the read modes (symbol/ranked/stats) get hidden under
-  // --no-write-tools too, but that's the conservative default.
+  // mode='load' / 'refresh' / 'drop' mutate indexed coverage rows. The
+  // read modes stay available under `--no-write-tools`.
   isWriteTool: true,
+  isReadOnlyCall: (args) => {
+    const mode = typeof args['mode'] === 'string' ? args['mode'] : args['symbol'] ? 'symbol' : 'ranked';
+    return mode === 'symbol' || mode === 'ranked' || mode === 'stats' || mode === 'sources';
+  },
+  readOnlyCallDescription: '`mode` symbol/ranked/stats/sources; omit `mode` for ranked or symbol lookup',
 });

@@ -613,6 +613,12 @@ export interface SearchOptions {
   /** File path patterns to include */
   includePatterns?: string[];
 
+  /** Inline `path:` file path substrings to include after the retrieval cascade. */
+  pathFilters?: string[];
+
+  /** Top-level pathFilter prefixes to include after the retrieval cascade. */
+  pathPrefixes?: string[];
+
   /** File path patterns to exclude */
   excludePatterns?: string[];
 

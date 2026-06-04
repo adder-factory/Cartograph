@@ -142,7 +142,9 @@ export interface AdminCommandDeps {
     };
   }>;
   loadDoctor: () => Promise<{
-    runDoctor: (opts: Record<string, unknown>) => Promise<{ overallStatus: string }>;
+    runDoctor: (
+      opts: Record<string, unknown>,
+    ) => Promise<{ overallStatus: string; afterFix?: { overallStatus: string } }>;
     formatDoctorReport: (result: unknown) => string;
   }>;
   loadLlmSetupPlan: () => Promise<{
@@ -1653,7 +1655,8 @@ function registerDoctorCommand(deps: AdminCommandDeps): void {
             skipProjectChecks,
           });
           writeStdout(`${formatDoctorReport(result)}\n`);
-          if (result.overallStatus === 'fail') process.exit(1);
+          const finalStatus = result.afterFix?.overallStatus ?? result.overallStatus;
+          if (finalStatus === 'fail') process.exit(1);
         } catch (err) {
           error(`doctor failed: ${errMsg(err)}`);
           process.exit(1);

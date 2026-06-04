@@ -11,11 +11,11 @@
  * drive both compile-time and runtime validation of params + rows.
  * Lazy-cached on `qb.queries.X`. `getCoverageStats` uses Pattern C
  * (two static variants for the optional `source` filter).
- * {@link getCoverageRanked} — with four independent optional filters
- * (`source`/`maxPct`/`minCentrality`/`kinds`) — uses
+ * {@link getCoverageRanked} — with independent optional filters
+ * (`source`/`maxPct`/`minCentrality`/`kinds`/`pathFilter`/`includeTests`) — uses
  * {@link defineDynamicQuery}: the SQL is built per call from the
  * present filters, and prepared statements are cached per filter-shape
- * within the instance. Avoids Pattern C variant explosion (16 variants)
+ * within the instance. Avoids Pattern C variant explosion
  * and Pattern B planner-defeat on indexed `nodes.kind`/`nodes.centrality`.
  */
 
@@ -160,9 +160,8 @@ const coverageStatsAggBySourceQuery = defineQuery({
 // ─── Coverage-ranked dynamic query ────────────────────────────────────────
 
 /**
- * Pattern: dynamic-WHERE query — 4 independent optional filters
- * (source / maxPct / minCentrality / kinds). Pattern C variant
- * dispatch would explode to 16 typed queries; Pattern B sentinel-OR
+ * Pattern: dynamic-WHERE query — independent optional filters. Pattern
+ * C variant dispatch would explode quickly; Pattern B sentinel-OR
  * would defeat the planner against indexes on nodes.kind /
  * nodes.centrality. `defineDynamicQuery` caches per-shape prepared
  * statements within the instance.
@@ -172,6 +171,7 @@ const CoverageRankedParamsSchema = z.object({
   maxPct: z.number().optional(),
   kinds: z.array(z.string()).optional(),
   pathFilter: z.string().optional(),
+  includeTests: z.boolean().optional(),
   limit: z.number(),
   source: z.string().optional(),
 });
@@ -215,12 +215,16 @@ const getCoverageRankedQuery = defineDynamicQuery({
       where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
       bindings['pathLike'] = prefixLikePattern(p.pathFilter);
     }
+    if (p.includeTests === false) {
+      where.push('f.is_test = 0');
+    }
     const sql =
       `SELECT n.id AS node_id, n.name, n.kind, n.file_path,
               c.covered_lines, c.total_lines, n.centrality,
               MAX(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) AS pct
          FROM nodes n
          JOIN node_coverage c ON c.node_id = n.id` +
+      (p.includeTests === false ? ' JOIN files f ON f.path = n.file_path' : '') +
       (where.length > 0 ? ' WHERE ' + where.join(' AND ') : '') +
       ` GROUP BY n.id
         ORDER BY pct ASC, n.centrality DESC NULLS LAST
@@ -420,6 +424,7 @@ export function getCoverageRanked(
     maxPct?: number;
     kinds?: ReadonlyArray<string> | undefined;
     pathFilter?: string;
+    includeTests?: boolean;
     limit?: number;
     source?: string;
   } = {},
@@ -439,6 +444,7 @@ export function getCoverageRanked(
     maxPct: options.maxPct,
     kinds: options.kinds ? Array.from(options.kinds) : undefined,
     pathFilter: options.pathFilter,
+    includeTests: options.includeTests,
     limit: options.limit ?? COVERAGE_DEFAULT_RANK_LIMIT,
     source: options.source,
   });

@@ -420,6 +420,7 @@ interface ResolvedQuery {
   text: string;
   kinds: NodeKind[] | undefined;
   languages: Language[] | undefined;
+  pathPrefixes: string[];
   pathFilters: string[];
   nameFilters: string[];
   signatureFilters: string[];
@@ -480,6 +481,11 @@ function resolveSearchQuery(qb: QueryBuilder, query: string, options: SearchOpti
     parsed.languages.length > 0
       ? Array.from(new Set([...(options.languages ?? []), ...parsed.languages]))
       : options.languages;
+  const pathFilters =
+    options.pathFilters && options.pathFilters.length > 0
+      ? Array.from(new Set([...parsed.pathFilters, ...options.pathFilters]))
+      : parsed.pathFilters;
+  const pathPrefixes = options.pathPrefixes ? Array.from(new Set(options.pathPrefixes)) : [];
   let cachedCallersSet: Set<string> | null = null;
   let cachedCalleesSet: Set<string> | null = null;
   let cachedDependsOnSet: Set<string> | null = null;
@@ -487,7 +493,8 @@ function resolveSearchQuery(qb: QueryBuilder, query: string, options: SearchOpti
     text: parsed.text,
     kinds,
     languages,
-    pathFilters: parsed.pathFilters,
+    pathPrefixes,
+    pathFilters,
     nameFilters: parsed.nameFilters,
     signatureFilters: parsed.signatureFilters,
     callersOf: parsed.callersOf,
@@ -594,6 +601,7 @@ export function searchNodes(qb: QueryBuilder, query: string, options: SearchOpti
   // budget; diversification is about the surfaced output.
   results = scoreAndDiversify(results, { scoringQuery: rq.text || query, limit, perFileCap });
   results = applySearchHardFilters(results, {
+    pathPrefixes: rq.pathPrefixes,
     pathFilters: rq.pathFilters,
     nameFilters: rq.nameFilters,
     signatureFilters: rq.signatureFilters,
@@ -881,6 +889,7 @@ function addExactNameSupplements(args: AddExactNameSupplementsArgs): void {
 function applySearchHardFilters(
   results: SearchResult[],
   filters: {
+    pathPrefixes: string[];
     pathFilters: string[];
     nameFilters: string[];
     signatureFilters: string[];
@@ -893,6 +902,13 @@ function applySearchHardFilters(
   },
 ): SearchResult[] {
   let out = results;
+  if (filters.pathPrefixes.length > 0) {
+    const lowered = filters.pathPrefixes.map((p) => p.toLowerCase());
+    out = out.filter((r) => {
+      const fp = r.node.filePath.toLowerCase();
+      return lowered.some((p) => fp.startsWith(p));
+    });
+  }
   if (filters.pathFilters.length > 0) {
     const lowered = filters.pathFilters.map((p) => p.toLowerCase());
     out = out.filter((r) => {

@@ -131,11 +131,11 @@ describe('audit-4 CLI argument-layer fixes', () => {
   );
 
   it.skipIf(!indexed)(
-    'module with no dirPath lists cached directory summaries',
+    'module with no dirPath reaches the list-all summaries path',
     () => {
       const { out, code } = runCli(['module']);
       expect(code).toBe(0);
-      expect(out).toContain('Module summaries');
+      expect(out).toMatch(/Module summaries|No module summaries cached yet/);
     },
     90_000,
   );

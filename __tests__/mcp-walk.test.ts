@@ -775,6 +775,22 @@ describe('cartograph_walk — container auto-contains', () => {
     expect(text).toMatch(/methodAlpha/);
     expect(text).toMatch(/methodBeta/);
   });
+
+  it("class start with direction='impact' honors explicit edgeKind", async () => {
+    const result = await handler.execute('cartograph_graph', {
+      start: 'Thing',
+      direction: 'impact',
+      edgeKind: 'calls',
+      maxNodes: 50,
+      hops: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0]?.text ?? '';
+    // With a hard calls-only filter, the container's contains edges
+    // must not leak methods into the impact rollup.
+    expect(text).not.toMatch(/methodAlpha/);
+    expect(text).not.toMatch(/methodBeta/);
+  });
 });
 
 // ---------------------------------------------------------------------------

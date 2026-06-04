@@ -737,4 +737,7 @@ export const ROLE_TOOL = defineTool({
     "Get triggers on-demand structural classification and persists; the LLM classification runs in the bulk classify pass (`cartograph_admin({action: 'classify'})`), which list/distribution require.",
   schema: roleSchema,
   handle: handleRole,
+  isWriteTool: true,
+  isReadOnlyCall: (args) => args['symbol'] === undefined && args['symbols'] === undefined,
+  readOnlyCallDescription: 'no args for distribution, or `role` for list-by-role',
 });

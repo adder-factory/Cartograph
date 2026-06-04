@@ -159,13 +159,13 @@ const findSchema = z.object({
   languageFilter: z
     .string()
     .optional()
-    .describe('(name/semantic + query) Restrict cluster results to one language (e.g. "typescript").'),
+    .describe('(name/semantic or name/intent + query) Restrict results to one language (e.g. "typescript").'),
   caseSensitive: z.boolean().optional().describe("(by='content' only) Default false (case-insensitive regex)."),
   pathFilter: z
     .string()
     .optional()
     .describe(
-      "Restrict to files whose path STARTS WITH this prefix (e.g. \"src/mcp/\"). Honoured on `by: 'content'` and `by: 'name', mode: 'intent'`.",
+      "Restrict to files whose project-relative path STARTS WITH this prefix for `by: 'content'` and `by: 'name', mode: 'exact'|'intent'`.",
     ),
   language: z
     .string()
@@ -372,6 +372,12 @@ function rejectEnvSqlOnlyKnobs(by: FindAxis, args: FindArgs): ToolOutcome | null
         `Use \`by: 'content'\` or \`by: 'name', mode: 'intent'\` for path-scoped queries.`,
     );
   }
+  if (isEnvOrSql && args.since !== undefined) {
+    return err(
+      `cartograph_find: \`since\` is not honoured for \`by: '${by}'\`. ` +
+        `Delta mode is supported on \`by: 'name', mode: 'exact'\` and \`by: 'content'\`.`,
+    );
+  }
   return null;
 }
 
@@ -393,7 +399,7 @@ function rejectNameOnlyKnobs(by: FindAxis, args: FindArgs): ToolOutcome | null {
     return err(`cartograph_find: \`differentLanguage\` is only valid with \`by: 'name', mode: 'semantic'\`.`);
   }
   if (args.languageFilter !== undefined) {
-    return err(`cartograph_find: \`languageFilter\` is only valid with \`by: 'name', mode: 'semantic'\`.`);
+    return err(`cartograph_find: \`languageFilter\` is only valid with \`by: 'name', mode: 'semantic'|'intent'\`.`);
   }
   if (args.compact !== undefined) {
     return err(`cartograph_find: \`compact\` is only valid with \`by: 'name', mode: 'exact'\`.`);
@@ -415,10 +421,15 @@ function rejectNameModeMismatches(by: FindAxis, args: FindArgs): ToolOutcome | n
     if (args.symbol !== undefined) {
       return err(`cartograph_find: \`symbol\` requires \`mode: 'semantic'\`. Got mode='${effectiveMode}'.`);
     }
-    if (args.sameLanguage !== undefined || args.differentLanguage !== undefined || args.languageFilter !== undefined) {
+    if (args.sameLanguage !== undefined || args.differentLanguage !== undefined) {
       return err(
-        `cartograph_find: language-filter args (\`sameLanguage\` / \`differentLanguage\` / \`languageFilter\`) require \`mode: 'semantic'\`. ` +
+        `cartograph_find: source-symbol language args (\`sameLanguage\` / \`differentLanguage\`) require \`mode: 'semantic'\`. ` +
           `Got mode='${effectiveMode}'.`,
+      );
+    }
+    if (args.languageFilter !== undefined && effectiveMode !== 'intent') {
+      return err(
+        `cartograph_find: \`languageFilter\` requires \`mode: 'semantic'\` or \`mode: 'intent'\`. Got mode='${effectiveMode}'.`,
       );
     }
   }
@@ -445,7 +456,7 @@ function rejectSentinelValues(by: FindAxis, args: FindArgs): ToolOutcome | null 
       `cartograph_find: \`fields\` must contain at least one entry. Omit the field to get the default column set.`,
     );
   }
-  if (Array.isArray(args.fields) && args.fields.length > 0 && !args.fields.includes('name')) {
+  if (args.compact === true && Array.isArray(args.fields) && args.fields.length > 0 && !args.fields.includes('name')) {
     const fieldList = args.fields.map((f) => `'${f}'`).join(', ');
     return err(`cartograph_find: \`fields\` must include 'name' so rows are identifiable. Got fields=[${fieldList}].`);
   }

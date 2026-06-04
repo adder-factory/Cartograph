@@ -250,49 +250,13 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // exemptions naming the actual gaps with justifications — the test
   // now catches a NEW unmirrored field even on a hand-written tool.
 
-  // `cartograph admin` is a multi-subcommand surface (init / uninit /
-  // index / sync / migrate / unlock / build-similarity-edges /
-  // prune-store / scip-export / scip-import / summarize / embed /
-  // classify / install-models). `action` is the subcommand axis
-  // itself (not a flag); `confirm` is `uninit`-specific;
-  // `clearParseCacheLanguage` and `summarizeLimit` are advanced
-  // operator knobs deliberately kept off the headline CLI surface.
-  admin: new Set([
-    'action',
-    'confirm',
-    'clearParseCacheLanguage',
-    'summarizeLimit',
-    // `doctor` is a top-level `cartograph doctor` command (lifecycle.ts),
-    // not nested under `admin doctor`. The MCP schema's `skipProjectChecks`
-    // surfaces on the CLI as `--no-project-checks` (Commander's negate
-    // form); the alignment normaliser doesn't bridge "skip" → "no-" prefix
-    // semantically, so the field is carved out here.
-    'skipProjectChecks',
-    // `preset` is the action-arg for `llm-apply` — the agent-driven
-    // LLM-setup flow exposed via MCP. The CLI counterpart is
-    // `cartograph llm setup` (interactive @clack wizard, lifecycle.ts)
-    // which presents the same presets as a TTY menu rather than a
-    // single-string flag. Agents drive the MCP path; humans drive
-    // the wizard. Both share `llm-setup-plan.ts`.
-    'preset',
-    // `fix` is a flag on the top-level `cartograph doctor` command
-    // (lifecycle.ts), not under `admin doctor`. The MCP schema
-    // declares it on the admin action since `cartograph_admin({action:
-    // 'doctor'})` is the agent-facing entry point; the CLI mirror
-    // surfaces it on the dedicated `doctor` command which the
-    // alignment normaliser doesn't bridge to the admin subcommand
-    // tree.
-    'fix',
-    // `tier` is the action-arg for `llm-tune` — agent-driven
-    // per-tier concurrency override exposed via MCP only (no CLI
-    // counterpart). Same pattern as `preset`: humans hand-edit
-    // `<Tier>Llm.concurrency` in `.cartograph/config.json` directly
-    // or re-run the `cartograph llm setup` wizard; agents call the
-    // MCP action. Adding a CLI flag would require designing a new
-    // `cartograph llm tune` subcommand surface, which is out of
-    // scope here.
-    'tier',
-  ]),
+  // `cartograph admin` is a multi-subcommand surface. `action` is the
+  // subcommand axis itself (not a flag); `confirm` is `uninit`-
+  // specific; `clearParseCacheLanguage` and `summarizeLimit` are
+  // advanced operator knobs deliberately kept off the headline CLI
+  // surface. Other admin fields must be mirrored by a subcommand flag
+  // or positional.
+  admin: new Set(['action', 'confirm', 'clearParseCacheLanguage', 'summarizeLimit']),
 
   // `cartograph files` carries hand-rendered tree / flat / grouped /
   // summary layouts; the MCP `path` field is REMOVED (rejected at
@@ -321,7 +285,7 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // reflecting the `action` enum. `items` is the agent-bridge save
   // payload — the CLI reads a JSON file argument instead of taking
   // it as a flag.
-  summaries: new Set(['action', 'items']),
+  summaries: new Set(['items']),
 
   // ── `affected` and `ask` ────────────────────────────────────────
   // Both formerly `'*'`; per the #31 audit ALL their schema fields
@@ -331,14 +295,6 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // `allowStale` is injected into every tool's schema by the
   // registry's `withAllowStale` wrapper; the CLI deliberately does
   // not surface it. Stripped globally below — no per-tool entry.
-  node: new Set([
-    // `cartograph node` is GENERATED but renders the schema's
-    // `symbols` array as the variadic `<symbols...>` positional and
-    // skips the scalar `symbol` field — the variadic already covers
-    // the single-symbol form, so `symbol` needs no separate flag.
-    // (skipFields: ['symbol'] on the registerGeneratedCommand call.)
-    'symbol',
-  ]),
   graph: new Set([
     // `cartograph graph` is GENERATED (registerGeneratedCommand), but
     // two schema properties have an intentional CLI asymmetry:
@@ -629,6 +585,24 @@ describe('CLI ↔ MCP argument-shape parity (#cat3)', () => {
       }
     }
     expect(stale, `Stale per-property exemptions:\n${fmt(stale)}`).toEqual([]);
+  });
+
+  it('ARG_SHAPE_EXCEPTIONS per-property carve-outs are not already mirrored by CLI args', async () => {
+    const cli = await import('../src/bin/cartograph.js');
+    const program = cli.program;
+    const stale: string[] = [];
+    for (const [tool, exception] of Object.entries(ARG_SHAPE_EXCEPTIONS)) {
+      if (exception === '*') continue;
+      const mirror = findMirrorCommand(program, tool);
+      if (!mirror) continue;
+      const cliArgs = collectCommandArgNames(mirror);
+      for (const prop of exception) {
+        if (cliArgs.has(normalizeArgName(prop))) {
+          stale.push(`${tool}: per-property exemption \`${prop}\` is now mirrored on the CLI`);
+        }
+      }
+    }
+    expect(stale, `Mirrored fields still listed in ARG_SHAPE_EXCEPTIONS:\n${fmt(stale)}`).toEqual([]);
   });
 });
 

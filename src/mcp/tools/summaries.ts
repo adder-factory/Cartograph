@@ -108,11 +108,8 @@ export const SUMMARIES_TOOL = defineTool({
     "Two-call: `action: 'pending'` pulls a batch (body + contentHash) → you write one-liners → `'save'` persists (echo each contentHash; mid-flight body changes auto-skip). The `pending` response splits the pool into `staleCount` (drifted from disk) and `neverSummarisedCount` (never processed).",
   schema: summariesSchema,
   handle: handleSummaries,
-  // Save-action mutates the summaries cache; pending-action is read-only.
-  // Marking the family as a write tool is the conservative choice — it
-  // gets disabled by `--no-write-tools` along with the other write
-  // family members. (The save action would fail anyway, so this just
-  // hides the read-only `pending` action too — acceptable trade for
-  // the simpler --no-write-tools semantics.)
+  // Save-action mutates the summaries cache; pending-action is read-only
+  // and remains available under `--no-write-tools`.
   isWriteTool: true,
+  readOnlyActions: new Set(['pending']),
 });

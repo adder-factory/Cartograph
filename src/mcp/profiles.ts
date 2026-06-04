@@ -12,7 +12,7 @@ export type McpServerProfile = (typeof MCP_SERVER_PROFILE_NAMES)[number];
 export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'full';
 
 export const MCP_SERVER_PROFILE_DESCRIPTION =
-  'MCP advertised-tool profile: full (current complete surface), core (common coding-agent lookups), read-only (no write-class tools), or review (diff/risk/test/change-impact tools). Default full.';
+  'MCP advertised-tool profile: full (current complete surface), core (common coding-agent lookups), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default full.';
 
 const CORE_PROFILE_TOOLS = [
   'cartograph_admin',
@@ -48,6 +48,7 @@ const READ_ONLY_PROFILE_TOOLS = [
   'cartograph_changed_since',
   'cartograph_compare_to_ref',
   'cartograph_context',
+  'cartograph_coverage',
   'cartograph_dead_code',
   'cartograph_deps',
   'cartograph_digest',
@@ -63,12 +64,15 @@ const READ_ONLY_PROFILE_TOOLS = [
   'cartograph_local_chat',
   'cartograph_module',
   'cartograph_node',
+  'cartograph_note',
   'cartograph_playbook',
   'cartograph_propose_rename',
   'cartograph_review',
   'cartograph_role',
+  'cartograph_session',
   'cartograph_sql',
   'cartograph_status',
+  'cartograph_summaries',
   'cartograph_tests_for',
   'cartograph_trace_to_culprits',
 ] as const;

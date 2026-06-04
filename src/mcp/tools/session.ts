@@ -520,4 +520,5 @@ export const SESSION_TOOL = defineTool({
   handle: handleSession,
   bypassFreshnessGate: true,
   isWriteTool: true,
+  readOnlyActions: new Set(['list', 'resume', 'macro_list']),
 });
