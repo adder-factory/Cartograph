@@ -498,14 +498,15 @@ For focused or read-only agents, trim the advertised surface at server launch:
 
 ```bash
 cartograph serve --mcp --profile core
+cartograph serve --mcp --profile read-only
 cartograph serve --mcp --profile review
 cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_local_chat
 ```
 
-Profiles are advertised-tool filters: `full` is the default 36-tool surface, `core` keeps common coding-agent lookup and change-impact tools, `review` focuses diff/risk/test workflows, and `read-only` removes write-class tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
+Profiles are advertised-tool filters: `full` is the default 36-tool surface, `core` keeps common coding-agent lookup and change-impact tools, `review` focuses diff/risk/test workflows, and `read-only` advertises read-capable tools while blocking mutating branches of mixed tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
 
-In the same measurement, `--no-write-tools` reduced the list to 31 tools and about 13.6k estimated tokens including initialize instructions. The registry test guards both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, and no more than 68 KB total for `tools/list` plus initialize instructions.
+In the same measurement, `--no-write-tools` and `--profile read-only` reduced the list to 35 tools and about 15.0k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
 
 ### Token Savings Benchmark
 
