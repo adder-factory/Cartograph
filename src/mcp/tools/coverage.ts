@@ -511,7 +511,12 @@ export const COVERAGE_TOOL = defineToolContract({
   // read modes stay available under `--no-write-tools`.
   isWriteTool: true,
   isReadOnlyCall: (args) => {
-    const mode = typeof args['mode'] === 'string' ? args['mode'] : args['symbol'] ? 'symbol' : 'ranked';
+    let mode = 'ranked';
+    if (typeof args['mode'] === 'string') {
+      mode = args['mode'];
+    } else if (args['symbol']) {
+      mode = 'symbol';
+    }
     return mode === 'symbol' || mode === 'ranked' || mode === 'stats' || mode === 'sources';
   },
   readOnlyCallDescription: '`mode` symbol/ranked/stats/sources; omit `mode` for ranked or symbol lookup',
