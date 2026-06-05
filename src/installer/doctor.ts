@@ -48,6 +48,7 @@ import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './default-endpoints.js';
 import { LLAMA_SERVER_RERANK_FLAG } from './llm-setup-catalog.js';
 import { loadConfig } from '../config.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
+import { formatBytes } from '../utils.js';
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -253,6 +254,15 @@ interface ConfiguredModelFile {
   readonly modelPath: string;
 }
 
+interface PartialModelFile {
+  readonly path: string;
+  readonly sizeBytes: number;
+}
+
+interface MissingConfiguredModelFile extends ConfiguredModelFile {
+  readonly partialDownload: PartialModelFile | null;
+}
+
 function configuredModelFiles(llm: Record<string, unknown> | null): ConfiguredModelFile[] {
   if (!llm) return [];
   const out: ConfiguredModelFile[] = [];
@@ -280,10 +290,10 @@ async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): P
           .access(entry.modelPath)
           .then(() => true)
           .catch(() => false);
-        return exists ? null : entry;
+        return exists ? null : { ...entry, partialDownload: await inspectPartialDownload(entry.modelPath) };
       }),
     )
-  ).filter((entry): entry is ConfiguredModelFile => entry !== null);
+  ).filter((entry): entry is MissingConfiguredModelFile => entry !== null);
 
   if (missing.length === 0) {
     return {
@@ -293,21 +303,39 @@ async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): P
     };
   }
 
-  const rendered = missing
-    .slice(0, MAX_RENDERED_MISSING_MODEL_FILES)
-    .map((m) => `${m.tier}: ${m.modelPath}`)
-    .join('; ');
+  const rendered = missing.slice(0, MAX_RENDERED_MISSING_MODEL_FILES).map(renderMissingConfiguredModelFile).join('; ');
   const suffix =
     missing.length > MAX_RENDERED_MISSING_MODEL_FILES
       ? `; +${missing.length - MAX_RENDERED_MISSING_MODEL_FILES} more`
       : '';
+  const hasPartialDownloads = missing.some((m) => m.partialDownload !== null);
   return {
     name: 'Configured model files',
     status: 'warn',
     detail: `${missing.length} configured local model file${missing.length === 1 ? '' : 's'} missing: ${rendered}${suffix}`,
-    remediation:
-      'Install the missing GGUFs, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.',
+    remediation: hasPartialDownloads
+      ? 'A `.partial` file means a previous model download was interrupted; the installer will remove stale partials and retry. Run `cartograph admin install-models` to finish the recommended GGUF set, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.'
+      : 'Install the missing GGUFs, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.',
   };
+}
+
+async function inspectPartialDownload(modelPath: string): Promise<PartialModelFile | null> {
+  const partialPath = `${modelPath}.partial`;
+  try {
+    const stat = await fsp.stat(partialPath);
+    if (!stat.isFile()) return null;
+    return { path: partialPath, sizeBytes: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function renderMissingConfiguredModelFile(entry: MissingConfiguredModelFile): string {
+  const partial = entry.partialDownload;
+  if (!partial) return `${entry.tier}: ${entry.modelPath}`;
+  return `${entry.tier}: ${entry.modelPath} (partial download found: ${partial.path}, ${formatBytes(
+    partial.sizeBytes,
+  )})`;
 }
 
 /**

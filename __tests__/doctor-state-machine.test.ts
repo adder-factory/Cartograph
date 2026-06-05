@@ -13,6 +13,7 @@ interface DoctorStateCase {
 
 const tempRoots: string[] = [];
 const LOOPBACK_ENDPOINT = ['http://', 'localhost:1'].join('');
+const PARTIAL_MODEL_BYTES = 1280;
 const processEnv = process['env'];
 const originalModelsDir = processEnv.CARTOGRAPH_MODELS_DIR;
 
@@ -176,6 +177,29 @@ describe('runDoctor installer state machine', () => {
         const files = findCheck(result, 'Configured model files');
         expect(files.status).toBe('warn');
         expect(files.detail).toContain('missing-ask.gguf');
+      },
+    },
+    {
+      name: 'configured local model file missing with interrupted partial download',
+      setup: async () => {
+        await pointModelsDirAtMissingPath();
+        const projectPath = await makeProject('cg-doctor-partial-model-file-');
+        await fsp.writeFile(
+          path.join(projectPath, '.cartograph', 'config.json'),
+          JSON.stringify(localModelConfig(projectPath, true), null, 2),
+        );
+        await fsp.writeFile(path.join(projectPath, 'missing-ask.gguf.partial'), Buffer.alloc(PARTIAL_MODEL_BYTES));
+        return { projectPath };
+      },
+      expect: (result) => {
+        const files = findCheck(result, 'Configured model files');
+        expect(files.status).toBe('warn');
+        expect(files.detail).toContain('missing-ask.gguf');
+        expect(files.detail).toContain('partial download found');
+        expect(files.detail).toContain('missing-ask.gguf.partial');
+        expect(files.detail).toContain('1.3 KB');
+        expect(files.remediation).toContain('previous model download was interrupted');
+        expect(files.remediation).toContain('cartograph admin install-models');
       },
     },
     {
