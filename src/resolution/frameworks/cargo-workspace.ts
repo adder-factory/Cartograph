@@ -4,6 +4,11 @@ const GLOB_CHARS = /[*?[\]{}]/;
 
 const cache = new WeakMap<ResolutionContext, Map<string, string>>();
 
+interface TomlQuoteState {
+  quote: '"' | "'" | null;
+  escaped: boolean;
+}
+
 export function clearCargoWorkspaceCache(context: ResolutionContext): void {
   cache.delete(context);
 }
@@ -79,38 +84,39 @@ function getTomlSection(content: string, sectionName: string): string | null {
 }
 
 function getTomlArrayValue(section: string, key: string): string | null {
+  const start = findTomlArrayStart(section, key);
+  if (start === null) return null;
+  const end = findTomlArrayEnd(section, start);
+  return end === null ? null : section.slice(start, end + 1);
+}
+
+function findTomlArrayStart(section: string, key: string): number | null {
   const match = new RegExp(`(?:^|\\n)\\s*${escapeRegExp(key)}\\s*=`).exec(section);
   if (!match) return null;
 
   let pos = match.index + match[0].length;
   while (pos < section.length && /\s/.test(section[pos]!)) pos++;
-  if (section[pos] !== '[') return null;
+  return section[pos] === '[' ? pos : null;
+}
 
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
+function findTomlArrayEnd(section: string, start: number): number | null {
+  const state: TomlQuoteState = { quote: null, escaped: false };
   let depth = 0;
-  const start = pos;
 
-  for (; pos < section.length; pos++) {
+  for (let pos = start; pos < section.length; pos++) {
     const ch = section[pos]!;
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      quote = ch;
-      continue;
-    }
-    if (ch === '[') depth++;
-    else if (ch === ']') {
-      depth--;
-      if (depth === 0) return section.slice(start, pos + 1);
-    }
+    if (advanceTomlQuoteState(state, ch)) continue;
+    depth = updateTomlArrayDepth(depth, ch);
+    if (depth === 0 && ch === ']') return pos;
   }
 
   return null;
+}
+
+function updateTomlArrayDepth(depth: number, ch: string): number {
+  if (ch === '[') return depth + 1;
+  if (ch === ']') return depth - 1;
+  return depth;
 }
 
 function extractQuotedStrings(text: string): string[] {
@@ -167,20 +173,33 @@ function globToRegex(pattern: string): string {
 }
 
 function stripTomlLineComment(line: string): string {
-  let quote: '"' | "'" | null = null;
-  let escaped = false;
+  const state: TomlQuoteState = { quote: null, escaped: false };
   for (let i = 0; i < line.length; i++) {
     const ch = line[i]!;
-    if (quote) {
-      if (escaped) escaped = false;
-      else if (ch === '\\') escaped = true;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === '"' || ch === "'") quote = ch;
-    else if (ch === '#') return line.slice(0, i);
+    if (advanceTomlQuoteState(state, ch)) continue;
+    if (ch === '#') return line.slice(0, i);
   }
   return line;
+}
+
+function advanceTomlQuoteState(state: TomlQuoteState, ch: string): boolean {
+  if (!state.quote) return startTomlQuote(state, ch);
+  if (state.escaped) {
+    state.escaped = false;
+    return true;
+  }
+  if (ch === '\\') {
+    state.escaped = true;
+    return true;
+  }
+  if (ch === state.quote) state.quote = null;
+  return true;
+}
+
+function startTomlQuote(state: TomlQuoteState, ch: string): boolean {
+  if (ch !== '"' && ch !== "'") return false;
+  state.quote = ch;
+  return true;
 }
 
 function cleanMemberPath(memberPath: string): string {
