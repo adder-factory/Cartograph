@@ -5,8 +5,8 @@
 # Built-in Read/Grep/Bash stay available in both arms, so the delta isolates
 # cartograph's contribution.
 #
-# Ported from upstream colbymchenry/codegraph scripts/agent-eval/run-all.sh
-# (commit a6183d7c). Fork adaptations:
+# Ported from the upstream project eval harness noted in ACKNOWLEDGEMENTS.md
+# (commit a6183d7c). Cartograph adaptations:
 #   - no global `cartograph` binary: the MCP server is `bun src/bin/cartograph.ts`
 #   - the serve flag is `--project-path` (not upstream's `--path`)
 #   - N runs per arm (median is taken downstream by aggregate.mjs)
