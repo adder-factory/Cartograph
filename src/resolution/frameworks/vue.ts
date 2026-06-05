@@ -78,7 +78,10 @@ export const vueResolver: FrameworkResolver = {
     const packageJson = context.readFile('package.json');
     if (packageJson) {
       try {
-        const pkg = JSON.parse(packageJson) as { dependencies?: Record<string, string>; devDependencies?: Record<string, string> };
+        const pkg = JSON.parse(packageJson) as {
+          dependencies?: Record<string, string>;
+          devDependencies?: Record<string, string>;
+        };
         const deps = { ...pkg.dependencies, ...pkg.devDependencies };
         if (deps['vue'] || deps['nuxt'] || deps['@nuxt/kit']) return true;
       } catch {
@@ -118,7 +121,9 @@ function resolveProvidedVueSymbol(ref: UnresolvedRef): ResolvedRef | null {
 
 function resolveNuxtVirtualImport(ref: UnresolvedRef): ResolvedRef | null {
   if (ref.referenceKind !== 'imports') return null;
-  const isVirtual = NUXT_VIRTUAL_MODULE_PREFIXES.some((prefix) => ref.referenceName === prefix || ref.referenceName.startsWith(`${prefix}/`));
+  const isVirtual = NUXT_VIRTUAL_MODULE_PREFIXES.some(
+    (prefix) => ref.referenceName === prefix || ref.referenceName.startsWith(`${prefix}/`),
+  );
   return isVirtual ? frameworkResolved(ref, ref.fromNodeId, 1) : null;
 }
 
@@ -224,7 +229,9 @@ function extractNuxtMiddleware(filePath: string, normalized: string): Node[] {
   const marker = '/middleware/';
   const parts = routeFileParts(normalized, marker);
   if (!parts || !SERVER_ROUTE_EXTENSIONS.has(parts.extension)) return [];
-  const name = stripExtension(parts.afterMarker).replace(/\/index$/, '').replaceAll('/', '.');
+  const name = stripExtension(parts.afterMarker)
+    .replace(/\/index$/, '')
+    .replaceAll('/', '.');
   if (!name) return [];
   const now = Date.now();
   return [
@@ -266,7 +273,9 @@ function stripExtension(filePath: string): string {
 }
 
 function filePathToNuxtRoute(afterMarker: string): string {
-  const withoutExt = stripExtension(afterMarker).replace(/\/index$/, '').replace(/^index$/, '');
+  const withoutExt = stripExtension(afterMarker)
+    .replace(/\/index$/, '')
+    .replace(/^index$/, '');
   const route = withoutExt
     .split('/')
     .filter(Boolean)

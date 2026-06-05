@@ -164,10 +164,7 @@ function resolveDaemonProjectRoot(projectPath: string | undefined): string {
   return findNearestCartographRoot(start) ?? start;
 }
 
-async function ensureDaemonSocket(
-  projectRoot: string,
-  options: SharedMcpDaemonOptions,
-): Promise<net.Socket | null> {
+async function ensureDaemonSocket(projectRoot: string, options: SharedMcpDaemonOptions): Promise<net.Socket | null> {
   const existing = await connectExistingDaemon(projectRoot);
   if (existing) return existing;
 
@@ -242,7 +239,9 @@ function isBunStandaloneModulePath(): boolean {
   return fileURLToPath(import.meta.url).startsWith('/$bunfs/');
 }
 
-function tryAcquireDaemonLock(projectRoot: string): { acquired: true; info: DaemonLockInfo } | { acquired: false; info: DaemonLockInfo } {
+function tryAcquireDaemonLock(
+  projectRoot: string,
+): { acquired: true; info: DaemonLockInfo } | { acquired: false; info: DaemonLockInfo } {
   const pidPath = getDaemonPidPath(projectRoot);
   const info: DaemonLockInfo = {
     pid: process.pid,
