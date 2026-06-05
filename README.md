@@ -10,13 +10,16 @@
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
 [![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](#other-mcp-clients)
 [![Storage](https://img.shields.io/badge/storage-SQLite-0f766e.svg)](#how-it-works)
+[![Website](https://img.shields.io/badge/Website-GitHub%20Pages-75bdff.svg)](https://adder-factory.github.io/cartograph/)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
 [![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
 
 <p>
+  <a href="https://adder-factory.github.io/cartograph/"><strong>Website</strong></a> ·
   <a href="#install">Install</a> ·
+  <a href="#visual-graph-viewer">Viewer</a> ·
   <a href="#configure-agents">Configure Agents</a> ·
   <a href="#initialize-a-project">Initialize</a> ·
   <a href="#mcp-tools">MCP Tools</a> ·
@@ -30,6 +33,8 @@
 </div>
 
 Cartograph builds a local SQLite knowledge graph of your codebase and exposes it to MCP-compatible agents. Instead of repeatedly scanning files, agents can ask structured questions about symbols, call graphs, changed tests, hotspots, and code health.
+
+**Website:** <https://adder-factory.github.io/cartograph/>
 
 It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, and any client that can start a stdio MCP server.
 
@@ -84,6 +89,35 @@ That gives you a local graph index immediately. Run `cartograph install` when yo
 <p align="center">
   <img src="docs/assets/status-verbose.svg" alt="Example cartograph status --verbose output" width="760">
 </p>
+
+## Visual Graph Viewer
+
+Cartograph also ships a local graph viewer for humans. It uses the same `.cartograph/` SQLite index as the CLI and MCP server, then renders the code graph as an interactive workspace.
+
+```bash
+cartograph viewer .
+# open http://127.0.0.1:8765/
+```
+
+<p align="center">
+  <img src="docs/assets/viewer.png" alt="Cartograph graph viewer showing symbol detail, source, graph tools, and code health" width="920">
+</p>
+
+Use the viewer when you want to inspect the graph directly:
+
+| Viewer Area | What it helps with |
+|---|---|
+| Graph canvas | Navigate symbol neighborhoods, edge types, graph density, layout, minimap, and exports |
+| Back / forward history | Move through previously selected symbols without losing context |
+| Detail pane | Read signature, file path, health, centrality, coverage, docstring, callers, callees, findings, and coverage tabs |
+| Source pane | View and copy the selected symbol's source beside the graph |
+| Diagnostics | Capture graph layout, visibility, overlap, edge, and rendering state for bug reports |
+
+The viewer is intentionally local-only: it starts an HTTP server on localhost, serves static assets from the checkout, and does not require an LLM. Optional Ask and semantic features use the same configured OpenAI-compatible tiers as the rest of Cartograph.
+
+## Project Website
+
+The static GitHub Pages site lives in [`docs/`](./docs/) and is published at <https://adder-factory.github.io/cartograph/>. It uses the real viewer screenshot above as its primary product visual. The repo also includes a Pages workflow that publishes the `/docs` folder on pushes to `main`.
 
 ## Install
 
