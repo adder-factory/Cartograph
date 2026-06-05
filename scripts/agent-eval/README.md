@@ -8,11 +8,11 @@ tokens, wall-clock, tool-call count, and — the decisive signal — how many by
 each tool dumped into context and how often the agent fell back to
 Read/Grep/Explore-subagent delegation.
 
-Ported from upstream `colbymchenry/codegraph` `scripts/agent-eval/` (commit
-`a6183d7c`) and adapted for this fork: no global `cartograph` binary (the MCP
-server is `bun src/bin/cartograph.ts`), the serve flag is `--project-path` (not
-upstream's `--path`), and the sweep takes a **median of N runs** rather than a
-single run.
+Ported from the upstream project eval harness noted in
+[`ACKNOWLEDGEMENTS.md`](../../ACKNOWLEDGEMENTS.md) (commit `a6183d7c`) and
+adapted for Cartograph: no global `cartograph` binary (the MCP server is
+`bun src/bin/cartograph.ts`), the serve flag is `--project-path`, and the sweep
+takes a **median of N runs** rather than a single run.
 
 ## The A/B
 

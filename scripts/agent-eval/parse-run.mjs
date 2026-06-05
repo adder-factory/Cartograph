@@ -2,8 +2,8 @@
 // Parse a Claude Code `claude -p --output-format stream-json` run log into a
 // machine-readable metrics object (for aggregate.mjs) plus a human summary.
 //
-// Ported from upstream colbymchenry/codegraph scripts/agent-eval/parse-run.mjs
-// (commit a6183d7c) and extended for this fork with:
+// Ported from the upstream project eval harness noted in ACKNOWLEDGEMENTS.md
+// (commit a6183d7c) and extended for Cartograph with:
 //   - per-tool-result OUTPUT SIZE measurement (the "load-bearing" signal:
 //     how many bytes each cartograph call vs Read/Grep returned into context)
 //   - subagent (Task/Explore) delegation tallying — central to the
