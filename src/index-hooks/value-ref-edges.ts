@@ -81,7 +81,9 @@ import {
  *  full re-mine on the next afterSync — so existing projects auto-
  *  activate the hook without a manual `cartograph admin index`. Mirrors
  *  STRING_IMPORTS_ALGO_VERSION / BUILD_CONTEXT_REFS_ALGO_VERSION. */
-export const VALUE_REF_EDGES_ALGO_VERSION = computeAlgoHash('src/index-hooks/value-ref-edges.ts', ['./value-ref-edges']);
+export const VALUE_REF_EDGES_ALGO_VERSION = computeAlgoHash('src/index-hooks/value-ref-edges.ts', [
+  './value-ref-edges',
+]);
 const LAST_MINED_KEY = 'last_mined_value_ref_edges_algo_version';
 
 type ValueRefEdge = ValueRefEdgeRecord;
