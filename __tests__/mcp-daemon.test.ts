@@ -7,7 +7,7 @@ import { Cartograph } from '../src/index.js';
 
 const repoRoot = path.join(__dirname, '..');
 const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
-const DAEMON_TEST_TIMEOUT_MS = 15_000;
+const DAEMON_TEST_TIMEOUT_MS = 25_000;
 
 describe('shared MCP daemon', () => {
   it(
@@ -65,7 +65,101 @@ describe('shared MCP daemon', () => {
     },
     DAEMON_TEST_TIMEOUT_MS,
   );
+
+  it(
+    'serves multiple simultaneous proxy clients from the same daemon',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-daemon-multi-'));
+      const exchanges: Array<ReturnType<typeof startDaemonProxy>> = [];
+      try {
+        const cg = Cartograph.initSync(dir, { config: { include: ['**/*.ts'], exclude: [] } });
+        cg.close();
+
+        for (let i = 0; i < 3; i++) exchanges.push(startDaemonProxy(dir));
+        await Promise.all(exchanges.map((exchange) => exchange.attached));
+
+        const daemonPid = readDaemonPid(dir);
+        expect(daemonPid).toBeGreaterThan(0);
+
+        for (let i = 0; i < exchanges.length; i++) {
+          sendInitializeAndList({
+            exchange: exchanges[i]!,
+            dir,
+            clientName: `daemon-client-${i}`,
+            idOffset: i * 10,
+          });
+        }
+
+        await Promise.all(
+          exchanges.map((exchange, i) =>
+            waitUntil(() => exchange.responses.has(i * 10 + 1) && exchange.responses.has(i * 10 + 2), {
+              child: exchange.child,
+              stdout: () => exchange.stdout,
+              stderr: () => exchange.stderr,
+              timeoutMs: 10_000,
+            }),
+          ),
+        );
+
+        expect(readDaemonPid(dir)).toBe(daemonPid);
+
+        for (let i = 0; i < exchanges.length; i++) {
+          const exchange = exchanges[i]!;
+          const initialize = exchange.responses.get(i * 10 + 1) as { result?: { serverInfo?: { name?: string } } };
+          expect(initialize.result?.serverInfo?.name).toBe('cartograph');
+
+          const toolsList = exchange.responses.get(i * 10 + 2) as { result?: { tools?: Array<{ name: string }> } };
+          const toolNames = toolsList.result?.tools?.map((tool) => tool.name) ?? [];
+          expect(toolNames).toContain('cartograph_status');
+          expect(toolNames).toContain('cartograph_find');
+        }
+
+        await Promise.all(
+          exchanges.map(async (exchange) => {
+            exchange.child.stdin.end();
+            await waitForExit(exchange.child, 5_000);
+          }),
+        );
+        exchanges.length = 0;
+      } finally {
+        for (const exchange of exchanges) {
+          if (exchange.child.exitCode === null) exchange.child.kill('SIGTERM');
+        }
+        cleanupDaemon(dir);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 });
+
+interface InitializeClientArgs {
+  exchange: ReturnType<typeof startDaemonProxy>;
+  dir: string;
+  clientName: string;
+  idOffset: number;
+}
+
+function sendInitializeAndList(args: InitializeClientArgs): void {
+  const { exchange, dir, clientName, idOffset } = args;
+  exchange.child.stdin.write(
+    `${JSON.stringify({
+      jsonrpc: '2.0',
+      id: idOffset + 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        clientInfo: { name: clientName, version: '0' },
+        capabilities: {},
+        rootUri: `file://${dir}`,
+      },
+    })}\n`,
+  );
+  exchange.child.stdin.write(`${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`);
+  exchange.child.stdin.write(
+    `${JSON.stringify({ jsonrpc: '2.0', id: idOffset + 2, method: 'tools/list', params: {} })}\n`,
+  );
+}
 
 function startDaemonProxy(projectRoot: string): {
   child: ChildProcessWithoutNullStreams;
@@ -176,18 +270,23 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
 }
 
 function cleanupDaemon(projectRoot: string): void {
+  const pid = readDaemonPid(projectRoot);
+  if (pid > 0) {
+    try {
+      process.kill(pid, 'SIGTERM');
+    } catch {
+      /* already exited */
+    }
+  }
+}
+
+function readDaemonPid(projectRoot: string): number {
   const pidPath = path.join(projectRoot, '.cartograph', 'daemon.pid');
   try {
     const parsed = JSON.parse(fs.readFileSync(pidPath, 'utf-8'));
-    if (typeof parsed.pid === 'number' && parsed.pid > 0) {
-      try {
-        process.kill(parsed.pid, 'SIGTERM');
-      } catch {
-        /* already exited */
-      }
-    }
+    return typeof parsed.pid === 'number' && parsed.pid > 0 ? parsed.pid : 0;
   } catch {
-    /* no daemon lock */
+    return 0;
   }
 }
 
