@@ -56,6 +56,8 @@ interface DoctorResult {
 interface ServeCommandOptions {
   projectPath?: string;
   mcp?: boolean;
+  daemon?: boolean;
+  daemonChild?: boolean;
   profile?: string;
   writeTools?: boolean; // commander auto-inverts `--no-write-tools` → writeTools=false
   allowStaleDefault?: boolean;
@@ -92,6 +94,10 @@ interface LifecycleCommandDeps {
   isInitialized: (projectPath: string) => boolean;
   compact: typeof defaultCompact;
   loadMcpServer: () => Promise<{ MCPServer: new (opts: unknown) => { start: () => Promise<void> } }>;
+  loadMcpDaemon: () => Promise<{
+    runSharedMcpDaemonProcess: (opts: unknown) => Promise<void>;
+    runSharedMcpDaemonProxy: (opts: unknown) => Promise<'proxied' | 'fallback'>;
+  }>;
   loadInstallerTargets: () => Promise<{
     getTarget: (id: string) => { printConfig: (location: string) => string } | null | undefined;
     listTargetIds: () => string[];
@@ -166,6 +172,7 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   isInitialized: defaultIsInitialized,
   compact: defaultCompact,
   loadMcpServer: (() => import('../../mcp/index.js')) as LifecycleCommandDeps['loadMcpServer'],
+  loadMcpDaemon: (() => import('../../mcp/daemon.js')) as LifecycleCommandDeps['loadMcpDaemon'],
   loadInstallerTargets: (() =>
     import('../../installer/targets/registry.js')) as LifecycleCommandDeps['loadInstallerTargets'],
   loadInstaller: (() => import('../../installer/index.js')) as LifecycleCommandDeps['loadInstaller'],
@@ -231,12 +238,14 @@ function writeServeMcpGuidance(deps: Pick<LifecycleCommandDeps, 'chalk' | 'write
  * cartograph serve
  */
 function registerServeCommand(deps: LifecycleCommandDeps): void {
-  const { program, resolveProjectPath, error, loadMcpServer } = deps;
+  const { program, resolveProjectPath, error, loadMcpServer, loadMcpDaemon } = deps;
   program
     .command('serve')
     .description('Start Cartograph as an MCP server for AI assistants')
     .option('-p, --project-path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
     .option('--mcp', 'Run as MCP server (stdio transport)')
+    .option('--daemon', 'Use a shared per-project MCP daemon with this process acting as the stdio proxy')
+    .option('--daemon-child', 'Internal: run the shared MCP daemon process')
     .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
     .option(
       '--no-write-tools',
@@ -266,8 +275,7 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
           const profile = resolveServeProfile(options.profile, error);
           if (!profile) return;
           // Start MCP server - it handles initialization lazily based on rootUri from client
-          const { MCPServer } = await loadMcpServer();
-          const server = new MCPServer({
+          const serverOptions = {
             projectPath,
             profile,
             // commander's `--no-write-tools` makes `writeTools` false when set;
@@ -278,7 +286,19 @@ function registerServeCommand(deps: LifecycleCommandDeps): void {
             disabledTools:
               options.disableTool && options.disableTool.length > 0 ? new Set(options.disableTool) : undefined,
             disableStartupSync: options.startupSync === false,
-          });
+          };
+          if (options.daemonChild) {
+            const { runSharedMcpDaemonProcess } = await loadMcpDaemon();
+            await runSharedMcpDaemonProcess(serverOptions);
+            return;
+          }
+          if (options.daemon) {
+            const { runSharedMcpDaemonProxy } = await loadMcpDaemon();
+            const outcome = await runSharedMcpDaemonProxy(serverOptions);
+            if (outcome === 'proxied') return;
+          }
+          const { MCPServer } = await loadMcpServer();
+          const server = new MCPServer(serverOptions);
           await server.start();
           // Server will run until terminated
         } else {

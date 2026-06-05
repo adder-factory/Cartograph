@@ -43,6 +43,7 @@ import { JSX_DEF } from './jsx.js';
 import { KOTLIN_DEF } from './kotlin.js';
 import { LIQUID_DEF } from './liquid.js';
 import { LUA_DEF } from './lua.js';
+import { LUAU_DEF } from './luau.js';
 import { OBJC_DEF } from './objc.js';
 import { PASCAL_DEF } from './pascal.js';
 import { PHP_DEF } from './php.js';
@@ -84,6 +85,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   KOTLIN_DEF,
   LIQUID_DEF,
   LUA_DEF,
+  LUAU_DEF,
   OBJC_DEF,
   PASCAL_DEF,
   PHP_DEF,

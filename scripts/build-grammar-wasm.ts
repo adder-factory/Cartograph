@@ -93,6 +93,12 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'swift', pkg: 'tree-sitter-swift', sample: 'let x = 1\n' },
   { wasm: 'hcl', pkg: '@tree-sitter-grammars/tree-sitter-hcl', sample: 'x = 1\n' },
   { wasm: 'lua', pkg: '@tree-sitter-grammars/tree-sitter-lua', sample: 'local x = 1\n' },
+  {
+    wasm: 'luau',
+    pkg: 'tree-sitter-luau',
+    sample: 'export type User = { name: string }\nfunction greet(name: string): string\n  return name\nend\n',
+    vendored: true,
+  },
   { wasm: 'sql', pkg: '@derekstride/tree-sitter-sql', sample: 'SELECT 1;\n' },
   { wasm: 'r', pkg: '@davisvaughan/tree-sitter-r', sample: 'x <- 1\n' },
   { wasm: 'prisma', pkg: 'tree-sitter-prisma', sample: 'model A {\n  id Int @id\n}\n' },

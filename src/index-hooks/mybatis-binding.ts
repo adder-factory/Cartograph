@@ -74,7 +74,7 @@ import type { SyncResult } from '../extraction/index.js';
 import type { Edge } from '../types.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers re-mine. */
-export const MYBATIS_BINDING_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./mybatis-binding']);
+export const MYBATIS_BINDING_ALGO_VERSION = computeAlgoHash('src/index-hooks/mybatis-binding.ts', ['./mybatis-binding']);
 const LAST_MINED_KEY = 'last_mined_mybatis_binding_algo_version';
 
 /** JVM languages whose Mapper-interface method nodes the bridge

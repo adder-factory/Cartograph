@@ -27,7 +27,9 @@ import { logDebug, errMsg } from '../errors.js';
 
 /** Algo-version SHA from this file's source — a matching-logic change forces a
  *  one-shot full re-mine on the next sync (mirrors GO_IMPLEMENTS_ALGO_VERSION). */
-export const FABRIC_NATIVE_IMPL_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./fabric-native-impl']);
+export const FABRIC_NATIVE_IMPL_ALGO_VERSION = computeAlgoHash('src/index-hooks/fabric-native-impl.ts', [
+  './fabric-native-impl',
+]);
 const LAST_MINED_KEY = 'last_mined_fabric_native_impl_algo_version';
 const SYNTHESIZED_BY = 'fabric-native-impl';
 

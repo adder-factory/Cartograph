@@ -51,7 +51,7 @@ import type { Edge } from '../types.js';
  *  a one-shot full re-mine on the next afterSync so existing projects
  *  auto-pick up logic improvements without a manual `cartograph admin index`.
  *  Mirrors VALUE_REF_EDGES_ALGO_VERSION. */
-export const GO_IMPLEMENTS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./go-implements']);
+export const GO_IMPLEMENTS_ALGO_VERSION = computeAlgoHash('src/index-hooks/go-implements.ts', ['./go-implements']);
 const LAST_MINED_KEY = 'last_mined_go_implements_algo_version';
 
 interface GoContainerMethods {

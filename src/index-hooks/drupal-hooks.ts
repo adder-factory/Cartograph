@@ -67,7 +67,7 @@ import type { SyncResult } from '../extraction/index.js';
 import type { Edge, Node, NodeKind } from '../types.js';
 import { HOOK_FILE_EXTENSIONS } from '../resolution/frameworks/drupal.js';
 
-export const DRUPAL_HOOKS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./drupal-hooks']);
+export const DRUPAL_HOOKS_ALGO_VERSION = computeAlgoHash('src/index-hooks/drupal-hooks.ts', ['./drupal-hooks']);
 const LAST_MINED_KEY = 'last_mined_drupal_hooks_algo_version';
 
 /** Match `Implements hook_X()` in a docstring. The leading non-word

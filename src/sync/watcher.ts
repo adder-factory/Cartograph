@@ -18,11 +18,18 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { subscribe as parcelSubscribe, type AsyncSubscription } from '@parcel/watcher';
+import type { AsyncSubscription } from '@parcel/watcher';
 import type { CartographConfig } from '../types.js';
 import { shouldIncludeFile } from '../extraction/index.js';
 import { logDebug, logWarn } from '../errors.js';
 import { normalizePath } from '../utils.js';
+
+type ParcelSubscribe = typeof import('@parcel/watcher')['subscribe'];
+
+async function loadParcelSubscribe(): Promise<ParcelSubscribe> {
+  const mod = await import('@parcel/watcher');
+  return mod.subscribe;
+}
 
 /**
  * Recognise filesystem events that indicate the project's HEAD or branch
@@ -615,24 +622,27 @@ export class FileWatcher {
     // resolver layer already handles negations downstream.
     const ignoreGlobs = this.opts.config.exclude.filter((p) => !p.startsWith('!'));
 
-    parcelSubscribe(
-      watchRoot,
-      (err, events) => {
-        if (err) {
-          logWarn('File watcher event error', { error: String(err) });
-          this.opts.onSyncError?.(toError(err));
-          return;
-        }
-        // Parcel batches; events: Array<{type: 'create'|'update'|'delete', path: string}>.
-        // We don't need to differentiate kinds here — any touch on a
-        // tracked file should debounce a sync; sync itself reconciles
-        // adds / modifies / deletes from disk reality.
-        for (const e of events) {
-          watcherHandleFileEvent(watchCtx, e.path);
-        }
-      },
-      { ignore: ignoreGlobs },
-    )
+    loadParcelSubscribe()
+      .then((parcelSubscribe) =>
+        parcelSubscribe(
+          watchRoot,
+          (err, events) => {
+            if (err) {
+              logWarn('File watcher event error', { error: String(err) });
+              this.opts.onSyncError?.(toError(err));
+              return;
+            }
+            // Parcel batches; events: Array<{type: 'create'|'update'|'delete', path: string}>.
+            // We don't need to differentiate kinds here — any touch on a
+            // tracked file should debounce a sync; sync itself reconciles
+            // adds / modifies / deletes from disk reality.
+            for (const e of events) {
+              watcherHandleFileEvent(watchCtx, e.path);
+            }
+          },
+          { ignore: ignoreGlobs },
+        ),
+      )
       .then((sub) => {
         if (stRef.stopped) {
           // stop() raced ahead of subscribe resolving — tear down the

@@ -11,6 +11,7 @@ import type { SchemaVersion } from '../types.js';
 import { runMigrations, getCurrentVersion, verifySchemaIntegrity, CURRENT_SCHEMA_VERSION } from './migrations.js';
 import { bootstrapVecTables } from './vec-helpers.js';
 import { compact } from '../utils.js';
+import { resolveAssetPath } from '../assets.js';
 
 export type { SqliteDatabase, SqliteBackend } from './sqlite-adapter.js';
 
@@ -97,7 +98,7 @@ export class DatabaseConnection {
     const { db, backend, vecLoaded } = createDatabase(dbPath);
     dbApplyPragmas(db);
 
-    const schemaPath = path.join(import.meta.dirname, 'schema.sql');
+    const schemaPath = resolveAssetPath('db', 'schema.sql');
     db.exec(fs.readFileSync(schemaPath, 'utf-8'));
 
     // Fresh-bootstrap integrity gate: if schema.sql was edited in a

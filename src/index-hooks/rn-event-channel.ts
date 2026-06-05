@@ -43,7 +43,7 @@ import {
 
 // Hash BOTH this hook AND the sibling parser module (the dispatch/subscribe
 // regexes live there) so a logic change in EITHER self-heals existing projects.
-export const RN_EVENT_CHANNEL_ALGO_VERSION = computeAlgoHash(import.meta.url, [
+export const RN_EVENT_CHANNEL_ALGO_VERSION = computeAlgoHash('src/index-hooks/rn-event-channel.ts', [
   './rn-event-channel',
   '../resolution/rn-event-bridge',
 ]);

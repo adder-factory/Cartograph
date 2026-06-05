@@ -10,6 +10,10 @@ node_modules/
 # generation for library consumers; dist/ stays local.
 dist/
 
+# Standalone bundle staging and archives produced by
+# `bun run build:standalone`.
+release/
+
 # Docker-extracted libcgshim artifact — produced by
 # `docker build -f docker/libcgshim/Dockerfile .` + `docker cp`.
 # Cross-platform prebuilts ship via the build-libcgshim CI workflow as

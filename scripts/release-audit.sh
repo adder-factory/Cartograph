@@ -16,5 +16,8 @@ bun run check:mcp-load
 echo "== biomarkers =="
 bun run check:biomarkers
 
+echo "== viewer smoke =="
+bun run test:viewer-smoke:required
+
 echo "== fast test suite =="
 bun run test:fast

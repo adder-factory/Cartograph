@@ -56,7 +56,8 @@ extracts nothing, so always cross-check against your probe in step 2.
 
 **License check.** Tree-sitter grammars are usually MIT or Apache-2.0 —
 confirm before committing the wasm and note the source/version in a header
-comment so the provenance is recoverable later.
+comment so the provenance is recoverable later. Keep checked-in grammar asset
+provenance in `docs/GRAMMAR-ASSETS.md`.
 
 **Count guard.** `__tests__/pr19-improvements.test.ts` asserts an *exact*
 count of vendored `.wasm` files (a "did a grammar get dropped?" tripwire).

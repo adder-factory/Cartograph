@@ -11,11 +11,13 @@ import { expressResolver } from './express.js';
 import { bunServeResolver } from './bun-serve.js';
 import { reactResolver } from './react.js';
 import { svelteResolver } from './svelte.js';
+import { vueResolver } from './vue.js';
 import { djangoResolver, flaskResolver, fastapiResolver } from './python.js';
 import { railsResolver } from './ruby.js';
 import { springResolver } from './java.js';
 import { goResolver } from './go.js';
 import { rustResolver } from './rust.js';
+import { playResolver } from './play.js';
 import { aspnetResolver } from './csharp.js';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift.js';
 import { swiftObjcBridgeResolver } from './swift-objc.js';
@@ -36,6 +38,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   bunServeResolver,
   reactResolver,
   svelteResolver,
+  vueResolver,
   cliCommanderResolver,
   // Python
   djangoResolver,
@@ -45,6 +48,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   railsResolver,
   // Java
   springResolver,
+  playResolver,
   // Go
   goResolver,
   // Rust
@@ -95,9 +99,11 @@ export { expressResolver } from './express.js';
 export { bunServeResolver } from './bun-serve.js';
 export { reactResolver } from './react.js';
 export { svelteResolver } from './svelte.js';
+export { vueResolver } from './vue.js';
 export { djangoResolver, flaskResolver, fastapiResolver } from './python.js';
 export { railsResolver } from './ruby.js';
 export { springResolver } from './java.js';
+export { playResolver } from './play.js';
 export { goResolver } from './go.js';
 export { rustResolver } from './rust.js';
 export { aspnetResolver } from './csharp.js';

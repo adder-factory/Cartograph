@@ -33,10 +33,10 @@
  * plain reopen alone would not heal it.)
  */
 
-import * as path from 'node:path';
 import * as fs from 'node:fs';
 import type { SqliteDatabase } from './sqlite-adapter.js';
 import { logWarn } from '../errors.js';
+import { resolveAssetPath } from '../assets.js';
 
 /**
  * The nine `nodes` triggers that maintain the FTS5 + R*Tree derived
@@ -133,7 +133,7 @@ export function finalizeDeferredNodeIndexes(db: SqliteDatabase, handle: Deferred
         captured: handle.capturedTriggerSql.length,
         expected: NODE_DERIVED_INDEX_TRIGGERS.length,
       });
-      const schemaPath = path.join(import.meta.dirname, 'schema.sql');
+      const schemaPath = resolveAssetPath('db', 'schema.sql');
       db.exec(fs.readFileSync(schemaPath, 'utf-8'));
     }
   }

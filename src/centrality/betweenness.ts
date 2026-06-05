@@ -94,7 +94,10 @@ export const DEFAULT_SEED = 0xc0de2026;
  * a one-shot full re-rank on the next sync. Mirrors
  * VALUE_REF_EDGES_ALGO_VERSION / CHURN_ALGO_VERSION shape.
  */
-export const BETWEENNESS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['betweenness-parallel', 'betweenness-pass']);
+export const BETWEENNESS_ALGO_VERSION = computeAlgoHash('src/centrality/betweenness.ts', [
+  'betweenness-parallel',
+  'betweenness-pass',
+]);
 
 /**
  * Mulberry32 — small, fast, well-distributed PRNG. Plenty for source

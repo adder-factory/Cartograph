@@ -41,7 +41,7 @@ import { makeRefMiner } from '../shared-miner.js';
  * don't invalidate). Editing the pattern catalogue or the scan logic
  * above changes the hash automatically. See `src/algo-hash.ts`.
  */
-export const CONFIG_REFS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./index']);
+export const CONFIG_REFS_ALGO_VERSION = computeAlgoHash('src/config-refs/index.ts', ['./index']);
 
 /** Project-metadata key holding the algo version of the last mining run. */
 export const LAST_MINED_CONFIG_REFS_ALGO_VERSION_KEY = 'last_mined_config_refs_algo_version';

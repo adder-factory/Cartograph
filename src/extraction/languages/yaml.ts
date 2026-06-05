@@ -50,6 +50,6 @@ export const YAML_DEF: LanguageDef = {
   name: 'yaml',
   displayName: 'YAML',
   extensions: ['.yml', '.yaml'],
-  includeGlobs: ['**/*.yml', '**/*.yaml'],
+  includeGlobs: ['**/*.yml', '**/*.yaml', '**/conf/routes', '**/conf/*.routes'],
   grammar: { wasmFile: 'yaml.wasm', extractor: yamlExtractor },
 };

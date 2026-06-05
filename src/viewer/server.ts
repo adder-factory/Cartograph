@@ -11,6 +11,9 @@
  *   GET /                      — viewer HTML
  *   GET /api/status            — project root + counts + indexed-at
  *   GET /api/graph?focus=…     — local subgraph around a focus symbol
+ *   GET /api/path?from=…&to=…  — shortest path between two symbols
+ *   GET /api/impact?focus=…    — incoming/outgoing impact graph
+ *   GET /api/compare           — git changed files + indexed symbols
  *   GET /api/symbol/:id        — full detail for one symbol
  *
  * Lifecycle is symmetric to MCPServer: `startViewerServer` returns a
@@ -21,12 +24,14 @@ import * as http from 'node:http';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import Cartograph from '../index.js';
 import { DatabaseConnection, getDatabasePath } from '../db/index.js';
 import { QueryBuilder, getStats as qbGetStats, getNodesByKind } from '../db/queries.js';
 import { GraphTraverser } from '../graph/traversal.js';
-import { getNodesByName, getNodesByLowerName } from '../db/queries-search.js';
+import { getNodesByName, getNodesByLowerName, searchNodes } from '../db/queries-search.js';
+import { findEdgesBetweenNodes } from '../db/queries-edges.js';
 import { getFindingsForNode, getFindingsStats, getFindingsRanked } from '../db/queries-findings.js';
 import { BIOMARKER_NAMES } from '../biomarkers/types.js';
 import { getFileByPath } from '../db/queries-files.js';
@@ -35,8 +40,9 @@ import { getNodeMetrics } from '../db/queries-metrics.js';
 import { getHotspots } from '../db/queries-history.js';
 import { getMetadata } from '../db/queries-metadata.js';
 import { recentSessions, callsForSession } from '../db/queries-trace.js';
-import type { Node, NodeKind } from '../types.js';
+import type { Edge, EdgeKind, Node, NodeKind } from '../types.js';
 import { logDebug, errMsg } from '../errors.js';
+import { resolveAssetPath } from '../assets.js';
 
 export interface ViewerHandle {
   url: string;
@@ -52,7 +58,7 @@ interface ViewerOptions {
 }
 
 /** Resolved at module load — same dir whether running from src/ or dist/. */
-const STATIC_DIR = path.resolve(import.meta.dirname, 'static');
+const STATIC_DIR = resolveAssetPath('viewer', 'static');
 
 /** Default viewer port. Picked to not collide with common dev servers. */
 const DEFAULT_PORT = 8765;
@@ -74,12 +80,16 @@ const URL_PARSE_BASE = `${HTTP_SCHEME}localhost`;
 // ──────────────────────────────────────────────────────────────────────
 /** 200 OK. */
 const HTTP_OK = 200;
+/** 304 Not Modified. */
+const HTTP_NOT_MODIFIED = 304;
 /** 400 Bad Request. */
 const HTTP_BAD_REQUEST = 400;
 /** 404 Not Found. */
 const HTTP_NOT_FOUND = 404;
 /** 405 Method Not Allowed. */
 const HTTP_METHOD_NOT_ALLOWED = 405;
+/** 413 Payload Too Large. */
+const HTTP_PAYLOAD_TOO_LARGE = 413;
 /** 500 Internal Server Error. */
 const HTTP_INTERNAL_ERROR = 500;
 /** 503 Service Unavailable. */
@@ -101,14 +111,102 @@ interface IntBound {
 // Per-endpoint integer-query bounds. Ranges chosen so a wild query
 // string can't pull in an unbounded number of nodes/rows.
 const GRAPH_DEPTH: IntBound = { min: 1, max: 4, default: 2 };
+const GRAPH_LIMIT: IntBound = { min: 1, max: 300, default: 80 };
 const HOTSPOTS_LIMIT: IntBound = { min: 1, max: 100, default: 12 };
 const BIOMARKER_LIMIT: IntBound = { min: 1, max: 200, default: 50 };
 const SESSIONS_LIMIT: IntBound = { min: 1, max: 50, default: 10 };
+const SEARCH_LIMIT: IntBound = { min: 1, max: 30, default: 8 };
+const IMPACT_DEPTH: IntBound = { min: 1, max: 4, default: 2 };
+const IMPACT_LIMIT: IntBound = { min: 1, max: 300, default: 120 };
+const COMPARE_LIMIT: IntBound = { min: 1, max: 200, default: 80 };
 
 /** BFS expansion ceiling per direction in `/api/graph` — keeps the
  *  Cytoscape canvas legible (each direction can pull at most this
  *  many nodes; the merged sub+incoming map dedupes overlap). */
 const GRAPH_BFS_LIMIT = 60;
+const DEFAULT_GRAPH_ROOT_CANDIDATES = 28;
+const STATIC_ASSET_CACHE_CONTROL = 'no-cache';
+const VIEWER_EXCLUDED_EDGE_KINDS = new Set(['similar_to', 'def_use']);
+
+type GraphMode = 'focus' | 'core' | 'all';
+type ImpactMode = 'callers' | 'callees' | 'both';
+
+interface GraphPayloadOptions {
+  readonly mode: GraphMode;
+  readonly limit: number | undefined;
+}
+
+interface GraphPayloadArgs {
+  readonly ctx: RequestContext;
+  readonly focus: string | null;
+  readonly depth: number;
+  readonly opts: GraphPayloadOptions;
+}
+
+interface LimitGraphNodesArgs {
+  readonly nodes: Map<string, Node>;
+  readonly edgesById: Map<string, { source: string; target: string; kind: string }>;
+  readonly focusId: string;
+  readonly limit: number | undefined;
+}
+
+interface CollectedGraph {
+  readonly nodes: Map<string, Node>;
+  readonly edgesById: Map<string, { source: string; target: string; kind: string }>;
+}
+
+interface GitChangedFile {
+  readonly status: string;
+  readonly path: string;
+  readonly oldPath?: string;
+}
+
+interface CollectImpactGraphArgs {
+  readonly ctx: RequestContext;
+  readonly focusNode: Node;
+  readonly mode: ImpactMode;
+  readonly depth: number;
+  readonly limit: number;
+  readonly edgeKinds: EdgeKind[];
+}
+
+interface ImpactPayloadArgs {
+  readonly ctx: RequestContext;
+  readonly focusRaw: string;
+  readonly mode: ImpactMode;
+  readonly depth: number;
+  readonly limit: number;
+  readonly edgeKinds: EdgeKind[];
+}
+
+type StaticAssetName = string;
+
+interface StaticAsset {
+  readonly body: string;
+  readonly contentType: string;
+  readonly etag: string;
+  readonly byteLength: number;
+}
+
+interface SendStaticAssetArgs {
+  readonly req: http.IncomingMessage;
+  readonly res: http.ServerResponse;
+  readonly ctx: RequestContext;
+  readonly filename: StaticAssetName;
+}
+
+interface CollectFocusGraphArgs {
+  readonly ctx: RequestContext;
+  readonly focusNode: Node;
+  readonly depth: number;
+}
+
+interface DefaultGraphRootCandidate {
+  readonly node: Node;
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+  readonly score: number;
+}
 
 // Defense-in-depth caps on /api/ask. Three nested layers: byte cap on
 // the request body, char cap per field, retrieval/citation caps on
@@ -206,10 +304,11 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
   const traverser = new GraphTraverser(queries);
 
   const indexHtml = loadIndexHtml();
+  const staticAssets = loadStaticAssets();
   // Single mutable context shared across requests so the lazily-
   // opened Cartograph (used by /api/ask) is reused, not re-opened
   // per request, and close() can tear it down on shutdown.
-  const ctx: RequestContext = { projectPath, conn, queries, traverser, indexHtml };
+  const ctx: RequestContext = { projectPath, conn, queries, traverser, indexHtml, staticAssets };
 
   const server = http.createServer((req, res) => {
     handleRequest(req, res, ctx).catch((err) => {
@@ -256,6 +355,7 @@ interface RequestContext {
   queries: QueryBuilder;
   traverser: GraphTraverser;
   indexHtml: string;
+  staticAssets: Record<StaticAssetName, StaticAsset>;
   /**
    * Lazy Cartograph handle — only the /api/ask path needs the full
    * service surface (LLM client + hybrid retrieval). Most viewer
@@ -277,7 +377,13 @@ async function ensureCartograph(ctx: RequestContext): Promise<Cartograph> {
  *  the first `match` that returns truthy. */
 interface GetRoute {
   match: (path: string) => RegExpExecArray | true | null;
-  handle: (m: RegExpExecArray | true, url: URL, res: http.ServerResponse, ctx: RequestContext) => void;
+  handle: (
+    m: RegExpExecArray | true,
+    url: URL,
+    res: http.ServerResponse,
+    ctx: RequestContext,
+    req: http.IncomingMessage,
+  ) => void;
 }
 
 const matchExact = (p: string) => (path: string) => (path === p ? true : null);
@@ -285,13 +391,64 @@ const matchExact = (p: string) => (path: string) => (path === p ? true : null);
 const GET_ROUTES: ReadonlyArray<GetRoute> = [
   { match: matchExact('/'), handle: (_m, _u, res, ctx) => sendIndexHtml(res, ctx) },
   { match: matchExact('/index.html'), handle: (_m, _u, res, ctx) => sendIndexHtml(res, ctx) },
+  {
+    match: (p) => /^\/(viewer(?:[\w.-]+)?\.app|viewer\.css|lucide\.min\.js)$/.exec(p),
+    handle: (m, _u, res, ctx, req) => sendStaticAsset({ req, res, ctx, filename: (m as RegExpExecArray)[1]! }),
+  },
   { match: matchExact('/api/status'), handle: (_m, _u, res, ctx) => sendJson(res, HTTP_OK, statusPayload(ctx)) },
   {
     match: matchExact('/api/graph'),
     handle: (_m, url, res, ctx) => {
       const focus = url.searchParams.get('focus');
       const depth = clampInt(url.searchParams.get('depth'), GRAPH_DEPTH);
-      sendJson(res, HTTP_OK, graphPayload(ctx, focus, depth));
+      const mode = parseGraphMode(url.searchParams.get('mode'));
+      const limit = parseGraphLimit(url.searchParams.get('limit'), mode);
+      sendJson(res, HTTP_OK, graphPayload({ ctx, focus, depth, opts: { mode, limit } }));
+    },
+  },
+  {
+    match: matchExact('/api/search'),
+    handle: (_m, url, res, ctx) => {
+      const q = clampString(url.searchParams.get('q'), 120);
+      const limit = clampInt(url.searchParams.get('limit'), SEARCH_LIMIT);
+      sendJson(res, HTTP_OK, searchPayload(ctx, q, limit));
+    },
+  },
+  {
+    match: matchExact('/api/path'),
+    handle: (_m, url, res, ctx) => {
+      const from = clampString(url.searchParams.get('from'), 200);
+      const to = clampString(url.searchParams.get('to'), 200);
+      if (!from || !to) {
+        sendJson(res, HTTP_BAD_REQUEST, { error: '`from` and `to` are required' });
+        return;
+      }
+      sendJson(res, HTTP_OK, pathPayload(ctx, from, to, parseEdgeKinds(url.searchParams)));
+    },
+  },
+  {
+    match: matchExact('/api/impact'),
+    handle: (_m, url, res, ctx) => {
+      const focus = clampString(url.searchParams.get('focus'), 200);
+      if (!focus) {
+        sendJson(res, HTTP_BAD_REQUEST, { error: '`focus` is required' });
+        return;
+      }
+      const depth = clampInt(url.searchParams.get('depth'), IMPACT_DEPTH);
+      const limit = clampInt(url.searchParams.get('limit'), IMPACT_LIMIT);
+      const mode = parseImpactMode(url.searchParams.get('mode'));
+      sendJson(
+        res,
+        HTTP_OK,
+        impactPayload({ ctx, focusRaw: focus, mode, depth, limit, edgeKinds: parseEdgeKinds(url.searchParams) }),
+      );
+    },
+  },
+  {
+    match: matchExact('/api/compare'),
+    handle: (_m, url, res, ctx) => {
+      const limit = clampInt(url.searchParams.get('limit'), COMPARE_LIMIT);
+      sendJson(res, HTTP_OK, comparePayload(ctx, limit));
     },
   },
   { match: matchExact('/api/findings'), handle: (_m, _u, res, ctx) => sendJson(res, HTTP_OK, findingsPayload(ctx)) },
@@ -346,6 +503,47 @@ function sendIndexHtml(res: http.ServerResponse, ctx: RequestContext): void {
   res.end(ctx.indexHtml);
 }
 
+function sendStaticAsset(args: SendStaticAssetArgs): void {
+  const { req, res, ctx, filename } = args;
+  const asset = ctx.staticAssets[filename];
+  if (!asset) {
+    sendJson(res, HTTP_NOT_FOUND, { error: `not found: /${filename}` });
+    return;
+  }
+  const headers = staticAssetHeaders(asset, { includeBodyLength: false });
+  if (requestHasMatchingEtag(req, asset.etag)) {
+    res.writeHead(HTTP_NOT_MODIFIED, headers);
+    res.end();
+    return;
+  }
+  res.writeHead(HTTP_OK, staticAssetHeaders(asset, { includeBodyLength: true }));
+  res.end(asset.body);
+}
+
+interface StaticAssetHeaderOptions {
+  readonly includeBodyLength: boolean;
+}
+
+function staticAssetHeaders(asset: StaticAsset, opts: StaticAssetHeaderOptions): http.OutgoingHttpHeaders {
+  const headers: http.OutgoingHttpHeaders = {
+    'cache-control': STATIC_ASSET_CACHE_CONTROL,
+    'content-type': `${asset.contentType}; charset=utf-8`,
+    etag: asset.etag,
+  };
+  if (opts.includeBodyLength) headers['content-length'] = asset.byteLength;
+  return headers;
+}
+
+function requestHasMatchingEtag(req: http.IncomingMessage, etag: string): boolean {
+  const raw = req.headers['if-none-match'];
+  if (raw === undefined) return false;
+  const value = Array.isArray(raw) ? raw.join(',') : raw;
+  return value
+    .split(',')
+    .map((candidate) => candidate.trim())
+    .some((candidate) => candidate === etag || candidate === `W/${etag}` || candidate === '*');
+}
+
 /** Decode the id param, look up via `lookup`, and respond. Pulled out
  *  so the symbol/source endpoints share one closure for the
  *  decode-or-400-then-lookup-or-404-then-200 chain. */
@@ -369,9 +567,10 @@ function respondWithIdLookup(args: RespondWithIdLookupArgs): void {
 }
 
 async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse, ctx: RequestContext): Promise<void> {
+  const url = new URL(req.url ?? '/', URL_PARSE_BASE);
   // POST /api/ask is the only write-shaped endpoint — every other
   // path is read-only GET.
-  if (req.method === 'POST' && req.url === '/api/ask') {
+  if (req.method === 'POST' && url.pathname === '/api/ask') {
     await handleAskRequest(req, res, ctx);
     return;
   }
@@ -379,11 +578,10 @@ async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse
     sendJson(res, HTTP_METHOD_NOT_ALLOWED, { error: 'method not allowed' });
     return;
   }
-  const url = new URL(req.url ?? '/', URL_PARSE_BASE);
   for (const route of GET_ROUTES) {
     const m = route.match(url.pathname);
     if (m === null) continue;
-    route.handle(m, url, res, ctx);
+    route.handle(m, url, res, ctx, req);
     return;
   }
   sendJson(res, HTTP_NOT_FOUND, { error: `not found: ${url.pathname}` });
@@ -425,7 +623,8 @@ function statusPayload(ctx: RequestContext): unknown {
   };
 }
 
-function graphPayload(ctx: RequestContext, focus: string | null, depth: number): unknown {
+function graphPayload(args: GraphPayloadArgs): unknown {
+  const { ctx, focus, depth, opts } = args;
   // No focus → BFS the neighborhood of the most-central node so the
   // visible graph is a single connected component. The previous "top
   // 30 by centrality" approach picked hubs from different parts of
@@ -437,19 +636,89 @@ function graphPayload(ctx: RequestContext, focus: string | null, depth: number):
   // Reuses the focus-branch payload below by recursing once. Keeps
   // the BFS limit / dedup / both-directions behavior in one place.
   if (!focus) {
-    const kinds: NodeKind[] = ['function', 'method', 'class'];
-    const all: Node[] = [];
-    for (const k of kinds) all.push(...getNodesByKind(ctx.queries, k));
-    if (all.length === 0) return { nodes: [], edges: [], focus: null };
-    all.sort((a, b) => (b.centrality ?? 0) - (a.centrality ?? 0));
-    const root = all[0]!;
-    return graphPayload(ctx, root.id, GRAPH_DEPTH.default);
+    const root = chooseDefaultGraphRoot(ctx, opts);
+    if (!root) return { mode: opts.mode, limit: opts.limit ?? null, nodes: [], edges: [], focus: null };
+    return graphPayload({ ctx, focus: root.id, depth: GRAPH_DEPTH.default, opts });
   }
 
   const focusNode = resolveSymbolToNode(ctx.queries, focus);
   if (!focusNode) {
-    return { nodes: [], edges: [], focus: null, error: `unknown symbol: ${focus}` };
+    return {
+      mode: opts.mode,
+      limit: opts.limit ?? null,
+      nodes: [],
+      edges: [],
+      focus: null,
+      error: `unknown symbol: ${focus}`,
+    };
   }
+  const { nodes, edgesById } = collectFocusGraph({ ctx, focusNode, depth });
+  const limited = limitGraphNodes({ nodes, edgesById, focusId: focusNode.id, limit: opts.limit });
+  return {
+    mode: opts.mode,
+    limit: opts.limit ?? null,
+    focus: focusNode.id,
+    nodes: limited.nodes.map((node) => serializeGraphNode(ctx, node)),
+    edges: limited.edges,
+  };
+}
+
+function healthForFindings(findings: ReturnType<typeof getFindingsForNode>): 'error' | 'warning' | 'info' | 'healthy' {
+  if (findings.some((f) => f.severity === 'error')) return 'error';
+  if (findings.some((f) => f.severity === 'warning')) return 'warning';
+  if (findings.some((f) => f.severity === 'info')) return 'info';
+  return 'healthy';
+}
+
+function serializeGraphNode(ctx: RequestContext, n: Node): Record<string, unknown> {
+  const findings = getFindingsForNode(ctx.queries, n.id);
+  return {
+    ...serializeNode(n),
+    health: healthForFindings(findings),
+    findings: findings.map((f) => ({ biomarker: f.biomarker, severity: f.severity, metric: f.metric })),
+  };
+}
+
+function parseGraphMode(v: string | null): GraphMode {
+  if (v === 'focus' || v === 'core' || v === 'all') return v;
+  return 'core';
+}
+
+function parseGraphLimit(v: string | null, mode: GraphMode): number | undefined {
+  if (v !== null) return clampInt(v, GRAPH_LIMIT);
+  if (mode === 'focus') return 32;
+  if (mode === 'core') return GRAPH_LIMIT.default;
+  return undefined;
+}
+
+function chooseDefaultGraphRoot(ctx: RequestContext, opts: GraphPayloadOptions): Node | null {
+  const kinds: NodeKind[] = ['function', 'method', 'class'];
+  const all: Node[] = [];
+  for (const k of kinds) all.push(...getNodesByKind(ctx.queries, k));
+  if (all.length === 0) return null;
+
+  const candidates = [...all]
+    .sort((a, b) => (b.centrality ?? 0) - (a.centrality ?? 0) || a.name.localeCompare(b.name))
+    .slice(0, DEFAULT_GRAPH_ROOT_CANDIDATES);
+  let best: DefaultGraphRootCandidate | null = null;
+  for (const node of candidates) {
+    const collected = collectFocusGraph({ ctx, focusNode: node, depth: GRAPH_DEPTH.default });
+    const limited = limitGraphNodes({
+      nodes: collected.nodes,
+      edgesById: collected.edgesById,
+      focusId: node.id,
+      limit: opts.limit,
+    });
+    const edgeCount = limited.edges.length;
+    const nodeCount = limited.nodes.length;
+    const score = edgeCount * 10 + nodeCount + (node.centrality ?? 0);
+    if (!best || score > best.score) best = { node, nodeCount, edgeCount, score };
+  }
+  return best?.node ?? candidates[0] ?? null;
+}
+
+function collectFocusGraph(args: CollectFocusGraphArgs): CollectedGraph {
+  const { ctx, focusNode, depth } = args;
   const sub = ctx.traverser.traverseBFS(focusNode.id, {
     maxDepth: depth,
     direction: 'outgoing',
@@ -464,14 +733,258 @@ function graphPayload(ctx: RequestContext, focus: string | null, depth: number):
   for (const [id, n] of sub.nodes) nodes.set(id, n);
   for (const [id, n] of incoming.nodes) nodes.set(id, n);
   const edgesById = new Map<string, { source: string; target: string; kind: string }>();
-  for (const e of [...sub.edges, ...incoming.edges]) {
+  const nodeIds = [...nodes.keys()];
+  const internalEdges = findEdgesBetweenNodes(ctx.queries, nodeIds).filter(
+    (e) => !VIEWER_EXCLUDED_EDGE_KINDS.has(e.kind),
+  );
+  for (const e of internalEdges) {
     edgesById.set(`${e.source}__${e.target}__${e.kind}`, { source: e.source, target: e.target, kind: e.kind });
   }
-  return {
-    focus: focusNode.id,
-    nodes: [...nodes.values()].map(serializeNode),
-    edges: [...edgesById.values()],
+  return { nodes, edgesById };
+}
+
+function limitGraphNodes(args: LimitGraphNodesArgs): {
+  nodes: Node[];
+  edges: Array<{ source: string; target: string; kind: string }>;
+} {
+  const { nodes, edgesById, focusId, limit } = args;
+  const allNodes = [...nodes.values()];
+  const allEdges = [...edgesById.values()];
+  if (!limit || allNodes.length <= limit) return { nodes: allNodes, edges: allEdges };
+
+  const keep = new Set<string>();
+  const frontier: string[] = [];
+  const adjacency = new Map<string, string[]>();
+  for (const edge of allEdges) {
+    const a = adjacency.get(edge.source) ?? [];
+    a.push(edge.target);
+    adjacency.set(edge.source, a);
+    const b = adjacency.get(edge.target) ?? [];
+    b.push(edge.source);
+    adjacency.set(edge.target, b);
+  }
+  const add = (id: string): boolean => {
+    if (keep.size >= limit || !nodes.has(id) || keep.has(id)) return false;
+    keep.add(id);
+    frontier.push(id);
+    return true;
   };
+
+  add(focusId);
+  for (let i = 0; i < frontier.length && keep.size < limit; i++) {
+    const id = frontier[i]!;
+    const neighbors = (adjacency.get(id) ?? [])
+      .filter((candidate) => !keep.has(candidate))
+      .sort(
+        (a, b) =>
+          (nodes.get(b)?.centrality ?? 0) - (nodes.get(a)?.centrality ?? 0) ||
+          (nodes.get(a)?.name ?? '').localeCompare(nodes.get(b)?.name ?? ''),
+      );
+    for (const neighbor of neighbors) {
+      if (keep.size >= limit) break;
+      add(neighbor);
+    }
+  }
+
+  const limitedNodes = [...keep].map((id) => nodes.get(id)).filter((node): node is Node => Boolean(node));
+  const limitedEdges = allEdges.filter((edge) => keep.has(edge.source) && keep.has(edge.target));
+  return { nodes: limitedNodes, edges: limitedEdges };
+}
+
+function searchPayload(ctx: RequestContext, q: string, limit: number): unknown {
+  if (q.length < 2) return { query: q, results: [] };
+  const results = searchNodes(ctx.queries, q, { limit, perFileCap: 2 });
+  return {
+    query: q,
+    results: results.map((r) => ({
+      ...serializeNode(r.node),
+      score: r.score,
+    })),
+  };
+}
+
+function parseImpactMode(v: string | null): ImpactMode {
+  if (v === 'callers' || v === 'callees' || v === 'both') return v;
+  return 'both';
+}
+
+function parseEdgeKinds(params: URLSearchParams): EdgeKind[] {
+  const raw = [...params.getAll('edgeKind'), ...params.getAll('edgeKinds')]
+    .flatMap((value) => value.split(','))
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(raw)] as EdgeKind[];
+}
+
+function serializeGraphEdge(edge: Pick<Edge, 'source' | 'target' | 'kind'>): {
+  source: string;
+  target: string;
+  kind: string;
+} {
+  return { source: edge.source, target: edge.target, kind: edge.kind };
+}
+
+function pathPayload(ctx: RequestContext, fromRaw: string, toRaw: string, edgeKinds: EdgeKind[]): unknown {
+  const from = resolveSymbolToNode(ctx.queries, fromRaw);
+  if (!from) return { found: false, error: `unknown symbol: ${fromRaw}`, from: null, to: null, nodes: [], edges: [] };
+  const to = resolveSymbolToNode(ctx.queries, toRaw);
+  if (!to) {
+    return {
+      found: false,
+      error: `unknown symbol: ${toRaw}`,
+      from: serializeGraphNode(ctx, from),
+      to: null,
+      nodes: [serializeGraphNode(ctx, from)],
+      edges: [],
+    };
+  }
+
+  const path = ctx.traverser.findPath(from.id, to.id, edgeKinds);
+  if (!path) {
+    return {
+      found: false,
+      from: serializeGraphNode(ctx, from),
+      to: serializeGraphNode(ctx, to),
+      nodes: [serializeGraphNode(ctx, from), serializeGraphNode(ctx, to)],
+      edges: [],
+    };
+  }
+  const edges = path
+    .map((hop) => hop.edge)
+    .filter((edge): edge is Edge => Boolean(edge))
+    .map(serializeGraphEdge);
+  return {
+    found: true,
+    from: serializeGraphNode(ctx, from),
+    to: serializeGraphNode(ctx, to),
+    hopCount: Math.max(0, path.length - 1),
+    edgeKinds,
+    nodes: path.map((hop) => serializeGraphNode(ctx, hop.node)),
+    edges,
+  };
+}
+
+function collectImpactGraph(args: CollectImpactGraphArgs): CollectedGraph {
+  const { ctx, focusNode, mode, depth, limit, edgeKinds } = args;
+  const nodes = new Map<string, Node>();
+  nodes.set(focusNode.id, focusNode);
+  const directions: Array<'incoming' | 'outgoing'> =
+    mode === 'callers' ? ['incoming'] : mode === 'callees' ? ['outgoing'] : ['incoming', 'outgoing'];
+  for (const direction of directions) {
+    const subgraph = ctx.traverser.traverseBFS(focusNode.id, {
+      direction,
+      maxDepth: depth,
+      limit,
+      edgeKinds,
+    });
+    for (const [id, node] of subgraph.nodes) nodes.set(id, node);
+  }
+
+  const nodeIds = [...nodes.keys()];
+  const kindFilter = edgeKinds.length > 0 ? new Set(edgeKinds) : null;
+  const internalEdges = findEdgesBetweenNodes(ctx.queries, nodeIds).filter((edge) => {
+    if (kindFilter) return kindFilter.has(edge.kind);
+    return !VIEWER_EXCLUDED_EDGE_KINDS.has(edge.kind);
+  });
+  const edgesById = new Map<string, { source: string; target: string; kind: string }>();
+  for (const edge of internalEdges)
+    edgesById.set(`${edge.source}__${edge.target}__${edge.kind}`, serializeGraphEdge(edge));
+  return { nodes, edgesById };
+}
+
+function impactPayload(args: ImpactPayloadArgs): unknown {
+  const { ctx, focusRaw, mode, depth, limit, edgeKinds } = args;
+  const focus = resolveSymbolToNode(ctx.queries, focusRaw);
+  if (!focus) return { error: `unknown symbol: ${focusRaw}`, focus: null, mode, depth, nodes: [], edges: [] };
+  const collected = collectImpactGraph({ ctx, focusNode: focus, mode, depth, limit, edgeKinds });
+  const limited = limitGraphNodes({
+    nodes: collected.nodes,
+    edgesById: collected.edgesById,
+    focusId: focus.id,
+    limit,
+  });
+  return {
+    focus: serializeGraphNode(ctx, focus),
+    mode,
+    depth,
+    limit,
+    edgeKinds,
+    nodes: limited.nodes.map((node) => serializeGraphNode(ctx, node)),
+    edges: limited.edges,
+  };
+}
+
+function comparePayload(ctx: RequestContext, limit: number): unknown {
+  const diff = gitNameStatus(ctx.projectPath);
+  if (!diff.ok) {
+    return {
+      base: 'HEAD',
+      gitAvailable: false,
+      error: diff.error,
+      changedFiles: [],
+      totals: { files: 0, nodes: 0 },
+    };
+  }
+
+  const changedFiles = parseGitNameStatus(diff.stdout).slice(0, limit);
+  let nodeTotal = 0;
+  const rows = changedFiles.map((file) => {
+    const nodes = file.status === 'D' ? [] : rankedNodesForFile(ctx, file.path).slice(0, 8);
+    nodeTotal += nodes.length;
+    return {
+      status: file.status,
+      path: file.path,
+      oldPath: file.oldPath ?? null,
+      nodeCount: file.status === 'D' ? 0 : ctx.queries.getNodesByFile(file.path).length,
+      nodes: nodes.map((node) => serializeGraphNode(ctx, node)),
+    };
+  });
+
+  return {
+    base: 'HEAD',
+    gitAvailable: true,
+    changedFiles: rows,
+    totals: { files: changedFiles.length, nodes: nodeTotal },
+  };
+}
+
+function rankedNodesForFile(ctx: RequestContext, filePath: string): Node[] {
+  return ctx.queries
+    .getNodesByFile(filePath)
+    .slice()
+    .sort(
+      (a, b) => (b.centrality ?? 0) - (a.centrality ?? 0) || a.startLine - b.startLine || a.name.localeCompare(b.name),
+    );
+}
+
+function gitNameStatus(projectPath: string): { ok: true; stdout: string } | { ok: false; error: string } {
+  const result = spawnSync('git', ['diff', '--name-status', 'HEAD', '--'], {
+    cwd: projectPath,
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  });
+  if (result.error) return { ok: false, error: result.error.message };
+  if (result.status !== 0) return { ok: false, error: (result.stderr || 'git diff failed').trim() };
+  return { ok: true, stdout: result.stdout };
+}
+
+function parseGitNameStatus(output: string): GitChangedFile[] {
+  const files: GitChangedFile[] = [];
+  for (const line of output.split('\n')) {
+    if (!line.trim()) continue;
+    const parts = line.split('\t');
+    const rawStatus = parts[0] ?? '';
+    const status = rawStatus[0] || '?';
+    if (status === 'R' || status === 'C') {
+      const oldPath = parts[1];
+      const newPath = parts[2];
+      if (oldPath && newPath) files.push({ status, oldPath, path: newPath });
+      continue;
+    }
+    const filePath = parts[1];
+    if (filePath) files.push({ status, path: filePath });
+  }
+  return files;
 }
 
 function findingsPayload(ctx: RequestContext): unknown {
@@ -575,8 +1088,8 @@ function hotspotsPayload(ctx: RequestContext, limit: number): unknown {
  *
  * No streaming yet (the underlying client returns a complete answer
  * synchronously). Errors return shaped JSON that the viewer renders
- * inline — the most common case being "no LLM configured", which
- * we surface with a hint to run `cartograph llm setup`.
+ * inline — the most common case being "no LLM configured" or an
+ * unreachable backend, which we surface with the current setup commands.
  */
 /**
  * Compose the LLM prompt by prefixing a symbol context line and
@@ -597,10 +1110,12 @@ function buildAskPrompt(question: string, symbol: string, selection: string): st
  */
 function sendAskErrorResponse(res: http.ServerResponse, err: unknown): void {
   const m = errMsg(err);
-  const noLlm = /No chat provider configured|not reachable/i.test(m);
+  const noLlm = /No (?:chat|ask) provider configured|not reachable/i.test(m);
   sendJson(res, noLlm ? HTTP_SERVICE_UNAVAILABLE : HTTP_INTERNAL_ERROR, {
     error: m,
-    hint: noLlm ? 'Run `cartograph llm setup` and restart the viewer.' : undefined,
+    hint: noLlm
+      ? 'Run `cartograph admin llm-plan`, apply a preset with `cartograph admin llm-apply --preset <id>`, start the backend, then restart the viewer.'
+      : undefined,
   });
 }
 
@@ -609,7 +1124,14 @@ async function handleAskRequest(
   res: http.ServerResponse,
   ctx: RequestContext,
 ): Promise<void> {
-  const body = await readBody(req, ASK_BODY_BYTE_LIMIT);
+  let body: string;
+  try {
+    body = await readBody(req, ASK_BODY_BYTE_LIMIT);
+  } catch (err) {
+    const msg = errMsg(err);
+    sendJson(res, msg === 'body too large' ? HTTP_PAYLOAD_TOO_LARGE : HTTP_BAD_REQUEST, { error: msg });
+    return;
+  }
   let parsed: { question?: unknown; symbol?: unknown; selection?: unknown };
   try {
     parsed = JSON.parse(body);
@@ -673,17 +1195,25 @@ function readBody(req: http.IncomingMessage, maxBytes: number): Promise<string> 
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let rejected = false;
     req.on('data', (c: Buffer) => {
+      if (rejected) return;
       size += c.length;
       if (size > maxBytes) {
-        req.destroy();
+        rejected = true;
+        chunks.length = 0;
         reject(new Error('body too large'));
+        req.resume();
         return;
       }
       chunks.push(c);
     });
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-    req.on('error', reject);
+    req.on('end', () => {
+      if (!rejected) resolve(Buffer.concat(chunks).toString('utf-8'));
+    });
+    req.on('error', (err) => {
+      if (!rejected) reject(err);
+    });
   });
 }
 
@@ -863,6 +1393,38 @@ function serializeNode(n: Node): Record<string, unknown> {
 function loadIndexHtml(): string {
   const file = path.join(STATIC_DIR, 'index.html');
   return fs.readFileSync(file, 'utf-8');
+}
+
+function loadStaticAssets(): Record<StaticAssetName, StaticAsset> {
+  const assets: Record<StaticAssetName, StaticAsset> = {};
+  for (const filename of fs.readdirSync(STATIC_DIR)) {
+    if (!isViewerStaticAsset(filename)) continue;
+    assets[filename] = loadStaticAsset(filename, contentTypeForStaticAsset(filename));
+  }
+  return assets;
+}
+
+function loadStaticAsset(filename: StaticAssetName, contentType: string): StaticAsset {
+  const body = fs.readFileSync(path.join(STATIC_DIR, filename), 'utf-8');
+  return {
+    body,
+    contentType,
+    etag: hashAssetEtag(body),
+    byteLength: Buffer.byteLength(body),
+  };
+}
+
+function isViewerStaticAsset(filename: string): boolean {
+  return filename === 'viewer.css' || filename === 'lucide.min.js' || /^viewer(?:[\w.-]+)?\.app$/.test(filename);
+}
+
+function contentTypeForStaticAsset(filename: string): string {
+  return filename.endsWith('.css') ? 'text/css' : 'text/javascript';
+}
+
+function hashAssetEtag(body: string): string {
+  const digest = createHash('sha256').update(body).digest('hex');
+  return `"sha256-${digest}"`;
 }
 
 function sendJson(res: http.ServerResponse, code: number, body: unknown): void {

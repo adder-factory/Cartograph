@@ -113,7 +113,7 @@ import { computeAlgoHash } from '../algo-hash.js';
  *   `getPrecedingDocstring` + `generateNodeId`) — coincided with the
  *   decorative-banner docstring-strip fix (friction sweep 2026-05-16).
  */
-export const EXTRACTION_LOGIC_VERSION = computeAlgoHash(import.meta.url, [
+export const EXTRACTION_LOGIC_VERSION = computeAlgoHash('src/extraction/extraction-logic-version.ts', [
   './extraction-logic-version',
   './tree-sitter',
   './tree-sitter-decls',
@@ -184,6 +184,7 @@ export const EXTRACTION_LOGIC_VERSION = computeAlgoHash(import.meta.url, [
   './languages/kotlin',
   './languages/liquid',
   './languages/lua',
+  './languages/luau',
   './languages/objc',
   './languages/pascal',
   './languages/php',

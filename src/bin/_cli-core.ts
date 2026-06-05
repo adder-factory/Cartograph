@@ -31,6 +31,7 @@ import { SUMMARIZABLE_KINDS } from '../llm/summarizer.js';
 import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-generator.js';
 import { getToolModules } from '../mcp/tools/registry.js';
 import { getToolContract } from '../mcp/tools/_tool-contract.js';
+import { resolveAssetPath } from '../assets.js';
 
 // Lazy-load heavy modules (Cartograph, runInstaller) to keep CLI startup fast.
 export async function loadCartograph(): Promise<typeof import('../index.js')> {
@@ -111,7 +112,7 @@ export const sessionCmd = program
   );
 
 // Version from package.json
-const packageJson = JSON.parse(fs.readFileSync(path.join(import.meta.dirname, '..', '..', 'package.json'), 'utf-8'));
+const packageJson = JSON.parse(fs.readFileSync(resolveAssetPath('package.json'), 'utf-8'));
 
 // =============================================================================
 // ANSI Color Helpers (avoid chalk ESM issues)

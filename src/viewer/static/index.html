@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>cartograph viewer — mockup</title>
+<title>cartograph viewer</title>
 <script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
 <script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
 <script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
@@ -28,1128 +28,8 @@
 <script src="https://unpkg.com/prismjs@1.29.0/components/prism-bash.min.js"></script>
 <script src="https://unpkg.com/prismjs@1.29.0/components/prism-sql.min.js"></script>
 <script src="https://unpkg.com/prismjs@1.29.0/components/prism-graphql.min.js"></script>
-<style>
-  :root {
-    /* 4px spacing unit, à la Tailwind. Use multiples: --s-2=8, --s-3=12, --s-4=16 etc. */
-    --s: 4px;
-    --s-1: 4px;  --s-2: 8px;  --s-3: 12px; --s-4: 16px;
-    --s-5: 20px; --s-6: 24px; --s-8: 32px; --s-10: 40px;
-
-    --bg-0:        #0b0f17;
-    --bg-1:        #141a28;
-    --bg-2:        #1c2336;
-    --bg-3:        #252e44;
-    --line:        #2c3550;
-    --line-soft:   #1e253a;
-    --text:        #e6ebf5;
-    --text-muted:  #8b95ad;
-    --text-dim:    #5a647a;
-    --accent:      #5fadff;
-    --accent-soft: #1c3a5f;
-    --ok:          #34d399;
-    --warn:        #f59e0b;
-    --err:         #ef4444;
-    --info:        #60a5fa;
-    --healthy:     #2c9c6a;
-    --shadow-sm:   0 1px 2px rgba(0,0,0,.3);
-    --shadow:      0 4px 16px rgba(0,0,0,.45);
-    --radius:      6px;
-  }
-
-  * { box-sizing: border-box; }
-  html, body { margin: 0; padding: 0; height: 100%; }
-  body {
-    background: var(--bg-0);
-    color: var(--text);
-    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, system-ui, sans-serif;
-    overflow: hidden;
-    user-select: none;
-    -webkit-font-smoothing: antialiased;
-  }
-  code, .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; font-size: 12.5px; }
-
-  /* Re-enable text selection in the regions where users genuinely
-     want to copy: source code, docstrings, AI answers, breadcrumb
-     paths, the file:line subtitle, and metric values. The page-wide
-     user-select: none still prevents accidental drag-selecting of
-     UI chrome. The line-number gutter stays unselectable so Cmd+C
-     on a code selection grabs only the actual code. */
-  .codepane pre, .codepane code,
-  .detail .docstring,
-  .askpanel-msg.a, .askpanel-msg.q,
-  .detail .subtitle,
-  .ref-row .name, .ref-row .loc,
-  .metric .v {
-    user-select: text;
-    -webkit-user-select: text;
-    cursor: text;
-  }
-  /* ───────── Top bar ───────── */
-  .topbar {
-    height: 52px;
-    display: flex;
-    align-items: center;
-    gap: var(--s-5);
-    padding: 0 var(--s-5);
-    background: var(--bg-1);
-    border-bottom: 1px solid var(--line);
-    position: relative;
-    z-index: 5;
-  }
-  .brand {
-    font-weight: 700;
-    letter-spacing: -.01em;
-    color: var(--accent);
-    font-size: 15px;
-  }
-  .topbar .path { color: var(--text); font-family: "SF Mono", Menlo, monospace; font-size: 13px; max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  /* Back / forward — borrowed from Sourcetrail's selection-history
-     navigation. Lives inside the searchgroup, flush against the
-     search input so the unit reads as one widget. */
-  .navbtn {
-    width: 32px;
-    background: transparent;
-    color: var(--text-muted);
-    border: 0;
-    border-right: 1px solid var(--line);
-    font: inherit; font-size: 18px; line-height: 1;
-    cursor: pointer;
-    transition: color .12s, background .12s, opacity .12s;
-  }
-  .navbtn:not(:disabled):hover { color: var(--accent); background: var(--bg-3); }
-  .navbtn:disabled { opacity: 0.35; cursor: default; }
-  .topbar .stats { color: var(--text-muted); font-size: 13px; }
-  .topbar .stats b { color: var(--text); font-weight: 600; }
-  .topbar .spacer { flex: 1; }
-  /* searchgroup: nav arrows + search input share a unified rounded
-     container so they read as one widget. Bounded width (420px) so
-     a long path can squeeze us slightly without pushing the tabs
-     off-screen — the two flex spacers center the group. */
-  .searchgroup {
-    display: flex; align-items: stretch; gap: 0;
-    width: 420px; max-width: 50vw;
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    overflow: hidden;
-  }
-  .searchgroup:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(95,173,255,.15); }
-  .searchgroup .navnav { display: flex; gap: 0; }
-  .topbar .search {
-    background: transparent;
-    border: 0;
-    color: var(--text);
-    font: inherit;
-    font-size: 13px;
-    padding: 7px 12px 7px 32px;
-    flex: 1 1 0;
-    min-width: 0;
-    outline: none;
-    background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%238390a8' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'><circle cx='11' cy='11' r='7'/><path d='M21 21l-4.3-4.3'/></svg>");
-    background-repeat: no-repeat;
-    background-position: 10px center;
-  }
-  .topbar .search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(78,168,255,.18); }
-  .topbar .search.error { border-color: var(--err); }
-  .tabs { display: flex; gap: var(--s-1); }
-  .tab {
-    padding: var(--s-2) var(--s-4);
-    border-radius: var(--radius);
-    color: var(--text-muted);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background .12s, color .12s;
-  }
-  .tab:hover { color: var(--text); background: var(--bg-2); }
-  .tab.active { color: var(--text); background: var(--accent-soft); }
-
-  /* ───────── Layout ────────────────────────────────────────────
-     Three columns + optional bottom tracebar. The tracebar only
-     renders on the Agent-trace tab — the other tabs let the canvas
-     fill the full vertical space (the previous fixed 256px reserve
-     wasted screen real estate on Graph and Health views). */
-  .stage {
-    display: grid;
-    grid-template-columns: 256px 1fr 360px;
-    grid-template-rows: 1fr;
-    height: calc(100vh - 52px);
-  }
-  .stage.with-tracebar {
-    grid-template-rows: 1fr 280px;
-  }
-  /* min-height: 0 lets grid items shrink below their content size,
-     which is required when a child (#cy) has implicit width/height
-     set inline by Cytoscape — without this the canvas would lock to
-     its previous height when the trace bar tries to claim row 2. */
-  .leftrail   { grid-row: 1 / 2; grid-column: 1 / 2; background: var(--bg-1); border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
-  /* The middle column is now a vertical split: graph on top, code
-     panel on the bottom (when a symbol is selected on the Graph
-     tab). The split is a child flex layout so the canvas can size
-     independently of the right detail pane. */
-  .canvas-col { grid-row: 1 / 2; grid-column: 2 / 3; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-  .canvas     { flex: 1 1 0; position: relative; min-height: 0; min-width: 0; overflow: hidden; background:
-    radial-gradient(ellipse at 50% 40%, #161c2e 0%, var(--bg-0) 75%); }
-  .detailpane { grid-row: 1 / 2; grid-column: 3 / 4; background: var(--bg-1); border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; }
-  .tracebar   { grid-row: 2 / 3; grid-column: 1 / 4; background: var(--bg-1); border-top: 1px solid var(--line); display: none; flex-direction: column; min-height: 0; }
-  .stage.with-tracebar .tracebar { display: flex; }
-
-  /* ───────── Left rail ───────── */
-  .rail-section { padding: var(--s-5) var(--s-5); border-bottom: 1px solid var(--line-soft); }
-  .rail-section:last-child { border-bottom: none; }
-  .rail-title {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--text-muted);
-    margin-bottom: var(--s-3);
-  }
-  .rail-row {
-    display: flex; align-items: center; gap: var(--s-2);
-    padding: var(--s-1) 0;
-    font-size: 13px;
-    color: var(--text);
-    cursor: pointer;
-  }
-  .rail-row:hover { color: var(--accent); }
-  .rail-row .count { margin-left: auto; color: var(--text-muted); font-variant-numeric: tabular-nums; font-size: 12px; }
-  .rail-row.dim { color: var(--text-dim); }
-  input[type="checkbox"] {
-    appearance: none;
-    width: 13px; height: 13px;
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    cursor: pointer;
-    position: relative;
-    top: 1px;
-  }
-  input[type="checkbox"]:checked {
-    background: var(--accent);
-    border-color: var(--accent);
-  }
-  input[type="checkbox"]:checked::after {
-    content: ""; position: absolute;
-    left: 3px; top: 0px; width: 4px; height: 8px;
-    border: solid var(--bg-0); border-width: 0 2px 2px 0;
-    transform: rotate(45deg);
-  }
-  .swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-  .swatch.err { background: var(--err); }
-  .swatch.warn { background: var(--warn); }
-  .swatch.info { background: var(--info); }
-  .swatch.healthy { background: var(--healthy); }
-
-  /* Kind chips — clickable legend that doubles as the filter.
-     Active chip shows the swatch in full color; inactive dims the
-     swatch + dims+strikethrough the text so the user can see what's
-     being hidden. Click toggles. The data-filter-kinds attribute
-     can carry multiple comma-separated kinds (one chip covers the
-     whole class/struct/enum family). */
-  .kind-chips { display: flex; flex-direction: column; gap: 2px; }
-  .kind-chip {
-    display: flex; align-items: center; gap: var(--s-2);
-    padding: var(--s-1) var(--s-2);
-    border-radius: 4px;
-    font-size: 12.5px;
-    cursor: pointer;
-    color: var(--text);
-    user-select: none;
-    transition: background .1s, color .1s;
-  }
-  .kind-chip:hover { background: var(--bg-2); }
-  .kind-chip[data-active="0"] { color: var(--text-dim); text-decoration: line-through; }
-  .kind-chip[data-active="0"] .legend-dot { opacity: 0.3; }
-  .rail-title .rail-hint {
-    font-size: 9.5px;
-    font-weight: 400;
-    color: var(--text-dim);
-    text-transform: none;
-    letter-spacing: 0;
-    margin-left: 6px;
-  }
-
-  /* slider */
-  .slider-wrap { display: flex; align-items: center; gap: 10px; }
-  input[type="range"] {
-    flex: 1;
-    -webkit-appearance: none;
-    appearance: none;
-    height: 3px;
-    background: var(--line);
-    border-radius: 2px;
-    outline: none;
-  }
-  input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 13px; height: 13px;
-    border-radius: 50%;
-    background: var(--accent);
-    cursor: pointer;
-    box-shadow: 0 0 0 4px rgba(78, 168, 255, .12);
-  }
-  .slider-val { font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px; min-width: 36px; text-align: right; }
-  .slider-label { display: flex; justify-content: space-between; font-size: 11.5px; color: var(--text-muted); margin-bottom: 6px; }
-
-  /* ───────── Canvas ───────── */
-  .canvas-header {
-    position: absolute;
-    top: var(--s-3); left: var(--s-4);
-    color: var(--text-muted);
-    font-size: 12px;
-    z-index: 2;
-    pointer-events: none;
-    background: rgba(11, 15, 23, .65);
-    padding: var(--s-1) var(--s-3);
-    border-radius: var(--radius);
-    backdrop-filter: blur(6px);
-  }
-  .canvas-banner {
-    position: absolute;
-    top: var(--s-3); left: 50%; transform: translateX(-50%);
-    background: rgba(95, 173, 255, .08);
-    border: 1px solid rgba(95, 173, 255, .3);
-    color: var(--accent);
-    padding: var(--s-2) var(--s-4);
-    border-radius: 999px;
-    font-size: 12.5px;
-    font-weight: 500;
-    z-index: 3;
-    display: none;
-  }
-  .canvas-banner.show { display: block; }
-  .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
-
-  /* Zoom controls — vertical button stack pinned bottom-right of the
-     canvas. Mirrors what users expect from any modern map / graph
-     viewer (Google Maps, Cytoscape demos, Sourcetrail). */
-  .zoom-controls {
-    position: absolute;
-    right: var(--s-4);
-    bottom: var(--s-4);
-    display: flex;
-    flex-direction: column;
-    gap: 1px;
-    z-index: 4;
-    border-radius: var(--radius);
-    overflow: hidden;
-    box-shadow: var(--shadow-sm);
-    border: 1px solid var(--line);
-  }
-  .zoom-controls button {
-    width: 36px; height: 36px;
-    background: rgba(20, 26, 40, .92);
-    color: var(--text);
-    border: none;
-    cursor: pointer;
-    font: inherit;
-    font-size: 18px;
-    line-height: 1;
-    backdrop-filter: blur(8px);
-    transition: background .12s, color .12s;
-    display: flex; align-items: center; justify-content: center;
-  }
-  .zoom-controls button:hover { background: var(--bg-3); color: var(--accent); }
-  .zoom-controls button:active { background: var(--accent-soft); }
-  .zoom-controls button + button { border-top: 1px solid var(--line-soft); }
-  .zoom-controls button .fit-icon {
-    width: 14px; height: 14px;
-    border: 1.6px solid currentColor;
-    border-radius: 2px;
-  }
-
-  /* Hint chip showing keyboard shortcuts on first hover. */
-  .kbd-hint {
-    position: absolute;
-    bottom: var(--s-4); left: var(--s-4);
-    color: var(--text-dim);
-    font-size: 11px;
-    pointer-events: none;
-    z-index: 2;
-  }
-  .kbd-hint kbd {
-    background: rgba(20,26,40,.85);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    padding: 1px 5px;
-    margin: 0 2px;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 10.5px;
-    color: var(--text-muted);
-  }
-
-  /* Clickable caller/callee/finding rows in the right pane. */
-  .ref-row:hover {
-    background: var(--bg-2);
-  }
-  .ref-row[data-symbol]:hover .name { color: var(--accent); }
-
-  #cy { width: 100%; height: 100%; }
-
-  /* ───────── Detail pane ───────── */
-  .detailpane > * { padding-left: var(--s-5); padding-right: var(--s-5); }
-  .detail-head {
-    padding-top: var(--s-5);
-    padding-bottom: var(--s-3);
-    border-bottom: 1px solid var(--line-soft);
-  }
-  /* Compact two-column stat grid in the right pane. Each row is
-     "Label   Value" using a CSS grid; values are tabular-nums for
-     vertical alignment. Replaced the old badges + metrics list
-     which together took ~14 lines for the same info. */
-  .stat-grid {
-    display: grid;
-    grid-template-columns: 1fr auto;
-    column-gap: var(--s-3);
-    row-gap: 4px;
-    padding-top: var(--s-3);
-    padding-bottom: var(--s-3);
-    border-bottom: 1px solid var(--line-soft);
-    font-size: 13px;
-  }
-  .stat-grid .stat { display: contents; }
-  .stat-grid .stat .k { color: var(--text-muted); }
-  .stat-grid .stat .v {
-    color: var(--text);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-    font-weight: 500;
-  }
-  .stat-grid .stat .v.ok   { color: var(--ok); }
-  .stat-grid .stat .v.warn { color: var(--warn); }
-  .stat-grid .stat .v.err  { color: var(--err); }
-
-  .detail {
-    /* Legacy padding for any stale .detail wrappers that survive. */
-    padding: var(--s-5) var(--s-5) 0;
-  }
-  .detail h2 {
-    margin: 0;
-    font-size: 18px;
-    color: var(--text);
-    font-weight: 600;
-    letter-spacing: -.01em;
-    word-break: break-word;
-  }
-  .d-name-row {
-    display: flex; align-items: flex-start; gap: var(--s-2);
-    justify-content: space-between;
-    margin-bottom: var(--s-1);
-  }
-  .d-actions {
-    display: flex; gap: 4px;
-    flex-shrink: 0;
-  }
-  .d-action {
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    color: var(--text-muted);
-    font: inherit; font-size: 11px;
-    padding: 3px 7px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .d-action:hover { color: var(--accent); border-color: var(--accent); }
-  .d-action.copied { color: var(--ok); border-color: var(--ok); }
-  .detail .subtitle { color: var(--text-muted); font-size: 12px; font-family: "SF Mono", Menlo, monospace; margin-bottom: var(--s-4); word-break: break-word; }
-  .detail .badges { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-bottom: var(--s-4); }
-  /* Breadcrumb — Sourcegraph-style. Each segment clickable: click a
-     directory to scope the search there, click the file to open
-     the source panel directly. */
-  .detail .breadcrumb {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 4px;
-    margin-bottom: var(--s-2);
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-family: "SF Mono", Menlo, monospace;
-  }
-  .detail .breadcrumb .seg {
-    color: var(--text-muted);
-    cursor: pointer;
-    padding: 1px 4px;
-    border-radius: 3px;
-  }
-  .detail .breadcrumb .seg:hover { background: var(--bg-2); color: var(--accent); }
-  .detail .breadcrumb .sep { opacity: 0.5; }
-  .detail .breadcrumb .seg.last { color: var(--text); cursor: default; }
-  .detail .breadcrumb .seg.last:hover { background: transparent; color: var(--text); }
-  .detail .breadcrumb .seg.scoped {
-    background: var(--accent-soft);
-    color: var(--accent);
-    border: 1px solid rgba(95,173,255,.4);
-  }
-
-  /* Code panel — split-view companion to the graph. 60% code +
-     40% AI chat side-by-side inside the canvas column's bottom
-     row. Sourcetrail-style "graph + code at the same time", plus
-     a chat that lives where the user already has context. */
-  .codepane {
-    border-top: 1px solid var(--line);
-    background: var(--bg-1);
-    overflow: hidden;
-    display: none;            /* hidden by default — toggled by .with-codepane */
-    flex-direction: row;
-    height: 380px;            /* default height; user can drag the splitter */
-    min-height: 0;
-    flex-shrink: 0;
-  }
-  .canvas-col.with-codepane .codepane { display: flex; }
-  .codepane-code, .codepane-chat {
-    display: flex; flex-direction: column;
-    min-width: 0; min-height: 0;
-  }
-  /* Default 60/40 split. Splitter drag updates --code-flex /
-     --chat-flex inline; localStorage persists across reloads. */
-  .codepane-code { flex: var(--code-flex, 6) 1 0; padding-right: 0; }
-  .codepane-chat { flex: var(--chat-flex, 4) 1 0; }
-
-  /* Splitters — thin visual line, wider invisible hit-area via padding-style.
-     splitter-v separates graph (top) and codepane (bottom).
-     splitter-h separates code (left) and chat (right) inside the codepane. */
-  .splitter {
-    background: var(--line);
-    flex-shrink: 0;
-    position: relative;
-    transition: background .12s;
-  }
-  .splitter:hover, .splitter.dragging { background: var(--accent); }
-  .splitter-v {
-    height: 4px;
-    cursor: row-resize;
-    /* invisible 8px hit area on top + bottom */
-    box-shadow: 0 -4px 0 transparent, 0 4px 0 transparent;
-    margin: -4px 0;
-    z-index: 4;
-  }
-  .splitter-h {
-    width: 6px;
-    cursor: col-resize;
-    /* No negative margin — letting the splitter sit beside the
-       scrollbar instead of overlapping it. The pseudo-element on
-       ::before extends only OUTWARD into the splitter's own band,
-       not into the adjacent panes. */
-    z-index: 4;
-  }
-  .splitter::before {
-    content: ''; position: absolute; inset: 0; padding: 0;
-  }
-  /* The code pane keeps zero right padding so its scrollbar has room
-     before the splitter. */
-  /* Splitter-v lives directly between .canvas and .codepane in the
-     canvas-col flex stack. It needs the with-codepane visibility. */
-  .canvas-col:not(.with-codepane) .splitter-v { display: none; }
-  .codepanel-head {
-    display: flex; align-items: center; gap: var(--s-2);
-    flex-wrap: wrap;
-    padding: var(--s-2) var(--s-3);
-    background: var(--bg-2);
-    border-bottom: 1px solid var(--line);
-    font-size: 12px;
-    flex: 0 0 auto;
-  }
-  .codepanel-close {
-    width: 24px; height: 24px;
-    background: transparent;
-    color: var(--text-muted);
-    border: 0; border-radius: 4px;
-    font: inherit; font-size: 16px; line-height: 1;
-    cursor: pointer;
-  }
-  .codepanel-close:hover { color: var(--err); background: var(--bg-3); }
-  .codepanel-action {
-    background: transparent;
-    color: var(--text-muted);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    font: inherit; font-size: 11.5px;
-    padding: 3px 8px;
-    cursor: pointer;
-    white-space: nowrap;
-  }
-  .codepanel-action:hover { color: var(--accent); border-color: var(--accent); }
-  .codepanel-action.copied { color: var(--ok); border-color: var(--ok); }
-  .codepanel-label { color: var(--text-muted); font-weight: 500; }
-  .codepanel-head .spacer { flex: 1; }
-  .codepanel-find {
-    display: flex; align-items: center; gap: var(--s-1);
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: 6px;
-    padding: 2px 4px 2px 6px;
-    min-width: 200px;       /* shrinks willingly when the codepane is narrow */
-    max-width: 360px;
-    flex: 1 1 200px;        /* grow to fill remaining space, shrink when crowded */
-  }
-  .codepanel-find:focus-within { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(95,173,255,.18); }
-  .codepanel-find input {
-    background: transparent;
-    border: 0;
-    color: var(--text);
-    font: inherit;
-    font-size: 12.5px;
-    padding: 4px var(--s-1);
-    flex: 1 1 0;
-    min-width: 0;
-    outline: none;
-  }
-  .codepanel-find-count { color: var(--text-dim); font-size: 11.5px; min-width: 44px; text-align: right; font-variant-numeric: tabular-nums; }
-  .codepanel-find button {
-    width: 22px; height: 22px;
-    background: transparent;
-    border: 0;
-    border-radius: 4px;
-    color: var(--text-muted);
-    font: inherit; font-size: 14px; line-height: 1;
-    cursor: pointer;
-  }
-  .codepanel-find button:hover { color: var(--accent); background: var(--bg-3); }
-
-  /* Go-to-line — small numeric input pinned right of the find. */
-  .codepanel-goto {
-    display: flex; align-items: center; gap: var(--s-2);
-    color: var(--text-dim);
-    font-size: 11.5px;
-  }
-  .codepanel-goto-label { white-space: nowrap; }
-  .codepanel-goto input {
-    width: 120px;           /* room for "12345 or 12345-67890" placeholder */
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: 4px;
-    color: var(--text);
-    font: inherit;
-    font-size: 12px;
-    font-variant-numeric: tabular-nums;
-    padding: 4px 6px;
-    outline: none;
-    text-align: center;
-  }
-  .codepanel-goto input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(95,173,255,.18); }
-  /* Hide spinner buttons — visually noisy and the user types. */
-  .codepanel-goto input::-webkit-outer-spin-button,
-  .codepanel-goto input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-  .codepanel-goto input[type="number"] { -moz-appearance: textfield; }
-
-  /* "Show source" button — appears bottom-right of the canvas
-     ONLY when the code panel is hidden, so the user always has a
-     way to bring it back. Mirrors the close × button's placement. */
-  .show-code-btn {
-    position: absolute;
-    right: var(--s-4);
-    bottom: 168px;  /* sits above the zoom-controls stack */
-    background: rgba(20, 26, 40, .92);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    color: var(--text);
-    font: inherit; font-size: 12px;
-    padding: 6px 12px;
-    cursor: pointer;
-    z-index: 4;
-    backdrop-filter: blur(6px);
-    box-shadow: var(--shadow-sm);
-    display: none;
-  }
-  .show-code-btn:hover { color: var(--accent); border-color: var(--accent); }
-  .canvas-col:not(.with-codepane) .show-code-btn { display: block; }
-  .codepane pre {
-    margin: 0;
-    padding: var(--s-3);
-    color: var(--text);
-    font-family: "SF Mono", "JetBrains Mono", Menlo, monospace;
-    font-size: 13px;
-    line-height: 1.55;
-    overflow: auto;
-    flex: 1 1 0;
-    min-height: 0;
-    white-space: pre;
-    tab-size: 2;
-    -moz-tab-size: 2;
-    background: var(--bg-0);
-  }
-  .codepane code { background: transparent; font-family: inherit; font-size: inherit; }
-  .codepane .lineno {
-    color: var(--text-dim);
-    user-select: none;
-    -webkit-user-select: none;
-    margin-right: var(--s-3);
-    display: inline-block;
-    text-align: right;
-    width: 36px;
-  }
-  /* In-code search highlight. The currently-active match is brighter. */
-  .codepane mark.m {
-    background: rgba(245, 158, 11, .35);
-    color: var(--text);
-    border-radius: 2px;
-    padding: 0;
-  }
-  .codepane mark.m.active {
-    background: var(--warn);
-    color: #1a1300;
-  }
-  /* Prism token colors tuned to our dark theme — the default
-     prism-tomorrow.css would clash with the existing palette, so
-     we hand-roll a small subset matching what most code samples
-     hit (keyword, string, number, comment, function name). */
-  .codepane .token.comment,
-  .codepane .token.prolog,
-  .codepane .token.doctype,
-  .codepane .token.cdata { color: #6c7693; font-style: italic; }
-  .codepane .token.punctuation { color: #b6c0d6; }
-  .codepane .token.property,
-  .codepane .token.tag,
-  .codepane .token.boolean,
-  .codepane .token.number,
-  .codepane .token.constant,
-  .codepane .token.symbol,
-  .codepane .token.deleted { color: #fbbf24; }
-  .codepane .token.selector,
-  .codepane .token.attr-name,
-  .codepane .token.string,
-  .codepane .token.char,
-  .codepane .token.builtin,
-  .codepane .token.inserted { color: #34d399; }
-  .codepane .token.operator,
-  .codepane .token.entity,
-  .codepane .token.url,
-  .codepane .token.variable { color: #b6c0d6; }
-  .codepane .token.atrule,
-  .codepane .token.attr-value,
-  .codepane .token.keyword { color: #c084fc; }
-  .codepane .token.function,
-  .codepane .token.class-name { color: #5fadff; }
-  .codepane .token.regex,
-  .codepane .token.important { color: #f472b6; }
-
-  /* Docstring preview — collapsible. Long JSDoc gets clipped to a
-     ~3-line teaser by default; click "Expand" to read the rest.
-     Persists open/collapsed state per symbol id in a Map so the
-     decision sticks while you nav around. */
-  .detail .docstring {
-    background: var(--bg-2);
-    border: 1px solid var(--line-soft);
-    border-left: 3px solid var(--accent);
-    border-radius: var(--radius);
-    margin-bottom: var(--s-4);
-    color: var(--text-muted);
-    font-size: 12.5px;
-    line-height: 1.55;
-    overflow: hidden;
-  }
-  .detail .docstring-body {
-    padding: var(--s-3) var(--s-4);
-    white-space: pre-wrap;
-    word-break: break-word;
-    max-height: 4.6em;        /* ~3 lines of body copy */
-    overflow: hidden;
-    position: relative;
-    transition: max-height .15s;
-  }
-  .detail .docstring.expanded .docstring-body {
-    max-height: 360px;
-    overflow-y: auto;
-  }
-  /* Faded mask at the bottom when collapsed, hinting there's more. */
-  .detail .docstring:not(.expanded) .docstring-body::after {
-    content: '';
-    position: absolute; left: 0; right: 0; bottom: 0;
-    height: 1.4em;
-    background: linear-gradient(transparent, var(--bg-2));
-    pointer-events: none;
-  }
-  .detail .docstring-toggle {
-    border-top: 1px solid var(--line-soft);
-    padding: 4px var(--s-4);
-    text-align: center;
-    color: var(--accent);
-    cursor: pointer;
-    font-size: 11.5px;
-    user-select: none;
-  }
-  .detail .docstring-toggle:hover { background: var(--bg-3); }
-  .badge {
-    font-size: 12px;
-    padding: var(--s-1) var(--s-2);
-    border-radius: var(--radius);
-    background: var(--bg-2);
-    color: var(--text-muted);
-    border: 1px solid var(--line);
-    font-variant-numeric: tabular-nums;
-  }
-  .badge.health-good { background: rgba(52, 211, 153, .12); color: var(--ok); border-color: rgba(52, 211, 153, .25); }
-  .badge.cov { background: rgba(78, 168, 255, .1); color: var(--accent); border-color: rgba(78, 168, 255, .25); }
-
-  .subtabs { display: flex; gap: 0; border-bottom: 1px solid var(--line); margin-top: 0; padding-top: var(--s-3); }
-  .subtab {
-    padding: var(--s-2) var(--s-3);
-    color: var(--text-muted);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    border-bottom: 2px solid transparent;
-    margin-bottom: -1px;
-    transition: color .12s, border-color .12s;
-  }
-  .subtab:hover { color: var(--text); }
-  .subtab.active { color: var(--text); border-bottom-color: var(--accent); }
-  .subtab .ct { color: var(--text-dim); margin-left: var(--s-1); font-variant-numeric: tabular-nums; font-size: 12px; }
-
-  .subpanel { padding: var(--s-3) var(--s-5) var(--s-5); }
-  .ref-row { padding: var(--s-2) 0; font-size: 13px; border-bottom: 1px solid var(--line-soft); cursor: pointer; transition: background .1s; }
-  .ref-row:last-child { border-bottom: none; }
-  .ref-row .name { color: var(--text); font-family: "SF Mono", Menlo, monospace; word-break: break-all; }
-  .ref-row .loc  { color: var(--text-dim); font-size: 11.5px; font-family: "SF Mono", Menlo, monospace; margin-top: var(--s-1); word-break: break-all; }
-
-  .metrics-section { padding: var(--s-2) var(--s-5) var(--s-6); }
-
-  /* Ask AI panel — right 40% of the codepane. Pre-contextualized
-     with the current symbol's name so answers are about THIS code. */
-  .askpanel-hint {
-    text-transform: none;
-    letter-spacing: 0;
-    font-weight: 400;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    margin-left: var(--s-2);
-  }
-  .askpanel-hint b { color: var(--accent); font-family: "SF Mono", Menlo, monospace; font-weight: 500; }
-  /* Selected-code chip — visible only when the user has highlighted
-     code in the source pane. Lets them know the next question will
-     carry that snippet as context. */
-  .ask-selection-chip {
-    display: inline-flex; align-items: center; gap: 4px;
-    background: var(--accent-soft);
-    border: 1px solid rgba(95,173,255,.3);
-    color: var(--accent);
-    font-size: 11px;
-    padding: 2px 4px 2px 8px;
-    border-radius: 12px;
-    font-family: "SF Mono", Menlo, monospace;
-  }
-  .ask-selection-chip[hidden] { display: none; }
-  .ask-selection-chip button {
-    background: transparent; border: 0; color: inherit;
-    font: inherit; font-size: 14px; line-height: 1;
-    cursor: pointer; padding: 0 4px;
-    opacity: 0.8;
-  }
-  .ask-selection-chip button:hover { opacity: 1; color: var(--err); }
-  .askpanel-history {
-    flex: 1 1 0;
-    overflow-y: auto;
-    padding: var(--s-3);
-    font-size: 13px;
-    line-height: 1.55;
-    min-height: 0;
-  }
-  .askpanel-history:empty { display: none; }
-  .askpanel-msg {
-    margin-bottom: var(--s-3);
-    padding: var(--s-2) var(--s-3);
-    border-radius: var(--radius);
-    word-break: break-word;
-  }
-  .askpanel-msg.q { background: var(--bg-2); color: var(--text); border-left: 3px solid var(--accent); }
-  .askpanel-msg.a { background: var(--bg-0); color: var(--text); border: 1px solid var(--line-soft); white-space: pre-wrap; }
-  .askpanel-msg.a code { background: var(--bg-2); padding: 1px 4px; border-radius: 3px; font-size: 11.5px; }
-  .askpanel-msg .ask-link {
-    color: var(--accent);
-    cursor: pointer;
-    text-decoration: none;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 12px;
-    padding: 1px 4px;
-    border-radius: 3px;
-    background: rgba(95,173,255,.08);
-    border: 1px solid rgba(95,173,255,.2);
-  }
-  .askpanel-msg .ask-link:hover { background: rgba(95,173,255,.18); border-color: var(--accent); }
-  .askpanel-msg .ask-link.clear-filter {
-    color: var(--text-muted);
-    background: transparent;
-    border-color: var(--line);
-  }
-  .askpanel-msg .ask-loc { color: var(--text-dim); font-size: 11px; font-family: "SF Mono", Menlo, monospace; margin-left: 4px; }
-  .askpanel-msg.err { background: #7f1d1d; border-color: var(--err); color: #ffffff; font-size: 12px; }
-  .askpanel-msg.err .hint { color: #f4f7fb; font-size: 11.5px; margin-top: 4px; }
-  .askpanel-msg.loading { color: var(--text-dim); font-style: italic; }
-  .askpanel-form { display: flex; flex-direction: column; gap: var(--s-2); padding: var(--s-2) var(--s-3) var(--s-3); border-top: 1px solid var(--line); }
-  .askpanel-form textarea {
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    color: var(--text);
-    font: inherit;
-    font-size: 13px;
-    padding: var(--s-2) var(--s-3);
-    resize: vertical;
-    outline: none;
-    min-height: 56px;
-  }
-  .askpanel-form textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(95,173,255,.18); }
-  .askpanel-form button {
-    align-self: flex-end;
-    background: var(--accent-soft);
-    color: var(--accent);
-    border: 1px solid rgba(95,173,255,.3);
-    border-radius: var(--radius);
-    font: inherit; font-size: 13px; font-weight: 500;
-    padding: var(--s-2) var(--s-4);
-    cursor: pointer;
-  }
-  .askpanel-form button:hover:not(:disabled) { background: rgba(95,173,255,.18); }
-  .askpanel-form button:disabled { opacity: 0.5; cursor: default; }
-  .metrics-title { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em; color: var(--text-muted); margin: var(--s-3) 0 var(--s-2); }
-  .metric { display: flex; justify-content: space-between; padding: var(--s-2) 0; font-size: 13px; border-bottom: 1px solid var(--line-soft); }
-  .metric:last-child { border-bottom: none; }
-  .metric .k { color: var(--text-muted); }
-  .metric .v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
-
-  /* ───────── Trace bar ───────── */
-  .trace-header {
-    height: 38px;
-    display: flex;
-    align-items: center;
-    padding: 0 16px;
-    border-bottom: 1px solid var(--line-soft);
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: .9px;
-    gap: 16px;
-  }
-  .trace-header .session { color: var(--text); text-transform: none; letter-spacing: 0; font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; }
-  .trace-header .session-picker {
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    color: var(--text);
-    font: inherit;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 11.5px;
-    padding: 4px 8px;
-    border-radius: 4px;
-    text-transform: none;
-    letter-spacing: 0;
-    outline: none;
-    cursor: pointer;
-    max-width: 380px;
-  }
-  .trace-header .session-picker:focus { border-color: var(--accent); }
-  .trace-header .spacer { flex: 1; }
-  .btn {
-    padding: 4px 12px;
-    border-radius: 4px;
-    background: transparent;
-    color: var(--text-muted);
-    font-size: 11.5px;
-    cursor: pointer;
-    border: 1px solid var(--line);
-    font-family: inherit;
-    text-transform: none;
-    letter-spacing: 0;
-  }
-  .btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--bg-2); }
-  .btn.primary { color: var(--accent); border-color: rgba(78,168,255,.3); }
-  .btn.primary:hover { background: rgba(78,168,255,.08); }
-
-  .trace-list {
-    flex: 1;
-    overflow-y: auto;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 12px;
-  }
-  .trace-row {
-    display: grid;
-    grid-template-columns: 60px 26px 200px 1fr 110px;
-    align-items: center;
-    padding: 6px 16px;
-    border-bottom: 1px solid var(--line-soft);
-    cursor: pointer;
-    transition: background .08s;
-    color: var(--text-muted);
-  }
-  .trace-row:hover { background: var(--bg-2); color: var(--text); }
-  .trace-row.active { background: var(--accent-soft); color: var(--text); }
-  .trace-row.active .step-num { background: var(--accent); color: var(--bg-0); }
-  .trace-row .delta { color: var(--text-dim); font-size: 11px; }
-  .trace-row .step-num {
-    width: 18px; height: 18px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--bg-3); color: var(--text-muted); font-size: 10.5px;
-    font-family: -apple-system, sans-serif;
-  }
-  .trace-row .tool { color: var(--accent); }
-  .trace-row.active .tool { color: var(--text); font-weight: 600; }
-  .trace-row .args { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .trace-row .result { color: var(--text-muted); text-align: right; font-size: 11.5px; }
-  .trace-row.active .result { color: var(--ok); }
-
-  /* ───────── Health pane ───────── */
-  .health-grid {
-    padding: 24px;
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-    gap: 18px;
-  }
-  .health-card {
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 16px;
-  }
-  .health-card .label {
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: .8px;
-    margin-bottom: 8px;
-  }
-  .health-card .value { font-size: 28px; color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
-  .health-card .sub { font-size: 11.5px; color: var(--text-dim); margin-top: 4px; }
-  .health-card.err .value { color: var(--err); }
-  .health-card.warn .value { color: var(--warn); }
-  .health-card.ok .value { color: var(--ok); }
-
-  /* Command palette — Cmd/Ctrl+K opens. Universal "jump anywhere"
-     navigation pattern (Linear, VS Code, Slack, GitHub). Lists
-     recently-viewed symbols + named actions; type to fuzzy-filter. */
-  .palette-backdrop {
-    position: fixed; inset: 0;
-    background: rgba(8, 12, 22, .65);
-    z-index: 100;
-    display: flex; align-items: flex-start; justify-content: center;
-    padding-top: 14vh;
-    backdrop-filter: blur(3px);
-  }
-  .palette-backdrop[hidden] { display: none; }
-  .palette {
-    width: 640px; max-width: 92vw;
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    box-shadow: var(--shadow);
-    overflow: hidden;
-    display: flex; flex-direction: column;
-    /* Explicit height so the inner flex-1 list expands; min-height
-       guarantees the palette is tall enough to show ~10 rows even
-       when there are few matches. */
-    height: min(70vh, 480px);
-    min-height: 320px;
-  }
-  .palette input {
-    background: transparent;
-    border: 0;
-    border-bottom: 1px solid var(--line);
-    color: var(--text);
-    font: inherit;
-    font-size: 15px;
-    padding: var(--s-4) var(--s-5);
-    outline: none;
-  }
-  .palette-list {
-    flex: 1 1 0;
-    overflow-y: auto;
-    padding: var(--s-2) 0;
-    min-height: 0;
-  }
-  .palette-section {
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-    color: var(--text-muted);
-    padding: var(--s-2) var(--s-5) var(--s-1);
-  }
-  .palette-item {
-    display: flex; align-items: center; gap: var(--s-3);
-    padding: var(--s-2) var(--s-5);
-    cursor: pointer;
-    color: var(--text);
-    font-size: 13px;
-  }
-  .palette-item:hover, .palette-item.active { background: var(--accent-soft); color: var(--text); }
-  .palette-item .it-icon {
-    width: 18px; height: 18px;
-    flex-shrink: 0;
-    border-radius: 4px;
-    background: var(--bg-3);
-    color: var(--text-muted);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 11px;
-  }
-  .palette-item .it-meta {
-    margin-left: auto;
-    color: var(--text-dim);
-    font-size: 11.5px;
-    font-family: "SF Mono", Menlo, monospace;
-  }
-  .palette-item .it-shortcut {
-    color: var(--text-dim);
-    font-size: 11px;
-    font-family: "SF Mono", Menlo, monospace;
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 1px 5px;
-  }
-  .palette-foot {
-    border-top: 1px solid var(--line);
-    padding: var(--s-2) var(--s-4);
-    color: var(--text-dim);
-    font-size: 11px;
-  }
-  .palette-foot kbd {
-    background: var(--bg-2);
-    border: 1px solid var(--line);
-    border-radius: 3px;
-    padding: 0 5px;
-    margin: 0 2px;
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 10.5px;
-  }
-
-  /* small touches */
-  ::-webkit-scrollbar { width: 12px; height: 12px; }
-  ::-webkit-scrollbar-thumb {
-    background: var(--bg-3);
-    border-radius: 6px;
-    border: 2px solid var(--bg-1);  /* same-as-track padding so the thumb is visually thinner */
-  }
-  ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
-  ::-webkit-scrollbar-track { background: transparent; }
-  ::-webkit-scrollbar-corner { background: transparent; }
-  /* Code panel needs an even more visible scrollbar so users can
-     grab it past the splitter. Override with a darker track. */
-  .codepane pre::-webkit-scrollbar { width: 14px; height: 14px; }
-  .codepane pre::-webkit-scrollbar-thumb {
-    background: var(--bg-3);
-    border-radius: 7px;
-    border: 3px solid var(--bg-0);
-  }
-  .codepane pre::-webkit-scrollbar-thumb:hover { background: var(--accent); }
-
-  /* clickable footer link area for "Showing X nodes" */
-  .canvas-footnote {
-    position: absolute;
-    bottom: 14px; left: 50%; transform: translateX(-50%);
-    color: var(--text-dim);
-    font-size: 11px;
-    z-index: 2;
-    pointer-events: none;
-  }
-
-  .empty {
-    padding: 32px 16px;
-    text-align: center;
-    color: var(--text-dim);
-    font-size: 12px;
-  }
-</style>
+<script src="lucide.min.js"></script>
+<link rel="stylesheet" href="viewer.css" />
 </head>
 <body>
 
@@ -1159,46 +39,148 @@
   <div class="stats">
     <b>153</b> files · <b>2,214</b> nodes · <b>4,882</b> edges
   </div>
+  <div class="history-nav" aria-label="Symbol history">
+    <button id="btn-nav-back" class="navbtn iconbtn" title="Back (Alt+←)" aria-label="Back" disabled><i data-lucide="chevron-left" aria-hidden="true"></i><span class="icon-fallback" aria-hidden="true">←</span></button>
+    <button id="btn-nav-fwd"  class="navbtn iconbtn" title="Forward (Alt+→)" aria-label="Forward" disabled><i data-lucide="chevron-right" aria-hidden="true"></i><span class="icon-fallback" aria-hidden="true">→</span></button>
+  </div>
   <div class="searchgroup">
-    <div class="navnav">
-      <button id="btn-nav-back" class="navbtn" title="Back (Alt+←)" aria-label="Back" disabled>‹</button>
-      <button id="btn-nav-fwd"  class="navbtn" title="Forward (Alt+→)" aria-label="Forward" disabled>›</button>
-    </div>
     <input type="text" class="search" id="search-input" data-shortcut="search"
            placeholder="Search symbol — case-insensitive, Enter to focus"
            autocomplete="off" />
+    <div class="search-suggest" id="search-suggest" role="listbox" hidden></div>
   </div>
   <div class="spacer"></div>
+  <button type="button" class="mode-toggle" id="btn-viewer-mode" data-tooltip="Show advanced viewer controls"><i data-lucide="sliders-horizontal" aria-hidden="true"></i><span data-ui-mode-label>Simple</span></button>
   <nav class="tabs" aria-label="Primary views">
-    <div class="tab active" data-view="graph">Graph</div>
-    <div class="tab" data-view="trace">Agent trace</div>
-    <div class="tab" data-view="health">Health</div>
+    <div class="tab active" data-view="graph" data-tooltip="Show the graph viewer"><i data-lucide="network" aria-hidden="true"></i><span>Graph</span></div>
+    <div class="tab" data-view="trace" data-tooltip="Replay recorded MCP tool calls"><i data-lucide="route" aria-hidden="true"></i><span>Agent trace</span></div>
+    <div class="tab" data-view="health" data-tooltip="Show project health metrics"><i data-lucide="heart-pulse" aria-hidden="true"></i><span>Health</span></div>
   </nav>
 </header>
 
-<main class="stage">
+<main class="stage" id="stage">
 
   <!-- ── left rail ── -->
   <aside class="leftrail" aria-label="Graph filters and ask panel">
     <section class="rail-section">
+      <button type="button" class="rail-action full" id="btn-reset-view" data-tooltip="Restore default filters and graph density"><i data-lucide="refresh-cw" aria-hidden="true"></i><span>Reset graph view</span></button>
+      <button type="button" class="rail-action full" id="btn-reset-local-state" data-tooltip="Clear saved viewer preferences, snapshots, pinned layouts, and URL state"><i data-lucide="trash-2" aria-hidden="true"></i><span>Reset saved state</span></button>
+      <div class="rail-status" id="viewer-reset-status" hidden></div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Saved views</div>
+      <div class="saved-view-grid">
+        <input type="text" id="saved-view-name" class="rail-input" placeholder="View name" autocomplete="off" data-tooltip="Name for the current graph state" />
+        <button type="button" class="rail-action" id="btn-save-view" data-tooltip="Save the current view"><i data-lucide="save" aria-hidden="true"></i><span>Save</span></button>
+        <select id="saved-view-select" class="rail-select" aria-label="Saved views" data-tooltip="Choose a saved graph view"></select>
+        <button type="button" class="rail-action" id="btn-load-view" data-tooltip="Load the selected saved view"><i data-lucide="folder-open" aria-hidden="true"></i><span>Load</span></button>
+        <button type="button" class="rail-action" id="btn-delete-view" data-tooltip="Delete the selected saved view"><i data-lucide="trash-2" aria-hidden="true"></i><span>Delete</span></button>
+      </div>
+      <div class="rail-status" id="saved-view-status" hidden></div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Graph tools</div>
+      <div class="tool-label">Impact</div>
+      <div class="impact-control" id="impact-control" role="group" aria-label="Impact mode">
+        <button type="button" data-impact-mode="callers" data-tooltip="Show symbols that call or reference the selection">Callers</button>
+        <button type="button" data-impact-mode="callees" data-tooltip="Show symbols called or referenced by the selection">Callees</button>
+        <button type="button" data-impact-mode="both" data-tooltip="Show incoming and outgoing impact around the selection">Both</button>
+      </div>
+      <div class="tool-label">Path</div>
+      <div class="path-tool-grid">
+        <input type="text" id="path-from" class="rail-input" placeholder="From symbol" autocomplete="off" data-tooltip="Path start symbol; blank uses the current selection" />
+        <input type="text" id="path-to" class="rail-input" placeholder="To symbol" autocomplete="off" data-tooltip="Path destination symbol" />
+        <button type="button" class="rail-action" id="btn-path-run" data-tooltip="Find the shortest graph path"><i data-lucide="route" aria-hidden="true"></i><span>Find</span></button>
+        <button type="button" class="rail-action" id="btn-feature-clear" data-tooltip="Clear path, impact, and compare highlights"><i data-lucide="eraser" aria-hidden="true"></i><span>Clear</span></button>
+      </div>
+      <div class="rail-actions feature-actions">
+        <button type="button" class="rail-action full" id="btn-compare-view" data-tooltip="Highlight symbols in files changed against HEAD"><i data-lucide="git-compare-arrows" aria-hidden="true"></i><span>Compare</span></button>
+      </div>
+      <div class="feature-panel" id="feature-panel" hidden></div>
+      <div class="tool-label">Snapshot</div>
+      <div class="snapshot-tool-grid">
+        <button type="button" class="rail-action" id="btn-save-snapshot" data-tooltip="Save the current graph payload for replay"><i data-lucide="camera" aria-hidden="true"></i><span>Save</span></button>
+        <button type="button" class="rail-action" id="btn-load-snapshot" data-tooltip="Replay the saved graph payload"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span>Replay</span></button>
+        <button type="button" class="rail-action" id="btn-delete-snapshot" data-tooltip="Delete the saved graph snapshot"><i data-lucide="trash-2" aria-hidden="true"></i><span>Delete</span></button>
+      </div>
+      <div class="rail-status" id="snapshot-status" hidden></div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Graph density</div>
+      <div class="density-control" id="density-control" role="group" aria-label="Graph density">
+        <button type="button" data-density-mode="focus" data-tooltip="Show a small neighborhood around the current focus">Focus</button>
+        <button type="button" data-density-mode="core" data-active="1" data-tooltip="Show central symbols plus the selected neighborhood">Core</button>
+        <button type="button" data-density-mode="all" data-tooltip="Show every node in the current fetched graph">All</button>
+      </div>
+      <div class="density-note" id="density-note">Core keeps the most central symbols plus the selected neighborhood.</div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Graph layout</div>
+      <div class="layout-quality-control" id="layout-quality-control" role="group" aria-label="Graph layout quality">
+        <button type="button" data-layout-quality="fast" data-tooltip="Run a faster graph layout">Fast</button>
+        <button type="button" data-layout-quality="balanced" data-active="1" data-tooltip="Balance layout speed and spacing">Balanced</button>
+        <button type="button" data-layout-quality="spread" data-tooltip="Spread dense graphs out more aggressively">Spread</button>
+      </div>
+      <div class="density-note" id="layout-quality-note">Balanced layout.</div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Groups <span class="rail-hint">directory boxes</span></div>
+      <div class="group-control" id="group-control" role="group" aria-label="Group controls">
+        <button type="button" id="btn-collapse-groups" title="Collapse all visible groups"><i data-lucide="minimize-2" aria-hidden="true"></i><span>Collapse</span></button>
+        <button type="button" id="btn-expand-groups" title="Expand all collapsed groups"><i data-lucide="maximize-2" aria-hidden="true"></i><span>Expand</span></button>
+      </div>
+      <div class="density-note" id="group-note">Click a group on the canvas to toggle it.</div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Detail nodes <span class="rail-hint">variables, fields, params</span></div>
+      <div class="detail-control" id="detail-control" role="group" aria-label="Detail node grouping">
+        <button type="button" data-detail-mode="grouped" data-active="1" data-tooltip="Group low-signal leaf nodes into compact buckets">Grouped</button>
+        <button type="button" data-detail-mode="expanded" data-tooltip="Show variable, field, and parameter nodes individually">Expanded</button>
+      </div>
+      <div class="density-note" id="detail-note">Grouped keeps low-signal leaf nodes in local file buckets.</div>
+    </section>
+
+    <section class="rail-section">
       <div class="rail-title">Kind <span class="rail-hint" id="kind-hint">click to filter</span></div>
       <div class="kind-chips" id="kind-chips">
-        <div class="kind-chip" data-filter-kinds="function"           data-active="1"><span class="legend-dot" style="background:#5fadff"></span> function</div>
-        <div class="kind-chip" data-filter-kinds="method"             data-active="1"><span class="legend-dot" style="background:#4cd1be"></span> method</div>
-        <div class="kind-chip" data-filter-kinds="class,struct,enum"  data-active="1"><span class="legend-dot" style="background:#c084fc;border-radius:2px"></span> class · struct · enum</div>
-        <div class="kind-chip" data-filter-kinds="interface,type,type_alias,trait" data-active="1"><span class="legend-dot" style="background:#a3e635;transform:rotate(45deg)"></span> interface · type · trait</div>
-        <div class="kind-chip" data-filter-kinds="variable,constant,field,property,parameter" data-active="1"><span class="legend-dot" style="background:#fbbf24"></span> variable · constant</div>
-        <div class="kind-chip" data-filter-kinds="file,module,namespace" data-active="1"><span class="legend-dot" style="background:#94a3b8;border-radius:2px"></span> file · module</div>
-        <div class="kind-chip" data-filter-kinds="route,component"    data-active="1"><span class="legend-dot" style="background:#f472b6"></span> route · component</div>
+        <div class="kind-chip" data-filter-kinds="function"           data-active="1" data-tooltip="Toggle function nodes"><span class="legend-dot" style="background:#5fadff"></span> function <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="method"             data-active="1" data-tooltip="Toggle method nodes"><span class="legend-dot" style="background:#4cd1be"></span> method <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="class,struct,enum"  data-active="1" data-tooltip="Toggle class, struct, and enum nodes"><span class="legend-dot" style="background:#c084fc;border-radius:2px"></span> class · struct · enum <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="interface,type,type_alias,trait" data-active="1" data-tooltip="Toggle interface, type, and trait nodes"><span class="legend-dot" style="background:#a3e635;transform:rotate(45deg)"></span> interface · type · trait <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="variable,constant,field,property,parameter" data-active="1" data-tooltip="Toggle variable, field, property, and parameter nodes"><span class="legend-dot" style="background:#fbbf24"></span> variable · constant <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="file,module,namespace" data-active="1" data-tooltip="Toggle file, module, and namespace nodes"><span class="legend-dot" style="background:#94a3b8;border-radius:2px"></span> file · module <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="route,component"    data-active="1" data-tooltip="Toggle route and component nodes"><span class="legend-dot" style="background:#f472b6"></span> route · component <span class="count" data-kind-count>0</span></div>
+      </div>
+    </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Edge kind <span class="rail-hint">from current graph</span></div>
+      <div class="tool-label">Lens</div>
+      <div class="edge-lens-control" id="edge-lens-control" role="group" aria-label="Edge lens">
+        <button type="button" data-edge-lens="all" data-active="1" data-tooltip="Show every visible edge">All edges</button>
+        <button type="button" data-edge-lens="selected" data-tooltip="Only show edges touching the selected symbol">Selected</button>
+      </div>
+      <div class="rail-actions">
+        <button type="button" class="rail-action" id="btn-edge-all" data-tooltip="Show every edge kind">All</button>
+        <button type="button" class="rail-action" id="btn-edge-none" data-tooltip="Hide every edge kind">None</button>
+      </div>
+      <div id="edge-kind-filters">
+        <div class="rail-row">Loading edges...</div>
       </div>
     </section>
 
     <section class="rail-section">
       <div class="rail-title">Code health</div>
-      <label class="rail-row"><input type="checkbox" data-filter-health="error"   checked> <span class="swatch err"></span> error    <span class="count"> 43</span></label>
-      <label class="rail-row"><input type="checkbox" data-filter-health="warning" checked> <span class="swatch warn"></span> warning  <span class="count">183</span></label>
-      <label class="rail-row"><input type="checkbox" data-filter-health="info"    checked> <span class="swatch info"></span> info     <span class="count">261</span></label>
-      <label class="rail-row"><input type="checkbox" data-filter-health="healthy" checked> <span class="swatch healthy"></span> healthy  <span class="count">1,887</span></label>
+      <label class="rail-row"><input type="checkbox" data-filter-health="error"   checked> <span class="swatch err"></span> error    <span class="count" data-health-count>0</span></label>
+      <label class="rail-row"><input type="checkbox" data-filter-health="warning" checked> <span class="swatch warn"></span> warning  <span class="count" data-health-count>0</span></label>
+      <label class="rail-row"><input type="checkbox" data-filter-health="info"    checked> <span class="swatch info"></span> info     <span class="count" data-health-count>0</span></label>
+      <label class="rail-row"><input type="checkbox" data-filter-health="healthy" checked> <span class="swatch healthy"></span> healthy  <span class="count" data-health-count>0</span></label>
     </section>
 
     <section class="rail-section">
@@ -1222,6 +204,14 @@
       <div class="rail-row"><span class="legend-dot" style="background:transparent;border:1px solid var(--text-dim)"></span> healthy / no findings</div>
       <div class="rail-row"><span class="legend-dot" style="background:var(--accent)"></span> selected / focus</div>
     </section>
+
+    <section class="rail-section">
+      <div class="rail-title">Diagnostics <span class="rail-hint" id="graph-diagnostics-summary">ready</span></div>
+      <button type="button" class="rail-action full" id="btn-graph-diagnostics" data-tooltip="Show graph layout and visibility diagnostics"><i data-lucide="activity" aria-hidden="true"></i><span data-diagnostics-label>Show diagnostics</span></button>
+      <button type="button" class="rail-action full" id="btn-copy-bug-report" data-tooltip="Copy current viewer diagnostics and reproduction state"><i data-lucide="clipboard-copy" aria-hidden="true"></i><span>Copy bug report</span></button>
+      <div class="rail-status" id="bug-report-status" hidden></div>
+      <div class="graph-diagnostics" id="graph-diagnostics" hidden></div>
+    </section>
   </aside>
 
   <!-- ── canvas column: graph on top, code panel underneath ── -->
@@ -1230,15 +220,52 @@
     <div class="canvas-header" id="canvas-counter">Showing 0 nodes · 0 edges</div>
     <div class="canvas-banner" id="canvas-banner">Replay mode — click a step in the timeline below</div>
     <div id="cy"></div>
-    <div class="zoom-controls" aria-label="Zoom controls">
-      <button id="btn-zoom-in"  title="Zoom in (+)"  aria-label="Zoom in">+</button>
-      <button id="btn-zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
-      <button id="btn-zoom-fit" title="Fit graph to viewport (0)" aria-label="Fit graph"><span class="fit-icon"></span></button>
+    <div class="graph-minimap" id="graph-minimap" title="Graph overview">
+      <canvas id="graph-minimap-canvas" width="192" height="128" aria-label="Graph overview"></canvas>
     </div>
-    <div class="kbd-hint">
-      <kbd>/</kbd> search · <kbd>Esc</kbd> clear · <kbd>+</kbd>/<kbd>−</kbd> zoom · <kbd>0</kbd> fit · double-click a node to focus
+    <div class="graph-state" id="graph-state" hidden></div>
+    <div class="edge-inspector" id="edge-inspector" hidden></div>
+    <button type="button" class="canvas-reset" id="btn-canvas-reset" data-tooltip="Restore default graph filters and fit">Reset view</button>
+    <div class="group-collapse-hint" id="group-collapse-hint" hidden>Click a group to collapse or expand</div>
+    <nav class="graph-trail" id="graph-trail" aria-label="Graph focus trail"></nav>
+    <button type="button" class="graph-health-pill" id="graph-health-pill" data-tooltip="Open graph diagnostics" hidden><i data-lucide="triangle-alert" aria-hidden="true"></i><span data-graph-health-label>Graph warning</span></button>
+    <div class="graph-tools" id="graph-tools">
+      <button type="button" class="graph-tools-toggle" id="btn-graph-tools" aria-expanded="false" aria-controls="graph-tools-popover" data-tooltip="Zoom, layout, and export tools"><i data-lucide="wrench" aria-hidden="true"></i><span>Tools</span></button>
+      <div class="graph-tools-popover" id="graph-tools-popover" hidden>
+        <div class="graph-tools-group">
+          <div class="graph-tools-label">Zoom</div>
+          <div class="zoom-controls" aria-label="Zoom controls">
+            <button id="btn-zoom-in"  title="Zoom in (+)"  aria-label="Zoom in"><i data-lucide="zoom-in" aria-hidden="true"></i><span class="icon-fallback" aria-hidden="true">+</span></button>
+            <button id="btn-zoom-out" title="Zoom out (−)" aria-label="Zoom out"><i data-lucide="zoom-out" aria-hidden="true"></i><span class="icon-fallback" aria-hidden="true">−</span></button>
+            <button id="btn-zoom-fit" title="Fit graph to viewport (0)" aria-label="Fit graph"><i data-lucide="scan" aria-hidden="true"></i><span class="sr-only">Fit</span></button>
+          </div>
+        </div>
+        <div class="graph-tools-group advanced-tool">
+          <div class="graph-tools-label">Layout pins</div>
+          <div class="graph-layout-controls" aria-label="Pinned layout controls">
+            <button id="btn-layout-pin" title="Lock visible node positions" aria-label="Lock visible node positions"><i data-lucide="pin" aria-hidden="true"></i><span class="sr-only">Pin</span></button>
+            <button id="btn-layout-unlock" title="Unlock pinned node positions" aria-label="Unlock pinned node positions"><i data-lucide="unlock" aria-hidden="true"></i><span class="sr-only">Free</span></button>
+            <button id="btn-layout-reset" title="Clear pinned positions and rerun layout" aria-label="Reset graph layout"><i data-lucide="rotate-ccw" aria-hidden="true"></i><span class="sr-only">Reset</span></button>
+          </div>
+        </div>
+        <div class="graph-tools-group advanced-tool">
+          <div class="graph-tools-label">Export</div>
+          <div class="graph-export-controls" aria-label="Graph export controls">
+            <button id="btn-graph-png" title="Export visible graph as PNG" aria-label="Export graph as PNG"><i data-lucide="image-down" aria-hidden="true"></i><span class="sr-only">PNG</span></button>
+            <button id="btn-graph-svg" title="Export visible graph as SVG" aria-label="Export graph as SVG"><i data-lucide="file-code-2" aria-hidden="true"></i><span class="sr-only">SVG</span></button>
+            <button id="btn-graph-json" title="Export visible graph data as JSON" aria-label="Export graph data as JSON"><i data-lucide="braces" aria-hidden="true"></i><span class="sr-only">JSON</span></button>
+          </div>
+        </div>
+      </div>
     </div>
-    <button class="show-code-btn" id="btn-show-code" title="Show source code panel">⌃ Show source</button>
+    <div class="mobile-graphbar" aria-label="Mobile graph panels">
+      <button type="button" id="btn-mobile-fit" data-mobile-panel="fit" aria-label="Fit graph"><i data-lucide="scan" aria-hidden="true"></i><span>Fit</span></button>
+      <button type="button" data-mobile-panel="detail" aria-label="Show selected symbol details"><i data-lucide="panel-right-open" aria-hidden="true"></i><span>Details</span></button>
+      <button type="button" data-mobile-panel="source" aria-label="Show selected source"><i data-lucide="file-code-2" aria-hidden="true"></i><span>Source</span></button>
+      <button type="button" data-mobile-panel="filters" aria-label="Show graph filters"><i data-lucide="list-filter" aria-hidden="true"></i><span>Filters</span></button>
+    </div>
+    <button type="button" class="mobile-panel-close" id="btn-mobile-close" aria-label="Close mobile drawer"><i data-lucide="x" aria-hidden="true"></i><span class="sr-only">Close</span></button>
+    <button class="show-code-btn" id="btn-show-code" title="Show source code panel"><i data-lucide="panel-bottom-open" aria-hidden="true"></i><span>Show source</span></button>
   </section>
   <div class="splitter splitter-v" id="splitter-v" title="Drag to resize"></div>
   <!-- ── code panel: 60% code + 40% AI chat split ── -->
@@ -1249,22 +276,22 @@
         <span class="codepanel-find">
           <input type="text" id="d-code-search" placeholder="Find in code (case-insensitive)…" spellcheck="false" autocomplete="off" />
           <span class="codepanel-find-count" id="d-code-find-count"></span>
-          <button id="d-code-find-prev" title="Previous (Shift+Enter)" aria-label="Previous match">‹</button>
-          <button id="d-code-find-next" title="Next (Enter)" aria-label="Next match">›</button>
+          <button id="d-code-find-prev" title="Previous (Shift+Enter)" aria-label="Previous match"><i data-lucide="chevron-left" aria-hidden="true"></i><span class="sr-only">Previous</span></button>
+          <button id="d-code-find-next" title="Next (Enter)" aria-label="Next match"><i data-lucide="chevron-right" aria-hidden="true"></i><span class="sr-only">Next</span></button>
         </span>
         <span class="spacer"></span>
         <span class="codepanel-goto">
           <span class="codepanel-goto-label">Line</span>
           <input type="text" id="d-code-goto" placeholder="123 or 10-50" spellcheck="false" autocomplete="off" inputmode="numeric" pattern="[0-9-]*" />
         </span>
-        <button id="btn-code-selectall" class="codepanel-action" title="Select all source (gutter excluded)">Select all</button>
-        <button id="btn-code-copy"      class="codepanel-action" title="Copy source to clipboard">Copy</button>
-        <button id="btn-code-export"    class="codepanel-action" title="Download as a file with the symbol's name">Export</button>
+        <button id="btn-code-selectall" class="codepanel-action" title="Select all source (gutter excluded)"><i data-lucide="text-select" aria-hidden="true"></i><span>Select all</span></button>
+        <button id="btn-code-copy"      class="codepanel-action" title="Copy source to clipboard"><i data-lucide="copy" aria-hidden="true"></i><span>Copy</span></button>
+        <button id="btn-code-export"    class="codepanel-action" title="Download as a file with the symbol's name"><i data-lucide="download" aria-hidden="true"></i><span>Export</span></button>
         <span class="ask-selection-chip" id="ask-selection-chip" hidden title="Highlighted code is sent with your next AI question">
           <span id="ask-selection-count">0 lines</span>
-          <button type="button" id="ask-selection-clear" title="Clear selection">×</button>
+          <button type="button" id="ask-selection-clear" title="Clear selection"><i data-lucide="x" aria-hidden="true"></i><span class="sr-only">Clear selection</span></button>
         </span>
-        <button id="btn-code-close"     class="codepanel-close"  title="Hide panel">×</button>
+        <button id="btn-code-close"     class="codepanel-close"  title="Hide panel"><i data-lucide="x" aria-hidden="true"></i><span class="sr-only">Hide panel</span></button>
       </header>
       <pre class="line-numbers"><code id="d-code" class="language-none"></code></pre>
     </div>
@@ -1276,7 +303,7 @@
       <div class="askpanel-history" id="ask-history"></div>
       <form class="askpanel-form" id="ask-form" autocomplete="off">
         <textarea id="ask-input" rows="2" placeholder="How does this work? What does it call? Why was this designed this way? (Cmd/Ctrl+Enter)" spellcheck="false"></textarea>
-        <button type="submit" id="ask-submit">Ask</button>
+        <button type="submit" id="ask-submit" data-tooltip="Ask about the selected symbol or highlighted source">Ask</button>
       </form>
     </div>
   </section>
@@ -1289,8 +316,14 @@
       <div class="d-name-row">
         <h2 id="d-name">extractFromSource</h2>
         <div class="d-actions">
-          <button id="btn-copy-link" class="d-action" title="Copy a sharable link to this view (focus + scope + filters)">Link</button>
-          <button id="btn-copy-mcp"  class="d-action" title="Copy an MCP tool-call snippet for this symbol — paste into an agent that uses cartograph">MCP</button>
+          <select id="editor-picker" class="d-action-select" title="Editor URL scheme" aria-label="Editor URL scheme">
+            <option value="vscode">VS Code</option>
+            <option value="cursor">Cursor</option>
+            <option value="windsurf">Windsurf</option>
+          </select>
+          <button id="btn-open-editor" class="d-action" title="Open selected symbol in editor"><i data-lucide="external-link" aria-hidden="true"></i><span>Open</span></button>
+          <button id="btn-copy-link" class="d-action" title="Copy a sharable link to this view (focus + scope + filters)"><i data-lucide="link" aria-hidden="true"></i><span>Link</span></button>
+          <button id="btn-copy-mcp"  class="d-action" title="Copy an MCP tool-call snippet for this symbol — paste into an agent that uses cartograph"><i data-lucide="code-2" aria-hidden="true"></i><span>MCP</span></button>
         </div>
       </div>
       <div class="subtitle" id="d-loc">function · src/extraction/tree-sitter.ts:2336</div>
@@ -1334,37 +367,88 @@
 </main>
 
 <!-- Health view (toggled) -->
-<section id="health-view" style="display:none; position:fixed; top:44px; left:0; right:0; bottom:0; background:var(--bg-0); overflow-y:auto;">
-  <div class="health-grid">
-    <div class="health-card ok">
-      <div class="label">Code Health</div>
-      <div class="value" id="hc-health">7.4 / 10</div>
-      <div class="sub" id="hc-health-sub">project-wide composite, weighted by centrality</div>
+<section id="health-view" class="health-view">
+  <div class="health-shell">
+    <div class="health-hero">
+      <section class="health-score" aria-label="Project code health">
+        <div>
+          <div class="health-kicker">Project code health</div>
+          <div class="value" id="hc-health">7.4 / 10</div>
+          <div class="sub" id="hc-health-sub">project-wide composite, weighted by current findings</div>
+        </div>
+        <div>
+          <div class="health-score-track" aria-hidden="true"><div class="health-score-fill" id="hc-health-fill"></div></div>
+        </div>
+      </section>
+      <section class="health-metrics" aria-label="Health metrics">
+        <div class="health-metric err">
+          <div class="label">Errors</div>
+          <div class="value" id="hc-errors">43</div>
+          <div class="sub" id="hc-errors-sub">error-tier findings</div>
+        </div>
+        <div class="health-metric warn">
+          <div class="label">Warnings</div>
+          <div class="value" id="hc-warnings">183</div>
+          <div class="sub" id="hc-warnings-sub">warning-tier findings</div>
+        </div>
+        <div class="health-metric">
+          <div class="label">Info</div>
+          <div class="value" id="hc-info">261</div>
+          <div class="sub" id="hc-info-sub">informational findings</div>
+        </div>
+        <div class="health-metric ok">
+          <div class="label">Total findings</div>
+          <div class="value" id="hc-total">281</div>
+          <div class="sub" id="hc-total-sub">across all biomarkers</div>
+        </div>
+        <div class="health-metric">
+          <div class="label">Nodes flagged</div>
+          <div class="value" id="hc-nodes">214</div>
+          <div class="sub" id="hc-nodes-sub">distinct symbols with at least one finding</div>
+        </div>
+      </section>
     </div>
-    <div class="health-card err">
-      <div class="label">Errors</div>
-      <div class="value" id="hc-errors">43</div>
-      <div class="sub" id="hc-errors-sub">top: god_class (8), brain_method (6), large_method (29)</div>
-    </div>
-    <div class="health-card warn">
-      <div class="label">Warnings</div>
-      <div class="value" id="hc-warnings">183</div>
-      <div class="sub" id="hc-warnings-sub">top: nested_complexity (52), unused_export (47)</div>
-    </div>
-    <div class="health-card">
-      <div class="label">Hotspots</div>
-      <div class="value" id="hc-hotspots">12</div>
-      <div class="sub" id="hc-hotspots-sub">central + actively churning files</div>
-    </div>
-    <div class="health-card ok">
-      <div class="label">Total findings</div>
-      <div class="value" id="hc-total">281</div>
-      <div class="sub" id="hc-total-sub">across all biomarkers</div>
-    </div>
-    <div class="health-card">
-      <div class="label">Nodes flagged</div>
-      <div class="value" id="hc-nodes">214</div>
-      <div class="sub" id="hc-nodes-sub">distinct symbols with at least one finding</div>
+    <div class="health-main">
+      <section class="health-panel">
+        <h3>Severity Mix</h3>
+        <div class="health-panel-body">
+          <div class="health-severity-stack" id="hc-severity-stack" aria-hidden="true">
+            <span class="err"></span>
+            <span class="warn"></span>
+            <span class="info"></span>
+          </div>
+          <div class="health-severity-list" id="hc-severity-list"></div>
+        </div>
+      </section>
+      <section class="health-panel">
+        <h3>Biomarkers</h3>
+        <div class="health-panel-body">
+          <div class="health-list" id="hc-biomarkers"></div>
+        </div>
+      </section>
+      <section class="health-panel">
+        <h3>Risk Hotspots</h3>
+        <div class="health-panel-body">
+          <div class="health-list" id="hc-hotspots-list"></div>
+        </div>
+      </section>
+      <section class="health-panel">
+        <h3>Index Coverage</h3>
+        <div class="health-panel-body">
+          <div class="health-row">
+            <div><div class="name">Indexed symbols</div><div class="meta" id="hc-total-nodes-sub">nodes available to the viewer</div></div>
+            <div class="value" id="hc-total-nodes">0</div>
+          </div>
+          <div class="health-row">
+            <div><div class="name">Indexed files</div><div class="meta">files in this project index</div></div>
+            <div class="value" id="hc-total-files">0</div>
+          </div>
+          <div class="health-row">
+            <div><div class="name">Hotspot files</div><div class="meta" id="hc-hotspots-sub">central + actively churning files</div></div>
+            <div class="value" id="hc-hotspots">12</div>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </section>
@@ -1380,2187 +464,26 @@
   </dialog>
 </div>
 
-<script>
-/* ───────────────────────────────────────────────────────
-   Data — hand-built to match the screenshots, but wired
-   so the trace replay actually reflects the call sequence.
-   ─────────────────────────────────────────────────────── */
-
-// Register fCoSE on the global cytoscape so the layout name resolves.
-// Both UMD globals are checked because the bundle name has shifted
-// across versions of the extension.
-if (globalThis.cytoscape !== undefined && typeof cytoscape.use === 'function') {
-  const ext = globalThis.cytoscapeFcose || globalThis['cytoscape-fcose'];
-  if (ext) try { cytoscape.use(ext); } catch (err) { console.debug('cytoscape extension already registered', err); }
-}
-
-const KIND = { fn: 'function', method: 'method', class: 'class' };
-
-const NODES = [
-  // Center / focus
-  { id: 'extractFromSource', label: 'extractFromSource', kind: KIND.fn, file: 'src/extraction/tree-sitter.ts',
-    line: 2336, health: 'healthy', centrality: 0.0048, coverage: 0.85,
-    callers: [
-      'indexAll', 'indexFiles', 'extractWorker', 'updateFile', 'indexFromSource',
-      { id: 'reindexChanged',   label: 'reindexChanged',   file: 'src/sync/index.ts',                line: 188 },
-      { id: 'incrementalIndex', label: 'incrementalIndex', file: 'src/sync/incremental.ts',          line: 41  },
-      { id: 'rebuildIndex',     label: 'rebuildIndex',     file: '__tests__/extraction.test.ts',     line: 142 },
-    ],
-    callees: [
-      'parseSource', 'walkTree', 'computeMetrics', 'analyseAnalysableNodes',
-      { id: 'collectImports',  label: 'collectImports',  file: 'src/extraction/imports.ts',  line: 22 },
-      { id: 'collectExports',  label: 'collectExports',  file: 'src/extraction/exports.ts',  line: 31 },
-      { id: 'normalisePaths',  label: 'normalisePaths',  file: 'src/utils/paths.ts',         line: 12 },
-      { id: 'findReferences',  label: 'findReferences',  file: 'src/resolution/index.ts',    line: 64 },
-    ],
-    metrics: { loc: 25, cyc: 4, nest: 2, first: '8mo ago', last: '2d ago', commits: 12 } },
-
-  // Callers ring (some warning / error to show health colors)
-  { id: 'indexAll',           label: 'indexAll',           kind: KIND.method, file: 'src/extraction/index.ts',  line: 43,  health: 'warning',  centrality: 0.0091, coverage: 0.62 },
-  { id: 'indexFiles',         label: 'indexFiles',         kind: KIND.method, file: 'src/extraction/index.ts',  line: 288, health: 'healthy',  centrality: 0.0061, coverage: 0.71 },
-  { id: 'extractWorker',      label: 'extractWorker',      kind: KIND.fn,     file: 'src/extraction/worker.ts', line: 71,  health: 'healthy',  centrality: 0.0034, coverage: 0.78 },
-  { id: 'updateFile',         label: 'updateFile',         kind: KIND.method, file: 'src/sync/index.ts',        line: 115, health: 'healthy',  centrality: 0.0029, coverage: 0.81 },
-  { id: 'indexFromSource',    label: 'indexFromSource',    kind: KIND.fn,     file: '__tests__/extraction.test.ts', line: 42, health: 'healthy', centrality: 0.0008, coverage: 1 },
-  { id: 'getImpactRadius',    label: 'getImpactRadius',    kind: KIND.method, file: 'src/graph/traversal.ts',   line: 88,  health: 'warning',  centrality: 0.0072, coverage: 0.55 },
-  { id: 'findRelevantContext',label: 'findRelevantContext',kind: KIND.method, file: 'src/context/index.ts',     line: 124, health: 'warning',  centrality: 0.0064, coverage: 0.49 },
-  { id: 'handleSource',       label: 'handleSource',       kind: KIND.fn,     file: 'src/mcp/tools.ts',         line: 401, health: 'error',    centrality: 0.0052, coverage: 0.31 },
-  { id: 'ingestCoverage',     label: 'ingestCoverage',     kind: KIND.fn,     file: 'src/coverage/index.ts',    line: 67,  health: 'healthy',  centrality: 0.0021, coverage: 0.84 },
-
-  // Classes (around the periphery)
-  { id: 'Cartograph',          label: 'Cartograph',          kind: KIND.class,  file: 'src/index.ts',             line: 41,  health: 'warning',  centrality: 0.0192, coverage: 0.66 },
-  { id: 'QueryBuilder',       label: 'QueryBuilder',       kind: KIND.class,  file: 'src/db/queries.ts',        line: 28,  health: 'warning',  centrality: 0.0156, coverage: 0.74 },
-  { id: 'GraphTraverser',     label: 'GraphTraverser',     kind: KIND.class,  file: 'src/graph/traversal.ts',   line: 14,  health: 'healthy',  centrality: 0.0089, coverage: 0.81 },
-  { id: 'ContextBuilder',     label: 'ContextBuilder',     kind: KIND.class,  file: 'src/context/index.ts',     line: 22,  health: 'healthy',  centrality: 0.0078, coverage: 0.69 },
-
-  // Callees that show in trace (impact subgraph)
-  { id: 'parseSource',        label: 'parseSource',        kind: KIND.fn,     file: 'src/extraction/parser.ts', line: 14,  health: 'healthy',  centrality: 0.004, coverage: 0.92 },
-  { id: 'walkTree',           label: 'walkTree',           kind: KIND.fn,     file: 'src/extraction/walker.ts', line: 31,  health: 'warning',  centrality: 0.0023, coverage: 0.61 },
-  { id: 'computeMetrics',     label: 'computeMetrics',     kind: KIND.fn,     file: 'src/biomarkers/engine.ts', line: 86,  health: 'healthy',  centrality: 0.0017, coverage: 0.88 },
-  { id: 'analyseAnalysableNodes', label: 'analyseAnalysableNodes', kind: KIND.fn, file: 'src/biomarkers/index.ts', line: 381, health: 'warning', centrality: 0.0019, coverage: 0.71 },
-];
-
-const EDGES = [
-  // calls into extractFromSource
-  ['indexAll', 'extractFromSource', 'calls'],
-  ['indexFiles', 'extractFromSource', 'calls'],
-  ['extractWorker', 'extractFromSource', 'calls'],
-  ['updateFile', 'extractFromSource', 'calls'],
-  ['indexFromSource', 'extractFromSource', 'calls'],
-  ['handleSource', 'extractFromSource', 'calls'],
-  ['ingestCoverage', 'extractFromSource', 'references'],
-  ['getImpactRadius', 'extractFromSource', 'references'],
-  ['findRelevantContext', 'extractFromSource', 'references'],
-
-  // extractFromSource calls out
-  ['extractFromSource', 'parseSource', 'calls'],
-  ['extractFromSource', 'walkTree', 'calls'],
-  ['extractFromSource', 'computeMetrics', 'calls'],
-  ['extractFromSource', 'analyseAnalysableNodes', 'calls'],
-
-  // class containment
-  ['Cartograph', 'indexAll', 'contains'],
-  ['Cartograph', 'indexFiles', 'contains'],
-  ['QueryBuilder', 'updateFile', 'references'],
-  ['GraphTraverser', 'getImpactRadius', 'contains'],
-  ['ContextBuilder', 'findRelevantContext', 'contains'],
-
-  // misc cross-links to fluff out the graph
-  ['Cartograph', 'QueryBuilder', 'instantiates'],
-  ['Cartograph', 'GraphTraverser', 'instantiates'],
-  ['Cartograph', 'ContextBuilder', 'instantiates'],
-  ['indexFiles', 'extractWorker', 'calls'],
-  ['walkTree', 'parseSource', 'calls'],
-  ['analyseAnalysableNodes', 'computeMetrics', 'calls'],
-];
-
-/* Trace = the agent's discovery sequence on extractFromSource.
-   Each step has a "focus" (the node the call illuminates) and an
-   optional "subgraph" — the set of nodes the call's *result*
-   reveals (callers list, impact radius, etc.). Replay mode
-   restricts the visible graph to the union of the focus + subgraph
-   so the user sees what each tool call "saw". */
-const TRACE = [
-  { delta: '+0ms',   step: 1, tool: 'cartograph_status',    args: '{}',
-    result: '153 files', focus: null, subgraph: null },
-  { delta: '+12ms',  step: 2, tool: 'cartograph_search',    args: 'query: "extractFromSource", kind: "function"',
-    result: '1 result', focus: 'extractFromSource', subgraph: ['extractFromSource'] },
-  { delta: '+30ms',  step: 3, tool: 'cartograph_node',      args: 'symbol: "extractFromSource", includeCode: true',
-    result: '1 node + code', focus: 'extractFromSource', subgraph: ['extractFromSource'] },
-  { delta: '+45ms',  step: 4, tool: 'cartograph_callers',   args: 'symbol: "extractFromSource"',
-    result: '5 callers', focus: 'extractFromSource',
-    subgraph: ['extractFromSource', 'indexAll', 'indexFiles', 'extractWorker', 'updateFile', 'indexFromSource'] },
-  { delta: '+51ms',  step: 5, tool: 'cartograph_callees',   args: 'symbol: "extractFromSource"',
-    result: '8 callees', focus: 'extractFromSource',
-    subgraph: ['extractFromSource', 'parseSource', 'walkTree', 'computeMetrics', 'analyseAnalysableNodes'] },
-  { delta: '+71ms',  step: 6, tool: 'cartograph_impact',    args: 'symbol: "extractFromSource", depth: 3',
-    result: '68 symbols', focus: 'extractFromSource',
-    subgraph: ['extractFromSource', 'parseSource', 'walkTree', 'computeMetrics', 'analyseAnalysableNodes',
-               'indexAll', 'indexFiles', 'extractWorker', 'updateFile', 'Cartograph', 'QueryBuilder', 'getImpactRadius',
-               'GraphTraverser', 'findRelevantContext', 'ContextBuilder', 'handleSource', 'ingestCoverage', 'indexFromSource'] },
-  { delta: '+118ms', step: 7, tool: 'cartograph_biomarkers',args: 'mode: "symbol", symbol: "extractFromSource"',
-    result: '0 findings', focus: 'extractFromSource', subgraph: ['extractFromSource'] },
-  { delta: '+126ms', step: 8, tool: 'cartograph_coverage',  args: 'mode: "symbol", symbol: "extractFromSource"',
-    result: '85% covered', focus: 'extractFromSource', subgraph: ['extractFromSource'] },
-];
-
-/* ───────── Cytoscape init ───────── */
-
-/* Two-axis color encoding:
-   - FILL = symbol kind (function/method/class/interface/file/...)
-   - BORDER = health (error/warning/healthy)
-   So a "warning class" reads as a violet rounded square with an
-   orange ring, a "healthy function" reads as a blue circle with no
-   ring. Two signals, no shouting match between them. */
-const KIND_FILL = {
-  function:   '#5fadff', // accent blue
-  method:     '#4cd1be', // teal
-  class:      '#c084fc', // violet
-  interface:  '#a3e635', // lime
-  type:       '#a3e635',
-  type_alias: '#a3e635',
-  trait:      '#a3e635',
-  struct:     '#c084fc',
-  enum:       '#c084fc',
-  variable:   '#fbbf24', // amber
-  constant:   '#fbbf24',
-  field:      '#fbbf24',
-  property:   '#fbbf24',
-  parameter:  '#fbbf24',
-  file:       '#94a3b8', // slate
-  module:     '#94a3b8',
-  namespace:  '#94a3b8',
-  route:      '#f472b6', // pink (entry-shaped)
-  component:  '#f472b6',
-  table:      '#94a3b8',
-  resource:   '#94a3b8',
-};
-const KIND_DEFAULT_FILL = '#5fadff';
-const HEALTH_FILL = { // legacy lookup for old code paths that haven't migrated
-  error: '#ef4444', warning: '#f59e0b', info: '#60a5fa', healthy: '#2c9c6a',
-};
-/* Border color signals health. Healthy = no visible ring. */
-const HEALTH_BORDER = {
-  error:   '#ef4444',
-  warning: '#f59e0b',
-  info:    '#60a5fa',
-  healthy: 'rgba(11,15,23,0.5)',
-};
-function fillForKind(kind) { return KIND_FILL[kind] ?? KIND_DEFAULT_FILL; }
-function borderForHealth(health) { return HEALTH_BORDER[health] ?? HEALTH_BORDER.healthy; }
-function borderWidthForHealth(health) {
-  if (health === 'error') return 3;
-  if (health === 'warning') return 2;
-  return 1;
-}
-
-/* Node size scales with PageRank centrality: hubs visibly bigger
-   than leaves. sqrt mapping gives perceptual range without the
-   biggest hub eating the canvas. Top centrality on this codebase is
-   ~0.02; min visible size 28px, max 86px. */
-function sizeForCentrality(c) {
-  const v = Math.max(0, Math.min(0.02, c || 0));
-  return Math.round(28 + Math.sqrt(v / 0.02) * 58);
-}
-
-/* Layout options for fCoSE — Cytoscape's recommended force-directed
-   layout. Tuned for code graphs: hubs repel hard so spokes spread,
-   ideal edge length keeps near neighbors visually paired, padding
-   gives the right pane breathing room. Falls back to built-in 'cose'
-   if the fCoSE extension didn't load (CDN failure). */
-function fcoseLayoutOpts() {
-  const hasFcose = globalThis.cytoscapeFcose !== undefined
-                || globalThis['cytoscape-fcose'] !== undefined;
-  return hasFcose ? {
-    name: 'fcose',
-    quality: 'proof',          // run more iterations for cleaner final positions
-    animate: false,
-    randomize: true,
-    padding: 60,
-    nodeSeparation: 180,        // more breathing room between adjacent nodes
-    idealEdgeLength: 220,       // longer edges → spokes spread outward
-    nodeRepulsion: 18000,       // hubs push neighbors further away
-    gravity: 0.1,               // weaker gravity → graph fills the canvas
-    gravityRange: 3.8,
-    gravityCompound: 0.5,
-    numIter: 4000,              // more iterations → simulation settles cleanly
-    tile: true,
-    tilingPaddingVertical: 30,
-    tilingPaddingHorizontal: 30,
-    fit: true,
-  } : {
-    name: 'cose',
-    animate: false, padding: 60,
-    idealEdgeLength: 160, nodeRepulsion: 24000, edgeElasticity: 80,
-    gravity: 0.18, numIter: 80, randomize: false, fit: true,
-  };
-}
-
-const cy = cytoscape({
-  container: document.getElementById('cy'),
-  elements: [
-    ...NODES.map(n => ({ data: { id: n.id, label: n.label, kind: n.kind, health: n.health, file: n.file, centrality: n.centrality || 0 } })),
-    ...EDGES.map(([s, t, k]) => ({ data: { id: `${s}__${t}`, source: s, target: t, kind: k } })),
-  ],
-  style: [
-    {
-      selector: 'node',
-      style: {
-        'label': 'data(label)',
-        'background-color': ele => fillForKind(ele.data('kind')),
-        'background-opacity': 0.94,
-        'color': '#dde3ee',
-        'font-size': 11,
-        'font-weight': 500,
-        'font-family': '-apple-system, system-ui, sans-serif',
-        'text-valign': 'bottom',
-        'text-halign': 'center',
-        'text-margin-y': 4,
-        'text-wrap': 'ellipsis',
-        'text-max-width': 140,
-        'text-background-color': '#0b0f17',
-        'text-background-opacity': 0.55,
-        'text-background-padding': 3,
-        'text-background-shape': 'round-rectangle',
-        'border-width': ele => borderWidthForHealth(ele.data('health')),
-        'border-color': ele => borderForHealth(ele.data('health')),
-        'width':  ele => sizeForCentrality(ele.data('centrality')),
-        'height': ele => sizeForCentrality(ele.data('centrality')),
-        'shape':  ele => {
-          const k = ele.data('kind');
-          if (k === 'class' || k === 'struct' || k === 'enum') return 'round-rectangle';
-          if (k === 'interface' || k === 'trait' || k === 'type' || k === 'type_alias') return 'diamond';
-          if (k === 'file' || k === 'module' || k === 'namespace') return 'rectangle';
-          return 'ellipse';
-        },
-        'transition-property': 'background-color, border-color, border-width, opacity, width, height',
-        'transition-duration': '200ms',
-      }
-    },
-    {
-      selector: 'node:active',
-      style: { 'overlay-opacity': 0 } // suppress the default tap halo
-    },
-    {
-      selector: 'node.hovered',
-      style: {
-        'border-color': '#dde3ee',
-        'border-width': 2.5,
-        'z-index': 50,
-      }
-    },
-    {
-      selector: 'node:selected, node.focus',
-      style: {
-        'background-color': '#4ea8ff',
-        'border-color': '#dde3ee',
-        'border-width': 3,
-        /* Label sits BELOW the node on the dark page background,
-           so we keep it light for contrast — switching to dark
-           (which makes sense for inside-node labels) made the
-           label disappear against the canvas. */
-        'color': '#ffffff',
-        'text-background-color': '#0b0f17',
-        'text-background-opacity': 0.85,
-        'z-index': 100,
-      }
-    },
-    {
-      selector: 'node.dim',
-      style: { 'opacity': 0.15 }
-    },
-    {
-      selector: 'edge',
-      style: {
-        'width': 1.3,
-        'line-color': '#3a4360',
-        'curve-style': 'bezier',
-        'target-arrow-shape': 'triangle',
-        'target-arrow-color': '#3a4360',
-        'arrow-scale': 0.9,
-        'opacity': 0.55,
-        'transition-property': 'opacity, line-color, width',
-        'transition-duration': '200ms',
-      }
-    },
-    {
-      selector: 'edge.adjacent',
-      style: { 'line-color': '#7daed8', 'target-arrow-color': '#7daed8', 'opacity': 0.9, 'width': 1.8 }
-    },
-    {
-      selector: 'edge.highlight',
-      style: { 'line-color': '#4ea8ff', 'target-arrow-color': '#4ea8ff', 'opacity': 1, 'width': 2.2 }
-    },
-    {
-      selector: 'edge.dim',
-      style: { 'opacity': 0.04 }
-    },
-  ],
-  layout: fcoseLayoutOpts(),
-  wheelSensitivity: 0.2,
-  minZoom: 0.3,
-  maxZoom: 2.4,
-});
-
-/* Zoom controls. Cy's zoom() takes a level relative to current; we
-   step by 25% in either direction. Fit returns to the auto-fit
-   rendered at boot. */
-function zoomBy(factor) {
-  const cur = cy.zoom();
-  const next = Math.max(cy.minZoom(), Math.min(cy.maxZoom(), cur * factor));
-  // Zoom toward the center of the viewport, not the cursor — feels
-  // less jumpy when triggered from a button instead of a wheel.
-  cy.zoom({ level: next, renderedPosition: { x: cy.width() / 2, y: cy.height() / 2 } });
-}
-document.getElementById('btn-zoom-in') .addEventListener('click', () => zoomBy(1.25));
-document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(0.8));
-document.getElementById('btn-zoom-fit').addEventListener('click', () => cy.fit(undefined, 60));
-
-/* Keyboard shortcuts. `/` focuses search (skipped if user is
-   already typing in an input), `Esc` clears the current selection
-   and any replay state, `+/-/0` mirror the zoom buttons. */
-document.addEventListener('keydown', (e) => {
-  const target = e.target;
-  const inField = target instanceof HTMLElement &&
-    (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
-  if (e.key === '/' && !inField) {
-    e.preventDefault();
-    document.getElementById('search-input')?.focus();
-    return;
-  }
-  if (e.key === 'Escape') {
-    if (inField) target.blur();
-    cy.nodes().removeClass('focus dim hovered');
-    cy.edges().removeClass('dim highlight adjacent');
-    document.getElementById('canvas-banner').classList.remove('show');
-    document.getElementById('canvas-counter').innerHTML = baseCounterHTML;
-    return;
-  }
-  if (inField) return;
-  if (e.key === '+' || e.key === '=') { e.preventDefault(); zoomBy(1.25); return; }
-  if (e.key === '-' || e.key === '_') { e.preventDefault(); zoomBy(0.8);  return; }
-  if (e.key === '0')                  { e.preventDefault(); cy.fit(undefined, 60); return; }
-  if (e.altKey && e.key === 'ArrowLeft')  { e.preventDefault(); navTo(-1); return; }
-  if (e.altKey && e.key === 'ArrowRight') { e.preventDefault(); navTo(+1); }
-});
-
-/* Double-click a node → fit the viewport to that node + its
-   immediate neighborhood. Cheap "focus on this" gesture without
-   leaving the page. */
-cy.on('dbltap', 'node', (evt) => {
-  const n = evt.target;
-  cy.fit(n.closedNeighborhood(), 80);
-});
-
-// Hover state: highlight the node and its incident edges. cleaner
-// than a popper tooltip and stays in-canvas.
-cy.on('mouseover', 'node', (evt) => {
-  const n = evt.target;
-  n.addClass('hovered');
-  n.connectedEdges().addClass('adjacent');
-  document.getElementById('cy').style.cursor = 'pointer';
-});
-cy.on('mouseout', 'node', (evt) => {
-  const n = evt.target;
-  n.removeClass('hovered');
-  n.connectedEdges().removeClass('adjacent');
-  document.getElementById('cy').style.cursor = '';
-});
-
-/* re-run layout once after fonts/layout settle, then fit and clamp
-   zoom so the initial render doesn't over-zoom on small graphs. */
-function fitAndClamp(zMin, zMax) {
-  cy.fit(undefined, 60);
-  const z = cy.zoom();
-  if (z > zMax)      { cy.zoom(zMax); cy.center(); }
-  else if (z < zMin) { cy.zoom(zMin); cy.center(); }
-}
-function relayoutAndFit() {
-  cy.layout({
-    name: 'cose', animate: false, padding: 60,
-    idealEdgeLength: 160, nodeRepulsion: 24000, edgeElasticity: 80,
-    gravity: 0.18, numIter: 80, randomize: false, fit: true,
-  }).run();
-  fitAndClamp(0.5, 0.9);
-}
-setTimeout(relayoutAndFit, 50);
-
-/* ───────── Live mode (served via http: from `cartograph viewer`) ─────────
-   When opened via file://, the viewer falls back to the hardcoded
-   NODES/EDGES/TRACE above. When served by the cartograph viewer CLI it
-   fetches /api/status, /api/graph, /api/symbol/:id, /api/findings,
-   /api/sessions/:id from the server instead — every visible panel
-   (graph, detail, Health tab, Agent-trace tab) is populated from
-   real DB state. */
-
-const LIVE_MODE = globalThis.location.protocol === 'http:' || globalThis.location.protocol === 'https:';
-let liveSymbolCache = null;       // last /api/symbol/:id response (used by renderSubpanel)
-const liveNodeIndex = new Map();  // id → {label, kind, file, line, centrality}
-
-/** Map an API node payload to a Cytoscape element. Health goes to
-    'healthy' here — without findings (which we'd need to fetch per
-    node) we can't paint the warn/error tiers. The detail panel shows
-    actual code-health when a node is selected. */
-function liveNodeToElem(n) {
-  const health = (n.findings && n.findings.length > 0) ? 'warning' : 'healthy';
-  liveNodeIndex.set(n.id, n);
-  return { data: { id: n.id, label: n.label, kind: n.kind, health, file: n.file, centrality: n.centrality || 0 } };
-}
-
-async function bootLive() {
-  // Status → top-bar
-  try {
-    const r = await fetch('/api/status');
-    if (r.ok) {
-      const s = await r.json();
-      document.querySelector('.topbar .path').textContent = s.projectRoot;
-      document.querySelector('.topbar .stats').innerHTML =
-        `<b>${s.files}</b> files · <b>${s.nodes.toLocaleString()}</b> nodes · <b>${s.edges.toLocaleString()}</b> edges`;
-    }
-  } catch (err) { console.debug('status endpoint unavailable', err); }
-
-  // Replace the hardcoded graph with /api/graph (no focus → top-30 by centrality)
-  try {
-    const r = await fetch('/api/graph');
-    if (!r.ok) return;
-    const g = await r.json();
-    cy.elements().remove();
-    cy.add(g.nodes.map(liveNodeToElem));
-    for (const e of g.edges || []) {
-      cy.add({ data: { id: `${e.source}__${e.target}__${e.kind}`, source: e.source, target: e.target, kind: e.kind } });
-    }
-    relayoutAndFit();
-    setBaseCounter(`Showing ${g.nodes.length} nodes · ${(g.edges ?? []).length} edges`);
-    // Re-apply chip / health / scope filters now that the live graph
-    // is in cy — the bootstrap call earlier ran against an empty graph.
-    applyFilters();
-
-    // If the URL carries a focus, restore that view; otherwise
-    // pick the highest-centrality node from the response.
-    const hashState = readHashState();
-    if (hashState.focus) {
-      await selectSymbolLive(hashState.focus);
-    } else {
-      const first = g.nodes[0];
-      if (first) await selectSymbolLive(first.id);
-    }
-  } catch (err) {
-    console.warn('viewer: bootLive failed', err);
-  }
-
-  // Trace bar: load whatever session the DB has so the user doesn't
-  // need to switch tabs to see anything. loadSessionsLive handles the
-  // empty-DB case with a helpful pointer to `cartograph serve --mcp`.
-  loadSessionsLive();
-}
-
-/** Fetch /api/sessions and populate the session picker; auto-select
-    the latest session and load its calls into the trace bar.
-    Empty-state when no MCP server has logged anything yet. */
-let liveTraceCalls = [];      // current session's calls (cached)
-let liveTraceActiveStep = -1; // 0-indexed pointer into liveTraceCalls
-let liveSessions = [];        // cache of /api/sessions for picker rendering
-
-async function loadSessionsLive() {
-  const tl = document.getElementById('trace-list');
-  const sessLabel = document.getElementById('session-label');
-  const picker = document.getElementById('session-picker');
-  try {
-    const sr = await fetch('/api/sessions?limit=20');
-    if (!sr.ok) throw new Error(`status ${sr.status}`);
-    liveSessions = (await sr.json()).sessions ?? [];
-    if (liveSessions.length === 0) {
-      sessLabel.textContent = '— no recorded sessions yet —';
-      sessLabel.style.display = '';
-      picker.style.display = 'none';
-      tl.innerHTML = `<div class="empty">No agent trace recorded yet. Start an MCP client (e.g. <code>cartograph serve --mcp</code>) and make a few tool calls to populate this view.</div>`;
-      liveTraceCalls = []; liveTraceActiveStep = -1;
-      return;
-    }
-    // Render picker options + show it; hide the static label.
-    picker.innerHTML = liveSessions.map((s) => {
-      const ago = formatRelative(s.lastActivityTs);
-      return `<option value="${escapeHtml(s.id)}">${escapeHtml(s.id)} · ${s.toolCount} calls · ${escapeHtml(ago)}</option>`;
-    }).join('');
-    picker.style.display = '';
-    sessLabel.style.display = 'none';
-    // Auto-load the latest (first) session.
-    picker.value = liveSessions[0].id;
-    await loadSession(liveSessions[0].id);
-  } catch (err) {
-    console.warn('viewer: loadSessionsLive failed', err);
-    tl.innerHTML = `<div class="empty">Failed to load sessions: ${escapeHtml(String(err))}</div>`;
-  }
-}
-
-/** Fetch one session's calls and render them in the trace bar.
-    The session must already exist in liveSessions so we know the
-    persisted tool_count for the divergence check. */
-async function loadSession(sessionId) {
-  const tl = document.getElementById('trace-list');
-  try {
-    const dr = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
-    if (!dr.ok) throw new Error(`status ${dr.status}`);
-    const detail = await dr.json();
-    liveTraceCalls = detail.calls ?? [];
-    liveTraceActiveStep = -1;
-    const meta = liveSessions.find((s) => s.id === sessionId);
-    const persistedCt = meta ? meta.toolCount : liveTraceCalls.length;
-    const totalMs = liveTraceCalls.reduce((a, c) => a + (c.durationMs || 0), 0);
-    // The picker now carries the session id; the static label only
-    // appears in the empty-state. Header on the picker side just
-    // shows the call count + duration so we don't repeat the id.
-    const sessLabel = document.getElementById('session-label');
-    const renderedCt = liveTraceCalls.length;
-    const headerCt = renderedCt === persistedCt ? `${renderedCt}` : `${renderedCt} of ${persistedCt}`;
-    sessLabel.textContent = ` · ${headerCt} CALLS · ${(totalMs/1000).toFixed(2)}S TOTAL`;
-    sessLabel.style.display = '';
-    sessLabel.style.color = 'var(--text-muted)';
-    renderLiveTraceList();
-  } catch (err) {
-    console.warn('viewer: loadSession failed', err);
-    tl.innerHTML = `<div class="empty">Failed to load session: ${escapeHtml(String(err))}</div>`;
-  }
-}
-
-document.getElementById('session-picker').addEventListener('change', (e) => {
-  loadSession(e.target.value);
-});
-
-function renderLiveTraceList() {
-  const tl = document.getElementById('trace-list');
-  if (liveTraceCalls.length === 0) {
-    tl.innerHTML = '<div class="empty">No calls in this session.</div>';
-    return;
-  }
-  const t0 = liveTraceCalls[0]?.ts ?? 0;
-  tl.innerHTML = liveTraceCalls.map((c, i) => `
-    <div class="trace-row${i === liveTraceActiveStep ? ' active' : ''}" data-i="${i}">
-      <span class="delta">+${c.ts - t0}ms</span>
-      <span class="step-num">${c.step}</span>
-      <span class="tool">${escapeHtml(c.tool ?? '')}</span>
-      <span class="args">${escapeHtml(formatArgs(c.args))}</span>
-      <span class="result">${escapeHtml(c.result ?? '')}</span>
-    </div>
-  `).join('');
-  tl.querySelectorAll('.trace-row').forEach(el =>
-    el.addEventListener('click', () => activateLiveTraceStep(Number.parseInt(el.dataset.i, 10)))
-  );
-}
-
-function formatArgs(args) {
-  if (args == null) return '';
-  if (typeof args === 'string') return args;
-  try {
-    const entries = Object.entries(args);
-    if (entries.length === 0) return '{}';
-    return entries.map(([k, v]) => `${k}: ${JSON.stringify(v)}`).join(', ');
-  } catch {
-    return String(args);
-  }
-}
-
-/** Click a live trace row → highlight its target symbol on the graph
-    (parsed from args.symbol if present) AND select it in the right
-    pane. No subgraph reduction in live mode (that needs the real
-    impact-radius result, which we don't store). */
-async function activateLiveTraceStep(i) {
-  liveTraceActiveStep = i;
-  const c = liveTraceCalls[i];
-  if (!c) return;
-  document.querySelectorAll('.trace-row').forEach(el =>
-    el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
-  const symbol = c.args && typeof c.args === 'object' ? c.args.symbol : null;
-  if (typeof symbol === 'string') {
-    await selectSymbolLive(symbol);
-  }
-}
-
-/** Search → focus a symbol in live mode. Fetches /api/symbol/<query>
-    to resolve the id; if found, fetches the focused subgraph and
-    re-renders. No-ops in file:// mode (no API to hit). */
-async function searchAndFocus(query) {
-  const input = document.getElementById('search-input');
-  input.classList.remove('error');
-  if (!LIVE_MODE) { input.classList.add('error'); return; }
-  const trimmed = query.trim();
-  if (!trimmed) return;
-  try {
-    const symRes = await fetch(`/api/symbol/${encodeURIComponent(trimmed)}`);
-    if (!symRes.ok) { input.classList.add('error'); return; }
-    const sym = await symRes.json();
-    const graphRes = await fetch(`/api/graph?focus=${encodeURIComponent(sym.id)}&depth=2`);
-    if (!graphRes.ok) { input.classList.add('error'); return; }
-    const g = await graphRes.json();
-    cy.elements().remove();
-    cy.add(g.nodes.map(liveNodeToElem));
-    for (const e of g.edges || []) {
-      cy.add({ data: { id: `${e.source}__${e.target}__${e.kind}`, source: e.source, target: e.target, kind: e.kind } });
-    }
-    relayoutAndFit();
-    setBaseCounter(`Showing ${g.nodes.length} nodes · ${(g.edges ?? []).length} edges · focus <b style="color:var(--text)">${escapeHtml(sym.label)}</b>`);
-    await selectSymbolLive(sym.id);
-  } catch (err) {
-    console.warn('viewer: searchAndFocus failed', err);
-    input.classList.add('error');
-  }
-}
-
-document.getElementById('search-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') searchAndFocus(e.target.value);
-});
-
-/* Click delegate on the right pane: a ref row carries data-symbol
-   if it's a navigable caller/callee. In live mode, route through
-   searchAndFocus so the graph re-anchors on the clicked symbol;
-   in file:// mode, just update the detail pane. */
-document.getElementById('subpanel').addEventListener('click', (e) => {
-  const row = e.target.closest('.ref-row[data-symbol]');
-  if (!row) return;
-  const symbolId = row.dataset.symbol;
-  if (LIVE_MODE) searchAndFocus(symbolId);
-  else if (typeof selectSymbol === 'function') selectSymbol(symbolId);
-});
-
-/** Pull /api/findings + /api/hotspots and update the Health-card grid.
-    No-ops gracefully on fetch failure — the hardcoded mockup numbers
-    stay visible so an offline run is still legible. */
-async function loadHealthLive() {
-  try {
-    const [fr, hr] = await Promise.all([
-      fetch('/api/findings'),
-      fetch('/api/hotspots?limit=50'),
-    ]);
-    if (fr.ok) {
-      const f = await fr.json();
-      document.getElementById('hc-health').textContent       = `${f.codeHealth.toFixed(1)} / 10`;
-      document.getElementById('hc-health-sub').textContent   = `mean across ${f.nodesWithFindings.toLocaleString()} flagged symbols`;
-      document.getElementById('hc-errors').textContent       = (f.bySeverity?.error ?? 0).toLocaleString();
-      document.getElementById('hc-errors-sub').textContent   = topThreeBy(f.byBiomarker, ['god_class', 'brain_method', 'large_method', 'complex_method']);
-      document.getElementById('hc-warnings').textContent     = (f.bySeverity?.warning ?? 0).toLocaleString();
-      document.getElementById('hc-warnings-sub').textContent = topThreeBy(f.byBiomarker, ['nested_complexity', 'unused_export', 'long_parameter_list']);
-      document.getElementById('hc-total').textContent        = f.totalFindings.toLocaleString();
-      document.getElementById('hc-total-sub').textContent    = `${Object.keys(f.byBiomarker || {}).length} biomarker types`;
-      document.getElementById('hc-nodes').textContent        = f.nodesWithFindings.toLocaleString();
-      document.getElementById('hc-nodes-sub').textContent    = `${((f.nodesWithFindings / Math.max(1, f.totalNodes)) * 100).toFixed(1)}% of ${f.totalNodes.toLocaleString()} indexed`;
-    }
-    if (hr.ok) {
-      const h = await hr.json();
-      document.getElementById('hc-hotspots').textContent     = (h.hotspots?.length ?? 0).toString();
-      document.getElementById('hc-hotspots-sub').textContent = h.hotspots?.[0]
-        ? `top: ${h.hotspots[0].filePath} (${h.hotspots[0].commits} commits)`
-        : 'no hotspots — no churn data yet';
-    }
-  } catch (err) {
-    console.warn('viewer: loadHealthLive failed', err);
-  }
-}
-
-/** Render up to 3 biomarker counts from a Record<biomarker, count>,
-    in the order given. Skips biomarkers absent or zero. */
-function topThreeBy(counts, prefer) {
-  if (!counts) return '';
-  const parts = [];
-  for (const k of prefer) {
-    if (counts[k]) parts.push(`${k} (${counts[k]})`);
-    if (parts.length === 3) break;
-  }
-  return parts.length > 0 ? `top: ${parts.join(', ')}` : '—';
-}
-
-/** ts (unix seconds OR ms) → "2d ago" / "8mo ago" / "—" if null. */
-function formatRelative(ts) {
-  if (ts == null) return '—';
-  // Heuristic: anything before 2001 in ms is likely a unix-seconds value.
-  const ms = ts < 1e12 ? ts * 1000 : ts;
-  const dt = Date.now() - ms;
-  if (dt < 0) return 'just now';
-  const m = Math.floor(dt / 60000);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  const d = Math.floor(h / 24);
-  if (d < 30) return `${d}d ago`;
-  const mo = Math.floor(d / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  const y = Math.floor(d / 365);
-  return `${y}y ago`;
-}
-
-/* Breadcrumb — split the file path into clickable segments and
-   render `dir › dir › file › symbol`. Directory segments scope the
-   search (filter file:// scope), file segment is currently inert
-   (could open the file in an editor in a future revision). */
-function renderBreadcrumb(file, label) {
-  const el = document.getElementById('d-breadcrumb');
-  if (!file) { el.innerHTML = ''; return; }
-  const parts = String(file).split('/').filter(Boolean);
-  const html = parts.map((seg, i) => {
-    const isLast = i === parts.length - 1 && !label;
-    return `<span class="seg${isLast ? ' last' : ''}" data-bc-prefix="${escapeHtml(parts.slice(0, i + 1).join('/'))}">${escapeHtml(seg)}</span>`;
-  }).join('<span class="sep">›</span>');
-  const tail = label ? `<span class="sep">›</span><span class="seg last">${escapeHtml(label)}</span>` : '';
-  el.innerHTML = html + tail;
-}
-
-/* Breadcrumb scope — when set, applyFilters hides any cy node
-   whose file path doesn't start with this prefix. Click a segment
-   to scope, click the same segment (or the root scope) again to
-   clear. */
-let breadcrumbScope = null;
-
-document.getElementById('d-breadcrumb').addEventListener('click', (e) => {
-  const seg = e.target.closest('.seg[data-bc-prefix]');
-  if (!seg || seg.classList.contains('last')) return;
-  const prefix = seg.dataset.bcPrefix + '/';
-  // Toggle: same prefix clicked twice clears scope.
-  breadcrumbScope = (breadcrumbScope === prefix) ? null : prefix;
-  // Reflect in the search input as a visible cue.
-  const input = document.getElementById('search-input');
-  input.value = breadcrumbScope ? `path:${breadcrumbScope}` : '';
-  applyFilters();
-  // Mark the active segment so the user sees what's scoping.
-  document.querySelectorAll('#d-breadcrumb .seg.scoped').forEach((el) => el.classList.remove('scoped'));
-  if (breadcrumbScope) seg.classList.add('scoped');
-});
-
-/* Map our `language` field to Prism's grammar key (mostly identity,
-   a few diverge). Unmapped languages stay as `language-none`,
-   which is fine — Prism just leaves them as plain text. */
-const PRISM_LANG = {
-  typescript: 'typescript', tsx: 'tsx', javascript: 'javascript', jsx: 'jsx',
-  python: 'python', go: 'go', rust: 'rust', java: 'java', c: 'c', cpp: 'cpp',
-  csharp: 'csharp', php: 'php', ruby: 'ruby', swift: 'swift', kotlin: 'kotlin',
-  scala: 'scala', dart: 'dart', sql: 'sql', graphql: 'graphql', svelte: 'svelte',
-  lua: 'lua', r: 'r', bash: 'bash',
-};
-function prismLangFor(lang) { return PRISM_LANG[lang] || 'none'; }
-
-/* Source loader — lazy on first selection, eager-load thereafter.
-   Renders raw source (with line-number gutter), then asks Prism to
-   syntax-highlight in-place. Search-in-code wraps the SAME DOM in
-   <mark class="m"> spans without re-running Prism, so highlighting
-   and search highlights coexist. */
-let codeOriginalHtml = '';   // post-Prism HTML, no search marks
-let codeMatches = [];        // <mark> elements in DOM order
-let codeMatchIndex = -1;
-let codeStartLine = 1;
-
-function resetCodePanel(symbolId) {
-  document.getElementById('d-code').innerHTML = '';
-  document.getElementById('d-code-summary').textContent = 'Source';
-  document.getElementById('d-code-search').value = '';
-  document.getElementById('d-code-find-count').textContent = '';
-  // Reset Line input — leftover "143-200" from a previous symbol
-  // is meaningless on the next file. Same for the captured
-  // selection chip in the chat header.
-  const gotoEl = document.getElementById('d-code-goto');
-  if (gotoEl) { gotoEl.value = ''; gotoEl.style.borderColor = ''; }
-  capturedSelection = '';
-  capturedSelectionLines = 0;
-  updateAskSelectionChip();
-  globalThis.getSelection()?.removeAllRanges();
-  codeOriginalHtml = '';
-  codeMatches = [];
-  codeMatchIndex = -1;
-  if (LIVE_MODE && symbolId) {
-    const colEl = document.getElementById('canvas-col');
-    const wasOpen = colEl.classList.contains('with-codepane');
-    colEl.classList.add('with-codepane');
-    // Re-fit cy whenever the canvas height actually changed.
-    if (!wasOpen) setTimeout(() => { cy.resize(); cy.fit(undefined, 60); }, 16);
-    loadSourceLive(symbolId);
-  }
-}
-
-document.getElementById('btn-code-close').addEventListener('click', () => {
-  document.getElementById('canvas-col').classList.remove('with-codepane');
-  setTimeout(() => { cy.resize(); cy.fit(undefined, 60); }, 0);
-});
-
-/* Copy / Export — pull the source out of #d-code without the
-   line-number gutter, then either clipboard-write or trigger a
-   download with the symbol's name + language extension. */
-function getCurrentSourceText() {
-  const codeEl = document.getElementById('d-code');
-  // textContent grabs all text including the lineno spans; clone the
-  // node, strip linenos first so the export is clean.
-  const clone = codeEl.cloneNode(true);
-  clone.querySelectorAll('.lineno').forEach((el) => el.remove());
-  return clone.textContent || '';
-}
-const EXT_BY_LANG = {
-  typescript: 'ts', tsx: 'tsx', javascript: 'js', jsx: 'jsx',
-  python: 'py', go: 'go', rust: 'rs', java: 'java', c: 'c', cpp: 'cpp',
-  csharp: 'cs', php: 'php', ruby: 'rb', swift: 'swift', kotlin: 'kt',
-  scala: 'scala', dart: 'dart', sql: 'sql', graphql: 'graphql',
-  svelte: 'svelte', lua: 'lua', r: 'r', bash: 'sh',
-};
-
-document.getElementById('btn-code-copy').addEventListener('click', async (e) => {
-  const src = getCurrentSourceText();
-  if (!src) return;
-  await copyToClipboard(src, e.currentTarget);
-});
-
-document.getElementById('btn-code-selectall').addEventListener('click', () => {
-  const codeEl = document.getElementById('d-code');
-  const linenos = Array.from(codeEl.querySelectorAll('span.lineno'));
-  if (linenos.length === 0) return;
-  // Select from just after the first lineno through the last child.
-  const range = document.createRange();
-  range.setStartAfter(linenos[0]);
-  range.setEndAfter(codeEl.lastChild ?? linenos[linenos.length - 1]);
-  const sel = globalThis.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
-});
-document.getElementById('btn-code-export').addEventListener('click', () => {
-  const src = getCurrentSourceText();
-  if (!src) return;
-  const lang = liveSymbolCache?.language || 'typescript';
-  const ext = EXT_BY_LANG[lang] || 'txt';
-  const safeName = (liveSymbolCache?.label || 'source').replaceAll(/[^A-Za-z0-9_-]/g, '_');
-  const blob = new Blob([src], { type: 'text/plain' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `${safeName}.${ext}`;
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-});
-
-/* "Show source" button — re-opens the panel after the user closed
-   it. Re-fetches the source for the current selection; falls back
-   to the cached symbol id when nothing is selected. */
-/* Splitter drag — vertical between graph & codepane (resizes the
-   codepane height), horizontal between code & chat (resizes the
-   60/40 split). Sizes persist via localStorage so the user's
-   preferred layout sticks across reloads. cy.resize() runs on
-   pointer-up so the graph re-fits cleanly. */
-const SPLIT_KEY = 'cartograph-viewer-splitters-v1';
-const splitState = (() => {
-  try { return JSON.parse(localStorage.getItem(SPLIT_KEY) || '{}'); }
-  catch { return {}; }
-})();
-function applySplitState() {
-  if (splitState.codepaneH) document.getElementById('codepane').style.height = splitState.codepaneH + 'px';
-  if (splitState.codeFlex)  document.documentElement.style.setProperty('--code-flex', splitState.codeFlex);
-  if (splitState.chatFlex)  document.documentElement.style.setProperty('--chat-flex', splitState.chatFlex);
-}
-applySplitState();
-
-function bindSplitter(el, axis, onMove, onEnd) {
-  el.addEventListener('mousedown', (e) => {
-    e.preventDefault();
-    el.classList.add('dragging');
-    document.body.style.cursor = (axis === 'v') ? 'row-resize' : 'col-resize';
-    document.body.style.userSelect = 'none';
-    const move = (ev) => onMove(ev);
-    const up = () => {
-      el.classList.remove('dragging');
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', move);
-      document.removeEventListener('mouseup', up);
-      onEnd?.();
-    };
-    document.addEventListener('mousemove', move);
-    document.addEventListener('mouseup', up);
-  });
-}
-
-bindSplitter(
-  document.getElementById('splitter-v'), 'v',
-  (e) => {
-    const col = document.getElementById('canvas-col');
-    const colRect = col.getBoundingClientRect();
-    // Codepane height = distance from cursor to bottom of canvas-col.
-    const newH = Math.max(140, Math.min(colRect.height - 200, colRect.bottom - e.clientY));
-    document.getElementById('codepane').style.height = newH + 'px';
-    splitState.codepaneH = Math.round(newH);
-  },
-  () => {
-    localStorage.setItem(SPLIT_KEY, JSON.stringify(splitState));
-    setTimeout(() => { cy.resize(); cy.fit(undefined, 60); }, 0);
-  },
-);
-bindSplitter(
-  document.getElementById('splitter-h'), 'h',
-  (e) => {
-    const pane = document.getElementById('codepane');
-    const r = pane.getBoundingClientRect();
-    const cursorX = e.clientX - r.left;
-    // Translate cursor x into a flex ratio. Clamp 25%..85% so neither pane vanishes.
-    const ratio = Math.max(0.25, Math.min(0.85, cursorX / r.width));
-    const codeFlex = Math.round(ratio * 100);
-    const chatFlex = 100 - codeFlex;
-    document.documentElement.style.setProperty('--code-flex', codeFlex);
-    document.documentElement.style.setProperty('--chat-flex', chatFlex);
-    splitState.codeFlex = codeFlex;
-    splitState.chatFlex = chatFlex;
-  },
-  () => localStorage.setItem(SPLIT_KEY, JSON.stringify(splitState)),
-);
-
-document.getElementById('btn-show-code').addEventListener('click', () => {
-  const symbolId = liveSymbolCache?.id;
-  if (!LIVE_MODE || !symbolId) return;
-  document.getElementById('canvas-col').classList.add('with-codepane');
-  setTimeout(() => { cy.resize(); cy.fit(undefined, 60); }, 16);
-  // Reload only if the panel was emptied; otherwise just keep what's there.
-  if (!codeOriginalHtml) loadSourceLive(symbolId);
-});
-
-/* Go-to-line / select-range. Accepts either:
-   - "123" → scroll line 123 into view and flash it
-   - "10-50" → make a real DOM Selection covering lines 10–50
-     (without the line-number gutter), so Cmd+C copies just the
-     code. The range is scrolled into view too. */
-function findLinenoSpan(codeEl, n) {
-  const padded = String(n);
-  return Array.from(codeEl.querySelectorAll('span.lineno'))
-    .find((el) => el.textContent.trim() === padded) ?? null;
-}
-
-function gotoLine(target) {
-  if (!Number.isFinite(target) || target < 1) return false;
-  const codeEl = document.getElementById('d-code');
-  const hit = findLinenoSpan(codeEl, target);
-  if (!hit) return false;
-  hit.scrollIntoView({ block: 'center', behavior: 'smooth' });
-  const prev = hit.style.background;
-  hit.style.background = 'var(--accent-soft)';
-  setTimeout(() => { hit.style.background = prev; }, 900);
-  return true;
-}
-
-function selectLineRange(startN, endN) {
-  if (!Number.isFinite(startN) || !Number.isFinite(endN)) return false;
-  if (startN > endN) [startN, endN] = [endN, startN];
-  const codeEl = document.getElementById('d-code');
-  const startSpan = findLinenoSpan(codeEl, startN);
-  const endSpan   = findLinenoSpan(codeEl, endN);
-  if (!startSpan || !endSpan) return false;
-  // Selection starts AFTER the start lineno (skip the gutter
-  // text), ends BEFORE the next-line lineno (or end of code).
-  const range = document.createRange();
-  range.setStartAfter(startSpan);
-  const tail = findLinenoSpan(codeEl, endN + 1);
-  if (tail) range.setEndBefore(tail);
-  else range.setEndAfter(codeEl.lastChild ?? endSpan);
-  const sel = globalThis.getSelection();
-  sel.removeAllRanges();
-  sel.addRange(range);
-  startSpan.scrollIntoView({ block: 'start', behavior: 'smooth' });
-  return true;
-}
-
-function flashGotoError() {
-  const input = document.getElementById('d-code-goto');
-  input.style.borderColor = 'var(--err)';
-  setTimeout(() => { input.style.borderColor = ''; }, 600);
-}
-
-function applyGotoExpression(raw) {
-  const v = String(raw).trim();
-  if (!v) return;
-  // Range: "10-50" or "10 - 50" → select lines.
-  const m = /^(\d+)\s*-\s*(\d+)$/.exec(v);
-  if (m) {
-    if (!selectLineRange(Number.parseInt(m[1], 10), Number.parseInt(m[2], 10))) flashGotoError();
-    return;
-  }
-  // Single line: "123" → scroll + flash.
-  if (/^\d+$/.test(v)) {
-    if (!gotoLine(Number.parseInt(v, 10))) flashGotoError();
-    return;
-  }
-  flashGotoError();
-}
-
-document.getElementById('d-code-goto').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    applyGotoExpression(e.target.value);
-  } else if (e.key === 'Escape') {
-    e.target.value = '';
-    e.target.blur();
-    globalThis.getSelection()?.removeAllRanges();
-  }
-});
-document.getElementById('d-code-goto').addEventListener('input', (e) => {
-  // Live single-line scroll only; ranges wait for Enter so the
-  // selection doesn't thrash while the user is still typing.
-  const v = e.target.value.trim();
-  if (/^\d+$/.test(v)) gotoLine(Number.parseInt(v, 10));
-});
-
-async function loadSourceLive(symbolId) {
-  const codeEl = document.getElementById('d-code');
-  codeEl.textContent = 'Loading…';
-  try {
-    const r = await fetch(`/api/source/${encodeURIComponent(symbolId)}`);
-    if (!r.ok) { codeEl.textContent = `(failed: HTTP ${r.status})`; return; }
-    const p = await r.json();
-    if (p.error) { codeEl.textContent = `(${p.error})`; return; }
-    const lang = prismLangFor(p.language);
-    codeStartLine = p.startLine || 1;
-    codeEl.className = `language-${lang}`;
-    codeEl.textContent = String(p.source ?? '');
-    document.getElementById('d-code-summary').textContent =
-      `Source · ${p.endLine - p.startLine + 1} lines · ${escapeHtml(p.file || '')}`;
-    // Reflect the file's actual line range in the goto placeholder
-    // so the user sees, e.g., "143 or 143-232" instead of an
-    // arbitrary "10-50". Helps when scanning long methods.
-    const gotoInput = document.getElementById('d-code-goto');
-    if (gotoInput) gotoInput.placeholder = `${p.startLine} or ${p.startLine}-${p.endLine}`;
-
-    /* All grammars are bundled up-front, so highlightElement is
-       fully synchronous — decorate line numbers immediately
-       afterwards, no callback or race window. */
-    if (globalThis.Prism) {
-      try { Prism.highlightElement(codeEl); } catch (err) { console.debug('syntax highlighting unavailable', err); }
-    }
-    decorateLineNumbers(codeEl, codeStartLine);
-    codeOriginalHtml = codeEl.innerHTML;
-    runCodeSearch(document.getElementById('d-code-search').value);
-  } catch (err) {
-    codeEl.textContent = `(error: ${String(err)})`;
-  }
-}
-
-/* Walk the Prism-rendered HTML and add a `<span class="lineno">`
-   prefix to each line. We insert at the start of every line by
-   splitting on newlines AT THE TEXT LEVEL — Prism wraps tokens
-   but doesn't wrap lines. Approach: replace the code element's
-   innerHTML with one wrapped per line. */
-function decorateLineNumbers(codeEl, startLine) {
-  const html = codeEl.innerHTML;
-  const lines = html.split('\n');
-  const padW = String(startLine + lines.length - 1).length;
-  codeEl.innerHTML = lines.map((line, i) => {
-    const ln = String(startLine + i).padStart(padW, ' ');
-    return `<span class="lineno">${ln}</span>${line}`;
-  }).join('\n');
-}
-
-/* In-code search. Walks the rendered code's text nodes and wraps
-   matches in <mark class="m">. Avoids touching <span class="lineno">
-   gutter entries so a query for "10" doesn't match the line
-   number. Skipped entirely on empty query. */
-function runCodeSearch(rawQuery) {
-  const codeEl = document.getElementById('d-code');
-  const countEl = document.getElementById('d-code-find-count');
-  if (!codeOriginalHtml) { countEl.textContent = ''; return; }
-  // Restore unmarked DOM first.
-  codeEl.innerHTML = codeOriginalHtml;
-  codeMatches = [];
-  codeMatchIndex = -1;
-  const query = rawQuery.trim();
-  if (!query) { countEl.textContent = ''; return; }
-  const queryLower = query.toLowerCase();
-  // Walk text nodes, skip linenos, replace matches with <mark>.
-  const walker = document.createTreeWalker(codeEl, NodeFilter.SHOW_TEXT, {
-    acceptNode(n) {
-      if (n.parentElement?.classList.contains('lineno')) return NodeFilter.FILTER_REJECT;
-      return n.nodeValue && n.nodeValue.toLowerCase().includes(queryLower)
-        ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT;
-    },
-  });
-  const targets = [];
-  let cur; while ((cur = walker.nextNode())) targets.push(cur);
-  for (const t of targets) wrapMatches(t, queryLower);
-  codeMatches = Array.from(codeEl.querySelectorAll('mark.m'));
-  if (codeMatches.length > 0) {
-    codeMatchIndex = 0;
-    codeMatches[0].classList.add('active');
-    codeMatches[0].scrollIntoView({ block: 'center' });
-  }
-  countEl.textContent = codeMatches.length === 0 ? 'no matches' : `${codeMatchIndex + 1}/${codeMatches.length}`;
-}
-
-/* Replace one text node's matching substrings with <mark> nodes. */
-function wrapMatches(textNode, queryLower) {
-  const text = textNode.nodeValue;
-  if (!text) return;
-  const lower = text.toLowerCase();
-  const qlen = queryLower.length;
-  const frag = document.createDocumentFragment();
-  let i = 0;
-  while (i < text.length) {
-    const j = lower.indexOf(queryLower, i);
-    if (j < 0) {
-      frag.appendChild(document.createTextNode(text.slice(i)));
-      break;
-    }
-    if (j > i) frag.appendChild(document.createTextNode(text.slice(i, j)));
-    const mark = document.createElement('mark');
-    mark.className = 'm';
-    mark.textContent = text.slice(j, j + qlen);
-    frag.appendChild(mark);
-    i = j + qlen;
-  }
-  textNode.parentNode.replaceChild(frag, textNode);
-}
-
-function stepCodeMatch(delta) {
-  if (codeMatches.length === 0) return;
-  codeMatches[codeMatchIndex]?.classList.remove('active');
-  codeMatchIndex = (codeMatchIndex + delta + codeMatches.length) % codeMatches.length;
-  const next = codeMatches[codeMatchIndex];
-  next.classList.add('active');
-  next.scrollIntoView({ block: 'center' });
-  document.getElementById('d-code-find-count').textContent = `${codeMatchIndex + 1}/${codeMatches.length}`;
-}
-
-document.getElementById('d-code-search').addEventListener('input', (e) => runCodeSearch(e.target.value));
-document.getElementById('d-code-search').addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    e.preventDefault();
-    if (codeMatches.length === 0) runCodeSearch(e.target.value);
-    else stepCodeMatch(e.shiftKey ? -1 : +1);
-  } else if (e.key === 'Escape') {
-    e.preventDefault();
-    e.target.value = '';
-    runCodeSearch('');
-    e.target.blur();
-  }
-});
-document.getElementById('d-code-find-prev').addEventListener('click', () => stepCodeMatch(-1));
-document.getElementById('d-code-find-next').addEventListener('click', () => stepCodeMatch(+1));
-
-/* Render the symbol's JSDoc / preceding-comment block into the
-   detail pane. Strips `/**` and leading `*` markers so the prose
-   reads cleanly. The block is collapsed by default to a 3-line
-   teaser; clicking the toggle expands it inline. Per-symbol open
-   state is persisted in `docExpandedFor` so navigating back to a
-   previously-expanded symbol keeps it open. */
-const docExpandedFor = new Set();
-
-function renderDocstringPreview(raw, symbolId) {
-  const el = document.getElementById('d-doc');
-  if (!raw) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  const cleaned = String(raw)
-    .replace(/^\s*\/\*+/, '')
-    .replace(/\*+\/\s*$/, '')
-    .split('\n')
-    .map((line) => line.replace(/^\s*\*\s?/, ''))
-    .join('\n')
-    .trim();
-  if (!cleaned) { el.style.display = 'none'; el.innerHTML = ''; return; }
-  // Decide whether to show the toggle: if the rendered docstring
-  // would actually exceed 3 lines (rough heuristic: any newline
-  // past line 3, or total chars > 220), surface the toggle.
-  const lineCount = cleaned.split('\n').length;
-  const longish = lineCount > 3 || cleaned.length > 220;
-  const expanded = symbolId && docExpandedFor.has(symbolId);
-  el.style.display = 'block';
-  el.classList.toggle('expanded', expanded);
-  let toggleHtml = '';
-  if (longish) {
-    const toggleText = expanded ? '⌃ Collapse' : '⌄ Expand';
-    toggleHtml = `<div class="docstring-toggle">${toggleText}</div>`;
-  }
-  el.innerHTML = `<div class="docstring-body"></div>${toggleHtml}`;
-  // textContent (not innerHTML) for the body so docstring text
-  // can't inject HTML.
-  el.querySelector('.docstring-body').textContent = cleaned;
-}
-
-document.getElementById('d-doc').addEventListener('click', (e) => {
-  const toggle = e.target.closest('.docstring-toggle');
-  if (!toggle) return;
-  const el = document.getElementById('d-doc');
-  const symbolId = liveSymbolCache?.id || null;
-  el.classList.toggle('expanded');
-  toggle.textContent = el.classList.contains('expanded') ? '⌃ Collapse' : '⌄ Expand';
-  if (symbolId) {
-    if (el.classList.contains('expanded')) docExpandedFor.add(symbolId);
-    else docExpandedFor.delete(symbolId);
-  }
-});
-
-/* Command palette — Cmd/Ctrl+K opens. Typing fuzzy-filters
-   across two source lists:
-   - Recents: every symbol the user has selected this session.
-   - Actions: named UI commands (switch tab, fit graph, etc.).
-   ↑/↓ navigate, Enter selects, Esc closes. Borrowed shape from
-   Linear / VS Code / Slack — the universal "jump anywhere"
-   keyboard pattern. */
-const ACTIONS = [
-  { id: 'tab-graph',  label: 'Switch to Graph tab',  shortcut: 'g g', run: () => clickTab('graph') },
-  { id: 'tab-trace',  label: 'Switch to Agent trace tab', shortcut: 'g t', run: () => clickTab('trace') },
-  { id: 'tab-health', label: 'Switch to Health tab', shortcut: 'g h', run: () => clickTab('health') },
-  { id: 'fit',        label: 'Fit graph to viewport', shortcut: '0',   run: () => cy.fit(undefined, 60) },
-  { id: 'zoom-in',    label: 'Zoom in',  shortcut: '+', run: () => zoomBy(1.25) },
-  { id: 'zoom-out',   label: 'Zoom out', shortcut: '-', run: () => zoomBy(0.8) },
-  { id: 'show-code',  label: 'Show source code panel', run: () => document.getElementById('btn-show-code')?.click() },
-  { id: 'hide-code',  label: 'Hide source code panel', run: () => document.getElementById('btn-code-close')?.click() },
-  { id: 'focus-search', label: 'Focus the symbol search', shortcut: '/', run: () => document.getElementById('search-input')?.focus() },
-  { id: 'focus-ask',    label: 'Focus the Ask AI input', run: () => document.getElementById('ask-input')?.focus() },
-  { id: 'copy-link',  label: 'Copy link to current view', run: () => document.getElementById('btn-copy-link')?.click() },
-  { id: 'copy-mcp',   label: 'Copy MCP query for current symbol', run: () => document.getElementById('btn-copy-mcp')?.click() },
-  { id: 'nav-back',   label: 'Navigate back', shortcut: 'Alt+←', run: () => navTo(-1) },
-  { id: 'nav-fwd',    label: 'Navigate forward', shortcut: 'Alt+→', run: () => navTo(+1) },
-  { id: 'clear-scope', label: 'Clear breadcrumb scope', run: () => { breadcrumbScope = null; document.querySelectorAll('#d-breadcrumb .seg.scoped').forEach(el => el.classList.remove('scoped')); applyFilters(); } },
-];
-
-const recentSymbols = []; // [{ id, label, file, kind }] newest first
-function pushRecent(symbol) {
-  if (!symbol?.id) return;
-  const idx = recentSymbols.findIndex((r) => r.id === symbol.id);
-  if (idx >= 0) recentSymbols.splice(idx, 1);
-  recentSymbols.unshift({ id: symbol.id, label: symbol.label, file: symbol.file, kind: symbol.kind });
-  if (recentSymbols.length > 50) recentSymbols.length = 50;
-}
-
-function clickTab(view) {
-  document.querySelector(`.tab[data-view="${view}"]`)?.click();
-}
-
-function openPalette() {
-  document.getElementById('palette-backdrop').hidden = false;
-  document.querySelector('.palette').open = true;
-  document.getElementById('palette-input').value = '';
-  paletteActiveIndex = 0;
-  renderPalette('');
-  setTimeout(() => document.getElementById('palette-input').focus(), 0);
-}
-function closePalette() {
-  document.querySelector('.palette').open = false;
-  document.getElementById('palette-backdrop').hidden = true;
-}
-
-let paletteActiveIndex = 0;
-let paletteVisible = [];
-
-function renderPalette(query) {
-  const list = document.getElementById('palette-list');
-  const q = query.trim().toLowerCase();
-  const fuzzy = (text) => !q || text.toLowerCase().includes(q);
-  const fuzzyMatch = (text) => fuzzy(text);
-
-  const matchedActions = ACTIONS.filter((a) => fuzzyMatch(a.label));
-  const matchedRecents = recentSymbols.filter((r) => fuzzyMatch(r.label) || fuzzyMatch(r.file || ''));
-
-  paletteVisible = [];
-  let html = '';
-  if (matchedActions.length > 0) {
-    html += `<div class="palette-section">Actions</div>`;
-    matchedActions.forEach((a) => {
-      const idx = paletteVisible.length;
-      paletteVisible.push({ kind: 'action', payload: a });
-      const shortcutHtml = a.shortcut ? `<span class="it-shortcut">${escapeHtml(a.shortcut)}</span>` : '';
-      html += `<div class="palette-item" data-i="${idx}"><span class="it-icon">⚙</span> ${escapeHtml(a.label)} ${shortcutHtml}</div>`;
-    });
-  }
-  if (matchedRecents.length > 0) {
-    html += `<div class="palette-section">Recent symbols</div>`;
-    matchedRecents.forEach((r) => {
-      const idx = paletteVisible.length;
-      paletteVisible.push({ kind: 'symbol', payload: r });
-      html += `<div class="palette-item" data-i="${idx}"><span class="it-icon">↗</span> ${escapeHtml(r.label)} <span class="it-meta">${escapeHtml(r.file || '')}</span></div>`;
-    });
-  }
-  // If the user typed something and there are no recents, show a "search live" hint.
-  if (matchedActions.length === 0 && matchedRecents.length === 0 && q && LIVE_MODE) {
-    paletteVisible.push({ kind: 'live-search', payload: q });
-    html = `<div class="palette-item active" data-i="0"><span class="it-icon">🔎</span> Search live: <b>${escapeHtml(q)}</b></div>`;
-    paletteActiveIndex = 0;
-  }
-  list.innerHTML = html;
-  highlightPaletteRow();
-}
-function highlightPaletteRow() {
-  document.querySelectorAll('.palette-item').forEach((el, i) => {
-    el.classList.toggle('active', i === paletteActiveIndex);
-  });
-  // Scroll the active row into view.
-  const active = document.querySelector('.palette-item.active');
-  active?.scrollIntoView({ block: 'nearest' });
-}
-
-function selectPalette(item) {
-  if (!item) return;
-  closePalette();
-  if (item.kind === 'action') item.payload.run();
-  else if (item.kind === 'symbol') {
-    if (LIVE_MODE) searchAndFocus(item.payload.id);
-    else if (typeof selectSymbol === 'function') selectSymbol(item.payload.id);
-  } else if (item.kind === 'live-search' && LIVE_MODE) {
-    searchAndFocus(item.payload);
-  }
-}
-
-document.getElementById('palette-input').addEventListener('input', (e) => {
-  paletteActiveIndex = 0;
-  renderPalette(e.target.value);
-});
-document.getElementById('palette-input').addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
-  else if (e.key === 'ArrowDown') {
-    e.preventDefault();
-    paletteActiveIndex = Math.min(paletteVisible.length - 1, paletteActiveIndex + 1);
-    highlightPaletteRow();
-  } else if (e.key === 'ArrowUp') {
-    e.preventDefault();
-    paletteActiveIndex = Math.max(0, paletteActiveIndex - 1);
-    highlightPaletteRow();
-  } else if (e.key === 'Enter') {
-    e.preventDefault();
-    selectPalette(paletteVisible[paletteActiveIndex]);
-  }
-});
-document.getElementById('palette-list').addEventListener('click', (e) => {
-  const row = e.target.closest('.palette-item[data-i]');
-  if (!row) return;
-  selectPalette(paletteVisible[Number.parseInt(row.dataset.i, 10)]);
-});
-document.getElementById('palette-backdrop').addEventListener('click', (e) => {
-  if (e.target.id === 'palette-backdrop') closePalette();
-});
-
-// Open Cmd/Ctrl+K from anywhere — including from inputs, since
-// that's the universal gesture users expect to work everywhere.
-document.addEventListener('keydown', (e) => {
-  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault();
-    if (document.getElementById('palette-backdrop').hidden) openPalette();
-    else closePalette();
-  }
-});
-
-/* URL hash state — `#focus=<id>&scope=<prefix>` reflects the
-   current view so an agent can navigate by setting location.hash
-   and a human can share a deep link to the same view. Also drives
-   "back/forward in browser history" for free. Agent-friendly URLs
-   are agent-friendly because the LOAD path is symmetric: parse
-   the hash on boot, apply it. */
-function readHashState() {
-  const h = location.hash.replace(/^#/, '');
-  if (!h) return {};
-  const out = {};
-  for (const part of h.split('&')) {
-    const [k, ...rest] = part.split('=');
-    if (k) out[decodeURIComponent(k)] = decodeURIComponent(rest.join('='));
-  }
-  return out;
-}
-function writeHashState() {
-  const parts = [];
-  if (liveSymbolCache?.id) parts.push(`focus=${encodeURIComponent(liveSymbolCache.id)}`);
-  if (breadcrumbScope) parts.push(`scope=${encodeURIComponent(breadcrumbScope)}`);
-  const next = '#' + parts.join('&');
-  if (location.hash !== next && parts.length > 0) {
-    // Use replaceState so URL-driven hops don't pollute browser history
-    // beyond what navPush already manages.
-    history.replaceState(null, '', next);
-  }
-}
-
-async function applyHashState() {
-  if (!LIVE_MODE) return;
-  const s = readHashState();
-  if (s.scope) {
-    breadcrumbScope = s.scope;
-    applyFilters();
-  }
-  if (s.focus) {
-    await searchAndFocus(s.focus);
-  }
-}
-
-/* "Copy link" — copies the current view's URL (with the hash state
-   we just set) to the clipboard. The button briefly turns green
-   so the user knows it landed. */
-async function copyToClipboard(text, btn) {
-  try { await navigator.clipboard.writeText(text); }
-  catch (err) {
-    console.debug('navigator clipboard unavailable', err);
-    try {
-      const ta = document.createElement('textarea');
-      ta.value = text;
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand('copy');
-      ta.remove();
-    } catch (fallbackErr) {
-      console.debug('clipboard fallback failed', fallbackErr);
-    }
-  }
-  if (btn) {
-    const orig = btn.textContent;
-    btn.textContent = '✓ Copied';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
-  }
-}
-
-document.getElementById('btn-copy-link').addEventListener('click', (e) => {
-  writeHashState();
-  copyToClipboard(location.href, e.currentTarget);
-});
-
-/* "Copy MCP" — emits a JSON tool-call snippet for the current
-   symbol that an agent can paste straight into a cartograph MCP
-   client. Defaults to cartograph_node (good detail-fetch); the
-   user can edit the tool name in the result. */
-document.getElementById('btn-copy-mcp').addEventListener('click', (e) => {
-  const sym = liveSymbolCache?.label || (LIVE_MODE ? null : 'extractFromSource');
-  if (!sym) return;
-  const snippet = JSON.stringify({
-    tool: 'cartograph_node',
-    args: { symbol: sym, code: true },
-    note: 'Replace `tool` with cartograph_callers / cartograph_callees / cartograph_impact / cartograph_biomarkers as needed.',
-  }, null, 2);
-  copyToClipboard(snippet, e.currentTarget);
-});
-
-globalThis.addEventListener('hashchange', () => {
-  // Don't loop when we just wrote the hash ourselves.
-  const s = readHashState();
-  if (LIVE_MODE && s.focus && s.focus !== liveSymbolCache?.id) searchAndFocus(s.focus);
-});
-
-/* List of biomarker names used by the intent detector. Mirrors
-   src/biomarkers/types.ts; rename / extend there to keep this in
-   sync. Lowercase + underscore form is what the API expects. */
-const KNOWN_BIOMARKERS = new Set([
-  'large_method', 'complex_method', 'nested_complexity',
-  'complex_conditional', 'brain_method', 'long_parameter_list',
-  'magic_number', 'hardcoded_url', 'recently_grew', 'stale_doc',
-  'unused_export', 'god_class', 'feature_envy',
-]);
-const BIOMARKER_ALIASES = {
-  'god classes': 'god_class', 'god class': 'god_class',
-  'large methods': 'large_method', 'large method': 'large_method',
-  'complex methods': 'complex_method', 'complex method': 'complex_method',
-  'unused exports': 'unused_export', 'unused export': 'unused_export',
-  'brain methods': 'brain_method', 'feature envies': 'feature_envy',
-  'errors': 'error', 'warnings': 'warning',
-};
-
-/* Try to interpret the question as a navigation command. Returns
-   one of: { kind: 'biomarker', name } | { kind: 'symbol', name }
-   | null (fall through to LLM). The detector is intentionally
-   conservative — only obvious "show me X" / bare-biomarker-name
-   inputs match, so general questions still hit the LLM. */
-function detectIntent(raw) {
-  const q = raw.trim().toLowerCase();
-  // Bare biomarker name → biomarker filter.
-  if (KNOWN_BIOMARKERS.has(q)) return { kind: 'biomarker', name: q };
-  if (BIOMARKER_ALIASES[q]) return { kind: 'biomarker', name: BIOMARKER_ALIASES[q] };
-  // "show me god_class", "find god classes", "where are the god classes"
-  const commandPrefixes = ['show me ', 'show ', 'find ', 'locate ', 'where is ', 'where are ', 'where the ', 'list '];
-  const prefix = commandPrefixes.find((candidate) => q.startsWith(candidate));
-  if (prefix) {
-    let target = q.slice(prefix.length).trim();
-    if (target.endsWith('?')) target = target.slice(0, -1).trim();
-    if (target.startsWith('all ')) target = target.slice(4).trim();
-    if (target.startsWith('the ')) target = target.slice(4).trim();
-    if (KNOWN_BIOMARKERS.has(target)) return { kind: 'biomarker', name: target };
-    if (BIOMARKER_ALIASES[target]) return { kind: 'biomarker', name: BIOMARKER_ALIASES[target] };
-    // Otherwise treat as a symbol name (preserve original case).
-    const symbolName = raw.trim().slice(prefix.length).replace(/\?$/, '').trim().replace(/^(?:all|the)\s+/i, '');
-    return { kind: 'symbol', name: symbolName };
-  }
-  return null;
-}
-
-/* Apply a biomarker filter — dim every cy node that doesn't carry
-   a finding of that biomarker, focus the highest-centrality one,
-   and post a clickable summary into the chat. */
-let activeBiomarkerFilter = null;
-async function applyBiomarkerFilter(name, history) {
-  try {
-    const r = await fetch(`/api/findings/${encodeURIComponent(name)}?limit=80`);
-    if (!r.ok) {
-      const err = await r.json().catch(() => ({}));
-      const msg = document.createElement('div');
-      msg.className = 'askpanel-msg err';
-      msg.textContent = err.error || `HTTP ${r.status}`;
-      history.appendChild(msg);
-      return;
-    }
-    const data = await r.json();
-    const findings = data.findings || [];
-    activeBiomarkerFilter = new Set(findings.map((f) => f.id));
-    // Dim non-matching nodes; highlight matches.
-    cy.nodes().forEach((n) => {
-      const hit = activeBiomarkerFilter.has(n.id());
-      n.toggleClass('dim', !hit);
-      n.toggleClass('focus', false);
-    });
-    // Auto-focus the top hit if any of them are in cy already.
-    const inGraph = findings.find((f) => cy.getElementById(f.id).length > 0);
-    if (inGraph) {
-      cy.getElementById(inGraph.id).addClass('focus');
-      await selectSymbolLive(inGraph.id);
-    } else if (findings[0]) {
-      // No match in current cy — re-anchor the graph on the top hit.
-      await searchAndFocus(findings[0].id);
-    }
-    // Render an answer-shaped summary with clickable hits.
-    const ans = document.createElement('div');
-    ans.className = 'askpanel-msg a';
-    ans.innerHTML = `Filtered to <b>${escapeHtml(name)}</b> · ${findings.length} matching symbol${findings.length === 1 ? '' : 's'}<br>` +
-      findings.slice(0, 12).map((f) =>
-        `<a class="ask-link" data-symbol="${escapeHtml(f.id)}">${escapeHtml(f.name)}</a> <span class="ask-loc">${escapeHtml(f.file)} · ${f.severity}/${f.metric}</span>`
-      ).join('<br>') +
-      (findings.length > 12 ? `<br><span class="ask-loc">+${findings.length - 12} more</span>` : '') +
-      `<br><br><a class="ask-link clear-filter" data-action="clear-biomarker">⊘ Clear filter</a>`;
-    history.appendChild(ans);
-  } catch (err) {
-    const msg = document.createElement('div');
-    msg.className = 'askpanel-msg err';
-    msg.textContent = `Failed to apply filter: ${String(err)}`;
-    history.appendChild(msg);
-  }
-}
-
-function clearBiomarkerFilter() {
-  activeBiomarkerFilter = null;
-  cy.nodes().removeClass('dim');
-}
-
-/* Turn backtick-quoted identifiers in an answer into <a> links.
-   `foo` → <a class="ask-link" data-symbol="foo">foo</a>.
-   Escapes the surrounding text so the answer can't inject HTML. */
-function renderAnswerWithCitations(text) {
-  // Split on backticks so we can wrap odd-indexed (inside ``) parts.
-  const parts = String(text ?? '').split('`');
-  return parts.map((part, i) => {
-    const safe = escapeHtml(part);
-    if (i % 2 === 1 && /^[A-Za-z_][\w$]*$/.test(part)) {
-      // Plain identifier in backticks — render as link.
-      return `<a class="ask-link" data-symbol="${safe}">${safe}</a>`;
-    }
-    if (i % 2 === 1) {
-      // Some other backticked content (e.g., a path or expression) —
-      // keep monospace styling but not clickable.
-      return `<code>${safe}</code>`;
-    }
-    return safe;
-  }).join('');
-}
-
-/* Click delegate inside the chat history for inline links —
-   clickable symbols and the Clear-filter action. */
-document.getElementById('ask-history').addEventListener('click', (e) => {
-  const link = e.target.closest('a.ask-link');
-  if (!link) return;
-  if (link.dataset.action === 'clear-biomarker') {
-    clearBiomarkerFilter();
-    const ack = document.createElement('div');
-    ack.className = 'askpanel-msg a';
-    ack.textContent = 'Filter cleared.';
-    document.getElementById('ask-history').appendChild(ack);
-    return;
-  }
-  const sym = link.dataset.symbol;
-  if (sym && LIVE_MODE) searchAndFocus(sym);
-});
-
-/* Captured source selection — refreshed on selectionchange whenever
-   the active selection lives inside the code panel. Kept around so
-   the user can highlight code, then click into the chat to ask
-   "refactor this" without losing the selection. */
-let capturedSelection = '';
-let capturedSelectionLines = 0;
-
-function updateAskSelectionChip() {
-  const chip = document.getElementById('ask-selection-chip');
-  const count = document.getElementById('ask-selection-count');
-  if (!capturedSelection) { chip.hidden = true; return; }
-  chip.hidden = false;
-  count.textContent = `${capturedSelectionLines} line${capturedSelectionLines === 1 ? '' : 's'} selected`;
-}
-
-document.addEventListener('selectionchange', () => {
-  const sel = globalThis.getSelection();
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) {
-    // Don't clear immediately — user might be moving focus to the
-    // chat input. Only clear when an entirely-different focus
-    // grabs the selection.
-    return;
-  }
-  const range = sel.getRangeAt(0);
-  const codeEl = document.getElementById('d-code');
-  if (!codeEl.contains(range.commonAncestorContainer)) return;
-  // Build a clean string from the selection, stripping line-number
-  // gutter spans (marked with .lineno).
-  const fragment = range.cloneContents();
-  fragment.querySelectorAll('.lineno').forEach((el) => el.remove());
-  const text = fragment.textContent ?? '';
-  if (!text.trim()) return;
-  capturedSelection = text;
-  capturedSelectionLines = text.split('\n').filter((l) => l.length > 0 || true).length;
-  // Recompute lines as the count of newlines + 1.
-  capturedSelectionLines = (text.match(/\n/g)?.length ?? 0) + 1;
-  updateAskSelectionChip();
-});
-
-document.getElementById('ask-selection-clear').addEventListener('click', () => {
-  capturedSelection = '';
-  capturedSelectionLines = 0;
-  updateAskSelectionChip();
-  globalThis.getSelection()?.removeAllRanges();
-});
-
-/* Ask-AI panel wiring.
-   Submitting first runs intent detection — bare biomarker names,
-   "show me <X>" / "find <X>" patterns trigger viewer navigation
-   directly without burning an LLM call. Anything else POSTs to
-   /api/ask (which delegates to cg.llm.ask), with any active code
-   selection folded in as context. */
-async function submitAsk(question) {
-  const target = liveSymbolCache?.label || (LIVE_MODE ? null : 'extractFromSource');
-  const history = document.getElementById('ask-history');
-  const submitBtn = document.getElementById('ask-submit');
-  // Render the user message.
-  const qNode = document.createElement('div');
-  qNode.className = 'askpanel-msg q';
-  qNode.textContent = question;
-  history.appendChild(qNode);
-
-  // Intent detection — does this match a navigation pattern?
-  // If yes, handle in-app and skip the LLM round-trip.
-  const intent = detectIntent(question);
-  if (intent && LIVE_MODE) {
-    submitBtn.disabled = true;
-    try {
-      if (intent.kind === 'biomarker') {
-        await applyBiomarkerFilter(intent.name, history);
-      } else if (intent.kind === 'symbol') {
-        await searchAndFocus(intent.name);
-        const ack = document.createElement('div');
-        ack.className = 'askpanel-msg a';
-        ack.innerHTML = `Focused on <a class="ask-link" data-symbol="${escapeHtml(intent.name)}">${escapeHtml(intent.name)}</a>.`;
-        history.appendChild(ack);
-      }
-    } finally {
-      submitBtn.disabled = false;
-      history.scrollTop = history.scrollHeight;
-    }
-    return;
-  }
-
-  // Render a loading placeholder.
-  const loading = document.createElement('div');
-  loading.className = 'askpanel-msg loading';
-  loading.textContent = 'Thinking…';
-  history.appendChild(loading);
-  history.scrollTop = history.scrollHeight;
-  submitBtn.disabled = true;
-
-  try {
-    if (!LIVE_MODE) {
-      loading.classList.replace('loading', 'err');
-      loading.textContent = 'Ask is only available in live mode (cartograph viewer CLI), not in the standalone mockup.';
-      return;
-    }
-    const r = await fetch('/api/ask', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ question, symbol: target, selection: capturedSelection }),
-    });
-    const data = await r.json();
-    if (!r.ok || data.error) {
-      loading.classList.replace('loading', 'err');
-      const errBody = document.createElement('div');
-      errBody.textContent = data.error || `HTTP ${r.status}`;
-      loading.textContent = '';
-      loading.appendChild(errBody);
-      if (data.hint) {
-        const hint = document.createElement('div');
-        hint.className = 'hint';
-        hint.textContent = data.hint;
-        loading.appendChild(hint);
-      }
-      return;
-    }
-    loading.classList.replace('loading', 'a');
-    // Render the answer with backtick-quoted identifiers turned
-    // into clickable links — same convention cartograph_ask uses
-    // for citation grounding. The click delegate above routes
-    // them through searchAndFocus.
-    loading.innerHTML = renderAnswerWithCitations(data.answer || '(empty answer)');
-  } catch (err) {
-    loading.classList.replace('loading', 'err');
-    loading.textContent = `Network error: ${String(err)}`;
-  } finally {
-    submitBtn.disabled = false;
-    history.scrollTop = history.scrollHeight;
-  }
-}
-
-document.getElementById('ask-form').addEventListener('submit', (e) => {
-  e.preventDefault();
-  const input = document.getElementById('ask-input');
-  const q = input.value.trim();
-  if (!q) return;
-  submitAsk(q);
-  input.value = '';
-});
-
-document.getElementById('ask-input').addEventListener('keydown', (e) => {
-  // Cmd/Ctrl+Enter submits — natural for multi-line textareas.
-  if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-    e.preventDefault();
-    document.getElementById('ask-form').requestSubmit();
-  }
-});
-
-function updateAskTarget(label) {
-  const el = document.getElementById('ask-target');
-  if (el) el.textContent = label || 'this symbol';
-}
-
-/* Selection history stack — back/forward navigation, browser-style.
-   Push on every NEW selection; back/forward replay through the
-   stack without re-pushing. The `_navigating` flag suppresses the
-   push when a selection comes from the back/forward buttons
-   themselves. */
-const navHistory = [];
-let navIndex = -1;
-let _navigating = false;
-
-function navUpdateButtons() {
-  document.getElementById('btn-nav-back').disabled = navIndex <= 0;
-  document.getElementById('btn-nav-fwd').disabled  = navIndex >= navHistory.length - 1;
-}
-function navPush(symbolId) {
-  if (_navigating) return;
-  // Truncate any forward history when a fresh selection lands.
-  navHistory.splice(navIndex + 1);
-  if (navHistory[navHistory.length - 1] === symbolId) return;  // no-op if same as top
-  navHistory.push(symbolId);
-  navIndex = navHistory.length - 1;
-  navUpdateButtons();
-}
-async function navTo(delta) {
-  const next = navIndex + delta;
-  if (next < 0 || next >= navHistory.length) return;
-  navIndex = next;
-  _navigating = true;
-  try {
-    if (LIVE_MODE) await selectSymbolLive(navHistory[navIndex]);
-    else if (typeof selectSymbol === 'function') selectSymbol(navHistory[navIndex]);
-  } finally {
-    _navigating = false;
-    navUpdateButtons();
-  }
-}
-document.getElementById('btn-nav-back').addEventListener('click', () => navTo(-1));
-document.getElementById('btn-nav-fwd') .addEventListener('click', () => navTo(+1));
-
-async function selectSymbolLive(symbolId) {
-  try {
-    const r = await fetch(`/api/symbol/${encodeURIComponent(symbolId)}`);
-    if (!r.ok) return;
-    const p = await r.json();
-    liveSymbolCache = p;
-    navPush(p.id);
-    pushRecent(p);
-    writeHashState();
-    document.getElementById('d-name').textContent = p.label;
-    const signatureSuffix = p.signature ? `  ${p.signature.replaceAll(/\s+/g, ' ').trim()}` : '';
-    const subtitle = `${p.kind} · ${p.file}:${p.line ?? '?'}${signatureSuffix}`;
-    document.getElementById('d-loc').textContent = subtitle;
-    renderBreadcrumb(p.file, p.label);
-    renderDocstringPreview(p.docstring, p.id);
-    resetCodePanel(p.id);
-    document.getElementById('d-cent').textContent = (p.centrality ?? 0).toFixed(4);
-    const errs = (p.findings ?? []).filter(f => f.severity === 'error').length;
-    const warns = (p.findings ?? []).filter(f => f.severity === 'warning').length;
-    let health10 = '10/10';
-    if (errs > 0) health10 = '3/10';
-    else if (warns > 0) health10 = '6/10';
-    const healthEl = document.getElementById('d-health');
-    healthEl.textContent = health10;
-    let healthClass = 'ok';
-    if (errs > 0) healthClass = 'err';
-    else if (warns > 0) healthClass = 'warn';
-    healthEl.className = `v ${healthClass}`;
-    document.getElementById('d-cov').textContent = p.coverage && p.coverage.ratio != null
-      ? `${Math.round(p.coverage.ratio * 100)}%`
-      : '—';
-    document.getElementById('d-callers-ct').textContent = `(${(p.callers ?? []).length})`;
-    document.getElementById('d-callees-ct').textContent = `(${(p.callees ?? []).length})`;
-    document.getElementById('d-findings-ct').textContent = `(${(p.findings ?? []).length})`;
-    const m = p.metrics ?? {};
-    document.getElementById('m-loc').textContent     = m.loc ?? '—';
-    document.getElementById('m-cyc').textContent     = m.cyclomatic ?? '—';
-    document.getElementById('m-nest').textContent    = m.maxNesting ?? '—';
-    document.getElementById('m-first').textContent   = formatRelative(m.fileFirstSeenTs);
-    document.getElementById('m-last').textContent    = formatRelative(m.fileLastTouchedTs);
-    document.getElementById('m-commits').textContent = m.fileCommits ?? '—';
-    const activeSub = document.querySelector('.subtab.active')?.dataset.sub || 'callers';
-    renderSubpanelLive(activeSub);
-    cy.nodes().removeClass('focus');
-    cy.getElementById(p.id).addClass('focus');
-  } catch (err) {
-    console.warn('viewer: selectSymbolLive failed', err);
-  }
-}
-
-function renderSubpanelLive(sub) {
-  const p = liveSymbolCache;
-  if (!p) { SUBPANEL.innerHTML = '<div class="empty">No selection</div>'; return; }
-  // All API string fields go through escapeHtml — symbol names from
-  // indexed source could contain '<' / '>' (e.g. C++ template params,
-  // operator overloads). Local-only viewer so the attack surface is
-  // small but the principle stands.
-  const esc = (v) => escapeHtml(String(v ?? '?'));
-  // data-symbol carries the node id so the click delegate below can
-  // navigate without re-resolving by name (collisions on common
-  // names would otherwise route to the wrong symbol).
-  const refRow = (n) => `<div class="ref-row" data-symbol="${esc(n.id)}" title="${esc(n.label || n.id)} — click to focus"><div class="name">${esc(n.label || n.id)}</div><div class="loc">${esc(n.file)}:${esc(n.line ?? '?')}</div></div>`;
-  SUBPANEL.innerHTML = renderLiveSubpanelHtml(sub, p, esc, refRow);
-}
-
-function renderLiveSubpanelHtml(sub, p, esc, refRow) {
-  if (sub === 'callers') return (p.callers ?? []).map(refRow).join('') || '<div class="empty">No callers</div>';
-  if (sub === 'callees') return (p.callees ?? []).map(refRow).join('') || '<div class="empty">No callees</div>';
-  if (sub === 'findings') return renderLiveFindingsHtml(p, esc);
-  if (sub === 'coverage') return renderLiveCoverageHtml(p, esc);
-  return '';
-}
-
-function renderLiveFindingsHtml(p, esc) {
-  const findings = p.findings ?? [];
-  return findings.length === 0
-    ? '<div class="empty">No findings — code health 10/10</div>'
-    : findings.map(f => `<div class="ref-row"><div class="name">${esc(f.biomarker)}</div><div class="loc">severity: ${esc(f.severity)} · metric ${esc(f.metric)}</div></div>`).join('');
-}
-
-function renderLiveCoverageHtml(p, esc) {
-  const cov = p.coverage;
-  if (!cov) return '<div class="empty">No coverage data — run <code>cartograph coverage --mode load --report-path &lt;lcov&gt;</code> to ingest.</div>';
-
-  const pct = typeof cov.ratio === 'number' ? `${Math.round(cov.ratio * 100)}%` : '—';
-  const branches = typeof cov.totalBranches === 'number'
-    ? `${cov.coveredBranches}/${cov.totalBranches} branches covered`
-    : 'branch coverage not in source';
-  return `<div class="ref-row"><div class="name">Lines: ${esc(pct)}</div><div class="loc">${cov.coveredLines}/${cov.totalLines} lines · source: ${esc(cov.source)}</div></div>` +
-    `<div class="ref-row"><div class="name">Branches</div><div class="loc">${esc(branches)}</div></div>`;
-}
-
-/* ───────── Detail pane ───────── */
-
-const SUBPANEL = document.getElementById('subpanel');
-
-function renderSubpanel(symbolId, sub) {
-  const n = NODES.find(x => x.id === symbolId);
-  if (!n) { SUBPANEL.innerHTML = '<div class="empty">No selection</div>'; return; }
-  const resolveRef = (entry) => {
-    if (typeof entry === 'object' && entry && entry.file) return entry;
-    const id = typeof entry === 'string' ? entry : entry?.id;
-    return NODES.find(x => x.id === id) || { id, label: id, file: '?', line: '?' };
-  };
-  if (sub === 'callers') {
-    const callers = n.callers || EDGES.filter(([,t]) => t === symbolId).map(([s]) => s);
-    SUBPANEL.innerHTML = callers.map(c => {
-      const r = resolveRef(c);
-      return `<div class="ref-row" data-symbol="${escapeHtml(r.id)}" title="${escapeHtml(r.label || r.id)} — click to focus"><div class="name">${r.label || r.id}</div><div class="loc">${r.file}:${r.line ?? '?'}</div></div>`;
-    }).join('') || '<div class="empty">No callers</div>';
-  } else if (sub === 'callees') {
-    const callees = n.callees || EDGES.filter(([s]) => s === symbolId).map(([,t]) => t);
-    SUBPANEL.innerHTML = callees.map(c => {
-      const r = resolveRef(c);
-      return `<div class="ref-row" data-symbol="${escapeHtml(r.id)}" title="${escapeHtml(r.label || r.id)} — click to focus"><div class="name">${r.label || r.id}</div><div class="loc">${r.file}:${r.line ?? '?'}</div></div>`;
-    }).join('') || '<div class="empty">No callees</div>';
-  } else if (sub === 'findings') {
-    SUBPANEL.innerHTML = n.health === 'healthy'
-      ? '<div class="empty">No findings — code health 10/10</div>'
-      : `<div class="ref-row"><div class="name">large_method</div><div class="loc">severity: warning · LOC ${(n.metrics?.loc ?? 120)} ≥ 100</div></div>`;
-  } else if (sub === 'coverage') {
-    SUBPANEL.innerHTML = `<div class="ref-row"><div class="name">Statement coverage</div><div class="loc">${Math.round((n.coverage ?? 0)*100)}% &middot; lcov</div></div>`;
-  }
-}
-
-function selectSymbol(symbolId) {
-  const n = NODES.find(x => x.id === symbolId);
-  if (!n) return;
-  navPush(n.id);
-  renderBreadcrumb(n.file, n.label);
-  renderDocstringPreview(null, n.id);  // hardcoded NODES don't carry docstrings
-  resetCodePanel(n.id);          // file:// mode: source isn't fetched
-  document.getElementById('d-name').textContent = n.label;
-  document.getElementById('d-loc').textContent = `${n.kind} · ${n.file}:${n.line ?? '?'}`;
-  document.getElementById('d-cent').textContent = n.centrality?.toFixed?.(4) ?? '—';
-  const health10 = ({ healthy: '10/10', info: '8/10', warning: '6/10', error: '3/10' })[n.health] || '—';
-  document.getElementById('d-health').textContent = health10;
-  document.getElementById('d-cov').textContent = `${Math.round((n.coverage ?? 0)*100)}%`;
-  const callerCt = (n.callers || EDGES.filter(([,t]) => t === symbolId).map(([s]) => s)).length;
-  const calleeCt = (n.callees || EDGES.filter(([s]) => s === symbolId).map(([,t]) => t)).length;
-  document.getElementById('d-callers-ct').textContent = `(${callerCt})`;
-  document.getElementById('d-callees-ct').textContent = `(${calleeCt})`;
-  document.getElementById('d-findings-ct').textContent = `(${n.health === 'healthy' ? 0 : 1})`;
-  if (n.metrics) {
-    document.getElementById('m-loc').textContent     = n.metrics.loc;
-    document.getElementById('m-cyc').textContent     = n.metrics.cyc;
-    document.getElementById('m-nest').textContent    = n.metrics.nest;
-    document.getElementById('m-first').textContent   = n.metrics.first;
-    document.getElementById('m-last').textContent    = n.metrics.last;
-    document.getElementById('m-commits').textContent = n.metrics.commits;
-  }
-  const activeSub = document.querySelector('.subtab.active')?.dataset.sub || 'callers';
-  renderSubpanel(symbolId, activeSub);
-
-  cy.nodes().removeClass('focus');
-  cy.getElementById(symbolId).addClass('focus');
-}
-
-document.querySelectorAll('.subtab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.subtab').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    if (LIVE_MODE) {
-      renderSubpanelLive(t.dataset.sub);
-    } else {
-      const id = document.getElementById('d-name').textContent;
-      const realId = NODES.find(n => n.label === id)?.id || id;
-      renderSubpanel(realId, t.dataset.sub);
-    }
-  });
-});
-
-cy.on('tap', 'node', (evt) => {
-  if (LIVE_MODE) {
-    selectSymbolLive(evt.target.id());
-  } else {
-    selectSymbol(evt.target.id());
-    // also activate the matching trace step if any
-    const traceForNode = TRACE.findIndex(t => t.focus === evt.target.id());
-    if (traceForNode >= 0) activateTraceStep(traceForNode, /* from cy */ true);
-  }
-});
-
-/* default selection — only for the file:// fallback. Live mode picks
-   its own initial selection inside bootLive() once the graph loads. */
-if (LIVE_MODE) await bootLive();
-else selectSymbol('extractFromSource');
-
-/* ───────── Trace timeline ───────── */
-
-const traceList = document.getElementById('trace-list');
-function renderTrace() {
-  traceList.innerHTML = TRACE.map((t, i) => `
-    <div class="trace-row" data-i="${i}">
-      <span class="delta">${t.delta}</span>
-      <span class="step-num">${t.step}</span>
-      <span class="tool">${t.tool}</span>
-      <span class="args">${escapeHtml(t.args)}</span>
-      <span class="result">${escapeHtml(t.result)}</span>
-    </div>
-  `).join('');
-  traceList.querySelectorAll('.trace-row').forEach(el =>
-    el.addEventListener('click', () => activateTraceStep(Number.parseInt(el.dataset.i, 10)))
-  );
-}
-function escapeHtml(s) { return s.replaceAll(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-renderTrace();
-
-let activeStep = -1;
-
-function activateTraceStep(i, fromCy = false) {
-  activeStep = i;
-  const t = TRACE[i];
-  document.querySelectorAll('.trace-row').forEach(el => el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
-  const row = traceList.querySelector(`.trace-row[data-i="${i}"]`);
-  if (row && !fromCy) row.scrollIntoView({ block: 'nearest' });
-
-  // visualise on graph: highlight subgraph, dim everything else
-  if (t.subgraph) {
-    const set = new Set(t.subgraph);
-    cy.nodes().forEach(n => n.toggleClass('dim', !set.has(n.id())));
-    cy.edges().forEach(e => {
-      const both = set.has(e.source().id()) && set.has(e.target().id());
-      e.toggleClass('dim', !both);
-      e.toggleClass('highlight', both);
-    });
-    document.getElementById('canvas-banner').classList.add('show');
-    document.getElementById('canvas-counter').innerHTML =
-      `Replay step ${t.step} · <b style="color:var(--text)">${t.tool}</b> · showing ${t.subgraph.length} nodes`;
-  } else {
-    cy.nodes().removeClass('dim');
-    cy.edges().removeClass('dim').removeClass('highlight');
-    document.getElementById('canvas-banner').classList.remove('show');
-    document.getElementById('canvas-counter').innerHTML = baseCounterHTML;
-  }
-
-  if (t.focus && !fromCy) selectSymbol(t.focus);
-}
-
-/* Tracks the most-recent "default" counter for the canvas (set by
-   bootLive in live mode, by the cy init in file:// mode). The
-   background-tap handler restores this instead of a hardcoded string
-   so live mode doesn't fall back to the mockup's 18-nodes/24-edges. */
-let baseCounterHTML = `Showing 0 nodes · 0 edges`;
-function setBaseCounter(html) { baseCounterHTML = html; document.getElementById('canvas-counter').innerHTML = html; }
-
-/* clear replay when clicking on the empty graph background */
-cy.on('tap', (e) => {
-  if (e.target === cy) {
-    activeStep = -1;
-    document.querySelectorAll('.trace-row').forEach(el => el.classList.remove('active'));
-    cy.nodes().removeClass('dim');
-    cy.edges().removeClass('dim').removeClass('highlight');
-    document.getElementById('canvas-banner').classList.remove('show');
-    document.getElementById('canvas-counter').innerHTML = baseCounterHTML;
-  }
-});
-
-/* ───────── Replay button ───────── */
-
-let replayTimer = null;
-document.getElementById('btn-replay').addEventListener('click', () => {
-  // Toggle pause/resume regardless of mode
-  if (replayTimer) {
-    clearInterval(replayTimer); replayTimer = null;
-    document.getElementById('btn-replay').textContent = '▶ Replay';
-    return;
-  }
-  // Pick the call list to step through based on mode
-  const calls = LIVE_MODE ? liveTraceCalls : TRACE;
-  if (!calls || calls.length === 0) return;
-  const stepFn = LIVE_MODE ? activateLiveTraceStep : activateTraceStep;
-  let i = 0;
-  document.getElementById('btn-replay').textContent = '⏸ Pause';
-  stepFn(i);
-  replayTimer = setInterval(() => {
-    i++;
-    if (i >= calls.length) {
-      clearInterval(replayTimer); replayTimer = null;
-      document.getElementById('btn-replay').textContent = '▶ Replay';
-      return;
-    }
-    stepFn(i);
-  }, 850);
-});
-
-document.getElementById('btn-export').addEventListener('click', () => {
-  // Export whatever trace the user is looking at — TRACE in file://
-  // mode, the live session's calls in live mode.
-  const data = LIVE_MODE ? liveTraceCalls : TRACE;
-  if (!data || data.length === 0) return;
-  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'agent-trace.json';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-});
-
-/* ───────── Filters ───────── */
-
-const minCentrality = 0;
-
-function applyFilters() {
-  // Active kinds come from the chip group: each chip's
-  // data-filter-kinds is a comma-separated list (e.g. "class,struct,
-  // enum") and inactive chips contribute none. The legacy
-  // data-filter-kind checkbox path is gone — chips replaced it.
-  const kinds = new Set();
-  document.querySelectorAll('.kind-chip[data-active="1"]').forEach((chip) => {
-    String(chip.dataset.filterKinds || '').split(',').forEach((k) => k && kinds.add(k.trim()));
-  });
-  const healths = new Set(
-    Array.from(document.querySelectorAll('[data-filter-health]:checked'))
-      .map(el => el.dataset.filterHealth)
-  );
-  const scopes = Array.from(document.querySelectorAll('[data-filter-scope]:checked'))
-    .map(el => el.dataset.filterScope);
-
-  let visibleCount = 0;
-  cy.nodes().forEach(n => {
-    const kind = n.data('kind');
-    const health = n.data('health');
-    const file = n.data('file') || '';
-    const cent = LIVE_MODE
-      ? (liveNodeIndex.get(n.id())?.centrality ?? 0)
-      : (NODES.find(x => x.id === n.id())?.centrality ?? 0);
-    const inKind = kinds.has(kind);
-    const inHealth = healths.has(health);
-    const inScope = scopes.length === 0 || scopes.some(s => file.startsWith(s)) || file === '';
-    const inCent = cent >= minCentrality;
-    // Breadcrumb scope is a stricter override on top of the rail
-    // file-scope: when set, only nodes under that exact prefix
-    // survive (regardless of which rail scopes are checked).
-    const inBreadcrumb = !breadcrumbScope || file.startsWith(breadcrumbScope);
-    const visible = inKind && inHealth && inScope && inCent && inBreadcrumb;
-    n.style('display', visible ? 'element' : 'none');
-    if (visible) visibleCount++;
-  });
-  let edgeCount = 0;
-  cy.edges().forEach(e => {
-    const visible = e.source().style('display') !== 'none' && e.target().style('display') !== 'none';
-    e.style('display', visible ? 'element' : 'none');
-    if (visible) edgeCount++;
-  });
-  document.getElementById('canvas-counter').innerHTML =
-    `Showing ${visibleCount} nodes · ${edgeCount} edges`;
-}
-
-document.querySelectorAll('[data-filter-health], [data-filter-scope]')
-  .forEach(el => el.addEventListener('change', applyFilters));
-
-// Click delegate on the chip group — toggles data-active and re-applies.
-document.getElementById('kind-chips').addEventListener('click', (e) => {
-  const chip = e.target.closest('.kind-chip');
-  if (!chip) return;
-  chip.dataset.active = chip.dataset.active === '1' ? '0' : '1';
-  applyFilters();
-});
-
-// Centrality + coverage sliders dropped in the redesign — they
-// added rail noise without enabling a real workflow. minCentrality
-// stays at the default 0.0 so applyFilters keeps every node by
-// default; future iteration can reintroduce as a "show only the
-// most-central N" toggle if there's demand.
-
-/* ───────── Top-level tabs ───────── */
-
-document.querySelectorAll('.tab').forEach(t => {
-  t.addEventListener('click', () => {
-    document.querySelectorAll('.tab').forEach(x => x.classList.remove('active'));
-    t.classList.add('active');
-    const view = t.dataset.view;
-    const stage = document.querySelector('.stage');
-    const health = document.getElementById('health-view');
-    // Trace bar is only relevant on the Agent trace tab — let the
-    // canvas claim the full vertical otherwise. The .with-tracebar
-    // class on the stage drives the grid template.
-    stage.classList.toggle('with-tracebar', view === 'trace');
-    // Code panel only makes sense on the Graph tab.
-    const colEl = document.getElementById('canvas-col');
-    if (view !== 'graph') colEl.classList.remove('with-codepane');
-    else if (LIVE_MODE && liveSymbolCache?.id) colEl.classList.add('with-codepane');
-    if (view === 'health') {
-      stage.style.display = 'none';
-      health.style.display = 'block';
-      if (LIVE_MODE) loadHealthLive();
-    } else {
-      stage.style.display = 'grid';
-      health.style.display = 'none';
-      // The canvas just got resized when grid-template-rows changed;
-      // ask cy to re-fit so nothing clips off-screen.
-      setTimeout(() => { cy.resize(); cy.fit(undefined, 60); }, 0);
-      if (view === 'trace') {
-        if (LIVE_MODE) loadSessionsLive();
-        else if (activeStep < 0) activateTraceStep(5); // step 6 (impact) is the most visually interesting
-      } else {
-        // graph: clear active step
-        activeStep = -1;
-        document.querySelectorAll('.trace-row').forEach(el => el.classList.remove('active'));
-        cy.nodes().removeClass('dim');
-        cy.edges().removeClass('dim').removeClass('highlight');
-        document.getElementById('canvas-banner').classList.remove('show');
-      }
-    }
-  });
-});
-
-</script>
+<script src="viewer.demo-data.app"></script>
+<script src="viewer.state.app"></script>
+<script src="viewer.graph-core.app"></script>
+<script src="viewer.mobile-panels.app"></script>
+<script src="viewer.graph-layout.app"></script>
+<script src="viewer.edge-inspection.app"></script>
+<script src="viewer.graph-diagnostics.app"></script>
+<script src="viewer.live.app"></script>
+<script src="viewer.health.app"></script>
+<script src="viewer.source.app"></script>
+<script src="viewer.palette.app"></script>
+<script src="viewer.hash-editor.app"></script>
+<script src="viewer.graph-export.app"></script>
+<script src="viewer.ask.app"></script>
+<script src="viewer.selection-detail.app"></script>
+<script src="viewer.trace.app"></script>
+<script src="viewer.filters.app"></script>
+<script src="viewer.features.app"></script>
+<script src="viewer.ui.app"></script>
+<script src="viewer.tooltips.app"></script>
+<script src="viewer.app"></script>
 </body>
 </html>

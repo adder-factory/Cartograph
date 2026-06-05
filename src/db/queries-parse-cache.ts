@@ -45,7 +45,7 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
  * entries that no longer match the live `ExtractionResult` shape — is
  * a hard-to-diagnose corruption class.
  */
-const PAYLOAD_VERSION = computeAlgoHash(import.meta.url, ['../types']);
+const PAYLOAD_VERSION = computeAlgoHash('src/db/queries-parse-cache.ts', ['../types']);
 
 interface CachedPayload {
   _v: string;
