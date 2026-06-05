@@ -74,14 +74,18 @@ function startDaemonProxy(projectRoot: string): {
   stdout: string;
   stderr: string;
 } {
-  const child = spawn('bun', [cliEntry, 'serve', '--mcp', '--daemon', '--project-path', projectRoot, '--no-startup-sync'], {
-    cwd: repoRoot,
-    env: {
-      ...process.env,
-      CARTOGRAPH_DAEMON_IDLE_TIMEOUT_MS: '500',
+  const child = spawn(
+    'bun',
+    [cliEntry, 'serve', '--mcp', '--daemon', '--project-path', projectRoot, '--no-startup-sync'],
+    {
+      cwd: repoRoot,
+      env: {
+        ...process.env,
+        CARTOGRAPH_DAEMON_IDLE_TIMEOUT_MS: '500',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
     },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  );
 
   const state = {
     child,
@@ -120,7 +124,9 @@ function startDaemonProxy(projectRoot: string): {
     });
     child.once('exit', (code) => {
       clearTimeout(timeout);
-      reject(new Error(`daemon proxy exited before attach with ${code}\nstdout:\n${state.stdout}\nstderr:\n${state.stderr}`));
+      reject(
+        new Error(`daemon proxy exited before attach with ${code}\nstdout:\n${state.stdout}\nstderr:\n${state.stderr}`),
+      );
     });
   });
 
