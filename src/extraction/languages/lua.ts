@@ -60,7 +60,7 @@ import type { LanguageExtractor, ExtractorContext } from '../tree-sitter-types.j
  * - `dofile` / `loadfile`, `package.path` indirection.
  */
 
-const luaExtractor: LanguageExtractor = {
+export const luaExtractor: LanguageExtractor = {
   functionTypes: ['function_declaration'],
   classTypes: [],
   methodTypes: [],

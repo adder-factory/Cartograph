@@ -42,7 +42,9 @@ import type { Edge, Node, NodeKind } from '../types.js';
 import { extractServiceTagFacts } from '../resolution/frameworks/drupal.js';
 import { getParser, loadGrammarsForLanguages } from '../extraction/grammars.js';
 
-export const DRUPAL_SERVICE_TAGS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./drupal-service-tags']);
+export const DRUPAL_SERVICE_TAGS_ALGO_VERSION = computeAlgoHash('src/index-hooks/drupal-service-tags.ts', [
+  './drupal-service-tags',
+]);
 const LAST_MINED_KEY = 'last_mined_drupal_service_tags_algo_version';
 
 /** Marker embedded in a tag hub's qualifiedName — `<file>::service-tag:<name>`

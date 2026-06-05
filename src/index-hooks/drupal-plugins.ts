@@ -52,7 +52,7 @@ import type { SyncResult } from '../extraction/index.js';
 import type { Edge, Node, NodeKind } from '../types.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers a full re-mine. */
-export const DRUPAL_PLUGINS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./drupal-plugins']);
+export const DRUPAL_PLUGINS_ALGO_VERSION = computeAlgoHash('src/index-hooks/drupal-plugins.ts', ['./drupal-plugins']);
 const LAST_MINED_KEY = 'last_mined_drupal_plugins_algo_version';
 
 /**

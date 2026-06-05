@@ -5,6 +5,8 @@ import { expressResolver } from '../src/resolution/frameworks/express.js';
 import { djangoResolver, flaskResolver, fastapiResolver } from '../src/resolution/frameworks/python.js';
 import { rustResolver } from '../src/resolution/frameworks/rust.js';
 import { goResolver } from '../src/resolution/frameworks/go.js';
+import { vueResolver } from '../src/resolution/frameworks/vue.js';
+import { playResolver } from '../src/resolution/frameworks/play.js';
 
 /**
  * Regression suite for the framework-extractor language gate. The
@@ -54,6 +56,14 @@ describe('framework resolver language gates', () => {
 
   it('Go declares languages: [go]', () => {
     expect(goResolver.languages).toEqual(['go']);
+  });
+
+  it('Vue/Nuxt declares languages: [vue, typescript, javascript, tsx, jsx]', () => {
+    expect(vueResolver.languages).toEqual(['vue', 'typescript', 'javascript', 'tsx', 'jsx']);
+  });
+
+  it('Play declares languages: [scala, java, yaml]', () => {
+    expect(playResolver.languages).toEqual(['scala', 'java', 'yaml']);
   });
 
   it('Vapor regex still matches a Swift `.get("path")` body even though it\'s gated by language', () => {

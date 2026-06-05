@@ -7,6 +7,8 @@ import { hashContent } from '../src/extraction/index.js';
 import {
   applyConfigFingerprintInvalidationPlan,
   computeConfigFingerprintInvalidationPlan,
+  configFingerprint,
+  type ConfigFingerprintPolicy,
 } from '../src/extraction/config-fingerprints.js';
 import type { SyncState } from '../src/extraction/index.js';
 
@@ -37,6 +39,24 @@ describe('extraction config fingerprint invalidation', () => {
     cg?.close();
     cg = null;
     fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('fingerprints watched config files and records missing files explicitly', () => {
+    fs.writeFileSync(path.join(tempDir, 'tooling.json'), 'configured\n');
+    const policy: ConfigFingerprintPolicy = {
+      metadataKey: 'source_set_config_signature',
+      watchedFiles: ['tooling.json', 'missing.json'],
+      action: { kind: 'force-full-scan' },
+    };
+
+    const fingerprint = configFingerprint({
+      rootDir: tempDir,
+      config: {},
+      policy,
+      hashContent: (content) => `hash:${content.trim()}`,
+    });
+
+    expect(fingerprint).toBe('tooling.json:hash:configured|missing.json:missing');
   });
 
   it('queues JS-family files when nested-function extraction knobs change', async () => {

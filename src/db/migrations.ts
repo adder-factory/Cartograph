@@ -11,10 +11,10 @@
  */
 
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 
 import type { SqliteDatabase } from './sqlite-adapter.js';
 import { ALL_MIGRATIONS } from './migrations/index.js';
+import { resolveAssetPath } from '../assets.js';
 
 /**
  * Highest registered migration version. Derived from the registry
@@ -118,7 +118,7 @@ const SCHEMA_SQL_OBJECTS = parseSchemaSqlObjects();
  * file). Done at module load so the cost is paid once.
  */
 function parseSchemaSqlObjects(): { tables: ReadonlySet<string>; views: ReadonlySet<string> } {
-  const schemaPath = path.join(import.meta.dirname, 'schema.sql');
+  const schemaPath = resolveAssetPath('db', 'schema.sql');
   const src = fs.readFileSync(schemaPath, 'utf-8');
   const tables = new Set<string>();
   const views = new Set<string>();

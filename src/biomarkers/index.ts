@@ -122,7 +122,7 @@ const MIN_LOC = ANALYSABLE_MIN_LOC;
  * The bump-misses the old scheme produced were more painful than
  * occasional spurious re-passes on refactors.
  */
-const biomarkerSourceHash = computeAlgoHash(import.meta.url, ['./index', './engine', './types', './lang-map']);
+const biomarkerSourceHash = computeAlgoHash('src/biomarkers/index.ts', ['./index', './engine', './types', './lang-map']);
 export const BIOMARKER_CACHE_KEY: `biomarker_file_state_${string}_${string}` = `biomarker_file_state_${biomarkerSourceHash}_${EXTRACTION_LOGIC_VERSION}`;
 
 interface AnalysisOptions {

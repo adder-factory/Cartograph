@@ -210,6 +210,7 @@ export const VALID_LANGUAGES = [
   'vue',
   'liquid',
   'lua',
+  'luau',
   'objc',
   'pascal',
   'hcl',

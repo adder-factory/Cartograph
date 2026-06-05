@@ -1,0 +1,52 @@
+name: Standalone Release
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - run: bun run build:standalone
+      - run: node scripts/smoke-standalone.mjs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: standalone-${{ runner.os }}
+          path: release/cartograph-*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+      - name: Stage release assets
+        run: |
+          mkdir -p release
+          find release-artifacts -type f -name 'cartograph-*' -exec cp {} release/ \;
+          (cd release && sha256sum cartograph-* > SHA256SUMS)
+          ls -lh release
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="v$(node -p "require('./package.json').version")"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/cartograph-* release/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" release/cartograph-* release/SHA256SUMS --title "$TAG" --notes "Cartograph standalone bundles."
+          fi

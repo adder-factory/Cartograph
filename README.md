@@ -40,7 +40,7 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 
 | Step | Command | Result |
 |---|---|---|
-| 1. Install from source | `git clone ... && cd cartograph && bun install && bun link` | Puts `cartograph` on PATH |
+| 1. Install | `curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh \| sh` or source install below | Puts `cartograph` on PATH |
 | 2. Configure your agent | `cartograph install` | Writes MCP config for supported clients |
 | 3. Index a project | `cartograph admin init -i` | Creates `.cartograph/` and builds the graph |
 | 4. Check readiness | `cartograph status --verbose` | Shows freshness, hotspots, biomarkers, and feature readiness |
@@ -55,10 +55,7 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 ## 60-Second Quickstart
 
 ```bash
-git clone https://github.com/adder-factory/cartograph.git
-cd cartograph
-bun install
-bun link
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
 
 cd /path/to/your/project
 cartograph admin init -i
@@ -66,6 +63,15 @@ cartograph status --verbose
 ```
 
 That gives you a local graph index immediately. Run `cartograph install` when you want an AI agent to use the same graph through MCP.
+
+Source install for development:
+
+```bash
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
+bun install
+bun link
+```
 
 ## At A Glance
 
@@ -125,6 +131,14 @@ bun link
 ```
 
 That puts the `cartograph` command on your PATH.
+
+Standalone installers are also available from GitHub Releases:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+# Windows PowerShell:
+# irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 | iex
+```
 
 ## Configure Agents
 
@@ -201,7 +215,7 @@ Common backend choices:
 | **Full-Text + Intent Search** | Find code by name, regex, env var, SQL table, semantic similarity, or summary intent |
 | **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
 | **Fresh Indexes** | Native file watching keeps the graph current with debounced auto-sync |
-| **Broad Language Coverage** | 36 language modes, including TS/JS, Python, Go, Rust, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Vue, Svelte, SQL, GraphQL, HCL, Prisma, XML, YAML, and more |
+| **Broad Language Coverage** | 37 language modes, including TS/JS, Python, Go, Rust, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Vue, Svelte, SQL, GraphQL, HCL, Prisma, XML, YAML, and more |
 | **Local-First Architecture** | Source indexing and graph storage stay local; LLM tiers can be local or cloud-hosted |
 
 ## Terminal Examples
@@ -732,7 +746,10 @@ cartograph serve --mcp --allow-stale-default
 cartograph serve --mcp --low-tokens-default
 cartograph serve --mcp --disable-tool cartograph_ask
 cartograph serve --mcp --no-startup-sync
+cartograph serve --mcp --daemon --project-path /absolute/path/to/project
 ```
+
+`--daemon` starts or attaches to one shared per-project MCP daemon and leaves the client-facing process as a stdio proxy. Use it when several agents attach to the same indexed project and you want one watcher, one SQLite writer, and one warm tool cache.
 
 > **Note:** Cartograph's MCP server does **not** speak SSE/HTTP. If your client only supports `url` + `transport: "sse"`, you'll need to wrap stdio with a bridge like [supergateway](https://github.com/supercorp-ai/supergateway).
 
@@ -823,7 +840,7 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 
 ## Supported Languages & File Formats
 
-Cartograph currently supports **36 language modes**. Frameworks and embedded DSLs are listed separately below so the core language matrix stays readable.
+Cartograph currently supports **37 language modes**. Frameworks and embedded DSLs are listed separately below so the core language matrix stays readable.
 
 <details>
 <summary><strong>Show language matrix</strong></summary>
@@ -855,6 +872,7 @@ Cartograph currently supports **36 language modes**. Frameworks and embedded DSL
 | ReScript | `.res`, `.resi` | Full support |
 | R | `.r`, `.R` | Full support |
 | Lua | `.lua` | Full support (`function M:foo()` colon syntax → `method` nodes) |
+| Luau | `.luau` | Full support (Lua extraction plus Luau type aliases and typed signatures) |
 | Elixir | `.ex`, `.exs` | Baseline support via the `tags.scm` fallback extractor (definitions + call references) |
 | Bash | `.sh`, `.bash` | Full support (functions, variables, command calls) |
 | Zsh | `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin` | Full support (functions, variables, command calls) |
@@ -875,12 +893,12 @@ Cartograph indexes plain language structure first, then adds framework-aware nod
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Express routes, Bun.serve routes, React components, SvelteKit routes, Commander CLI commands |
+| JavaScript / TypeScript | Express routes, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| Java / Kotlin | Spring route/config references and MyBatis Java/XML bindings |
-| Go / Rust / C# / Swift | Common route and framework entry-point patterns |
+| Java / Kotlin / Scala | Spring route/config references, Play `conf/routes`, and MyBatis Java/XML bindings |
+| Go / Rust / C# / Swift | Common route and framework entry-point patterns, including Cargo workspace crate aliases for Rust |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, and Fabric/Paper view components |
 
 ## Embedded DSLs & Derived Signals

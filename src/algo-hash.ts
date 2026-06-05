@@ -18,17 +18,13 @@
  * hash changes automatically and the cache invalidates on the next
  * sync — no manifest update, no constant bump, no drift detector.
  *
- * Runtime resolution: the caller passes its own `import.meta.url`;
- * the helper reads sibling files relative to that path. In
- * dev/test (bun:test) the URL points at `src/.../*.ts` and
- * the helper hashes the TypeScript sources. In production (compiled
- * `dist/.../*.js`) the URL points at the built files and the helper
- * hashes those. Both produce stable hashes within a single install;
- * the absolute hash value differs between src and dist, but a single
- * project never straddles the two so the cache invalidates exactly
- * once when a contributor flips between `npm test` (src) and
- * `npx cartograph` (dist) — acceptable for the contribution workflow,
- * invisible for end users.
+ * Runtime resolution: callers pass a stable source path such as
+ * `src/extraction/extraction-logic-version.ts`; the helper reads
+ * sibling files relative to that path. Source checkouts and the npm
+ * package both ship `src/`, while standalone bundles ship a copy under
+ * `share/cartograph/algo-sources/`. That keeps the cache key tied to
+ * real algorithm sources even when Bun compiles the executable and
+ * `import.meta.url` becomes an opaque virtual path.
  *
  * The hash is truncated to 16 hex chars — 64 bits of entropy, plenty
  * to make accidental collision astronomical, short enough to read in
@@ -46,27 +42,26 @@ import { stripCommentsForRegex } from './utils.js';
 const HASH_CACHE = new Map<string, string>();
 
 /**
- * Hash the listed sibling source files relative to the caller's
- * `import.meta.url`. The caller passes `import.meta.url` so we can
- * resolve siblings without depending on `__dirname` (ESM has no
- * `__dirname`) and so the helper works identically in src/ (where
- * siblings are `.ts`) and dist/ (where siblings are `.js`).
+ * Hash the listed sibling source files relative to `callerRef`.
+ * Prefer a stable repo-relative source path (`src/foo/bar.ts`). File
+ * URLs are still accepted for compatibility with older in-tree call
+ * sites, but compiled standalone binaries cannot recover module source
+ * paths from Bun's virtual `import.meta.url`.
  *
  * `siblingBasenames` are filename stems WITHOUT extension. The helper
- * derives the extension from the caller's own file (`.ts` in dev,
- * `.js` in prod) and reads the corresponding sibling files. Pass
- * `..`-prefixed names to reach parent directories
+ * derives the extension from the caller's source file and reads the
+ * corresponding sibling files. Pass `..`-prefixed names to reach parent directories
  * (e.g. `'../types'` from a `db/` module).
  *
  * Throws on a missing file — silently producing the wrong hash would
  * defeat the point.
  */
-export function computeAlgoHash(callerUrl: string, siblingBasenames: readonly string[]): string {
-  const cacheKey = `${callerUrl}\0${siblingBasenames.join('\0')}`;
+export function computeAlgoHash(callerRef: string, siblingBasenames: readonly string[]): string {
+  const cacheKey = `${callerRef}\0${siblingBasenames.join('\0')}`;
   const cached = HASH_CACHE.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  const callerPath = fileURLToPath(callerUrl);
+  const callerPath = resolveCallerPath(callerRef);
   const callerDir = path.dirname(callerPath);
   const ext = path.extname(callerPath);
 
@@ -97,4 +92,36 @@ export function computeAlgoHash(callerUrl: string, siblingBasenames: readonly st
   const hash = hasher.digest('hex').slice(0, 16);
   HASH_CACHE.set(cacheKey, hash);
   return hash;
+}
+
+function resolveCallerPath(callerRef: string): string {
+  for (const candidate of callerPathCandidates(callerRef)) {
+    if (fs.existsSync(candidate)) return candidate;
+  }
+  throw new Error(`computeAlgoHash: cannot resolve caller source ${callerRef}`);
+}
+
+function callerPathCandidates(callerRef: string): string[] {
+  if (callerRef.startsWith('file:')) {
+    return [fileURLToPath(callerRef)];
+  }
+
+  const normalized = callerRef.replaceAll('\\', '/');
+  const candidates: string[] = [];
+
+  if (path.isAbsolute(normalized)) {
+    candidates.push(normalized);
+    return candidates;
+  }
+
+  const explicitRoot = process.env['CARTOGRAPH_ALGO_SOURCE_ROOT'];
+  if (explicitRoot) candidates.push(path.join(explicitRoot, normalized));
+
+  const assetRoot = process.env['CARTOGRAPH_ASSET_ROOT'];
+  if (assetRoot) candidates.push(path.join(assetRoot, 'algo-sources', normalized));
+
+  candidates.push(path.resolve(process.cwd(), normalized));
+  candidates.push(path.resolve(import.meta.dirname, '..', normalized));
+
+  return candidates;
 }

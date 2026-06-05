@@ -25,6 +25,7 @@ import { join } from 'node:path';
 
 mkdirSync('dist/db', { recursive: true });
 copyFileSync('src/db/schema.sql', 'dist/db/schema.sql');
+copyFileSync('node_modules/web-tree-sitter/web-tree-sitter.wasm', 'dist/web-tree-sitter.wasm');
 
 // The src/llm/native/ tree was deleted 2026-05-24c when the in-process
 // LLM pathway (mini-nllc + libcgshim) was removed in step 4c of the

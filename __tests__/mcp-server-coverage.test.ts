@@ -138,23 +138,18 @@ async function withTransportHarness<T>(
   fn: (harness: TransportHarness) => Promise<T>,
 ): Promise<T> {
   const fakeStdin = new PassThrough();
+  const fakeStdout = new PassThrough();
   const chunks: string[] = [];
-  const transport = new StdioTransport();
-  const originalStdin = process.stdin;
-  const originalWrite = process.stdout.write.bind(process.stdout);
+  const transport = new StdioTransport({
+    input: fakeStdin,
+    output: fakeStdout,
+    exitOnClose: false,
+  });
   const originalExit = process.exit;
 
-  (process as unknown as { stdin: NodeJS.ReadStream }).stdin = fakeStdin as unknown as NodeJS.ReadStream;
-  (process.stdout.write as unknown as (chunk: string | Uint8Array, encodingOrCb?: unknown, cb?: unknown) => boolean) = (
-    chunk: string | Uint8Array,
-    encodingOrCb?: unknown,
-    cb?: unknown,
-  ): boolean => {
+  fakeStdout.on('data', (chunk: string | Uint8Array) => {
     chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
-    const callback = typeof encodingOrCb === 'function' ? encodingOrCb : cb;
-    if (typeof callback === 'function') callback();
-    return true;
-  };
+  });
   (process as unknown as { exit: typeof process.exit }).exit = (() => undefined as never) as typeof process.exit;
 
   transport.start(messageHandler);
@@ -170,8 +165,7 @@ async function withTransportHarness<T>(
   } finally {
     transport.stop();
     fakeStdin.destroy();
-    (process as unknown as { stdin: NodeJS.ReadStream }).stdin = originalStdin;
-    process.stdout.write = originalWrite;
+    fakeStdout.destroy();
     process.exit = originalExit;
   }
 }

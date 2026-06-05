@@ -111,11 +111,24 @@ process.on('unhandledRejection', (reason) => {
 // Anything else (EACCES, EIO, etc.) is unexpected and would silently
 // suppress CLI parse if swallowed, so we log to stderr before
 // returning false so an operator sees why the CLI didn't dispatch.
+function isBunStandaloneModulePath(modulePath: string): boolean {
+  return modulePath.startsWith('/$bunfs/');
+}
+
+function cliUserArgs(): string[] {
+  return process.argv.slice(2);
+}
+
 function isEntryPoint(): boolean {
+  const modulePath = fileURLToPath(import.meta.url);
+  // Bun standalone executables expose bundled modules under a virtual
+  // `/$bunfs/root/...` path. There is no on-disk module path to compare
+  // with argv[1], and this file is only bundled as the executable entry.
+  if (isBunStandaloneModulePath(modulePath)) return true;
   const argv1 = process.argv[1];
   if (!argv1) return false;
   try {
-    return fs.realpathSync(argv1) === fs.realpathSync(fileURLToPath(import.meta.url));
+    return fs.realpathSync(argv1) === fs.realpathSync(modulePath);
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
@@ -138,7 +151,7 @@ function topLevelCommandSuggestion(input: string): string | undefined {
 }
 
 function rejectUnknownCommandHelp(): boolean {
-  const args = process.argv.slice(2);
+  const args = cliUserArgs();
   if (!args.some((arg) => arg === '--help' || arg === '-h')) return false;
   const firstCommand = args.find((arg) => arg !== '--help' && arg !== '-h' && !arg.startsWith('-'));
   if (!firstCommand || firstCommand === 'help') return false;
@@ -154,7 +167,7 @@ function rejectUnknownCommandHelp(): boolean {
 }
 
 if (isEntryPoint()) {
-  if (process.argv.length === 2) {
+  if (cliUserArgs().length === 0) {
     try {
       const { runInstaller } = await import('../installer/index.js');
       await runInstaller();

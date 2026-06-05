@@ -72,7 +72,7 @@ export const LAST_MINED_CHURN_HEAD_KEY = 'last_mined_churn_head';
  *         when a commit also touched many non-indexed files).
  *   '2' — 2026-04-30 (cap on indexed paths; matches mineCoChanges).
  */
-export const CHURN_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./index']);
+export const CHURN_ALGO_VERSION = computeAlgoHash('src/churn/index.ts', ['./index']);
 
 /** Project-metadata key holding the algo version of the last mining run. */
 export const LAST_MINED_CHURN_ALGO_VERSION_KEY = 'last_mined_churn_algo_version';

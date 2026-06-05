@@ -30,7 +30,7 @@ import { makeRefMiner } from '../shared-miner.js';
  * (comment-strip + whitespace-normalise). Mirrors the CHURN_ALGO_VERSION
  * pattern from `src/churn/index.ts`.
  */
-export const BUILD_CONTEXT_REFS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./index']);
+export const BUILD_CONTEXT_REFS_ALGO_VERSION = computeAlgoHash('src/build-context-refs/index.ts', ['./index']);
 
 /** Project-metadata key holding the algo version of the last mining run. */
 export const LAST_MINED_BUILD_CONTEXT_REFS_ALGO_VERSION_KEY = 'last_mined_build_context_refs_algo_version';

@@ -11,16 +11,18 @@ export const SERVER_INSTRUCTIONS = `# Cartograph — compact startup guide
 Cartograph is an indexed code graph. Use it before broad file reads, then
 open files directly only when you need exact current source.
 
-Start with:
-- \`cartograph_status\` for index health, freshness, active server profile, and LLM readiness.
+Default path:
+- \`cartograph_status\` when project readiness, freshness, active server profile, or LLM setup is uncertain.
+- \`cartograph_context({format: "plan"})\` to route an unfamiliar task before reading source.
 - \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
 - \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
 - \`cartograph_node\` for one symbol's metadata; use \`code: true\` only when source is needed.
-- \`cartograph_context({format: "plan"})\` for a low-token route plan and suggested next MCP calls; default \`cartograph_context\` may return source.
-- \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_compare_to_ref\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for review, diff, final self-check, and test selection.
+
+Review / close-out:
+- \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for diff context, line ranges, and test selection.
 - \`cartograph_affected({includeCommands: true})\` after edits when you want affected tests plus package-script verification commands.
-- \`cartograph_session({action: "audit"})\` to review a session's tool-use pattern and missed close-out steps.
-- \`cartograph_playbook\` for the full tool map, edge directions, common chains, and anti-patterns.
+- \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting an edit-touching task as done.
+- \`cartograph_session({action: "audit"})\` for tool-use pattern review; \`cartograph_playbook\` for the full tool map.
 
 Token discipline:
 - Metadata tools are cheap. Source-heavy modes are \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.

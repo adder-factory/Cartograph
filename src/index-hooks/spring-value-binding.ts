@@ -50,7 +50,9 @@ import type { Edge } from '../types.js';
 import { parseDecoratorArgsJson } from './_decorator-args.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers re-mine. */
-export const SPRING_VALUE_BINDING_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./spring-value-binding']);
+export const SPRING_VALUE_BINDING_ALGO_VERSION = computeAlgoHash('src/index-hooks/spring-value-binding.ts', [
+  './spring-value-binding',
+]);
 const LAST_MINED_KEY = 'last_mined_spring_value_binding_algo_version';
 
 /** JVM languages whose field/property nodes carry `@Value` decorators. */

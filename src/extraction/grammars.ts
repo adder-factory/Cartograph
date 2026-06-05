@@ -24,12 +24,12 @@
  * to `dist/extraction/wasm/` by `scripts/copy-assets.mjs` at build time.
  */
 
-import * as path from 'node:path';
 import { readFile } from 'node:fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import type { Language } from '../types.js';
 import { getLanguageDefs, getLanguageDefByExtension, getLanguageDefByName } from './languages/registry.js';
 import { errMsg, logWarn } from '../errors.js';
+import { resolveAssetPath } from '../assets.js';
 
 /**
  * File extension → Language mapping, computed lazily on first read.
@@ -95,7 +95,12 @@ let parserInitialized = false;
  */
 export async function initGrammars(): Promise<void> {
   if (parserInitialized) return;
-  await Parser.init();
+  await Parser.init({
+    locateFile(scriptName: string, scriptDirectory: string) {
+      if (scriptName === 'web-tree-sitter.wasm') return resolveAssetPath('web-tree-sitter.wasm');
+      return `${scriptDirectory}${scriptName}`;
+    },
+  });
   parserInitialized = true;
 }
 
@@ -127,7 +132,7 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
   // https://github.com/tree-sitter/tree-sitter/issues/2338
   for (const { lang, wasmFile } of toLoad) {
     try {
-      const wasmPath = path.join(import.meta.dirname, 'wasm', wasmFile);
+      const wasmPath = resolveAssetPath('extraction', 'wasm', wasmFile);
       const language = await WasmLanguage.load(await readFile(wasmPath));
       languageCache.set(lang, language);
     } catch (error) {
@@ -183,6 +188,8 @@ export function getLanguageGrammar(language: Language): WasmLanguage | null {
  * Detect language from file extension.
  */
 export function detectLanguage(filePath: string, source?: string): Language {
+  if (isPlayRoutesFile(filePath)) return 'yaml';
+
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   const def = getLanguageDefByExtension(ext);
   const lang = (def?.name as Language) ?? 'unknown';
@@ -210,6 +217,15 @@ export function detectLanguage(filePath: string, source?: string): Language {
   }
 
   return lang;
+}
+
+/** Play Framework route declarations live in extensionless `conf/routes`
+ *  files (and included `conf/*.routes` files). Treat only those well-known
+ *  paths as indexable YAML so the Play framework resolver can extract the
+ *  actual route nodes. */
+export function isPlayRoutesFile(filePath: string): boolean {
+  const normalized = filePath.replaceAll('\\', '/');
+  return /(^|\/)conf\/routes$/.test(normalized) || /(^|\/)conf\/[^/]+\.routes$/.test(normalized);
 }
 
 /**

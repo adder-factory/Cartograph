@@ -20,6 +20,7 @@ import { homedir } from 'node:os';
 import { ALL_TARGETS, detectAll, getTarget, resolveTargetFlag } from './targets/registry.js';
 import type { AgentTarget, Location } from './targets/types.js';
 import { errMsg } from '../errors.js';
+import { resolveAssetPath } from '../assets.js';
 
 // Backwards-compat: keep these named exports — downstream code may
 // import them. The shim in `config-writer.ts` continues to re-export
@@ -46,7 +47,7 @@ function formatNumber(n: number): string {
 
 function getVersion(): string {
   try {
-    const packageJsonPath = path.join(import.meta.dirname, '..', '..', 'package.json');
+    const packageJsonPath = resolveAssetPath('package.json');
     const packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8'));
     return packageJson.version;
   } catch {

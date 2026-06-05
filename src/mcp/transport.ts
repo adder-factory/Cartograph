@@ -5,6 +5,7 @@
  */
 
 import * as readline from 'node:readline';
+import type { Socket } from 'node:net';
 import { errMsg } from '../errors.js';
 
 /**
@@ -56,6 +57,14 @@ export const ErrorCodes = {
 
 type MessageHandler = (message: JsonRpcRequest | JsonRpcNotification) => Promise<void>;
 
+export interface StdioTransportOptions {
+  input?: NodeJS.ReadableStream;
+  output?: NodeJS.WritableStream;
+  exitOnClose?: boolean;
+  closeOnStop?: boolean;
+  onClose?: () => void;
+}
+
 /**
  * Stdio Transport for MCP
  *
@@ -64,6 +73,12 @@ type MessageHandler = (message: JsonRpcRequest | JsonRpcNotification) => Promise
 export class StdioTransport {
   private rl: readline.Interface | null = null;
   private messageHandler: MessageHandler | null = null;
+  private readonly input: NodeJS.ReadableStream;
+  private readonly output: NodeJS.WritableStream;
+  private readonly exitOnClose: boolean;
+  private readonly closeOnStop: boolean;
+  private readonly onClose: (() => void) | undefined;
+  private closed = false;
 
   /**
    * Serialises all stdout writes through a promise chain so that two large
@@ -76,6 +91,14 @@ export class StdioTransport {
    */
   private writeQueue: Promise<void> = Promise.resolve();
 
+  constructor(options: StdioTransportOptions = {}) {
+    this.input = options.input ?? process.stdin;
+    this.output = options.output ?? process.stdout;
+    this.exitOnClose = options.exitOnClose ?? true;
+    this.closeOnStop = options.closeOnStop ?? false;
+    this.onClose = options.onClose;
+  }
+
   /**
    * Start listening for messages on stdin
    */
@@ -83,8 +106,8 @@ export class StdioTransport {
     this.messageHandler = handler;
 
     this.rl = readline.createInterface({
-      input: process.stdin,
-      output: process.stdout,
+      input: this.input,
+      output: this.output,
       terminal: false,
     });
 
@@ -92,9 +115,7 @@ export class StdioTransport {
       await this.handleLine(line);
     });
 
-    this.rl.on('close', () => {
-      process.exit(0);
-    });
+    this.rl.on('close', () => this.handleClose());
   }
 
   /**
@@ -105,6 +126,15 @@ export class StdioTransport {
       this.rl.close();
       this.rl = null;
     }
+    if (this.closeOnStop) {
+      const stream = this.output as NodeJS.WritableStream & { destroy?: () => void; end?: () => void };
+      try {
+        stream.end?.();
+        stream.destroy?.();
+      } catch {
+        /* best-effort close */
+      }
+    }
   }
 
   private enqueueWrite(line: string): void {
@@ -112,9 +142,9 @@ export class StdioTransport {
       .then(
         () =>
           new Promise<void>((resolve) => {
-            const ok = process.stdout.write(line);
+            const ok = this.output.write(line);
             if (ok) resolve();
-            else process.stdout.once('drain', resolve);
+            else this.output.once('drain', resolve);
           }),
       )
       .catch((err) => {
@@ -202,6 +232,13 @@ export class StdioTransport {
     }
   }
 
+  private handleClose(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.onClose?.();
+    if (this.exitOnClose) process.exit(0);
+  }
+
   /** JSON-RPC error reply for a thrown messageHandler — only sent when the incoming message had an `id`. */
   private reportHandlerError(message: JsonRpcRequest, err: unknown): void {
     if (!('id' in message)) return;
@@ -217,5 +254,11 @@ export class StdioTransport {
     if (obj['jsonrpc'] !== '2.0') return false;
     if (typeof obj['method'] !== 'string') return false;
     return true;
+  }
+}
+
+export class SocketTransport extends StdioTransport {
+  constructor(socket: Socket, onClose?: () => void) {
+    super({ input: socket, output: socket, exitOnClose: false, closeOnStop: true, ...(onClose ? { onClose } : {}) });
   }
 }

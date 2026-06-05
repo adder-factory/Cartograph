@@ -43,7 +43,7 @@ import { makeRefMiner } from '../shared-miner.js';
  * don't invalidate). Editing the mining logic below changes the hash
  * automatically.
  */
-export const SQL_REFS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./index']);
+export const SQL_REFS_ALGO_VERSION = computeAlgoHash('src/sql-refs/index.ts', ['./index']);
 
 /** Project-metadata key holding the algo version of the last mining run. */
 export const LAST_MINED_SQL_REFS_ALGO_VERSION_KEY = 'last_mined_sql_refs_algo_version';

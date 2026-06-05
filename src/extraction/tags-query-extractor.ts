@@ -1,5 +1,4 @@
 import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { Query } from 'web-tree-sitter';
 import type { Node as SyntaxNode, QueryMatch, Tree } from 'web-tree-sitter';
 import type { ExtractionResult, NodeKind, Language } from '../types.js';
@@ -7,6 +6,7 @@ import { getNodeText, type NodeIdFactory } from './tree-sitter-helpers.js';
 import { getParser, getLanguageGrammar } from './grammars.js';
 import { errMsg } from '../errors.js';
 import { StandaloneExtractor } from './standalone-extractor.js';
+import { resolveAssetPath } from '../assets.js';
 
 /**
  * TagsQueryExtractor — a query-driven generic extractor.
@@ -96,7 +96,7 @@ const queryCache = new Map<Language, Query>();
 function loadTagsScm(language: Language): string | null {
   const cached = scmTextCache.get(language);
   if (cached !== undefined) return cached;
-  const scmPath = path.join(import.meta.dirname, 'tags', `${language}.scm`);
+  const scmPath = resolveAssetPath('extraction', 'tags', `${language}.scm`);
   let text: string | null;
   try {
     text = fs.readFileSync(scmPath, 'utf-8');

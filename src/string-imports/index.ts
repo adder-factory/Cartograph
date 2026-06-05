@@ -47,7 +47,7 @@ import { computeAlgoHash } from '../algo-hash.js';
  *
  * Mirrors the CHURN_ALGO_VERSION pattern — see `src/churn/index.ts`.
  */
-export const STRING_IMPORTS_ALGO_VERSION = computeAlgoHash(import.meta.url, ['./index']);
+export const STRING_IMPORTS_ALGO_VERSION = computeAlgoHash('src/string-imports/index.ts', ['./index']);
 
 /** Project-metadata key holding the algo version of the last mining run. */
 export const LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY = 'last_mined_string_imports_algo_version';

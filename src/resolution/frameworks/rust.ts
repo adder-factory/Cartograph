@@ -8,6 +8,7 @@ import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
 import { resolveByNameAndKind } from './resolve-by-name.js';
+import { clearCargoWorkspaceCache, getCargoWorkspaceCrateMap } from './cargo-workspace.js';
 
 export const rustResolver: FrameworkResolver = {
   name: 'rust',
@@ -78,8 +79,8 @@ export const rustResolver: FrameworkResolver = {
       if (result) {
         return {
           original: ref,
-          targetNodeId: result,
-          confidence: 0.6,
+          targetNodeId: result.targetNodeId,
+          confidence: result.confidence,
           resolvedBy: 'framework',
         };
       }
@@ -89,6 +90,10 @@ export const rustResolver: FrameworkResolver = {
   },
 
   languages: ['rust'],
+
+  clearCache(context: ResolutionContext): void {
+    clearCargoWorkspaceCache(context);
+  },
 
   extractNodes(filePath: string, content: string, getStripped?: () => string): Node[] {
     const nodes: Node[] = [];
@@ -185,7 +190,10 @@ const FUNCTION_KINDS = new Set(['function']);
 const SERVICE_KINDS = new Set(['struct', 'trait']);
 const STRUCT_KINDS = new Set(['struct']);
 
-function resolveModule(name: string, context: ResolutionContext): string | null {
+function resolveModule(name: string, context: ResolutionContext): { targetNodeId: string; confidence: number } | null {
+  const workspaceCrate = resolveWorkspaceCrate(name, context);
+  if (workspaceCrate) return { targetNodeId: workspaceCrate, confidence: 0.85 };
+
   // Rust modules can be either mod.rs in a directory or name.rs
   const possiblePaths = [`src/${name}.rs`, `src/${name}/mod.rs`];
 
@@ -194,13 +202,30 @@ function resolveModule(name: string, context: ResolutionContext): string | null 
       const nodes = context.getNodesInFile(modPath);
       const modNode = nodes.find((n) => n.kind === 'module');
       if (modNode) {
-        return modNode.id;
+        return { targetNodeId: modNode.id, confidence: 0.6 };
       }
       // If no explicit module node, return the first node in the file
       if (nodes.length > 0) {
-        return nodes[0]!.id;
+        return { targetNodeId: nodes[0]!.id, confidence: 0.6 };
       }
     }
+  }
+
+  return null;
+}
+
+function resolveWorkspaceCrate(name: string, context: ResolutionContext): string | null {
+  const memberPath = getCargoWorkspaceCrateMap(context).get(name);
+  if (!memberPath) return null;
+
+  for (const crateRoot of [`${memberPath}/src/lib.rs`, `${memberPath}/src/main.rs`, `${memberPath}/src/mod.rs`]) {
+    if (!context.fileExists(crateRoot)) continue;
+    const nodes = context.getNodesInFile(crateRoot);
+    const moduleNode = nodes.find((n) => n.kind === 'module');
+    if (moduleNode) return moduleNode.id;
+    const firstSymbol = nodes.find((n) => n.kind !== 'file');
+    if (firstSymbol) return firstSymbol.id;
+    if (nodes[0]) return nodes[0].id;
   }
 
   return null;

@@ -109,6 +109,8 @@ interface MCPServerOptions {
    * frequent restarts) and you'd rather see stale results than wait.
    */
   disableStartupSync?: boolean | undefined;
+  /** Internal/test hook: use a non-stdio transport. */
+  transport?: StdioTransport | undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -444,6 +446,7 @@ export class MCPServer {
   /** @internal — exposed for module-scope helpers only. */
   readonly st: McpServerState;
   private readonly transport: StdioTransport;
+  private readonly activeTransports = new Set<StdioTransport>();
   /** @internal */
   readonly toolHandler: ToolHandler;
   /** @internal */
@@ -460,7 +463,7 @@ export class MCPServer {
       traceLogger: null,
       noDefaultProjectPreamble: null,
     };
-    this.transport = new StdioTransport();
+    this.transport = options.transport ?? new StdioTransport();
     this.disableTrace = options.disableWriteTools === true || resolveMcpServerProfile(options.profile) === 'read-only';
     this.disableStartupSync = options.disableStartupSync === true;
     this.toolHandler = new ToolHandler(null, {
@@ -477,11 +480,24 @@ export class MCPServer {
    * Start the MCP server
    */
   async start(): Promise<void> {
-    this.transport.start((msg) => mcpHandleMessage(this, this.transport, msg));
+    this.attachTransport(this.transport);
     process.on('SIGINT', () => this.stop());
     process.on('SIGTERM', () => this.stop());
     process.stdin.on('end', () => this.stop());
     process.stdin.on('close', () => this.stop());
+  }
+
+  /** Attach an additional JSON-RPC transport to this server instance.
+   *  Used by the shared daemon to serve multiple socket clients through
+   *  one Cartograph connection, watcher, trace logger, and tool cache. */
+  attachTransport(transport: StdioTransport): void {
+    this.activeTransports.add(transport);
+    transport.start((msg) => mcpHandleMessage(this, transport, msg));
+  }
+
+  detachTransport(transport: StdioTransport): void {
+    if (!this.activeTransports.delete(transport)) return;
+    transport.stop();
   }
 
   /**
@@ -555,21 +571,24 @@ export class MCPServer {
   /**
    * Stop the server
    */
-  stop(): void {
+  stop(exitProcess = true): void {
     this.toolHandler.closeAll();
     if (this.st.cg) {
       this.st.cg.close();
       this.st.cg = null;
     }
-    this.transport.stop();
+    for (const transport of this.activeTransports) {
+      transport.stop();
+    }
+    this.activeTransports.clear();
     // No in-process LLM cache drainers to run any more — the
     // ggml-Metal cleanup choreography went away with the in-process
     // pathway deletion (2026-05-24c). HTTP clients hold no native
     // resources; fetch handles its own cleanup at the request layer.
-    process.exit(0);
+    if (exitProcess) process.exit(0);
   }
 }
 
 // Export for use in CLI
-export { StdioTransport } from './transport.js';
+export { StdioTransport, SocketTransport } from './transport.js';
 export { tools, ToolHandler } from './tools.js';

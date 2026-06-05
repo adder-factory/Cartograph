@@ -230,7 +230,7 @@ interface NoLlmFooterBackend {
 }
 export async function buildNoLlmFooter(scan?: () => Promise<readonly NoLlmFooterBackend[]>): Promise<string> {
   const bare =
-    'Base graph is queryable now. (No LLM configured — `find mode:intent` / `ask` need `cartograph llm setup`, `cartograph admin install-models --write-config`, or `cartograph_admin({action: "llm-plan"})` then `llm-apply`.)';
+    'Base graph is queryable now. (No LLM configured — `find mode:intent` / `ask` need `cartograph_admin({action: "llm-plan"})` then `cartograph_admin({action: "llm-apply", preset: "<id>"})`; CLI users can run `cartograph admin llm-plan` then `cartograph admin llm-apply --preset <id>`.)';
   const runScan =
     scan ??
     (async () => {
@@ -242,7 +242,7 @@ export async function buildNoLlmFooter(scan?: () => Promise<readonly NoLlmFooter
     if (detected.length === 0) return bare;
     const list = detected.map((d) => `${d.kind} ${d.endpoint}`).join(', ');
     const noun = detected.length === 1 ? 'backend' : 'backends';
-    return `Base graph is queryable now. ${detected.length} OpenAI-compat ${noun} detected on standard ports: ${list}. Run \`cartograph_admin({action: 'llm-plan'})\` to see setup presets, then \`llm-apply\` to enroll one for this project.`;
+    return `Base graph is queryable now. ${detected.length} OpenAI-compat ${noun} detected on standard ports: ${list}. Run \`cartograph_admin({action: 'llm-plan'})\` to see setup presets, then \`cartograph_admin({action: 'llm-apply', preset: '<id>'})\` to enroll one for this project.`;
   } catch {
     return bare;
   }

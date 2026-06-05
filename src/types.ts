@@ -100,6 +100,7 @@ export type Language =
   | 'vue'
   | 'liquid'
   | 'lua'
+  | 'luau'
   | 'objc'
   | 'pascal'
   | 'hcl'
