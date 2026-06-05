@@ -39,115 +39,115 @@ interface DaemonHello {
   protocol: 1;
 }
 
-export async function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Promise<void> {
-  const projectRoot = resolveDaemonProjectRoot(options.projectPath);
-  fs.mkdirSync(path.dirname(getDaemonPidPath(projectRoot)), { recursive: true });
+interface DaemonRuntime {
+  projectRoot: string;
+  socketPath: string;
+  mcp: MCPServer;
+  server: net.Server | null;
+  clients: number;
+  idleTimer: NodeJS.Timeout | null;
+  stopping: boolean;
+}
 
-  const lock = tryAcquireDaemonLock(projectRoot);
+export function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Promise<void> {
+  const projectRoot = resolveDaemonProjectRoot(options.projectPath);
+  const lock = prepareDaemonLock(projectRoot);
   if (!lock.acquired) {
     process.stderr.write(`[Cartograph daemon] Existing daemon is active at ${lock.info.socketPath}; exiting child.\n`);
     process.exit(0);
   }
 
-  const socketPath = lock.info.socketPath;
-  const mcp = new MCPServer({ ...options, projectPath: projectRoot });
-  let server: net.Server | null = null;
-  let clients = 0;
-  let idleTimer: NodeJS.Timeout | null = null;
-  let stopping = false;
+  const runtime = createDaemonRuntime(projectRoot, lock.info.socketPath, options);
+  cleanupStaleSocket(runtime.socketPath);
+  runtime.server = createDaemonServer(runtime);
 
-  const cleanup = (): void => {
-    try {
-      if (process.platform !== 'win32') fs.unlinkSync(socketPath);
-    } catch {
-      /* already gone */
-    }
-    try {
-      const current = readLockInfo(projectRoot);
-      if (current?.pid === process.pid) fs.unlinkSync(getDaemonPidPath(projectRoot));
-    } catch {
-      /* already gone */
-    }
-  };
-
-  const stop = (reason: string): void => {
-    if (stopping) return;
-    stopping = true;
-    if (idleTimer) clearTimeout(idleTimer);
-    process.stderr.write(`[Cartograph daemon] Shutting down (${reason}; clients=${clients}).\n`);
-    server?.close();
-    mcp.stop(false);
-    cleanup();
-    process.exit(0);
-  };
-
-  const armIdleTimer = (): void => {
-    if (idleTimer || stopping) return;
-    const timeoutMs = resolveIdleTimeoutMs();
-    if (timeoutMs <= 0) return;
-    idleTimer = setTimeout(() => {
-      idleTimer = null;
-      if (clients === 0) stop('idle timeout');
-      else armIdleTimer();
-    }, timeoutMs);
-    idleTimer.unref?.();
-  };
-
-  const disarmIdleTimer = (): void => {
-    if (!idleTimer) return;
-    clearTimeout(idleTimer);
-    idleTimer = null;
-  };
-
-  if (process.platform !== 'win32') {
-    try {
-      fs.unlinkSync(socketPath);
-    } catch {
-      /* stale socket absent */
-    }
-  }
-
-  server = net.createServer((socket) => {
-    const hello: DaemonHello = {
-      cartograph: CARTOGRAPH_PACKAGE_VERSION,
-      pid: process.pid,
-      socketPath,
-      protocol: 1,
-    };
-    socket.write(`${JSON.stringify(hello)}\n`);
-
-    let transport: SocketTransport;
-    const onClose = (): void => {
-      clients = Math.max(0, clients - 1);
-      mcp.detachTransport(transport);
-      if (clients === 0) armIdleTimer();
-    };
-    transport = new SocketTransport(socket, onClose);
-    clients++;
-    disarmIdleTimer();
-    mcp.attachTransport(transport);
+  return listenDaemonServer(runtime.server, runtime.socketPath).then(() => {
+    chmodDaemonSocket(runtime.socketPath);
+    process.stderr.write(`[Cartograph daemon] Listening on ${runtime.socketPath} (pid ${process.pid}).\n`);
+    void runtime.mcp.tryInitializeDefault(projectRoot);
+    armDaemonIdleTimer(runtime);
+    process.on('SIGINT', () => stopDaemon(runtime, 'SIGINT'));
+    process.on('SIGTERM', () => stopDaemon(runtime, 'SIGTERM'));
   });
+}
 
-  await new Promise<void>((resolve, reject) => {
-    server!.once('error', reject);
-    server!.listen(socketPath, () => {
-      server!.off('error', reject);
-      if (process.platform !== 'win32') {
-        try {
-          fs.chmodSync(socketPath, 0o600);
-        } catch {
-          /* best effort */
-        }
-      }
+function createDaemonRuntime(projectRoot: string, socketPath: string, options: SharedMcpDaemonOptions): DaemonRuntime {
+  return {
+    projectRoot,
+    socketPath,
+    mcp: new MCPServer({ ...options, projectPath: projectRoot }),
+    server: null,
+    clients: 0,
+    idleTimer: null,
+    stopping: false,
+  };
+}
+
+function createDaemonServer(runtime: DaemonRuntime): net.Server {
+  return net.createServer((socket) => attachDaemonClient(runtime, socket));
+}
+
+function attachDaemonClient(runtime: DaemonRuntime, socket: net.Socket): void {
+  writeDaemonHello(socket, runtime.socketPath);
+  let transport: SocketTransport;
+  const onClose = (): void => {
+    runtime.clients = Math.max(0, runtime.clients - 1);
+    runtime.mcp.detachTransport(transport);
+    if (runtime.clients === 0) armDaemonIdleTimer(runtime);
+  };
+  transport = new SocketTransport(socket, onClose);
+  runtime.clients++;
+  disarmDaemonIdleTimer(runtime);
+  runtime.mcp.attachTransport(transport);
+}
+
+function writeDaemonHello(socket: net.Socket, socketPath: string): void {
+  const hello: DaemonHello = {
+    cartograph: CARTOGRAPH_PACKAGE_VERSION,
+    pid: process.pid,
+    socketPath,
+    protocol: 1,
+  };
+  socket.write(`${JSON.stringify(hello)}\n`);
+}
+
+function listenDaemonServer(server: net.Server, socketPath: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(socketPath, () => {
+      server.off('error', reject);
       resolve();
     });
   });
+}
 
-  process.stderr.write(`[Cartograph daemon] Listening on ${socketPath} (pid ${process.pid}).\n`);
-  void mcp.tryInitializeDefault(projectRoot);
-  armIdleTimer();
-  process.on('SIGINT', () => stop('SIGINT'));
-  process.on('SIGTERM', () => stop('SIGTERM'));
+function armDaemonIdleTimer(runtime: DaemonRuntime): void {
+  if (runtime.idleTimer || runtime.stopping) return;
+  const timeoutMs = resolveIdleTimeoutMs();
+  if (timeoutMs <= 0) return;
+  runtime.idleTimer = setTimeout(() => {
+    runtime.idleTimer = null;
+    if (runtime.clients === 0) stopDaemon(runtime, 'idle timeout');
+    else armDaemonIdleTimer(runtime);
+  }, timeoutMs);
+  runtime.idleTimer.unref?.();
+}
+
+function disarmDaemonIdleTimer(runtime: DaemonRuntime): void {
+  if (!runtime.idleTimer) return;
+  clearTimeout(runtime.idleTimer);
+  runtime.idleTimer = null;
+}
+
+function stopDaemon(runtime: DaemonRuntime, reason: string): void {
+  if (runtime.stopping) return;
+  runtime.stopping = true;
+  disarmDaemonIdleTimer(runtime);
+  process.stderr.write(`[Cartograph daemon] Shutting down (${reason}; clients=${runtime.clients}).\n`);
+  runtime.server?.close();
+  runtime.mcp.stop(false);
+  cleanupDaemonRuntime(runtime);
+  process.exit(0);
 }
 
 export async function runSharedMcpDaemonProxy(options: SharedMcpDaemonOptions): Promise<'proxied' | 'fallback'> {
@@ -179,30 +179,26 @@ async function ensureDaemonSocket(projectRoot: string, options: SharedMcpDaemonO
   return null;
 }
 
-async function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> {
-  const lock = readLockInfo(projectRoot);
-  if (lock && !isProcessAlive(lock.pid)) {
-    removeStaleLock(projectRoot, lock);
-    return null;
-  }
-  const socketPath = lock?.socketPath || getDaemonSocketPath(projectRoot);
-  if (process.platform !== 'win32' && !fs.existsSync(socketPath)) return null;
-
+function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> {
+  const socketPath = resolveDaemonSocketTarget(projectRoot);
+  if (!socketPath) return Promise.resolve(null);
   const socket = net.createConnection(socketPath);
-  const hello = await readHelloLine(socket).catch(() => null);
-  if (!hello) {
-    socket.destroy();
-    return null;
-  }
-  if (hello.cartograph !== CARTOGRAPH_PACKAGE_VERSION || hello.protocol !== 1) {
-    process.stderr.write(
-      `[Cartograph MCP] Shared daemon version/protocol mismatch ` +
-        `(daemon ${hello.cartograph}, local ${CARTOGRAPH_PACKAGE_VERSION}); using direct mode.\n`,
-    );
-    socket.destroy();
-    return null;
-  }
-  return socket;
+  return readHelloLine(socket)
+    .then((hello) => acceptDaemonSocket(socket, hello))
+    .catch(() => {
+      socket.destroy();
+      return null;
+    });
+}
+
+function acceptDaemonSocket(socket: net.Socket, hello: DaemonHello): net.Socket | null {
+  if (hello.cartograph === CARTOGRAPH_PACKAGE_VERSION && hello.protocol === 1) return socket;
+  process.stderr.write(
+    `[Cartograph MCP] Shared daemon version/protocol mismatch ` +
+      `(daemon ${hello.cartograph}, local ${CARTOGRAPH_PACKAGE_VERSION}); using direct mode.\n`,
+  );
+  socket.destroy();
+  return null;
 }
 
 function spawnDaemonChild(projectRoot: string, options: SharedMcpDaemonOptions): void {
@@ -270,6 +266,24 @@ function tryAcquireDaemonLock(
   return { acquired: false, info: existing };
 }
 
+function prepareDaemonLock(
+  projectRoot: string,
+): { acquired: true; info: DaemonLockInfo } | { acquired: false; info: DaemonLockInfo } {
+  fs.mkdirSync(path.dirname(getDaemonPidPath(projectRoot)), { recursive: true });
+  return tryAcquireDaemonLock(projectRoot);
+}
+
+function resolveDaemonSocketTarget(projectRoot: string): string | null {
+  const lock = readLockInfo(projectRoot);
+  if (lock && !isProcessAlive(lock.pid)) {
+    removeStaleLock(projectRoot, lock);
+    return null;
+  }
+  const socketPath = lock?.socketPath || getDaemonSocketPath(projectRoot);
+  if (process.platform !== 'win32' && !fs.existsSync(socketPath)) return null;
+  return socketPath;
+}
+
 function readLockInfo(projectRoot: string): DaemonLockInfo | null {
   try {
     return decodeLockInfo(fs.readFileSync(getDaemonPidPath(projectRoot), 'utf-8'));
@@ -290,6 +304,38 @@ function removeStaleLock(projectRoot: string, info: DaemonLockInfo | null): void
     } catch {
       /* absent */
     }
+  }
+}
+
+function cleanupStaleSocket(socketPath: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    fs.unlinkSync(socketPath);
+  } catch {
+    /* stale socket absent */
+  }
+}
+
+function chmodDaemonSocket(socketPath: string): void {
+  if (process.platform === 'win32') return;
+  try {
+    fs.chmodSync(socketPath, 0o600);
+  } catch {
+    /* best effort */
+  }
+}
+
+function cleanupDaemonRuntime(runtime: DaemonRuntime): void {
+  try {
+    if (process.platform !== 'win32') fs.unlinkSync(runtime.socketPath);
+  } catch {
+    /* already gone */
+  }
+  try {
+    const current = readLockInfo(runtime.projectRoot);
+    if (current?.pid === process.pid) fs.unlinkSync(getDaemonPidPath(runtime.projectRoot));
+  } catch {
+    /* already gone */
   }
 }
 
