@@ -10,9 +10,9 @@ import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
 import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
-import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MIN, RETRIEVE_K_MAX } from '../../mcp/tools/ask.js';
 import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
+import { registerAskCommand as registerAskFeatureCommand } from '../../features/ask/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
 import { registerDigestCommand } from '../../features/digest/index.js';
 import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
@@ -29,7 +29,6 @@ import {
   chalk,
   resolveProjectPath,
   loadCartograph,
-  assignIntArg,
   formatNumber,
   runViaMCP,
 } from '../_cli-core.js';
@@ -63,65 +62,6 @@ interface StatusRollupConfig {
   ) => void;
   appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
-}
-
-function validateAskQuestion(question: string): boolean {
-  if (question.trim().length === 0) {
-    error('ask: the question must not be empty.');
-    process.exitCode = 1;
-    return false;
-  }
-  if (question.length > 4096) {
-    error(`ask: the question must be at most 4096 characters (got ${question.length}).`);
-    process.exitCode = 1;
-    return false;
-  }
-  return true;
-}
-
-function parseRetrieveK(raw: string | undefined): number | null {
-  const retrieveKArgs: Record<string, unknown> = {};
-  if (
-    !assignIntArg({
-      args: retrieveKArgs,
-      key: 'retrieveK',
-      raw,
-      optionName: '--retrieve-k',
-      opts: { min: RETRIEVE_K_MIN, max: RETRIEVE_K_MAX },
-    })
-  ) {
-    return null;
-  }
-  return (retrieveKArgs['retrieveK'] as number | undefined) ?? RETRIEVE_K_DEFAULT;
-}
-
-async function printAskAnnotations(
-  cg: Parameters<typeof import('../../mcp/tools/ask.js')['groundCitations']>[0],
-  result: {
-    answer: string;
-    citations: Array<{ node: { name: string; kind: string; filePath: string; startLine?: number } }>;
-    retrieveMs: number;
-    chatMs: number;
-  },
-  askModel: string,
-): Promise<void> {
-  const { groundCitations, buildCitationReport } = await import('../../mcp/tools/ask.js');
-  const { displayModelName } = await import('../../mcp/tools/shared.js');
-  const cited = groundCitations(cg, result.answer);
-  const report = buildCitationReport(cited);
-  for (const line of report.sections) {
-    out(line ? chalk.dim(line) : '');
-  }
-  out('\n' + chalk.dim('Retrieval sources:'));
-  for (const c of result.citations) {
-    const loc = c.node.startLine ? `:${c.node.startLine}` : '';
-    out(chalk.dim(`  • ${c.node.name} (${c.node.kind}) ${c.node.filePath}${loc}`));
-  }
-  out(
-    chalk.dim(
-      `\n  retrieve ${result.retrieveMs}ms · chat ${result.chatMs}ms · model ${displayModelName(askModel)} · ${report.counter}`,
-    ),
-  );
 }
 
 async function buildStatusRollupConfig(options: StatusOptions): Promise<StatusRollupConfig> {
@@ -335,6 +275,7 @@ function printStatusRollupLine(line: string): void {
 interface CommandLike {
   command(name: string): CommandLike;
   description(text: string): CommandLike;
+  argument(...args: unknown[]): CommandLike;
   option(...args: unknown[]): CommandLike;
   action(fn: (...args: any[]) => unknown): CommandLike;
 }
@@ -383,6 +324,14 @@ function registerAtRangeReadCommand(deps: ReadCommandDeps): void {
   registerAtRangeFeatureCommand({ ...deps, warn });
 }
 
+function registerAskReadCommand(deps: ReadCommandDeps): void {
+  registerAskFeatureCommand({
+    ...deps,
+    writeLine: out,
+    dim: chalk.dim,
+  });
+}
+
 function registerFilesReadCommand(deps: ReadCommandDeps): void {
   registerFilesFeatureCommand({
     ...deps,
@@ -416,91 +365,7 @@ function registerAffectedReadCommand(deps: ReadCommandDeps): void {
 
 registerAtRangeReadCommand(defaultReadCommandDeps);
 
-/**
- * cartograph ask <question> [path]
- *
- * Natural-language Q&A over the indexed codebase. Hybrid-retrieves
- * relevant symbols via FTS+semantic, then asks the configured chat
- * model. Requires LLM (config.llm).
- *
- * CLI/MCP alignment exception (B11): direct implementation so the
- * LLM response can be streamed to stdout token-by-token. The MCP
- * version returns the completed answer in one block — fine for the
- * agent surface, less helpful for an interactive human shell.
- */
-program
-  .command('ask')
-  .description(
-    `Ask a natural-language question about the codebase (requires LLM). The question is capped at 4096 characters.`,
-  )
-  .argument('<question>', 'Natural-language question about the codebase (capped at 4096 characters).')
-  .argument('[path]', 'Path to a project with .cartograph/ (default: current directory). Equivalent to --project-path.')
-  .option('-p, --project-path <path>', 'Project path (alias of the [path] positional)')
-  .option(
-    '-k, --retrieve-k <n>',
-    `Number of candidates to feed the model (default ${RETRIEVE_K_DEFAULT}, range ${RETRIEVE_K_MIN}-${RETRIEVE_K_MAX})`,
-  )
-  .option('-q, --quiet', 'Print only the answer (no sources block)')
-  .action(
-    async (
-      question: string,
-      pathArg: string | undefined,
-      options: { projectPath?: string; retrieveK?: string; quiet?: boolean },
-    ) => {
-      // Mirror the MCP `cartograph_ask` input validation (validateString):
-      // reject an empty / whitespace-only question and cap the length at
-      // 4096 chars, so the CLI fails fast with a clean message instead of
-      // forwarding junk to the LLM.
-      if (!validateAskQuestion(question)) return;
-      // `-p, --project-path` is an alias of the [path] positional so `ask`
-      // matches the `local-chat` / `summaries` project-path convention.
-      // The explicit flag wins on conflict.
-      const projectPath = resolveProjectPath(options.projectPath ?? pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
-        const { getChatModel, getAskModel } = await import('../../llm/provider.js');
-        const chatModel = getChatModel(llmConfig);
-        if (!chatModel) {
-          error('No LLM available. Configure config.llm.summarizeLlm in .cartograph/config.json.');
-          cg.close();
-          process.exit(1);
-        }
-        // Prefer the ask model id for the trailer — that's what actually
-        // generated this answer. Falls back to chatModel when no ask
-        // override is configured (single-provider setup).
-        const askModel = getAskModel(llmConfig) ?? chatModel;
-        // Route `--retrieve-k` through `assignIntArg` so an out-of-range
-        // value is REJECTED with a clean message (matching every other
-        // bounded numeric flag) rather than silently clamped. `cg` is
-        // already open here, so destroy it before returning on a bad arg.
-        const retrieveK = parseRetrieveK(options.retrieveK);
-        if (retrieveK === null) {
-          cg.close();
-          return;
-        }
-        const result = await cg.llm.ask(question, { retrieveK });
-        out(result.answer);
-        if (!options.quiet) {
-          // Verified-citations block — mirror the MCP `cartograph_ask`
-          // surface (friction #33). `groundCitations` resolves every
-          // backtick-quoted identifier in the answer against the index;
-          // `buildCitationReport` is the shared renderer so the CLI and
-          // MCP citation sections cannot diverge.
-          await printAskAnnotations(cg, result, askModel);
-        }
-        cg.close();
-      } catch (err) {
-        error(`Failed to answer: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    },
-  );
+registerAskReadCommand(defaultReadCommandDeps);
 
 /**
  * cartograph status [path]
@@ -589,6 +454,7 @@ registerFilesReadCommand(defaultReadCommandDeps);
 
 export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
   registerAtRangeReadCommand(deps);
+  registerAskReadCommand(deps);
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
@@ -598,8 +464,6 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
 registerAffectedReadCommand(defaultReadCommandDeps);
 
 export const __readCommandInternals = {
-  validateAskQuestion,
-  parseRetrieveK,
   printUninitializedStatus,
   buildStatusRollupConfig,
   printStatusJson,
