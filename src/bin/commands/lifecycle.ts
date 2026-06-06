@@ -23,6 +23,7 @@ import { registerBackendCommand, type BackendRuntimeModule } from '../../feature
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
 import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
+import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -250,34 +251,6 @@ function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
     });
 
   registerLlmSmokeCommand(deps);
-}
-
-function registerTraceToCulpritsCommand(deps: LifecycleCommandDeps): void {
-  const { program, assignIntArg, runViaMCP, writeStderr } = deps;
-  program
-    .command('trace-to-culprits')
-    .description(
-      'Pipe a stack trace into cartograph and get a ranked list of likely fix-site candidates (mirrors cartograph_trace_to_culprits MCP tool). Reads the trace from stdin (or pass --trace).',
-    )
-    .option('-p, --project-path <path>', 'Project path')
-    .option('-l, --limit <n>', 'Maximum culprits to return (default 10, max 50)')
-    .option('-t, --trace <text>', 'Trace text inline (default: read from stdin)')
-    .action(async (options: { projectPath?: string; limit?: string; trace?: string }) => {
-      let trace = options.trace;
-      if (!trace) {
-        // stdin slurp — typical usage `cat error.log | cartograph trace-to-culprits`.
-        const chunks: Buffer[] = [];
-        for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
-        trace = Buffer.concat(chunks).toString('utf8');
-      }
-      if (!trace.trim()) {
-        writeStderr('No trace provided. Pipe a stack trace to stdin or pass --trace "<text>".');
-        process.exit(2);
-      }
-      const args: Record<string, unknown> = { trace };
-      if (!assignIntArg({ args, key: 'limit', raw: options.limit, optionName: '--limit', opts: { min: 1 } })) return;
-      await runViaMCP('cartograph_trace_to_culprits', args, options.projectPath);
-    });
 }
 
 function registerPlaybookCommand(deps: LifecycleCommandDeps): void {
