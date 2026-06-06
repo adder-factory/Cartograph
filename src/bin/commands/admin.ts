@@ -15,6 +15,7 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
+import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
@@ -1542,43 +1543,6 @@ function registerInstallModelsCommand(deps: AdminCommandDeps): void {
     });
 }
 
-/**
- * MCP-parity aliases for installer/LLM admin actions.
- */
-function registerDoctorCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, loadDoctor, resolveProjectPath, writeStdout } = deps;
-  adminCmd
-    .command('doctor [path]')
-    .description("Diagnose install state (mirrors cartograph_admin MCP tool with action='doctor')")
-    .option('--fix', 'Auto-apply fixable remediations')
-    .option('--no-project-checks', 'Skip project init/config checks')
-    .option('--skip-project-checks', 'Skip project init/config checks')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(
-      async (
-        pathArg: string | undefined,
-        options: { fix?: boolean; projectChecks?: boolean; skipProjectChecks?: boolean; json?: boolean },
-      ) => {
-        const projectPath = resolveProjectPath(pathArg);
-        try {
-          const { runDoctor, formatDoctorReport, formatDoctorJson } = await loadDoctor();
-          const skipProjectChecks = options.projectChecks === false || options.skipProjectChecks === true;
-          const result = await runDoctor({
-            projectPath,
-            fix: options.fix === true,
-            skipProjectChecks,
-          });
-          writeStdout(`${options.json ? formatDoctorJson(result) : formatDoctorReport(result)}\n`);
-          const finalStatus = result.afterFix?.overallStatus ?? result.overallStatus;
-          if (finalStatus === 'fail') process.exit(1);
-        } catch (err) {
-          error(`doctor failed: ${errMsg(err)}`);
-          process.exit(1);
-        }
-      },
-    );
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -1615,7 +1579,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
     readFile: (filePath) => fs.promises.readFile(filePath),
   });
   registerInstallModelsCommand(deps);
-  registerDoctorCommand(deps);
+  registerAdminDoctorCommand(deps);
   registerAdminLlmSetupCommands(deps);
   deps.attachUnknownActionHandler(deps.adminCmd, 'admin');
 }
