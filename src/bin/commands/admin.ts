@@ -15,6 +15,20 @@ import {
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
 import {
+  clearParseCacheIfRequested as clearParseCacheIfRequestedWithDeps,
+  indexAllOptions,
+  parseParseWorkersValue,
+  phaseTimingLines as phaseTimingLinesWithDeps,
+  printSyncResult as printSyncResultWithDeps,
+  registerAdminIndexingCommands,
+  reportBackgroundSummaryStatus as reportBackgroundSummaryStatusWithDeps,
+  runQuietIndex as runQuietIndexWithDeps,
+  type AdminIndexGraph,
+  type AdminIndexOptions,
+  type AdminIndexResult,
+  type SyncResult,
+} from '../../features/admin-indexing/index.js';
+import {
   registerAdminInstallModelsCommand,
   printInstallModelResults as printInstallModelResultsWithDeps,
   type InstallModelResult,
@@ -44,17 +58,7 @@ import {
   assignFloatArg as cliAssignFloatArg,
   awaitSummarisationWithProgress as cliAwaitSummarisationWithProgress,
   printIndexResult as cliPrintIndexResult,
-  type IndexResult,
 } from '../_cli-core.js';
-
-interface AdminIndexOptions {
-  force?: boolean;
-  quiet?: boolean;
-  verbose?: boolean;
-  profile?: boolean;
-  clearParseCache?: boolean | string;
-  parseWorkers?: string;
-}
 
 type ClackPrompts = typeof import('@clack/prompts');
 
@@ -73,9 +77,6 @@ interface AssignNumericArgInput {
   optionName: string;
   opts?: { min?: number; max?: number };
 }
-
-type LoadedCartographModule = Awaited<ReturnType<typeof cliLoadCartograph>>;
-type AdminIndexGraph = Awaited<ReturnType<LoadedCartographModule['default']['open']>>;
 
 export interface AdminCommandDeps {
   adminCmd: CommandLike;
@@ -242,21 +243,13 @@ const defaultAdminCommandDeps: AdminCommandDeps = {
 
 let activeAdminCommandDeps: AdminCommandDeps = defaultAdminCommandDeps;
 
-const PHASE_PERCENT_SCALE = 100;
-const PHASE_LABEL_WIDTH = 14;
-const PHASE_DURATION_WIDTH = 8;
-const PHASE_PERCENT_WIDTH = 2;
-const POST_HOOK_LABEL_WIDTH = 12;
-
 function parseParseWorkers(raw: string | undefined): number | undefined {
-  const { error } = activeAdminCommandDeps;
-  if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1) {
-    error(`--parse-workers must be a positive integer (got "${raw}")`);
+  const parsed = parseParseWorkersValue(raw);
+  if (!parsed.ok) {
+    activeAdminCommandDeps.error(parsed.error);
     process.exit(1);
   }
-  return n;
+  return parsed.value;
 }
 
 function parseConcurrencyOption(raw: string | undefined): number {
@@ -269,46 +262,8 @@ function parseConcurrencyOption(raw: string | undefined): number {
   return parseConcurrency(raw);
 }
 
-function indexAllOptions(
-  options: Pick<AdminIndexOptions, 'force' | 'profile'>,
-  parseWorkers: number | undefined,
-): {
-  summarize: false;
-  profile: boolean;
-  clearStructural: boolean;
-  parseWorkers?: number;
-} {
-  return {
-    summarize: false,
-    profile: !!options.profile,
-    clearStructural: !!options.force,
-    ...(parseWorkers !== undefined && { parseWorkers }),
-  };
-}
-
-function phaseTimingLines(result: IndexResult): string[] {
-  const { formatDuration } = activeAdminCommandDeps;
-  const p = result.profile;
-  if (!p) return [];
-  const fmt = (label: string, ms: number | undefined): string => {
-    if (ms === undefined) return '';
-    const pct = result.durationMs > 0 ? Math.round((ms / result.durationMs) * PHASE_PERCENT_SCALE) : 0;
-    return `  ${label.padEnd(PHASE_LABEL_WIDTH)} ${formatDuration(ms).padStart(PHASE_DURATION_WIDTH)}  (${pct.toString().padStart(PHASE_PERCENT_WIDTH)}%)`;
-  };
-  const lines = [fmt('scan', p.scanMs), fmt('parse+store', p.parseStoreMs)];
-  if (p.retryMs && p.retryMs > 0) lines.push(fmt('retry', p.retryMs));
-  lines.push(fmt('resolve', p.resolveMs), fmt('postHooks', p.postHooksMs));
-  if (p.postHooksByHook && p.postHooksMs && p.postHooksMs > 0) {
-    const sorted = Object.entries(p.postHooksByHook).sort((a, b) => b[1] - a[1]);
-    for (const [name, ms] of sorted) {
-      const pct = p.postHooksMs > 0 ? Math.round((ms / p.postHooksMs) * PHASE_PERCENT_SCALE) : 0;
-      lines.push(
-        `    ${name.padEnd(POST_HOOK_LABEL_WIDTH)} ${formatDuration(ms).padStart(PHASE_DURATION_WIDTH)}  (${pct.toString().padStart(PHASE_PERCENT_WIDTH)}% of postHooks)`,
-      );
-    }
-  }
-  lines.push(fmt('maintenance', p.maintenanceMs), fmt('total', result.durationMs));
-  return lines.filter(Boolean);
+function phaseTimingLines(result: AdminIndexResult): string[] {
+  return phaseTimingLinesWithDeps(result, activeAdminCommandDeps);
 }
 
 function parseEagerLimit(
@@ -332,24 +287,8 @@ function printInstallModelResults(result: InstallModelResult): void {
   printInstallModelResultsWithDeps(result, activeAdminCommandDeps);
 }
 
-function printSyncResult(
-  clack: typeof import('@clack/prompts'),
-  result: { filesAdded: number; filesModified: number; filesRemoved: number; nodesUpdated: number; durationMs: number },
-): void {
-  const { formatNumber, formatDuration } = activeAdminCommandDeps;
-  const totalChanges = result.filesAdded + result.filesModified + result.filesRemoved;
-  if (totalChanges === 0) {
-    clack.log.info('Already up to date');
-    return;
-  }
-  clack.log.success(`Synced ${formatNumber(totalChanges)} changed files`);
-  const details: string[] = [];
-  if (result.filesAdded > 0) details.push(`Added: ${result.filesAdded}`);
-  if (result.filesModified > 0) details.push(`Modified: ${result.filesModified}`);
-  if (result.filesRemoved > 0) details.push(`Removed: ${result.filesRemoved}`);
-  clack.log.info(
-    `${details.join(', ')} — ${formatNumber(result.nodesUpdated)} nodes in ${formatDuration(result.durationMs)}`,
-  );
+function printSyncResult(clack: typeof import('@clack/prompts'), result: SyncResult): void {
+  printSyncResultWithDeps(clack, result, activeAdminCommandDeps);
 }
 
 function printSummarizeDetails(
@@ -422,170 +361,19 @@ function printSummarizeEmbedDetails(
   );
 }
 
-/**
- * cartograph admin index [path]
- */
-function registerIndexCommand(deps: AdminCommandDeps): void {
-  const { adminCmd } = deps;
-  adminCmd
-    .command('index [path]')
-    .description("Index all files in the project (mirrors cartograph_admin MCP tool with action='index')")
-    .option('-f, --force', 'Force full re-index even if already indexed')
-    .option('-q, --quiet', 'Suppress progress output')
-    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-    .option('--profile', 'Print per-phase timings (scan / parse+store / resolve / postHooks / maintenance)')
-    .option(
-      '--clear-parse-cache [language]',
-      'Wipe the per-file parse cache before reindexing. ' +
-        '`--force` alone preserves it intentionally so re-extracts replay; ' +
-        'use this when the extractor itself changed and the schema-version ' +
-        'envelope (PAYLOAD_VERSION) was not bumped to match. ' +
-        'Pass a language (e.g. `--clear-parse-cache=typescript`) to drop ' +
-        "only that language's entries — much faster when one extractor changed.",
-    )
-    .option(
-      '--parse-workers <n>',
-      'Parse-worker pool size. Default: CPU count − 1, floored at 1, ' +
-        'capped at 16. Lower it on memory-constrained CI runners; raise ' +
-        'it on big monorepos. Bench with --profile before settling on a value.',
-    )
-    .action(runAdminIndexCommand);
-}
-
-async function runAdminIndexCommand(pathArg: string | undefined, options: AdminIndexOptions): Promise<void> {
-  const { error, info, isInitialized, loadCartograph, resolveProjectPath } = activeAdminCommandDeps;
-  const projectPath = resolveProjectPath(pathArg);
-
-  // Parse --parse-workers once: a positive integer overrides the
-  // pool-size default; anything else is rejected loudly rather than
-  // silently ignored.
-  const parseWorkers = parseParseWorkers(options.parseWorkers);
-
-  try {
-    if (!isInitialized(projectPath)) {
-      error(`Cartograph not initialized in ${projectPath}`);
-      info('Run "cartograph admin init" first');
-      process.exit(1);
-    }
-
-    const { default: Cartograph } = await loadCartograph();
-    // Write path (admin index): explicitly opt in to auto-migration.
-    const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-    if (options.quiet) {
-      await runQuietIndex(cg, options, parseWorkers);
-      return;
-    }
-
-    await runInteractiveIndex({ cg, projectPath, options, parseWorkers });
-  } catch (err) {
-    error(`Failed to index: ${errMsg(err)}`);
-    process.exit(1);
-  }
-}
-
 async function runQuietIndex(
   cg: AdminIndexGraph,
   options: AdminIndexOptions,
   parseWorkers: number | undefined,
 ): Promise<void> {
-  // Quiet mode: no UI, no background summarisation (the process
-  // exits immediately and would kill in-flight LLM work anyway).
-  await clearParseCacheIfRequested(cg, options.clearParseCache);
-  // `--force` clear is threaded INTO indexAll so it runs under the
-  // file lock (a contended --force must not wipe the index).
-  const result = await cg.indexAll(indexAllOptions(options, parseWorkers));
-  if (!result.success) process.exit(1);
-  if (options.profile && result.profile) {
-    // Quiet+profile is the scripted use case (CI bench, etc.) —
-    // emit a single compact JSON line so it parses cleanly.
-    activeAdminCommandDeps.writeStdout(JSON.stringify(result.profile) + '\n');
-  }
-  cg.close();
-}
-
-async function runInteractiveIndex(args: {
-  cg: AdminIndexGraph;
-  projectPath: string;
-  options: AdminIndexOptions;
-  parseWorkers: number | undefined;
-}): Promise<void> {
-  const { cg, projectPath, options, parseWorkers } = args;
-  const { printIndexResult } = activeAdminCommandDeps;
-  const clack = await activeAdminCommandDeps.loadClack();
-  clack.intro('Indexing project');
-
-  await prepareInteractiveIndex(cg, clack, options);
-  const result = await runIndexWithProgress(cg, options, parseWorkers);
-  printIndexResult(clack, result, projectPath);
-
-  if (options.profile && result.profile) {
-    clack.note(phaseTimingLines(result).join('\n'), 'Phase timings');
-  }
-  if (!result.success) process.exit(1);
-
-  await reportBackgroundSummaryStatus(cg, clack, projectPath);
-  clack.outro('Done');
-}
-
-async function prepareInteractiveIndex(
-  cg: AdminIndexGraph,
-  clack: ClackPrompts,
-  options: AdminIndexOptions,
-): Promise<void> {
-  if (options.force) {
-    // The structural clear is threaded into indexAll (below) so it
-    // runs UNDER the file lock — a contended --force then leaves the
-    // existing index intact instead of wiping it with no rebuild.
-    clack.log.info(
-      'Full re-index (--force): structural index will be cleared under lock, then rebuilt (nothing is cleared if the lock is held); LLM caches preserved',
-    );
-  }
-  const dropped = await clearParseCacheIfRequested(cg, options.clearParseCache);
-  if (!dropped) return;
-  clack.log.info(
-    dropped.lang
-      ? `Cleared ${dropped.count} parse-cache entries for language=${dropped.lang}`
-      : `Cleared ${dropped.count} parse-cache entries (every file will fully re-parse)`,
-  );
+  await runQuietIndexWithDeps({ cg, options, parseWorkers, deps: activeAdminCommandDeps });
 }
 
 async function clearParseCacheIfRequested(
   cg: AdminIndexGraph,
   clearParseCacheOption: boolean | string | undefined,
 ): Promise<{ count: number; lang: string | undefined } | null> {
-  if (!clearParseCacheOption) return null;
-  const { clearParseCache } = await activeAdminCommandDeps.loadParseCache();
-  const lang = typeof clearParseCacheOption === 'string' ? clearParseCacheOption : undefined;
-  return { count: clearParseCache(cg.queries, lang), lang };
-}
-
-async function runIndexWithProgress(
-  cg: AdminIndexGraph,
-  options: AdminIndexOptions,
-  parseWorkers: number | undefined,
-): Promise<IndexResult> {
-  // `summarize: false` — the LLM summary tail is NOT run inline.
-  // After base indexing the CLI hands it to a detached process
-  // (see below), so the in-process background pass must not also
-  // fire. Without this both would run and double the GPU load.
-  const { colors, createShimmerProgress, createVerboseProgress, writeStdout } = activeAdminCommandDeps;
-  if (options.verbose) {
-    return cg.indexAll({
-      onProgress: createVerboseProgress(),
-      verbose: true,
-      ...indexAllOptions(options, parseWorkers),
-    });
-  }
-
-  writeStdout(`${colors.dim}│${colors.reset}\n`);
-  const progress = createShimmerProgress();
-  const result = await cg.indexAll({
-    onProgress: progress.onProgress,
-    ...indexAllOptions(options, parseWorkers),
-  });
-  await progress.stop();
-  return result;
+  return clearParseCacheIfRequestedWithDeps(cg, clearParseCacheOption, activeAdminCommandDeps);
 }
 
 async function reportBackgroundSummaryStatus(
@@ -593,221 +381,7 @@ async function reportBackgroundSummaryStatus(
   clack: ClackPrompts,
   projectPath: string,
 ): Promise<void> {
-  // Base graph is complete and queryable NOW. Hand the slow LLM
-  // summary tail (minutes) to a detached process so the CLI
-  // returns immediately instead of making the user sit and wait.
-  const llmCfgForSummary = await cg.llm.config.getEffectiveLlmConfig();
-  const eagerLimitCfg = cg.config.llm?.summarizeEagerLimit;
-  cg.close(); // release DB handles before the child opens them
-
-  if (!llmCfgForSummary) {
-    clack.log.info(
-      'No LLM configured — symbol summaries skipped. Run ' +
-        '`cartograph admin install-models --write-config` to enable them.',
-    );
-    return;
-  }
-  if (eagerLimitCfg === 0) {
-    clack.log.info(
-      'Summaries: ad-hoc only (config.llm.summarizeEagerLimit = 0) — ' +
-        'generated on demand as `find mode:intent` references symbols.',
-    );
-    return;
-  }
-
-  const { spawnDetachedSummarize } = await activeAdminCommandDeps.loadDetachedSummarize();
-  const detached = spawnDetachedSummarize(projectPath);
-  if (detached.spawned) {
-    clack.log.success(
-      `Base index ready — cartograph is usable now. Symbol summaries are ` +
-        `generating in the background (pid ${detached.pid}); run \`cartograph status\` ` +
-        `for coverage, or \`cartograph admin summarize --all\` to wait for a full pass.`,
-    );
-    return;
-  }
-  clack.log.info(`Base index ready. Background summarization ${detached.reason}.`);
-}
-
-/**
- * cartograph admin embed-only [path]
- *
- * Fast-lane indexing for operators who only want semantic search
- * (`cartograph_search mode='semantic'` + `cartograph_ask`). Runs the
- * extractor, skips reference-resolution + every postHook (centrality,
- * biomarkers, churn, co-change, etc.), then runs the embed pass
- * synchronously so the CLI returns when embeddings are persisted.
- *
- * Drops indexing wall-clock by 70-90% on large repos vs full
- * `admin index`. Trade-off: NO biomarker findings, NO hotspot data,
- * NO call graph, NO classify roles. Use `admin index` to backfill
- * those later when needed.
- */
-function registerEmbedOnlyCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    colors,
-    createShimmerProgress,
-    createVerboseProgress,
-    error,
-    info,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    printIndexResult,
-    resolveProjectPath,
-    writeStdout,
-  } = deps;
-  adminCmd
-    .command('embed-only [path]')
-    .description('Fast-lane index: skip reference resolution + postHooks; embed only (Stage 4 #9)')
-    .option('-q, --quiet', 'Suppress progress output')
-    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean; verbose?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          info('Run "cartograph admin init" first');
-          process.exit(1);
-        }
-
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-        if (options.quiet) {
-          const result = await cg.indexAll({ summarize: false, embedOnly: true });
-          if (!result.success) process.exit(1);
-          try {
-            await cg.llm.embed.embedAll();
-          } catch (err) {
-            error(`Embed pass failed: ${errMsg(err)}`);
-            cg.close();
-            process.exit(1);
-          }
-          cg.close();
-          return;
-        }
-
-        const clack = await loadClack();
-        clack.intro('Embed-only indexing (skip resolution + postHooks)');
-
-        let result: IndexResult;
-        if (options.verbose) {
-          result = await cg.indexAll({
-            onProgress: createVerboseProgress(),
-            verbose: true,
-            embedOnly: true,
-            summarize: false,
-          });
-        } else {
-          writeStdout(`${colors.dim}│${colors.reset}\n`);
-          const progress = createShimmerProgress();
-          result = await cg.indexAll({
-            onProgress: progress.onProgress,
-            embedOnly: true,
-            summarize: false,
-          });
-          await progress.stop();
-        }
-        printIndexResult(clack, result, projectPath);
-
-        // Embed pass — run synchronously so the CLI returns when embeddings
-        // are persisted (the bgCtrl path is skipped because embedOnly
-        // disables the auto-summarization trigger).
-        try {
-          clack.log.info('Running embed pass…');
-          const embedResult = await cg.llm.embed.embedAll({});
-          clack.log.success(
-            `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
-              `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
-          );
-        } catch (err) {
-          clack.log.warn(`Embed pass skipped: ${errMsg(err)}`);
-        }
-
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        error(`Failed to embed-only index: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
- * cartograph admin sync [path]
- */
-function registerSyncCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    awaitSummarisationWithProgress,
-    colors,
-    createShimmerProgress,
-    error,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    resolveProjectPath,
-    writeStderr,
-    writeStdout,
-  } = deps;
-  adminCmd
-    .command('sync [path]')
-    .description("Sync changes since last index (mirrors cartograph_admin MCP tool with action='sync')")
-    .option('-q, --quiet', 'Suppress output (for git hooks)')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-
-      try {
-        if (!isInitialized(projectPath)) {
-          if (!options.quiet) {
-            error(`Cartograph not initialized in ${projectPath}`);
-          }
-          process.exit(1);
-        }
-
-        const { default: Cartograph } = await loadCartograph();
-        // Write path (admin sync): opt in to auto-migration.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-        if (options.quiet) {
-          // Quiet mode (git hooks, scripts): skip summarisation so the
-          // hook stays fast. The next interactive sync/index picks up
-          // any new symbols.
-          await cg.sync({ summarize: false });
-          cg.close();
-          return;
-        }
-
-        const clack = await loadClack();
-        clack.intro('Syncing Cartograph');
-
-        writeStdout(`${colors.dim}│${colors.reset}\n`);
-        const progress = createShimmerProgress();
-
-        const result = await cg.sync({
-          onProgress: progress.onProgress,
-        });
-
-        await progress.stop();
-
-        printSyncResult(clack, result);
-
-        // Await any background summarisation kicked off by sync() so
-        // the work persists before exit.
-        await awaitSummarisationWithProgress(cg, clack);
-
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        if (!options.quiet) {
-          error(`Failed to sync: ${errMsg(err)}`);
-          if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
-        }
-        process.exit(1);
-      }
-    });
+  return reportBackgroundSummaryStatusWithDeps({ cg, clack, projectPath, deps: activeAdminCommandDeps });
 }
 
 /**
@@ -1069,9 +643,7 @@ function registerClassifyCommand(deps: AdminCommandDeps): void {
 export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminCommandDeps): void {
   activeAdminCommandDeps = deps;
   registerAdminProjectLifecycleCommands(deps);
-  registerIndexCommand(deps);
-  registerEmbedOnlyCommand(deps);
-  registerSyncCommand(deps);
+  registerAdminIndexingCommands(deps);
   registerSummarizeCommand(deps);
   registerEmbedCommand(deps);
   registerClassifyCommand(deps);
