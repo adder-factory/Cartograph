@@ -22,6 +22,7 @@ import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
+import { registerPlaybookCommand } from '../../features/playbook/index.js';
 import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
 import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
 
@@ -251,25 +252,6 @@ function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
     });
 
   registerLlmSmokeCommand(deps);
-}
-
-function registerPlaybookCommand(deps: LifecycleCommandDeps): void {
-  const { program, loadToolHandler, writeStdout } = deps;
-  program
-    .command('playbook')
-    .description('Print the cartograph tool playbook (mirrors cartograph_playbook MCP tool)')
-    .action(async () => {
-      // Playbook is project-agnostic — bypass runViaMCP (which requires an
-      // initialized project) and dispatch directly with a null cg, the
-      // same way the MCP server treats `cartograph_playbook` calls before
-      // any project is open.
-      const { ToolHandler } = await loadToolHandler();
-      const handler = new ToolHandler(null);
-      const result = await handler.execute('cartograph_playbook', {});
-      handler.closeAll();
-      writeStdout(result.content[0]?.text ?? '');
-      if (result.isError) process.exit(1);
-    });
 }
 
 function registerViewerCommand(deps: LifecycleCommandDeps): void {
