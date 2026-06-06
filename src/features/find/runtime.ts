@@ -1,3 +1,5 @@
+import { parsePositiveIntValue } from '../shared/cli-args.js';
+
 export type FindAxis = 'name' | 'content' | 'env' | 'sql';
 export type FindNameMode = 'exact' | 'fuzzy' | 'semantic' | 'intent';
 
@@ -56,7 +58,7 @@ export function buildFindMcpArgs(queryArg: string | undefined, options: FindOpti
 function buildFindContentArgs(query: string | undefined, options: FindOptions): FindArgsResult {
   if (!query) return { ok: false, error: '--by content: [query] is required (regex pattern).' };
   const args: Record<string, unknown> = { by: 'content', query };
-  const limit = parsePositiveInt(options.limit ?? FIND_CONTENT_LIMIT_DEFAULT, '--limit');
+  const limit = parsePositiveIntValue(options.limit ?? FIND_CONTENT_LIMIT_DEFAULT, '--limit');
   if (!limit.ok) return limit;
   args['limit'] = limit.value;
   if (options.caseSensitive) args['caseSensitive'] = true;
@@ -70,7 +72,7 @@ function buildFindContentArgs(query: string | undefined, options: FindOptions): 
 
 function buildFindEnvOrSqlArgs(by: 'env' | 'sql', options: FindOptions): FindArgsResult {
   const args: Record<string, unknown> = { by };
-  const limit = parsePositiveInt(options.limit ?? FIND_REF_LIMIT_DEFAULT, '--limit');
+  const limit = parsePositiveIntValue(options.limit ?? FIND_REF_LIMIT_DEFAULT, '--limit');
   if (!limit.ok) return limit;
   args['limit'] = limit.value;
   if (options.key) args['key'] = options.key;
@@ -100,7 +102,7 @@ function buildFindDelegatedNameArgs(
   const valid = validateDelegatedNameMode(mode, query, options);
   if (!valid.ok) return valid;
   const args: Record<string, unknown> = { by: 'name', mode };
-  const limit = parsePositiveInt(options.limit ?? FIND_NAME_LIMIT_DEFAULT, '--limit');
+  const limit = parsePositiveIntValue(options.limit ?? FIND_NAME_LIMIT_DEFAULT, '--limit');
   if (!limit.ok) return limit;
   args['limit'] = limit.value;
   if (query) args['query'] = query;
@@ -147,7 +149,7 @@ export function validateSemanticFind(
 function buildFindExactNameArgs(query: string | undefined, options: FindOptions): FindArgsResult {
   if (!query) return { ok: false, error: '[query] is required for --by name --mode exact' };
   const exactArgs: Record<string, unknown> = { by: 'name', mode: 'exact', query };
-  const limit = parsePositiveInt(options.limit ?? FIND_NAME_LIMIT_DEFAULT, '--limit');
+  const limit = parsePositiveIntValue(options.limit ?? FIND_NAME_LIMIT_DEFAULT, '--limit');
   if (!limit.ok) return limit;
   exactArgs['limit'] = limit.value;
   if (options.kind) exactArgs['kind'] = options.kind;
@@ -158,13 +160,4 @@ function buildFindExactNameArgs(query: string | undefined, options: FindOptions)
   if (options.allowStale) exactArgs['allowStale'] = true;
   if (options.lowTokens) exactArgs['lowTokens'] = true;
   return { ok: true, args: exactArgs };
-}
-
-function parsePositiveInt(raw: string, optionName: string): { ok: true; value: number } | { ok: false; error: string } {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || !Number.isFinite(n)) {
-    return { ok: false, error: `Invalid value for ${optionName}: "${raw}" is not an integer` };
-  }
-  if (n < 1) return { ok: false, error: `Invalid value for ${optionName}: must be >= 1` };
-  return { ok: true, value: n };
 }

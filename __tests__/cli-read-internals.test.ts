@@ -13,6 +13,8 @@ import {
   renderNoDerivedChanges,
   validateAffectedIndexedPaths,
 } from '../src/features/affected/runtime.js';
+import { resolveDiffOption } from '../src/features/at-range/cli.js';
+import { buildAtRangeMcpArgs } from '../src/features/at-range/runtime.js';
 import {
   parseFilesOutputOptions,
   renderFileSummary,
@@ -57,52 +59,63 @@ describe('read command internals', () => {
     const diffPath = path.join(dir, 'change.diff');
     fs.writeFileSync(diffPath, 'diff --git a/src/a.ts b/src/a.ts\n@@ -1 +1 @@\n-old\n+new\n');
     try {
-      await expect(
-        read.buildAtRangeArgs({
+      expect(
+        buildAtRangeMcpArgs({
           file: 'src/a.ts',
           startLine: '10',
           endLine: '12',
           options: { limit: '5', compact: true, fields: 'name,path' },
         }),
-      ).resolves.toMatchObject({
-        file: 'src/a.ts',
-        startLine: 10,
-        endLine: 12,
-        limit: 5,
-        compact: true,
-        fields: ['name', 'path'],
+      ).toEqual({
+        ok: true,
+        args: {
+          file: 'src/a.ts',
+          startLine: 10,
+          endLine: 12,
+          limit: 5,
+          compact: true,
+          fields: ['name', 'path'],
+        },
       });
-      await expect(
-        read.buildAtRangeArgs({
+      expect(
+        buildAtRangeMcpArgs({
           file: undefined,
           startLine: undefined,
           endLine: undefined,
           options: { ranges: 'src/a.ts:1-2,src/b.ts:3-4' },
         }),
-      ).resolves.toMatchObject({
-        ranges: [
-          { file: 'src/a.ts', startLine: 1, endLine: 2 },
-          { file: 'src/b.ts', startLine: 3, endLine: 4 },
-        ],
+      ).toEqual({
+        ok: true,
+        args: {
+          limit: 20,
+          ranges: [
+            { file: 'src/a.ts', startLine: 1, endLine: 2 },
+            { file: 'src/b.ts', startLine: 3, endLine: 4 },
+          ],
+        },
       });
-      await expect(
-        read.buildAtRangeArgs({
+      const fileDiff = await resolveDiffOption(diffPath, { warn: () => undefined });
+      expect(
+        buildAtRangeMcpArgs({
           file: undefined,
           startLine: undefined,
           endLine: undefined,
           options: { diff: diffPath },
+          diffText: fileDiff,
         }),
-      ).resolves.toMatchObject({
-        diff: expect.stringContaining('+new'),
+      ).toEqual({
+        ok: true,
+        args: { limit: 20, diff: expect.stringContaining('+new') },
       });
-      await expect(
-        read.buildAtRangeArgs({
+      expect(
+        buildAtRangeMcpArgs({
           file: undefined,
           startLine: undefined,
           endLine: undefined,
           options: { diff: '@@ -1 +1 @@\n-old\n+new' },
+          diffText: '@@ -1 +1 @@\n-old\n+new',
         }),
-      ).resolves.toMatchObject({ diff: expect.stringContaining('-old') });
+      ).toEqual({ ok: true, args: { limit: 20, diff: expect.stringContaining('-old') } });
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
