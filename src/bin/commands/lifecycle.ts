@@ -18,6 +18,7 @@ import {
 } from '../_cli-core.js';
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
+import { registerDoctorCommand, type DoctorResult, type DoctorRunOptions } from '../../features/doctor/index.js';
 import { registerInstallCommand } from '../../features/install/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
@@ -39,11 +40,6 @@ interface AssignNumericArgInput {
   raw: string | undefined;
   optionName: string;
   opts?: { min?: number; max?: number };
-}
-
-interface DoctorResult {
-  overallStatus: string;
-  afterFix?: { overallStatus: string };
 }
 
 interface LifecycleCommandDeps {
@@ -95,7 +91,7 @@ interface LifecycleCommandDeps {
   }>;
   loadViewerServer: () => Promise<ViewerServerModule>;
   loadDoctor: () => Promise<{
-    runDoctor: (opts: Record<string, unknown>) => Promise<DoctorResult>;
+    runDoctor: (opts: DoctorRunOptions | { projectPath: string }) => Promise<DoctorResult>;
     formatDoctorReport: (result: unknown) => string;
     formatDoctorJson: (result: unknown) => string;
   }>;
@@ -172,53 +168,6 @@ function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
     });
 
   registerLlmSmokeCommand(deps);
-}
-
-/**
- * cartograph doctor [path]
- *
- * Diagnose the install state: Bun runtime, native shim, models,
- * project init, project config. Each gap prints a concrete next-step.
- * The first thing a user should run when something doesn't work.
- *
- * Direct implementation rather than runViaMCP because the checks are
- * filesystem + process state, no live MCP server needed (and you'd
- * want doctor to work BEFORE the MCP can serve).
- */
-function registerDoctorCommand(deps: LifecycleCommandDeps): void {
-  const { program, loadDoctor, writeStdout } = deps;
-  program
-    .command('doctor [path]')
-    .description(
-      'Diagnose install state (Bun, models, project init/config, detected LLM backends, embedding endpoint reachability) with actionable next steps. Pass `--fix` to auto-apply remediations.',
-    )
-    .option('--no-project-checks', 'Skip the project-init + config checks (useful for fresh-install verification).')
-    .option('--skip-project-checks', 'Skip the project-init + config checks (alias of --no-project-checks).')
-    .option(
-      '--fix',
-      'Auto-apply remediations for fixable gaps (creates `.cartograph/`, downloads models, writes a recommended LLM config). Re-runs checks after applying. Backend-not-running gaps remain manual.',
-    )
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(
-      async (
-        pathArg: string | undefined,
-        options: { projectChecks?: boolean; skipProjectChecks?: boolean; fix?: boolean; json?: boolean },
-      ) => {
-        const { runDoctor, formatDoctorReport, formatDoctorJson } = await loadDoctor();
-        const skip = options.projectChecks === false || options.skipProjectChecks === true;
-        const result = await runDoctor({
-          ...(pathArg ? { projectPath: pathArg } : {}),
-          skipProjectChecks: skip,
-          fix: options.fix === true,
-        });
-        writeStdout(options.json ? formatDoctorJson(result) : formatDoctorReport(result));
-        // When --fix ran, exit on the AFTER-fix status (the user cares
-        // whether the system is healthy now, not whether it was broken
-        // before the fix). Otherwise use the pre-fix status.
-        const finalStatus = result.afterFix?.overallStatus ?? result.overallStatus;
-        if (finalStatus === 'fail') process.exit(1);
-      },
-    );
 }
 
 export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLifecycleCommandDeps): void {
