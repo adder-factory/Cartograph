@@ -3,7 +3,6 @@
  * bin/cartograph.ts decomposition; this is a side-effecting module:
  * importing it registers the commands on `adminCmd`.
  */
-import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { getCartographDir as defaultGetCartographDir, isInitialized as defaultIsInitialized } from '../../directory.js';
 import { createShimmerProgress as defaultCreateShimmerProgress } from '../../ui/shimmer-progress.js';
@@ -22,6 +21,7 @@ import {
 } from '../../features/admin-install-models/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerAdminMigrateCommand } from '../../features/admin-migrate/index.js';
+import { registerAdminProjectLifecycleCommands } from '../../features/admin-project-lifecycle/index.js';
 import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
@@ -420,134 +420,6 @@ function printSummarizeEmbedDetails(
     `Embedded ${formatNumber(embed.generated)} new vectors in ${formatDuration(embed.durationMs)}` +
       (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
   );
-}
-
-/**
- * cartograph admin init [path]
- */
-function registerInitCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    colors,
-    createShimmerProgress,
-    createVerboseProgress,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    printIndexResult,
-    writeStdout,
-  } = deps;
-  adminCmd
-    .command('init [path]')
-    .description(
-      "Initialize Cartograph in a project directory — creates .cartograph/ and ensures the project .gitignore excludes it (mirrors cartograph_admin MCP tool with action='init')",
-    )
-    .option('-i, --index', 'Run initial indexing after initialization')
-    .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-    .action(async (pathArg: string | undefined, options: { index?: boolean; verbose?: boolean }) => {
-      const projectPath = path.resolve(pathArg || process.cwd());
-      const clack = await loadClack();
-
-      clack.intro('Initializing Cartograph');
-
-      try {
-        if (isInitialized(projectPath)) {
-          clack.log.warn(`Already initialized in ${projectPath}`);
-          clack.log.info('Use "cartograph admin index" to re-index or "cartograph admin sync" to update');
-          clack.outro('');
-          return;
-        }
-
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.init(projectPath, { index: false });
-        clack.log.success(`Initialized in ${projectPath}`);
-
-        if (options.index) {
-          let result: IndexResult;
-
-          if (options.verbose) {
-            result = await cg.indexAll({
-              onProgress: createVerboseProgress(),
-              verbose: true,
-            });
-          } else {
-            writeStdout(`${colors.dim}│${colors.reset}\n`);
-            const progress = createShimmerProgress();
-            result = await cg.indexAll({
-              onProgress: progress.onProgress,
-            });
-            await progress.stop();
-          }
-
-          printIndexResult(clack, result, projectPath);
-        } else {
-          clack.log.info('Run "cartograph admin index" to index the project');
-        }
-
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        clack.log.error(`Failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
- * cartograph admin uninit [path]
- */
-function registerUninitCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    chalk,
-    error,
-    info,
-    isInitialized,
-    loadCartograph,
-    loadReadline,
-    resolveProjectPath,
-    success,
-    warn,
-  } = deps;
-  adminCmd
-    .command('uninit [path]')
-    .description(
-      "Remove Cartograph from a project, deletes .cartograph/ directory (mirrors cartograph_admin MCP tool with action='uninit')",
-    )
-    .option('-f, --force', 'Skip confirmation prompt')
-    .action(async (pathArg: string | undefined, options: { force?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-
-      try {
-        if (!isInitialized(projectPath)) {
-          warn(`Cartograph is not initialized in ${projectPath}`);
-          return;
-        }
-
-        if (!options.force) {
-          const readline = await loadReadline();
-          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-          const answer = await new Promise<string>((resolve) => {
-            rl.question(chalk.yellow('⚠ This will permanently delete all Cartograph data. Continue? (y/N) '), resolve);
-          });
-          rl.close();
-
-          if (answer.toLowerCase() !== 'y') {
-            info('Cancelled');
-            return;
-          }
-        }
-
-        const { default: Cartograph } = await loadCartograph();
-        const cg = Cartograph.openSync(projectPath);
-        await cg.uninitialize();
-
-        success(`Removed Cartograph from ${projectPath}`);
-      } catch (err) {
-        error(`Failed to uninitialize: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
 }
 
 /**
@@ -1196,8 +1068,7 @@ function registerClassifyCommand(deps: AdminCommandDeps): void {
 
 export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminCommandDeps): void {
   activeAdminCommandDeps = deps;
-  registerInitCommand(deps);
-  registerUninitCommand(deps);
+  registerAdminProjectLifecycleCommands(deps);
   registerIndexCommand(deps);
   registerEmbedOnlyCommand(deps);
   registerSyncCommand(deps);
