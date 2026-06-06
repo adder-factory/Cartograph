@@ -40,7 +40,15 @@ class FakeCommand {
 
 const fakeCg = {
   queries: {},
-  internals: { graphManager: {} },
+  get projectRoot() {
+    return projectPath;
+  },
+  internals: {
+    graphManager: {},
+    orchestrator: {
+      getChangedFiles: () => ({ added: [], modified: [], removed: [] }),
+    },
+  },
   stats: {
     getStats: () => ({
       fileCount: 1,
@@ -136,13 +144,14 @@ describe('read command action bodies', () => {
     ]);
   });
 
-  it('runs files and affected actions against opened Cartograph data', async () => {
+  it('runs status, files, and affected actions against opened Cartograph data', async () => {
     const originalWrite = process.stdout.write;
     process.stdout.write = ((chunk: string | Uint8Array) => {
       stdout.push(chunk.toString());
       return true;
     }) as typeof process.stdout.write;
     try {
+      await actions.get('status [path]')!(projectPath, { json: true });
       await actions.get('files [dir]')!(undefined, {
         projectPath,
         dir: 'src',
@@ -159,6 +168,8 @@ describe('read command action bodies', () => {
     }
 
     const text = stdout.join('');
+    expect(text).toContain('"initialized":true');
+    expect(text).toContain('"fileCount":1');
     expect(text).toContain('Files (1)');
     expect(text).toContain('src/a.ts');
     expect(text).toContain('source file summary');
