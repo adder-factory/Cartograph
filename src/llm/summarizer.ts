@@ -37,6 +37,7 @@ import {
   recordPriorityQueueFailure,
 } from '../db/queries-summary-priority.js';
 import { type LlmClient, LlmEndpointError, BATCH_PARSE_FAILURE_LOG_CHARS } from './client.js';
+import { withTransientLlmRetry } from './retry-policy.js';
 import { extractJsonArrayFromText } from './json-utils.js';
 import { logDebug, logWarn } from '../errors.js';
 import { validatePathWithinRootReal, stripReasoningTokens, compact } from '../utils.js';
@@ -711,9 +712,16 @@ async function summaryTryBatchSummarize(ctx: SummarizerCallContext, batch: Pendi
   const batchMaxTokens = Math.max(BATCH_SUMMARIZE_MIN_MAX_TOKENS, batch.length * BATCH_SUMMARIZE_TOKENS_PER_ENTRY);
   let result: Awaited<ReturnType<typeof client.chat>> | undefined;
   try {
-    result = await client.chat(
-      [{ role: 'user', content: buildBatchPrompt(batch) }],
-      compact({ temperature: 0, maxTokens: batchMaxTokens, signal: options.signal }),
+    result = await withTransientLlmRetry(
+      () =>
+        client.chat(
+          [{ role: 'user', content: buildBatchPrompt(batch) }],
+          compact({ temperature: 0, maxTokens: batchMaxTokens, signal: options.signal }),
+        ),
+      {
+        onRetry: (retryErr) =>
+          logDebug('Summarizer: retrying transient batch endpoint error', { error: retryErr.message }),
+      },
     );
   } catch (err) {
     if (options.signal?.aborted) return false;
@@ -748,12 +756,16 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
 
   let summary: string | null = null;
   try {
-    const result = await client.chat(
-      [
-        { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
-        { role: 'user', content: buildSummaryUserPrompt(item.sym, item.body) },
-      ],
-      compact({ temperature: 0, maxTokens: 80, signal: options.signal }),
+    const result = await withTransientLlmRetry(
+      () =>
+        client.chat(
+          [
+            { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+            { role: 'user', content: buildSummaryUserPrompt(item.sym, item.body) },
+          ],
+          compact({ temperature: 0, maxTokens: 80, signal: options.signal }),
+        ),
+      { onRetry: (retryErr) => logDebug('Summarizer: retrying transient endpoint error', { error: retryErr.message }) },
     );
     if (options.signal?.aborted) return;
     summary = stripPreamble(stripReasoningTokens(result.text).trim().split('\n')[0]?.trim() ?? '');

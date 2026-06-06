@@ -31,6 +31,7 @@ import {
 } from '../db/queries-roles.js';
 import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
+import { isContextWindowError, withTransientLlmRetry } from './retry-policy.js';
 import { z } from 'zod';
 
 /** Closed label set. The model is asked to pick exactly one.
@@ -89,9 +90,6 @@ const MIN_BATCH_MAX_TOKENS = 64;
 /** Approx tokens per batched output entry (12). Pairs with
  *  `MIN_BATCH_MAX_TOKENS` to size the chat call. */
 const TOKENS_PER_BATCH_ENTRY = 12;
-const CONTEXT_WINDOW_ERROR_RE =
-  /\b(?:exceeds? the available context size|maximum context length|context window|context size|too many tokens|prompt is too long)\b/i;
-
 const ROLE_LIST_TEXT = [
   '- api_endpoint: ONLY a function that directly services an inbound HTTP/RPC request — ' +
     'a framework route handler, a controller action, or a request/response handler. ' +
@@ -637,14 +635,18 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
   const batchMaxTokens = Math.max(MIN_BATCH_MAX_TOKENS, batch.length * TOKENS_PER_BATCH_ENTRY);
   let result: Awaited<ReturnType<typeof ctx.client.chat>> | undefined;
   try {
-    result = await ctx.client.chat(
-      [{ role: 'user', content: buildBatchPrompt(batch, ctx.evidenceByNodeId) }],
-      compact({
-        temperature: 0,
-        maxTokens: batchMaxTokens,
-        responseSchema: BATCH_ROLE_SCHEMA,
-        signal: ctx.options.signal,
-      }),
+    result = await withTransientLlmRetry(
+      () =>
+        ctx.client.chat(
+          [{ role: 'user', content: buildBatchPrompt(batch, ctx.evidenceByNodeId) }],
+          compact({
+            temperature: 0,
+            maxTokens: batchMaxTokens,
+            responseSchema: BATCH_ROLE_SCHEMA,
+            signal: ctx.options.signal,
+          }),
+        ),
+      { onRetry: (retryErr) => logDebug('Classifier: retrying transient endpoint error', { error: retryErr.message }) },
     );
   } catch (err) {
     if (ctx.options.signal?.aborted) return;
@@ -715,9 +717,4 @@ async function classifierRetryOversizedBatch(
   await classifierClassifyBatch(ctx, batch.slice(0, mid), start);
   if (ctx.options.signal?.aborted) return;
   await classifierClassifyBatch(ctx, batch.slice(mid), start + mid);
-}
-
-function isContextWindowError(err: unknown): boolean {
-  if (!(err instanceof LlmEndpointError)) return false;
-  return CONTEXT_WINDOW_ERROR_RE.test(err.message);
 }

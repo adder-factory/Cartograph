@@ -71,6 +71,13 @@ function loadLifecycleCommandActions(): void {
         }
       },
     }),
+    loadMcpDaemon: async () => ({
+      runSharedMcpDaemonProcess: async (opts: unknown) => calls.push(`daemon.child:${JSON.stringify(opts)}`),
+      runSharedMcpDaemonProxy: async (opts: unknown) => {
+        calls.push(`daemon.proxy:${JSON.stringify(opts)}`);
+        return 'fallback' as const;
+      },
+    }),
     loadInstallerTargets: async () => ({
       getTarget: (id: string) => (id === 'claude' ? { printConfig: (loc: string) => `config:${loc}` } : null),
       listTargetIds: () => ['claude', 'cursor'],
@@ -112,6 +119,44 @@ function loadLifecycleCommandActions(): void {
         return { overallStatus: 'pass' };
       },
       formatDoctorReport: () => 'doctor report',
+      formatDoctorJson: () => '{"overallStatus":"pass"}',
+    }),
+    loadBackendRuntime: async () => {
+      const row = {
+        state: 'stopped',
+        spec: { labels: ['embed'], endpoint: 'http://localhost:8080', modelPath: '/models/embed.gguf' },
+        logPath: '/repo/.cartograph/backends/embed.log',
+        pidFilePath: '/repo/.cartograph/backends/embed.json',
+        pidRecord: null,
+        pidAlive: false,
+      };
+      return {
+        backendStatus: async (pathArg: string) => {
+          calls.push(`backend-status:${pathArg}`);
+          return { projectPath: pathArg, rows: [row] };
+        },
+        startBackends: async (opts: unknown) => {
+          calls.push(`backend-start:${JSON.stringify(opts)}`);
+          return { projectPath, rows: [{ ...row, state: 'running' }], started: [row], skipped: [] };
+        },
+        stopBackends: async (opts: unknown) => {
+          calls.push(`backend-stop:${JSON.stringify(opts)}`);
+          return { projectPath, rows: [{ ...row, state: 'stopped' }], stopped: [row], skipped: [] };
+        },
+        backendLogs: async (opts: unknown) => {
+          calls.push(`backend-logs:${JSON.stringify(opts)}`);
+          return { projectPath, rows: [row], logs: [{ row, exists: true, content: 'server ready' }] };
+        },
+        renderBackendStartCommand: () => 'llama-server -m /models/embed.gguf --port 8080',
+      };
+    },
+    loadLlmSmoke: async () => ({
+      runLlmSmoke: async (opts: unknown) => {
+        calls.push(`llm-smoke:${JSON.stringify(opts)}`);
+        return { overallStatus: 'ok', rows: [], durationMs: 1 };
+      },
+      formatLlmSmokeReport: () => 'smoke report',
+      formatLlmSmokeJson: () => '{"overallStatus":"ok"}',
     }),
     loadInstallModels: async () => ({
       installRecommendedModels: async () => ({ downloaded: [], skipped: [] }),
@@ -183,6 +228,7 @@ describe('lifecycle command action bodies', () => {
 
   it('routes llm setup, trace-to-culprits, playbook, mcp-budget, and viewer actions', async () => {
     await actions.get('llm:setup [path]')!(projectPath);
+    await actions.get('llm:smoke [path]')!(projectPath, { timeoutMs: '1234' });
     await actions.get('program:trace-to-culprits')!({
       projectPath,
       limit: '4',
@@ -201,14 +247,36 @@ describe('lifecycle command action bodies', () => {
 
     const text = calls.join('\n');
     expect(text).toContain(`llm-setup:${projectPath}`);
+    expect(text).toContain(`llm-smoke:{"projectPath":"${projectPath}","timeoutMs":1234}`);
     expect(text).toContain('mcp:cartograph_trace_to_culprits');
     expect(text).toContain('mcp-budget:');
     expect(text).toContain('"profile":"review"');
     expect(text).toContain('"disableWriteTools":true');
     expect(text).toContain('"topContributors":3');
     expect(stdout.join('\n')).toContain('playbook text');
+    expect(stdout.join('\n')).toContain('smoke report');
     expect(stdout.join('\n')).toContain('budget:');
     expect(text).toContain('open:http://localhost:0');
+  });
+
+  it('routes backend lifecycle commands', async () => {
+    await actions.get('program:backend:status [path]')!(projectPath, {});
+    await actions.get('program:backend:start [path]')!(projectPath, { bin: '/usr/local/bin/llama-server' });
+    await actions.get('program:backend:stop [path]')!(projectPath, { force: true });
+    await actions.get('program:backend:logs [path]')!(projectPath, { tier: 'embed', lines: '20' });
+
+    const text = calls.join('\n');
+    expect(text).toContain(`backend-status:${projectPath}`);
+    expect(text).toContain(
+      `backend-start:{"projectPath":"${projectPath}","bin":"/usr/local/bin/llama-server","dryRun":false}`,
+    );
+    expect(text).toContain(`backend-stop:{"projectPath":"${projectPath}","force":true}`);
+    expect(text).toContain(`backend-logs:{"projectPath":"${projectPath}","tier":"embed","lines":20}`);
+    expect(stdout.join('\n')).toContain('cartograph backend status');
+    expect(stdout.join('\n')).toContain('cartograph backend start');
+    expect(stdout.join('\n')).toContain('cartograph backend stop');
+    expect(stdout.join('\n')).toContain('cartograph backend logs');
+    expect(stdout.join('\n')).toContain('server ready');
   });
 
   it('passes minimal config options during setup --minimal', async () => {
@@ -232,8 +300,9 @@ describe('lifecycle command action bodies', () => {
   });
 
   it('accepts --skip-project-checks on top-level doctor as an alias', async () => {
-    await actions.get('program:doctor [path]')!(projectPath, { skipProjectChecks: true });
+    await actions.get('program:doctor [path]')!(projectPath, { skipProjectChecks: true, json: true });
 
     expect(calls.join('\n')).toContain(`doctor:{"projectPath":"${projectPath}","skipProjectChecks":true,"fix":false}`);
+    expect(stdout.join('\n')).toContain('{"overallStatus":"pass"}');
   });
 });

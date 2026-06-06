@@ -44,7 +44,6 @@ import {
   type DetectedBackend,
   type DetectedBackendKind,
 } from './scan-backends.js';
-import { recommendedTuning } from './hardware-tuning.js';
 import {
   OLLAMA_DEFAULT_ENDPOINT,
   MLX_DEFAULT_ENDPOINT,
@@ -57,7 +56,7 @@ import {
   OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
 } from './default-endpoints.js';
 import type { CartographConfig } from '../types.js';
-import { LLAMA_SERVER_RERANK_FLAG, MLX_RECOMMENDED_MODELS, OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
+import { MLX_RECOMMENDED_MODELS, OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
 export { OLLAMA_RECOMMENDED_MODELS } from './llm-setup-catalog.js';
 
 /** Each preset the agent can apply. `description` is rendered to the
@@ -414,11 +413,6 @@ function buildInstallLlamaCppPreset(
 ): SetupPreset {
   const missingMb = localGgufPresence.filter((m) => !m.present).reduce((sum, m) => sum + m.sizeMb, 0);
   const downloadHint = missingMb > 0 ? `~${missingMb} MB GGUFs need download` : 'all GGUFs already present';
-  // Hardware-aware `--parallel N` per tier. Embed gets the most
-  // slots (cheap model, batches well); ask gets the fewest (largest
-  // model, biggest KV-cache per slot). See `hardware-tuning.ts` for
-  // the per-tier sizing rationale.
-  const tuning = recommendedTuning();
   return {
     id: 'install-llama-cpp',
     label: 'Install llama-cpp + download recommended GGUFs',
@@ -428,10 +422,8 @@ function buildInstallLlamaCppPreset(
     nextSteps: [
       backendInstallHint('llama-server'),
       'cartograph admin install-models   # if not already downloaded',
-      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_EMBED)} --port 8080 --embeddings --parallel ${tuning.embed.llamaServerParallel} --batch-size 512 --ubatch-size 512 &`,
-      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_SUMMARIZE)} --port 8081 --parallel ${tuning.chat.llamaServerParallel} &`,
-      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_CHAT_ASK)} --port 8082 --parallel ${tuning.ask.llamaServerParallel} &`,
-      `llama-server -m ${resolveRecommendedModelPath(RECOMMENDED_RERANKER)} --port 8083 ${LLAMA_SERVER_RERANK_FLAG} --parallel ${tuning.reranker.llamaServerParallel} &`,
+      'cartograph backend start   # launches configured local llama-server processes',
+      'cartograph llm smoke       # exercise real chat/embed/rerank requests',
       'cartograph doctor   # verify',
     ],
     requiresInstall: true,

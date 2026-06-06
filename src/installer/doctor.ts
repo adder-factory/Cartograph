@@ -36,6 +36,8 @@
 
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import {
   backendInstallHint,
   backendLabel,
@@ -46,9 +48,19 @@ import {
 import { describeHardware, recommendedTuning } from './hardware-tuning.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './default-endpoints.js';
 import { LLAMA_SERVER_RERANK_FLAG } from './llm-setup-catalog.js';
+import {
+  backendStatus,
+  configuredEndpointsFromLlm,
+  configuredModelFilesFromLlm,
+  LLM_TIER_KEYS,
+  renderBackendStartCommands,
+  type ConfiguredModelFile,
+} from './backend-runtime.js';
 import { loadConfig } from '../config.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
 import { formatBytes } from '../utils.js';
+
+const execFileAsync = promisify(execFile);
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
@@ -120,7 +132,7 @@ function resolveModelsDir(): string {
 
 async function checkModels(llm: Record<string, unknown> | null): Promise<CheckResult> {
   if (hasConfiguredLlmTier(llm)) {
-    const localModelFiles = configuredModelFiles(llm);
+    const localModelFiles = configuredModelFilesFromLlm(llm);
     if (localModelFiles.length === 0) {
       return {
         name: 'LLM models',
@@ -246,14 +258,7 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
   return { name: 'Project config', status: 'ok', detail: `${configPath} valid` };
 }
 
-const LLM_TIER_KEYS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
 const MAX_RENDERED_MISSING_MODEL_FILES = 4;
-const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
-
-interface ConfiguredModelFile {
-  readonly tier: (typeof LLM_TIER_KEYS)[number];
-  readonly modelPath: string;
-}
 
 interface PartialModelFile {
   readonly path: string;
@@ -264,24 +269,8 @@ interface MissingConfiguredModelFile extends ConfiguredModelFile {
   readonly partialDownload: PartialModelFile | null;
 }
 
-function configuredModelFiles(llm: Record<string, unknown> | null): ConfiguredModelFile[] {
-  if (!llm) return [];
-  const out: ConfiguredModelFile[] = [];
-  for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const cfg = block as Record<string, unknown>;
-    if (cfg['provider'] !== 'openai-compat') continue;
-    const model = cfg['model'];
-    if (typeof model !== 'string' || model.length === 0) continue;
-    if (!path.isAbsolute(model)) continue;
-    out.push({ tier, modelPath: model });
-  }
-  return out;
-}
-
 async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): Promise<CheckResult | null> {
-  const configured = configuredModelFiles(llm);
+  const configured = configuredModelFilesFromLlm(llm);
   if (configured.length === 0) return null;
 
   const missing = (
@@ -357,18 +346,6 @@ async function detectBackends(configuredEndpoints: readonly string[] = []): Prom
   }
 }
 
-function configuredEndpoints(llm: Record<string, unknown> | null): string[] {
-  if (!llm) return [];
-  const endpoints: string[] = [];
-  for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const endpoint = (block as Record<string, unknown>)['endpoint'];
-    if (typeof endpoint === 'string' && endpoint.length > 0) endpoints.push(endpoint);
-  }
-  return [...new Set(endpoints)];
-}
-
 /**
  * Check that the project's configured embedding backend is reachable.
  * Only `'openai-compat'` is supported post-2026-05-24c; configs with
@@ -383,6 +360,8 @@ function configuredEndpoints(llm: Record<string, unknown> | null): string[] {
 function checkEmbeddingReachability(
   embeddingLlm: Record<string, unknown> | null | undefined,
   detected: readonly DetectedBackend[],
+  projectPath: string | null,
+  llm: Record<string, unknown> | null,
 ): CheckResult | null {
   if (!embeddingLlm || typeof embeddingLlm !== 'object') return null;
   if (embeddingLlm['provider'] !== 'openai-compat') return null;
@@ -403,13 +382,18 @@ function checkEmbeddingReachability(
 
   // Endpoint set but unreachable. Surface what IS running on the
   // machine as alternatives.
-  let alternatives =
-    'No OpenAI-compat backends detected on common ports (8080, 11434, 8000, 1234, 5000). ' +
-    backendInstallHint('llama-server');
+  const localStartHint =
+    projectPath && renderBackendStartCommands(llm).length > 0 ? localBackendStartHint(projectPath) : null;
+  let alternatives = localStartHint
+    ? `No OpenAI-compat backends detected on common ports (8080, 11434, 8000, 1234, 5000). ${localStartHint}`
+    : 'No OpenAI-compat backends detected on common ports (8080, 11434, 8000, 1234, 5000). ' +
+      backendInstallHint('llama-server');
   if (detected.length > 0) {
     alternatives = `Detected ${detected.length} other backend${detected.length === 1 ? '' : 's'} running: ${detected
       .map((d) => `${backendLabel(d.kind)} at ${d.endpoint}`)
-      .join(', ')}. Point \`embeddingLlm.endpoint\` at one of those, or start the configured backend.`;
+      .join(', ')}. Point \`embeddingLlm.endpoint\` at one of those, or ${
+      localStartHint ?? 'start the configured backend.'
+    }`;
   }
   return {
     name: 'Embedding endpoint',
@@ -417,6 +401,14 @@ function checkEmbeddingReachability(
     detail: `embeddingLlm.endpoint=${endpoint} is not responding to GET /v1/models.`,
     remediation: alternatives,
   };
+}
+
+function localBackendStartHint(projectPath: string): string {
+  return (
+    `Start the configured local stack with \`cartograph backend start ${projectPath}\`, ` +
+    `then run \`cartograph llm smoke ${projectPath}\`. ` +
+    `If startup fails, inspect \`cartograph backend logs ${projectPath} --tier embed\`.`
+  );
 }
 
 function checkEndpointlessOpenAiEmbedding(embeddingLlm: Record<string, unknown>): CheckResult {
@@ -490,109 +482,64 @@ function recommendedTuningCheck(): CheckResult {
 }
 
 function backendStartCommandsCheck(llm: Record<string, unknown> | null): CheckResult | null {
-  const commands = buildBackendStartCommands(llm);
+  const commands = renderBackendStartCommands(llm);
   if (commands.length === 0) return null;
   return {
     name: 'Backend start commands',
     status: 'ok',
     detail: [
+      'Managed start command: `cartograph backend start <project>`.',
+      'Log command: `cartograph backend logs <project> --tier <embed|summarize|local|ask|rerank>`.',
       'Configured local llama-server commands (one process per unique endpoint/model):',
       ...commands.map((cmd) => `  ${cmd}`),
     ].join('\n'),
   };
 }
 
-interface BackendStartCommand {
-  readonly labels: string[];
-  readonly endpoint: string;
-  readonly modelPath: string;
-  readonly flag: string;
-  readonly parallel: number;
-}
-
-function buildBackendStartCommands(llm: Record<string, unknown> | null): string[] {
-  if (!llm) return [];
-  const tuning = recommendedTuning();
-  const commands = new Map<string, BackendStartCommand>();
-
-  for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const cfg = block as Record<string, unknown>;
-    if (cfg['provider'] !== 'openai-compat') continue;
-    const model = cfg['model'];
-    const endpoint = cfg['endpoint'];
-    if (typeof model !== 'string' || typeof endpoint !== 'string') continue;
-    if (!path.isAbsolute(model)) continue;
-
-    const url = parseLocalEndpoint(endpoint);
-    if (!url) continue;
-    const flag = llamaServerFlagForTier(tier);
-    const key = `${normaliseEndpoint(endpoint)}\0${model}\0${flag}`;
-    const existing = commands.get(key);
-    if (existing) {
-      existing.labels.push(llmTierLabel(tier));
-      continue;
-    }
-    commands.set(key, {
-      labels: [llmTierLabel(tier)],
-      endpoint,
-      modelPath: model,
-      flag,
-      parallel: llamaServerParallelForTier(tuning, tier),
-    });
+async function backendLifecycleCheck(
+  projectPath: string,
+  llm: Record<string, unknown> | null,
+): Promise<CheckResult | null> {
+  if (renderBackendStartCommands(llm).length === 0) return null;
+  const status = await backendStatus(projectPath);
+  if (status.rows.length === 0) return null;
+  const missing = status.rows.filter((row) => !row.modelExists);
+  if (missing.length > 0) {
+    return {
+      name: 'Backend lifecycle',
+      status: 'warn',
+      detail: `${missing.length} managed backend model file${missing.length === 1 ? '' : 's'} missing.`,
+      remediation: `Install the missing GGUFs or run \`cartograph admin install-models --write-config --project-path ${projectPath}\`.`,
+    };
   }
-
-  return [...commands.values()].map(renderBackendStartCommand);
-}
-
-function parseLocalEndpoint(endpoint: string): URL | null {
-  try {
-    const url = new URL(normaliseEndpoint(endpoint));
-    if (!LOCAL_BACKEND_HOSTS.has(url.hostname)) return null;
-    return url;
-  } catch {
-    return null;
+  const stale = status.rows.filter((row) => row.pidRecord !== null && !row.pidAlive);
+  if (stale.length > 0) {
+    return {
+      name: 'Backend lifecycle',
+      status: 'warn',
+      detail: `${stale.length} stale backend pid file${stale.length === 1 ? '' : 's'} found.`,
+      remediation: `Run \`cartograph backend stop ${projectPath}\` to remove stale pid files, then \`cartograph backend start ${projectPath}\` if you need local LLMs.`,
+    };
   }
-}
-
-function renderBackendStartCommand(cmd: BackendStartCommand): string {
-  const url = parseLocalEndpoint(cmd.endpoint);
-  if (!url) throw new Error(`invalid local endpoint: ${cmd.endpoint}`);
-  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
-  const label = cmd.labels.join('/');
-  const flag = cmd.flag.length > 0 ? ` ${cmd.flag}` : '';
-  return `# ${label} ${normaliseEndpoint(cmd.endpoint)}\n  llama-server -m ${shellQuote(
-    cmd.modelPath,
-  )} --host ${url.hostname} --port ${port}${flag} --parallel ${cmd.parallel}`;
-}
-
-function llamaServerFlagForTier(tier: (typeof LLM_TIER_KEYS)[number]): string {
-  if (tier === 'embeddingLlm') return '--embeddings';
-  if (tier === 'rerankerLlm') return LLAMA_SERVER_RERANK_FLAG;
-  return '';
-}
-
-function llamaServerParallelForTier(
-  tuning: ReturnType<typeof recommendedTuning>,
-  tier: (typeof LLM_TIER_KEYS)[number],
-): number {
-  if (tier === 'embeddingLlm') return tuning.embed.llamaServerParallel;
-  if (tier === 'askLlm') return tuning.ask.llamaServerParallel;
-  if (tier === 'rerankerLlm') return tuning.reranker.llamaServerParallel;
-  return tuning.chat.llamaServerParallel;
-}
-
-function llmTierLabel(tier: (typeof LLM_TIER_KEYS)[number]): string {
-  if (tier === 'summarizeLlm') return 'summarize';
-  if (tier === 'localLlm') return 'local';
-  if (tier === 'askLlm') return 'ask';
-  if (tier === 'embeddingLlm') return 'embed';
-  return 'rerank';
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  const starting = status.rows.filter((row) => row.state === 'starting');
+  if (starting.length > 0) {
+    return {
+      name: 'Backend lifecycle',
+      status: 'warn',
+      detail: `${starting.length} managed backend process${starting.length === 1 ? '' : 'es'} alive but not reachable yet.`,
+      remediation: `Wait for model load, run \`cartograph llm smoke ${projectPath}\`, or inspect \`cartograph backend logs ${projectPath}\`.`,
+    };
+  }
+  const counts = new Map<string, number>();
+  for (const row of status.rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
+  const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ');
+  return {
+    name: 'Backend lifecycle',
+    status: 'ok',
+    detail:
+      `Managed backend states: ${summary}. ` +
+      `Use \`cartograph backend start ${projectPath}\`, \`cartograph llm smoke ${projectPath}\`, and \`cartograph backend stop ${projectPath}\` for the local stack.`,
+  };
 }
 
 export interface RunDoctorOptions {
@@ -732,10 +679,11 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   // configured-endpoint reachability check. Scanner is async and
   // probes 5+ ports in parallel with a 1s per-port timeout, so this
   // adds ~1s to the doctor run worst-case.
-  const detected = await detectBackends(configuredEndpoints(llm));
+  const detected = await detectBackends(configuredEndpointsFromLlm(llm));
   checks.push(detectedBackendsCheck(detected));
   const embeddingLlm = llm?.['embeddingLlm'] as Record<string, unknown> | null | undefined;
-  const reachability = checkEmbeddingReachability(embeddingLlm, detected);
+  const projectPathForChecks = opts.skipProjectChecks ? null : path.resolve(opts.projectPath ?? process.cwd());
+  const reachability = checkEmbeddingReachability(embeddingLlm, detected, projectPathForChecks, llm);
   if (reachability) checks.push(reachability);
   // Informational tuning row — surfaces the hardware-aware
   // `--parallel N` recommendation per tier so users can self-tune
@@ -745,12 +693,85 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   checks.push(recommendedTuningCheck());
   const backendCommands = backendStartCommandsCheck(llm);
   if (backendCommands) checks.push(backendCommands);
+  if (projectPathForChecks) {
+    const lifecycle = await backendLifecycleCheck(projectPathForChecks, llm);
+    if (lifecycle) checks.push(lifecycle);
+  }
+  if (!opts.skipProjectChecks) {
+    checks.push(await activeCartographProcessesCheck(path.resolve(opts.projectPath ?? process.cwd())));
+  }
 
   return {
     checks,
     overallStatus: worstStatus(checks),
     ...(opts.skipProjectChecks ? { projectChecksSkipped: true } : {}),
   };
+}
+
+interface CartographProcessRow {
+  readonly pid: number;
+  readonly command: string;
+}
+
+async function activeCartographProcessesCheck(projectPath: string): Promise<CheckResult> {
+  const rows = await listCartographSiblingProcesses(projectPath);
+  if (rows.length === 0) {
+    return {
+      name: 'Cartograph processes',
+      status: 'ok',
+      detail: 'No sibling MCP/admin/hook processes detected for this project.',
+    };
+  }
+  const rendered = rows
+    .slice(0, 4)
+    .map((row) => `pid ${row.pid}: ${truncateProcessCommand(row.command)}`)
+    .join('; ');
+  const suffix = rows.length > 4 ? `; +${rows.length - 4} more` : '';
+  return {
+    name: 'Cartograph processes',
+    status: 'ok',
+    detail:
+      `${rows.length} sibling Cartograph process${rows.length === 1 ? '' : 'es'} visible (${rendered}${suffix}). ` +
+      'If an admin/index command reports `database is locked`, stop or restart those MCP/hook/admin processes, then retry.',
+  };
+}
+
+async function listCartographSiblingProcesses(projectPath: string): Promise<CartographProcessRow[]> {
+  if (process.platform === 'win32') return [];
+  const args = process.platform === 'darwin' ? ['-axo', 'pid=,command='] : ['-eo', 'pid=,command='];
+  try {
+    const { stdout } = await execFileAsync('ps', args, { timeout: 1500, maxBuffer: 512 * 1024 });
+    return stdout
+      .split('\n')
+      .map(parsePsLine)
+      .filter((row): row is CartographProcessRow => row !== null)
+      .filter((row) => row.pid !== process.pid && isRelevantCartographProcess(row.command, projectPath));
+  } catch {
+    return [];
+  }
+}
+
+function parsePsLine(line: string): CartographProcessRow | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+  const match = /^(\d+)\s+(.+)$/.exec(trimmed);
+  if (!match) return null;
+  return { pid: Number.parseInt(match[1]!, 10), command: match[2]! };
+}
+
+function isRelevantCartographProcess(command: string, projectPath: string): boolean {
+  const invokesCartograph =
+    /(^|\s)(?:bun\s+)?(?:\S*\/)?cartograph(?:\.ts)?(\s|$)|src\/bin\/cartograph\.ts|src\/index-hooks\/hook-worker\.ts/.test(
+      command,
+    );
+  if (!invokesCartograph) return false;
+  if (command.includes(projectPath)) return true;
+  return /serve\s+--mcp|--mcp|hook-worker\.ts|cartograph\.ts\s+admin|cartograph\s+admin/.test(command);
+}
+
+function truncateProcessCommand(command: string): string {
+  const max = 140;
+  return command.length <= max ? command : `${command.slice(0, max - 1)}…`;
 }
 
 /** Auto-apply fixes for gaps the doctor knows how to handle. Returns
@@ -903,6 +924,10 @@ export function formatDoctorReport(result: DoctorResultWithFix): string {
   lines.push('', overallStatusBlurb(result));
   if (result.remediations !== undefined) appendFixOutcome(lines, result);
   return lines.join('\n');
+}
+
+export function formatDoctorJson(result: DoctorResultWithFix): string {
+  return JSON.stringify(result, null, 2);
 }
 
 function appendCheckLines(lines: string[], checks: ReadonlyArray<DoctorResult['checks'][number]>): void {

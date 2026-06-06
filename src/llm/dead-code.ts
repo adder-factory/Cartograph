@@ -21,6 +21,7 @@ import { getIncomingEdges, getOutgoingEdges } from '../db/queries-edges.js';
 import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
 import { pathCategory, isFixturePath } from '../path-class.js';
+import { isContextWindowError, withTransientLlmRetry } from './retry-policy.js';
 
 function zodFallback<T extends z.ZodType>(schema: T, value: z.output<T>): z.ZodCatch<T> {
   return schema['catch'](value);
@@ -930,24 +931,34 @@ class DeadCodeJudgeRun {
    * valid verdict set by construction — no per-item retry, no
    * prose-scanning. `applyBatchVerdicts` fills any position the model
    * omitted (or that the soft claude-bridge path mangled) with
-   * `uncertain`. A chat-level failure marks the whole batch errored.
+   * `uncertain`. A context-window failure splits the batch and retries;
+   * a single over-context candidate becomes `uncertain`. Other
+   * chat-level failures mark the whole batch errored.
    */
   private async judgeBatch(batch: BatchItem[], start: number): Promise<void> {
     const batchMaxTokens = Math.max(BATCH_JUDGE_MIN_MAX_TOKENS, batch.length * BATCH_JUDGE_TOKENS_PER_ENTRY);
     let result: Awaited<ReturnType<typeof this.client.chat>> | undefined;
     try {
-      result = await this.client.chat(
-        [{ role: 'user', content: buildBatchPrompt(batch) }],
-        compact({
-          temperature: 0,
-          maxTokens: batchMaxTokens,
-          responseSchema: BATCH_JUDGE_SCHEMA,
-          useAskModel: true,
-          signal: this.options.signal,
-        }),
+      result = await withTransientLlmRetry(
+        () =>
+          this.client.chat(
+            [{ role: 'user', content: buildBatchPrompt(batch) }],
+            compact({
+              temperature: 0,
+              maxTokens: batchMaxTokens,
+              responseSchema: BATCH_JUDGE_SCHEMA,
+              useAskModel: true,
+              signal: this.options.signal,
+            }),
+          ),
+        { onRetry: (retryErr) => logDebug('DeadCode: retrying transient endpoint error', { error: retryErr.message }) },
       );
     } catch (err) {
       if (this.options.signal?.aborted) return;
+      if (isContextWindowError(err)) {
+        await this.retryOversizedBatch(batch, start, err);
+        return;
+      }
       this.st.errors += batch.length;
       this.st.done += batch.length;
       this.options.onProgress?.(this.st.done, this.total);
@@ -969,5 +980,39 @@ class DeadCodeJudgeRun {
       });
     }
     this.applyBatchVerdicts(batch, parsed);
+  }
+
+  private async retryOversizedBatch(batch: BatchItem[], start: number, err: unknown): Promise<void> {
+    if (batch.length <= 1) {
+      const item = batch[0];
+      if (!item) return;
+      logWarn('DeadCode: single candidate exceeded chat context — marking uncertain', {
+        nodeId: item.node.id,
+        name: item.node.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this.st.results.push({
+        node: item.node,
+        verdict: 'uncertain',
+        confidence: UNPARSEABLE_JUDGE_CONFIDENCE,
+        reason: 'prompt exceeded model context window',
+      });
+      this.st.judged++;
+      this.st.done++;
+      this.options.onProgress?.(this.st.done, this.total);
+      return;
+    }
+
+    const mid = Math.ceil(batch.length / 2);
+    logDebug('DeadCode: splitting oversized judge batch', {
+      batchStart: start,
+      batchSize: batch.length,
+      left: mid,
+      right: batch.length - mid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    await this.judgeBatch(batch.slice(0, mid), start);
+    if (this.options.signal?.aborted) return;
+    await this.judgeBatch(batch.slice(mid), start + mid);
   }
 }
