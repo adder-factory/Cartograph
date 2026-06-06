@@ -4,6 +4,16 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { __readCommandInternals as read } from '../src/bin/commands/read.js';
 import {
+  buildAffectedFilter,
+  collectExplicitChangedFiles,
+  parseAffectedDepth,
+  renderAffectedOutput,
+  renderAffectedTestList,
+  renderBarrelWarning,
+  renderNoDerivedChanges,
+  validateAffectedIndexedPaths,
+} from '../src/features/affected/runtime.js';
+import {
   parseFilesOutputOptions,
   renderFileSummary,
   renderFileTree,
@@ -320,67 +330,83 @@ describe('read command internals', () => {
       totalDependents: 3,
       barrelsReached: ['src/index.ts'],
       derivedFromGit: true,
+      projectPath: '/repo',
     };
 
-    const json = stripAnsi(captureOutput(() => read.printAffectedOutput({ ...base, options: { json: true } })));
+    const json = stripAnsi(renderAffectedOutput({ ...base, options: { json: true } }).join('\n'));
     expect(JSON.parse(json)).toMatchObject({ changedFiles: ['src/a.ts'], affectedTests: ['__tests__/a.test.ts'] });
 
-    const quiet = stripAnsi(captureOutput(() => read.printAffectedOutput({ ...base, options: { quiet: true } })));
+    const quiet = stripAnsi(renderAffectedOutput({ ...base, options: { quiet: true } }).join('\n'));
     expect(quiet).toContain('__tests__/a.test.ts');
 
-    const human = stripAnsi(captureOutput(() => read.printAffectedOutput({ ...base, options: {} })));
+    const human = stripAnsi(renderAffectedOutput({ ...base, options: {} }).join('\n'));
     expect(human).toContain('Changed set derived from `git diff HEAD`');
     expect(human).toContain('Affected test files (1)');
     expect(human).toContain('Traversed 3 dependents total');
     expect(human).toContain('src/index.ts');
 
-    const empty = stripAnsi(captureOutput(() => read.printAffectedTestList([])));
+    const empty = stripAnsi(renderAffectedTestList([]).join('\n'));
     expect(empty).toContain('No test files affected');
 
     const many = Array.from({ length: 42 }, (_, i) => `__tests__/${String(i).padStart(2, '0')}.test.ts`);
-    const limited = stripAnsi(captureOutput(() => read.printAffectedTestList(many)));
+    const limited = stripAnsi(renderAffectedTestList(many).join('\n'));
     expect(limited).toContain('Affected test files (42)');
     expect(limited).toContain('showing first 40 of 42');
 
-    const noBarrel = stripAnsi(captureOutput(() => read.printBarrelWarning([])));
+    const noBarrel = stripAnsi(renderBarrelWarning([]).join('\n'));
     expect(noBarrel).toBe('');
   });
 
   it('validates affected paths and builds safe filters', async () => {
-    const regex = read.buildAffectedFilter('src/*.ts');
+    const regex = buildAffectedFilter('src/*.ts');
     expect(regex?.test('src/a.ts')).toBe(true);
-    expect(read.buildAffectedFilter(undefined)).toBeNull();
+    expect(buildAffectedFilter(undefined)).toBeNull();
 
-    const closeCalls: string[] = [];
-    read.validateAffectedIndexedPaths({
-      changedFiles: ['src/a.ts', 'missing.ts'],
-      derivedFromGit: false,
-      coreInput: { allIndexedPaths: new Set(['src/a.ts']) },
-      cg: { close: () => closeCalls.push('close') },
+    expect(
+      validateAffectedIndexedPaths({
+        changedFiles: ['src/a.ts', 'missing.ts'],
+        derivedFromGit: false,
+        allIndexedPaths: new Set(['src/a.ts']),
+      }),
+    ).toEqual({ ok: true, missing: ['missing.ts'] });
+
+    expect(
+      validateAffectedIndexedPaths({
+        changedFiles: ['missing.ts'],
+        derivedFromGit: true,
+        allIndexedPaths: new Set<string>(),
+      }),
+    ).toEqual({ ok: true, missing: [] });
+
+    expect(
+      validateAffectedIndexedPaths({
+        changedFiles: ['missing.ts'],
+        derivedFromGit: false,
+        allIndexedPaths: new Set<string>(),
+      }),
+    ).toEqual({
+      ok: false,
+      error: 'None of the 1 input file match indexed paths: missing.ts',
     });
-    expect(closeCalls).toEqual([]);
 
-    read.validateAffectedIndexedPaths({
-      changedFiles: ['missing.ts'],
-      derivedFromGit: true,
-      coreInput: { allIndexedPaths: new Set<string>() },
-      cg: { close: () => closeCalls.push('derived') },
+    expect(parseAffectedDepth({ depth: '3' })).toEqual({ ok: true, depth: 3 });
+    expect(parseAffectedDepth({ depth: 'abc' })).toEqual({
+      ok: false,
+      error: 'Invalid value for --depth: "abc" is not a number',
     });
-    expect(closeCalls).toEqual([]);
+    expect(parseAffectedDepth({ depth: '0' })).toEqual({
+      ok: false,
+      error: 'Invalid value for --depth: must be >= 1',
+    });
 
-    expect(read.parseAffectedDepth({ depth: '3' }, { close: () => closeCalls.push('depth') })).toBe(3);
-    expect(read.parseAffectedDepth({ depth: 'abc' }, { close: () => closeCalls.push('bad-depth') })).toBeNull();
-    expect(read.parseAffectedDepth({ depth: '0' }, { close: () => closeCalls.push('zero-depth') })).toBeNull();
-    expect(closeCalls).toEqual(['bad-depth', 'zero-depth']);
-
-    await expect(read.collectAffectedChangedFiles(['src/a.ts'], { files: ['src/b.ts'] }, '/repo')).resolves.toEqual({
+    expect(collectExplicitChangedFiles({ fileArgs: ['src/a.ts'], optionFiles: ['src/b.ts'] })).toEqual({
       changedFiles: ['src/a.ts', 'src/b.ts'],
       derivedFromGit: false,
     });
 
-    const json = stripAnsi(captureOutput(() => read.printNoDerivedChanges({ json: true })));
+    const json = stripAnsi(renderNoDerivedChanges({ json: true }).join('\n'));
     expect(JSON.parse(json)).toMatchObject({ changedFiles: [], affectedTests: [] });
-    expect(stripAnsi(captureOutput(() => read.printNoDerivedChanges({ quiet: true })))).toBe('');
+    expect(stripAnsi(renderNoDerivedChanges({ quiet: true }).join('\n'))).toBe('');
   });
 
   it('renders file listings in grouped, summary, and tree modes', () => {

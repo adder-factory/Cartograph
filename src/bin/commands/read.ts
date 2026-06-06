@@ -10,13 +10,13 @@ import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
-import { type AffectedCoreInput, DEFAULT_DEPTH, buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
+import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
 import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MIN, RETRIEVE_K_MAX } from '../../mcp/tools/ask.js';
 import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
+import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
 import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { isInitialized } from '../../directory.js';
-import { globToSafeRegex } from '../../utils.js';
 import { errMsg } from '../../errors.js';
 import { detectPackageManager, packageScriptCommand, readPackageScripts } from '../../package-scripts.js';
 import {
@@ -73,33 +73,6 @@ interface StatusRollupConfig {
   ) => void;
   appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
-}
-
-interface AffectedOptions {
-  projectPath?: string;
-  files?: string[];
-  stdin?: boolean;
-  depth?: string;
-  filter?: string;
-  includeTests?: boolean;
-  includeCommands?: boolean;
-  json?: boolean;
-  quiet?: boolean;
-}
-
-interface ChangedFilesResult {
-  changedFiles: string[];
-  derivedFromGit: boolean;
-}
-
-interface AffectedOutputArgs {
-  changedFiles: string[];
-  sortedTests: string[];
-  totalDependents: number;
-  barrelsReached: string[];
-  derivedFromGit: boolean;
-  projectPath: string;
-  options: AffectedOptions;
 }
 
 async function readDiffOption(diff: string): Promise<string> {
@@ -517,8 +490,6 @@ const defaultReadCommandDeps: ReadCommandDeps = {
   loadGitUtils: (() => import('../../git-utils.js')) as ReadCommandDeps['loadGitUtils'],
 };
 
-let activeReadCommandDeps: ReadCommandDeps = defaultReadCommandDeps;
-
 function registerFilesReadCommand(deps: ReadCommandDeps): void {
   registerFilesFeatureCommand({
     ...deps,
@@ -531,198 +502,23 @@ function registerFilesReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
-async function collectAffectedChangedFiles(
-  fileArgs: string[],
-  options: AffectedOptions,
-  projectPath: string,
-): Promise<ChangedFilesResult | null> {
-  const changedFiles = [...(fileArgs || []), ...(options.files ?? [])];
-  if (options.stdin) changedFiles.push(...readFilesFromStdin());
-  if (changedFiles.length > 0 || options.stdin) return { changedFiles, derivedFromGit: false };
-  return deriveChangedFilesFromGit(projectPath, options);
-}
-
-function readFilesFromStdin(): string[] {
-  return fs
-    .readFileSync(0, 'utf-8')
-    .split('\n')
-    .map((f) => f.trim())
-    .filter(Boolean);
-}
-
-async function deriveChangedFilesFromGit(
-  projectPath: string,
-  options: AffectedOptions,
-): Promise<ChangedFilesResult | null> {
-  const { listChangedFilesSince } = await activeReadCommandDeps.loadGitUtils();
-  const derived = listChangedFilesSince(projectPath, 'HEAD');
-  if (derived === null) {
-    if (!options.quiet) {
-      info('No files provided and could not derive from git (git unavailable or no HEAD ref).');
-      info('Use file arguments or --stdin.');
-    }
-    process.exit(0);
-  }
-  if (derived.length === 0) {
-    printNoDerivedChanges(options);
-    process.exit(0);
-  }
-  return { changedFiles: derived, derivedFromGit: true };
-}
-
-function printNoDerivedChanges(options: AffectedOptions): void {
-  if (options.json) {
-    out(JSON.stringify({ changedFiles: [], affectedTests: [], totalDependentsTraversed: 0 }, null, 2));
-  } else if (!options.quiet) {
-    info('No uncommitted changes — nothing to re-test.');
-  }
-}
-
-function parseAffectedDepth(options: AffectedOptions, cg: any): number | null {
-  const maxDepth = Number.parseInt(options.depth || String(DEFAULT_DEPTH), 10);
-  if (!Number.isFinite(maxDepth)) {
-    error(`Invalid value for --depth: "${options.depth}" is not a number`);
-    cg.close();
-    process.exitCode = 1;
-    return null;
-  }
-  if (maxDepth < 1) {
-    error('Invalid value for --depth: must be >= 1');
-    cg.close();
-    process.exitCode = 1;
-    return null;
-  }
-  return maxDepth;
-}
-
-function buildAffectedFilter(pattern: string | undefined): RegExp | null {
-  if (!pattern) return null;
-  const regexBody = globToSafeRegex(pattern);
-  return regexBody === null ? null : new RegExp(regexBody);
-}
-
-function validateAffectedIndexedPaths(args: {
-  changedFiles: string[];
-  derivedFromGit: boolean;
-  coreInput: AffectedCoreInput;
-  cg: any;
-  quiet?: boolean;
-}): void {
-  if (args.derivedFromGit) return;
-  const missing = args.changedFiles.filter((f) => !args.coreInput.allIndexedPaths.has(f));
-  if (missing.length === args.changedFiles.length) {
-    error(
-      `None of the ${args.changedFiles.length} input file${args.changedFiles.length === 1 ? '' : 's'} match indexed paths: ${missing.join(', ')}`,
-    );
-    args.cg.close();
-    process.exit(1);
-  }
-  if (missing.length > 0 && !args.quiet) {
-    info(
-      `${missing.length} input path${missing.length === 1 ? '' : 's'} not in the index (skipped): ${missing.join(', ')}`,
-    );
-  }
-}
-
-function printAffectedOutput(args: AffectedOutputArgs): void {
-  if (args.options.json) {
-    printAffectedJson(args);
-  } else if (args.options.quiet) {
-    for (const t of args.sortedTests) out(t);
-  } else {
-    printAffectedHuman(args);
-  }
-}
-
-function printAffectedJson(args: AffectedOutputArgs): void {
-  const verificationCommands = args.options.includeCommands
-    ? buildAffectedVerificationCommands(args.projectPath, args.sortedTests)
-    : [];
-  out(
-    JSON.stringify(
-      {
-        changedFiles: args.changedFiles,
-        affectedTests: args.sortedTests,
-        totalDependentsTraversed: args.totalDependents,
-        barrelsReached: args.barrelsReached,
-        derivedFromGit: args.derivedFromGit,
-        ...(args.options.includeCommands ? { verificationCommands } : {}),
-      },
-      null,
-      2,
-    ),
-  );
-}
-
-function printAffectedHuman(args: AffectedOutputArgs): void {
-  if (args.derivedFromGit) printDerivedChangedFiles(args.changedFiles);
-  printAffectedTestList(args.sortedTests);
-  if (args.options.includeCommands) printAffectedVerificationCommands(args.projectPath, args.sortedTests);
-  out(chalk.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`));
-  printBarrelWarning(args.barrelsReached);
-}
-
-function buildAffectedVerificationCommands(projectPath: string, sortedTests: string[]): string[] {
-  const manager = detectPackageManager(projectPath);
-  const scripts = readPackageScripts(projectPath);
-  const commands: string[] = [];
-  if (sortedTests.length > 0 && scripts['test']) commands.push(packageScriptCommand(manager, 'test', sortedTests));
-  for (const script of ['typecheck', 'lint']) {
-    if (scripts[script]) commands.push(packageScriptCommand(manager, script));
-  }
-  return commands;
-}
-
-function printAffectedVerificationCommands(projectPath: string, sortedTests: string[]): void {
-  const commands = buildAffectedVerificationCommands(projectPath, sortedTests);
-  out();
-  if (commands.length === 0) {
-    info('No package test/typecheck/lint scripts found for verification commands.');
-    return;
-  }
-  out(chalk.bold('Verification commands:\n'));
-  for (const command of commands) out('  ' + chalk.cyan(command));
-  out();
-}
-
-function printDerivedChangedFiles(changedFiles: string[]): void {
-  out(
-    chalk.dim(
-      `\nChanged set derived from \`git diff HEAD\` (${changedFiles.length} file${changedFiles.length === 1 ? '' : 's'}):`,
-    ),
-  );
-  for (const f of changedFiles) out(chalk.dim('  ' + f));
-}
-
-function printAffectedTestList(sortedTests: string[]): void {
-  const AFFECTED_ROW_LIMIT = 40;
-  if (sortedTests.length === 0) {
-    info('No test files affected by the changed files.');
-    return;
-  }
-  const shown = sortedTests.slice(0, AFFECTED_ROW_LIMIT);
-  out(chalk.bold(`\nAffected test files (${sortedTests.length}):\n`));
-  for (const t of shown) out('  ' + chalk.cyan(t));
-  if (sortedTests.length > AFFECTED_ROW_LIMIT) {
-    out(
-      chalk.dim(
-        `\n  … showing first ${shown.length} of ${sortedTests.length} (sorted). Pass --filter <glob> or narrow the input set to see fewer.`,
-      ),
-    );
-  }
-  out();
-}
-
-function printBarrelWarning(barrelsReached: string[]): void {
-  if (barrelsReached.length === 0) return;
-  const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
-  out();
-  out(
-    chalk.yellow(
-      `⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-        `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
-    ),
-  );
+function registerAffectedReadCommand(deps: ReadCommandDeps): void {
+  registerAffectedFeatureCommand({
+    ...deps,
+    readStdin: () => fs.readFileSync(0, 'utf-8'),
+    packageDeps: {
+      detectPackageManager,
+      readPackageScripts,
+      packageScriptCommand,
+    },
+    writeLine: out,
+    style: {
+      bold: chalk.bold,
+      cyan: chalk.cyan,
+      dim: chalk.dim,
+      yellow: chalk.yellow,
+    },
+  });
 }
 
 /**
@@ -968,142 +764,15 @@ registerDigestCommand(defaultReadCommandDeps);
 
 registerFilesReadCommand(defaultReadCommandDeps);
 
-/**
- * cartograph affected [files...]
- *
- * Find test files affected by the given source files.
- * Traces dependency edges transitively to find test files that depend on changed code.
- *
- * Usage:
- *   cartograph affected                        # auto: derive changed set from `git diff HEAD`
- *   git diff --name-only | cartograph affected --stdin
- *   cartograph affected --include-commands     # print package-script verification commands
- *   cartograph affected src/lib/components/Editor.svelte src/routes/+page.svelte
- *
- * When neither file args nor --stdin are provided, the changed set
- * is derived from `git diff HEAD` (working tree vs HEAD, plus
- * untracked) — Friction-Y (2026-05-14). Clean tree exits with a
- * friendly hint, not an error.
- *
- * CLI/MCP alignment exception (B11): direct implementation rather
- * than runViaMCP shim because the CLI carries human/CI-specific
- * features (--stdin file-list piping, custom test-glob via
- * --filter, --quiet mode, --json export) that the MCP
- * `cartograph_affected` tool doesn't surface. Designed for `git
- * diff --name-only | cartograph affected --stdin` pipeline use.
- */
-async function handleAffectedCommand(
-  fileArgs: string[],
-  options: AffectedOptions,
-  deps: ReadCommandDeps,
-): Promise<void> {
-  const { resolveProjectPath, isInitialized, error, info, loadCartograph, buildIndexedPathSets, findAffectedTests } =
-    deps;
-  const projectPath = resolveProjectPath(options.projectPath);
-
-  try {
-    if (!isInitialized(projectPath)) {
-      error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
-    }
-
-    const changed = await collectAffectedChangedFiles(fileArgs, options, projectPath);
-    if (!changed) return;
-
-    if (changed.changedFiles.length === 0) {
-      if (!options.quiet) info('No files provided. Use file arguments or --stdin.');
-      process.exit(0);
-    }
-
-    const { default: Cartograph } = await loadCartograph();
-    const cg = await Cartograph.open(projectPath);
-    const maxDepth = parseAffectedDepth(options, cg);
-    if (maxDepth === null) return;
-
-    const coreInput: AffectedCoreInput = {
-      files: changed.changedFiles,
-      depth: maxDepth,
-      customFilter: buildAffectedFilter(options.filter),
-      ...buildIndexedPathSets(cg.queries),
-    };
-    validateAffectedIndexedPaths({
-      changedFiles: changed.changedFiles,
-      derivedFromGit: changed.derivedFromGit,
-      coreInput,
-      cg,
-      quiet: options.quiet === true,
-    });
-
-    const { affectedTests, totalDependents, barrelsReached } = findAffectedTests(cg.internals.graphManager, coreInput);
-    const sortedTests = Array.from(affectedTests).sort((a, b) => a.localeCompare(b));
-
-    printAffectedOutput({
-      changedFiles: changed.changedFiles,
-      sortedTests,
-      totalDependents,
-      barrelsReached,
-      derivedFromGit: changed.derivedFromGit,
-      projectPath,
-      options,
-    });
-
-    cg.close();
-  } catch (err) {
-    error(`Affected analysis failed: ${errMsg(err)}`);
-    process.exit(1);
-  }
-}
-
-function registerAffectedCommand(deps: ReadCommandDeps): void {
-  const { program } = deps;
-  program
-    .command('affected [files...]')
-    .description('Find test files affected by changed source files (defaults to `git diff HEAD` when no files passed)')
-    .option('-p, --project-path <path>', 'Project path')
-    .option('--files <paths...>', 'Alias for positional file arguments — mirrors the MCP `files` param name')
-    .option('--stdin', 'Read file list from stdin (one per line)')
-    .option('-d, --depth <number>', 'Max dependency traversal depth', String(DEFAULT_DEPTH))
-    .option('-f, --filter <glob>', 'Custom glob filter for test files (e.g. "e2e/*.spec.ts")')
-    .option(
-      '--include-commands',
-      'Print conservative package-script verification commands for affected tests plus typecheck/lint when scripts exist.',
-    )
-    .option(
-      '--include-tests',
-      "Include test-file targets when walking the dependents graph (mirrors the MCP `includeTests` flag's surface; default off — affected reports only test files, and this surface keeps the canonical no-op behavior so a script can pass the flag uniformly across surfaces).",
-    )
-    .option('-j, --json', 'Output as JSON')
-    .option('-q, --quiet', 'Only output file paths, no decoration')
-    .action(
-      async (
-        fileArgs: string[],
-        options: {
-          projectPath?: string;
-          files?: string[];
-          stdin?: boolean;
-          depth?: string;
-          filter?: string;
-          includeCommands?: boolean;
-          includeTests?: boolean;
-          json?: boolean;
-          quiet?: boolean;
-        },
-      ) => {
-        await handleAffectedCommand(fileArgs, options, deps);
-      },
-    );
-}
-
 export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
-  activeReadCommandDeps = deps;
   registerAtRangeCommand(deps);
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
-  registerAffectedCommand(deps);
+  registerAffectedReadCommand(deps);
 }
 
-registerAffectedCommand(defaultReadCommandDeps);
+registerAffectedReadCommand(defaultReadCommandDeps);
 
 export const __readCommandInternals = {
   readDiffOption,
@@ -1124,17 +793,4 @@ export const __readCommandInternals = {
   printStatusRollupLine,
   parseFieldsOption,
   isValidFindAxis,
-  collectAffectedChangedFiles,
-  readFilesFromStdin,
-  deriveChangedFilesFromGit,
-  printNoDerivedChanges,
-  parseAffectedDepth,
-  buildAffectedFilter,
-  validateAffectedIndexedPaths,
-  printAffectedOutput,
-  printAffectedJson,
-  printAffectedHuman,
-  printDerivedChangedFiles,
-  printAffectedTestList,
-  printBarrelWarning,
 };
