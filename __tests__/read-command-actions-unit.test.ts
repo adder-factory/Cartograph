@@ -76,7 +76,8 @@ function loadReadCommandActions(): void {
     buildDirRollup: () => ({ totalFiles: 1, totalSymbols: 2, rows: [{ dir: 'src', files: 1, symbols: 2 }] }),
     buildIndexedPathSets: () => ({
       allIndexedPaths: new Set(['src/a.ts', 'test/a.test.ts']),
-      testPaths: new Set(['test/a.test.ts']),
+      isTestByIndex: new Set(['test/a.test.ts']),
+      filesWithTestCases: new Set(['test/a.test.ts']),
     }),
     findAffectedTests: () => ({
       affectedTests: new Set(['test/a.test.ts']),
