@@ -7,16 +7,16 @@
  * `/v1/chat/completions`, or a reranker endpoint missing `/v1/rerank`.
  */
 
-import { loadConfig } from '../config.js';
-import { createEmbeddingClient } from '../llm/embedding-client.js';
+import { loadConfig } from '../../config.js';
+import { createEmbeddingClient } from '../../llm/embedding-client.js';
 import {
   LlmClient,
   type ChatProviderConfig,
   type EmbeddingProviderConfig,
   type LlmEndpointConfig,
-} from '../llm/client.js';
-import { RerankerClient, type RerankerProviderConfig } from '../llm/reranker-client.js';
-import { errMsg } from '../errors.js';
+} from '../../llm/client.js';
+import { RerankerClient, type RerankerProviderConfig } from '../../llm/reranker-client.js';
+import { errMsg } from '../../errors.js';
 
 export type LlmSmokeStatus = 'ok' | 'skip' | 'fail';
 export type LlmSmokeOverallStatus = 'ok' | 'warn' | 'fail';

@@ -5,6 +5,33 @@
 If the user says exactly `go`, read `NEXT_SESSION_GO.md` and begin the
 first unchecked task listed there.
 
+## Architecture rules for development
+
+Use feature slices, not layer-first buckets, for new code and for any
+area you touch during maintenance. The platform's natural unit is the
+slice boundary: MCP tool/action, CLI command/subcommand, installer flow,
+index hook, language extractor, or LLM action.
+
+Each slice should keep its contract, runtime, formatting/adapters, and
+focused tests close together when practical. Use explicit types or Zod
+schemas at trust boundaries, and validate data as it crosses those
+boundaries.
+
+Expected failures are return values with stable codes/messages/remediation
+where possible. Reserve thrown exceptions for truly unexpected states,
+programmer errors, and low-level I/O failures that cannot be handled
+locally.
+
+Prefer the simplest feature-local shape that keeps the contract explicit.
+Do not add indirection unless the reason is stated in code or the
+surrounding module pattern makes it obvious. Consistency matters more
+than cleverness: repeated slices should look predictable.
+
+Before declaring work done, verify it with type-checking and the smallest
+relevant test set; broaden to full tests or health checks when touching
+shared behavior, public CLI/MCP contracts, indexing, extraction, or LLM
+flows.
+
 This file is for AI assistants (Claude Code, Cursor, Windsurf, etc.)
 helping a user install cartograph. The instructions are written
 sequentially so they can be followed mechanically: run a command,

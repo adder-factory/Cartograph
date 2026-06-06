@@ -14,11 +14,11 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
-import { loadConfig } from '../config.js';
-import { isProcessAlive } from '../utils-concurrency.js';
-import { LLAMA_SERVER_RERANK_FLAG } from './llm-setup-catalog.js';
-import { recommendedTuning } from './hardware-tuning.js';
-import { normaliseEndpoint, scanForLlmBackends } from './scan-backends.js';
+import { loadConfig } from '../../config.js';
+import { isProcessAlive } from '../../utils-concurrency.js';
+import { LLAMA_SERVER_RERANK_FLAG } from '../../installer/llm-setup-catalog.js';
+import { recommendedTuning } from '../../installer/hardware-tuning.js';
+import { normaliseEndpoint, scanForLlmBackends } from '../../installer/scan-backends.js';
 
 export const LLM_TIER_KEYS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
 export type LlmTierKey = (typeof LLM_TIER_KEYS)[number];
