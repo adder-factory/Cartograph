@@ -142,6 +142,13 @@ describe('OpenAiSdkRerankerClient', () => {
     expect(scores).toEqual([0.2, 0.9]);
   });
 
+  it('normalizes raw backend logits into [0, 1] while preserving input order', async () => {
+    server = startMockServer(() => rerankResp([3.5, -10]));
+    const client = new OpenAiSdkRerankerClient(baseCfg(server.url));
+    const scores = await client.rerank('q', ['doc-a', 'doc-b']);
+    expect(scores).toEqual([1, 0]);
+  });
+
   it('fills missing indices with 0 (e.g. backend skipped some)', async () => {
     server = startMockServer(() =>
       Response.json({

@@ -146,6 +146,7 @@ export interface AdminCommandDeps {
       opts: Record<string, unknown>,
     ) => Promise<{ overallStatus: string; afterFix?: { overallStatus: string } }>;
     formatDoctorReport: (result: unknown) => string;
+    formatDoctorJson: (result: unknown) => string;
   }>;
   loadLlmSetupPlan: () => Promise<{
     planLlmSetup: () => Promise<{
@@ -1617,9 +1618,12 @@ function registerInstallModelsCommand(deps: AdminCommandDeps): void {
           if (diff.addedOrUpdated.length > 0) {
             info(`  added/updated: ${diff.addedOrUpdated.join(', ')}`);
           }
+          info(`Next: cartograph backend start ${projectRoot}`);
+          info(`      cartograph llm smoke ${projectRoot}`);
+          info(`      cartograph doctor ${projectRoot}`);
         } else {
           info(
-            'Next: re-run with `--write-config` to merge the recommended LLM block into .cartograph/config.json, or set `llm.summarizeLlm`, `llm.askLlm`, `llm.embeddingLlm`, `llm.rerankerLlm` by hand.',
+            'Next: re-run with `--write-config` to merge the recommended LLM block into .cartograph/config.json, or run `cartograph admin llm-plan` then `cartograph admin llm-apply --preset <id>` for a detected/cloud backend.',
           );
         }
       } catch (err) {
@@ -1640,21 +1644,22 @@ function registerDoctorCommand(deps: AdminCommandDeps): void {
     .option('--fix', 'Auto-apply fixable remediations')
     .option('--no-project-checks', 'Skip project init/config checks')
     .option('--skip-project-checks', 'Skip project init/config checks')
+    .option('--json', 'Print structured JSON instead of Markdown')
     .action(
       async (
         pathArg: string | undefined,
-        options: { fix?: boolean; projectChecks?: boolean; skipProjectChecks?: boolean },
+        options: { fix?: boolean; projectChecks?: boolean; skipProjectChecks?: boolean; json?: boolean },
       ) => {
         const projectPath = resolveProjectPath(pathArg);
         try {
-          const { runDoctor, formatDoctorReport } = await loadDoctor();
+          const { runDoctor, formatDoctorReport, formatDoctorJson } = await loadDoctor();
           const skipProjectChecks = options.projectChecks === false || options.skipProjectChecks === true;
           const result = await runDoctor({
             projectPath,
             fix: options.fix === true,
             skipProjectChecks,
           });
-          writeStdout(`${formatDoctorReport(result)}\n`);
+          writeStdout(`${options.json ? formatDoctorJson(result) : formatDoctorReport(result)}\n`);
           const finalStatus = result.afterFix?.overallStatus ?? result.overallStatus;
           if (finalStatus === 'fail') process.exit(1);
         } catch (err) {

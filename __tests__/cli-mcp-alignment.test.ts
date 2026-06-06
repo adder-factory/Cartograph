@@ -65,6 +65,22 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   'llm',
   'llm:setup',
 
+  // `cartograph llm smoke` sends tiny real requests to configured
+  // local/cloud backends. MCP setup diagnostics stay under
+  // `cartograph_admin({action: 'doctor'|'llm-plan'})`; this command is
+  // a human/operator smoke harness for the running backend processes.
+  'llm:smoke',
+
+  // `cartograph backend status|start|stop|logs` manages local llama-server
+  // child processes and pid/log files. That is intentionally CLI-only:
+  // an MCP session should not start or stop the process stack it may
+  // depend on for the very tool call.
+  'backend',
+  'backend:status',
+  'backend:start',
+  'backend:stop',
+  'backend:logs',
+
   // `cartograph similar <symbol>` routes through `cartograph_graph` with
   // `direction: 'similar'` (folded 2026-05-14, FRICTION-46 — the
   // standalone `cartograph_similar` MCP tool was retired to free a slot

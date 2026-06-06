@@ -37,13 +37,16 @@
  * typically sorted by score descending. We re-order by `index` before
  * returning so callers see scores aligned with their input `candidates`
  * array, matching the in-process `MiniNllcRankingContext.rankAll`
- * contract.
+ * contract. Some backends return probabilities in [0, 1]; llama.cpp
+ * reranker GGUFs can return raw logits. Callers get normalized [0, 1]
+ * scores either way.
  */
 
 import { LlmEndpointError } from './client.js';
 import { logWarn } from '../errors.js';
 import { backendLabel, scanForLlmBackends, type DetectedBackendKind } from '../installer/scan-backends.js';
 import type { RerankerProviderConfig } from './reranker-client.js';
+import { isContextWindowError, isInputTooLargeError } from './retry-policy.js';
 import {
   assertOpenAiCompatEndpointOrApiKey,
   normaliseOpenAiCompatFetchBaseUrl,
@@ -160,6 +163,9 @@ export class OpenAiSdkRerankerClient {
       const body = (await res.json()) as RerankResponse;
       return scoresFromRerankResponse(body, candidates.length);
     } catch (err) {
+      if (isContextWindowError(err) || isInputTooLargeError(err)) {
+        return this.retryOversizedRerank(query, candidates, opts, err);
+      }
       if (err instanceof LlmEndpointError) throw err;
       if (err instanceof Error && err.name === 'AbortError') {
         throw new Error('rerank aborted');
@@ -169,6 +175,25 @@ export class OpenAiSdkRerankerClient {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  private async retryOversizedRerank(
+    query: string,
+    candidates: string[],
+    opts: { signal?: AbortSignal },
+    err: unknown,
+  ): Promise<number[]> {
+    if (candidates.length <= 1) {
+      logWarn('Reranker: single candidate exceeded backend context/batch limit', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [0];
+    }
+    const mid = Math.ceil(candidates.length / 2);
+    const left = await this.rerank(query, candidates.slice(0, mid), opts);
+    if (opts.signal?.aborted) throw new Error('rerank aborted');
+    const right = await this.rerank(query, candidates.slice(mid), opts);
+    return [...left, ...right];
   }
 
   /**
@@ -213,8 +238,11 @@ function scoresFromRerankResponse(body: RerankResponse, candidateCount: number):
   }
   // Fill scores in input order — backends may sort by score descending.
   const scores = new Array<number>(candidateCount).fill(0);
-  for (const entry of body.results) {
-    if (isValidRerankEntry(entry, candidateCount)) scores[entry.index] = entry.relevance_score;
+  const validEntries = body.results.filter((entry) => isValidRerankEntry(entry, candidateCount));
+  const normalized = normalizeRerankScores(validEntries.map((entry) => entry.relevance_score));
+  for (let i = 0; i < validEntries.length; i++) {
+    const entry = validEntries[i]!;
+    scores[entry.index] = normalized[i] ?? 0;
   }
   return scores;
 }
@@ -224,6 +252,17 @@ function isValidRerankEntry(entry: RerankResultEntry | undefined, candidateCount
     typeof entry?.index === 'number' &&
     entry.index >= 0 &&
     entry.index < candidateCount &&
-    typeof entry.relevance_score === 'number'
+    typeof entry.relevance_score === 'number' &&
+    Number.isFinite(entry.relevance_score)
   );
+}
+
+function normalizeRerankScores(rawScores: readonly number[]): number[] {
+  if (rawScores.length === 0) return [];
+  const alreadyNormalized = rawScores.every((score) => score >= 0 && score <= 1);
+  if (alreadyNormalized) return [...rawScores];
+  const min = Math.min(...rawScores);
+  const max = Math.max(...rawScores);
+  if (max === min) return rawScores.map(() => 1);
+  return rawScores.map((score) => (score - min) / (max - min));
 }

@@ -277,6 +277,7 @@ function fakeInstallLoaders(): Pick<
         return { overallStatus: 'pass', checks: [] };
       }),
       formatDoctorReport: vi.fn(() => '# Doctor\n\nAll checks passed.'),
+      formatDoctorJson: vi.fn(() => '{"overallStatus":"pass"}'),
     })),
   };
 }
@@ -463,6 +464,7 @@ describe('admin command action bodies', () => {
         return { overallStatus: 'fail', afterFix: { overallStatus: 'pass' } };
       }),
       formatDoctorReport: vi.fn(() => '# Doctor\n\nFixed.'),
+      formatDoctorJson: vi.fn(() => '{"overallStatus":"fail"}'),
     }));
     actions.clear();
     registerAdminCommands(deps);

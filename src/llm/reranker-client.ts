@@ -8,9 +8,10 @@
  * cross-encoder reads both texts jointly so it picks up subtle signal
  * that a bi-encoder misses.
  *
- * Scores are in `[0, 1]` (whatever the upstream `/v1/rerank` response
- * carries — typically already normalised). Callers that blend
- * reranker scores with cosine similarity should rank-normalise
+ * Scores returned by this client are normalized to `[0, 1]`. Some
+ * upstream `/v1/rerank` providers already return probabilities;
+ * llama.cpp reranker GGUFs can return raw logits. Callers that blend
+ * reranker scores with cosine similarity should still rank-normalise
  * (e.g. via reciprocal-rank fusion) rather than treating these as
  * probabilities across queries.
  *
@@ -34,6 +35,8 @@
  */
 
 import { LlmEndpointError } from './client.js';
+import { logDebug } from '../errors.js';
+import { withTransientLlmRetry } from './retry-policy.js';
 
 /** Reranker config shape. Only `'openai-compat'` after the in-process
  *  `'local'` pathway was deleted 2026-05-24c (step 4c).
@@ -117,7 +120,9 @@ export class RerankerClient {
     }
     if (candidates.length === 0) return [];
     if (opts.signal?.aborted) throw new Error('rerank aborted');
-    return (await this.getHttpImpl()).rerank(query, candidates, opts);
+    return withTransientLlmRetry(() => this.getHttpImpl().then((impl) => impl.rerank(query, candidates, opts)), {
+      onRetry: (retryErr) => logDebug('Reranker: retrying transient endpoint error', { error: retryErr.message }),
+    });
   }
 
   /** True when the configured backend's `/v1/rerank` endpoint

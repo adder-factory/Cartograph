@@ -189,13 +189,18 @@ cd your-project
 cartograph admin init -i
 ```
 
-For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and prints the backend commands you still need to start manually.
+For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and points you at the managed backend commands.
 
 ```bash
 cartograph doctor --fix /path/to/your/project
 
-# Start the printed backend commands, then verify:
+# Start local llama-server tiers, smoke real LLM requests, then verify:
+cartograph backend start /path/to/your/project
+cartograph llm smoke /path/to/your/project
 cartograph doctor /path/to/your/project
+
+# If startup fails:
+cartograph backend logs /path/to/your/project --tier embed
 ```
 
 Common backend choices:
@@ -438,13 +443,21 @@ cartograph admin sync [path]       # Incremental update
 cartograph status [path]           # Show index status and statistics
 cartograph find [query]            # Find symbols by name / regex / env-var / SQL ref (--by, --mode, --kind, --limit)
 cartograph ask <question> [path]   # Ask a natural-language question about the codebase (needs an LLM)
-cartograph llm                     # Local LLM setup utilities
+cartograph backend <subcommand>    # Manage configured local llama-server processes (status / start / stop / logs)
+cartograph llm                     # Local LLM setup utilities (`setup`, `smoke`)
 cartograph digest                  # "Land in a new repo" overview — hotspots, health, entry points
 cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
 cartograph context <task>          # Build context for AI (--format, --max-nodes)
 cartograph affected [files...]     # Find test files affected by changes (see below)
 cartograph review <subcommand>     # context / neighbors / risk / agent-audit / trust
 cartograph serve --mcp             # Start MCP server
+```
+
+Operator acceptance smokes:
+
+```bash
+bun run test:managed-backend-smoke  # requires llama-server + minimal GGUFs; skips when unavailable
+bun run test:clean-install:docker   # copies the repo into a clean Bun container and runs setup/index/doctor
 ```
 
 Additional query and maintenance commands are available for deeper workflows:

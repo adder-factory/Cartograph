@@ -23,6 +23,7 @@
 
 import { Buffer } from 'node:buffer';
 import { LlmEndpointError } from './client.js';
+import { isInputTooLargeError, withTransientLlmRetry } from './retry-policy.js';
 import type { EmbeddingProvider } from './embedding-client.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getEmbeddableNodes, upsertSymbolEmbedding } from '../db/queries-embeddings.js';
@@ -354,19 +355,6 @@ interface EmbedOneBatchArgs {
 }
 
 /**
- * Detect the llama.cpp / server "input too large to process" family of
- * errors. The exact message varies by server version but they all
- * mention the physical batch size or a length cap, so the regex stays
- * deliberately loose. When this trips, the offending row(s) inside the
- * batch get isolated via per-row retry — not all rows fail, just the
- * over-length ones, and `errors` doesn't bump on capability misses.
- */
-function isInputTooLargeError(err: unknown): boolean {
-  if (!(err instanceof LlmEndpointError)) return false;
-  return /too large to process|exceeds.*batch size|input.*length.*exceeds|context length/i.test(err.message);
-}
-
-/**
  * Embed a batch and return vectors only — no persist. The caller
  * stashes the vecs and persists them on the NEXT loop iteration so
  * SQLite writes happen while native ONNX runs the next batch (see
@@ -390,7 +378,9 @@ async function embedBatchVecsOnly(args: EmbedOneBatchArgs): Promise<BatchVecsRes
     const inputs = batch.map((c) =>
       buildEmbedText({ name: c.name, signature: c.signature, docstring: c.docstring, summary: c.summary }),
     );
-    const vecs = await client.embed(inputs, compact({ signal }));
+    const vecs = await withTransientLlmRetry(() => client.embed(inputs, compact({ signal })), {
+      onRetry: (retryErr) => logDebug('Embedder: retrying transient endpoint error', { error: retryErr.message }),
+    });
     if (vecs.length !== batch.length) {
       throw new LlmEndpointError(`embedding response length mismatch: got ${vecs.length}, want ${batch.length}`);
     }
@@ -457,7 +447,13 @@ async function embedOneRow(args: {
     summary: row.summary,
   });
   try {
-    const vecs = await client.embed([input], compact({ signal }));
+    const vecs = await withTransientLlmRetry(() => client.embed([input], compact({ signal })), {
+      onRetry: (retryErr) =>
+        logDebug('Embedder: retrying transient per-row endpoint error', {
+          nodeId: row.nodeId,
+          error: retryErr.message,
+        }),
+    });
     if (vecs.length !== 1) throw new LlmEndpointError(`per-row embed expected 1 vec, got ${vecs.length}`);
     const includedSummary = !!(row.summary && row.summary.trim().length > 0);
     const summaryHashAtEmbed = includedSummary ? row.summaryHash : '';
