@@ -13,29 +13,10 @@
  * output has the correct format.
  */
 
-import { describe, it, expect } from 'vitest';
-import { mock } from 'bun:test';
+import { describe, expect, it } from 'vitest';
 import type { Node, SearchResult } from '../src/types.js';
-
-// ── Mutable result store + module mock (NOT hoisted under bun:test) ───────
-// bun:test's `mock.module(...)` is registered at the call site (not
-// hoisted like vitest's `vi.mock`), so we register the mock FIRST
-// and import the importer via dynamic `await import(...)` below.
-const store: { results: SearchResult[] } = { results: [] };
-mock.module('../src/cartograph-llm-service.js', () => ({
-  CartographLlmService: class CartographLlmService {},
-  llmFindDeadCode: async () => ({ candidates: [], totalCandidates: 0 }),
-  llmFindImplementations: async () => store.results,
-  llmLocalChat: async () => ({ text: '' }),
-  llmFindSimilar: async () => [],
-  llmCheckNamingDrift: async () => ({ verdict: 'ok', confidence: 0, reasoning: '' }),
-  llmSummarizeChange: async () => ({ intent: '', confidence: 0, evidence: [] }),
-}));
-
-// ── Import after mock registration ────────────────────────────────────────
-const { handleSearchSemantic } = await import('../src/mcp/tools/_search-semantic.js');
-import type { ToolCtx } from '../src/mcp/tools/types.js';
-import type { ToolOutcome } from '../src/mcp/tools/_outcome.js';
+import { buildSearchSemanticConceptSpec } from '../src/mcp/tools/_search-semantic.js';
+import { renderMarkdownCardList } from '../src/mcp/tools/_result-spec.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -52,43 +33,18 @@ function fakeNode(name: string, filePath = 'src/foo.ts', startLine = 5): Node {
   } as Node;
 }
 
-/** Minimal ToolCtx — only what handleSearchSemantic actually reads. */
-function makeCtx(): ToolCtx {
-  const fakeCartograph = {
-    llm: {
-      getEffectiveLlmConfig: async () => ({}),
-    },
-    queries: {
-      getNodeById: (id: string) => store.results.find((r) => r.node.id === id)?.node ?? null,
-      db: { prepare: () => ({ get: () => undefined }) },
-    },
-  } as unknown;
-
-  return {
-    getCartograph: () => fakeCartograph as ReturnType<ToolCtx['getCartograph']>,
-    refIds: undefined,
-    callIds: undefined as unknown as ToolCtx['callIds'],
-  } as ToolCtx;
-}
-
-/** Unwrap a `handleSearchSemantic` outcome's success text. `handleSearchSemantic`
- *  returns a `ToolOutcome` (P6) — fail loudly if it produced an `err` arm. */
-function textOf(outcome: ToolOutcome): string {
-  if (!outcome.ok) throw new Error(`expected an ok outcome, got err: ${outcome.error}`);
-  return outcome.value.content[0]!.text;
+function renderConceptResults(results: SearchResult[], query = 'some concept'): string {
+  return renderMarkdownCardList(buildSearchSemanticConceptSpec(query, results)).trimEnd();
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
 
 describe('FRICTION-1: semantic concept score format', () => {
   it('renders "score X.XXX" without a "%" suffix for a normal [0,1] score', async () => {
-    store.results = [{ node: fakeNode('detectStaleness'), score: 0.701 }];
-    const ctx = makeCtx();
-    const result = await handleSearchSemantic(ctx, {
-      mode: 'semantic',
-      query: 'detect index staleness against git HEAD',
-    });
-    const text = textOf(result);
+    const text = renderConceptResults(
+      [{ node: fakeNode('detectStaleness'), score: 0.701 }],
+      'detect index staleness against git HEAD',
+    );
     expect(text).toContain('score 0.701');
     expect(text).not.toMatch(/\d+%\s*similar/);
   });
@@ -97,13 +53,7 @@ describe('FRICTION-1: semantic concept score format', () => {
     // The in-memory EmbeddingCache path (topKByCosineMatrix) computes raw dot
     // products without L2 normalisation. Scores > 1 were previously displayed
     // as e.g. "12439% similar" (score 124.39 * 100 = 12439).
-    store.results = [{ node: fakeNode('handleSomething'), score: 124.39 }];
-    const ctx = makeCtx();
-    const result = await handleSearchSemantic(ctx, {
-      mode: 'semantic',
-      query: 'handle something',
-    });
-    const text = textOf(result);
+    const text = renderConceptResults([{ node: fakeNode('handleSomething'), score: 124.39 }], 'handle something');
     // Must render the raw score, not a multiplied percentage.
     expect(text).toContain('score 124.390');
     expect(text).not.toMatch(/12439.*%/);
@@ -111,16 +61,10 @@ describe('FRICTION-1: semantic concept score format', () => {
   });
 
   it('shows multiple results in score-descending order', async () => {
-    store.results = [
+    const text = renderConceptResults([
       { node: fakeNode('alpha'), score: 0.9 },
       { node: fakeNode('beta'), score: 0.5 },
-    ];
-    const ctx = makeCtx();
-    const result = await handleSearchSemantic(ctx, {
-      mode: 'semantic',
-      query: 'some concept',
-    });
-    const text = textOf(result);
+    ]);
     const alphaIdx = text.indexOf('alpha');
     const betaIdx = text.indexOf('beta');
     expect(alphaIdx).toBeGreaterThanOrEqual(0);

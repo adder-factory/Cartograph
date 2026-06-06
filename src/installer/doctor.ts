@@ -64,7 +64,25 @@ const execFileAsync = promisify(execFile);
 
 export type CheckStatus = 'ok' | 'warn' | 'fail';
 
+export type CheckId =
+  | 'bun-runtime'
+  | 'llm-models'
+  | 'project-init'
+  | 'project-config'
+  | 'configured-model-files'
+  | 'detected-llm-backends'
+  | 'embedding-endpoint'
+  | 'recommended-tuning'
+  | 'backend-start-commands'
+  | 'backend-lifecycle'
+  | 'project-checks'
+  | 'cartograph-processes';
+
 export interface CheckResult {
+  /** Stable machine-readable check identity for JSON consumers and
+   *  internal control flow. Human-readable names may change; IDs must
+   *  not unless accompanied by an explicit contract migration. */
+  id: CheckId;
   /** Short human-readable name shown in the report header line. */
   name: string;
   status: CheckStatus;
@@ -108,6 +126,7 @@ function checkBunRuntime(): CheckResult {
   const bunGlobal = (globalThis as { Bun?: { version?: string } }).Bun;
   if (!bunGlobal) {
     return {
+      id: 'bun-runtime',
       name: 'Bun runtime',
       status: 'fail',
       detail: 'Not running under Bun (bun:sqlite + bun:ffi are required).',
@@ -117,13 +136,14 @@ function checkBunRuntime(): CheckResult {
   const version = bunGlobal.version ?? '0.0.0';
   if (compareSemver(version, ENGINES_BUN_MIN) < 0) {
     return {
+      id: 'bun-runtime',
       name: 'Bun runtime',
       status: 'fail',
       detail: `Bun ${version} is older than the required ${ENGINES_BUN_MIN}.`,
       remediation: `Upgrade Bun: \`bun upgrade\` (or reinstall from ${BUN_DOWNLOAD_URL}).`,
     };
   }
-  return { name: 'Bun runtime', status: 'ok', detail: `Bun ${version}` };
+  return { id: 'bun-runtime', name: 'Bun runtime', status: 'ok', detail: `Bun ${version}` };
 }
 
 function resolveModelsDir(): string {
@@ -135,12 +155,14 @@ async function checkModels(llm: Record<string, unknown> | null): Promise<CheckRe
     const localModelFiles = configuredModelFilesFromLlm(llm);
     if (localModelFiles.length === 0) {
       return {
+        id: 'llm-models',
         name: 'LLM models',
         status: 'ok',
         detail: 'Current LLM config uses backend model IDs; no local GGUF model directory is required.',
       };
     }
     return {
+      id: 'llm-models',
       name: 'LLM models',
       status: 'ok',
       detail: `${localModelFiles.length} configured local model file path${
@@ -156,6 +178,7 @@ async function checkModels(llm: Record<string, unknown> | null): Promise<CheckRe
     .catch(() => false);
   if (!modelsDirExists) {
     return {
+      id: 'llm-models',
       name: 'LLM models',
       status: 'warn',
       detail: `${modelsDir} does not exist.`,
@@ -168,6 +191,7 @@ async function checkModels(llm: Record<string, unknown> | null): Promise<CheckRe
   const ggufs = entries.filter((f) => f.endsWith('.gguf'));
   if (ggufs.length === 0) {
     return {
+      id: 'llm-models',
       name: 'LLM models',
       status: 'warn',
       detail: `${modelsDir} exists but contains no .gguf files.`,
@@ -175,6 +199,7 @@ async function checkModels(llm: Record<string, unknown> | null): Promise<CheckRe
     };
   }
   return {
+    id: 'llm-models',
     name: 'LLM models',
     status: 'ok',
     detail: `${ggufs.length} model${ggufs.length === 1 ? '' : 's'} present under ${modelsDir}`,
@@ -197,13 +222,14 @@ async function checkProjectInit(projectPath: string): Promise<CheckResult> {
     .catch(() => false);
   if (!cgDirExists) {
     return {
+      id: 'project-init',
       name: 'Project init',
       status: 'fail',
       detail: `No \`.cartograph/\` directory at ${projectPath}.`,
       remediation: `\`cartograph admin init ${projectPath}\` to create one.`,
     };
   }
-  return { name: 'Project init', status: 'ok', detail: `${cgDir} present` };
+  return { id: 'project-init', name: 'Project init', status: 'ok', detail: `${cgDir} present` };
 }
 
 async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
@@ -216,6 +242,7 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
     // The init flow creates a config; missing it after init is
     // recoverable but warrants flagging.
     return {
+      id: 'project-config',
       name: 'Project config',
       status: 'warn',
       detail: `No config.json at ${configPath}.`,
@@ -228,6 +255,7 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
     parsed = JSON.parse(await fsp.readFile(configPath, 'utf8')) as Record<string, unknown>;
   } catch (e) {
     return {
+      id: 'project-config',
       name: 'Project config',
       status: 'fail',
       detail: `${configPath} is not valid JSON: ${(e as Error).message}`,
@@ -237,6 +265,7 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
   const llm = parsed['llm'] as Record<string, unknown> | undefined;
   if (!llm || Object.keys(llm).length === 0) {
     return {
+      id: 'project-config',
       name: 'Project config',
       status: 'warn',
       detail: `${configPath} present but no \`llm\` block configured.`,
@@ -249,13 +278,14 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
     loadConfig(projectPath);
   } catch (e) {
     return {
+      id: 'project-config',
       name: 'Project config',
       status: 'fail',
       detail: `${configPath} failed runtime validation: ${(e as Error).message}`,
       remediation: 'Fix `.cartograph/config.json`, or re-run `cartograph admin install-models --write-config`.',
     };
   }
-  return { name: 'Project config', status: 'ok', detail: `${configPath} valid` };
+  return { id: 'project-config', name: 'Project config', status: 'ok', detail: `${configPath} valid` };
 }
 
 const MAX_RENDERED_MISSING_MODEL_FILES = 4;
@@ -287,6 +317,7 @@ async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): P
 
   if (missing.length === 0) {
     return {
+      id: 'configured-model-files',
       name: 'Configured model files',
       status: 'ok',
       detail: `${configured.length} configured local model file${configured.length === 1 ? '' : 's'} present.`,
@@ -300,6 +331,7 @@ async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): P
       : '';
   const hasPartialDownloads = missing.some((m) => m.partialDownload !== null);
   return {
+    id: 'configured-model-files',
     name: 'Configured model files',
     status: 'warn',
     detail: `${missing.length} configured local model file${missing.length === 1 ? '' : 's'} missing: ${rendered}${suffix}`,
@@ -374,6 +406,7 @@ function checkEmbeddingReachability(
   const match = detected.find((d) => d.endpoint === base);
   if (match) {
     return {
+      id: 'embedding-endpoint',
       name: 'Embedding endpoint',
       status: 'ok',
       detail: `${backendLabel(match.kind)} reachable at ${base} (${loadedModelSummary(match)}).`,
@@ -396,6 +429,7 @@ function checkEmbeddingReachability(
     }`;
   }
   return {
+    id: 'embedding-endpoint',
     name: 'Embedding endpoint',
     status: 'warn',
     detail: `embeddingLlm.endpoint=${endpoint} is not responding to GET /v1/models.`,
@@ -416,6 +450,7 @@ function checkEndpointlessOpenAiEmbedding(embeddingLlm: Record<string, unknown>)
   const envApiKey = typeof process.env['OPENAI_API_KEY'] === 'string' && process.env['OPENAI_API_KEY'].length > 0;
   if (configuredApiKey || envApiKey) {
     return {
+      id: 'embedding-endpoint',
       name: 'Embedding endpoint',
       status: 'ok',
       detail: `No embeddingLlm.endpoint set; OpenAI SDK default endpoint will be used with ${
@@ -424,6 +459,7 @@ function checkEndpointlessOpenAiEmbedding(embeddingLlm: Record<string, unknown>)
     };
   }
   return {
+    id: 'embedding-endpoint',
     name: 'Embedding endpoint',
     status: 'warn',
     detail: 'embeddingLlm.endpoint is not set.',
@@ -443,6 +479,7 @@ function loadedModelSummary(match: DetectedBackend): string {
 function detectedBackendsCheck(detected: readonly DetectedBackend[]): CheckResult {
   if (detected.length === 0) {
     return {
+      id: 'detected-llm-backends',
       name: 'Detected LLM backends',
       status: 'ok',
       detail: 'No OpenAI-compat backends running on common ports.',
@@ -454,6 +491,7 @@ function detectedBackendsCheck(detected: readonly DetectedBackend[]): CheckResul
     )
     .join(', ');
   return {
+    id: 'detected-llm-backends',
     name: 'Detected LLM backends',
     status: 'ok',
     detail: summary,
@@ -478,13 +516,14 @@ function recommendedTuningCheck(): CheckResult {
     `  rerank :8083 (with ${LLAMA_SERVER_RERANK_FLAG}) → --parallel ${t.reranker.llamaServerParallel}  (cartograph drives ${t.reranker.cartographConcurrency})`,
     'Increase `--parallel N` on your llama-server startup to saturate every slot; cartograph auto-matches outbound concurrency.',
   ].join('\n');
-  return { name: 'Recommended tuning', status: 'ok', detail: lines };
+  return { id: 'recommended-tuning', name: 'Recommended tuning', status: 'ok', detail: lines };
 }
 
 function backendStartCommandsCheck(llm: Record<string, unknown> | null): CheckResult | null {
   const commands = renderBackendStartCommands(llm);
   if (commands.length === 0) return null;
   return {
+    id: 'backend-start-commands',
     name: 'Backend start commands',
     status: 'ok',
     detail: [
@@ -506,6 +545,7 @@ async function backendLifecycleCheck(
   const missing = status.rows.filter((row) => !row.modelExists);
   if (missing.length > 0) {
     return {
+      id: 'backend-lifecycle',
       name: 'Backend lifecycle',
       status: 'warn',
       detail: `${missing.length} managed backend model file${missing.length === 1 ? '' : 's'} missing.`,
@@ -515,6 +555,7 @@ async function backendLifecycleCheck(
   const stale = status.rows.filter((row) => row.pidRecord !== null && !row.pidAlive);
   if (stale.length > 0) {
     return {
+      id: 'backend-lifecycle',
       name: 'Backend lifecycle',
       status: 'warn',
       detail: `${stale.length} stale backend pid file${stale.length === 1 ? '' : 's'} found.`,
@@ -524,6 +565,7 @@ async function backendLifecycleCheck(
   const starting = status.rows.filter((row) => row.state === 'starting');
   if (starting.length > 0) {
     return {
+      id: 'backend-lifecycle',
       name: 'Backend lifecycle',
       status: 'warn',
       detail: `${starting.length} managed backend process${starting.length === 1 ? '' : 'es'} alive but not reachable yet.`,
@@ -534,6 +576,7 @@ async function backendLifecycleCheck(
   for (const row of status.rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
   const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ');
   return {
+    id: 'backend-lifecycle',
     name: 'Backend lifecycle',
     status: 'ok',
     detail:
@@ -616,7 +659,7 @@ export async function runDoctor(opts: RunDoctorOptions = {}): Promise<DoctorResu
     const recheck = await runDoctorChecks(opts);
     // Stop if nothing changed (every round-N remediation either
     // succeeded into ok or got skipped).
-    const stillFixable = recheck.checks.some((c) => isAutoFixable(c.name, c.status));
+    const stillFixable = recheck.checks.some((c) => isAutoFixable(c.id, c.status));
     lastChecks = recheck.checks;
     if (!stillFixable) break;
   }
@@ -639,9 +682,11 @@ function worstStatus(checks: readonly CheckResult[]): CheckStatus {
 
 /** Which checks `applyRemediations` knows how to address. Used by
  *  the fix loop to decide whether another pass would do anything. */
-function isAutoFixable(name: string, status: CheckStatus): boolean {
+const AUTO_FIXABLE_CHECK_IDS = new Set<CheckId>(['project-init', 'llm-models', 'project-config']);
+
+function isAutoFixable(id: CheckId, status: CheckStatus): boolean {
   if (status === 'ok') return false;
-  return name === 'Project init' || name === 'LLM models' || name === 'Project config';
+  return AUTO_FIXABLE_CHECK_IDS.has(id);
 }
 
 /** Pure-check pass — the body of `runDoctor` minus the `fix` branch.
@@ -657,6 +702,7 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   let llm: Record<string, unknown> | null = null;
   if (opts.skipProjectChecks) {
     checks.push({
+      id: 'project-checks',
       name: 'Project checks',
       status: 'ok',
       detail: 'Skipped project init/config checks by request.',
@@ -717,6 +763,7 @@ async function activeCartographProcessesCheck(projectPath: string): Promise<Chec
   const rows = await listCartographSiblingProcesses(projectPath);
   if (rows.length === 0) {
     return {
+      id: 'cartograph-processes',
       name: 'Cartograph processes',
       status: 'ok',
       detail: 'No sibling MCP/admin/hook processes detected for this project.',
@@ -728,6 +775,7 @@ async function activeCartographProcessesCheck(projectPath: string): Promise<Chec
     .join('; ');
   const suffix = rows.length > 4 ? `; +${rows.length - 4} more` : '';
   return {
+    id: 'cartograph-processes',
     name: 'Cartograph processes',
     status: 'ok',
     detail:
@@ -784,13 +832,13 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   const projectPath = path.resolve(opts.projectPath ?? process.cwd());
 
   // 1. Project init missing → create `.cartograph/`.
-  const initCheck = checks.find((c) => c.name === 'Project init' && c.status !== 'ok');
+  const initCheck = checks.find((c) => c.id === 'project-init' && c.status !== 'ok');
   if (initCheck) {
     steps.push(await applyProjectInitRemediation(projectPath));
   }
 
   // 2. Missing GGUF models → install the curated set.
-  const modelsCheck = checks.find((c) => c.name === 'LLM models' && c.status !== 'ok');
+  const modelsCheck = checks.find((c) => c.id === 'llm-models' && c.status !== 'ok');
   if (modelsCheck) {
     steps.push(await applyModelInstallRemediation());
   }
@@ -798,7 +846,7 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   // 3. Project config missing OR no llm block → apply the planner's
   //    recommended preset (no user input — the agent / fix flag is
   //    saying "just pick the best path automatically").
-  const configCheck = checks.find((c) => c.name === 'Project config' && c.status !== 'ok');
+  const configCheck = checks.find((c) => c.id === 'project-config' && c.status !== 'ok');
   if (configCheck) {
     steps.push(await applyProjectConfigRemediation(projectPath));
   }
@@ -806,7 +854,7 @@ async function applyRemediations(checks: CheckResult[], opts: RunDoctorOptions):
   // 4. Embedding endpoint unreachable → can't auto-fix (cartograph
   //    doesn't manage backend processes). Surface the next-step
   //    so the report's `--fix` output names the gap.
-  const embCheck = checks.find((c) => c.name === 'Embedding endpoint' && c.status !== 'ok');
+  const embCheck = checks.find((c) => c.id === 'embedding-endpoint' && c.status !== 'ok');
   if (embCheck) {
     steps.push({
       check: 'Embedding endpoint',
