@@ -28,6 +28,7 @@ import {
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
+import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -42,12 +43,6 @@ interface AssignNumericArgInput {
   raw: string | undefined;
   optionName: string;
   opts?: { min?: number; max?: number };
-}
-
-interface SetupCartographModule {
-  default: {
-    init: (projectPath: string, options: { index: boolean }) => Promise<{ close: () => void }>;
-  };
 }
 
 interface DoctorResult {
@@ -586,124 +581,6 @@ function registerDoctorCommand(deps: LifecycleCommandDeps): void {
         if (finalStatus === 'fail') process.exit(1);
       },
     );
-}
-
-/**
- * cartograph setup [path]
- *
- * One-shot bootstrap for first-time users. Runs:
- *   1. admin init (if .cartograph/ missing)
- *   2. install-models (if no GGUFs present; honors --minimal — used
- *      with a llama-server pointing at the downloaded GGUFs)
- *   3. doctor (final verification — surfaces missing HTTP backend)
- *
- * Idempotent — each step skips when its precondition is already met,
- * so re-running setup on a partially-installed environment is safe.
- *
- * Pre-2026-05-24c this also ran an `install-shim` step for the
- * in-process libcgshim pathway; that pathway was deleted in step 4c
- * of the LLM HTTP migration. Setup now assumes the user runs
- * `llama-server` (or another OpenAI-compat backend) themselves — the
- * doctor step prints a remediation line with the exact command if
- * not detected.
- *
- * Direct implementation rather than runViaMCP because setup runs
- * BEFORE the MCP server is reachable.
- */
-function registerSetupCommand(deps: LifecycleCommandDeps): void {
-  const { program, resolveProjectPath, info, writeStdout, loadDoctor } = deps;
-  program
-    .command('setup [path]')
-    .description('One-shot bootstrap: admin init + install-models + doctor. Each step skips when already satisfied.')
-    .option('--minimal', 'Install only the smallest viable model subset (embed + 3B chat) instead of the full set.')
-    .option('--no-models', 'Skip the install-models step (use when models are already present).')
-    .action(async (pathArg: string | undefined, options: { minimal?: boolean; models?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const { runDoctor, formatDoctorReport } = await loadDoctor();
-
-      await runSetupInitStep(projectPath, deps);
-      await runSetupModelStep(projectPath, options, deps);
-      info('Step 3/3: running doctor verification');
-      const result = await runDoctor({ projectPath });
-      writeStdout('\n' + formatDoctorReport(result));
-      if (result.overallStatus === 'fail') process.exit(1);
-    });
-}
-
-async function runSetupInitStep(projectPath: string, deps: LifecycleCommandDeps): Promise<void> {
-  const { isInitialized, info, loadCartograph } = deps;
-  if (isInitialized(projectPath)) {
-    info(`Step 1/3: ${projectPath} already initialized — skipping init`);
-    return;
-  }
-
-  info(`Step 1/3: initialising Cartograph at ${projectPath}`);
-  const { default: Cartograph } = await loadCartograph();
-  const cg = await Cartograph.init(projectPath, { index: false });
-  cg.close();
-}
-
-async function runSetupModelStep(
-  projectPath: string,
-  options: { minimal?: boolean; models?: boolean },
-  deps: LifecycleCommandDeps,
-): Promise<void> {
-  const { info, error, loadInstallModels, loadRecommendedModels } = deps;
-  if (options.models === false) {
-    info('Step 2/3: --no-models → skipping models install');
-    info(
-      '  Next: configure an existing or backend-managed LLM with `cartograph admin llm-plan` then `cartograph admin llm-apply --preset <id> --project-path <project>`, or hand-edit `.cartograph/config.json`.',
-    );
-    info('  Then run `cartograph llm smoke <project>` and `cartograph doctor <project>` to verify real requests.');
-    return;
-  }
-
-  info(`Step 2/3: installing ${options.minimal ? 'minimal' : 'full'} GGUF set`);
-  const { installRecommendedModels } = await loadInstallModels();
-  const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await loadRecommendedModels();
-  const modelSet = options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS;
-  try {
-    const result = await installRecommendedModels({
-      models: modelSet,
-      onProgress: ({ model, downloaded, total }) => {
-        const mb = (n: number): string => (n / BYTES_PER_MIB).toFixed(0);
-        const pct = total > 0 ? ((downloaded / total) * PERCENT_SCALE).toFixed(0) : '?';
-        process.stderr.write(`\r  ${model.filename}: ${mb(downloaded)}/${total > 0 ? mb(total) : '?'} MB (${pct}%)   `);
-      },
-    });
-    process.stderr.write('\n');
-    if (result.downloaded.length > 0) info(`  downloaded ${result.downloaded.length} GGUF(s)`);
-    if (result.skipped.length > 0) info(`  ${result.skipped.length} already present (skipped)`);
-    await writeSetupRecommendedConfig(projectPath, deps, { minimal: options.minimal === true });
-  } catch (error_) {
-    error(`install-models failed: ${errMsg(error_)}`);
-    // models are needed for LLM features, but the user might already
-    // have a working subset from a prior run. doctor will catch a true gap.
-  }
-}
-
-const BYTES_PER_MIB = 1024 * 1024;
-const PERCENT_SCALE = 100;
-
-async function writeSetupRecommendedConfig(
-  projectPath: string,
-  deps: LifecycleCommandDeps,
-  options: { minimal: boolean },
-): Promise<void> {
-  const { info, loadRecommendedConfig } = deps;
-  const { writeRecommendedLlmConfig } = await loadRecommendedConfig();
-  const writeOpts: { projectRoot: string; dir?: string; includeAsk?: boolean; includeReranker?: boolean } = {
-    projectRoot: projectPath,
-  };
-  if (options.minimal) {
-    writeOpts.includeAsk = false;
-    writeOpts.includeReranker = false;
-  }
-  const { configPath, backupPath } = writeRecommendedLlmConfig(writeOpts);
-  info(`  wrote ${options.minimal ? 'minimal' : 'recommended'} LLM config: ${configPath}`);
-  if (backupPath) info(`  backup written: ${backupPath}`);
-  info(`  next: cartograph backend start ${projectPath}`);
-  info(`        cartograph llm smoke ${projectPath}`);
 }
 
 export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLifecycleCommandDeps): void {

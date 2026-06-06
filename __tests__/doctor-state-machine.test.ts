@@ -89,6 +89,25 @@ afterEach(async () => {
 });
 
 describe('runDoctor installer state machine', () => {
+  it('emits stable check ids alongside human-readable names', async () => {
+    await pointModelsDirAtGguf();
+    const result = await runDoctor({
+      projectPath: await makeTempDir('cg-doctor-stable-ids-'),
+      skipProjectChecks: true,
+    });
+
+    expect(result.checks.every((check) => typeof check.id === 'string' && check.id.length > 0)).toBe(true);
+    expect(result.checks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'bun-runtime', name: 'Bun runtime' }),
+        expect.objectContaining({ id: 'project-checks', name: 'Project checks' }),
+        expect.objectContaining({ id: 'llm-models', name: 'LLM models' }),
+        expect.objectContaining({ id: 'detected-llm-backends', name: 'Detected LLM backends' }),
+        expect.objectContaining({ id: 'recommended-tuning', name: 'Recommended tuning' }),
+      ]),
+    );
+  });
+
   const cases: DoctorStateCase[] = [
     {
       name: 'uninitialized project',
