@@ -26,6 +26,8 @@ import {
   type McpServerProfile,
 } from '../../mcp/profiles.js';
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
+import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
+import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -134,18 +136,8 @@ interface LifecycleCommandDeps {
     formatDoctorReport: (result: unknown) => string;
     formatDoctorJson: (result: unknown) => string;
   }>;
-  loadBackendRuntime: () => Promise<{
-    backendStatus: (projectPath: string, options?: { bin?: string }) => Promise<any>;
-    startBackends: (options: { projectPath: string; bin?: string; dryRun?: boolean }) => Promise<any>;
-    stopBackends: (options: { projectPath: string; force?: boolean }) => Promise<any>;
-    backendLogs: (options: { projectPath: string; tier?: string; lines?: number }) => Promise<any>;
-    renderBackendStartCommand: (spec: any) => string;
-  }>;
-  loadLlmSmoke: () => Promise<{
-    runLlmSmoke: (opts: { projectPath: string; timeoutMs?: number }) => Promise<any>;
-    formatLlmSmokeReport: (result: any) => string;
-    formatLlmSmokeJson: (result: any) => string;
-  }>;
+  loadBackendRuntime: () => Promise<BackendRuntimeModule>;
+  loadLlmSmoke: () => Promise<LlmSmokeRuntimeModule>;
   loadInstallModels: () => Promise<{
     installRecommendedModels: (opts: {
       models: readonly unknown[];
@@ -194,8 +186,8 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   loadMcpLoadBudget: () => import('../../mcp/load-budget.js'),
   loadViewerServer: () => import('../../viewer/server.js'),
   loadDoctor: (() => import('../../installer/doctor.js')) as unknown as LifecycleCommandDeps['loadDoctor'],
-  loadBackendRuntime: () => import('../../installer/backend-runtime.js'),
-  loadLlmSmoke: () => import('../../installer/llm-smoke.js'),
+  loadBackendRuntime: () => import('../../features/backend/index.js'),
+  loadLlmSmoke: () => import('../../features/llm-smoke/index.js'),
   loadInstallModels: (() => import('../../installer/install-models.js')) as LifecycleCommandDeps['loadInstallModels'],
   loadRecommendedModels: (() =>
     import('../../llm/recommended-models.js')) as LifecycleCommandDeps['loadRecommendedModels'],
@@ -403,7 +395,7 @@ function registerInstallCommand(deps: LifecycleCommandDeps): void {
 // future `llm test`, `llm list-models`) without renaming.
 // `llmCmd` is the family-parent command — defined in `_cli-core.ts`.
 function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
-  const { llmCmd, loadLlmSetupCli, loadLlmSmoke, resolveProjectPath, writeStdout, error } = deps;
+  const { llmCmd, loadLlmSetupCli } = deps;
   llmCmd
     .command('setup [path]')
     .description('Interactive LLM provider setup — picks chat + embeddings backends and writes them into config.json')
@@ -412,35 +404,7 @@ function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
       await runLlmSetupCli(pathArg);
     });
 
-  llmCmd
-    .command('smoke [path]')
-    .description('Send tiny real requests to configured LLM tiers (embedding, summarize, ask/local, rerank)')
-    .option('--timeout-ms <n>', 'Per-tier smoke timeout in milliseconds (default 60000)')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(async (pathArg: string | undefined, options: { timeoutMs?: string; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const timeoutMs = parseOptionalPositiveInt(options.timeoutMs, '--timeout-ms', error);
-      if (timeoutMs === null) return;
-      const { runLlmSmoke, formatLlmSmokeReport, formatLlmSmokeJson } = await loadLlmSmoke();
-      const result = await runLlmSmoke({ projectPath, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
-      writeStdout(options.json ? formatLlmSmokeJson(result) : formatLlmSmokeReport(result));
-      if (result.overallStatus === 'fail') process.exit(1);
-    });
-}
-
-function parseOptionalPositiveInt(
-  raw: string | undefined,
-  optionName: string,
-  error: (message: string) => void,
-): number | undefined | null {
-  if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1) {
-    error(`${optionName} must be a positive integer`);
-    process.exitCode = 1;
-    return null;
-  }
-  return n;
+  registerLlmSmokeCommand(deps);
 }
 
 function registerTraceToCulpritsCommand(deps: LifecycleCommandDeps): void {
@@ -575,177 +539,6 @@ function registerViewerCommand(deps: LifecycleCommandDeps): void {
         process.exit(1);
       }
     });
-}
-
-function registerBackendCommand(deps: LifecycleCommandDeps): void {
-  const { program, resolveProjectPath, loadBackendRuntime, writeStdout } = deps;
-  const backendCmd = program
-    .command('backend')
-    .description('Manage configured local llama-server backends for this project');
-
-  backendCmd
-    .command('status [path]')
-    .description('Show configured local llama-server backend status')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(async (pathArg: string | undefined, options: { json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
-      const result = await runtime.backendStatus(projectPath);
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStatusReport(result, runtime));
-    });
-
-  backendCmd
-    .command('start [path]')
-    .description('Start configured local llama-server backend processes in the background')
-    .option('--bin <path>', 'llama-server binary path (default: llama-server)')
-    .option('--dry-run', 'Print what would be started without spawning processes')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(async (pathArg: string | undefined, options: { bin?: string; dryRun?: boolean; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
-      const result = await runtime.startBackends({
-        projectPath,
-        ...(options.bin ? { bin: options.bin } : {}),
-        dryRun: options.dryRun === true,
-      });
-      writeStdout(
-        options.json
-          ? JSON.stringify(result, null, 2)
-          : formatBackendStartReport(result, runtime, options.dryRun === true),
-      );
-      if (result.rows.length === 0 || result.rows.some((row: any) => row.state === 'missing-model')) process.exit(1);
-    });
-
-  backendCmd
-    .command('stop [path]')
-    .description('Stop local llama-server backend processes started by `cartograph backend start`')
-    .option('--force', 'Send SIGKILL if a process does not exit after SIGTERM')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(async (pathArg: string | undefined, options: { force?: boolean; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
-      const result = await runtime.stopBackends({ projectPath, force: options.force === true });
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStopReport(result, runtime));
-    });
-
-  backendCmd
-    .command('logs [path]')
-    .description('Tail logs for configured local llama-server backend processes')
-    .option('--tier <name>', 'Only show logs for one tier label (embed, summarize, local, ask, rerank)')
-    .option('--lines <n>', 'Number of log lines per backend to show (default 80)')
-    .option('--json', 'Print structured JSON instead of Markdown')
-    .action(async (pathArg: string | undefined, options: { tier?: string; lines?: string; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const lines = parseOptionalPositiveInt(options.lines, '--lines', deps.error);
-      if (lines === null) return;
-      const runtime = await loadBackendRuntime();
-      const result = await runtime.backendLogs({
-        projectPath,
-        ...(options.tier ? { tier: options.tier } : {}),
-        ...(lines === undefined ? {} : { lines }),
-      });
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendLogsReport(result));
-      if (options.tier && result.logs.length === 0) process.exit(1);
-    });
-}
-
-function formatBackendStatusReport(result: any, runtime: { renderBackendStartCommand: (spec: any) => string }): string {
-  const lines = ['## cartograph backend status', ''];
-  if (result.rows.length === 0) {
-    lines.push(`_No managed backend processes._ ${result.unmanagedReason ?? ''}`.trim());
-    return lines.join('\n');
-  }
-  appendBackendRows(lines, result.rows, runtime);
-  return lines.join('\n');
-}
-
-function formatBackendStartReport(
-  result: any,
-  runtime: { renderBackendStartCommand: (spec: any) => string },
-  dryRun: boolean,
-): string {
-  const lines = ['## cartograph backend start', ''];
-  if (dryRun) lines.push('_Dry run: no processes were started._', '');
-  if (result.started.length > 0) {
-    lines.push(`Started ${result.started.length} backend process${result.started.length === 1 ? '' : 'es'}.`, '');
-  }
-  if (result.skipped.length > 0) {
-    lines.push('Skipped:');
-    for (const skipped of result.skipped) lines.push(`- ${skipped.row.spec.labels.join('/')} — ${skipped.reason}`);
-    lines.push('');
-  }
-  if (result.rows.length === 0) lines.push(`_No managed backend processes._ ${result.unmanagedReason ?? ''}`.trim());
-  else appendBackendRows(lines, result.rows, runtime);
-  return lines.join('\n');
-}
-
-function formatBackendStopReport(result: any, runtime: { renderBackendStartCommand: (spec: any) => string }): string {
-  const lines = ['## cartograph backend stop', ''];
-  if (result.stopped.length > 0) {
-    lines.push(`Stopped ${result.stopped.length} backend process${result.stopped.length === 1 ? '' : 'es'}.`, '');
-  }
-  if (result.skipped.length > 0) {
-    lines.push('Skipped:');
-    for (const skipped of result.skipped) lines.push(`- ${skipped.row.spec.labels.join('/')} — ${skipped.reason}`);
-    lines.push('');
-  }
-  if (result.rows.length === 0) lines.push(`_No managed backend processes._ ${result.unmanagedReason ?? ''}`.trim());
-  else appendBackendRows(lines, result.rows, runtime);
-  return lines.join('\n');
-}
-
-function appendBackendRows(
-  lines: string[],
-  rows: readonly any[],
-  runtime: { renderBackendStartCommand: (spec: any) => string },
-): void {
-  for (const row of rows) {
-    const icon = row.state === 'running' || row.state === 'external' ? '✓' : row.state === 'missing-model' ? '✗' : '○';
-    const pid = row.pidRecord?.pid ? ` pid=${row.pidRecord.pid}${row.pidAlive ? '' : ' stale'}` : '';
-    lines.push(`${icon} **${row.spec.labels.join('/')}** — ${row.state} at ${row.spec.endpoint}${pid}`);
-    lines.push(`  model: ${row.spec.modelPath}`);
-    lines.push(`  log: ${row.logPath}`);
-    lines.push(`  command: ${runtime.renderBackendStartCommand(row.spec)}`);
-    if (row.pidRecord && !row.pidAlive) {
-      lines.push(`  stale pid cleanup: cartograph backend stop ${resultProjectPathFromRow(row)}`);
-    }
-    if (row.state === 'starting') {
-      lines.push(`  readiness: process is alive but endpoint is not reachable yet; inspect logs if it stays here.`);
-    }
-  }
-}
-
-function resultProjectPathFromRow(row: any): string {
-  const marker = `${pathSeparator()}.cartograph${pathSeparator()}backends${pathSeparator()}`;
-  const idx = typeof row.pidFilePath === 'string' ? row.pidFilePath.indexOf(marker) : -1;
-  return idx >= 0 ? row.pidFilePath.slice(0, idx) : '<project>';
-}
-
-function pathSeparator(): string {
-  return process.platform === 'win32' ? '\\' : '/';
-}
-
-function formatBackendLogsReport(result: any): string {
-  const lines = ['## cartograph backend logs', ''];
-  if (result.rows.length === 0) {
-    lines.push(`_No managed backend processes._ ${result.unmanagedReason ?? ''}`.trim());
-    return lines.join('\n');
-  }
-  if (result.logs.length === 0) {
-    lines.push('_No backend matched the requested tier._');
-    return lines.join('\n');
-  }
-  for (const entry of result.logs) {
-    lines.push(`### ${entry.row.spec.labels.join('/')} — ${entry.row.logPath}`, '');
-    if (entry.error) {
-      lines.push(`_Could not read log: ${entry.error}_`, '');
-    } else if (!entry.exists || entry.content.length === 0) {
-      lines.push('_No log output yet._', '');
-    } else {
-      lines.push('```text', entry.content, '```', '');
-    }
-  }
-  return lines.join('\n').trimEnd();
 }
 
 /**

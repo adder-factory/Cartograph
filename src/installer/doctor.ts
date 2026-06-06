@@ -55,7 +55,7 @@ import {
   LLM_TIER_KEYS,
   renderBackendStartCommands,
   type ConfiguredModelFile,
-} from './backend-runtime.js';
+} from '../features/backend/index.js';
 import { loadConfig } from '../config.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
 import { formatBytes } from '../utils.js';
