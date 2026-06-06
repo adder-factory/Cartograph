@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { __readCommandInternals as read } from '../src/bin/commands/read.js';
+import { buildFindMcpArgs } from '../src/features/find/runtime.js';
 
 function captureOutput(fn: () => unknown): string {
   const originalLog = console.log;
@@ -109,13 +110,9 @@ describe('read command internals', () => {
     expect(read.isValidFindAxis('bogus')).toBe(false);
   });
 
-  it('builds MCP payloads for find content, env/sql, exact, fuzzy, and semantic modes', async () => {
-    const calls: Array<{ tool: string; args: Record<string, unknown>; projectPath?: string }> = [];
-    const restore = read.setReadCommandMcpRunnerForTest(async (tool, args, projectPath) => {
-      calls.push({ tool, args: args as Record<string, unknown>, projectPath });
-    });
-    try {
-      await read.runFindCommand('needle', {
+  it('builds MCP payloads for find content, env/sql, exact, fuzzy, and semantic modes', () => {
+    const payloads = [
+      buildFindMcpArgs('needle', {
         by: 'content',
         limit: '7',
         caseSensitive: true,
@@ -124,23 +121,23 @@ describe('read command internals', () => {
         since: 'c_1',
         allowStale: true,
         projectPath: '/repo',
-      });
-      await read.runFindCommand(undefined, {
+      }),
+      buildFindMcpArgs(undefined, {
         by: 'env',
         limit: '3',
         key: 'API_KEY',
         includeTests: false,
         projectPath: '/repo',
-      });
-      await read.runFindCommand(undefined, {
+      }),
+      buildFindMcpArgs(undefined, {
         by: 'sql',
         limit: '4',
         key: 'users',
         op: 'read',
         includeTests: true,
         allowStale: true,
-      });
-      await read.runFindCommand('Widget', {
+      }),
+      buildFindMcpArgs('Widget', {
         by: 'name',
         mode: 'exact',
         limit: '9',
@@ -149,8 +146,8 @@ describe('read command internals', () => {
         fields: 'name,path,id',
         since: 'c_2',
         allowStale: true,
-      });
-      await read.runFindCommand('render', {
+      }),
+      buildFindMcpArgs('render', {
         by: 'name',
         mode: 'fuzzy',
         limit: '5',
@@ -158,8 +155,8 @@ describe('read command internals', () => {
         sameLanguage: true,
         languageFilter: 'typescript',
         pathFilter: 'src/ui',
-      });
-      await read.runFindCommand(undefined, {
+      }),
+      buildFindMcpArgs(undefined, {
         by: 'name',
         mode: 'semantic',
         symbol: 'Button',
@@ -167,15 +164,12 @@ describe('read command internals', () => {
         limit: '6',
         allowStale: true,
         projectPath: '/repo',
-      });
-    } finally {
-      restore();
-    }
+      }),
+    ];
 
-    expect(calls).toEqual([
+    expect(payloads).toEqual([
       {
-        tool: 'cartograph_find',
-        projectPath: '/repo',
+        ok: true,
         args: {
           by: 'content',
           query: 'needle',
@@ -187,19 +181,10 @@ describe('read command internals', () => {
           allowStale: true,
         },
       },
+      { ok: true, args: { by: 'env', limit: 3, key: 'API_KEY', includeTests: false } },
+      { ok: true, args: { by: 'sql', limit: 4, key: 'users', op: 'read', includeTests: true, allowStale: true } },
       {
-        tool: 'cartograph_find',
-        projectPath: '/repo',
-        args: { by: 'env', limit: 3, key: 'API_KEY', includeTests: false },
-      },
-      {
-        tool: 'cartograph_find',
-        projectPath: undefined,
-        args: { by: 'sql', limit: 4, key: 'users', op: 'read', includeTests: true, allowStale: true },
-      },
-      {
-        tool: 'cartograph_find',
-        projectPath: undefined,
+        ok: true,
         args: {
           by: 'name',
           mode: 'exact',
@@ -213,8 +198,7 @@ describe('read command internals', () => {
         },
       },
       {
-        tool: 'cartograph_find',
-        projectPath: undefined,
+        ok: true,
         args: {
           by: 'name',
           mode: 'fuzzy',
@@ -227,8 +211,7 @@ describe('read command internals', () => {
         },
       },
       {
-        tool: 'cartograph_find',
-        projectPath: '/repo',
+        ok: true,
         args: {
           by: 'name',
           mode: 'semantic',

@@ -19,6 +19,7 @@ import {
   compareFileTreeChildren,
   recurseFileTreeChildren as sharedRecurseFileTreeChildren,
 } from '../../file-tree-render.js';
+import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { isInitialized } from '../../directory.js';
 import { globToSafeRegex } from '../../utils.js';
 import { errMsg } from '../../errors.js';
@@ -76,30 +77,6 @@ interface StatusRollupConfig {
   ) => void;
   appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
-}
-
-interface FindOptions {
-  projectPath?: string;
-  by?: string;
-  query?: string;
-  limit?: string;
-  kind?: string;
-  mode?: string;
-  symbol?: string;
-  sameLanguage?: boolean;
-  differentLanguage?: boolean;
-  languageFilter?: string;
-  caseSensitive?: boolean;
-  pathFilter?: string;
-  language?: string;
-  key?: string;
-  op?: string;
-  includeTests?: boolean;
-  since?: string;
-  allowStale?: boolean;
-  compact?: boolean;
-  fields?: string;
-  lowTokens?: boolean;
 }
 
 interface AffectedOptions {
@@ -497,17 +474,6 @@ function printStatusRollupLine(line: string): void {
   }
 }
 
-function parseFieldsOption(fields: string | undefined): string[] | undefined {
-  return fields
-    ?.split(',')
-    .map((f) => f.trim())
-    .filter(Boolean);
-}
-
-type McpRunner = typeof runViaMCP;
-
-let readCommandMcpRunner: McpRunner = runViaMCP;
-
 interface CommandLike {
   command(name: string): CommandLike;
   description(text: string): CommandLike;
@@ -556,140 +522,6 @@ const defaultReadCommandDeps: ReadCommandDeps = {
 };
 
 let activeReadCommandDeps: ReadCommandDeps = defaultReadCommandDeps;
-
-function setReadCommandMcpRunnerForTest(runner: McpRunner): () => void {
-  const previous = readCommandMcpRunner;
-  readCommandMcpRunner = runner;
-  return () => {
-    readCommandMcpRunner = previous;
-  };
-}
-
-async function runFindCommand(queryArg: string | undefined, options: FindOptions): Promise<void> {
-  const query = queryArg === undefined && typeof options.query === 'string' ? options.query : queryArg;
-  const by = options.by ?? 'name';
-  if (!isValidFindAxis(by)) {
-    error(`--by: must be 'name' | 'content' | 'env' | 'sql'; got '${by}'.`);
-    process.exit(1);
-  }
-  if (by === 'content') return runFindContent(query, options);
-  if (by === 'env' || by === 'sql') return runFindEnvOrSql(by, options);
-  return runFindByName(query, options);
-}
-
-function isValidFindAxis(by: string): by is 'name' | 'content' | 'env' | 'sql' {
-  return by === 'name' || by === 'content' || by === 'env' || by === 'sql';
-}
-
-async function runFindContent(query: string | undefined, options: FindOptions): Promise<void> {
-  if (!query) {
-    error('--by content: [query] is required (regex pattern).');
-    process.exit(1);
-  }
-  const args: Record<string, unknown> = { by: 'content', query };
-  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '50', optionName: '--limit', opts: { min: 1 } }))
-    return;
-  if (options.caseSensitive) args['caseSensitive'] = true;
-  if (options.pathFilter) args['pathFilter'] = options.pathFilter;
-  if (options.language) args['language'] = options.language;
-  if (options.since) args['since'] = options.since;
-  if (options.allowStale) args['allowStale'] = true;
-  if (options.lowTokens) args['lowTokens'] = true;
-  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
-}
-
-async function runFindEnvOrSql(by: 'env' | 'sql', options: FindOptions): Promise<void> {
-  const args: Record<string, unknown> = { by };
-  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '30', optionName: '--limit', opts: { min: 1 } }))
-    return;
-  if (options.key) args['key'] = options.key;
-  if (options.op) args['op'] = options.op;
-  args['includeTests'] = options.includeTests;
-  if (options.allowStale) args['allowStale'] = true;
-  if (options.lowTokens) args['lowTokens'] = true;
-  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
-}
-
-async function runFindByName(query: string | undefined, options: FindOptions): Promise<void> {
-  const mode = options.mode ?? 'exact';
-  if (mode === 'fuzzy' || mode === 'semantic' || mode === 'intent') {
-    return runFindDelegatedNameMode(mode, query, options);
-  }
-  if (mode !== 'exact') {
-    error(`Unknown --mode: ${mode}. Valid: exact | fuzzy | semantic | intent.`);
-    process.exit(1);
-  }
-  return runFindExactName(query, options);
-}
-
-async function runFindDelegatedNameMode(mode: string, query: string | undefined, options: FindOptions): Promise<void> {
-  validateDelegatedNameMode(mode, query, options);
-  const args: Record<string, unknown> = { by: 'name', mode };
-  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '10', optionName: '--limit', opts: { min: 1 } }))
-    return;
-  if (query) args['query'] = query;
-  if (options.symbol) args['symbol'] = options.symbol;
-  if (options.kind) args['kind'] = options.kind;
-  if (options.sameLanguage) args['sameLanguage'] = true;
-  if (options.differentLanguage) args['differentLanguage'] = true;
-  if (options.languageFilter) args['languageFilter'] = options.languageFilter;
-  if (options.pathFilter) args['pathFilter'] = options.pathFilter;
-  if (options.allowStale) args['allowStale'] = true;
-  if (options.lowTokens) args['lowTokens'] = true;
-  await readCommandMcpRunner('cartograph_find', args, options.projectPath);
-}
-
-function validateDelegatedNameMode(mode: string, query: string | undefined, options: FindOptions): void {
-  if (mode === 'semantic') {
-    validateSemanticFind(query, options);
-    return;
-  }
-  if (!query) {
-    error(`--by name --mode ${mode}: [query] is required`);
-    process.exit(1);
-  }
-}
-
-function validateSemanticFind(query: string | undefined, options: FindOptions): void {
-  if (!options.symbol && !query) {
-    error('--by name --mode semantic: pass either [query] (concept text) or --symbol <name>');
-    process.exit(1);
-  }
-  if (options.symbol && query) {
-    error('--by name --mode semantic: [query] and --symbol are mutually exclusive — pick one');
-    process.exit(1);
-  }
-  if (options.sameLanguage && options.differentLanguage) {
-    error('--by name --mode semantic: --same-language and --different-language are mutually exclusive — pick one');
-    process.exit(1);
-  }
-}
-
-async function runFindExactName(query: string | undefined, options: FindOptions): Promise<void> {
-  if (!query) {
-    error('[query] is required for --by name --mode exact');
-    process.exit(1);
-  }
-  const exactArgs: Record<string, unknown> = { by: 'name', mode: 'exact', query };
-  if (
-    !assignIntArg({
-      args: exactArgs,
-      key: 'limit',
-      raw: options.limit ?? '10',
-      optionName: '--limit',
-      opts: { min: 1 },
-    })
-  )
-    return;
-  if (options.kind) exactArgs['kind'] = options.kind;
-  if (options.compact) exactArgs['compact'] = true;
-  const fields = parseFieldsOption(options.fields);
-  if (fields) exactArgs['fields'] = fields;
-  if (options.since) exactArgs['since'] = options.since;
-  if (options.allowStale) exactArgs['allowStale'] = true;
-  if (options.lowTokens) exactArgs['lowTokens'] = true;
-  await readCommandMcpRunner('cartograph_find', exactArgs, options.projectPath);
-}
 
 async function collectAffectedChangedFiles(
   fileArgs: string[],
@@ -1245,113 +1077,6 @@ program
     },
   );
 
-/**
- * cartograph find <query> — unified "find a thing" command.
- *
- * Mirrors `cartograph_find({by})` on the MCP side. Replaces the
- * pre-merge `cartograph search` / `cartograph grep` / `cartograph string-refs`
- * three-command family (2026-05-11). `by` is a flag (matches the
- * `cartograph graph --direction <d>` shape that landed earlier the same
- * day) so the CLI surface stays one command per MCP tool.
- *
- * `--by name --mode exact` (the default) keeps the chalk-coloured
- * relative-score rendering as a CLI-only direct path; every other
- * combination delegates straight to the MCP family handler.
- */
-function registerFindCommand(deps: ReadCommandDeps): void {
-  const { program } = deps;
-  program
-    .command('find [query]')
-    .description(
-      'Find a thing in the codebase — symbol by name (--by name), regex content (--by content), env-var reads (--by env), or SQL table refs (--by sql). Mirrors cartograph_find MCP tool.',
-    )
-    .option('-p, --project-path <path>', 'Project path')
-    .option('-b, --by <axis>', "Axis: 'name' (default) | 'content' | 'env' | 'sql'", 'name')
-    // `--query <text>` aliases the `[query]` positional so the MCP
-    // shape `cartograph find --by name --query X` parses (mirrors the
-    // MCP arg name without changing the canonical positional form).
-    // The positional wins on conflict; an empty positional + a passed
-    // --query falls through to the existing query branches below.
-    .option('--query <text>', 'Alias for the [query] positional (mirrors MCP arg name)')
-    .option('-l, --limit <number>', 'Maximum results (default 10 for name, 50 for content, 30 for env/sql)')
-    .option('-k, --kind <kind>', '(--by name) Filter by node kind (function, class, etc.)')
-    .option('-m, --mode <m>', '(--by name) Search mode: exact (default) | fuzzy | semantic | intent', 'exact')
-    .option(
-      '-s, --symbol <name>',
-      '(--by name --mode semantic) Source symbol name for peer lookup; mutually exclusive with [query]',
-    )
-    .option('--same-language', '(--by name --mode semantic + symbol) Restrict to same language as source')
-    .option('--different-language', '(--by name --mode semantic + symbol) Restrict to a different language than source')
-    .option(
-      '--language-filter <lang>',
-      '(--by name --mode semantic + query / --mode intent) Restrict results to one language',
-    )
-    .option('-c, --case-sensitive', '(--by content) Case-sensitive regex (default: insensitive)')
-    .option(
-      '--path-filter <prefix>',
-      '(--by content / --by name --mode intent) Restrict to files under this path prefix',
-    )
-    .option('--language <lang>', '(--by content) Restrict to one language (typescript / python / …)')
-    .option('--key <key>', '(--by env / --by sql) Specific env-var name or table name; omit for the top-N listing')
-    .option('--op <op>', '(--by sql) Filter by op (read | write | ddl)')
-    // Commander negation form: the destination key `includeTests` defaults
-    // to `true` and `--no-include-tests` flips it to `false`. Matches the
-    // codebase's other `--no-*` flags (--no-metadata, --no-dedupe-by-name,
-    // --no-permissions). Closes handoff #3: previously only `--include-tests`
-    // was registered (a plain boolean toggle that defaulted to `undefined`),
-    // so users couldn't ask for the filter-out behavior the help text claimed.
-    .option(
-      '--no-include-tests',
-      '(--by env / --by sql) Hide test-only entries (default: keep them, ranked behind prod)',
-    )
-    .option(
-      '--since <call-id>',
-      'Delta mode: pass a `c_xxxxxxxx` UID to return only NEW rows (--by name + --mode exact, or --by content)',
-    )
-    .option('--allow-stale', 'Bypass the freshness gate; query the cached index even when stale')
-    .option('--low-tokens', 'Prefer compact output: compact exact-name rows and lower default caps')
-    .option('--compact', '(--by name --mode exact) Emit terse pipe-delimited rows (name|kind|path:line|sig:…|id:…)')
-    .option(
-      '--fields <fields>',
-      '(--by name --mode exact, with --compact) Comma-separated subset of fields (name,kind,path,line,signature,id)',
-    )
-    .action(
-      async (
-        query: string | undefined,
-        options: {
-          projectPath?: string;
-          by?: string;
-          query?: string;
-          limit?: string;
-          kind?: string;
-          mode?: string;
-          symbol?: string;
-          sameLanguage?: boolean;
-          differentLanguage?: boolean;
-          languageFilter?: string;
-          caseSensitive?: boolean;
-          pathFilter?: string;
-          language?: string;
-          key?: string;
-          op?: string;
-          includeTests?: boolean;
-          since?: string;
-          allowStale?: boolean;
-          compact?: boolean;
-          fields?: string;
-          lowTokens?: boolean;
-        },
-      ) => {
-        const restoreRunner = setReadCommandMcpRunnerForTest(deps.runViaMCP);
-        try {
-          await runFindCommand(query, options);
-        } finally {
-          restoreRunner();
-        }
-      },
-    );
-}
-
 registerFindCommand(defaultReadCommandDeps);
 
 /**
@@ -1739,15 +1464,6 @@ export const __readCommandInternals = {
   printStatusRollupLine,
   parseFieldsOption,
   isValidFindAxis,
-  setReadCommandMcpRunnerForTest,
-  runFindCommand,
-  runFindContent,
-  runFindEnvOrSql,
-  runFindByName,
-  runFindDelegatedNameMode,
-  validateDelegatedNameMode,
-  validateSemanticFind,
-  runFindExactName,
   collectAffectedChangedFiles,
   readFilesFromStdin,
   deriveChangedFilesFromGit,
