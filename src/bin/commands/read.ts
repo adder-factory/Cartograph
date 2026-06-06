@@ -143,18 +143,6 @@ function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
-registerAtRangeReadCommand(defaultReadCommandDeps);
-
-registerAskReadCommand(defaultReadCommandDeps);
-
-registerStatusReadCommand(defaultReadCommandDeps);
-
-registerFindCommand(defaultReadCommandDeps);
-
-registerDigestCommand(defaultReadCommandDeps);
-
-registerFilesReadCommand(defaultReadCommandDeps);
-
 export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
   registerAtRangeReadCommand(deps);
   registerAskReadCommand(deps);
@@ -165,7 +153,7 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerAffectedReadCommand(deps);
 }
 
-registerAffectedReadCommand(defaultReadCommandDeps);
+registerReadCommands();
 
 export const __readCommandInternals = {
   parseFieldsOption,
