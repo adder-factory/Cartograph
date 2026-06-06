@@ -13,6 +13,7 @@ import {
   renderNoDerivedChanges,
   validateAffectedIndexedPaths,
 } from '../src/features/affected/runtime.js';
+import { parseRetrieveK, validateAskQuestion } from '../src/features/ask/runtime.js';
 import { resolveDiffOption } from '../src/features/at-range/cli.js';
 import { buildAtRangeMcpArgs } from '../src/features/at-range/runtime.js';
 import {
@@ -122,16 +123,12 @@ describe('read command internals', () => {
   });
 
   it('validates ask and find option primitives before expensive project work', () => {
-    expect(read.validateAskQuestion('How does status work?')).toBe(true);
-    expect(read.validateAskQuestion('   ')).toBe(false);
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    expect(validateAskQuestion('How does status work?')).toEqual({ ok: true });
+    expect(validateAskQuestion('   ')).toEqual({ ok: false, error: 'ask: the question must not be empty.' });
 
-    expect(read.parseRetrieveK(undefined)).toBe(12);
-    expect(read.parseRetrieveK('4')).toBe(4);
-    expect(read.parseRetrieveK('0')).toBeNull();
-    expect(process.exitCode).toBe(1);
-    process.exitCode = 0;
+    expect(parseRetrieveK(undefined)).toEqual({ ok: true, value: 12 });
+    expect(parseRetrieveK('4')).toEqual({ ok: true, value: 4 });
+    expect(parseRetrieveK('0')).toEqual({ ok: false, error: 'Invalid value for --retrieve-k: must be >= 4' });
 
     expect(read.parseFieldsOption(' name, kind,,path ')).toEqual(['name', 'kind', 'path']);
     expect(read.parseFieldsOption(undefined)).toBeUndefined();

@@ -15,11 +15,29 @@ export function parseOptionalPositiveInt(
 
 export type PositiveIntParseResult = { ok: true; value: number } | { ok: false; error: string };
 
-export function parsePositiveIntValue(raw: string, optionName: string): PositiveIntParseResult {
+export interface IntegerValueBounds {
+  min?: number;
+  max?: number;
+}
+
+export function parseIntegerValue(
+  raw: string,
+  optionName: string,
+  bounds: IntegerValueBounds = {},
+): PositiveIntParseResult {
   const n = Number(raw);
   if (!Number.isInteger(n) || !Number.isFinite(n)) {
     return { ok: false, error: `Invalid value for ${optionName}: "${raw}" is not an integer` };
   }
-  if (n < 1) return { ok: false, error: `Invalid value for ${optionName}: must be >= 1` };
+  if (bounds.min !== undefined && n < bounds.min) {
+    return { ok: false, error: `Invalid value for ${optionName}: must be >= ${bounds.min}` };
+  }
+  if (bounds.max !== undefined && n > bounds.max) {
+    return { ok: false, error: `Invalid value for ${optionName}: must be <= ${bounds.max}` };
+  }
   return { ok: true, value: n };
+}
+
+export function parsePositiveIntValue(raw: string, optionName: string): PositiveIntParseResult {
+  return parseIntegerValue(raw, optionName, { min: 1 });
 }
