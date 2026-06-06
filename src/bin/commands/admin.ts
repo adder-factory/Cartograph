@@ -21,6 +21,7 @@ import {
   type InstallModelResult,
 } from '../../features/admin-install-models/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
+import { registerAdminMigrateCommand } from '../../features/admin-migrate/index.js';
 import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
@@ -1186,59 +1187,6 @@ function registerClassifyCommand(deps: AdminCommandDeps): void {
     });
 }
 
-/**
- * cartograph admin migrate [path]
- *
- * Apply forward schema migrations on the project DB. Cheapest
- * recovery path when a read-style command fails with "Database
- * schema vN is behind this binary's vM" — opens the DB with
- * autoMigrate=true, which runs migrations once and exits.
- */
-function registerMigrateCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, success } = deps;
-  adminCmd
-    .command('migrate [path]')
-    .description(
-      'Apply forward schema migrations on the project DB (mirrors cartograph_admin MCP tool with action=\'migrate\'). Use after a read-style command fails with "Database schema vN is behind".',
-    )
-    .action(async (pathArg: string | undefined) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        // Two-phase open lets us distinguish "already current" from
-        // "migrated this run" without a separate version probe: the
-        // default open() throws when the DB is behind, so success means
-        // already-current. On the throw we re-open with autoMigrate=true
-        // to actually run the migrations.
-        let migratedThisRun = false;
-        let cg: Awaited<ReturnType<typeof Cartograph.open>>;
-        try {
-          cg = await Cartograph.open(projectPath);
-        } catch {
-          cg = await Cartograph.open(projectPath, { autoMigrate: true });
-          migratedThisRun = true;
-        }
-        const v = cg.db.getSchemaVersion();
-        cg.close();
-        if (migratedThisRun) {
-          success(`Schema migrated to v${v?.version ?? '?'}.`);
-          info(
-            'Restart any MCP server still bound to the old schema (its tools will return "stale code, restart" until you do).',
-          );
-        } else {
-          success(`Schema already current (v${v?.version ?? '?'}). Nothing to migrate.`);
-        }
-      } catch (err) {
-        error(`Failed to migrate: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -1257,7 +1205,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerEmbedCommand(deps);
   registerClassifyCommand(deps);
   registerAdminUnlockCommand(deps);
-  registerMigrateCommand(deps);
+  registerAdminMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
   registerAdminPruneStoreCommand(deps);
   registerScipAdminCommands({
