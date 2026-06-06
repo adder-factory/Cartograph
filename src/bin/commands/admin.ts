@@ -15,6 +15,7 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
+import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
   adminCmd as cliAdminCmd,
@@ -1578,125 +1579,6 @@ function registerDoctorCommand(deps: AdminCommandDeps): void {
     );
 }
 
-function registerLlmPlanCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, loadLlmSetupPlan, writeStdout } = deps;
-  adminCmd
-    .command('llm-plan')
-    .description("Print agent-friendly LLM setup presets (mirrors cartograph_admin MCP tool with action='llm-plan')")
-    .action(async () => {
-      try {
-        const { planLlmSetup } = await loadLlmSetupPlan();
-        const plan = await planLlmSetup();
-        writeStdout(`Recommended preset: ${plan.recommendedPresetId}\n`);
-        writeStdout('\n');
-        writeStdout('Detected backends:\n');
-        if (plan.detectedBackends.length === 0) {
-          writeStdout('- none\n');
-        } else {
-          for (const b of plan.detectedBackends) {
-            writeStdout(
-              `- ${b.label} at ${b.endpoint} (${b.models.length} model${b.models.length === 1 ? '' : 's'})\n`,
-            );
-          }
-        }
-        writeStdout('\n');
-        writeStdout('Available presets:\n');
-        for (const preset of plan.presets) {
-          writeStdout(`- ${preset.id} — ${preset.summary}\n`);
-        }
-      } catch (err) {
-        error(`llm-plan failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-function registerLlmApplyCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, info, loadLlmSetupPlan, resolveProjectPath, success, writeStdout } = deps;
-  adminCmd
-    .command('llm-apply')
-    .description(
-      "Apply an LLM setup preset non-interactively (mirrors cartograph_admin MCP tool with action='llm-apply')",
-    )
-    .requiredOption('--preset <id>', 'Preset id returned by `cartograph admin llm-plan`')
-    .option('-p, --project-path <path>', 'Project root to write config for (default: cwd)')
-    .action(async (options: { preset: string; projectPath?: string }) => {
-      const projectRoot = resolveProjectPath(options.projectPath);
-      try {
-        const { applyLlmSetupChoice } = await loadLlmSetupPlan();
-        const result = await applyLlmSetupChoice({
-          projectRoot,
-          preset: options.preset,
-        });
-        if (result.applied) {
-          success(`Applied preset ${result.preset}: ${result.configPath}`);
-          if (result.backupPath) info(`Backup written: ${result.backupPath}`);
-        } else {
-          info(`Preset ${result.preset}: no config written`);
-        }
-        if (result.notes.length > 0) {
-          for (const note of result.notes) info(note);
-        }
-        if (result.nextSteps.length > 0) {
-          info('Next steps:');
-          for (const step of result.nextSteps) writeStdout(`  ${step}\n`);
-        }
-      } catch (err) {
-        error(`llm-apply failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-function registerLlmTuneCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, info, loadHardwareTuning, loadLlmSetupPlan, resolveProjectPath, success, writeStdout } =
-    deps;
-  adminCmd
-    .command('llm-tune [path]')
-    .description(
-      "Inspect or override LLM concurrency tuning (mirrors cartograph_admin MCP tool with action='llm-tune')",
-    )
-    .option('--tier <name>', 'Tier to override: embed, chat, ask, reranker')
-    .option('--concurrency <n>', 'Positive integer concurrency override for --tier')
-    .action(async (pathArg: string | undefined, options: { tier?: string; concurrency?: string }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        const { describeHardware, recommendedTuning } = await loadHardwareTuning();
-        const tuning = recommendedTuning();
-        if (!options.tier) {
-          writeStdout(`Detected: ${describeHardware()}\n`);
-          writeStdout(`embed: ${tuning.embed.cartographConcurrency}\n`);
-          writeStdout(`chat: ${tuning.chat.cartographConcurrency}\n`);
-          writeStdout(`ask: ${tuning.ask.cartographConcurrency}\n`);
-          writeStdout(`reranker: ${tuning.reranker.cartographConcurrency}\n`);
-          return;
-        }
-        const tiers = new Set(['embed', 'chat', 'ask', 'reranker']);
-        if (!tiers.has(options.tier)) {
-          error('--tier must be one of embed, chat, ask, reranker');
-          process.exit(1);
-        }
-        const n = Number.parseInt(options.concurrency ?? '', 10);
-        if (!Number.isInteger(n) || n < 1) {
-          error('--concurrency must be a positive integer when --tier is set');
-          process.exit(1);
-        }
-        const { writeLlmTierConcurrencyOverride } = await loadLlmSetupPlan();
-        const result = await writeLlmTierConcurrencyOverride({
-          projectRoot: projectPath,
-          tier: options.tier,
-          concurrency: n,
-        });
-        success(`Updated ${result.configPath}`);
-        if (result.backupPath) info(`Backup written: ${result.backupPath}`);
-        info(`llm.${result.configKey}.concurrency: ${result.previous ?? '(unset)'} → ${result.concurrency}`);
-      } catch (err) {
-        error(`llm-tune failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -1734,9 +1616,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   });
   registerInstallModelsCommand(deps);
   registerDoctorCommand(deps);
-  registerLlmPlanCommand(deps);
-  registerLlmApplyCommand(deps);
-  registerLlmTuneCommand(deps);
+  registerAdminLlmSetupCommands(deps);
   deps.attachUnknownActionHandler(deps.adminCmd, 'admin');
 }
 
