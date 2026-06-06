@@ -14,9 +14,9 @@ import {
   writeScipImport as defaultWriteScipImport,
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
-import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
+import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
   adminCmd as cliAdminCmd,
@@ -1289,79 +1289,6 @@ function registerMigrateCommand(deps: AdminCommandDeps): void {
 }
 
 /**
- * cartograph admin build-similarity-edges [path]
- *
- * Build similar_to edges over the embedding space. For each node with
- * an embedding, finds its k nearest neighbors and creates edges when
- * similarity exceeds the threshold.
- */
-function registerBuildSimilarityEdgesCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    assignFloatArg,
-    assignIntArg,
-    error,
-    info,
-    isInitialized,
-    loadCartograph,
-    loadSimilarEdges,
-    resolveProjectPath,
-    success,
-  } = deps;
-  adminCmd
-    .command('build-similarity-edges [path]')
-    .option('--k <number>', `Number of nearest neighbors to find (default ${DEFAULT_SIMILAR_K})`)
-    .option('--min-score <number>', `Minimum similarity threshold 0..1 (default ${DEFAULT_SIMILAR_MIN_SCORE})`)
-    .description(
-      "Build similar_to edges from embeddings (mirrors cartograph_admin MCP tool with action='build-similarity-edges')",
-    )
-    .action(async (pathArg: string | undefined, opts) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        const { buildSimilarToEdges } = await loadSimilarEdges();
-        // Route --k / --min-score through the shared validators so bad
-        // input (NaN, negative, out-of-range) is rejected with a clean
-        // error instead of being silently coerced to the default / clamped.
-        const o = opts as Record<string, string | undefined>;
-        const parsed: Record<string, unknown> = {};
-        if (!assignIntArg({ args: parsed, key: 'k', raw: o['k'], optionName: '--k', opts: { min: 1, max: 100 } })) {
-          cg.close();
-          return;
-        }
-        if (
-          !assignFloatArg({
-            args: parsed,
-            key: 'minScore',
-            raw: o['minScore'],
-            optionName: '--min-score',
-            opts: { min: 0, max: 1 },
-          })
-        ) {
-          cg.close();
-          return;
-        }
-        const k = (parsed['k'] as number | undefined) ?? DEFAULT_SIMILAR_K;
-        const minScore = (parsed['minScore'] as number | undefined) ?? DEFAULT_SIMILAR_MIN_SCORE;
-        const result = await buildSimilarToEdges(cg, { k, minScore });
-        cg.close();
-        success(`Built similarity edges: ${result.written} edges from ${result.processed} nodes.`);
-        if (result.reason) {
-          info(`Note: ${result.reason}`);
-        }
-      } catch (err) {
-        error(`Failed to build similarity edges: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
  * cartograph admin prune-store [path]
  *
  * Evict cold orphan rows from the content-addressed summary_store /
@@ -1562,7 +1489,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerClassifyCommand(deps);
   registerUnlockCommand(deps);
   registerMigrateCommand(deps);
-  registerBuildSimilarityEdgesCommand(deps);
+  registerAdminSimilarityEdgesCommand(deps);
   registerPruneStoreCommand(deps);
   registerScipAdminCommands({
     adminCmd: deps.adminCmd,
