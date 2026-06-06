@@ -3,6 +3,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { __readCommandInternals as read } from '../src/bin/commands/read.js';
+import {
+  parseFilesOutputOptions,
+  renderFileSummary,
+  renderFileTree,
+  renderFilesOutput,
+  renderGroupedFiles,
+} from '../src/features/files/runtime.js';
 import { buildFindMcpArgs } from '../src/features/find/runtime.js';
 
 function captureOutput(fn: () => unknown): string {
@@ -383,24 +390,17 @@ describe('read command internals', () => {
       { path: 'README.md', language: 'markdown', nodeCount: 1, size: 5 },
     ];
 
-    const grouped = stripAnsi(captureOutput(() => read.printGroupedFiles(files, true)));
+    const grouped = stripAnsi(renderGroupedFiles(files, true).join('\n'));
     expect(grouped).toContain('typescript (2)');
     expect(grouped).toContain('src/a.ts');
 
-    const summary = stripAnsi(captureOutput(() => read.printFileSummary(files, 1, 'src')));
+    const summary = stripAnsi(
+      renderFileSummary({ files, maxDepth: 1, dir: 'src', buildDirRollup: fakeBuildDirRollup }).join('\n'),
+    );
     expect(summary).toContain('Subtree Summary');
     expect(summary).toContain('src/');
 
-    const tree = stripAnsi(
-      captureOutput(() =>
-        read.printFileTree({
-          files,
-          includeMetadata: true,
-          maxDepth: 3,
-          chalk: { dim: (s) => s, cyan: (s) => s },
-        }),
-      ),
-    );
+    const tree = stripAnsi(renderFileTree({ files, includeMetadata: true, maxDepth: 3 }).join('\n'));
     expect(tree).toContain('src');
     expect(tree).toContain('a.ts');
 
@@ -411,23 +411,21 @@ describe('read command internals', () => {
       size: i,
     }));
     const flat = stripAnsi(
-      captureOutput(() =>
-        read.printFilesOutput({
-          files: flatFiles,
-          format: 'flat',
-          includeMetadata: true,
-          maxDepth: undefined,
-          dir: undefined,
-          queries: {},
-        }),
-      ),
+      renderFilesOutput({
+        files: flatFiles,
+        format: 'flat',
+        includeMetadata: true,
+        maxDepth: undefined,
+        dir: undefined,
+        buildDirRollup: fakeBuildDirRollup,
+      }).join('\n'),
     );
     expect(flat).toContain('Files (81)');
     expect(flat).toContain('src/00.ts');
     expect(flat).toContain('(typescript, 0 symbols)');
 
-    const parsed = read.parseFilesOutputOptions({ format: 'summary', maxDepth: '2' }, () => undefined);
-    expect(parsed).toEqual({ format: 'summary', maxDepth: 2 });
+    const parsed = parseFilesOutputOptions({ format: 'summary', maxDepth: '2' });
+    expect(parsed).toEqual({ ok: true, format: 'summary', maxDepth: 2 });
   });
 });
 
@@ -480,5 +478,16 @@ function fakeRollups() {
     appendFeatureReadiness: (lines: string[]) => lines.push('### Readiness', 'ready'),
     appendInlineHotspots: (lines: string[], _cg: unknown, topN: number) => lines.push(`hotspots:${topN}`),
     appendInlineBiomarkers: (lines: string[], _cg: unknown, topN: number) => lines.push(`biomarkers:${topN}`),
+  };
+}
+
+function fakeBuildDirRollup(files: Array<{ path: string; nodeCount: number }>, maxDepth?: number, dir?: string) {
+  const scoped = dir ? files.filter((file) => file.path === dir || file.path.startsWith(`${dir}/`)) : files;
+  const depth = maxDepth ?? 1;
+  const rows = scoped.length > 0 ? [{ dir: dir ?? 'src', files: scoped.length, symbols: depth + scoped.length }] : [];
+  return {
+    rows,
+    totalFiles: scoped.length,
+    totalSymbols: scoped.reduce((sum, file) => sum + file.nodeCount, 0),
   };
 }

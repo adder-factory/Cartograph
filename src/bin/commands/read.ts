@@ -13,12 +13,7 @@ import { getFileSummaries } from '../../db/queries-file-summaries.js';
 import { type AffectedCoreInput, DEFAULT_DEPTH, buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
 import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MIN, RETRIEVE_K_MAX } from '../../mcp/tools/ask.js';
 import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
-import {
-  type FileTreeNode,
-  buildFileTree,
-  compareFileTreeChildren,
-  recurseFileTreeChildren as sharedRecurseFileTreeChildren,
-} from '../../file-tree-render.js';
+import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { isInitialized } from '../../directory.js';
 import { globToSafeRegex } from '../../utils.js';
@@ -43,6 +38,7 @@ import {
  *  top-level import of status.ts. The dynamic-import path still clamps
  *  with the real `parseInlineTopN`. */
 const STATUS_MAX_INLINE_TOP_N = 30;
+const DECIMAL_RADIX = 10;
 
 function out(message = ''): void {
   process.stdout.write(`${message}\n`);
@@ -523,6 +519,18 @@ const defaultReadCommandDeps: ReadCommandDeps = {
 
 let activeReadCommandDeps: ReadCommandDeps = defaultReadCommandDeps;
 
+function registerFilesReadCommand(deps: ReadCommandDeps): void {
+  registerFilesFeatureCommand({
+    ...deps,
+    writeLine: out,
+    style: {
+      bold: chalk.bold,
+      cyan: chalk.cyan,
+      dim: chalk.dim,
+    },
+  });
+}
+
 async function collectAffectedChangedFiles(
   fileArgs: string[],
   options: AffectedOptions,
@@ -715,145 +723,6 @@ function printBarrelWarning(barrelsReached: string[]): void {
         `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
     ),
   );
-}
-
-type FileListing = ReturnType<typeof getAllFilesWithSymbolCount>;
-type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
-
-function parseFilesOutputOptions(
-  options: { format?: string; maxDepth?: string; lowTokens?: boolean },
-  close: () => void,
-): { format: FileListFormat; maxDepth: number | undefined } | null {
-  const format = (options.format ?? (options.lowTokens ? 'summary' : 'tree')) as FileListFormat;
-  const validFormats: FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
-  if (!validFormats.includes(format)) {
-    error(`Invalid value for --format: "${format}" — valid values: ${validFormats.join(', ')}`);
-    close();
-    process.exitCode = 1;
-    return null;
-  }
-  if (!options.maxDepth) return { format, maxDepth: options.lowTokens ? 3 : undefined };
-  const maxDepth = Number.parseInt(options.maxDepth, 10);
-  if (!Number.isFinite(maxDepth)) {
-    error(`Invalid value for --max-depth: "${options.maxDepth}" is not a number`);
-    close();
-    process.exitCode = 1;
-    return null;
-  }
-  if (maxDepth < 1) {
-    error('Invalid value for --max-depth: must be >= 1');
-    close();
-    process.exitCode = 1;
-    return null;
-  }
-  return { format, maxDepth };
-}
-
-interface PrintFilesOutputArgs {
-  files: FileListing;
-  format: FileListFormat;
-  includeMetadata: boolean;
-  maxDepth: number | undefined;
-  dir: string | undefined;
-  queries: Parameters<typeof getFileSummaries>[0];
-}
-
-function printFilesOutput(args: PrintFilesOutputArgs): void {
-  switch (args.format) {
-    case 'flat':
-      printFlatFiles(args.files, args.includeMetadata, args.queries);
-      break;
-    case 'grouped':
-      printGroupedFiles(args.files, args.includeMetadata);
-      break;
-    case 'summary':
-      printFileSummary(args.files, args.maxDepth, args.dir);
-      break;
-    default:
-      out(chalk.bold(`\nProject Structure (${args.files.length} files):\n`));
-      printFileTree({ files: args.files, includeMetadata: args.includeMetadata, maxDepth: args.maxDepth, chalk });
-      break;
-  }
-}
-
-function printFlatFiles(
-  files: FileListing,
-  includeMetadata: boolean,
-  queries: Parameters<typeof getFileSummaries>[0],
-): void {
-  out(chalk.bold(`\nFiles (${files.length}):\n`));
-  const flatSummaries =
-    files.length <= 80
-      ? activeReadCommandDeps.getFileSummaries(
-          queries,
-          files.map((f) => f.path),
-        )
-      : undefined;
-  const sortedFiles = [...files];
-  sortedFiles.sort((a, b) => a.path.localeCompare(b.path));
-  for (const file of sortedFiles) {
-    if (includeMetadata) {
-      const metadata = chalk.dim(`(${file.language}, ${file.nodeCount} symbols)`);
-      out(`  ${file.path} ${metadata}`);
-    } else {
-      out(`  ${file.path}`);
-    }
-    const summary = flatSummaries?.get(file.path);
-    if (summary) out(`    ${chalk.dim(summary)}`);
-  }
-}
-
-function printGroupedFiles(files: FileListing, includeMetadata: boolean): void {
-  out(chalk.bold(`\nFiles by Language (${files.length} total):\n`));
-  const byLang = new Map<string, FileListing>();
-  for (const file of files) {
-    const existing = byLang.get(file.language) || [];
-    existing.push(file);
-    byLang.set(file.language, existing);
-  }
-  const sortedLangs = [...byLang.entries()];
-  sortedLangs.sort((a, b) => b[1].length - a[1].length);
-  for (const [lang, langFiles] of sortedLangs) {
-    out(chalk.cyan(`${lang} (${langFiles.length}):`));
-    const sortedLangFiles = [...langFiles];
-    sortedLangFiles.sort((a, b) => a.path.localeCompare(b.path));
-    for (const file of sortedLangFiles) {
-      if (includeMetadata) {
-        const metadata = chalk.dim(`(${file.nodeCount} symbols)`);
-        out(`  ${file.path} ${metadata}`);
-      } else {
-        out(`  ${file.path}`);
-      }
-    }
-    out();
-  }
-}
-
-function printFileSummary(files: FileListing, maxDepth: number | undefined, dir: string | undefined): void {
-  const rollup = activeReadCommandDeps.buildDirRollup(files, maxDepth, dir);
-  out(chalk.bold(fileSummaryHeader(dir, rollup.totalFiles, rollup.totalSymbols)));
-  for (const row of rollup.rows) {
-    const label = row.dir === null ? '(root)' : `${row.dir}/`;
-    const filesText = chalk.dim(`${row.files} files`.padStart(10));
-    const symbolsText = chalk.dim(`${row.symbols} symbols`.padStart(14));
-    out(`  ${chalk.cyan(label.padEnd(SUMMARY_DIR_LABEL_WIDTH))} ${filesText} ${symbolsText}`);
-  }
-}
-
-const DECIMAL_RADIX = 10;
-const SUMMARY_DIR_LABEL_WIDTH = 40;
-
-function fileSummaryHeader(dir: string | undefined, totalFiles: number, totalSymbols: number): string {
-  const filterPrefix = trimTrailingSlashes(dir);
-  if (filterPrefix) return `\nSubtree Summary — ${filterPrefix}/ (${totalFiles} files, ${totalSymbols} symbols):\n`;
-  return `\nProject Summary (${totalFiles} files, ${totalSymbols} symbols):\n`;
-}
-
-function trimTrailingSlashes(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  let end = value.length;
-  while (end > 0 && value.codePointAt(end - 1) === 47) end--;
-  return value.slice(0, end);
 }
 
 /**
@@ -1097,216 +966,7 @@ function registerDigestCommand(deps: ReadCommandDeps): void {
 
 registerDigestCommand(defaultReadCommandDeps);
 
-/**
- * cartograph files [path]
- *
- * CLI/MCP alignment exception (B11): direct implementation rather
- * than runViaMCP shim because the CLI surface offers richer human-
- * UI features (--format=tree|flat|grouped, --dir / --pattern
- * filters, --json export, --no-metadata) that the agent-focused
- * MCP `cartograph_files` doesn't carry. The two surfaces share a
- * name but serve different audiences.
- */
-interface FilesCommandOptions {
-  projectPath?: string;
-  dir?: string;
-  pattern?: string;
-  format?: string;
-  maxDepth?: string;
-  metadata?: boolean;
-  json?: boolean;
-  lowTokens?: boolean;
-}
-
-function registerFilesCommand(deps: ReadCommandDeps): void {
-  const { program } = deps;
-  program
-    .command('files [dir]')
-    .description('Show project file structure from the index')
-    .option('-p, --project-path <path>', 'Project path')
-    .option('--dir <dir>', 'Filter to files under this directory')
-    .option('--pattern <glob>', 'Filter files matching this glob pattern')
-    .option('--format <format>', 'Output format (tree, flat, grouped, summary)')
-    .option('--max-depth <number>', 'Maximum directory depth for tree format')
-    .option('--no-metadata', 'Hide file metadata (language, symbol count)')
-    .option('--low-tokens', 'Prefer compact output: defaults to summary format, no metadata, and shallow max depth')
-    .option('-j, --json', 'Output as JSON')
-    .action(async (dirArg: string | undefined, options: FilesCommandOptions) => runFilesCommand(deps, dirArg, options));
-}
-
-registerFilesCommand(defaultReadCommandDeps);
-
-async function runFilesCommand(
-  deps: ReadCommandDeps,
-  dirArg: string | undefined,
-  options: FilesCommandOptions,
-): Promise<void> {
-  const effectiveOptions: FilesCommandOptions = options.dir || !dirArg ? options : { ...options, dir: dirArg };
-  const projectPath = deps.resolveProjectPath(effectiveOptions.projectPath);
-
-  try {
-    if (!deps.isInitialized(projectPath)) {
-      deps.error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
-    }
-
-    const { cg, files: indexedFiles } = await openIndexedFiles(deps, projectPath);
-    const files = filterFilesForCli({
-      deps,
-      files: indexedFiles,
-      options: effectiveOptions,
-      close: () => cg.close(),
-    });
-    if (!files) return;
-
-    if (effectiveOptions.json) {
-      printFilesJson(files);
-      cg.close();
-      return;
-    }
-
-    const outputOptions = parseFilesOutputOptions(effectiveOptions, () => cg.close());
-    if (!outputOptions) return;
-
-    printFilesOutput({
-      files,
-      format: outputOptions.format,
-      includeMetadata: effectiveOptions.lowTokens ? false : effectiveOptions.metadata !== false,
-      maxDepth: outputOptions.maxDepth,
-      dir: effectiveOptions.dir,
-      queries: cg.queries,
-    });
-
-    out();
-    cg.close();
-  } catch (err) {
-    deps.error(`Failed to list files: ${errMsg(err)}`);
-    process.exit(1);
-  }
-}
-
-async function openIndexedFiles(deps: ReadCommandDeps, projectPath: string): Promise<{ cg: any; files: FileListing }> {
-  const { default: Cartograph } = await deps.loadCartograph();
-  const cg = await Cartograph.open(projectPath);
-  // `nodeCount` corrected to a true symbol count by
-  // getAllFilesWithSymbolCount (drops the file's own `kind='file'`
-  // node) — the same shared correction the MCP `cartograph_files`
-  // handler uses, so CLI and MCP counts can't drift.
-  return { cg, files: deps.getAllFilesWithSymbolCount(cg.queries) };
-}
-
-interface FilterFilesForCliArgs {
-  deps: ReadCommandDeps;
-  files: FileListing;
-  options: FilesCommandOptions;
-  close: () => void;
-}
-
-function filterFilesForCli({ deps, files, options, close }: FilterFilesForCliArgs): FileListing | null {
-  if (files.length === 0) {
-    deps.info('No files indexed. Run "cartograph admin index" first.');
-    close();
-    return null;
-  }
-
-  const filtered = filterFilesByPattern(deps, files, options);
-  if (filtered.length > 0) return filtered;
-
-  deps.info('No files found matching the criteria.');
-  close();
-  return null;
-}
-
-function filterFilesByPattern(deps: ReadCommandDeps, files: FileListing, options: FilesCommandOptions): FileListing {
-  let filtered = files;
-  // Filter by directory — SEGMENT-boundary match (shared with the MCP
-  // `cartograph_files`) so `--dir src/mcp/tools` does NOT also capture
-  // the sibling file `src/mcp/tools.ts`.
-  if (options.dir) filtered = deps.filterFilesByDir(filtered, options.dir);
-
-  // Filter by glob pattern. globToSafeRegex returns null only for a
-  // pathologically long (>1024-char) glob — treat that as "matches
-  // nothing" so the degenerate input can't fall through unfiltered.
-  if (!options.pattern) return filtered;
-  const regexBody = globToSafeRegex(options.pattern);
-  const regex = regexBody === null ? /(?!)/ : new RegExp(regexBody);
-  return filtered.filter((f) => regex.test(f.path));
-}
-
-function printFilesJson(files: FileListing): void {
-  const output = files.map((f) => ({
-    path: f.path,
-    language: f.language,
-    nodeCount: f.nodeCount,
-    size: f.size,
-  }));
-  out(JSON.stringify(output, null, 2));
-}
-
-interface RenderCliTreeArgs {
-  node: FileTreeNode;
-  prefix: string;
-  isLast: boolean;
-  depth: number;
-  includeMetadata: boolean;
-  maxDepth: number | undefined;
-  chalk: { dim: (s: string) => string; cyan: (s: string) => string };
-}
-
-type CliChalk = { dim: (s: string) => string; cyan: (s: string) => string };
-
-function renderCliTreeNode(args: RenderCliTreeArgs): void {
-  const { node, prefix, isLast, depth, includeMetadata, maxDepth, chalk } = args;
-  const exceedsMaxDepth = maxDepth !== undefined && depth > maxDepth;
-  if (exceedsMaxDepth) return;
-  const connector = isLast ? '└── ' : '├── ';
-  const childPrefix = isLast ? '    ' : '│   ';
-  if (node.name) {
-    let line = prefix + connector + node.name;
-    if (node.file && includeMetadata) {
-      line += chalk.dim(` (${node.file.language}, ${node.file.nodeCount} symbols)`);
-    }
-    process.stdout.write(line + '\n');
-  }
-  const children = [...node.children.values()].sort(compareFileTreeChildren);
-  sharedRecurseFileTreeChildren<FileTreeNode, CliChalk>(
-    children,
-    { prefix, childPrefix, depth, includeMetadata, maxDepth, parentName: node.name, extra: chalk },
-    (child, cArgs, childIsLast) =>
-      renderCliTreeNode({
-        node: child,
-        prefix: cArgs.prefix,
-        isLast: childIsLast,
-        depth: cArgs.depth,
-        includeMetadata: cArgs.includeMetadata,
-        maxDepth: cArgs.maxDepth,
-        chalk: cArgs.extra,
-      }),
-  );
-}
-
-/**
- * Print files as a tree
- */
-interface PrintFileTreeArgs {
-  files: { path: string; language: string; nodeCount: number }[];
-  includeMetadata: boolean;
-  maxDepth: number | undefined;
-  chalk: { dim: (s: string) => string; cyan: (s: string) => string };
-}
-
-function printFileTree(args: PrintFileTreeArgs): void {
-  const { files, includeMetadata, maxDepth, chalk } = args;
-  renderCliTreeNode({
-    node: buildFileTree(files),
-    prefix: '',
-    isLast: true,
-    depth: 0,
-    includeMetadata,
-    maxDepth,
-    chalk,
-  });
-}
+registerFilesReadCommand(defaultReadCommandDeps);
 
 /**
  * cartograph affected [files...]
@@ -1439,7 +1099,7 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerAtRangeCommand(deps);
   registerFindCommand(deps);
   registerDigestCommand(deps);
-  registerFilesCommand(deps);
+  registerFilesReadCommand(deps);
   registerAffectedCommand(deps);
 }
 
@@ -1477,9 +1137,4 @@ export const __readCommandInternals = {
   printDerivedChangedFiles,
   printAffectedTestList,
   printBarrelWarning,
-  parseFilesOutputOptions,
-  printFilesOutput,
-  printGroupedFiles,
-  printFileSummary,
-  printFileTree,
 };
