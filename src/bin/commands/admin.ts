@@ -15,6 +15,7 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
+import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
   adminCmd as cliAdminCmd,
   loadCartograph as cliLoadCartograph,
@@ -246,14 +247,6 @@ function removeLockFileIfPresent(lockPath: string): boolean {
   if (!fs.existsSync(lockPath)) return false;
   fs.unlinkSync(lockPath);
   return true;
-}
-
-function readExistingScipFile(inPath: string, error: (message: string) => void): Buffer | null {
-  if (!fs.existsSync(inPath)) {
-    error(`SCIP file not found: ${inPath}`);
-    process.exit(1);
-  }
-  return fs.readFileSync(inPath);
 }
 
 function parseParseWorkers(raw: string | undefined): number | undefined {
@@ -1461,91 +1454,6 @@ function registerPruneStoreCommand(deps: AdminCommandDeps): void {
 }
 
 /**
- * cartograph admin scip-export [path]
- *
- * Export the cartograph index to a SCIP protobuf file.
- * Mirrors cartograph_admin({action: 'scip-export'}).
- */
-function registerScipExportCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, writeScipExport } = deps;
-  adminCmd
-    .command('scip-export [path]')
-    .description(
-      "Export the cartograph index to a SCIP protobuf file (mirrors cartograph_admin MCP tool with action='scip-export')",
-    )
-    .option('-o, --out <file>', 'Output .scip file path (default: <project>/index.scip)')
-    .action(async (pathArg: string | undefined, options: { out?: string }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        const outPath = options.out ?? path.join(projectPath, 'index.scip');
-        const result = writeScipExport(cg.queries, cg.projectRoot, outPath);
-        cg.close();
-        info(`Exported SCIP index → ${result.outPath}`);
-        info(
-          `${result.stats.documents} documents, ${result.stats.symbols} symbols, ${result.stats.occurrences} occurrences (${result.stats.bytes} bytes)`,
-        );
-        if (result.stats.disambiguated > 0) {
-          info(`${result.stats.disambiguated} symbol(s) disambiguated (name collision)`);
-        }
-      } catch (err) {
-        error(`SCIP export failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
- * cartograph admin scip-import [path]
- *
- * Import a SCIP protobuf index into the cartograph graph (per-file replace).
- * Mirrors cartograph_admin({action: 'scip-import'}).
- */
-function registerScipImportCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, info, isInitialized, loadCartograph, resolveProjectPath, writeScipImport } = deps;
-  adminCmd
-    .command('scip-import [path]')
-    .description(
-      "Import a SCIP protobuf index into the cartograph graph — per-file replace (mirrors cartograph_admin MCP tool with action='scip-import')",
-    )
-    .option('-i, --in <file>', 'Input .scip file path (default: <project>/index.scip)')
-    .action(async (pathArg: string | undefined, options: { in?: string }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const inPath = options.in ?? path.join(projectPath, 'index.scip');
-        const bytes = readExistingScipFile(inPath, error);
-        if (!bytes) return;
-        const { default: Cartograph } = await loadCartograph();
-        const cg = await Cartograph.open(projectPath);
-        const result = writeScipImport(cg.queries, cg.projectRoot, bytes);
-        cg.close();
-        info(`Imported SCIP index ← ${inPath}`);
-        info(
-          `${result.stats.documents} documents, ${result.stats.files} files, ${result.stats.nodes} nodes, ${result.stats.edges} edges`,
-        );
-        if (result.stats.skippedDocuments > 0) {
-          info(`${result.stats.skippedDocuments} document(s) skipped (unsafe path)`);
-        }
-        if (result.stats.unresolvedEdges > 0) {
-          info(`${result.stats.unresolvedEdges} edge(s) dropped (target symbol had no definition)`);
-        }
-      } catch (err) {
-        error(`SCIP import failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
  * cartograph admin install-models [--dir <path>]
  *
  * Download the curated GGUF set (Qwen2.5-Coder 3B + 7B, jina-code,
@@ -1810,8 +1718,20 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerMigrateCommand(deps);
   registerBuildSimilarityEdgesCommand(deps);
   registerPruneStoreCommand(deps);
-  registerScipExportCommand(deps);
-  registerScipImportCommand(deps);
+  registerScipAdminCommands({
+    adminCmd: deps.adminCmd,
+    resolveProjectPath: deps.resolveProjectPath,
+    info: deps.info,
+    error: deps.error,
+    isInitialized: deps.isInitialized,
+    openCartograph: async (projectPath) => {
+      const { default: Cartograph } = await deps.loadCartograph();
+      return await Cartograph.open(projectPath);
+    },
+    writeScipExport: deps.writeScipExport,
+    writeScipImport: deps.writeScipImport,
+    readFile: (filePath) => fs.promises.readFile(filePath),
+  });
   registerInstallModelsCommand(deps);
   registerDoctorCommand(deps);
   registerLlmPlanCommand(deps);
