@@ -14,6 +14,7 @@ import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MIN, RETRIEVE_K_MAX } from '../../mcp/to
 import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
+import { registerDigestCommand } from '../../features/digest/index.js';
 import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { isInitialized } from '../../directory.js';
@@ -581,22 +582,6 @@ program
   );
 
 registerFindCommand(defaultReadCommandDeps);
-
-/**
- * cartograph digest [path]
- */
-function registerDigestCommand(deps: ReadCommandDeps): void {
-  const { program, runViaMCP } = deps;
-  program
-    .command('digest')
-    .description(
-      '"Land in a new repo" overview — hotspots, code health, entry points, recent churn, suggested next queries (mirrors cartograph_digest MCP tool)',
-    )
-    .option('-p, --project-path <path>', 'Project path')
-    .action(async (options: { projectPath?: string }) => {
-      await runViaMCP('cartograph_digest', {}, options.projectPath);
-    });
-}
 
 registerDigestCommand(defaultReadCommandDeps);
 
