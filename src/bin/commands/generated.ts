@@ -4,46 +4,14 @@
  * runs the `registerGeneratedCommand` calls.
  */
 import { registerGeneratedCommand, runViaMCPCapture } from '../_cli-core.js';
+import { makeCompareToRefMcpRunner } from '../../features/compare-to-ref/index.js';
 
-/**
- * Custom runner for `cartograph compare-to-ref` — handoff #27.
- *
- * The default `runViaMCP` prints the MCP tool's text verbatim. When
- * the result is the empty "No files differ from HEAD." message AND
- * `cartograph_changed_since` would flag content-drifted files on
- * disk, the two CLI tools silently disagree (one says "clean",
- * the other reports drift) with no breadcrumb between them.
- *
- * This wrapper mirrors the parallel hint that landed in the MCP
- * `affected` handler (`src/mcp/tools/affected.ts`'s
- * `noUncommittedChanges` branch). When the empty marker is detected
- * AND `contentDriftedFiles > 0`, append a one-liner pointing at
- * `cartograph changed-since`.
- */
-async function runCompareToRefViaMcp(
-  toolName: string,
-  args: Record<string, unknown>,
-  projectPath: string | undefined,
-): Promise<void> {
-  const { text, exitCode, contentDriftedFiles } = await runViaMCPCapture(toolName, args, projectPath);
-  if (exitCode !== 0) {
-    process.stderr.write(text + '\n');
-    process.exit(exitCode);
-  }
-  // The MCP `compare-to-ref` empty marker — the ref is rendered
-  // backtick-wrapped (`No files differ from `HEAD`.`) by the MCP
-  // tool's renderer. Match the literal prefix + any ref token so
-  // the hint fires regardless of which ref the caller picked.
-  const empty = /No files differ from `[^`]+`\.\s*$/m.test(text);
-  let suffix = '';
-  if (empty && contentDriftedFiles !== null && contentDriftedFiles > 0) {
-    const n = contentDriftedFiles;
-    suffix =
-      `\n\n_Note: \`cartograph changed-since\` reports ${n} file${n === 1 ? '' : 's'} content-drifted on disk vs the index — ` +
-      'compare-to-ref uses `git diff` only; for the drifted set see `cartograph changed-since`._';
-  }
-  process.stdout.write(text + suffix + '\n');
-}
+const runCompareToRefViaMcp = makeCompareToRefMcpRunner({
+  runViaMCPCapture,
+  writeStdout: (message) => process.stdout.write(message),
+  writeStderr: (message) => process.stderr.write(message),
+  exit: (code) => process.exit(code),
+});
 
 // ── P8: commands generated from the tool Zod schema ─────────────────
 // One schema drives both the MCP `inputSchema` and the CLI option
