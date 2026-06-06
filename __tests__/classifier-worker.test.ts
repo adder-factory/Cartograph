@@ -27,7 +27,7 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { getRoleCounts } from '../src/db/queries-roles.js';
 import { classifyAllRoles } from '../src/llm/classifier.js';
-import { LlmClient } from '../src/llm/client.js';
+import { LlmClient, LlmEndpointError } from '../src/llm/client.js';
 import { FakeLlmClient } from './helpers/fake-chat-client.js';
 
 // ── fake client helpers ────────────────────────────────────────────────────────
@@ -215,6 +215,38 @@ describe('classifier worker — branch coverage', () => {
     // Invariant: every candidate is either structurally classified or
     // batch-errored — none silently lost when the LLM call fails.
     expect(result.classified + result.errors).toBe(result.candidates);
+  });
+
+  it('splits context-window failures into smaller classifier batches', async () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const db = (cg.queries as any).db;
+    db.prepare(`UPDATE nodes SET role = NULL, role_model = NULL`).run();
+
+    const client = new FakeLlmClient((messages) => {
+      const userText = messages[0]?.content ?? '';
+      const n = (/Symbols \(zero-indexed\):\n([\s\S]*?)\n\n/.exec(userText)?.[1] ?? '')
+        .split('\n')
+        .filter((line) => /^\d+\./.test(line)).length;
+      if (n > 1) {
+        throw new LlmEndpointError(
+          'chat endpoint returned 400: request exceeds the available context size, try increasing it',
+          400,
+        );
+      }
+      return classifyHandler(messages);
+    });
+
+    const result = await classifyAllRoles({
+      queries: cg.queries,
+      client,
+      modelLabel: '/fake/models/test-model.gguf',
+      options: { concurrency: 1, batchSize: 50 },
+    });
+
+    expect(result.candidates).toBeGreaterThan(0);
+    expect(result.errors).toBe(0);
+    expect(result.classified).toBe(result.candidates);
+    expect(client.chatCalls).toBeGreaterThan(1);
   });
 
   it('abort signal causes worker to exit early without classifying all', async () => {

@@ -387,6 +387,7 @@ function shouldSkipGraphCandidate(args: GraphCandidateSkipArgs): boolean {
   if (isPublicApiShim(node)) return true;
   if (isDecoratedFrameworkHook(node)) return true;
   if (isFrameworkConventionLive(node)) return true;
+  if (isInstallerTargetLifecycleMethod(node)) return true;
   if (isPublicMemberOnExportedContainer(queries, node)) return true;
   if (!includeTests && isSuspicionExemptPath(node.filePath)) return true;
   return isExempt?.(node.filePath) === true;
@@ -416,6 +417,21 @@ function isFrameworkConventionLive(node: Node): boolean {
   if (node.filePath.startsWith('src/mcp/tools/') && /^handle[A-Z]/.test(node.name)) return true;
   if (node.filePath.startsWith('src/bin/') && /^run[A-Z].*Command$/.test(node.name)) return true;
   return false;
+}
+
+const INSTALLER_TARGET_LIFECYCLE_METHOD_NAMES: ReadonlySet<string> = new Set([
+  'supportsLocation',
+  'detect',
+  'install',
+  'uninstall',
+  'printConfig',
+  'describePaths',
+]);
+
+function isInstallerTargetLifecycleMethod(node: Node): boolean {
+  if (node.kind !== 'method') return false;
+  if (!node.filePath.startsWith('src/installer/targets/')) return false;
+  return INSTALLER_TARGET_LIFECYCLE_METHOD_NAMES.has(node.name);
 }
 
 function isPublicMemberOnExportedContainer(queries: QueryBuilder, node: Node): boolean {

@@ -74,6 +74,7 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
       ].join('\n'),
     );
     fs.mkdirSync(path.join(testDir, 'src', 'db'), { recursive: true });
+    fs.mkdirSync(path.join(testDir, 'src', 'installer', 'targets'), { recursive: true });
     fs.writeFileSync(
       path.join(testDir, 'src', 'cartograph-llm-service.ts'),
       [
@@ -83,6 +84,21 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
         '  legacyLike(): string { return "candidate"; }',
         '  private internalOnly(): string { return "candidate"; }',
         '}',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(testDir, 'src', 'installer', 'targets', 'demo.ts'),
+      [
+        'class DemoTarget {',
+        '  supportsLocation(): boolean { return true; }',
+        '  detect(): null { return null; }',
+        '  install(): null { return null; }',
+        '  uninstall(): null { return null; }',
+        '  printConfig(): string { return ""; }',
+        '  describePaths(): string[] { return []; }',
+        '  targetInternal(): number { return 1; }',
+        '}',
+        'export const demoTarget = new DemoTarget();',
       ].join('\n'),
     );
     fs.writeFileSync(
@@ -149,6 +165,19 @@ describe('findGraphCandidates — constructor + fixture-exemption behaviour', ()
     const names = candidates.map((c) => c.name);
     expect(names).not.toContain('getServerSideProps');
     expect(names).not.toContain('status');
+  });
+
+  it('does not flag installer target lifecycle methods dispatched through the target interface', () => {
+    const candidates = findGraphCandidates({ queries: cg.queries, max: 50 });
+    const namesByPath = candidates.map((c) => `${c.filePath}:${c.name}`);
+
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:supportsLocation');
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:detect');
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:install');
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:uninstall');
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:printConfig');
+    expect(namesByPath).not.toContain('src/installer/targets/demo.ts:describePaths');
+    expect(namesByPath).toContain('src/installer/targets/demo.ts:targetInternal');
   });
 
   it('suppresses public API methods on exported containers but keeps private orphan methods visible', () => {
