@@ -259,6 +259,22 @@ function toolHandlerResolveLowTokensArgs(
   return { ...args, lowTokens: true };
 }
 
+function toolHandlerVisibleTools(options: ToolHandlerOptions): ToolDefinition[] {
+  return tools.filter((t) => !toolHandlerIsDisabled(options, t.name));
+}
+
+function toolHandlerWithDynamicDescriptions(cg: Cartograph, visibleTools: ToolDefinition[]): ToolDefinition[] {
+  const stats = cg.stats.getStats();
+  const budget = getExploreBudget(stats.fileCount);
+  return visibleTools.map((tool) => {
+    if (tool.name !== 'cartograph_explore') return tool;
+    return {
+      ...tool,
+      description: `Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed). ${tool.description}`,
+    };
+  });
+}
+
 /**
  * Schema-compat guard (B4): refuse calls when the on-disk schema is
  * newer than this server's loaded code understands.
@@ -648,23 +664,12 @@ export class ToolHandler {
    * Get tool definitions with dynamic descriptions based on project size.
    */
   getTools(): ToolDefinition[] {
-    const filtered = tools.filter((t) => !toolHandlerIsDisabled(this.options, t.name));
-    if (!this.cg) return filtered.map(compactMcpToolDefinition);
+    const visibleTools = toolHandlerVisibleTools(this.options);
+    if (!this.cg) return visibleTools.map(compactMcpToolDefinition);
     try {
-      const stats = this.cg.stats.getStats();
-      const budget = getExploreBudget(stats.fileCount);
-      const withDynamicDescriptions = filtered.map((tool) => {
-        if (tool.name === 'cartograph_explore') {
-          return {
-            ...tool,
-            description: `Budget: make at most ${budget} calls for this project (${stats.fileCount.toLocaleString()} files indexed). ${tool.description}`,
-          };
-        }
-        return tool;
-      });
-      return withDynamicDescriptions.map(compactMcpToolDefinition);
+      return toolHandlerWithDynamicDescriptions(this.cg, visibleTools).map(compactMcpToolDefinition);
     } catch {
-      return filtered.map(compactMcpToolDefinition);
+      return visibleTools.map(compactMcpToolDefinition);
     }
   }
 

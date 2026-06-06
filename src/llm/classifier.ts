@@ -89,6 +89,8 @@ const MIN_BATCH_MAX_TOKENS = 64;
 /** Approx tokens per batched output entry (12). Pairs with
  *  `MIN_BATCH_MAX_TOKENS` to size the chat call. */
 const TOKENS_PER_BATCH_ENTRY = 12;
+const CONTEXT_WINDOW_ERROR_RE =
+  /\b(?:exceeds? the available context size|maximum context length|context window|context size|too many tokens|prompt is too long)\b/i;
 
 const ROLE_LIST_TEXT = [
   '- api_endpoint: ONLY a function that directly services an inbound HTTP/RPC request — ' +
@@ -627,8 +629,9 @@ function applyStructuralPreFilter(ctx: ClassifierRunCtx, batch: Candidate[]): Ca
  * valid set of role labels by construction — no per-item retry, no
  * prose-scanning. A symbol the model omits, or one the (soft)
  * claude-bridge path mangles, defaults to `unknown` (re-classifiable
- * on a later pass). A chat-level failure marks the whole batch as
- * errored. Every batch member gets a counter update either way.
+ * on a later pass). A context-window failure splits the batch and
+ * retries; other chat-level failures mark the whole batch as errored.
+ * Every batch member gets a counter update either way.
  */
 async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[], start: number): Promise<void> {
   const batchMaxTokens = Math.max(MIN_BATCH_MAX_TOKENS, batch.length * TOKENS_PER_BATCH_ENTRY);
@@ -645,6 +648,10 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
     );
   } catch (err) {
     if (ctx.options.signal?.aborted) return;
+    if (isContextWindowError(err)) {
+      await classifierRetryOversizedBatch(ctx, batch, start, err);
+      return;
+    }
     ctx.counters.errors += batch.length;
     ctx.counters.done += batch.length;
     ctx.options.onProgress?.(ctx.counters.done, ctx.total);
@@ -674,4 +681,43 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
     ctx.counters.done++;
     ctx.options.onProgress?.(ctx.counters.done, ctx.total);
   }
+}
+
+async function classifierRetryOversizedBatch(
+  ctx: ClassifierRunCtx,
+  batch: Candidate[],
+  start: number,
+  err: unknown,
+): Promise<void> {
+  if (batch.length <= 1) {
+    const c = batch[0];
+    if (!c) return;
+    logWarn('Classifier: single candidate exceeded chat context — assigning unknown role', {
+      nodeId: c.nodeId,
+      name: c.name,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    upsertSymbolRole(ctx.queries, c.nodeId, { role: 'unknown', roleModel: ctx.modelLabel });
+    ctx.counters.classified++;
+    ctx.counters.done++;
+    ctx.options.onProgress?.(ctx.counters.done, ctx.total);
+    return;
+  }
+
+  const mid = Math.ceil(batch.length / 2);
+  logDebug('Classifier: splitting oversized batch', {
+    batchStart: start,
+    batchSize: batch.length,
+    left: mid,
+    right: batch.length - mid,
+    error: err instanceof Error ? err.message : String(err),
+  });
+  await classifierClassifyBatch(ctx, batch.slice(0, mid), start);
+  if (ctx.options.signal?.aborted) return;
+  await classifierClassifyBatch(ctx, batch.slice(mid), start + mid);
+}
+
+function isContextWindowError(err: unknown): boolean {
+  if (!(err instanceof LlmEndpointError)) return false;
+  return CONTEXT_WINDOW_ERROR_RE.test(err.message);
 }

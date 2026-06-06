@@ -248,6 +248,7 @@ async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
 
 const LLM_TIER_KEYS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
 const MAX_RENDERED_MISSING_MODEL_FILES = 4;
+const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 
 interface ConfiguredModelFile {
   readonly tier: (typeof LLM_TIER_KEYS)[number];
@@ -488,6 +489,112 @@ function recommendedTuningCheck(): CheckResult {
   return { name: 'Recommended tuning', status: 'ok', detail: lines };
 }
 
+function backendStartCommandsCheck(llm: Record<string, unknown> | null): CheckResult | null {
+  const commands = buildBackendStartCommands(llm);
+  if (commands.length === 0) return null;
+  return {
+    name: 'Backend start commands',
+    status: 'ok',
+    detail: [
+      'Configured local llama-server commands (one process per unique endpoint/model):',
+      ...commands.map((cmd) => `  ${cmd}`),
+    ].join('\n'),
+  };
+}
+
+interface BackendStartCommand {
+  readonly labels: string[];
+  readonly endpoint: string;
+  readonly modelPath: string;
+  readonly flag: string;
+  readonly parallel: number;
+}
+
+function buildBackendStartCommands(llm: Record<string, unknown> | null): string[] {
+  if (!llm) return [];
+  const tuning = recommendedTuning();
+  const commands = new Map<string, BackendStartCommand>();
+
+  for (const tier of LLM_TIER_KEYS) {
+    const block = llm[tier];
+    if (typeof block !== 'object' || block === null) continue;
+    const cfg = block as Record<string, unknown>;
+    if (cfg['provider'] !== 'openai-compat') continue;
+    const model = cfg['model'];
+    const endpoint = cfg['endpoint'];
+    if (typeof model !== 'string' || typeof endpoint !== 'string') continue;
+    if (!path.isAbsolute(model)) continue;
+
+    const url = parseLocalEndpoint(endpoint);
+    if (!url) continue;
+    const flag = llamaServerFlagForTier(tier);
+    const key = `${normaliseEndpoint(endpoint)}\0${model}\0${flag}`;
+    const existing = commands.get(key);
+    if (existing) {
+      existing.labels.push(llmTierLabel(tier));
+      continue;
+    }
+    commands.set(key, {
+      labels: [llmTierLabel(tier)],
+      endpoint,
+      modelPath: model,
+      flag,
+      parallel: llamaServerParallelForTier(tuning, tier),
+    });
+  }
+
+  return [...commands.values()].map(renderBackendStartCommand);
+}
+
+function parseLocalEndpoint(endpoint: string): URL | null {
+  try {
+    const url = new URL(normaliseEndpoint(endpoint));
+    if (!LOCAL_BACKEND_HOSTS.has(url.hostname)) return null;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
+function renderBackendStartCommand(cmd: BackendStartCommand): string {
+  const url = parseLocalEndpoint(cmd.endpoint);
+  if (!url) throw new Error(`invalid local endpoint: ${cmd.endpoint}`);
+  const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+  const label = cmd.labels.join('/');
+  const flag = cmd.flag.length > 0 ? ` ${cmd.flag}` : '';
+  return `# ${label} ${normaliseEndpoint(cmd.endpoint)}\n  llama-server -m ${shellQuote(
+    cmd.modelPath,
+  )} --host ${url.hostname} --port ${port}${flag} --parallel ${cmd.parallel}`;
+}
+
+function llamaServerFlagForTier(tier: (typeof LLM_TIER_KEYS)[number]): string {
+  if (tier === 'embeddingLlm') return '--embeddings';
+  if (tier === 'rerankerLlm') return LLAMA_SERVER_RERANK_FLAG;
+  return '';
+}
+
+function llamaServerParallelForTier(
+  tuning: ReturnType<typeof recommendedTuning>,
+  tier: (typeof LLM_TIER_KEYS)[number],
+): number {
+  if (tier === 'embeddingLlm') return tuning.embed.llamaServerParallel;
+  if (tier === 'askLlm') return tuning.ask.llamaServerParallel;
+  if (tier === 'rerankerLlm') return tuning.reranker.llamaServerParallel;
+  return tuning.chat.llamaServerParallel;
+}
+
+function llmTierLabel(tier: (typeof LLM_TIER_KEYS)[number]): string {
+  if (tier === 'summarizeLlm') return 'summarize';
+  if (tier === 'localLlm') return 'local';
+  if (tier === 'askLlm') return 'ask';
+  if (tier === 'embeddingLlm') return 'embed';
+  return 'rerank';
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
 export interface RunDoctorOptions {
   /** Project directory to run init / config checks against. Pass the
    *  cwd when invoked without an explicit path. */
@@ -636,6 +743,8 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   // Honours `*Llm.concurrency` overrides in the project config when
   // present (those win over the hardware default).
   checks.push(recommendedTuningCheck());
+  const backendCommands = backendStartCommandsCheck(llm);
+  if (backendCommands) checks.push(backendCommands);
 
   return {
     checks,

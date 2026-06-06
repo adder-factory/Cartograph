@@ -160,6 +160,12 @@ describe('runDoctor installer state machine', () => {
         expect(findCheck(result, 'LLM models').status).toBe('ok');
         expect(findCheck(result, 'LLM models').detail).toContain('configured local model file path');
         expect(findCheck(result, 'Configured model files').status).toBe('ok');
+        const backendCommands = findCheck(result, 'Backend start commands');
+        expect(backendCommands.status).toBe('ok');
+        expect(backendCommands.detail).toContain('llama-server -m');
+        expect(backendCommands.detail).toContain('--embeddings');
+        expect(backendCommands.detail).toContain('--port 1');
+        expect(formatDoctorReport(result)).toContain('Backend start commands');
       },
     },
     {
