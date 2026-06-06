@@ -5,7 +5,6 @@
  * commands on `program`.
  */
 import * as fs from 'node:fs';
-import * as fsp from 'node:fs/promises';
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
@@ -14,6 +13,7 @@ import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js'
 import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MIN, RETRIEVE_K_MAX } from '../../mcp/tools/ask.js';
 import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
+import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
 import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { isInitialized } from '../../directory.js';
@@ -38,20 +38,9 @@ import {
  *  top-level import of status.ts. The dynamic-import path still clamps
  *  with the real `parseInlineTopN`. */
 const STATUS_MAX_INLINE_TOP_N = 30;
-const DECIMAL_RADIX = 10;
 
 function out(message = ''): void {
   process.stdout.write(`${message}\n`);
-}
-
-interface AtRangeOptions {
-  projectPath?: string;
-  limit?: string;
-  diff?: string;
-  ranges?: string;
-  compact?: boolean;
-  fields?: string;
-  lowTokens?: boolean;
 }
 
 interface StatusOptions {
@@ -73,107 +62,6 @@ interface StatusRollupConfig {
   ) => void;
   appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
-}
-
-async function readDiffOption(diff: string): Promise<string> {
-  if (diff === '-') {
-    return new Promise<string>((resolve, reject) => {
-      const chunks: Buffer[] = [];
-      process.stdin.on('data', (c) => chunks.push(c));
-      process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-      process.stdin.on('error', reject);
-    });
-  }
-  if (diff.includes('\n') || diff.startsWith('@@') || diff.startsWith('diff --git')) {
-    return diff;
-  }
-  const exists = await fsp
-    .access(diff)
-    .then(() => true)
-    .catch(() => false);
-  if (exists) return fsp.readFile(diff, 'utf-8');
-  warn(`--diff: "${diff}" is not an existing file — treating it as inline diff text.`);
-  return diff;
-}
-
-function parseRangeSpecs(raw: string): Array<{ file: string; startLine: number; endLine: number }> {
-  const ranges: Array<{ file: string; startLine: number; endLine: number }> = [];
-  for (const spec of raw
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)) {
-    const m = /^(.+):(\d+)-(\d+)$/.exec(spec);
-    if (!m) {
-      error(`Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.`);
-      process.exit(1);
-    }
-    ranges.push({
-      file: m[1]!,
-      startLine: Number.parseInt(m[2]!, DECIMAL_RADIX),
-      endLine: Number.parseInt(m[3]!, DECIMAL_RADIX),
-    });
-  }
-  if (ranges.length === 0) {
-    error('--ranges had no valid `file:startLine-endLine` specs.');
-    process.exit(1);
-  }
-  return ranges;
-}
-
-async function buildAtRangeArgs(params: {
-  file: string | undefined;
-  startLine: string | undefined;
-  endLine: string | undefined;
-  options: AtRangeOptions;
-}): Promise<Record<string, unknown> | null> {
-  const { file, startLine, endLine, options } = params;
-  const args: Record<string, unknown> = {};
-  if (!assignIntArg({ args, key: 'limit', raw: options.limit ?? '20', optionName: '--limit', opts: { min: 1 } }))
-    return null;
-  if (options.compact) args['compact'] = true;
-  if (options.lowTokens) args['lowTokens'] = true;
-  if (options.fields) {
-    args['fields'] = options.fields
-      .split(',')
-      .map((f) => f.trim())
-      .filter(Boolean);
-  }
-  const modeFlags = [options.diff !== undefined, options.ranges !== undefined].filter(Boolean).length;
-  if (modeFlags > 1) {
-    error('--diff and --ranges are mutually exclusive.');
-    process.exit(1);
-  }
-  if (options.diff !== undefined) {
-    if (file !== undefined || startLine !== undefined || endLine !== undefined) {
-      error('--diff is mutually exclusive with positional file/startLine/endLine.');
-      process.exit(1);
-    }
-    args['diff'] = await readDiffOption(options.diff);
-    return args;
-  }
-  if (options.ranges !== undefined) {
-    if (file !== undefined || startLine !== undefined || endLine !== undefined) {
-      error('--ranges is mutually exclusive with positional file/startLine/endLine.');
-      process.exit(1);
-    }
-    args['ranges'] = parseRangeSpecs(options.ranges);
-    return args;
-  }
-  if (file === undefined || startLine === undefined || endLine === undefined) {
-    error('Pass <file> <startLine> <endLine> positionally OR use --diff <pathOrText|-> OR --ranges <list>.');
-    process.exit(1);
-  }
-  const startNum = Number.parseInt(startLine, 10);
-  const endNum = Number.parseInt(endLine, 10);
-  if (!Number.isFinite(startNum) || !Number.isFinite(endNum)) {
-    error('startLine and endLine must be numbers.');
-    process.exitCode = 1;
-    return null;
-  }
-  args['file'] = file;
-  args['startLine'] = startNum;
-  args['endLine'] = endNum;
-  return args;
 }
 
 function validateAskQuestion(question: string): boolean {
@@ -490,6 +378,10 @@ const defaultReadCommandDeps: ReadCommandDeps = {
   loadGitUtils: (() => import('../../git-utils.js')) as ReadCommandDeps['loadGitUtils'],
 };
 
+function registerAtRangeReadCommand(deps: ReadCommandDeps): void {
+  registerAtRangeFeatureCommand({ ...deps, warn });
+}
+
 function registerFilesReadCommand(deps: ReadCommandDeps): void {
   registerFilesFeatureCommand({
     ...deps,
@@ -521,61 +413,7 @@ function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
-/**
- * cartograph at-range <file> <startLine> <endLine>
- *
- * List indexed symbols whose line ranges overlap the given span.
- * O(log n) via the `nodes_rtree` R*Tree virtual table (mirrors
- * cartograph_at_range MCP tool). Useful for PR-review ("what symbols
- * does this diff hunk touch?") and diff-overlay workflows.
- */
-function registerAtRangeCommand(deps: ReadCommandDeps): void {
-  const { program, runViaMCP } = deps;
-  program
-    .command('at-range [file] [startLine] [endLine]')
-    .description('List indexed symbols whose ranges overlap the given file:line span (R*Tree-backed, O(log n))')
-    .option('-p, --project-path <path>', 'Path to the project (defaults to current directory)')
-    .option('-l, --limit <n>', 'Maximum results (default 20)', '20')
-    .option(
-      '--diff <pathOrText>',
-      "Unified diff to query — accepts a file path, '-' for stdin, or the diff TEXT itself (the MCP `diff` param takes the text; this flag accepts either). Server parses hunks and queries each. Mutually exclusive with the positional file/startLine/endLine and --ranges.",
-    )
-    .option(
-      '--ranges <list>',
-      "Bulk mode — comma-separated `file:startLine-endLine` specs (e.g. 'src/a.ts:10-20,src/b.ts:5-9'). Queries up to 100 ranges in one call. Mutually exclusive with the positional file/startLine/endLine and --diff.",
-    )
-    .option(
-      '--compact',
-      'Emit terse pipe-delimited rows instead of a markdown table (saves 50-70% output tokens on chained range queries)',
-    )
-    .option(
-      '--fields <names>',
-      '(--compact only) Comma-separated subset of fields to emit: name,kind,path,line,endLine,signature. Default: all six.',
-    )
-    .option('--low-tokens', 'Prefer compact projected rows plus a lower per-range cap')
-    .action(
-      async (
-        file: string | undefined,
-        startLine: string | undefined,
-        endLine: string | undefined,
-        options: {
-          projectPath?: string;
-          limit?: string;
-          diff?: string;
-          ranges?: string;
-          compact?: boolean;
-          fields?: string;
-          lowTokens?: boolean;
-        },
-      ) => {
-        const args = await buildAtRangeArgs({ file, startLine, endLine, options });
-        if (!args) return;
-        await runViaMCP('cartograph_at_range', args, options.projectPath);
-      },
-    );
-}
-
-registerAtRangeCommand(defaultReadCommandDeps);
+registerAtRangeReadCommand(defaultReadCommandDeps);
 
 /**
  * cartograph ask <question> [path]
@@ -765,7 +603,7 @@ registerDigestCommand(defaultReadCommandDeps);
 registerFilesReadCommand(defaultReadCommandDeps);
 
 export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
-  registerAtRangeCommand(deps);
+  registerAtRangeReadCommand(deps);
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
@@ -775,9 +613,6 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
 registerAffectedReadCommand(defaultReadCommandDeps);
 
 export const __readCommandInternals = {
-  readDiffOption,
-  parseRangeSpecs,
-  buildAtRangeArgs,
   validateAskQuestion,
   parseRetrieveK,
   printUninitializedStatus,
