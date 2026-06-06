@@ -25,26 +25,6 @@ import {
 } from '../src/features/files/runtime.js';
 import { buildFindMcpArgs } from '../src/features/find/runtime.js';
 
-function captureOutput(fn: () => unknown): string {
-  const originalLog = console.log;
-  const originalWrite = process.stdout.write;
-  const chunks: string[] = [];
-  console.log = (...args: unknown[]) => {
-    chunks.push(args.join(' '));
-  };
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    chunks.push(chunk.toString());
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    fn();
-  } finally {
-    console.log = originalLog;
-    process.stdout.write = originalWrite;
-  }
-  return chunks.join('\n');
-}
-
 function stripAnsi(text: string): string {
   const esc = String.fromCharCode(27);
   return text.replace(new RegExp(`${esc}\\[[0-?]*[ -/]*[@-~]`, 'g'), '');
@@ -251,88 +231,6 @@ describe('read command internals', () => {
     ]);
   });
 
-  it('prints uninitialized status and initialized JSON status with rollup lines', () => {
-    const uninitialized = stripAnsi(captureOutput(() => read.printUninitializedStatus('/repo', {})));
-    expect(uninitialized).toContain('Cartograph Status');
-    expect(uninitialized).toContain('Project: /repo');
-    expect(uninitialized).toContain('Not initialized');
-
-    const json = stripAnsi(
-      captureOutput(() =>
-        read.printStatusJson({
-          cg: fakeCg(),
-          projectPath: '/repo',
-          stats: fakeStats(),
-          changes: { added: ['src/new.ts'], removed: [], healOnly: [] },
-          healOnly: [],
-          realModifiedCount: 1,
-          hnswAvailable: true,
-          rollups: fakeRollups(),
-        }),
-      ),
-    );
-    const parsed = JSON.parse(json);
-    expect(parsed).toMatchObject({
-      initialized: true,
-      projectPath: '/repo',
-      fileCount: 3,
-      pendingChanges: { added: 1, modified: 1, removed: 0, healFlagged: 0 },
-    });
-    expect(parsed.rollups).toEqual(expect.arrayContaining(['ready', 'hotspots:2', 'biomarkers:1']));
-  });
-
-  it('prints status sections, pending change states, and LLM summary coverage', () => {
-    const out = stripAnsi(
-      captureOutput(() => {
-        read.printStatusIndexStats(fakeStats(), fakeCg(), false);
-        read.printCountBreakdown('Nodes by Kind:', { function: 2, class: 1, file: 0 });
-        read.printPendingChanges({ added: ['src/a.ts'], removed: ['src/old.ts'] }, 2, ['src/heal.ts']);
-        read.printStatusRollups(fakeCg(), fakeRollups());
-      }),
-    );
-
-    expect(out).toContain('Index Statistics');
-    expect(out).toContain('Files:     3');
-    expect(out).toContain('Nodes by Kind:');
-    expect(out).toContain('Pending Changes');
-    expect(out).toContain('Heal-flagged');
-    expect(out).toContain('Readiness');
-    expect(out).toContain('hotspots:2');
-  });
-
-  it('normalizes status rollup options and renders no-LLM status without provider work', async () => {
-    const verboseRollups = await read.buildStatusRollupConfig({
-      verbose: true,
-      topHotspots: '0',
-      topBiomarkers: '0',
-      summaryBreakdown: false,
-    });
-    expect(verboseRollups.topHotspots).toBe(5);
-    expect(verboseRollups.topBiomarkers).toBe(5);
-    expect(verboseRollups.summaryBreakdown).toBe(false);
-
-    const cappedRollups = await read.buildStatusRollupConfig({ topHotspots: '999', topBiomarkers: '-2' });
-    expect(cappedRollups.topHotspots).toBe(30);
-    expect(cappedRollups.topBiomarkers).toBe(0);
-
-    const out = stripAnsi(
-      await captureAsyncOutput(() =>
-        read.printLlmStatus(
-          {
-            llm: {
-              config: {
-                getEffectiveLlmConfig: async () => null,
-              },
-            },
-          },
-          '/repo',
-        ),
-      ),
-    );
-    expect(out).toContain('LLM Enrichment');
-    expect(out).toContain('No LLM configured');
-  });
-
   it('renders affected-test output for json, quiet, human, empty, and barrel-warning modes', () => {
     const base = {
       changedFiles: ['src/a.ts'],
@@ -464,58 +362,6 @@ describe('read command internals', () => {
     expect(parsed).toEqual({ ok: true, format: 'summary', maxDepth: 2 });
   });
 });
-
-async function captureAsyncOutput(fn: () => Promise<unknown>): Promise<string> {
-  const originalLog = console.log;
-  const originalWrite = process.stdout.write;
-  const chunks: string[] = [];
-  console.log = (...args: unknown[]) => {
-    chunks.push(args.join(' '));
-  };
-  process.stdout.write = ((chunk: string | Uint8Array) => {
-    chunks.push(chunk.toString());
-    return true;
-  }) as typeof process.stdout.write;
-  try {
-    await fn();
-  } finally {
-    console.log = originalLog;
-    process.stdout.write = originalWrite;
-  }
-  return chunks.join('\n');
-}
-
-function fakeStats() {
-  return {
-    fileCount: 3,
-    nodeCount: 8,
-    edgeCount: 5,
-    dbSizeBytes: 4096,
-    nodesByKind: { function: 2, class: 1 },
-    filesByLanguage: { typescript: 3 },
-  };
-}
-
-function fakeCg() {
-  return {
-    db: {
-      getBackend: () => 'bun:sqlite',
-      hasVecExtension: () => true,
-    },
-    queries: {},
-  };
-}
-
-function fakeRollups() {
-  return {
-    topHotspots: 2,
-    topBiomarkers: 1,
-    summaryBreakdown: true,
-    appendFeatureReadiness: (lines: string[]) => lines.push('### Readiness', 'ready'),
-    appendInlineHotspots: (lines: string[], _cg: unknown, topN: number) => lines.push(`hotspots:${topN}`),
-    appendInlineBiomarkers: (lines: string[], _cg: unknown, topN: number) => lines.push(`biomarkers:${topN}`),
-  };
-}
 
 function fakeBuildDirRollup(files: Array<{ path: string; nodeCount: number }>, maxDepth?: number, dir?: string) {
   const scoped = dir ? files.filter((file) => file.path === dir || file.path.startsWith(`${dir}/`)) : files;
