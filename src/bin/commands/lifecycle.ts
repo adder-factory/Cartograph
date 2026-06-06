@@ -20,6 +20,7 @@ import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
 import { registerDoctorCommand, type DoctorResult, type DoctorRunOptions } from '../../features/doctor/index.js';
 import { registerInstallCommand } from '../../features/install/index.js';
+import { registerLlmSetupCommand } from '../../features/llm-setup/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
 import { registerPlaybookCommand } from '../../features/playbook/index.js';
@@ -153,23 +154,6 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
     import('../../installer/recommended-config.js')) as LifecycleCommandDeps['loadRecommendedConfig'],
 };
 
-// `llm setup` is the only remaining LLM provisioning command. Kept
-// as a subcommand under `llm` so the surface stays extensible (e.g.
-// future `llm test`, `llm list-models`) without renaming.
-// `llmCmd` is the family-parent command — defined in `_cli-core.ts`.
-function registerLlmSetupCommand(deps: LifecycleCommandDeps): void {
-  const { llmCmd, loadLlmSetupCli } = deps;
-  llmCmd
-    .command('setup [path]')
-    .description('Interactive LLM provider setup — picks chat + embeddings backends and writes them into config.json')
-    .action(async (pathArg: string | undefined) => {
-      const { runLlmSetupCli } = await loadLlmSetupCli();
-      await runLlmSetupCli(pathArg);
-    });
-
-  registerLlmSmokeCommand(deps);
-}
-
 export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLifecycleCommandDeps): void {
   registerMcpServerCommands(deps);
   registerInstallCommand({
@@ -182,6 +166,7 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
     loadInstaller: deps.loadInstaller,
   });
   registerLlmSetupCommand(deps);
+  registerLlmSmokeCommand(deps);
   registerTraceToCulpritsCommand(deps);
   registerPlaybookCommand(deps);
   registerViewerCommand(deps);
