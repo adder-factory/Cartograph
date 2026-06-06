@@ -13,34 +13,9 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
-import {
-  clearParseCacheIfRequested as clearParseCacheIfRequestedWithDeps,
-  indexAllOptions,
-  parseParseWorkersValue,
-  phaseTimingLines as phaseTimingLinesWithDeps,
-  printSyncResult as printSyncResultWithDeps,
-  registerAdminIndexingCommands,
-  reportBackgroundSummaryStatus as reportBackgroundSummaryStatusWithDeps,
-  runQuietIndex as runQuietIndexWithDeps,
-  type AdminIndexGraph,
-  type AdminIndexOptions,
-  type AdminIndexResult,
-  type SyncResult,
-} from '../../features/admin-indexing/index.js';
-import {
-  parseEagerLimit as parseEagerLimitWithDeps,
-  printSummarizeDetails as printSummarizeDetailsWithDeps,
-  printSummarizeEmbedDetails as printSummarizeEmbedDetailsWithDeps,
-  registerAdminLlmEnrichmentCommands,
-  type LlmEmbedResult,
-  type LlmSummarizeResult,
-  type SummarizeOptions,
-} from '../../features/admin-llm-enrichment/index.js';
-import {
-  registerAdminInstallModelsCommand,
-  printInstallModelResults as printInstallModelResultsWithDeps,
-  type InstallModelResult,
-} from '../../features/admin-install-models/index.js';
+import { registerAdminIndexingCommands } from '../../features/admin-indexing/index.js';
+import { registerAdminLlmEnrichmentCommands } from '../../features/admin-llm-enrichment/index.js';
+import { registerAdminInstallModelsCommand } from '../../features/admin-install-models/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerAdminMigrateCommand } from '../../features/admin-migrate/index.js';
 import { registerAdminProjectLifecycleCommands } from '../../features/admin-project-lifecycle/index.js';
@@ -67,8 +42,6 @@ import {
   awaitSummarisationWithProgress as cliAwaitSummarisationWithProgress,
   printIndexResult as cliPrintIndexResult,
 } from '../_cli-core.js';
-
-type ClackPrompts = typeof import('@clack/prompts');
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -249,67 +222,6 @@ const defaultAdminCommandDeps: AdminCommandDeps = {
   loadHardwareTuning: () => import('../../installer/hardware-tuning.js'),
 };
 
-let activeAdminCommandDeps: AdminCommandDeps = defaultAdminCommandDeps;
-
-function parseParseWorkers(raw: string | undefined): number | undefined {
-  const parsed = parseParseWorkersValue(raw);
-  if (!parsed.ok) {
-    activeAdminCommandDeps.error(parsed.error);
-    process.exit(1);
-  }
-  return parsed.value;
-}
-
-function phaseTimingLines(result: AdminIndexResult): string[] {
-  return phaseTimingLinesWithDeps(result, activeAdminCommandDeps);
-}
-
-function parseEagerLimit(options: SummarizeOptions, onInvalid?: () => void): number | undefined {
-  return parseEagerLimitWithDeps(options, activeAdminCommandDeps, onInvalid);
-}
-
-function printInstallModelResults(result: InstallModelResult): void {
-  printInstallModelResultsWithDeps(result, activeAdminCommandDeps);
-}
-
-function printSyncResult(clack: typeof import('@clack/prompts'), result: SyncResult): void {
-  printSyncResultWithDeps(clack, result, activeAdminCommandDeps);
-}
-
-function printSummarizeDetails(clack: typeof import('@clack/prompts'), result: LlmSummarizeResult): void {
-  printSummarizeDetailsWithDeps(clack, result, activeAdminCommandDeps);
-}
-
-function printSummarizeEmbedDetails(
-  clack: typeof import('@clack/prompts'),
-  embed: LlmEmbedResult | null | undefined,
-): void {
-  printSummarizeEmbedDetailsWithDeps(clack, embed, activeAdminCommandDeps);
-}
-
-async function runQuietIndex(
-  cg: AdminIndexGraph,
-  options: AdminIndexOptions,
-  parseWorkers: number | undefined,
-): Promise<void> {
-  await runQuietIndexWithDeps({ cg, options, parseWorkers, deps: activeAdminCommandDeps });
-}
-
-async function clearParseCacheIfRequested(
-  cg: AdminIndexGraph,
-  clearParseCacheOption: boolean | string | undefined,
-): Promise<{ count: number; lang: string | undefined } | null> {
-  return clearParseCacheIfRequestedWithDeps(cg, clearParseCacheOption, activeAdminCommandDeps);
-}
-
-async function reportBackgroundSummaryStatus(
-  cg: AdminIndexGraph,
-  clack: ClackPrompts,
-  projectPath: string,
-): Promise<void> {
-  return reportBackgroundSummaryStatusWithDeps({ cg, clack, projectPath, deps: activeAdminCommandDeps });
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -318,7 +230,6 @@ async function reportBackgroundSummaryStatus(
 // helper for setup guidance.
 
 export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminCommandDeps): void {
-  activeAdminCommandDeps = deps;
   registerAdminProjectLifecycleCommands(deps);
   registerAdminIndexingCommands(deps);
   registerAdminLlmEnrichmentCommands(deps);
@@ -347,17 +258,3 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
 }
 
 registerAdminCommands();
-
-export const __adminCommandInternals = {
-  parseParseWorkers,
-  indexAllOptions,
-  phaseTimingLines,
-  parseEagerLimit,
-  printInstallModelResults,
-  printSyncResult,
-  printSummarizeDetails,
-  printSummarizeEmbedDetails,
-  runQuietIndex,
-  clearParseCacheIfRequested,
-  reportBackgroundSummaryStatus,
-};
