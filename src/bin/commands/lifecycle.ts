@@ -5,8 +5,6 @@
  * registers the commands.
  */
 import { isInitialized as defaultIsInitialized } from '../../directory.js';
-import { compact as defaultCompact } from '../../utils.js';
-import { errMsg } from '../../errors.js';
 import {
   program as cliProgram,
   llmCmd as cliLlmCmd,
@@ -20,6 +18,7 @@ import {
 } from '../_cli-core.js';
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
+import { registerInstallCommand } from '../../features/install/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
 import { registerPlaybookCommand } from '../../features/playbook/index.js';
@@ -65,7 +64,6 @@ interface LifecycleCommandDeps {
   runViaMCP: (tool: string, args: Record<string, unknown>, projectPath?: string) => Promise<void>;
   loadCartograph: () => Promise<SetupCartographModule>;
   isInitialized: (projectPath: string) => boolean;
-  compact: typeof defaultCompact;
   loadMcpServer: () => Promise<{ MCPServer: new (opts: unknown) => { start: () => Promise<void> } }>;
   loadMcpDaemon: () => Promise<{
     runSharedMcpDaemonProcess: (opts: unknown) => Promise<void>;
@@ -140,7 +138,6 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   runViaMCP: cliRunViaMCP,
   loadCartograph: cliLoadCartograph as () => Promise<SetupCartographModule>,
   isInitialized: defaultIsInitialized,
-  compact: defaultCompact,
   loadMcpServer: (() => import('../../mcp/index.js')) as LifecycleCommandDeps['loadMcpServer'],
   loadMcpDaemon: (() => import('../../mcp/daemon.js')) as LifecycleCommandDeps['loadMcpDaemon'],
   loadInstallerTargets: (() =>
@@ -159,78 +156,6 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   loadRecommendedConfig: (() =>
     import('../../installer/recommended-config.js')) as LifecycleCommandDeps['loadRecommendedConfig'],
 };
-
-/**
- * cartograph install
- */
-function registerInstallCommand(deps: LifecycleCommandDeps): void {
-  const { program, error, compact, loadInstallerTargets, loadInstaller } = deps;
-  program
-    .command('install')
-    .description(
-      'Install cartograph MCP server into one or more agents (Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro)',
-    )
-    .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
-    .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
-    .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=auto, auto-allow on')
-    .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
-    .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
-    .action(
-      async (opts: {
-        target?: string;
-        location?: string;
-        yes?: boolean;
-        permissions?: boolean;
-        printConfig?: string;
-      }) => {
-        if (opts.printConfig) {
-          const { getTarget, listTargetIds } = await loadInstallerTargets();
-          const target = getTarget(opts.printConfig);
-          if (!target) {
-            const known = listTargetIds().join(', ');
-            error(`Unknown target "${opts.printConfig}". Known: ${known}.`);
-            process.exit(1);
-          }
-          const loc = opts.location === 'local' ? 'local' : 'global';
-          process.stdout.write(target.printConfig(loc));
-          return;
-        }
-
-        const { runInstallerWithOptions } = await loadInstaller();
-        if (opts.location && opts.location !== 'global' && opts.location !== 'local') {
-          error(`--location must be "global" or "local" (got "${opts.location}").`);
-          process.exit(1);
-        }
-        try {
-          // Commander's `--no-permissions` makes `opts.permissions === false`;
-          // omitting the flag leaves it `true` (the positive-form default).
-          // We MUST treat the default-true as "user did not override — let
-          // the orchestrator prompt" and only forward an explicit `false`
-          // (or `true` when --yes implies it). Otherwise the auto-allow
-          // prompt is silently skipped on every interactive run.
-          const explicitNoPermissions = opts.permissions === false;
-          let autoAllow: boolean | undefined;
-          if (explicitNoPermissions) {
-            autoAllow = false;
-          } else if (opts.yes) {
-            autoAllow = true;
-          }
-
-          await runInstallerWithOptions(
-            compact({
-              target: opts.target,
-              location: opts.location as 'global' | 'local' | undefined,
-              autoAllow,
-              yes: opts.yes,
-            }),
-          );
-        } catch (err) {
-          error(errMsg(err));
-          process.exit(1);
-        }
-      },
-    );
-}
 
 // `llm setup` is the only remaining LLM provisioning command. Kept
 // as a subcommand under `llm` so the surface stays extensible (e.g.
@@ -298,7 +223,15 @@ function registerDoctorCommand(deps: LifecycleCommandDeps): void {
 
 export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLifecycleCommandDeps): void {
   registerMcpServerCommands(deps);
-  registerInstallCommand(deps);
+  registerInstallCommand({
+    program: deps.program,
+    error: deps.error,
+    writeStdout: (message) => {
+      process.stdout.write(message);
+    },
+    loadInstallerTargets: deps.loadInstallerTargets,
+    loadInstaller: deps.loadInstaller,
+  });
   registerLlmSetupCommand(deps);
   registerTraceToCulpritsCommand(deps);
   registerPlaybookCommand(deps);

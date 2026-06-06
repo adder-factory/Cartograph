@@ -59,8 +59,6 @@ function loadLifecycleCommandActions(): void {
       calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
     loadCartograph: async () => ({ default: { init: async () => ({ close: () => undefined }) } }),
     isInitialized: projectHasCartographDb,
-    compact: (value: Record<string, unknown>) =>
-      Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)),
     loadMcpServer: async () => ({
       MCPServer: class {
         constructor(private readonly opts: unknown) {
