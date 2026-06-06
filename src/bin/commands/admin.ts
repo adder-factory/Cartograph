@@ -15,6 +15,11 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
+import {
+  registerAdminInstallModelsCommand,
+  printInstallModelResults as printInstallModelResultsWithDeps,
+  type InstallModelResult,
+} from '../../features/admin-install-models/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
@@ -240,11 +245,6 @@ const PHASE_LABEL_WIDTH = 14;
 const PHASE_DURATION_WIDTH = 8;
 const PHASE_PERCENT_WIDTH = 2;
 const POST_HOOK_LABEL_WIDTH = 12;
-const BYTES_PER_MIB = 1024 * 1024;
-
-function bytesToMiBText(bytes: number): string {
-  return (bytes / BYTES_PER_MIB).toFixed(0);
-}
 
 function removeLockFileIfPresent(lockPath: string): boolean {
   if (!fs.existsSync(lockPath)) return false;
@@ -332,19 +332,8 @@ function parseEagerLimit(
   return parsed;
 }
 
-function printInstallModelResults(result: {
-  downloaded: Array<{ filename: string; description: string }>;
-  skipped: Array<{ filename: string }>;
-}): void {
-  const { success, info } = activeAdminCommandDeps;
-  if (result.downloaded.length > 0) {
-    success(`Downloaded ${result.downloaded.length} model${result.downloaded.length === 1 ? '' : 's'}:`);
-    for (const m of result.downloaded) info(`  ${m.filename} — ${m.description}`);
-  }
-  if (result.skipped.length > 0) {
-    info(`Already present (skipped): ${result.skipped.map((m) => m.filename).join(', ')}`);
-  }
-  info('');
+function printInstallModelResults(result: InstallModelResult): void {
+  printInstallModelResultsWithDeps(result, activeAdminCommandDeps);
 }
 
 function printSyncResult(
@@ -1289,94 +1278,6 @@ function registerMigrateCommand(deps: AdminCommandDeps): void {
     });
 }
 
-/**
- * cartograph admin install-models [--dir <path>]
- *
- * Download the curated GGUF set (Qwen2.5-Coder 3B + 7B, jina-code,
- * bge-reranker-v2-m3) into ~/.cartograph/models/ (override via --dir).
- * Idempotent — files already present are skipped.
- *
- * Mirrors cartograph_admin({action: 'install-models'}).
- */
-function registerInstallModelsCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    error,
-    info,
-    loadInstallModels,
-    loadRecommendedConfig,
-    loadRecommendedModels,
-    resolveProjectPath,
-    success,
-    writeStderr,
-  } = deps;
-  adminCmd
-    .command('install-models')
-    .description(
-      "Download the recommended GGUF set into ~/.cartograph/models/ (mirrors cartograph_admin MCP tool with action='install-models').",
-    )
-    .option('--dir <path>', 'Directory to install GGUFs into (overrides ~/.cartograph/models)')
-    .option(
-      '--minimal',
-      'Only install the smallest viable subset (embed + 3B chat, ~2.1 GB) instead of the full ~7 GB set.',
-    )
-    .option(
-      '--write-config',
-      'After download, merge the recommended LLM block into .cartograph/config.json (creates a .bak.<timestamp> first). Default off for back-compat.',
-    )
-    .option('-p, --project-path <path>', 'Project root for --write-config (default: cwd)')
-    .action(async (options: { dir?: string; minimal?: boolean; writeConfig?: boolean; projectPath?: string }) => {
-      try {
-        const { installRecommendedModels } = await loadInstallModels();
-        const { RECOMMENDED_MODELS, MINIMAL_MODELS } = await loadRecommendedModels();
-        const installOpts = options.dir ? { dir: options.dir } : {};
-        const result = await installRecommendedModels({
-          ...installOpts,
-          models: options.minimal ? MINIMAL_MODELS : RECOMMENDED_MODELS,
-          onProgress: ({ model, downloaded, total }) => {
-            const pct = total > 0 ? ((downloaded / total) * PHASE_PERCENT_SCALE).toFixed(0) : '?';
-            writeStderr(
-              `\r${model.filename}: ${bytesToMiBText(downloaded)}/${total > 0 ? bytesToMiBText(total) : '?'} MB (${pct}%)   `,
-            );
-          },
-        });
-        writeStderr('\n');
-        printInstallModelResults(result);
-
-        if (options.writeConfig) {
-          const projectRoot = resolveProjectPath(options.projectPath);
-          const { writeRecommendedLlmConfig } = await loadRecommendedConfig();
-          const writeOpts: { projectRoot: string; dir?: string; includeAsk?: boolean; includeReranker?: boolean } = {
-            projectRoot,
-          };
-          if (options.dir) writeOpts.dir = options.dir;
-          if (options.minimal) {
-            writeOpts.includeAsk = false;
-            writeOpts.includeReranker = false;
-          }
-          const { configPath, backupPath, diff } = writeRecommendedLlmConfig(writeOpts);
-          if (backupPath) {
-            info(`Backup written: ${backupPath}`);
-          }
-          success(`Updated ${configPath}`);
-          if (diff.addedOrUpdated.length > 0) {
-            info(`  added/updated: ${diff.addedOrUpdated.join(', ')}`);
-          }
-          info(`Next: cartograph backend start ${projectRoot}`);
-          info(`      cartograph llm smoke ${projectRoot}`);
-          info(`      cartograph doctor ${projectRoot}`);
-        } else {
-          info(
-            'Next: re-run with `--write-config` to merge the recommended LLM block into .cartograph/config.json, or run `cartograph admin llm-plan` then `cartograph admin llm-apply --preset <id>` for a detected/cloud backend.',
-          );
-        }
-      } catch (err) {
-        error(`install-models failed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -1412,7 +1313,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
     writeScipImport: deps.writeScipImport,
     readFile: (filePath) => fs.promises.readFile(filePath),
   });
-  registerInstallModelsCommand(deps);
+  registerAdminInstallModelsCommand(deps);
   registerAdminDoctorCommand(deps);
   registerAdminLlmSetupCommands(deps);
   deps.attachUnknownActionHandler(deps.adminCmd, 'admin');
