@@ -16,6 +16,7 @@ import {
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
+import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
@@ -1289,100 +1290,6 @@ function registerMigrateCommand(deps: AdminCommandDeps): void {
 }
 
 /**
- * cartograph admin prune-store [path]
- *
- * Evict cold orphan rows from the content-addressed summary_store /
- * embedding_store tables — orphans whose `last_ref_at` is older than
- * `--max-age-days` and have no live ref. Active rows (any with at
- * least one ref) are NEVER evicted; recent orphans within the
- * freshness window are kept as the revert/rename reuse pool.
- *
- * Pass `--max-age-days 0` to evict EVERY orphan immediately,
- * regardless of age — the full cache-eviction sweep. Vec0 mirror
- * rows are deleted in lockstep (vec0 has no FK). After the delete,
- * `dbRunMaintenance` returns the freed pages to the OS so the DB
- * file actually shrinks.
- */
-function registerPruneStoreCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    error,
-    formatBytes,
-    formatNumber,
-    info,
-    isInitialized,
-    loadCartograph,
-    loadDbIndex,
-    loadSummaryQueries,
-    resolveProjectPath,
-    success,
-  } = deps;
-  adminCmd
-    .command('prune-store [path]')
-    .description(
-      "Evict cold orphan summary_store/embedding_store rows (mirrors cartograph_admin MCP tool with action='prune-store')",
-    )
-    .option(
-      '--max-age-days <number>',
-      'Evict orphans older than this many days (default uses PRUNE_STORE_DEFAULT_DAYS; 0 = evict every orphan now)',
-    )
-    .action(async (pathArg: string | undefined, opts) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { pruneOrphanStoreRows, MS_PER_DAY, PRUNE_STORE_DEFAULT_DAYS } = await loadSummaryQueries();
-        const raw = (opts as Record<string, string>)['maxAgeDays'];
-        const maxAgeDays = raw === undefined ? PRUNE_STORE_DEFAULT_DAYS : Number.parseFloat(raw);
-        if (!Number.isFinite(maxAgeDays) || maxAgeDays < 0) {
-          error(`--max-age-days must be a non-negative number. Got '${raw}'.`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        // Write path: opt in to auto-migration so a cold project that's
-        // never touched the new prune-store action still picks up
-        // migration 053 on first run.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-        try {
-          const { dbReclaimAfterBulkDelete } = await loadDbIndex();
-          const sizeBefore = cg.db.getSize();
-          const result = pruneOrphanStoreRows(cg.queries, {
-            maxAgeMs: maxAgeDays * MS_PER_DAY,
-          });
-          const totalPruned = result.summariesPruned + result.embeddingsPruned;
-          // Deleting rows only moves pages to the freelist — the file
-          // still occupies the same disk. Reclaim the freelist AND
-          // truncate the WAL so the prune actually shrinks the DB.
-          // Skipped when nothing was deleted (no freelist to reclaim).
-          if (totalPruned > 0) {
-            dbReclaimAfterBulkDelete(cg.db);
-          }
-          const sizeAfter = cg.db.getSize();
-          success(
-            `Pruned ${formatNumber(result.summariesPruned)} summary_store + ` +
-              `${formatNumber(result.embeddingsPruned)} embedding_store row(s) ` +
-              `older than ${maxAgeDays} day(s).`,
-          );
-          if (totalPruned > 0) {
-            const reclaimed = sizeBefore - sizeAfter;
-            info(
-              `Database: ${formatBytes(sizeBefore)} → ${formatBytes(sizeAfter)} ` +
-                `(reclaimed ${formatBytes(Math.max(0, reclaimed))}).`,
-            );
-          }
-        } finally {
-          cg.close();
-        }
-      } catch (err) {
-        error(`Failed to prune store: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
  * cartograph admin install-models [--dir <path>]
  *
  * Download the curated GGUF set (Qwen2.5-Coder 3B + 7B, jina-code,
@@ -1490,7 +1397,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerUnlockCommand(deps);
   registerMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
-  registerPruneStoreCommand(deps);
+  registerAdminPruneStoreCommand(deps);
   registerScipAdminCommands({
     adminCmd: deps.adminCmd,
     resolveProjectPath: deps.resolveProjectPath,
