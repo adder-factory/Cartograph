@@ -7,7 +7,6 @@ import * as fs from 'node:fs';
 import { getCartographDir as defaultGetCartographDir, isInitialized as defaultIsInitialized } from '../../directory.js';
 import { createShimmerProgress as defaultCreateShimmerProgress } from '../../ui/shimmer-progress.js';
 import { formatBytes as defaultFormatBytes } from '../../utils.js';
-import { errMsg } from '../../errors.js';
 import {
   writeScipExport as defaultWriteScipExport,
   writeScipImport as defaultWriteScipImport,
@@ -28,6 +27,15 @@ import {
   type AdminIndexResult,
   type SyncResult,
 } from '../../features/admin-indexing/index.js';
+import {
+  parseEagerLimit as parseEagerLimitWithDeps,
+  printSummarizeDetails as printSummarizeDetailsWithDeps,
+  printSummarizeEmbedDetails as printSummarizeEmbedDetailsWithDeps,
+  registerAdminLlmEnrichmentCommands,
+  type LlmEmbedResult,
+  type LlmSummarizeResult,
+  type SummarizeOptions,
+} from '../../features/admin-llm-enrichment/index.js';
 import {
   registerAdminInstallModelsCommand,
   printInstallModelResults as printInstallModelResultsWithDeps,
@@ -252,35 +260,12 @@ function parseParseWorkers(raw: string | undefined): number | undefined {
   return parsed.value;
 }
 
-function parseConcurrencyOption(raw: string | undefined): number {
-  const { error, parseConcurrency } = activeAdminCommandDeps;
-  if (raw === undefined) return parseConcurrency(undefined);
-  if (!/^\d+$/.test(raw.trim())) {
-    error('--concurrency must be a positive integer');
-    process.exit(1);
-  }
-  return parseConcurrency(raw);
-}
-
 function phaseTimingLines(result: AdminIndexResult): string[] {
   return phaseTimingLinesWithDeps(result, activeAdminCommandDeps);
 }
 
-function parseEagerLimit(
-  options: { quiet?: boolean; limit?: string; all?: boolean },
-  onInvalid?: () => void,
-): number | undefined {
-  const { error } = activeAdminCommandDeps;
-  if (options.all) return Number.POSITIVE_INFINITY;
-  if (options.limit === undefined) return undefined;
-  const parsed = Number(options.limit);
-  if (!Number.isInteger(parsed) || parsed < 0) {
-    if (!options.quiet)
-      error('--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)');
-    onInvalid?.();
-    process.exit(1);
-  }
-  return parsed;
+function parseEagerLimit(options: SummarizeOptions, onInvalid?: () => void): number | undefined {
+  return parseEagerLimitWithDeps(options, activeAdminCommandDeps, onInvalid);
 }
 
 function printInstallModelResults(result: InstallModelResult): void {
@@ -291,74 +276,15 @@ function printSyncResult(clack: typeof import('@clack/prompts'), result: SyncRes
   printSyncResultWithDeps(clack, result, activeAdminCommandDeps);
 }
 
-function printSummarizeDetails(
-  clack: typeof import('@clack/prompts'),
-  result: {
-    candidates: number;
-    generated: number;
-    errors: number;
-    cacheHits: number;
-    deferred: number;
-    durationMs: number;
-    embed?: {
-      failed?: boolean;
-      failureReason?: string;
-      generated: number;
-      errors: number;
-      skipped: number;
-      durationMs: number;
-    } | null;
-  },
-): void {
-  const { formatNumber, formatDuration } = activeAdminCommandDeps;
-  const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
-  clack.log.success(`Summarised ${formatNumber(result.generated)} new symbols in ${formatDuration(result.durationMs)}`);
-  const details: string[] = [];
-  if (result.cacheHits > 0) details.push(`Cache hits: ${formatNumber(result.cacheHits)}`);
-  if (result.errors > 0) details.push(`Errors: ${formatNumber(result.errors)}`);
-  if (skipped > 0) details.push(`Skipped: ${formatNumber(skipped)}`);
-  if (details.length > 0) clack.log.info(details.join(' — '));
-  if (result.deferred > 0) {
-    clack.log.info(
-      `Deferred ${formatNumber(result.deferred)} lower-priority symbols — they summarise on demand ` +
-        `when \`find mode:intent\` references them. Run \`cartograph admin summarize --all\` for a full pass.`,
-    );
-  }
-  printSummarizeEmbedDetails(clack, result.embed ?? undefined);
+function printSummarizeDetails(clack: typeof import('@clack/prompts'), result: LlmSummarizeResult): void {
+  printSummarizeDetailsWithDeps(clack, result, activeAdminCommandDeps);
 }
 
 function printSummarizeEmbedDetails(
   clack: typeof import('@clack/prompts'),
-  embed:
-    | {
-        failed?: boolean;
-        failureReason?: string;
-        generated: number;
-        errors: number;
-        skipped: number;
-        durationMs: number;
-      }
-    | null
-    | undefined,
+  embed: LlmEmbedResult | null | undefined,
 ): void {
-  const { formatNumber, formatDuration } = activeAdminCommandDeps;
-  if (!embed) return;
-  if (embed.failed) {
-    clack.log.warn(
-      `Embed phase failed: ${embed.failureReason ?? 'unknown error'}. ` +
-        `Summaries are persisted; rerun \`cartograph admin embed\` once the embedding endpoint is back.`,
-    );
-    return;
-  }
-  if (embed.generated === 0) return;
-  const counters: string[] = [];
-  if (embed.errors > 0) counters.push(`${formatNumber(embed.errors)} errors`);
-  if (embed.skipped > 0)
-    counters.push(`${formatNumber(embed.skipped)} skipped — too large for embed server's batch size`);
-  clack.log.success(
-    `Embedded ${formatNumber(embed.generated)} new vectors in ${formatDuration(embed.durationMs)}` +
-      (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
-  );
+  printSummarizeEmbedDetailsWithDeps(clack, embed, activeAdminCommandDeps);
 }
 
 async function runQuietIndex(
@@ -384,255 +310,6 @@ async function reportBackgroundSummaryStatus(
   return reportBackgroundSummaryStatusWithDeps({ cg, clack, projectPath, deps: activeAdminCommandDeps });
 }
 
-/**
- * cartograph admin summarize [path]
- *
- * Run an LLM-driven summarisation pass over symbols missing docstrings.
- * Requires `config.llm` to be configured. Cached by content_hash,
- * so re-runs are cheap.
- *
- * CLI/MCP alignment exception (B11): direct implementation rather
- * than runViaMCP shim — summarisation can take minutes on a
- * cold cache, and the CLI streams per-symbol progress. The MCP
- * version returns a single completion blob.
- */
-function registerSummarizeCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, createShimmerProgress, error, isInitialized, loadCartograph, loadClack, resolveProjectPath } = deps;
-  adminCmd
-    .command('summarize [path]')
-    .description('Generate one-line LLM summaries for indexed symbols (requires config.llm)')
-    .option('-q, --quiet', 'Suppress output')
-    .option('-c, --concurrency <n>', 'Concurrent LLM requests')
-    .option(
-      '--limit <n>',
-      'Cap eager summary generations this pass; the importance-ordered tail defers to on-demand summarisation. `0` = ad-hoc only (summarise nothing eagerly). Overrides config.llm.summarizeEagerLimit',
-    )
-    .option(
-      '--all',
-      'Summarize every eligible symbol — uncapped full pass (overrides config.llm.summarizeEagerLimit and --limit)',
-    )
-    .action(
-      async (
-        pathArg: string | undefined,
-        options: { quiet?: boolean; concurrency?: string; limit?: string; all?: boolean },
-      ) => {
-        const projectPath = resolveProjectPath(pathArg);
-        try {
-          if (!isInitialized(projectPath)) {
-            if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-            process.exit(1);
-          }
-          const { default: Cartograph } = await loadCartograph();
-          // Write path (summarize): opt in to auto-migration.
-          const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-          const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
-          if (!llmConfig) {
-            if (!options.quiet) {
-              error(
-                'No LLM available. Add config.llm to .cartograph/config.json (run `cartograph admin install-models --write-config` for the recommended stack — llama-server HTTP for every tier — or set provider: "anthropic-api" for Claude).',
-              );
-            }
-            cg.close();
-            process.exit(1);
-          }
-
-          // Match the MCP `cartograph_admin({action: 'summarize'})` clamp [1, 16] so both
-          // surfaces enforce the same upper bound. Local LLMs and rate-
-          // limited cloud endpoints both work poorly past ~8 concurrent.
-          const concurrency = parseConcurrencyOption(options.concurrency);
-
-          // Lever C — eager-summary cap. `--all` wins, then `--limit`,
-          // else undefined so the service falls back to
-          // config.llm.summarizeEagerLimit (then the built-in default).
-          const eagerLimit = parseEagerLimit(options, () => cg.close());
-
-          // Conditional spread — `exactOptionalPropertyTypes` rejects an
-          // explicit `eagerLimit: undefined` (let the service default it).
-          const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
-
-          if (options.quiet) {
-            await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });
-            cg.close();
-            return;
-          }
-
-          const clack = await loadClack();
-          clack.intro('Summarising indexed symbols');
-
-          const progress = createShimmerProgress();
-          progress.onProgress({ phase: 'parsing', current: 0, total: 0 });
-
-          const result = await cg.llm.summarizeAll({
-            concurrency,
-            ...eagerLimitOpt,
-            onProgress: (done: number, total: number) => {
-              progress.onProgress({ phase: 'parsing', current: done, total });
-            },
-          });
-
-          await progress.stop();
-
-          printSummarizeDetails(clack, result);
-
-          clack.outro('Done');
-          cg.close();
-        } catch (err) {
-          if (!options.quiet) error(`Failed to summarise: ${errMsg(err)}`);
-          process.exit(1);
-        }
-      },
-    );
-}
-
-/**
- * cartograph admin embed [path]
- *
- * Run an LLM-driven embedding pass over every indexed symbol. Covers
- * all nodes with kind not in (file, import, export) — not just those
- * with LLM-generated summaries. Input text: name + signature +
- * docstring + summary (summary used when available). Populates
- * `symbol_embeddings` for `cartograph_search({mode: 'semantic'})` /
- * hybrid retrieval. Idempotent — second runs are pure cache checks.
- *
- * CLI/MCP alignment exception (B11): direct implementation for the
- * same reason as `summarize` — embedding cold-cache runs take
- * minutes and the CLI streams per-symbol progress.
- */
-function registerEmbedCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    error,
-    formatDuration,
-    formatNumber,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    resolveProjectPath,
-  } = deps;
-  adminCmd
-    .command('embed [path]')
-    .description('Generate embeddings for every indexed symbol (requires embedding provider)')
-    .option('-q, --quiet', 'Suppress output')
-    .option('-c, --concurrency <n>', 'Concurrent embedding requests')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        // Write path (embed): opt in to auto-migration.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-        // Clamped to [1, 16] — typical embedding endpoints rate-limit
-        // around 4–8 concurrent requests; anything higher just queues.
-        const concurrency = parseConcurrencyOption(options.concurrency);
-
-        if (options.quiet) {
-          await cg.llm.embed.embedAll({ concurrency });
-          cg.close();
-          return;
-        }
-
-        const clack = await loadClack();
-        clack.intro('Embedding indexed symbols');
-        const result = await cg.llm.embed.embedAll({ concurrency });
-        const counters: string[] = [];
-        if (result.errors > 0) counters.push(`${formatNumber(result.errors)} errors`);
-        if (result.skipped > 0)
-          counters.push(`${formatNumber(result.skipped)} skipped — too large for embed server's batch size`);
-        clack.log.success(
-          `Embedded ${formatNumber(result.generated)} new vectors in ${formatDuration(result.durationMs)}` +
-            (counters.length > 0 ? ` (${counters.join(', ')})` : ''),
-        );
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        if (!options.quiet) error(`Failed to embed: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
- * cartograph admin classify [path]
- *
- * Run an LLM-driven role-classification pass over symbols with a
- * non-empty description (cascade input: summary if present, else
- * docstring). Idempotent; only symbols missing a role from the
- * active model are touched.
- *
- * Operationally symmetric to `cartograph admin embed`: one phase of the
- * `cartograph admin summarize` pipeline, runnable on its own. Useful when
- * you've added new summaries via the agent-bridge (`cartograph
- * summaries save`), or want to classify docstring-only symbols
- * without paying for a full summarise pass.
- *
- * CLI/MCP alignment exception (B11): direct implementation so the
- * CLI streams per-symbol progress for what can be a multi-minute
- * cold-cache run on large codebases.
- */
-function registerClassifyCommand(deps: AdminCommandDeps): void {
-  const {
-    adminCmd,
-    error,
-    formatDuration,
-    formatNumber,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    resolveProjectPath,
-  } = deps;
-  adminCmd
-    .command('classify [path]')
-    .description('Assign roles via the LLM (cascade input: summary if present, else docstring; requires config.llm)')
-    .option('-q, --quiet', 'Suppress output')
-    .option('-c, --concurrency <n>', 'Concurrent LLM requests')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      try {
-        if (!isInitialized(projectPath)) {
-          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
-        }
-        const { default: Cartograph } = await loadCartograph();
-        // Write path (classify): opt in to auto-migration.
-        const cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-        // Clamped to [1, 16] — same band as summarize/embed; classifier
-        // chat calls are short and per-symbol, so concurrency speeds the
-        // happy path but local LLMs queue past ~8 anyway.
-        const concurrency = parseConcurrencyOption(options.concurrency);
-
-        if (options.quiet) {
-          await cg.llm.classifyAll({ concurrency });
-          cg.close();
-          return;
-        }
-
-        const clack = await loadClack();
-        clack.intro('Classifying symbol roles');
-        const result = await cg.llm.classifyAll({ concurrency });
-        clack.log.success(
-          `Classified ${formatNumber(result.classified)} symbols in ${formatDuration(result.durationMs)}` +
-            (result.errors > 0 ? ` (${formatNumber(result.errors)} errors)` : ''),
-        );
-        if (result.candidates === 0) {
-          clack.log.info(
-            'No candidates — every symbol with a description (summary or docstring) already has a role from the active model.',
-          );
-        }
-        clack.outro('Done');
-        cg.close();
-      } catch (err) {
-        if (!options.quiet) error(`Failed to classify: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
 // The `cartograph admin install-shim` command was removed 2026-05-24c
 // when the in-process LLM pathway (libcgshim + mini-nllc) was deleted
 // in step 4c of the migration. Embed / chat / rerank all run via HTTP
@@ -644,9 +321,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   activeAdminCommandDeps = deps;
   registerAdminProjectLifecycleCommands(deps);
   registerAdminIndexingCommands(deps);
-  registerSummarizeCommand(deps);
-  registerEmbedCommand(deps);
-  registerClassifyCommand(deps);
+  registerAdminLlmEnrichmentCommands(deps);
   registerAdminUnlockCommand(deps);
   registerAdminMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
