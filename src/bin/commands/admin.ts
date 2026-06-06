@@ -23,6 +23,7 @@ import {
 import { registerAdminLlmSetupCommands } from '../../features/admin-llm-setup/index.js';
 import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
+import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import {
   adminCmd as cliAdminCmd,
@@ -245,12 +246,6 @@ const PHASE_LABEL_WIDTH = 14;
 const PHASE_DURATION_WIDTH = 8;
 const PHASE_PERCENT_WIDTH = 2;
 const POST_HOOK_LABEL_WIDTH = 12;
-
-function removeLockFileIfPresent(lockPath: string): boolean {
-  if (!fs.existsSync(lockPath)) return false;
-  fs.unlinkSync(lockPath);
-  return true;
-}
 
 function parseParseWorkers(raw: string | undefined): number | undefined {
   const { error } = activeAdminCommandDeps;
@@ -1192,40 +1187,6 @@ function registerClassifyCommand(deps: AdminCommandDeps): void {
 }
 
 /**
- * cartograph admin unlock [path]
- */
-function registerUnlockCommand(deps: AdminCommandDeps): void {
-  const { adminCmd, error, getCartographDir, info, isInitialized, resolveProjectPath, success } = deps;
-  adminCmd
-    .command('unlock [path]')
-    .description(
-      "Remove a stale lock file that is blocking indexing (mirrors cartograph_admin MCP tool with action='unlock')",
-    )
-    .action(async (pathArg: string | undefined) => {
-      const projectPath = resolveProjectPath(pathArg);
-
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          return;
-        }
-
-        const lockPath = path.join(getCartographDir(projectPath), 'cartograph.lock');
-
-        if (!removeLockFileIfPresent(lockPath)) {
-          info('No lock file found — nothing to do');
-          return;
-        }
-
-        success('Removed lock file. You can now run indexing again.');
-      } catch (err) {
-        error(`Failed to remove lock: ${errMsg(err)}`);
-        process.exit(1);
-      }
-    });
-}
-
-/**
  * cartograph admin migrate [path]
  *
  * Apply forward schema migrations on the project DB. Cheapest
@@ -1295,7 +1256,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerSummarizeCommand(deps);
   registerEmbedCommand(deps);
   registerClassifyCommand(deps);
-  registerUnlockCommand(deps);
+  registerAdminUnlockCommand(deps);
   registerMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
   registerAdminPruneStoreCommand(deps);
