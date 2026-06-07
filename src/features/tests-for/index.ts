@@ -10,3 +10,10 @@ export {
   buildTestsForSameFileExplainer,
 } from './render.js';
 export type { TestRow, TestsForBucketKind } from './render.js';
+export { DEFAULT_FILES_MODE_DEPTH, MAX_FILES_MODE_DEPTH, runTestsForFilesMode } from './files-runtime.js';
+export {
+  buildTestRow,
+  collectSymbolTestDescriptions,
+  fetchTestDescriptionsForFile,
+  scopeRowsToSymbol,
+} from './test-descriptions.js';
