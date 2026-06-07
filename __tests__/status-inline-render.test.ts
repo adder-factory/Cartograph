@@ -102,9 +102,9 @@ const {
   appendInlineHotspots,
   buildStatusInlineBiomarkersSpec,
   buildStatusInlineHotspotsSpec,
-  parseInlineTopN,
-  resolveStatusRollups,
-} = await import('../src/mcp/tools/status.js');
+} = await import('../src/features/status/rollups.js');
+
+const { parseInlineTopN, resolveStatusRollups } = await import('../src/features/status/rollup-options.js');
 
 function cg(overrides: Record<string, unknown> = {}) {
   const db = {
