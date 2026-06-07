@@ -29,9 +29,16 @@ async function makeTempDir(prefix: string): Promise<string> {
   return dir;
 }
 
-async function makeProject(prefix: string, config?: Record<string, unknown>): Promise<string> {
+async function makeProject(
+  prefix: string,
+  config?: Record<string, unknown>,
+  options: { databaseFile?: boolean } = {},
+): Promise<string> {
   const projectPath = await makeTempDir(prefix);
   await fsp.mkdir(path.join(projectPath, '.cartograph'), { recursive: true });
+  if (options.databaseFile !== false) {
+    await fsp.writeFile(path.join(projectPath, '.cartograph', 'cartograph.db'), '');
+  }
   if (config !== undefined) {
     await fsp.writeFile(path.join(projectPath, '.cartograph', 'config.json'), JSON.stringify(config, null, 2));
   }
@@ -120,6 +127,19 @@ describe('runDoctor installer state machine', () => {
         expect(findCheck(result, 'Project init').status).toBe('fail');
         expect(result.checks.some((item) => item.name === 'Project config')).toBe(false);
         expect(findCheck(result, 'LLM models').status).toBe('ok');
+      },
+    },
+    {
+      name: 'initialized without database storage',
+      setup: async () => {
+        await pointModelsDirAtGguf();
+        return { projectPath: await makeProject('cg-doctor-no-db-', {}, { databaseFile: false }) };
+      },
+      expect: (result) => {
+        expect(result.overallStatus).toBe('fail');
+        const storage = findCheck(result, 'Database storage');
+        expect(storage.status).toBe('fail');
+        expect(storage.detail).toContain('No SQLite database');
       },
     },
     {

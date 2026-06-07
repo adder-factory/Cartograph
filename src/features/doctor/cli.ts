@@ -24,7 +24,7 @@ export function registerDoctorCommand(deps: DoctorCommandDeps): void {
   program
     .command('doctor [path]')
     .description(
-      'Diagnose install state (Bun, models, project init/config, detected LLM backends, embedding endpoint reachability) with actionable next steps. Pass `--fix` to auto-apply remediations.',
+      'Diagnose install state (Bun, storage, models, project init/config, detected LLM backends, embedding endpoint reachability) with actionable next steps. Pass `--fix` to auto-apply remediations.',
     )
     .option('--no-project-checks', 'Skip the project-init + config checks (useful for fresh-install verification).')
     .option('--skip-project-checks', 'Skip the project-init + config checks (alias of --no-project-checks).')

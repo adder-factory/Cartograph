@@ -1,0 +1,220 @@
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { Worker } from 'node:worker_threads';
+import { fileURLToPath } from 'node:url';
+import type { SqliteDatabase, SqliteStatement } from './sqlite-adapter.js';
+import { parsePostgresWorkerJson } from './postgres-codec.js';
+import { POSTGRES_DEFAULT_QUERY_TIMEOUT_MS, postgresSqlOptions, type DatabaseConfig } from './database-config.js';
+
+type PostgresAdapterOptions = DatabaseConfig & { provider: 'postgres' };
+
+interface WorkerResponse {
+  ok: boolean;
+  rows?: unknown[];
+  changes?: number;
+  lastInsertRowid?: number | bigint;
+  value?: unknown;
+  error?: string;
+}
+
+interface WorkerRequest {
+  op: 'query' | 'batch' | 'exec' | 'pragma' | 'close';
+  sql?: string;
+  mode?: 'run' | 'get' | 'all';
+  params?: unknown[];
+  paramSets?: unknown[][];
+  pragma?: string;
+}
+
+const WORKER_READY = 10;
+const WORKER_REQUEST = 1;
+const WORKER_RESPONSE = 2;
+
+export class PostgresAdapter implements SqliteDatabase {
+  readonly dialect = 'postgres' as const;
+  private readonly worker: Worker;
+  private readonly control = new Int32Array(new SharedArrayBuffer(4));
+  private readonly dir: string;
+  private readonly requestPath: string;
+  private readonly responsePath: string;
+  private readonly queryTimeoutMs: number;
+  private _open = true;
+  private txDepth = 0;
+
+  constructor(options: PostgresAdapterOptions) {
+    this.queryTimeoutMs = options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS;
+    this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pg-'));
+    this.requestPath = path.join(this.dir, 'request.json');
+    this.responsePath = path.join(this.dir, 'response.json');
+    const here = fileURLToPath(import.meta.url);
+    const ext = here.endsWith('.ts') ? '.ts' : '.js';
+    const workerPath = fileURLToPath(new URL(`./postgres-worker${ext}`, import.meta.url));
+    this.worker = new Worker(workerPath, {
+      workerData: {
+        control: this.control.buffer,
+        requestPath: this.requestPath,
+        responsePath: this.responsePath,
+        sqlOptions: postgresSqlOptions(options),
+        url: options.url,
+        schema: options.schema ?? 'public',
+      },
+    });
+    const ready = Atomics.wait(this.control, 0, 0, 30_000);
+    if (ready === 'timed-out' || Atomics.load(this.control, 0) !== WORKER_READY) {
+      terminateWorker(this.worker);
+      throw new Error('PostgreSQL adapter worker did not become ready within 30s');
+    }
+    Atomics.store(this.control, 0, 0);
+  }
+
+  get open(): boolean {
+    return this._open;
+  }
+
+  prepare(sql: string): SqliteStatement {
+    return new PostgresStatement(this, sql);
+  }
+
+  exec(sql: string): void {
+    if (isNoopPragmaSql(sql)) return;
+    this.call({ op: 'exec', sql });
+  }
+
+  pragma(str: string): unknown {
+    return this.call({ op: 'pragma', pragma: str }).value;
+  }
+
+  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
+    return (...args: unknown[]) => {
+      const savepoint = `cartograph_sp_${this.txDepth}`;
+      if (this.txDepth === 0) this.exec('BEGIN');
+      else this.exec(`SAVEPOINT ${savepoint}`);
+      this.txDepth++;
+      try {
+        const result = fn(...args);
+        this.txDepth--;
+        if (this.txDepth === 0) this.exec('COMMIT');
+        else this.exec(`RELEASE SAVEPOINT ${savepoint}`);
+        return result;
+      } catch (err) {
+        this.txDepth--;
+        if (this.txDepth === 0) this.exec('ROLLBACK');
+        else this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        throw err;
+      }
+    };
+  }
+
+  close(): void {
+    if (!this._open) return;
+    try {
+      this.call({ op: 'close' });
+    } catch {
+      /* worker is already gone */
+    }
+    this._open = false;
+    terminateWorker(this.worker);
+    try {
+      fs.rmSync(this.dir, { recursive: true, force: true });
+    } catch {
+      /* temp cleanup is best effort */
+    }
+  }
+
+  call(request: WorkerRequest): WorkerResponse {
+    if (!this._open && request.op !== 'close') throw new Error('PostgreSQL connection is closed');
+    fs.writeFileSync(this.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
+    Atomics.store(this.control, 0, WORKER_REQUEST);
+    Atomics.notify(this.control, 0);
+    const wait = Atomics.wait(this.control, 0, WORKER_REQUEST, this.queryTimeoutMs);
+    if (wait === 'timed-out') throw new Error(`PostgreSQL query timed out after ${this.queryTimeoutMs}ms`);
+    if (Atomics.load(this.control, 0) !== WORKER_RESPONSE) {
+      throw new Error('PostgreSQL worker returned an invalid state');
+    }
+    const raw = fs.readFileSync(this.responsePath, 'utf-8');
+    Atomics.store(this.control, 0, 0);
+    const response = decodeValue(parsePostgresWorkerJson(raw, 'response')) as WorkerResponse;
+    if (!response.ok) throw new Error(response.error ?? 'PostgreSQL query failed');
+    return response;
+  }
+}
+
+function terminateWorker(worker: Worker): void {
+  void worker.terminate();
+}
+
+class PostgresStatement implements SqliteStatement {
+  constructor(
+    private readonly adapter: PostgresAdapter,
+    private readonly sql: string,
+  ) {}
+
+  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
+    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'run', params });
+    return {
+      changes: response.changes ?? 0,
+      lastInsertRowid: response.lastInsertRowid ?? 0,
+    };
+  }
+
+  runBatch(paramSets: unknown[][]): { changes: number; lastInsertRowid: number | bigint } {
+    if (paramSets.length === 0) return { changes: 0, lastInsertRowid: 0 };
+    const response = this.adapter.call({ op: 'batch', sql: this.sql, mode: 'run', paramSets });
+    return {
+      changes: response.changes ?? 0,
+      lastInsertRowid: response.lastInsertRowid ?? 0,
+    };
+  }
+
+  get(...params: unknown[]): unknown {
+    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'get', params });
+    return response.rows?.[0] ?? null;
+  }
+
+  all(...params: unknown[]): unknown[] {
+    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'all', params });
+    return response.rows ?? [];
+  }
+
+  iterate(...params: unknown[]): IterableIterator<unknown> {
+    return this.all(...params)[Symbol.iterator]();
+  }
+}
+
+function isNoopPragmaSql(sql: string): boolean {
+  return /^PRAGMA\b/i.test(sql.trim());
+}
+
+function encodeValue(value: unknown): unknown {
+  if (value instanceof Uint8Array) {
+    return { __cartographBinary: Buffer.from(value).toString('base64') };
+  }
+  if (typeof value === 'bigint') {
+    return { __cartographBigInt: value.toString() };
+  }
+  if (Array.isArray(value)) return value.map(encodeValue);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value)) out[key] = encodeValue(inner);
+    return out;
+  }
+  return value;
+}
+
+function decodeValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(decodeValue);
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>;
+    if (typeof obj['__cartographBinary'] === 'string') {
+      return Buffer.from(obj['__cartographBinary'], 'base64');
+    }
+    if (typeof obj['__cartographBigInt'] === 'string') {
+      return BigInt(obj['__cartographBigInt']);
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(obj)) out[key] = decodeValue(inner);
+    return out;
+  }
+  return value;
+}

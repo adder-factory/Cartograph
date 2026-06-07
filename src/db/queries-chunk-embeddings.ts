@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { Buffer } from 'node:buffer';
 import type { QueryBuilder } from './queries.js';
 import { mirrorChunkEmbeddingToVec } from './vec-helpers.js';
+import { mirrorChunkEmbeddingToPgvector } from './pgvector-helpers.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 
 const FLOAT32_BYTES = 4;
@@ -155,6 +156,10 @@ export function upsertChunkEmbedding(qb: QueryBuilder, args: UpsertChunkEmbeddin
       summaryHashAtEmbed,
     });
     wrote = result.changes > 0;
+    if (!wrote && qb.db.dialect === 'postgres') {
+      qb.queries.chunkEmbeddingRowid ??= chunkEmbeddingRowidQuery(qb.db);
+      wrote = qb.queries.chunkEmbeddingRowid.get({ nodeId, chunkIdx }) !== undefined;
+    }
     if (!wrote) return;
     // Stage 5 #C — mirror into the multi-vec table when sqlite-vec
     // is loaded. No-op on WASM / extension-missing builds.
@@ -173,6 +178,19 @@ export function upsertChunkEmbedding(qb: QueryBuilder, args: UpsertChunkEmbeddin
       }
     }
   })();
+  if (wrote) {
+    qb.queries.chunkEmbeddingRowid ??= chunkEmbeddingRowidQuery(qb.db);
+    const rowidRow = qb.queries.chunkEmbeddingRowid.get({ nodeId, chunkIdx });
+    if (rowidRow) {
+      mirrorChunkEmbeddingToPgvector({
+        db: qb.db,
+        rowid: rowidRow.r,
+        nodeId,
+        model: embeddingModel,
+        embedding,
+      });
+    }
+  }
   return wrote;
 }
 

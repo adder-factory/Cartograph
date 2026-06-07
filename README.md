@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
 [![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](#other-mcp-clients)
-[![Storage](https://img.shields.io/badge/storage-SQLite-0f766e.svg)](#how-it-works)
+[![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](#how-it-works)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
@@ -30,7 +30,7 @@
 
 </div>
 
-Cartograph builds a local SQLite knowledge graph of your codebase and exposes it to MCP-compatible agents. Instead of repeatedly scanning files, agents can ask structured questions about symbols, call graphs, changed tests, hotspots, and code health.
+Cartograph builds a local-first knowledge graph of your codebase and exposes it to MCP-compatible agents. SQLite is the default storage backend; PostgreSQL is available as an opt-in backend. Instead of repeatedly scanning files, agents can ask structured questions about symbols, call graphs, changed tests, hotspots, and code health.
 
 It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, and any client that can start a stdio MCP server.
 
@@ -77,7 +77,7 @@ bun link
 
 | Area | What Cartograph does |
 |---|---|
-| Graph index | Stores files, symbols, edges, references, metrics, and derived signals in local SQLite |
+| Graph index | Stores files, symbols, edges, references, metrics, and derived signals in SQLite by default or PostgreSQL by choice |
 | Query surfaces | Exposes the same graph through CLI commands, MCP stdio tools, and a library API |
 | Freshness | Runs MCP startup sync and debounced file-watch sync through `@parcel/watcher` |
 | Code health | Computes biomarkers, hotspots, churn, coverage joins, dependency audits, and risk reviews |
@@ -94,7 +94,7 @@ bun link
 
 ## Visual Graph Viewer
 
-Cartograph also ships a local graph viewer for humans. It uses the same `.cartograph/` SQLite index as the CLI and MCP server, then renders the code graph as an interactive workspace.
+Cartograph also ships a local graph viewer for humans. It uses the same configured graph index as the CLI and MCP server, then renders the code graph as an interactive workspace.
 
 ```bash
 cartograph viewer .
@@ -188,6 +188,8 @@ From the project you want indexed:
 cd your-project
 cartograph admin init -i
 ```
+
+That uses SQLite, the zero-config default. To keep the graph in PostgreSQL instead, start with the [Storage Backend](#storage-backend) flags before the first init.
 
 For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and points you at the managed backend commands.
 
@@ -357,7 +359,7 @@ flowchart LR
   source["Project source files"]
   scan["Scan files<br/>apply include / exclude globs"]
   extract["ExtractionOrchestrator<br/>detect languages<br/>parse with tree-sitter WASM workers<br/>emit symbols, raw edges, refs"]
-  store[("SQLite graph DB<br/>.cartograph/cartograph.db<br/>nodes / edges / files<br/>FTS lookup tables<br/>optional sqlite-vec tables")]
+  store[("Graph DB<br/>SQLite default or PostgreSQL<br/>nodes / edges / files<br/>SQLite vec or pgvector accelerators when available")]
   enrich["Enrichment passes<br/>reference resolution<br/>framework and index hooks<br/>biomarkers, churn, tests, coverage"]
 
   source --> scan --> extract --> store --> enrich --> store
@@ -374,7 +376,7 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-  db[("SQLite graph DB")]
+  db[("Graph DB<br/>SQLite default or PostgreSQL")]
 
   subgraph surfaces["Query surfaces"]
     cli["CLI<br/>cartograph ..."]
@@ -417,7 +419,7 @@ flowchart TB
 
 1. **Extraction** — `ExtractionOrchestrator` scans included files, detects languages, and parses source with [tree-sitter](https://tree-sitter.github.io/) WASM grammars. Language-specific extractors emit files, symbols, raw edges, and unresolved references.
 
-2. **Storage** — The graph is stored in a local SQLite database (`.cartograph/cartograph.db`) with FTS-backed lookup tables and optional `sqlite-vec` tables for vector features.
+2. **Storage** — The graph is stored in SQLite by default (`.cartograph/cartograph.db`). Set `database.provider: "postgres"` with a PostgreSQL URL to store the same graph in PostgreSQL instead. SQLite uses FTS/RTree/sqlite-vec accelerators when available; PostgreSQL uses native GIN indexes and optional pgvector acceleration, with HNSW/in-memory fallbacks when pgvector is unavailable.
 
 3. **Enrichment** — After extraction, Cartograph resolves references and runs index hooks for derived signals such as framework edges, tests, churn, co-change, coverage, centrality, and biomarkers.
 
@@ -434,9 +436,10 @@ flowchart TB
 ```bash
 cartograph                         # Run interactive installer
 cartograph install                 # Run installer (explicit)
-cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor (--minimal, --no-models)
+cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor (--minimal, --no-models, --database-provider)
 cartograph doctor [path]           # Diagnose install state (--fix to auto-apply remediations)
-cartograph admin init [path]       # Initialize in a project (-i / --index to also index)
+cartograph admin init [path]       # Initialize in a project (-i / --index; --database-provider postgres for PostgreSQL)
+cartograph admin storage-migrate [path] # Move an existing SQLite project to PostgreSQL
 cartograph admin uninit [path]     # Remove Cartograph from a project (--force to skip prompt)
 cartograph admin index [path]      # Full (re)index of the project
 cartograph admin sync [path]       # Incremental update
@@ -826,6 +829,104 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `exclude` | Glob patterns to ignore | dependency, build, cache, fixture, and generated-output defaults |
 | `maxFileSize` | Skip files larger than this (bytes) | `5242880` (5MB) |
 
+### Storage Backend
+
+SQLite is the default and needs no configuration. To initialize a project on PostgreSQL, pass the storage flags during setup/init:
+
+```bash
+# local PostgreSQL for development / evaluation:
+docker run --rm -d --name cartograph-postgres \
+  -e POSTGRES_USER=cartograph \
+  -e POSTGRES_PASSWORD=cartograph \
+  -e POSTGRES_DB=cartograph \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+
+cartograph admin init -i \
+  --database-provider postgres \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph \
+  --database-pgvector auto \
+  --database-query-timeout-ms 120000
+
+# or the one-shot bootstrap:
+cartograph setup . --database-provider postgres --database-url "$DATABASE_URL"
+```
+
+The same choice can be hand-authored in `.cartograph/config.json`:
+
+```json
+{
+  "database": {
+    "provider": "postgres",
+    "url": "postgres://user:pass@localhost:5432/cartograph",
+    "schema": "cartograph",
+    "pgvector": "auto",
+    "queryTimeoutMs": 120000,
+    "connectionTimeoutSeconds": 30,
+    "maxConnections": 1
+  }
+}
+```
+
+Environment fallbacks are supported for secrets and deployment overrides: `CARTOGRAPH_DATABASE_PROVIDER=postgres`, `CARTOGRAPH_DATABASE_URL` or `DATABASE_URL`, `CARTOGRAPH_DATABASE_SCHEMA`, `CARTOGRAPH_DATABASE_PGVECTOR=auto|off|require`, `CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS`, `CARTOGRAPH_DATABASE_CONNECTION_TIMEOUT_SECONDS`, `CARTOGRAPH_DATABASE_MAX_CONNECTIONS`, and `CARTOGRAPH_DATABASE_SSL`.
+
+PostgreSQL initialization expects a database the connection URL can reach, and a schema name Cartograph can create/use. PostgreSQL storage currently supports fresh schema bootstrap rather than in-place PostgreSQL schema migrations; use a new schema for upgrades that need a rebuild. If you intentionally reset or drop the configured schema, remove the local PostgreSQL sentinel `.cartograph/cartograph.db` and run `cartograph admin init` again. Use one schema per project to keep indexes, `hnsw_meta`, and cleanup isolated.
+
+For production, create the database/user outside Cartograph and grant the configured role ownership or equivalent privileges on the project schema. `cartograph doctor` verifies connectivity, schema version, runtime DML writes, and whether the role can create/drop a probe table for init/rebuild workflows. A minimal dedicated-role shape is:
+
+```sql
+CREATE SCHEMA cartograph AUTHORIZATION cartograph;
+GRANT USAGE, CREATE ON SCHEMA cartograph TO cartograph;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA cartograph TO cartograph;
+GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cartograph TO cartograph;
+ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cartograph;
+ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
+  GRANT USAGE, SELECT ON SEQUENCES TO cartograph;
+```
+
+For hosted PostgreSQL, prefer putting certificate mode in the URL (`?sslmode=require`, `verify-ca`, or `verify-full`). The `database.ssl` / `CARTOGRAPH_DATABASE_SSL=true` knob only forces TLS on/off; URL `sslmode` is the right place for certificate-verification policy.
+
+`database.pgvector` defaults to `auto`: Cartograph tries `CREATE EXTENSION IF NOT EXISTS vector`, mirrors embeddings into per-dimension `vector(n)` tables when the extension is available, and otherwise keeps using BYTEA storage with HNSW/in-memory fallbacks. Use `require` when native pgvector search is mandatory and you want initialization/doctor to fail if the extension is missing. Use `off` to disable pgvector entirely.
+
+To move an existing SQLite-backed project to PostgreSQL without reindexing:
+
+```bash
+cartograph admin storage-migrate . \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph
+```
+
+The migration command requires a fresh/nonexistent PostgreSQL schema. Pass `--force` only when you intentionally want Cartograph to drop and recreate the target schema. The old SQLite file is kept as a timestamped `.sqlite-backup.*` next to `.cartograph/cartograph.db`, and the project config is updated to `database.provider: "postgres"`.
+
+PostgreSQL-specific performance behavior:
+
+- High-volume node and edge writes use PostgreSQL set-based JSON batch inserts.
+- Symbol search uses PostgreSQL GIN full-text indexes over name, qualified name, signature, and docstring, with `ILIKE` as a fallback tier.
+- Signature-token ownership uses a PostgreSQL GIN full-text index on signatures.
+- Semantic search and `similar_to` edge builds use pgvector on PostgreSQL when `database.pgvector` is active. Canonical embeddings still live as `BYTEA`; pgvector tables are an optional native mirror and can be rebuilt from the canonical rows.
+- If pgvector is unavailable, PostgreSQL falls back to the existing USearch/HNSW path when the optional `usearch` dependency is available, then the in-memory embedding scan for query-time semantic search.
+- SQLite-only RTree/sqlite-vec tables remain SQLite-only. Range queries and vector fallbacks use backend-specific compatibility paths.
+
+#### SQLite vs PostgreSQL Benchmark
+
+Use `bench/storage-backends.mts` to compare the two storage backends on the same machine:
+
+```bash
+CARTOGRAPH_BENCH_POSTGRES_URL=postgres://user:pass@localhost:5432/cartograph \
+  bun bench/storage-backends.mts
+```
+
+Local result from June 7, 2026 on darwin arm64, Bun 1.3.14, PostgreSQL 16 in Docker, synthetic workload of 200 files / 1,600 nodes / 3,200 candidate edges / 40 read iterations, median of 3 fresh runs:
+
+| Backend | Init median | Write median | Read median | Total median | Storage |
+|---|---:|---:|---:|---:|---:|
+| SQLite | 7 ms | 70 ms | 36 ms | 112 ms | 2.12 MB |
+| PostgreSQL | 145 ms | 298 ms | 351 ms | 758 ms | 6.76 MB |
+
+Interpretation: SQLite remains the fastest default for local single-writer indexing. PostgreSQL batches high-volume node and edge writes with native set-based inserts and uses native GIN full-text search, but Docker/remote connection overhead still makes it slower for local-only workloads. PostgreSQL is the better fit when you want external/shared storage, operational database controls, managed backups, or native pgvector search.
+
 <details>
 <summary><strong>Advanced config options</strong></summary>
 
@@ -839,6 +940,16 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `enableConfigRefs` / `enableSqlRefs` / `enableBuildContextRefs` / `enableStringImports` | Add derived reference edges from non-call domains | `true` |
 | `indexSubmodules` | Recurse into git submodules | `true` |
 | `dependenciesAllowlist` | Packages never flagged by `cartograph deps` | `[]` |
+| `database.provider` | Storage backend: `sqlite` or `postgres` | `sqlite` |
+| `database.url` | PostgreSQL connection URL when `database.provider` is `postgres` | unset |
+| `database.schema` | PostgreSQL schema name | `public` |
+| `database.pgvector` | Optional native pgvector mode: `auto`, `off`, or `require` | `auto` |
+| `database.maxConnections` | PostgreSQL pool cap | `1` |
+| `database.connectionTimeoutSeconds` | PostgreSQL connection timeout | `30` |
+| `database.queryTimeoutMs` | Adapter wait timeout and PostgreSQL `statement_timeout` | `120000` |
+| `database.idleTimeoutSeconds` | Close idle PostgreSQL connections after this many seconds | Bun default |
+| `database.maxLifetimeSeconds` | Recycle PostgreSQL connections after this many seconds | Bun default |
+| `database.ssl` | Force PostgreSQL TLS on/off; prefer URL `sslmode=` for verification modes | URL/default |
 
 </details>
 
@@ -846,7 +957,7 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 
 | Expectation | Reality |
 |---|---|
-| Hosted SaaS | Cartograph is local-first; the graph database lives under `.cartograph/` in your project |
+| Hosted SaaS | Cartograph is local-first; the graph database is local SQLite by default or your configured PostgreSQL instance |
 | Test replacement | It helps find affected tests and risk areas, but your test suite remains the source of truth |
 | LLM-only reviewer | Review tools are deterministic graph queries first; LLM features are optional enrichment |
 | Cloud dependency | Core indexing and graph tools work offline after dependencies are installed |
@@ -937,12 +1048,13 @@ Scripts used by `.github/workflows/check.yml` must run on a stock GitHub runner 
 
 **Indexing is slow** — Check that `node_modules` and other large directories are excluded. Large generated files can also dominate a run; lower `maxFileSize` in `.cartograph/config.json` to skip them.
 
-**Vector search is slow / `⚠ no sqlite-vec`** — The storage backend is Bun's built-in `bun:sqlite`. Vector similarity (semantic/intent search and `similar`) is accelerated by the optional [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension. Run `cartograph status` and look at the `Backend:` line:
+**Vector search is slow / `⚠ no sqlite-vec`** — On the SQLite backend, vector similarity (semantic/intent search and `similar`) is accelerated by the optional [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension. Run `cartograph status` and look at the `Backend:` line:
 
 - `Backend: bun:sqlite + sqlite-vec` — the accelerated path, nothing to do.
 - `Backend: bun:sqlite ⚠ no sqlite-vec` — the extension didn't load, so vector search falls back to a slower in-memory brute-force scan. `sqlite-vec` ships prebuilt binaries for darwin/linux (x64 + arm64) and windows-x64; on other platforms the brute-force path is expected. A clean `bun install` usually re-fetches the prebuilt for your platform.
+- `Backend: postgres` — PostgreSQL storage is active; native PostgreSQL full-text indexes are used for symbol search, pgvector is used when available/configured, and SQLite-only RTree/sqlite-vec accelerators are bypassed.
 
-If status says USearch is unavailable, `similar_to` edge builds fall back to the vec0 brute-force path. A clean `bun install` re-fetches the optional `usearch` accelerator.
+If status says USearch is unavailable, SQLite `similar_to` edge builds fall back to the vec0 brute-force path. PostgreSQL `similar_to` edge builds use pgvector when available, then USearch/HNSW. A clean `bun install` re-fetches the optional `usearch` accelerator.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `cartograph serve --mcp` works from the command line.
 

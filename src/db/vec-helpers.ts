@@ -25,6 +25,7 @@
 import { z } from 'zod';
 import type { SqliteDatabase } from './sqlite-adapter.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
+import { getOrBuildCachedQuery } from './dynamic-query-cache.js';
 
 /** Float32 = 4 bytes per element, used to derive embedding dim from BLOB length. */
 const FLOAT32_BYTES = 4;
@@ -78,42 +79,6 @@ function discoverDimsQueryFor(table: DiscoverDimsTable) {
     params: NoParams,
     row: DimLenRowSchema,
   });
-}
-
-/**
- * Lazy per-(db, name) cache of dynamic-SQL typed queries. The
- * factory takes the dynamic name (table name, dim-keyed identifier,
- * etc.) at construction time and is invoked once per unique name;
- * the resulting prepared statement is memoised on the `(db, name)`
- * pair so the cache holds at most one prepared statement per
- * (database connection, dynamic name) combination. Caches survive
- * for the database connection's lifetime via `WeakMap`.
- *
- * Single source of truth for the "two-level lazy cache" shape that
- * every dim-keyed factory in this file shares — folding the body
- * here eliminates the duplicate_code findings the per-getter copies
- * used to trip.
- */
-interface GetOrBuildCachedQueryArgs<N extends string, P, R> {
-  cache: WeakMap<SqliteDatabase, Map<string, TypedQuery<P, R>>>;
-  db: SqliteDatabase;
-  name: N;
-  build: (name: N) => (db: SqliteDatabase) => TypedQuery<P, R>;
-}
-
-function getOrBuildCachedQuery<N extends string, P, R>(args: GetOrBuildCachedQueryArgs<N, P, R>): TypedQuery<P, R> {
-  const { cache, db, name, build } = args;
-  let perDb = cache.get(db);
-  if (!perDb) {
-    perDb = new Map();
-    cache.set(db, perDb);
-  }
-  let q = perDb.get(name);
-  if (!q) {
-    q = build(name)(db);
-    perDb.set(name, q);
-  }
-  return q;
 }
 
 const discoverDimsByDbAndTable = new WeakMap<

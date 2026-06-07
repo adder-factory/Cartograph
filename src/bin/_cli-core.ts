@@ -70,7 +70,7 @@ export const adminCmd = program
   .command('admin')
   .summary('Project lifecycle, indexing, setup, doctor, and LLM admin commands')
   .description(
-    'Project lifecycle / index maintenance. Subcommands: init / uninit / sync / index / embed-only / summarize / embed / classify / unlock / migrate / build-similarity-edges / prune-store / scip-export / scip-import / install-models / doctor / llm-plan / llm-apply / llm-tune.',
+    'Project lifecycle / index maintenance. Subcommands: init / uninit / sync / index / embed-only / summarize / embed / classify / unlock / migrate / storage-migrate / build-similarity-edges / prune-store / scip-export / scip-import / install-models / doctor / llm-plan / llm-apply / llm-tune.',
   );
 export const summariesCmd = program
   .command('summaries')
@@ -157,18 +157,18 @@ program
 /**
  * Resolve project path from argument or current directory
  * Walks up parent directories to find nearest initialized Cartograph project
- * (must have .cartograph/cartograph.db, not just .cartograph/lessons.db)
+ * (must have usable SQLite storage or configured PostgreSQL storage, not
+ * just a stray .cartograph/ directory)
  */
 export function resolveProjectPath(pathArg?: string): string {
   const absolutePath = path.resolve(pathArg || process.cwd());
 
-  // If exact path is initialized (has cartograph.db), use it
+  // If exact path is initialized, use it.
   if (isInitialized(absolutePath)) {
     return absolutePath;
   }
 
-  // Walk up to find nearest parent with Cartograph initialized
-  // Note: findNearestCartographRoot finds any .cartograph folder, but we need one with cartograph.db
+  // Walk up to find nearest parent with Cartograph initialized.
   let current = absolutePath;
   const root = path.parse(current).root;
 

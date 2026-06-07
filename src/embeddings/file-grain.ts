@@ -27,6 +27,7 @@ import type { EmbeddingProvider } from '../llm/embedding-client.js';
 import { vectorToBytes } from '../llm/embeddings.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { mirrorEmbeddingToVec } from '../db/vec-helpers.js';
+import { mirrorEmbeddingToPgvector } from '../db/pgvector-helpers.js';
 import { logDebug, logWarn } from '../errors.js';
 
 /** How many top-centrality symbols per file to fold into the embed
@@ -256,6 +257,16 @@ export function upsertFileEmbedding(args: UpsertFileEmbeddingArgs): boolean {
       )
       .run(fileNodeId, fileContentHash, model, combinedHash, fileNodeId);
     wrote = info.changes > 0;
+    if (!wrote && qb.db.dialect === 'postgres') {
+      wrote =
+        qb.db
+          .prepare(
+            `SELECT 1 AS ok FROM embedding_refs
+              WHERE node_id = ? AND model = ? AND grain = 'file'
+              LIMIT 1`,
+          )
+          .get(fileNodeId, model) != null;
+    }
     if (!wrote) return;
     if (qb.vecLoaded) {
       // vec0 mirrors embedding_store.ROWID — look it up by the
@@ -278,6 +289,24 @@ export function upsertFileEmbedding(args: UpsertFileEmbeddingArgs): boolean {
       }
     }
   })();
+  if (wrote) {
+    const rowidRow = qb.db
+      .prepare(
+        `SELECT rowid AS r FROM embedding_store
+           WHERE body_hash = ? AND model = ? AND grain = 'file'`,
+      )
+      .get(fileContentHash, model) as { r: number | bigint } | undefined;
+    if (rowidRow) {
+      mirrorEmbeddingToPgvector({
+        db: qb.db,
+        rowid: rowidRow.r,
+        bodyHash: fileContentHash,
+        model,
+        grain: 'file',
+        embedding,
+      });
+    }
+  }
   return wrote;
 }
 

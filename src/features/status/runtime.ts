@@ -172,6 +172,16 @@ export function printStatusIndexStats({ deps, stats, cg, hnswAvailable }: PrintS
   writeStatusLine(deps, `  Nodes:     ${deps.formatNumber(stats.nodeCount)}`);
   writeStatusLine(deps, `  Edges:     ${deps.formatNumber(stats.edgeCount)}`);
   writeStatusLine(deps, `  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
+  const backend = String(cg.db.getBackend?.() ?? 'bun-sqlite');
+  if (backend === 'postgres') {
+    writeStatusLine(deps, `  Backend:   ${deps.style.magenta('postgres')}`);
+    writeStatusLine(
+      deps,
+      deps.style.dim('  ℹ PostgreSQL storage active — native GIN/pgvector paths are used when available.'),
+    );
+    writeStatusLine(deps);
+    return;
+  }
   const vec = cg.db.hasVecExtension();
   const vecSuffix = vec ? ' + sqlite-vec' : '';
   const backendLabel = deps.style.magenta(`bun:sqlite${vecSuffix}`);

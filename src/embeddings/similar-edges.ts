@@ -5,15 +5,17 @@
  *
  * Idempotent: runs deleteAllSimilarToEdges first.
  *
- * KNN backend: HNSW (USearch) when available, with brute-force
- * vec0 as the fallback. HNSW is built once per buildSimilarToEdges
- * call (one index per embedding dim) instead of per-row vec0 scans —
- * extrapolated 312k symbols drops from ~30 min to ~3-5 min.
+ * KNN backend: pgvector on PostgreSQL when available, otherwise HNSW
+ * (USearch), with sqlite-vec as the SQLite fallback. HNSW is built
+ * once per buildSimilarToEdges call (one index per embedding dim)
+ * instead of per-row vec0 scans — extrapolated 312k symbols drops
+ * from ~30 min to ~3-5 min.
  */
 
 import path from 'node:path';
 
 import type { Cartograph } from '../index.js';
+import { findSimilarViaPgvector, isPgvectorAvailable } from '../db/pgvector-helpers.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';
 import { deleteAllSimilarToEdges, insertSimilarToEdges } from '../db/queries-similarity.js';
 import { HnswIndex, type HnswEmbeddingRow } from './hnsw-index.js';
@@ -73,6 +75,8 @@ interface ComputeEdgesForRowArgs {
   hnswByDim: Map<number, HnswIndex>;
   /** node_id → unit-normalised embedding vector, for exact cosine rescoring. */
   unitByNode: Map<string, Float32Array>;
+  vecLoaded: boolean;
+  pgvectorAvailable: boolean;
 }
 
 /**
@@ -115,8 +119,9 @@ function dot(a: Float32Array, b: Float32Array): number {
  * Compute similar-to edges for a single embedding row by querying its
  * k nearest neighbors, filtering out self-matches and below-threshold pairs.
  *
- * Uses the prebuilt HNSW index for the row's dim when present; falls
- * back to per-row vec0 scan otherwise.
+ * Uses pgvector first on PostgreSQL when available, then the prebuilt
+ * HNSW index for the row's dim when present. SQLite falls back to
+ * per-row vec0 when HNSW is unavailable.
  *
  * The KNN backend distance is used ONLY for candidate retrieval/order.
  * The persisted `score` is recomputed as an exact cosine similarity
@@ -126,20 +131,43 @@ function dot(a: Float32Array, b: Float32Array): number {
  * when the stored vectors aren't unit-length — recomputing here keeps
  * writer, reader, and the documented 0..1 `--min-score` scale aligned.
  */
-function computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode }: ComputeEdgesForRowArgs): SimilarEdge[] {
+function computeEdgesForRow({
+  db,
+  row,
+  k,
+  minScore,
+  hnswByDim,
+  unitByNode,
+  vecLoaded,
+  pgvectorAvailable,
+}: ComputeEdgesForRowArgs): SimilarEdge[] {
   const dim = row.embedding.length / FLOAT32_BYTES;
   const queryVec = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, dim);
 
   const hnsw = hnswByDim.get(dim);
-  const hits = hnsw
-    ? hnsw.query(queryVec, k + 1, row.embedding_model)
-    : findSimilarViaVec({
+  let hits: Array<{ nodeId: string; distance: number }> = [];
+  if (pgvectorAvailable) {
+    hits = findSimilarViaPgvector({
+      db,
+      queryVec,
+      model: row.embedding_model,
+      k: k + 1,
+      grain: 'symbol',
+    });
+  }
+  if (hits.length === 0) {
+    if (hnsw) {
+      hits = hnsw.query(queryVec, k + 1, row.embedding_model);
+    } else if (vecLoaded) {
+      hits = findSimilarViaVec({
         db,
         vecLoaded: true,
         queryVec,
         model: row.embedding_model,
         k: k + 1, // +1 to account for self-match
       });
+    }
+  }
 
   const srcUnit = unitByNode.get(row.node_id);
   const edges: SimilarEdge[] = [];
@@ -214,8 +242,8 @@ function writeSimilarEdgesAtomically(
  *   3. Filter out self and below-threshold matches
  *   4. Write edges with similarity score in metadata
  *
- * Returns idempotency-safe result counts. If vec extension is not loaded,
- * returns {written: 0, processed: 0} silently (no error).
+ * Returns idempotency-safe result counts. SQLite can use HNSW or
+ * sqlite-vec. PostgreSQL can use pgvector when configured, then HNSW.
  */
 export async function buildSimilarToEdges(
   cg: Cartograph,
@@ -228,12 +256,14 @@ export async function buildSimilarToEdges(
   const db = dbConn.getDb();
   const queries = cg.queries;
 
-  if (!dbConn.hasVecExtension()) {
-    return { written: 0, processed: 0, reason: 'vec extension not loaded' };
-  }
-
+  const vecLoaded = dbConn.hasVecExtension();
+  const pgvectorAvailable = isPgvectorAvailable(db);
   const rows = fetchEmbeddingRows(db);
+  if (rows.length === 0) return { written: 0, processed: 0 };
   const hnswByDim = await buildHnswByDim(rows, cg);
+  if (!pgvectorAvailable && !vecLoaded && hnswByDim.size === 0) {
+    return { written: 0, processed: 0, reason: 'pgvector unavailable, HNSW unavailable, and sqlite-vec not loaded' };
+  }
 
   // Precompute one L2-normalised vector per node so edge scores are an
   // exact cosine similarity, independent of the KNN backend's distance
@@ -248,7 +278,7 @@ export async function buildSimilarToEdges(
 
   const edges: SimilarEdge[] = [];
   for (const row of rows) {
-    edges.push(...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode }));
+    edges.push(...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode, vecLoaded, pgvectorAvailable }));
   }
 
   writeSimilarEdgesAtomically(db, queries, edges);

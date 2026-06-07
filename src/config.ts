@@ -357,6 +357,21 @@ const layerExceptionSchema = z
   })
   .loose();
 
+const databaseConfigSchema = z
+  .object({
+    provider: z.enum(['sqlite', 'postgres']).optional(),
+    url: z.string().optional(),
+    schema: z.string().optional(),
+    pgvector: z.enum(['auto', 'off', 'require']).optional(),
+    maxConnections: z.number().int().positive().optional(),
+    idleTimeoutSeconds: z.number().int().nonnegative().optional(),
+    maxLifetimeSeconds: z.number().int().nonnegative().optional(),
+    connectionTimeoutSeconds: z.number().int().positive().optional(),
+    queryTimeoutMs: z.number().int().positive().optional(),
+    ssl: z.boolean().optional(),
+  })
+  .loose();
+
 /**
  * Zod v4 schema for a fully-merged `CartographConfig`.
  *
@@ -390,6 +405,7 @@ const CartographConfigSchema = z
     maxFileSize: z.number(),
     extractDocstrings: z.boolean(),
     trackCallSites: z.boolean(),
+    database: databaseConfigSchema.optional(),
 
     indexSubmodules: z.boolean().optional(),
     enableCoChange: z.boolean().optional(),

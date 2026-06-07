@@ -155,6 +155,38 @@ export interface CartographConfig {
   trackCallSites: boolean;
 
   /**
+   * Storage backend. SQLite remains the default local database. Set
+   * `provider: 'postgres'` plus `url` to store the index in PostgreSQL
+   * instead.
+   */
+  database?: {
+    provider?: 'sqlite' | 'postgres';
+    /** PostgreSQL connection URL, e.g. postgres://user:pass@localhost:5432/cartograph. */
+    url?: string;
+    /** Optional PostgreSQL schema. Defaults to public. */
+    schema?: string;
+    /**
+     * Optional PostgreSQL pgvector acceleration mode. `auto` tries to
+     * enable/use pgvector when the extension is available, `off`
+     * leaves embeddings as BYTEA/HNSW only, and `require` fails
+     * initialization when pgvector is unavailable.
+     */
+    pgvector?: 'auto' | 'off' | 'require';
+    /** PostgreSQL pool cap. Defaults to 1 because Cartograph serializes storage calls through one worker. */
+    maxConnections?: number;
+    /** Close idle PostgreSQL connections after this many seconds. Bun default is no idle timeout. */
+    idleTimeoutSeconds?: number;
+    /** Recycle PostgreSQL connections after this many seconds. Bun default is no maximum lifetime. */
+    maxLifetimeSeconds?: number;
+    /** PostgreSQL connection-establishment timeout in seconds. Defaults to 30. */
+    connectionTimeoutSeconds?: number;
+    /** Adapter wait timeout and PostgreSQL statement_timeout in milliseconds. Defaults to 120000. */
+    queryTimeoutMs?: number;
+    /** Force TLS on/off. Prefer URL `sslmode=` for certificate-verification modes. */
+    ssl?: boolean;
+  };
+
+  /**
    * Whether to recurse into git submodules during indexing and sync.
    * Default: true.
    */

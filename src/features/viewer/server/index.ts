@@ -9,6 +9,7 @@ import * as fsp from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { DatabaseConnection, getDatabasePath } from '../../../db/index.js';
 import { QueryBuilder } from '../../../db/queries.js';
+import { loadConfig } from '../../../config.js';
 import { GraphTraverser } from '../../../graph/traversal.js';
 import { logDebug, errMsg } from '../../../errors.js';
 import { loadIndexHtml, loadStaticAssets } from './assets.js';
@@ -54,14 +55,18 @@ function makeViewerClose(server: http.Server, ctx: RequestContext, conn: Databas
 
 export async function startViewerServer(projectPath: string, opts: ViewerOptions = {}): Promise<ViewerHandle> {
   const dbPath = getDatabasePath(projectPath);
-  const dbExists = await fsp
-    .access(dbPath)
-    .then(() => true)
-    .catch(() => false);
+  const config = loadConfig(projectPath);
+  const usesPostgres = config.database?.provider === 'postgres';
+  const dbExists =
+    usesPostgres ||
+    (await fsp
+      .access(dbPath)
+      .then(() => true)
+      .catch(() => false));
   if (!dbExists) {
     throw new Error(`No cartograph DB at ${dbPath} — run \`cartograph init\` and \`cartograph index\` first.`);
   }
-  const conn = DatabaseConnection.open(dbPath);
+  const conn = DatabaseConnection.open(dbPath, { database: config.database });
   const queries = new QueryBuilder(conn.getDb());
   const traverser = new GraphTraverser(queries);
   const ctx: RequestContext = {

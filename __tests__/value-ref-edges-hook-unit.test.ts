@@ -79,7 +79,12 @@ function tempProject(): string {
 }
 
 function ctx(projectRoot: string): IndexHookContext {
-  return { projectRoot, queries: {}, config: {} } as IndexHookContext;
+  return {
+    projectRoot,
+    queries: {},
+    config: {},
+    db: { getBackend: () => 'bun-sqlite' },
+  } as IndexHookContext;
 }
 
 beforeEach(() => {

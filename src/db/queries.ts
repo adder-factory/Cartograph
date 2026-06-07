@@ -7,6 +7,7 @@
 import { z } from 'zod';
 import type { SqliteDatabase } from './sqlite-adapter.js';
 import { clearVecTables } from './vec-helpers.js';
+import { clearPgvectorTables } from './pgvector-helpers.js';
 import { bindingsFromObject, insertSqlParts, mapRow, updateSqlSets, type Schema } from './row-mapper.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 import type { UnresolvedReference } from '../extraction/types.js';
@@ -610,6 +611,46 @@ export class QueryBuilder {
     this.vecLoaded = vecLoaded;
   }
 
+  private nodeInsertParams(node: Node, action: 'insert' | 'update'): NodeInsertParams | null {
+    if (
+      node.id == null ||
+      node.id === '' ||
+      node.kind == null ||
+      node.name == null ||
+      node.name === '' ||
+      node.filePath == null ||
+      node.filePath === '' ||
+      node.language == null
+    ) {
+      if (action === 'update') {
+        logWarn('Skipping node update with missing required fields', { id: node.id });
+      } else {
+        logWarn('Skipping node with missing required fields', {
+          id: node.id,
+          kind: node.kind,
+          name: node.name,
+          filePath: node.filePath,
+          language: node.language,
+        });
+      }
+      return null;
+    }
+
+    return {
+      ...bindingsFromObject(node, NODE_SCHEMA),
+      // Defaults the bindings helper can't supply (it uses the value
+      // as-is): qualified_name falls back to name, updated_at to now,
+      // name_subwords is computed, and body_hash falls back to ''
+      // (matches the DB-side `body_hash TEXT NOT NULL DEFAULT ''` from
+      // migration 048 — `Node.bodyHash` is optional, so when callers omit
+      // it `bindingsFromObject` returns null and the column would reject).
+      qualifiedName: node.qualifiedName ?? node.name,
+      updatedAt: node.updatedAt ?? Date.now(),
+      nameSubwords: buildNameSubwords(node.name),
+      bodyHash: node.bodyHash ?? '',
+    } as NodeInsertParams;
+  }
+
   // ===========================================================================
   // Node Operations
   // ===========================================================================
@@ -626,25 +667,8 @@ export class QueryBuilder {
     // LRU eviction sweep closed. `kind` and `language` are closed
     // string-literal unions (NodeKind / Language) with no empty
     // member, so a null/undefined check is sufficient for them.
-    if (
-      node.id == null ||
-      node.id === '' ||
-      node.kind == null ||
-      node.name == null ||
-      node.name === '' ||
-      node.filePath == null ||
-      node.filePath === '' ||
-      node.language == null
-    ) {
-      logWarn('Skipping node with missing required fields', {
-        id: node.id,
-        kind: node.kind,
-        name: node.name,
-        filePath: node.filePath,
-        language: node.language,
-      });
-      return;
-    }
+    const params = this.nodeInsertParams(node, 'insert');
+    if (params === null) return;
 
     // INSERT OR REPLACE may overwrite a node we have cached. Drop the
     // stale entry so the next getNodeById sees the new row, not the old
@@ -654,29 +678,25 @@ export class QueryBuilder {
     this.nodeCache.namesList = null;
 
     this.queries.insertNode ??= insertNodeQuery(this.db);
-    this.queries.insertNode.run({
-      ...bindingsFromObject(node, NODE_SCHEMA),
-      // Defaults the bindings helper can't supply (it uses the value
-      // as-is): qualified_name falls back to name, updated_at to now,
-      // name_subwords is computed, and body_hash falls back to ''
-      // (matches the DB-side `body_hash TEXT NOT NULL DEFAULT ''` from
-      // migration 048 — `Node.bodyHash` is optional, so when callers omit
-      // it `bindingsFromObject` returns null and the column would reject).
-      qualifiedName: node.qualifiedName ?? node.name,
-      updatedAt: node.updatedAt ?? Date.now(),
-      nameSubwords: buildNameSubwords(node.name),
-      bodyHash: node.bodyHash ?? '',
-    } as NodeInsertParams);
+    this.queries.insertNode.run(params);
   }
 
   /**
    * Insert multiple nodes in a transaction
    */
   insertNodes(nodes: Node[]): void {
+    const paramsList: NodeInsertParams[] = [];
+    for (const node of nodes) {
+      const params = this.nodeInsertParams(node, 'insert');
+      if (params === null) continue;
+      this.nodeCache.delete(node.id);
+      this.nodeCache.namesList = null;
+      paramsList.push(params);
+    }
+    if (paramsList.length === 0) return;
+    const query = (this.queries.insertNode ??= insertNodeQuery(this.db));
     this.db.transaction(() => {
-      for (const node of nodes) {
-        this.insertNode(node);
-      }
+      query.runBatch(paramsList);
     })();
   }
 
@@ -690,28 +710,11 @@ export class QueryBuilder {
 
     // Validate required fields — same explicit-null/empty pattern as
     // insertNode so an empty-string identifier doesn't silently drop.
-    if (
-      node.id == null ||
-      node.id === '' ||
-      node.kind == null ||
-      node.name == null ||
-      node.name === '' ||
-      node.filePath == null ||
-      node.filePath === '' ||
-      node.language == null
-    ) {
-      logWarn('Skipping node update with missing required fields', { id: node.id });
-      return;
-    }
+    const params = this.nodeInsertParams(node, 'update');
+    if (params === null) return;
 
     this.queries.updateNode ??= updateNodeQuery(this.db);
-    this.queries.updateNode.run({
-      ...bindingsFromObject(node, NODE_SCHEMA),
-      qualifiedName: node.qualifiedName ?? node.name,
-      updatedAt: node.updatedAt ?? Date.now(),
-      nameSubwords: buildNameSubwords(node.name),
-      bodyHash: node.bodyHash ?? '',
-    } as NodeInsertParams);
+    this.queries.updateNode.run(params);
   }
 
   /**
@@ -924,6 +927,7 @@ export function clearAll(qb: QueryBuilder): void {
     qb.db.exec('DELETE FROM summary_store');
     qb.db.exec('DELETE FROM directory_summaries');
     clearVecTables(qb.db, qb.vecLoaded);
+    clearPgvectorTables(qb.db);
   })();
 }
 

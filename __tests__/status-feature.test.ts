@@ -64,6 +64,15 @@ describe('status feature runtime', () => {
     expect(out).toContain('hotspots:2');
   });
 
+  it('prints PostgreSQL backend status without sqlite-vec remediation', () => {
+    const printer = createTestStatusPrinter();
+    const out = stripAnsi(captureOutput(() => printer.printStatusIndexStats(fakeStats(), fakeCg('postgres'), false)));
+
+    expect(out).toContain('Backend:   postgres');
+    expect(out).toContain('PostgreSQL storage active');
+    expect(out).not.toContain('sqlite-vec did not load');
+  });
+
   it('normalizes rollup options and renders no-LLM status without provider work', async () => {
     const verboseRollups = await buildStatusRollupConfig({
       verbose: true,
@@ -173,11 +182,11 @@ function fakeStats() {
   };
 }
 
-function fakeCg() {
+function fakeCg(backend = 'bun-sqlite') {
   return {
     db: {
-      getBackend: () => 'bun:sqlite',
-      hasVecExtension: () => true,
+      getBackend: () => backend,
+      hasVecExtension: () => backend !== 'postgres',
     },
     queries: {},
   };

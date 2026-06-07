@@ -136,7 +136,7 @@ process.on('message', async (msg: RunHooksMessage) => {
     // `autoMigrate: false` — see the file header. A schema-behind DB
     // throws here; the catch surfaces it as a phase error and the next
     // sync respawns the child rather than silently migrating.
-    db = DatabaseConnection.open(msg.dbPath);
+    db = DatabaseConnection.open(msg.dbPath, { database: msg.config.database });
     const queries = new QueryBuilder(db.getDb(), db.hasVecExtension());
     const ctx: IndexHookContext = {
       projectRoot: msg.projectRoot,

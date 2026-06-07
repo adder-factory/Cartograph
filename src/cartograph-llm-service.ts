@@ -793,10 +793,11 @@ function mergeMultiGrainHits(
 /**
  * Top-K cosine semantic search shared between `llmFindImplementations`,
  * `llmFindSimilar`, and `searchHybrid`. Routing order:
- *   1. HNSW (when an up-to-date on-disk index for this dim exists)
+ *   1. pgvector on PostgreSQL when the optional extension is available.
+ *   2. HNSW (when an up-to-date on-disk index for this dim exists)
  *      with symbol-first / file-fallback grain merging.
- *   2. vec0 brute force (when sqlite-vec is loaded).
- *   3. in-memory `EmbeddingCache` brute-force scan.
+ *   3. vec0 brute force (when sqlite-vec is loaded).
+ *   4. in-memory `EmbeddingCache` brute-force scan.
  *
  * The HNSW path over-fetches by 3x to give the grain merge enough
  * material to pick from; the cap at 100 keeps the SQL kind-lookup
@@ -815,27 +816,76 @@ const OVERFETCH_CAP = 100;
 
 export async function llmSemanticTopK(args: SemanticTopKArgs): Promise<Array<{ nodeId: string; score: number }>> {
   const { svc, queryVec, model, k } = args;
-  if (svc.cg.db.hasVecExtension()) {
-    const hnsw = await tryLoadHnswForDim(svc, queryVec.length);
-    if (hnsw) {
-      const overK = Math.min(Math.max(k * OVERFETCH_MULTIPLIER, k + OVERFETCH_PAD), OVERFETCH_CAP);
-      const rawHits = hnsw.query(queryVec, overK, model);
-      if (rawHits.length > 0) {
-        const merged = mergeMultiGrainHits(svc, rawHits, k);
-        if (merged.length > 0) return merged;
-      }
-    }
-    const { findSimilarViaVec } = await import('./db/vec-helpers.js');
-    const hits = findSimilarViaVec({ db: svc.cg.db.getDb(), vecLoaded: true, queryVec, model, k });
-    if (hits.length > 0) {
-      return hits.map((h) => ({ nodeId: h.nodeId, score: 1 - h.distance }));
-    }
-  }
+  const pgvector = await tryPgvectorSemanticTopK(args);
+  if (pgvector.length > 0) return pgvector;
+
+  const hnsw = await tryHnswSemanticTopK(args);
+  if (hnsw.length > 0) return hnsw;
+
+  const vec = await tryVecSemanticTopK(args);
+  if (vec.length > 0) return vec;
 
   const cached = svc.embed.embeddingCache.get(svc.embed.embeddingFetcher, model);
   if (cached.ids.length === 0) return [];
   const { topKByCosineMatrix } = await import('./llm/embeddings.js');
   return topKByCosineMatrix({ query: queryVec, matrix: cached.matrix, ids: cached.ids, dim: cached.dim, k });
+}
+
+async function tryPgvectorSemanticTopK({
+  svc,
+  queryVec,
+  model,
+  k,
+}: SemanticTopKArgs): Promise<Array<{ nodeId: string; score: number }>> {
+  if (!usesPostgresBackend(svc)) return [];
+  const { findSimilarViaPgvector } = await import('./db/pgvector-helpers.js');
+  const rawHits = findSimilarViaPgvector({
+    db: svc.cg.db.getDb(),
+    queryVec,
+    model,
+    k: semanticOverfetchK(k),
+    grain: 'all',
+  });
+  return mergeRawSemanticHits(svc, rawHits, k);
+}
+
+async function tryHnswSemanticTopK({
+  svc,
+  queryVec,
+  model,
+  k,
+}: SemanticTopKArgs): Promise<Array<{ nodeId: string; score: number }>> {
+  const hnsw = await tryLoadHnswForDim(svc, queryVec.length);
+  if (!hnsw) return [];
+  return mergeRawSemanticHits(svc, hnsw.query(queryVec, semanticOverfetchK(k), model), k);
+}
+
+async function tryVecSemanticTopK({
+  svc,
+  queryVec,
+  model,
+  k,
+}: SemanticTopKArgs): Promise<Array<{ nodeId: string; score: number }>> {
+  if (!svc.cg.db.hasVecExtension()) return [];
+  const { findSimilarViaVec } = await import('./db/vec-helpers.js');
+  const hits = findSimilarViaVec({ db: svc.cg.db.getDb(), vecLoaded: true, queryVec, model, k });
+  return hits.map((h) => ({ nodeId: h.nodeId, score: 1 - h.distance }));
+}
+
+function mergeRawSemanticHits(
+  svc: CartographLlmService,
+  rawHits: Array<{ nodeId: string; distance: number }>,
+  k: number,
+): Array<{ nodeId: string; score: number }> {
+  return rawHits.length === 0 ? [] : mergeMultiGrainHits(svc, rawHits, k);
+}
+
+function semanticOverfetchK(k: number): number {
+  return Math.min(Math.max(k * OVERFETCH_MULTIPLIER, k + OVERFETCH_PAD), OVERFETCH_CAP);
+}
+
+function usesPostgresBackend(svc: CartographLlmService): boolean {
+  return typeof svc.cg.db.getBackend === 'function' && svc.cg.db.getBackend() === 'postgres';
 }
 
 /**

@@ -45,6 +45,18 @@ These are the current owner modules future sessions should preserve:
   `src/context/types.ts`.
 - Extraction contracts live in `src/extraction/types.ts`.
 - Database contracts live in `src/db/types.ts`.
+- Storage provider selection is owned by `src/db/database-config.ts` and
+  `DatabaseConnection` in `src/db/index.ts`. SQLite remains the default;
+  PostgreSQL support should enter through the same `SqliteDatabase`-shaped
+  adapter boundary instead of branching in feature callers.
+- PostgreSQL storage is fresh-schema bootstrap only for now. Do not route it
+  through SQLite's forward migration chain; use `admin storage-migrate` for
+  SQLite-to-PostgreSQL moves and require a fresh/nonexistent target schema.
+- PostgreSQL-specific acceleration belongs at the storage/query boundary:
+  schema-postgres indexes, pgvector mirror/query helpers, the PostgreSQL
+  adapter/worker translation layer, or query helpers that already branch on
+  `db.dialect`. Do not leak backend checks into extraction, MCP tools, or
+  feature runtimes unless the feature itself is storage administration.
 - Search contracts live in `src/search/types.ts`.
 - Files feature filtering, rollup, and render runtime helpers live in
   `src/features/files/runtime.ts`; MCP and CLI adapters consume that feature

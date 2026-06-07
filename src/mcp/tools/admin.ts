@@ -30,6 +30,7 @@ import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
 import { LLM_CONCURRENCY_BOUNDS, parseConcurrency } from '../../llm/concurrency.js';
+import { databaseConfigFromOptionInput, resolveDatabaseConfig } from '../../db/database-config.js';
 import {
   appendCloudChatAvailability,
   appendDetectedBackends,
@@ -53,7 +54,11 @@ async function handleInit(_ctx: ToolCtx, args: Record<string, unknown>): Promise
     // tools/admin.ts → src/index.ts → src/mcp/index.ts → tools.ts forms a
     // module-load cycle. Loading Cartograph lazily breaks the cycle.
     const { default: Cartograph } = await import('../../index.js');
-    const cg = await Cartograph.init(projectPath, { index: false });
+    const database = databaseConfigFromOptionInput(args);
+    const cg = await Cartograph.init(projectPath, {
+      index: false,
+      ...(database ? { config: { database } } : {}),
+    });
     cg.close();
     return ok(
       textResult(
@@ -413,6 +418,46 @@ async function handleMigrate(ctx: ToolCtx, args: Record<string, unknown>): Promi
     );
   }
   return ok(textResult(lines.join('\n')));
+}
+
+async function handleStorageMigrate(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
+  const projectPath = args['projectPath'];
+  if (typeof projectPath !== 'string' || !projectPath) {
+    return err('action=storage-migrate: `projectPath` must be a non-empty absolute project path.');
+  }
+  try {
+    const databaseInput = databaseConfigFromOptionInput({ ...args, databaseProvider: 'postgres' });
+    if (!databaseInput) return err('action=storage-migrate: PostgreSQL database URL is required.');
+    const database = resolveDatabaseConfig(databaseInput);
+    const pathMod = await import('node:path');
+    ctx.closeProjectsMatching(pathMod.resolve(projectPath));
+    const { migrateSqliteProjectToPostgres, storageMigrationSuccessMessage } = await import(
+      '../../features/admin-storage-migrate/runtime.js'
+    );
+    const result = await migrateSqliteProjectToPostgres({
+      projectPath,
+      database,
+      force: args['force'] === true,
+    });
+    if (!result.ok) {
+      const remediation = result.error.remediation ? ` ${result.error.remediation}` : '';
+      return err(`${result.error.message}${remediation}`);
+    }
+    ctx.evictCachedProject(projectPath);
+    return ok(
+      textResult(
+        [
+          '## Storage Migrated',
+          '',
+          `- ${storageMigrationSuccessMessage(result.summary)}`,
+          `- Updated config: \`${result.summary.configPath}\``,
+          '- Restart any MCP server still attached to the old SQLite database.',
+        ].join('\n'),
+      ),
+    );
+  } catch (error_) {
+    return err(`storage-migrate failed: ${errMsg(error_)}`);
+  }
 }
 
 async function handleBuildSimilarityEdges(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
@@ -813,6 +858,7 @@ const ADMIN_ACTIONS: Record<string, AdminAction> = {
   index: handleIndex,
   'embed-only': handleEmbedOnly,
   migrate: handleMigrate,
+  'storage-migrate': handleStorageMigrate,
   'build-similarity-edges': handleBuildSimilarityEdges,
   'prune-store': handlePruneStore,
   'scip-export': handleScipExport,
@@ -848,9 +894,55 @@ const adminSchema = z.object({
     // shape `z.enum` requires. The dispatch table is the sole source.
     .enum(ADMIN_ACTION_NAMES as [string, ...string[]])
     .describe(
-      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
+      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move SQLite storage to PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
     ),
   path: z.string().optional().describe('(action=init / action=uninit) Absolute path to the project directory.'),
+  databaseProvider: z
+    .string()
+    .optional()
+    .describe(
+      '(action=init / storage-migrate) Storage backend: `sqlite` (default) or `postgres`. `postgresql` is accepted as an alias.',
+    ),
+  databaseUrl: z
+    .string()
+    .optional()
+    .describe(
+      '(action=init / storage-migrate) PostgreSQL connection URL. Required for `databaseProvider: "postgres"` unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set on the server.',
+    ),
+  databaseSchema: z
+    .string()
+    .optional()
+    .describe('(action=init / storage-migrate) PostgreSQL schema name. Defaults to `public`.'),
+  databasePgvector: z
+    .enum(['auto', 'off', 'require'])
+    .optional()
+    .describe(
+      '(action=init / storage-migrate) PostgreSQL pgvector mode: `auto` opportunistically enables native vector search, `off` disables it, `require` fails when unavailable.',
+    ),
+  databaseMaxConnections: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('(action=init / storage-migrate) PostgreSQL pool cap. Defaults to 1.'),
+  databaseQueryTimeoutMs: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('(action=init / storage-migrate) PostgreSQL query timeout in milliseconds. Defaults to 120000.'),
+  databaseConnectionTimeoutSeconds: z
+    .number()
+    .int()
+    .positive()
+    .optional()
+    .describe('(action=init / storage-migrate) PostgreSQL connection timeout in seconds. Defaults to 30.'),
+  databaseSsl: z
+    .boolean()
+    .optional()
+    .describe(
+      '(action=init / storage-migrate) Force TLS for PostgreSQL connections. Prefer URL sslmode= for verification modes.',
+    ),
   confirm: z
     .boolean()
     .optional()
@@ -859,7 +951,7 @@ const adminSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      '(action=index) Clear structural data (nodes, edges, refs) before re-indexing; LLM caches survive via content-hash fallback. Default false.',
+      '(action=index) Clear structural data (nodes, edges, refs) before re-indexing; LLM caches survive via content-hash fallback. (action=storage-migrate) Drop the target PostgreSQL schema before copying. Default false.',
     ),
   clearParseCache: z
     .boolean()

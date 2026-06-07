@@ -11,7 +11,7 @@ const REMEDIATION_ACTION_ICON: Record<RemediationStep['action'], string> = {
 const OVERALL_STATUS_BLURB: Record<DoctorResult['overallStatus'], string> = {
   ok: '_All checks passed. cartograph is ready to use._',
   warn: '_Doctor found non-blocking gaps. The checks above suggest next steps._',
-  fail: '_Doctor found blocking gaps. Fix the `✗` items above before using LLM-backed features._',
+  fail: '_Doctor found blocking gaps. Fix the `✗` items above before using Cartograph._',
 };
 
 function overallStatusBlurb(result: DoctorResult): string {

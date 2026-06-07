@@ -21,14 +21,18 @@ export function getCartographDir(projectRoot: string): string {
 
 /**
  * Check if a project has been initialized with Cartograph
- * Requires both .cartograph/ directory AND cartograph.db to exist
+ * Requires `.cartograph/` plus either SQLite storage on disk or a
+ * PostgreSQL sentinel on disk. A hand-authored PostgreSQL config alone
+ * is not enough: `admin init` must still be able to bootstrap the
+ * configured schema.
  */
 export function isInitialized(projectRoot: string): boolean {
   const cartographDir = getCartographDir(projectRoot);
   if (!fs.existsSync(cartographDir) || !fs.statSync(cartographDir).isDirectory()) {
     return false;
   }
-  // Must have cartograph.db, not just .cartograph folder
+  // SQLite projects use this as the real DB; PostgreSQL projects use it
+  // as a provider sentinel written after successful schema bootstrap.
   const dbPath = path.join(cartographDir, 'cartograph.db');
   return fs.existsSync(dbPath);
 }
@@ -65,14 +69,16 @@ export function findNearestCartographRoot(startPath: string): string | null {
 
 /**
  * Create the .cartograph directory structure
- * Note: Only throws if cartograph.db already exists, not just if .cartograph/ exists.
+ * Note: Only throws if storage already exists, not just if `.cartograph/`
+ * or a hand-authored config file exists. That lets `admin init` recover
+ * partial setup and bootstrap a configured PostgreSQL schema.
  */
 export function createDirectory(projectRoot: string): void {
   const cartographDir = getCartographDir(projectRoot);
   const dbPath = path.join(cartographDir, 'cartograph.db');
 
-  // Only throw if Cartograph is actually initialized (db exists)
-  // .cartograph/ folder alone is fine
+  // Only throw if Cartograph is actually initialized. .cartograph/ and
+  // config.json alone are fine because users often create them by hand.
   if (fs.existsSync(dbPath)) {
     throw new Error(`Cartograph already initialized in ${projectRoot}`);
   }

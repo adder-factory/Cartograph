@@ -143,7 +143,7 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
   // readers). Below `VALUE_REF_WORKER_FILE_THRESHOLD` the in-main
   // path beats the worker-spawn overhead. See
   // `./value-ref-edges-pool.ts` for the G9-shape resilience details.
-  if (shouldUseValueRefWorkers(files.length)) {
+  if (ctx.db.getBackend() === 'bun-sqlite' && shouldUseValueRefWorkers(files.length)) {
     const dbPath = getDatabasePath(ctx.projectRoot);
     const poolResult = await buildValueRefEdgesInWorkers({
       dbPath,

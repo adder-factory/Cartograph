@@ -5,6 +5,37 @@ seed (default) or an existing `.cartograph/`-bearing project via env
 override. All scripts run with `bun bench/<name>.mts` from the repo
 root; no transpile step needed.
 
+## bench/storage-backends.mts
+
+Compares the SQLite default storage backend with the PostgreSQL opt-in
+backend using the same synthetic QueryBuilder workload: schema init,
+file/node/edge writes, then stats/search/range/history reads.
+PostgreSQL node and edge bulk writes use the same optimized batch path
+as production indexing. Use a `pgvector/pgvector:pg16` container when
+you also want to benchmark native vector-search paths; the bench still
+runs against plain PostgreSQL for structural storage timings.
+
+```sh
+bun bench/storage-backends.mts
+CARTOGRAPH_BENCH_POSTGRES_URL=postgres://user:pass@localhost:5432/cartograph \
+  bun bench/storage-backends.mts
+```
+
+### Env overrides
+
+| Var | Default | Effect |
+|---|---|---|
+| `CARTOGRAPH_BENCH_POSTGRES_URL` | _(unset)_ | PostgreSQL connection URL. When unset, the script runs SQLite only. |
+| `BENCH_RUNS` | `3` | Fresh database/schema runs per backend. |
+| `BENCH_FILE_COUNT` | `200` | Synthetic file rows to seed. |
+| `BENCH_NODES_PER_FILE` | `8` | Node rows per synthetic file. |
+| `BENCH_EDGE_FANOUT` | `2` | Candidate outgoing edges per node. |
+| `BENCH_READ_ITERATIONS` | `40` | Repeated read bundle count after writes. |
+
+Use this bench to refresh the README storage table when the PostgreSQL
+adapter, query batching, or schema shape changes. Treat the output as
+machine- and workload-specific, not as a universal database ranking.
+
 ## bench/sync-parallel-hooks.mts
 
 Three sections measured on the same corpus:

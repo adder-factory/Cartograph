@@ -128,6 +128,24 @@ describe('cartograph_discover', () => {
     expect(text).toMatch(/2 cartograph contexts found/);
   });
 
+  it('lists PostgreSQL-configured contexts without trying to read the sentinel as SQLite', async () => {
+    const pgProject = path.join(monorepo, 'services', 'pg');
+    fs.mkdirSync(path.join(pgProject, '.cartograph'), { recursive: true });
+    fs.writeFileSync(
+      path.join(pgProject, '.cartograph', 'config.json'),
+      JSON.stringify({ database: { provider: 'postgres', url: 'postgres://localhost/cartograph' } }, null, 2),
+    );
+    fs.writeFileSync(path.join(pgProject, '.cartograph', 'cartograph.db'), 'postgres provider sentinel\n');
+
+    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toMatch(/3 cartograph contexts found/);
+    expect(text).toContain(pgProject);
+    expect(text).toContain('PostgreSQL storage; discover does not open external database connections');
+    expect(text).not.toContain('file is not a database');
+  });
+
   it('returns a helpful empty message when no contexts are under the path', async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-discover-empty-'));
     try {

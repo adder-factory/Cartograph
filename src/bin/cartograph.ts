@@ -33,9 +33,9 @@
  * error handling, explicit command registration, and `program.parse()`.
  */
 
-// FIRST import — a Node-version preflight that must run before any
-// import below pulls in the db layer's `node:sqlite` dependency. See
-// version-check.ts. On Node < 22.5 it prints a clear message + exits.
+// FIRST import — a runtime preflight that must run before any import
+// below pulls in the Bun-only default storage adapter. See
+// version-check.ts.
 import './version-check.js';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';

@@ -36,6 +36,20 @@ jobs:
   check:
     name: portability + typecheck + lint + format + mock hygiene + leaks + biomarkers
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: cartograph
+          POSTGRES_PASSWORD: cartograph
+          POSTGRES_DB: cartograph
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cartograph -d cartograph"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     # Bumped from 15 → 20: the leak canary adds a serial set of paired
     # bun:test runs, and the biomarker gate adds one structural index of the
     # whole repo (serial mode, ~tens of seconds on a 2-core runner).
@@ -67,6 +81,11 @@ jobs:
 
       - name: Test mock hygiene
         run: npm run test:mock-hygiene
+
+      - name: PostgreSQL storage smoke
+        env:
+          CARTOGRAPH_TEST_POSTGRES_URL: postgres://cartograph:cartograph@localhost:5432/cartograph
+        run: npm run test:postgres
 
       - name: Module leak canaries
         run: npm run test:leaks
