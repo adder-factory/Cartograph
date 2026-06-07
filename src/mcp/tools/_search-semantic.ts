@@ -22,7 +22,8 @@ import { textResult, truncateOutput } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { findSymbol, symbolNotFound, withDisambiguationBanner } from './symbol-resolver.js';
 import type { ToolCtx } from './types.js';
-import type { Node, SearchResult } from '../../types.js';
+import type { SearchResult } from '../../search/types.js';
+import type { Node } from '../../types.js';
 import { llmFindImplementations, llmFindSimilar } from '../../cartograph-llm-service.js';
 import { renderMarkdownCardList, type MarkdownCardListSpec } from './_result-spec.js';
 

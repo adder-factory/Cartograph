@@ -10,7 +10,8 @@
  * language filters, all the empty-result probe diagnostics.
  */
 import type { ToolResult } from '../tool-types.js';
-import type { Language, Node, NodeKind, SearchResult } from '../../types.js';
+import type { SearchResult } from '../../search/types.js';
+import type { Language, Node, NodeKind } from '../../types.js';
 import { clamp, compact, isTestPath, numArg } from '../../utils.js';
 import {
   applyDeltaSince,

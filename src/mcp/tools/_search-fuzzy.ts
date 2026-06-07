@@ -6,7 +6,8 @@
  * `search-fuzzy.ts` so eval baseline is unchanged.
  */
 
-import type { NodeKind, SearchResult } from '../../types.js';
+import type { SearchResult } from '../../search/types.js';
+import type { NodeKind } from '../../types.js';
 import { clamp, compact, numArg } from '../../utils.js';
 import { textResult, truncateOutput, validateStringOutcome } from './shared.js';
 import { type ToolOutcome, ok } from './_outcome.js';

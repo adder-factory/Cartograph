@@ -9,16 +9,8 @@ import type { SqliteDatabase } from './sqlite-adapter.js';
 import { clearVecTables } from './vec-helpers.js';
 import { bindingsFromObject, insertSqlParts, mapRow, updateSqlSets, type Schema } from './row-mapper.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
-import type {
-  Node,
-  Edge,
-  FileRecord,
-  UnresolvedReference,
-  NodeKind,
-  EdgeKind,
-  Language,
-  GraphStats,
-} from '../types.js';
+import type { Node, Edge, FileRecord, UnresolvedReference, NodeKind, EdgeKind, Language } from '../types.js';
+import type { GraphStats } from './types.js';
 import { buildNameSubwords } from '../utils.js';
 import { logWarn } from '../errors.js';
 
