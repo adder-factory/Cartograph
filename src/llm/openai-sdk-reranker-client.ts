@@ -99,6 +99,38 @@ interface RerankResponse {
   readonly results?: ReadonlyArray<RerankResultEntry>;
 }
 
+interface RerankAbort {
+  readonly controller: AbortController;
+  readonly timer: ReturnType<typeof setTimeout>;
+}
+
+interface RerankFailureContext {
+  readonly err: unknown;
+  readonly query: string;
+  readonly candidates: string[];
+  readonly opts: { signal?: AbortSignal };
+}
+
+function throwIfRerankAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new Error('rerank aborted');
+}
+
+function createRerankAbort(signal: AbortSignal | undefined, timeoutMs: number): RerankAbort {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  if (signal) signal.addEventListener('abort', () => controller.abort(), { once: true });
+  return { controller, timer };
+}
+
+async function assertRerankResponseOk(res: Response): Promise<void> {
+  if (res.ok) return;
+  const text = await res.text().catch(() => '');
+  throw new LlmEndpointError(
+    `rerank endpoint returned ${res.status}: ${text.slice(0, 200) || res.statusText}`,
+    res.status,
+  );
+}
+
 export class OpenAiSdkRerankerClient {
   private readonly cfg: RerankerProviderConfig;
   private readonly baseUrl: string;
@@ -126,63 +158,56 @@ export class OpenAiSdkRerankerClient {
    */
   async rerank(query: string, candidates: string[], opts: { signal?: AbortSignal } = {}): Promise<number[]> {
     if (candidates.length === 0) return [];
-    if (opts.signal?.aborted) throw new Error('rerank aborted');
+    throwIfRerankAborted(opts.signal);
 
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    // Chain external abort onto our internal controller.
-    if (opts.signal) {
-      if (opts.signal.aborted) {
-        clearTimeout(timer);
-        throw new Error('rerank aborted');
-      }
-      opts.signal.addEventListener('abort', () => controller.abort(), { once: true });
-    }
-
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-    if (this.cfg.apiKey) headers['Authorization'] = `Bearer ${this.cfg.apiKey}`;
-
+    const abort = createRerankAbort(opts.signal, this.timeoutMs);
     try {
-      const res = await fetch(`${this.baseUrl}/v1/rerank`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          model: this.cfg.model,
-          query,
-          documents: candidates,
-        }),
-        signal: controller.signal,
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new LlmEndpointError(
-          `rerank endpoint returned ${res.status}: ${text.slice(0, 200) || res.statusText}`,
-          res.status,
-        );
-      }
-      const body = (await res.json()) as RerankResponse;
-      return scoresFromRerankResponse(body, candidates.length);
+      return await this.fetchRerankScores(query, candidates, abort.controller.signal);
     } catch (err) {
-      if (isContextWindowError(err) || isInputTooLargeError(err)) {
-        return this.retryOversizedRerank(query, candidates, opts, err);
-      }
-      if (err instanceof LlmEndpointError) throw err;
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new Error('rerank aborted');
-      }
-      const msg = err instanceof Error ? err.message : String(err);
-      throw new LlmEndpointError(`rerank endpoint request failed: ${msg}`);
+      return await this.handleRerankFailure({ err, query, candidates, opts });
     } finally {
-      clearTimeout(timer);
+      clearTimeout(abort.timer);
     }
   }
 
-  private async retryOversizedRerank(
+  private async fetchRerankScores(
     query: string,
-    candidates: string[],
-    opts: { signal?: AbortSignal },
-    err: unknown,
+    candidates: readonly string[],
+    signal: AbortSignal,
   ): Promise<number[]> {
+    const res = await fetch(`${this.baseUrl}/v1/rerank`, {
+      method: 'POST',
+      headers: this.requestHeaders(),
+      body: JSON.stringify({
+        model: this.cfg.model,
+        query,
+        documents: candidates,
+      }),
+      signal,
+    });
+    await assertRerankResponseOk(res);
+    const body = (await res.json()) as RerankResponse;
+    return scoresFromRerankResponse(body, candidates.length);
+  }
+
+  private requestHeaders(): Record<string, string> {
+    return {
+      'Content-Type': 'application/json',
+      ...(this.cfg.apiKey ? { Authorization: `Bearer ${this.cfg.apiKey}` } : {}),
+    };
+  }
+
+  private async handleRerankFailure({ err, query, candidates, opts }: RerankFailureContext): Promise<number[]> {
+    if (isContextWindowError(err) || isInputTooLargeError(err)) {
+      return this.retryOversizedRerank({ err, query, candidates, opts });
+    }
+    if (err instanceof LlmEndpointError) throw err;
+    if (err instanceof Error && err.name === 'AbortError') throw new Error('rerank aborted');
+    const msg = err instanceof Error ? err.message : String(err);
+    throw new LlmEndpointError(`rerank endpoint request failed: ${msg}`);
+  }
+
+  private async retryOversizedRerank({ err, query, candidates, opts }: RerankFailureContext): Promise<number[]> {
     if (candidates.length <= 1) {
       logWarn('Reranker: single candidate exceeded backend context/batch limit', {
         error: err instanceof Error ? err.message : String(err),

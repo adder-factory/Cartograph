@@ -25,7 +25,7 @@ export interface StatusRollupConfig {
   appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
 }
 
-export interface StatusStyle {
+interface StatusStyle {
   bold: (text: string) => string;
   cyan: (text: string) => string;
   dim: (text: string) => string;

@@ -196,7 +196,7 @@ export function buildEntityMismatchWarning(entities: string[], answer: string): 
   );
 }
 
-export interface AskOptions {
+interface AskOptions {
   /** Max retrieved candidates to consider (deeper = better recall, slower prompt). */
   retrieveK?: number;
   /** Override the default ask model temperature (default 0.2 — stays grounded). */

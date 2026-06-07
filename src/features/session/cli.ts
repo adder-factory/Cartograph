@@ -11,8 +11,9 @@ import {
   type SessionArgResult,
 } from './runtime.js';
 import type { Command } from 'commander';
+import { runMcpToolFamilyCall } from '../shared/mcp-call.js';
 
-export interface AssignIntArgInput {
+interface AssignIntArgInput {
   args: Record<string, unknown>;
   key: string;
   raw: string | undefined;
@@ -28,17 +29,12 @@ export interface SessionCommandDeps {
   runViaMCP: (toolName: string, args: Record<string, unknown>, projectPath?: string) => Promise<void>;
 }
 
-async function runSessionCall(
+function runSessionCall(
   result: SessionArgResult,
   projectPath: string | undefined,
   deps: SessionCommandDeps,
 ): Promise<void> {
-  if (!result.ok) {
-    deps.error(result.error);
-    process.exitCode = 1;
-    return;
-  }
-  await deps.runViaMCP('cartograph_session', result.args, projectPath);
+  return runMcpToolFamilyCall({ toolName: 'cartograph_session', result, projectPath, deps });
 }
 
 export function registerSessionCommand(deps: SessionCommandDeps): void {
@@ -68,34 +64,48 @@ function registerCreateCommand(deps: SessionCommandDeps): void {
 }
 
 function registerResumeCommand(deps: SessionCommandDeps): void {
-  const { sessionCmd } = deps;
-
-  sessionCmd
-    .command('resume [id]')
-    .description(
+  registerSessionLookupCommand(deps, {
+    command: 'resume [id]',
+    description:
       "Resume a prior session — render a compact summary of its tool calls (mirrors cartograph_session({action:'resume'}))",
-    )
-    .option('-p, --project-path <path>', 'Project path')
-    .option('--id <id>', 'Session id to resume (alternative to the positional id)')
-    .option('-l, --label <label>', 'Session label to resume (alternative to --id)')
-    .action(async (idArg: string | undefined, options: { projectPath?: string; id?: string; label?: string }) => {
-      await runSessionCall(buildResumeSessionArgs(idArg, options), options.projectPath, deps);
-    });
+    idDescription: 'Session id to resume (alternative to the positional id)',
+    labelDescription: 'Session label to resume (alternative to --id)',
+    build: buildResumeSessionArgs,
+  });
 }
 
 function registerAuditCommand(deps: SessionCommandDeps): void {
-  const { sessionCmd } = deps;
-
-  sessionCmd
-    .command('audit [id]')
-    .description(
+  registerSessionLookupCommand(deps, {
+    command: 'audit [id]',
+    description:
       "Audit a prior session's tool-use pattern, repeated calls, and missed close-out steps (mirrors cartograph_session({action:'audit'}))",
-    )
+    idDescription: 'Session id to audit (alternative to the positional id)',
+    labelDescription: 'Session label to audit (alternative to --id)',
+    build: buildAuditSessionArgs,
+  });
+}
+
+interface SessionLookupCommandSpec {
+  command: string;
+  description: string;
+  idDescription: string;
+  labelDescription: string;
+  build: (
+    idArg: string | undefined,
+    options: { projectPath?: string; id?: string; label?: string },
+  ) => SessionArgResult;
+}
+
+function registerSessionLookupCommand(deps: SessionCommandDeps, spec: SessionLookupCommandSpec): void {
+  const { sessionCmd } = deps;
+  sessionCmd
+    .command(spec.command)
+    .description(spec.description)
     .option('-p, --project-path <path>', 'Project path')
-    .option('--id <id>', 'Session id to audit (alternative to the positional id)')
-    .option('-l, --label <label>', 'Session label to audit (alternative to --id)')
+    .option('--id <id>', spec.idDescription)
+    .option('-l, --label <label>', spec.labelDescription)
     .action(async (idArg: string | undefined, options: { projectPath?: string; id?: string; label?: string }) => {
-      await runSessionCall(buildAuditSessionArgs(idArg, options), options.projectPath, deps);
+      await runSessionCall(spec.build(idArg, options), options.projectPath, deps);
     });
 }
 
@@ -131,33 +141,25 @@ function registerDeleteCommand(deps: SessionCommandDeps): void {
 }
 
 function registerMacroSaveCommand(deps: SessionCommandDeps): void {
-  const { sessionCmd } = deps;
-
-  sessionCmd
-    .command('macro_save')
-    .alias('macro-save')
-    .description("Save a named macro recipe of tool steps (mirrors cartograph_session({action:'macro_save'}))")
-    .option('-p, --project-path <path>', 'Project path')
-    .option('-n, --name <name>', 'Macro name')
-    .option('-s, --steps <json>', 'JSON array of {tool, args} steps')
-    .action(async (options: { projectPath?: string; name?: string; steps?: string }) => {
-      await runSessionCall(buildMacroSaveArgs(options), options.projectPath, deps);
-    });
+  registerMacroNamedCommand(deps, {
+    command: 'macro_save',
+    alias: 'macro-save',
+    description: "Save a named macro recipe of tool steps (mirrors cartograph_session({action:'macro_save'}))",
+    extraFlag: '-s, --steps <json>',
+    extraDescription: 'JSON array of {tool, args} steps',
+    build: buildMacroSaveArgs,
+  });
 }
 
 function registerMacroRunCommand(deps: SessionCommandDeps): void {
-  const { sessionCmd } = deps;
-
-  sessionCmd
-    .command('macro_run')
-    .alias('macro-run')
-    .description("Replay a saved macro recipe (mirrors cartograph_session({action:'macro_run'}))")
-    .option('-p, --project-path <path>', 'Project path')
-    .option('-n, --name <name>', 'Macro name to run')
-    .option('-a, --args <json>', 'JSON array of positional substitution values (replaces ${0}, ${1}, … in step args)')
-    .action(async (options: { projectPath?: string; name?: string; args?: string }) => {
-      await runSessionCall(buildMacroRunArgs(options), options.projectPath, deps);
-    });
+  registerMacroNamedCommand(deps, {
+    command: 'macro_run',
+    alias: 'macro-run',
+    description: "Replay a saved macro recipe (mirrors cartograph_session({action:'macro_run'}))",
+    extraFlag: '-a, --args <json>',
+    extraDescription: 'JSON array of positional substitution values (replaces ${0}, ${1}, ... in step args)',
+    build: buildMacroRunArgs,
+  });
 }
 
 function registerMacroListCommand(deps: SessionCommandDeps): void {
@@ -174,15 +176,32 @@ function registerMacroListCommand(deps: SessionCommandDeps): void {
 }
 
 function registerMacroDeleteCommand(deps: SessionCommandDeps): void {
-  const { sessionCmd } = deps;
+  registerMacroNamedCommand(deps, {
+    command: 'macro_delete',
+    alias: 'macro-delete',
+    description: "Delete a saved macro recipe (mirrors cartograph_session({action:'macro_delete'}))",
+    build: buildMacroDeleteArgs,
+  });
+}
 
-  sessionCmd
-    .command('macro_delete')
-    .alias('macro-delete')
-    .description("Delete a saved macro recipe (mirrors cartograph_session({action:'macro_delete'}))")
+interface MacroNamedCommandSpec {
+  command: string;
+  alias: string;
+  description: string;
+  extraFlag?: string;
+  extraDescription?: string;
+  build: (options: { projectPath?: string; name?: string; steps?: string; args?: string }) => SessionArgResult;
+}
+
+function registerMacroNamedCommand(deps: SessionCommandDeps, spec: MacroNamedCommandSpec): void {
+  const command = deps.sessionCmd
+    .command(spec.command)
+    .alias(spec.alias)
+    .description(spec.description)
     .option('-p, --project-path <path>', 'Project path')
-    .option('-n, --name <name>', 'Macro name to delete')
-    .action(async (options: { projectPath?: string; name?: string }) => {
-      await runSessionCall(buildMacroDeleteArgs(options), options.projectPath, deps);
-    });
+    .option('-n, --name <name>', spec.command === 'macro_run' ? 'Macro name to run' : 'Macro name');
+  if (spec.extraFlag && spec.extraDescription) command.option(spec.extraFlag, spec.extraDescription);
+  command.action(async (options: { projectPath?: string; name?: string; steps?: string; args?: string }) => {
+    await runSessionCall(spec.build(options), options.projectPath, deps);
+  });
 }

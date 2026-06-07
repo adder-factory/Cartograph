@@ -7,20 +7,17 @@ import * as path from 'node:path';
  */
 export function resolveAssetPath(...relativeParts: string[]): string {
   const relative = path.join(...relativeParts);
-  const candidates: string[] = [];
-
   const explicitRoot = process.env['CARTOGRAPH_ASSET_ROOT'];
-  if (explicitRoot) candidates.push(path.join(explicitRoot, relative));
-
-  candidates.push(path.join(import.meta.dirname, relative));
-  candidates.push(path.join(import.meta.dirname, '..', relative));
-  candidates.push(path.join(import.meta.dirname, '..', 'node_modules', 'web-tree-sitter', relative));
-
   const execDir = path.dirname(process.execPath);
-  candidates.push(path.join(execDir, '..', 'share', 'cartograph', relative));
-
   const argv0 = process.argv[0] ? path.dirname(process.argv[0]) : '';
-  if (argv0) candidates.push(path.join(argv0, '..', 'share', 'cartograph', relative));
+  const candidates = [
+    ...(explicitRoot ? [path.join(explicitRoot, relative)] : []),
+    path.join(import.meta.dirname, relative),
+    path.join(import.meta.dirname, '..', relative),
+    path.join(import.meta.dirname, '..', 'node_modules', 'web-tree-sitter', relative),
+    path.join(execDir, '..', 'share', 'cartograph', relative),
+    ...(argv0 ? [path.join(argv0, '..', 'share', 'cartograph', relative)] : []),
+  ];
 
   return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0]!;
 }

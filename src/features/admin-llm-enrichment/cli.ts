@@ -38,6 +38,24 @@ interface EnrichmentGraph {
   };
 }
 
+interface EnrichmentCommandOptions {
+  quiet?: boolean;
+  concurrency?: string;
+}
+
+interface OpenedEnrichmentGraphContext {
+  cg: EnrichmentGraph;
+  concurrency: number;
+}
+
+interface RunOpenedEnrichmentGraphArgs {
+  pathArg: string | undefined;
+  options: EnrichmentCommandOptions;
+  deps: AdminLlmEnrichmentCommandDeps;
+  failureVerb: string;
+  action: (ctx: OpenedEnrichmentGraphContext) => Promise<void>;
+}
+
 export interface AdminLlmEnrichmentCommandDeps {
   adminCmd: CommandLike;
   createShimmerProgress: () => { onProgress: any; stop: () => Promise<void> };
@@ -194,24 +212,8 @@ async function runSummarizeCommand(args: {
   }
 }
 
-function registerEmbedCommand(deps: AdminLlmEnrichmentCommandDeps): void {
-  const { adminCmd } = deps;
-  adminCmd
-    .command('embed [path]')
-    .description('Generate embeddings for every indexed symbol (requires embedding provider)')
-    .option('-q, --quiet', 'Suppress output')
-    .option('-c, --concurrency <n>', 'Concurrent embedding requests')
-    .action((pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) =>
-      runEmbedCommand({ pathArg, options, deps }),
-    );
-}
-
-async function runEmbedCommand(args: {
-  pathArg: string | undefined;
-  options: { quiet?: boolean; concurrency?: string };
-  deps: AdminLlmEnrichmentCommandDeps;
-}): Promise<void> {
-  const { pathArg, options, deps } = args;
+async function runOpenedEnrichmentGraph(args: RunOpenedEnrichmentGraphArgs): Promise<void> {
+  const { pathArg, options, deps, failureVerb, action } = args;
   const { error, isInitialized, loadCartograph, resolveProjectPath } = deps;
   const projectPath = resolveProjectPath(pathArg);
   const concurrency = parseConcurrencyOption(options.concurrency, deps);
@@ -223,27 +225,50 @@ async function runEmbedCommand(args: {
       process.exit(1);
     }
     const { default: Cartograph } = await loadCartograph();
-    // Write path (embed): opt in to auto-migration.
     cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-    if (options.quiet) {
-      await cg.llm.embed.embedAll({ concurrency });
-      return;
-    }
-
-    const clack = await deps.loadClack();
-    clack.intro('Embedding indexed symbols');
-    const result = await cg.llm.embed.embedAll({ concurrency });
-    clack.log.success(embedSuccessMessage(result, deps));
-    clack.outro('Done');
+    await action({ cg, concurrency });
   } catch (err) {
     cg?.close();
     cg = undefined;
-    if (!options.quiet) error(`Failed to embed: ${errMsg(err)}`);
+    if (!options.quiet) error(`Failed to ${failureVerb}: ${errMsg(err)}`);
     process.exit(1);
   } finally {
     cg?.close();
   }
+}
+
+function registerEmbedCommand(deps: AdminLlmEnrichmentCommandDeps): void {
+  const { adminCmd } = deps;
+  adminCmd
+    .command('embed [path]')
+    .description('Generate embeddings for every indexed symbol (requires embedding provider)')
+    .option('-q, --quiet', 'Suppress output')
+    .option('-c, --concurrency <n>', 'Concurrent embedding requests')
+    .action((pathArg: string | undefined, options: EnrichmentCommandOptions) =>
+      runEmbedCommand({ pathArg, options, deps }),
+    );
+}
+
+async function runEmbedCommand(args: {
+  pathArg: string | undefined;
+  options: EnrichmentCommandOptions;
+  deps: AdminLlmEnrichmentCommandDeps;
+}): Promise<void> {
+  await runOpenedEnrichmentGraph({
+    ...args,
+    failureVerb: 'embed',
+    action: async ({ cg, concurrency }) => {
+      if (args.options.quiet) {
+        await cg.llm.embed.embedAll({ concurrency });
+        return;
+      }
+      const clack = await args.deps.loadClack();
+      clack.intro('Embedding indexed symbols');
+      const result = await cg.llm.embed.embedAll({ concurrency });
+      clack.log.success(embedSuccessMessage(result, args.deps));
+      clack.outro('Done');
+    },
+  });
 }
 
 function registerClassifyCommand(deps: AdminLlmEnrichmentCommandDeps): void {
@@ -253,47 +278,29 @@ function registerClassifyCommand(deps: AdminLlmEnrichmentCommandDeps): void {
     .description('Assign roles via the LLM (cascade input: summary if present, else docstring; requires config.llm)')
     .option('-q, --quiet', 'Suppress output')
     .option('-c, --concurrency <n>', 'Concurrent LLM requests')
-    .action((pathArg: string | undefined, options: { quiet?: boolean; concurrency?: string }) =>
+    .action((pathArg: string | undefined, options: EnrichmentCommandOptions) =>
       runClassifyCommand({ pathArg, options, deps }),
     );
 }
 
 async function runClassifyCommand(args: {
   pathArg: string | undefined;
-  options: { quiet?: boolean; concurrency?: string };
+  options: EnrichmentCommandOptions;
   deps: AdminLlmEnrichmentCommandDeps;
 }): Promise<void> {
-  const { pathArg, options, deps } = args;
-  const { error, isInitialized, loadCartograph, resolveProjectPath } = deps;
-  const projectPath = resolveProjectPath(pathArg);
-  const concurrency = parseConcurrencyOption(options.concurrency, deps);
-  let cg: EnrichmentGraph | undefined;
-
-  try {
-    if (!isInitialized(projectPath)) {
-      if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
-    }
-    const { default: Cartograph } = await loadCartograph();
-    // Write path (classify): opt in to auto-migration.
-    cg = await Cartograph.open(projectPath, { autoMigrate: true });
-
-    if (options.quiet) {
-      await cg.llm.classifyAll({ concurrency });
-      return;
-    }
-
-    const clack = await deps.loadClack();
-    clack.intro('Classifying symbol roles');
-    const result = await cg.llm.classifyAll({ concurrency });
-    printMessages(clack, classifySuccessMessages(result, deps));
-    clack.outro('Done');
-  } catch (err) {
-    cg?.close();
-    cg = undefined;
-    if (!options.quiet) error(`Failed to classify: ${errMsg(err)}`);
-    process.exit(1);
-  } finally {
-    cg?.close();
-  }
+  await runOpenedEnrichmentGraph({
+    ...args,
+    failureVerb: 'classify',
+    action: async ({ cg, concurrency }) => {
+      if (args.options.quiet) {
+        await cg.llm.classifyAll({ concurrency });
+        return;
+      }
+      const clack = await args.deps.loadClack();
+      clack.intro('Classifying symbol roles');
+      const result = await cg.llm.classifyAll({ concurrency });
+      printMessages(clack, classifySuccessMessages(result, args.deps));
+      clack.outro('Done');
+    },
+  });
 }

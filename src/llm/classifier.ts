@@ -651,7 +651,7 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
   } catch (err) {
     if (ctx.options.signal?.aborted) return;
     if (isContextWindowError(err)) {
-      await classifierRetryOversizedBatch(ctx, batch, start, err);
+      await classifierRetryOversizedBatch({ ctx, batch, start, err });
       return;
     }
     ctx.counters.errors += batch.length;
@@ -685,12 +685,19 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
   }
 }
 
-async function classifierRetryOversizedBatch(
-  ctx: ClassifierRunCtx,
-  batch: Candidate[],
-  start: number,
-  err: unknown,
-): Promise<void> {
+interface ClassifierRetryOversizedBatchArgs {
+  readonly ctx: ClassifierRunCtx;
+  readonly batch: Candidate[];
+  readonly start: number;
+  readonly err: unknown;
+}
+
+async function classifierRetryOversizedBatch({
+  ctx,
+  batch,
+  start,
+  err,
+}: ClassifierRetryOversizedBatchArgs): Promise<void> {
   if (batch.length <= 1) {
     const c = batch[0];
     if (!c) return;

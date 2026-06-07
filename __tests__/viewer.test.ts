@@ -440,6 +440,20 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.edges.some((edge) => edge.kind === 'calls')).toBe(true);
   });
 
+  it('returns callee and combined impact graph modes at /api/impact', async () => {
+    const calleesRes = await fetch(`${handle.url}api/impact?focus=alpha&mode=callees&depth=2&limit=20`);
+    expect(calleesRes.status).toBe(200);
+    const callees = (await calleesRes.json()) as { mode: string; nodes: Array<{ label: string }> };
+    expect(callees.mode).toBe('callees');
+    expect(callees.nodes.map((node) => node.label)).toContain('gamma');
+
+    const bothRes = await fetch(`${handle.url}api/impact?focus=beta&mode=both&depth=1&limit=20`);
+    expect(bothRes.status).toBe(200);
+    const both = (await bothRes.json()) as { mode: string; nodes: Array<{ label: string }> };
+    expect(both.mode).toBe('both');
+    expect(both.nodes.map((node) => node.label)).toEqual(expect.arrayContaining(['alpha', 'beta', 'gamma']));
+  });
+
   it('returns changed files and indexed symbols at /api/compare', async () => {
     const res = await fetch(`${handle.url}api/compare?limit=20`);
     expect(res.status).toBe(200);

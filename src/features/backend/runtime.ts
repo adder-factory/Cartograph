@@ -244,24 +244,25 @@ export async function backendStatus(projectPath: string, options: { bin?: string
 
   const detected = await scanForLlmBackends(specs.map((spec) => spec.endpoint)).catch(() => []);
   const reachableEndpoints = new Set(detected.map((backend) => backend.endpoint));
-  const rows: BackendStatusRow[] = [];
-  for (const spec of specs) {
-    const paths = backendPaths(projectPath, spec);
-    const pidRecord = await readPidFile(paths.pidFilePath);
-    const pidAlive = pidRecord ? isProcessAlive(pidRecord.pid) : false;
-    const endpointReachable = reachableEndpoints.has(spec.endpoint);
-    const modelExists = await pathExists(spec.modelPath);
-    rows.push({
-      spec,
-      pidFilePath: paths.pidFilePath,
-      logPath: paths.logPath,
-      pidRecord,
-      pidAlive,
-      endpointReachable,
-      modelExists,
-      state: backendRuntimeState({ pidAlive, endpointReachable, modelExists, pidRecord }),
-    });
-  }
+  const rows = await Promise.all(
+    specs.map(async (spec): Promise<BackendStatusRow> => {
+      const paths = backendPaths(projectPath, spec);
+      const pidRecord = await readPidFile(paths.pidFilePath);
+      const pidAlive = pidRecord ? isProcessAlive(pidRecord.pid) : false;
+      const endpointReachable = reachableEndpoints.has(spec.endpoint);
+      const modelExists = await pathExists(spec.modelPath);
+      return {
+        spec,
+        pidFilePath: paths.pidFilePath,
+        logPath: paths.logPath,
+        pidRecord,
+        pidAlive,
+        endpointReachable,
+        modelExists,
+        state: backendRuntimeState({ pidAlive, endpointReachable, modelExists, pidRecord }),
+      };
+    }),
+  );
   return { projectPath, stateDir, rows };
 }
 
@@ -509,5 +510,5 @@ async function tailTextFile(filePath: string, maxLines: number): Promise<string>
 
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_./:=+-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return "'" + value.replaceAll("'", String.raw`'\''`) + "'";
 }

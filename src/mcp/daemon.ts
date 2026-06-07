@@ -380,8 +380,8 @@ function readHelloLine(socket: net.Socket): Promise<DaemonHello> {
       }
       const newline = buf.indexOf(0x0a);
       if (newline < 0) return;
-      const line = buf.slice(0, newline).toString('utf-8').trim();
-      const tail = buf.slice(newline + 1);
+      const line = buf.subarray(0, newline).toString('utf-8').trim();
+      const tail = buf.subarray(newline + 1);
       if (tail.length > 0) socket.unshift(tail);
       cleanup();
       try {

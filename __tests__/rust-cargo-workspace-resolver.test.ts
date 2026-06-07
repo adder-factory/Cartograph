@@ -65,4 +65,41 @@ describe('Rust Cargo workspace resolver', () => {
     expect(resolved?.targetNodeId).toBe('module:core');
     expect(resolved?.confidence).toBe(0.85);
   });
+
+  it('parses workspace members and package names without broad regex matching', () => {
+    const ctx = context(
+      ['Cargo.toml', 'crates/exact/Cargo.toml', 'crates/escaped/Cargo.toml'],
+      {
+        'Cargo.toml': '[workspace]\n# comment\nmembers = [\n  "crates/exact",\n  "crates/escaped",\n]\n',
+        'crates/exact/Cargo.toml': '[package]\nversion = "0.1.0"\nname_extra = "ignored"\nname = "exact-crate"\n',
+        'crates/escaped/Cargo.toml': '[package]\nname = "escaped-\\"crate"\n',
+      },
+      [],
+    );
+
+    const crateMap = getCargoWorkspaceCrateMap(ctx);
+    expect(crateMap.get('exact-crate')).toBe('crates/exact');
+    expect(crateMap.get('exact_crate')).toBe('crates/exact');
+    expect(crateMap.get('escaped-\\"crate')).toBe('crates/escaped');
+  });
+
+  it('returns an empty crate map when workspace members are not an array', () => {
+    const ctx = context(['Cargo.toml'], { 'Cargo.toml': '[workspace]\nresolver = "2"\n' }, []);
+
+    expect(getCargoWorkspaceCrateMap(ctx).size).toBe(0);
+  });
+
+  it('skips members with missing or unterminated package names', () => {
+    const ctx = context(
+      ['Cargo.toml', 'crates/missing/Cargo.toml', 'crates/broken/Cargo.toml'],
+      {
+        'Cargo.toml': '[workspace]\nmembers = ["crates/missing", "crates/broken"]\n',
+        'crates/missing/Cargo.toml': '[package]\nversion = "0.1.0"\n',
+        'crates/broken/Cargo.toml': '[package]\nname = "unterminated\n',
+      },
+      [],
+    );
+
+    expect(getCargoWorkspaceCrateMap(ctx).size).toBe(0);
+  });
 });

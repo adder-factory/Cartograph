@@ -5,10 +5,12 @@ export interface LockFileDeps {
   unlinkSync: (filePath: string) => void;
 }
 
-export function removeLockFileIfPresent(
-  lockPath: string,
-  deps: LockFileDeps = { existsSync: fs.existsSync, unlinkSync: fs.unlinkSync },
-): boolean {
+const DEFAULT_LOCK_FILE_DEPS: LockFileDeps = {
+  existsSync: fs.existsSync,
+  unlinkSync: fs.unlinkSync,
+};
+
+export function removeLockFileIfPresent(lockPath: string, deps: LockFileDeps = DEFAULT_LOCK_FILE_DEPS): boolean {
   if (!deps.existsSync(lockPath)) return false;
   deps.unlinkSync(lockPath);
   return true;

@@ -189,10 +189,12 @@ const MODEL_DIRS = ['/models/', '/model/', '/entities/', '/entity/', '/domain/',
 const FUNCTION_KINDS = new Set(['function']);
 const SERVICE_KINDS = new Set(['struct', 'trait']);
 const STRUCT_KINDS = new Set(['struct']);
+const WORKSPACE_CRATE_CONFIDENCE = 0.85;
+const RUST_MODULE_FILE_CONFIDENCE = 0.6;
 
 function resolveModule(name: string, context: ResolutionContext): { targetNodeId: string; confidence: number } | null {
   const workspaceCrate = resolveWorkspaceCrate(name, context);
-  if (workspaceCrate) return { targetNodeId: workspaceCrate, confidence: 0.85 };
+  if (workspaceCrate) return { targetNodeId: workspaceCrate, confidence: WORKSPACE_CRATE_CONFIDENCE };
 
   // Rust modules can be either mod.rs in a directory or name.rs
   const possiblePaths = [`src/${name}.rs`, `src/${name}/mod.rs`];
@@ -202,11 +204,11 @@ function resolveModule(name: string, context: ResolutionContext): { targetNodeId
       const nodes = context.getNodesInFile(modPath);
       const modNode = nodes.find((n) => n.kind === 'module');
       if (modNode) {
-        return { targetNodeId: modNode.id, confidence: 0.6 };
+        return { targetNodeId: modNode.id, confidence: RUST_MODULE_FILE_CONFIDENCE };
       }
       // If no explicit module node, return the first node in the file
       if (nodes.length > 0) {
-        return { targetNodeId: nodes[0]!.id, confidence: 0.6 };
+        return { targetNodeId: nodes[0]!.id, confidence: RUST_MODULE_FILE_CONFIDENCE };
       }
     }
   }

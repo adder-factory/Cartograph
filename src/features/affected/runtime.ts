@@ -144,14 +144,13 @@ export function renderAffectedJson(args: AffectedOutputArgs): string {
 
 export function renderAffectedHuman(args: AffectedOutputArgs): string[] {
   const style = args.style ?? identityStyle;
-  const lines: string[] = [];
-  if (args.derivedFromGit) lines.push(...renderDerivedChangedFiles(args.changedFiles, style));
-  lines.push(...renderAffectedTestList(args.sortedTests, style));
-  if (args.options.includeCommands)
-    lines.push(...renderAffectedVerificationCommands(args.verificationCommands ?? [], style));
-  lines.push(style.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`));
-  lines.push(...renderBarrelWarning(args.barrelsReached, style));
-  return lines;
+  return [
+    ...(args.derivedFromGit ? renderDerivedChangedFiles(args.changedFiles, style) : []),
+    ...renderAffectedTestList(args.sortedTests, style),
+    ...(args.options.includeCommands ? renderAffectedVerificationCommands(args.verificationCommands ?? [], style) : []),
+    style.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`),
+    ...renderBarrelWarning(args.barrelsReached, style),
+  ];
 }
 
 export function renderAffectedVerificationCommands(

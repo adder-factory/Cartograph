@@ -23,7 +23,7 @@ export interface McpLoadMetric {
   estimatedTokens: number;
 }
 
-export interface McpLoadContributor extends McpLoadMetric {
+interface McpLoadContributor extends McpLoadMetric {
   name: string;
   shareOfToolsList: number;
 }

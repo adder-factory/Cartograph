@@ -186,10 +186,15 @@
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
     gap: var(--s-2);
+    width: 100%;
     padding: var(--s-2) var(--s-3);
     cursor: pointer;
+    background: transparent;
+    border: 0;
     color: var(--text);
+    font-family: inherit;
     font-size: 12.5px;
+    text-align: left;
   }
   .search-suggest-row:hover,
   .search-suggest-row.active {
@@ -543,6 +548,10 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--s-2);
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .edge-lens-control {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -749,16 +758,28 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--s-2);
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .group-control {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--s-2);
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .detail-control {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--s-2);
+    min-inline-size: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
   }
   .density-control button,
   .group-control button,
@@ -1943,12 +1964,12 @@
   }
   .askpanel-msg .ask-loc { color: var(--text-dim); font-size: 11px; font-family: "SF Mono", Menlo, monospace; margin-left: 4px; }
   .askpanel-msg.err {
-    background: rgba(239,68,68,.12);
-    border: 1px solid rgba(239,68,68,.4);
-    color: #ffd9d9;
+    background: #7f1d1d;
+    border: 1px solid #ef4444;
+    color: #ffffff;
     font-size: 12px;
   }
-  .askpanel-msg.err .hint { color: #f4b8b8; font-size: 11.5px; margin-top: 4px; }
+  .askpanel-msg.err .hint { color: #ffffff; font-size: 11.5px; margin-top: 4px; }
   .askpanel-msg.loading {
     color: var(--text-muted);
     border: 1px solid var(--line-soft);
@@ -2668,6 +2689,7 @@
     .stage.mobile-filters-open .mobile-graphbar,
     .canvas-col.with-codepane .mobile-graphbar {
       position: fixed;
+      right: calc(var(--s-3) + var(--control-h) + var(--s-2));
       bottom: calc(min(72svh, 640px) + var(--s-3));
       z-index: 45;
     }
@@ -2691,11 +2713,6 @@
       font-size: 20px;
       line-height: 1;
       box-shadow: var(--shadow);
-    }
-    .stage.mobile-detail-open .mobile-graphbar,
-    .stage.mobile-filters-open .mobile-graphbar,
-    .canvas-col.with-codepane .mobile-graphbar {
-      right: calc(var(--s-3) + var(--control-h) + var(--s-2));
     }
     .stage.mobile-detail-open .zoom-controls,
     .stage.mobile-detail-open .graph-tools,

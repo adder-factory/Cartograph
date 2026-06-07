@@ -250,34 +250,11 @@ function gqmAppendInternalOutgoingEdgesInto(args: GqmAppendInternalOutgoingEdges
   }
 }
 
-/**
- * Graph query manager for complex queries
- */
-export class GraphQueryManager {
-  private readonly queries: QueryBuilder;
-  private readonly traverser: GraphTraverser;
+class GraphDependencyQueries {
+  protected readonly queries: QueryBuilder;
 
   constructor(queries: QueryBuilder) {
     this.queries = queries;
-    this.traverser = new GraphTraverser(queries);
-  }
-
-  getContext(nodeId: string): Context {
-    const focal = this.queries.getNodeById(nodeId);
-    if (!focal) throw new Error(`Node not found: ${nodeId}`);
-
-    const ancestors = this.traverser.getAncestors(nodeId);
-    const children = this.traverser.getChildren(nodeId);
-
-    return {
-      focal,
-      ancestors,
-      children,
-      incomingRefs: gqmCollectIncomingRefs(this.queries, nodeId),
-      outgoingRefs: gqmCollectOutgoingRefs(this.queries, nodeId),
-      types: gqmCollectTypeNodes(this.queries, nodeId),
-      imports: gqmCollectImportNodes(this.queries, ancestors),
-    };
   }
 
   /**
@@ -340,26 +317,6 @@ export class GraphQueryManager {
     });
   }
 
-  getExportedSymbols(filePath: string): Node[] {
-    return this.queries.getNodesByFile(filePath).filter((n) => n.isExported);
-  }
-
-  findByQualifiedName(pattern: string): Node[] {
-    // Convert glob pattern to regex (ReDoS-safe).
-    const regexBody = globToSafeRegex(pattern);
-    if (regexBody === null) return [];
-    const regex = new RegExp(`^${regexBody}$`);
-
-    const allNodes: Node[] = [];
-    const kinds: Node['kind'][] = ['class', 'function', 'method', 'interface', 'type_alias', 'variable', 'constant'];
-    for (const kind of kinds) {
-      for (const node of getNodesByKind(this.queries, kind)) {
-        if (regex.test(node.qualifiedName)) allNodes.push(node);
-      }
-    }
-    return allNodes;
-  }
-
   getModuleStructure(): Map<string, string[]> {
     const files = getAllFiles(this.queries);
     const structure = new Map<string, string[]>();
@@ -400,6 +357,56 @@ export class GraphQueryManager {
       if (!visited.has(file.path)) dfs(file.path, []);
     }
     return cycles;
+  }
+}
+
+/**
+ * Graph query manager for complex queries
+ */
+export class GraphQueryManager extends GraphDependencyQueries {
+  private readonly traverser: GraphTraverser;
+
+  constructor(queries: QueryBuilder) {
+    super(queries);
+    this.traverser = new GraphTraverser(queries);
+  }
+
+  getContext(nodeId: string): Context {
+    const focal = this.queries.getNodeById(nodeId);
+    if (!focal) throw new Error(`Node not found: ${nodeId}`);
+
+    const ancestors = this.traverser.getAncestors(nodeId);
+    const children = this.traverser.getChildren(nodeId);
+
+    return {
+      focal,
+      ancestors,
+      children,
+      incomingRefs: gqmCollectIncomingRefs(this.queries, nodeId),
+      outgoingRefs: gqmCollectOutgoingRefs(this.queries, nodeId),
+      types: gqmCollectTypeNodes(this.queries, nodeId),
+      imports: gqmCollectImportNodes(this.queries, ancestors),
+    };
+  }
+
+  getExportedSymbols(filePath: string): Node[] {
+    return this.queries.getNodesByFile(filePath).filter((n) => n.isExported);
+  }
+
+  findByQualifiedName(pattern: string): Node[] {
+    // Convert glob pattern to regex (ReDoS-safe).
+    const regexBody = globToSafeRegex(pattern);
+    if (regexBody === null) return [];
+    const regex = new RegExp(`^${regexBody}$`);
+
+    const allNodes: Node[] = [];
+    const kinds: Node['kind'][] = ['class', 'function', 'method', 'interface', 'type_alias', 'variable', 'constant'];
+    for (const kind of kinds) {
+      for (const node of getNodesByKind(this.queries, kind)) {
+        if (regex.test(node.qualifiedName)) allNodes.push(node);
+      }
+    }
+    return allNodes;
   }
 
   getNodeMetrics(nodeId: string): {

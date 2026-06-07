@@ -115,13 +115,13 @@ function callerPathCandidates(callerRef: string): string[] {
   }
 
   const explicitRoot = process.env['CARTOGRAPH_ALGO_SOURCE_ROOT'];
-  if (explicitRoot) candidates.push(path.join(explicitRoot, normalized));
-
   const assetRoot = process.env['CARTOGRAPH_ASSET_ROOT'];
-  if (assetRoot) candidates.push(path.join(assetRoot, 'algo-sources', normalized));
-
-  candidates.push(path.resolve(process.cwd(), normalized));
-  candidates.push(path.resolve(import.meta.dirname, '..', normalized));
+  candidates.push(
+    ...(explicitRoot ? [path.join(explicitRoot, normalized)] : []),
+    ...(assetRoot ? [path.join(assetRoot, 'algo-sources', normalized)] : []),
+    path.resolve(process.cwd(), normalized),
+    path.resolve(import.meta.dirname, '..', normalized),
+  );
 
   return candidates;
 }

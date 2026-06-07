@@ -60,8 +60,7 @@ function parseWorkspaceMembers(cargoToml: string): string[] {
 
 function parsePackageName(cargoToml: string): string | null {
   const section = getTomlSection(cargoToml, 'package');
-  const match = section?.match(/(?:^|\n)\s*name\s*=\s*["']([^"'\n]+)["']/);
-  return match?.[1]?.trim() ?? null;
+  return section ? getTomlStringValue(section, 'name') : null;
 }
 
 function getTomlSection(content: string, sectionName: string): string | null {
@@ -91,12 +90,21 @@ function getTomlArrayValue(section: string, key: string): string | null {
 }
 
 function findTomlArrayStart(section: string, key: string): number | null {
-  const match = new RegExp(`(?:^|\\n)\\s*${escapeRegExp(key)}\\s*=`).exec(section);
-  if (!match) return null;
+  let lineStart = 0;
+  while (lineStart < section.length) {
+    const lineEnd = section.indexOf('\n', lineStart);
+    const end = lineEnd < 0 ? section.length : lineEnd;
+    const line = section.slice(lineStart, end);
+    const valueStart = findTomlAssignmentValueStart(stripTomlLineComment(line), key);
+    if (valueStart !== null) {
+      let pos = lineStart + valueStart;
+      while (pos < section.length && isTomlWhitespace(section[pos]!)) pos++;
+      return section[pos] === '[' ? pos : null;
+    }
+    lineStart = end + 1;
+  }
 
-  let pos = match.index + match[0].length;
-  while (pos < section.length && /\s/.test(section[pos]!)) pos++;
-  return section[pos] === '[' ? pos : null;
+  return null;
 }
 
 function findTomlArrayEnd(section: string, start: number): number | null {
@@ -202,10 +210,66 @@ function startTomlQuote(state: TomlQuoteState, ch: string): boolean {
   return true;
 }
 
+function getTomlStringValue(section: string, key: string): string | null {
+  for (const rawLine of section.split(/\r?\n/)) {
+    const line = stripTomlLineComment(rawLine);
+    const valueStart = findTomlAssignmentValueStart(line, key);
+    if (valueStart === null) continue;
+    const quote = line[valueStart];
+    if (quote !== '"' && quote !== "'") continue;
+    const end = findTomlStringEnd(line, valueStart + 1, quote);
+    if (end !== null) return line.slice(valueStart + 1, end).trim();
+  }
+  return null;
+}
+
+function findTomlAssignmentValueStart(line: string, key: string): number | null {
+  let pos = skipTomlWhitespace(line, 0);
+  if (!line.startsWith(key, pos)) return null;
+  pos += key.length;
+  if (pos < line.length && isTomlBareKeyChar(line[pos]!)) return null;
+  pos = skipTomlWhitespace(line, pos);
+  if (line[pos] !== '=') return null;
+  return skipTomlWhitespace(line, pos + 1);
+}
+
+function findTomlStringEnd(line: string, start: number, quote: '"' | "'"): number | null {
+  let escaped = false;
+  for (let pos = start; pos < line.length; pos++) {
+    const ch = line[pos]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (ch === quote) return pos;
+  }
+  return null;
+}
+
+function skipTomlWhitespace(value: string, start: number): number {
+  let pos = start;
+  while (pos < value.length && isTomlWhitespace(value[pos]!)) pos++;
+  return pos;
+}
+
+function isTomlWhitespace(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\r' || ch === '\n';
+}
+
+function isTomlBareKeyChar(ch: string): boolean {
+  return (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch === '_' || ch === '-';
+}
+
 function cleanMemberPath(memberPath: string): string {
-  return memberPath.replaceAll('\\', '/').replace(/\/+$/, '').replace(/^\.\//, '');
+  let cleaned = memberPath.replaceAll('\\', '/');
+  while (cleaned.endsWith('/')) cleaned = cleaned.slice(0, -1);
+  return cleaned.startsWith('./') ? cleaned.slice(2) : cleaned;
 }
 
 function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
 }

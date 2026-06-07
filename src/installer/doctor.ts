@@ -119,6 +119,10 @@ function compareSemver(a: string, b: string): number {
 }
 
 const BUN_DOWNLOAD_URL = 'https://bun.sh';
+const PROCESS_LIST_TIMEOUT_MS = 1_500;
+const PROCESS_LIST_MAX_BUFFER_BYTES = 512 * 1_024;
+const MAX_RENDERED_CARTOGRAPH_PROCESSES = 4;
+const MAX_PROCESS_COMMAND_CHARS = 140;
 
 function checkBunRuntime(): CheckResult {
   // `Bun` is a global injected when running under bun. Under node the
@@ -389,12 +393,19 @@ async function detectBackends(configuredEndpoints: readonly string[] = []): Prom
  *     lists any backends the scanner DID find as alternatives.
  *   - skipped (returns null): no openai-compat config present.
  */
-function checkEmbeddingReachability(
-  embeddingLlm: Record<string, unknown> | null | undefined,
-  detected: readonly DetectedBackend[],
-  projectPath: string | null,
-  llm: Record<string, unknown> | null,
-): CheckResult | null {
+interface EmbeddingReachabilityCheckArgs {
+  readonly embeddingLlm: Record<string, unknown> | null | undefined;
+  readonly detected: readonly DetectedBackend[];
+  readonly projectPath: string | null;
+  readonly llm: Record<string, unknown> | null;
+}
+
+function checkEmbeddingReachability({
+  embeddingLlm,
+  detected,
+  projectPath,
+  llm,
+}: EmbeddingReachabilityCheckArgs): CheckResult | null {
   if (!embeddingLlm || typeof embeddingLlm !== 'object') return null;
   if (embeddingLlm['provider'] !== 'openai-compat') return null;
   const endpoint = typeof embeddingLlm['endpoint'] === 'string' ? embeddingLlm['endpoint'] : null;
@@ -729,7 +740,7 @@ async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   checks.push(detectedBackendsCheck(detected));
   const embeddingLlm = llm?.['embeddingLlm'] as Record<string, unknown> | null | undefined;
   const projectPathForChecks = opts.skipProjectChecks ? null : path.resolve(opts.projectPath ?? process.cwd());
-  const reachability = checkEmbeddingReachability(embeddingLlm, detected, projectPathForChecks, llm);
+  const reachability = checkEmbeddingReachability({ embeddingLlm, detected, projectPath: projectPathForChecks, llm });
   if (reachability) checks.push(reachability);
   // Informational tuning row — surfaces the hardware-aware
   // `--parallel N` recommendation per tier so users can self-tune
@@ -770,10 +781,11 @@ async function activeCartographProcessesCheck(projectPath: string): Promise<Chec
     };
   }
   const rendered = rows
-    .slice(0, 4)
+    .slice(0, MAX_RENDERED_CARTOGRAPH_PROCESSES)
     .map((row) => `pid ${row.pid}: ${truncateProcessCommand(row.command)}`)
     .join('; ');
-  const suffix = rows.length > 4 ? `; +${rows.length - 4} more` : '';
+  const suffix =
+    rows.length > MAX_RENDERED_CARTOGRAPH_PROCESSES ? `; +${rows.length - MAX_RENDERED_CARTOGRAPH_PROCESSES} more` : '';
   return {
     id: 'cartograph-processes',
     name: 'Cartograph processes',
@@ -788,38 +800,101 @@ async function listCartographSiblingProcesses(projectPath: string): Promise<Cart
   if (process.platform === 'win32') return [];
   const args = process.platform === 'darwin' ? ['-axo', 'pid=,command='] : ['-eo', 'pid=,command='];
   try {
-    const { stdout } = await execFileAsync('ps', args, { timeout: 1500, maxBuffer: 512 * 1024 });
-    return stdout
-      .split('\n')
-      .map(parsePsLine)
-      .filter((row): row is CartographProcessRow => row !== null)
-      .filter((row) => row.pid !== process.pid && isRelevantCartographProcess(row.command, projectPath));
+    const { stdout } = await execFileAsync('ps', args, {
+      timeout: PROCESS_LIST_TIMEOUT_MS,
+      maxBuffer: PROCESS_LIST_MAX_BUFFER_BYTES,
+    });
+    return parseCartographProcessList(stdout, projectPath).filter(
+      (row) => row.pid !== process.pid && isRelevantCartographProcess(row.command, projectPath),
+    );
   } catch {
     return [];
   }
 }
 
+export function parseCartographProcessList(stdout: string, projectPath: string): CartographProcessRow[] {
+  return stdout
+    .split('\n')
+    .map(parsePsLine)
+    .filter((row): row is CartographProcessRow => row !== null)
+    .filter((row) => isRelevantCartographProcess(row.command, projectPath));
+}
+
 function parsePsLine(line: string): CartographProcessRow | null {
   const trimmed = line.trim();
   if (!trimmed) return null;
-  const match = /^(\d+)\s+(.+)$/.exec(trimmed);
-  if (!match) return null;
-  return { pid: Number.parseInt(match[1]!, 10), command: match[2]! };
+  const pidEnd = findFirstShellWhitespace(trimmed);
+  if (pidEnd <= 0) return null;
+  const pidText = trimmed.slice(0, pidEnd);
+  if (!isUnsignedIntegerText(pidText)) return null;
+  const commandStart = skipShellWhitespace(trimmed, pidEnd);
+  const command = trimmed.slice(commandStart);
+  return command ? { pid: Number.parseInt(pidText, 10), command } : null;
 }
 
 function isRelevantCartographProcess(command: string, projectPath: string): boolean {
+  const tokens = commandTokens(command);
   const invokesCartograph =
-    /(^|\s)(?:bun\s+)?(?:\S*\/)?cartograph(?:\.ts)?(\s|$)|src\/bin\/cartograph\.ts|src\/index-hooks\/hook-worker\.ts/.test(
-      command,
-    );
+    tokens.some(isCartographExecutableToken) ||
+    command.includes('src/bin/cartograph.ts') ||
+    command.includes('src/index-hooks/hook-worker.ts');
   if (!invokesCartograph) return false;
   if (command.includes(projectPath)) return true;
-  return /serve\s+--mcp|--mcp|hook-worker\.ts|cartograph\.ts\s+admin|cartograph\s+admin/.test(command);
+  return command.includes('--mcp') || command.includes('hook-worker.ts') || hasCartographAdminCommand(tokens);
+}
+
+function commandTokens(command: string): string[] {
+  const tokens: string[] = [];
+  let start: number | null = null;
+  for (let pos = 0; pos < command.length; pos++) {
+    if (isShellWhitespace(command[pos]!)) {
+      if (start !== null) {
+        tokens.push(command.slice(start, pos));
+        start = null;
+      }
+      continue;
+    }
+    start ??= pos;
+  }
+  if (start !== null) tokens.push(command.slice(start));
+  return tokens;
+}
+
+function isShellWhitespace(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r';
+}
+
+function findFirstShellWhitespace(value: string): number {
+  for (let pos = 0; pos < value.length; pos++) {
+    if (isShellWhitespace(value[pos]!)) return pos;
+  }
+  return -1;
+}
+
+function skipShellWhitespace(value: string, start: number): number {
+  let pos = start;
+  while (pos < value.length && isShellWhitespace(value[pos]!)) pos++;
+  return pos;
+}
+
+function isUnsignedIntegerText(value: string): boolean {
+  for (const ch of value) {
+    if (ch < '0' || ch > '9') return false;
+  }
+  return value.length > 0;
+}
+
+function isCartographExecutableToken(token: string): boolean {
+  const name = token.replaceAll('\\', '/').split('/').at(-1);
+  return name === 'cartograph' || name === 'cartograph.ts';
+}
+
+function hasCartographAdminCommand(tokens: readonly string[]): boolean {
+  return tokens.some((token, index) => isCartographExecutableToken(token) && tokens[index + 1] === 'admin');
 }
 
 function truncateProcessCommand(command: string): string {
-  const max = 140;
-  return command.length <= max ? command : `${command.slice(0, max - 1)}…`;
+  return command.length <= MAX_PROCESS_COMMAND_CHARS ? command : `${command.slice(0, MAX_PROCESS_COMMAND_CHARS - 1)}…`;
 }
 
 /** Auto-apply fixes for gaps the doctor knows how to handle. Returns

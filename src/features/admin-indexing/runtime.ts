@@ -7,7 +7,7 @@ export interface AdminIndexOptions {
   parseWorkers?: string;
 }
 
-export interface AdminIndexProfile {
+interface AdminIndexProfile {
   scanMs?: number;
   parseStoreMs?: number;
   retryMs?: number;

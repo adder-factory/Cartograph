@@ -18,7 +18,7 @@ export function getDaemonPidPath(projectRoot: string): string {
 
 export function getDaemonSocketPath(projectRoot: string): string {
   const hash = projectHash(projectRoot);
-  if (process.platform === 'win32') return `\\\\.\\pipe\\cartograph-${hash}`;
+  if (process.platform === 'win32') return String.raw`\\.\pipe\cartograph-${hash}`;
 
   const inProject = path.join(getCartographDir(projectRoot), 'daemon.sock');
   if (inProject.length <= POSIX_SOCKET_PATH_LIMIT) return inProject;
@@ -33,8 +33,13 @@ export function decodeLockInfo(raw: string): DaemonLockInfo | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   try {
-    const parsed = JSON.parse(trimmed) as Partial<DaemonLockInfo>;
+    const parsed = JSON.parse(trimmed) as Partial<DaemonLockInfo> | number;
+    if (typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0) {
+      return { pid: parsed, version: 'unknown', socketPath: '', startedAt: 0 };
+    }
     if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
       typeof parsed.pid === 'number' &&
       typeof parsed.version === 'string' &&
       typeof parsed.socketPath === 'string' &&
