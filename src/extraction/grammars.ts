@@ -208,11 +208,11 @@ export function detectLanguage(filePath: string, source?: string): Language {
 
   // .html (and .md) files that begin with a YAML front-matter block (`---\n…\n---`)
   // are Jekyll/Liquid templates. Detect by content so plain HTML files (no front
-  // matter) continue to map to 'unknown' and are not run through the Liquid
+  // matter) continue to map to HTML and are not run through the Liquid
   // extractor. `.md` files that are already matched by a markdown-language def
-  // are not reclassified; only `.html` (and unmatched `.md`) that have no
-  // registered extractor are candidates.
-  if (source && (lang === 'unknown' || lang === 'liquid') && hasYamlFrontMatter(source)) {
+  // are not reclassified; only `.html` (plus unmatched `.md`) files with front
+  // matter are candidates.
+  if (source && (lang === 'unknown' || lang === 'html' || lang === 'liquid') && hasYamlFrontMatter(source)) {
     if (ext === '.html' || ext === '.md') return 'liquid';
   }
 

@@ -280,10 +280,9 @@ describe('parse_cache integration with indexAll', () => {
     expect(getParseCacheStats(cg.queries).rows).toBe(0);
     await cg.indexAll({ summarize: false });
     const after = getParseCacheStats(cg.queries);
-    // One row per indexed source file (a.ts + b.ts). Diagnostic
-    // / package.json files aren't run through extractFromSource, so
-    // they don't appear.
-    expect(after.rows).toBeGreaterThanOrEqual(2);
+    // One row per indexed source file (a.ts + b.ts + package.json now
+    // that JSON has parser-only support).
+    expect(after.rows).toBeGreaterThanOrEqual(3);
   });
 
   it('hits the cache on a re-extract of unchanged files', async () => {
@@ -292,11 +291,12 @@ describe('parse_cache integration with indexAll', () => {
     // parse should be a cache hit.
     cg.clearStructural();
     await cg.indexAll({ summarize: false });
-    // The cache held two entries from pass 1; pass 2 hit them both.
+    // The cache held entries from pass 1; pass 2 hit unchanged TS
+    // files plus package.json now that JSON is parser-only supported.
     // Production code derives this signal from `getParseCacheHits()`,
     // which we read below.
     const hits = cg.internals.orchestrator.getParseCacheHits();
-    expect(hits).toBeGreaterThanOrEqual(2);
+    expect(hits).toBeGreaterThanOrEqual(3);
   });
 
   it('misses the cache after a content edit (re-parses + re-caches)', async () => {
@@ -308,12 +308,12 @@ describe('parse_cache integration with indexAll', () => {
     cg.clearStructural();
     await cg.indexAll({ summarize: false });
     const hits = cg.internals.orchestrator.getParseCacheHits();
-    // b.ts is unchanged → 1 hit. a.ts was edited → miss; re-parsed
-    // and a NEW row is cached for the new hash.
-    expect(hits).toBe(1);
+    // b.ts and package.json are unchanged → 2 hits. a.ts was edited
+    // → miss; re-parsed and a NEW row is cached for the new hash.
+    expect(hits).toBe(2);
     // Both versions of a.ts (old hash and new hash) are now cached
     // since clearStructural doesn't wipe parse_cache (intentional —
     // content-addressed entries are still valid).
-    expect(getParseCacheStats(cg.queries).rows).toBeGreaterThanOrEqual(3);
+    expect(getParseCacheStats(cg.queries).rows).toBeGreaterThanOrEqual(4);
   });
 });

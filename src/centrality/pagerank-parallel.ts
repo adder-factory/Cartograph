@@ -318,7 +318,7 @@ function spawnWorkers(args: SpawnWorkersArgs): WorkerHandle[] {
     // after each iteration. The persistent `.on` is safe — we never
     // remove this listener for the worker's lifetime.
     worker.on('error', (err) => {
-      args.errorSink.error ??= err;
+      args.errorSink.error ??= err instanceof Error ? err : new Error(String(err));
     });
     // B29 (2026-05-24) — also capture silent exits. A worker that
     // process.exit()s without an 'error' event would otherwise leave

@@ -48,6 +48,19 @@ const NOISE_TYPES: ReadonlySet<string> = new Set(['comment', 'line_comment', 'bl
 /** Directories never worth walking in `<path>` repo-scan mode. */
 const SKIP_DIRS: ReadonlySet<string> = new Set(['node_modules', '.git', 'dist', '.cartograph', 'coverage']);
 
+/** Languages with grammar-backed parser-only or framework-dispatch support.
+ *  They intentionally emit no symbols from the language extractor, so the
+ *  blind-spot diagnostic should not classify them as broken extractors. */
+const KNOWN_ZERO_SYMBOL_LANGUAGES: ReadonlySet<string> = new Set([
+  'css',
+  'embedded_template',
+  'html',
+  'jsdoc',
+  'json',
+  'regex',
+  'yaml',
+]);
+
 // ── CLI flags ─────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
 const asJson = argv.includes('--json');
@@ -59,9 +72,9 @@ interface LangCoverage {
   language: string;
   files: number;
   /** Extracted symbol `Node`s (excluding the synthetic file node),
-   *  summed across every sampled file. Zero is a loud signal — a
-   *  grammar-backed language should always emit *some* symbol; zero
-   *  means a broken extractor (or genuinely empty fixtures). */
+   *  summed across every sampled file. Zero is a loud signal for
+   *  symbol-emitting languages; parser-only/framework-dispatch modes
+   *  are listed in KNOWN_ZERO_SYMBOL_LANGUAGES. */
   symbolNodes: number;
   /** named node type → total occurrences across every sampled file. */
   typeCounts: Map<string, number>;
@@ -267,17 +280,20 @@ function printReport(reports: LangReport[], skipped: string[]): void {
 
   const broken: string[] = [];
   for (const r of reports) {
+    const knownZero = KNOWN_ZERO_SYMBOL_LANGUAGES.has(r.language);
     console.log(
       `[${r.language.padEnd(11)}] files ${String(r.files).padStart(3)} · ` +
         `kinds ${String(r.kinds).padStart(3)} · covered ${String(r.covered).padStart(3)} ` +
         `(${String(r.coveragePct).padStart(3)}%) · uncovered ${r.uncovered.length}`,
     );
-    if (r.symbolNodes === 0 && r.files > 0) {
+    if (knownZero && r.symbolNodes === 0 && r.files > 0) {
+      console.log('    parser-only / framework-dispatch mode — zero symbols expected');
+    } else if (r.symbolNodes === 0 && r.files > 0) {
       broken.push(r.language);
       console.log('    ⚠⚠ extracted ZERO symbol nodes — likely a broken extractor');
       console.log('       (grammar node types vs the LanguageExtractor config drifted) or empty fixtures');
     }
-    for (const u of r.uncovered) {
+    for (const u of knownZero ? [] : r.uncovered) {
       console.log(`    ${u.type.padEnd(34)} ×${u.count}`);
     }
     for (const e of r.parseErrors) console.log(`    ⚠ ${e}`);
@@ -287,9 +303,12 @@ function printReport(reports: LangReport[], skipped: string[]): void {
     console.log(`\nSkipped (no tree-sitter grammar): ${skipped.join(', ')}`);
   }
 
-  const ranked = [...reports].sort((a, b) => a.coveragePct - b.coveragePct);
-  const avg = reports.length > 0 ? Math.round(reports.reduce((s, r) => s + r.coveragePct, 0) / reports.length) : 0;
-  console.log(`\n${reports.length} languages analysed · mean coverage ${avg}%`);
+  const scored = reports.filter((r) => !KNOWN_ZERO_SYMBOL_LANGUAGES.has(r.language));
+  const ranked = [...scored].sort((a, b) => a.coveragePct - b.coveragePct);
+  const avg = scored.length > 0 ? Math.round(scored.reduce((s, r) => s + r.coveragePct, 0) / scored.length) : 0;
+  console.log(
+    `\n${reports.length} languages analysed · mean coverage ${avg}% across ${scored.length} symbol-emitting modes`,
+  );
   if (ranked.length > 0) {
     const lowest = ranked.slice(0, 5).map((r) => `${r.language} ${r.coveragePct}%`);
     console.log(`Lowest coverage: ${lowest.join(' · ')}`);

@@ -93,14 +93,15 @@ is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 22 tools | 44,900 | ~11,225 |
-| initialize instructions | 2,539 | ~635 |
-| combined startup load | 47,439 | ~11,860 |
-| full playbook, on demand | 13,435 | ~3,359 |
+| tools/list, 22 tools | 44,899 | ~11,225 |
+| initialize instructions | 2,567 | ~642 |
+| combined startup load | 47,466 | ~11,867 |
+| full playbook, on demand | 13,348 | ~3,337 |
 
-The full 36-tool profile is 63,964 `tools/list` chars and 66,503 combined
+The full 36-tool profile is 63,963 `tools/list` chars and 66,530 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 35 tools and 61,047 combined startup chars.
+reduce the full list to 35 tools, 58,508 `tools/list` chars, and 61,075
+combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the
 advertised startup schema.

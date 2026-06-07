@@ -188,7 +188,13 @@ describe('extraction config fingerprint invalidation', () => {
     expect(
       cg.queries.db.prepare(`SELECT COUNT(*) AS c FROM parse_cache WHERE file_path = 'src/unmatched.ts'`).get(),
     ).toEqual({ c: 1 });
-    expect(cg.queries.db.prepare(`SELECT path, needs_reextract FROM files ORDER BY path`).all()).toEqual([
+    const sourceFlags = (
+      cg.queries.db.prepare(`SELECT path, needs_reextract FROM files ORDER BY path`).all() as Array<{
+        path: string;
+        needs_reextract: number;
+      }>
+    ).filter((row) => row.path === 'src/a.ts' || row.path === 'src/b.py');
+    expect(sourceFlags).toEqual([
       { path: 'src/a.ts', needs_reextract: 1 },
       { path: 'src/b.py', needs_reextract: 0 },
     ]);

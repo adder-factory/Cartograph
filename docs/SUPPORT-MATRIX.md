@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 37 language modes. The registry is the source of truth:
+Cartograph supports 48 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -10,6 +10,10 @@ recognized and indexed. Framework-aware signals add routes, entry points,
 dynamic references, or cross-language bridge edges when Cartograph detects a
 known framework shape.
 
+`Tree-sitter parser-only` means Cartograph recognizes the file, parses it with
+the vendored grammar, emits the file node, and surfaces syntax diagnostics, but
+does not yet extract language-specific symbols from that grammar.
+
 ## Languages
 
 | Language mode | Extensions / scope | Extractor path |
@@ -18,26 +22,36 @@ known framework shape.
 | C | `.c`, `.h` | Tree-sitter |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Tree-sitter |
 | C# | `.cs` | Tree-sitter |
+| CSS | `.css` | Tree-sitter parser-only |
 | Dart | `.dart` | Tree-sitter |
 | Elixir | `.ex`, `.exs` | Tree-sitter |
+| ERB / EJS | `.erb`, `.ejs`, `.eta`, `.etlua` | Tree-sitter parser-only |
 | Fish | `.fish` | Tree-sitter |
 | Go | `.go` | Tree-sitter |
 | GraphQL | `.graphql`, `.gql` | Tree-sitter |
+| Haskell | `.hs` | Tree-sitter tags query |
 | HCL / Terraform | `.tf`, `.tfvars`, `.hcl` | Tree-sitter |
+| HTML | `.html`, `.htm` | Tree-sitter parser-only |
 | Java | `.java` | Tree-sitter |
 | JavaScript | `.js`, `.mjs`, `.cjs` | Tree-sitter |
+| JSDoc | `.jsdoc` | Tree-sitter parser-only |
+| JSON | `.json` | Tree-sitter parser-only |
 | JSX | `.jsx` | Tree-sitter |
+| Julia | `.jl` | Tree-sitter tags query |
 | Kotlin | `.kt`, `.kts` | Tree-sitter |
 | Liquid | `.liquid` | Custom extractor |
 | Lua | `.lua` | Tree-sitter |
 | Luau | `.luau` | Tree-sitter |
 | Objective-C | `.m`, `.mm` | Tree-sitter |
+| OCaml | `.ml` | Tree-sitter tags query |
+| OCaml Interface | `.mli` | Tree-sitter tags query |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` | Tree-sitter plus form-file extractor |
 | PHP | `.php`, `.module`, `.install`, `.theme`, `.inc` | Tree-sitter |
 | Prisma | `.prisma` | Tree-sitter |
 | Java Properties | `.properties` | Custom extractor |
 | Python | `.py`, `.pyw` | Tree-sitter |
 | R | `.r` | Tree-sitter |
+| Regex | `.regex`, `.regexp` | Tree-sitter parser-only |
 | ReScript | `.res`, `.resi` | Tree-sitter |
 | Ruby | `.rb`, `.rake` | Tree-sitter |
 | Rust | `.rs` | Tree-sitter |
@@ -47,6 +61,7 @@ known framework shape.
 | Swift | `.swift` | Tree-sitter |
 | TSX | `.tsx` | Tree-sitter |
 | TypeScript | `.ts`, `.mts`, `.cts` | Tree-sitter |
+| Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
 | Vue | `.vue` | Custom extractor |
 | XML (MyBatis) | `.xml` | Custom extractor |
 | YAML | `.yml`, `.yaml` | Tree-sitter |
@@ -98,3 +113,15 @@ framework, so generic codebases do not pay the full resolver cost.
 ## Extending Support
 
 To add a language, start with [Adding A Language](ADDING-A-LANGUAGE.md).
+
+## Tree-sitter Catalog Notes
+
+Tree-sitter's homepage lists a smaller upstream parser set, while its wiki
+tracks a much larger community parser catalog. Cartograph vendors grammars
+deliberately rather than downloading every community parser at runtime, so the
+support matrix above is the authoritative shipped set.
+
+Agda remains the known upstream-parser gap for the current `web-tree-sitter`
+runtime: `tree-sitter build --wasm` fails because the package's external
+scanner symbols are not available to Wasm parsers. Support should wait for a
+WASM-compatible upstream artifact or a compatible scanner implementation.

@@ -31,26 +31,36 @@ import type { LanguageDef } from './types.js';
 import { BASH_DEF } from './bash.js';
 import { C_DEF, CPP_DEF } from './c-cpp.js';
 import { CSHARP_DEF } from './csharp.js';
+import { CSS_DEF } from './css.js';
 import { DART_DEF } from './dart.js';
 import { ELIXIR_DEF } from './elixir.js';
+import { EMBEDDED_TEMPLATE_DEF } from './embedded-template.js';
 import { FISH_DEF } from './fish.js';
 import { GO_DEF } from './go.js';
 import { GRAPHQL_DEF } from './graphql.js';
+import { HASKELL_DEF } from './haskell.js';
 import { HCL_DEF } from './hcl.js';
+import { HTML_DEF } from './html.js';
 import { JAVA_DEF } from './java.js';
 import { JAVASCRIPT_DEF } from './javascript.js';
+import { JSDOC_DEF } from './jsdoc.js';
+import { JSON_DEF } from './json.js';
 import { JSX_DEF } from './jsx.js';
+import { JULIA_DEF } from './julia.js';
 import { KOTLIN_DEF } from './kotlin.js';
 import { LIQUID_DEF } from './liquid.js';
 import { LUA_DEF } from './lua.js';
 import { LUAU_DEF } from './luau.js';
 import { OBJC_DEF } from './objc.js';
+import { OCAML_DEF } from './ocaml.js';
+import { OCAML_INTERFACE_DEF } from './ocaml-interface.js';
 import { PASCAL_DEF } from './pascal.js';
 import { PHP_DEF } from './php.js';
 import { PRISMA_DEF } from './prisma.js';
 import { PROPERTIES_DEF } from './properties.js';
 import { PYTHON_DEF } from './python.js';
 import { R_DEF } from './r.js';
+import { REGEX_DEF } from './regex.js';
 import { RESCRIPT_DEF } from './rescript.js';
 import { RUBY_DEF } from './ruby.js';
 import { RUST_DEF } from './rust.js';
@@ -60,6 +70,7 @@ import { SVELTE_DEF } from './svelte.js';
 import { SWIFT_DEF } from './swift.js';
 import { TSX_DEF } from './tsx.js';
 import { TYPESCRIPT_DEF } from './typescript.js';
+import { VERILOG_DEF } from './verilog.js';
 import { VUE_DEF } from './vue.js';
 import { XML_DEF } from './xml.js';
 import { YAML_DEF } from './yaml.js';
@@ -73,26 +84,36 @@ const ALL_DEFS: readonly LanguageDef[] = [
   C_DEF,
   CPP_DEF,
   CSHARP_DEF,
+  CSS_DEF,
   DART_DEF,
   ELIXIR_DEF,
+  EMBEDDED_TEMPLATE_DEF,
   FISH_DEF,
   GO_DEF,
   GRAPHQL_DEF,
+  HASKELL_DEF,
   HCL_DEF,
+  HTML_DEF,
   JAVA_DEF,
   JAVASCRIPT_DEF,
+  JSDOC_DEF,
+  JSON_DEF,
   JSX_DEF,
+  JULIA_DEF,
   KOTLIN_DEF,
   LIQUID_DEF,
   LUA_DEF,
   LUAU_DEF,
   OBJC_DEF,
+  OCAML_DEF,
+  OCAML_INTERFACE_DEF,
   PASCAL_DEF,
   PHP_DEF,
   PRISMA_DEF,
   PROPERTIES_DEF,
   PYTHON_DEF,
   R_DEF,
+  REGEX_DEF,
   RESCRIPT_DEF,
   RUBY_DEF,
   RUST_DEF,
@@ -102,6 +123,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   SWIFT_DEF,
   TSX_DEF,
   TYPESCRIPT_DEF,
+  VERILOG_DEF,
   VUE_DEF,
   XML_DEF,
   YAML_DEF,

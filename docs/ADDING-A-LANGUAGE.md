@@ -4,21 +4,25 @@ This is a cookbook for adding a new language to Cartograph. It assumes you have 
 working dev setup (`bun install`, `bun run typecheck`, and `bun run test:fast`
 pass).
 
-There are three patterns. **Pick the one that matches the language you're adding.**
+There are four patterns. **Pick the one that matches the language you're adding.**
 
 | Language shape | Pattern | Examples |
 |---|---|---|
 | Procedural / OO with named functions, classes, methods | **`LanguageExtractor` config** | `python.ts`, `ruby.ts`, `r.ts` |
 | Declarative / template / configuration / no named functions | **Custom extractor class** | `hcl-extractor.ts`, `liquid-extractor.ts`, `sql-extractor.ts` |
-| Any language whose grammar ships a `queries/tags.scm` — when you want baseline coverage *fast* | **tags.scm fallback extractor** | `elixir.ts` |
+| Any language whose grammar ships a `queries/tags.scm` — when you want baseline coverage *fast* | **tags.scm fallback extractor** | `elixir.ts`, `ocaml.ts` |
+| Markup/data/comment grammars with no useful standalone symbols yet | **Parser-only extractor** | `html.ts`, `json.ts`, `regex.ts` |
 
 Paths A and B are full hand-written extractors — they emit cartograph's complete
 edge graph (imports, typed signatures, the method-vs-function split, …). Path C
 is the **new-language onramp**: zero extractor code, just a vendored query, for a
-strict-subset floor (definitions + `calls` references). Reach for Path C first;
-graduate a language to Path A/B only once it earns the depth.
+strict-subset floor (definitions + `calls` references). Path D is the minimal
+recognition tier: files are parsed, indexed as file nodes, and syntax diagnostics
+surface, but no language-specific symbols are emitted yet. Reach for Path C first
+when a usable tags query exists; use Path D only when the grammar is valuable for
+coverage or future injections but has no useful standalone tags yet.
 
-All three patterns share the same setup steps (1–4) and only diverge at the
+All four patterns share the same setup steps (1–4) and only diverge at the
 extractor itself (step 5).
 
 ---
@@ -417,6 +421,35 @@ shows the `@ignore` convention: grammars suppress keyword pseudo-calls
 
 ---
 
+## 5d. Path D — parser-only extractor
+
+Path D is for grammars that are valuable for file recognition, syntax-error
+diagnostics, or future injection support, but do not yet have useful standalone
+symbols to emit. This is common for data/markup/comment grammars such as JSON,
+HTML, CSS, JSDoc, or Regex.
+
+Register the language with `parserOnlyExtractor`:
+
+```ts
+import { parserOnlyExtractor } from './parser-only.js';
+import type { LanguageDef } from './types.js';
+
+export const FOO_DEF: LanguageDef = {
+  name: 'foo',
+  displayName: 'Foo',
+  extensions: ['.foo'],
+  includeGlobs: ['**/*.foo'],
+  grammar: { wasmFile: 'foo.wasm', extractor: parserOnlyExtractor },
+};
+```
+
+What you get: file nodes, language detection, syntax diagnostics, and grammar
+load coverage. What you *don't* get: language-specific symbols or references.
+If the grammar later gains a useful tags query, promote it to Path C; if users
+need richer graph semantics, promote it to Path A or B.
+
+---
+
 ## 6. Pick `NodeKind` and `EdgeKind` values
 
 `NodeKind` and `EdgeKind` are fixed unions in `src/graph/core-types.ts`
@@ -517,18 +550,21 @@ bun <repo>/src/bin/cartograph.ts find "<symbol>" --by name
 
 The `status` call should report your file under "Languages" with a non-zero
 symbol count, and `find` should surface the symbols you expect at the right
-line numbers.
+line numbers. For a parser-only mode, expect the language/file count and parse
+diagnostics only; symbol count stays zero until a real extractor is added.
 
 ### Add a test-bed fixture
 
 Drop a representative program at `docs/test-beds/<lang>/fixture.<ext>`. The
 always-on `__tests__/language-coverage.test.ts` parity-guard auto-discovers
-it — no harness edit — and asserts a per-language extraction floor: the
-fixture parses without a hard error and the extractor emits at least one real
-symbol and one edge. This is the regression tripwire that catches a future
-grammar bump or refactor silently zeroing your extractor's output. Keep the
-fixture small but exercise the main constructs (a function, a call, a
-variable; whatever the language's symbols are).
+it — no harness edit — and asserts a per-language extraction floor. Every
+fixture must parse without a hard error. Symbol-emitting languages must also
+emit at least one real symbol and one edge; parser-only modes must be listed in
+`KNOWN_ZERO_SYMBOL_LANGUAGES` so the zero-symbol behavior is deliberate. This
+is the regression tripwire that catches a future grammar bump or refactor
+silently zeroing your extractor's output. Keep the fixture small but exercise
+the main constructs (a function, a call, a variable; whatever the language's
+symbols are).
 
 ### Test-file detection
 
