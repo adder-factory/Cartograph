@@ -36,7 +36,6 @@ import {
 import { areBiomarkersPending } from './biomarkers.js';
 import { classifyChangedFiles, realModifiedCount, type ChangedFiles } from '../../changed-files-classify.js';
 import { shortSha, isShallowClone } from '../../git-utils.js';
-import { clamp } from '../../utils.js';
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { detectModuleFormat, formatModuleFormatLine } from '../../module-format.js';
@@ -50,22 +49,18 @@ import { type ToolOutcome, ok } from './_outcome.js';
 import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
 import { resolveMcpServerProfile } from '../profiles.js';
 import { appendLlmProviders } from './status-llm.js';
+import { STATUS_MAX_INLINE_TOP_N, resolveStatusRollups } from '../../features/status/rollup-options.js';
+export {
+  parseInlineTopN,
+  resolveStatusRollups,
+  type ResolvedStatusRollups,
+  type StatusRollupInput,
+} from '../../features/status/rollup-options.js';
 
 // NOTE: `getToolModules` from './registry.js' is imported DYNAMICALLY
 // inside `appendToolRegistryDrift` — a static import here creates a
 // load-order cycle (registry.ts statically imports STATUS_TOOL from
 // this file). See the comment on that function.
-
-/** Hard cap on the optional inline rollup flags. The dedicated tools
- *  (`cartograph_hotspots`, `cartograph_biomarkers`) are still the right
- *  surface for higher counts — keep status compact.
- *
- *  The CLI `status` command mirrors this value as a local literal
- *  (`STATUS_MAX_INLINE_TOP_N` in src/bin/cartograph.ts) for its help
- *  text — it can't import this module at the top level (load-order
- *  cycle), only dynamically inside the handler. The clamp itself still
- *  runs through the shared {@link parseInlineTopN}. */
-const MAX_INLINE_TOP_N = 30;
 
 /**
  * Zod schema for `cartograph_status`.
@@ -90,13 +85,13 @@ const statusSchema = z.object({
     .number()
     .optional()
     .describe(
-      `Inline the top-N hotspots (by risk = centrality × churn). Default 0 (suppressed); values ≥ 1 capped at ${MAX_INLINE_TOP_N}.`,
+      `Inline the top-N hotspots (by risk = centrality × churn). Default 0 (suppressed); values ≥ 1 capped at ${STATUS_MAX_INLINE_TOP_N}.`,
     ),
   topBiomarkers: z
     .number()
     .optional()
     .describe(
-      `Inline the top-N biomarker findings (warning+ severity, worst-first). Default 0 (suppressed); values ≥ 1 capped at ${MAX_INLINE_TOP_N}. ` +
+      `Inline the top-N biomarker findings (warning+ severity, worst-first). Default 0 (suppressed); values ≥ 1 capped at ${STATUS_MAX_INLINE_TOP_N}. ` +
         'With no warning+ findings, an explicit clean-state line is shown rather than dropping the request.',
     ),
   summaryBreakdown: z
@@ -155,59 +150,6 @@ async function handleStatus(ctx: ToolCtx, args: StatusArgs): Promise<ToolOutcome
   appendOtherProjects(lines, ctx, projectRoot);
 
   return ok(textResult(lines.join('\n')));
-}
-
-/** Single source of truth for `topHotspots` / `topBiomarkers` coercion
- *  across the MCP and CLI surfaces. Documented contract:
- *
- *    - undefined / null / non-numeric  → 0 (suppressed)
- *    - negative / 0 / NaN              → 0 (suppressed)
- *    - fractional                      → floored
- *    - positive                        → clamped to [1, MAX_INLINE_TOP_N]
- *
- *  The MCP path arrives here AFTER Zod has validated `topHotspots:
- *  z.number()` so `raw` is a JS number; the `Number()` coercion is the
- *  CLI path's load-bearing branch (Commander hands us raw strings from
- *  argv). Both surfaces share this function so the agent sees one
- *  consistent contract regardless of transport — closes the prior
- *  MCP-vs-CLI drift where the CLI rejected `0` / `-5` / `1.5` while the
- *  MCP silently coerced them. The schema description on `topHotspots`
- *  / `topBiomarkers` documents this contract verbatim; CLI help text
- *  mirrors it. */
-export function parseInlineTopN(raw: unknown): number {
-  if (raw === undefined || raw === null) return 0;
-  const n = typeof raw === 'number' ? Math.floor(raw) : Math.floor(Number(raw));
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return clamp(n, 1, MAX_INLINE_TOP_N);
-}
-
-export interface StatusRollupInput {
-  readonly verbose?: boolean | undefined;
-  readonly topHotspots?: unknown;
-  readonly topBiomarkers?: unknown;
-  readonly summaryBreakdown?: boolean | undefined;
-}
-
-export interface ResolvedStatusRollups {
-  readonly topHotspots: number;
-  readonly topBiomarkers: number;
-  readonly summaryBreakdown: boolean;
-}
-
-/**
- * Resolve the status rollup switches shared by MCP `cartograph_status`
- * and CLI `cartograph status`. `verbose: true` supplies onboarding
- * defaults, while explicit caller values still win.
- */
-export function resolveStatusRollups(input: StatusRollupInput): ResolvedStatusRollups {
-  const verbose = input.verbose === true;
-  const rawTopHotspots = parseInlineTopN(input.topHotspots);
-  const rawTopBiomarkers = parseInlineTopN(input.topBiomarkers);
-  return {
-    topHotspots: verbose && rawTopHotspots === 0 ? 5 : rawTopHotspots,
-    topBiomarkers: verbose && rawTopBiomarkers === 0 ? 5 : rawTopBiomarkers,
-    summaryBreakdown: typeof input.summaryBreakdown === 'boolean' ? input.summaryBreakdown : verbose,
-  };
 }
 
 /**
@@ -1475,7 +1417,7 @@ export const STATUS_TOOL = defineTool({
   description:
     'Index status — project root, counts, languages, feature-readiness. Call first when unsure which project the MCP defaults to.\n\n' +
     '`topHotspots: N` / `topBiomarkers: N` fold in top-N rollups (capped at ' +
-    MAX_INLINE_TOP_N +
+    STATUS_MAX_INLINE_TOP_N +
     '). `summaryBreakdown: true` splits Summaries into structural/neighbor-prop/llm + body-floor skips. ' +
     '`verbose: true` enables all three rollups at sensible defaults. ' +
     'Drift banner shows commit-drift and uncommitted-edit signals together; re-extraction-flagged files get a separate 🔵 line.',
