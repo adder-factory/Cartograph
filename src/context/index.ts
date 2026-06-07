@@ -6,7 +6,6 @@
  */
 
 import * as fsp from 'node:fs/promises';
-import * as path from 'node:path';
 import type {
   Node,
   Edge,
@@ -31,32 +30,21 @@ import { ScoreTrace } from './score-trace.js';
 import { extractSymbolsFromQuery } from './query-symbols.js';
 import { buildTaskContext, extractCodeBlocks } from './task-context.js';
 import { HIGH_VALUE_NODE_KINDS, normalizeBuildOptions, normalizeFindOptions, pickSearchKinds } from './options.js';
+import {
+  CENTRALITY_BOOST_WEIGHT,
+  TEST_FILE_PENALTY,
+  TEXT_MULTI_TERM_BONUS,
+  TEXT_SEARCH_DAMPEN_RATE,
+  accumulateTermResults,
+  applyBehaviorBias,
+  applyCentralityBoost,
+  applyMultiTermBoost,
+  colocationScore,
+  countTermGroupMatches,
+  groupSubstringStemVariants,
+  mergeSearchChannels,
+} from './scoring.js';
 import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
-
-/**
- * Merge per-term hits into the cross-term accumulator: weight each
- * row's score, max-merge against any existing row for the same node,
- * tally how many distinct terms hit each node. Pulled out of the
- * outer per-term for-loop so the body stays at depth 3.
- */
-function accumulateTermResults(
-  termResultsMap: Map<string, { result: SearchResult; termHits: number }>,
-  termResults: ReadonlyArray<SearchResult>,
-  weight: number,
-): void {
-  const skipReweight = weight >= 0.999;
-  for (const r of termResults) {
-    const reweighted = { ...r, score: r.score * weight };
-    const adjusted = skipReweight ? r : reweighted;
-    const existing = termResultsMap.get(r.node.id);
-    if (existing) {
-      existing.termHits++;
-      existing.result.score = Math.max(existing.result.score, adjusted.score);
-      continue;
-    }
-    termResultsMap.set(r.node.id, { result: adjusted, termHits: 1 });
-  }
-}
 
 /**
  * Immutable slice of `ContextBuilder` threaded through module-scope helpers.
@@ -273,20 +261,6 @@ const COMPOUND_BASE_SCORE = 10;
 const COMPOUND_PER_TERM_BONUS = 20;
 
 // ── findRelevantContext orchestration tunables ─────────────────────────────
-/**
- * PageRank-centrality blend weight for `applyCentralityBoost`.
- *
- * `score *= 1 + γ * sqrt(centrality)`. With γ=5.0 and the empirical
- * top-centrality of ~0.12 in this codebase, the most-central hub
- * gets a ~+173% bump (sqrt(0.12)*5 ≈ 1.73), a 0.01-centrality node
- * gets +50%, a 0.001-centrality leaf gets +16%. Iteratively tuned
- * against the self-eval suite — γ=5 was the value that recovered
- * `self-explore-biomarker-engine`'s recall after the common-term
- * dampener (`DAMPEN_RATE`) downweighted shared tokens. Bump
- * cautiously — over-amplification promotes hubs the user didn't
- * ask about.
- */
-const CENTRALITY_BOOST_WEIGHT = 5;
 /** Over-fetch multiplier feeding `findNodesByExactName` so co-location boost has room to re-rank. */
 const EXACT_FETCH_MULT = 5;
 /** Trim factor for the exact-match channel's intermediate output (after co-location boost). */
@@ -301,55 +275,12 @@ const TEXT_FETCH_MULT = 2;
 const TEXT_TRIM_MULT = 2;
 /** FTS limit when scanning class-like definitions whose name has the title-cased query as prefix. */
 const PREFIX_FTS_LIMIT = 30;
-/** Co-location bonus per extra distinct query symbol matched in the same file. */
-const COLOCATION_BOOST = 20;
 /** Base score uplift for a prefix-class match (added on top of the FTS score). */
 const PREFIX_BASE_BONUS = 15;
 /** Brevity-bonus ceiling for prefix-class matches (added before the per-extra-char penalty). */
 const PREFIX_BREVITY_CEIL = 10;
 /** Char-length divisor in the prefix-class brevity penalty. */
 const PREFIX_BREVITY_DIVISOR = 3;
-/** Boost per *additional* term matched in the text-search merge ("two terms" pays once, "three terms" pays twice, etc.). */
-const TEXT_MULTI_TERM_BONUS = 5;
-/** Smooth common-term dampener: each term's score is multiplied by
- *  `1 - DAMPEN_RATE * (termHits / fetchLimit)`. 0.5 = saturated terms
- *  (16/16) get 0.5×, mid-saturation 0.75×, rare hits ~1.0×. Tuned
- *  on the eval suite — see runMultiTermTextSearch's inline notes. */
-const TEXT_SEARCH_DAMPEN_RATE = 0.5;
-
-/** Score multiplier applied to non-production results (test / fixture /
- *  script / benchmark — `isDiagnosticPath`) when the query isn't itself
- *  test-flavoured. */
-const TEST_FILE_PENALTY = 0.3;
-
-/**
- * Behaviour-question bias multipliers. When the caller opts in via
- * `behaviorBias: true` (MCP layer flips it on for "how/when/why does X
- * happen" phrasing), function/method/route nodes get a small boost and
- * shape-only kinds (interface, type_alias, etc.) get a small penalty.
- * Tuned to nudge — not exclude — so a behaviour question that genuinely
- * needs a shape symbol can still surface it on raw lexical fit.
- *
- * Reproduces the friction caught 2026-05-14 where "how does the file
- * watcher decide when to trigger a sync" surfaced WatcherStats /
- * WatcherState / WatchEventCtx interfaces but missed the gating
- * function `watcherHandleFileEvent`.
- */
-const BEHAVIOR_BIAS_FN_BOOST = 1.4;
-const BEHAVIOR_BIAS_SHAPE_PENALTY = 0.7;
-const BEHAVIOR_BIAS_FN_KINDS: ReadonlySet<string> = new Set(['function', 'method', 'route', 'component']);
-const BEHAVIOR_BIAS_SHAPE_KINDS: ReadonlySet<string> = new Set(['interface', 'type_alias', 'enum', 'enum_member']);
-
-function applyBehaviorBias(results: SearchResult[]): void {
-  for (const r of results) {
-    if (BEHAVIOR_BIAS_FN_KINDS.has(r.node.kind)) {
-      r.score *= BEHAVIOR_BIAS_FN_BOOST;
-    } else if (BEHAVIOR_BIAS_SHAPE_KINDS.has(r.node.kind)) {
-      r.score *= BEHAVIOR_BIAS_SHAPE_PENALTY;
-    }
-  }
-}
-
 // ── Per-file diversification + non-production caps ─────────────────────────
 /** Cap any one file at this fraction of the total budget. */
 const PER_FILE_CAP_FRACTION = 0.2;
@@ -380,61 +311,6 @@ const KIND_PRIORITY: Readonly<Record<string, number>> = {
   field: 0,
   variable: 0,
 };
-
-/**
- * In-place re-rank: boost each result's score by its node's PageRank
- * centrality. `score *= 1 + weight * sqrt(centrality)`. Sqrt-smoothing
- * keeps the boost meaningful for high-centrality hubs (~+69% at the
- * top of this repo) without distorting the long tail (low-centrality
- * leaves get a ~+6% nudge). Nodes with NULL/undefined centrality
- * (centrality hook hasn't run yet) are left at their original score.
- *
- * Closes the gap behind `findRelevantContext`'s explore-pipeline
- * failures: the agent's "how does X work" queries should surface the
- * orchestrator hubs (ExtractionOrchestrator, etc.) above the
- * incidental matches that share query tokens. BM25 alone scored them
- * comparably; centrality is the missing tiebreaker.
- */
-function applyCentralityBoost(results: SearchResult[], weight: number): void {
-  if (weight <= 0) return;
-  for (const r of results) {
-    const c = r.node.centrality;
-    if (c == null || c <= 0) continue;
-    r.score *= 1 + weight * Math.sqrt(c);
-  }
-}
-
-/**
- * Merge two search channels (exact-match + text-FTS) into a single
- * deduped list, taking the maximum score when a node appears in
- * both. Exact matches go in first so they win the entry-order tie
- * within the dedup map, but the score is reconciled per-id via
- * `Math.max` so the merged row reflects the best evidence either
- * channel produced.
- */
-function mergeSearchChannels(exactMatches: SearchResult[], textResults: SearchResult[]): SearchResult[] {
-  const resultById = new Map<string, SearchResult>();
-  const merged: SearchResult[] = [];
-  for (const result of exactMatches) {
-    const existing = resultById.get(result.node.id);
-    if (existing) {
-      existing.score = Math.max(existing.score, result.score);
-    } else {
-      resultById.set(result.node.id, result);
-      merged.push(result);
-    }
-  }
-  for (const result of textResults) {
-    const existing = resultById.get(result.node.id);
-    if (existing) {
-      existing.score = Math.max(existing.score, result.score);
-    } else {
-      resultById.set(result.node.id, result);
-      merged.push(result);
-    }
-  }
-  return merged;
-}
 
 /** Render a `TaskInput` (string or `{title, description?}`) into the
  *  composite query string used by {@link ContextBuilder.buildContext}. */
@@ -510,84 +386,6 @@ function mergeHierarchyInto(hierarchy: { nodes: Map<string, Node>; edges: Edge[]
     if (!acc.nodes.has(edge.source) || !acc.nodes.has(edge.target)) continue;
     const exists = acc.edges.some((e) => e.source === edge.source && e.target === edge.target && e.kind === edge.kind);
     if (!exists) acc.edges.push(edge);
-  }
-}
-
-/**
- * Group query terms that are substrings of each other (stem variants of the
- * same root). Largest first so longer terms anchor each group.
- */
-function groupSubstringStemVariants(queryTerms: string[]): string[][] {
-  const termGroups: string[][] = [];
-  const sorted = [...queryTerms].sort((a, b) => b.length - a.length);
-  const assigned = new Set<string>();
-  for (const term of sorted) {
-    if (assigned.has(term)) continue;
-    const group = [term];
-    assigned.add(term);
-    for (const other of sorted) {
-      if (assigned.has(other)) continue;
-      if (term.includes(other) || other.includes(term)) {
-        group.push(other);
-        assigned.add(other);
-      }
-    }
-    termGroups.push(group);
-  }
-  return termGroups;
-}
-
-/**
- * Count how many term groups match a node's name (substring) or
- * containing-directory segment (exact segment match).
- */
-function countTermGroupMatches(node: Node, termGroups: string[][]): number {
-  // Name match is substring; directory match is exact segment
-  // ("search" matches `search/` but NOT `elasticsearch/`).
-  const nameLower = node.name.toLowerCase();
-  const dirSegments = path.dirname(node.filePath).toLowerCase().split('/');
-  let matchCount = 0;
-  for (const group of termGroups) {
-    if (groupMatchesNode(group, nameLower, dirSegments)) matchCount++;
-  }
-  return matchCount;
-}
-
-/** True if any term in the group matches the node's name or a dir segment. */
-function groupMatchesNode(group: string[], nameLower: string, dirSegments: string[]): boolean {
-  for (const term of group) {
-    if (nameLower.includes(term)) return true;
-    if (dirSegments.includes(term)) return true;
-  }
-  return false;
-}
-
-/** Args bundle for {@link applyMultiTermBoost}. */
-interface ApplyMultiTermBoostArgs {
-  result: SearchResult;
-  matchCount: number;
-  exactMatchIds: Set<string>;
-  extraIds: ReadonlySet<string>;
-}
-
-/**
- * Apply the multi-term boost (or non-exact-match penalty) to a
- * SearchResult. A node matching ≥2 query term-groups is boosted; one
- * matching <2 is damped as an incidental hit — UNLESS it is an exact
- * name match or a semantic `extraCandidate`. The extra-candidate
- * carve-out exists because a stop-word in the query can hide a real
- * match: "file watcher" drops `file` (a stop-word), so `FileWatcher`
- * matches only the `watcher` group and would be penalised as
- * incidental — even though the semantic channel ranked it the #1 hit
- * (friction F-r9-1). The lexical co-occurrence rule must not override
- * the semantic channel's verdict.
- */
-function applyMultiTermBoost(args: ApplyMultiTermBoostArgs): void {
-  const { result, matchCount, exactMatchIds, extraIds } = args;
-  if (matchCount >= 2) {
-    result.score *= 1 + matchCount * 0.5;
-  } else if (!exactMatchIds.has(result.node.id) && !extraIds.has(result.node.id)) {
-    result.score *= 0.6;
   }
 }
 
@@ -832,10 +630,6 @@ function cbExpandTypeHierarchy(st: ContextBuilderState, args: ExpandTypeHierarch
  */
 /** Compute the co-location bonus for a result given how many distinct
  *  symbol names from the match set live in the same file. */
-function colocationScore(baseScore: number, symbolCount: number): number {
-  return symbolCount > 1 ? baseScore + (symbolCount - 1) * COLOCATION_BOOST : baseScore;
-}
-
 function cbApplyColocationBoost(matches: SearchResult[]): SearchResult[] {
   const fileSymbolCounts = new Map<string, Set<string>>();
   for (const r of matches) {
