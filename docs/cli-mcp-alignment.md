@@ -202,10 +202,11 @@ Before a release or quarterly tool-surface audit, run:
 bun run check:release
 ```
 
-That bundles typecheck, Biome, the MCP load-budget target,
-biomarker checks, and the fast test suite. The smaller MCP release
-target intentionally fails before the hard startup-size ceiling so
-schema/help growth is caught while there is still room to trim.
+That bundles typecheck, the architecture drift gate, Biome, the MCP
+load-budget target, biomarker checks, required viewer smoke, and the
+fast test suite. The smaller MCP release target intentionally fails
+before the hard startup-size ceiling so schema/help growth is caught
+while there is still room to trim.
 
 ### Per-property exemption shape (#31 closed 2026-05-22)
 
