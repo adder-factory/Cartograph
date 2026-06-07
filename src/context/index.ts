@@ -29,31 +29,9 @@ import { logDebug } from '../errors.js';
 import { validatePathWithinRootReal, compact } from '../utils.js';
 import { isDiagnosticPath } from '../path-class.js';
 import { ScoreTrace } from './score-trace.js';
+import { extractSymbolsFromQuery } from './query-symbols.js';
 import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
 import { runSequential } from '../utils/async-iteration.js';
-
-/**
- * Extract likely symbol names from a natural language query
- *
- * Identifies potential code symbols using patterns:
- * - CamelCase: UserService, signInWithGoogle
- * - snake_case: user_service, sign_in
- * - SCREAMING_SNAKE: MAX_RETRIES
- * - dot.notation: app.isPackaged (extracts both sides)
- * - Single words that look like identifiers (no spaces, not common English words)
- *
- * @param query - Natural language query
- * @returns Array of potential symbol names
- */
-/** Add a dot-qualified path (`app.isPackaged`) AND each individual
- *  part (`app`, `isPackaged`) to `symbols`. Single-char parts skipped
- *  — they're below the noise threshold the rest of the extractor uses. */
-function addDotPathAndParts(symbols: Set<string>, path: string): void {
-  symbols.add(path);
-  for (const part of path.split('.')) {
-    if (part.length >= 2) symbols.add(part);
-  }
-}
 
 /**
  * Merge per-term hits into the cross-term accumulator: weight each
@@ -78,208 +56,6 @@ function accumulateTermResults(
     }
     termResultsMap.set(r.node.id, { result: adjusted, termHits: 1 });
   }
-}
-
-/**
- * English stopwords + generic code-shaped nouns/verbs (`handle`,
- * `code`, `request`, `data`, …) that match thousands of unrelated
- * symbols when used as a search term. Hoisted to module scope so the
- * Set is allocated once at load instead of per-call, and so
- * {@link extractSymbolsFromQuery} stays under the `large_method`
- * biomarker threshold.
- */
-const QUERY_STOPWORDS = new Set([
-  'the',
-  'and',
-  'for',
-  'with',
-  'from',
-  'this',
-  'that',
-  'have',
-  'been',
-  'will',
-  'would',
-  'could',
-  'should',
-  'does',
-  'done',
-  'make',
-  'made',
-  'use',
-  'used',
-  'using',
-  'work',
-  'works',
-  'find',
-  'found',
-  'show',
-  'call',
-  'called',
-  'calling',
-  'get',
-  'set',
-  'add',
-  'all',
-  'any',
-  'how',
-  'what',
-  'when',
-  'where',
-  'which',
-  'who',
-  'why',
-  'not',
-  'but',
-  'are',
-  'was',
-  'were',
-  'has',
-  'had',
-  'its',
-  'can',
-  'did',
-  'may',
-  'also',
-  'into',
-  'than',
-  'then',
-  'them',
-  'each',
-  'other',
-  'some',
-  'such',
-  'only',
-  'same',
-  'about',
-  'after',
-  'before',
-  'between',
-  'through',
-  'during',
-  'without',
-  'again',
-  'further',
-  'once',
-  'here',
-  'there',
-  'both',
-  'just',
-  'more',
-  'most',
-  'very',
-  'being',
-  'having',
-  'doing',
-  'system',
-  'need',
-  'needs',
-  'want',
-  'wants',
-  'like',
-  'look',
-  'change',
-  'changes',
-  'changed',
-  'changing',
-  // Common English nouns/verbs that match thousands of unrelated code symbols
-  'layer',
-  'handle',
-  'handles',
-  'handling',
-  'incoming',
-  'outgoing',
-  'data',
-  'flow',
-  'flows',
-  'level',
-  'levels',
-  'request',
-  'requests',
-  'response',
-  'responses',
-  'implement',
-  'implements',
-  'implementation',
-  'interface',
-  'interfaces',
-  'class',
-  'classes',
-  'method',
-  'methods',
-  'trigger',
-  'triggers',
-  'affected',
-  'affect',
-  'affects',
-  'else',
-  'code',
-  'failing',
-  'failed',
-  'silently',
-  'decide',
-  'decides',
-  'return',
-  'returns',
-  'returned',
-  'take',
-  'takes',
-  'taken',
-  'check',
-  'checks',
-  'checked',
-  'create',
-  'creates',
-  'created',
-  'read',
-  'reads',
-  'write',
-  'writes',
-  'written',
-  'start',
-  'starts',
-  'stop',
-  'stops',
-  'run',
-  'runs',
-  'running',
-]);
-
-function extractSymbolsFromQuery(query: string): string[] {
-  const symbols = new Set<string>();
-
-  // Each pattern extracts a different identifier shape. The minLength
-  // gate skips noise that the bare regex would otherwise admit.
-  collectRegexMatches(query, { pattern: /\b([A-Z][a-z]+(?:[A-Z][a-z]*)*)\b/g, minLength: 2 }, symbols);
-  collectRegexMatches(query, { pattern: /\b([a-z]+(?:[A-Z][a-z]*)+)\b/g, minLength: 2 }, symbols);
-  collectRegexMatches(query, { pattern: /\b([a-z][a-z0-9]*(?:_[a-z0-9]+)+)\b/gi, minLength: 3 }, symbols);
-  collectRegexMatches(query, { pattern: /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g, minLength: 1 }, symbols);
-  collectRegexMatches(query, { pattern: /\b([A-Z]{2,})\b/g, minLength: 1 }, symbols);
-  collectRegexMatches(query, { pattern: /\b([a-z][a-z0-9]{2,})\b/g, minLength: 1 }, symbols);
-
-  // Dot notation needs its own loop because matches expand into parts
-  // (e.g., "app.isPackaged" → ["app.isPackaged", "app", "isPackaged"]).
-  const dotPattern = /\b([a-zA-Z][a-zA-Z0-9.]*\.[a-zA-Z0-9.]*)\b/g;
-  let match: RegExpExecArray | null;
-  while ((match = dotPattern.exec(query)) !== null) {
-    if (match[1] && isDottedIdentifierPath(match[1])) addDotPathAndParts(symbols, match[1]);
-  }
-
-  return Array.from(symbols).filter((s) => !QUERY_STOPWORDS.has(s.toLowerCase()));
-}
-
-function isDottedIdentifierPath(value: string): boolean {
-  const parts = value.split('.');
-  return parts.length > 1 && parts.every(isIdentifierPathPart);
-}
-
-function isIdentifierPathPart(value: string): boolean {
-  if (!value) return false;
-  if (!/[a-zA-Z]/.test(value[0]!)) return false;
-  for (const char of value.slice(1)) {
-    if (!/[a-zA-Z0-9]/.test(char)) return false;
-  }
-  return true;
 }
 
 /**
@@ -504,12 +280,6 @@ interface SubgraphWorkspace {
   nodes: Map<string, Node>;
   edges: Edge[];
   roots: string[];
-}
-
-/** Regex-pattern spec for `collectRegexMatches`. */
-interface RegexSpec {
-  pattern: RegExp;
-  minLength: number;
 }
 
 /** Args bundle for {@link ContextBuilder.finaliseSubgraph} — keeps the
@@ -890,17 +660,6 @@ function appendNonRootByKind(subgraph: Subgraph, out: Node[], pred: (kind: strin
   for (const node of subgraph.nodes.values()) {
     if (subgraph.roots.includes(node.id)) continue;
     if (pred(node.kind)) out.push(node);
-  }
-}
-
-/**
- * Run a global regex over `text` and add capture-group 1 to `out` when
- * its length >= `minLength`. Keeps the per-pattern boilerplate in one place.
- */
-function collectRegexMatches(text: string, spec: RegexSpec, out: Set<string>): void {
-  let match: RegExpExecArray | null;
-  while ((match = spec.pattern.exec(text)) !== null) {
-    if (match[1] && match[1].length >= spec.minLength) out.add(match[1]);
   }
 }
 
