@@ -47,7 +47,7 @@ These are the current owner modules future sessions should preserve:
 - Database contracts live in `src/db/types.ts`.
 - Storage provider selection is owned by `src/db/database-config.ts` and
   `DatabaseConnection` in `src/db/index.ts`. SQLite remains the default;
-  PostgreSQL support should enter through the same `SqliteDatabase`-shaped
+  PostgreSQL 18+ support should enter through the same `SqliteDatabase`-shaped
   adapter boundary instead of branching in feature callers.
 - PostgreSQL storage is fresh-schema bootstrap only for now. Do not route it
   through SQLite's forward migration chain; use `admin storage-migrate` for

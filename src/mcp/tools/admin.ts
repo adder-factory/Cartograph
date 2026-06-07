@@ -907,7 +907,7 @@ const adminSchema = z.object({
     .string()
     .optional()
     .describe(
-      '(action=init / storage-migrate) PostgreSQL connection URL. Required for `databaseProvider: "postgres"` unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set on the server.',
+      '(action=init / storage-migrate) PostgreSQL 18+ connection URL. Required for `databaseProvider: "postgres"` unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set on the server.',
     ),
   databaseSchema: z
     .string()
@@ -917,7 +917,7 @@ const adminSchema = z.object({
     .enum(['auto', 'off', 'require'])
     .optional()
     .describe(
-      '(action=init / storage-migrate) PostgreSQL pgvector mode: `auto` opportunistically enables native vector search, `off` disables it, `require` fails when unavailable.',
+      '(action=init / storage-migrate) PostgreSQL 18+ pgvector mode: `auto` opportunistically enables native vector search, `off` disables it, `require` fails when unavailable.',
     ),
   databaseMaxConnections: z
     .number()

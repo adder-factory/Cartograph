@@ -1,4 +1,5 @@
 import type { CartographConfig } from '../types.js';
+import type { SqliteDatabase } from './sqlite-adapter.js';
 
 export type DatabaseProvider = 'sqlite' | 'postgres';
 export type PgvectorMode = 'auto' | 'off' | 'require';
@@ -32,6 +33,14 @@ export interface DatabaseOptionInput {
 export const POSTGRES_DEFAULT_MAX_CONNECTIONS = 1;
 export const POSTGRES_DEFAULT_CONNECTION_TIMEOUT_SECONDS = 30;
 export const POSTGRES_DEFAULT_QUERY_TIMEOUT_MS = 120_000;
+export const POSTGRES_MIN_SERVER_MAJOR = 18;
+export const POSTGRES_MIN_SERVER_VERSION_NUM = POSTGRES_MIN_SERVER_MAJOR * 10_000;
+
+export interface PostgresServerVersionInfo {
+  version: string;
+  versionNum: number | null;
+  ioMethod: string | null;
+}
 
 export function resolveDatabaseConfig(config?: CartographConfig['database']): DatabaseConfig {
   const envProvider = process.env['CARTOGRAPH_DATABASE_PROVIDER'];
@@ -158,7 +167,67 @@ export function postgresConnectionSummary(database: DatabaseConfig): string {
   if (database.ssl === true) ssl = 'enabled';
   if (database.ssl === false) ssl = 'disabled';
   const pgvector = database.pgvector ?? 'auto';
-  return `pool max ${maxConnections}, connect timeout ${connectionTimeout}s, query timeout ${queryTimeout}ms, SSL ${ssl}, pgvector ${pgvector}`;
+  return `PostgreSQL ${POSTGRES_MIN_SERVER_MAJOR}+ required, pool max ${maxConnections}, connect timeout ${connectionTimeout}s, query timeout ${queryTimeout}ms, SSL ${ssl}, pgvector ${pgvector}`;
+}
+
+export function parsePostgresServerVersionNum(value: unknown): number | null {
+  if (typeof value === 'number' && Number.isInteger(value)) return value;
+  if (typeof value !== 'string') return null;
+  const parsed = Number(value.trim());
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+export function postgresServerMajor(versionNum: number | null): number | null {
+  if (versionNum === null) return null;
+  return Math.floor(versionNum / 10_000);
+}
+
+export function isPostgresServerVersionSupported(versionNum: number | null): boolean {
+  return versionNum !== null && versionNum >= POSTGRES_MIN_SERVER_VERSION_NUM;
+}
+
+export function postgresMinimumVersionRemediation(): string {
+  return (
+    `Use PostgreSQL ${POSTGRES_MIN_SERVER_MAJOR} or newer. For local Docker setups, use ` +
+    '`pgvector/pgvector:pg18` when pgvector is desired, or a PostgreSQL 18+ image plus `database.pgvector: "off"`.'
+  );
+}
+
+export function postgresUnsupportedVersionMessage(
+  info: Pick<PostgresServerVersionInfo, 'version' | 'versionNum'>,
+): string {
+  const detected =
+    info.versionNum === null
+      ? info.version || 'unknown server version'
+      : `${info.version || 'PostgreSQL'} (server_version_num=${info.versionNum})`;
+  return `Cartograph PostgreSQL storage requires PostgreSQL ${POSTGRES_MIN_SERVER_MAJOR} or newer; detected ${detected}.`;
+}
+
+export function assertPostgresServerVersionSupported(info: PostgresServerVersionInfo): void {
+  if (isPostgresServerVersionSupported(info.versionNum)) return;
+  throw new Error(`${postgresUnsupportedVersionMessage(info)} ${postgresMinimumVersionRemediation()}`);
+}
+
+export function readPostgresServerVersionInfo(db: Pick<SqliteDatabase, 'prepare'>): PostgresServerVersionInfo {
+  const row = db
+    .prepare(
+      `SELECT
+         current_setting('server_version_num') AS server_version_num,
+         current_setting('server_version') AS version,
+         current_setting('io_method', true) AS io_method`,
+    )
+    .get() as { server_version_num?: unknown; version?: unknown; io_method?: unknown } | null;
+  return postgresServerVersionInfoFromRow(row);
+}
+
+export function postgresServerVersionInfoFromRow(
+  row: { server_version_num?: unknown; version?: unknown; io_method?: unknown } | null | undefined,
+): PostgresServerVersionInfo {
+  return {
+    version: typeof row?.version === 'string' ? row.version : '',
+    versionNum: parsePostgresServerVersionNum(row?.server_version_num),
+    ioMethod: typeof row?.io_method === 'string' && row.io_method.length > 0 ? row.io_method : null,
+  };
 }
 
 export function parseDatabaseProvider(value: unknown): DatabaseProvider {

@@ -30,7 +30,7 @@ cartograph admin unlock            # clear stale lock
 cartograph admin prune-store       # clean old orphaned LLM store rows
 ```
 
-PostgreSQL storage flags are available on `setup` and `admin init`:
+PostgreSQL 18+ storage flags are available on `setup` and `admin init`:
 
 ```sh
 cartograph admin init -i \

@@ -1,7 +1,15 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { loadConfig, saveConfig } from '../../config.js';
-import { postgresSqlOptions, resolveDatabaseConfig, type DatabaseConfig } from '../../db/database-config.js';
+import {
+  isPostgresServerVersionSupported,
+  postgresMinimumVersionRemediation,
+  postgresServerVersionInfoFromRow,
+  postgresSqlOptions,
+  postgresUnsupportedVersionMessage,
+  resolveDatabaseConfig,
+  type DatabaseConfig,
+} from '../../db/database-config.js';
 import { DatabaseConnection, getDatabasePath } from '../../db/index.js';
 
 export interface StorageMigrationOptions {
@@ -190,6 +198,8 @@ async function prepareTargetSchema(
   const sql = new Bun.SQL(postgresSqlOptions({ ...database, maxConnections: 1 }));
   try {
     await sql`SELECT 1`;
+    const versionResult = await checkTargetPostgresVersion(sql);
+    if (!versionResult.ok) return versionResult;
     const existingCount = await countSchemaObjects(sql, schema);
     if (existingCount > 0) {
       if (!force) {
@@ -211,6 +221,24 @@ async function prepareTargetSchema(
   } finally {
     await sql.close();
   }
+}
+
+async function checkTargetPostgresVersion(sql: Bun.SQL): Promise<StorageMigrationResult | { ok: true }> {
+  const rows = await sql`
+    SELECT
+      current_setting('server_version_num') AS server_version_num,
+      current_setting('server_version') AS version,
+      current_setting('io_method', true) AS io_method
+  `;
+  const info = postgresServerVersionInfoFromRow(
+    rows[0] as { server_version_num?: unknown; version?: unknown; io_method?: unknown } | undefined,
+  );
+  if (isPostgresServerVersionSupported(info.versionNum)) return { ok: true };
+  return failure(
+    'unsupported-postgres-version',
+    postgresUnsupportedVersionMessage(info),
+    postgresMinimumVersionRemediation(),
+  );
 }
 
 async function countSchemaObjects(sql: Bun.SQL, schema: string): Promise<number> {

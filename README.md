@@ -29,7 +29,8 @@ symbols, callers, impact radius, affected tests, hotspots, code-health
 findings, SQL/env references, and semantic matches without repeatedly scanning
 the same files.
 
-SQLite is the zero-config default. PostgreSQL is available when you want
+SQLite is the zero-config default and is capability-checked through Bun's
+embedded SQLite runtime. PostgreSQL 18+ is available when you want
 shared/external storage, managed backups, operational database controls, or
 native pgvector search.
 
@@ -119,7 +120,7 @@ SQLite is the default and works immediately:
 cartograph admin init -i
 ```
 
-PostgreSQL is opt-in:
+PostgreSQL 18+ is opt-in:
 
 ```bash
 docker run --rm -d --name cartograph-postgres \
@@ -147,8 +148,9 @@ cartograph admin storage-migrate . \
   --database-pgvector auto
 ```
 
-See [Storage Backends](docs/STORAGE-BACKENDS.md) for pgvector modes,
-production grants, hosted TLS notes, and migration details.
+See [Storage Backends](docs/STORAGE-BACKENDS.md) for the PostgreSQL 18+
+minimum, pgvector modes, production grants, hosted TLS notes, and migration
+details.
 
 Local storage benchmark, run 2026-06-07 with Bun 1.3.14 on `darwin arm64`:
 

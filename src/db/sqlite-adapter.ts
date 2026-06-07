@@ -65,6 +65,17 @@ export interface SqliteDatabase {
 }
 
 export type SqliteBackend = 'bun-sqlite' | 'postgres';
+export const SQLITE_MIN_VERSION = '3.37.0';
+
+export interface SqliteRuntimeCapabilities {
+  version: string;
+  strictTables: boolean;
+  fts5: boolean;
+  rtree: boolean;
+  json: boolean;
+}
+
+let sqliteCapabilitiesCache: SqliteRuntimeCapabilities | undefined;
 
 /**
  * Pull every `@name`, `:name`, `$name` placeholder out of a SQL string.
@@ -102,6 +113,80 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
     !(value instanceof Buffer) &&
     !(value instanceof Uint8Array)
   );
+}
+
+export function compareSqliteVersions(a: string, b: string): number {
+  const parse = (value: string): number[] => value.split('.').map((part) => Number.parseInt(part, 10));
+  const aa = parse(a);
+  const bb = parse(b);
+  for (let i = 0; i < 3; i++) {
+    const left = aa[i] ?? 0;
+    const right = bb[i] ?? 0;
+    if (left !== right) return left - right;
+  }
+  return 0;
+}
+
+export function readSqliteRuntimeCapabilities(db: SqliteDatabase): SqliteRuntimeCapabilities {
+  if (sqliteCapabilitiesCache) return { ...sqliteCapabilitiesCache };
+  const row = db.prepare('SELECT sqlite_version() AS version').get() as { version?: unknown } | null;
+  const version = typeof row?.version === 'string' ? row.version : '0.0.0';
+  sqliteCapabilitiesCache = {
+    version,
+    strictTables: probeSqliteFeature(db, 'strict'),
+    fts5: probeSqliteFeature(db, 'fts5'),
+    rtree: probeSqliteFeature(db, 'rtree'),
+    json: probeSqliteFeature(db, 'json'),
+  };
+  return { ...sqliteCapabilitiesCache };
+}
+
+export function assertSqliteRuntimeCapabilities(db: SqliteDatabase): SqliteRuntimeCapabilities {
+  const capabilities = readSqliteRuntimeCapabilities(db);
+  const missing: string[] = [];
+  if (compareSqliteVersions(capabilities.version, SQLITE_MIN_VERSION) < 0) {
+    missing.push(`SQLite ${SQLITE_MIN_VERSION}+`);
+  }
+  if (!capabilities.strictTables) missing.push('STRICT tables');
+  if (!capabilities.fts5) missing.push('FTS5');
+  if (!capabilities.rtree) missing.push('RTree');
+  if (!capabilities.json) missing.push('JSON functions');
+  if (missing.length > 0) {
+    throw new Error(
+      `SQLite runtime is missing required capabilities (${missing.join(', ')}); detected SQLite ` +
+        `${capabilities.version}. Upgrade Bun, set CARTOGRAPH_BUN_SQLITE_PATH to a modern SQLite build, or configure PostgreSQL ${POSTGRESQL_ALTERNATIVE_LABEL}.`,
+    );
+  }
+  return capabilities;
+}
+
+const POSTGRESQL_ALTERNATIVE_LABEL = '18+';
+
+function probeSqliteFeature(db: SqliteDatabase, feature: 'strict' | 'fts5' | 'rtree' | 'json'): boolean {
+  try {
+    if (feature === 'strict') {
+      db.exec('DROP TABLE IF EXISTS temp.__cartograph_cap_strict');
+      db.exec('CREATE TEMP TABLE __cartograph_cap_strict (id INTEGER) STRICT');
+      db.exec('DROP TABLE temp.__cartograph_cap_strict');
+      return true;
+    }
+    if (feature === 'fts5') {
+      db.exec('DROP TABLE IF EXISTS temp.__cartograph_cap_fts5');
+      db.exec('CREATE VIRTUAL TABLE temp.__cartograph_cap_fts5 USING fts5(value)');
+      db.exec('DROP TABLE temp.__cartograph_cap_fts5');
+      return true;
+    }
+    if (feature === 'rtree') {
+      db.exec('DROP TABLE IF EXISTS temp.__cartograph_cap_rtree');
+      db.exec('CREATE VIRTUAL TABLE temp.__cartograph_cap_rtree USING rtree_i32(id, min_line, max_line)');
+      db.exec('DROP TABLE temp.__cartograph_cap_rtree');
+      return true;
+    }
+    const jsonRow = db.prepare(`SELECT json_extract('{"ok":true}', '$.ok') AS ok`).get() as { ok?: unknown } | null;
+    return jsonRow?.ok === 1 || jsonRow?.ok === true;
+  } catch {
+    return false;
+  }
 }
 
 // ─── Bun setCustomSQLite (macOS only) ────────────────────────────────────────
@@ -275,6 +360,12 @@ function tryLoadVecExtension(db: SqliteDatabase): boolean {
 export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: SqliteBackend; vecLoaded: boolean } {
   try {
     const db = new BunSqliteAdapter(dbPath);
+    try {
+      assertSqliteRuntimeCapabilities(db);
+    } catch (error) {
+      db.close();
+      throw error;
+    }
     const vecLoaded = tryLoadVecExtension(db);
     return { db, backend: 'bun-sqlite', vecLoaded };
   } catch (error) {

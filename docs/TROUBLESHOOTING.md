@@ -75,6 +75,8 @@ Check:
   right database.
 - Hosted databases often need TLS. Prefer URL options such as
   `?sslmode=require`, `verify-ca`, or `verify-full`.
+- Cartograph requires PostgreSQL 18 or newer. `cartograph doctor` reports the
+  detected server version before it checks schema state.
 - The configured role can create and write in the schema. Fresh-schema init and
   rebuild flows need DDL permissions.
 
@@ -88,6 +90,17 @@ docker run --rm -d --name cartograph-postgres \
   -p 5432:5432 \
   pgvector/pgvector:pg18
 ```
+
+## PostgreSQL Is Too Old
+
+Doctor may report:
+
+```text
+Cartograph PostgreSQL storage requires PostgreSQL 18 or newer
+```
+
+Use a PostgreSQL 18+ server, or keep the default SQLite backend. For local
+pgvector testing, use `pgvector/pgvector:pg18`.
 
 ## pgvector Is Missing
 

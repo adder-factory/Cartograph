@@ -16,7 +16,12 @@ import { bootstrapVecTables } from './vec-helpers.js';
 import { bootstrapPgvector, bootstrapPgvectorTables } from './pgvector-helpers.js';
 import { compact } from '../utils.js';
 import { resolveAssetPath } from '../assets.js';
-import { resolveDatabaseConfig, type DatabaseConfig } from './database-config.js';
+import {
+  assertPostgresServerVersionSupported,
+  readPostgresServerVersionInfo,
+  resolveDatabaseConfig,
+  type DatabaseConfig,
+} from './database-config.js';
 import { PostgresAdapter } from './postgres-adapter.js';
 
 export type { SqliteDatabase, SqliteBackend } from './sqlite-adapter.js';
@@ -32,6 +37,12 @@ function createConfiguredDatabase(
   const database = resolveDatabaseConfig(options.database);
   if (database.provider === 'postgres') {
     const db = new PostgresAdapter({ ...database, provider: 'postgres' });
+    try {
+      assertPostgresServerVersionSupported(readPostgresServerVersionInfo(db));
+    } catch (err) {
+      db.close();
+      throw err;
+    }
     return { db, backend: 'postgres', vecLoaded: false, database };
   }
   return { ...createDatabase(dbPath), database };
@@ -118,7 +129,7 @@ export class DatabaseConnection {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const { db, backend, vecLoaded, database } = createConfiguredDatabase(dbPath, opts);
-    dbApplyPragmas(db);
+    if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
     const schemaPath = resolveAssetPath('db', db.dialect === 'postgres' ? 'schema-postgres.sql' : 'schema.sql');
     db.exec(fs.readFileSync(schemaPath, 'utf-8'));
@@ -171,7 +182,7 @@ export class DatabaseConnection {
     if (database.provider === 'sqlite' && !fs.existsSync(dbPath)) throw new Error(`Database not found: ${dbPath}`);
 
     const { db, backend, vecLoaded } = createConfiguredDatabase(dbPath, { database });
-    dbApplyPragmas(db);
+    if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
     const conn = new DatabaseConnection({ db, dbPath, backend, vecLoaded });
     const currentVersion = getCurrentVersion(db);
@@ -384,6 +395,14 @@ function dbCheckpointWal(
  * or index completion hang.
  */
 export function dbRunMaintenance(conn: DatabaseConnection): void {
+  if (conn.getBackend() === 'postgres') {
+    try {
+      conn.getDb().exec('ANALYZE');
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
   try {
     conn.getDb().exec('PRAGMA optimize');
   } catch {

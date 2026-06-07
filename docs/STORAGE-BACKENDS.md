@@ -4,7 +4,9 @@ Cartograph supports both storage backends:
 
 - **SQLite** is the default. It needs no service, stores the graph at
   `.cartograph/cartograph.db`, and is the fastest local single-writer path.
-- **PostgreSQL** is opt-in. Use it when you want external/shared storage,
+  Cartograph verifies the Bun SQLite runtime supports SQLite 3.37+,
+  STRICT tables, FTS5, RTree, and JSON functions.
+- **PostgreSQL 18+** is opt-in. Use it when you want external/shared storage,
   managed backups, operational DB controls, or native pgvector search.
 
 ## SQLite Default
@@ -14,12 +16,14 @@ cartograph admin init -i /path/to/project
 cartograph status /path/to/project
 ```
 
-No database config is required. SQLite uses FTS, RTree, and sqlite-vec when
-the optional sqlite-vec extension is available.
+No database config is required. SQLite uses FTS, RTree, JSON-backed variable
+lists, and sqlite-vec when the optional sqlite-vec extension is available.
+Doctor reports the SQLite version and feature check result.
 
 ## PostgreSQL New Project
 
-Start a PostgreSQL database first. For local development and pgvector testing:
+Start a PostgreSQL 18+ database first. For local development and pgvector
+testing:
 
 ```sh
 docker run --rm -d --name cartograph-postgres \
@@ -128,10 +132,12 @@ cartograph doctor /path/to/project
 cartograph status /path/to/project --verbose
 ```
 
-Doctor verifies PostgreSQL connectivity, schema version, DML writes, DDL
+Doctor verifies PostgreSQL 18+, connectivity, schema version, DML writes, DDL
 privileges for init/rebuild workflows, and pgvector availability when enabled.
 Status reports the active backend; PostgreSQL storage uses native GIN indexes
 and pgvector when available instead of SQLite-only sqlite-vec/RTree paths.
+Maintenance runs PostgreSQL `ANALYZE` after bulk writes so the PG18 planner can
+use fresh statistics for its newer index and scan paths.
 
 ## Production Notes
 
@@ -153,7 +159,8 @@ For hosted PostgreSQL, prefer URL certificate policy such as
 `?sslmode=require`, `verify-ca`, or `verify-full`. The
 `database.ssl` / `CARTOGRAPH_DATABASE_SSL=true` setting only forces TLS on/off.
 
-PostgreSQL support currently bootstraps fresh schemas. It does not run
+PostgreSQL support requires PostgreSQL 18 or newer and currently bootstraps
+fresh schemas. It does not run
 SQLite's forward migration chain in PostgreSQL; use a new schema for upgrades
 that need a rebuild.
 

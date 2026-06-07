@@ -2,12 +2,18 @@ import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { loadConfig } from '../../config.js';
 import {
+  isPostgresServerVersionSupported,
+  postgresMinimumVersionRemediation,
   postgresConnectionSummary,
+  postgresServerVersionInfoFromRow,
+  postgresUnsupportedVersionMessage,
   postgresSqlOptions,
   resolveDatabaseConfig,
   type DatabaseConfig,
+  type PostgresServerVersionInfo,
 } from '../../db/database-config.js';
 import { CURRENT_SCHEMA_VERSION } from '../../db/migrations.js';
+import { createDatabase, readSqliteRuntimeCapabilities } from '../../db/sqlite-adapter.js';
 import { configuredModelFilesFromLlm, LLM_TIER_KEYS, type ConfiguredModelFile } from '../../features/backend/index.js';
 import { MODELS_DIR_DEFAULT } from '../../llm/recommended-models.js';
 import { formatBytes } from '../../utils.js';
@@ -258,12 +264,33 @@ async function checkSqliteStorage(projectPath: string): Promise<CheckResult> {
       remediation: `Run \`cartograph admin init ${projectPath}\` to create the database, or configure PostgreSQL with \`database.provider: "postgres"\`.`,
     };
   }
-  return {
-    id: 'database-storage',
-    name: 'Database storage',
-    status: 'ok',
-    detail: `SQLite database present at ${dbPath}`,
-  };
+  let opened: ReturnType<typeof createDatabase> | null = null;
+  try {
+    opened = createDatabase(dbPath);
+    const capabilities = readSqliteRuntimeCapabilities(opened.db);
+    const vecDetail = opened.vecLoaded
+      ? 'sqlite-vec loaded'
+      : 'sqlite-vec unavailable; in-memory vector fallback active';
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'ok',
+      detail:
+        `SQLite database present at ${dbPath}; SQLite ${capabilities.version}; ` +
+        `STRICT/FTS5/RTree/JSON ok; ${vecDetail}.`,
+    };
+  } catch (e) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: `SQLite check failed: ${(e as Error).message}`,
+      remediation:
+        'Upgrade Bun, set CARTOGRAPH_BUN_SQLITE_PATH to a modern SQLite build, or configure PostgreSQL 18+ with `database.provider: "postgres"`.',
+    };
+  } finally {
+    opened?.db.close();
+  }
 }
 
 async function checkPostgresStorage(database: DatabaseConfig, projectPath: string): Promise<CheckResult> {
@@ -286,6 +313,24 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
   const sql = new Bun.SQL(postgresSqlOptions({ ...database, maxConnections: 1 }));
   try {
     await sql`SELECT 1`;
+    const serverRows = await sql`
+      SELECT
+        current_setting('server_version_num') AS server_version_num,
+        current_setting('server_version') AS version,
+        current_setting('io_method', true) AS io_method
+    `;
+    const serverInfo = postgresServerVersionInfoFromRow(
+      serverRows[0] as { server_version_num?: unknown; version?: unknown; io_method?: unknown } | undefined,
+    );
+    if (!isPostgresServerVersionSupported(serverInfo.versionNum)) {
+      return {
+        id: 'database-storage',
+        name: 'Database storage',
+        status: 'fail',
+        detail: postgresUnsupportedVersionMessage(serverInfo),
+        remediation: postgresMinimumVersionRemediation(),
+      };
+    }
     const schemaRows = await sql.unsafe('SELECT to_regnamespace($1) AS name', [schema]);
     const schemaName = (schemaRows[0] as { name?: string | null } | undefined)?.name;
     if (!schemaName) {
@@ -322,7 +367,7 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
         remediation: initRecovery,
       };
     }
-    return await checkPostgresRuntimePrivileges(sql, database, schema, version);
+    return await checkPostgresRuntimePrivileges(sql, database, schema, version, serverInfo);
   } catch (e) {
     return {
       id: 'database-storage',
@@ -341,6 +386,7 @@ async function checkPostgresRuntimePrivileges(
   database: DatabaseConfig,
   schema: string,
   version: number,
+  serverInfo: PostgresServerVersionInfo,
 ): Promise<CheckResult> {
   const dmlProbe = await probePostgresDml(sql, schema);
   if (dmlProbe !== null) {
@@ -360,7 +406,7 @@ async function checkPostgresRuntimePrivileges(
       name: 'Database storage',
       status: 'fail',
       detail:
-        `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+        `${postgresRuntimeDetail(serverInfo)}; schema "${schema}" is at version ${version}; runtime writes ok; ` +
         `${pgvectorProbe.detail}.`,
       remediation: pgvectorProbe.remediation,
     };
@@ -371,7 +417,7 @@ async function checkPostgresRuntimePrivileges(
       name: 'Database storage',
       status: 'warn',
       detail:
-        `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+        `${postgresRuntimeDetail(serverInfo)}; schema "${schema}" is at version ${version}; runtime writes ok; ` +
         `schema DDL probe failed: ${ddlProbe}; ${pgvectorProbe.detail}. ${postgresConnectionSummary(database)}.`,
       remediation: `Grant CREATE on schema "${schema}" for init/rebuild workflows, or keep using a separate admin role for \`cartograph admin init\` and \`cartograph admin storage-migrate --force\`.`,
     };
@@ -381,9 +427,14 @@ async function checkPostgresRuntimePrivileges(
     name: 'Database storage',
     status: 'ok',
     detail:
-      `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+      `${postgresRuntimeDetail(serverInfo)}; schema "${schema}" is at version ${version}; runtime writes ok; ` +
       `schema DDL ok; ${pgvectorProbe.detail}. ${postgresConnectionSummary(database)}.`,
   };
+}
+
+function postgresRuntimeDetail(info: PostgresServerVersionInfo): string {
+  const io = info.ioMethod ? `, io_method=${info.ioMethod}` : '';
+  return `PostgreSQL ${info.version || '18+'}${io}; PG18 planner/storage paths available`;
 }
 
 type PgvectorProbeResult = { status: 'ok'; detail: string } | { status: 'fail'; detail: string; remediation: string };
@@ -408,7 +459,7 @@ async function probePostgresPgvector(
         status: 'fail',
         detail: 'pgvector required but the PostgreSQL `vector` extension is not installed',
         remediation:
-          'Install pgvector in the configured database, use a pgvector-enabled image such as `pgvector/pgvector:pg16`, or set `database.pgvector` to `auto`/`off`.',
+          'Install pgvector in the configured database, use a pgvector-enabled image such as `pgvector/pgvector:pg18`, or set `database.pgvector` to `auto`/`off`.',
       };
     }
     return { status: 'ok', detail: 'pgvector unavailable; BYTEA storage with HNSW/in-memory fallbacks active' };
