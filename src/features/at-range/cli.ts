@@ -1,5 +1,5 @@
 import * as fsp from 'node:fs/promises';
-import { buildAtRangeMcpArgs, type AtRangeOptions } from './runtime.js';
+import { buildAtRangeMcpArgs, type AtRangeOptions, type BuildAtRangeArgsInput } from './runtime.js';
 
 interface CommandLike {
   command(name: string): CommandLike;
@@ -49,13 +49,14 @@ export function registerAtRangeCommand(deps: AtRangeCommandDeps): void {
         options: AtRangeOptions,
       ) => {
         const diffText = options.diff === undefined ? undefined : await resolveDiffOption(options.diff, deps);
-        const result = buildAtRangeMcpArgs({
+        const input: BuildAtRangeArgsInput = {
           file,
           startLine,
           endLine,
           options,
-          ...(diffText !== undefined ? { diffText } : {}),
-        });
+        };
+        if (diffText !== undefined) input.diffText = diffText;
+        const result = buildAtRangeMcpArgs(input);
         if (!result.ok) {
           deps.error(result.error);
           process.exitCode = 1;

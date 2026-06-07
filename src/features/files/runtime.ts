@@ -27,7 +27,7 @@ export interface FileListingRow {
 export type FileListing = FileListingRow[];
 export type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
 
-export interface DirRollupRow {
+interface DirRollupRow {
   dir: string | null;
   files: number;
   symbols: number;

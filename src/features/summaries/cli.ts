@@ -5,8 +5,9 @@ import {
   readSummariesSaveInput,
   type SummariesArgResult,
 } from './runtime.js';
+import { runMcpToolFamilyCall } from '../shared/mcp-call.js';
 
-export interface AssignIntArgInput {
+interface AssignIntArgInput {
   args: Record<string, unknown>;
   key: string;
   raw: string | undefined;
@@ -25,17 +26,12 @@ export interface SummariesCommandDeps {
   readStdin: () => Promise<string>;
 }
 
-async function runSummariesCall(
+function runSummariesCall(
   result: SummariesArgResult,
   projectPath: string | undefined,
   deps: SummariesCommandDeps,
 ): Promise<void> {
-  if (!result.ok) {
-    deps.error(result.error);
-    process.exitCode = 1;
-    return;
-  }
-  await deps.runViaMCP('cartograph_summaries', result.args, projectPath);
+  return runMcpToolFamilyCall({ toolName: 'cartograph_summaries', result, projectPath, deps });
 }
 
 export function registerSummariesCommand(deps: SummariesCommandDeps): void {

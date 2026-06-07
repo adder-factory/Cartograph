@@ -22,7 +22,7 @@ import { defineTool, type DefineToolSpec, type ToolZodSchema } from './_define-t
  * read by `src/bin/_command-generator.ts`, but it should not import
  * commander or CLI execution code.
  */
-export interface ToolCliContract {
+interface ToolCliContract {
   /** Override `cartograph_X` -> `x` command-name derivation. */
   readonly commandName?: string;
   /** Schema fields intentionally omitted from the generated CLI surface. */

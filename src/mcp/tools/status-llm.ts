@@ -56,10 +56,8 @@ export async function appendLlmProviders(lines: string[], cg: Cartograph): Promi
     }),
   );
 
-  llmLines.push(...renderTuningSection(llmCfg));
-
   const reachLines = await renderReachabilitySection(llmCfg);
-  if (reachLines.length > 0) llmLines.push(...reachLines);
+  llmLines.push(...renderTuningSection(llmCfg), ...reachLines);
 
   if (llmLines.length > 0) {
     lines.push('', '### 🤖 LLM providers', ...llmLines);

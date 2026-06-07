@@ -6,12 +6,12 @@ export interface SetupCartographModule {
   };
 }
 
-export interface SetupDoctorResult {
+interface SetupDoctorResult {
   overallStatus: string;
   afterFix?: { overallStatus: string };
 }
 
-export interface SetupDoctorModule {
+interface SetupDoctorModule {
   runDoctor: (opts: { projectPath: string }) => Promise<SetupDoctorResult>;
   formatDoctorReport: (result: SetupDoctorResult) => string;
 }

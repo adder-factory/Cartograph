@@ -47,7 +47,7 @@
     <input type="text" class="search" id="search-input" data-shortcut="search"
            placeholder="Search symbol — case-insensitive, Enter to focus"
            autocomplete="off" />
-    <div class="search-suggest" id="search-suggest" role="listbox" hidden></div>
+    <div class="search-suggest" id="search-suggest" hidden></div>
   </div>
   <div class="spacer"></div>
   <button type="button" class="mode-toggle" id="btn-viewer-mode" data-tooltip="Show advanced viewer controls"><i data-lucide="sliders-horizontal" aria-hidden="true"></i><span data-ui-mode-label>Simple</span></button>
@@ -83,11 +83,12 @@
     <section class="rail-section">
       <div class="rail-title">Graph tools</div>
       <div class="tool-label">Impact</div>
-      <div class="impact-control" id="impact-control" role="group" aria-label="Impact mode">
+      <fieldset class="impact-control" id="impact-control">
+        <legend class="sr-only">Impact mode</legend>
         <button type="button" data-impact-mode="callers" data-tooltip="Show symbols that call or reference the selection">Callers</button>
         <button type="button" data-impact-mode="callees" data-tooltip="Show symbols called or referenced by the selection">Callees</button>
         <button type="button" data-impact-mode="both" data-tooltip="Show incoming and outgoing impact around the selection">Both</button>
-      </div>
+      </fieldset>
       <div class="tool-label">Path</div>
       <div class="path-tool-grid">
         <input type="text" id="path-from" class="rail-input" placeholder="From symbol" autocomplete="off" data-tooltip="Path start symbol; blank uses the current selection" />
@@ -110,39 +111,43 @@
 
     <section class="rail-section">
       <div class="rail-title">Graph density</div>
-      <div class="density-control" id="density-control" role="group" aria-label="Graph density">
+      <fieldset class="density-control" id="density-control">
+        <legend class="sr-only">Graph density</legend>
         <button type="button" data-density-mode="focus" data-tooltip="Show a small neighborhood around the current focus">Focus</button>
         <button type="button" data-density-mode="core" data-active="1" data-tooltip="Show central symbols plus the selected neighborhood">Core</button>
         <button type="button" data-density-mode="all" data-tooltip="Show every node in the current fetched graph">All</button>
-      </div>
+      </fieldset>
       <div class="density-note" id="density-note">Core keeps the most central symbols plus the selected neighborhood.</div>
     </section>
 
     <section class="rail-section">
       <div class="rail-title">Graph layout</div>
-      <div class="layout-quality-control" id="layout-quality-control" role="group" aria-label="Graph layout quality">
+      <fieldset class="layout-quality-control" id="layout-quality-control">
+        <legend class="sr-only">Graph layout quality</legend>
         <button type="button" data-layout-quality="fast" data-tooltip="Run a faster graph layout">Fast</button>
         <button type="button" data-layout-quality="balanced" data-active="1" data-tooltip="Balance layout speed and spacing">Balanced</button>
         <button type="button" data-layout-quality="spread" data-tooltip="Spread dense graphs out more aggressively">Spread</button>
-      </div>
+      </fieldset>
       <div class="density-note" id="layout-quality-note">Balanced layout.</div>
     </section>
 
     <section class="rail-section">
       <div class="rail-title">Groups <span class="rail-hint">directory boxes</span></div>
-      <div class="group-control" id="group-control" role="group" aria-label="Group controls">
+      <fieldset class="group-control" id="group-control">
+        <legend class="sr-only">Group controls</legend>
         <button type="button" id="btn-collapse-groups" title="Collapse all visible groups"><i data-lucide="minimize-2" aria-hidden="true"></i><span>Collapse</span></button>
         <button type="button" id="btn-expand-groups" title="Expand all collapsed groups"><i data-lucide="maximize-2" aria-hidden="true"></i><span>Expand</span></button>
-      </div>
+      </fieldset>
       <div class="density-note" id="group-note">Click a group on the canvas to toggle it.</div>
     </section>
 
     <section class="rail-section">
       <div class="rail-title">Detail nodes <span class="rail-hint">variables, fields, params</span></div>
-      <div class="detail-control" id="detail-control" role="group" aria-label="Detail node grouping">
+      <fieldset class="detail-control" id="detail-control">
+        <legend class="sr-only">Detail node grouping</legend>
         <button type="button" data-detail-mode="grouped" data-active="1" data-tooltip="Group low-signal leaf nodes into compact buckets">Grouped</button>
         <button type="button" data-detail-mode="expanded" data-tooltip="Show variable, field, and parameter nodes individually">Expanded</button>
-      </div>
+      </fieldset>
       <div class="density-note" id="detail-note">Grouped keeps low-signal leaf nodes in local file buckets.</div>
     </section>
 
@@ -162,10 +167,11 @@
     <section class="rail-section">
       <div class="rail-title">Edge kind <span class="rail-hint">from current graph</span></div>
       <div class="tool-label">Lens</div>
-      <div class="edge-lens-control" id="edge-lens-control" role="group" aria-label="Edge lens">
+      <fieldset class="edge-lens-control" id="edge-lens-control">
+        <legend class="sr-only">Edge lens</legend>
         <button type="button" data-edge-lens="all" data-active="1" data-tooltip="Show every visible edge">All edges</button>
         <button type="button" data-edge-lens="selected" data-tooltip="Only show edges touching the selected symbol">Selected</button>
-      </div>
+      </fieldset>
       <div class="rail-actions">
         <button type="button" class="rail-action" id="btn-edge-all" data-tooltip="Show every edge kind">All</button>
         <button type="button" class="rail-action" id="btn-edge-none" data-tooltip="Hide every edge kind">None</button>

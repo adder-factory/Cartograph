@@ -67,6 +67,7 @@ const DEFAULT_PORT = 8765;
  *  give `new URL()` a base for relative-path parsing. Module-scoped so
  *  per-request handlers don't carry literal URLs. */
 const HTTP_SCHEME = 'http://';
+const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
 
 /** Dummy base for resolving relative request URLs — `req.url` arrives
  *  path-only, but the URL constructor needs a base. The host doesn't
@@ -179,8 +180,6 @@ interface ImpactPayloadArgs {
   readonly edgeKinds: EdgeKind[];
 }
 
-type StaticAssetName = string;
-
 interface StaticAsset {
   readonly body: string;
   readonly contentType: string;
@@ -192,7 +191,7 @@ interface SendStaticAssetArgs {
   readonly req: http.IncomingMessage;
   readonly res: http.ServerResponse;
   readonly ctx: RequestContext;
-  readonly filename: StaticAssetName;
+  readonly filename: string;
 }
 
 interface CollectFocusGraphArgs {
@@ -355,7 +354,7 @@ interface RequestContext {
   queries: QueryBuilder;
   traverser: GraphTraverser;
   indexHtml: string;
-  staticAssets: Record<StaticAssetName, StaticAsset>;
+  staticAssets: Record<string, StaticAsset>;
   /**
    * Lazy Cartograph handle — only the /api/ask path needs the full
    * service surface (LLM client + hybrid retrieval). Most viewer
@@ -423,7 +422,11 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
         sendJson(res, HTTP_BAD_REQUEST, { error: '`from` and `to` are required' });
         return;
       }
-      sendJson(res, HTTP_OK, pathPayload(ctx, from, to, parseEdgeKinds(url.searchParams)));
+      sendJson(
+        res,
+        HTTP_OK,
+        pathPayload({ ctx, fromRaw: from, toRaw: to, edgeKinds: parseEdgeKinds(url.searchParams) }),
+      );
     },
   },
   {
@@ -824,7 +827,14 @@ function serializeGraphEdge(edge: Pick<Edge, 'source' | 'target' | 'kind'>): {
   return { source: edge.source, target: edge.target, kind: edge.kind };
 }
 
-function pathPayload(ctx: RequestContext, fromRaw: string, toRaw: string, edgeKinds: EdgeKind[]): unknown {
+interface PathPayloadArgs {
+  ctx: RequestContext;
+  fromRaw: string;
+  toRaw: string;
+  edgeKinds: EdgeKind[];
+}
+
+function pathPayload({ ctx, fromRaw, toRaw, edgeKinds }: PathPayloadArgs): unknown {
   const from = resolveSymbolToNode(ctx.queries, fromRaw);
   if (!from) return { found: false, error: `unknown symbol: ${fromRaw}`, from: null, to: null, nodes: [], edges: [] };
   const to = resolveSymbolToNode(ctx.queries, toRaw);
@@ -868,9 +878,7 @@ function collectImpactGraph(args: CollectImpactGraphArgs): CollectedGraph {
   const { ctx, focusNode, mode, depth, limit, edgeKinds } = args;
   const nodes = new Map<string, Node>();
   nodes.set(focusNode.id, focusNode);
-  const directions: Array<'incoming' | 'outgoing'> =
-    mode === 'callers' ? ['incoming'] : mode === 'callees' ? ['outgoing'] : ['incoming', 'outgoing'];
-  for (const direction of directions) {
+  for (const direction of impactDirections(mode)) {
     const subgraph = ctx.traverser.traverseBFS(focusNode.id, {
       direction,
       maxDepth: depth,
@@ -890,6 +898,12 @@ function collectImpactGraph(args: CollectImpactGraphArgs): CollectedGraph {
   for (const edge of internalEdges)
     edgesById.set(`${edge.source}__${edge.target}__${edge.kind}`, serializeGraphEdge(edge));
   return { nodes, edgesById };
+}
+
+function impactDirections(mode: ImpactMode): Array<'incoming' | 'outgoing'> {
+  if (mode === 'callers') return ['incoming'];
+  if (mode === 'callees') return ['outgoing'];
+  return ['incoming', 'outgoing'];
 }
 
 function impactPayload(args: ImpactPayloadArgs): unknown {
@@ -958,7 +972,7 @@ function rankedNodesForFile(ctx: RequestContext, filePath: string): Node[] {
 }
 
 function gitNameStatus(projectPath: string): { ok: true; stdout: string } | { ok: false; error: string } {
-  const result = spawnSync('git', ['diff', '--name-status', 'HEAD', '--'], {
+  const result = spawnSync(GIT_BINARY, ['diff', '--name-status', 'HEAD', '--'], {
     cwd: projectPath,
     encoding: 'utf8',
     maxBuffer: 1024 * 1024,
@@ -1395,8 +1409,8 @@ function loadIndexHtml(): string {
   return fs.readFileSync(file, 'utf-8');
 }
 
-function loadStaticAssets(): Record<StaticAssetName, StaticAsset> {
-  const assets: Record<StaticAssetName, StaticAsset> = {};
+function loadStaticAssets(): Record<string, StaticAsset> {
+  const assets: Record<string, StaticAsset> = {};
   for (const filename of fs.readdirSync(STATIC_DIR)) {
     if (!isViewerStaticAsset(filename)) continue;
     assets[filename] = loadStaticAsset(filename, contentTypeForStaticAsset(filename));
@@ -1404,7 +1418,7 @@ function loadStaticAssets(): Record<StaticAssetName, StaticAsset> {
   return assets;
 }
 
-function loadStaticAsset(filename: StaticAssetName, contentType: string): StaticAsset {
+function loadStaticAsset(filename: string, contentType: string): StaticAsset {
   const body = fs.readFileSync(path.join(STATIC_DIR, filename), 'utf-8');
   return {
     body,

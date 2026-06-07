@@ -192,14 +192,11 @@ function dirname(filePath: string): string {
 }
 
 function routeFileParts(normalized: string, marker: string): { afterMarker: string; extension: string } | null {
-  const bareMarker = marker.replace(/^\/+/, '');
+  const bareMarker = stripLeadingSlashes(marker);
   const idx = normalized.indexOf(marker);
-  const afterMarker =
-    idx >= 0
-      ? normalized.slice(idx + marker.length)
-      : normalized.startsWith(bareMarker)
-        ? normalized.slice(bareMarker.length)
-        : null;
+  let afterMarker: string | null = null;
+  if (idx >= 0) afterMarker = normalized.slice(idx + marker.length);
+  else if (normalized.startsWith(bareMarker)) afterMarker = normalized.slice(bareMarker.length);
   if (afterMarker === null) return null;
   const lastSlash = afterMarker.lastIndexOf('/');
   const fileName = lastSlash < 0 ? afterMarker : afterMarker.slice(lastSlash + 1);
@@ -211,10 +208,16 @@ function routeFileParts(normalized: string, marker: string): { afterMarker: stri
 function extractNuxtPageRoute(filePath: string, normalized: string): Node[] {
   const marker = '/pages/';
   const parts = routeFileParts(normalized, marker);
-  if (!parts || parts.extension !== '.vue') return [];
+  if (parts?.extension !== '.vue') return [];
   const routePath = filePathToNuxtRoute(parts.afterMarker);
   if (!routePath) return [];
   return [routeNode(filePath, routePath, 'vue')];
+}
+
+function stripLeadingSlashes(value: string): string {
+  let start = 0;
+  while (value[start] === '/') start++;
+  return value.slice(start);
 }
 
 function extractNuxtApiRoute(filePath: string, normalized: string): Node[] {

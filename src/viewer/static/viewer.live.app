@@ -382,7 +382,6 @@ function highlightSearchSuggest() {
   searchSuggestEl.querySelectorAll('.search-suggest-row').forEach((row, i) => {
     const active = i === searchSuggestIndex;
     row.classList.toggle('active', active);
-    row.setAttribute('aria-selected', active ? 'true' : 'false');
   });
 }
 
@@ -435,12 +434,12 @@ function renderSearchSuggest(items, message = '', query = searchInputEl.value) {
     const line = item.line == null ? '?' : item.line;
     const score = typeof item.score === 'number' ? item.score.toFixed(2) : '';
     return `
-    <div class="search-suggest-row${i === searchSuggestIndex ? ' active' : ''}" data-i="${i}" role="option" aria-selected="${i === searchSuggestIndex ? 'true' : 'false'}">
+    <button type="button" class="search-suggest-row${i === searchSuggestIndex ? ' active' : ''}" data-i="${i}">
       <div class="search-suggest-name">${highlightSearchLabel(label, query)}${exact && exactCount > 1 ? '<span class="search-suggest-exact">exact</span>' : ''}</div>
       <div class="search-suggest-kind">${escapeHtml(item.kind || '')} <span class="search-suggest-line">:${escapeHtml(String(line))}</span></div>
       <div class="search-suggest-file">${escapeHtml(file)}</div>
       ${score ? `<div class="search-suggest-score">score ${escapeHtml(score)}</div>` : ''}
-    </div>
+    </button>
   `;
   }).join('');
   searchSuggestEl.hidden = false;

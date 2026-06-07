@@ -1,0 +1,44 @@
+import { describe, expect, it } from 'vitest';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import {
+  decodeLockInfo,
+  encodeLockInfo,
+  getDaemonPidPath,
+  getDaemonSocketPath,
+  type DaemonLockInfo,
+} from '../src/mcp/daemon-paths.js';
+
+describe('MCP daemon path helpers', () => {
+  it('builds pid and socket paths from the project metadata directory', () => {
+    const projectRoot = path.join(os.tmpdir(), 'cg-daemon-short-root');
+
+    expect(getDaemonPidPath(projectRoot)).toBe(path.join(projectRoot, '.cartograph', 'daemon.pid'));
+    if (process.platform !== 'win32') {
+      expect(getDaemonSocketPath(projectRoot)).toBe(path.join(projectRoot, '.cartograph', 'daemon.sock'));
+    }
+  });
+
+  it('falls back to the temp dir when a POSIX socket path would be too long', () => {
+    if (process.platform === 'win32') return;
+    const projectRoot = path.join(os.tmpdir(), 'cartograph-' + 'nested-'.repeat(20));
+
+    const socketPath = getDaemonSocketPath(projectRoot);
+    expect(socketPath.startsWith(os.tmpdir())).toBe(true);
+    expect(socketPath.endsWith('.sock')).toBe(true);
+  });
+
+  it('round-trips structured lock info and accepts legacy pid-only locks', () => {
+    const info: DaemonLockInfo = {
+      pid: 123,
+      version: '0.0.0-test',
+      socketPath: '/tmp/cartograph-test.sock',
+      startedAt: 456,
+    };
+
+    expect(decodeLockInfo(encodeLockInfo(info))).toEqual(info);
+    expect(decodeLockInfo('789')).toEqual({ pid: 789, version: 'unknown', socketPath: '', startedAt: 0 });
+    expect(decodeLockInfo('')).toBeNull();
+    expect(decodeLockInfo('{ nope')).toBeNull();
+  });
+});

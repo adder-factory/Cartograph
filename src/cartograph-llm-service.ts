@@ -38,7 +38,7 @@ import { classifyAllRoles, type ClassifierResult } from './llm/classifier.js';
 import { HnswIndex, computeRowsetSignature } from './embeddings/hnsw-index.js';
 import path from 'node:path';
 import * as fsp from 'node:fs/promises';
-import { askWithCandidates, type AskOptions, type AskResult } from './llm/ask.js';
+import { askWithCandidates, type AskResult } from './llm/ask.js';
 import {
   summarizeChange as summarizeChangeIntent,
   type ChangeIntentOptions,
@@ -61,6 +61,19 @@ import {
 import { logDebug, logWarn } from './errors.js';
 import { LlmConfigManager } from './llm/config-manager.js';
 import { EmbedPipeline, type EmbedResultRow } from './llm/embed-pipeline.js';
+
+interface AskOptions {
+  /** Max retrieved candidates to consider. */
+  retrieveK?: number;
+  /** Override the default ask model temperature. */
+  temperature?: number;
+  /** Cap on response tokens. */
+  maxTokens?: number;
+  /** AbortSignal for cancellation. */
+  signal?: AbortSignal;
+  /** Route to the higher-stakes ask model when configured. */
+  useAskModel?: boolean;
+}
 
 /**
  * Cap (3) on FTS results per symbol name in hybrid-search fallback.

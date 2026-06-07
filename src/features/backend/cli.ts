@@ -146,19 +146,38 @@ function formatBackendStopReport(result: BackendStopResult, runtime: BackendRunt
 
 function appendBackendRows(lines: string[], rows: readonly BackendStatusRow[], runtime: BackendRuntimeModule): void {
   for (const row of rows) {
-    const icon = row.state === 'running' || row.state === 'external' ? '✓' : row.state === 'missing-model' ? '✗' : '○';
-    const pid = row.pidRecord?.pid ? ` pid=${row.pidRecord.pid}${row.pidAlive ? '' : ' stale'}` : '';
-    lines.push(`${icon} **${row.spec.labels.join('/')}** — ${row.state} at ${row.spec.endpoint}${pid}`);
-    lines.push(`  model: ${row.spec.modelPath}`);
-    lines.push(`  log: ${row.logPath}`);
-    lines.push(`  command: ${runtime.renderBackendStartCommand(row.spec)}`);
-    if (row.pidRecord && !row.pidAlive) {
-      lines.push(`  stale pid cleanup: cartograph backend stop ${resultProjectPathFromRow(row)}`);
-    }
-    if (row.state === 'starting') {
-      lines.push(`  readiness: process is alive but endpoint is not reachable yet; inspect logs if it stays here.`);
-    }
+    lines.push(...formatBackendRow(row, runtime));
   }
+}
+
+function formatBackendRow(row: BackendStatusRow, runtime: BackendRuntimeModule): string[] {
+  const icon = backendStateIcon(row.state);
+  const pid = backendPidLabel(row);
+  const lines = [
+    `${icon} **${row.spec.labels.join('/')}** — ${row.state} at ${row.spec.endpoint}${pid}`,
+    `  model: ${row.spec.modelPath}`,
+    `  log: ${row.logPath}`,
+    `  command: ${runtime.renderBackendStartCommand(row.spec)}`,
+  ];
+  if (row.pidRecord && !row.pidAlive) {
+    lines.push(`  stale pid cleanup: cartograph backend stop ${resultProjectPathFromRow(row)}`);
+  }
+  if (row.state === 'starting') {
+    lines.push(`  readiness: process is alive but endpoint is not reachable yet; inspect logs if it stays here.`);
+  }
+  return lines;
+}
+
+function backendPidLabel(row: BackendStatusRow): string {
+  if (!row.pidRecord?.pid) return '';
+  const stale = row.pidAlive ? '' : ' stale';
+  return ` pid=${row.pidRecord.pid}${stale}`;
+}
+
+function backendStateIcon(state: BackendStatusRow['state']): string {
+  if (state === 'running' || state === 'external') return '✓';
+  if (state === 'missing-model') return '✗';
+  return '○';
 }
 
 function resultProjectPathFromRow(row: BackendStatusRow): string {

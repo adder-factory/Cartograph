@@ -191,6 +191,11 @@ describe('OpenAiSdkRerankerClient', () => {
     await expect(client.rerank('q', ['a'])).rejects.toThrow(/Cohere-compatible/);
   });
 
+  it('wraps transport errors into LlmEndpointError', async () => {
+    const client = new OpenAiSdkRerankerClient(baseCfg('http://localhost:1'));
+    await expect(client.rerank('q', ['a'])).rejects.toThrow(/rerank endpoint request failed/);
+  });
+
   it('sends Bearer apiKey when configured', async () => {
     server = startMockServer(() => rerankResp([0.5]));
     const client = new OpenAiSdkRerankerClient({

@@ -18,7 +18,7 @@ import {
 import { RerankerClient, type RerankerProviderConfig } from '../../llm/reranker-client.js';
 import { errMsg } from '../../errors.js';
 
-export type LlmSmokeStatus = 'ok' | 'skip' | 'fail';
+type LlmSmokeStatus = 'ok' | 'skip' | 'fail';
 export type LlmSmokeOverallStatus = 'ok' | 'warn' | 'fail';
 
 export interface LlmSmokeRow {
@@ -66,12 +66,13 @@ export async function runLlmSmoke(options: RunLlmSmokeOptions): Promise<LlmSmoke
   };
   const client = new LlmClient(endpointConfig);
 
-  const rows: LlmSmokeRow[] = [];
-  rows.push(await smokeEmbedding(llm.embeddingLlm ?? null, timeoutMs));
-  rows.push(await smokeChat('summarize', summarizeLlm, client, { timeoutMs }));
-  rows.push(await smokeChat('ask', askLlm, client, { timeoutMs, useAskModel: true }));
-  rows.push(await smokeChat('local', localLlm, client, { timeoutMs, useLocalChat: true }));
-  rows.push(await smokeRerank(llm.rerankerLlm ?? null, timeoutMs));
+  const rows = [
+    await smokeEmbedding(llm.embeddingLlm ?? null, timeoutMs),
+    await smokeChat({ tier: 'summarize', cfg: summarizeLlm, client, options: { timeoutMs } }),
+    await smokeChat({ tier: 'ask', cfg: askLlm, client, options: { timeoutMs, useAskModel: true } }),
+    await smokeChat({ tier: 'local', cfg: localLlm, client, options: { timeoutMs, useLocalChat: true } }),
+    await smokeRerank(llm.rerankerLlm ?? null, timeoutMs),
+  ];
 
   return {
     projectPath: options.projectPath,
@@ -102,24 +103,20 @@ async function smokeEmbedding(
       detail: `1 vector returned (${dim} dimensions).`,
     };
   } catch (err) {
-    return failRow('embedding', cfg, Date.now() - t0, err);
+    return failRow({ tier: 'embedding', cfg, durationMs: Date.now() - t0, err });
   }
 }
 
-async function smokeChat(
-  tier: 'summarize' | 'ask' | 'local',
-  cfg: ChatProviderConfig | null | undefined,
-  client: LlmClient,
-  options: { timeoutMs: number; useAskModel?: boolean; useLocalChat?: boolean },
-): Promise<LlmSmokeRow> {
+interface SmokeChatArgs {
+  tier: 'summarize' | 'ask' | 'local';
+  cfg: ChatProviderConfig | null | undefined;
+  client: LlmClient;
+  options: { timeoutMs: number; useAskModel?: boolean; useLocalChat?: boolean };
+}
+
+async function smokeChat({ tier, cfg, client, options }: SmokeChatArgs): Promise<LlmSmokeRow> {
   if (!cfg) {
-    const fallback =
-      tier === 'ask'
-        ? 'askLlm is not configured; ask calls fall back to summarizeLlm.'
-        : tier === 'local'
-          ? 'localLlm is not configured; local chat calls fall back to summarizeLlm.'
-          : 'summarizeLlm is not configured.';
-    return { tier, status: tier === 'summarize' ? 'fail' : 'skip', detail: fallback };
+    return { tier, status: tier === 'summarize' ? 'fail' : 'skip', detail: missingChatTierDetail(tier) };
   }
   const t0 = Date.now();
   try {
@@ -145,7 +142,7 @@ async function smokeChat(
       detail: `chat completion returned ${result.text.trim().length} chars.${tokenDetail}`,
     };
   } catch (err) {
-    return failRow(tier, cfg, Date.now() - t0, err);
+    return failRow({ tier, cfg, durationMs: Date.now() - t0, err });
   }
 }
 
@@ -158,7 +155,7 @@ async function smokeRerank(cfg: RerankerProviderConfig | null | undefined, timeo
     };
   }
   if (!cfg.model) {
-    return failRow('rerank', cfg, 0, new Error('rerankerLlm.model is not configured.'));
+    return failRow({ tier: 'rerank', cfg, durationMs: 0, err: new Error('rerankerLlm.model is not configured.') });
   }
   const t0 = Date.now();
   try {
@@ -180,7 +177,7 @@ async function smokeRerank(cfg: RerankerProviderConfig | null | undefined, timeo
       detail: `scores returned: ${scores.map((score) => score.toFixed(3)).join(', ')}`,
     };
   } catch (err) {
-    return failRow('rerank', cfg, Date.now() - t0, err);
+    return failRow({ tier: 'rerank', cfg, durationMs: Date.now() - t0, err });
   }
 }
 
@@ -194,12 +191,14 @@ async function withTimeout<T>(timeoutMs: number, fn: (signal: AbortSignal) => Pr
   }
 }
 
-function failRow(
-  tier: LlmSmokeRow['tier'],
-  cfg: { provider?: string; endpoint?: string; model?: string } | null | undefined,
-  durationMs: number,
-  err: unknown,
-): LlmSmokeRow {
+interface LlmSmokeFailureArgs {
+  tier: LlmSmokeRow['tier'];
+  cfg: { provider?: string; endpoint?: string; model?: string } | null | undefined;
+  durationMs: number;
+  err: unknown;
+}
+
+function failRow({ tier, cfg, durationMs, err }: LlmSmokeFailureArgs): LlmSmokeRow {
   return {
     tier,
     status: 'fail',
@@ -236,11 +235,11 @@ function smokeOverallStatus(rows: readonly LlmSmokeRow[]): LlmSmokeOverallStatus
 export function formatLlmSmokeReport(result: LlmSmokeResult): string {
   const lines = ['## cartograph llm smoke', ''];
   for (const row of result.rows) {
-    const icon = row.status === 'ok' ? '✓' : row.status === 'skip' ? '○' : '✗';
+    const icon = llmSmokeStatusIcon(row.status);
     const location = [row.provider, row.endpoint, row.model].filter(Boolean).join(' / ');
     const suffix = row.durationMs === undefined ? '' : ` (${row.durationMs}ms)`;
-    lines.push(`${icon} **${row.tier}**${location ? ` — ${location}` : ''}${suffix}`);
-    lines.push(`  ${row.detail}`);
+    const locationSuffix = location ? ` — ${location}` : '';
+    lines.push(`${icon} **${row.tier}**${locationSuffix}${suffix}`, `  ${row.detail}`);
   }
   lines.push('');
   if (result.overallStatus === 'ok') lines.push('_All configured LLM tiers completed smoke requests._');
@@ -251,4 +250,16 @@ export function formatLlmSmokeReport(result: LlmSmokeResult): string {
 
 export function formatLlmSmokeJson(result: LlmSmokeResult): string {
   return JSON.stringify(result, null, 2);
+}
+
+function missingChatTierDetail(tier: 'summarize' | 'ask' | 'local'): string {
+  if (tier === 'ask') return 'askLlm is not configured; ask calls fall back to summarizeLlm.';
+  if (tier === 'local') return 'localLlm is not configured; local chat calls fall back to summarizeLlm.';
+  return 'summarizeLlm is not configured.';
+}
+
+function llmSmokeStatusIcon(status: LlmSmokeRow['status']): string {
+  if (status === 'ok') return '✓';
+  if (status === 'skip') return '○';
+  return '✗';
 }

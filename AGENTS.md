@@ -32,6 +32,57 @@ relevant test set; broaden to full tests or health checks when touching
 shared behavior, public CLI/MCP contracts, indexing, extraction, or LLM
 flows.
 
+## SonarQube verification for agents
+
+Use the local Sonar credentials from `/Users/adderclaudedev/.sonarqube-env`;
+do not print token values. Source it inside the command that needs it:
+
+```sh
+set -a
+. /Users/adderclaudedev/.sonarqube-env
+set +a
+```
+
+Scanner success is not quality-gate success. After `sonar-scanner` exits
+successfully, read the CE task id for that exact scan and check the gate by
+`analysisId`:
+
+```sh
+task_id=$(sed -n 's/^ceTaskId=//p' .scannerwork/report-task.txt)
+task_json=$(curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
+  "$SONAR_HOST_URL/api/ce/task?id=$task_id")
+analysis_id=$(printf '%s' "$task_json" | jq -r '.task.analysisId')
+curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
+  "$SONAR_HOST_URL/api/qualitygates/project_status?analysisId=$analysis_id"
+```
+
+Report the quality-gate `projectStatus.status` separately from scanner
+execution. If the gate fails, pull unresolved issues and `TO_REVIEW` hotspots
+from Sonar before guessing:
+
+```sh
+curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
+  "$SONAR_HOST_URL/api/issues/search?components=cartograph&issueStatuses=OPEN&ps=100&additionalFields=_all"
+curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
+  "$SONAR_HOST_URL/api/hotspots/search?project=cartograph&status=TO_REVIEW&ps=100"
+```
+
+Prefer Sonar's API v2 when the local server metadata says a v2 replacement
+exists. Check metadata instead of guessing endpoint names:
+
+```sh
+curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
+  "$SONAR_HOST_URL/api/webservices/list" |
+  jq -r '.webServices[] as $ws | $ws.actions[]? as $a |
+    ($a.changelog // [])[]? |
+    select(.description | test("api/v2"; "i")) |
+    "\($ws.path)/\($a.key) -> \(.description)"'
+```
+
+On the local SonarQube `26.5.0.122743` server, API v2 is available for some
+areas such as users and authorizations, but CE task polling and quality-gate
+status still use `/api/ce/task` and `/api/qualitygates/project_status`.
+
 This file is for AI assistants (Claude Code, Cursor, Windsurf, etc.)
 helping a user install cartograph. The instructions are written
 sequentially so they can be followed mechanically: run a command,

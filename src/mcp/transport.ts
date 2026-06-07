@@ -65,20 +65,8 @@ export interface StdioTransportOptions {
   onClose?: () => void;
 }
 
-/**
- * Stdio Transport for MCP
- *
- * Reads JSON-RPC messages from stdin and writes responses to stdout.
- */
-export class StdioTransport {
-  private rl: readline.Interface | null = null;
-  private messageHandler: MessageHandler | null = null;
-  private readonly input: NodeJS.ReadableStream;
-  private readonly output: NodeJS.WritableStream;
-  private readonly exitOnClose: boolean;
-  private readonly closeOnStop: boolean;
-  private readonly onClose: (() => void) | undefined;
-  private closed = false;
+class JsonRpcResponder {
+  protected readonly output: NodeJS.WritableStream;
 
   /**
    * Serialises all stdout writes through a promise chain so that two large
@@ -86,14 +74,89 @@ export class StdioTransport {
    * pipe. Without this, concurrent admin actions (e.g. `summarize` +
    * `index` running in parallel) could split writes across the OS boundary,
    * causing the MCP client to see garbled JSON, fail to parse it, and close
-   * stdin — which triggered `readline.on('close')` → `process.exit(0)`,
-   * killing the server irrecoverably mid-session.
+   * stdin.
    */
   private writeQueue: Promise<void> = Promise.resolve();
 
+  constructor(output: NodeJS.WritableStream) {
+    this.output = output;
+  }
+
+  private enqueueWrite(line: string): void {
+    this.writeQueue = this.writeQueue
+      .then(
+        () =>
+          new Promise<void>((resolve) => {
+            const ok = this.output.write(line);
+            if (ok) resolve();
+            else this.output.once('drain', resolve);
+          }),
+      )
+      .catch((err) => {
+        // A write failure must not poison the queue for subsequent writes.
+        // stderr breadcrumb so the operator sees at least one signal
+        // before the MCP client disconnects (stdout is unreliable here).
+        try {
+          process.stderr.write(`StdioTransport: stdout write failed — ${String(err)}\n`);
+        } catch {
+          /* stderr also broken — nothing left to log to. */
+        }
+      });
+  }
+
+  /** Send a response. */
+  send(response: JsonRpcResponse): void {
+    const json = JSON.stringify(response);
+    this.enqueueWrite(json + '\n');
+  }
+
+  /** Send a notification (no id). */
+  notify(method: string, params?: unknown): void {
+    const notification: JsonRpcNotification = {
+      jsonrpc: '2.0',
+      method,
+      params,
+    };
+    this.enqueueWrite(JSON.stringify(notification) + '\n');
+  }
+
+  /** Send a success response. */
+  sendResult(id: string | number, result: unknown): void {
+    this.send({
+      jsonrpc: '2.0',
+      id,
+      result,
+    });
+  }
+
+  /** Send an error response. */
+  sendError(id: string | number | null, err: { code: number; message: string; data?: unknown }): void {
+    this.send({
+      jsonrpc: '2.0',
+      id,
+      error: err,
+    });
+  }
+}
+
+/**
+ * Stdio Transport for MCP
+ *
+ * Reads JSON-RPC messages from stdin and writes responses to stdout.
+ */
+export class StdioTransport extends JsonRpcResponder {
+  private rl: readline.Interface | null = null;
+  private messageHandler: MessageHandler | null = null;
+  private readonly input: NodeJS.ReadableStream;
+  private readonly exitOnClose: boolean;
+  private readonly closeOnStop: boolean;
+  private readonly onClose: (() => void) | undefined;
+  private closed = false;
+
   constructor(options: StdioTransportOptions = {}) {
+    const output = options.output ?? process.stdout;
+    super(output);
     this.input = options.input ?? process.stdin;
-    this.output = options.output ?? process.stdout;
     this.exitOnClose = options.exitOnClose ?? true;
     this.closeOnStop = options.closeOnStop ?? false;
     this.onClose = options.onClose;
@@ -135,70 +198,6 @@ export class StdioTransport {
         /* best-effort close */
       }
     }
-  }
-
-  private enqueueWrite(line: string): void {
-    this.writeQueue = this.writeQueue
-      .then(
-        () =>
-          new Promise<void>((resolve) => {
-            const ok = this.output.write(line);
-            if (ok) resolve();
-            else this.output.once('drain', resolve);
-          }),
-      )
-      .catch((err) => {
-        // A write failure must not poison the queue for subsequent writes.
-        // stderr breadcrumb so the operator sees at least one signal
-        // before the MCP client disconnects (stdout is unreliable here).
-        try {
-          process.stderr.write(`StdioTransport: stdout write failed — ${String(err)}\n`);
-        } catch {
-          /* stderr also broken — nothing left to log to. */
-        }
-      });
-  }
-
-  /**
-   * Send a response
-   */
-  send(response: JsonRpcResponse): void {
-    const json = JSON.stringify(response);
-    this.enqueueWrite(json + '\n');
-  }
-
-  /**
-   * Send a notification (no id)
-   */
-  notify(method: string, params?: unknown): void {
-    const notification: JsonRpcNotification = {
-      jsonrpc: '2.0',
-      method,
-      params,
-    };
-    this.enqueueWrite(JSON.stringify(notification) + '\n');
-  }
-
-  /**
-   * Send a success response
-   */
-  sendResult(id: string | number, result: unknown): void {
-    this.send({
-      jsonrpc: '2.0',
-      id,
-      result,
-    });
-  }
-
-  /**
-   * Send an error response
-   */
-  sendError(id: string | number | null, err: { code: number; message: string; data?: unknown }): void {
-    this.send({
-      jsonrpc: '2.0',
-      id,
-      error: err,
-    });
   }
 
   /**

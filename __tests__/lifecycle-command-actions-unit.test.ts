@@ -9,7 +9,11 @@ const calls: string[] = [];
 const stdout: string[] = [];
 const stderr: string[] = [];
 let projectPath: string;
+let failMcpServerLoad = false;
 const DEFAULT_TEST_VIEWER_PORT = 8765;
+const TEST_MCP_TOOL_COUNT = 12;
+const TEST_STALE_BACKEND_PID = 1234;
+const TEST_STARTING_BACKEND_PID = 2345;
 
 function projectHasCartographDb(projectPath: string): boolean {
   return fs.existsSync(path.join(projectPath, '.cartograph', 'cartograph.db'));
@@ -59,16 +63,19 @@ function loadLifecycleCommandActions(): void {
       calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
     loadCartograph: async () => ({ default: { init: async () => ({ close: () => undefined }) } }),
     isInitialized: projectHasCartographDb,
-    loadMcpServer: async () => ({
-      MCPServer: class {
-        constructor(private readonly opts: unknown) {
-          calls.push(`server:${JSON.stringify(opts)}`);
-        }
-        async start() {
-          calls.push('server.start');
-        }
-      },
-    }),
+    loadMcpServer: async () => {
+      if (failMcpServerLoad) throw new Error('mcp loader exploded');
+      return {
+        MCPServer: class {
+          constructor(private readonly opts: unknown) {
+            calls.push(`server:${JSON.stringify(opts)}`);
+          }
+          async start() {
+            calls.push('server.start');
+          }
+        },
+      };
+    },
     loadMcpDaemon: async () => ({
       runSharedMcpDaemonProcess: async (opts: unknown) => calls.push(`daemon.child:${JSON.stringify(opts)}`),
       runSharedMcpDaemonProxy: async (opts: unknown) => {
@@ -100,7 +107,7 @@ function loadLifecycleCommandActions(): void {
     loadMcpLoadBudget: async () => ({
       measureMcpLoadBudget: (_cg: null, opts: unknown) => {
         calls.push(`mcp-budget:${JSON.stringify(opts)}`);
-        return { toolCount: 12 } as any;
+        return { toolCount: TEST_MCP_TOOL_COUNT } as any;
       },
       formatMcpLoadBudgetReport: (report: unknown) => `budget:${JSON.stringify(report)}`,
     }),
@@ -128,10 +135,22 @@ function loadLifecycleCommandActions(): void {
         pidRecord: null,
         pidAlive: false,
       };
+      const staleRow = {
+        ...row,
+        state: 'running',
+        pidRecord: { pid: TEST_STALE_BACKEND_PID },
+        pidAlive: false,
+      };
+      const startingRow = {
+        ...row,
+        state: 'starting',
+        pidRecord: { pid: TEST_STARTING_BACKEND_PID },
+        pidAlive: true,
+      };
       return {
         backendStatus: async (pathArg: string) => {
           calls.push(`backend-status:${pathArg}`);
-          return { projectPath: pathArg, rows: [row] };
+          return { projectPath: pathArg, rows: [row, staleRow, startingRow] };
         },
         startBackends: async (opts: unknown) => {
           calls.push(`backend-start:${JSON.stringify(opts)}`);
@@ -174,6 +193,7 @@ describe('lifecycle command action bodies', () => {
     calls.length = 0;
     stdout.length = 0;
     stderr.length = 0;
+    failMcpServerLoad = false;
     process.exitCode = 0;
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-cli-'));
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
@@ -204,6 +224,31 @@ describe('lifecycle command action bodies', () => {
     await actions.get('program:serve')!({});
     expect(stderr.join('\n')).toContain('Cartograph MCP Server');
     expect(stderr.join('\n')).toContain('Use --mcp flag');
+  });
+
+  it('routes MCP daemon child and proxy serve paths', async () => {
+    await actions.get('program:serve')!({ projectPath, mcp: true, daemonChild: true });
+    await actions.get('program:serve')!({ projectPath, mcp: true, daemon: true });
+
+    const text = calls.join('\n');
+    expect(text).toContain('daemon.child:');
+    expect(text).toContain('daemon.proxy:');
+    expect(text).toContain('server.start');
+  });
+
+  it('reports MCP serve startup failures through the CLI error channel', async () => {
+    failMcpServerLoad = true;
+    const originalExit = process.exit;
+    process.exit = ((code?: string | number | null) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit;
+    try {
+      await expect(actions.get('program:serve')!({ projectPath, mcp: true })).rejects.toThrow('exit:1');
+    } finally {
+      process.exit = originalExit;
+    }
+
+    expect(calls.join('\n')).toContain('error:Failed to start server: mcp loader exploded');
   });
 
   it('runs install print-config and non-interactive install paths', async () => {
@@ -275,6 +320,9 @@ describe('lifecycle command action bodies', () => {
     expect(stdout.join('\n')).toContain('cartograph backend stop');
     expect(stdout.join('\n')).toContain('cartograph backend logs');
     expect(stdout.join('\n')).toContain('server ready');
+    expect(stdout.join('\n')).toContain('pid=1234 stale');
+    expect(stdout.join('\n')).toContain('stale pid cleanup');
+    expect(stdout.join('\n')).toContain('readiness: process is alive');
   });
 
   it('passes minimal config options during setup --minimal', async () => {
