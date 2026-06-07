@@ -13,7 +13,6 @@ import type {
   NodeKind,
   EdgeKind,
   Subgraph,
-  CodeBlock,
   TaskContext,
   TaskInput,
   BuildContextOptions,
@@ -30,8 +29,8 @@ import { validatePathWithinRootReal, compact } from '../utils.js';
 import { isDiagnosticPath } from '../path-class.js';
 import { ScoreTrace } from './score-trace.js';
 import { extractSymbolsFromQuery } from './query-symbols.js';
+import { buildTaskContext, extractCodeBlocks } from './task-context.js';
 import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
-import { runSequential } from '../utils/async-iteration.js';
 
 /**
  * Merge per-term hits into the cross-term accumulator: weight each
@@ -255,12 +254,6 @@ function cbEnsureTopExtraRoots(
   return [...guaranteed, ...filteredResults].slice(0, Math.max(searchLimit, guaranteed.length));
 }
 
-/** Code-block extraction budget for `cbExtractCodeBlocks`. */
-interface CodeBlockBudget {
-  maxBlocks: number;
-  maxBlockSize: number;
-}
-
 /** Inputs for the multi-term text-search pass (`cbCollectTermResultsAcross`). */
 interface TextSearchParams {
   searchTerms: string[];
@@ -472,12 +465,6 @@ const MIN_NON_PROD_CAP = 3;
 const ROOT_PRIORITY_BONUS = 10;
 
 /**
- * Max entry-point names rendered inline in the context summary string.
- * Above this we summarise the remainder as "and N more" to keep the
- * summary scannable.
- */
-const ENTRY_POINTS_INLINE_CAP = 3;
-/**
  * Per-kind sort weight inside the per-file cap (3 for entry types,
  * 1 for methods/functions, 0 for fields/properties). Defaults to 0
  * for any kind not listed, dropping it to the bottom.
@@ -567,14 +554,6 @@ function pickKindFilter<K>(kinds: K[] | undefined): K[] | undefined {
   return kinds;
 }
 
-/** Trim a code block to `maxBytes`, appending an ellipsis marker when
- *  the slice fired. Pulled out of {@link ContextBuilder.extractCodeBlocks}
- *  so its inner-loop conditional stays simple. */
-function truncateCodeBlock(code: string, maxBytes: number): string {
-  if (code.length <= maxBytes) return code;
-  return code.slice(0, maxBytes) + '\n// ... truncated ...';
-}
-
 /**
  * One-hop expansion of root ids along all edges (both directions). Used by
  * `trimToMaxNodes` to keep edge endpoints together when culling.
@@ -633,33 +612,6 @@ function mergeHierarchyInto(hierarchy: { nodes: Map<string, Node>; edges: Edge[]
     if (!acc.nodes.has(edge.source) || !acc.nodes.has(edge.target)) continue;
     const exists = acc.edges.some((e) => e.source === edge.source && e.target === edge.target && e.kind === edge.kind);
     if (!exists) acc.edges.push(edge);
-  }
-}
-
-/**
- * Build the priority list for `extractCodeBlocks`: roots first, then non-root
- * functions/methods, then non-root classes. Module-scope helper so its branches
- * don't roll up into the parent's complexity.
- */
-function collectPriorityCodeBlockNodes(subgraph: Subgraph): Node[] {
-  const out: Node[] = [];
-  // 1) entry-point roots
-  for (const id of subgraph.roots) {
-    const node = subgraph.nodes.get(id);
-    if (node) out.push(node);
-  }
-  // 2) non-root functions/methods
-  appendNonRootByKind(subgraph, out, (k) => k === 'function' || k === 'method');
-  // 3) non-root classes
-  appendNonRootByKind(subgraph, out, (k) => k === 'class');
-  return out;
-}
-
-/** Append nodes to `out` whose kind matches `pred` and which aren't roots. */
-function appendNonRootByKind(subgraph: Subgraph, out: Node[], pred: (kind: string) => boolean): void {
-  for (const node of subgraph.nodes.values()) {
-    if (subgraph.roots.includes(node.id)) continue;
-    if (pred(node.kind)) out.push(node);
   }
 }
 
@@ -794,100 +746,6 @@ async function cbExtractNodeCode(st: ContextBuilderState, node: Node): Promise<s
     logDebug('Failed to extract code from node', { nodeId: node.id, filePath: node.filePath, error: String(error) });
     return null;
   }
-}
-
-/** Get entry points from a subgraph (the root nodes). */
-function cbGetEntryPoints(subgraph: Subgraph): Node[] {
-  return subgraph.roots.map((id) => subgraph.nodes.get(id)).filter((n): n is Node => n !== undefined);
-}
-
-/** Get unique sorted file paths from a subgraph. */
-function cbGetRelatedFiles(subgraph: Subgraph): string[] {
-  const files = new Set<string>();
-  for (const node of subgraph.nodes.values()) files.add(node.filePath);
-  return Array.from(files).sort((a, b) => Number(a > b) - Number(a < b));
-}
-
-/** Generate a one-line summary of the context result. */
-function cbGenerateSummary(_query: string, subgraph: Subgraph, entryPoints: Node[]): string {
-  const nodeCount = subgraph.nodes.size;
-  const edgeCount = subgraph.edges.length;
-  const files = cbGetRelatedFiles(subgraph);
-  const entryPointNames = entryPoints
-    .slice(0, ENTRY_POINTS_INLINE_CAP)
-    .map((n) => n.name)
-    .join(', ');
-  const overflow = entryPoints.length - ENTRY_POINTS_INLINE_CAP;
-  const remaining = overflow > 0 ? ` and ${overflow} more` : '';
-  return (
-    `Found ${nodeCount} relevant code symbols across ${files.length} files. ` +
-    `Key entry points: ${entryPointNames}${remaining}. ` +
-    `${edgeCount} relationships identified.`
-  );
-}
-
-interface CbAssembleTaskContextArgs {
-  query: string;
-  subgraph: Subgraph;
-  entryPoints: Node[];
-  codeBlocks: CodeBlock[];
-  relatedFiles: string[];
-  summary: string;
-}
-
-/** Assemble a TaskContext from pre-computed subgraph components. */
-function cbAssembleTaskContext(args: CbAssembleTaskContextArgs): TaskContext {
-  const { query, subgraph, entryPoints, codeBlocks, relatedFiles, summary } = args;
-  return {
-    query,
-    subgraph,
-    entryPoints,
-    codeBlocks,
-    relatedFiles,
-    summary,
-    stats: {
-      nodeCount: subgraph.nodes.size,
-      edgeCount: subgraph.edges.length,
-      fileCount: relatedFiles.length,
-      codeBlockCount: codeBlocks.length,
-      totalCodeSize: codeBlocks.reduce((sum, block) => sum + block.content.length, 0),
-    },
-  };
-}
-
-/** Read a node's source and wrap it in a CodeBlock, or undefined if extraction fails. */
-async function cbTryBuildCodeBlock(
-  st: ContextBuilderState,
-  node: Node,
-  maxBlockSize: number,
-): Promise<CodeBlock | undefined> {
-  const code = await cbExtractNodeCode(st, node);
-  if (!code) return undefined;
-  return {
-    content: truncateCodeBlock(code, maxBlockSize),
-    filePath: node.filePath,
-    startLine: node.startLine,
-    endLine: node.endLine,
-    language: node.language,
-    node,
-  };
-}
-
-/** Extract code blocks for key nodes in the subgraph. */
-async function cbExtractCodeBlocks(
-  st: ContextBuilderState,
-  subgraph: Subgraph,
-  budget: CodeBlockBudget,
-): Promise<CodeBlock[]> {
-  const priorityNodes = collectPriorityCodeBlockNodes(subgraph);
-  const blocks: CodeBlock[] = [];
-  await runSequential(priorityNodes, async (node) => {
-    if (blocks.length >= budget.maxBlocks) return false;
-    const block = await cbTryBuildCodeBlock(st, node, budget.maxBlockSize);
-    if (block) blocks.push(block);
-    return true;
-  });
-  return blocks;
 }
 
 /** Resolve import/export nodes to their actual definitions where possible. */
@@ -1610,16 +1468,18 @@ export class ContextBuilder {
       explain: opts.explain,
     });
 
-    const entryPoints = cbGetEntryPoints(subgraph);
+    const st = this.state();
     const codeBlocks = opts.includeCode
-      ? await cbExtractCodeBlocks(this.state(), subgraph, {
-          maxBlocks: opts.maxCodeBlocks,
-          maxBlockSize: opts.maxCodeBlockSize,
-        })
+      ? await extractCodeBlocks(
+          subgraph,
+          {
+            maxBlocks: opts.maxCodeBlocks,
+            maxBlockSize: opts.maxCodeBlockSize,
+          },
+          (node) => cbExtractNodeCode(st, node),
+        )
       : [];
-    const relatedFiles = cbGetRelatedFiles(subgraph);
-    const summary = cbGenerateSummary(query, subgraph, entryPoints);
-    const context = cbAssembleTaskContext({ query, subgraph, entryPoints, codeBlocks, relatedFiles, summary });
+    const context = buildTaskContext({ query, subgraph, codeBlocks });
 
     if (opts.format === 'markdown') return formatContextAsMarkdown(context);
     if (opts.format === 'json') return formatContextAsJson(context);
