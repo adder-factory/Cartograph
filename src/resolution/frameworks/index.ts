@@ -10,6 +10,7 @@ import { laravelResolver } from './laravel.js';
 import { expressResolver } from './express.js';
 import { bunServeResolver } from './bun-serve.js';
 import { reactResolver } from './react.js';
+import { salesforceResolver } from './salesforce.js';
 import { svelteResolver } from './svelte.js';
 import { vueResolver } from './vue.js';
 import { djangoResolver, flaskResolver, fastapiResolver } from './python.js';
@@ -37,6 +38,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   expressResolver,
   bunServeResolver,
   reactResolver,
+  salesforceResolver,
   svelteResolver,
   vueResolver,
   cliCommanderResolver,
@@ -98,6 +100,7 @@ export { laravelResolver, FACADE_MAPPINGS } from './laravel.js';
 export { expressResolver } from './express.js';
 export { bunServeResolver } from './bun-serve.js';
 export { reactResolver } from './react.js';
+export { salesforceResolver } from './salesforce.js';
 export { svelteResolver } from './svelte.js';
 export { vueResolver } from './vue.js';
 export { djangoResolver, flaskResolver, fastapiResolver } from './python.js';

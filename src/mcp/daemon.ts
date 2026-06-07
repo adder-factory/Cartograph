@@ -154,7 +154,9 @@ export async function runSharedMcpDaemonProxy(options: SharedMcpDaemonOptions): 
   const projectRoot = resolveDaemonProjectRoot(options.projectPath);
   const socket = await ensureDaemonSocket(projectRoot, options);
   if (!socket) return 'fallback';
-  process.stderr.write(`[Cartograph MCP] Attached to shared daemon for ${projectRoot}.\n`);
+  if (process.env['CARTOGRAPH_MCP_LOG_ATTACH'] === '1') {
+    process.stderr.write(`[Cartograph MCP] Attached to shared daemon for ${projectRoot}.\n`);
+  }
   await pipeStdioToSocket(socket);
   process.exit(0);
 }

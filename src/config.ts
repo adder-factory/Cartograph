@@ -190,6 +190,8 @@ export function getConfigPath(projectRoot: string): string {
  * instead of silently rejecting valid configs at runtime.
  */
 export const VALID_LANGUAGES = [
+  'apex',
+  'aura',
   'typescript',
   'javascript',
   'tsx',
@@ -236,6 +238,7 @@ export const VALID_LANGUAGES = [
   'prisma',
   'properties',
   'verilog',
+  'visualforce',
   'xml',
   'yaml',
   'unknown',
@@ -419,6 +422,7 @@ const CartographConfigSchema = z
     database: databaseConfigSchema.optional(),
 
     indexSubmodules: z.boolean().optional(),
+    indexEmbeddedRepos: z.boolean().optional(),
     enableCoChange: z.boolean().optional(),
     enableBiomarkers: z.boolean().optional(),
     enableCentrality: z.boolean().optional(),

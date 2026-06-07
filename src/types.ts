@@ -193,6 +193,13 @@ export interface CartographConfig {
   indexSubmodules?: boolean;
 
   /**
+   * Whether to recurse into nested git repositories that are not registered
+   * as submodules, including repos hidden from the parent by .gitignore.
+   * Default: true when indexSubmodules is not false.
+   */
+  indexEmbeddedRepos?: boolean;
+
+  /**
    * Mine the file-level co-change graph from git history. Default true.
    */
   enableCoChange?: boolean;

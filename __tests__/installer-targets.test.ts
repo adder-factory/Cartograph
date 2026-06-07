@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
+import { getCartographPermissions } from '../src/installer/targets/shared.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
@@ -149,6 +150,22 @@ describe('Installer targets — contract', () => {
       }
     });
   }
+});
+
+describe('Installer permissions', () => {
+  it('auto-allow includes every core read helper including cartograph_files', () => {
+    expect(getCartographPermissions()).toEqual(
+      expect.arrayContaining([
+        'mcp__cartograph__cartograph_find',
+        'mcp__cartograph__cartograph_context',
+        'mcp__cartograph__cartograph_graph',
+        'mcp__cartograph__cartograph_node',
+        'mcp__cartograph__cartograph_files',
+        'mcp__cartograph__cartograph_at_range',
+        'mcp__cartograph__cartograph_status',
+      ]),
+    );
+  });
 });
 
 describe('Installer targets — partial-state idempotency', () => {

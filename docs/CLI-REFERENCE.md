@@ -75,6 +75,19 @@ cartograph coverage AuthService
 cartograph trace-to-culprits --trace "$STACK_TRACE"
 ```
 
+## Session State And Notes
+
+```sh
+cartograph session list
+cartograph session audit
+cartograph session usage
+cartograph session macro-list
+cartograph note list
+```
+
+`session usage` reports aggregate tool-call counts and timing summaries only;
+it does not print raw tool arguments or result bodies.
+
 ## Change And Test Selection
 
 ```sh

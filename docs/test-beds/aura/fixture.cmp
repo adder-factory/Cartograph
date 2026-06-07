@@ -1,0 +1,5 @@
+<aura:component controller="AccountController">
+  <aura:attribute name="rows" type="Account[]"/>
+  <aura:handler name="init" value="{!this}" action="{!c.doInit}"/>
+  <c:AccountCard/>
+</aura:component>

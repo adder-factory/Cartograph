@@ -315,6 +315,9 @@ const REQUEST_HANDLERS: Record<
   (server: MCPServer, transport: StdioTransport, req: JsonRpcRequest) => Promise<void>
 > = {
   initialize: mcpHandleInitialize,
+  'resources/list': mcpHandleResourcesList,
+  'resources/templates/list': mcpHandleResourceTemplatesList,
+  'prompts/list': mcpHandlePromptsList,
   'tools/list': mcpHandleToolsList,
   'tools/call': mcpHandleToolsCall,
   ping: (_, transport, req) => {
@@ -381,10 +384,34 @@ async function mcpHandleInitialize(
 
   transport.sendResult(request.id, {
     protocolVersion: PROTOCOL_VERSION,
-    capabilities: { tools: {} },
+    capabilities: { tools: {}, resources: {}, prompts: {} },
     serverInfo: SERVER_INFO,
     instructions: buildInitInstructions(server.st.noDefaultProjectPreamble),
   });
+}
+
+async function mcpHandleResourcesList(
+  _server: MCPServer,
+  transport: StdioTransport,
+  request: JsonRpcRequest,
+): Promise<void> {
+  transport.sendResult(request.id, { resources: [] });
+}
+
+async function mcpHandleResourceTemplatesList(
+  _server: MCPServer,
+  transport: StdioTransport,
+  request: JsonRpcRequest,
+): Promise<void> {
+  transport.sendResult(request.id, { resourceTemplates: [] });
+}
+
+async function mcpHandlePromptsList(
+  _server: MCPServer,
+  transport: StdioTransport,
+  request: JsonRpcRequest,
+): Promise<void> {
+  transport.sendResult(request.id, { prompts: [] });
 }
 
 /** Handle tools/list request. */

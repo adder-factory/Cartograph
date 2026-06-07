@@ -26,6 +26,21 @@ import { getCurrentHeadSha, isCartographMetaPath } from '../git-utils.js';
 import { matchesGlob as globMatches } from '../glob.js';
 import { runSequential } from '../utils/async-iteration.js';
 import {
+  CARTOGRAPH_IGNORE_MARKER,
+  GIT_LIST_MAX_BUFFER_BYTES,
+  GIT_LIST_TIMEOUT_MS,
+  GIT_PROBE_TIMEOUT_MS,
+  collectEmbeddedRepoFilesInto,
+  collectSubmoduleFilesInto,
+  findEmbeddedGitRepositories,
+  getGitSubmodules,
+  getNestedGitRepoFiles,
+  isDirExcluded,
+  parseGitLinesToPaths,
+  safeReaddir,
+  safeRealpath,
+} from './file-discovery-policy.js';
+import {
   type EoIndexCounters,
   eoScanFilesForIndex,
   eoAbortIndexResult,
@@ -65,15 +80,6 @@ export const WORKER_RECYCLE_INTERVAL = 250;
 
 /** Hard ceiling (16) on caller-supplied pool size — bounds memory cost in the face of hostile inputs. */
 export const POOL_SIZE_MAX = 16;
-
-// git invocation timeouts and buffer sizes shared by getGitVisibleFiles
-// + unionDiffSinceLastSync. Probes that should return immediately
-// (rev-parse, check-ignore, cat-file) get the short timeout; commands
-// that may scan the whole work tree (ls-files, diff) get the long one.
-const GIT_PROBE_TIMEOUT_MS = 5_000;
-const GIT_LIST_TIMEOUT_MS = 30_000;
-/** 50 MB — comfortably above any real-world `git ls-files` / `git diff` output. */
-const GIT_LIST_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 
 /**
  * Default size of the parse-worker pool. Each worker holds its own
@@ -258,79 +264,6 @@ export function shouldIncludeFile(filePath: string, config: CartographConfig): b
 }
 
 /**
- * Parse git output as newline-delimited paths, trimmed and normalized.
- * Returns empty array on null input.
- */
-function parseGitLinesToPaths(output: string | null): string[] {
-  if (!output) return [];
-  const paths: string[] = [];
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed) paths.push(normalizePath(trimmed));
-  }
-  return paths;
-}
-
-/**
- * Enumerate all initialized submodule paths (recursively), relative to `rootDir`.
- *
- * Uses `git submodule foreach` so we get exactly the submodules git considers
- * active — uninitialized / deinitialized submodules are skipped automatically,
- * which is what we want (we can't ls-files inside a directory with no .git).
- *
- * Returns [] when there are no submodules or when the command fails. Errors
- * here are non-fatal: submodule indexing is a best-effort enhancement on top
- * of the parent-repo file scan.
- */
-function getGitSubmodules(rootDir: string): string[] {
-  try {
-    const output = execFileSync('git', ['submodule', 'foreach', '--recursive', '--quiet', 'echo "$displaypath"'], {
-      cwd: rootDir,
-      encoding: 'utf-8',
-      timeout: 10000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    return parseGitLinesToPaths(output);
-  } catch {
-    return [];
-  }
-}
-
-/**
- * Parse git output as newline-delimited paths, trimmed, normalized, and prefixed.
- * Returns empty array on null input.
- */
-function parseGitLinesToPrefixedPaths(output: string | null, prefix: string): string[] {
-  if (!output) return [];
-  const paths: string[] = [];
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed) paths.push(normalizePath(`${prefix}/${trimmed}`));
-  }
-  return paths;
-}
-
-/**
- * Run `git ls-files -co --exclude-standard` inside a submodule and return
- * paths prefixed back into the parent repo's relative-path namespace.
- * Errors are swallowed so one broken submodule doesn't fail the whole scan.
- */
-function getSubmoduleFiles(rootDir: string, submodulePath: string): string[] {
-  try {
-    const output = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], {
-      cwd: path.join(rootDir, submodulePath),
-      encoding: 'utf-8',
-      timeout: GIT_LIST_TIMEOUT_MS,
-      maxBuffer: GIT_LIST_MAX_BUFFER_BYTES,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    return parseGitLinesToPrefixedPaths(output, submodulePath);
-  } catch {
-    return [];
-  }
-}
-
-/**
  * Check if rootDir is gitignored by a parent repository (nested repo case).
  * Returns true if gitignored, false if not gitignored or git command fails.
  */
@@ -344,9 +277,12 @@ function checkGitignoredByParentRepo(rootDir: string, gitRoot: string): boolean 
 /**
  * Get all files visible to git (tracked + untracked but not ignored).
  * Respects .gitignore at all levels (root, subdirectories) and recurses
- * into git submodules — `git ls-files` itself does not enter submodules,
- * so each one is enumerated separately and its paths are prefixed.
- * Pass `indexSubmodules: false` in config to skip the submodule walk.
+ * into active git submodules plus standalone embedded repositories hidden
+ * by parent ignore rules. `git ls-files` itself does not enter nested
+ * repositories, so each one is enumerated separately and prefixed back into
+ * the parent path namespace. Pass `indexSubmodules: false` to skip all
+ * nested-repo walks; pass `indexEmbeddedRepos: false` to keep submodules but
+ * skip standalone embedded repositories.
  * Returns null on failure (non-git project) so callers can fall back.
  */
 function getGitVisibleFiles(rootDir: string, config: CartographConfig): Set<string> | null {
@@ -376,7 +312,11 @@ function getGitVisibleFiles(rootDir: string, config: CartographConfig): Set<stri
     const files = new Set<string>(parseGitLinesToPaths(output));
 
     if (config.indexSubmodules !== false) {
-      collectSubmoduleFilesInto(files, rootDir);
+      const submodules = new Set(getGitSubmodules(rootDir));
+      collectSubmoduleFilesInto(files, rootDir, submodules);
+      if (config.indexEmbeddedRepos !== false) {
+        collectEmbeddedRepoFilesInto(files, { rootDir, config, submodules });
+      }
     }
 
     return files;
@@ -403,20 +343,6 @@ function isGitignoredByParentRepo(targetDir: string): boolean {
     return true;
   } catch {
     return false;
-  }
-}
-
-/**
- * Recurse into every git submodule of `rootDir`, adding each
- * submodule-relative file path into `target` in place. Each
- * submodule has its own git index — the parent's `ls-files` only
- * emits the submodule's directory entry, not the files inside.
- */
-function collectSubmoduleFilesInto(target: Set<string>, rootDir: string): void {
-  for (const submodulePath of getGitSubmodules(rootDir)) {
-    for (const filePath of getSubmoduleFiles(rootDir, submodulePath)) {
-      target.add(filePath);
-    }
   }
 }
 
@@ -596,7 +522,11 @@ export function getGitChangedFiles(
   }
 
   if (config.indexSubmodules !== false) {
-    mergeSubmoduleStatuses(rootDir, ctx);
+    const submodules = new Set(getGitSubmodules(rootDir));
+    mergeSubmoduleStatuses(rootDir, ctx, submodules);
+    if (config.indexEmbeddedRepos !== false) {
+      mergeEmbeddedRepoStatuses(rootDir, ctx, submodules);
+    }
   }
 
   // A file present in both sets exists on disk now (working tree wins over
@@ -742,8 +672,7 @@ function unionDiffSinceLastSync(diffArgs: DiffSinceArgs, ctx: PorcelainScanCtx):
  * candidates picked up from the parent. Errors are non-fatal — a
  * broken submodule shouldn't block the rest of the sync.
  */
-function mergeSubmoduleStatuses(rootDir: string, ctx: PorcelainScanCtx): void {
-  const submodules = new Set(getGitSubmodules(rootDir));
+function mergeSubmoduleStatuses(rootDir: string, ctx: PorcelainScanCtx, submodules: ReadonlySet<string>): void {
   for (const subPath of submodules) {
     ctx.candidates.delete(subPath);
   }
@@ -751,6 +680,19 @@ function mergeSubmoduleStatuses(rootDir: string, ctx: PorcelainScanCtx): void {
     const subStatus = runGitStatusPorcelain(path.join(rootDir, subPath));
     if (subStatus === null) continue;
     parsePorcelainOutput(subStatus, `${subPath}/`, ctx);
+  }
+}
+
+function mergeEmbeddedRepoStatuses(rootDir: string, ctx: PorcelainScanCtx, submodules: ReadonlySet<string>): void {
+  for (const repoPath of findEmbeddedGitRepositories(rootDir, ctx.config, submodules)) {
+    ctx.candidates.delete(repoPath);
+    for (const filePath of getNestedGitRepoFiles(rootDir, repoPath)) {
+      if (shouldIncludeFile(filePath, ctx.config) && !ctx.candidates.has(filePath)) {
+        ctx.candidates.set(filePath, 'modified');
+      }
+    }
+    const repoStatus = runGitStatusPorcelain(path.join(rootDir, repoPath));
+    if (repoStatus !== null) parsePorcelainOutput(repoStatus, `${repoPath}/`, ctx);
   }
 }
 
@@ -778,11 +720,6 @@ function partitionCandidates(
   const deleted = Array.from(deletions).filter((p) => !isUnderCartographIgnoredDir(p, ignoredDirs));
   return { modified, added, deleted };
 }
-
-/**
- * Marker file name that indicates a directory (and all children) should be skipped
- */
-const CARTOGRAPH_IGNORE_MARKER = '.cartographignore';
 
 /**
  * Walk every parent directory of the given files (relative to rootDir) and
@@ -976,41 +913,6 @@ function walkDirRecursive(ctx: ScanWalkCtx, dir: string): void {
     const relativePath = normalizePath(path.relative(ctx.rootDir, path.join(dir, entry.name)));
     dispatchScanEntry(ctx, entry, relativePath);
   }
-}
-
-/** `realpath` with debug-log on failure. */
-function safeRealpath(dir: string): string | null {
-  try {
-    return fs.realpathSync(dir);
-  } catch {
-    logDebug('Skipping unresolvable directory', { dir });
-    return null;
-  }
-}
-
-/** `readdirSync(withFileTypes)` with debug-log on failure. */
-function safeReaddir(dir: string): fs.Dirent[] | null {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch (error) {
-    logDebug('Skipping unreadable directory', { dir, error: String(error) });
-    return null;
-  }
-}
-
-/**
- * Match `relativePath` against the configured exclude patterns. Tests both
- * the bare path and a `${path}/` form so directory-anchored patterns
- * (`node_modules/`) match correctly.
- */
-function isDirExcluded(relativePath: string, exclude: readonly string[]): boolean {
-  const dirPattern = relativePath + '/';
-  for (const pattern of exclude) {
-    if (matchesGlob(dirPattern, pattern) || matchesGlob(relativePath, pattern)) {
-      return true;
-    }
-  }
-  return false;
 }
 
 /**

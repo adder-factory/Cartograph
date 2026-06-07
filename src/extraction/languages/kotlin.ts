@@ -79,14 +79,18 @@ function kotlinPropertyVisibility(node: SyntaxNode): KotlinVisibility {
   return 'public';
 }
 
-function kotlinPropertyTypeText(varDecl: SyntaxNode, source: string): string | undefined {
-  const typeNode = varDecl.namedChildren.find(
+const KOTLIN_TYPE_NODE_TYPES = new Set(['user_type', 'nullable_type', 'function_type', 'parenthesized_type']);
+
+function kotlinTypeNode(node: SyntaxNode): SyntaxNode | undefined {
+  return node.namedChildren.find(
     (c: SyntaxNode) =>
-      c.type === 'user_type' ||
-      c.type === 'nullable_type' ||
-      c.type === 'function_type' ||
-      c.type === 'parenthesized_type',
+      KOTLIN_TYPE_NODE_TYPES.has(c.type) ||
+      (c.type === 'type_projection' &&
+        c.namedChildren.some((child: SyntaxNode) => KOTLIN_TYPE_NODE_TYPES.has(child.type))),
   );
+}
+
+function kotlinPropertyTypeText(typeNode: SyntaxNode | undefined, source: string): string | undefined {
   return typeNode ? getNodeText(typeNode, source) : undefined;
 }
 
@@ -99,35 +103,85 @@ function kotlinPropertySignature(keyword: string, name: string, typeText: string
   return typeText ? `${keyword} ${name}: ${typeText}` : `${keyword} ${name}`;
 }
 
+interface KotlinPropertyInfo {
+  name: string;
+  keyword: 'val' | 'var';
+  isVal: boolean;
+  typeNode?: SyntaxNode;
+  typeText?: string;
+  visibility: KotlinVisibility;
+}
+
+function kotlinBindingKeyword(node: SyntaxNode): 'val' | 'var' | null {
+  const bindingKind = node.namedChildren.find((c: SyntaxNode) => c.type === 'binding_pattern_kind');
+  if (bindingKind?.text === 'val') return 'val';
+  if (bindingKind?.text === 'var') return 'var';
+  return null;
+}
+
+function extractKotlinPropertyDeclarationInfo(node: SyntaxNode, source: string): KotlinPropertyInfo | null {
+  const varDecl = node.namedChildren.find((c: SyntaxNode) => c.type === 'variable_declaration');
+  if (!varDecl) return null; // destructuring or other unusual shape — skip
+  const nameNode = varDecl.namedChildren.find((c: SyntaxNode) => c.type === 'simple_identifier');
+  const keyword = kotlinBindingKeyword(node);
+  if (!nameNode || !keyword) return null;
+  const typeNode = kotlinTypeNode(varDecl);
+  const typeText = kotlinPropertyTypeText(typeNode, source);
+  return {
+    name: getNodeText(nameNode, source),
+    keyword,
+    isVal: keyword === 'val',
+    ...(typeNode ? { typeNode } : {}),
+    ...(typeText ? { typeText } : {}),
+    visibility: kotlinPropertyVisibility(node),
+  };
+}
+
+function extractKotlinClassParameterPropertyInfo(node: SyntaxNode, source: string): KotlinPropertyInfo | null {
+  const keyword = kotlinBindingKeyword(node);
+  if (!keyword) return null; // plain constructor parameter, not a property
+  const nameNode = node.namedChildren.find((c: SyntaxNode) => c.type === 'simple_identifier');
+  if (!nameNode) return null;
+  const typeNode = kotlinTypeNode(node);
+  const typeText = kotlinPropertyTypeText(typeNode, source);
+  return {
+    name: getNodeText(nameNode, source),
+    keyword,
+    isVal: keyword === 'val',
+    ...(typeNode ? { typeNode } : {}),
+    ...(typeText ? { typeText } : {}),
+    visibility: kotlinPropertyVisibility(node),
+  };
+}
+
 function visitKotlinPropertyDeclaration(node: SyntaxNode, ctx: ExtractorContext): boolean {
   if (node.type !== 'property_declaration') return false;
-  const varDecl = node.namedChildren.find((c: SyntaxNode) => c.type === 'variable_declaration');
-  if (!varDecl) return false; // destructuring or other unusual shape — skip
-  const nameNode = varDecl.namedChildren.find((c: SyntaxNode) => c.type === 'simple_identifier');
-  if (!nameNode) return false;
-
-  const name = getNodeText(nameNode, ctx.source);
-  const bindingKind = node.namedChildren.find((c: SyntaxNode) => c.type === 'binding_pattern_kind');
-  const isVal = bindingKind?.text === 'val';
-  const keyword = isVal ? 'val' : 'var';
+  const info = extractKotlinPropertyDeclarationInfo(node, ctx.source);
+  if (!info) return false;
   const isClassScope = isCurrentScopeClassLike(ctx);
 
   if (!isClassScope) {
     // Top-level or local: keep as constant (val) or variable (var)
-    ctx.createNode({ kind: kotlinPropertyKind(isVal, isClassScope), name, node });
+    const propNode = ctx.createNode({
+      kind: kotlinPropertyKind(info.isVal, isClassScope),
+      name: info.name,
+      node,
+      extra: info.typeText ? { signature: kotlinPropertySignature(info.keyword, info.name, info.typeText) } : {},
+    });
+    if (propNode && info.typeNode) ctx.extractTypeRefs(info.typeNode, propNode.id, 'type_of');
     return true;
   }
 
-  const typeText = kotlinPropertyTypeText(varDecl, ctx.source);
-  ctx.createNode({
-    kind: kotlinPropertyKind(isVal, isClassScope),
-    name,
+  const propNode = ctx.createNode({
+    kind: kotlinPropertyKind(info.isVal, isClassScope),
+    name: info.name,
     node,
     extra: compact({
-      signature: kotlinPropertySignature(keyword, name, typeText),
-      visibility: kotlinPropertyVisibility(node),
+      signature: kotlinPropertySignature(info.keyword, info.name, info.typeText),
+      visibility: info.visibility,
     }),
   });
+  if (propNode && info.typeNode) ctx.extractTypeRefs(info.typeNode, propNode.id, 'type_of');
   return true;
 }
 
@@ -213,6 +267,25 @@ const kotlinExtractor: LanguageExtractor = {
       }
     }
     return null;
+  },
+  extractClassLikeHeader: (node, _ownerNode, ctx) => {
+    const primary = node.namedChildren.find((child: SyntaxNode) => child.type === 'primary_constructor');
+    if (!primary) return;
+    for (const param of primary.namedChildren) {
+      if (param.type !== 'class_parameter') continue;
+      const info = extractKotlinClassParameterPropertyInfo(param, ctx.source);
+      if (!info) continue;
+      const fieldNode = ctx.createNode({
+        kind: 'field',
+        name: info.name,
+        node: param,
+        extra: compact({
+          signature: kotlinPropertySignature(info.keyword, info.name, info.typeText),
+          visibility: info.visibility,
+        }),
+      });
+      if (fieldNode && info.typeNode) ctx.extractTypeRefs(info.typeNode, fieldNode.id, 'type_of');
+    }
   },
   classifyClassNode: (node) => {
     // Kotlin reuses class_declaration for classes, interfaces, and enums.

@@ -38,7 +38,14 @@ conservative.
 | `enableBuildContextRefs` | Add Docker/build context refs | `true` |
 | `enableStringImports` | Add string import edges | `true` |
 | `indexSubmodules` | Recurse into git submodules | `true` |
+| `indexEmbeddedRepos` | Recurse into standalone nested git repos hidden by the parent repo ignore rules when submodule indexing is enabled | `true` |
 | `dependenciesAllowlist` | Packages never flagged by dependency audit | `[]` |
+
+`indexEmbeddedRepos` covers nested repositories that are not registered git
+submodules, for example a checked-out SDK under a parent-ignored `vendor/` or
+`embedded/` directory. Set it to `false` when those nested repositories should
+stay outside the graph. `indexSubmodules: false` disables both submodule and
+embedded-repository recursion.
 
 ## Storage Options
 

@@ -57,6 +57,7 @@ export function getCartographPermissions(): string[] {
     'mcp__cartograph__cartograph_context',
     'mcp__cartograph__cartograph_graph',
     'mcp__cartograph__cartograph_node',
+    'mcp__cartograph__cartograph_files',
     'mcp__cartograph__cartograph_at_range',
     'mcp__cartograph__cartograph_status',
   ];

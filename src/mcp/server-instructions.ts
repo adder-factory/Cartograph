@@ -22,7 +22,7 @@ Review / close-out:
 - \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for diff context, line ranges, and test selection.
 - \`cartograph_affected({includeCommands: true})\` after edits when you want affected tests plus package-script verification commands.
 - \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting an edit-touching task as done.
-- \`cartograph_session({action: "audit"})\` for tool-use pattern review; \`cartograph_playbook\` for the full tool map.
+- \`cartograph_session({action: "audit"})\` for tool-use pattern review; \`action: "usage"\` for aggregate tool/session counts; \`cartograph_playbook\` for the full tool map.
 
 Token discipline:
 - Metadata tools are cheap. Source-heavy modes are \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
@@ -91,7 +91,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` (read-only escape hatch; \`schema: true\` first).
 - **"What other cartograph indices are on this machine?"** → \`cartograph_discover\`.
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
-- **"Did this agent navigate efficiently?"** → \`cartograph_session({action: "audit"})\` (tool-use findings, repeated calls, missing test-selection/self-check steps).
+- **"Did this agent navigate efficiently?"** → \`cartograph_session({action: "audit"})\` (tool-use findings, repeated calls, missing test-selection/self-check steps); **"How much did this server session use?"** → \`cartograph_session({action: "usage"})\` (aggregate counts/timings only, no raw args or result bodies).
 
 ## Edge orientations (which direction each edge flows)
 
@@ -133,5 +133,5 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 
 ## Cross-call state & extending
 
-\`cartograph_session({action})\` creates/resumes/lists/deletes sessions, audits prior tool-use patterns, and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs.
+\`cartograph_session({action})\` creates/resumes/lists/deletes sessions, audits prior tool-use patterns, reports aggregate usage, and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs.
 `;

@@ -1,0 +1,6 @@
+<apex:page controller="AccountController">
+  <apex:form>
+    <apex:commandButton action="{!save}" value="Save"/>
+    <c:AccountCard/>
+  </apex:form>
+</apex:page>

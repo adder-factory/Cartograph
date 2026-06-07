@@ -28,6 +28,8 @@ import type { LanguageDef } from './types.js';
 // =====================================================================
 // Imports — one per language, alphabetical by name
 // =====================================================================
+import { APEX_DEF } from './apex.js';
+import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
 import { C_DEF, CPP_DEF } from './c-cpp.js';
 import { CSHARP_DEF } from './csharp.js';
@@ -71,6 +73,7 @@ import { SWIFT_DEF } from './swift.js';
 import { TSX_DEF } from './tsx.js';
 import { TYPESCRIPT_DEF } from './typescript.js';
 import { VERILOG_DEF } from './verilog.js';
+import { VISUALFORCE_DEF } from './visualforce.js';
 import { VUE_DEF } from './vue.js';
 import { XML_DEF } from './xml.js';
 import { YAML_DEF } from './yaml.js';
@@ -80,6 +83,8 @@ import { ZSH_DEF } from './zsh.js';
 // Registry — alphabetical by name
 // =====================================================================
 const ALL_DEFS: readonly LanguageDef[] = [
+  APEX_DEF,
+  AURA_DEF,
   BASH_DEF,
   C_DEF,
   CPP_DEF,
@@ -124,6 +129,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   TSX_DEF,
   TYPESCRIPT_DEF,
   VERILOG_DEF,
+  VISUALFORCE_DEF,
   VUE_DEF,
   XML_DEF,
   YAML_DEF,

@@ -37,6 +37,21 @@ interface ToolCallRow {
   durationMs: number;
 }
 
+export interface TraceToolUsage {
+  toolName: string;
+  callCount: number;
+  p50DurationMs: number;
+  p95DurationMs: number;
+  maxDurationMs: number;
+}
+
+export interface TraceUsageSummary {
+  sessionCount: number;
+  toolCallCount: number;
+  errorLikeCount: number;
+  tools: TraceToolUsage[];
+}
+
 interface InsertSessionArgs {
   qb: QueryBuilder;
   id: string;
@@ -67,6 +82,21 @@ const ToolCallDbRowSchema = z.object({
 });
 
 type ToolCallDbRow = z.infer<typeof ToolCallDbRowSchema>;
+
+const UsageCountsDbRowSchema = z.object({
+  session_count: z.number(),
+  tool_call_count: z.number(),
+});
+
+type UsageCountsDbRow = z.infer<typeof UsageCountsDbRowSchema>;
+
+const UsageCallDbRowSchema = z.object({
+  tool_name: z.string(),
+  duration_ms: z.number(),
+  result_summary: z.string(),
+});
+
+type UsageCallDbRow = z.infer<typeof UsageCallDbRowSchema>;
 
 // ─── Typed query definitions (module-level; bound per-DB lazily) ──────────
 
@@ -177,6 +207,24 @@ const callsForSessionQuery = defineQuery({
   row: ToolCallDbRowSchema,
 });
 
+const usageCountsQuery = defineQuery({
+  sql:
+    `SELECT ` +
+    `  (SELECT COUNT(*) FROM mcp_sessions) AS session_count, ` +
+    `  (SELECT COUNT(*) FROM mcp_tool_calls) AS tool_call_count`,
+  params: z.object({}),
+  row: UsageCountsDbRowSchema,
+});
+
+const usageToolCallsQuery = defineQuery({
+  sql:
+    `SELECT tool_name, duration_ms, result_summary ` +
+    `FROM mcp_tool_calls ` +
+    `ORDER BY tool_name ASC, duration_ms ASC`,
+  params: z.object({}),
+  row: UsageCallDbRowSchema,
+});
+
 // ─── Module augmentation: register typed entries on QueryRegistry ─────────
 
 declare module './queries.js' {
@@ -203,6 +251,8 @@ declare module './queries.js' {
     gcEmptySessions?: TypedQuery<Record<string, never>, never>;
     recentSessions?: TypedQuery<{ limit: number }, SessionDbRow>;
     callsForSession?: TypedQuery<{ sessionId: string }, ToolCallDbRow>;
+    traceUsageCounts?: TypedQuery<Record<string, never>, UsageCountsDbRow>;
+    traceUsageToolCalls?: TypedQuery<Record<string, never>, UsageCallDbRow>;
   }
 }
 
@@ -325,4 +375,48 @@ export function callsForSession(qb: QueryBuilder, sessionId: string): ToolCallRo
     resultSummary: r.result_summary,
     durationMs: r.duration_ms,
   }));
+}
+
+export function getTraceUsage(qb: QueryBuilder): TraceUsageSummary {
+  qb.queries.traceUsageCounts ??= usageCountsQuery(qb.db);
+  qb.queries.traceUsageToolCalls ??= usageToolCallsQuery(qb.db);
+  const counts = qb.queries.traceUsageCounts.get({}) ?? { session_count: 0, tool_call_count: 0 };
+  const calls = qb.queries.traceUsageToolCalls.all({});
+  return {
+    sessionCount: counts.session_count,
+    toolCallCount: counts.tool_call_count,
+    errorLikeCount: calls.filter((row) => isErrorLikeSummary(row.result_summary)).length,
+    tools: summarizeToolUsage(calls),
+  };
+}
+
+function summarizeToolUsage(rows: UsageCallDbRow[]): TraceToolUsage[] {
+  const byTool = new Map<string, number[]>();
+  for (const row of rows) {
+    const durations = byTool.get(row.tool_name) ?? [];
+    durations.push(row.duration_ms);
+    byTool.set(row.tool_name, durations);
+  }
+  return [...byTool.entries()]
+    .map(([toolName, durations]) => {
+      durations.sort((a, b) => a - b);
+      return {
+        toolName,
+        callCount: durations.length,
+        p50DurationMs: percentile(durations, 0.5),
+        p95DurationMs: percentile(durations, 0.95),
+        maxDurationMs: durations.at(-1) ?? 0,
+      };
+    })
+    .sort((a, b) => b.callCount - a.callCount || a.toolName.localeCompare(b.toolName));
+}
+
+function percentile(sorted: readonly number[], p: number): number {
+  if (sorted.length === 0) return 0;
+  const idx = Math.max(0, Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1));
+  return Math.round(sorted[idx] ?? 0);
+}
+
+function isErrorLikeSummary(summary: string): boolean {
+  return /\b(error|failed|failure|exception)\b/i.test(summary);
 }

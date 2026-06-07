@@ -151,7 +151,7 @@ describe('language-coverage parity-guard', () => {
   // A vacuous pass guard: if discovery silently returns too little,
   // `it.each([])` or a stale fixture tree can pass for free.
   it('discovers the test-bed fixtures', () => {
-    expect(FIXTURES.length).toBeGreaterThanOrEqual(48);
+    expect(FIXTURES.length).toBeGreaterThanOrEqual(51);
   });
 
   it.each(FIXTURES)('$language extracts to a non-empty graph', ({ language, fixture }) => {

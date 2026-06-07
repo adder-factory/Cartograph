@@ -55,6 +55,11 @@ surface. `full` exposes every registered tool. `review` focuses diff/risk/test
 workflows. `read-only` advertises read-capable tools and blocks mutating
 branches of mixed tools.
 
+The server advertises MCP `tools`, `resources`, and `prompts` capabilities.
+Cartograph's public surface is still tool-first; `resources/list`,
+`resources/templates/list`, and `prompts/list` return empty lists so clients
+that probe the modern MCP resource/prompt endpoints do not fail the session.
+
 ## Suggested Agent Workflow
 
 Start with metadata tools before reading source:
@@ -76,7 +81,8 @@ cartograph_compare_to_ref({findingsDelta: true})
 
 Use `cartograph_playbook` for the full tool-selection guide. Use
 `cartograph_session({action: "audit"})` to inspect whether an agent skipped
-important closeout steps.
+important closeout steps, and `cartograph_session({action: "usage"})` for
+aggregate session/tool counts without raw request or response bodies.
 
 ## Load Budget
 
@@ -94,13 +100,13 @@ is:
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
 | tools/list, 22 tools | 44,899 | ~11,225 |
-| initialize instructions | 2,567 | ~642 |
-| combined startup load | 47,466 | ~11,867 |
-| full playbook, on demand | 13,348 | ~3,337 |
+| initialize instructions | 2,622 | ~656 |
+| combined startup load | 47,521 | ~11,881 |
+| full playbook, on demand | 13,526 | ~3,382 |
 
-The full 36-tool profile is 63,963 `tools/list` chars and 66,530 combined
+The full 36-tool profile is 63,971 `tools/list` chars and 66,593 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 35 tools, 58,508 `tools/list` chars, and 61,075
+reduce the full list to 35 tools, 58,516 `tools/list` chars, and 61,138
 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the

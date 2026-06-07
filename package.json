@@ -106,6 +106,7 @@
     "@typescript/native-preview": "^7.0.0-dev.20260607.1",
     "playwright": "^1.60.0",
     "tree-sitter-cli": "^0.26.9",
+    "tree-sitter-sfapex": "3.0.0",
     "typescript": "^5.9.3"
   },
   "optionalDependencies": {

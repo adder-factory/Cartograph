@@ -191,8 +191,7 @@ export function detectLanguage(filePath: string, source?: string): Language {
   if (isPlayRoutesFile(filePath)) return 'yaml';
 
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
-  const def = getLanguageDefByExtension(ext);
-  const lang = (def?.name as Language) ?? 'unknown';
+  const lang = pathGatedLanguage(filePath, source, registryLanguageForExtension(ext));
 
   // .h files could be C, C++, or Objective-C (F#65). Check source
   // content. ObjC wins when the file has `@interface` / `@implementation`
@@ -201,10 +200,7 @@ export function detectLanguage(filePath: string, source?: string): Language {
   // C++ check stays after the ObjC check for legacy reasons (existing
   // `.h` files that look like C++ but were extracted as C++ pre-F#65
   // shouldn't get reclassified just because they import an ObjC header).
-  if (lang === 'c' && ext === '.h' && source) {
-    if (looksLikeObjc(source)) return 'objc';
-    if (looksLikeCpp(source)) return 'cpp';
-  }
+  if (lang === 'c' && ext === '.h' && source) return detectHeaderLanguage(source);
 
   // .html (and .md) files that begin with a YAML front-matter block (`---\n…\n---`)
   // are Jekyll/Liquid templates. Detect by content so plain HTML files (no front
@@ -217,6 +213,37 @@ export function detectLanguage(filePath: string, source?: string): Language {
   }
 
   return lang;
+}
+
+function registryLanguageForExtension(ext: string): Language {
+  const def = getLanguageDefByExtension(ext);
+  return (def?.name as Language) ?? 'unknown';
+}
+
+function pathGatedLanguage(filePath: string, source: string | undefined, language: Language): Language {
+  if (language === 'aura' && !isSalesforceAuraFile(filePath, source)) return 'unknown';
+  if (language === 'visualforce' && !isSalesforceVisualforceFile(filePath, source)) return 'unknown';
+  return language;
+}
+
+function detectHeaderLanguage(source: string): Language {
+  if (looksLikeObjc(source)) return 'objc';
+  return looksLikeCpp(source) ? 'cpp' : 'c';
+}
+
+function isSalesforceAuraFile(filePath: string, source?: string): boolean {
+  const normalized = filePath.replaceAll('\\', '/').toLowerCase();
+  return normalized.includes('/aura/') || /<\s*aura:/i.test(source ?? '');
+}
+
+function isSalesforceVisualforceFile(filePath: string, source?: string): boolean {
+  const normalized = filePath.replaceAll('\\', '/').toLowerCase();
+  return (
+    normalized.includes('/pages/') ||
+    normalized.includes('/components/') ||
+    normalized.includes('/visualforce/') ||
+    /<\s*apex:/i.test(source ?? '')
+  );
 }
 
 /** Play Framework route declarations live in extensionless `conf/routes`

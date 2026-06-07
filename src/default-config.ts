@@ -248,6 +248,7 @@ const baseConfig: CartographConfig = {
   enableBuildContextRefs: true,
   enableStringImports: true,
   indexSubmodules: true,
+  indexEmbeddedRepos: true,
   enableCoChange: true,
   // F#12 slice 1: per-file mode threshold for nested-function extraction.
   // Files whose largest function body fits under this LOC get eager

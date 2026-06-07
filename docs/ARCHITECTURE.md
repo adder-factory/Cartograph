@@ -62,6 +62,10 @@ These are the current owner modules future sessions should preserve:
   `db.dialect`. Do not leak backend checks into extraction, MCP tools, or
   feature runtimes unless the feature itself is storage administration.
 - Search contracts live in `src/search/types.ts`.
+- Index file-discovery policy for git-visible files, submodules, embedded
+  repositories, and `.cartographignore` directory mechanics lives in
+  `src/extraction/file-discovery-policy.ts`; the extraction orchestrator should
+  decide scan/sync flow, not own low-level repository discovery.
 - Files feature filtering, rollup, and render runtime helpers live in
   `src/features/files/runtime.ts`; MCP and CLI adapters consume that feature
   runtime.
