@@ -1,4 +1,4 @@
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult } from './types.js';
 import {
   type ComponentExtractorConfig,
   type ComponentExtractorRuntime,

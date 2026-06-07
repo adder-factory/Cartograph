@@ -113,7 +113,8 @@
  * documentation comment (which describes the regex shape verbatim).
  */
 
-import type { ExtractionResult, Node, Edge, UnresolvedReference } from '../../types.js';
+import type { ExtractionResult, UnresolvedReference } from '../types.js';
+import type { Edge, Node } from '../../types.js';
 import type { LanguageDef } from './types.js';
 import { generateNodeId } from '../tree-sitter-helpers.js';
 

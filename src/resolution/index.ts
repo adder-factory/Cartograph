@@ -6,7 +6,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Node, UnresolvedReference, Edge, EdgeKind } from '../types.js';
+import type { UnresolvedReference } from '../extraction/types.js';
+import type { Edge, EdgeKind, Node } from '../types.js';
 import { type QueryBuilder, getNodesByKind } from '../db/queries.js';
 import { getNodesByName, getNodesByQualifiedNameExact, getNodesByLowerName } from '../db/queries-search.js';
 import { insertEdges } from '../db/queries-edges.js';

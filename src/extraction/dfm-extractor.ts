@@ -1,4 +1,4 @@
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult } from './types.js';
 import { compact } from '../utils.js';
 import { errMsg } from '../errors.js';
 import { StandaloneExtractor } from './standalone-extractor.js';

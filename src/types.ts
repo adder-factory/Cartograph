@@ -5,6 +5,7 @@
  */
 
 import type { LayerConfig, LayerException } from './biomarkers/layering-types.js';
+import type { ExtractionError } from './extraction/types.js';
 
 export type { LayerConfig, LayerException } from './biomarkers/layering-types.js';
 export type {
@@ -15,6 +16,12 @@ export type {
   TaskInput,
 } from './context/types.js';
 export type { GraphStats, SchemaVersion } from './db/types.js';
+export type {
+  ExtractionError,
+  ExtractionResult,
+  NestedFunctionManifestRow,
+  UnresolvedReference,
+} from './extraction/types.js';
 export type {
   CandidateScoreTrace,
   ScoreExplanation,
@@ -400,133 +407,6 @@ export interface FileRecord {
    * record. Defaults to false. See staleness-redesign Phase 1 / friction F4.
    */
   needsReextract?: boolean;
-}
-
-// =============================================================================
-// Extraction Types
-// =============================================================================
-
-/**
- * Result from parsing a source file
- */
-export interface ExtractionResult {
-  /** Extracted nodes */
-  nodes: Node[];
-
-  /** Extracted edges */
-  edges: Edge[];
-
-  /** References that couldn't be resolved yet */
-  unresolvedReferences: UnresolvedReference[];
-
-  /**
-   * F#12 slice 2: nested-function manifest rows mined from manifest-mode
-   * files (mega-files above `largeFunctionThreshold`). Empty on eager-mode
-   * files — those already emit nested fns as first-class nodes via slice 1.
-   * Persisted via `upsertNestedFunctionsForFile` so the storage path is
-   * delete-by-file-then-insert per re-extract.
-   */
-  nestedFunctionManifest?: NestedFunctionManifestRow[];
-
-  /** Any errors during extraction */
-  errors: ExtractionError[];
-
-  /** Extraction duration in milliseconds */
-  durationMs: number;
-}
-
-/**
- * F#12 slice 2: one manifest entry per nested function declaration in a
- * manifest-mode (mega-) file. Captures name + position + signature +
- * body hash — enough for `cartograph_find` to surface "this name exists
- * as a nested fn inside a mega-file" and for the stateless
- * `cartograph_node({deep:true})` ad-hoc view to re-locate the function
- * by position. NOT a graph node — no edges, no PageRank participation,
- * no cross-file resolution. Slice 3 adds the hit-counting + promotion
- * layer on top of these rows.
- *
- * `parentNodeId` is the CLOSEST REAL-NODE ANCESTOR — not the immediate
- * lexical parent. For nested-nested cases (e.g. `getInnerFn` inside
- * `getTypeOfSymbol` inside `createTypeChecker`), the immediate lexical
- * parent (`getTypeOfSymbol`) isn't itself a real node in manifest mode,
- * so the closest real ancestor (`createTypeChecker`) wins. Used for
- * the "inside `createTypeChecker`" render footer.
- */
-export interface NestedFunctionManifestRow {
-  parentNodeId: string;
-  filePath: string;
-  name: string;
-  startLine: number;
-  startCol: number;
-  endLine: number;
-  endCol: number;
-  signature: string | null;
-  bodyHash: string;
-}
-
-/**
- * Error during code extraction
- */
-export interface ExtractionError {
-  /** Error message */
-  message: string;
-
-  /** File path where the error occurred */
-  filePath?: string;
-
-  /** Line number if available */
-  line?: number;
-
-  /** Column number if available */
-  column?: number;
-
-  /** Error severity */
-  severity: 'error' | 'warning';
-
-  /** Error code for categorization */
-  code?: string;
-}
-
-/**
- * A reference that couldn't be resolved during extraction
- */
-export interface UnresolvedReference {
-  /** ID of the node containing the reference */
-  fromNodeId: string;
-
-  /** Name being referenced */
-  referenceName: string;
-
-  /** Type of reference (call, type, import, etc.) */
-  referenceKind: EdgeKind;
-
-  /** Location of the reference */
-  line: number;
-  column: number;
-
-  /** File path where reference occurs (denormalized for performance) */
-  filePath?: string;
-
-  /** Language of the source file (denormalized for performance) */
-  language?: Language;
-
-  /** Possible qualified names it might resolve to */
-  candidates?: string[];
-
-  /**
-   * Number of call/reference sites that collapsed to this entry during
-   * extraction-time dedup. ≥ 1 (1 = no duplicates seen). Used so the
-   * resolver can stamp an accurate site count onto the edge metadata
-   * even though we only emit one edge per (source, target, kind) pair.
-   */
-  siteCount?: number;
-
-  /**
-   * Additional 1-based line numbers (beyond `line`) where this same
-   * reference also appeared. Capped — see EXTRA_SITES_CAP in the
-   * extractor — so a 100-call hot loop doesn't blow the metadata budget.
-   */
-  extraLines?: number[];
 }
 
 // =============================================================================

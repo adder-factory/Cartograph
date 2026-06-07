@@ -1,5 +1,6 @@
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
-import type { Node, Edge, ExtractionResult, UnresolvedReference, NodeKind } from '../types.js';
+import type { ExtractionResult, UnresolvedReference } from './types.js';
+import type { Edge, Node, NodeKind } from '../types.js';
 import { getNodeText, type NodeIdFactory } from './tree-sitter-helpers.js';
 import { getParser } from './grammars.js';
 import { errMsg } from '../errors.js';

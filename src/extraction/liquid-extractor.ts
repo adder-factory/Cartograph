@@ -1,4 +1,5 @@
-import type { Node, Edge, ExtractionResult, UnresolvedReference } from '../types.js';
+import type { ExtractionResult, UnresolvedReference } from './types.js';
+import type { Edge, Node } from '../types.js';
 import type { NodeIdFactory } from './tree-sitter-helpers.js';
 import { compact } from '../utils.js';
 import { errMsg } from '../errors.js';

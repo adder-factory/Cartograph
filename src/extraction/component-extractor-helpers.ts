@@ -1,4 +1,5 @@
-import type { Edge, ExtractionError, ExtractionResult, Language, Node, UnresolvedReference } from '../types.js';
+import type { ExtractionError, ExtractionResult, UnresolvedReference } from './types.js';
+import type { Edge, Language, Node } from '../types.js';
 import { errMsg } from '../errors.js';
 import { isLanguageSupported } from './grammars.js';
 import { TreeSitterExtractor } from './tree-sitter.js';

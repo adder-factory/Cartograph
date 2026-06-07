@@ -1,7 +1,8 @@
 import * as fs from 'node:fs';
 import { Query } from 'web-tree-sitter';
 import type { Node as SyntaxNode, QueryMatch, Tree } from 'web-tree-sitter';
-import type { ExtractionResult, NodeKind, Language } from '../types.js';
+import type { ExtractionResult } from './types.js';
+import type { Language, NodeKind } from '../types.js';
 import { getNodeText, type NodeIdFactory } from './tree-sitter-helpers.js';
 import { getParser, getLanguageGrammar } from './grammars.js';
 import { errMsg } from '../errors.js';

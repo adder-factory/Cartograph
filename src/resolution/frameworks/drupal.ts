@@ -66,7 +66,8 @@
  *   - Twig template scanning (no shipped tree-sitter-twig grammar)
  */
 
-import type { Node, NodeKind, UnresolvedReference } from '../../types.js';
+import type { UnresolvedReference } from '../../extraction/types.js';
+import type { Node, NodeKind } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
 import { generateNodeId } from '../../extraction/tree-sitter-helpers.js';
 import { getParser } from '../../extraction/grammars.js';

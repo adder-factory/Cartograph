@@ -302,7 +302,7 @@ export interface FrameworkResolver {
   extract?(
     filePath: string,
     content: string,
-  ): { nodes: Node[]; references: import('../types.js').UnresolvedReference[] };
+  ): { nodes: Node[]; references: import('../extraction/types.js').UnresolvedReference[] };
 }
 
 /**

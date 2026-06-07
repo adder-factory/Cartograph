@@ -20,7 +20,8 @@
  */
 
 import { z } from 'zod';
-import type { UnresolvedReference, Language, EdgeKind } from '../types.js';
+import type { UnresolvedReference } from '../extraction/types.js';
+import type { EdgeKind, Language } from '../types.js';
 import { bindingsFromObject } from './row-mapper.js';
 import {
   type QueryBuilder,

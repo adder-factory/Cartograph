@@ -7,7 +7,8 @@
  *   GET  /users/:id  controllers.Users.show(id: Long)
  */
 
-import type { Node, UnresolvedReference } from '../../types.js';
+import type { UnresolvedReference } from '../../extraction/types.js';
+import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
 import { isPlayRoutesFile } from '../../extraction/grammars.js';
 

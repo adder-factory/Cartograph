@@ -23,7 +23,7 @@
  *     for terminate() paths (recycle, end-of-index, timeout).
  */
 
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult } from './types.js';
 import type { Worker as NodeWorker } from 'node:worker_threads';
 import { mergeProfileEntries, type ProfileEntry } from './profile.js';
 
