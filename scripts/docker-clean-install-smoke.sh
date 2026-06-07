@@ -31,6 +31,7 @@ docker run --rm \
       --exclude=node_modules \
       --exclude=.cartograph \
       --exclude=dist \
+      --exclude=release \
       -cf - . | tar -xf - -C "$work"
 
     cd "$work"

@@ -17,8 +17,8 @@
 #
 # Install path: `npm ci` (lockfile) for the native prebuilts (tsgo / biome /
 # usearch). The biomarker gate additionally needs the Bun runtime (bun:sqlite
-# + bun:ffi + the vendored wasm grammars to index the repo), so a Bun setup
-# step is added; tsgo + biome themselves still run under node.
+# + bun:ffi + the vendored wasm grammars to index the repo), and PostgreSQL
+# storage tests run against a pgvector-enabled PostgreSQL service.
 name: check
 
 on:
@@ -38,7 +38,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16-alpine
+        image: pgvector/pgvector:pg18
         env:
           POSTGRES_USER: cartograph
           POSTGRES_PASSWORD: cartograph
@@ -82,9 +82,10 @@ jobs:
       - name: Test mock hygiene
         run: npm run test:mock-hygiene
 
-      - name: PostgreSQL storage smoke
+      - name: PostgreSQL storage + pgvector smoke
         env:
           CARTOGRAPH_TEST_POSTGRES_URL: postgres://cartograph:cartograph@localhost:5432/cartograph
+          CARTOGRAPH_TEST_PGVECTOR_URL: postgres://cartograph:cartograph@localhost:5432/cartograph
         run: npm run test:postgres
 
       - name: Module leak canaries

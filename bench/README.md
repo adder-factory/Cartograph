@@ -11,7 +11,7 @@ Compares the SQLite default storage backend with the PostgreSQL opt-in
 backend using the same synthetic QueryBuilder workload: schema init,
 file/node/edge writes, then stats/search/range/history reads.
 PostgreSQL node and edge bulk writes use the same optimized batch path
-as production indexing. Use a `pgvector/pgvector:pg16` container when
+as production indexing. Use a `pgvector/pgvector:pg18` container when
 you also want to benchmark native vector-search paths; the bench still
 runs against plain PostgreSQL for structural storage timings.
 
