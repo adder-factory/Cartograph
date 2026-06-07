@@ -21,7 +21,7 @@
       "!src/extraction/wasm",
       "!scripts/spikes",
       "!bench/mini-nllc/_archive",
-      "!src/viewer/static"
+      "!src/features/viewer/static"
     ]
   },
   "formatter": {

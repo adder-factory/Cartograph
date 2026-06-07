@@ -86,7 +86,7 @@ Additionally, `src/extraction/tags/elixir.scm` is vendored verbatim from **tree-
 
 ## Optional viewer
 
-The optional graph viewer (`src/viewer/static/index.html`) loads the following browser libraries from the unpkg CDN at runtime (they are not bundled in this repository):
+The optional graph viewer (`src/features/viewer/static/index.html`) loads the following browser libraries from the unpkg CDN at runtime (they are not bundled in this repository):
 
 - [Cytoscape.js](https://github.com/cytoscape/cytoscape.js), [cytoscape-fcose](https://github.com/iVis-at-Bilkent/cytoscape.js-fcose), [cose-base](https://github.com/iVis-at-Bilkent/cose-base), [layout-base](https://github.com/iVis-at-Bilkent/layout-base) — Max Franz / i-Vis Lab, MIT — graph rendering and layout.
 - [Prism.js](https://github.com/PrismJS/prism) — Lea Verou & contributors, MIT — source-code syntax highlighting.

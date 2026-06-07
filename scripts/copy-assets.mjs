@@ -33,9 +33,9 @@ copyFileSync('node_modules/web-tree-sitter/web-tree-sitter.wasm', 'dist/web-tree
 // the HTTP path lives in plain .ts files that tsc emits straight to
 // dist/ along with the rest of the source.
 
-mkdirSync('dist/viewer/static', { recursive: true });
-for (const f of readdirSync('src/viewer/static')) {
-  copyFileSync(join('src/viewer/static', f), join('dist/viewer/static', f));
+mkdirSync('dist/features/viewer/static', { recursive: true });
+for (const f of readdirSync('src/features/viewer/static')) {
+  copyFileSync(join('src/features/viewer/static', f), join('dist/features/viewer/static', f));
 }
 
 mkdirSync('dist/extraction/wasm', { recursive: true });
