@@ -212,7 +212,7 @@ function appendBackendStatus(lines: string[], cg: Cartograph, hnswAvailable: boo
   if (backend === 'postgres') {
     lines.push(
       '**Backend:** postgres',
-      '  ℹ PostgreSQL storage active — native GIN/pgvector paths are used when available.',
+      '  ℹ PostgreSQL 18+ storage active — native GIN/pgvector paths and PostgreSQL planner/storage improvements are used when available.',
     );
     return;
   }

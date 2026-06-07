@@ -48,6 +48,7 @@ Start with `cartograph llm setup`, then run `cartograph doctor .`.
 
 ```text
 Move Cartograph storage from SQLite to PostgreSQL for this repository.
-Use `docs/STORAGE-BACKENDS.md`, preserve the existing graph with
-`cartograph admin storage-migrate`, and run `cartograph doctor .` afterward.
+Use PostgreSQL 18+, follow `docs/STORAGE-BACKENDS.md`, preserve the existing
+graph with `cartograph admin storage-migrate`, and run `cartograph doctor .`
+afterward.
 ```

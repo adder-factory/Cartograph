@@ -42,12 +42,13 @@ conservative.
 
 ## Storage Options
 
-SQLite is default. PostgreSQL options live under `database`:
+SQLite is default. PostgreSQL options live under `database` and require
+PostgreSQL 18 or newer:
 
 | Option | Description | Default |
 |---|---|---|
 | `database.provider` | `sqlite` or `postgres` | `sqlite` |
-| `database.url` | PostgreSQL connection URL | unset |
+| `database.url` | PostgreSQL 18+ connection URL | unset |
 | `database.schema` | PostgreSQL schema | `public` |
 | `database.pgvector` | `auto`, `off`, or `require` | `auto` |
 | `database.maxConnections` | PostgreSQL pool cap | `1` |
