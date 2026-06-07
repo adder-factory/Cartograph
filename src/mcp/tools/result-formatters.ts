@@ -9,20 +9,17 @@
  */
 
 import type { Edge, Node } from '../../types.js';
+import {
+  CONFIDENCE_RANK,
+  detectUniformConfidence,
+  filterByConfidence,
+  formatConfidence,
+  formatSiteCount,
+} from '../../graph/edge-confidence.js';
 import type { RefIdCache } from './_id-cache.js';
 import { err, type ToolOutcome } from './_outcome.js';
 
-/**
- * Numeric ordering of confidence levels — used by `minConfidence`
- * filters on callers / callees / impact. Higher = more trustworthy.
- * AMBIGUOUS isn't currently stamped (see B3 in tasks), but the
- * ordering is defined so a future producer slots in cleanly.
- */
-export const CONFIDENCE_RANK: Record<NonNullable<Edge['confidence']>, number> = {
-  EXTRACTED: 2,
-  INFERRED: 1,
-  AMBIGUOUS: 0,
-};
+export { CONFIDENCE_RANK, detectUniformConfidence, filterByConfidence, formatConfidence, formatSiteCount };
 
 /**
  * Parse a `minConfidence` arg from a raw tool-args bag. Returns the
@@ -42,83 +39,6 @@ export function parseMinConfidence(raw: unknown): NonNullable<Edge['confidence']
     return err(`'minConfidence' must be one of ${valid}; got ${JSON.stringify(raw)}.`);
   }
   return raw as NonNullable<Edge['confidence']>;
-}
-
-/**
- * Filter `(node, edge)` rows so only edges at-or-above `min` survive.
- * Edges with no confidence (legacy rows / structural edges) default
- * to EXTRACTED — they pass every filter, matching the migration's
- * backfill default.
- */
-export function filterByConfidence<T extends { edge: Edge }>(
-  rows: T[],
-  min: NonNullable<Edge['confidence']> | null,
-): T[] {
-  if (!min) return rows;
-  const threshold = CONFIDENCE_RANK[min];
-  return rows.filter((r) => CONFIDENCE_RANK[r.edge.confidence ?? 'EXTRACTED'] >= threshold);
-}
-
-/**
- * Render a `(INFERRED)` / `(AMBIGUOUS)` suffix for an edge whose
- * resolver confidence is below the trustworthy default. EXTRACTED
- * rows render no suffix — the absence is the signal "this is fine".
- * Returns empty when no edge is available or it's the default level.
- */
-export function formatConfidence(edge: Edge | undefined): string {
-  const c = edge?.confidence;
-  if (!c || c === 'EXTRACTED') return '';
-  return ` *(${c})*`;
-}
-
-/**
- * Detect when every edge in `edges` carries the same non-default
- * confidence (INFERRED or AMBIGUOUS uniformly across all rows). The
- * common-case shape of resolver output: when symbol resolution is
- * ambiguous the resolver tends to mark every row identically, not
- * mix levels. Returns the shared label when uniform, null otherwise
- * (or when any row is EXTRACTED/missing — those rows wouldn't render
- * a marker anyway, so consolidation doesn't apply).
- *
- * Used by formatters to hoist a single header suffix
- * (` — all *INFERRED*`) instead of repeating ` *(INFERRED)*` on
- * every row. Saves ~12 chars × N rows when the shape is uniform.
- */
-export function detectUniformConfidence(
-  nodeIds: ReadonlyArray<string>,
-  edges: Map<string, Edge> | undefined,
-): string | null {
-  if (!edges || nodeIds.length < 2) return null;
-  let seen: string | null = null;
-  for (const id of nodeIds) {
-    const c = edges.get(id)?.confidence;
-    if (!c || c === 'EXTRACTED') return null;
-    if (seen === null) seen = c;
-    else if (seen !== c) return null;
-  }
-  return seen;
-}
-
-/**
- * Render a "(N call sites: l1, l2, …)" suffix for a caller/callee
- * row when the underlying edge stood in for >1 site (the extractor
- * dedups (caller, callee, kind) and stamps siteCount on the edge
- * metadata). Label varies by edge kind so a duplicated `import` or
- * `references` edge doesn't get tagged as "call sites" — readers of
- * type-user / import surfaces would find that misleading. Empty
- * string when the edge represents a single site or no edge is
- * available — callers don't need to special-case.
- */
-export function formatSiteCount(edge: Edge | undefined): string {
-  if (!edge?.metadata) return '';
-  const m = edge.metadata as { siteCount?: number; extraLines?: number[] };
-  if (!m.siteCount || m.siteCount <= 1) return '';
-  const samples: number[] = [];
-  if (typeof edge.line === 'number') samples.push(edge.line);
-  if (m.extraLines) samples.push(...m.extraLines);
-  const ellipsis = m.siteCount > samples.length ? ', …' : '';
-  const noun = edge.kind === 'calls' ? 'call sites' : 'sites';
-  return ` (${m.siteCount} ${noun}: ${samples.join(', ')}${ellipsis})`;
 }
 
 /**

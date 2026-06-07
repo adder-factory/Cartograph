@@ -34,7 +34,7 @@ import {
   symbolNotFound,
   withDisambiguationBanner,
 } from './symbol-resolver.js';
-import { expandTestFileCallers } from './_callers.js';
+import { expandTestFileCallers } from '../../features/graph/callers/index.js';
 import { defineTool } from './_define-tool.js';
 import type { ToolCtx } from './types.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';

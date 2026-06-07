@@ -18,7 +18,7 @@ import { getCoChangedFiles } from '../db/queries-history.js';
 import type { GraphTraverser } from '../graph/traversal.js';
 import { parseDiff, symbolsTouchedByHunks, type DiffFile, type FileStatus } from './diff-parser.js';
 import { compact } from '../utils.js';
-import { expandTestFileCallersWithQueries } from '../mcp/tools/_callers.js';
+import { expandTestFileCallersWithQueries } from '../features/graph/callers/index.js';
 
 export { parseDiff, type DiffFile, type Hunk, type FileStatus } from './diff-parser.js';
 
