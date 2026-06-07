@@ -29,7 +29,7 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
   adminCmd
     .command('storage-migrate [path]')
     .description(
-      'Migrate a SQLite-backed Cartograph project to PostgreSQL storage. Requires a fresh PostgreSQL schema unless --force is passed.',
+      'Migrate a SQLite-backed Cartograph project to PostgreSQL storage, with optional pgvector acceleration. Requires a fresh PostgreSQL schema unless --force is passed.',
     )
     .option(
       '--database-url <url>',

@@ -46,6 +46,8 @@ For the smallest useful output, pass \`lowTokens: true\` to supported high-volum
 
 Use \`cartograph_context({format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_affected({includeCommands: true})\` for affected tests plus package-script verification commands, then \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
 
+Storage defaults to SQLite. If the user asks for PostgreSQL/shared storage, initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\` before indexing, or use \`cartograph_admin({action: "storage-migrate", ...})\` to move an existing SQLite graph to PostgreSQL. After changing storage, run \`cartograph_admin({action: "doctor"})\` and restart any MCP server attached to the old database.
+
 If you control the MCP server launch, run \`cartograph mcp-budget\` to measure startup load. The default MCP profile is \`core\`; use \`--profile full\` for the complete toolbox, or \`--profile read-only\`, \`--profile review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` for narrower surfaces.
 
 | Tool | Use For |
@@ -65,6 +67,8 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 At the start of a session, ask the user if they'd like to initialize Cartograph:
 
 "I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph admin init -i\` to build a code knowledge graph?"
+
+If they prefer PostgreSQL, use \`cartograph admin init -i --database-provider postgres --database-url <url> --database-pgvector auto\` instead of the SQLite default.
 ${CARTOGRAPH_SECTION_END}`;
 
 /**

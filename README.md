@@ -9,7 +9,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
 [![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](#other-mcp-clients)
-[![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](#how-it-works)
+[![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](#storage-backend-sqlite-or-postgresql)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
@@ -20,6 +20,7 @@
   <a href="#visual-graph-viewer">Viewer</a> ·
   <a href="#configure-agents">Configure Agents</a> ·
   <a href="#initialize-a-project">Initialize</a> ·
+  <a href="#storage-backend-sqlite-or-postgresql">PostgreSQL</a> ·
   <a href="#mcp-tools">MCP Tools</a> ·
   <a href="#token-savings-benchmark">Benchmarks</a> ·
   <a href="#cli-reference">CLI</a> ·
@@ -49,6 +50,7 @@ It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Anti
 |---|---|
 | Agent setup details | [Configure Agents](#configure-agents) |
 | LLM-backed features | [Initialize a Project](#initialize-a-project) |
+| PostgreSQL / pgvector storage | [Storage Backend](#storage-backend-sqlite-or-postgresql) |
 | Non-built-in MCP clients | [Other MCP Clients](#other-mcp-clients) |
 | Full command catalog | [CLI Reference](#cli-reference) |
 
@@ -63,6 +65,27 @@ cartograph status --verbose
 ```
 
 That gives you a local graph index immediately. Run `cartograph install` when you want an AI agent to use the same graph through MCP.
+
+PostgreSQL is opt-in. Use it when you want the graph in an external/shared database, managed backups, operational DB controls, or native pgvector search:
+
+```bash
+docker run --rm -d --name cartograph-postgres \
+  -e POSTGRES_USER=cartograph \
+  -e POSTGRES_PASSWORD=cartograph \
+  -e POSTGRES_DB=cartograph \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+
+cartograph admin init -i \
+  --database-provider postgres \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph \
+  --database-pgvector auto
+
+cartograph doctor .
+```
+
+For an existing SQLite-backed project, use `cartograph admin storage-migrate`; see [Storage Backend](#storage-backend-sqlite-or-postgresql).
 
 Source install for development:
 
@@ -189,7 +212,7 @@ cd your-project
 cartograph admin init -i
 ```
 
-That uses SQLite, the zero-config default. To keep the graph in PostgreSQL instead, start with the [Storage Backend](#storage-backend) flags before the first init.
+That uses SQLite, the zero-config default. To keep the graph in PostgreSQL instead, start with the [Storage Backend](#storage-backend-sqlite-or-postgresql) flags before the first init.
 
 For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and points you at the managed backend commands.
 
@@ -436,7 +459,7 @@ flowchart TB
 ```bash
 cartograph                         # Run interactive installer
 cartograph install                 # Run installer (explicit)
-cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor (--minimal, --no-models, --database-provider)
+cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor (--minimal, --no-models, --database-provider postgres)
 cartograph doctor [path]           # Diagnose install state (--fix to auto-apply remediations)
 cartograph admin init [path]       # Initialize in a project (-i / --index; --database-provider postgres for PostgreSQL)
 cartograph admin storage-migrate [path] # Move an existing SQLite project to PostgreSQL
@@ -562,7 +585,7 @@ Use `cartograph_session({action: "audit"})` to review a prior session's tool-use
 
 ### MCP Load Context
 
-MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. The default `core` profile advertises the common coding-agent tools. On this repository, the default core 22-tool list currently serializes to 43,487 chars, or about 10.9k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured core startup load is 45,781 chars, or about 11.4k estimated tokens. The opt-in full 36-tool profile is 62,551 `tools/list` chars and 64,845 combined startup chars, or about 16.2k estimated tokens.
+MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. The default `core` profile advertises the common coding-agent tools. On this repository, the default core 22-tool list currently serializes to 44,900 chars, or about 11.2k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured core startup load is 47,439 chars, or about 11.9k estimated tokens. The opt-in full 36-tool profile is 63,964 `tools/list` chars and 66,503 combined startup chars, or about 16.6k estimated tokens.
 
 Measure the current surface with `cartograph mcp-budget` or `bun run measure:mcp-load`. The report includes tool count, `tools/list`, initialize, combined startup load, the on-demand full playbook size, and the largest schema contributors. Pass `--profile`, `--no-write-tools`, `--disable-tool`, `--top`, or `--json` to inspect a specific server shape. For CI, run `bun run check:mcp-load`; it prints the same budget report plus PASS/FAIL and exits non-zero when either the hard guard or the smaller release target is exceeded. Before a release or quarterly tool-surface audit, run `bun run check:release` for typecheck, formatting/lint, MCP load, biomarkers, and the fast test suite.
 
@@ -581,7 +604,7 @@ cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_l
 
 Profiles are advertised-tool filters: `core` is the default common coding-agent lookup and change-impact surface, `full` exposes every registered tool, `review` focuses diff/risk/test workflows, and `read-only` advertises read-capable tools while blocking mutating branches of mixed tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
 
-In the same measurement, `--profile full --no-write-tools` and `--profile read-only` reduced the full list to 35 tools and 60,802 combined startup chars, or about 15.2k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
+In the same measurement, `--profile full --no-write-tools` and `--profile read-only` reduced the full list to 35 tools and 61,047 combined startup chars, or about 15.3k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
 
 ### Token Savings Benchmark
 
@@ -829,7 +852,7 @@ The `.cartograph/config.json` file controls indexing and derived-signal passes. 
 | `exclude` | Glob patterns to ignore | dependency, build, cache, fixture, and generated-output defaults |
 | `maxFileSize` | Skip files larger than this (bytes) | `5242880` (5MB) |
 
-### Storage Backend
+### Storage Backend: SQLite or PostgreSQL
 
 SQLite is the default and needs no configuration. To initialize a project on PostgreSQL, pass the storage flags during setup/init:
 
@@ -870,6 +893,8 @@ The same choice can be hand-authored in `.cartograph/config.json`:
 ```
 
 Environment fallbacks are supported for secrets and deployment overrides: `CARTOGRAPH_DATABASE_PROVIDER=postgres`, `CARTOGRAPH_DATABASE_URL` or `DATABASE_URL`, `CARTOGRAPH_DATABASE_SCHEMA`, `CARTOGRAPH_DATABASE_PGVECTOR=auto|off|require`, `CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS`, `CARTOGRAPH_DATABASE_CONNECTION_TIMEOUT_SECONDS`, `CARTOGRAPH_DATABASE_MAX_CONNECTIONS`, and `CARTOGRAPH_DATABASE_SSL`.
+
+The focused operator guide lives in [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md).
 
 PostgreSQL initialization expects a database the connection URL can reach, and a schema name Cartograph can create/use. PostgreSQL storage currently supports fresh schema bootstrap rather than in-place PostgreSQL schema migrations; use a new schema for upgrades that need a rebuild. If you intentionally reset or drop the configured schema, remove the local PostgreSQL sentinel `.cartograph/cartograph.db` and run `cartograph admin init` again. Use one schema per project to keep indexes, `hnsw_meta`, and cleanup isolated.
 

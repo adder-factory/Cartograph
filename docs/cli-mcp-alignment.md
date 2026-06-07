@@ -8,7 +8,7 @@ command has a corresponding MCP tool, with a small set of explicit
 exceptions documented below.
 
 This document is the source of truth for that mapping. Last
-re-verified **2026-06-04**. The mapping is also test-enforced —
+re-verified **2026-06-07**. The mapping is also test-enforced —
 `__tests__/cli-mcp-alignment.test.ts` fails if a tool gains/loses a
 CLI mirror.
 Branch-specific argument consumption is test-enforced in
@@ -177,9 +177,10 @@ new public tool name:
 2. **Playbook/startup guide**: update `src/mcp/server-instructions.ts`
    so both `SERVER_INSTRUCTIONS` and `FULL_PLAYBOOK` mention the new
    route when it changes agent workflow.
-3. **Installer instructions + README**: update
-   `src/installer/instructions-template.ts` and `README.md` when the
-   feature changes first-use guidance or human CLI usage.
+3. **Installer instructions + docs**: update
+   `src/installer/instructions-template.ts`, `README.md`, and focused
+   docs such as `docs/STORAGE-BACKENDS.md` when the feature changes
+   first-use guidance, storage/admin setup, or human CLI usage.
 4. **Help parity**: for family commands such as `session`, update the
    parent-command description in `src/bin/_cli-core.ts` and add any
    new subcommand in `src/bin/commands/<family>.ts`.
