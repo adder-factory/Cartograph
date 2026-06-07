@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Cartograph from '../src/index.js';
-import { startViewerServer, type ViewerHandle } from '../src/viewer/server.js';
+import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 import { runViewerSmokeFeaturesWorkflow } from './viewer-smoke-features.js';
 import { runViewerSmokeLayoutWorkflow } from './viewer-smoke-layout.js';
 import { runViewerSmokeMobileWorkflow } from './viewer-smoke-mobile.js';

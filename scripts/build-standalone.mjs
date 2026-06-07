@@ -29,7 +29,7 @@ copyFile('src/db/schema.sql', 'share/cartograph/db/schema.sql');
 copyFile('node_modules/web-tree-sitter/web-tree-sitter.wasm', 'share/cartograph/web-tree-sitter.wasm');
 copyDir('src/extraction/wasm', 'share/cartograph/extraction/wasm', (name) => name.endsWith('.wasm'));
 copyDir('src/extraction/tags', 'share/cartograph/extraction/tags', (name) => name.endsWith('.scm'));
-copyDir('src/viewer/static', 'share/cartograph/viewer/static');
+copyDir('src/features/viewer/static', 'share/cartograph/features/viewer/static');
 copyDir('src', 'share/cartograph/algo-sources/src', (name) => name.endsWith('.ts'));
 copyFile('package.json', 'share/cartograph/package.json');
 copyFile('README.md', 'README.md');

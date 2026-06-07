@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Cartograph from '../src/index.js';
-import { startViewerServer, type ViewerHandle } from '../src/viewer/server.js';
+import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 
 describe('viewer HTTP server', () => {
   let testDir: string;
@@ -504,6 +504,24 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.metrics.loc).toBeGreaterThan(0);
     expect(typeof body.metrics.cyclomatic).toBe('number');
     expect(typeof body.metrics.maxNesting).toBe('number');
+  });
+
+  it('returns source snippets at /api/source/:name', async () => {
+    const res = await fetch(`${handle.url}api/source/compute`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      source: string;
+      startLine: number;
+      endLine: number;
+      language: string;
+      file: string;
+    };
+    expect(body.file).toBe('src/lib.ts');
+    expect(body.language).toBe('typescript');
+    expect(body.startLine).toBeGreaterThan(0);
+    expect(body.endLine).toBeGreaterThanOrEqual(body.startLine);
+    expect(body.source).toContain('export function compute');
+    expect(body.source).toContain('return d;');
   });
 
   it('returns coverage: null when no lcov has been loaded', async () => {

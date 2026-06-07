@@ -10,15 +10,15 @@ without changing behavior.
 
 The viewer has already been split from one large `index.html` into:
 
-- `src/viewer/static/index.html` — markup only, currently about 387 lines.
-- `src/viewer/static/viewer.css` — extracted stylesheet.
-- `src/viewer/static/viewer.app` — extracted browser script, served as
+- `src/features/viewer/static/index.html` — markup only, currently about 387 lines.
+- `src/features/viewer/static/viewer.css` — extracted stylesheet.
+- `src/features/viewer/static/viewer.app` — extracted browser script, served as
   `text/javascript` but intentionally not named `.js` so Cartograph does not
   index the legacy browser script as source during the current transition.
 
 ## First Checklist
 
-- [ ] Inventory `src/viewer/static/viewer.app` into logical sections and propose
+- [ ] Inventory `src/features/viewer/static/viewer.app` into logical sections and propose
       a small module boundary plan before editing. Keep the first pass
       mechanical: state/store, API/fetch helpers, graph rendering/layout,
       filters/grouping, detail/source panels, health dashboard, command palette,
@@ -55,9 +55,9 @@ bun src/bin/cartograph.ts viewer --no-open --port 8765 .
   functions with Playwright.
 - Split static viewer assets:
   - `index.html` links `viewer.css` and `viewer.app`.
-  - `src/viewer/server.ts` serves `/viewer.css` and `/viewer.app`.
+  - `src/features/viewer/server/` serves `/viewer.css` and `/viewer.app`.
   - `scripts/copy-assets.mjs` already copies every file under
-    `src/viewer/static`, so no extra build rule was needed.
+    `src/features/viewer/static`, so no extra build rule was needed.
 - Optimized viewer static asset serving:
   - CSS/app assets are preloaded once when the viewer server starts.
   - Asset responses include `ETag` and `Cache-Control: no-cache`.
@@ -90,8 +90,8 @@ Modified files observed:
 - `src/mcp/server-instructions.ts`
 - `src/mcp/tools/admin.ts`
 - `src/mcp/tools/status.ts`
-- `src/viewer/server.ts`
-- `src/viewer/static/index.html`
+- `src/features/viewer/server/index.ts`
+- `src/features/viewer/static/index.html`
 
 Untracked files observed:
 
@@ -99,8 +99,8 @@ Untracked files observed:
 - `__tests__/status-llm.test.ts`
 - `scripts/viewer-smoke.ts`
 - `src/mcp/tools/status-llm.ts`
-- `src/viewer/static/viewer.app`
-- `src/viewer/static/viewer.css`
+- `src/features/viewer/static/viewer.app`
+- `src/features/viewer/static/viewer.css`
 
 ## Final Verification For The Module Split
 

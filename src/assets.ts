@@ -14,6 +14,8 @@ export function resolveAssetPath(...relativeParts: string[]): string {
     ...(explicitRoot ? [path.join(explicitRoot, relative)] : []),
     path.join(import.meta.dirname, relative),
     path.join(import.meta.dirname, '..', relative),
+    path.join(import.meta.dirname, '..', '..', relative),
+    path.join(import.meta.dirname, '..', '..', '..', relative),
     path.join(import.meta.dirname, '..', 'node_modules', 'web-tree-sitter', relative),
     path.join(execDir, '..', 'share', 'cartograph', relative),
     ...(argv0 ? [path.join(argv0, '..', 'share', 'cartograph', relative)] : []),
