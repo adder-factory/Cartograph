@@ -1,7 +1,7 @@
 {
   "name": "@adder-factory/cartograph",
   "version": "0.7.2",
-  "description": "Semantic code intelligence for AI coding agents — 45% fewer tool calls, 17% faster exploration, 100% local.",
+  "description": "Local-first code intelligence for AI coding agents with CLI, MCP, SQLite, and PostgreSQL support.",
   "type": "module",
   "exports": {
     ".": {
@@ -17,8 +17,13 @@
   "files": [
     "src",
     "scripts",
+    "docs",
+    "bench",
     "README.md",
-    "AGENTS.md"
+    "AGENTS.md",
+    "ACKNOWLEDGEMENTS.md",
+    "install.sh",
+    "install.ps1"
   ],
   "scripts": {
     "build": "tsc && npm run copy-assets",
