@@ -36,26 +36,22 @@ import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { getIncomingEdges } from '../../db/queries-edges.js';
 import { getAllFiles, getFileByPath } from '../../db/queries-files.js';
-import { getEnclosingTestName } from '../../db/queries-test-names.js';
 import type Cartograph from '../../index.js';
 import type { Node } from '../../types.js';
+import { escapeRegExp } from '../../utils.js';
 import {
-  escapeRegExp,
-  globToSafeRegex,
-  identifierBoundaryRegex,
-  isTestPath,
-  stripCommentsForRegex,
-} from '../../utils.js';
-import { detectLanguage } from '../../extraction/grammars.js';
-import { callSiteLinesFromEdge } from '../../features/graph/callers/index.js';
-import {
-  MAX_TEST_DESCRIPTIONS_SHOWN,
+  DEFAULT_FILES_MODE_DEPTH,
+  MAX_FILES_MODE_DEPTH,
   TESTS_FOR_NO_RESULTS_NOTE,
+  buildTestRow,
   buildTestsForBucketSpec,
   buildTestsForDescribeNameExplainer,
   buildTestsForDescribeNameSpec,
   buildTestsForDispatchSpec,
   buildTestsForSameFileExplainer,
+  collectSymbolTestDescriptions,
+  runTestsForFilesMode,
+  scopeRowsToSymbol,
   type TestRow,
 } from '../../features/tests-for/index.js';
 export {
@@ -76,10 +72,6 @@ import { findSymbol, notFoundMessage, withDisambiguationBanner } from './symbol-
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
-
-/** Default + max files-mode dependency-traversal depth. */
-const DEFAULT_FILES_MODE_DEPTH = 5;
-const MAX_FILES_MODE_DEPTH = 50;
 
 /**
  * Zod schema for `cartograph_tests_for`.
@@ -119,35 +111,6 @@ type TestsForArgs = z.infer<typeof testsForSchema>;
 /** Cap on test files surfaced via MCP dispatch search to avoid overwhelming the agent. */
 const MAX_MCP_DISPATCH_TESTS = 10;
 
-/** Cap on test files rendered by files-mode — a barrel-file seed can
- *  fan out to most of the suite; the tail is summarised, not dropped. */
-const FILES_MODE_RENDER_CAP = 40;
-
-/**
- * Path basenames treated as public-API barrels. A files-mode traversal
- * that passes through one of these has reached the project's whole
- * public surface — the blast radius is "most of the suite" and a
- * file-level affected-tests answer stops being actionable. Mirrors
- * `BARREL_BASENAMES` in `affected-core.ts` (kept in sync by hand — the
- * set is tiny and stable, and replicating it avoids a cross-module
- * export just for the basename check).
- */
-const BARREL_BASENAMES: ReadonlySet<string> = new Set([
-  'index.ts',
-  'index.js',
-  'index.mjs',
-  'index.cjs',
-  'index.mts',
-  'index.cts',
-]);
-
-/** True when `filePath` is a public-API barrel (`index.*` re-export hub). */
-function isBarrelFile(filePath: string): boolean {
-  const slash = filePath.lastIndexOf('/');
-  const base = slash >= 0 ? filePath.slice(slash + 1) : filePath;
-  return BARREL_BASENAMES.has(base);
-}
-
 /** Cap on test files surfaced via describe-name FTS match. */
 const MAX_DESCRIBE_NAME_TESTS = 10;
 
@@ -174,29 +137,6 @@ function looksLikeProgrammaticIdentifier(name: string): boolean {
   // Contains a digit or underscore: snake_case or contains a number.
   if (/[0-9_]/.test(name)) return true;
   return false;
-}
-
-/** Node kinds whose names can plausibly identify a test
- *  function/method. Filters out type defs / imports / etc. */
-const TEST_SYMBOL_KINDS: ReadonlySet<string> = new Set(['function', 'method']);
-
-/**
- * Heuristic: does this symbol name look like a test? Loose enough to
- * match the conventions of the major frameworks indexed by cartograph
- * (vitest/jest `it_*` / `test_*` / `describe_*`, Go `TestX`, Python
- * `test_*`, JUnit `*Test`).
- */
-function looksLikeTestName(name: string): boolean {
-  const lower = name.toLowerCase();
-  return (
-    lower.startsWith('test') ||
-    lower.startsWith('it_') ||
-    lower === 'it' ||
-    lower.startsWith('describe') ||
-    lower.endsWith('test') ||
-    lower.endsWith('_test') ||
-    lower.endsWith('spec')
-  );
 }
 
 /**
@@ -371,7 +311,7 @@ function partitionDirectImporters(
     seen.add(importerFile);
     const file = getFileByPath(cg.queries, importerFile);
     if (!file) continue;
-    if (file.isTest) directTests.push(buildRow(cg, importerFile, 1));
+    if (file.isTest) directTests.push(buildTestRow(cg, importerFile, 1));
     else indirectImporters.push(importerFile);
   }
   return { directTests, indirectImporters };
@@ -472,44 +412,6 @@ async function handleSymbolMode(ctx: ToolCtx, args: TestsForArgs): Promise<ToolO
   );
 }
 
-/**
- * BFS from `seedFile` along file-dependent edges (depth-bounded),
- * adding any test-file leaf to `affected` and any public-API barrel
- * the walk passes through to `barrelsReached`. Returns the count of
- * dependent files visited. Pulled out of handleFilesMode so the per-
- * seed loop stays at depth 1 instead of nesting `for/while/for/if`
- * four levels deep.
- */
-interface BfsTestImpactArgs {
-  cg: Cartograph;
-  seedFile: string;
-  maxDepth: number;
-  isTest: (filePath: string) => boolean;
-  affected: Set<string>;
-  /** Accumulator for public-API barrel files the traversal touched. */
-  barrelsReached: Set<string>;
-}
-
-function bfsTestImpactFromFile(args: BfsTestImpactArgs): number {
-  const { cg, seedFile, maxDepth, isTest, affected, barrelsReached } = args;
-  let dependentsVisited = 0;
-  const queue: Array<{ file: string; depth: number }> = [{ file: seedFile, depth: 0 }];
-  const visited = new Set<string>([seedFile]);
-  while (queue.length > 0) {
-    const cur = queue.shift()!;
-    if (cur.depth >= maxDepth) continue;
-    for (const dep of cg.internals.graphManager.getFileDependents(cur.file)) {
-      if (visited.has(dep)) continue;
-      visited.add(dep);
-      dependentsVisited++;
-      if (isBarrelFile(dep)) barrelsReached.add(dep);
-      if (isTest(dep)) affected.add(dep);
-      else queue.push({ file: dep, depth: cur.depth + 1 });
-    }
-  }
-  return dependentsVisited;
-}
-
 /** One-hop walk from an indirect importer back to the test files
  *  that import IT. Pushed rows have `hops=2` to distinguish from the
  *  direct-importer case. Skips already-`seen` files so the merge
@@ -531,7 +433,7 @@ function pushTransitiveTestImporters(args: PushTransitiveTestImportersArgs): voi
     seen.add(importerFile);
     const file = getFileByPath(cg.queries, importerFile);
     if (!file?.isTest) continue;
-    out.push(buildRow(cg, importerFile, 2));
+    out.push(buildTestRow(cg, importerFile, 2));
   }
 }
 
@@ -576,7 +478,7 @@ function collectDirectTestCallers(cg: Cartograph, targetIds: readonly string[], 
       const file = getFileByPath(cg.queries, source.filePath);
       if (!file?.isTest) continue;
       seen.add(source.filePath);
-      out.push(buildRow(cg, source.filePath, 1));
+      out.push(buildTestRow(cg, source.filePath, 1));
     }
   }
   return out;
@@ -614,168 +516,9 @@ function collectSameFileTests(cg: Cartograph, sourceFile: string, seen: Set<stri
     seen.add(importerFile);
     const file = getFileByPath(cg.queries, importerFile);
     if (!file?.isTest) continue;
-    out.push(buildRow(cg, importerFile, 1));
+    out.push(buildTestRow(cg, importerFile, 1));
   }
   return out;
-}
-
-/** Pull test-shaped symbols out of a file via its indexed nodes. */
-function buildRow(cg: Cartograph, filePath: string, hops: number): TestRow {
-  const symbols: string[] = [];
-  for (const n of cg.queries.getNodesByFile(filePath)) {
-    if (!TEST_SYMBOL_KINDS.has(n.kind)) continue;
-    if (looksLikeTestName(n.name)) symbols.push(n.name);
-  }
-  const testDescriptions = fetchTestDescriptionsForFile(cg, filePath);
-  return { filePath, testSymbols: symbols, testDescriptions, hops };
-}
-
-/** Pull mined `it/test/describe(...)` descriptions for a file from
- *  the `test_names` table. Empty array when test-names mining hasn't
- *  populated the file (pre-039 schema or non-TS/JS test file). */
-function fetchTestDescriptionsForFile(cg: Cartograph, filePath: string): Array<{ line: number; description: string }> {
-  try {
-    const rows = cg.db
-      .getDb()
-      .prepare('SELECT line, description FROM test_names WHERE file_path = ? ORDER BY line LIMIT 50')
-      .all(filePath) as Array<{ line: number; description: string }>;
-    return rows;
-  } catch {
-    // Table may not exist on older indexes — fail silent, the symbol
-    // bucket still renders.
-    return [];
-  }
-}
-
-/**
- * Source-scan fallback for the symbol-scoped description set.
- *
- * The edge-based pass below relies on `metadata.extraLines` to carry
- * every call site of a symbol within a file. The extractor collapses
- * repeated calls within one scope (e.g. all 15 `findDuplicateCode(...)`
- * calls across a test file's `it` blocks) into a SINGLE `calls` edge
- * anchored at the FIRST site, and does not always populate
- * `extraLines`. When that happens the edge-based pass resolves exactly
- * one enclosing `it` — under-reporting coverage ~16:1 for a test file
- * that exercises the symbol in nearly every block.
- *
- * This pass recovers the true site set by reading the test file and
- * scanning for word-boundary occurrences of the symbol identifier,
- * comment-stripped so doc-comment / commented-out mentions don't
- * count. Each surviving line is resolved to its enclosing
- * `it/describe` descriptor. The import statement that brings the
- * symbol into scope still matches the identifier, but it sits above
- * the first test block so `getEnclosingTestName` returns the
- * top-level `describe` (or null) for it — harmless: the describe is a
- * legitimate covering block, and a null drops out.
- *
- * Returns the set of `(line, description)` enclosing descriptors. Best
- * effort: a read error or a non-TS/JS path yields an empty set and the
- * caller falls back to the edge-based result alone.
- */
-function scanSymbolTestDescriptions(cg: Cartograph, filePath: string, symbolName: string): Map<number, string> {
-  const found = new Map<number, string>();
-  if (!/^[A-Za-z_$][\w$]*$/.test(symbolName)) return found;
-  const projectRoot = cg.projectRoot;
-  const absPath = path.isAbsolute(filePath) ? filePath : path.join(projectRoot, filePath);
-  let src: string;
-  try {
-    src = fs.readFileSync(absPath, 'utf8');
-  } catch {
-    return found;
-  }
-  // Strip comments so a regex scan can't match a doc-comment example
-  // or commented-out call. `stripCommentsForRegex` is length- and
-  // newline-preserving, so 1-indexed line numbers stay exact. Derive
-  // the language from the path so a non-JS/TS test file gets its own
-  // comment syntax stripped rather than `//`-style by assumption.
-  const stripped = stripCommentsForRegex(src, detectLanguage(filePath));
-  // `$`-safe boundary: the guard above admits `$` in identifiers (RxJS
-  // `data$` etc.), where a plain `\b…\b` never matches `data$.subscribe()`.
-  const identRe = identifierBoundaryRegex(symbolName);
-  const lines = stripped.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    if (!identRe.test(lines[i]!)) continue;
-    const test = getEnclosingTestName(cg.queries, { filePath, line: i + 1 });
-    if (!test) continue;
-    found.set(test.line, test.description);
-  }
-  return found;
-}
-
-/**
- * Symbol mode: map each test file that calls / references the queried
- * symbol to the `it/describe(...)` descriptors that enclose a real use
- * of the symbol — keyed by file path.
- *
- * `fetchTestDescriptionsForFile` dumps EVERY test block in a file, so a
- * test file that exercises many symbols would list blocks unrelated to
- * the queried one under "Tests covering <symbol>". This scopes the
- * descriptions two ways and unions them:
- *
- *  1. Edge-based — `callSiteLinesFromEdge` (the edge's `metadata.extraLines`)
- *     + `getEnclosingTestName`. High confidence but UNDER-counts when the
- *     extractor collapses repeated calls into one edge without `extraLines`.
- *  2. Source-scan — {@link scanSymbolTestDescriptions} reads the test file
- *     and resolves every comment-stripped identifier occurrence to its
- *     enclosing `it`. Recovers the true covering-block count when the edge
- *     metadata is incomplete (the common case for a test file that calls
- *     the symbol in nearly every block).
- *
- * An import-statement `references` edge sits above the first test block,
- * so it resolves to no descriptor (or to the top-level `describe`) and
- * doesn't pollute the per-`it` count.
- */
-function collectSymbolTestDescriptions(
-  cg: Cartograph,
-  symbolNodeId: string,
-  symbolName: string,
-): Map<string, Array<{ line: number; description: string }>> {
-  const perFile = new Map<string, Map<number, string>>();
-  for (const edge of getIncomingEdges(cg.queries, symbolNodeId, ['calls', 'references'])) {
-    const source = cg.queries.getNodeById(edge.source);
-    if (!source?.filePath || !isTestPath(source.filePath)) continue;
-    let descs = perFile.get(source.filePath);
-    if (!descs) {
-      descs = new Map();
-      perFile.set(source.filePath, descs);
-    }
-    for (const line of callSiteLinesFromEdge(edge)) {
-      const test = getEnclosingTestName(cg.queries, { filePath: source.filePath, line });
-      if (!test) continue;
-      descs.set(test.line, test.description);
-    }
-  }
-  // Union in the source-scan pass per file — recovers `it` blocks the
-  // edge metadata collapsed away (the extractor anchors all repeated
-  // call sites on one edge and may omit `extraLines`).
-  for (const [filePath, descs] of perFile) {
-    for (const [line, description] of scanSymbolTestDescriptions(cg, filePath, symbolName)) {
-      descs.set(line, description);
-    }
-  }
-  const out = new Map<string, Array<{ line: number; description: string }>>();
-  for (const [file, descs] of perFile) {
-    out.set(
-      file,
-      [...descs.entries()].map(([line, description]) => ({ line, description })).sort((a, b) => a.line - b.line),
-    );
-  }
-  return out;
-}
-
-/**
- * Replace each row's file-wide description dump with the symbol-scoped
- * descriptors from {@link collectSymbolTestDescriptions}. A row with no
- * resolvable site (transitive importer, or a call outside any mined
- * `it/describe` block) keeps an empty list — the file path and any
- * test-shaped symbols still render, but no misleading descriptions do.
- */
-function scopeRowsToSymbol(
-  rows: readonly TestRow[],
-  scoped: Map<string, Array<{ line: number; description: string }>>,
-): TestRow[] {
-  return rows.map((r) => ({ ...r, testDescriptions: scoped.get(r.filePath) ?? [] }));
 }
 
 interface FormatTestReportArgs {
@@ -833,40 +576,6 @@ function formatReport(args: FormatTestReportArgs): string {
 }
 
 /**
- * @internal Build a test-path predicate from an optional filter glob.
- * Always returns `{ predicate, err? }` — `predicate` is always set
- * (falls back to `isTestPath` when the glob is missing or unsafe);
- * `err` is set when the glob is unsafe and omitted on success.
- */
-function buildIsTestPredicate(filterGlob: string | undefined): { predicate: (p: string) => boolean; err?: string } {
-  if (!filterGlob) return { predicate: isTestPath };
-  const regexBody = globToSafeRegex(filterGlob);
-  if (regexBody === null) {
-    return {
-      predicate: isTestPath,
-      err: `Filter glob is not supported (unsafe quantifier or unsupported syntax): \`${filterGlob}\`. Try a simpler pattern like "**/*.test.ts".`,
-    };
-  }
-  const re = new RegExp(regexBody);
-  return { predicate: (p: string) => re.test(p) };
-}
-
-/** @internal Render the affected-test-file list body with inline descriptions. */
-function formatAffectedTestLines(cg: Cartograph, sorted: readonly string[]): string[] {
-  const lines: string[] = [];
-  for (const t of sorted) {
-    lines.push(`- \`${t}\``);
-    const descs = fetchTestDescriptionsForFile(cg, t);
-    const shown = descs.slice(0, MAX_TEST_DESCRIPTIONS_SHOWN);
-    for (const d of shown) lines.push(`  - L${d.line}: "${d.description}"`);
-    if (descs.length > shown.length) {
-      lines.push(`  - _…and ${descs.length - shown.length} more assertions_`);
-    }
-  }
-  return lines;
-}
-
-/**
  * Files-mode handler — BFS the dependency graph from each given
  * file, returning test files that transitively import any of them.
  * Folded in from the former `cartograph_affected` tool. Same depth
@@ -875,143 +584,13 @@ function formatAffectedTestLines(cg: Cartograph, sorted: readonly string[]): str
 async function handleFilesMode(ctx: ToolCtx, args: TestsForArgs): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args.projectPath);
   // `handleTestsFor` only routes here when `files` is a non-empty array.
-  const files = args.files!;
-  // `depth` is already an integer in [1, 50] — Zod's `.int().min().max()`
-  // rejected anything else at the dispatch boundary. No clamp needed.
-  const depth = args.depth;
-  // `predErr` (not `err`) so the local binding can't shadow the `err`
-  // outcome constructor imported from `_outcome.js`.
-  const { predicate: isTest, err: predErr } = buildIsTestPredicate(args.filter);
-  if (predErr) return err(predErr);
-
-  // Surface input paths that match no indexed file — otherwise a typo'd
-  // or stale path is silently dropped and the caller reads a misleading
-  // "0 affected tests" with no clue that the input itself didn't land.
-  // Mirrors `cartograph_affected`'s unmatched-paths reporting.
-  const indexedPaths = new Set(getAllFiles(cg.queries).map((f) => f.path));
-  const unmatchedInputs = files.filter((f) => !indexedPaths.has(f));
-  if (unmatchedInputs.length === files.length && files.length > 0) {
-    const unmatchedList = unmatchedInputs.map((f) => `\`${f}\``).join(', ');
-    const fileWordSuffix = files.length === 1 ? '' : 's';
-    return err(
-      `None of the ${files.length} input file${fileWordSuffix} match indexed paths: ${unmatchedList}. Check spelling, or run \`cartograph_admin({action: 'sync'})\` if the files are new.`,
-    );
-  }
-
-  const affected = new Set<string>();
-  // Track input-barrels and BFS-reached-barrels separately so the
-  // footer can distinguish "the file YOU passed is itself a barrel"
-  // from "BFS walked through a barrel" — handoff #8: previously both
-  // collapsed into one set and emitted the same misleading wording
-  // ("Traversal reached the public-API barrel" with `Traversed 0
-  // dependent files` was contradictory).
-  const inputBarrels = new Set<string>();
-  const bfsBarrels = new Set<string>();
-  let totalDependents = 0;
-  for (const f of files) {
-    // A seed file that is itself a public-API barrel fans out to the
-    // whole public surface — flag it directly. `bfsTestImpactFromFile`
-    // only inspects DEPENDENTS, so without this an `index.*` seed
-    // never trips the barrel warning even though it is the worst case.
-    if (isBarrelFile(f)) {
-      inputBarrels.add(f);
-      continue;
-    }
-    if (isTest(f)) {
-      affected.add(f);
-      continue;
-    }
-    totalDependents += bfsTestImpactFromFile({
-      cg,
-      seedFile: f,
-      maxDepth: depth,
-      isTest,
-      affected,
-      barrelsReached: bfsBarrels,
-    });
-  }
-  const sorted = [...affected].sort((a, b) => Number(a > b) - Number(a < b));
-  // The footers carry the load-bearing signals — the "showing first N
-  // of M" cap notice and the barrel-blast-radius warning. The
-  // chokepoint truncates the BODY first and appends the footers AFTER,
-  // so a wide inline-description list can never chop the cap / barrel
-  // notice off the end.
-  const footers = buildFilesModeFooters({ sorted, totalDependents, inputBarrels, bfsBarrels, unmatchedInputs });
-  const header = `## Affected test files (${sorted.length})`;
-  let bodyLines: string[];
-  if (sorted.length === 0) {
-    bodyLines = ['- _None._'];
-  } else {
-    // Cap the rendered list — a barrel-file seed can fan out to most
-    // of the suite. Mirrors cartograph_affected's "showing first N".
-    const shown = sorted.slice(0, FILES_MODE_RENDER_CAP);
-    bodyLines = formatAffectedTestLines(cg, shown);
-  }
-  return ok(renderToolResponse({ body: `${header}\n${bodyLines.join('\n')}`, footers }));
-}
-
-/**
- * Build the files-mode footers — cap notice + traversal count + barrel
- * warning. Returned as a `footers` array; {@link renderToolResponse}
- * places them after body truncation so these signals always survive.
- */
-function buildFilesModeFooters(args: {
-  sorted: readonly string[];
-  totalDependents: number;
-  /** Input files that are themselves public-API barrels. Different
-   *  wording than {@link bfsBarrels} — "the file you passed IS the
-   *  barrel" vs "BFS walked through one". Handoff #8. */
-  inputBarrels: ReadonlySet<string>;
-  /** Barrels reached during BFS traversal of dependents. */
-  bfsBarrels: ReadonlySet<string>;
-  /** Input paths that matched no indexed file (subset — the all-unmatched
-   *  case is rejected upstream with an error). */
-  unmatchedInputs: readonly string[];
-}): string[] {
-  const { sorted, totalDependents, inputBarrels, bfsBarrels, unmatchedInputs } = args;
-  const footers: string[] = [];
-  if (unmatchedInputs.length > 0) {
-    const unmatchedList = unmatchedInputs.map((f) => `\`${f}\``).join(', ');
-    const pathSuffix = unmatchedInputs.length === 1 ? '' : 's';
-    const verb = unmatchedInputs.length === 1 ? 'was' : 'were';
-    footers.push(
-      `> ⚠ ${unmatchedInputs.length} input path${pathSuffix} matched no indexed file and ${verb} skipped: ${unmatchedList}. Check spelling, or \`cartograph_admin({action: 'sync'})\` if the files are new.`,
-    );
-  }
-  if (sorted.length > FILES_MODE_RENDER_CAP) {
-    footers.push(
-      `_Showing first ${FILES_MODE_RENDER_CAP} of ${sorted.length} — narrow with \`filter\`, or use \`symbol\` mode for symbol-level test discovery._`,
-    );
-  }
-  footers.push(`_Traversed ${totalDependents} dependent file${totalDependents === 1 ? '' : 's'}._`);
-  // Barrel hints — two distinct phrasings depending on how the barrel
-  // entered the result set. An input file that IS itself a barrel never
-  // had a traversal to "reach", so the prior single-message wording
-  // ("Traversal reached the public-API barrel") was contradictory next
-  // to "Traversed 0 dependent files" (handoff #8). Both can fire on
-  // the same call when one input is a barrel AND BFS reaches another.
-  if (inputBarrels.size > 0) {
-    const barrelList = [...inputBarrels]
-      .sort((a, b) => Number(a > b) - Number(a < b))
-      .map((b) => `\`${b}\``)
-      .join(', ');
-    const isPlural = inputBarrels.size > 1;
-    footers.push(
-      `> ⚠ Input file${isPlural ? 's are themselves' : ' is itself a'} public-API barrel${isPlural ? 's' : ''} (${barrelList}) — every test that imports the barrel's re-exports is "affected". ` +
-        `For an actionable answer pass \`symbol\` instead of \`files\` for symbol-level test discovery.`,
-    );
-  }
-  if (bfsBarrels.size > 0) {
-    const barrelList = [...bfsBarrels]
-      .sort((a, b) => Number(a > b) - Number(a < b))
-      .map((b) => `\`${b}\``)
-      .join(', ');
-    footers.push(
-      `> ⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-        `For an actionable answer pass \`symbol\` instead of \`files\` for symbol-level test discovery.`,
-    );
-  }
-  return footers;
+  const result = runTestsForFilesMode(cg, {
+    files: args.files!,
+    depth: args.depth,
+    filter: args.filter,
+  });
+  if (!result.ok) return err(result.message);
+  return ok(renderToolResponse({ body: result.body, footers: result.footers }));
 }
 
 export const TESTS_FOR_TOOL = defineTool({
