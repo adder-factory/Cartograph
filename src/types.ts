@@ -4,6 +4,13 @@
  * Core types for the semantic knowledge graph system.
  */
 
+import type { LayerConfig, LayerException } from './biomarkers/layering-types.js';
+import type { SearchResult } from './search/types.js';
+
+export type { LayerConfig, LayerException } from './biomarkers/layering-types.js';
+export type { GraphStats, SchemaVersion } from './db/types.js';
+export type { SearchOptions, SearchResult } from './search/types.js';
+
 // =============================================================================
 // Union Types
 // =============================================================================
@@ -601,63 +608,6 @@ export interface TraversalOptions {
   includeStart?: boolean;
 }
 
-/**
- * Options for searching the graph
- */
-export interface SearchOptions {
-  /** Node types to search */
-  kinds?: NodeKind[];
-
-  /** Languages to include */
-  languages?: Language[];
-
-  /** File path patterns to include */
-  includePatterns?: string[];
-
-  /** Inline `path:` file path substrings to include after the retrieval cascade. */
-  pathFilters?: string[];
-
-  /** Top-level pathFilter prefixes to include after the retrieval cascade. */
-  pathPrefixes?: string[];
-
-  /** File path patterns to exclude */
-  excludePatterns?: string[];
-
-  /** Maximum results to return */
-  limit?: number;
-
-  /** Offset for pagination */
-  offset?: number;
-
-  /** Whether search is case-sensitive */
-  caseSensitive?: boolean;
-
-  /**
-   * Cap the number of results from any single file before returning.
-   * Default 3. Set to 0 to disable diversification (return raw ranked
-   * results, even if 10 of them come from the same class). The class /
-   * function / interface members of the same file are usually less
-   * informative as multiple distinct results than as "this file plus
-   * representative members" — diversification surfaces context across
-   * the codebase rather than burying the user in one file's internals.
-   */
-  perFileCap?: number;
-}
-
-/**
- * A search result with relevance scoring
- */
-export interface SearchResult {
-  /** Matching node */
-  node: Node;
-
-  /** Relevance score (0-1) */
-  score: number;
-
-  /** Matched text snippets for highlighting */
-  highlights?: string[];
-}
-
 // =============================================================================
 // Context Types
 // =============================================================================
@@ -734,54 +684,6 @@ interface FrameworkHint {
     /** Model detection patterns */
     models?: string[];
   };
-}
-
-/**
- * One named architectural layer. Files matching `paths` (glob
- * patterns, project-root-relative POSIX) belong to this layer. The
- * layering rule walks `imports` edges and emits an `illegal_import`
- * finding when a layer-A file imports a layer-B file that the rule
- * forbids.
- *
- * Forbidden direction is expressed in EITHER direction:
- *   - `cannotImport: ['layer-name', 'glob/...']` listed on the
- *     SOURCE layer (preferred); OR
- *   - `canImport: [...]` listed on the source layer (allow-list — any
- *     import to a target NOT in this list is forbidden).
- *
- * Both forms accept layer names (matched against `Layer.name`) and
- * glob patterns (matched against the resolved target file path via
- * `Bun.Glob`).
- *
- * If neither field is set, the layer has no outbound restrictions.
- */
-export interface LayerConfig {
-  /** Stable name (referenced by other layers' canImport / cannotImport). */
-  name: string;
-  /** Glob patterns assigning files to this layer (matched via
-   *  `Bun.Glob`). POSIX paths, project-root-relative. First-match wins
-   *  across all layers in declared order. */
-  paths: string[];
-  /** Allow-list of layers/globs this layer is permitted to import.
-   *  Mutually exclusive with `cannotImport` — set one, not both. */
-  canImport?: string[];
-  /** Deny-list of layers/globs this layer must NOT import.
-   *  Mutually exclusive with `canImport`. */
-  cannotImport?: string[];
-}
-
-/**
- * Per-file override that lifts the layering restriction for a single
- * file. Useful for the rare deliberate cross-layer reach (e.g. the
- * `mcp/tools/biomarkers.ts` tool legitimately imports the biomarker
- * engine). Match is exact (project-root-relative POSIX path).
- */
-export interface LayerException {
-  /** File path the exception applies to. */
-  file: string;
-  /** Targets this file is allowed to import despite layer rules.
-   *  Layer names or globs. */
-  canImport: string[];
 }
 
 /**
@@ -1247,56 +1149,6 @@ export interface CartographConfig {
 // cycles. Re-exported here for backward compat with consumers that
 // already import it from `'./types'`.
 export { DEFAULT_CONFIG } from './default-config.js';
-
-// =============================================================================
-// Database Types
-// =============================================================================
-
-/**
- * Database schema version info
- */
-export interface SchemaVersion {
-  /** Current schema version */
-  version: number;
-
-  /** When schema was created/updated */
-  appliedAt: number;
-
-  /** Description of this version */
-  description?: string;
-}
-
-/**
- * Statistics about the knowledge graph
- */
-export interface GraphStats {
-  /** Total number of nodes */
-  nodeCount: number;
-
-  /** Total number of edges */
-  edgeCount: number;
-
-  /** Number of tracked files */
-  fileCount: number;
-
-  /** Number of tracked files matching test-file conventions (is_test=1). */
-  testFileCount: number;
-
-  /** Node counts by kind */
-  nodesByKind: Record<NodeKind, number>;
-
-  /** Edge counts by kind */
-  edgesByKind: Record<EdgeKind, number>;
-
-  /** File counts by language */
-  filesByLanguage: Record<Language, number>;
-
-  /** Database size in bytes */
-  dbSizeBytes: number;
-
-  /** Last update timestamp */
-  lastUpdated: number;
-}
 
 // =============================================================================
 // Task Context Types (for buildContext)

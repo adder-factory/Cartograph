@@ -11,7 +11,8 @@
  * tagged `db` and `stmts` fields on the parent `QueryBuilder`.
  */
 
-import type { Node, NodeKind, EdgeKind, Language, SearchOptions, SearchResult } from '../types.js';
+import type { EdgeKind, Language, Node, NodeKind } from '../types.js';
+import type { SearchOptions, SearchResult } from '../search/types.js';
 import { compact } from '../utils.js';
 import {
   kindBonus,

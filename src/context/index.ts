@@ -14,8 +14,8 @@ import type {
   TaskInput,
   BuildContextOptions,
   FindRelevantContextOptions,
-  SearchResult,
 } from '../types.js';
+import type { SearchResult } from '../search/types.js';
 import { type QueryBuilder, getNodesByKind } from '../db/queries.js';
 import { searchNodes, findNodesByExactName, findNodesByNameSubstring } from '../db/queries-search.js';
 import type { GraphTraverser } from '../graph/index.js';

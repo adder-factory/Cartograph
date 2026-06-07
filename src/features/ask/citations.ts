@@ -3,7 +3,7 @@ import { displayModelName } from '../../llm/display-model.js';
 import type { AskResult } from '../../llm/ask.js';
 import { pathCategory } from '../../path-class.js';
 import { findSignatureTokenOwner, getNodesByName, searchNodes } from '../../db/queries-search.js';
-import type { SearchResult } from '../../types.js';
+import type { SearchResult } from '../../search/types.js';
 
 /**
  * Language literals and reserved keywords that an LLM answer routinely

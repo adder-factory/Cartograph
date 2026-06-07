@@ -11,7 +11,8 @@
  */
 
 import type { Cartograph } from './index.js';
-import type { FileRecord, GraphStats } from './types.js';
+import type { GraphStats } from './db/types.js';
+import type { FileRecord } from './types.js';
 import { getStats as qbGetStats } from './db/queries.js';
 import { getOutgoingEdges, getIncomingEdges } from './db/queries-edges.js';
 import { getFileByPath } from './db/queries-files.js';

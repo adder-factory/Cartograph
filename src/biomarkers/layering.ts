@@ -12,7 +12,7 @@ import { compileGlob } from '../glob.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getAllFilePaths } from '../db/queries-files.js';
 import { logWarn } from '../errors.js';
-import type { LayerConfig, LayerException } from '../types.js';
+import type { LayerConfig, LayerException } from './layering-types.js';
 import type { Finding } from './types.js';
 
 // ---------------------------------------------------------------------------

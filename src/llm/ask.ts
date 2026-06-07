@@ -12,7 +12,8 @@
  */
 
 import type { LlmClient } from './client.js';
-import type { Node, SearchResult } from '../types.js';
+import type { SearchResult } from '../search/types.js';
+import type { Node } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getSymbolDescriptions } from '../db/queries-summaries.js';
 import { stripReasoningTokens, compact } from '../utils.js';

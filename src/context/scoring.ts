@@ -1,5 +1,6 @@
 import * as path from 'node:path';
-import type { Node, SearchResult } from '../types.js';
+import type { SearchResult } from '../search/types.js';
+import type { Node } from '../types.js';
 
 export const CENTRALITY_BOOST_WEIGHT = 5;
 export const COLOCATION_BOOST = 20;

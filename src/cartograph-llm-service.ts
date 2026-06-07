@@ -28,7 +28,7 @@
  */
 
 import type { Cartograph } from './index.js';
-import type { SearchOptions, SearchResult } from './types.js';
+import type { SearchOptions, SearchResult } from './search/types.js';
 import { getEmbeddingForNode } from './db/queries-embeddings.js';
 import { searchNodes } from './db/queries-search.js';
 import { LlmClient } from './llm/client.js';
