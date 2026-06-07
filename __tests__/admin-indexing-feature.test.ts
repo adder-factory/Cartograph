@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   indexAllOptions,
+  parseMaxFileSizeValue,
   parseParseWorkersValue,
   phaseTimingLines,
   registerAdminIndexingCommands,
@@ -27,11 +28,22 @@ describe('admin indexing feature runtime', () => {
       ok: false,
       error: '--parse-workers must be a positive integer (got "0")',
     });
-    expect(indexAllOptions({ force: true, profile: true }, 4)).toEqual({
+    expect(parseMaxFileSizeValue(undefined)).toEqual({ ok: true, value: undefined });
+    expect(parseMaxFileSizeValue('4096')).toEqual({ ok: true, value: 4096 });
+    expect(parseMaxFileSizeValue('0')).toEqual({
+      ok: false,
+      error: '--max-file-size must be a positive integer byte count (got "0")',
+    });
+    expect(parseMaxFileSizeValue('1e3')).toEqual({
+      ok: false,
+      error: '--max-file-size must be a positive integer byte count (got "1e3")',
+    });
+    expect(indexAllOptions({ force: true, profile: true }, 4, 4096)).toEqual({
       summarize: false,
       profile: true,
       clearStructural: true,
       parseWorkers: 4,
+      maxFileSize: 4096,
     });
   });
 
@@ -106,6 +118,22 @@ describe('admin indexing feature CLI', () => {
     expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
   });
 
+  it('exits early on invalid max-file-size values before opening the graph', async () => {
+    const { deps, calls } = fakeDeps();
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(runAdminIndexCommand('/repo', { maxFileSize: 'abc' }, deps)).rejects.toThrow('exit:1');
+    } finally {
+      exit.mockRestore();
+    }
+
+    expect(calls).toContain('error:--max-file-size must be a positive integer byte count (got "abc")');
+    expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+  });
+
   it('runs quiet indexing with parse-cache clearing, profile output, and graph cleanup', async () => {
     const { deps, calls } = fakeDeps();
     const graph = fakeGraph(calls);
@@ -114,11 +142,14 @@ describe('admin indexing feature CLI', () => {
       cg: graph,
       options: { force: true, profile: true, clearParseCache: 'typescript' },
       parseWorkers: 2,
+      maxFileSize: 4096,
       deps,
     });
 
     expect(calls).toContain('clearParseCache:typescript');
-    expect(calls).toContain('indexAll:{"summarize":false,"profile":true,"clearStructural":true,"parseWorkers":2}');
+    expect(calls).toContain(
+      'indexAll:{"summarize":false,"profile":true,"clearStructural":true,"parseWorkers":2,"maxFileSize":4096}',
+    );
     expect(calls).toContain('stdout:{"scanMs":1}\n');
     expect(calls).toContain('close');
   });
@@ -144,6 +175,7 @@ describe('admin indexing feature CLI', () => {
           cg: graph,
           options: { force: true },
           parseWorkers: undefined,
+          maxFileSize: undefined,
           deps,
         }),
       ).rejects.toThrow('exit:1');
@@ -189,16 +221,24 @@ describe('admin indexing feature CLI', () => {
   it('registers index, embed-only, and sync command actions through injected dependencies', async () => {
     const { actions, calls, deps } = fakeDeps();
 
-    await actions.get('index [path]')!('/repo', { quiet: true, force: true, profile: false, parseWorkers: '2' });
-    await actions.get('embed-only [path]')!('/repo', { quiet: true });
-    await actions.get('sync [path]')!('/repo', { quiet: false });
+    await actions.get('index [path]')!('/repo', {
+      quiet: true,
+      force: true,
+      profile: false,
+      parseWorkers: '2',
+      maxFileSize: '4096',
+    });
+    await actions.get('embed-only [path]')!('/repo', { quiet: true, maxFileSize: '2048' });
+    await actions.get('sync [path]')!('/repo', { quiet: false, maxFileSize: '1024' });
 
     const text = calls.join('\n');
     expect(text.match(/open:\/repo/g)?.length).toBe(3);
-    expect(text).toContain('indexAll:{"summarize":false,"profile":false,"clearStructural":true,"parseWorkers":2}');
-    expect(text).toContain('indexAll:{"summarize":false,"embedOnly":true}');
+    expect(text).toContain(
+      'indexAll:{"summarize":false,"profile":false,"clearStructural":true,"parseWorkers":2,"maxFileSize":4096}',
+    );
+    expect(text).toContain('indexAll:{"summarize":false,"embedOnly":true,"maxFileSize":2048}');
     expect(text).toContain('embedAll:{}');
-    expect(text).toContain('sync:{}');
+    expect(text).toContain('sync:{"maxFileSize":1024}');
     expect(text).toContain('awaitSummarisationWithProgress');
     expect(deps.loadClack).toHaveBeenCalled();
   });

@@ -7,6 +7,7 @@
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
+import { pathMatchesDirectoryPattern } from './resolve-by-name.js';
 import { detectTsOrJs } from './detect-language.js';
 
 export const expressResolver: FrameworkResolver = {
@@ -173,7 +174,9 @@ function resolveMiddleware(name: string, context: ResolutionContext): string | n
   if (baseName !== name) {
     const baseCandidates = context.getNodesByName(baseName);
     const MIDDLEWARE_DIRS = ['/middleware/', '/middlewares/'];
-    const preferred = baseCandidates.filter((n) => MIDDLEWARE_DIRS.some((d) => n.filePath.includes(d)));
+    const preferred = baseCandidates.filter((n) =>
+      MIDDLEWARE_DIRS.some((d) => pathMatchesDirectoryPattern(n.filePath, d)),
+    );
     if (preferred.length > 0) return preferred[0]!.id;
     if (baseCandidates.length > 0) return baseCandidates[0]!.id;
   }

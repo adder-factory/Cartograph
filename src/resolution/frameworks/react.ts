@@ -7,6 +7,7 @@
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
 import { makeLineIndex } from '../../utils.js';
+import { isSameDirectoryPath, pathMatchesDirectoryPattern } from './resolve-by-name.js';
 
 export const reactResolver: FrameworkResolver = {
   name: 'react',
@@ -178,8 +179,7 @@ function resolveComponent(name: string, fromFile: string, context: ResolutionCon
   if (components.length === 0) return null;
 
   // Prefer same directory
-  const fromDir = fromFile.substring(0, fromFile.lastIndexOf('/'));
-  const sameDir = components.filter((n) => n.filePath.startsWith(fromDir));
+  const sameDir = components.filter((n) => isSameDirectoryPath(n.filePath, fromFile));
   if (sameDir.length > 0) return sameDir[0]!.id;
 
   // Prefer component directories
@@ -192,7 +192,7 @@ function resolveComponent(name: string, fromFile: string, context: ResolutionCon
     '/views/',
     '/src/views/',
   ];
-  const preferred = components.filter((n) => COMPONENT_DIRS.some((d) => n.filePath.includes(d)));
+  const preferred = components.filter((n) => COMPONENT_DIRS.some((d) => pathMatchesDirectoryPattern(n.filePath, d)));
   if (preferred.length > 0) return preferred[0]!.id;
 
   return components[0]!.id;
@@ -210,7 +210,7 @@ function resolveHook(name: string, context: ResolutionContext): string | null {
 
   // Prefer hooks directories
   const HOOK_DIRS = ['/hooks/', '/src/hooks/', '/lib/hooks/', '/utils/hooks/'];
-  const preferred = hooks.filter((n) => HOOK_DIRS.some((d) => n.filePath.includes(d)));
+  const preferred = hooks.filter((n) => HOOK_DIRS.some((d) => pathMatchesDirectoryPattern(n.filePath, d)));
   if (preferred.length > 0) return preferred[0]!.id;
 
   return hooks[0]!.id;
@@ -233,7 +233,7 @@ function resolveContext(name: string, context: ResolutionContext): string | null
 
   // Prefer context directories
   const CONTEXT_DIRS = ['/context/', '/contexts/', '/src/context/', '/src/contexts/', '/providers/', '/src/providers/'];
-  const preferred = candidates.filter((n) => CONTEXT_DIRS.some((d) => n.filePath.includes(d)));
+  const preferred = candidates.filter((n) => CONTEXT_DIRS.some((d) => pathMatchesDirectoryPattern(n.filePath, d)));
   if (preferred.length > 0) return preferred[0]!.id;
 
   return candidates[0]!.id;

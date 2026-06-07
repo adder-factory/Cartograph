@@ -4371,6 +4371,15 @@ int countClients(void) { return 0; }
       expect(builtinRefs).toHaveLength(0);
     });
 
+    it('indexes C/C++ functions with leading export-style macros', () => {
+      const code = 'API_EXPORT int api_foo(void) { return 1; }\n';
+      const cResult = extractFromSource('src/api.c', code, 'c');
+      const cppResult = extractFromSource('src/api.cpp', code, 'cpp');
+
+      expect(cResult.nodes.some((n) => n.kind === 'function' && n.name === 'api_foo')).toBe(true);
+      expect(cppResult.nodes.some((n) => n.kind === 'function' && n.name === 'api_foo')).toBe(true);
+    });
+
     it('does not extract function-like macros (preproc_function_def) as constants', () => {
       // `#define MAX(a,b) ...` is `preproc_function_def`, NOT `preproc_def`.
       // Function-like macros behave more like callable functions and are

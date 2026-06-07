@@ -47,6 +47,11 @@ submodules, for example a checked-out SDK under a parent-ignored `vendor/` or
 stay outside the graph. `indexSubmodules: false` disables both submodule and
 embedded-repository recursion.
 
+`maxFileSize` can also be set from the CLI. `cartograph admin init
+--max-file-size <bytes>` writes it into the initial config; `admin index`,
+`admin sync`, and `admin embed-only` accept the same flag as a transient
+one-run override.
+
 ## Storage Options
 
 SQLite is default. PostgreSQL options live under `database` and require

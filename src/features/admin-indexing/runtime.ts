@@ -5,6 +5,7 @@ export interface AdminIndexOptions {
   profile?: boolean;
   clearParseCache?: boolean | string;
   parseWorkers?: string;
+  maxFileSize?: string;
 }
 
 interface AdminIndexProfile {
@@ -39,12 +40,14 @@ export interface SyncResult {
 }
 
 export type ParseWorkersResult = { ok: true; value: number | undefined } | { ok: false; error: string };
+export type MaxFileSizeResult = { ok: true; value: number | undefined } | { ok: false; error: string };
 
 export interface IndexAllOptions {
   summarize: false;
   profile: boolean;
   clearStructural: boolean;
   parseWorkers?: number;
+  maxFileSize?: number;
 }
 
 export interface SyncResultMessage {
@@ -67,15 +70,30 @@ export function parseParseWorkersValue(raw: string | undefined): ParseWorkersRes
   return { ok: true, value: n };
 }
 
+export function parseMaxFileSizeValue(raw: string | undefined): MaxFileSizeResult {
+  if (raw === undefined) return { ok: true, value: undefined };
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return { ok: false, error: `--max-file-size must be a positive integer byte count (got "${raw}")` };
+  }
+  const n = Number(trimmed);
+  if (!Number.isSafeInteger(n) || n < 1) {
+    return { ok: false, error: `--max-file-size must be a positive integer byte count (got "${raw}")` };
+  }
+  return { ok: true, value: n };
+}
+
 export function indexAllOptions(
   options: Pick<AdminIndexOptions, 'force' | 'profile'>,
   parseWorkers: number | undefined,
+  maxFileSize?: number | undefined,
 ): IndexAllOptions {
   return {
     summarize: false,
     profile: !!options.profile,
     clearStructural: !!options.force,
     ...(parseWorkers !== undefined && { parseWorkers }),
+    ...(maxFileSize !== undefined && { maxFileSize }),
   };
 }
 

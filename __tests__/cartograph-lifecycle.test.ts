@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Cartograph, FileLock } from '../src/index.js';
+import { getAllFiles } from '../src/db/queries-files.js';
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-'));
@@ -101,6 +102,34 @@ describe('Cartograph lifecycle API', () => {
         expect(indexedFiles.errors[0]?.message).toContain('Could not acquire file lock');
       } finally {
         held.release();
+        cg.close();
+      }
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('applies per-call maxFileSize overrides after config refresh without persisting them', async () => {
+    const dir = tempDir();
+    try {
+      fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'src', 'small.ts'), 'export const a=1;\n');
+      fs.writeFileSync(path.join(dir, 'src', 'large.ts'), `export const large="${'x'.repeat(128)}";\n`);
+      const configuredMaxFileSize = 1024 * 1024;
+      const cg = Cartograph.initSync(dir, {
+        config: { enableWatcher: false, include: ['src/**/*.ts'], maxFileSize: configuredMaxFileSize },
+      });
+      try {
+        const result = await cg.indexAll({ summarize: false, maxFileSize: 64 });
+        expect(result.success).toBe(true);
+        expect(result.filesSkipped).toBe(1);
+        expect(
+          getAllFiles(cg.queries)
+            .map((f) => f.path)
+            .sort(),
+        ).toEqual(['src/small.ts']);
+        expect(cg.getConfig().maxFileSize).toBe(configuredMaxFileSize);
+      } finally {
         cg.close();
       }
     } finally {

@@ -9,6 +9,7 @@ export {
 } from './cli.js';
 export {
   indexAllOptions,
+  parseMaxFileSizeValue,
   parseParseWorkersValue,
   phaseTimingLines,
   printSyncResult,

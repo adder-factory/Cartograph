@@ -1,6 +1,7 @@
 import { errMsg } from '../../errors.js';
 import {
   indexAllOptions,
+  parseMaxFileSizeValue,
   parseParseWorkersValue,
   phaseTimingLines,
   printSyncResult,
@@ -65,6 +66,7 @@ interface RunQuietIndexArgs {
   cg: AdminIndexGraph;
   options: AdminIndexOptions;
   parseWorkers: number | undefined;
+  maxFileSize: number | undefined;
   deps: AdminIndexingCommandDeps;
 }
 
@@ -84,6 +86,20 @@ interface BackgroundSummaryStatusArgs {
   clack: ClackPrompts;
   projectPath: string;
   deps: Pick<AdminIndexingCommandDeps, 'loadDetachedSummarize'>;
+}
+
+interface EmbedOnlyOptions {
+  quiet?: boolean;
+  verbose?: boolean;
+  maxFileSize?: string;
+}
+
+interface InteractiveEmbedOnlyArgs {
+  cg: AdminIndexGraph;
+  projectPath: string;
+  options: EmbedOnlyOptions;
+  maxFileSize: number | undefined;
+  deps: AdminIndexingCommandDeps;
 }
 
 export function registerAdminIndexingCommands(deps: AdminIndexingCommandDeps): void {
@@ -116,6 +132,10 @@ function registerIndexCommand(deps: AdminIndexingCommandDeps): void {
         'capped at 16. Lower it on memory-constrained CI runners; raise ' +
         'it on big monorepos. Bench with --profile before settling on a value.',
     )
+    .option(
+      '--max-file-size <bytes>',
+      'Transiently override config.maxFileSize for this index run. Use a positive integer byte count.',
+    )
     .action((pathArg: string | undefined, options: AdminIndexOptions) => runAdminIndexCommand(pathArg, options, deps));
 }
 
@@ -132,6 +152,12 @@ export async function runAdminIndexCommand(
     process.exit(1);
   }
   const parseWorkers = parsed.value;
+  const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
+  if (!parsedMaxFileSize.ok) {
+    error(parsedMaxFileSize.error);
+    process.exit(1);
+  }
+  const maxFileSize = parsedMaxFileSize.value;
   let cg: AdminIndexGraph | undefined;
 
   try {
@@ -146,12 +172,12 @@ export async function runAdminIndexCommand(
     cg = await Cartograph.open(projectPath, { autoMigrate: true });
 
     if (options.quiet) {
-      await runQuietIndex({ cg, options, parseWorkers, deps });
+      await runQuietIndex({ cg, options, parseWorkers, maxFileSize, deps });
       cg = undefined;
       return;
     }
 
-    await runInteractiveIndex({ cg, projectPath, options, parseWorkers, deps });
+    await runInteractiveIndex({ cg, projectPath, options, parseWorkers, maxFileSize, deps });
     cg = undefined;
   } catch (err) {
     cg?.close();
@@ -169,7 +195,7 @@ export async function runQuietIndex(args: RunQuietIndexArgs): Promise<void> {
     await clearParseCacheIfRequested(cg, options.clearParseCache, deps);
     // `--force` clear is threaded INTO indexAll so it runs under the
     // file lock (a contended --force must not wipe the index).
-    result = await cg.indexAll(indexAllOptions(options, parseWorkers));
+    result = await cg.indexAll(indexAllOptions(options, parseWorkers, args.maxFileSize));
     if (options.profile && result.profile) {
       // Quiet+profile is the scripted use case (CI bench, etc.) —
       // emit a single compact JSON line so it parses cleanly.
@@ -189,13 +215,13 @@ export async function runQuietIndex(args: RunQuietIndexArgs): Promise<void> {
 }
 
 async function runInteractiveIndex(args: InteractiveIndexArgs): Promise<void> {
-  const { cg, projectPath, options, parseWorkers, deps } = args;
+  const { cg, projectPath, options, parseWorkers, maxFileSize, deps } = args;
   const { printIndexResult } = deps;
   const clack = await deps.loadClack();
   clack.intro('Indexing project');
 
   await prepareInteractiveIndex({ cg, clack, options, deps });
-  const result = await runIndexWithProgress({ cg, options, parseWorkers, deps });
+  const result = await runIndexWithProgress({ cg, options, parseWorkers, maxFileSize, deps });
   printIndexResult(clack, result, projectPath);
 
   if (options.profile && result.profile) {
@@ -238,7 +264,7 @@ export async function clearParseCacheIfRequested(
 }
 
 async function runIndexWithProgress(args: RunQuietIndexArgs): Promise<AdminIndexResult> {
-  const { cg, options, parseWorkers, deps } = args;
+  const { cg, options, parseWorkers, maxFileSize, deps } = args;
   // `summarize: false` — the LLM summary tail is NOT run inline.
   // After base indexing the CLI hands it to a detached process
   // (see below), so the in-process background pass must not also
@@ -248,7 +274,7 @@ async function runIndexWithProgress(args: RunQuietIndexArgs): Promise<AdminIndex
     return cg.indexAll({
       onProgress: createVerboseProgress(),
       verbose: true,
-      ...indexAllOptions(options, parseWorkers),
+      ...indexAllOptions(options, parseWorkers, maxFileSize),
     });
   }
 
@@ -257,7 +283,7 @@ async function runIndexWithProgress(args: RunQuietIndexArgs): Promise<AdminIndex
   try {
     return await cg.indexAll({
       onProgress: progress.onProgress,
-      ...indexAllOptions(options, parseWorkers),
+      ...indexAllOptions(options, parseWorkers, maxFileSize),
     });
   } finally {
     await progress.stop();
@@ -302,99 +328,126 @@ export async function reportBackgroundSummaryStatus(args: BackgroundSummaryStatu
 }
 
 function registerEmbedOnlyCommand(deps: AdminIndexingCommandDeps): void {
-  const {
-    adminCmd,
-    colors,
-    createShimmerProgress,
-    createVerboseProgress,
-    error,
-    info,
-    isInitialized,
-    loadCartograph,
-    loadClack,
-    printIndexResult,
-    resolveProjectPath,
-    writeStdout,
-  } = deps;
+  const { adminCmd } = deps;
   adminCmd
     .command('embed-only [path]')
     .description('Fast-lane index: skip reference resolution + postHooks; embed only (Stage 4 #9)')
     .option('-q, --quiet', 'Suppress progress output')
     .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean; verbose?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      let cg: AdminIndexGraph | undefined;
+    .option(
+      '--max-file-size <bytes>',
+      'Transiently override config.maxFileSize for this embed-only index run. Use a positive integer byte count.',
+    )
+    .action((pathArg: string | undefined, options: EmbedOnlyOptions) => runEmbedOnlyCommand(pathArg, options, deps));
+}
 
-      try {
-        if (!isInitialized(projectPath)) {
-          error(`Cartograph not initialized in ${projectPath}`);
-          info('Run "cartograph admin init" first');
-          process.exit(1);
-        }
+async function runEmbedOnlyCommand(
+  pathArg: string | undefined,
+  options: EmbedOnlyOptions,
+  deps: AdminIndexingCommandDeps,
+): Promise<void> {
+  const { error, info, isInitialized, loadCartograph, resolveProjectPath } = deps;
+  const projectPath = resolveProjectPath(pathArg);
+  const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
+  if (!parsedMaxFileSize.ok) {
+    error(parsedMaxFileSize.error);
+    process.exit(1);
+  }
+  const maxFileSize = parsedMaxFileSize.value;
+  let cg: AdminIndexGraph | undefined;
 
-        const { default: Cartograph } = await loadCartograph();
-        cg = await Cartograph.open(projectPath, { autoMigrate: true });
+  try {
+    if (!isInitialized(projectPath)) {
+      error(`Cartograph not initialized in ${projectPath}`);
+      info('Run "cartograph admin init" first');
+      process.exit(1);
+    }
 
-        if (options.quiet) {
-          const result = await cg.indexAll({ summarize: false, embedOnly: true });
-          if (!result.success) process.exit(1);
-          try {
-            await cg.llm.embed.embedAll();
-          } catch (err) {
-            error(`Embed pass failed: ${errMsg(err)}`);
-            process.exit(1);
-          }
-          return;
-        }
+    const { default: Cartograph } = await loadCartograph();
+    cg = await Cartograph.open(projectPath, { autoMigrate: true });
 
-        const clack = await loadClack();
-        clack.intro('Embed-only indexing (skip resolution + postHooks)');
+    if (options.quiet) {
+      await runQuietEmbedOnly(cg, maxFileSize, deps);
+      return;
+    }
 
-        let result: AdminIndexResult;
-        if (options.verbose) {
-          result = await cg.indexAll({
-            onProgress: createVerboseProgress(),
-            verbose: true,
-            embedOnly: true,
-            summarize: false,
-          });
-        } else {
-          writeStdout(`${colors.dim}│${colors.reset}\n`);
-          const progress = createShimmerProgress();
-          try {
-            result = await cg.indexAll({
-              onProgress: progress.onProgress,
-              embedOnly: true,
-              summarize: false,
-            });
-          } finally {
-            await progress.stop();
-          }
-        }
-        printIndexResult(clack, result, projectPath);
+    await runInteractiveEmbedOnly({ cg, projectPath, options, maxFileSize, deps });
+  } catch (err) {
+    error(`Failed to embed-only index: ${errMsg(err)}`);
+    process.exit(1);
+  } finally {
+    cg?.close();
+  }
+}
 
-        // Embed pass — run synchronously so the CLI returns when embeddings
-        // are persisted (the bgCtrl path is skipped because embedOnly
-        // disables the auto-summarization trigger).
-        try {
-          clack.log.info('Running embed pass…');
-          const embedResult = await cg.llm.embed.embedAll({});
-          clack.log.success(
-            `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
-              `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
-          );
-        } catch (err) {
-          clack.log.warn(`Embed pass skipped: ${errMsg(err)}`);
-        }
+async function runQuietEmbedOnly(
+  cg: AdminIndexGraph,
+  maxFileSize: number | undefined,
+  deps: Pick<AdminIndexingCommandDeps, 'error'>,
+): Promise<void> {
+  const result = await cg.indexAll({
+    summarize: false,
+    embedOnly: true,
+    ...(maxFileSize !== undefined && { maxFileSize }),
+  });
+  if (!result.success) process.exit(1);
+  try {
+    await cg.llm.embed.embedAll();
+  } catch (err) {
+    deps.error(`Embed pass failed: ${errMsg(err)}`);
+    process.exit(1);
+  }
+}
 
-        clack.outro('Done');
-      } catch (err) {
-        error(`Failed to embed-only index: ${errMsg(err)}`);
-        process.exit(1);
-      } finally {
-        cg?.close();
-      }
+async function runInteractiveEmbedOnly(args: InteractiveEmbedOnlyArgs): Promise<void> {
+  const { cg, projectPath, options, maxFileSize, deps } = args;
+  const clack = await deps.loadClack();
+  clack.intro('Embed-only indexing (skip resolution + postHooks)');
+
+  const result = options.verbose
+    ? await cg.indexAll({
+        onProgress: deps.createVerboseProgress(),
+        verbose: true,
+        embedOnly: true,
+        summarize: false,
+        ...(maxFileSize !== undefined && { maxFileSize }),
+      })
+    : await runEmbedOnlyWithShimmer(cg, maxFileSize, deps);
+  deps.printIndexResult(clack, result, projectPath);
+  await runEmbedOnlyEmbedPass(cg, clack);
+  clack.outro('Done');
+}
+
+async function runEmbedOnlyWithShimmer(
+  cg: AdminIndexGraph,
+  maxFileSize: number | undefined,
+  deps: AdminIndexingCommandDeps,
+): Promise<AdminIndexResult> {
+  deps.writeStdout(`${deps.colors.dim}│${deps.colors.reset}\n`);
+  const progress = deps.createShimmerProgress();
+  try {
+    return await cg.indexAll({
+      onProgress: progress.onProgress,
+      embedOnly: true,
+      summarize: false,
+      ...(maxFileSize !== undefined && { maxFileSize }),
     });
+  } finally {
+    await progress.stop();
+  }
+}
+
+async function runEmbedOnlyEmbedPass(cg: AdminIndexGraph, clack: ClackPrompts): Promise<void> {
+  try {
+    clack.log.info('Running embed pass…');
+    const embedResult = await cg.llm.embed.embedAll({});
+    clack.log.success(
+      `Embedded ${embedResult.generated}/${embedResult.candidates} symbols ` +
+        `(${embedResult.errors} errors, ${embedResult.durationMs}ms)`,
+    );
+  } catch (err) {
+    clack.log.warn(`Embed pass skipped: ${errMsg(err)}`);
+  }
 }
 
 function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
@@ -415,8 +468,18 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
     .command('sync [path]')
     .description("Sync changes since last index (mirrors cartograph_admin MCP tool with action='sync')")
     .option('-q, --quiet', 'Suppress output (for git hooks)')
-    .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
+    .option(
+      '--max-file-size <bytes>',
+      'Transiently override config.maxFileSize for this sync run. Use a positive integer byte count.',
+    )
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean; maxFileSize?: string }) => {
       const projectPath = resolveProjectPath(pathArg);
+      const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
+      if (!parsedMaxFileSize.ok) {
+        error(parsedMaxFileSize.error);
+        process.exit(1);
+      }
+      const maxFileSize = parsedMaxFileSize.value;
       let cg: AdminIndexGraph | undefined;
 
       try {
@@ -435,7 +498,7 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
           // Quiet mode (git hooks, scripts): skip summarisation so the
           // hook stays fast. The next interactive sync/index picks up
           // any new symbols.
-          await cg.sync({ summarize: false });
+          await cg.sync({ summarize: false, ...(maxFileSize !== undefined && { maxFileSize }) });
           return;
         }
 
@@ -449,6 +512,7 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
         try {
           result = await cg.sync({
             onProgress: progress.onProgress,
+            ...(maxFileSize !== undefined && { maxFileSize }),
           });
         } finally {
           await progress.stop();
