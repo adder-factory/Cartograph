@@ -127,7 +127,7 @@ docker run --rm -d --name cartograph-postgres \
   -e POSTGRES_PASSWORD=cartograph \
   -e POSTGRES_DB=cartograph \
   -p 5432:5432 \
-  pgvector/pgvector:pg16
+  pgvector/pgvector:pg18
 
 cartograph admin init -i \
   --database-provider postgres \
