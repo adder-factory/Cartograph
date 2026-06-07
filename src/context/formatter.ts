@@ -4,7 +4,8 @@
  * Formats TaskContext as markdown or JSON for consumption by Claude.
  */
 
-import type { Node, Edge, TaskContext } from '../types.js';
+import type { TaskContext } from './types.js';
+import type { Edge, Node } from '../types.js';
 
 /**
  * Format entry points section of markdown output.

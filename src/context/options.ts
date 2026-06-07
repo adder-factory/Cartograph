@@ -1,4 +1,5 @@
-import type { BuildContextOptions, FindRelevantContextOptions, NodeKind } from '../types.js';
+import type { NodeKind } from '../types.js';
+import type { BuildContextOptions, FindRelevantContextOptions } from './types.js';
 
 const DEFAULT_SEARCH_LIMIT = 3;
 const DEFAULT_TRAVERSAL_DEPTH = 1;

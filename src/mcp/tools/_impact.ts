@@ -8,7 +8,8 @@
  * concentration rollup + per-source breakdown) instead of a flat BFS.
  */
 import type { ToolResult } from '../tool-types.js';
-import type { Edge, EdgeKind, Node, Subgraph } from '../../types.js';
+import type { Subgraph } from '../../graph/types.js';
+import type { Edge, EdgeKind, Node } from '../../types.js';
 import { clamp, isTestPath, numArg } from '../../utils.js';
 import { textResult, validateStringOutcome } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
