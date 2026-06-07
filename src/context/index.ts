@@ -30,6 +30,7 @@ import { isDiagnosticPath } from '../path-class.js';
 import { ScoreTrace } from './score-trace.js';
 import { extractSymbolsFromQuery } from './query-symbols.js';
 import { buildTaskContext, extractCodeBlocks } from './task-context.js';
+import { HIGH_VALUE_NODE_KINDS, normalizeBuildOptions, normalizeFindOptions, pickSearchKinds } from './options.js';
 import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
 
 /**
@@ -56,65 +57,6 @@ function accumulateTermResults(
     termResultsMap.set(r.node.id, { result: adjusted, termHits: 1 });
   }
 }
-
-/**
- * Default options for context building
- *
- * Tuned for minimal context usage while still providing useful results:
- * - Fewer nodes and code blocks by default
- * - Smaller code block size limit
- * - Shallower traversal
- */
-const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
-  maxNodes: 20, // Reduced from 50 - most tasks don't need 50 symbols
-  maxCodeBlocks: 5, // Reduced from 10 - only show most relevant code
-  maxCodeBlockSize: 1500, // Reduced from 2000
-  includeCode: true,
-  format: 'markdown',
-  searchLimit: 3, // Reduced from 5 - fewer entry points
-  traversalDepth: 1, // Reduced from 2 - shallower graph expansion
-  minScore: 0.3,
-  extraCandidates: [],
-  behaviorBias: false,
-  explain: false,
-};
-
-/**
- * Node kinds that provide high information value in context results.
- * Imports/exports are excluded because they have near-zero information density -
- * they tell you something exists, not how it works.
- */
-const HIGH_VALUE_NODE_KINDS: NodeKind[] = [
-  'function',
-  'method',
-  'class',
-  'interface',
-  'type_alias',
-  'struct',
-  'trait',
-  'component',
-  'route',
-  'variable',
-  'constant',
-  'enum',
-  'module',
-  'namespace',
-];
-
-/**
- * Default options for finding relevant context
- */
-const DEFAULT_FIND_OPTIONS: Required<FindRelevantContextOptions> = {
-  searchLimit: 3, // Reduced from 5
-  traversalDepth: 1, // Reduced from 2
-  maxNodes: 20, // Reduced from 50
-  minScore: 0.3,
-  edgeKinds: [],
-  nodeKinds: HIGH_VALUE_NODE_KINDS, // Filter out imports/exports by default
-  extraCandidates: [],
-  behaviorBias: false,
-  explain: false,
-};
 
 /**
  * Immutable slice of `ContextBuilder` threaded through module-scope helpers.
@@ -345,12 +287,6 @@ const COMPOUND_PER_TERM_BONUS = 20;
  * ask about.
  */
 const CENTRALITY_BOOST_WEIGHT = 5;
-/** Hard ceiling (100) on caller-supplied `searchLimit` — multiplied 5× elsewhere; cap prevents runaway fetches. */
-const MAX_SEARCH_LIMIT = 100;
-/** Hard ceiling on caller-supplied `maxNodes`. */
-const MAX_NODES = 1000;
-/** Hard ceiling on caller-supplied `traversalDepth`. */
-const MAX_TRAVERSAL_DEPTH = 10;
 /** Over-fetch multiplier feeding `findNodesByExactName` so co-location boost has room to re-rank. */
 const EXACT_FETCH_MULT = 5;
 /** Trim factor for the exact-match channel's intermediate output (after co-location boost). */
@@ -380,44 +316,6 @@ const TEXT_MULTI_TERM_BONUS = 5;
  *  (16/16) get 0.5×, mid-saturation 0.75×, rare hits ~1.0×. Tuned
  *  on the eval suite — see runMultiTermTextSearch's inline notes. */
 const TEXT_SEARCH_DAMPEN_RATE = 0.5;
-
-/**
- * Default search-kind set for `runMultiTermTextSearch` when the
- * caller didn't supply `nodeKinds`. Imports are intentionally absent
- * — they flood FTS with qualified-name matches almost no exploration
- * query wants.
- */
-const DEFAULT_TEXT_SEARCH_KINDS: NodeKind[] = [
-  'file',
-  'module',
-  'class',
-  'struct',
-  'interface',
-  'trait',
-  'protocol',
-  'function',
-  'method',
-  'property',
-  'field',
-  'variable',
-  'constant',
-  'enum',
-  'enum_member',
-  'type_alias',
-  'namespace',
-  'export',
-  'route',
-  'component',
-];
-
-/** Pick search kinds — caller-supplied list when non-empty, otherwise
- *  the project default. Lifted out of `runMultiTermTextSearch` so the
- *  conditional expression doesn't push the method past the
- *  conditional-operand budget. */
-function pickSearchKinds(callerKinds: readonly NodeKind[] | undefined): NodeKind[] {
-  if (callerKinds && callerKinds.length > 0) return [...callerKinds];
-  return DEFAULT_TEXT_SEARCH_KINDS;
-}
 
 /** Score multiplier applied to non-production results (test / fixture /
  *  script / benchmark — `isDiagnosticPath`) when the query isn't itself
@@ -1455,7 +1353,7 @@ export class ContextBuilder {
    * @returns TaskContext (structured) or formatted string
    */
   async buildContext(input: TaskInput, options: BuildContextOptions = {}): Promise<TaskContext | string> {
-    const opts = { ...DEFAULT_BUILD_OPTIONS, ...options };
+    const opts = normalizeBuildOptions(options);
     const query = stringifyTaskInput(input);
 
     const subgraph = await this.findRelevantContext(query, {
@@ -1501,14 +1399,7 @@ export class ContextBuilder {
    * @returns Subgraph of relevant nodes and edges
    */
   async findRelevantContext(query: string, options: FindRelevantContextOptions = {}): Promise<Subgraph> {
-    const opts = { ...DEFAULT_FIND_OPTIONS, ...options };
-    // Bound user-supplied limits — `searchLimit` is multiplied by 5 in
-    // findNodesByExactName, so an unbounded request would pull millions
-    // of rows before any filtering. The named ceilings are well above
-    // the largest legitimate use we've seen.
-    opts.searchLimit = Math.min(Math.max(1, opts.searchLimit), MAX_SEARCH_LIMIT);
-    opts.maxNodes = Math.min(Math.max(1, opts.maxNodes), MAX_NODES);
-    opts.traversalDepth = Math.min(Math.max(0, opts.traversalDepth), MAX_TRAVERSAL_DEPTH);
+    const opts = normalizeFindOptions(options);
 
     if (!query || query.trim().length === 0) {
       return { nodes: new Map<string, Node>(), edges: [], roots: [] };
