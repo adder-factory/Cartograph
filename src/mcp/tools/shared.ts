@@ -25,6 +25,7 @@ import type { FileRecord, Node } from '../../types.js';
 import type { ToolResult } from '../tool-types.js';
 import { isTestPath } from '../../utils.js';
 import { CallIdCache } from './_call-id-cache.js';
+export { displayModelName } from '../../llm/display-model.js';
 
 /** Maximum output length to prevent context bloat (characters). */
 export const MAX_OUTPUT_LENGTH = 15000;
@@ -142,26 +143,6 @@ function checkString(args: CheckStringArgs): string | { error: string } {
     return { error: `${name} must be at most ${maxLength} characters` };
   }
   return value;
-}
-
-/**
- * Render a model identifier for a user-/agent-facing trailer.
- *
- * A local GGUF backend reports its model as the absolute file path it
- * was loaded from (`/Users/me/.cartograph/models/Qwen3-7B-Q4_K_M.gguf`).
- * Echoing that verbatim in an `_ask: model … _` / `_local-chat: model …_`
- * trailer leaks the operator's home directory and bloats the line with
- * a path the agent can't act on. This collapses any value that looks
- * like a filesystem path down to its basename; API model ids
- * (`claude-…`, `gpt-…`, `qwen2.5-coder:7b`) contain no slash and pass
- * through untouched.
- */
-export function displayModelName(model: string): string {
-  if (!model.includes('/') && !model.includes('\\')) return model;
-  // path.basename handles both separators on the host platform; the
-  // explicit backslash split covers a Windows path seen on a POSIX host.
-  const base = path.basename(model.replaceAll('\\', '/'));
-  return base.length > 0 ? base : model;
 }
 
 /**

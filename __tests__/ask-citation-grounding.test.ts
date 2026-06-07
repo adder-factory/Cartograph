@@ -31,7 +31,7 @@ import {
   buildCitationReport,
   formatRerankTag,
   buildAskOutput,
-} from '../src/mcp/tools/ask.js';
+} from '../src/features/ask/citations.js';
 import type { RerankOutcome } from '../src/cartograph-llm-service.js';
 import {
   extractQuestionEntities,

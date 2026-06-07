@@ -1,4 +1,4 @@
-import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from '../../mcp/tools/ask.js';
+import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from './constants.js';
 import { parseIntegerValue } from '../shared/cli-args.js';
 
 export interface AskOptions {
