@@ -12,14 +12,19 @@ import type { Edge, Node } from '../../types.js';
 import {
   CONFIDENCE_RANK,
   detectUniformConfidence,
-  filterByConfidence,
   formatConfidence,
   formatSiteCount,
 } from '../../graph/edge-confidence.js';
 import type { RefIdCache } from './_id-cache.js';
 import { err, type ToolOutcome } from './_outcome.js';
 
-export { CONFIDENCE_RANK, detectUniformConfidence, filterByConfidence, formatConfidence, formatSiteCount };
+export {
+  CONFIDENCE_RANK,
+  detectUniformConfidence,
+  filterByConfidence,
+  formatConfidence,
+  formatSiteCount,
+} from '../../graph/edge-confidence.js';
 
 /**
  * Parse a `minConfidence` arg from a raw tool-args bag. Returns the
