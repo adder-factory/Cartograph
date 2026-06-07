@@ -1,8 +1,7 @@
 /**
  * Lifecycle / utility CLI commands (serve / install / playbook /
  * trace-to-culprits / viewer / llm setup) — extracted from the
- * bin/cartograph.ts decomposition; side-effecting module: importing it
- * registers the commands.
+ * bin/cartograph.ts decomposition.
  */
 import { isInitialized as defaultIsInitialized } from '../../directory.js';
 import {
@@ -43,7 +42,7 @@ interface AssignNumericArgInput {
   opts?: { min?: number; max?: number };
 }
 
-interface LifecycleCommandDeps {
+export interface LifecycleCommandDeps {
   program: CommandLike;
   llmCmd: CommandLike;
   chalk: {
@@ -174,5 +173,3 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
   registerDoctorCommand(deps);
   registerSetupCommand(deps);
 }
-
-registerLifecycleCommands();

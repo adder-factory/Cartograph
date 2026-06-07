@@ -1,7 +1,6 @@
 /**
  * `cartograph admin` family subcommands — extracted from the
- * bin/cartograph.ts decomposition; this is a side-effecting module:
- * importing it registers the commands on `adminCmd`.
+ * bin/cartograph.ts decomposition.
  */
 import * as fs from 'node:fs';
 import { getCartographDir as defaultGetCartographDir, isInitialized as defaultIsInitialized } from '../../directory.js';
@@ -256,5 +255,3 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerAdminLlmSetupCommands(deps);
   deps.attachUnknownActionHandler(deps.adminCmd, 'admin');
 }
-
-registerAdminCommands();

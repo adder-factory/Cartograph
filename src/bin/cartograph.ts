@@ -28,10 +28,9 @@
  *   - `_cli-core.ts`     — the commander `program`, family-parent
  *                          commands, and stateless helpers.
  *   - `commands/*.ts`    — the command definitions, one module per
- *                          group; each is SIDE-EFFECTING — importing it
- *                          registers its commands on `program`.
- * This entry point is thin: the Node-version preflight, the command-
- * module imports, and `program.parse()`.
+ *                          group; each exports an explicit registrar.
+ * This entry point is thin: the Node-version preflight, process-level
+ * error handling, explicit command registration, and `program.parse()`.
  */
 
 // FIRST import — a Node-version preflight that must run before any
@@ -43,19 +42,8 @@ import { fileURLToPath } from 'node:url';
 import { errMsg } from '../errors.js';
 import { editDistance } from '../text-distance.js';
 import { program, error } from './_cli-core.js';
+import { registerCartographCommands } from './commands/index.js';
 export { program } from './_cli-core.js';
-
-// Command groups — each module is side-effecting: importing it
-// registers that group's commands on `program` / a family parent.
-// `_cli-core.js` (imported above) has already created `program` and
-// the family-parent commands, so these are safe to pull in here.
-import './commands/admin.js';
-import './commands/read.js';
-import './commands/lifecycle.js';
-import './commands/review.js';
-import './commands/summaries.js';
-import './commands/session.js';
-import './commands/generated.js';
 
 function isEpipe(error: unknown): boolean {
   return (error as { code?: string } | undefined)?.code === 'EPIPE';
@@ -90,6 +78,8 @@ process.on('unhandledRejection', (reason) => {
   if ((reason as NodeJS.ErrnoException | undefined)?.code === 'EPIPE') process.exit(0);
   process.stderr.write(`[Cartograph] Unhandled rejection: ${String(reason)}\n`);
 });
+
+registerCartographCommands();
 
 // The configured commander program is re-exported above so structural
 // tests can introspect the command tree without spawning the CLI.

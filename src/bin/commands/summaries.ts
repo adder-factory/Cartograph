@@ -2,8 +2,7 @@
  * `cartograph summaries` family subcommands.
  *
  * Thin compatibility entry point: command behavior lives in
- * `features/summaries`, while this module preserves the historical
- * side-effecting import used by `bin/cartograph.ts`.
+ * `features/summaries`.
  */
 import {
   summariesCmd,
@@ -14,9 +13,9 @@ import {
   attachUnknownActionHandler,
 } from '../_cli-core.js';
 import * as fs from 'node:fs';
-import { registerSummariesCommand } from '../../features/summaries/index.js';
+import { registerSummariesCommand, type SummariesCommandDeps } from '../../features/summaries/index.js';
 
-registerSummariesCommand({
+const defaultSummariesCommandDeps: SummariesCommandDeps = {
   summariesCmd,
   installFamilyActionAlias,
   attachUnknownActionHandler,
@@ -32,4 +31,8 @@ registerSummariesCommand({
       process.stdin.on('end', () => resolve(buf));
       process.stdin.on('error', reject);
     }),
-});
+};
+
+export function registerSummariesCommands(deps: SummariesCommandDeps = defaultSummariesCommandDeps): void {
+  registerSummariesCommand(deps);
+}
