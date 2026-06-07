@@ -97,7 +97,7 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
   installTargetsAt({ clack, targets, location, autoAllow });
 
   if (location === 'local') {
-    await initializeLocalProject(clack);
+    await initializeLocalProject(clack, { deferLlmSetup: useDefaults });
   }
   if (location === 'global') {
     clack.note('cd your-project\ncartograph admin init -i', 'Quick start');
@@ -302,11 +302,17 @@ async function resolveTargets(args: ResolveTargetsArgs): Promise<AgentTarget[]> 
   return choice.map((id) => getTarget(id)).filter((t): t is AgentTarget => t !== undefined);
 }
 
+interface InitializeLocalProjectOptions {
+  deferLlmSetup?: boolean;
+}
+
 /**
- * Initialize Cartograph in the current project (for local installs).
- * Unchanged from the pre-refactor version — agent-agnostic by nature.
+ * Initialize Cartograph in the current project for local installs.
  */
-async function initializeLocalProject(clack: typeof import('@clack/prompts')): Promise<void> {
+async function initializeLocalProject(
+  clack: typeof import('@clack/prompts'),
+  options: InitializeLocalProjectOptions = {},
+): Promise<void> {
   const projectPath = process.cwd();
 
   let Cartograph: typeof import('../index.js').default;
@@ -327,21 +333,25 @@ async function initializeLocalProject(clack: typeof import('@clack/prompts')): P
   const cg = await Cartograph.init(projectPath);
   clack.log.success('Created .cartograph/ directory');
 
-  try {
-    const { runLlmSetup } = await import('./llm-setup.js');
-    const llmConfig = await runLlmSetup(clack, undefined, projectPath);
-    if (llmConfig) {
-      cg.updateConfig({ llm: llmConfig });
-      const summary = [
-        llmConfig.summarizeLlm?.provider ? `summarize=${llmConfig.summarizeLlm.provider}` : null,
-        llmConfig.embeddingLlm?.provider ? `embed=${llmConfig.embeddingLlm.provider}` : null,
-      ]
-        .filter(Boolean)
-        .join(', ');
-      clack.log.success(`Configured LLM (${summary || 'features disabled'})`);
+  if (options.deferLlmSetup) {
+    clack.log.info('Skipped interactive LLM setup in --yes mode. Run `cartograph llm setup` later if needed.');
+  } else {
+    try {
+      const { runLlmSetup } = await import('./llm-setup.js');
+      const llmConfig = await runLlmSetup(clack, undefined, projectPath);
+      if (llmConfig) {
+        cg.updateConfig({ llm: llmConfig });
+        const summary = [
+          llmConfig.summarizeLlm?.provider ? `summarize=${llmConfig.summarizeLlm.provider}` : null,
+          llmConfig.embeddingLlm?.provider ? `embed=${llmConfig.embeddingLlm.provider}` : null,
+        ]
+          .filter(Boolean)
+          .join(', ');
+        clack.log.success(`Configured LLM (${summary || 'features disabled'})`);
+      }
+    } catch (err) {
+      clack.log.warn(`LLM setup skipped: ${errMsg(err)}`);
     }
-  } catch (err) {
-    clack.log.warn(`LLM setup skipped: ${errMsg(err)}`);
   }
 
   await runInitialIndex(cg, clack);

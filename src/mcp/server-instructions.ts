@@ -114,7 +114,7 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 
 1. **Deterministic, sub-millisecond** — most tasks finish here: find / graph / node / at_range / status / biomarkers / hotspots / changed_since / affected / digest / entry_points / blame / review / tests_for / trace_to_culprits / module / imports / deps. (\`context\`/\`explore\` are also tier-1-fast but source-heavy — see the delegation note above.)
 2. **Conditional on data**: \`cartograph_coverage\` needs a prior lcov load (\`mode: 'refresh'\` auto-discovers); \`cartograph_history\`/\`_blame\` need git history; \`cartograph_find({by: 'env'|'sql'})\` needs the mined string signals. Each returns clearly when the data isn't there.
-3. **LLM-mediated (needs a configured local LLM)**: \`cartograph_ask\` (RAG Q&A), \`cartograph_find({mode: 'semantic'})\`, \`cartograph_dead_code({via: 'llm'})\`, \`cartograph_role\`, \`cartograph_admin({action: 'summarize'|'embed'|'classify'})\`, \`cartograph_local_chat\` (delegate bulk prose to save Anthropic-token cost — low-stakes only). With NO local LLM, \`cartograph_summaries({action: 'pending'|'save'})\` lets you generate summaries yourself. Setup / repair / perf-tuning: \`cartograph doctor\` and \`cartograph_admin({action: 'llm-plan'|'doctor'})\`; env tuning knobs are documented in CLAUDE.md.
+3. **LLM-mediated (needs a configured local LLM)**: \`cartograph_ask\` (RAG Q&A), \`cartograph_find({mode: 'semantic'})\`, \`cartograph_dead_code({via: 'llm'})\`, \`cartograph_role\`, \`cartograph_admin({action: 'summarize'|'embed'|'classify'})\`, \`cartograph_local_chat\` (delegate bulk prose to save Anthropic-token cost — low-stakes only). With NO local LLM, \`cartograph_summaries({action: 'pending'|'save'})\` lets you generate summaries yourself. Setup / repair / perf-tuning: \`cartograph doctor\`, \`cartograph_admin({action: 'llm-plan'|'doctor'})\`, and \`cartograph_admin({action: 'llm-tune'})\`.
 
 ## Anti-patterns
 
@@ -133,5 +133,5 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 
 ## Cross-call state & extending
 
-\`cartograph_session({action})\` creates/resumes/lists/deletes sessions, audits prior tool-use patterns, and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs. Adding a tool / detector / resolver to cartograph itself? The structural patterns are documented in \`CLAUDE.md\`.
+\`cartograph_session({action})\` creates/resumes/lists/deletes sessions, audits prior tool-use patterns, and saves/replays tool macros across calls; \`cartograph_note({action})\` leaves persistent symbol annotations (note / question / followup / bookmark) — useful for long investigations and agent-to-agent handoffs.
 `;

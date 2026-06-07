@@ -98,5 +98,3 @@ framework, so generic codebases do not pay the full resolver cost.
 ## Extending Support
 
 To add a language, start with [Adding A Language](ADDING-A-LANGUAGE.md).
-To add framework or bridge extraction, start with
-[Extending Extractors + Resolvers](EXTENDING-EXTRACTORS-RESOLVERS.md).

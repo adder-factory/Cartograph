@@ -65,6 +65,15 @@ describe('runInstallerWithOptions', () => {
     expect(listFiles(tmpCwd)).toEqual([]);
   });
 
+  it('initializes local projects in yes mode without interactive LLM config', async () => {
+    await runInstallerWithOptions({ yes: true, location: 'local', target: 'none' });
+
+    const configPath = path.join(tmpCwd, '.cartograph', 'config.json');
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(fs.readFileSync(configPath, 'utf-8')).not.toContain('"llm"');
+    expect(listFiles(tmpHome)).toEqual([]);
+  });
+
   it('writes selected global target configuration under redirected HOME', async () => {
     await runInstallerWithOptions({
       yes: true,

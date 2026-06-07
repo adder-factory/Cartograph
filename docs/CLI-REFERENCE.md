@@ -7,6 +7,9 @@ runtime reference. This page groups the top-level commands by workflow.
 
 ```sh
 cartograph install                 # configure supported agents
+cartograph install --yes --target=auto --location=local
+cartograph install --yes --target=auto --location=global
+cartograph install --print-config codex
 cartograph setup [path]            # init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph status [path]           # index status and feature readiness

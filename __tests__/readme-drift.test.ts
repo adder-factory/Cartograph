@@ -10,6 +10,7 @@ import { getToolModules } from '../src/mcp/tools/registry.js';
 const root = path.resolve(import.meta.dir, '..');
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 const supportMatrix = fs.readFileSync(path.join(root, 'docs/SUPPORT-MATRIX.md'), 'utf8');
+const standaloneBuilder = fs.readFileSync(path.join(root, 'scripts/build-standalone.mjs'), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as {
   files?: string[];
 };
@@ -76,8 +77,32 @@ describe('README drift guard', () => {
 
   it('ships README-linked docs and assets in the package allowlist', () => {
     const files = new Set(packageJson.files ?? []);
-    for (const expected of ['docs', 'bench', 'ACKNOWLEDGEMENTS.md', 'install.sh', 'install.ps1']) {
+    for (const expected of [
+      'docs/assets/viewer.png',
+      'docs/AGENT-INSTALL.md',
+      'docs/ADDING-A-LANGUAGE.md',
+      'docs/CLI-REFERENCE.md',
+      'docs/CONFIGURATION.md',
+      'docs/GRAMMAR-ASSETS.md',
+      'docs/MCP-USAGE.md',
+      'docs/STORAGE-BACKENDS.md',
+      'docs/SUPPORT-MATRIX.md',
+      'docs/TROUBLESHOOTING.md',
+      'bench/README.md',
+      'bench/storage-backends.mts',
+      'ACKNOWLEDGEMENTS.md',
+      'install.sh',
+      'install.ps1',
+    ]) {
       expect(files.has(expected), `package.json files is missing ${expected}`).toBe(true);
     }
+    expect(files.has('docs'), 'package.json files should not ship private docs wholesale').toBe(false);
+    expect(files.has('AGENTS.md'), 'repo-local agent instructions are private project docs').toBe(false);
+    expect(files.has('docs/ARCHITECTURE.md'), 'architecture rules are private project docs').toBe(false);
+  });
+
+  it('keeps standalone release docs public-facing', () => {
+    expect(standaloneBuilder).toContain("copyFile('docs/AGENT-INSTALL.md', 'AGENT-INSTALL.md')");
+    expect(standaloneBuilder).not.toContain("copyFile('AGENTS.md'");
   });
 });

@@ -57,6 +57,25 @@ The installer detects and configures Claude Code, Cursor, Codex CLI,
 opencode, Hermes, Gemini CLI, Antigravity, and Kiro. It writes MCP config plus
 agent instructions where the target supports them.
 
+Or give this task to your coding agent:
+
+```text
+Install Cartograph for this repository. Use non-interactive commands.
+If `cartograph --version` fails, run:
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+
+Then, from this repository, run:
+cartograph install --yes --target=auto --location=local
+cartograph status --verbose
+
+Report changed files, status output, and whether I need to restart the agent.
+Do not configure LLMs, download models, migrate storage, or switch to
+PostgreSQL unless I ask.
+```
+
+See [Agent-Assisted Install](docs/AGENT-INSTALL.md) for the full prompt,
+PowerShell command, and source-install fallback.
+
 Source install for development:
 
 ```bash
@@ -194,6 +213,7 @@ cartograph_context({format: "plan"})
 
 | Need | Go to |
 |---|---|
+| Pasteable task for a coding agent to install Cartograph | [docs/AGENT-INSTALL.md](docs/AGENT-INSTALL.md) |
 | PostgreSQL, pgvector, migration, storage benchmark | [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md) |
 | CLI command reference | [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md) |
 | MCP setup, profiles, load budget, client snippets | [docs/MCP-USAGE.md](docs/MCP-USAGE.md) |
@@ -201,7 +221,6 @@ cartograph_context({format: "plan"})
 | Language/framework matrix | [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) |
 | Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
 | Add a language | [docs/ADDING-A-LANGUAGE.md](docs/ADDING-A-LANGUAGE.md) |
-| Architecture rules | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
 
 ## Command Map
 

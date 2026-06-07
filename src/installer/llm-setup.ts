@@ -384,7 +384,7 @@ async function runDetectedPath(
   const fallbackModel = backend.models[0] ?? '<set model in config.json>';
   clack.log.info(
     `Wiring every tier at ${backend.endpoint} with model "${fallbackModel}". ` +
-      `Edit .cartograph/config.json to swap models per tier if needed — see CLAUDE.md for the per-port layout.`,
+      `Edit .cartograph/config.json to swap models per tier if needed, then run cartograph doctor.`,
   );
   return buildSingleEndpointConfig(backend.endpoint, {
     embed: fallbackModel,

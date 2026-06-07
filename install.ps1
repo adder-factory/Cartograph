@@ -42,3 +42,8 @@ if (($userPath -split ';') -notcontains $binDir) {
 
 Write-Host "Installed to $dest"
 Write-Host 'Run: cartograph --help'
+Write-Host ''
+Write-Host 'Agent-friendly project setup:'
+Write-Host '  cd /path/to/your/project'
+Write-Host '  cartograph install --yes --target=auto --location=local'
+Write-Host '  cartograph status --verbose'
