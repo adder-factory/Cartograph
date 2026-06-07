@@ -1,5 +1,7 @@
-import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from '../../mcp/tools/ask.js';
 import { errMsg } from '../../errors.js';
+import { displayModelName } from '../../llm/display-model.js';
+import { buildCitationReport, groundCitations } from './citations.js';
+import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from './constants.js';
 import {
   type AskCitation,
   type AskOptions,
@@ -141,8 +143,6 @@ interface BuildAskAnnotationLinesArgs {
 }
 
 async function buildAskAnnotationLines({ cg, result, askModel, dim }: BuildAskAnnotationLinesArgs): Promise<string[]> {
-  const { groundCitations, buildCitationReport } = await import('../../mcp/tools/ask.js');
-  const { displayModelName } = await import('../../mcp/tools/shared.js');
   const cited = groundCitations(cg, result.answer);
   const report = buildCitationReport(cited);
   return renderAskAnnotations({
