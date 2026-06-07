@@ -7,6 +7,7 @@
 
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
+import { isSameDirectoryPath } from './resolve-by-name.js';
 
 /**
  * Svelte 5 runes — compiler-provided, not user code
@@ -190,8 +191,7 @@ function resolveComponent(name: string, fromFile: string, context: ResolutionCon
   if (components.length === 0) return null;
 
   // Prefer same directory
-  const fromDir = fromFile.substring(0, fromFile.lastIndexOf('/'));
-  const sameDir = components.filter((n) => n.filePath.startsWith(fromDir));
+  const sameDir = components.filter((n) => isSameDirectoryPath(n.filePath, fromFile));
   if (sameDir.length > 0) return sameDir[0]!.id;
 
   return components[0]!.id;

@@ -66,9 +66,15 @@ describe('Svelte framework resolver', () => {
   it('resolves runes, store subscriptions, framework imports, and local components', () => {
     const count = node('var:count', 'count', 'variable', 'src/stores.ts');
     const localButton = node('component:local-button', 'Button', 'component', 'src/routes/Button.svelte');
+    const siblingPrefixButton = node(
+      'component:sibling-prefix-button',
+      'Button',
+      'component',
+      'src/routes-extra/Button.svelte',
+    );
     const otherButton = node('component:other-button', 'Button', 'component', 'src/lib/Button.svelte');
     const libNode = node('component:lib-card', 'Card', 'component', 'src/lib/Card.svelte');
-    const ctx = context(['src/lib/Card.svelte'], [count, otherButton, localButton, libNode]);
+    const ctx = context(['src/lib/Card.svelte'], [count, siblingPrefixButton, otherButton, localButton, libNode]);
 
     expect(svelteResolver.resolve(ref('$state'), ctx)?.targetNodeId).toBe(ref('$state').fromNodeId);
     expect(svelteResolver.resolve(ref('$derived.by'), ctx)?.confidence).toBe(1);

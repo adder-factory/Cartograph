@@ -168,6 +168,13 @@ export interface IndexOptions {
   parseWorkers?: number;
 
   /**
+   * Transiently override `config.maxFileSize` for this index/sync call.
+   * This is not persisted to `.cartograph/config.json`; CLI callers use it
+   * for one-off large-file runs without changing project policy.
+   */
+  maxFileSize?: number;
+
+  /**
    * Skip every derived-signal pass that isn't required for semantic
    * search: reference resolution, all post-index hooks (centrality,
    * biomarkers, churn, co-change, sql/config-refs, build-context,
@@ -408,6 +415,19 @@ function cgRunMaintenancePhase(cg: Cartograph, result: IndexResult): number {
   const maintStart = Date.now();
   dbRunMaintenance(cg.db);
   return Date.now() - maintStart;
+}
+
+function cgApplyTransientIndexConfig(cg: CartographCore, options: IndexOptions): () => void {
+  const maxFileSize = options.maxFileSize;
+  if (maxFileSize === undefined) return () => {};
+  if (!Number.isSafeInteger(maxFileSize) || maxFileSize < 1) {
+    throw new Error(`IndexOptions.maxFileSize must be a positive integer byte count (got ${maxFileSize})`);
+  }
+  const previousMaxFileSize = cg.config.maxFileSize;
+  cg.config.maxFileSize = maxFileSize;
+  return () => {
+    cg.config.maxFileSize = previousMaxFileSize;
+  };
 }
 
 /**
@@ -785,11 +805,16 @@ export class Cartograph extends CartographCore {
    */
   async indexAll(options: IndexOptions = {}): Promise<IndexResult> {
     const coordinatorStart = Date.now();
-    const result = await this.lock.mutex.withLock(() => {
+    const result = await this.lock.mutex.withLock(async () => {
       // FRICTION-11: re-read .cartograph/config.json so an edit since
       // server startup (include/exclude globs, flags) takes effect.
       cgRefreshConfigFromDisk(this);
-      return cgRunIndexUnderLock(this, options, coordinatorStart);
+      const restoreConfig = cgApplyTransientIndexConfig(this, options);
+      try {
+        return await cgRunIndexUnderLock(this, options, coordinatorStart);
+      } finally {
+        restoreConfig();
+      }
     });
     if (result.success && result.filesIndexed > 0) {
       // Drop the embedding cache — any new symbols extracted in this
@@ -841,21 +866,26 @@ export class Cartograph extends CartographCore {
         // FRICTION-11: re-read .cartograph/config.json so an edit made
         // since server startup takes effect on this sync.
         cgRefreshConfigFromDisk(this);
-        // Friction #66 self-heal — see indexAll's call site.
-        applyExtractionLogicVersionHeal(this.queries);
-        const syncResult = await this.internals.orchestrator.sync(options.onProgress);
-        await cgSyncResolveReferences(this, syncResult, options.onProgress);
-        await cgRunHookPhase(this, 'sync', syncResult);
-        // Run maintenance on every sync, including no-op syncs. It is
-        // cheap in steady state (PRAGMA optimize / incremental_vacuum
-        // over a small freelist / short-timeout WAL truncate), and the
-        // one-time legacy-DB full VACUUM in dbReclaimFreePages is
-        // self-gated on the freelist ratio. Gating this behind a
-        // changed-files check meant a clean-tree (no-op) sync never
-        // reclaimed pages, so a bloated legacy auto_vacuum=0 DB could
-        // never self-heal on a repo with no pending edits.
-        dbRunMaintenance(this.db);
-        return syncResult;
+        const restoreConfig = cgApplyTransientIndexConfig(this, options);
+        try {
+          // Friction #66 self-heal — see indexAll's call site.
+          applyExtractionLogicVersionHeal(this.queries);
+          const syncResult = await this.internals.orchestrator.sync(options.onProgress);
+          await cgSyncResolveReferences(this, syncResult, options.onProgress);
+          await cgRunHookPhase(this, 'sync', syncResult);
+          // Run maintenance on every sync, including no-op syncs. It is
+          // cheap in steady state (PRAGMA optimize / incremental_vacuum
+          // over a small freelist / short-timeout WAL truncate), and the
+          // one-time legacy-DB full VACUUM in dbReclaimFreePages is
+          // self-gated on the freelist ratio. Gating this behind a
+          // changed-files check meant a clean-tree (no-op) sync never
+          // reclaimed pages, so a bloated legacy auto_vacuum=0 DB could
+          // never self-heal on a repo with no pending edits.
+          dbRunMaintenance(this.db);
+          return syncResult;
+        } finally {
+          restoreConfig();
+        }
       } finally {
         this.lock.file.release();
       }

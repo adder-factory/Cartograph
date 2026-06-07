@@ -639,6 +639,10 @@ function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string
     return resolveObjcMessageName(ext, node);
   }
 
+  if (ext.language === 'ruby' && node.type === 'call') {
+    return resolveRubyCallName(ext, node);
+  }
+
   const func = getChildByField(node, 'function') || node.namedChild(0);
   if (!func) return '';
 
@@ -692,6 +696,28 @@ function readObjcReceiverName(ext: TreeSitterExtractor, node: SyntaxNode): strin
   if (!receiverField || receiverField.type === 'message_expression') return null;
   const receiverName = getNodeText(receiverField, ext.source);
   return receiverName && receiverName !== 'self' && receiverName !== 'super' ? receiverName : null;
+}
+
+function resolveRubyCallName(ext: TreeSitterExtractor, node: SyntaxNode): string {
+  const method = getChildByField(node, 'method');
+  if (!method) return '';
+  const methodName = getNodeText(method, ext.source);
+  if (!methodName) return '';
+
+  const receiver = getChildByField(node, 'receiver');
+  if (!receiver) return methodName;
+
+  const receiverName = rubyReceiverName(ext, receiver, methodName);
+  return tsQualifyCallReceiver(methodName, receiverName, MEMBER_CALL_SKIP_RECEIVERS);
+}
+
+function rubyReceiverName(ext: TreeSitterExtractor, receiver: SyntaxNode, methodName: string): string {
+  if (receiver.type === 'call') {
+    const nested = resolveRubyCallName(ext, receiver);
+    if (methodName !== 'new' && nested.endsWith('.new')) return nested.slice(0, -'.new'.length);
+    return nested;
+  }
+  return getNodeText(receiver, ext.source);
 }
 
 /**

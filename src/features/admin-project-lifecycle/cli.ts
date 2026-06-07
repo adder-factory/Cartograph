@@ -1,5 +1,6 @@
 import { errMsg } from '../../errors.js';
 import { databaseConfigFromOptionInput } from '../../db/database-config.js';
+import { parseMaxFileSizeValue } from '../admin-indexing/runtime.js';
 import { resolveInitProjectPath, shouldConfirmUninit } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
@@ -75,6 +76,10 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
     .option('--database-query-timeout-ms <ms>', 'PostgreSQL query timeout in milliseconds (default: 120000)')
     .option('--database-connection-timeout-seconds <seconds>', 'PostgreSQL connection timeout in seconds (default: 30)')
     .option('--database-ssl', 'Force TLS for PostgreSQL connections (URL sslmode= is preferred for verification modes)')
+    .option(
+      '--max-file-size <bytes>',
+      'Set config.maxFileSize during initialization. Use a positive integer byte count.',
+    )
     .action(async (pathArg: string | undefined, options: InitCommandOptions) => {
       const projectPath = resolveInitProjectPath(pathArg);
       const clack = await loadClack();
@@ -90,11 +95,19 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
           return;
         }
 
+        const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
+        if (!parsedMaxFileSize.ok) {
+          clack.log.error(parsedMaxFileSize.error);
+          process.exit(1);
+        }
         const { default: Cartograph } = await loadCartograph();
         const database = databaseConfigFromOptionInput(options);
+        const config: Record<string, unknown> = {};
+        if (database) config['database'] = database;
+        if (parsedMaxFileSize.value !== undefined) config['maxFileSize'] = parsedMaxFileSize.value;
         cg = await Cartograph.init(projectPath, {
           index: false,
-          ...(database ? { config: { database } } : {}),
+          ...(Object.keys(config).length > 0 ? { config } : {}),
         });
         clack.log.success(`Initialized in ${projectPath}`);
 
@@ -105,12 +118,14 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
             result = await cg.indexAll({
               onProgress: createVerboseProgress(),
               verbose: true,
+              ...(parsedMaxFileSize.value !== undefined && { maxFileSize: parsedMaxFileSize.value }),
             });
           } else {
             writeStdout(`${colors.dim}│${colors.reset}\n`);
             const progress = createShimmerProgress();
             result = await cg.indexAll({
               onProgress: progress.onProgress,
+              ...(parsedMaxFileSize.value !== undefined && { maxFileSize: parsedMaxFileSize.value }),
             });
             await progress.stop();
           }
@@ -141,6 +156,7 @@ interface InitCommandOptions {
   databaseQueryTimeoutMs?: string;
   databaseConnectionTimeoutSeconds?: string;
   databaseSsl?: boolean;
+  maxFileSize?: string;
 }
 
 function registerUninitCommand(deps: AdminProjectLifecycleCommandDeps): void {

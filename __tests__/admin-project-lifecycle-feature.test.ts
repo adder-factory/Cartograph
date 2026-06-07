@@ -33,6 +33,24 @@ describe('admin project lifecycle feature CLI', () => {
     ]);
   });
 
+  it('initializes max-file-size config and applies it to the first index', async () => {
+    const { actions, calls } = registerTestCommands(false);
+
+    await actions.get('init [path]')!('/repo', { index: true, verbose: false, maxFileSize: '4096' });
+
+    expect(calls).toEqual([
+      'intro:Initializing Cartograph',
+      'init:/repo:{"index":false,"config":{"maxFileSize":4096}}',
+      'clack.success:Initialized in /repo',
+      'stdout:dim│reset\n',
+      'indexAll:{"maxFileSize":4096}',
+      'progress.stop',
+      'printIndexResult:/repo',
+      'outro:Done',
+      'close',
+    ]);
+  });
+
   it('uninitializes with force without prompting', async () => {
     const { actions, calls } = registerTestCommands(true);
 

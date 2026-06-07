@@ -6,7 +6,7 @@
 
 import type { Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping } from './types.js';
-import { splitIdentifierTokens } from '../utils.js';
+import { escapeRegExp, splitIdentifierTokens } from '../utils.js';
 
 /**
  * Common builtin/global method names in TS/JS that frequently collide
@@ -386,6 +386,35 @@ function inferTsJsFieldReceiverType(
   if (annotated?.[1]) return annotated[1];
   const constructed = /=\s*new\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(tail);
   return constructed?.[1] ?? null;
+}
+
+function inferRubyLocalReceiverType(
+  receiverName: string,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): string | null {
+  if (ref.language !== 'ruby') return null;
+  const source = context.readFile(ref.filePath);
+  if (!source) return null;
+
+  const owner = context.getNodesInFile(ref.filePath).find((n) => n.id === ref.fromNodeId);
+  const startLine = owner ? Math.max(1, owner.startLine) : 1;
+  const lines = source.split(/\r?\n/);
+  for (let lineIndex = Math.min(ref.line - 2, lines.length - 1); lineIndex >= startLine - 1; lineIndex--) {
+    const inferred = parseRubyConstructedLocal(lines[lineIndex] ?? '', receiverName);
+    if (inferred) return inferred;
+  }
+  return null;
+}
+
+function parseRubyConstructedLocal(line: string, receiverName: string): string | null {
+  const receiver = escapeRegExp(receiverName);
+  const match = new RegExp(
+    String.raw`^\s*${receiver}\s*(?:\|\|)?=\s*(?:::)?([A-Z][A-Za-z0-9_]*(?:::[A-Z][A-Za-z0-9_]*)*)\.new\b`,
+  ).exec(line);
+  const typeName = match?.[1];
+  if (!typeName) return null;
+  return typeName.split('::').at(-1) ?? null;
 }
 
 function indexOfIdentifier(line: string, identifier: string): number {
@@ -854,7 +883,8 @@ function matchReceiverFallbackMethod(args: MethodCallMatchArgs): ResolvedRef | n
   return (
     findCapitalizedReceiverMethod(args) ??
     findInferredFieldReceiverMethod({ ...args, inferType: inferJavaFieldReceiverType }) ??
-    findInferredFieldReceiverMethod({ ...args, inferType: inferTsJsFieldReceiverType })
+    findInferredFieldReceiverMethod({ ...args, inferType: inferTsJsFieldReceiverType }) ??
+    findInferredFieldReceiverMethod({ ...args, inferType: inferRubyLocalReceiverType })
   );
 }
 

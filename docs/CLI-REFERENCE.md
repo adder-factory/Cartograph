@@ -45,6 +45,11 @@ cartograph admin init -i \
 
 See [Storage Backends](STORAGE-BACKENDS.md).
 
+Indexing commands accept `--max-file-size <bytes>` when generated files or
+large fixtures need a one-off cap change. On `admin init`, the value is saved
+as `config.maxFileSize`; on `admin index`, `admin sync`, and
+`admin embed-only`, it applies only to that run.
+
 ## Search And Navigation
 
 ```sh

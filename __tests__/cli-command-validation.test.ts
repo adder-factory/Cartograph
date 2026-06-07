@@ -55,6 +55,14 @@ describe('CLI command validation contracts', () => {
     expect(out).toContain('got "0"');
   });
 
+  it('admin index rejects invalid --max-file-size before opening a project', () => {
+    const { out, code } = runCli(['admin', 'index', '/tmp/cartograph-not-initialized', '--max-file-size', 'abc']);
+
+    expect(code).not.toBe(0);
+    expect(out).toContain('--max-file-size must be a positive integer byte count');
+    expect(out).toContain('got "abc"');
+  });
+
   it('ask rejects blank questions before opening a project or contacting an LLM', () => {
     const { out, code } = runCli(['ask', '   ', '/tmp/cartograph-not-initialized']);
 

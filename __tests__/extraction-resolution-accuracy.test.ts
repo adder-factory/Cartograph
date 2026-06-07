@@ -457,6 +457,13 @@ describe('Framework resolver detection and convention-based resolution', () => {
       filePath: 'src/screens/Button.tsx',
       language: 'tsx',
     });
+    const siblingPrefixButton = frameworkNode({
+      id: 'component:src/screens-extra/Button.tsx:Button',
+      kind: 'component',
+      name: 'Button',
+      filePath: 'src/screens-extra/Button.tsx',
+      language: 'tsx',
+    });
     const libraryButton = frameworkNode({
       id: 'component:src/components/Button.tsx:Button',
       kind: 'component',
@@ -485,7 +492,9 @@ describe('Framework resolver detection and convention-based resolution', () => {
       filePath: 'src/providers/Theme.tsx',
       language: 'tsx',
     });
-    const ctx = frameworkContext({ nodes: [libraryButton, localButton, hook, context, baseContext] });
+    const ctx = frameworkContext({
+      nodes: [siblingPrefixButton, libraryButton, localButton, hook, context, baseContext],
+    });
 
     const componentRef = frameworkRef('Button', 'tsx');
     componentRef.filePath = 'src/screens/App.tsx';
