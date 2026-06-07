@@ -10,14 +10,9 @@ import {
   resolveAskProjectPath,
   validateAskQuestion,
 } from './runtime.js';
+import type { CliArgumentOptionCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  argument(...args: unknown[]): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliArgumentOptionCommand;
 
 interface AskCartographModule {
   default: {

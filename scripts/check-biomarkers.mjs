@@ -48,6 +48,8 @@ import { Database } from 'bun:sqlite';
 const root = process.cwd();
 const CLI = 'src/bin/cartograph.ts';
 const dbPath = path.join(root, '.cartograph', 'cartograph.db');
+const DB_OPEN_ATTEMPTS = 5;
+const DB_OPEN_RETRY_MS = 200;
 
 /** Run a cartograph CLI subcommand; abort the gate on a non-zero exit. */
 function runCli(args, label) {
@@ -62,6 +64,67 @@ function runCli(args, label) {
   }
 }
 
+function sleepMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isRetryableSqliteOpenError(error) {
+  return error?.code === 'SQLITE_CANTOPEN' || error?.errno === 14;
+}
+
+function readBiomarkerGateStateAttempt(databasePath) {
+  if (!existsSync(databasePath)) {
+    return { ok: false, error: new Error(`${databasePath} does not exist after indexing`) };
+  }
+  try {
+    return { ok: true, state: readBiomarkerGateState(databasePath) };
+  } catch (error) {
+    if (!isRetryableSqliteOpenError(error)) throw error;
+    return { ok: false, error };
+  }
+}
+
+function readBiomarkerGateState(databasePath) {
+  const db = new Database(databasePath, { readonly: true, create: false });
+  try {
+    const counts = { error: 0, warning: 0, info: 0 };
+    for (const row of db.query('SELECT severity, COUNT(*) AS n FROM code_health_findings GROUP BY severity').all()) {
+      counts[row.severity] = row.n;
+    }
+    const offenders =
+      counts.error + counts.warning > 0
+        ? db
+            .query(
+              `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
+               FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
+               WHERE f.severity IN ('error', 'warning')
+               ORDER BY f.severity DESC, n.file_path, n.start_line`,
+            )
+            .all()
+        : [];
+    const cfRaw =
+      db.query("SELECT value FROM project_metadata WHERE key = 'biomarker_cross_file_errors'").get()?.value ?? null;
+    return { counts, offenders, cfRaw };
+  } finally {
+    db.close();
+  }
+}
+
+function sleepBeforeNextDbReadAttempt(attempt) {
+  if (attempt < DB_OPEN_ATTEMPTS) sleepMs(DB_OPEN_RETRY_MS * attempt);
+}
+
+function readBiomarkerGateStateWithRetry(databasePath) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= DB_OPEN_ATTEMPTS; attempt++) {
+    const result = readBiomarkerGateStateAttempt(databasePath);
+    if (result.ok) return result.state;
+    lastError = result.error;
+    sleepBeforeNextDbReadAttempt(attempt);
+  }
+  throw lastError ?? new Error(`Unable to open ${databasePath}`);
+}
+
 // 1. Index the repo structurally. `admin init` first when there's no index
 //    yet (the CI checkout has no committed `.cartograph/`); `--force` so the
 //    findings reflect the CURRENT source, `--quiet` to skip the LLM tail
@@ -70,23 +133,6 @@ if (!existsSync(dbPath)) runCli(['admin', 'init'], 'admin init');
 runCli(['admin', 'index', '--force', '--quiet'], 'admin index --force --quiet');
 
 // 2. Count findings by severity straight off the table (no markdown parsing).
-const db = new Database(dbPath, { readonly: true });
-const counts = { error: 0, warning: 0, info: 0 };
-for (const row of db.query('SELECT severity, COUNT(*) AS n FROM code_health_findings GROUP BY severity').all()) {
-  counts[row.severity] = row.n;
-}
-const offenders =
-  counts.error + counts.warning > 0
-    ? db
-        .query(
-          `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
-           FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
-           WHERE f.severity IN ('error', 'warning')
-           ORDER BY f.severity DESC, n.file_path, n.start_line`,
-        )
-        .all()
-    : [];
-
 // Cross-file rule-error sentinel (key must match `setMetadata(...,
 // 'biomarker_cross_file_errors', ...)` in src/biomarkers/index.ts). The
 // writer always stores `String(<non-negative integer>)`, so the gate passes
@@ -95,10 +141,8 @@ const offenders =
 // unknown (note, don't fail) to stay non-brittle — but see the JSDoc caveat:
 // `enableBiomarkers: false` is the one config where absent legitimately means
 // "nothing to gate."
-const cfRaw =
-  db.query("SELECT value FROM project_metadata WHERE key = 'biomarker_cross_file_errors'").get()?.value ?? null;
+const { counts, offenders, cfRaw } = readBiomarkerGateStateWithRetry(dbPath);
 const crossFileErrors = cfRaw === null ? null : Number(cfRaw);
-db.close();
 
 console.log(`\nbiomarker floor: ${counts.error} error / ${counts.warning} warning / ${counts.info} info`);
 console.log(`cross-file rule errors: ${cfRaw === null ? '(not recorded — full-pass sentinel absent)' : cfRaw}`);

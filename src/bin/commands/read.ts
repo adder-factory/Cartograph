@@ -7,13 +7,17 @@ import * as fs from 'node:fs';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
 import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
-import { buildDirRollup, filterFilesByDir } from '../../mcp/tools/files.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
 import { registerAskCommand as registerAskFeatureCommand } from '../../features/ask/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
 import { registerDigestCommand } from '../../features/digest/index.js';
-import { registerFilesCommand as registerFilesFeatureCommand } from '../../features/files/index.js';
+import {
+  buildDirRollup,
+  filterFilesByDir,
+  registerFilesCommand as registerFilesFeatureCommand,
+} from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
+import type { CliArgumentOptionCommand } from '../../features/shared/cli-command.js';
 import { registerStatusCommand as registerStatusFeatureCommand } from '../../features/status/index.js';
 import { isInitialized } from '../../directory.js';
 import { detectPackageManager, packageScriptCommand, readPackageScripts } from '../../package-scripts.js';
@@ -34,13 +38,7 @@ function out(message = ''): void {
   process.stdout.write(`${message}\n`);
 }
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  argument(...args: unknown[]): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliArgumentOptionCommand;
 
 interface ReadCartographModule {
   default: {

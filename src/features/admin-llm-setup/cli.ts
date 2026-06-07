@@ -1,13 +1,8 @@
 import { errMsg } from '../../errors.js';
 import { parseLlmTuneOverride } from './runtime.js';
+import type { CliRequiredOptionCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  requiredOption(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliRequiredOptionCommand;
 
 interface LlmSetupPlanModule {
   planLlmSetup: () => Promise<{

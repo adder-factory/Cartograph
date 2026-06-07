@@ -7,13 +7,9 @@ import type {
   renderBackendStartCommand,
 } from './runtime.js';
 import { parseOptionalPositiveInt } from '../shared/cli-args.js';
+import type { CliOptionCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliOptionCommand;
 
 export interface BackendRuntimeModule {
   backendStatus: (projectPath: string, options?: { bin?: string }) => Promise<BackendStatusReport>;

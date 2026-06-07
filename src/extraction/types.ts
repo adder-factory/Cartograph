@@ -1,4 +1,4 @@
-import type { Edge, EdgeKind, Language, Node } from '../types.js';
+import type { Edge, EdgeKind, Language, Node } from '../graph/core-types.js';
 
 /**
  * Result from parsing a source file.

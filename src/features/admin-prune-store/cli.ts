@@ -1,12 +1,8 @@
 import { errMsg } from '../../errors.js';
 import { parseMaxAgeDays } from './runtime.js';
+import type { CliOptionCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliOptionCommand;
 
 interface PruneStoreGraph {
   queries: unknown;

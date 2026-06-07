@@ -1,6 +1,6 @@
 import type { Subgraph } from '../graph/types.js';
 import type { SearchResult } from '../search/types.js';
-import type { EdgeKind, Language, Node, NodeKind } from '../types.js';
+import type { EdgeKind, Language, Node, NodeKind } from '../graph/core-types.js';
 
 /**
  * A block of code with context.

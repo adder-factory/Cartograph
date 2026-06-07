@@ -1,13 +1,9 @@
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
 import { errMsg } from '../../errors.js';
 import { resolveSimilarityEdgeBuildOptions } from './runtime.js';
+import type { CliOptionCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliOptionCommand;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;

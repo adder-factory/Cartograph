@@ -1,4 +1,4 @@
-import type { EdgeKind, Language, NodeKind } from '../types.js';
+import type { EdgeKind, Language, NodeKind } from '../graph/core-types.js';
 
 /**
  * Database schema version info.

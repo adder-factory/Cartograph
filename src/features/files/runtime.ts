@@ -27,7 +27,7 @@ export interface FileListingRow {
 export type FileListing = FileListingRow[];
 export type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
 
-interface DirRollupRow {
+export interface DirRollupRow {
   dir: string | null;
   files: number;
   symbols: number;
@@ -128,6 +128,76 @@ const identityStyle: FilesRenderStyle = {
   dim: (s) => s,
   cyan: (s) => s,
 };
+
+function fileUnderDir(filePath: string, dir: string): boolean {
+  const normDir = trimTrailingSlashes(dir) ?? '';
+  if (!normDir) return true;
+  return filePath === normDir || filePath.startsWith(normDir + '/');
+}
+
+export function filterFilesByDir<T extends { path: string }>(files: ReadonlyArray<T>, dir: string): T[] {
+  const normDir = trimTrailingSlashes(dir)?.replace(/^\.\//, '') ?? '';
+  return files.filter((file) => {
+    const filePath = file.path.replace(/^\.\//, '');
+    return fileUnderDir(filePath, normDir);
+  });
+}
+
+export function buildDirRollup(files: ReadonlyArray<FileListingRow>, maxDepth?: number, dirFilter?: string): DirRollup {
+  const dirStats = new Map<string, { files: number; symbols: number }>();
+  let totalSymbols = 0;
+  let rootBucketFiles = 0;
+  let rootBucketSymbols = 0;
+  for (const file of files) {
+    totalSymbols += file.nodeCount;
+    if (isRootFile(file)) {
+      rootBucketFiles++;
+      rootBucketSymbols += file.nodeCount;
+      continue;
+    }
+    addFileAncestors(dirStats, file, maxDepth);
+  }
+
+  const filterPrefix = dirFilter ? trimTrailingSlashes(dirFilter) : null;
+  const rows = buildDirRollupRows(dirStats, filterPrefix ?? null);
+  if (rootBucketFiles > 0) rows.push({ dir: null, files: rootBucketFiles, symbols: rootBucketSymbols });
+  return { rows, totalFiles: files.length, totalSymbols };
+}
+
+function isRootFile(file: FileListingRow): boolean {
+  return !file.path.includes('/');
+}
+
+function addFileAncestors(
+  dirStats: Map<string, { files: number; symbols: number }>,
+  file: FileListingRow,
+  maxDepth: number | undefined,
+): void {
+  const parts = file.path.split('/');
+  for (let depth = 1; depth < parts.length; depth++) {
+    if (maxDepth !== undefined && depth > maxDepth) break;
+    const dir = parts.slice(0, depth).join('/');
+    if (!dir) continue;
+    const cur = dirStats.get(dir) ?? { files: 0, symbols: 0 };
+    cur.files++;
+    cur.symbols += file.nodeCount;
+    dirStats.set(dir, cur);
+  }
+}
+
+function buildDirRollupRows(
+  dirStats: ReadonlyMap<string, { files: number; symbols: number }>,
+  filterPrefix: string | null,
+): DirRollupRow[] {
+  return [...dirStats.entries()]
+    .sort((a, b) => b[1].symbols - a[1].symbols || a[0].localeCompare(b[0]))
+    .filter(([dir]) => !isStrictAncestorOfFilter(dir, filterPrefix))
+    .map(([dir, stats]) => ({ dir, files: stats.files, symbols: stats.symbols }));
+}
+
+function isStrictAncestorOfFilter(dir: string, filterPrefix: string | null): boolean {
+  return filterPrefix !== null && dir !== filterPrefix && filterPrefix.startsWith(dir + '/');
+}
 
 export function buildEffectiveFilesOptions(
   dirArg: string | undefined,
