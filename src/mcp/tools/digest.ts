@@ -36,7 +36,7 @@ import { isCliCommandRoute, collectPublicExportNodes } from './entry-points.js';
 import { DEFAULT_MIN_COMMITS } from './hotspots.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
-import { areBiomarkersPending } from './biomarkers.js';
+import { areBiomarkersPending } from '../../biomarkers/pending.js';
 import { type ToolOutcome, ok } from './_outcome.js';
 import type { Node } from '../../types.js';
 

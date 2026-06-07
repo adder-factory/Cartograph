@@ -6,7 +6,7 @@ import { findGraphCandidates } from '../../llm/dead-code.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
 import { isFixturePath, textResult, truncateOutput } from './shared.js';
 import type { ToolCtx } from './types.js';
-import { areBiomarkersPending } from './biomarkers.js';
+import { areBiomarkersPending } from '../../biomarkers/pending.js';
 
 type CheckState = 'ok' | 'warn' | 'blocked';
 
