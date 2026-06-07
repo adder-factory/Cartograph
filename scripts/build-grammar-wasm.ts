@@ -71,8 +71,9 @@ interface Grammar {
 }
 
 /**
- * The 25 grammar `.wasm` files cartograph ships (the set commit 2442417
- * deleted from `src/extraction/wasm/` when it swapped WASM→native).
+ * Grammar `.wasm` files cartograph ships (the original set commit 2442417
+ * deleted from `src/extraction/wasm/` when it swapped WASM→native, plus
+ * later language-slice additions).
  */
 const GRAMMARS: Grammar[] = [
   { wasm: 'typescript', pkg: 'tree-sitter-typescript', subdir: 'typescript', sample: 'const x: number = 1;' },
@@ -84,6 +85,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'java', pkg: 'tree-sitter-java', sample: 'class A {}\n' },
   { wasm: 'c', pkg: 'tree-sitter-c', sample: 'int main(){return 0;}\n' },
   { wasm: 'cpp', pkg: 'tree-sitter-cpp', sample: 'int main(){return 0;}\n' },
+  { wasm: 'css', pkg: 'tree-sitter-css', sample: '.a { color: red; }\n' },
   { wasm: 'ruby', pkg: 'tree-sitter-ruby', sample: 'x = 1\n' },
   { wasm: 'bash', pkg: 'tree-sitter-bash', sample: 'x=1\n' },
   { wasm: 'php', pkg: 'tree-sitter-php', subdir: 'php', sample: '<?php $x = 1;' },
@@ -91,7 +93,13 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'kotlin', pkg: 'tree-sitter-kotlin', sample: 'fun main() {}\n' },
   { wasm: 'scala', pkg: 'tree-sitter-scala', sample: 'object A\n' },
   { wasm: 'swift', pkg: 'tree-sitter-swift', sample: 'let x = 1\n' },
+  { wasm: 'embedded_template', pkg: 'tree-sitter-embedded-template', sample: '<%= user.name %>\n' },
+  { wasm: 'haskell', pkg: 'tree-sitter-haskell', sample: 'module M where\nx = 1\n' },
+  { wasm: 'html', pkg: 'tree-sitter-html', sample: '<main><h1>Hello</h1></main>\n' },
   { wasm: 'hcl', pkg: '@tree-sitter-grammars/tree-sitter-hcl', sample: 'x = 1\n' },
+  { wasm: 'jsdoc', pkg: 'tree-sitter-jsdoc', sample: '/** Adds one. */\n' },
+  { wasm: 'json', pkg: 'tree-sitter-json', sample: '{ "x": 1 }\n' },
+  { wasm: 'julia', pkg: 'tree-sitter-julia', sample: 'module M\nx = 1\nend\n' },
   { wasm: 'lua', pkg: '@tree-sitter-grammars/tree-sitter-lua', sample: 'local x = 1\n' },
   {
     wasm: 'luau',
@@ -101,7 +109,11 @@ const GRAMMARS: Grammar[] = [
   },
   { wasm: 'sql', pkg: '@derekstride/tree-sitter-sql', sample: 'SELECT 1;\n' },
   { wasm: 'r', pkg: '@davisvaughan/tree-sitter-r', sample: 'x <- 1\n' },
+  { wasm: 'ocaml', pkg: 'tree-sitter-ocaml', sample: 'let x = 1\n', tagsScm: true },
+  { wasm: 'ocaml_interface', pkg: 'tree-sitter-ocaml', sample: 'val x : int\n', tagsScm: true },
   { wasm: 'prisma', pkg: 'tree-sitter-prisma', sample: 'model A {\n  id Int @id\n}\n' },
+  { wasm: 'regex', pkg: 'tree-sitter-regex', sample: '^[a-z]+$\n' },
+  { wasm: 'verilog', pkg: 'tree-sitter-verilog', sample: 'module top; endmodule\n' },
   // ── currently vendored — source packages not in package.json ──────
   // dart: `tree-sitter-dart@1.0.0` ships a BUNDLED `tree-sitter-dart.wasm`
   // that is NOT web-tree-sitter-loadable (malformed dylink metadata —

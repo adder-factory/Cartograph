@@ -59,11 +59,13 @@ const DEFINITION_KIND_MAP: Readonly<Record<string, NodeKind>> = {
   struct: 'struct',
   type: 'type_alias',
   enum: 'enum',
+  enum_variant: 'enum_member',
   field: 'field',
   variable: 'variable',
   namespace: 'namespace',
   // Languages with macros / protocols / traits map onto the nearest kind.
   macro: 'function',
+  operator: 'function',
   protocol: 'protocol',
   trait: 'trait',
 };

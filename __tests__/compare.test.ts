@@ -431,15 +431,15 @@ describe('compareToRef', () => {
 
   // ── Task #23: filesSkipped ───────────────────────────────────────────────
 
-  it('filesSkipped counts non-TS files that git reports changed', async () => {
+  it('filesSkipped counts non-indexable files that git reports changed', async () => {
     // Add a markdown file — not an indexable language, so it will get
     // a skipReason from fileDeltaForOnePath.
     fs.writeFileSync(path.join(testDir, 'README.md'), '# Hello\n');
-    fs.writeFileSync(path.join(testDir, 'data.json'), '{"key": "value"}\n');
+    fs.writeFileSync(path.join(testDir, 'data.unsupported'), 'key=value\n');
 
     const result = await compareToRef(cg);
     expect(result.error).toBeUndefined();
-    // At least the two non-TS files should be skipped.
+    // At least the two non-indexable files should be skipped.
     expect(result.filesSkipped).toBeGreaterThanOrEqual(2);
     // The skipped count should equal the number of files with a skipReason.
     const skippedInFiles = result.files.filter((f) => f.skipReason !== undefined).length;

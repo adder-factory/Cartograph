@@ -85,7 +85,7 @@ async function defaultFileExists(path: string): Promise<boolean> {
 function readProcessStdin(): Promise<string> {
   return new Promise<string>((resolve, reject) => {
     const chunks: Buffer[] = [];
-    process.stdin.on('data', (c) => chunks.push(c));
+    process.stdin.on('data', (c) => chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c)));
     process.stdin.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
     process.stdin.on('error', reject);
   });

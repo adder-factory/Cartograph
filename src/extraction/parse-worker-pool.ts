@@ -276,8 +276,9 @@ export class ParseWorkerPool {
       }
     });
     w.on('error', (err) => {
-      this.opts.logWarn('Parse worker error', { slot: slotIndex, error: err.message });
-      poolRejectPendingForSlot(this.state, slotIndex, `Worker error: ${err.message}`);
+      const message = err instanceof Error ? err.message : String(err);
+      this.opts.logWarn('Parse worker error', { slot: slotIndex, error: message });
+      poolRejectPendingForSlot(this.state, slotIndex, `Worker error: ${message}`);
     });
     w.on('exit', (code) => {
       // Only warn on TRULY unexpected exits — `closing=true` covers

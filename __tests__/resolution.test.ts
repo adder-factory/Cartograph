@@ -1397,7 +1397,8 @@ function processDate(input: string): string {
 
       // Get stats to verify indexing worked
       const stats = cg.stats.getStats();
-      expect(stats.fileCount).toBe(2);
+      // package.json is now indexable via parser-only JSON support.
+      expect(stats.fileCount).toBe(3);
       expect(stats.nodeCount).toBeGreaterThan(0);
     });
 

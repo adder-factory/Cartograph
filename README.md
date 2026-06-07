@@ -280,7 +280,7 @@ cartograph_context({format: "plan"})
 
 ## Supported Languages & File Formats
 
-Cartograph supports **37 language modes**. Framework-aware and derived signals
+Cartograph supports **48 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -298,10 +298,13 @@ are listed separately so the core language matrix stays readable.
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
 | Dart / ReScript / R / Lua / Luau / Elixir | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs` |
+| Haskell / Julia / OCaml | `.hs`, `.jl`, `.ml`, `.mli` |
+| HTML / CSS / ERB / EJS | `.html`, `.htm`, `.css`, `.erb`, `.ejs`, `.eta`, `.etlua` |
 | Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
 | GraphQL / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
+| JSON / JSDoc / Regex / Verilog | `.json`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
 </details>
 

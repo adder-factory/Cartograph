@@ -32,6 +32,6 @@
   <rect x="502" y="304" width="410" height="150" rx="14" fill="#231f3b" stroke="#4f46e5"/>
   <text x="530" y="342" fill="#c7d2fe" font-family="Menlo, Consolas, monospace" font-size="18" font-weight="700">Feature Readiness</text>
   <text x="530" y="378" fill="#eef2ff" font-family="Menlo, Consolas, monospace" font-size="16">MCP tools       36 loaded</text>
-  <text x="530" y="410" fill="#eef2ff" font-family="Menlo, Consolas, monospace" font-size="16">language modes  37 enabled</text>
+  <text x="530" y="410" fill="#eef2ff" font-family="Menlo, Consolas, monospace" font-size="16">language modes  48 enabled</text>
   <text x="530" y="442" fill="#c7d2fe" font-family="Menlo, Consolas, monospace" font-size="16">risk lenses     biomarkers + hotspots</text>
 </svg>

@@ -1,0 +1,8 @@
+:root {
+  --brand-color: #0f766e;
+}
+
+.card {
+  color: var(--brand-color);
+  display: grid;
+}
