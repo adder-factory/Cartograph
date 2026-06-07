@@ -13,7 +13,7 @@ import {
   TESTS_FOR_DESCRIBE_NAME_EXPLAIN_PREFIX,
   TESTS_FOR_SAME_FILE_EXPLAIN_PREFIX,
 } from '../src/mcp/tools/tests-for.js';
-import { renderMarkdownBulletList, renderMarkdownTable } from '../src/mcp/tools/_result-spec.js';
+import { renderMarkdownBulletList, renderMarkdownTable } from '../src/rendering/result-spec.js';
 import type { Node } from '../src/types.js';
 
 describe('cartograph_biomarkers render specs', () => {

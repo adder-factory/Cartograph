@@ -16,7 +16,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Node, SearchResult } from '../src/types.js';
 import { buildSearchSemanticConceptSpec } from '../src/mcp/tools/_search-semantic.js';
-import { renderMarkdownCardList } from '../src/mcp/tools/_result-spec.js';
+import { renderMarkdownCardList } from '../src/rendering/result-spec.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 

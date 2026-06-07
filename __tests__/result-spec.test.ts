@@ -1,5 +1,5 @@
 /**
- * `_result-spec.ts` — `MarkdownTableSpec` + `renderMarkdownTable`
+ * `result-spec.ts` — `MarkdownTableSpec` + `renderMarkdownTable`
  * contract tests, plus a wording-alignment lint that checks the spec's
  * user-visible strings match the tool's `.describe()` text.
  *
@@ -22,7 +22,7 @@ import {
   type MarkdownKeyValueCardSpec,
   type MarkdownTableColumn,
   type MarkdownTableSpec,
-} from '../src/mcp/tools/_result-spec.js';
+} from '../src/rendering/result-spec.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
 
