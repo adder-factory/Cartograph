@@ -169,6 +169,51 @@ export function isDirExcluded(relativePath: string, exclude: readonly string[]):
   return false;
 }
 
+/**
+ * Walk every parent directory of the given files and return directories
+ * containing `.cartographignore`. Git-backed scans and filesystem fallback
+ * scans both consume this policy so marker behavior cannot diverge.
+ */
+export function findCartographIgnoredDirs(rootDir: string, files: Iterable<string>): Set<string> {
+  const dirs = new Set<string>(['.']);
+  for (const file of files) {
+    let dir = path.posix.dirname(normalizePath(file));
+    while (dir && dir !== '.' && dir !== '/') {
+      if (dirs.has(dir)) break;
+      dirs.add(dir);
+      dir = path.posix.dirname(dir);
+    }
+  }
+
+  const ignored = new Set<string>();
+  for (const dir of dirs) {
+    const marker =
+      dir === '.' ? path.join(rootDir, CARTOGRAPH_IGNORE_MARKER) : path.join(rootDir, dir, CARTOGRAPH_IGNORE_MARKER);
+    if (fs.existsSync(marker)) ignored.add(dir);
+  }
+  return ignored;
+}
+
+/**
+ * True if `filePath` lives under a `.cartographignore` directory.
+ * Directory `.` matches the project root.
+ */
+export function isUnderCartographIgnoredDir(filePath: string, ignoredDirs: Set<string>): boolean {
+  if (ignoredDirs.size === 0) return false;
+  if (ignoredDirs.has('.')) return true;
+  let dir = path.posix.dirname(filePath);
+  while (dir && dir !== '.' && dir !== '/') {
+    if (ignoredDirs.has(dir)) return true;
+    dir = path.posix.dirname(dir);
+  }
+  return false;
+}
+
+/** True when `dir` opts out of indexing with a `.cartographignore` marker. */
+export function hasCartographIgnoreMarker(dir: string): boolean {
+  return fs.existsSync(path.join(dir, CARTOGRAPH_IGNORE_MARKER));
+}
+
 function parseGitLinesToPrefixedPaths(output: string | null, prefix: string): string[] {
   if (!output) return [];
   const paths: string[] = [];

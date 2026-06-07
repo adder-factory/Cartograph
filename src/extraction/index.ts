@@ -26,16 +26,18 @@ import { getCurrentHeadSha, isCartographMetaPath } from '../git-utils.js';
 import { matchesGlob as globMatches } from '../glob.js';
 import { runSequential } from '../utils/async-iteration.js';
 import {
-  CARTOGRAPH_IGNORE_MARKER,
   GIT_LIST_MAX_BUFFER_BYTES,
   GIT_LIST_TIMEOUT_MS,
   GIT_PROBE_TIMEOUT_MS,
   collectEmbeddedRepoFilesInto,
   collectSubmoduleFilesInto,
+  findCartographIgnoredDirs,
   findEmbeddedGitRepositories,
   getGitSubmodules,
   getNestedGitRepoFiles,
+  hasCartographIgnoreMarker,
   isDirExcluded,
+  isUnderCartographIgnoredDir,
   parseGitLinesToPaths,
   safeReaddir,
   safeRealpath,
@@ -722,51 +724,6 @@ function partitionCandidates(
 }
 
 /**
- * Walk every parent directory of the given files (relative to rootDir) and
- * return the subset that contain a `.cartographignore` marker. Anything
- * under one of these directories should be excluded.
- *
- * Called by `scanDirectory`, `scanDirectoryAsync`, and `getGitChangedFiles`
- * so the git-driven paths honor the marker the same way the filesystem
- * walk fallback does. Without this the marker had inconsistent behavior:
- * respected on non-git projects, silently ignored on git ones.
- */
-function findCartographIgnoredDirs(rootDir: string, files: Iterable<string>): Set<string> {
-  const dirs = new Set<string>(['.']);
-  for (const file of files) {
-    let dir = path.posix.dirname(normalizePath(file));
-    while (dir && dir !== '.' && dir !== '/') {
-      if (dirs.has(dir)) break; // already enumerated this branch
-      dirs.add(dir);
-      dir = path.posix.dirname(dir);
-    }
-  }
-
-  const ignored = new Set<string>();
-  for (const dir of dirs) {
-    const marker =
-      dir === '.' ? path.join(rootDir, CARTOGRAPH_IGNORE_MARKER) : path.join(rootDir, dir, CARTOGRAPH_IGNORE_MARKER);
-    if (fs.existsSync(marker)) ignored.add(dir);
-  }
-  return ignored;
-}
-
-/**
- * True if `filePath` (relative, forward-slashed) lives under any directory
- * in `ignoredDirs`. Directory `.` matches the project root.
- */
-function isUnderCartographIgnoredDir(filePath: string, ignoredDirs: Set<string>): boolean {
-  if (ignoredDirs.size === 0) return false;
-  if (ignoredDirs.has('.')) return true;
-  let dir = path.posix.dirname(filePath);
-  while (dir && dir !== '.' && dir !== '/') {
-    if (ignoredDirs.has(dir)) return true;
-    dir = path.posix.dirname(dir);
-  }
-  return false;
-}
-
-/**
  * Recursively scan directory for source files.
  *
  * In git repos, uses `git ls-files` to get the file list (inherently
@@ -902,7 +859,7 @@ function walkDirRecursive(ctx: ScanWalkCtx, dir: string): void {
   ctx.visitedDirs.add(realDir);
 
   // .cartographignore marker file opts a directory out of indexing entirely.
-  if (fs.existsSync(path.join(dir, CARTOGRAPH_IGNORE_MARKER))) {
+  if (hasCartographIgnoreMarker(dir)) {
     logDebug('Skipping directory due to .cartographignore marker', { dir });
     return;
   }
