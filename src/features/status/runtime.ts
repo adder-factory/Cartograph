@@ -2,6 +2,7 @@ import { classifyChangedFiles, realModifiedCount as computeRealModified } from '
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import { resolveStatusRollups } from './rollup-options.js';
+import { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots } from './rollups.js';
 
 export { STATUS_MAX_INLINE_TOP_N } from './rollup-options.js';
 
@@ -17,13 +18,9 @@ export interface StatusRollupConfig {
   topHotspots: number;
   topBiomarkers: number;
   summaryBreakdown: boolean;
-  appendFeatureReadiness: (
-    lines: string[],
-    cg: any,
-    options: { summaryBreakdown: boolean; surface?: 'mcp' | 'cli' },
-  ) => void;
-  appendInlineHotspots: (lines: string[], cg: any, topN: number) => void;
-  appendInlineBiomarkers: (lines: string[], cg: any, topN: number) => void;
+  appendFeatureReadiness: typeof appendFeatureReadiness;
+  appendInlineHotspots: typeof appendInlineHotspots;
+  appendInlineBiomarkers: typeof appendInlineBiomarkers;
 }
 
 interface StatusStyle {
@@ -83,9 +80,6 @@ export interface PrintPendingChangesArgs {
 }
 
 export async function buildStatusRollupConfig(options: StatusOptions): Promise<StatusRollupConfig> {
-  const { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots } = await import(
-    '../../mcp/tools/status.js'
-  );
   const rollups = resolveStatusRollups(options);
   return {
     ...rollups,

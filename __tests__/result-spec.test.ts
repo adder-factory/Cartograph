@@ -147,7 +147,7 @@ import {
   STATUS_BIOMARKERS_PENDING_NOTE,
   buildStatusInlineHotspotsSpec,
   buildStatusInlineBiomarkersSpec,
-} from '../src/mcp/tools/status.js';
+} from '../src/features/status/rollups.js';
 import { buildDiscoverContextsSpec } from '../src/mcp/tools/discover.js';
 import {
   buildBiomarkerStatsByBiomarkerSpec,
