@@ -1,8 +1,7 @@
 /**
  * Top-level read-query CLI commands (at-range / ask / status / find /
  * digest / files / affected) — extracted from the bin/cartograph.ts
- * decomposition; side-effecting module: importing it registers the
- * commands on `program`.
+ * decomposition.
  */
 import * as fs from 'node:fs';
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
@@ -152,8 +151,6 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerFilesReadCommand(deps);
   registerAffectedReadCommand(deps);
 }
-
-registerReadCommands();
 
 export const __readCommandInternals = {
   parseFieldsOption,

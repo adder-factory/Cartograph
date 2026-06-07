@@ -33,5 +33,3 @@ const defaultReviewCommandDeps: ReviewCommandDeps = {
 export function registerReviewCommands(deps: ReviewCommandDeps = defaultReviewCommandDeps): void {
   registerReviewFeatureCommands(deps);
 }
-
-registerReviewCommands();
