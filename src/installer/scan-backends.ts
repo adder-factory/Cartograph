@@ -194,7 +194,7 @@ function identifyFromHeader(header: string): DetectedBackendKind | null {
  *  `/v1` segment so `http://localhost:8080`, `http://localhost:8080/`,
  *  and `http://localhost:8080/v1` all dedup to the same canonical
  *  form. Exported so callers comparing a configured endpoint against
- *  scanner output (e.g. `doctor.ts`'s reachability check) share one
+ *  scanner output (e.g. doctor's reachability check) share one
  *  normalisation rule with the scanner. */
 export function normaliseEndpoint(endpoint: string): string {
   const trimmed = endpoint.endsWith('/') ? endpoint.slice(0, -1) : endpoint;

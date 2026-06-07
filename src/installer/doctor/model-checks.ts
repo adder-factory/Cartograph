@@ -1,0 +1,284 @@
+import * as fsp from 'node:fs/promises';
+import * as path from 'node:path';
+import { loadConfig } from '../../config.js';
+import { configuredModelFilesFromLlm, LLM_TIER_KEYS, type ConfiguredModelFile } from '../../features/backend/index.js';
+import { MODELS_DIR_DEFAULT } from '../../llm/recommended-models.js';
+import { formatBytes } from '../../utils.js';
+import type { CheckResult } from './contract.js';
+
+const ENGINES_BUN_MIN = '1.3.0';
+const BUN_DOWNLOAD_URL = 'https://bun.sh';
+const SEMVER_COMPONENT_COUNT = 3;
+const SEMVER_RADIX = 10;
+const MAX_RENDERED_MISSING_MODEL_FILES = 4;
+
+interface PartialModelFile {
+  readonly path: string;
+  readonly sizeBytes: number;
+}
+
+interface MissingConfiguredModelFile extends ConfiguredModelFile {
+  readonly partialDownload: PartialModelFile | null;
+}
+
+function compareSemver(a: string, b: string): number {
+  const pa = a.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
+  const pb = b.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
+  for (let i = 0; i < SEMVER_COMPONENT_COUNT; i++) {
+    const ai = pa[i] ?? 0;
+    const bi = pb[i] ?? 0;
+    if (ai !== bi) return ai - bi;
+  }
+  return 0;
+}
+
+export function checkBunRuntime(): CheckResult {
+  const bunGlobal = (globalThis as { Bun?: { version?: string } }).Bun;
+  if (!bunGlobal) {
+    return {
+      id: 'bun-runtime',
+      name: 'Bun runtime',
+      status: 'fail',
+      detail: 'Not running under Bun (bun:sqlite + bun:ffi are required).',
+      remediation: `Install Bun ≥ ${ENGINES_BUN_MIN} from ${BUN_DOWNLOAD_URL}, then re-run cartograph commands via bun (or via the cartograph binary which spawns bun internally).`,
+    };
+  }
+
+  const version = bunGlobal.version ?? '0.0.0';
+  if (compareSemver(version, ENGINES_BUN_MIN) < 0) {
+    return {
+      id: 'bun-runtime',
+      name: 'Bun runtime',
+      status: 'fail',
+      detail: `Bun ${version} is older than the required ${ENGINES_BUN_MIN}.`,
+      remediation: `Upgrade Bun: \`bun upgrade\` (or reinstall from ${BUN_DOWNLOAD_URL}).`,
+    };
+  }
+
+  return { id: 'bun-runtime', name: 'Bun runtime', status: 'ok', detail: `Bun ${version}` };
+}
+
+export function resolveModelsDir(): string {
+  return process.env['CARTOGRAPH_MODELS_DIR'] ?? MODELS_DIR_DEFAULT;
+}
+
+export async function checkModels(llm: Record<string, unknown> | null): Promise<CheckResult> {
+  if (hasConfiguredLlmTier(llm)) {
+    const localModelFiles = configuredModelFilesFromLlm(llm);
+    if (localModelFiles.length === 0) {
+      return {
+        id: 'llm-models',
+        name: 'LLM models',
+        status: 'ok',
+        detail: 'Current LLM config uses backend model IDs; no local GGUF model directory is required.',
+      };
+    }
+    return {
+      id: 'llm-models',
+      name: 'LLM models',
+      status: 'ok',
+      detail: `${localModelFiles.length} configured local model file path${
+        localModelFiles.length === 1 ? '' : 's'
+      } will be checked from config.`,
+    };
+  }
+
+  const modelsDir = resolveModelsDir();
+  const modelsDirExists = await fsp
+    .access(modelsDir)
+    .then(() => true)
+    .catch(() => false);
+  if (!modelsDirExists) {
+    return {
+      id: 'llm-models',
+      name: 'LLM models',
+      status: 'warn',
+      detail: `${modelsDir} does not exist.`,
+      remediation:
+        '`cartograph admin install-models` to download the recommended GGUF set (~7 GB), ' +
+        'or `cartograph admin install-models --minimal` for the smallest viable subset (embed + 3B chat, ~2.1 GB).',
+    };
+  }
+
+  const entries = await fsp.readdir(modelsDir);
+  const ggufs = entries.filter((f) => f.endsWith('.gguf'));
+  if (ggufs.length === 0) {
+    return {
+      id: 'llm-models',
+      name: 'LLM models',
+      status: 'warn',
+      detail: `${modelsDir} exists but contains no .gguf files.`,
+      remediation: '`cartograph admin install-models` to download the recommended set.',
+    };
+  }
+
+  return {
+    id: 'llm-models',
+    name: 'LLM models',
+    status: 'ok',
+    detail: `${ggufs.length} model${ggufs.length === 1 ? '' : 's'} present under ${modelsDir}`,
+  };
+}
+
+function hasConfiguredLlmTier(llm: Record<string, unknown> | null): boolean {
+  if (!llm) return false;
+  return LLM_TIER_KEYS.some((tier) => {
+    const block = llm[tier];
+    return typeof block === 'object' && block !== null;
+  });
+}
+
+export async function checkProjectInit(projectPath: string): Promise<CheckResult> {
+  const cgDir = path.join(projectPath, '.cartograph');
+  const cgDirExists = await fsp
+    .access(cgDir)
+    .then(() => true)
+    .catch(() => false);
+  if (!cgDirExists) {
+    return {
+      id: 'project-init',
+      name: 'Project init',
+      status: 'fail',
+      detail: `No \`.cartograph/\` directory at ${projectPath}.`,
+      remediation: `\`cartograph admin init ${projectPath}\` to create one.`,
+    };
+  }
+  return { id: 'project-init', name: 'Project init', status: 'ok', detail: `${cgDir} present` };
+}
+
+export async function checkProjectConfig(projectPath: string): Promise<CheckResult> {
+  const configPath = path.join(projectPath, '.cartograph', 'config.json');
+  const configExists = await fsp
+    .access(configPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!configExists) {
+    return {
+      id: 'project-config',
+      name: 'Project config',
+      status: 'warn',
+      detail: `No config.json at ${configPath}.`,
+      remediation:
+        '`cartograph admin install-models --write-config` to regenerate a working recommended config, or hand-author `.cartograph/config.json`.',
+    };
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(await fsp.readFile(configPath, 'utf8')) as Record<string, unknown>;
+  } catch (e) {
+    return {
+      id: 'project-config',
+      name: 'Project config',
+      status: 'fail',
+      detail: `${configPath} is not valid JSON: ${(e as Error).message}`,
+      remediation: 'Hand-fix the JSON, or delete and re-run `cartograph admin init`.',
+    };
+  }
+
+  const llm = parsed['llm'] as Record<string, unknown> | undefined;
+  if (!llm || Object.keys(llm).length === 0) {
+    return {
+      id: 'project-config',
+      name: 'Project config',
+      status: 'warn',
+      detail: `${configPath} present but no \`llm\` block configured.`,
+      remediation:
+        'LLM-driven features (semantic search, dead-code judge, ask) need at least an embedding model. ' +
+        'Run `cartograph admin install-models --write-config` to install + wire the recommended GGUF set in one go.',
+    };
+  }
+
+  try {
+    loadConfig(projectPath);
+  } catch (e) {
+    return {
+      id: 'project-config',
+      name: 'Project config',
+      status: 'fail',
+      detail: `${configPath} failed runtime validation: ${(e as Error).message}`,
+      remediation: 'Fix `.cartograph/config.json`, or re-run `cartograph admin install-models --write-config`.',
+    };
+  }
+
+  return { id: 'project-config', name: 'Project config', status: 'ok', detail: `${configPath} valid` };
+}
+
+export async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): Promise<CheckResult | null> {
+  const configured = configuredModelFilesFromLlm(llm);
+  if (configured.length === 0) return null;
+
+  const missing = (
+    await Promise.all(
+      configured.map(async (entry) => {
+        const exists = await fsp
+          .access(entry.modelPath)
+          .then(() => true)
+          .catch(() => false);
+        return exists ? null : { ...entry, partialDownload: await inspectPartialDownload(entry.modelPath) };
+      }),
+    )
+  ).filter((entry): entry is MissingConfiguredModelFile => entry !== null);
+
+  if (missing.length === 0) {
+    return {
+      id: 'configured-model-files',
+      name: 'Configured model files',
+      status: 'ok',
+      detail: `${configured.length} configured local model file${configured.length === 1 ? '' : 's'} present.`,
+    };
+  }
+
+  const rendered = missing.slice(0, MAX_RENDERED_MISSING_MODEL_FILES).map(renderMissingConfiguredModelFile).join('; ');
+  const suffix =
+    missing.length > MAX_RENDERED_MISSING_MODEL_FILES
+      ? `; +${missing.length - MAX_RENDERED_MISSING_MODEL_FILES} more`
+      : '';
+  const hasPartialDownloads = missing.some((m) => m.partialDownload !== null);
+  return {
+    id: 'configured-model-files',
+    name: 'Configured model files',
+    status: 'warn',
+    detail: `${missing.length} configured local model file${missing.length === 1 ? '' : 's'} missing: ${rendered}${suffix}`,
+    remediation: hasPartialDownloads
+      ? 'A `.partial` file means a previous model download was interrupted; the installer will remove stale partials and retry. Run `cartograph admin install-models` to finish the recommended GGUF set, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.'
+      : 'Install the missing GGUFs, edit/remove the unavailable tier(s), or run `cartograph admin install-models --minimal --write-config` to write an embed + 3B chat config.',
+  };
+}
+
+async function inspectPartialDownload(modelPath: string): Promise<PartialModelFile | null> {
+  const partialPath = `${modelPath}.partial`;
+  try {
+    const stat = await fsp.stat(partialPath);
+    if (!stat.isFile()) return null;
+    return { path: partialPath, sizeBytes: stat.size };
+  } catch {
+    return null;
+  }
+}
+
+function renderMissingConfiguredModelFile(entry: MissingConfiguredModelFile): string {
+  const partial = entry.partialDownload;
+  if (!partial) return `${entry.tier}: ${entry.modelPath}`;
+  return `${entry.tier}: ${entry.modelPath} (partial download found: ${partial.path}, ${formatBytes(
+    partial.sizeBytes,
+  )})`;
+}
+
+/** Pull the parsed `llm` block out of a project's config. */
+export async function readLlmFromConfig(projectPath: string): Promise<Record<string, unknown> | null> {
+  const configPath = path.join(projectPath, '.cartograph', 'config.json');
+  const configExists = await fsp
+    .access(configPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!configExists) return null;
+  try {
+    const parsed = loadConfig(projectPath) as unknown as Record<string, unknown>;
+    const llm = parsed['llm'] as Record<string, unknown> | undefined;
+    if (!llm || typeof llm !== 'object') return null;
+    return llm;
+  } catch {
+    return null;
+  }
+}

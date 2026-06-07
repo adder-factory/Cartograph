@@ -14,10 +14,10 @@
  *      baked in for the detected hardware (e.g. on M4 Max it suggests
  *      `--parallel 8` for embed, `--parallel 4` for chat).
  *
- *   3. `src/installer/doctor.ts` — informational row in the report
- *      surfacing "this is the recommended tuning for your hardware"
- *      so users can self-tune their llama-server invocations even if
- *      they didn't use the wizard.
+ *   3. `src/installer/doctor/backend-checks.ts` — informational row
+ *      in the report surfacing "this is the recommended tuning for
+ *      your hardware" so users can self-tune their llama-server
+ *      invocations even if they didn't use the wizard.
  *
  * Detection budget: pure `os.*` calls + `process.platform` / `arch`.
  * No subprocess spawning (no `nvidia-smi`, no `system_profiler`) —
