@@ -18,7 +18,7 @@ checked-in asset hash here before it is merged.
 Regenerate check:
 
 ```sh
-npm install --no-save tree-sitter-luau@1.2.0
+bun add -d tree-sitter-luau@1.2.0
 bun scripts/build-grammar-wasm.ts --only=luau --force-build
 bun test __tests__/luau-extraction.test.ts __tests__/language-registry.test.ts
 ```

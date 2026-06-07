@@ -8,6 +8,7 @@ export interface CliOptionCommand extends CliCommand {
   command(name: string): CliOptionCommand;
   description(text: string): CliOptionCommand;
   option(...args: unknown[]): CliOptionCommand;
+  addHelpText?(position: string, text: string): CliOptionCommand;
   action(fn: (...args: any[]) => unknown): CliOptionCommand;
 }
 

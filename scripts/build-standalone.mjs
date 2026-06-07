@@ -33,7 +33,7 @@ copyDir('src/features/viewer/static', 'share/cartograph/features/viewer/static')
 copyDir('src', 'share/cartograph/algo-sources/src', (name) => name.endsWith('.ts'));
 copyFile('package.json', 'share/cartograph/package.json');
 copyFile('README.md', 'README.md');
-copyFile('AGENTS.md', 'AGENTS.md');
+copyFile('docs/AGENT-INSTALL.md', 'AGENT-INSTALL.md');
 copyFile('package.json', 'package.json');
 
 if (isWindows) writeWindowsLauncher();

@@ -1,7 +1,8 @@
 # Adding a Language
 
 This is a cookbook for adding a new language to Cartograph. It assumes you have a
-working dev setup (`npm install` and `npm test` pass).
+working dev setup (`bun install`, `bun run typecheck`, and `bun run test:fast`
+pass).
 
 There are three patterns. **Pick the one that matches the language you're adding.**
 
@@ -39,14 +40,17 @@ source with `tree-sitter-cli` (a devDependency; recent versions ship their
 own wasi-sdk — no Docker or local emcc needed). To add one grammar:
 
 ```bash
-# Install the grammar's source package transiently...
-npm install --no-save tree-sitter-foo
+# Install the grammar's source package temporarily...
+bun add -d tree-sitter-foo
 # ...add a GRAMMARS entry in scripts/build-grammar-wasm.ts:
 #   { wasm: 'foo', pkg: 'tree-sitter-foo', sample: '<minimal snippet>' }
 # ...then build just that one:
 bun scripts/build-grammar-wasm.ts --only=foo --force-build
 # → src/extraction/wasm/foo.wasm, load-tested in web-tree-sitter 0.26.x
 ```
+
+Remove the temporary grammar package before committing unless the package is
+intentionally becoming a project dependency.
 
 The `.wasm` must be ABI-compatible with web-tree-sitter 0.26.x (it accepts
 ABI 13-15). The build script load-tests every output — but the load-test
@@ -118,8 +122,8 @@ from it.
 **Step 3a — Create `src/extraction/languages/foo.ts`** with a `LanguageDef`:
 
 ```ts
-import type { LanguageDef } from './types';
-import type { LanguageExtractor } from '../tree-sitter-types';
+import type { LanguageExtractor } from '../tree-sitter-types.js';
+import type { LanguageDef } from './types.js';
 
 // Path A languages (procedural / OO — Python, Ruby, R) define a
 // LanguageExtractor here and reference it from the def below.
@@ -147,7 +151,7 @@ export const FOO_DEF: LanguageDef = {
 **Step 3b — Register in `src/extraction/languages/registry.ts`** (2 lines):
 
 ```ts
-import { FOO_DEF } from './foo';   // alphabetical
+import { FOO_DEF } from './foo.js';   // alphabetical
 // ...
 const ALL_DEFS: readonly LanguageDef[] = [
   // ... existing definitions, alphabetical
@@ -156,11 +160,11 @@ const ALL_DEFS: readonly LanguageDef[] = [
 ];
 ```
 
-**Step 3c — Add `'foo'` to the `Language` union (`src/types.ts`) AND to
+**Step 3c — Add `'foo'` to the `Language` union (`src/graph/core-types.ts`) AND to
 `VALID_LANGUAGES` (`src/config.ts`)** — two lines, two files:
 
 ```ts
-// src/types.ts
+// src/graph/core-types.ts
 export type Language =
   | 'typescript'
   | ...
@@ -177,27 +181,32 @@ const VALID_LANGUAGES = [
 ] as const satisfies readonly Language[];
 ```
 
-`DEFAULT_CONFIG.include`, `EXTENSION_MAP`, the `EXTRACTORS` lookup, and
+`DEFAULT_CONFIG.include`, `EXTENSION_MAP`, the legacy `EXTRACTORS` lookup, and
 `getLanguageDisplayName()` are all derived from the registry — no other
-parallel lists to keep in sync. New languages registered only via the
-registry (without the union / `VALID_LANGUAGES` entries) still work at
-runtime — those two are for TypeScript narrowing in language-specific code.
+parallel lists to keep in sync. Add the union and `VALID_LANGUAGES` entries in
+the same change so config validation, TypeScript narrowing, and extractor code
+all agree.
 
 > **Why per-file?** Two PRs adding two different languages used to collide on
 > the same `EXTRACTORS` map, the same `EXTENSION_MAP`, the same `Language`
-> union, and the same `WASM_GRAMMAR_FILES` table. With per-file `LanguageDef`s,
-> two language PRs only conflict if their alphabetical positions in `registry.ts`
-> happen to land on the same line — almost never. See `src/extraction/languages/`
-> for ~20 worked examples.
+> union, and the same central wasm table. With per-file `LanguageDef`s, two
+> language PRs only conflict if their alphabetical positions in `registry.ts`
+> happen to land on the same line — almost never. See
+> `src/extraction/languages/` for worked examples.
 
-**`CLAUDE.md`** — append the language to the "Supported Languages" line so the
-LLM-readable architecture doc stays in sync.
+Update the public docs in the same change:
+
+- Add the language to `docs/SUPPORT-MATRIX.md`.
+- If the README compact matrix needs a new grouping, update `README.md`.
+
+`__tests__/readme-drift.test.ts` checks the registry count and support-matrix
+display names so public docs fail fast when a language is added without docs.
 
 ---
 
 ## 4. Type-check before writing the extractor
 
-Run `npm run typecheck` now (tsgo — fast). If it's not clean, the wiring is
+Run `bun run typecheck` now (tsgo — fast). If it's not clean, the wiring is
 wrong — fix that before adding extraction logic, otherwise type errors will
 pile up.
 
@@ -209,7 +218,7 @@ Use this when the language has named function/class/method declarations (Python,
 Java, R, etc.). Create `src/extraction/languages/<lang>.ts`:
 
 ```ts
-import type { LanguageExtractor } from '../tree-sitter-types';
+import type { LanguageExtractor } from '../tree-sitter-types.js';
 
 export const fooExtractor: LanguageExtractor = {
   // Map AST node types → graph kinds. Empty array = "this kind doesn't
@@ -274,9 +283,9 @@ different shape than functions/classes/methods (Liquid templates, Pascal `.dfm` 
 files). Create `src/extraction/<lang>-extractor.ts`:
 
 ```ts
-import { Node, Edge, ExtractionResult, ExtractionError, UnresolvedReference } from '../types';
-import { generateNodeId, getNodeText } from './tree-sitter-helpers';
-import { getParser } from './grammars';
+import type { Edge, ExtractionError, ExtractionResult, Node, UnresolvedReference } from '../types.js';
+import { getParser } from './grammars.js';
+import { generateNodeId, getNodeText } from './tree-sitter-helpers.js';
 
 export class FooExtractor {
   private filePath: string;
@@ -329,8 +338,8 @@ Wire the dispatch via `customExtractor` in your `LanguageDef` (Section 3a):
 
 ```ts
 // in src/extraction/languages/foo.ts
-import { FooExtractor } from '../foo-extractor';
-import type { LanguageDef } from './types';
+import { FooExtractor } from '../foo-extractor.js';
+import type { LanguageDef } from './types.js';
 
 export const FOO_DEF: LanguageDef = {
   name: 'foo',
@@ -410,10 +419,10 @@ shows the `@ignore` convention: grammars suppress keyword pseudo-calls
 
 ## 6. Pick `NodeKind` and `EdgeKind` values
 
-`NodeKind` and `EdgeKind` are fixed unions in `src/types.ts`. Map your language's
-constructs onto the closest existing kind rather than introducing new ones —
-adding a new kind is a cross-cutting change that touches search, resolution, and
-context-building code.
+`NodeKind` and `EdgeKind` are fixed unions in `src/graph/core-types.ts`
+re-exported by `src/types.ts`. Map your language's constructs onto the closest
+existing kind rather than introducing new ones — adding a new kind is a
+cross-cutting change that touches search, resolution, and context-building code.
 
 Common mappings used by recent extractors:
 
@@ -486,10 +495,11 @@ particular attention to:
 - Anything you intentionally skipped (anonymous lambdas, dynamic imports, etc.)
   with a negative assertion so the omission is documented
 
-Run the suite serialized to avoid the file-watcher tests' parallel flakiness:
+Run the focused language guards first, then the fast suite:
 
 ```bash
-npx vitest run --no-file-parallelism
+bun test --timeout 30000 __tests__/language-coverage.test.ts __tests__/pr19-improvements.test.ts
+bun run test:fast
 ```
 
 End-to-end smoke test from a fresh fixture before opening the PR:
@@ -499,15 +509,15 @@ SMOKE=$(mktemp -d) && cat > "$SMOKE/main.foo" <<'EOF'
 ... realistic input ...
 EOF
 cd "$SMOKE" && git init -q
-node <repo>/dist/bin/cartograph.js admin init "$SMOKE"
-node <repo>/dist/bin/cartograph.js admin index "$SMOKE"
-node <repo>/dist/bin/cartograph.js status "$SMOKE"
-node <repo>/dist/bin/cartograph.js context "<symbol>"
+bun <repo>/src/bin/cartograph.ts admin init "$SMOKE"
+bun <repo>/src/bin/cartograph.ts admin index "$SMOKE"
+bun <repo>/src/bin/cartograph.ts status "$SMOKE"
+bun <repo>/src/bin/cartograph.ts find "<symbol>" --by name
 ```
 
-The `status` call should report your file under "Files by Language" with a
-non-zero symbol count, and `context` should surface the symbols you expect at
-the right line numbers.
+The `status` call should report your file under "Languages" with a non-zero
+symbol count, and `find` should surface the symbols you expect at the right
+line numbers.
 
 ### Add a test-bed fixture
 
@@ -540,7 +550,8 @@ Include in the PR description:
 
 - The grammar source + version + license + sha256 (if vendored)
 - A small worked example showing what gets extracted
-- The full test plan (`npm test`, `tsc`, `npm run build`, CLI smoke)
+- The full test plan (`bun run typecheck`, `bun run test:fast`,
+  `bun run build`, CLI smoke)
 - Any known limitations (constructs not supported, AST quirks, things the grammar
   itself can't parse)
 

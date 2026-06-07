@@ -65,3 +65,8 @@ case ":$PATH:" in
 esac
 echo ""
 echo "Run: cartograph --help"
+echo ""
+echo "Agent-friendly project setup:"
+echo "  cd /path/to/your/project"
+echo "  cartograph install --yes --target=auto --location=local"
+echo "  cartograph status --verbose"

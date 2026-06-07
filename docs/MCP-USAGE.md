@@ -15,6 +15,29 @@ cartograph install
 It can configure Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI,
 Antigravity, and Kiro.
 
+## Agent-Assisted Install
+
+For a coding agent working inside the user's project, prefer the
+non-interactive local install:
+
+```sh
+cartograph install --yes --target=auto --location=local
+cartograph status --verbose
+```
+
+If the current agent has no supported local config path, retry global wiring:
+
+```sh
+cartograph install --yes --target=auto --location=global
+```
+
+`--yes` makes the command suitable for agents and CI. In local mode it
+initializes `.cartograph/`, indexes the repository, and defers optional LLM
+setup instead of opening the interactive provider wizard.
+
+The full copy-paste task for users is in
+[Agent-Assisted Install](AGENT-INSTALL.md).
+
 ## Server Profiles
 
 ```sh

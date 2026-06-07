@@ -23,17 +23,28 @@ export interface InstallCommandDeps {
 
 export function registerInstallCommand(deps: InstallCommandDeps): void {
   const { program } = deps;
-  program
+  const install = program
     .command('install')
     .description(
-      'Install cartograph MCP server into one or more agents (Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro)',
+      'Install cartograph MCP server into one or more agents. For agent-run setup, use --yes --target=auto --location=local.',
     )
     .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
-    .option('-y, --yes', 'Non-interactive: defaults to --location=global --target=auto, auto-allow on')
+    .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')
     .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
     .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
     .action((opts: InstallOptions) => runInstallCommand(opts, deps));
+
+  install.addHelpText?.(
+    'after',
+    `
+Examples:
+  cartograph install
+  cartograph install --yes --target=auto --location=local
+  cartograph install --yes --target=auto --location=global
+  cartograph install --print-config codex
+`,
+  );
 }
 
 async function runInstallCommand(options: InstallOptions, deps: InstallCommandDeps): Promise<void> {
