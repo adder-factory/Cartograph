@@ -33,7 +33,7 @@ import {
   type UnresolvedRefBucket,
   type UnresolvedRefNameSample,
 } from '../../db/queries-unresolved-refs.js';
-import { areBiomarkersPending } from './biomarkers.js';
+import { areBiomarkersPending } from '../../biomarkers/pending.js';
 import { classifyChangedFiles, realModifiedCount, type ChangedFiles } from '../../changed-files-classify.js';
 import { shortSha, isShallowClone } from '../../git-utils.js';
 import { z } from 'zod';

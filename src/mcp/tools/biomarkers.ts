@@ -32,6 +32,7 @@ import {
 import { getMetadata } from '../../db/queries-metadata.js';
 import { codeHealthScore } from '../../biomarkers/index.js';
 import { BIOMARKER_NAMES } from '../../biomarkers/types.js';
+import { areBiomarkersPending } from '../../biomarkers/pending.js';
 import { compact } from '../../utils.js';
 import { textResult, truncateOutput } from './shared.js';
 import { renderToolResponse } from './_response.js';
@@ -41,6 +42,7 @@ import type { ToolCtx } from './types.js';
 import type { RefIdCache } from './_id-cache.js';
 import { resolveSymbolToNode, symbolNotFound } from './symbol-resolver.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
+export { areBiomarkersPending } from '../../biomarkers/pending.js';
 
 type BiomarkerSeverity = 'info' | 'warning' | 'error';
 
@@ -123,53 +125,6 @@ export function chooseCentralityDecimals(rows: ReadonlyArray<{ centrality: numbe
 export function formatIndexedAt(raw: string): string {
   const ms = Number(raw);
   return Number.isFinite(ms) ? new Date(ms).toISOString() : raw;
-}
-
-/**
- * Detect the "cross-file findings are stale for this index" state. Two
- * triggers fire it:
- *   1. The transient window between `index --force` clearing all
- *      findings (FK ON DELETE CASCADE on node_id) and the postHook
- *      repopulating them.
- *   2. Steady-state file editing: incremental syncs only run per-file
- *      rules, so any save that bumps `index_timestamp` invalidates the
- *      cross-file pass timestamp until a full pass runs (admin index,
- *      or a no-op sync that takes the full-pass branch).
- *
- * Implementation (G10.7, 2026-05-21): compare the
- * `biomarker_cross_file_pass_at` timestamp (stamped at the end of every
- * full-pass `analyseProject` — see `src/biomarkers/index.ts`) against
- * `index_timestamp`. If the cross-file pass timestamp is missing OR
- * older than the current index, the table reflects a prior index
- * generation and findings should be treated as pending. Otherwise the
- * table is authoritative — INCLUDING the genuinely-clean case where the
- * pass completed with zero findings.
- *
- * Replaces the prior heuristic ("empty table + analysable nodes ⇒
- * pending") which couldn't distinguish a clean project from a stalled
- * pass. The heuristic burned ~30 minutes diagnosing a non-hang during
- * G10.6.
- *
- * Returns `true` when findings should be treated as pending rather than
- * authoritative.
- *
- * @internal Exported for unit-testing.
- */
-export function areBiomarkersPending(cg: import('../../index.js').default): boolean {
-  try {
-    const passAtRaw = getMetadata(cg.queries, 'biomarker_cross_file_pass_at');
-    if (!passAtRaw) return true; // Never completed a full pass.
-    const passAt = Number(passAtRaw);
-    if (!Number.isFinite(passAt)) return true; // Corrupt value — treat as pending.
-    const indexedAtRaw = getMetadata(cg.queries, 'index_timestamp');
-    if (!indexedAtRaw) return false; // No index yet — pending check is meaningless.
-    const indexedAt = Number(indexedAtRaw);
-    if (!Number.isFinite(indexedAt)) return false; // Bad value — fail open to "not pending".
-    return passAt < indexedAt;
-  } catch {
-    // Fail open: if we can't query metadata, don't suppress the "clean" result.
-    return false;
-  }
 }
 
 /** mode=stats — project-wide biomarker rollup with per-biomarker severity breakdown. */

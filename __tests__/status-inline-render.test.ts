@@ -9,7 +9,7 @@ import * as summaryQueries from '../src/db/queries-summaries.js';
 import * as unresolvedRefQueries from '../src/db/queries-unresolved-refs.js';
 import * as gitUtils from '../src/git-utils.js';
 import * as detachedSummarize from '../src/llm/detached-summarize.js';
-import * as biomarkerTool from '../src/mcp/tools/biomarkers.js';
+import * as biomarkerPending from '../src/biomarkers/pending.js';
 
 const state = {
   hotspots: [] as Array<{
@@ -61,7 +61,7 @@ vi.spyOn(findingQueries, 'getFindingsStats').mockImplementation((() => ({
   totalFindings: state.totalFindings,
 })) as never);
 
-vi.spyOn(biomarkerTool, 'areBiomarkersPending').mockImplementation((() => state.pending) as never);
+vi.spyOn(biomarkerPending, 'areBiomarkersPending').mockImplementation((() => state.pending) as never);
 
 vi.spyOn(gitUtils, 'isShallowClone').mockImplementation((() => state.shallowClone) as never);
 vi.spyOn(gitUtils, 'shortSha').mockImplementation(((sha: string, len = 12) => sha.slice(0, len)) as never);

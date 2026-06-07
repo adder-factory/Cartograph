@@ -21,7 +21,7 @@ import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { setMetadata } from '../src/db/queries-metadata.js';
-import { areBiomarkersPending } from '../src/mcp/tools/biomarkers.js';
+import { areBiomarkersPending } from '../src/biomarkers/pending.js';
 
 function makeCgLike(queries: QueryBuilder, db: DatabaseConnection): { queries: QueryBuilder; db: DatabaseConnection } {
   // areBiomarkersPending only consumes cg.queries; the cg.db field is
