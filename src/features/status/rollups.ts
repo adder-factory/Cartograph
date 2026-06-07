@@ -29,7 +29,7 @@ import {
   type UnresolvedRefBucket,
   type UnresolvedRefNameSample,
 } from '../../db/queries-unresolved-refs.js';
-import { renderMarkdownBulletList, type MarkdownBulletListSpec } from '../../mcp/tools/_result-spec.js';
+import { renderMarkdownBulletList, type MarkdownBulletListSpec } from '../../rendering/result-spec.js';
 
 function rollupCountPhrase(shown: number, requestedTopN: number, noun: string): string {
   const plural = shown === 1 ? noun : `${noun}s`;
