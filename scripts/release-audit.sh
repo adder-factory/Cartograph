@@ -7,8 +7,11 @@ set -euo pipefail
 echo "== typecheck =="
 bun run typecheck
 
+echo "== architecture gate =="
+bun run check:architecture
+
 echo "== biome check =="
-bun run check
+bun run check:biome
 
 echo "== MCP load budget =="
 bun run check:mcp-load

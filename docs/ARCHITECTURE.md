@@ -76,6 +76,11 @@ These are the current owner modules future sessions should preserve:
 - Biomarker floor enforcement lives in `scripts/check-biomarkers.mjs`; keep the
   bar at 0 error / 0 warning / 0 info unless the user explicitly changes the
   project standard.
+- Architecture drift enforcement lives in `scripts/check-architecture.mjs` and
+  runs through `check:architecture` plus the aggregate `check` script. Keep
+  high-signal ownership rules there when they can be checked statically:
+  adapter direction, resolver registration/language gates, discovery-policy
+  ownership, broad bucket bans, and central-file growth budgets.
 
 Avoid adding new "misc" or "shared" buckets unless the contract is genuinely
 cross-feature and already has multiple consumers. Prefer putting helpers next
@@ -204,6 +209,10 @@ Every feature-slice change should run:
 - `bun run typecheck`
 - `bun run check`
 - focused tests for the touched feature
+
+`bun run check` includes `check:architecture`, so feature-slice drift fails in
+the same gate as lint/format. Use `bun run check:architecture` directly when
+you are touching boundaries and want faster feedback.
 
 Run broader checks when public contracts or shared behavior change:
 
