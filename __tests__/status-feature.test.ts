@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { buildStatusRollupConfig, createStatusPrinter } from '../src/features/status/runtime.js';
+import {
+  parseInlineTopN,
+  resolveStatusRollups,
+  STATUS_MAX_INLINE_TOP_N,
+} from '../src/features/status/rollup-options.js';
 
 const FAKE_FILE_COUNT = 3;
 const FAKE_NODE_COUNT = 8;
@@ -91,6 +96,17 @@ describe('status feature runtime', () => {
     );
     expect(out).toContain('LLM Enrichment');
     expect(out).toContain('No LLM configured');
+  });
+
+  it('owns inline rollup option normalization at the feature boundary', () => {
+    expect([undefined, null, -1, 0, Number.NaN, 'nope'].map(parseInlineTopN)).toEqual([0, 0, 0, 0, 0, 0]);
+    expect(parseInlineTopN('1.9')).toBe(1);
+    expect(parseInlineTopN(999)).toBe(STATUS_MAX_INLINE_TOP_N);
+    expect(resolveStatusRollups({ verbose: true, topHotspots: 1, topBiomarkers: 0 })).toEqual({
+      topHotspots: 1,
+      topBiomarkers: 5,
+      summaryBreakdown: true,
+    });
   });
 });
 
