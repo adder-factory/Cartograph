@@ -430,15 +430,28 @@ function resolveRustBoundType(bound: SyntaxNode): SyntaxNode | null {
 function extractCSharpBaseList(extractor: TreeSitterExtractor, child: SyntaxNode, classId: string): void {
   for (const baseType of child.namedChildren) {
     if (!baseType) continue;
-    const name =
-      baseType.type === 'generic_name'
-        ? getNodeText(
-            baseType.namedChildren.find((c: SyntaxNode) => c.type === 'identifier') ?? baseType,
-            extractor.source,
-          )
-        : getNodeText(baseType, extractor.source);
+    const name = csharpBaseTypeName(baseType, extractor.source);
+    if (!name) continue;
     pushInheritanceRef({ extractor, classId, name, kind: 'extends', posNode: baseType });
   }
+}
+
+function csharpBaseTypeName(baseType: SyntaxNode, source: string): string | null {
+  if (baseType.type === 'argument_list') return null;
+  if (baseType.type === 'generic_name') {
+    return getNodeText(baseType.namedChildren.find((c: SyntaxNode) => c.type === 'identifier') ?? baseType, source);
+  }
+  if (baseType.type === 'qualified_name') {
+    for (let i = baseType.namedChildCount - 1; i >= 0; i--) {
+      const child = baseType.namedChild(i);
+      if (child?.type === 'identifier' || child?.type === 'generic_name') {
+        return csharpBaseTypeName(child, source);
+      }
+    }
+    return getNodeText(baseType, source);
+  }
+  if (baseType.type === 'identifier') return getNodeText(baseType, source);
+  return null;
 }
 
 /**

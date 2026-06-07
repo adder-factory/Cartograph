@@ -16,6 +16,9 @@ import { hermesTarget } from './hermes.js';
 import { geminiTarget } from './gemini.js';
 import { antigravityTarget } from './antigravity.js';
 import { kiroTarget } from './kiro.js';
+import { factoryTarget } from './factory.js';
+import { rovoTarget } from './rovo.js';
+import { qoderTarget } from './qoder.js';
 
 export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   claudeTarget,
@@ -26,6 +29,9 @@ export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   geminiTarget,
   antigravityTarget,
   kiroTarget,
+  factoryTarget,
+  rovoTarget,
+  qoderTarget,
 ]);
 
 export function getTarget(id: string): AgentTarget | undefined {

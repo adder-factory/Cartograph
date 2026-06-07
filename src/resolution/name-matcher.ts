@@ -691,27 +691,55 @@ const INSTANCE_RECEIVER_CONFIDENCE = 0.8;
  * Try to resolve by method name on a class/object
  */
 function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
-  // Parse method call patterns: `obj.method` (dotted) or `Class::method` (scoped).
-  const match = /^(\w+)\.(\w+)$/.exec(ref.referenceName) ?? /^(\w+)::(\w+)$/.exec(ref.referenceName);
-  if (!match) return null;
-  const [, objectOrClass, methodName] = match;
-  if (!objectOrClass || !methodName) return null;
+  const chained = matchReturnedReceiverMethodCall(ref, context);
+  if (chained) return chained;
 
-  // JVM-only: the caller file's imports name the FQN of each
-  // referenced class. The map drives same-name disambiguation in
-  // both Strategy 1 (direct `Foo.bar()`) and Strategy 2 (field
-  // receiver `foo.bar()` capitalized to `Foo`). Computed once per
-  // ref to avoid re-walking the file's import nodes.
-  //
-  // Kotlin alias quirk: `import com.example.a.Service as ABackend`
-  // adds `ABackend → com.example.a.Service` to the map. When the
-  // caller writes `aBackend.run()`, Strategy 2 capitalizes to
-  // `ABackend` and hits the alias. The class's actual simple name
-  // is the FQN's last segment (`Service`), NOT the alias key, so
-  // `jvmClassLookupName` translates alias→real name before lookup.
-  const jvmImportFqnMap = isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined;
+  const parsed = parseSimpleMethodCall(ref.referenceName);
+  if (!parsed) return null;
 
-  const direct = findReceiverMethod({
+  const args = buildMethodCallMatchArgs(ref, context, parsed);
+  return (
+    matchDirectReceiverMethod(args) ??
+    matchReceiverFallbackMethod(args) ??
+    (shouldSuppressUnbackedBuiltinMethod(args) ? null : matchMethodByNameOverlap(args))
+  );
+}
+
+interface SimpleMethodCall {
+  objectOrClass: string;
+  methodName: string;
+}
+
+interface MethodCallMatchArgs extends SimpleMethodCall {
+  ref: UnresolvedRef;
+  context: ResolutionContext;
+  capitalizedReceiver: string;
+  jvmImportFqnMap: Map<string, string> | undefined;
+}
+
+function parseSimpleMethodCall(refName: string): SimpleMethodCall | null {
+  const match = /^(\w+)\.(\w+)$/.exec(refName) ?? /^(\w+)::(\w+)$/.exec(refName);
+  if (!match?.[1] || !match[2]) return null;
+  return { objectOrClass: match[1], methodName: match[2] };
+}
+
+function buildMethodCallMatchArgs(
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+  parsed: SimpleMethodCall,
+): MethodCallMatchArgs {
+  return {
+    ...parsed,
+    ref,
+    context,
+    capitalizedReceiver: parsed.objectOrClass.charAt(0).toUpperCase() + parsed.objectOrClass.slice(1),
+    jvmImportFqnMap: isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined,
+  };
+}
+
+function matchDirectReceiverMethod(args: MethodCallMatchArgs): ResolvedRef | null {
+  const { objectOrClass, methodName, ref, context, jvmImportFqnMap } = args;
+  return findReceiverMethod({
     receiverName: objectOrClass,
     methodName,
     ref,
@@ -720,72 +748,97 @@ function matchMethodCall(ref: UnresolvedRef, context: ResolutionContext): Resolv
     confidence: QUALIFIED_RECEIVER_CONFIDENCE,
     resolvedBy: 'qualified-name',
   });
-  if (direct) return direct;
+}
 
-  // Strategy 2 — instance-variable receiver, try the capitalized form to
-  // find the matching class. e.g. `permissionEngine.foo()` → look for
-  // a `PermissionEngine` class.
-  const capitalizedReceiver = objectOrClass.charAt(0).toUpperCase() + objectOrClass.slice(1);
-  const capitalized = findCapitalizedReceiverMethod({
-    objectOrClass,
-    capitalizedReceiver,
-    methodName,
-    ref,
-    context,
-    jvmImportFqnMap,
-  });
-  if (capitalized) return capitalized;
+function matchReceiverFallbackMethod(args: MethodCallMatchArgs): ResolvedRef | null {
+  return (
+    findCapitalizedReceiverMethod(args) ??
+    findInferredFieldReceiverMethod({ ...args, inferType: inferJavaFieldReceiverType }) ??
+    findInferredFieldReceiverMethod({ ...args, inferType: inferTsJsFieldReceiverType })
+  );
+}
 
-  // F#64a (B11) — Strategy 2.5: JVM-only field-receiver type inference.
-  // When `fooConverter` doesn't capitalize cleanly to the declared
-  // class name (`UserBO userbo` → capitalize is `Userbo`, not `UserBO`),
-  // look up the receiver name in the enclosing class's field
-  // declarations and read the field's declared type from its
-  // signature. The declared type IS the class name we should resolve
-  // against. Strictly more permissive than Strategy 2 (which only
-  // handles the camel-case convention).
-  const fromField = findInferredFieldReceiverMethod({
-    objectOrClass,
-    capitalizedReceiver,
-    methodName,
-    ref,
-    context,
-    jvmImportFqnMap,
-    inferType: inferJavaFieldReceiverType,
-  });
-  if (fromField) return fromField;
-
-  const fromTsJsField = findInferredFieldReceiverMethod({
-    objectOrClass,
-    capitalizedReceiver,
-    methodName,
-    ref,
-    context,
-    jvmImportFqnMap,
-    inferType: inferTsJsFieldReceiverType,
-  });
-  if (fromTsJsField) return fromTsJsField;
-
-  // F2 — strategies 1/2 having failed means the receiver (`objectOrClass`
-  // / its capitalized form) is NOT a known user class. If the method
-  // name is also a builtin prototype method (`someMap.set`, `arr.map`),
-  // strategy 3's pure method-name overlap match would land the call on
-  // a coincidental user homonym (e.g. `QueryBuilder.set`). With the
-  // receiver demonstrably not a user type AND no concrete import
-  // backing, suppress — leave the call unresolved instead of guessing.
-  if (
+function shouldSuppressUnbackedBuiltinMethod(args: MethodCallMatchArgs): boolean {
+  const { objectOrClass, methodName, ref, context } = args;
+  return (
     TS_JS_FAMILY_LANGS.has(ref.language) &&
     ref.referenceKind === 'calls' &&
     TS_JS_BUILTIN_PROTOTYPE_METHODS.has(methodName) &&
     !hasConcreteImportBacking(ref, context, objectOrClass)
-  ) {
-    return null;
-  }
+  );
+}
 
-  // Strategy 3 — method name across the codebase, score by receiver-word
-  // overlap with the containing class. Handles abbreviated variable
-  // names like `permEngine.run()` → `PermissionRuleEngine.run()`.
-  return matchMethodByNameOverlap({ objectOrClass, methodName, ref, context });
+interface ReturnedReceiverCall {
+  objectOrClass: string;
+  factoryMethod: string;
+  methodName: string;
+}
+
+function parseReturnedReceiverCall(refName: string): ReturnedReceiverCall | null {
+  const match = /^(\w+)\.(\w+)\(\)\.(\w+)$/.exec(refName);
+  if (!match) return null;
+  const [, objectOrClass, factoryMethod, methodName] = match;
+  if (!objectOrClass || !factoryMethod || !methodName) return null;
+  return { objectOrClass, factoryMethod, methodName };
+}
+
+function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
+  const parsed = parseReturnedReceiverCall(ref.referenceName);
+  if (!parsed) return null;
+
+  const inner = matchMethodCall(
+    {
+      ...ref,
+      referenceName: `${parsed.objectOrClass}.${parsed.factoryMethod}`,
+    },
+    context,
+  );
+  if (!inner) return null;
+
+  const factoryNode = context.getNodesByName(parsed.factoryMethod).find((n) => n.id === inner.targetNodeId);
+  const returnType = inferCallableReturnType(factoryNode);
+  if (!returnType) return null;
+
+  return findReceiverMethod({
+    receiverName: returnType,
+    methodName: parsed.methodName,
+    ref,
+    context,
+    jvmImportFqnMap: isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined,
+    confidence: INSTANCE_RECEIVER_CONFIDENCE,
+    resolvedBy: 'instance-method',
+  });
+}
+
+function inferCallableReturnType(node: Node | undefined): string | null {
+  if (!node?.signature) return null;
+  const colonReturn = /:\s*([A-Za-z_$][A-Za-z0-9_$:.]*)/.exec(node.signature);
+  if (colonReturn?.[1]) return normalizeReturnTypeName(colonReturn[1]);
+  const arrowReturn = /->\s*([A-Za-z_$][A-Za-z0-9_$:.]*)/.exec(node.signature);
+  if (arrowReturn?.[1]) return normalizeReturnTypeName(arrowReturn[1]);
+
+  const leadingReturn = /^\s*(?:const\s+)?([A-Za-z_$][A-Za-z0-9_$:.]*)[\s*&]*\(/.exec(node.signature);
+  if (leadingReturn?.[1]) return normalizeReturnTypeName(leadingReturn[1]);
+  return null;
+}
+
+function normalizeReturnTypeName(raw: string): string | null {
+  const cleaned = trimReturnTypeDecorators(raw);
+  if (!cleaned || cleaned === 'void') return null;
+  const segments = cleaned.split(/[:.]/);
+  return segments.at(-1) ?? null;
+}
+
+function trimReturnTypeDecorators(raw: string): string {
+  let start = 0;
+  let end = raw.length;
+  while (start < end && isReturnTypeTrimChar(raw[start]!)) start++;
+  while (end > start && isReturnTypeTrimChar(raw[end - 1]!)) end--;
+  return raw.slice(start, end);
+}
+
+function isReturnTypeTrimChar(ch: string): boolean {
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '&' || ch === '*';
 }
 
 interface FindReceiverMethodArgs {

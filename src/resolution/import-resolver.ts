@@ -217,9 +217,10 @@ function resolveRelativeImport(ctx: RelativeImportCtx): string | null {
   const { importPath, language, context, fromDir } = ctx;
   const projectRoot = context.getProjectRoot();
   const extensions = EXTENSION_RESOLUTION[language] || [];
+  const normalizedImportPath = normalizeRelativeImportPath(importPath, language);
 
   // Try the path as-is first
-  const basePath = path.resolve(fromDir, importPath);
+  const basePath = path.resolve(fromDir, normalizedImportPath);
   const relativePath = path.relative(projectRoot, basePath).replaceAll('\\', '/');
 
   // Try each extension
@@ -283,7 +284,34 @@ function resolveAliasedImport(ctx: AliasedImportCtx): string | null {
   if (fromFallback) return fromFallback;
 
   // 3. Direct path.
-  return tryWithExt(importPath);
+  return tryWithExt(normalizeAliasedImportPath(importPath, language));
+}
+
+/**
+ * Python dotted module paths are import syntax, not filesystem syntax:
+ * `from .models import User` should probe `./models.py`, not `.models.py`.
+ * Non-Python languages keep their existing path semantics.
+ */
+function normalizeRelativeImportPath(importPath: string, language: Language): string {
+  if (language !== 'python') return importPath;
+  const dotCount = leadingDotCount(importPath);
+  if (dotCount === 0) return importPath;
+  const rest = importPath.slice(dotCount);
+  const upward = dotCount === 1 ? './' : '../'.repeat(dotCount - 1);
+  if (!rest) return upward.slice(0, -1) || '.';
+  return upward + rest.replaceAll('.', '/');
+}
+
+function leadingDotCount(value: string): number {
+  let count = 0;
+  while (value[count] === '.') count++;
+  return count;
+}
+
+/** Python absolute imports use dotted package names (`pkg.mod`), while
+ * indexed project paths use directory separators (`pkg/mod.py`). */
+function normalizeAliasedImportPath(importPath: string, language: Language): string {
+  return language === 'python' ? importPath.replaceAll('.', '/') : importPath;
 }
 
 /** Try every alias candidate from the project's tsconfig/jsconfig, in priority order. */
@@ -1049,18 +1077,38 @@ function pushNamedReExportsFromBrace(out: ReExport[], source: string, inner: str
  * Returns the import that should drive resolution, or null.
  */
 function pickMatchingImport(ref: UnresolvedRef, imports: ImportMapping[]): ImportMapping | null {
+  return pickLocalImport(ref, imports) ?? pickAliasedSameLineImport(ref, imports);
+}
+
+function pickLocalImport(ref: UnresolvedRef, imports: ImportMapping[]): ImportMapping | null {
   for (const imp of imports) {
     if (imp.localName === ref.referenceName) return imp;
     if (imp.isNamespace && ref.referenceName.startsWith(imp.localName + '.')) return imp;
+    if (isPythonImportedModuleAttribute(ref, imp)) return imp;
   }
-  // Aliased fallback: `import { Exp as Local }` plus a ref keyed on
-  // `Exp`. Uses the ref's line to pick the specific import.
+  return null;
+}
+
+function pickAliasedSameLineImport(ref: UnresolvedRef, imports: ImportMapping[]): ImportMapping | null {
   for (const imp of imports) {
     if (imp.exportedName !== ref.referenceName) continue;
     if (imp.localName === imp.exportedName) continue; // not aliased; covered by pass 1
     if (imp.line !== undefined && imp.line === ref.line) return imp;
   }
   return null;
+}
+
+/**
+ * Python's `from pkg import helpers; helpers.run()` imports the
+ * submodule as a local binding. The mapping is not a namespace import
+ * syntactically, but when the call is attribute-qualified and the
+ * submodule resolves to a real project file, it should behave like one.
+ */
+function isPythonImportedModuleAttribute(ref: UnresolvedRef, imp: ImportMapping): boolean {
+  if (ref.language !== 'python') return false;
+  if (imp.isNamespace) return false;
+  if (imp.localName !== imp.exportedName) return false;
+  return ref.referenceName.startsWith(`${imp.localName}.`);
 }
 
 /**
@@ -1118,6 +1166,9 @@ export function resolveViaImport(ref: UnresolvedRef, context: ResolutionContext)
   const imp = pickMatchingImport(ref, imports);
   if (!imp) return null;
 
+  const pythonModuleAttribute = resolvePythonImportedModuleAttribute(ref, imp, context);
+  if (pythonModuleAttribute) return pythonModuleAttribute;
+
   const resolvedPath = resolveImportPath({
     importPath: imp.source,
     fromFile: ref.filePath,
@@ -1174,6 +1225,57 @@ export function resolveViaImport(ref: UnresolvedRef, context: ResolutionContext)
   }
 
   return null;
+}
+
+function resolvePythonImportedModuleAttribute(
+  ref: UnresolvedRef,
+  imp: ImportMapping,
+  context: ResolutionContext,
+): ResolvedRef | null {
+  if (!isPythonImportedModuleAttribute(ref, imp)) return null;
+  const memberName = ref.referenceName.slice(imp.localName.length + 1);
+  if (!memberName || memberName.includes('.')) return null;
+
+  const modulePath = isOnlyDots(imp.source) ? `${imp.source}${imp.exportedName}` : `${imp.source}.${imp.exportedName}`;
+  const resolvedPath = resolveImportPath({
+    importPath: modulePath,
+    fromFile: ref.filePath,
+    language: ref.language,
+    context,
+  });
+  if (!resolvedPath) return null;
+
+  const targetNode =
+    findPythonModuleMember(context, resolvedPath, memberName) ??
+    findExportedSymbol({
+      filePath: resolvedPath,
+      want: { isDefault: false, isNamespace: true, exportedName: imp.exportedName, memberName },
+      language: ref.language,
+      context,
+      visited: new Set(),
+    });
+  if (!targetNode) return null;
+
+  return {
+    original: ref,
+    targetNodeId: targetNode.id,
+    confidence: 0.9,
+    resolvedBy: 'import',
+  };
+}
+
+function isOnlyDots(value: string): boolean {
+  if (!value) return false;
+  for (const ch of value) {
+    if (ch !== '.') return false;
+  }
+  return true;
+}
+
+function findPythonModuleMember(context: ResolutionContext, filePath: string, memberName: string): Node | undefined {
+  return context
+    .getNodesInFile(filePath)
+    .find((n) => n.name === memberName && n.kind !== 'import' && n.kind !== 'file');
 }
 
 /** True when an import source is a relative intra-project reference

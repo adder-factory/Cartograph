@@ -179,7 +179,13 @@ export async function runQuietIndex(args: RunQuietIndexArgs): Promise<void> {
     cg.close();
   }
 
-  if (!result.success) process.exit(1);
+  if (!result.success) {
+    for (const err of result.errors) {
+      const location = err.filePath ? `${err.filePath}: ` : '';
+      deps.writeStderr(`${location}${err.message}\n`);
+    }
+    process.exit(1);
+  }
 }
 
 async function runInteractiveIndex(args: InteractiveIndexArgs): Promise<void> {

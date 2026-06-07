@@ -13,7 +13,7 @@ cartograph install
 ```
 
 It can configure Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI,
-Antigravity, and Kiro.
+Antigravity, Kiro, Factory Droid, Rovo Dev, and Qoder CLI.
 
 ## Agent-Assisted Install
 
@@ -150,6 +150,57 @@ cartograph serve --mcp --project-path /absolute/path/to/project
       "type": "local",
       "command": ["cartograph", "serve", "--mcp"],
       "enabled": true
+    }
+  }
+}
+```
+
+### Factory Droid
+
+`~/.factory/mcp.json` or `.factory/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "type": "stdio",
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "disabled": false
+    }
+  }
+}
+```
+
+### Rovo Dev
+
+`~/.rovodev/mcp.json` or `.rovodev/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+For local Rovo profiles, point `mcp.mcpConfigPath` at `.rovodev/mcp.json` if
+the profile does not already load that file.
+
+### Qoder CLI
+
+`~/.qoder/settings.json` or `.qoder/settings.local.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"]
     }
   }
 }

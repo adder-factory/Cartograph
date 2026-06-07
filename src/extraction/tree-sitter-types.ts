@@ -74,6 +74,19 @@ export interface ExtractorContext {
 }
 
 /**
+ * Context passed to language hooks that enrich a class-like declaration
+ * header after the owner node exists and is on the scope stack.
+ */
+export interface ClassLikeHeaderContext {
+  /** Create a child node under the current class-like owner */
+  createNode(args: { kind: NodeKind; name: string; node: SyntaxNode; extra?: Partial<Node> }): Node | null;
+  /** Walk a subtree for type references and attribute them to `fromNodeId` */
+  extractTypeRefs(node: SyntaxNode, fromNodeId: string, kind?: 'type_of' | 'returns' | 'references'): void;
+  /** Current source text */
+  readonly source: string;
+}
+
+/**
  * Language-specific extraction configuration.
  *
  * Each supported language provides an implementation of this interface
@@ -215,6 +228,13 @@ export interface LanguageExtractor {
    * structural nodes (classes, structs, enums).
    */
   isMisparsedFunction?: (name: string, node: SyntaxNode) => boolean;
+
+  /**
+   * Enrich a class-like declaration header after the owner node is created.
+   * Used for language features such as C# primary constructors, where the
+   * constructor signature lives on the class/struct declaration itself.
+   */
+  extractClassLikeHeader?: (node: SyntaxNode, ownerNode: Node, ctx: ClassLikeHeaderContext) => void;
 
   /**
    * Detect bare method calls that don't use call expression syntax.

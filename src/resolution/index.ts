@@ -789,6 +789,10 @@ function resolverCheckDotQualifiedParts(name: string, names: Set<string>): boole
   const receiver = name.substring(0, dotIdx);
   const member = name.substring(dotIdx + 1);
   if (names.has(receiver) || names.has(member)) return true;
+  for (const part of member.split('.')) {
+    const normalized = part.replace(/\(\)$/, '');
+    if (normalized && names.has(normalized)) return true;
+  }
   const capitalized = receiver.charAt(0).toUpperCase() + receiver.slice(1);
   return names.has(capitalized);
 }

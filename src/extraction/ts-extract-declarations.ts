@@ -18,7 +18,7 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import type { Node, NodeKind } from '../types.js';
 import { getNodeText, getChildByField, getPrecedingDocstring, subtreeContainsType } from './tree-sitter-helpers.js';
-import type { LanguageExtractor } from './tree-sitter-types.js';
+import type { ClassLikeHeaderContext, LanguageExtractor } from './tree-sitter-types.js';
 import { compact, isJsFamily } from '../utils.js';
 import { extractDefUseEdges } from './def-use.js';
 import { extractTypeRefsFromSubtree } from './tree-sitter-typerefs.js';
@@ -350,6 +350,17 @@ function visitClassBodyChildren(ext: TreeSitterExtractor, body: SyntaxNode, clas
     }
     ext.visitNode(child);
   }
+}
+
+function makeClassLikeHeaderContext(ext: TreeSitterExtractor): ClassLikeHeaderContext {
+  return {
+    createNode: (args) => ext.createNode(args),
+    extractTypeRefs: (node, fromNodeId, kind) =>
+      extractTypeRefsFromSubtree({ extractor: ext, node, fromNodeId, kind: kind ?? 'type_of' }),
+    get source() {
+      return ext.source;
+    },
+  };
 }
 
 /**
@@ -688,6 +699,7 @@ export function tsExtractClass(ext: TreeSitterExtractor, node: SyntaxNode, kind:
 
   ext.nodeStack.push(classNode.id);
   const body = resolveNodeBody(ext, node) ?? node;
+  ext.extractor.extractClassLikeHeader?.(node, classNode, makeClassLikeHeaderContext(ext));
 
   // For Python: class-body annotations like `class Baz: field: Foo`
   if (ext.language === 'python') {
@@ -769,6 +781,7 @@ export function tsExtractStruct(ext: TreeSitterExtractor, node: SyntaxNode): voi
   extractInheritance(ext, node, structNode.id);
 
   ext.nodeStack.push(structNode.id);
+  ext.extractor.extractClassLikeHeader?.(node, structNode, makeClassLikeHeaderContext(ext));
   for (const child of body.namedChildren) {
     if (!child) continue;
     emitTypeOfEdgeForNamedStructField(ext, child, structNode.id);

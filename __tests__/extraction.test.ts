@@ -2877,6 +2877,50 @@ public class OrderService
     expect(classNode?.name).toBe('OrderService');
     expect(classNode?.visibility).toBe('public');
   });
+
+  it('extracts C# 12 primary constructors as constructor-shaped methods', () => {
+    const code = `
+public class OrderService(IOrderRepository repository, ILogger<OrderService> logger) : BaseService(repository)
+{
+    public async Task<Order> GetOrderAsync(string id)
+    {
+        logger.LogInformation(id);
+        return await repository.FindByIdAsync(id);
+    }
+}
+`;
+    const result = extractFromSource('OrderService.cs', code);
+
+    const classNode = result.nodes.find((n) => n.kind === 'class' && n.name === 'OrderService');
+    expect(classNode).toBeDefined();
+
+    const constructorNode = result.nodes.find((n) => n.kind === 'method' && n.name === 'OrderService');
+    expect(constructorNode).toBeDefined();
+    expect(constructorNode?.qualifiedName).toBe('OrderService::OrderService');
+    expect(constructorNode?.signature).toBe('(IOrderRepository repository, ILogger<OrderService> logger)');
+    expect(
+      result.edges.find((e) => e.kind === 'contains' && e.source === classNode?.id && e.target === constructorNode?.id),
+    ).toBeDefined();
+
+    const constructorTypeRefs = result.unresolvedReferences
+      .filter((r) => r.fromNodeId === constructorNode?.id && r.referenceKind === 'type_of')
+      .map((r) => r.referenceName);
+    expect(constructorTypeRefs).toEqual(expect.arrayContaining(['IOrderRepository', 'ILogger', 'OrderService']));
+    expect(constructorTypeRefs).not.toContain('repository');
+    expect(constructorTypeRefs).not.toContain('logger');
+
+    const extendsRefs = result.unresolvedReferences
+      .filter((r) => r.fromNodeId === classNode?.id && r.referenceKind === 'extends')
+      .map((r) => r.referenceName);
+    expect(extendsRefs).toEqual(['BaseService']);
+
+    const methodNode = result.nodes.find((n) => n.kind === 'method' && n.name === 'GetOrderAsync');
+    expect(methodNode).toBeDefined();
+    const returnRefs = result.unresolvedReferences
+      .filter((r) => r.fromNodeId === methodNode?.id && r.referenceKind === 'returns')
+      .map((r) => r.referenceName);
+    expect(returnRefs).toEqual(expect.arrayContaining(['Task', 'Order']));
+  });
 });
 
 describe('PHP Extraction', () => {

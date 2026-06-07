@@ -49,6 +49,14 @@ function includeModuleName(node: SyntaxNode, source: string): string | null {
   return stringContent ? getNodeText(stringContent, source) : null;
 }
 
+function cLikeFunctionSignature(node: SyntaxNode, source: string): string | undefined {
+  const params = getChildByField(node, 'parameters');
+  if (!params) return undefined;
+  const returnType = getChildByField(node, 'type');
+  const paramsText = getNodeText(params, source);
+  return returnType ? `${getNodeText(returnType, source)} ${paramsText}` : paramsText;
+}
+
 const cExtractor: LanguageExtractor = {
   functionTypes: ['function_definition'],
   classTypes: [],
@@ -73,6 +81,7 @@ const cExtractor: LanguageExtractor = {
   // correctly drops them (BUILTIN_TYPES guard) so we don't pollute the
   // graph with edges to non-symbols.
   returnField: 'type',
+  getSignature: cLikeFunctionSignature,
   visitNode: (node, ctx) => extractCPreprocDefConstant(node, ctx),
   resolveTypeAliasKind: (node, _source) => {
     // C typedef: `typedef enum { ... } name;` or `typedef struct { ... } name;`
@@ -324,6 +333,7 @@ const cppExtractor: LanguageExtractor = {
   // F#40: same field-name shape as C (tree-sitter-cpp inherits
   // `function_definition` from the C grammar).
   returnField: 'type',
+  getSignature: cLikeFunctionSignature,
   getVisibility: (node) => {
     // Check for access specifier in parent
     return cppParentVisibility(node);

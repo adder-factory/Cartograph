@@ -6,6 +6,13 @@ Cartograph stands on a great deal of other people's work. This file credits the 
 
 Cartograph is a fork of **[codegraph](https://github.com/colbymchenry/codegraph)** by **Colby Mchenry**, used under the MIT License (Copyright (c) 2026 Colby Mchenry). Cartograph has diverged substantially from upstream but derives from that codebase, and we gratefully acknowledge it as the foundation.
 
+Recent Cartograph improvements have also been informed by public Codegraph issues
+and pull requests covering Python package-member calls, Go receiver ownership,
+C# primary constructors, PHP include/require imports, chained receiver calls,
+and additional MCP client targets. Those ideas were reimplemented inside
+Cartograph's current feature-slice architecture; no upstream patch code was
+copied blindly.
+
 ## tree-sitter
 
 Code parsing is built entirely on **[tree-sitter](https://tree-sitter.github.io/tree-sitter/)** by **Max Brunsfeld** and contributors (MIT). Specifically:

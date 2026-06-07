@@ -3,7 +3,8 @@
  *
  * Multi-target: writes MCP server config + instructions for the
  * agents the user picks (Claude Code, Cursor, Codex CLI, opencode,
- * Hermes, Gemini CLI, Antigravity, Kiro).
+ * Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev,
+ * Qoder CLI).
  * Defaults to the Claude-only behavior for backwards compatibility
  * when no targets are explicitly chosen and nothing else is detected.
  *
@@ -194,17 +195,18 @@ interface ResolveAutoAllowArgs {
 
 /**
  * Step 4: decide whether to auto-allow Cartograph commands. Only
- * meaningful for Claude; skipped silently by other targets.
+ * meaningful for targets with a permissions allow-list; skipped
+ * silently by other targets.
  */
 async function resolveAutoAllow(args: ResolveAutoAllowArgs): Promise<boolean> {
   const { clack, opts, useDefaults, targets } = args;
   if (opts.autoAllow !== undefined) return opts.autoAllow;
   if (useDefaults) return true;
-  if (!targets.some((t) => t.id === 'claude')) return false;
+  if (!targets.some((t) => t.id === 'claude' || t.id === 'qoder')) return false;
   return assertNotCancelled(
     clack,
     await clack.confirm({
-      message: 'Auto-allow Cartograph commands? (Skips permission prompts in Claude Code)',
+      message: 'Auto-allow Cartograph commands? (Skips permission prompts in Claude Code and Qoder CLI)',
       initialValue: true,
     }),
   );

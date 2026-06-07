@@ -186,6 +186,7 @@ function findSimilarChunkQueryFor(name: string) {
 const pgvectorAvailableByDb = new WeakMap<SqliteDatabase, boolean>();
 const ensuredStoreTablesByDb = new WeakMap<SqliteDatabase, Set<number>>();
 const ensuredChunkTablesByDb = new WeakMap<SqliteDatabase, Set<number>>();
+type PgvectorMirrorTableKind = 'store' | 'chunk';
 
 const storeBackfillByDbAndName = new WeakMap<
   SqliteDatabase,
@@ -347,7 +348,7 @@ export function bootstrapPgvectorTables(db: SqliteDatabase, pgvectorAvailable: b
 }
 
 function backfillPgvectorStoreTable(db: SqliteDatabase, dim: number): void {
-  if (!ensurePgvectorStoreTable(db, dim)) return;
+  if (!ensurePgvectorMirrorTable(db, dim, 'store')) return;
   const tableName = pgvectorStoreTableNameForDim(dim);
   const rows = getStoreBackfillQuery(db, tableName).all({ byteLen: dim * FLOAT32_BYTES });
   for (const row of rows) {
@@ -363,7 +364,7 @@ function backfillPgvectorStoreTable(db: SqliteDatabase, dim: number): void {
 }
 
 function backfillPgvectorChunkTable(db: SqliteDatabase, dim: number): void {
-  if (!ensurePgvectorChunkTable(db, dim)) return;
+  if (!ensurePgvectorMirrorTable(db, dim, 'chunk')) return;
   const tableName = pgvectorChunkTableNameForDim(dim);
   const rows = getChunkBackfillQuery(db, tableName).all({ byteLen: dim * FLOAT32_BYTES });
   for (const row of rows) {
@@ -377,22 +378,18 @@ function backfillPgvectorChunkTable(db: SqliteDatabase, dim: number): void {
   }
 }
 
-function ensurePgvectorStoreTable(db: SqliteDatabase, dim: number): boolean {
+function ensurePgvectorMirrorTable(db: SqliteDatabase, dim: number, kind: PgvectorMirrorTableKind): boolean {
   if (!isValidDim(dim) || !isPgvectorAvailable(db)) return false;
-  const ensured = ensuredStoreTablesByDb.get(db) ?? new Set<number>();
+  const ensuredByDb = kind === 'store' ? ensuredStoreTablesByDb : ensuredChunkTablesByDb;
+  const ensured = ensuredByDb.get(db) ?? new Set<number>();
   if (ensured.has(dim)) return true;
-  ensuredStoreTablesByDb.set(db, ensured);
-  const name = pgvectorStoreTableNameForDim(dim);
+  ensuredByDb.set(db, ensured);
+  const name = kind === 'store' ? pgvectorStoreTableNameForDim(dim) : pgvectorChunkTableNameForDim(dim);
+  const indexPrefix = kind === 'store' ? `pgv_se_${dim}` : `pgv_ce_${dim}`;
   try {
-    db.exec(`CREATE TABLE IF NOT EXISTS ${name} (
-      store_rowid BIGINT PRIMARY KEY REFERENCES embedding_store(rowid) ON DELETE CASCADE,
-      body_hash TEXT NOT NULL,
-      model TEXT NOT NULL,
-      grain TEXT NOT NULL CHECK (grain IN ('symbol', 'file')),
-      embedding vector(${dim}) NOT NULL
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS pgv_se_${dim}_model_grain ON ${name}(model, grain)`);
-    ensurePgvectorKnnIndex(db, name, `pgv_se_${dim}`);
+    db.exec(pgvectorCreateTableSql(kind, name, dim));
+    db.exec(pgvectorLookupIndexSql(kind, name, dim));
+    ensurePgvectorKnnIndex(db, name, indexPrefix);
     ensured.add(dim);
     return true;
   } catch {
@@ -400,26 +397,27 @@ function ensurePgvectorStoreTable(db: SqliteDatabase, dim: number): boolean {
   }
 }
 
-function ensurePgvectorChunkTable(db: SqliteDatabase, dim: number): boolean {
-  if (!isValidDim(dim) || !isPgvectorAvailable(db)) return false;
-  const ensured = ensuredChunkTablesByDb.get(db) ?? new Set<number>();
-  if (ensured.has(dim)) return true;
-  ensuredChunkTablesByDb.set(db, ensured);
-  const name = pgvectorChunkTableNameForDim(dim);
-  try {
-    db.exec(`CREATE TABLE IF NOT EXISTS ${name} (
+function pgvectorCreateTableSql(kind: PgvectorMirrorTableKind, name: string, dim: number): string {
+  if (kind === 'store') {
+    return `CREATE TABLE IF NOT EXISTS ${name} (
+      store_rowid BIGINT PRIMARY KEY REFERENCES embedding_store(rowid) ON DELETE CASCADE,
+      body_hash TEXT NOT NULL,
+      model TEXT NOT NULL,
+      grain TEXT NOT NULL CHECK (grain IN ('symbol', 'file')),
+      embedding vector(${dim}) NOT NULL
+    )`;
+  }
+  return `CREATE TABLE IF NOT EXISTS ${name} (
       chunk_rowid BIGINT PRIMARY KEY REFERENCES symbol_chunk_embeddings(rowid) ON DELETE CASCADE,
       node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
       embedding_model TEXT NOT NULL,
       embedding vector(${dim}) NOT NULL
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS pgv_ce_${dim}_model ON ${name}(embedding_model)`);
-    ensurePgvectorKnnIndex(db, name, `pgv_ce_${dim}`);
-    ensured.add(dim);
-    return true;
-  } catch {
-    return false;
-  }
+    )`;
+}
+
+function pgvectorLookupIndexSql(kind: PgvectorMirrorTableKind, name: string, dim: number): string {
+  if (kind === 'store') return `CREATE INDEX IF NOT EXISTS pgv_se_${dim}_model_grain ON ${name}(model, grain)`;
+  return `CREATE INDEX IF NOT EXISTS pgv_ce_${dim}_model ON ${name}(embedding_model)`;
 }
 
 function ensurePgvectorKnnIndex(db: SqliteDatabase, tableName: string, indexPrefix: string): void {
@@ -453,7 +451,7 @@ export function mirrorEmbeddingToPgvector(opts: MirrorEmbeddingToPgvectorOpts): 
   const { db, rowid, bodyHash, model, grain, embedding } = opts;
   if (db.dialect !== 'postgres') return;
   const dim = Math.floor(embedding.byteLength / FLOAT32_BYTES);
-  if (!ensurePgvectorStoreTable(db, dim)) return;
+  if (!ensurePgvectorMirrorTable(db, dim, 'store')) return;
   const literal = vectorLiteralFromBytes(embedding);
   if (!literal) return;
   try {
@@ -482,7 +480,7 @@ export function mirrorChunkEmbeddingToPgvector(opts: MirrorChunkEmbeddingToPgvec
   const { db, rowid, nodeId, model, embedding } = opts;
   if (db.dialect !== 'postgres') return;
   const dim = Math.floor(embedding.byteLength / FLOAT32_BYTES);
-  if (!ensurePgvectorChunkTable(db, dim)) return;
+  if (!ensurePgvectorMirrorTable(db, dim, 'chunk')) return;
   const literal = vectorLiteralFromBytes(embedding);
   if (!literal) return;
   try {

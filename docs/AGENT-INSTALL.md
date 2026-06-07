@@ -39,6 +39,9 @@ configuration, indexes the repository, and skips the interactive LLM wizard in
 `--yes` mode. Core search, graph, impact, review, status, and affected-test
 commands work without an LLM backend.
 
+Supported installer targets include Claude Code, Cursor, Codex CLI, opencode,
+Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and Qoder CLI.
+
 Optional follow-up tasks:
 
 ```text

@@ -18,13 +18,12 @@ import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
   atomicWriteFileSync,
-  getCartographPermissions,
   getHomeDir,
   getMcpServerConfig,
-  jsonDeepEqual,
   readJsonFile,
   removeMarkedSection,
   replaceOrAppendMarkedSection,
+  writePermissionsAllowList,
   writeJsonFile,
 } from './shared.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
@@ -154,25 +153,7 @@ export function writeMcpEntry(loc: Location): WriteResult['files'][number] {
 }
 
 export function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
-  const file = settingsJsonPath(loc);
-  const settings = readJsonFile(file);
-  const created = !fs.existsSync(file);
-
-  if (!settings['permissions']) settings['permissions'] = {};
-  if (!Array.isArray(settings['permissions'].allow)) settings['permissions'].allow = [];
-
-  const want = getCartographPermissions();
-  const before = [...settings['permissions'].allow];
-  for (const perm of want) {
-    if (!settings['permissions'].allow.includes(perm)) {
-      settings['permissions'].allow.push(perm);
-    }
-  }
-  if (jsonDeepEqual(before, settings['permissions'].allow) && !created) {
-    return { path: file, action: 'unchanged' };
-  }
-  writeJsonFile(file, settings);
-  return { path: file, action: created ? 'created' : 'updated' };
+  return writePermissionsAllowList(settingsJsonPath(loc));
 }
 
 /** Where the legacy unmarked Cartograph section ends. Pulled out of

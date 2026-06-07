@@ -904,6 +904,10 @@ const RETURN_TYPE_NODE_TYPES: ReadonlySet<string> = new Set([
   'array_type',
 ]);
 
+function isReturnTypeCandidate(language: string, child: SyntaxNode): boolean {
+  return RETURN_TYPE_NODE_TYPES.has(child.type) || (language === 'csharp' && child.type === 'identifier');
+}
+
 /**
  * Some languages (Kotlin, Dart, Scala, Swift) attach the return type
  * as a direct named child after — or before — `parameters` rather
@@ -914,16 +918,19 @@ const RETURN_TYPE_NODE_TYPES: ReadonlySet<string> = new Set([
  * tree-sitter-web returns fresh wrapper objects from every navigation
  * so reference equality always fails — match by `startIndex`.
  */
-function findReturnTypeBySiblingScan(node: SyntaxNode, params: SyntaxNode): SyntaxNode | null {
+function findReturnTypeBySiblingScan(language: string, node: SyntaxNode, params: SyntaxNode): SyntaxNode | null {
   const paramsIdx = node.namedChildren.findIndex((c: SyntaxNode) => c.startIndex === params.startIndex);
+  const nameNode = getChildByField(node, 'name');
   if (paramsIdx < 0) return null;
   for (let i = paramsIdx + 1; i < node.namedChildCount; i++) {
     const child = node.namedChild(i);
-    if (child && RETURN_TYPE_NODE_TYPES.has(child.type)) return child;
+    if (child && isReturnTypeCandidate(language, child)) return child;
   }
   for (let i = paramsIdx - 1; i >= 0; i--) {
     const child = node.namedChild(i);
-    if (child && RETURN_TYPE_NODE_TYPES.has(child.type)) return child;
+    if (!child) continue;
+    if (child.startIndex === nameNode?.startIndex) continue;
+    if (isReturnTypeCandidate(language, child)) return child;
   }
   return null;
 }
@@ -947,7 +954,7 @@ export function extractTypeAnnotations(extractor: TreeSitterExtractor, node: Syn
   if (params) extractTypeRefsFromSubtree({ extractor, node: params, fromNodeId: nodeId, kind: 'type_of' });
 
   let returnType = resolveSignatureChild(node, extractor.extractor.returnField || 'return_type');
-  if (!returnType && params) returnType = findReturnTypeBySiblingScan(node, params);
+  if (!returnType && params) returnType = findReturnTypeBySiblingScan(extractor.language, node, params);
   if (returnType) extractTypeRefsFromSubtree({ extractor, node: returnType, fromNodeId: nodeId, kind: 'returns' });
 
   const typeAnnotation = node.namedChildren.find((c: SyntaxNode) => c.type === 'type_annotation');

@@ -27,49 +27,63 @@ interface WorkerRequest {
   pragma?: string;
 }
 
+interface PostgresAdapterState {
+  worker: Worker;
+  control: Int32Array;
+  dir: string;
+  requestPath: string;
+  responsePath: string;
+  queryTimeoutMs: number;
+  open: boolean;
+  txDepth: number;
+}
+
 const WORKER_READY = 10;
 const WORKER_REQUEST = 1;
 const WORKER_RESPONSE = 2;
 
 export class PostgresAdapter implements SqliteDatabase {
   readonly dialect = 'postgres' as const;
-  private readonly worker: Worker;
-  private readonly control = new Int32Array(new SharedArrayBuffer(4));
-  private readonly dir: string;
-  private readonly requestPath: string;
-  private readonly responsePath: string;
-  private readonly queryTimeoutMs: number;
-  private _open = true;
-  private txDepth = 0;
+  private readonly state: PostgresAdapterState;
 
   constructor(options: PostgresAdapterOptions) {
-    this.queryTimeoutMs = options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS;
-    this.dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pg-'));
-    this.requestPath = path.join(this.dir, 'request.json');
-    this.responsePath = path.join(this.dir, 'response.json');
+    const control = new Int32Array(new SharedArrayBuffer(4));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pg-'));
+    const requestPath = path.join(dir, 'request.json');
+    const responsePath = path.join(dir, 'response.json');
     const here = fileURLToPath(import.meta.url);
     const ext = here.endsWith('.ts') ? '.ts' : '.js';
     const workerPath = fileURLToPath(new URL(`./postgres-worker${ext}`, import.meta.url));
-    this.worker = new Worker(workerPath, {
+    const worker = new Worker(workerPath, {
       workerData: {
-        control: this.control.buffer,
-        requestPath: this.requestPath,
-        responsePath: this.responsePath,
+        control: control.buffer,
+        requestPath,
+        responsePath,
         sqlOptions: postgresSqlOptions(options),
         url: options.url,
         schema: options.schema ?? 'public',
       },
     });
-    const ready = Atomics.wait(this.control, 0, 0, 30_000);
-    if (ready === 'timed-out' || Atomics.load(this.control, 0) !== WORKER_READY) {
-      terminateWorker(this.worker);
+    this.state = {
+      worker,
+      control,
+      dir,
+      requestPath,
+      responsePath,
+      queryTimeoutMs: options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS,
+      open: true,
+      txDepth: 0,
+    };
+    const ready = Atomics.wait(control, 0, 0, 30_000);
+    if (ready === 'timed-out' || Atomics.load(control, 0) !== WORKER_READY) {
+      terminateWorker(worker);
       throw new Error('PostgreSQL adapter worker did not become ready within 30s');
     }
-    Atomics.store(this.control, 0, 0);
+    Atomics.store(control, 0, 0);
   }
 
   get open(): boolean {
-    return this._open;
+    return this.state.open;
   }
 
   prepare(sql: string): SqliteStatement {
@@ -87,19 +101,19 @@ export class PostgresAdapter implements SqliteDatabase {
 
   transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
     return (...args: unknown[]) => {
-      const savepoint = `cartograph_sp_${this.txDepth}`;
-      if (this.txDepth === 0) this.exec('BEGIN');
+      const savepoint = `cartograph_sp_${this.state.txDepth}`;
+      if (this.state.txDepth === 0) this.exec('BEGIN');
       else this.exec(`SAVEPOINT ${savepoint}`);
-      this.txDepth++;
+      this.state.txDepth++;
       try {
         const result = fn(...args);
-        this.txDepth--;
-        if (this.txDepth === 0) this.exec('COMMIT');
+        this.state.txDepth--;
+        if (this.state.txDepth === 0) this.exec('COMMIT');
         else this.exec(`RELEASE SAVEPOINT ${savepoint}`);
         return result;
       } catch (err) {
-        this.txDepth--;
-        if (this.txDepth === 0) this.exec('ROLLBACK');
+        this.state.txDepth--;
+        if (this.state.txDepth === 0) this.exec('ROLLBACK');
         else this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
         throw err;
       }
@@ -107,33 +121,33 @@ export class PostgresAdapter implements SqliteDatabase {
   }
 
   close(): void {
-    if (!this._open) return;
+    if (!this.state.open) return;
     try {
       this.call({ op: 'close' });
     } catch {
       /* worker is already gone */
     }
-    this._open = false;
-    terminateWorker(this.worker);
+    this.state.open = false;
+    terminateWorker(this.state.worker);
     try {
-      fs.rmSync(this.dir, { recursive: true, force: true });
+      fs.rmSync(this.state.dir, { recursive: true, force: true });
     } catch {
       /* temp cleanup is best effort */
     }
   }
 
   call(request: WorkerRequest): WorkerResponse {
-    if (!this._open && request.op !== 'close') throw new Error('PostgreSQL connection is closed');
-    fs.writeFileSync(this.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
-    Atomics.store(this.control, 0, WORKER_REQUEST);
-    Atomics.notify(this.control, 0);
-    const wait = Atomics.wait(this.control, 0, WORKER_REQUEST, this.queryTimeoutMs);
-    if (wait === 'timed-out') throw new Error(`PostgreSQL query timed out after ${this.queryTimeoutMs}ms`);
-    if (Atomics.load(this.control, 0) !== WORKER_RESPONSE) {
+    if (!this.state.open && request.op !== 'close') throw new Error('PostgreSQL connection is closed');
+    fs.writeFileSync(this.state.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
+    Atomics.store(this.state.control, 0, WORKER_REQUEST);
+    Atomics.notify(this.state.control, 0);
+    const wait = Atomics.wait(this.state.control, 0, WORKER_REQUEST, this.state.queryTimeoutMs);
+    if (wait === 'timed-out') throw new Error(`PostgreSQL query timed out after ${this.state.queryTimeoutMs}ms`);
+    if (Atomics.load(this.state.control, 0) !== WORKER_RESPONSE) {
       throw new Error('PostgreSQL worker returned an invalid state');
     }
-    const raw = fs.readFileSync(this.responsePath, 'utf-8');
-    Atomics.store(this.control, 0, 0);
+    const raw = fs.readFileSync(this.state.responsePath, 'utf-8');
+    Atomics.store(this.state.control, 0, 0);
     const response = decodeValue(parsePostgresWorkerJson(raw, 'response')) as WorkerResponse;
     if (!response.ok) throw new Error(response.error ?? 'PostgreSQL query failed');
     return response;

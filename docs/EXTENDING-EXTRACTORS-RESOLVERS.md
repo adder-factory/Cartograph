@@ -27,6 +27,38 @@ Provenance: `[[project_session_handoff_2026_05_23d_ollama_bug_hunt]]`.
 
 Provenance + reviewer findings: `docs/STRUCTURAL-CAMPAIGN-BACKLOG.md` section D.
 
+### Upstream Codegraph review pass (2026-06-07)
+
+This pass borrowed public issue/PR ideas from Codegraph but reimplemented them
+inside Cartograph's feature-slice boundaries. Reuse these patterns when closing
+similar extraction or resolver gaps:
+
+- **Python `from pkg import module` module-member calls resolve in the import
+  resolver, not in extraction.** Keep the import statement shape unchanged
+  (`importName: 'pkg'`, `symbolName: 'module'`), then let
+  `pickMatchingImport` recognize a call such as `module.run()` and resolve
+  `pkg/module.py::run`. This preserves normal Python import semantics and keeps
+  `classifyImport` focused on file-path classification.
+- **Go receiver ownership is a post-index edge pass.** Methods are extracted as
+  top-level nodes for Go, so cross-file owner edges are inserted by the
+  `go-implements` hook before interface matching. Keep the association scoped
+  to the same package directory to avoid linking same-named structs in sibling
+  packages.
+- **Return-type-backed chained calls belong in the name matcher.** Extraction
+  should emit the full static call shape (`b.build().commit`); resolution then
+  resolves `b.build`, reads its return type from the signature, and resolves the
+  terminal method on that returned type. Keep the cheap resolver prefilter in
+  sync with this shape by admitting the terminal member name.
+- **C# primary constructors use the language hook, not a one-off parser pass.**
+  `extractClassLikeHeader` enriches class/struct declarations with a
+  constructor-shaped method node and type references from constructor
+  parameters. Type-only filtering in `tree-sitter-typerefs.ts` prevents
+  parameter names and base-constructor arguments from becoming bogus type refs.
+- **PHP includes are file imports.** Treat string-literal
+  `include`/`include_once`/`require`/`require_once` as import references so the
+  existing import graph and `imports` command see them without a PHP-only edge
+  type.
+
 ### Cross-language bridging + framework-resolver hooks (B12 arc — 2026-05-29)
 
 Landed with B12 sub-channel 1 (Swift↔ObjC `@objc` bridge, commit `4009f5f9`).

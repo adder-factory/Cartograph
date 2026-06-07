@@ -1,6 +1,42 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
-import { getNodeText } from '../tree-sitter-helpers.js';
+import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
 import type { LanguageExtractor } from '../tree-sitter-types.js';
+
+const CSHARP_TYPE_NODE_TYPES: ReadonlySet<string> = new Set([
+  'identifier',
+  'predefined_type',
+  'generic_name',
+  'qualified_name',
+  'nullable_type',
+  'array_type',
+  'tuple_type',
+]);
+
+function findDirectParameterList(node: SyntaxNode): SyntaxNode | null {
+  return node.namedChildren.find((child: SyntaxNode) => child.type === 'parameter_list') ?? null;
+}
+
+function findCSharpReturnType(node: SyntaxNode, params: SyntaxNode): SyntaxNode | null {
+  const nameNode = getChildByField(node, 'name');
+  const paramsIdx = node.namedChildren.findIndex((child: SyntaxNode) => child.startIndex === params.startIndex);
+  if (paramsIdx < 0) return null;
+  for (let i = paramsIdx - 1; i >= 0; i--) {
+    const child = node.namedChild(i);
+    if (!child) continue;
+    if (child.startIndex === nameNode?.startIndex) continue;
+    if (CSHARP_TYPE_NODE_TYPES.has(child.type)) return child;
+  }
+  return null;
+}
+
+function getCSharpSignature(node: SyntaxNode, source: string): string | undefined {
+  const params = getChildByField(node, 'parameters') ?? findDirectParameterList(node);
+  if (!params) return undefined;
+  const paramsText = getNodeText(params, source);
+  if (node.type !== 'method_declaration') return paramsText;
+  const returnType = findCSharpReturnType(node, params);
+  return returnType ? `${getNodeText(returnType, source)} ${paramsText}` : paramsText;
+}
 
 const csharpExtractor: LanguageExtractor = {
   functionTypes: [],
@@ -19,6 +55,7 @@ const csharpExtractor: LanguageExtractor = {
   nameField: 'name',
   bodyField: 'body',
   paramsField: 'parameter_list',
+  getSignature: getCSharpSignature,
   getVisibility: (node) => {
     for (const child of node.children) {
       if (child?.type === 'modifier') {
@@ -46,6 +83,19 @@ const csharpExtractor: LanguageExtractor = {
       }
     }
     return false;
+  },
+  extractClassLikeHeader: (node, ownerNode, ctx) => {
+    if (node.type !== 'class_declaration' && node.type !== 'struct_declaration') return;
+    const params = findDirectParameterList(node);
+    if (!params) return;
+    const signature = getNodeText(params, ctx.source);
+    const constructorNode = ctx.createNode({
+      kind: 'method',
+      name: ownerNode.name,
+      node: params,
+      extra: ownerNode.visibility ? { signature, visibility: ownerNode.visibility } : { signature },
+    });
+    if (constructorNode) ctx.extractTypeRefs(params, constructorNode.id, 'type_of');
   },
   extractImport: (node, source) => {
     const importText = source.substring(node.startIndex, node.endIndex).trim();

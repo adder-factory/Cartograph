@@ -365,6 +365,43 @@ type NodeInsertParams = z.infer<typeof NodeInsertParamsSchema>;
 const IdParams = z.object({ id: z.string() });
 const NoParams = z.object({});
 
+function nodeInsertParams(node: Node, action: 'insert' | 'update'): NodeInsertParams | null {
+  if (
+    node.id == null ||
+    node.id === '' ||
+    node.kind == null ||
+    node.name == null ||
+    node.name === '' ||
+    node.filePath == null ||
+    node.filePath === '' ||
+    node.language == null
+  ) {
+    if (action === 'update') {
+      logWarn('Skipping node update with missing required fields', { id: node.id });
+    } else {
+      logWarn('Skipping node with missing required fields', {
+        id: node.id,
+        kind: node.kind,
+        name: node.name,
+        filePath: node.filePath,
+        language: node.language,
+      });
+    }
+    return null;
+  }
+
+  return {
+    ...bindingsFromObject(node, NODE_SCHEMA),
+    // Defaults the bindings helper can't supply (it uses the value as-is):
+    // qualified_name falls back to name, updated_at to now, name_subwords
+    // is computed, and body_hash falls back to '' (matches migration 048).
+    qualifiedName: node.qualifiedName ?? node.name,
+    updatedAt: node.updatedAt ?? Date.now(),
+    nameSubwords: buildNameSubwords(node.name),
+    bodyHash: node.bodyHash ?? '',
+  } as NodeInsertParams;
+}
+
 const insertNodeQuery = defineQuery({
   sql:
     `INSERT OR REPLACE INTO nodes (${NODE_INSERT_PARTS.columns}, name_subwords) ` +
@@ -590,8 +627,8 @@ export class QueryBuilder {
    */
   /** @internal */ vecLoaded: boolean = false;
 
-  // Node LRU cache + names list — bundled in NodeLruCache to keep
-  // this class below the god_class threshold.
+  // Node LRU cache + names list — bundled in NodeLruCache to keep this
+  // facade small enough for the god_class detector's info floor.
   /** @internal */ readonly nodeCache: NodeLruCache = new NodeLruCache();
 
   /**
@@ -611,46 +648,6 @@ export class QueryBuilder {
     this.vecLoaded = vecLoaded;
   }
 
-  private nodeInsertParams(node: Node, action: 'insert' | 'update'): NodeInsertParams | null {
-    if (
-      node.id == null ||
-      node.id === '' ||
-      node.kind == null ||
-      node.name == null ||
-      node.name === '' ||
-      node.filePath == null ||
-      node.filePath === '' ||
-      node.language == null
-    ) {
-      if (action === 'update') {
-        logWarn('Skipping node update with missing required fields', { id: node.id });
-      } else {
-        logWarn('Skipping node with missing required fields', {
-          id: node.id,
-          kind: node.kind,
-          name: node.name,
-          filePath: node.filePath,
-          language: node.language,
-        });
-      }
-      return null;
-    }
-
-    return {
-      ...bindingsFromObject(node, NODE_SCHEMA),
-      // Defaults the bindings helper can't supply (it uses the value
-      // as-is): qualified_name falls back to name, updated_at to now,
-      // name_subwords is computed, and body_hash falls back to ''
-      // (matches the DB-side `body_hash TEXT NOT NULL DEFAULT ''` from
-      // migration 048 — `Node.bodyHash` is optional, so when callers omit
-      // it `bindingsFromObject` returns null and the column would reject).
-      qualifiedName: node.qualifiedName ?? node.name,
-      updatedAt: node.updatedAt ?? Date.now(),
-      nameSubwords: buildNameSubwords(node.name),
-      bodyHash: node.bodyHash ?? '',
-    } as NodeInsertParams;
-  }
-
   // ===========================================================================
   // Node Operations
   // ===========================================================================
@@ -667,7 +664,7 @@ export class QueryBuilder {
     // LRU eviction sweep closed. `kind` and `language` are closed
     // string-literal unions (NodeKind / Language) with no empty
     // member, so a null/undefined check is sufficient for them.
-    const params = this.nodeInsertParams(node, 'insert');
+    const params = nodeInsertParams(node, 'insert');
     if (params === null) return;
 
     // INSERT OR REPLACE may overwrite a node we have cached. Drop the
@@ -687,7 +684,7 @@ export class QueryBuilder {
   insertNodes(nodes: Node[]): void {
     const paramsList: NodeInsertParams[] = [];
     for (const node of nodes) {
-      const params = this.nodeInsertParams(node, 'insert');
+      const params = nodeInsertParams(node, 'insert');
       if (params === null) continue;
       this.nodeCache.delete(node.id);
       this.nodeCache.namesList = null;
@@ -710,7 +707,7 @@ export class QueryBuilder {
 
     // Validate required fields — same explicit-null/empty pattern as
     // insertNode so an empty-string identifier doesn't silently drop.
-    const params = this.nodeInsertParams(node, 'update');
+    const params = nodeInsertParams(node, 'update');
     if (params === null) return;
 
     this.queries.updateNode ??= updateNodeQuery(this.db);

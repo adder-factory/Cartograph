@@ -13,6 +13,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { errMsg, logWarn } from '../../errors.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import type { WriteResult } from './types.js';
 
 /**
  * Resolve the user's home directory.
@@ -59,6 +60,28 @@ export function getCartographPermissions(): string[] {
     'mcp__cartograph__cartograph_at_range',
     'mcp__cartograph__cartograph_status',
   ];
+}
+
+export function writePermissionsAllowList(filePath: string): WriteResult['files'][number] {
+  const settings = readJsonFile(filePath);
+  const created = !fs.existsSync(filePath);
+
+  if (!settings['permissions']) settings['permissions'] = {};
+  if (!Array.isArray(settings['permissions'].allow)) settings['permissions'].allow = [];
+
+  const before = [...settings['permissions'].allow];
+  for (const permission of getCartographPermissions()) {
+    if (!settings['permissions'].allow.includes(permission)) {
+      settings['permissions'].allow.push(permission);
+    }
+  }
+
+  if (jsonDeepEqual(before, settings['permissions'].allow) && !created) {
+    return { path: filePath, action: 'unchanged' };
+  }
+
+  writeJsonFile(filePath, settings);
+  return { path: filePath, action: created ? 'created' : 'updated' };
 }
 
 /** Best-effort copy to `<path>.backup`. Swallows errors — backup is advisory. */

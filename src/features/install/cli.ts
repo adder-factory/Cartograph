@@ -28,10 +28,13 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
     .description(
       'Install cartograph MCP server into one or more agents. For agent-run setup, use --yes --target=auto --location=local.',
     )
-    .option('-t, --target <ids>', 'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Default: prompt')
+    .option(
+      '-t, --target <ids>',
+      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder.',
+    )
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
     .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')
-    .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code only)')
+    .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code and Qoder CLI)')
     .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
     .action((opts: InstallOptions) => runInstallCommand(opts, deps));
 
@@ -43,6 +46,7 @@ Examples:
   cartograph install --yes --target=auto --location=local
   cartograph install --yes --target=auto --location=global
   cartograph install --print-config codex
+  cartograph install --print-config qoder
 `,
   );
 }

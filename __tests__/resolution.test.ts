@@ -753,6 +753,38 @@ describe('Resolution Module', () => {
       expect(result).toBe('src/helpers.ts');
     });
 
+    it('resolves Python dotted package imports to project files', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByLowerName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'pkg/helpers.py' || p === 'app/models.py',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['pkg/helpers.py', 'app/models.py'],
+        getImportMappings: () => [],
+      };
+
+      expect(
+        resolveImportPath({
+          importPath: 'pkg.helpers',
+          fromFile: 'app/main.py',
+          language: 'python',
+          context,
+        }),
+      ).toBe('pkg/helpers.py');
+      expect(
+        resolveImportPath({
+          importPath: '.models',
+          fromFile: 'app/main.py',
+          language: 'python',
+          context,
+        }),
+      ).toBe('app/models.py');
+    });
+
     it('NodeNext shim — strips .js suffix and finds the .ts source', () => {
       // NodeNext ESM convention: import paths use `.js` even though
       // the source file is `.ts`. Without the strip-and-retry logic in
@@ -1449,6 +1481,61 @@ function processDate(input: string): string {
       for (const [, count] of refsPerFile) {
         expect(count).toBeGreaterThan(0);
       }
+    });
+
+    it('resolves Python `from pkg import module; module.func()` calls to the imported module file', async () => {
+      fs.mkdirSync(path.join(tempDir, 'pkg'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'app'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'pkg', '__init__.py'), '');
+      fs.writeFileSync(path.join(tempDir, 'pkg', 'helpers.py'), 'def run():\n    return 1\n');
+      fs.writeFileSync(
+        path.join(tempDir, 'app', 'main.py'),
+        'from pkg import helpers\n\n\ndef main():\n    return helpers.run()\n',
+      );
+
+      cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+
+      const runNode = getNodesByKind(cg.queries, 'function').find(
+        (n) => n.name === 'run' && n.filePath === 'pkg/helpers.py',
+      );
+      expect(runNode).toBeDefined();
+      const callers = cg.internals.traverser.getCallers(runNode!.id);
+      expect(callers.some((c) => c.node.name === 'main' && c.node.filePath === 'app/main.py')).toBe(true);
+    });
+
+    it('resolves call-chain methods through the intermediate method return type', async () => {
+      fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(tempDir, 'src', 'chain.ts'),
+        `class Builder {
+  build(): Committer { return new Committer(); }
+}
+class Committer {
+  commit(): void {}
+}
+class Wrong {
+  commit(): void {}
+}
+export function go(): void {
+  const b = new Builder();
+  b.build().commit();
+}
+`,
+      );
+
+      cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+
+      const commitNodes = getNodesByKind(cg.queries, 'method').filter((n) => n.name === 'commit');
+      expect(commitNodes).toHaveLength(2);
+      const target = commitNodes.find((n) => n.qualifiedName === 'Committer::commit');
+      const wrong = commitNodes.find((n) => n.qualifiedName === 'Wrong::commit');
+      expect(target).toBeDefined();
+      expect(wrong).toBeDefined();
+
+      const targetCallers = cg.internals.traverser.getCallers(target!.id);
+      const wrongCallers = cg.internals.traverser.getCallers(wrong!.id);
+      expect(targetCallers.some((c) => c.node.name === 'go')).toBe(true);
+      expect(wrongCallers.some((c) => c.node.name === 'go')).toBe(false);
     });
 
     // B3 (2026-05-23) — `resolveAndPersistBatched`'s progress counter
