@@ -2,6 +2,13 @@ import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getNodeText } from '../tree-sitter-helpers.js';
 import type { LanguageExtractor } from '../tree-sitter-types.js';
 
+const PHP_FILE_INCLUDE_TYPES = new Set([
+  'include_expression',
+  'include_once_expression',
+  'require_expression',
+  'require_once_expression',
+]);
+
 const phpExtractor: LanguageExtractor = {
   functionTypes: ['function_definition'],
   classTypes: ['class_declaration', 'trait_declaration'],
@@ -11,7 +18,7 @@ const phpExtractor: LanguageExtractor = {
   enumTypes: ['enum_declaration'],
   enumMemberTypes: ['enum_case'],
   typeAliasTypes: [],
-  importTypes: ['namespace_use_declaration'],
+  importTypes: ['namespace_use_declaration', ...PHP_FILE_INCLUDE_TYPES],
   callTypes: ['function_call_expression', 'member_call_expression', 'scoped_call_expression'],
   variableTypes: ['const_declaration'],
   fieldTypes: ['property_declaration'],
@@ -79,6 +86,11 @@ const phpExtractor: LanguageExtractor = {
   extractImport: (node, source) => {
     const importText = source.substring(node.startIndex, node.endIndex).trim();
 
+    const fileIncludeTarget = extractPhpFileIncludeTarget(node, source);
+    if (fileIncludeTarget) {
+      return { moduleName: fileIncludeTarget, signature: importText };
+    }
+
     // Check for grouped imports: use X\{A, B} - return null for core fallback
     const namespacePrefix = node.namedChildren.find((c: SyntaxNode) => c.type === 'namespace_name');
     const useGroup = node.namedChildren.find((c: SyntaxNode) => c.type === 'namespace_use_group');
@@ -101,6 +113,33 @@ const phpExtractor: LanguageExtractor = {
     return null;
   },
 };
+
+function extractPhpFileIncludeTarget(node: SyntaxNode, source: string): string | null {
+  if (!PHP_FILE_INCLUDE_TYPES.has(node.type)) return null;
+  const target = unwrapPhpParenthesizedExpression(node.namedChild(0));
+  if (!target) return null;
+  return readPhpStaticStringLiteral(target, source);
+}
+
+function unwrapPhpParenthesizedExpression(node: SyntaxNode | null): SyntaxNode | null {
+  let current = node;
+  while (current?.type === 'parenthesized_expression' && current.namedChildCount === 1) {
+    current = current.namedChild(0);
+  }
+  return current;
+}
+
+function readPhpStaticStringLiteral(node: SyntaxNode, source: string): string | null {
+  if (node.type !== 'string' && node.type !== 'encapsed_string') return null;
+
+  const parts: string[] = [];
+  for (const child of node.namedChildren) {
+    if (child.type !== 'string_content' && child.type !== 'escape_sequence') return null;
+    parts.push(getNodeText(child, source));
+  }
+  const literal = parts.join('');
+  return literal.length > 0 ? literal : null;
+}
 
 import type { LanguageDef } from './types.js';
 export const PHP_DEF: LanguageDef = {

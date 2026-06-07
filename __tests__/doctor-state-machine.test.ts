@@ -4,6 +4,12 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { formatDoctorReport, runDoctor, type DoctorResultWithFix } from '../src/installer/doctor.js';
+import {
+  checkConfiguredModelFiles,
+  checkModels,
+  checkProjectConfig,
+  readLlmFromConfig,
+} from '../src/installer/doctor/model-checks.js';
 
 interface DoctorStateCase {
   readonly name: string;
@@ -13,7 +19,12 @@ interface DoctorStateCase {
 
 const tempRoots: string[] = [];
 const LOOPBACK_ENDPOINT = ['http://', 'localhost:1'].join('');
+const LOCAL_ENDPOINT_PREFIX = ['http://', 'localhost:'].join('');
 const PARTIAL_MODEL_BYTES = 1280;
+const PORT_EMBED = 8080;
+const PORT_CHAT = 8081;
+const PORT_ASK = 8082;
+const PORT_RERANK = 8083;
 const processEnv = process['env'];
 const originalModelsDir = processEnv.CARTOGRAPH_MODELS_DIR;
 
@@ -274,3 +285,82 @@ describe('runDoctor installer state machine', () => {
     });
   }
 });
+
+describe('doctor model/config checks', () => {
+  it('reports unmanaged model directories without requiring a full doctor run', async () => {
+    const emptyModelsDir = await makeTempDir('cg-doctor-empty-models-');
+    processEnv.CARTOGRAPH_MODELS_DIR = emptyModelsDir;
+
+    const noGgufs = await checkModels(null);
+    expect(noGgufs.status).toBe('warn');
+    expect(noGgufs.detail).toContain('contains no .gguf files');
+
+    await fsp.writeFile(path.join(emptyModelsDir, 'embed.gguf'), '');
+    await fsp.writeFile(path.join(emptyModelsDir, 'chat.gguf'), '');
+    const present = await checkModels(null);
+    expect(present.status).toBe('ok');
+    expect(present.detail).toContain('2 models present');
+  });
+
+  it('validates project config JSON, runtime config, and llm extraction paths', async () => {
+    const invalidJsonProject = await makeProject('cg-doctor-invalid-json-');
+    await fsp.writeFile(path.join(invalidJsonProject, '.cartograph', 'config.json'), '{not json');
+    const invalidJson = await checkProjectConfig(invalidJsonProject);
+    expect(invalidJson.status).toBe('fail');
+    expect(invalidJson.detail).toContain('not valid JSON');
+    expect(await readLlmFromConfig(invalidJsonProject)).toBeNull();
+
+    const invalidRuntimeProject = await makeProject('cg-doctor-invalid-runtime-', {
+      llm: {
+        summarizeLlm: { provider: 'bad-provider' },
+      },
+    });
+    const invalidRuntime = await checkProjectConfig(invalidRuntimeProject);
+    expect(invalidRuntime.status).toBe('fail');
+    expect(invalidRuntime.detail).toContain('runtime validation');
+
+    const validProject = await makeProject('cg-doctor-valid-runtime-', singleEndpointConfig(LOOPBACK_ENDPOINT));
+    const valid = await checkProjectConfig(validProject);
+    expect(valid.status).toBe('ok');
+    expect(await readLlmFromConfig(validProject)).toMatchObject({
+      embeddingLlm: expect.objectContaining({ model: 'nomic-embed-text' }),
+    });
+  });
+
+  it('summarizes missing configured model files with truncation and partial downloads', async () => {
+    const projectPath = await makeProject('cg-doctor-many-missing-models-');
+    const llm = fiveMissingLocalModelTiers(projectPath);
+    await fsp.writeFile(path.join(projectPath, 'ask.gguf.partial'), Buffer.alloc(PARTIAL_MODEL_BYTES));
+
+    const check = await checkConfiguredModelFiles(llm);
+
+    expect(check).toMatchObject({
+      id: 'configured-model-files',
+      name: 'Configured model files',
+      status: 'warn',
+    });
+    expect(check?.detail).toContain('5 configured local model files missing');
+    expect(check?.detail).toContain('+1 more');
+    expect(check?.detail).toContain('ask.gguf.partial');
+    expect(check?.remediation).toContain('previous model download was interrupted');
+    expect(await checkConfiguredModelFiles(null)).toBeNull();
+  });
+});
+
+function fiveMissingLocalModelTiers(projectPath: string): Record<string, unknown> {
+  return {
+    summarizeLlm: localModelTier(path.join(projectPath, 'summary.gguf'), PORT_CHAT),
+    localLlm: localModelTier(path.join(projectPath, 'local.gguf'), PORT_CHAT),
+    askLlm: localModelTier(path.join(projectPath, 'ask.gguf'), PORT_ASK),
+    embeddingLlm: localModelTier(path.join(projectPath, 'embed.gguf'), PORT_EMBED),
+    rerankerLlm: localModelTier(path.join(projectPath, 'rerank.gguf'), PORT_RERANK),
+  };
+}
+
+function localModelTier(model: string, port: number): Record<string, unknown> {
+  return {
+    provider: 'openai-compat',
+    endpoint: `${LOCAL_ENDPOINT_PREFIX}${port}`,
+    model,
+  };
+}

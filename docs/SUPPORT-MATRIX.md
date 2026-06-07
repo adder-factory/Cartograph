@@ -76,6 +76,18 @@ Special cases:
 - Liquid can also be detected from YAML front matter in `.html` / `.md` files
   under Jekyll convention directories such as `_layouts`, `_includes`,
   `_posts`, and `_drafts`.
+- C# primary constructors are extracted as constructor-shaped method nodes, and
+  C# generic/qualified type references are mined from type positions.
+- Go receiver methods are associated with same-package structs even when the
+  struct and methods live in different files, so implementation and owner edges
+  are available after the post-index hooks run.
+- PHP `include`, `include_once`, `require`, and `require_once` statements emit
+  file import edges when they use string-literal paths.
+- Python `from pkg import module` calls can resolve through the imported module
+  to top-level members in `pkg/module.py`.
+- Chained member calls can resolve through an intermediate method return type
+  when Cartograph has a signature such as `build(): Committer` or
+  `Committer build()`.
 
 ## Framework-Aware Signals
 

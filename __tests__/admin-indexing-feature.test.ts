@@ -5,10 +5,12 @@ import {
   phaseTimingLines,
   registerAdminIndexingCommands,
   reportBackgroundSummaryStatus,
+  runAdminIndexCommand,
   runQuietIndex,
   syncResultMessages,
   type AdminIndexGraph,
   type AdminIndexingCommandDeps,
+  type AdminIndexResult,
 } from '../src/features/admin-indexing/index.js';
 
 const TEST_FILES_INDEXED = 1;
@@ -71,6 +73,39 @@ describe('admin indexing feature runtime', () => {
 });
 
 describe('admin indexing feature CLI', () => {
+  it('exits early on invalid parse-worker values before opening the graph', async () => {
+    const { deps, calls } = fakeDeps();
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(runAdminIndexCommand('/repo', { parseWorkers: '0' }, deps)).rejects.toThrow('exit:1');
+    } finally {
+      exit.mockRestore();
+    }
+
+    expect(calls).toContain('error:--parse-workers must be a positive integer (got "0")');
+    expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+  });
+
+  it('reports uninitialized projects before opening the graph', async () => {
+    const { deps, calls } = fakeDeps({ initialized: false });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(runAdminIndexCommand('/repo', {}, deps)).rejects.toThrow('exit:1');
+    } finally {
+      exit.mockRestore();
+    }
+
+    expect(calls).toContain('error:Cartograph not initialized in /repo');
+    expect(calls).toContain('info:Run "cartograph admin init" first');
+    expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+  });
+
   it('runs quiet indexing with parse-cache clearing, profile output, and graph cleanup', async () => {
     const { deps, calls } = fakeDeps();
     const graph = fakeGraph(calls);
@@ -85,6 +120,39 @@ describe('admin indexing feature CLI', () => {
     expect(calls).toContain('clearParseCache:typescript');
     expect(calls).toContain('indexAll:{"summarize":false,"profile":true,"clearStructural":true,"parseWorkers":2}');
     expect(calls).toContain('stdout:{"scanMs":1}\n');
+    expect(calls).toContain('close');
+  });
+
+  it('prints quiet indexing errors before exiting on failed results', async () => {
+    const { deps, calls } = fakeDeps();
+    const graph = fakeGraph(calls, {
+      indexResult: {
+        success: false,
+        errors: [
+          { severity: 'error', filePath: 'src/bad.ts', message: 'parse failed' },
+          { severity: 'error', message: 'global failure' },
+        ],
+      },
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
+      throw new Error(`exit:${code}`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(
+        runQuietIndex({
+          cg: graph,
+          options: { force: true },
+          parseWorkers: undefined,
+          deps,
+        }),
+      ).rejects.toThrow('exit:1');
+    } finally {
+      exit.mockRestore();
+    }
+
+    expect(calls).toContain('stderr:src/bad.ts: parse failed\n');
+    expect(calls).toContain('stderr:global failure\n');
     expect(calls).toContain('close');
   });
 
@@ -134,6 +202,46 @@ describe('admin indexing feature CLI', () => {
     expect(text).toContain('awaitSummarisationWithProgress');
     expect(deps.loadClack).toHaveBeenCalled();
   });
+
+  it('runs interactive index and detached summary status through injected UI adapters', async () => {
+    const { actions, calls } = fakeDeps({
+      detached: { spawned: true, pid: 1234 },
+    });
+
+    await actions.get('index [path]')!('/repo', {
+      quiet: false,
+      force: true,
+      profile: true,
+      clearParseCache: true,
+      parseWorkers: '1',
+    });
+
+    const text = calls.join('\n');
+    expect(text).toContain('intro:Indexing project');
+    expect(text).toContain('Full re-index (--force)');
+    expect(text).toContain('clearParseCache:all');
+    expect(text).toContain('progress.stop');
+    expect(text).toContain('note:Phase timings');
+    expect(text).toContain('spawnDetachedSummarize:/repo');
+    expect(text).toContain('pid 1234');
+    expect(text).toContain('outro:Done');
+  });
+
+  it('runs non-quiet embed-only indexing with verbose progress and warning fallback', async () => {
+    const { actions, calls } = fakeDeps({
+      graphOptions: { embedError: new Error('backend offline') },
+    });
+
+    await actions.get('embed-only [path]')!('/repo', { quiet: false, verbose: true });
+
+    const text = calls.join('\n');
+    expect(text).toContain('intro:Embed-only indexing');
+    expect(text).toContain('indexAll:{"verbose":true,"embedOnly":true,"summarize":false}');
+    expect(text).toContain('info:Running embed pass');
+    expect(text).toContain('warn:Embed pass skipped: backend offline');
+    expect(text).toContain('outro:Done');
+    expect(text).toContain('close');
+  });
 });
 
 function noChangeSyncResult() {
@@ -153,7 +261,15 @@ function testFormatters() {
   };
 }
 
-function fakeGraph(calls: string[], opts: { llmConfig?: unknown; summarizeEagerLimit?: number } = {}): AdminIndexGraph {
+function fakeGraph(
+  calls: string[],
+  opts: {
+    llmConfig?: unknown;
+    summarizeEagerLimit?: number;
+    indexResult?: Partial<AdminIndexResult>;
+    embedError?: Error;
+  } = {},
+): AdminIndexGraph {
   const llmValue = Object.hasOwn(opts, 'llmConfig') ? opts.llmConfig : { summarizeLlm: { model: 'qwen' } };
   return {
     queries: {},
@@ -171,6 +287,7 @@ function fakeGraph(calls: string[], opts: { llmConfig?: unknown; summarizeEagerL
         errors: [],
         durationMs: TEST_INDEX_DURATION_MS,
         profile: { scanMs: TEST_PROFILE_SCAN_MS },
+        ...opts.indexResult,
       };
     },
     sync: async (syncOpts) => {
@@ -182,6 +299,7 @@ function fakeGraph(calls: string[], opts: { llmConfig?: unknown; summarizeEagerL
       embed: {
         embedAll: async (embedOpts = {}) => {
           calls.push(`embedAll:${JSON.stringify(embedOpts)}`);
+          if (opts.embedError) throw opts.embedError;
           return { generated: 1, candidates: 1, errors: 0, skipped: 0, durationMs: 5 };
         },
       },
@@ -189,8 +307,8 @@ function fakeGraph(calls: string[], opts: { llmConfig?: unknown; summarizeEagerL
   };
 }
 
-function fakeClack() {
-  const calls: string[] = [];
+function fakeClack(existingCalls?: string[]) {
+  const calls: string[] = existingCalls ?? [];
   return {
     calls,
     clack: {
@@ -207,11 +325,17 @@ function fakeClack() {
   };
 }
 
-function fakeDeps() {
+function fakeDeps(
+  opts: {
+    initialized?: boolean;
+    detached?: { spawned: boolean; pid?: number; reason?: string };
+    graphOptions?: Parameters<typeof fakeGraph>[1];
+  } = {},
+) {
   const actions = new Map<string, (...args: any[]) => Promise<void>>();
   const calls: string[] = [];
-  const clack = fakeClack();
-  const graph = fakeGraph(calls);
+  const clack = fakeClack(calls);
+  const graph = fakeGraph(calls, opts.graphOptions);
   const deps: AdminIndexingCommandDeps = {
     adminCmd: new FakeCommand(actions),
     colors: { dim: 'dim', reset: 'reset' },
@@ -226,7 +350,7 @@ function fakeDeps() {
     }),
     awaitSummarisationWithProgress: async () => calls.push('awaitSummarisationWithProgress'),
     printIndexResult: (_clack, _result, projectPath) => calls.push(`printIndexResult:${projectPath}`),
-    isInitialized: () => true,
+    isInitialized: () => opts.initialized ?? true,
     loadCartograph: async () => ({
       default: {
         open: async (projectPath) => {
@@ -245,7 +369,7 @@ function fakeDeps() {
     loadDetachedSummarize: async () => ({
       spawnDetachedSummarize: (projectPath) => {
         calls.push(`spawnDetachedSummarize:${projectPath}`);
-        return { spawned: false, reason: 'not started' };
+        return opts.detached ?? { spawned: false, reason: 'not started' };
       },
     }),
     resolveProjectPath: (pathArg) => pathArg ?? '/repo',

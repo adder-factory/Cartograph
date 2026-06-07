@@ -45,6 +45,7 @@ import { logDebug, errMsg } from '../errors.js';
 import { insertEdges } from '../db/queries-edges.js';
 import type { SyncResult } from '../extraction/index.js';
 import type { Edge } from '../types.js';
+import * as path from 'node:path';
 
 /** Algo-version SHA derived from this file's source. A change to the
  *  matching logic invalidates the stored last-mined version, triggering
@@ -71,6 +72,7 @@ interface GoContainerMethods {
  */
 function refresh(ctx: IndexHookContext): void {
   try {
+    insertGoReceiverOwnershipEdges(ctx);
     const interfaces = collectContainerMethods(ctx, 'interface');
     if (interfaces.length === 0) return; // no Go interfaces → nothing to derive
     const structs = collectContainerMethods(ctx, 'struct');
@@ -87,6 +89,56 @@ function refresh(ctx: IndexHookContext): void {
   } catch (err) {
     logDebug(`go-implements stamp failed: ${errMsg(err)}`);
   }
+}
+
+/**
+ * Go lets a receiver method live in any file in the same package. The
+ * extraction-time receiver link only sees declarations already emitted
+ * from the current file, so `type T struct{}` in `types.go` and
+ * `func (t T) Run()` in `methods.go` need a project-wide repair pass.
+ *
+ * We scope by directory instead of name-only matching: same directory
+ * is Go's package boundary in normal source layouts, and it avoids
+ * linking two unrelated `Config` structs that happen to live in
+ * different packages.
+ */
+function insertGoReceiverOwnershipEdges(ctx: IndexHookContext): void {
+  const rows = ctx.queries.db
+    .prepare(
+      `SELECT id, name, kind, qualified_name AS qualifiedName, file_path AS filePath
+       FROM nodes
+       WHERE language = 'go' AND kind IN ('struct', 'method')`,
+    )
+    .all() as Array<{ id: string; name: string; kind: 'struct' | 'method'; qualifiedName: string; filePath: string }>;
+
+  const structsByDirAndName = new Map<string, string>();
+  const methods: typeof rows = [];
+  for (const row of rows) {
+    if (row.kind === 'struct') {
+      structsByDirAndName.set(goOwnerKey(row.filePath, row.name), row.id);
+    } else {
+      methods.push(row);
+    }
+  }
+
+  const edges: Edge[] = [];
+  for (const method of methods) {
+    const receiverName = receiverNameFromQualifiedName(method.qualifiedName);
+    if (!receiverName) continue;
+    const structId = structsByDirAndName.get(goOwnerKey(method.filePath, receiverName));
+    if (!structId) continue;
+    edges.push({ source: structId, target: method.id, kind: 'contains' });
+  }
+  if (edges.length > 0) insertEdges(ctx.queries, edges);
+}
+
+function goOwnerKey(filePath: string, name: string): string {
+  return `${path.posix.dirname(filePath.replaceAll('\\', '/'))}\0${name}`;
+}
+
+function receiverNameFromQualifiedName(qualifiedName: string): string | null {
+  const idx = qualifiedName.indexOf('::');
+  return idx > 0 ? qualifiedName.slice(0, idx) : null;
 }
 
 /**

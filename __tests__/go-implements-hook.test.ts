@@ -70,6 +70,45 @@ func (f *FileReader) Close() error               { return nil }
     expect(rows[0]).toEqual({ structName: 'FileReader', ifaceName: 'Reader' });
   });
 
+  it('links Go receiver methods to same-package structs across files', async () => {
+    fs.mkdirSync(path.join(dir, 'pkg'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'pkg', 'types.go'),
+      `package pkg
+
+type Worker struct{}
+`,
+    );
+    fs.writeFileSync(
+      path.join(dir, 'pkg', 'methods.go'),
+      `package pkg
+
+func (w *Worker) Run() {}
+`,
+    );
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'fix', version: '0.0.0' }));
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    await cg.indexAll({ summarize: false });
+
+    const rows = cg.queries.db
+      .prepare(
+        `SELECT s.name AS structName, m.name AS methodName, s.file_path AS structFile, m.file_path AS methodFile
+         FROM edges e
+         JOIN nodes s ON s.id = e.source
+         JOIN nodes m ON m.id = e.target
+         WHERE e.kind = 'contains' AND s.language = 'go' AND s.kind = 'struct' AND m.kind = 'method'`,
+      )
+      .all() as Array<{ structName: string; methodName: string; structFile: string; methodFile: string }>;
+    cg.close();
+
+    expect(rows).toContainEqual({
+      structName: 'Worker',
+      methodName: 'Run',
+      structFile: 'pkg/types.go',
+      methodFile: 'pkg/methods.go',
+    });
+  });
+
   it('does NOT emit when the struct is missing one of the interface methods', async () => {
     fs.mkdirSync(path.join(dir, 'pkg'), { recursive: true });
     fs.writeFileSync(

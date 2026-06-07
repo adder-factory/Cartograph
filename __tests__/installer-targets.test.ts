@@ -222,6 +222,9 @@ describe('Installer targets — registry', () => {
     expect(getTarget('gemini')?.id).toBe('gemini');
     expect(getTarget('antigravity')?.id).toBe('antigravity');
     expect(getTarget('kiro')?.id).toBe('kiro');
+    expect(getTarget('factory')?.id).toBe('factory');
+    expect(getTarget('rovo')?.id).toBe('rovo');
+    expect(getTarget('qoder')?.id).toBe('qoder');
     expect(getTarget('not-a-real-target')).toBeUndefined();
   });
 
@@ -234,6 +237,114 @@ describe('Installer targets — registry', () => {
 
   it('resolveTargetFlag throws on unknown id', () => {
     expect(() => resolveTargetFlag('claude,bogus', 'global')).toThrow(/Unknown --target/);
+  });
+});
+
+describe('Installer targets — Factory, Rovo, and Qoder specifics', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('home');
+    tmpCwd = mkTmpDir('cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  it('uses disjoint default paths for all three targets', () => {
+    const factory = getTarget('factory')!;
+    const rovo = getTarget('rovo')!;
+    const qoder = getTarget('qoder')!;
+
+    const paths = [
+      ...factory.describePaths('global'),
+      ...factory.describePaths('local'),
+      ...rovo.describePaths('global'),
+      ...rovo.describePaths('local'),
+      ...qoder.describePaths('global'),
+      ...qoder.describePaths('local'),
+    ];
+
+    expect(new Set(paths).size).toBe(paths.length);
+    expect(factory.describePaths('global')).toEqual([path.join(tmpHome, '.factory', 'mcp.json')]);
+    expect(rovo.describePaths('local')).toEqual([path.join(process.cwd(), '.rovodev', 'mcp.json')]);
+    expect(qoder.describePaths('local')).toEqual([path.join(process.cwd(), '.qoder', 'settings.local.json')]);
+  });
+
+  it('writes each target-specific MCP entry shape', () => {
+    const factory = getTarget('factory')!;
+    const rovo = getTarget('rovo')!;
+    const qoder = getTarget('qoder')!;
+
+    factory.install('local', { autoAllow: false });
+    rovo.install('local', { autoAllow: false });
+    qoder.install('local', { autoAllow: false });
+
+    const factoryConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.factory', 'mcp.json'), 'utf-8'));
+    expect(factoryConfig.mcpServers.cartograph).toEqual({
+      type: 'stdio',
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      disabled: false,
+    });
+
+    const rovoConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.rovodev', 'mcp.json'), 'utf-8'));
+    expect(rovoConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      transport: 'stdio',
+    });
+
+    const qoderConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.qoder', 'settings.local.json'), 'utf-8'));
+    expect(qoderConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+    });
+  });
+
+  it('qoder writes and removes auto-allow permissions when requested', () => {
+    const qoder = getTarget('qoder')!;
+    qoder.install('local', { autoAllow: true });
+
+    const settingsPath = path.join(tmpCwd, '.qoder', 'settings.local.json');
+    const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(settings.permissions.allow).toContain('mcp__cartograph__cartograph_find');
+    expect(settings.permissions.allow).toContain('mcp__cartograph__cartograph_status');
+
+    const second = qoder.install('local', { autoAllow: true });
+    for (const file of second.files) expect(file.action).toBe('unchanged');
+
+    qoder.uninstall('local');
+    const after = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+    expect(after.mcpServers?.cartograph).toBeUndefined();
+    expect(after.permissions?.allow).toBeUndefined();
+  });
+
+  it('rovo honors an existing mcpConfigPath override', () => {
+    const rovo = getTarget('rovo')!;
+    const rovoDir = path.join(tmpCwd, '.rovodev');
+    fs.mkdirSync(rovoDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(rovoDir, 'config.yml'),
+      ['mcp:', '  mcpConfigPath: .rovodev/custom-mcp.json', ''].join('\n'),
+    );
+
+    const expected = path.join(process.cwd(), '.rovodev', 'custom-mcp.json');
+    expect(rovo.describePaths('local')).toEqual([expected]);
+
+    rovo.install('local', { autoAllow: false });
+    const config = JSON.parse(fs.readFileSync(expected, 'utf-8'));
+    expect(config.mcpServers.cartograph.transport).toBe('stdio');
   });
 });
 

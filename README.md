@@ -55,8 +55,9 @@ cartograph install
 ```
 
 The installer detects and configures Claude Code, Cursor, Codex CLI,
-opencode, Hermes, Gemini CLI, Antigravity, and Kiro. It writes MCP config plus
-agent instructions where the target supports them.
+opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and
+Qoder CLI. It writes MCP config plus agent instructions where the target
+supports them.
 
 Or give this task to your coding agent:
 
@@ -319,6 +320,11 @@ are listed separately so the core language matrix stays readable.
 | JVM | Spring route/config references, Play routes, and MyBatis Java/XML bindings |
 | Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |
+
+Static resolution also handles language-specific ownership and call shapes,
+including Python package-member imports, Go receiver methods split across files,
+C# primary constructors, PHP include/require imports, and return-type-backed
+chained calls.
 
 ## Embedded DSLs & Derived Signals
 

@@ -1,11 +1,11 @@
 /**
- * Shared implementation for writing the cartograph MCP-server entry
+ * Shared implementation for reading/writing the cartograph MCP-server entry
  * into JSON-shaped agent configs (Claude Code, Cursor).
  *
- * Both agents use a `{mcpServers: {cartograph: {...}}}` wrapper and
+ * Most JSON targets use a `{mcpServers: {cartograph: {...}}}` wrapper and
  * the same "file-existence → 'created' vs 'updated'" action idiom.
- * The only per-target variation is the path of the config file, which
- * callers supply via `resolvePath`.
+ * Per-target variations are the path and, for a few clients, the exact
+ * server-entry object.
  *
  * Codex CLI is intentionally NOT covered here — it uses TOML, a
  * different action idiom (empty-content => 'created'), and takes no
@@ -13,12 +13,24 @@
  */
 
 import * as fs from 'node:fs';
-import type { Location, WriteResult } from './types.js';
+import type { DetectionResult, Location, WriteResult } from './types.js';
 import { getMcpServerConfig, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
 
 export interface WriteMcpEntryJsonArgs {
   /** Resolve the absolute path to the agent's JSON config file. */
   resolvePath: (loc: Location) => string;
+  /** Optional per-client MCP entry shape. Defaults to the standard stdio entry. */
+  entry?: () => Record<string, unknown>;
+}
+
+function targetEntry(args: WriteMcpEntryJsonArgs): Record<string, unknown> {
+  return args.entry?.() ?? getMcpServerConfig();
+}
+
+export function detectMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs, installed: boolean): DetectionResult {
+  const file = args.resolvePath(loc);
+  const config = readJsonFile(file);
+  return { installed, alreadyConfigured: !!config['mcpServers']?.cartograph, configPath: file };
 }
 
 /**
@@ -37,7 +49,7 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
   const file = args.resolvePath(loc);
   const existing = readJsonFile(file);
   const before = existing['mcpServers']?.cartograph;
-  const after = getMcpServerConfig();
+  const after = targetEntry(args);
 
   if (jsonDeepEqual(before, after)) {
     // Already exactly what we'd write — preserve byte-identical file.
@@ -57,4 +69,18 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
   existing['mcpServers'].cartograph = after;
   writeJsonFile(file, existing);
   return { path: file, action };
+}
+
+export function removeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): WriteResult['files'][number] {
+  const file = args.resolvePath(loc);
+  const config = readJsonFile(file);
+  if (!config['mcpServers']?.cartograph) {
+    return { path: file, action: 'not-found' };
+  }
+  delete config['mcpServers'].cartograph;
+  if (Object.keys(config['mcpServers']).length === 0) {
+    delete config['mcpServers'];
+  }
+  writeJsonFile(file, config);
+  return { path: file, action: 'removed' };
 }

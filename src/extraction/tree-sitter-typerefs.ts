@@ -66,6 +66,14 @@ const BUILTIN_TYPES: ReadonlySet<string> = new Set([
   'float',
   'double',
   'char',
+  'decimal',
+  'uint',
+  'ulong',
+  'ushort',
+  'sbyte',
+  'nint',
+  'nuint',
+  'dynamic',
   // Go
   'int8',
   'int16',
@@ -147,6 +155,17 @@ function isCsharpQualifiedTypeNode(language: string, nodeType: string): boolean 
   return language === 'csharp' && (nodeType === 'generic_name' || nodeType === 'qualified_name');
 }
 
+const CSHARP_TYPE_POSITION_NODE_TYPES: ReadonlySet<string> = new Set([
+  'identifier',
+  'predefined_type',
+  'generic_name',
+  'qualified_name',
+  'nullable_type',
+  'array_type',
+  'tuple_type',
+  'type_argument_list',
+]);
+
 function isPhpNamedTypeNode(language: string, nodeType: string): boolean {
   return language === 'php' && nodeType === 'named_type';
 }
@@ -171,6 +190,17 @@ function tryLanguageSpecificHandler(ctx: TypeRefCtx): boolean {
   if (node.type === 'type' && extractor.language === 'python') {
     handlePythonTypeWrapper(ctx);
     return true;
+  }
+
+  if (extractor.language === 'csharp') {
+    if (node.type === 'parameter' || node.type === 'tuple_element') {
+      handleCSharpParameterLikeType(ctx);
+      return true;
+    }
+    if (CSHARP_TYPE_POSITION_NODE_TYPES.has(node.type)) {
+      handleCSharpTypePosition(ctx);
+      return true;
+    }
   }
 
   // C# / PHP qualified types
@@ -297,6 +327,62 @@ function handlePythonTypeWrapper(ctx: TypeRefCtx): void {
       extractTypeRefsFromCtx({ extractor, node: child, fromNodeId, kind });
     }
   }
+}
+
+function firstCSharpTypeChild(node: SyntaxNode): SyntaxNode | null {
+  return node.namedChildren.find((child: SyntaxNode) => CSHARP_TYPE_POSITION_NODE_TYPES.has(child.type)) ?? null;
+}
+
+function handleCSharpParameterLikeType(ctx: TypeRefCtx): void {
+  const typeNode = firstCSharpTypeChild(ctx.node);
+  if (typeNode) handleCSharpTypePosition({ ...ctx, node: typeNode });
+}
+
+function handleCSharpTypePosition(ctx: TypeRefCtx): void {
+  const { node } = ctx;
+  if (node.type === 'identifier' || node.type === 'predefined_type') {
+    pushTypeRef({
+      extractor: ctx.extractor,
+      fromNodeId: ctx.fromNodeId,
+      name: getNodeText(node, ctx.extractor.source),
+      kind: ctx.kind,
+      posNode: node,
+    });
+    return;
+  }
+  if (node.type === 'generic_name') {
+    handleCSharpGenericName(ctx);
+    return;
+  }
+  if (node.type === 'qualified_name') {
+    handleCSharpQualifiedName(ctx);
+    return;
+  }
+  for (const child of node.namedChildren) {
+    if (child && CSHARP_TYPE_POSITION_NODE_TYPES.has(child.type)) {
+      handleCSharpTypePosition({ ...ctx, node: child });
+    }
+  }
+}
+
+function handleCSharpGenericName(ctx: TypeRefCtx): void {
+  const { node, extractor, fromNodeId, kind } = ctx;
+  const head = node.namedChildren.find((child: SyntaxNode) => child.type === 'identifier');
+  if (head) {
+    pushTypeRef({ extractor, fromNodeId, name: getNodeText(head, extractor.source), kind, posNode: head });
+  }
+  for (const child of node.namedChildren) {
+    if (!child || child.startIndex === head?.startIndex) continue;
+    if (CSHARP_TYPE_POSITION_NODE_TYPES.has(child.type)) handleCSharpTypePosition({ ...ctx, node: child });
+  }
+}
+
+function handleCSharpQualifiedName(ctx: TypeRefCtx): void {
+  const typeChildren = ctx.node.namedChildren.filter((child: SyntaxNode) =>
+    CSHARP_TYPE_POSITION_NODE_TYPES.has(child.type),
+  );
+  const target = typeChildren.at(-1);
+  if (target) handleCSharpTypePosition({ ...ctx, node: target });
 }
 
 /**

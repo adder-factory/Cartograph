@@ -18,6 +18,9 @@ cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
 ```
 
+Supported install target ids: `claude`, `cursor`, `codex`, `opencode`,
+`hermes`, `gemini`, `antigravity`, `kiro`, `factory`, `rovo`, and `qoder`.
+
 ## Admin
 
 ```sh

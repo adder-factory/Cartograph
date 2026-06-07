@@ -720,6 +720,10 @@ function tsResolveMemberCallName(ext: TreeSitterExtractor, func: SyntaxNode): st
   const receiver = getChildByField(func, 'object') || getChildByField(func, 'operand') || func.namedChild(0);
   const receiverName = receiver ? extractLeafReceiverName(receiver, ext.source, MEMBER_CALL_SKIP_RECEIVERS) : null;
   if (ext.language === 'go' && receiverName === 'C') return methodName;
+  if (!receiverName && receiver?.type === 'call_expression') {
+    const chainedReceiver = tsResolveCalleeName(ext, receiver);
+    if (chainedReceiver) return `${chainedReceiver}().${methodName}`;
+  }
   return tsQualifyCallReceiver(methodName, receiverName ?? '', MEMBER_CALL_SKIP_RECEIVERS);
 }
 

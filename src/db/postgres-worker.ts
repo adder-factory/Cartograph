@@ -245,12 +245,15 @@ async function handleBatchRun(inputSql: string, paramSets: unknown[][]): Promise
 
   let changes = 0;
   let lastInsertRowid = 0;
-  for (const params of paramSets) {
+  let index = 0;
+  while (index < paramSets.length) {
+    const params = paramSets[index] ?? [];
     const translated = translateQuery(inputSql, params);
     const rows = await sql.unsafe(translated.sql, translated.params);
     const dataRows = Array.from(rows as unknown[]).map(normalizeRow);
     changes += numericMeta(rows, 'count') ?? dataRows.length;
     lastInsertRowid = inferLastInsertRowid(dataRows) || lastInsertRowid;
+    index++;
   }
   return { ok: true, changes, lastInsertRowid };
 }
