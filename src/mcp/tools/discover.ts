@@ -166,6 +166,22 @@ function readActiveContextStats(
   }
 }
 
+function configuredStorageProvider(cartographDir: string): 'postgres' | 'sqlite' | null {
+  const configPath = pathMod.join(cartographDir, 'config.json');
+  if (!fsMod.existsSync(configPath)) return null;
+  try {
+    const parsed = JSON.parse(fsMod.readFileSync(configPath, 'utf-8')) as {
+      database?: { provider?: unknown };
+    };
+    const provider = parsed.database?.provider;
+    if (provider === 'postgres' || provider === 'postgresql') return 'postgres';
+    if (provider === 'sqlite') return 'sqlite';
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 interface TryRecordCartographDirArgs {
   entry: fsMod.Dirent;
   full: string;
@@ -177,6 +193,17 @@ interface TryRecordCartographDirArgs {
 function tryRecordCartographDir(args: TryRecordCartographDirArgs): boolean {
   const { entry, full, dir, out } = args;
   if (entry.name !== '.cartograph') return false;
+  if (configuredStorageProvider(full) === 'postgres') {
+    out.push({
+      path: dir,
+      fileCount: null,
+      nodeCount: null,
+      indexedAt: null,
+      failureReason:
+        'PostgreSQL storage; discover does not open external database connections. Use cartograph_status with this projectPath for live counts.',
+    });
+    return true;
+  }
   const dbPath = pathMod.join(full, 'cartograph.db');
   if (fsMod.existsSync(dbPath)) {
     out.push({ path: dir, ...readContextStats(dbPath) });
@@ -245,7 +272,7 @@ function formatDiscovered(root: string, contexts: DiscoveredContext[], maxDepth:
   const failureFooter =
     failed.length > 0
       ? [
-          `_Stat read failed for ${failed.length} index${failed.length === 1 ? '' : 'es'} — em-dashes above mean the DB couldn't be opened read-only (the live MCP holding a writer connection, schema mismatch, or truncated file). Per-row reasons:_`,
+          `_Stats unavailable for ${failed.length} index${failed.length === 1 ? '' : 'es'} — em-dashes above mean discover could not read counts directly (for example PostgreSQL storage, a live writer lock, schema mismatch, or a truncated SQLite file). Per-row reasons:_`,
           ...failed.map((c) => `- \`${c.path}\` — ${c.failureReason}`),
         ]
       : [];

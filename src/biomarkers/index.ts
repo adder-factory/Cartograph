@@ -243,7 +243,7 @@ async function runFileLoop(args: FileLoopArgs): Promise<void> {
   // parse + walk + rule eval against a slice, and returns serializable
   // per-file results. The main thread persists — SQLite writes
   // serialize at the engine level anyway.
-  if (shouldUsePerFileWorkers(targetFiles.length)) {
+  if (ctx.queries.db.dialect === 'sqlite' && shouldUsePerFileWorkers(targetFiles.length)) {
     await runFileLoopInWorkers(args);
     return;
   }
@@ -1404,7 +1404,7 @@ async function runCrossFileBiomarkers(args: RunCrossFileBiomarkersArgs): Promise
   // Small-project fast path — see BIOMARKER_WORKER_NODE_THRESHOLD.
   // Spawning 6 worker_threads to run rules whose total work is a
   // few ms is a net loss; route to the serial path instead.
-  if (countAllNodesInProject(args.queries) < BIOMARKER_WORKER_NODE_THRESHOLD) {
+  if (args.queries.db.dialect !== 'sqlite' || countAllNodesInProject(args.queries) < BIOMARKER_WORKER_NODE_THRESHOLD) {
     runCrossFileBiomarkersSerial(args);
     return;
   }

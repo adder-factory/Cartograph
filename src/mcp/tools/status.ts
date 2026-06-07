@@ -206,18 +206,18 @@ function appendHeaderAndCounts(args: AppendHeaderAndCountsArgs): void {
   );
 }
 
-/**
- * Surface the active SQLite backend. node:sqlite is the default
- * (Node 22.5+ built-in, no native compile, no platform binaries).
- * better-sqlite3 is reported when the user has installed it
- * explicitly for the perf opt-in (~1.5× faster indexing). Per-instance
- * via cg.db.getBackend() so explicit-project queries report the right
- * backend.
- */
+/** Surface the active storage backend for this project. */
 function appendBackendStatus(lines: string[], cg: Cartograph, hnswAvailable: boolean): void {
+  const backend = cg.db.getBackend();
+  if (backend === 'postgres') {
+    lines.push(
+      '**Backend:** postgres',
+      '  ℹ PostgreSQL storage active — native GIN/pgvector paths are used when available.',
+    );
+    return;
+  }
   const vec = cg.db.hasVecExtension();
   const vecSuffix = vec ? ' + sqlite-vec (indexed similarity) ✅' : ' ⚠ no sqlite-vec';
-  // cartograph is Bun-only now — bun:sqlite is the sole backend.
   lines.push(`**Backend:** bun:sqlite${vecSuffix}`);
   // Surface a degraded vector-search path so an operator on a platform
   // without a prebuilt binary knows they're on a slow fallback (and

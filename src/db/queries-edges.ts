@@ -229,10 +229,10 @@ export function insertEdges(qb: QueryBuilder, edges: Edge[]): Edge[] {
   const nonSelfLoops = edges.filter((e) => !(e.source === e.target && SELF_LOOP_NOISE_KINDS.has(e.kind)));
   const insertable = filterEdgesWithExistingEndpoints(qb, nonSelfLoops);
   if (insertable.length === 0) return [];
+  const query = (qb.queries.insertEdge ??= insertEdgeQuery(qb.db));
+  const paramsList = insertable.map((edge) => bindingsFromObject(edge, EDGE_SCHEMA) as InsertEdgeParams);
   qb.db.transaction(() => {
-    for (const edge of insertable) {
-      insertEdge(qb, edge);
-    }
+    query.runBatch(paramsList);
   })();
   return insertable;
 }

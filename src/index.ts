@@ -14,7 +14,7 @@ import {
   getUnresolvedReferencesByDefiningFiles,
   getUnresolvedReferencesCount,
 } from './db/queries-unresolved-refs.js';
-import { loadConfig, saveConfig, createDefaultConfig } from './config.js';
+import { loadConfig, saveConfig } from './config.js';
 import { isInitialized, createDirectory, removeDirectory, validateDirectory } from './directory.js';
 import {
   ExtractionOrchestrator,
@@ -625,8 +625,10 @@ export class Cartograph extends CartographCore {
     // Create directory structure
     createDirectory(resolvedRoot);
 
-    // Create and save configuration
-    const config = createDefaultConfig(resolvedRoot);
+    // Create and save configuration. Preserve an existing hand-authored
+    // `.cartograph/config.json` during partial setup recovery; CLI/API
+    // options still win via the explicit merge below.
+    const config = loadConfig(resolvedRoot);
     if (options.config) {
       Object.assign(config, options.config);
     }
@@ -634,7 +636,7 @@ export class Cartograph extends CartographCore {
 
     // Initialize database
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.initialize(dbPath);
+    const db = DatabaseConnection.initialize(dbPath, { database: config.database });
     const queries = new QueryBuilder(db.getDb(), db.hasVecExtension());
 
     const instance = new Cartograph({ db, queries, config, projectRoot: resolvedRoot });
@@ -661,8 +663,10 @@ export class Cartograph extends CartographCore {
     // Create directory structure
     createDirectory(resolvedRoot);
 
-    // Create and save configuration
-    const config = createDefaultConfig(resolvedRoot);
+    // Create and save configuration. Preserve an existing hand-authored
+    // `.cartograph/config.json` during partial setup recovery; CLI/API
+    // options still win via the explicit merge below.
+    const config = loadConfig(resolvedRoot);
     if (options.config) {
       Object.assign(config, options.config);
     }
@@ -670,7 +674,7 @@ export class Cartograph extends CartographCore {
 
     // Initialize database
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.initialize(dbPath);
+    const db = DatabaseConnection.initialize(dbPath, { database: config.database });
     const queries = new QueryBuilder(db.getDb(), db.hasVecExtension());
 
     return new Cartograph({ db, queries, config, projectRoot: resolvedRoot });
@@ -703,7 +707,10 @@ export class Cartograph extends CartographCore {
 
     // Open database
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.open(dbPath, { autoMigrate: options.autoMigrate ?? false });
+    const db = DatabaseConnection.open(dbPath, {
+      autoMigrate: options.autoMigrate ?? false,
+      database: config.database,
+    });
     const queries = new QueryBuilder(db.getDb(), db.hasVecExtension());
 
     const instance = new Cartograph({ db, queries, config, projectRoot: resolvedRoot });
@@ -738,7 +745,10 @@ export class Cartograph extends CartographCore {
 
     // Open database
     const dbPath = getDatabasePath(resolvedRoot);
-    const db = DatabaseConnection.open(dbPath, { autoMigrate: options.autoMigrate ?? false });
+    const db = DatabaseConnection.open(dbPath, {
+      autoMigrate: options.autoMigrate ?? false,
+      database: config.database,
+    });
     const queries = new QueryBuilder(db.getDb(), db.hasVecExtension());
 
     return new Cartograph({ db, queries, config, projectRoot: resolvedRoot });

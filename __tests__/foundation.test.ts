@@ -104,6 +104,35 @@ describe('Cartograph Foundation', () => {
 
       cg.close();
     });
+
+    it('should not treat PostgreSQL config alone as initialized', () => {
+      const cartographDir = getCartographDir(tempDir);
+      fs.mkdirSync(cartographDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(cartographDir, 'config.json'),
+        JSON.stringify({
+          database: {
+            provider: 'postgres',
+            url: 'postgres://cartograph:cartograph@localhost:5432/cartograph',
+          },
+        }),
+      );
+
+      expect(Cartograph.isInitialized(tempDir)).toBe(false);
+    });
+
+    it('should preserve an existing partial config while completing initialization', () => {
+      const cartographDir = getCartographDir(tempDir);
+      fs.mkdirSync(cartographDir, { recursive: true });
+      fs.writeFileSync(path.join(cartographDir, 'config.json'), JSON.stringify({ maxFileSize: 123456 }));
+
+      const cg = Cartograph.initSync(tempDir);
+
+      expect(Cartograph.isInitialized(tempDir)).toBe(true);
+      expect(cg.getConfig().maxFileSize).toBe(123456);
+
+      cg.close();
+    });
   });
 
   describe('Opening Projects', () => {

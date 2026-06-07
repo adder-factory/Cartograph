@@ -20,6 +20,7 @@ import { registerAdminMigrateCommand } from '../../features/admin-migrate/index.
 import { registerAdminProjectLifecycleCommands } from '../../features/admin-project-lifecycle/index.js';
 import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store/index.js';
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
+import { registerAdminStorageMigrateCommand } from '../../features/admin-storage-migrate/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
 import type { CliRequiredOptionCommand } from '../../features/shared/cli-command.js';
@@ -229,6 +230,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerAdminLlmEnrichmentCommands(deps);
   registerAdminUnlockCommand(deps);
   registerAdminMigrateCommand(deps);
+  registerAdminStorageMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
   registerAdminPruneStoreCommand(deps);
   registerScipAdminCommands({

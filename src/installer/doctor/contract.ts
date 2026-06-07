@@ -5,6 +5,7 @@ export type CheckId =
   | 'llm-models'
   | 'project-init'
   | 'project-config'
+  | 'database-storage'
   | 'configured-model-files'
   | 'detected-llm-backends'
   | 'embedding-endpoint'

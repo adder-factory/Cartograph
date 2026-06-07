@@ -1,4 +1,5 @@
 import { errMsg } from '../../errors.js';
+import { databaseConfigFromOptionInput } from '../../db/database-config.js';
 import { resolveInitProjectPath, shouldConfirmUninit } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
@@ -21,7 +22,10 @@ export interface AdminProjectLifecycleCommandDeps {
   isInitialized: (projectPath: string) => boolean;
   loadCartograph: () => Promise<{
     default: {
-      init: (projectPath: string, opts: { index: boolean }) => Promise<ProjectLifecycleGraph>;
+      init: (
+        projectPath: string,
+        opts: { index: boolean; config?: Record<string, unknown> },
+      ) => Promise<ProjectLifecycleGraph>;
       openSync: (projectPath: string) => ProjectLifecycleGraph;
     };
   }>;
@@ -60,7 +64,18 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
     )
     .option('-i, --index', 'Run initial indexing after initialization')
     .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
-    .action(async (pathArg: string | undefined, options: { index?: boolean; verbose?: boolean }) => {
+    .option('--database-provider <provider>', 'Storage backend: sqlite (default) or postgres')
+    .option(
+      '--database-url <url>',
+      'PostgreSQL connection URL; required for provider=postgres unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set',
+    )
+    .option('--database-schema <schema>', 'PostgreSQL schema name (default: public)')
+    .option('--database-pgvector <mode>', 'PostgreSQL pgvector mode: auto (default), off, or require')
+    .option('--database-max-connections <n>', 'PostgreSQL pool cap (default: 1)')
+    .option('--database-query-timeout-ms <ms>', 'PostgreSQL query timeout in milliseconds (default: 120000)')
+    .option('--database-connection-timeout-seconds <seconds>', 'PostgreSQL connection timeout in seconds (default: 30)')
+    .option('--database-ssl', 'Force TLS for PostgreSQL connections (URL sslmode= is preferred for verification modes)')
+    .action(async (pathArg: string | undefined, options: InitCommandOptions) => {
       const projectPath = resolveInitProjectPath(pathArg);
       const clack = await loadClack();
       let cg: ProjectLifecycleGraph | undefined;
@@ -76,7 +91,11 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         }
 
         const { default: Cartograph } = await loadCartograph();
-        cg = await Cartograph.init(projectPath, { index: false });
+        const database = databaseConfigFromOptionInput(options);
+        cg = await Cartograph.init(projectPath, {
+          index: false,
+          ...(database ? { config: { database } } : {}),
+        });
         clack.log.success(`Initialized in ${projectPath}`);
 
         if (options.index) {
@@ -109,6 +128,19 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         cg?.close();
       }
     });
+}
+
+interface InitCommandOptions {
+  index?: boolean;
+  verbose?: boolean;
+  databaseProvider?: string;
+  databaseUrl?: string;
+  databaseSchema?: string;
+  databasePgvector?: string;
+  databaseMaxConnections?: string;
+  databaseQueryTimeoutMs?: string;
+  databaseConnectionTimeoutSeconds?: string;
+  databaseSsl?: boolean;
 }
 
 function registerUninitCommand(deps: AdminProjectLifecycleCommandDeps): void {

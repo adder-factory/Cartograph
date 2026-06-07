@@ -113,6 +113,15 @@ const getSymbolNameIndexByFileQuery = defineQuery({
   row: z.object({ name: z.string(), id: z.string() }),
 });
 
+const POSTGRES_NODE_SEARCH_VECTOR = `to_tsvector(
+  'simple',
+  COALESCE(name, '') || ' ' ||
+  COALESCE(qualified_name, '') || ' ' ||
+  COALESCE(signature, '') || ' ' ||
+  COALESCE(docstring, '')
+)`;
+const POSTGRES_SIGNATURE_VECTOR = `to_tsvector('simple', COALESCE(signature, ''))`;
+
 // Static FTS5 MATCH query — the hand-tuned phrase pattern is built at
 // the call site from a pre-validated bare identifier and bound as a
 // param, so the SQL string itself is constant.
@@ -124,6 +133,19 @@ const findSignatureTokenOwnerQuery = defineQuery({
     ORDER BY bm25(nodes_fts) LIMIT 10
   `,
   params: z.object({ match: z.string() }),
+  row: NodeRowSchema,
+});
+
+const findSignatureTokenOwnerPostgresQuery = defineQuery({
+  sql: `
+    SELECT nodes.*
+      FROM nodes
+     WHERE ${POSTGRES_SIGNATURE_VECTOR} @@ plainto_tsquery('simple', @token)
+     ORDER BY ts_rank_cd(${POSTGRES_SIGNATURE_VECTOR}, plainto_tsquery('simple', @token)) DESC,
+              length(COALESCE(signature, '')) ASC
+     LIMIT 10
+  `,
+  params: z.object({ token: z.string() }),
   row: NodeRowSchema,
 });
 
@@ -169,6 +191,7 @@ declare module './queries.js' {
     getNodesByQualifiedNameExact?: TypedQuery<{ qualifiedName: string }, NodeRow>;
     getNodesByLowerName?: TypedQuery<{ lowerName: string }, NodeRow>;
     findSignatureTokenOwner?: TypedQuery<{ match: string }, NodeRow>;
+    findSignatureTokenOwnerPostgres?: TypedQuery<{ token: string }, NodeRow>;
     nodesByIdsBulk?: TypedQuery<{ idsJson: string }, NodeRow>;
     nodesCallingAny?: TypedQuery<{ namesJson: string }, { id: string }>;
     nodesCalledByAny?: TypedQuery<{ namesJson: string }, { id: string }>;
@@ -385,6 +408,15 @@ const SIGNATURE_OWNER_KINDS: ReadonlySet<string> = new Set([
 export function findSignatureTokenOwner(qb: QueryBuilder, token: string): Node | null {
   // Only a bare identifier is safe to interpolate into the phrase query.
   if (!/^[A-Za-z_]\w*$/.test(token)) return null;
+  if (qb.db.dialect === 'postgres') {
+    qb.queries.findSignatureTokenOwnerPostgres ??= findSignatureTokenOwnerPostgresQuery(qb.db);
+    const rows = qb.queries.findSignatureTokenOwnerPostgres.all({ token });
+    for (const row of rows) {
+      const node = rowToNode(row);
+      if (SIGNATURE_OWNER_KINDS.has(node.kind)) return node;
+    }
+    return null;
+  }
   // Fetch a small bm25-ranked window rather than just the top hit:
   // the best lexical match may be an import/file node we must skip,
   // and the genuine signature owner could be ranked just behind it.
@@ -1511,14 +1543,25 @@ function fetchFuzzyNameRows(ctx: FuzzyFetchCtx, c: { name: string; dist: number 
  * OR-join), filtering stopwords, then OR-joining with prefix marks.
  */
 function buildFtsPrefixQuery(query: string): string {
-  const rawTerms = query
+  const rawTerms = queryTermsForSqliteFts(query);
+  return filterStopwords(rawTerms)
+    .map((term) => `"${term}"*`) // Prefix match each term
+    .join(' OR ');
+}
+
+function queryTermsForSqliteFts(query: string): string[] {
+  return query
     .replaceAll(/['"*():^]/g, '')
     .split(/\s+/)
     .filter((term) => term.length > 0)
     .filter((term) => !/^(AND|OR|NOT|NEAR)$/i.test(term));
+}
+
+function buildPostgresPrefixQuery(query: string): string {
+  const rawTerms = query.match(/\w+/g) ?? [];
   return filterStopwords(rawTerms)
-    .map((term) => `"${term}"*`) // Prefix match each term
-    .join(' OR ');
+    .map((term) => `${term}:*`)
+    .join(' | ');
 }
 
 /**
@@ -1545,13 +1588,33 @@ function appendKindLanguageFiltersNamed(
 
 function searchNodesFTS(qb: QueryBuilder, query: string, options: SearchOptions): SearchResult[] {
   const { kinds, languages, limit = SEARCH_DEFAULT_LIMIT, offset = 0 } = options;
-
   const ftsQuery = buildFtsPrefixQuery(query);
   if (!ftsQuery) return [];
 
   // BM25 column weights kept on the SQL side; ftsLimit comes from
   // limit*5 (min 100) so the post-fetch ranking has room to pick.
   const ftsLimit = Math.max(limit * 5, 100);
+
+  if (qb.db.dialect === 'postgres') {
+    const postgresFtsQuery = buildPostgresPrefixQuery(query);
+    if (!postgresFtsQuery) return [];
+    qb.queries.searchNodesPostgresFTS ??= searchNodesPostgresFTSQuery(qb.db);
+    try {
+      const rows = qb.queries.searchNodesPostgresFTS.all({
+        ftsQuery: postgresFtsQuery,
+        kinds,
+        languages,
+        ftsLimit,
+        offset,
+      });
+      return rows.map((row) => ({
+        node: rowToNode(row),
+        score: row.score,
+      }));
+    } catch {
+      return [];
+    }
+  }
 
   qb.queries.searchNodesFTS ??= searchNodesFTSQuery(qb.db);
   try {
@@ -1578,8 +1641,15 @@ function searchNodesFTS(qb: QueryBuilder, query: string, options: SearchOptions)
  */
 function searchNodesLike(qb: QueryBuilder, query: string, options: SearchOptions): SearchResult[] {
   const { kinds, languages, limit = SEARCH_DEFAULT_LIMIT, offset = 0 } = options;
-  qb.queries.searchNodesLike ??= searchNodesLikeQuery(qb.db);
-  const rows = qb.queries.searchNodesLike.all({
+  let statement: DynamicTypedQuery<SearchNodesLikeParams, NodeRowWithScore>;
+  if (qb.db.dialect === 'postgres') {
+    qb.queries.searchNodesLikePostgres ??= searchNodesLikePostgresQuery(qb.db);
+    statement = qb.queries.searchNodesLikePostgres;
+  } else {
+    qb.queries.searchNodesLike ??= searchNodesLikeQuery(qb.db);
+    statement = qb.queries.searchNodesLike;
+  }
+  const rows = statement.all({
     query,
     startsWith: `${query}%`,
     contains: `%${query}%`,
@@ -1848,6 +1918,31 @@ const searchNodesFTSQuery = defineDynamicQuery({
   },
 });
 
+const searchNodesPostgresFTSQuery = defineDynamicQuery({
+  params: SearchNodesFTSParamsSchema,
+  row: NodeRowWithScoreSchema,
+  build: (p) => {
+    const state = {
+      sql: `SELECT nodes.*,
+                  ts_rank_cd(${POSTGRES_NODE_SEARCH_VECTOR}, to_tsquery('simple', @ftsQuery)) AS score
+             FROM nodes
+            WHERE ${POSTGRES_NODE_SEARCH_VECTOR} @@ to_tsquery('simple', @ftsQuery)`,
+      bindings: {
+        ftsQuery: p.ftsQuery,
+        ftsLimit: p.ftsLimit,
+        offset: p.offset,
+      } as Record<string, unknown>,
+    };
+    appendKindLanguageFiltersNamed(state, {
+      kinds: p.kinds,
+      languages: p.languages,
+      tablePrefix: 'nodes.',
+    });
+    state.sql += ' ORDER BY score DESC LIMIT @ftsLimit OFFSET @offset';
+    return state;
+  },
+});
+
 const SearchNodesLikeParamsSchema = z.object({
   query: z.string(),
   startsWith: z.string(),
@@ -1892,6 +1987,39 @@ const searchNodesLikeQuery = defineDynamicQuery({
   },
 });
 
+const searchNodesLikePostgresQuery = defineDynamicQuery({
+  params: SearchNodesLikeParamsSchema,
+  row: NodeRowWithScoreSchema,
+  build: (p) => {
+    const state = {
+      sql: `SELECT nodes.*,
+           CASE
+             WHEN lower(name) = lower(@query) THEN 1.0
+             WHEN name ILIKE @startsWith THEN 0.9
+             WHEN name ILIKE @contains THEN 0.8
+             WHEN qualified_name ILIKE @contains THEN 0.7
+             ELSE 0.5
+           END as score
+         FROM nodes
+         WHERE (
+           name ILIKE @contains OR
+           qualified_name ILIKE @contains OR
+           name ILIKE @startsWith
+         )`,
+      bindings: {
+        query: p.query,
+        startsWith: p.startsWith,
+        contains: p.contains,
+        limit: p.limit,
+        offset: p.offset,
+      } as Record<string, unknown>,
+    };
+    appendKindLanguageFiltersNamed(state, { kinds: p.kinds, languages: p.languages });
+    state.sql += ' ORDER BY score DESC, length(name) ASC LIMIT @limit OFFSET @offset';
+    return state;
+  },
+});
+
 const ScoreExactNameParamsSchema = z.object({
   name: z.string(),
   kinds: z.array(z.string()).optional(),
@@ -1919,7 +2047,9 @@ const scoreExactNameRowsQuery = defineDynamicQuery({
 declare module './queries.js' {
   interface QueryRegistry {
     searchNodesFTS?: DynamicTypedQuery<SearchNodesFTSParams, NodeRowWithScore>;
+    searchNodesPostgresFTS?: DynamicTypedQuery<SearchNodesFTSParams, NodeRowWithScore>;
     searchNodesLike?: DynamicTypedQuery<SearchNodesLikeParams, NodeRowWithScore>;
+    searchNodesLikePostgres?: DynamicTypedQuery<SearchNodesLikeParams, NodeRowWithScore>;
     scoreExactNameRows?: DynamicTypedQuery<ScoreExactNameParams, NodeRowWithScore>;
   }
 }

@@ -45,10 +45,11 @@ Freshness:
  */
 export const FULL_PLAYBOOK = `# Cartograph — code intelligence over an indexed knowledge graph
 
-Cartograph is a SQLite knowledge graph of every symbol, edge, and file in
-the workspace — a structural reference manual you consult BEFORE writing
-or editing code, not a live linter. Reads are sub-millisecond; the index
-lags disk writes by about a second through the file watcher.
+Cartograph is a knowledge graph of every symbol, edge, and file in the
+workspace — SQLite by default, PostgreSQL when configured. It is a
+structural reference manual you consult BEFORE writing or editing code,
+not a live linter. Reads are sub-millisecond on the indexed surfaces; the
+index lags disk writes by about a second through the file watcher.
 
 ## Answer directly vs. delegate (read first if you can spawn sub-agents)
 

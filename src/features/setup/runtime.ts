@@ -1,8 +1,12 @@
 import { errMsg } from '../../errors.js';
+import type { CartographConfig } from '../../types.js';
 
 export interface SetupCartographModule {
   default: {
-    init: (projectPath: string, options: { index: boolean }) => Promise<{ close: () => void }>;
+    init: (
+      projectPath: string,
+      options: { index: boolean; config?: Partial<CartographConfig> },
+    ) => Promise<{ close: () => void }>;
   };
 }
 
@@ -47,6 +51,7 @@ export interface RunSetupOptions {
   projectPath: string;
   minimal?: boolean;
   models?: boolean;
+  database?: CartographConfig['database'];
 }
 
 export interface SetupRunResult {
@@ -58,14 +63,14 @@ export async function runSetup(options: RunSetupOptions, deps: SetupRuntimeDeps)
   const { projectPath } = options;
   const { runDoctor, formatDoctorReport } = await deps.loadDoctor();
 
-  await runSetupInitStep(projectPath, deps);
+  await runSetupInitStep(projectPath, options, deps);
   await runSetupModelStep(projectPath, options, deps);
   deps.info('Step 3/3: running doctor verification');
   const doctor = await runDoctor({ projectPath });
   return { doctor, doctorReport: formatDoctorReport(doctor) };
 }
 
-async function runSetupInitStep(projectPath: string, deps: SetupRuntimeDeps): Promise<void> {
+async function runSetupInitStep(projectPath: string, options: RunSetupOptions, deps: SetupRuntimeDeps): Promise<void> {
   const { isInitialized, info, loadCartograph } = deps;
   if (isInitialized(projectPath)) {
     info(`Step 1/3: ${projectPath} already initialized — skipping init`);
@@ -74,7 +79,10 @@ async function runSetupInitStep(projectPath: string, deps: SetupRuntimeDeps): Pr
 
   info(`Step 1/3: initialising Cartograph at ${projectPath}`);
   const { default: Cartograph } = await loadCartograph();
-  const cg = await Cartograph.init(projectPath, { index: false });
+  const cg = await Cartograph.init(projectPath, {
+    index: false,
+    ...(options.database ? { config: { database: options.database } } : {}),
+  });
   cg.close();
 }
 

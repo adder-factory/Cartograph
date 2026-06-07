@@ -37,6 +37,7 @@ const requireCjs = createRequire(import.meta.url);
 
 export interface SqliteStatement {
   run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
+  runBatch?(paramSets: any[][]): { changes: number; lastInsertRowid: number | bigint };
   get(...params: any[]): any;
   all(...params: any[]): any[];
   /**
@@ -49,6 +50,7 @@ export interface SqliteStatement {
 }
 
 export interface SqliteDatabase {
+  readonly dialect: 'sqlite' | 'postgres';
   prepare(sql: string): SqliteStatement;
   exec(sql: string): void;
   pragma(str: string): any;
@@ -62,7 +64,7 @@ export interface SqliteDatabase {
   loadExtension?(file: string, entrypoint?: string): void;
 }
 
-export type SqliteBackend = 'bun-sqlite';
+export type SqliteBackend = 'bun-sqlite' | 'postgres';
 
 /**
  * Pull every `@name`, `:name`, `$name` placeholder out of a SQL string.
@@ -153,6 +155,7 @@ interface BunSqliteHandle {
 export class BunSqliteAdapter implements SqliteDatabase {
   private readonly _db: BunSqliteHandle;
   private _open: boolean;
+  readonly dialect = 'sqlite' as const;
 
   constructor(dbPath: string) {
     applyBunCustomSqliteOnce();

@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import { Buffer } from 'node:buffer';
 import { mirrorEmbeddingToVec } from './vec-helpers.js';
+import { mirrorEmbeddingToPgvector } from './pgvector-helpers.js';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 
@@ -491,6 +492,15 @@ function mirrorVecForBodyHash(args: MirrorVecForBodyHashArgs): void {
   mirrorEmbeddingToVec({ db: qb.db, vecLoaded: qb.vecLoaded, rowid: rowidRow.r, embedding, dim });
 }
 
+function mirrorPgvectorForBodyHash(args: MirrorVecForBodyHashArgs): void {
+  const { qb, bodyHash, model, grain, embedding } = args;
+  if (qb.db.dialect !== 'postgres') return;
+  qb.queries.embeddingStoreRowid ??= embeddingStoreRowidQuery(qb.db);
+  const rowidRow = qb.queries.embeddingStoreRowid.get({ bodyHash, model, grain });
+  if (!rowidRow) return;
+  mirrorEmbeddingToPgvector({ db: qb.db, rowid: rowidRow.r, bodyHash, model, grain, embedding });
+}
+
 interface UpsertSymbolEmbeddingArgs {
   qb: QueryBuilder;
   nodeId: string;
@@ -547,8 +557,13 @@ export function upsertSymbolEmbedding(args: UpsertSymbolEmbeddingArgs): boolean 
       nodeIdExists: nodeId,
     });
     wrote = info.changes > 0;
+    if (!wrote && qb.db.dialect === 'postgres') {
+      qb.queries.hasSymbolEmbeddingWithModel ??= hasSymbolEmbeddingWithModelQuery(qb.db);
+      wrote = qb.queries.hasSymbolEmbeddingWithModel.get({ nodeId, embeddingModel: model }) !== undefined;
+    }
     if (!wrote) return;
     mirrorVecForBodyHash({ qb, bodyHash, model, grain, embedding });
   })();
+  if (wrote) mirrorPgvectorForBodyHash({ qb, bodyHash, model, grain, embedding });
   return wrote;
 }

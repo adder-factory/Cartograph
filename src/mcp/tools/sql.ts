@@ -6,8 +6,8 @@
  * surface doesn't fit (e.g. "every method in src/llm/ that has zero
  * callers AND zero tests AND wasn't touched in 30 days"). Borrowed
  * from CartographContext's `execute_cypher_query` shape — we run
- * SQL against our SQLite backend instead of Cypher against Neo4j,
- * but the agent affordance is the same.
+ * SQL against Cartograph's configured graph database instead of
+ * Cypher against Neo4j, but the agent affordance is the same.
  *
  * Safety bounds:
  *   - Read-only enforced via SQL prefix whitelist (SELECT, WITH...
@@ -37,10 +37,8 @@ const MAX_LIMIT = 1000;
 
 /** Per-query wall-clock cap. A recursive CTE materialising 5M rows or a
  *  3-way Cartesian product over the nodes table can pin the MCP server's
- *  CPU for minutes. The cap is checked between iterate() rows — long
- *  prepare-phase compute (e.g. `WITH RECURSIVE … SELECT MAX(n) …`) still
- *  runs to completion since node:sqlite has no interrupt facility, but
- *  any query that streams rows will abort cleanly. */
+ *  CPU for minutes. The cap is checked between iterate() rows; any query
+ *  that streams rows can abort cleanly between rows. */
 const DEFAULT_TIMEOUT_MS = 10_000;
 const MAX_TIMEOUT_MS = 60_000;
 
@@ -620,9 +618,8 @@ function executeQuery(args: ExecuteQueryArgs): {
   //
   // Wall-clock check between rows bounds streaming-query CPU. Doesn't
   // help on queries that block in prepare (recursive CTE that
-  // materialises before yielding the first row) — node:sqlite has no
-  // interrupt API. The cap is best-effort defense-in-depth, not a hard
-  // resource fence.
+  // materialises before yielding the first row). The cap is best-effort
+  // defense-in-depth, not a hard resource fence.
   for (const row of stmt.iterate()) {
     if (rows.length >= limit) {
       truncated = true;

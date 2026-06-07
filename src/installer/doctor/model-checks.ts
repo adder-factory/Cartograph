@@ -1,6 +1,13 @@
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { loadConfig } from '../../config.js';
+import {
+  postgresConnectionSummary,
+  postgresSqlOptions,
+  resolveDatabaseConfig,
+  type DatabaseConfig,
+} from '../../db/database-config.js';
+import { CURRENT_SCHEMA_VERSION } from '../../db/migrations.js';
 import { configuredModelFilesFromLlm, LLM_TIER_KEYS, type ConfiguredModelFile } from '../../features/backend/index.js';
 import { MODELS_DIR_DEFAULT } from '../../llm/recommended-models.js';
 import { formatBytes } from '../../utils.js';
@@ -39,7 +46,7 @@ export function checkBunRuntime(): CheckResult {
       id: 'bun-runtime',
       name: 'Bun runtime',
       status: 'fail',
-      detail: 'Not running under Bun (bun:sqlite + bun:ffi are required).',
+      detail: 'Not running under Bun.',
       remediation: `Install Bun ≥ ${ENGINES_BUN_MIN} from ${BUN_DOWNLOAD_URL}, then re-run cartograph commands via bun (or via the cartograph binary which spawns bun internally).`,
     };
   }
@@ -163,9 +170,8 @@ export async function checkProjectConfig(projectPath: string): Promise<CheckResu
     };
   }
 
-  let parsed: Record<string, unknown>;
   try {
-    parsed = JSON.parse(await fsp.readFile(configPath, 'utf8')) as Record<string, unknown>;
+    JSON.parse(await fsp.readFile(configPath, 'utf8')) as unknown;
   } catch (e) {
     return {
       id: 'project-config',
@@ -176,7 +182,20 @@ export async function checkProjectConfig(projectPath: string): Promise<CheckResu
     };
   }
 
-  const llm = parsed['llm'] as Record<string, unknown> | undefined;
+  let runtimeConfig: Record<string, unknown>;
+  try {
+    runtimeConfig = loadConfig(projectPath) as unknown as Record<string, unknown>;
+  } catch (e) {
+    return {
+      id: 'project-config',
+      name: 'Project config',
+      status: 'fail',
+      detail: `${configPath} failed runtime validation: ${(e as Error).message}`,
+      remediation: 'Fix `.cartograph/config.json`, or re-run `cartograph admin install-models --write-config`.',
+    };
+  }
+
+  const llm = runtimeConfig['llm'] as Record<string, unknown> | undefined;
   if (!llm || Object.keys(llm).length === 0) {
     return {
       id: 'project-config',
@@ -189,19 +208,270 @@ export async function checkProjectConfig(projectPath: string): Promise<CheckResu
     };
   }
 
+  return { id: 'project-config', name: 'Project config', status: 'ok', detail: `${configPath} valid` };
+}
+
+export async function checkDatabaseStorage(projectPath: string): Promise<CheckResult> {
+  let config: ReturnType<typeof loadConfig>;
   try {
-    loadConfig(projectPath);
+    config = loadConfig(projectPath);
   } catch (e) {
     return {
-      id: 'project-config',
-      name: 'Project config',
+      id: 'database-storage',
+      name: 'Database storage',
       status: 'fail',
-      detail: `${configPath} failed runtime validation: ${(e as Error).message}`,
-      remediation: 'Fix `.cartograph/config.json`, or re-run `cartograph admin install-models --write-config`.',
+      detail: `Cannot read storage config: ${(e as Error).message}`,
+      remediation: 'Fix `.cartograph/config.json`, then re-run `cartograph doctor`.',
     };
   }
 
-  return { id: 'project-config', name: 'Project config', status: 'ok', detail: `${configPath} valid` };
+  let database: DatabaseConfig;
+  try {
+    database = resolveDatabaseConfig(config.database);
+  } catch (e) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: (e as Error).message,
+      remediation:
+        'Set `database.url` in `.cartograph/config.json`, or export CARTOGRAPH_DATABASE_URL / DATABASE_URL before running Cartograph.',
+    };
+  }
+
+  if (database.provider === 'postgres') return checkPostgresStorage(database, projectPath);
+  return checkSqliteStorage(projectPath);
+}
+
+async function checkSqliteStorage(projectPath: string): Promise<CheckResult> {
+  const dbPath = path.join(projectPath, '.cartograph', 'cartograph.db');
+  const exists = await fsp
+    .access(dbPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!exists) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: `No SQLite database at ${dbPath}.`,
+      remediation: `Run \`cartograph admin init ${projectPath}\` to create the database, or configure PostgreSQL with \`database.provider: "postgres"\`.`,
+    };
+  }
+  return {
+    id: 'database-storage',
+    name: 'Database storage',
+    status: 'ok',
+    detail: `SQLite database present at ${dbPath}`,
+  };
+}
+
+async function checkPostgresStorage(database: DatabaseConfig, projectPath: string): Promise<CheckResult> {
+  const schema = database.schema ?? 'public';
+  const sentinelPath = path.join(projectPath, '.cartograph', 'cartograph.db');
+  const initRecovery =
+    `If this is a new or intentionally reset PostgreSQL schema, remove the PostgreSQL sentinel ` +
+    `\`${sentinelPath}\` and run \`cartograph admin init ${projectPath}\`; otherwise recreate the configured schema.`;
+  if (!/^[A-Za-z_]\w*$/.test(schema)) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: `Invalid PostgreSQL schema name: ${schema}`,
+      remediation:
+        'Use a simple PostgreSQL schema identifier such as `cartograph`, or omit `database.schema` for `public`.',
+    };
+  }
+
+  const sql = new Bun.SQL(postgresSqlOptions({ ...database, maxConnections: 1 }));
+  try {
+    await sql`SELECT 1`;
+    const schemaRows = await sql.unsafe('SELECT to_regnamespace($1) AS name', [schema]);
+    const schemaName = (schemaRows[0] as { name?: string | null } | undefined)?.name;
+    if (!schemaName) {
+      return {
+        id: 'database-storage',
+        name: 'Database storage',
+        status: 'fail',
+        detail: `PostgreSQL is reachable, but schema "${schema}" does not exist.`,
+        remediation: initRecovery,
+      };
+    }
+    const versionTableRows = await sql.unsafe('SELECT to_regclass($1) AS name', [`${schema}.schema_versions`]);
+    const versionTableName = (versionTableRows[0] as { name?: string | null } | undefined)?.name;
+    if (!versionTableName) {
+      return {
+        id: 'database-storage',
+        name: 'Database storage',
+        status: 'fail',
+        detail: `PostgreSQL schema "${schema}" exists, but Cartograph tables are not initialized.`,
+        remediation: initRecovery,
+      };
+    }
+    const schemaIdent = quoteIdent(schema);
+    const versionRows = await sql.unsafe(
+      `SELECT version FROM ${schemaIdent}.schema_versions ORDER BY version DESC LIMIT 1`,
+    );
+    const version = Number((versionRows[0] as { version?: number | string } | undefined)?.version ?? 0);
+    if (version !== CURRENT_SCHEMA_VERSION) {
+      return {
+        id: 'database-storage',
+        name: 'Database storage',
+        status: 'fail',
+        detail: `PostgreSQL schema "${schema}" is at version ${version || 'unknown'}; expected ${CURRENT_SCHEMA_VERSION}.`,
+        remediation: initRecovery,
+      };
+    }
+    return await checkPostgresRuntimePrivileges(sql, database, schema, version);
+  } catch (e) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: `PostgreSQL check failed: ${(e as Error).message}`,
+      remediation: 'Verify `database.url`, network access, credentials, and that the configured database is running.',
+    };
+  } finally {
+    await sql.close();
+  }
+}
+
+async function checkPostgresRuntimePrivileges(
+  sql: Bun.SQL,
+  database: DatabaseConfig,
+  schema: string,
+  version: number,
+): Promise<CheckResult> {
+  const dmlProbe = await probePostgresDml(sql, schema);
+  if (dmlProbe !== null) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail: `PostgreSQL schema "${schema}" is initialized, but runtime write privilege failed: ${dmlProbe}`,
+      remediation: `Grant SELECT/INSERT/UPDATE/DELETE on tables in schema "${schema}" to the configured role, then re-run \`cartograph doctor\`.`,
+    };
+  }
+  const ddlProbe = await probePostgresDdl(sql, schema);
+  const pgvectorProbe = await probePostgresPgvector(sql, schema, database.pgvector ?? 'auto');
+  if (pgvectorProbe.status === 'fail') {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'fail',
+      detail:
+        `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+        `${pgvectorProbe.detail}.`,
+      remediation: pgvectorProbe.remediation,
+    };
+  }
+  if (ddlProbe !== null) {
+    return {
+      id: 'database-storage',
+      name: 'Database storage',
+      status: 'warn',
+      detail:
+        `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+        `schema DDL probe failed: ${ddlProbe}; ${pgvectorProbe.detail}. ${postgresConnectionSummary(database)}.`,
+      remediation: `Grant CREATE on schema "${schema}" for init/rebuild workflows, or keep using a separate admin role for \`cartograph admin init\` and \`cartograph admin storage-migrate --force\`.`,
+    };
+  }
+  return {
+    id: 'database-storage',
+    name: 'Database storage',
+    status: 'ok',
+    detail:
+      `PostgreSQL reachable; schema "${schema}" is at version ${version}; runtime writes ok; ` +
+      `schema DDL ok; ${pgvectorProbe.detail}. ${postgresConnectionSummary(database)}.`,
+  };
+}
+
+type PgvectorProbeResult = { status: 'ok'; detail: string } | { status: 'fail'; detail: string; remediation: string };
+
+async function probePostgresPgvector(
+  sql: Bun.SQL,
+  schema: string,
+  mode: 'auto' | 'off' | 'require',
+): Promise<PgvectorProbeResult> {
+  if (mode === 'off') return { status: 'ok', detail: 'pgvector disabled by config' };
+  const rows = await sql.unsafe(
+    `SELECT n.nspname AS schema_name
+       FROM pg_extension e
+       JOIN pg_namespace n ON n.oid = e.extnamespace
+      WHERE e.extname = 'vector'
+      LIMIT 1`,
+  );
+  const extensionSchema = (rows[0] as { schema_name?: string } | undefined)?.schema_name;
+  if (!extensionSchema) {
+    if (mode === 'require') {
+      return {
+        status: 'fail',
+        detail: 'pgvector required but the PostgreSQL `vector` extension is not installed',
+        remediation:
+          'Install pgvector in the configured database, use a pgvector-enabled image such as `pgvector/pgvector:pg16`, or set `database.pgvector` to `auto`/`off`.',
+      };
+    }
+    return { status: 'ok', detail: 'pgvector unavailable; BYTEA storage with HNSW/in-memory fallbacks active' };
+  }
+  if (extensionSchema !== schema && extensionSchema !== 'public') {
+    const detail = `pgvector installed in schema "${extensionSchema}", outside Cartograph search_path "${schema}, public"`;
+    if (mode === 'require') {
+      return {
+        status: 'fail',
+        detail,
+        remediation: `Install pgvector in schema "${schema}" or "public", or expose schema "${extensionSchema}" on the Cartograph PostgreSQL search_path.`,
+      };
+    }
+    return { status: 'ok', detail };
+  }
+  return { status: 'ok', detail: `pgvector available in schema "${extensionSchema}"` };
+}
+
+function quoteIdent(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
+}
+
+async function probePostgresDml(sql: Bun.SQL, schema: string): Promise<string | null> {
+  const schemaIdent = quoteIdent(schema);
+  const probeKey = `__cartograph_doctor_probe_${process.pid}`;
+  await sql.unsafe('BEGIN').simple();
+  try {
+    await sql.unsafe(
+      `INSERT INTO ${schemaIdent}.project_metadata (key, value, updated_at)
+       VALUES ($1, $2, $3)
+       ON CONFLICT(key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at`,
+      [probeKey, 'insert', Date.now()],
+    );
+    await sql.unsafe(`UPDATE ${schemaIdent}.project_metadata SET value = $2 WHERE key = $1`, [probeKey, 'update']);
+    await sql.unsafe(`DELETE FROM ${schemaIdent}.project_metadata WHERE key = $1`, [probeKey]);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    await rollbackQuietly(sql);
+  }
+}
+
+async function probePostgresDdl(sql: Bun.SQL, schema: string): Promise<string | null> {
+  const schemaIdent = quoteIdent(schema);
+  await sql.unsafe('BEGIN').simple();
+  try {
+    await sql.unsafe(`CREATE TABLE ${schemaIdent}.__cartograph_doctor_probe (id INTEGER PRIMARY KEY)`).simple();
+    await sql.unsafe(`DROP TABLE ${schemaIdent}.__cartograph_doctor_probe`).simple();
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    await rollbackQuietly(sql);
+  }
+}
+
+async function rollbackQuietly(sql: Bun.SQL): Promise<void> {
+  try {
+    await sql.unsafe('ROLLBACK').simple();
+  } catch {
+    /* probe rollback is best effort */
+  }
 }
 
 export async function checkConfiguredModelFiles(llm: Record<string, unknown> | null): Promise<CheckResult | null> {

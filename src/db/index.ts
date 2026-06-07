@@ -1,19 +1,41 @@
 /**
  * Database Layer
  *
- * Handles SQLite database initialization and connection management.
+ * Handles graph database initialization and connection management.
+ * SQLite is the default backend; PostgreSQL is selected through the
+ * configured adapter boundary.
  */
 
 import { type SqliteDatabase, type SqliteBackend, createDatabase } from './sqlite-adapter.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import type { CartographConfig } from '../types.js';
 import type { SchemaVersion } from './types.js';
 import { runMigrations, getCurrentVersion, verifySchemaIntegrity, CURRENT_SCHEMA_VERSION } from './migrations.js';
 import { bootstrapVecTables } from './vec-helpers.js';
+import { bootstrapPgvector, bootstrapPgvectorTables } from './pgvector-helpers.js';
 import { compact } from '../utils.js';
 import { resolveAssetPath } from '../assets.js';
+import { resolveDatabaseConfig, type DatabaseConfig } from './database-config.js';
+import { PostgresAdapter } from './postgres-adapter.js';
 
 export type { SqliteDatabase, SqliteBackend } from './sqlite-adapter.js';
+
+interface DatabaseOpenOptions {
+  database?: CartographConfig['database'];
+}
+
+function createConfiguredDatabase(
+  dbPath: string,
+  options: DatabaseOpenOptions = {},
+): { db: SqliteDatabase; backend: SqliteBackend; vecLoaded: boolean; database: DatabaseConfig } {
+  const database = resolveDatabaseConfig(options.database);
+  if (database.provider === 'postgres') {
+    const db = new PostgresAdapter({ ...database, provider: 'postgres' });
+    return { db, backend: 'postgres', vecLoaded: false, database };
+  }
+  return { ...createDatabase(dbPath), database };
+}
 
 /** Apply standard PRAGMAs to a freshly-opened SQLite database. */
 function dbApplyPragmas(db: SqliteDatabase): void {
@@ -91,14 +113,14 @@ export class DatabaseConnection {
   /**
    * Initialize a new database at the given path
    */
-  static initialize(dbPath: string): DatabaseConnection {
+  static initialize(dbPath: string, opts: DatabaseOpenOptions = {}): DatabaseConnection {
     const dir = path.dirname(dbPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    const { db, backend, vecLoaded } = createDatabase(dbPath);
+    const { db, backend, vecLoaded, database } = createConfiguredDatabase(dbPath, opts);
     dbApplyPragmas(db);
 
-    const schemaPath = resolveAssetPath('db', 'schema.sql');
+    const schemaPath = resolveAssetPath('db', db.dialect === 'postgres' ? 'schema-postgres.sql' : 'schema.sql');
     db.exec(fs.readFileSync(schemaPath, 'utf-8'));
 
     // Fresh-bootstrap integrity gate: if schema.sql was edited in a
@@ -106,7 +128,7 @@ export class DatabaseConnection {
     // DB as fully migrated and let the divergence escape into queries
     // that error at read time (the production-DB state that triggered
     // migration 057).
-    verifySchemaIntegrity(db);
+    if (db.dialect === 'sqlite') verifySchemaIntegrity(db);
 
     const currentVersion = getCurrentVersion(db);
     if (currentVersion < CURRENT_SCHEMA_VERSION) {
@@ -119,6 +141,13 @@ export class DatabaseConnection {
 
     // No-op on first init; kept for symmetry with `open()`.
     bootstrapVecTables(db, vecLoaded);
+    if (backend === 'postgres') {
+      const pgvectorLoaded = bootstrapPgvector(db, database);
+      bootstrapPgvectorTables(db, pgvectorLoaded);
+    }
+    if (backend === 'postgres' && !fs.existsSync(dbPath)) {
+      fs.writeFileSync(dbPath, 'postgres provider sentinel\n', 'utf-8');
+    }
 
     return new DatabaseConnection({ db, dbPath, backend, vecLoaded });
   }
@@ -134,10 +163,14 @@ export class DatabaseConnection {
    * load) opt in with `autoMigrate: true`. Newer-than-binary DBs
    * always fail to prevent silent old-code-vs-new-data corruption.
    */
-  static open(dbPath: string, opts: { autoMigrate?: boolean } = {}): DatabaseConnection {
-    if (!fs.existsSync(dbPath)) throw new Error(`Database not found: ${dbPath}`);
+  static open(
+    dbPath: string,
+    opts: { autoMigrate?: boolean; database?: CartographConfig['database'] } = {},
+  ): DatabaseConnection {
+    const database = resolveDatabaseConfig(opts.database);
+    if (database.provider === 'sqlite' && !fs.existsSync(dbPath)) throw new Error(`Database not found: ${dbPath}`);
 
-    const { db, backend, vecLoaded } = createDatabase(dbPath);
+    const { db, backend, vecLoaded } = createConfiguredDatabase(dbPath, { database });
     dbApplyPragmas(db);
 
     const conn = new DatabaseConnection({ db, dbPath, backend, vecLoaded });
@@ -150,6 +183,13 @@ export class DatabaseConnection {
       );
     }
     if (currentVersion < CURRENT_SCHEMA_VERSION) {
+      if (backend === 'postgres') {
+        throw new Error(
+          `PostgreSQL database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
+            `PostgreSQL storage currently supports fresh initialization only; run \`cartograph admin init\` against an ` +
+            `empty PostgreSQL schema or recreate the configured schema.`,
+        );
+      }
       if (!opts.autoMigrate) {
         throw new Error(
           `Database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
@@ -168,6 +208,10 @@ export class DatabaseConnection {
 
     // Bootstrap vec0 tables when the sqlite-vec extension is loaded.
     bootstrapVecTables(db, vecLoaded);
+    if (backend === 'postgres') {
+      const pgvectorLoaded = bootstrapPgvector(db, database);
+      bootstrapPgvectorTables(db, pgvectorLoaded);
+    }
 
     return conn;
   }
@@ -178,7 +222,7 @@ export class DatabaseConnection {
   }
 
   /**
-   * Get the SQLite backend serving this connection. Per-instance so
+   * Get the storage backend serving this connection. Per-instance so
    * MCP explicit-project queries report the right backend.
    */
   getBackend(): SqliteBackend {
@@ -218,6 +262,12 @@ export class DatabaseConnection {
 
   /** Get database file size in bytes. */
   getSize(): number {
+    if (this.core.backend === 'postgres') {
+      const row = this.core.db.prepare('SELECT pg_database_size(current_database()) AS n').get() as {
+        n?: number;
+      } | null;
+      return row?.n ?? 0;
+    }
     return fs.statSync(this.core.dbPath).size;
   }
 
@@ -250,10 +300,9 @@ export function dbOptimize(conn: DatabaseConnection): void {
 const RECLAIM_FREELIST_RATIO = 0.25;
 
 /** Read a single-value integer PRAGMA through the backend adapter.
- *  The two backends return different shapes: the node:sqlite adapter
- *  yields one row object (`{auto_vacuum: 2}`) while better-sqlite3's
- *  native `pragma()` yields an array of rows (`[{auto_vacuum: 2}]`) —
- *  unwrap both before pulling the single value. */
+ *  SQLite returns one row object for read pragmas through the Bun
+ *  adapter, while PostgreSQL compatibility pragmas return the same
+ *  shape with zero values for SQLite-only settings. */
 function readPragmaInt(db: SqliteDatabase, name: string): number {
   const raw = db.pragma(name);
   const row = (Array.isArray(raw) ? raw[0] : raw) as Record<string, unknown> | undefined;

@@ -1,4 +1,5 @@
 import { runSetup, type RunSetupOptions, type SetupRuntimeDeps } from './runtime.js';
+import { databaseConfigFromOptionInput } from '../../db/database-config.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliOptionCommand;
@@ -39,11 +40,24 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
     .description('One-shot bootstrap: admin init + install-models + doctor. Each step skips when already satisfied.')
     .option('--minimal', 'Install only the smallest viable model subset (embed + 3B chat) instead of the full set.')
     .option('--no-models', 'Skip the install-models step (use when models are already present).')
-    .action(async (pathArg: string | undefined, options: { minimal?: boolean; models?: boolean }) => {
+    .option('--database-provider <provider>', 'Storage backend: sqlite (default) or postgres')
+    .option(
+      '--database-url <url>',
+      'PostgreSQL connection URL; required for provider=postgres unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set',
+    )
+    .option('--database-schema <schema>', 'PostgreSQL schema name (default: public)')
+    .option('--database-pgvector <mode>', 'PostgreSQL pgvector mode: auto (default), off, or require')
+    .option('--database-max-connections <n>', 'PostgreSQL pool cap (default: 1)')
+    .option('--database-query-timeout-ms <ms>', 'PostgreSQL query timeout in milliseconds (default: 120000)')
+    .option('--database-connection-timeout-seconds <seconds>', 'PostgreSQL connection timeout in seconds (default: 30)')
+    .option('--database-ssl', 'Force TLS for PostgreSQL connections (URL sslmode= is preferred for verification modes)')
+    .action(async (pathArg: string | undefined, options: SetupCommandOptions) => {
       const projectPath = resolveProjectPath(pathArg);
       const setupOptions: RunSetupOptions = { projectPath };
       if (options.minimal === true) setupOptions.minimal = true;
       if (options.models !== undefined) setupOptions.models = options.models;
+      const database = databaseConfigFromOptionInput(options);
+      if (database) setupOptions.database = database;
       const result = await runSetup(setupOptions, {
         ...deps,
         writeProgress: deps.writeProgress ?? ((message: string) => process.stderr.write(message)),
@@ -51,4 +65,17 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
       writeStdout('\n' + result.doctorReport);
       if (result.doctor.overallStatus === 'fail') process.exit(1);
     });
+}
+
+interface SetupCommandOptions {
+  minimal?: boolean;
+  models?: boolean;
+  databaseProvider?: string;
+  databaseUrl?: string;
+  databaseSchema?: string;
+  databasePgvector?: string;
+  databaseMaxConnections?: string;
+  databaseQueryTimeoutMs?: string;
+  databaseConnectionTimeoutSeconds?: string;
+  databaseSsl?: boolean;
 }

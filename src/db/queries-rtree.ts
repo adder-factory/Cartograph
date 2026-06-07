@@ -96,6 +96,20 @@ export function getNodesAtRange(
   qb: QueryBuilder,
   args: { filePath: string; startLine: number; endLine: number; limit: number },
 ): NodeAtRange[] {
+  if (qb.db.dialect === 'postgres') {
+    return qb.db
+      .prepare(
+        `SELECT id, kind, name, qualified_name, file_path, start_line, end_line, signature
+           FROM nodes
+          WHERE start_line <= @endLine
+            AND end_line >= @startLine
+            AND file_path = @filePath
+            AND kind != 'file'
+          ORDER BY (end_line - start_line) ASC, start_line ASC
+          LIMIT @limit`,
+      )
+      .all(args) as NodeAtRange[];
+  }
   qb.queries.getNodesAtRange ??= getNodesAtRangeQuery(qb.db);
   return qb.queries.getNodesAtRange.all(args);
 }

@@ -46,6 +46,7 @@ interface TypedQueryOptions {
 
 export interface TypedQuery<TParams, TRow> {
   run(params: TParams): { changes: number; lastInsertRowid: number | bigint };
+  runBatch(paramsList: TParams[]): { changes: number; lastInsertRowid: number | bigint };
   get(params: TParams): TRow | undefined;
   all(params: TParams): TRow[];
   iterate(params: TParams): IterableIterator<TRow>;
@@ -172,6 +173,22 @@ export function defineQuery<PSchema extends ZodType, RSchema extends ZodType>(
       run(params) {
         const bound = parseParams(params);
         return stmt.run(bound);
+      },
+
+      runBatch(paramsList) {
+        if (paramsList.length === 0) return { changes: 0, lastInsertRowid: 0 };
+        const boundSets = paramsList.map((params) => [parseParams(params)]);
+        if (typeof stmt.runBatch === 'function') {
+          return stmt.runBatch(boundSets);
+        }
+        let changes = 0;
+        let lastInsertRowid: number | bigint = 0;
+        for (const bound of boundSets) {
+          const result = stmt.run(...bound);
+          changes += result.changes;
+          lastInsertRowid = result.lastInsertRowid;
+        }
+        return { changes, lastInsertRowid };
       },
 
       get(params) {
