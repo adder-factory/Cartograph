@@ -1,4 +1,4 @@
-import type { Language, Node, NodeKind } from '../types.js';
+import type { Language, Node, NodeKind } from '../graph/core-types.js';
 
 /**
  * Options for searching the graph.

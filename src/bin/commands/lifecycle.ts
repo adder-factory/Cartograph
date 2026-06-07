@@ -4,6 +4,7 @@
  * bin/cartograph.ts decomposition.
  */
 import { isInitialized as defaultIsInitialized } from '../../directory.js';
+import type { CliOptionCommand } from '../../features/shared/cli-command.js';
 import {
   program as cliProgram,
   llmCmd as cliLlmCmd,
@@ -27,12 +28,7 @@ import { registerSetupCommand, type SetupCartographModule } from '../../features
 import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
 import { registerViewerCommand, type ViewerServerModule } from '../../features/viewer/index.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliOptionCommand;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;

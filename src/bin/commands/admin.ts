@@ -22,6 +22,7 @@ import { registerAdminPruneStoreCommand } from '../../features/admin-prune-store
 import { registerAdminSimilarityEdgesCommand } from '../../features/admin-similarity-edges/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
+import type { CliRequiredOptionCommand } from '../../features/shared/cli-command.js';
 import {
   adminCmd as cliAdminCmd,
   loadCartograph as cliLoadCartograph,
@@ -42,13 +43,7 @@ import {
   printIndexResult as cliPrintIndexResult,
 } from '../_cli-core.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  requiredOption(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliRequiredOptionCommand;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;

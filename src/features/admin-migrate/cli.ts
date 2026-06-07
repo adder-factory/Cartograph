@@ -1,11 +1,9 @@
 import { errMsg } from '../../errors.js';
 import { migrationSuccessMessage, type MigrationOutcome } from './runtime.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+import type { CliCommand } from '../shared/cli-command.js';
+
+type CommandLike = CliCommand;
 
 interface MigrationGraph {
   db: { getSchemaVersion: () => { version?: number | string | null } | null | undefined };

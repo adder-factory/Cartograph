@@ -1,4 +1,4 @@
-import type { Edge, EdgeKind, Node, NodeKind } from '../types.js';
+import type { Edge, EdgeKind, Node, NodeKind } from './core-types.js';
 
 /**
  * A subgraph containing a subset of the knowledge graph.

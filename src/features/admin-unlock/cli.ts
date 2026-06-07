@@ -1,12 +1,9 @@
 import * as path from 'node:path';
 import { errMsg } from '../../errors.js';
 import { removeLockFileIfPresent } from './runtime.js';
+import type { CliCommand } from '../shared/cli-command.js';
 
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+type CommandLike = CliCommand;
 
 export interface AdminUnlockCommandDeps {
   adminCmd: CommandLike;

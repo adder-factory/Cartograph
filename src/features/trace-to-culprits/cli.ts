@@ -1,9 +1,6 @@
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  option(...args: unknown[]): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+import type { CliOptionCommand } from '../shared/cli-command.js';
+
+type CommandLike = CliOptionCommand;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;

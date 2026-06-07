@@ -10,6 +10,7 @@ import { type ToolOutcome, ok } from './_outcome.js';
 
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
+import { type DirRollup, buildDirRollup, filterFilesByDir } from '../../features/files/runtime.js';
 import {
   type FileTreeNode,
   buildFileTree,
@@ -18,38 +19,6 @@ import {
 } from '../../file-tree-render.js';
 
 type FileRow = { path: string; language: string; nodeCount: number };
-
-/**
- * Path-SEGMENT-boundary directory match. A file belongs to `dir`
- * iff its path equals `dir` exactly or sits strictly below it
- * (`dir + '/'` prefix). A literal `startsWith(dir)` would also
- * match a SIBLING file whose name shares the prefix — e.g. the
- * filter `src/mcp/tools` would wrongly capture `src/mcp/tools.ts`.
- * The input `dir` is normalised (trailing slashes stripped) so
- * `src/mcp/tools` and `src/mcp/tools/` behave identically.
- *
- * Internal to this module — external callers (the CLI included) go
- * through {@link filterFilesByDir}, which also handles the
- * `./`-prefixed path variant.
- */
-function fileUnderDir(filePath: string, dir: string): boolean {
-  const normDir = dir.replace(/\/+$/, '');
-  if (!normDir) return true;
-  return filePath === normDir || filePath.startsWith(normDir + '/');
-}
-
-/**
- * Apply a `dir` filter to a file list using segment-boundary
- * matching. Accepts the bare `dir` and a `./`-prefixed variant
- * (older clients / shells pass either form).
- */
-export function filterFilesByDir<T extends { path: string }>(files: ReadonlyArray<T>, dir: string): T[] {
-  const normDir = dir.replace(/\/+$/, '').replace(/^\.\//, '');
-  return files.filter((f) => {
-    const p = f.path.replace(/^\.\//, '');
-    return fileUnderDir(p, normDir);
-  });
-}
 
 /**
  * Only fold per-file LLM summaries into the flat listing when the
@@ -107,115 +76,6 @@ function formatFilesGrouped(files: FileRow[], includeMetadata: boolean): string 
   }
 
   return lines.join('\n');
-}
-
-/** One rendered rollup row: a directory (or the synthetic
- *  `(root)` bucket) with its file + symbol counts. */
-export interface DirRollupRow {
-  /** Directory path WITHOUT trailing slash, or `null` for the
-   *  synthetic project-root bucket. */
-  dir: string | null;
-  files: number;
-  symbols: number;
-}
-
-/** Result of {@link buildDirRollup} — the rows plus the scope
- *  totals both surfaces need for their headers. */
-export interface DirRollup {
-  /** Rollup rows, strict-ancestor-suppressed, sorted by symbol
-   *  density descending. The `(root)` bucket (if any) is last. */
-  rows: DirRollupRow[];
-  /** File count of the (already dir/pattern-filtered) input. */
-  totalFiles: number;
-  /** Symbol count summed across the filtered input. */
-  totalSymbols: number;
-}
-
-/**
- * SHARED per-directory rollup builder — single-sourced so the MCP
- * `formatFilesSummary` and the CLI `files --format summary` path
- * cannot drift (they did twice: friction #8 in 2026-05-11 and the
- * sibling-file friction in 2026-05-14 each had to be fixed twice).
- *
- * Roll up per-directory counts: for a path like
- * `src/mcp/tools/foo.ts`, increment the file + symbol count for
- * `src`, `src/mcp`, and `src/mcp/tools` (each ancestor sees the
- * file). Capped by `maxDepth` when provided.
- *
- * Project-root files (no `/` separator) belong to no directory and
- * would otherwise be invisible, making the depth-1 totals sum to
- * N-rootFiles instead of N — the friction that originally surfaced
- * this gap (612 in summary vs 617 in status). They land in a
- * synthetic `(root)` bucket so the rollup reconciles with
- * `cartograph_status`.
- *
- * STRICT-ancestor suppression: when `dirFilter` is set the input is
- * already scoped to that subtree, so a row for a PROPER prefix of
- * the filter (e.g. `src` when the filter is `src/mcp/tools`) would
- * carry the scoped count, not the directory's TRUE project-wide
- * content — misleading, so it's dropped. The dirFilter's OWN row
- * and its descendants ARE kept.
- */
-export function buildDirRollup(files: ReadonlyArray<FileRow>, maxDepth?: number, dirFilter?: string): DirRollup {
-  const dirStats = new Map<string, { files: number; symbols: number }>();
-  let totalSymbols = 0;
-  let rootBucketFiles = 0;
-  let rootBucketSymbols = 0;
-  for (const file of files) {
-    totalSymbols += file.nodeCount;
-    if (isRootFile(file)) {
-      rootBucketFiles++;
-      rootBucketSymbols += file.nodeCount;
-      continue;
-    }
-    addFileAncestors(dirStats, file, maxDepth);
-  }
-
-  const filterPrefix = dirFilter ? dirFilter.replace(/\/+$/, '') : null;
-  const rows = buildDirRollupRows(dirStats, filterPrefix);
-  if (rootBucketFiles > 0) {
-    // `(root)` row last so it's easy to spot but doesn't outrank
-    // the heavy subtrees in the symbol-density ranking.
-    rows.push({ dir: null, files: rootBucketFiles, symbols: rootBucketSymbols });
-  }
-  return { rows, totalFiles: files.length, totalSymbols };
-}
-
-function isRootFile(file: FileRow): boolean {
-  return !file.path.includes('/');
-}
-
-function addFileAncestors(
-  dirStats: Map<string, { files: number; symbols: number }>,
-  file: FileRow,
-  maxDepth: number | undefined,
-): void {
-  const parts = file.path.split('/');
-  // Walk ancestors. parts[length - 1] is the filename, so the
-  // deepest DIRECTORY is parts[0..length - 2].
-  for (let depth = 1; depth < parts.length; depth++) {
-    if (maxDepth !== undefined && depth > maxDepth) break;
-    const dir = parts.slice(0, depth).join('/');
-    if (!dir) continue;
-    const cur = dirStats.get(dir) ?? { files: 0, symbols: 0 };
-    cur.files++;
-    cur.symbols += file.nodeCount;
-    dirStats.set(dir, cur);
-  }
-}
-
-function buildDirRollupRows(
-  dirStats: ReadonlyMap<string, { files: number; symbols: number }>,
-  filterPrefix: string | null,
-): DirRollupRow[] {
-  return [...dirStats.entries()]
-    .sort((a, b) => b[1].symbols - a[1].symbols || a[0].localeCompare(b[0]))
-    .filter(([dir]) => !isStrictAncestorOfFilter(dir, filterPrefix))
-    .map(([dir, stats]) => ({ dir, files: stats.files, symbols: stats.symbols }));
-}
-
-function isStrictAncestorOfFilter(dir: string, filterPrefix: string | null): boolean {
-  return filterPrefix !== null && dir !== filterPrefix && filterPrefix.startsWith(dir + '/');
 }
 
 /** Options bundle for {@link formatFilesSummary}. */

@@ -1,8 +1,6 @@
-interface CommandLike {
-  command(name: string): CommandLike;
-  description(text: string): CommandLike;
-  action(fn: (...args: any[]) => unknown): CommandLike;
-}
+import type { CliCommand } from '../shared/cli-command.js';
+
+type CommandLike = CliCommand;
 
 export interface LlmSetupCommandDeps {
   llmCmd: CommandLike;
