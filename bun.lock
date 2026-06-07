@@ -19,6 +19,7 @@
         "@typescript/native-preview": "^7.0.0-dev.20260607.1",
         "playwright": "^1.60.0",
         "tree-sitter-cli": "^0.26.9",
+        "tree-sitter-sfapex": "3.0.0",
         "typescript": "^5.9.3",
       },
       "optionalDependencies": {
@@ -145,7 +146,11 @@
 
     "sqlite-vec-darwin-arm64": ["sqlite-vec-darwin-arm64@0.1.9", "", { "os": "darwin", "cpu": "arm64" }, ""],
 
+    "tree-sitter": ["tree-sitter@0.22.4", "", { "dependencies": { "node-addon-api": "^8.3.0", "node-gyp-build": "^4.8.4" } }, "sha512-usbHZP9/oxNsUY65MQUsduGRqDHQOou1cagUSwjhoSYAmSahjQDAVsh9s+SlZkn8X8+O1FULRGwHu7AFP3kjzg=="],
+
     "tree-sitter-cli": ["tree-sitter-cli@0.26.9", "", { "bin": { "tree-sitter": "cli.js" } }, "sha512-7l+U1RmazPVe+yA/JiX80GFOILnL/j24GbawamIzNQC8UlINrcyECbaWGaG1wuq4j/m0DQTx7Uu4r0iW9Ao1BQ=="],
+
+    "tree-sitter-sfapex": ["tree-sitter-sfapex@3.0.0", "", { "dependencies": { "node-addon-api": "^8.7.0", "node-gyp-build": "^4.8.0" }, "peerDependencies": { "tree-sitter": "^0.22.4", "tree_sitter": "*" }, "optionalPeers": ["tree_sitter"] }, "sha512-AGwAjSr9WDM+1IgqpQfYEsi+FN4zjGaagPEU9RGrO7abNVc51X6gaAnBEdl7FMVAxEH1qWgHO8nO2Nbb8jOgAA=="],
 
     "typescript": ["typescript@5.9.3", "", { "bin": { "tsc": "bin/tsc", "tsserver": "bin/tsserver" } }, ""],
 

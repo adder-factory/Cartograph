@@ -790,6 +790,53 @@ export function newFn(): number { return 42; }
     });
   });
 
+  describe('Gitignored embedded repository support', () => {
+    let parentDir: string;
+    let cg: Cartograph;
+
+    beforeEach(() => {
+      parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-embedded-repo-'));
+      runSyncGit(parentDir, 'init');
+      runSyncGit(parentDir, 'config', 'user.email', 'test@test.com');
+      runSyncGit(parentDir, 'config', 'user.name', 'Test');
+      fs.writeFileSync(path.join(parentDir, '.gitignore'), 'embedded/\n');
+      fs.writeFileSync(path.join(parentDir, 'main.ts'), `export function fromParent() { return 'parent'; }`);
+
+      const repoDir = path.join(parentDir, 'embedded/repo');
+      fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
+      runSyncGit(repoDir, 'init');
+      fs.writeFileSync(path.join(repoDir, 'src/lib.ts'), `export function fromEmbedded() { return 'embedded'; }`);
+
+      cg = Cartograph.initSync(parentDir, {
+        config: {
+          include: ['**/*.ts'],
+          exclude: [],
+        },
+      });
+    });
+
+    afterEach(() => {
+      if (cg) cg.close();
+      if (fs.existsSync(parentDir)) fs.rmSync(parentDir, { recursive: true, force: true });
+    });
+
+    it('indexes and syncs files inside a parent-ignored embedded repository', async () => {
+      await cg.indexAll();
+      expect(searchNodes(cg.queries, 'fromEmbedded').some((r) => r.node.filePath.startsWith('embedded/repo/'))).toBe(
+        true,
+      );
+
+      fs.writeFileSync(
+        path.join(parentDir, 'embedded/repo/src/lib.ts'),
+        `export function fromEmbedded2() { return 2; }`,
+      );
+      const result = await cg.sync();
+
+      expect(result.changedFilePaths).toContain('embedded/repo/src/lib.ts');
+      expect(searchNodes(cg.queries, 'fromEmbedded2').length).toBeGreaterThan(0);
+    });
+  });
+
   // Large queued sets (chiefly the EXTRACTION_LOGIC_VERSION heal, which
   // re-flags every file) route through the parse-worker pool path
   // instead of the serial in-process loop. This exercises that branch.

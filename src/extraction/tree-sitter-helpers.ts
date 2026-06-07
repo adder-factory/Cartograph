@@ -201,6 +201,7 @@ export function findChildByTypes(node: SyntaxNode, types: ReadonlyArray<string>)
  * can short-circuit on languages that simply don't have them.
  */
 export const TYPE_ANNOTATION_LANGUAGES: ReadonlySet<string> = new Set([
+  'apex',
   'typescript',
   'tsx',
   'dart',

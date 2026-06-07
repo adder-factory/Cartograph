@@ -246,4 +246,115 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
     expect(processed!.language).toBe('java');
     expect(processed!.filePath.replaceAll('\\', '/')).toContain('com/example/svc/JavaService.java');
   });
+
+  it('Kotlin field receiver resolves from declared property type when capitalization is wrong', async () => {
+    const modelDir = path.join(tempDir, 'src/main/kotlin/com/example/model');
+    const repoDir = path.join(tempDir, 'src/main/kotlin/com/example/repo');
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(modelDir, 'UserBO.kt'),
+      'package com.example.model\nclass UserBO { fun toLogin2(): String { return "ok" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(repoDir, 'Repo.kt'),
+      [
+        'package com.example.repo',
+        '',
+        'import com.example.model.UserBO',
+        '',
+        'class Repo {',
+        '  private val userbo: UserBO = UserBO()',
+        '  fun run(): String = userbo.toLogin2()',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true });
+
+    const run = getNodesByKind(cg.queries, 'method').find((n) => n.qualifiedName.endsWith('Repo::run'));
+    expect(run).toBeDefined();
+    const target = getOutgoingEdges(cg.queries, run!.id)
+      .map((edge) => cg!.queries.getNodeById(edge.target))
+      .find((node) => node?.name === 'toLogin2');
+    expect(target?.qualifiedName).toContain('UserBO::toLogin2');
+  });
+
+  it('Kotlin primary-constructor property receiver resolves by field type', async () => {
+    const modelDir = path.join(tempDir, 'src/main/kotlin/com/example/model');
+    const repoDir = path.join(tempDir, 'src/main/kotlin/com/example/repo');
+    fs.mkdirSync(modelDir, { recursive: true });
+    fs.mkdirSync(repoDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(modelDir, 'UserBO.kt'),
+      'package com.example.model\nclass UserBO { fun toLogin2(): String { return "ok" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(repoDir, 'Repo.kt'),
+      [
+        'package com.example.repo',
+        '',
+        'import com.example.model.UserBO',
+        '',
+        'class Repo(private val userbo: UserBO) {',
+        '  fun run(): String = userbo.toLogin2()',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true });
+
+    const run = getNodesByKind(cg.queries, 'method').find((n) => n.qualifiedName.endsWith('Repo::run'));
+    expect(run).toBeDefined();
+    const target = getOutgoingEdges(cg.queries, run!.id)
+      .map((edge) => cg!.queries.getNodeById(edge.target))
+      .find((node) => node?.name === 'toLogin2');
+    expect(target?.qualifiedName).toContain('UserBO::toLogin2');
+  });
+
+  it('Kotlin import FQN disambiguates same-name classes in non-eponymous files by package declaration', async () => {
+    const aDir = path.join(tempDir, 'mod-a/src/main/kotlin/misc/a');
+    const bDir = path.join(tempDir, 'mod-b/src/main/kotlin/misc/b');
+    const callerDir = path.join(tempDir, 'mod-c/src/main/kotlin/com/example/c');
+    fs.mkdirSync(aDir, { recursive: true });
+    fs.mkdirSync(bDir, { recursive: true });
+    fs.mkdirSync(callerDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(aDir, 'Converters.kt'),
+      'package com.example.a\nclass Service { fun run(): String { return "a" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(bDir, 'Converters.kt'),
+      'package com.example.b\nclass Service { fun run(): String { return "b" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(callerDir, 'Caller.kt'),
+      [
+        'package com.example.c',
+        '',
+        'import com.example.b.Service',
+        '',
+        'class Caller {',
+        '  private val service: Service = Service()',
+        '  fun go(): String = service.run()',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true });
+
+    const go = getNodesByKind(cg.queries, 'method').find((n) => n.qualifiedName.endsWith('Caller::go'));
+    expect(go).toBeDefined();
+    const target = getOutgoingEdges(cg.queries, go!.id)
+      .map((edge) => cg!.queries.getNodeById(edge.target))
+      .find((node) => node?.name === 'run');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-b/');
+    expect(target?.filePath.replaceAll('\\', '/')).not.toContain('mod-a/');
+  });
 });

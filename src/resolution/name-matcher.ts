@@ -6,7 +6,7 @@
 
 import type { Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping } from './types.js';
-import { escapeRegExp, splitIdentifierTokens } from '../utils.js';
+import { splitIdentifierTokens } from '../utils.js';
 
 /**
  * Common builtin/global method names in TS/JS that frequently collide
@@ -230,6 +230,75 @@ function jvmClassLookupName(localName: string, importFqn: string | undefined): s
   return importFqn.substring(importFqn.lastIndexOf('.') + 1) || localName;
 }
 
+function normalizeJvmReceiverType(raw: string): string | null {
+  let base = raw.trim();
+  while (base.endsWith('?')) base = base.slice(0, -1).trimEnd();
+  if (!base) return null;
+  const head = firstTokenBeforeAny(base, '<[ \t\r\n');
+  if (!head) return null;
+  const segments = head.split('.');
+  return segments.at(-1) ?? null;
+}
+
+function parseKotlinFieldSignature(signature: string, receiverName: string): string | null {
+  const trimmed = signature.trimStart();
+  let afterKeyword: string | null = null;
+  if (trimmed.startsWith('val ')) afterKeyword = trimmed.slice(4);
+  if (trimmed.startsWith('var ')) afterKeyword = trimmed.slice(4);
+  if (!afterKeyword) return null;
+  const afterLeadingSpace = afterKeyword.trimStart();
+  if (!startsWithIdentifier(afterLeadingSpace, receiverName)) return null;
+  const afterName = afterLeadingSpace.slice(receiverName.length).trimStart();
+  if (!afterName.startsWith(':')) return null;
+  const typeExpr = firstTokenBeforeAny(afterName.slice(1).trimStart(), '= \t\r\n');
+  return typeExpr ? normalizeJvmReceiverType(typeExpr) : null;
+}
+
+function parseJavaFieldSignature(signature: string, receiverName: string): string | null {
+  // Signature shape: `<type-expr> <fieldName>` — strip the trailing
+  // field-name word, then strip generic args + array dims from the
+  // remaining type expression. The head identifier is the class.
+  const beforeAssignment = signature.split('=', 1)[0]!.trimEnd();
+  if (!beforeAssignment.endsWith(receiverName)) return null;
+  const typeExpr = beforeAssignment.slice(0, -receiverName.length).trimEnd();
+  if (!typeExpr || !hasWhitespaceBeforeSuffix(beforeAssignment, receiverName.length)) return null;
+  return normalizeJvmReceiverType(typeExpr);
+}
+
+function parseJvmFieldSignature(signature: string, receiverName: string): string | null {
+  return parseKotlinFieldSignature(signature, receiverName) ?? parseJavaFieldSignature(signature, receiverName);
+}
+
+function firstTokenBeforeAny(value: string, delimiters: string): string {
+  let end = value.length;
+  for (const delimiter of delimiters) {
+    const index = value.indexOf(delimiter);
+    if (index >= 0 && index < end) end = index;
+  }
+  return value.slice(0, end);
+}
+
+function hasWhitespaceBeforeSuffix(value: string, suffixLength: number): boolean {
+  const index = value.length - suffixLength - 1;
+  return index >= 0 && isWhitespace(value[index]!);
+}
+
+function startsWithIdentifier(value: string, identifier: string): boolean {
+  if (!value.startsWith(identifier)) return false;
+  const next = value.charAt(identifier.length);
+  return !next || !isIdentifierChar(next);
+}
+
+function isIdentifierChar(value: string): boolean {
+  return (
+    (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') || (value >= '0' && value <= '9') || value === '_'
+  );
+}
+
+function isWhitespace(value: string): boolean {
+  return value === ' ' || value === '\t' || value === '\r' || value === '\n';
+}
+
 /**
  * F#64a / B11 (2026-05-26) — Infer the declared type of a Java/Kotlin
  * field-receiver call by walking the enclosing class's field
@@ -286,21 +355,7 @@ function inferJavaFieldReceiverType(
       n.endLine <= enclosing.endLine,
   );
   if (!field?.signature) return null;
-  // Signature shape: `<type-expr> <fieldName>` — strip the trailing
-  // field-name word, then strip generic args + array dims from the
-  // remaining type expression. The HEAD identifier is the class.
-  const fieldNameAtEnd = new RegExp(String.raw`\s+${escapeRegExp(receiverName)}(?:\s*=.*)?\s*$`);
-  const typeExpr = field.signature.replace(fieldNameAtEnd, '').trim();
-  if (!typeExpr) return null;
-  // `Map<String, Foo>` → `Map`; `Foo[]` → `Foo`; `Foo.Inner` → `Inner`
-  // (the inner class is the actual receiver type).
-  const headMatch = typeExpr.match(/([A-Za-z_$][A-Za-z0-9_$]*)\s*[<[]?/g);
-  if (!headMatch) return null;
-  // Pick the LAST identifier in a dotted path (`com.example.Foo`
-  // collapses to `Foo` since the simple name is what the rest of
-  // the resolver looks up).
-  const segments = typeExpr.split(/[<[\s]/, 1)[0]!.split('.');
-  return segments.at(-1) ?? null;
+  return parseJvmFieldSignature(field.signature, receiverName);
 }
 
 /**
@@ -324,13 +379,26 @@ function inferTsJsFieldReceiverType(
   const line = source?.split(/\r?\n/)[field.startLine - 1] ?? '';
   if (!line) return null;
 
-  const nameIndex = line.search(new RegExp(String.raw`\b${escapeRegExp(receiverName)}\b`));
+  const nameIndex = indexOfIdentifier(line, receiverName);
   if (nameIndex < 0) return null;
   const tail = line.slice(nameIndex + receiverName.length);
   const annotated = /^\s*:\s*([A-Za-z_$][A-Za-z0-9_$]*)/.exec(tail);
   if (annotated?.[1]) return annotated[1];
   const constructed = /=\s*new\s+([A-Za-z_$][A-Za-z0-9_$]*)/.exec(tail);
   return constructed?.[1] ?? null;
+}
+
+function indexOfIdentifier(line: string, identifier: string): number {
+  let searchFrom = 0;
+  while (searchFrom < line.length) {
+    const index = line.indexOf(identifier, searchFrom);
+    if (index < 0) return -1;
+    const before = index > 0 ? line.charAt(index - 1) : '';
+    const after = line.charAt(index + identifier.length);
+    if ((!before || !isIdentifierChar(before)) && (!after || !isIdentifierChar(after))) return index;
+    searchFrom = index + identifier.length;
+  }
+  return -1;
 }
 
 function findEnclosingClassField(receiverName: string, ref: UnresolvedRef, context: ResolutionContext): Node | null {
@@ -364,7 +432,7 @@ function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map
     if (node.kind !== 'import') continue;
     if (!isJvmLang(node.language)) continue;
     const fqn = node.name;
-    if (!fqn || fqn.endsWith('.*')) continue;
+    if (!fqn || fqn.endsWith('.*') || isWildcardJvmImportSignature(node.signature)) continue;
     // Kotlin alias parsed from the single captured `signature` line —
     // tree-sitter already tokenized the import statement; this regex
     // operates on that one-line substring, not on source content.
@@ -373,6 +441,13 @@ function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map
     if (localName) map.set(localName, fqn);
   }
   return map;
+}
+
+function isWildcardJvmImportSignature(signature: string | undefined): boolean {
+  let trimmed = signature?.trim();
+  if (!trimmed) return false;
+  if (trimmed.endsWith(';')) trimmed = trimmed.slice(0, -1).trimEnd();
+  return trimmed.endsWith('.*');
 }
 
 /**
@@ -395,6 +470,31 @@ function fqnMatchesFilePath(filePath: string, fqn: string): boolean {
     fp.endsWith(`/${dotsToSlashes}.java`) ||
     fp.endsWith(`/${dotsToSlashes}.kt`)
   );
+}
+
+function fqnMatchesJvmPackage(classNode: Node, fqn: string, context: ResolutionContext): boolean {
+  if (!isJvmLang(classNode.language)) return false;
+  const className = fqn.substring(fqn.lastIndexOf('.') + 1);
+  if (classNode.name !== className) return false;
+  const expectedPackage = fqn.slice(0, Math.max(0, fqn.length - className.length - 1));
+  if (!expectedPackage) return false;
+  const source = context.readFile(classNode.filePath);
+  if (!source) return false;
+  return readJvmPackageName(source) === expectedPackage;
+}
+
+function readJvmPackageName(source: string): string | null {
+  for (const rawLine of source.split('\n')) {
+    const line = rawLine.trimStart();
+    if (!line.startsWith('package ')) continue;
+    const packageName = firstTokenBeforeAny(line.slice('package '.length).trimStart(), '; \t\r\n');
+    return packageName || null;
+  }
+  return null;
+}
+
+function classNodeMatchesJvmFqn(classNode: Node, fqn: string, context: ResolutionContext): boolean {
+  return fqnMatchesFilePath(classNode.filePath, fqn) || fqnMatchesJvmPackage(classNode, fqn, context);
 }
 
 // matchByExactName confidence values. Single-match resolution gets the
@@ -916,10 +1016,10 @@ function findMethodOnClassByName(args: FindMethodOnClassByNameArgs): ResolvedRef
   // FQN'd file falls through to the next match (parity with the
   // pre-F#57 behaviour where we tried each class in turn).
   const fqnAvailable = preferredFqn !== undefined;
-  const anyFqnMatch = fqnAvailable && candidates.some((c) => fqnMatchesFilePath(c.filePath, preferredFqn));
+  const anyFqnMatch = fqnAvailable && candidates.some((c) => classNodeMatchesJvmFqn(c, preferredFqn, context));
   const ordered = fqnAvailable
-    ? [...candidates.filter((c) => fqnMatchesFilePath(c.filePath, preferredFqn))].concat(
-        candidates.filter((c) => !fqnMatchesFilePath(c.filePath, preferredFqn)),
+    ? [...candidates.filter((c) => classNodeMatchesJvmFqn(c, preferredFqn, context))].concat(
+        candidates.filter((c) => !classNodeMatchesJvmFqn(c, preferredFqn, context)),
       )
     : candidates;
 
@@ -933,6 +1033,7 @@ function findMethodOnClassByName(args: FindMethodOnClassByNameArgs): ResolvedRef
       ref,
       methodNode,
       classNode,
+      context,
       confidence,
       resolvedBy,
       preferredFqn,
@@ -990,6 +1091,7 @@ function resolveMethodCandidate(args: {
   ref: UnresolvedRef;
   methodNode: Node;
   classNode: Node;
+  context: ResolutionContext;
   confidence: number;
   resolvedBy: 'qualified-name' | 'instance-method';
   preferredFqn: string | undefined;
@@ -1008,7 +1110,7 @@ function resolveMethodCandidate(args: {
     anyFqnMatch,
     candidateCount,
   } = args;
-  if (fqnAvailable && fqnMatchesFilePath(classNode.filePath, preferredFqn!)) {
+  if (fqnAvailable && classNodeMatchesJvmFqn(classNode, preferredFqn!, args.context)) {
     return { original: ref, targetNodeId: methodNode.id, confidence: 0.9, resolvedBy: 'fqn-disambiguated' };
   }
   if (fqnAvailable && !anyFqnMatch && candidateCount > 1) {

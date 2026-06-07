@@ -76,6 +76,7 @@ interface Grammar {
  * later language-slice additions).
  */
 const GRAMMARS: Grammar[] = [
+  { wasm: 'apex', pkg: 'tree-sitter-sfapex', subdir: 'apex', sample: 'public class A {}\n', vendored: true },
   { wasm: 'typescript', pkg: 'tree-sitter-typescript', subdir: 'typescript', sample: 'const x: number = 1;' },
   { wasm: 'tsx', pkg: 'tree-sitter-typescript', subdir: 'tsx', sample: 'const x = <div/>;' },
   { wasm: 'javascript', pkg: 'tree-sitter-javascript', sample: 'const x = 1;' },

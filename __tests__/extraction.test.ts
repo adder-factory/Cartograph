@@ -9,6 +9,7 @@ import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 import { extractFromSource, scanDirectory } from '../src/extraction/index.js';
 import {
@@ -5525,6 +5526,41 @@ describe('Directory Exclusion', () => {
 
     expect(files).toContain('src/index.ts');
     expect(files.every((f) => !f.includes('.git'))).toBe(true);
+  });
+
+  it('includes files from gitignored embedded repositories', () => {
+    execFileSync('git', ['init'], { cwd: tempDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(tempDir, '.gitignore'), 'embedded/\n');
+    const repoDir = path.join(tempDir, 'embedded', 'repo');
+    fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
+    execFileSync('git', ['init'], { cwd: repoDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repoDir, 'src', 'nested.ts'), 'export function nestedRepoFn() { return 1; }\n');
+    fs.writeFileSync(path.join(tempDir, 'src.ts'), 'export function rootFn() { return 1; }\n');
+
+    const config = { ...DEFAULT_CONFIG, rootDir: tempDir, include: ['**/*.ts'], exclude: [] };
+    const files = scanDirectory(tempDir, config);
+
+    expect(files).toContain('src.ts');
+    expect(files).toContain('embedded/repo/src/nested.ts');
+  });
+
+  it('skips ignored embedded repositories when nested repo indexing is disabled', () => {
+    execFileSync('git', ['init'], { cwd: tempDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(tempDir, '.gitignore'), 'embedded/\n');
+    const repoDir = path.join(tempDir, 'embedded', 'repo');
+    fs.mkdirSync(path.join(repoDir, 'src'), { recursive: true });
+    execFileSync('git', ['init'], { cwd: repoDir, stdio: 'pipe' });
+    fs.writeFileSync(path.join(repoDir, 'src', 'nested.ts'), 'export function nestedRepoFn() { return 1; }\n');
+
+    const files = scanDirectory(tempDir, {
+      ...DEFAULT_CONFIG,
+      rootDir: tempDir,
+      include: ['**/*.ts'],
+      exclude: [],
+      indexEmbeddedRepos: false,
+    });
+
+    expect(files).not.toContain('embedded/repo/src/nested.ts');
   });
 
   it('should return forward-slash paths on all platforms', () => {

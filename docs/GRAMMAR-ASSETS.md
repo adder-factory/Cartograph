@@ -46,6 +46,28 @@ done
 bun test __tests__/tree-sitter-upstream-languages.test.ts __tests__/language-registry.test.ts
 ```
 
+## Apex / Salesforce
+
+| Field | Value |
+|---|---|
+| Checked-in asset | `src/extraction/wasm/apex.wasm` |
+| SHA-256 | `ffb52ba4bc33374b1d8d94da1a83484a81cb1183750192f48007ab9d41a03071` |
+| Source package target | `tree-sitter-sfapex@3.0.0` (`apex/` subgrammar) |
+| Package integrity | `sha512-AGwAjSr9WDM+1IgqpQfYEsi+FN4zjGaagPEU9RGrO7abNVc51X6gaAnBEdl7FMVAxEH1qWgHO8nO2Nbb8jOgAA==` |
+| Repository | `https://github.com/aheber/tree-sitter-sfapex` |
+| License | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false tree-sitter-sfapex@3.0.0
+bun scripts/build-grammar-wasm.ts --only=apex --force-build
+bun test __tests__/salesforce.test.ts __tests__/language-registry.test.ts
+```
+
+Aura and Visualforce are custom markup extractors and do not add separate
+tree-sitter grammar assets.
+
 ## Luau
 
 | Field | Value |

@@ -281,7 +281,7 @@ cartograph_context({format: "plan"})
 
 ## Supported Languages & File Formats
 
-Cartograph supports **48 language modes**. Framework-aware and derived signals
+Cartograph supports **51 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -298,6 +298,7 @@ are listed separately so the core language matrix stays readable.
 | C / C++ / C# | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs` |
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
+| Salesforce | `.cls`, `.trigger`, plus Aura/Visualforce markup extensions in Salesforce source paths |
 | Dart / ReScript / R / Lua / Luau / Elixir | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs` |
 | Haskell / Julia / OCaml | `.hs`, `.jl`, `.ml`, `.mli` |
 | HTML / CSS / ERB / EJS | `.html`, `.htm`, `.css`, `.erb`, `.ejs`, `.eta`, `.etlua` |
@@ -318,6 +319,7 @@ are listed separately so the core language matrix stays readable.
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
 | JVM | Spring route/config references, Play routes, and MyBatis Java/XML bindings |
+| Salesforce | Apex classes/methods/triggers, LWC component bundles and Apex imports, Aura controllers/actions, Visualforce routes/actions |
 | Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |
 

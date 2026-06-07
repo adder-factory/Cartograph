@@ -9,9 +9,11 @@ Cartograph is a fork of **[codegraph](https://github.com/colbymchenry/codegraph)
 Recent Cartograph improvements have also been informed by public Codegraph issues
 and pull requests covering Python package-member calls, Go receiver ownership,
 C# primary constructors, PHP include/require imports, chained receiver calls,
-and additional MCP client targets. Those ideas were reimplemented inside
-Cartograph's current feature-slice architecture; no upstream patch code was
-copied blindly.
+additional MCP client targets, Salesforce stack support, Kotlin property/import
+disambiguation, embedded repository indexing, MCP resource/prompt probes,
+installer auto-allow permissions, aggregate session usage, and quieter daemon
+attachment. Those ideas were reimplemented inside Cartograph's current
+feature-slice architecture; no upstream patch code was copied blindly.
 
 ## tree-sitter
 
@@ -38,6 +40,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | ruby | [tree-sitter/tree-sitter-ruby](https://github.com/tree-sitter/tree-sitter-ruby) | MIT |
 | bash (also serves zsh) | [tree-sitter/tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) | MIT |
 | php | [tree-sitter/tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | MIT |
+| apex | [aheber/tree-sitter-sfapex](https://github.com/aheber/tree-sitter-sfapex) | MIT |
 | kotlin | [fwcd/tree-sitter-kotlin](https://github.com/fwcd/tree-sitter-kotlin) | MIT |
 | scala | [tree-sitter/tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | MIT |
 | swift | [alex-pinkus/tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | MIT |

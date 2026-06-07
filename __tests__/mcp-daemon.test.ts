@@ -131,6 +131,39 @@ describe('shared MCP daemon', () => {
     },
     DAEMON_TEST_TIMEOUT_MS,
   );
+
+  it(
+    'does not print daemon attach noise unless explicitly requested',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-daemon-quiet-'));
+      let child: ChildProcessWithoutNullStreams | null = null;
+      try {
+        const cg = Cartograph.initSync(dir, { config: { include: ['**/*.ts'], exclude: [] } });
+        cg.close();
+
+        const exchange = startDaemonProxy(dir, { logAttach: false, resolveOnStdout: true });
+        child = exchange.child;
+        sendInitializeAndList({ exchange, dir, clientName: 'quiet-daemon-client', idOffset: 100 });
+
+        await waitUntil(() => exchange.responses.has(101) && exchange.responses.has(102), {
+          child,
+          stdout: () => exchange.stdout,
+          stderr: () => exchange.stderr,
+          timeoutMs: 10_000,
+        });
+
+        expect(exchange.stderr).not.toContain('Attached to shared daemon');
+        child.stdin.end();
+        await waitForExit(child, 5_000);
+        child = null;
+      } finally {
+        if (child && child.exitCode === null) child.kill('SIGTERM');
+        cleanupDaemon(dir);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 });
 
 interface InitializeClientArgs {
@@ -161,7 +194,10 @@ function sendInitializeAndList(args: InitializeClientArgs): void {
   );
 }
 
-function startDaemonProxy(projectRoot: string): {
+function startDaemonProxy(
+  projectRoot: string,
+  options: { logAttach?: boolean; resolveOnStdout?: boolean } = {},
+): {
   child: ChildProcessWithoutNullStreams;
   attached: Promise<void>;
   responses: Map<number, unknown>;
@@ -176,6 +212,9 @@ function startDaemonProxy(projectRoot: string): {
       env: {
         ...process.env,
         CARTOGRAPH_DAEMON_IDLE_TIMEOUT_MS: '500',
+        ...(options.logAttach === false
+          ? { CARTOGRAPH_MCP_LOG_ATTACH: undefined }
+          : { CARTOGRAPH_MCP_LOG_ATTACH: '1' }),
       },
       stdio: ['pipe', 'pipe', 'pipe'],
     },
@@ -190,6 +229,7 @@ function startDaemonProxy(projectRoot: string): {
   };
 
   let stdoutBuffer = '';
+  let resolveAttachedFromOutput: (() => void) | undefined;
   child.stdout.on('data', (chunk) => {
     state.stdout += String(chunk);
     stdoutBuffer += String(chunk);
@@ -200,6 +240,7 @@ function startDaemonProxy(projectRoot: string): {
       if (line) {
         const parsed = parseJsonRpcLine(line);
         if (typeof parsed.id === 'number') state.responses.set(parsed.id, parsed);
+        if (options.resolveOnStdout && state.responses.size > 0) resolveAttachedFromOutput?.();
       }
       newline = stdoutBuffer.indexOf('\n');
     }
@@ -209,11 +250,14 @@ function startDaemonProxy(projectRoot: string): {
     const timeout = setTimeout(() => {
       reject(new Error(`daemon proxy did not attach\nstdout:\n${state.stdout}\nstderr:\n${state.stderr}`));
     }, 10_000);
+    resolveAttachedFromOutput = () => {
+      clearTimeout(timeout);
+      resolve();
+    };
     child.stderr.on('data', (chunk) => {
       state.stderr += String(chunk);
       if (state.stderr.includes('Attached to shared daemon')) {
-        clearTimeout(timeout);
-        resolve();
+        resolveAttachedFromOutput?.();
       }
     });
     child.once('exit', (code) => {

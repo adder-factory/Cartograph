@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 48 language modes. The registry is the source of truth:
+Cartograph supports 51 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -18,6 +18,8 @@ does not yet extract language-specific symbols from that grammar.
 
 | Language mode | Extensions / scope | Extractor path |
 |---|---|---|
+| Apex | `.cls`, `.trigger` | Tree-sitter |
+| Aura | `.cmp`, `.app`, `.evt`, `.intf`, `.design`, `.auradoc` in Aura source paths or Aura markup | Custom extractor |
 | Bash | `.sh`, `.bash` | Tree-sitter |
 | C | `.c`, `.h` | Tree-sitter |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Tree-sitter |
@@ -62,6 +64,7 @@ does not yet extract language-specific symbols from that grammar.
 | TSX | `.tsx` | Tree-sitter |
 | TypeScript | `.ts`, `.mts`, `.cts` | Tree-sitter |
 | Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
+| Visualforce | `.page`, `.component` | Custom extractor |
 | Vue | `.vue` | Custom extractor |
 | XML (MyBatis) | `.xml` | Custom extractor |
 | YAML | `.yml`, `.yaml` | Tree-sitter |
@@ -71,6 +74,11 @@ Special cases:
 
 - Play Framework route files at `conf/routes` and `conf/*.routes` are treated
   as YAML so route declarations can be extracted.
+- Salesforce DX source roots such as `force-app/main/default` are recognized.
+  Apex `.cls` / `.trigger` files use a tree-sitter grammar, while Aura and
+  Visualforce markup use custom extractors for controller refs, component refs,
+  fields, routes, and action calls. Aura/Visualforce extension detection is
+  path/content gated so unrelated `.app` or `.component` files are not claimed.
 - Objective-C header files are detected by content so `.h` can resolve to C,
   C++, or Objective-C.
 - Liquid can also be detected from YAML front matter in `.html` / `.md` files
@@ -103,6 +111,7 @@ Special cases:
 | C# | ASP.NET route/controller patterns |
 | Swift / Apple | SwiftUI, UIKit, Vapor, Swift/Objective-C bridge edges |
 | React Native / Expo | Legacy bridge, TurboModules, Expo Modules, Fabric/Paper view components and native implementation edges |
+| Salesforce | LWC `@salesforce/apex` imports, LWC/Aura component refs, Aura client/server actions, Visualforce controller/actions |
 
 Framework resolvers run only when the project looks like it uses that
 framework, so generic codebases do not pay the full resolver cost.

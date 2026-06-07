@@ -41,7 +41,9 @@ import {
   recentSessions,
   callsForSession,
   deleteSession,
+  getTraceUsage,
   type SessionRow,
+  type TraceUsageSummary,
 } from '../../db/queries-trace.js';
 import { saveMacro, getMacro, listMacros, bumpMacroRun, deleteMacro, type MacroStep } from '../../db/queries-macros.js';
 import { textResult, truncateOutput } from './shared.js';
@@ -635,6 +637,33 @@ function handleMacroDelete(ctx: ToolCtx, args: Record<string, unknown>): ToolOut
   return ok(textResult(removed ? `Deleted macro \`${name}\`.` : `No macro named \`${name}\`.`));
 }
 
+function handleUsage(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome {
+  const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
+  return ok(textResult(formatUsageReport(getTraceUsage(cg.queries))));
+}
+
+function formatUsageReport(usage: TraceUsageSummary): string {
+  const lines = [
+    '## MCP Usage',
+    '',
+    `- **sessions:** ${usage.sessionCount}`,
+    `- **tool calls:** ${usage.toolCallCount}`,
+    `- **error-like summaries:** ${usage.errorLikeCount}`,
+    '',
+  ];
+  if (usage.tools.length === 0) {
+    lines.push('_No tool calls recorded yet._');
+    return lines.join('\n');
+  }
+  lines.push('| Tool | Calls | p50 | p95 | Max |', '| --- | ---: | ---: | ---: | ---: |');
+  for (const tool of usage.tools) {
+    lines.push(
+      `| ${tool.toolName} | ${tool.callCount} | ${tool.p50DurationMs}ms | ${tool.p95DurationMs}ms | ${tool.maxDurationMs}ms |`,
+    );
+  }
+  return lines.join('\n');
+}
+
 /* ---------- dispatch ---------- */
 
 /**
@@ -650,9 +679,20 @@ function handleMacroDelete(ctx: ToolCtx, args: Record<string, unknown>): ToolOut
  */
 const sessionSchema = z.object({
   action: z
-    .enum(['create', 'resume', 'audit', 'list', 'delete', 'macro_save', 'macro_run', 'macro_list', 'macro_delete'])
+    .enum([
+      'create',
+      'resume',
+      'audit',
+      'list',
+      'delete',
+      'usage',
+      'macro_save',
+      'macro_run',
+      'macro_list',
+      'macro_delete',
+    ])
     .describe(
-      'Sessions: `create` / `resume` / `audit` / `list` / `delete`. Macros: `macro_save` / `macro_run` / `macro_list` / `macro_delete`.',
+      'Sessions: `create` / `resume` / `audit` / `list` / `delete` / `usage`. Macros: `macro_save` / `macro_run` / `macro_list` / `macro_delete`.',
     ),
   id: z.string().optional().describe('(resume / audit / delete) Session id from create.'),
   label: z
@@ -711,6 +751,8 @@ async function handleSession(ctx: ToolCtx, args: SessionArgs): Promise<ToolOutco
       return handleList(ctx, raw);
     case 'delete':
       return handleDelete(ctx, raw);
+    case 'usage':
+      return handleUsage(ctx, raw);
     case 'macro_save':
       return handleMacroSave(ctx, raw);
     case 'macro_run':
@@ -726,11 +768,11 @@ export const SESSION_TOOL = defineTool({
   name: 'cartograph_session',
   description:
     'Session state + tool-call macros — resume investigations and replay recipes.\n\n' +
-    'Sessions: `create` / `resume` (id or label) / `audit` (id, label, or latest non-empty) / `list` / `delete` (id or label). ' +
+    'Sessions: `create` / `resume` (id or label) / `audit` (id, label, or latest non-empty) / `list` / `delete` (id or label) / `usage` (aggregate counts only). ' +
     'Macros: `macro_save` (`{name, steps}`) / `macro_run` (substitutes `${0}`/`${1}`/… from runtime args) / `macro_list` / `macro_delete`.',
   schema: sessionSchema,
   handle: handleSession,
   bypassFreshnessGate: true,
   isWriteTool: true,
-  readOnlyActions: new Set(['list', 'resume', 'audit', 'macro_list']),
+  readOnlyActions: new Set(['list', 'resume', 'audit', 'usage', 'macro_list']),
 });

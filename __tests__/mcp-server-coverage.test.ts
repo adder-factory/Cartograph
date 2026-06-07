@@ -203,12 +203,16 @@ describe('MCPServer JSON-RPC request handling', () => {
       expect(harness.results).toHaveLength(1);
       const init = harness.results[0]!.result as {
         protocolVersion: string;
-        capabilities: { tools: Record<string, unknown> };
+        capabilities: {
+          tools: Record<string, unknown>;
+          resources: Record<string, unknown>;
+          prompts: Record<string, unknown>;
+        };
         serverInfo: { name: string; version: string };
         instructions: string;
       };
       expect(init.protocolVersion).toBe('2024-11-05');
-      expect(init.capabilities).toEqual({ tools: {} });
+      expect(init.capabilities).toEqual({ tools: {}, resources: {}, prompts: {} });
       expect(init.serverInfo.name).toBe('cartograph');
       expect(init.instructions.startsWith(SERVER_INSTRUCTIONS)).toBe(true);
       expect(init.instructions).toContain('compact startup guide');
@@ -301,6 +305,22 @@ describe('MCPServer JSON-RPC request handling', () => {
           id: 'unknown-tool',
           error: { code: ErrorCodes.InvalidParams, message: 'Unknown tool: cartograph_nope' },
         },
+      ]);
+    });
+  });
+
+  it('returns empty resource and prompt lists for MCP clients that ask', async () => {
+    const server = new MCPServer({ disableStartupSync: true });
+
+    await withServerHarness(server, async (harness) => {
+      await harness.request({ jsonrpc: '2.0', id: 'resources', method: 'resources/list' });
+      await harness.request({ jsonrpc: '2.0', id: 'templates', method: 'resources/templates/list' });
+      await harness.request({ jsonrpc: '2.0', id: 'prompts', method: 'prompts/list' });
+
+      expect(harness.results).toEqual([
+        { id: 'resources', result: { resources: [] } },
+        { id: 'templates', result: { resourceTemplates: [] } },
+        { id: 'prompts', result: { prompts: [] } },
       ]);
     });
   });

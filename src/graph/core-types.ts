@@ -50,6 +50,8 @@ export type EdgeKind =
   | 'def_use';
 
 export type Language =
+  | 'apex'
+  | 'aura'
   | 'typescript'
   | 'javascript'
   | 'tsx'
@@ -96,6 +98,7 @@ export type Language =
   | 'prisma'
   | 'properties'
   | 'verilog'
+  | 'visualforce'
   | 'xml'
   | 'yaml'
   | 'unknown';

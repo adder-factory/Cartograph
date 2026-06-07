@@ -327,6 +327,7 @@ function blankPreservingNewlines(text: string): string {
 }
 
 const BLOCK_COMMENT_LANGUAGES = new Set([
+  'apex',
   'javascript',
   'typescript',
   'tsx',
@@ -345,6 +346,7 @@ const BLOCK_COMMENT_LANGUAGES = new Set([
 ]);
 
 const LINE_COMMENT_MARKER: Record<string, RegExp> = {
+  apex: /^[ \t]*\/\//,
   javascript: /^[ \t]*\/\//,
   typescript: /^[ \t]*\/\//,
   tsx: /^[ \t]*\/\//,
@@ -372,6 +374,7 @@ const LINE_COMMENT_MARKER: Record<string, RegExp> = {
  * regexes) because the inline scan walks the line char-by-char.
  */
 const LINE_COMMENT_TOKENS: Record<string, readonly string[]> = {
+  apex: ['//'],
   javascript: ['//'],
   typescript: ['//'],
   tsx: ['//'],

@@ -58,6 +58,20 @@ similar extraction or resolver gaps:
   `include`/`include_once`/`require`/`require_once` as import references so the
   existing import graph and `imports` command see them without a PHP-only edge
   type.
+- **Salesforce framework references should stay namespaced at extraction
+  boundaries.** LWC Apex imports use the documented `@salesforce/apex/...`
+  module shape, and Aura server actions are emitted as `c.method` rather than a
+  bare method name. This lets the framework resolver bypass JS built-in names
+  such as `fetch` without weakening the generic built-in filter.
+- **Kotlin property receiver typing belongs in the JVM name matcher.** The
+  extractor emits typed `field` nodes for class-body and primary-constructor
+  `val`/`var` declarations plus `type_of` refs; the resolver reads JVM-style
+  field signatures and package directives to disambiguate imports even when the
+  source file name does not mirror the package path.
+- **Nested git repositories are file-discovery policy, not orchestrator logic.**
+  Keep submodule/embedded-repo discovery in `src/extraction/file-discovery-policy.ts`
+  and let `src/extraction/index.ts` decide only when to use git-backed scan
+  versus filesystem fallback.
 
 ### Cross-language bridging + framework-resolver hooks (B12 arc — 2026-05-29)
 

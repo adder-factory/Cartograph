@@ -137,6 +137,38 @@ describe('cartograph_session family (#13)', () => {
       expect(text).toContain('No end-of-task self-check recorded');
       expect(text).toContain('No test-selection call recorded');
     });
+
+    it('usage renders aggregate tool counts without args or result bodies', async () => {
+      const sessionId = 'usage-session';
+      const ts = Date.now();
+      insertSession({ qb: cg.queries, id: sessionId, startedTs: ts, label: 'usage-me' });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 1,
+        ts: ts + 1,
+        toolName: 'cartograph_find',
+        argsJson: JSON.stringify({ query: 'secret-token' }),
+        resultSummary: 'found private detail',
+        durationMs: 10,
+      });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 2,
+        ts: ts + 2,
+        toolName: 'cartograph_find',
+        argsJson: JSON.stringify({ query: 'another-secret' }),
+        resultSummary: 'error: failed lookup',
+        durationMs: 30,
+      });
+
+      const text = textOf(await handler.runHandler('cartograph_session', { action: 'usage' }));
+
+      expect(text).toContain('MCP Usage');
+      expect(text).toContain('| cartograph_find | 2 |');
+      expect(text).toContain('error-like summaries');
+      expect(text).not.toContain('secret-token');
+      expect(text).not.toContain('private detail');
+    });
   });
 
   describe('macros', () => {

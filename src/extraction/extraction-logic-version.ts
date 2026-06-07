@@ -169,6 +169,8 @@ export const EXTRACTION_LOGIC_VERSION = computeAlgoHash('src/extraction/extracti
   // are pure type/barrel modules and stay out (their edits ride
   // alongside a real extractor edit that DOES flip the hash).
   './languages/registry',
+  './languages/apex',
+  './languages/aura',
   './languages/bash',
   './languages/c-cpp',
   './languages/csharp',
@@ -201,6 +203,7 @@ export const EXTRACTION_LOGIC_VERSION = computeAlgoHash('src/extraction/extracti
   './languages/swift',
   './languages/tsx',
   './languages/typescript',
+  './languages/visualforce',
   './languages/vue',
   './languages/xml',
   './languages/yaml',

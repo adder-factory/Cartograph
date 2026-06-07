@@ -23,6 +23,15 @@ import {
 
 const byName = (a: string, b: string): number => a.localeCompare(b);
 
+function samplePathFor(language: string, extension: string): string {
+  if (language === 'aura') return `force-app/main/default/aura/Sample/Sample${extension}`;
+  if (language === 'visualforce' && extension === '.component') {
+    return `force-app/main/default/components/Sample${extension}`;
+  }
+  if (language === 'visualforce') return `force-app/main/default/pages/Sample${extension}`;
+  return `x${extension}`;
+}
+
 describe('language registry — single source of truth', () => {
   it('has at least the original 19 languages', () => {
     const defs = getLanguageDefs();
@@ -126,7 +135,7 @@ describe('derived consumers stay in sync with the registry', () => {
       for (const ext of def.extensions) {
         // .h is pinned to C by the registry; the C++ heuristic only
         // applies when source is provided AND looks like C++.
-        expect(detectLanguage(`x${ext}`)).toBe(def.name);
+        expect(detectLanguage(samplePathFor(def.name, ext))).toBe(def.name);
       }
     }
   });
