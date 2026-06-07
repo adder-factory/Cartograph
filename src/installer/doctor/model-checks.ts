@@ -367,7 +367,7 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
         remediation: initRecovery,
       };
     }
-    return await checkPostgresRuntimePrivileges(sql, database, schema, version, serverInfo);
+    return await checkPostgresRuntimePrivileges({ sql, database, schema, version, serverInfo });
   } catch (e) {
     return {
       id: 'database-storage',
@@ -381,13 +381,16 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
   }
 }
 
-async function checkPostgresRuntimePrivileges(
-  sql: Bun.SQL,
-  database: DatabaseConfig,
-  schema: string,
-  version: number,
-  serverInfo: PostgresServerVersionInfo,
-): Promise<CheckResult> {
+interface PostgresRuntimeCheckContext {
+  sql: Bun.SQL;
+  database: DatabaseConfig;
+  schema: string;
+  version: number;
+  serverInfo: PostgresServerVersionInfo;
+}
+
+async function checkPostgresRuntimePrivileges(ctx: PostgresRuntimeCheckContext): Promise<CheckResult> {
+  const { sql, database, schema, version, serverInfo } = ctx;
   const dmlProbe = await probePostgresDml(sql, schema);
   if (dmlProbe !== null) {
     return {

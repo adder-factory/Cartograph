@@ -254,6 +254,7 @@ cartograph setup [project-path]
 This runs three steps in order:
 
 1. `admin init` — creates `.cartograph/` in the project directory.
+   SQLite is the zero-config storage default.
 2. `install-models` — downloads the curated GGUF set into
    `~/.cartograph/models/`. ~7 GB for the full set; pass `--minimal`
    for the ~2.1 GB subset (embed + 3B chat, no 7B chat or reranker).
@@ -272,8 +273,9 @@ the Ollama model id.
 cartograph setup --minimal /path/to/project
 ```
 
-SQLite is the zero-config storage default. For PostgreSQL, start a PostgreSQL
-18+ database first and pass storage flags before the first init/setup:
+If the user asked for PostgreSQL, start a PostgreSQL 18+ database first and
+pass storage flags before the first init/setup. Do not switch storage just
+because PostgreSQL is available; SQLite is the recommended local default.
 
 ```sh
 docker run --rm -d --name cartograph-postgres \
@@ -292,7 +294,8 @@ cartograph setup --minimal /path/to/project \
 
 For an existing SQLite project, use `cartograph admin storage-migrate
 /path/to/project --database-url <postgres-url> --database-schema <schema>`
-and restart any MCP server attached to the old SQLite database.
+and restart any MCP server attached to the old SQLite database. The PostgreSQL
+target schema must be fresh or intentionally recreated with `--force`.
 
 ---
 
@@ -309,16 +312,20 @@ The output is a Markdown report with one line per check:
 - `✗` — blocking failure (a remediation is required)
 
 A clean install shows all checks `✓` with "_All checks passed.
-cartograph is ready to use._" Doctor's seven check rows:
+cartograph is ready to use._" Doctor check areas include:
 
 1. Bun runtime version
-2. GGUF models present under `~/.cartograph/models/`
-3. Project init (`.cartograph/` exists)
-4. Project config (`config.json` parses + has `llm` block)
-5. Detected LLM backends — informational scan of common ports
+2. Project init (`.cartograph/` exists)
+3. Project config (`config.json` parses, including storage and LLM config)
+4. Database storage — SQLite capability check or PostgreSQL 18+ connectivity,
+   schema, write, DDL, and pgvector checks
+5. GGUF models present under `~/.cartograph/models/` when configured
+6. Detected LLM backends — informational scan of common ports
    (:8080 / :11434 / :8000 / :1234 / :5000)
-6. Embedding endpoint reachability — probes the configured
+7. Embedding endpoint reachability — probes the configured
    `embeddingLlm.endpoint`; surfaces detected alternatives on failure
+8. Backend tuning, start commands, lifecycle, and active Cartograph process
+   checks when relevant
 
 ---
 
@@ -374,6 +381,24 @@ The `.cartograph/config.json` exists but doesn't reference the LLM
 backends. Run `cartograph admin install-models --write-config` to
 download + wire the recommended block in one go (creates a `.bak.<ts>`
 backup if config.json already exists).
+
+### `Database storage ✗ PostgreSQL server is too old`
+
+Cartograph PostgreSQL storage requires PostgreSQL 18 or newer. Use a
+PostgreSQL 18+ service, such as `pgvector/pgvector:pg18` for local Docker
+testing, or keep the default SQLite backend.
+
+### `Database storage ✗ PostgreSQL check failed`
+
+Verify `database.url`, credentials, network access, and that the configured
+server is running. If `database.pgvector` is `require`, make sure pgvector is
+installed in that database; for local Docker tests use `pgvector/pgvector:pg18`.
+
+### `Database storage ⚠ No SQLite database`
+
+The project was initialized but the SQLite graph file is missing. Run
+`cartograph admin init /path/to/project`, or configure PostgreSQL explicitly
+with `database.provider: "postgres"` and a PostgreSQL 18+ `database.url`.
 
 ### `Embedding endpoint ⚠ http://localhost:8080 is not responding`
 
@@ -434,7 +459,7 @@ git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
 # 2. An OpenAI-compat backend. macOS quickstart:
 brew install llama.cpp  # OR: brew install ollama (simpler, auto-starts)
 
-# 3. Bootstrap (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
+# 3. Bootstrap with SQLite storage (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
 cartograph setup --minimal /path/to/the/users/project
 
 # 4. Start the backends (one llama-server per port — paste each in its
@@ -444,6 +469,24 @@ llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --por
 
 # 5. Verify
 cartograph doctor /path/to/the/users/project
+```
+
+If the user asked for PostgreSQL instead of SQLite, start PostgreSQL 18+ first
+and pass storage flags during setup:
+
+```sh
+docker run --rm -d --name cartograph-postgres \
+  -e POSTGRES_USER=cartograph \
+  -e POSTGRES_PASSWORD=cartograph \
+  -e POSTGRES_DB=cartograph \
+  -p 5432:5432 \
+  pgvector/pgvector:pg18
+
+cartograph setup --minimal /path/to/the/users/project \
+  --database-provider postgres \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph \
+  --database-pgvector auto
 ```
 
 If the user picked Ollama instead, after the `setup` step:
