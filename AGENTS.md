@@ -439,8 +439,9 @@ the report.
 
 ## Where to look when something else breaks
 
-- `src/installer/doctor.ts` — every check + its remediation message,
-  in source. Add a new check by extending this file.
+- `src/installer/doctor/` — every doctor check + remediation module.
+  Add a new check by extending the focused module and wiring it in
+  `src/installer/doctor/checks.ts`.
 - `src/installer/scan-backends.ts` — the per-port LLM-backend
   detector. Extend `SCAN_TARGETS` to probe additional well-known
   ports.
