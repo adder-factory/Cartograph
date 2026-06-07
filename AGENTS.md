@@ -7,6 +7,10 @@ first unchecked task listed there.
 
 ## Architecture rules for development
 
+Read `docs/ARCHITECTURE.md` before architecture-sensitive changes. It is the
+canonical persistent guide for Cartograph's feature-slice architecture and the
+current post-migration ownership conventions.
+
 Use feature slices, not layer-first buckets, for new code and for any
 area you touch during maintenance. The platform's natural unit is the
 slice boundary: MCP tool/action, CLI command/subcommand, installer flow,
