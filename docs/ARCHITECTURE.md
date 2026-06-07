@@ -49,6 +49,10 @@ These are the current owner modules future sessions should preserve:
   `DatabaseConnection` in `src/db/index.ts`. SQLite remains the default;
   PostgreSQL 18+ support should enter through the same `SqliteDatabase`-shaped
   adapter boundary instead of branching in feature callers.
+- The SQLite adapter intentionally uses `bun:sqlite`, not Bun.SQL's SQLite
+  adapter. Cartograph's local SQLite contract is synchronous and
+  statement-oriented; `bench/sqlite-driver.mts` is the benchmark gate for
+  revisiting that choice.
 - PostgreSQL storage is fresh-schema bootstrap only for now. Do not route it
   through SQLite's forward migration chain; use `admin storage-migrate` for
   SQLite-to-PostgreSQL moves and require a fresh/nonexistent target schema.

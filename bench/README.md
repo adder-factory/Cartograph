@@ -37,6 +37,37 @@ Use this bench to refresh the README storage table when the PostgreSQL
 adapter, query batching, or schema shape changes. Treat the output as
 machine- and workload-specific, not as a universal database ranking.
 
+## bench/sqlite-driver.mts
+
+Compares Cartograph's current `bun:sqlite` local driver against Bun.SQL's
+SQLite adapter:
+
+- `bun:sqlite` - synchronous prepared statements, matching Cartograph's
+  current SQLite adapter contract.
+- `bun.sql-row` - mechanical async tagged-template shape, one awaited insert
+  per row.
+- `bun.sql-bulk` - Bun.SQL's best-case object-array bulk insert helper.
+
+```sh
+bun bench/sqlite-driver.mts
+BENCH_RUNS=5 BENCH_FILE_COUNT=2000 BENCH_NODES_PER_FILE=8 BENCH_READ_ITERATIONS=4000 \
+  bun bench/sqlite-driver.mts
+```
+
+Reference run from 2026-06-07, Bun 1.3.14, `darwin arm64`, 2,000 files,
+16,000 nodes, 4,000 read iterations, five measured runs after one warmup:
+
+| Driver | Init median | Write median | Read median | Total median | DB size |
+|---|---:|---:|---:|---:|---:|
+| `bun:sqlite` | 2 ms | 30 ms | 1502 ms | 1534 ms | 2.50 MB |
+| `bun.sql-row` | 2 ms | 101 ms | 1584 ms | 1687 ms | 2.50 MB |
+| `bun.sql-bulk` | 2 ms | 34 ms | 1591 ms | 1626 ms | 2.50 MB |
+
+Conclusion for Cartograph: keep `bun:sqlite` as the local SQLite driver. Use
+Bun.SQL for PostgreSQL and any future external SQL backends. Revisit only if
+Bun.SQL gains a synchronous SQLite-facing API or a measured Cartograph workload
+beats `bun:sqlite` without forcing an async rewrite of the storage contract.
+
 ## bench/sync-parallel-hooks.mts
 
 Three sections measured on the same corpus:

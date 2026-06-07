@@ -20,6 +20,12 @@ No database config is required. SQLite uses FTS, RTree, JSON-backed variable
 lists, and sqlite-vec when the optional sqlite-vec extension is available.
 Doctor reports the SQLite version and feature check result.
 
+Cartograph intentionally uses `bun:sqlite` for this backend rather than
+Bun.SQL's SQLite adapter. The local graph API is synchronous and
+statement-oriented, and `bench/sqlite-driver.mts` currently shows `bun:sqlite`
+faster on Cartograph-shaped local workloads. Bun.SQL remains the right boundary
+for PostgreSQL and future external SQL backends.
+
 ## PostgreSQL New Project
 
 Start a PostgreSQL 18+ database first. For local development and pgvector
