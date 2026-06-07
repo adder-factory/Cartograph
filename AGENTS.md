@@ -132,6 +132,8 @@ CLI commands you'd give a user with no agent or no MCP access yet.
 
 Cartograph is a local-first code-intelligence MCP server. It needs:
 - **Bun ≥ 1.3.0** as its runtime
+- **Storage**: SQLite by default; optional PostgreSQL when the user wants
+  external/shared storage, managed backups, or native pgvector search
 - An **OpenAI-compat HTTP LLM backend** running on localhost — cartograph
   recommends llama-cpp's `llama-server`, but Ollama / mlx_lm.server /
   LM Studio / vLLM / LocalAI all work. Cloud OpenAI (or any
@@ -269,6 +271,28 @@ the Ollama model id.
 ```sh
 cartograph setup --minimal /path/to/project
 ```
+
+SQLite is the zero-config storage default. For PostgreSQL, start a database
+first and pass storage flags before the first init/setup:
+
+```sh
+docker run --rm -d --name cartograph-postgres \
+  -e POSTGRES_USER=cartograph \
+  -e POSTGRES_PASSWORD=cartograph \
+  -e POSTGRES_DB=cartograph \
+  -p 5432:5432 \
+  pgvector/pgvector:pg16
+
+cartograph setup --minimal /path/to/project \
+  --database-provider postgres \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph \
+  --database-pgvector auto
+```
+
+For an existing SQLite project, use `cartograph admin storage-migrate
+/path/to/project --database-url <postgres-url> --database-schema <schema>`
+and restart any MCP server attached to the old SQLite database.
 
 ---
 

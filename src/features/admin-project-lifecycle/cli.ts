@@ -60,7 +60,7 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
   adminCmd
     .command('init [path]')
     .description(
-      "Initialize Cartograph in a project directory — creates .cartograph/ and ensures the project .gitignore excludes it (mirrors cartograph_admin MCP tool with action='init')",
+      "Initialize Cartograph in a project directory. SQLite is default; pass --database-provider postgres for PostgreSQL/pgvector storage (mirrors cartograph_admin action='init').",
     )
     .option('-i, --index', 'Run initial indexing after initialization')
     .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')

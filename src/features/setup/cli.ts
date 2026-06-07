@@ -37,7 +37,9 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
   const { program, resolveProjectPath, writeStdout } = deps;
   program
     .command('setup [path]')
-    .description('One-shot bootstrap: admin init + install-models + doctor. Each step skips when already satisfied.')
+    .description(
+      'One-shot bootstrap: admin init + install-models + doctor. SQLite is default; pass --database-provider postgres for PostgreSQL/pgvector storage.',
+    )
     .option('--minimal', 'Install only the smallest viable model subset (embed + 3B chat) instead of the full set.')
     .option('--no-models', 'Skip the install-models step (use when models are already present).')
     .option('--database-provider <provider>', 'Storage backend: sqlite (default) or postgres')

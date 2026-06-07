@@ -32,6 +32,9 @@ Token discipline:
 Freshness:
 - The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional. For \`cartograph_node({code: true})\`, pass \`liveSource: true\` to explicitly read a stale file's current disk slice using indexed line ranges.
 - End edit-touching turns with \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done.
+
+Storage:
+- SQLite is the default. For PostgreSQL, initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\` or migrate with \`action: "storage-migrate"\`.
 `;
 
 /**
@@ -84,6 +87,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"Summarise / review a PR diff"** → \`cartograph_review({mode: 'context'})\`; sister implementations → \`mode: 'neighbors'\`; project risk → \`mode: 'risk'\`; trust self-check → \`mode: 'trust'\`; agent-prone detector audit → \`mode: 'agent-audit'\`; "what did I change structurally?" → \`cartograph_compare_to_ref\`.
 - **"Plan a rename"** → \`cartograph_propose_rename\` (every call site + doc mention + confidence).
 - **"Is the index ready / how big?"** → \`cartograph_status\` (\`verbose: true\` folds in top hotspots + biomarkers).
+- **"Set up or move storage?"** → \`cartograph_admin({action: 'init'})\` for a new project; pass \`databaseProvider: 'postgres'\`, \`databaseUrl\`, \`databaseSchema\`, and \`databasePgvector: 'auto'|'off'|'require'\` for PostgreSQL. Use \`cartograph_admin({action: 'storage-migrate'})\` to move an existing SQLite graph to PostgreSQL.
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` (read-only escape hatch; \`schema: true\` first).
 - **"What other cartograph indices are on this machine?"** → \`cartograph_discover\`.
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
@@ -101,6 +105,7 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 - **Route a task cheaply**: \`cartograph_context({format: "plan"})\` → follow the top \`metadata.nextActions\` call → escalate to source only when the target is clear.
 - **Onboard to a topic**: \`cartograph_context({format: "plan"})\` first; still unclear? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
 - **Onboard to a new repo**: \`cartograph_digest\` → \`cartograph_entry_points\`.
+- **Initialize with PostgreSQL**: \`cartograph_admin({action: 'init', projectPath, databaseProvider: 'postgres', databaseUrl, databaseSchema: 'cartograph', databasePgvector: 'auto'})\` → \`cartograph_admin({action: 'doctor', projectPath})\`; for an existing SQLite graph, use \`action: 'storage-migrate'\` and restart attached MCP servers.
 - **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'trust'})\` before relying on broad graph answers; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
 - **Refactor planning**: \`cartograph_find\` → \`cartograph_biomarkers\` (Code Health) → \`cartograph_coverage\` (tests) → \`cartograph_graph({direction: 'impact'})\` (blast radius) → \`cartograph_propose_rename\`.
 - **Debug a regression**: \`cartograph_graph({direction: 'callers'})\` of the suspect + \`cartograph_hotspots\` + \`cartograph_biomarkers\`; with a trace, \`cartograph_trace_to_culprits\`.
