@@ -4,7 +4,8 @@
  * BFS and DFS traversal for the code knowledge graph.
  */
 
-import type { Node, Edge, Subgraph, TraversalOptions, EdgeKind } from '../types.js';
+import type { Subgraph, TraversalOptions } from './types.js';
+import type { Edge, EdgeKind, Node } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getOutgoingEdges, getIncomingEdges } from '../db/queries-edges.js';
 

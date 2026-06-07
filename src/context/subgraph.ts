@@ -1,5 +1,7 @@
 import type { SearchResult } from '../search/types.js';
-import type { Edge, EdgeKind, FindRelevantContextOptions, Node, Subgraph } from '../types.js';
+import type { Subgraph } from '../graph/types.js';
+import type { Edge, EdgeKind, Node } from '../types.js';
+import type { FindRelevantContextOptions } from './types.js';
 import { findEdgesBetweenNodes, getOutgoingEdges } from '../db/queries-edges.js';
 import { logDebug } from '../errors.js';
 import { isDiagnosticPath } from '../path-class.js';

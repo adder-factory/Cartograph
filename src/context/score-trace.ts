@@ -16,7 +16,8 @@
  */
 
 import type { SearchResult } from '../search/types.js';
-import type { CandidateScoreTrace, Node, ScoreExplanation, ScorePassEntry } from '../types.js';
+import type { CandidateScoreTrace, ScoreExplanation, ScorePassEntry } from '../graph/types.js';
+import type { Node } from '../types.js';
 
 /** Default cap on near-miss (non-surviving) candidates in the output. */
 const DEFAULT_NEAR_MISS_LIMIT = 8;

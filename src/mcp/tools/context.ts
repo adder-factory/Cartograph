@@ -9,8 +9,10 @@ import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type Cartograph from '../../index.js';
+import type { TaskContext } from '../../context/types.js';
+import type { ScoreExplanation } from '../../graph/types.js';
 import type { SearchResult } from '../../search/types.js';
-import type { Node, ScoreExplanation } from '../../types.js';
+import type { Node } from '../../types.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
 import { logDebug } from '../../errors.js';
@@ -368,7 +370,7 @@ export function annotateScoreTraceEntryMarkers(rendered: string, trace: ScoreExp
 interface FormatContextResponseArgs {
   cg: ReturnType<ToolCtx['getCartograph']>;
   task: string;
-  context: import('../../types.js').TaskContext;
+  context: TaskContext;
   format: ContextFormat;
 }
 
@@ -396,11 +398,11 @@ function attachNextActions(result: ToolResult, nextActions: NextAction[]): ToolR
   };
 }
 
-function topContextNodes(context: import('../../types.js').TaskContext, limit: number): Node[] {
+function topContextNodes(context: TaskContext, limit: number): Node[] {
   return Array.from(context.subgraph.nodes.values()).slice(0, limit);
 }
 
-function buildContextNextActions(context: import('../../types.js').TaskContext, task: string): NextAction[] {
+function buildContextNextActions(context: TaskContext, task: string): NextAction[] {
   const nodes = topContextNodes(context, PLAN_ACTION_NODE_LIMIT);
   if (nodes.length === 0) {
     return [
@@ -472,11 +474,7 @@ function buildContextNextActions(context: import('../../types.js').TaskContext, 
   return actions;
 }
 
-function renderContextPlan(args: {
-  task: string;
-  context: import('../../types.js').TaskContext;
-  nextActions: NextAction[];
-}): string {
+function renderContextPlan(args: { task: string; context: TaskContext; nextActions: NextAction[] }): string {
   const { task, context, nextActions } = args;
   const nodes = topContextNodes(context, PLAN_RENDER_NODE_LIMIT);
   const entryLines =

@@ -5,17 +5,10 @@
  * Outputs structured context ready to inject into Claude.
  */
 
-import type {
-  Node,
-  Edge,
-  NodeKind,
-  Subgraph,
-  TaskContext,
-  TaskInput,
-  BuildContextOptions,
-  FindRelevantContextOptions,
-} from '../types.js';
+import type { Node, Edge, NodeKind } from '../types.js';
+import type { Subgraph } from '../graph/types.js';
 import type { SearchResult } from '../search/types.js';
+import type { BuildContextOptions, FindRelevantContextOptions, TaskContext, TaskInput } from './types.js';
 import { type QueryBuilder, getNodesByKind } from '../db/queries.js';
 import { searchNodes, findNodesByExactName, findNodesByNameSubstring } from '../db/queries-search.js';
 import type { GraphTraverser } from '../graph/index.js';

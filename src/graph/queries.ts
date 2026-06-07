@@ -4,7 +4,8 @@
  * Higher-level query functions built on top of traversal algorithms.
  */
 
-import type { Node, Edge, Context, Subgraph, EdgeKind } from '../types.js';
+import type { Subgraph } from './types.js';
+import type { Context, Edge, EdgeKind, Node } from '../types.js';
 import { type QueryBuilder, getNodesByKind } from '../db/queries.js';
 import { getOutgoingEdges, getIncomingEdges } from '../db/queries-edges.js';
 import { getAllFiles, getAllFilePaths } from '../db/queries-files.js';

@@ -1,4 +1,6 @@
-import type { CodeBlock, Node, Subgraph, TaskContext } from '../types.js';
+import type { Subgraph } from '../graph/types.js';
+import type { Node } from '../types.js';
+import type { CodeBlock, TaskContext } from './types.js';
 import { runSequential } from '../utils/async-iteration.js';
 
 /** Code-block extraction budget for `extractCodeBlocks`. */
