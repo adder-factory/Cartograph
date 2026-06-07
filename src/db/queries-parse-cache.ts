@@ -19,7 +19,7 @@
 
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult } from '../extraction/types.js';
 import { logDebug } from '../errors.js';
 import { computeAlgoHash } from '../algo-hash.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';

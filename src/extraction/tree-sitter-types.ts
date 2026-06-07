@@ -7,7 +7,8 @@
  */
 
 import type { Node as SyntaxNode } from 'web-tree-sitter';
-import type { Node, NodeKind, UnresolvedReference } from '../types.js';
+import type { UnresolvedReference } from './types.js';
+import type { Node, NodeKind } from '../types.js';
 
 /**
  * Information returned by a language's extractImport hook.

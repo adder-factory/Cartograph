@@ -39,7 +39,8 @@
  * Spring's own loader).
  */
 
-import type { ExtractionResult, Node, Edge } from '../../types.js';
+import type { ExtractionResult } from '../types.js';
+import type { Edge, Node } from '../../types.js';
 import type { LanguageDef } from './types.js';
 import { generateNodeId } from '../tree-sitter-helpers.js';
 

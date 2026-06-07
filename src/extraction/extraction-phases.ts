@@ -25,15 +25,8 @@
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import type {
-  Language,
-  FileRecord,
-  ExtractionResult,
-  ExtractionError,
-  Node,
-  Edge,
-  UnresolvedReference,
-} from '../types.js';
+import type { Language, FileRecord, Node, Edge } from '../types.js';
+import type { ExtractionError, ExtractionResult, UnresolvedReference } from './types.js';
 import { getAllFrameworkResolvers } from '../resolution/frameworks/index.js';
 import { qbTransaction } from '../db/queries.js';
 import { insertEdges } from '../db/queries-edges.js';

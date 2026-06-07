@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
-import type { NestedFunctionManifestRow } from '../types.js';
+import type { NestedFunctionManifestRow } from '../extraction/types.js';
 
 /**
  * Typed queries over the F#12 slice 2 nested-function manifest tables

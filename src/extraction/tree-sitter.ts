@@ -14,16 +14,8 @@
 
 import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
 import * as path from 'node:path';
-import type {
-  Language,
-  Node,
-  Edge,
-  NodeKind,
-  ExtractionResult,
-  ExtractionError,
-  UnresolvedReference,
-  NestedFunctionManifestRow,
-} from '../types.js';
+import type { Language, Node, Edge, NodeKind } from '../types.js';
+import type { ExtractionError, ExtractionResult, NestedFunctionManifestRow, UnresolvedReference } from './types.js';
 import { getParser, detectLanguage, isLanguageSupported } from './grammars.js';
 import { getNodeText, getChildByField, createIdFactory, type NodeIdFactory } from './tree-sitter-helpers.js';
 import type { LanguageExtractor, ExtractorContext } from './tree-sitter-types.js';

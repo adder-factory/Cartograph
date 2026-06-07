@@ -10,7 +10,7 @@
  */
 
 import type { LanguageExtractor } from '../tree-sitter-types.js';
-import type { ExtractionResult } from '../../types.js';
+import type { ExtractionResult } from '../types.js';
 
 /**
  * Custom extraction function for languages that don't fit the

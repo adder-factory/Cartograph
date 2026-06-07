@@ -44,7 +44,8 @@
  */
 
 import type { IndexHook, IndexHookContext } from './types.js';
-import type { Node, Edge, UnresolvedReference } from '../types.js';
+import type { UnresolvedReference } from '../extraction/types.js';
+import type { Edge, Node } from '../types.js';
 import { generateNodeId } from '../extraction/tree-sitter-helpers.js';
 import { detectLanguage } from '../extraction/grammars.js';
 import {

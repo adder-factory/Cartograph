@@ -1,4 +1,5 @@
-import type { Node, Edge, ExtractionResult, ExtractionError, UnresolvedReference } from '../types.js';
+import type { ExtractionError, ExtractionResult, UnresolvedReference } from './types.js';
+import type { Edge, Node } from '../types.js';
 
 /**
  * Shared accumulator fields that every self-contained extractor (GraphQL,

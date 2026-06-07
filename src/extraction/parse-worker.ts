@@ -8,7 +8,8 @@
 import { parentPort } from 'node:worker_threads';
 import { extractFromSource } from './tree-sitter.js';
 import { detectLanguage, loadGrammarsForLanguages, resetParser } from './grammars.js';
-import type { Language, ExtractionResult } from '../types.js';
+import type { ExtractionResult } from './types.js';
+import type { Language } from '../types.js';
 import { errMsg } from '../errors.js';
 import { snapshotProfileDelta } from './profile.js';
 

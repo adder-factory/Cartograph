@@ -27,7 +27,7 @@
  * always importable (same convention as Svelte).
  */
 
-import type { ExtractionResult } from '../types.js';
+import type { ExtractionResult } from './types.js';
 import {
   type ComponentExtractorConfig,
   type ComponentExtractorRuntime,
