@@ -626,33 +626,7 @@ export function fileNodeIdFor(cg: Cartograph, filePath: string): string | null {
   return null;
 }
 
-/**
- * Node kinds that hold type-usage incoming edges (rather than call
- * edges). Class / interface / type_alias / etc. are reached via
- * `instantiates` / `type_of` / `returns` / `extends` / `implements`
- * — not via the regular `calls` edge that `traverser.getCallers`
- * walks. Both `cartograph_callers` and `cartograph_node {includeCallers}`
- * consult this so a class's construction sites are surfaced under
- * "Callers" instead of being hidden behind file-level imports.
- */
-export const TYPE_LIKE_KINDS: ReadonlySet<import('../../types.js').NodeKind> = new Set<
-  import('../../types.js').NodeKind
->(['interface', 'class', 'struct', 'type_alias', 'enum', 'trait', 'protocol', 'component', 'module']);
-
-/**
- * Edge kinds that represent type-usage of a type-like node. Typed
- * array so callers can hand it straight to `getIncomingEdges` — the
- * filter pushes into SQL rather than scanning structural edges in JS.
- *
- * Treat as logically immutable — exported for read-only consumption.
- */
-export const TYPE_USAGE_EDGE_KINDS: import('../../types.js').Edge['kind'][] = [
-  'instantiates',
-  'type_of',
-  'returns',
-  'extends',
-  'implements',
-];
+export { TYPE_LIKE_KINDS, TYPE_USAGE_EDGE_KINDS } from '../../graph/type-usage.js';
 
 /**
  * Args for {@link pathFilterStripHint}. The probe callback returns

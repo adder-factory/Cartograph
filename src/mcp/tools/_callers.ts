@@ -8,28 +8,33 @@
  * hops=1 calls verbatim.
  */
 import type { ToolResult } from '../tool-types.js';
-import { getIncomingEdges } from '../../db/queries-edges.js';
 import { getSymbolRoles } from '../../db/queries-roles.js';
 import type Cartograph from '../../index.js';
-import type { QueryBuilder } from '../../db/queries.js';
 import type { Edge, Node } from '../../types.js';
-import { getEnclosingTestName } from '../../db/queries-test-names.js';
-import { clamp, isTestPath, numArg } from '../../utils.js';
+import { clamp, numArg } from '../../utils.js';
 import {
-  CONFIDENCE_RANK,
-  filterByConfidence,
-  formatConfidence,
-  formatNodeList,
-  formatSiteCount,
-  parseMinConfidence,
-} from './result-formatters.js';
+  collectCallers,
+  collectCallersForSource,
+  collectTypeUsers,
+  formatGroupedCallers,
+  pickCallersNote,
+  type CallersAccum,
+} from '../../features/graph/callers/index.js';
+export {
+  CALLERS_CONSTRUCTOR_HINT,
+  CALLERS_NO_CALLERS_NOTE,
+  buildCallersGroupSpec,
+  callSiteLinesFromEdge,
+  expandTestFileCallers,
+  expandTestFileCallersWithQueries,
+} from '../../features/graph/callers/index.js';
+export type { BuildCallersGroupSpecArgs } from '../../features/graph/callers/index.js';
+import { formatNodeList, parseMinConfidence } from './result-formatters.js';
 import {
   applyDeltaSince,
   mintCallId,
   parseFieldsArg,
   textResult,
-  TYPE_LIKE_KINDS,
-  TYPE_USAGE_EDGE_KINDS,
   validateStringOutcome,
   type CompactFieldName,
 } from './shared.js';
@@ -39,26 +44,6 @@ import { splitCallIdFooter } from './_call-id-footer.js';
 import { renderToolResponse } from './_response.js';
 import { findAllSymbols, notFoundMessage, symbolNotFound } from './symbol-resolver.js';
 import type { ToolCtx } from './types.js';
-import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
-
-/**
- * Default "no callers" italic note — emitted by
- * {@link buildCallersGroupSpec} when a per-source section has no
- * incoming edges and the source is NOT a constructor (constructors
- * route through {@link CALLERS_CONSTRUCTOR_HINT} instead). Exported
- * so the wording-lint can pin it without re-stating the string.
- */
-export const CALLERS_NO_CALLERS_NOTE = '_No callers._';
-
-/**
- * Constructor-specific empty-callers hint. Constructors are invoked
- * via `new ClassName(...)`, which graph-edges as `instantiates` on
- * the parent class — not as a `call` edge on the constructor method
- * itself. Without this hint the agent reads "_No callers._" and gives
- * up; with it they get a one-step pointer to the right query.
- */
-export const CALLERS_CONSTRUCTOR_HINT =
-  '> Note: constructors are invoked via `new ClassName(...)`, which graph-edges as `instantiates` on the parent class. To find construction sites, run cartograph_callers on the enclosing class instead of "constructor".';
 
 /** Maximum symbols accepted by the `symbols` batch parameter. Mirror
  *  of {@link BATCHED_SYMBOLS_MAX} from `_common-fields.ts`, so the
@@ -66,326 +51,6 @@ export const CALLERS_CONSTRUCTOR_HINT =
  *  one source of truth. */
 const MAX_SYMBOLS = BATCHED_SYMBOLS_MAX;
 export const CALLERS_MAX_SYMBOLS = MAX_SYMBOLS;
-
-// TYPE_LIKE_KINDS / TYPE_USAGE_EDGE_KINDS live in shared.ts as the
-// single source of truth for both this file and node.ts. Keep the
-// local Set form too because the type-usage merge in
-// `appendTypeUsersForNode` does an O(1) `has()` check rather than
-// a list scan when iterating ALL incoming edges of a popular type.
-const TYPE_USAGE_EDGE_KIND_SET: ReadonlySet<string> = new Set<string>(TYPE_USAGE_EDGE_KINDS);
-
-/**
- * Per-source: combine the regular call-edge callers with the
- * type-usage incoming edges (when the source is a type-like kind).
- * Without the type-usage merge, multi-match queries on a class name
- * like `callers of Dup` (where `Dup` is defined in two files and a
- * caller does `new Dup()` against the imported one) would render
- * "_No callers._" even though `instantiates` edges exist correctly
- * in the graph — `traverser.getCallers` filters to call-edge kinds
- * only, so the data was hidden by the formatter, not absent.
- *
- * Each row carries an `edge` so the formatter can render a site
- * count via {@link formatSiteCount}. Returns deduped sources (a
- * caller that both calls a method on the type AND instantiates it
- * appears once, with the call-edge winning).
- */
-interface CollectCallersForSourceArgs {
-  cg: Cartograph;
-  source: Node;
-  edgeKindFilter: string | undefined;
-  minConfidence: NonNullable<Edge['confidence']> | null;
-}
-
-function makeResolvedFileImportEdge(source: Node, target: Node, line: number | undefined): Edge {
-  const edge: Edge = {
-    source: source.id,
-    target: target.id,
-    kind: 'imports',
-    confidence: 'EXTRACTED',
-    metadata: { resolvedFileImport: true },
-  };
-  if (line !== undefined) edge.line = line;
-  return edge;
-}
-
-function appendResolvedFileImportCallers(args: {
-  cg: Cartograph;
-  source: Node;
-  edgeKindFilter: string | undefined;
-  seen: Set<string>;
-  rows: Array<{ node: Node; edge: Edge }>;
-}): void {
-  const { cg, source, edgeKindFilter, seen, rows } = args;
-  if (source.kind !== 'file') return;
-  if (edgeKindFilter !== undefined && edgeKindFilter !== 'imports') return;
-
-  for (const dep of cg.internals.graphManager.getResolvedFileImportDependents(source.filePath)) {
-    const depFileNode = cg.queries.getNodesByFile(dep.filePath).find((n) => n.kind === 'file');
-    if (!depFileNode || seen.has(depFileNode.id)) continue;
-    seen.add(depFileNode.id);
-    rows.push({ node: depFileNode, edge: makeResolvedFileImportEdge(depFileNode, source, dep.line) });
-  }
-}
-
-function collectCallersForSource(args: CollectCallersForSourceArgs): Array<{ node: Node; edge: Edge }> {
-  const { cg, source, edgeKindFilter, minConfidence } = args;
-  const callRows = edgeKindFilter
-    ? cg.internals.traverser.getCallers(source.id).filter((c) => c.edge.kind === edgeKindFilter)
-    : cg.internals.traverser.getCallers(source.id);
-
-  const seen = new Set<string>(callRows.map((r) => r.node.id));
-  const merged = [...callRows];
-  appendResolvedFileImportCallers({ cg, source, edgeKindFilter, seen, rows: merged });
-
-  if (!TYPE_LIKE_KINDS.has(source.kind)) return filterByConfidence(merged, minConfidence);
-
-  // Push the kind filter into SQL — saves walking structural
-  // (`contains`) edges in JS on a popular type.
-  for (const e of getIncomingEdges(cg.queries, source.id, TYPE_USAGE_EDGE_KINDS)) {
-    if (edgeKindFilter && e.kind !== edgeKindFilter) continue;
-    if (seen.has(e.source)) continue;
-    seen.add(e.source);
-    const node = cg.queries.getNodeById(e.source);
-    if (node) merged.push({ node, edge: e });
-  }
-  return filterByConfidence(merged, minConfidence);
-}
-
-/**
- * Collect the call-site lines an edge represents. The edge carries
- * the first site as `edge.line` and any de-duplicated extras in
- * `metadata.extraLines`. Returns a deduped, ascending list. Used by
- * {@link expandTestFileCaller} to fan out one row per site when the
- * caller node is a test-file file-row. Also reused by
- * `cartograph_tests_for` to scope a test file's `it/describe` blocks
- * to those that actually exercise the queried symbol.
- */
-export function callSiteLinesFromEdge(edge: Edge): number[] {
-  const lines = new Set<number>();
-  if (typeof edge.line === 'number' && edge.line > 0) lines.add(edge.line);
-  const meta = edge.metadata as { extraLines?: number[] } | undefined;
-  if (meta?.extraLines) {
-    for (const ln of meta.extraLines) {
-      if (typeof ln === 'number' && ln > 0) lines.add(ln);
-    }
-  }
-  return [...lines].sort((a, b) => a - b);
-}
-
-/**
- * Expand one test-file file-node caller into per-call-site rows.
- *
- * Friction-D fix (2026-05-14): the renderer was anchoring test-file
- * callers at line 1 of the file (`startLine = 1` for the file row),
- * forcing the agent to follow up with `at_range` to find the actual
- * `it/describe` block. When the caller is a `kind = file` node AND
- * the file is a test path, fan the row out using the edge's
- * `siteCount + extraLines` metadata and anchor each site on the
- * enclosing `it/describe(...)` descriptor mined into `test_names`.
- *
- * Strategy per site:
- *   1. `getEnclosingTestName` returns the descriptor with the largest
- *      `line` value that's still ≤ the call-site line — the innermost
- *      test case in practice. Synthesise a node with that line +
- *      `<file>::"description"` as the row label.
- *   2. If no descriptor is above the line (call sits before the first
- *      `it/describe` — module-scope setup, top-level import, etc.),
- *      anchor on the call-site line itself rather than line 1.
- *
- * Returns the original `(node, edge)` row when the file isn't a test
- * path so non-test paths are unaffected (changing those would be
- * invasive). Returns a single row at the edge line for test files with
- * no test_names entries (`test_names` may be empty for a freshly
- * indexed project before the index hook runs).
- */
-/**
- * Core expansion logic: takes `QueryBuilder` directly so it can be
- * reused by both the `Cartograph`-bearing MCP tool path (via
- * `expandTestFileCallers`) and the `QueryBuilder`-only review path
- * (via `expandTestFileCallersWithQueries`).
- */
-function expandTestFileCallerCore(
-  queries: QueryBuilder,
-  row: { node: Node; edge: Edge },
-): Array<{ node: Node; edge: Edge }> {
-  const { node, edge } = row;
-  if (node.kind !== 'file' || !isTestPath(node.filePath)) return [row];
-
-  const siteLines = callSiteLinesFromEdge(edge);
-  if (siteLines.length === 0) return [row];
-
-  const expanded: Array<{ node: Node; edge: Edge }> = [];
-  // Strip siteCount/extraLines on per-site rows so `formatSiteCount`
-  // doesn't append the now-redundant "(3 call sites: 60, 74, 85)"
-  // tail — we've already fanned the rows out, one per site.
-  const perSiteMeta =
-    edge.metadata && typeof edge.metadata === 'object'
-      ? Object.fromEntries(Object.entries(edge.metadata).filter(([k]) => k !== 'siteCount' && k !== 'extraLines'))
-      : undefined;
-  for (const callLine of siteLines) {
-    const test = getEnclosingTestName(queries, { filePath: node.filePath, line: callLine });
-    // Two cases:
-    //   - test_names hit: anchor at the descriptor's line, name shows the description.
-    //   - no hit:         anchor at the call-site line, keep the file name.
-    // Either way avoid line 1 and avoid forcing a follow-up at_range.
-    const anchorLine = test?.line ?? callLine;
-    const synthName = test ? `${node.name}::"${test.description}"` : node.name;
-    const perSiteEdge: Edge = {
-      ...edge,
-      line: callLine,
-      ...(perSiteMeta && Object.keys(perSiteMeta).length > 0 ? { metadata: perSiteMeta } : { metadata: undefined }),
-    };
-    expanded.push({
-      // Synthesise a fresh row per site so the formatter renders one
-      // bullet per call. Distinct synthetic ids prevent the dedup set
-      // upstream from collapsing them.
-      node: { ...node, id: `${node.id}#site:${anchorLine}`, startLine: anchorLine, name: synthName },
-      edge: perSiteEdge,
-    });
-  }
-  return expanded;
-}
-
-/** Thin wrapper kept for call sites that already have a `Cartograph`. */
-function expandTestFileCaller(cg: Cartograph, row: { node: Node; edge: Edge }): Array<{ node: Node; edge: Edge }> {
-  return expandTestFileCallerCore(cg.queries, row);
-}
-
-/**
- * Apply {@link expandTestFileCallerCore} to every row in a list. Preserves
- * order; non-test-file rows pass through unchanged.
- *
- * Exported so `node.ts` can reuse the same fan-out logic for its inline
- * callers section (FRICTION-5 fix, 2026-05-15) — previously those callers
- * were anchored at line 1 of the test file rather than the enclosing
- * `it/describe` block.
- */
-export function expandTestFileCallers(
-  cg: Cartograph,
-  rows: Array<{ node: Node; edge: Edge }>,
-): Array<{ node: Node; edge: Edge }> {
-  const out: Array<{ node: Node; edge: Edge }> = [];
-  for (const r of rows) out.push(...expandTestFileCaller(cg, r));
-  return out;
-}
-
-/**
- * Same as {@link expandTestFileCallers} but takes a {@link QueryBuilder}
- * directly — for callers in `src/review/` that don't have the full
- * `Cartograph` instance (FRICTION-5 fix, 2026-05-15).
- */
-export function expandTestFileCallersWithQueries(
-  queries: QueryBuilder,
-  rows: Array<{ node: Node; edge: Edge }>,
-): Array<{ node: Node; edge: Edge }> {
-  const out: Array<{ node: Node; edge: Edge }> = [];
-  for (const r of rows) out.push(...expandTestFileCallerCore(queries, r));
-  return out;
-}
-
-/**
- * Group callers per matching source symbol when a name resolves to
- * multiple definitions. Avoids the cross-contamination problem where
- * a `JSON-encoder.Encode` caller appears in the same flat list as
- * `tokenizer.Encode` callers (different methods, different concerns).
- *
- * Per-source caller collection goes through
- * {@link collectCallersForSource} so type-like sources (class /
- * interface / etc.) surface their `instantiates` / `extends` /
- * `implements` / `type_of` / `returns` users alongside plain call
- * predecessors — matching the single-match path's behavior.
- */
-interface FormatGroupedCallersOpts {
-  cg: Cartograph;
-  symbol: string;
-  matches: Node[];
-  matchesNote?: string;
-  limit: number;
-  edgeKindFilter: string | undefined;
-  minConfidence: NonNullable<Edge['confidence']> | null;
-  refIds?: import('./_id-cache.js').RefIdCache;
-}
-
-/**
- * Build the per-source H3 bullet-list spec used by the multi-match
- * (`formatGroupedCallers`) path. Mirror of {@link buildCalleesGroupSpec}
- * in `_callees.ts` (same shape, opposite direction). Title is
- * `${name} (${kind}) — ${filePath}:${startLine}` at headingLevel 3.
- *
- * Rows are pre-rendered bullet strings + optional `- … (+N more)`
- * overflow row at the tail, identity-passthrough formatRow — same
- * pattern as changed-since per-bucket / imports per-kind / grep
- * per-file / callees per-source.
- *
- * Empty callers path branches on source kind:
- *  - method + name 'constructor' → {@link CALLERS_CONSTRUCTOR_HINT}
- *    (one-step pointer to the right query, since constructors graph
- *    as `instantiates` on the parent class, not `call` on the method).
- *  - anything else → {@link CALLERS_NO_CALLERS_NOTE}.
- * Both flow through `emptyNote` so the renderer emits `heading\nnote\n`.
- *
- * Caller (`formatGroupedCallers` below) computes `hasMore` outside
- * the spec since the spec contract is render-only.
- */
-export interface BuildCallersGroupSpecArgs {
-  node: Node;
-  callers: ReadonlyArray<{ node: Node; edge: Edge }>;
-  perSourceLimit: number;
-  refIds: import('./_id-cache.js').RefIdCache | undefined;
-}
-
-export function buildCallersGroupSpec(args: BuildCallersGroupSpecArgs): MarkdownBulletListSpec<string> {
-  const { node, callers, perSourceLimit, refIds } = args;
-  const loc = node.startLine ? `:${node.startLine}` : '';
-  const shown = callers.slice(0, perSourceLimit);
-  const overflow = callers.length - shown.length;
-  const bullets = shown.map((c) => {
-    const cloc = c.node.startLine ? `:${c.node.startLine}` : '';
-    const sites = formatSiteCount(c.edge);
-    const conf = formatConfidence(c.edge);
-    const idTag = refIds ? ` \`[id: ${refIds.mint(c.node.id)}]\`` : '';
-    return `- ${c.node.name} (${c.node.kind}) - ${c.node.filePath}${cloc}${conf}${sites}${idTag}`;
-  });
-  const rows = overflow > 0 ? [...bullets, `- … (+${overflow} more)`] : bullets;
-  const isConstructor = node.kind === 'method' && node.name === 'constructor';
-  return {
-    title: `${node.name} (${node.kind}) — ${node.filePath}${loc}`,
-    headingLevel: 3,
-    rows,
-    formatRow: (s) => s,
-    emptyState: '',
-    emptyNote: isConstructor ? CALLERS_CONSTRUCTOR_HINT : CALLERS_NO_CALLERS_NOTE,
-  };
-}
-
-function formatGroupedCallers(opts: FormatGroupedCallersOpts): { text: string; hasMore: boolean } {
-  const { cg, symbol, matches, matchesNote, limit, edgeKindFilter, minConfidence, refIds } = opts;
-  const perSymbol = matches.map((node) => ({
-    node,
-    // Expand test-file file-row callers into per-call-site rows so the
-    // grouped view doesn't anchor every row at `__tests__/foo.test.ts:1`
-    // (Friction-D, 2026-05-14).
-    callers: expandTestFileCallers(cg, collectCallersForSource({ cg, source: node, edgeKindFilter, minConfidence })),
-  }));
-  const totalCallers = perSymbol.reduce((sum, p) => sum + p.callers.length, 0);
-  // Per-source budget: divide the limit, with a floor so each source
-  // gets at least 3 visible callers when there are many matches.
-  const perSourceLimit = Math.max(Math.floor(limit / matches.length), 3);
-  const lines: string[] = [
-    `## Callers of ${symbol} (${matches.length} source definitions, ${totalCallers} callers total)`,
-    '',
-    `> **Note:** "${symbol}" resolves to multiple symbols. Callers are grouped per source so you can tell which definition each caller targets. Up to ${perSourceLimit} callers shown per source — the aggregate may exceed the \`limit\` argument when many sources have many callers.`,
-    '',
-  ];
-  const candidateNote = matchesNote?.replace(/^\n+/, '').trim();
-  if (candidateNote) lines.push(candidateNote, '');
-  let hasMore = false;
-  for (const { node, callers } of perSymbol) {
-    lines.push(renderMarkdownBulletList(buildCallersGroupSpec({ node, callers, perSourceLimit, refIds })));
-    if (callers.length > perSourceLimit) hasMore = true;
-  }
-  return { text: lines.join('\n'), hasMore };
-}
 
 /**
  * Batched path: run `findAllSymbols` for each symbol in `symbols`,
@@ -850,118 +515,6 @@ export async function handleCallers(ctx: ToolCtx, args: Record<string, unknown>)
   );
 }
 
-interface CallersAccum {
-  nodes: Node[];
-  edges: Map<string, Edge>;
-  seen: Set<string>;
-}
-
-/**
- * Walk every match's `calls`-edge predecessors and accumulate them
- * into a deduped list. The same source can appear via multiple
- * matches (e.g. when a name resolves to overloads); keep only the
- * first edge per caller node.
- */
-interface CollectCallersArgs {
-  cg: Cartograph;
-  matchNodes: Node[];
-  edgeKindFilter: string | undefined;
-  minConfidence: NonNullable<Edge['confidence']> | null;
-}
-
-function collectCallers(args: CollectCallersArgs): CallersAccum {
-  const { cg, matchNodes, edgeKindFilter, minConfidence } = args;
-  const seen = new Set<string>();
-  const rawRows: Array<{ node: Node; edge: Edge }> = [];
-  const threshold = minConfidence ? CONFIDENCE_RANK[minConfidence] : 0;
-  for (const node of matchNodes) {
-    for (const c of cg.internals.traverser.getCallers(node.id)) {
-      if (edgeKindFilter && c.edge.kind !== edgeKindFilter) continue;
-      if (CONFIDENCE_RANK[c.edge.confidence ?? 'EXTRACTED'] < threshold) continue;
-      if (seen.has(c.node.id)) continue;
-      seen.add(c.node.id);
-      rawRows.push({ node: c.node, edge: c.edge });
-    }
-    appendResolvedFileImportCallers({ cg, source: node, edgeKindFilter, seen, rows: rawRows });
-  }
-  // Expand test-file file-row callers into per-call-site rows (FRICTION-D,
-  // 2026-05-14). `seen` deliberately stays keyed by ORIGINAL node ids so
-  // the downstream `collectTypeUsers` pass still dedupes against the
-  // unexpanded caller set — typeUsers don't go through this expansion.
-  const expandedRows = expandTestFileCallers(cg, rawRows);
-  const nodes: Node[] = [];
-  const edges = new Map<string, Edge>();
-  for (const r of expandedRows) {
-    nodes.push(r.node);
-    edges.set(r.node.id, r.edge);
-  }
-  return { nodes, edges, seen };
-}
-
-/**
- * When the match set contains a type-like node, also collect its
- * type-usage incoming edges so a query like `callers of Model`
- * surfaces parameter / return / field / instantiation users — not
- * just plain `calls` predecessors. Skips sources already in
- * `alreadySeen` to avoid double-counting a function that both calls
- * a method and references a type.
- */
-interface CollectTypeUsersArgs {
-  cg: Cartograph;
-  matchNodes: Node[];
-  edgeKindFilter: string | undefined;
-  alreadySeen: Set<string>;
-  minConfidence: NonNullable<Edge['confidence']> | null;
-}
-
-function collectTypeUsers(args: CollectTypeUsersArgs): Node[] {
-  const { cg, matchNodes, edgeKindFilter, alreadySeen, minConfidence } = args;
-  const typeNodes = matchNodes.filter((n) => TYPE_LIKE_KINDS.has(n.kind));
-  if (typeNodes.length === 0) return [];
-
-  const ctx: TypeUserCollectCtx = {
-    cg,
-    edgeKindFilter,
-    threshold: minConfidence ? CONFIDENCE_RANK[minConfidence] : 0,
-    alreadySeen,
-    seenTypeUsers: new Set<string>(),
-    typeUsers: [],
-  };
-  for (const n of typeNodes) {
-    appendTypeUsersForNode(ctx, n.id);
-  }
-  return ctx.typeUsers;
-}
-
-/** Bundle of accumulators for {@link appendTypeUsersForNode} — keeps the param list short. */
-interface TypeUserCollectCtx {
-  cg: CollectTypeUsersArgs['cg'];
-  edgeKindFilter: CollectTypeUsersArgs['edgeKindFilter'];
-  threshold: number;
-  alreadySeen: CollectTypeUsersArgs['alreadySeen'];
-  seenTypeUsers: Set<string>;
-  typeUsers: Node[];
-}
-
-/**
- * Append users of one type-node to the running accumulator, applying the
- * type-usage edge-kind whitelist, the optional `edgeKindFilter`, the
- * confidence threshold, and the dedup sets in one pass.
- */
-function appendTypeUsersForNode(ctx: TypeUserCollectCtx, nodeId: string): void {
-  const { cg, edgeKindFilter, threshold, alreadySeen, seenTypeUsers, typeUsers } = ctx;
-  for (const e of getIncomingEdges(cg.queries, nodeId)) {
-    if (!TYPE_USAGE_EDGE_KIND_SET.has(e.kind)) continue;
-    if (edgeKindFilter && e.kind !== edgeKindFilter) continue;
-    if (CONFIDENCE_RANK[e.confidence ?? 'EXTRACTED'] < threshold) continue;
-    if (seenTypeUsers.has(e.source)) continue;
-    if (alreadySeen.has(e.source)) continue;
-    seenTypeUsers.add(e.source);
-    const src = cg.queries.getNodeById(e.source);
-    if (src) typeUsers.push(src);
-  }
-}
-
 /**
  * Format the final markdown response: the callers section followed
  * by a type-users section (with at least 5 reserved slots so the
@@ -991,41 +544,6 @@ interface FormatCallersResponseOpts {
   /** When set, the type-users note names only this edge kind rather
    *  than listing all five usage kinds. */
   edgeKindFilter?: string;
-}
-
-/**
- * Human-readable verb for a type-usage edge kind, used in the
- * type-users note when a caller passed an explicit `edgeKind` filter.
- */
-const TYPE_USAGE_VERB: Record<string, string> = {
-  instantiates: 'instantiate',
-  type_of: 'use as a type',
-  returns: 'return',
-  extends: 'extend',
-  implements: 'implement',
-};
-
-/** Inputs for {@link pickCallersNote}. */
-interface CallersNoteArgs {
-  symbol: string;
-  typeUserCount: number;
-  callerCount: number;
-  edgeKindFilter?: string;
-}
-
-/** Render the type/callable disambiguation note for the callers
- *  response. Three branches: type-only, mixed, or none.
- *  When an explicit `edgeKindFilter` is active the note names only
- *  that edge kind instead of the full five-kind list. */
-function pickCallersNote(args: CallersNoteArgs): string {
-  const { symbol, typeUserCount, callerCount, edgeKindFilter } = args;
-  if (typeUserCount === 0) return '';
-  if (callerCount === 0) {
-    const verb = edgeKindFilter ? TYPE_USAGE_VERB[edgeKindFilter] : undefined;
-    const usageDesc = verb ? `*${verb}* it.` : `*use* it (parameter / return / field / instantiation / inheritance).`;
-    return `\n\n> **Note:** \`${symbol}\` is a type, not a callable. Showing symbols that ${usageDesc}`;
-  }
-  return `\n\n> **Note:** \`${symbol}\` resolves to both callable and type-like definitions; both surfaces shown.`;
 }
 
 /**

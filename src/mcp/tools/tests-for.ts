@@ -47,7 +47,7 @@ import {
   stripCommentsForRegex,
 } from '../../utils.js';
 import { detectLanguage } from '../../extraction/grammars.js';
-import { callSiteLinesFromEdge } from './_callers.js';
+import { callSiteLinesFromEdge } from '../../features/graph/callers/index.js';
 import { fileNodeIdFor, textResult } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
