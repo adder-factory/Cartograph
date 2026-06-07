@@ -2,59 +2,42 @@
 
 # Cartograph
 
-### Semantic Code Intelligence for AI Coding Agents
+### Code intelligence for AI coding agents
 
-**Fewer tool calls · Faster exploration · Local-first by default**
+**Index a repo once. Ask structured questions instead of rereading files.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
-[![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](#other-mcp-clients)
-[![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](#storage-backend-sqlite-or-postgresql)
-
-[![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
-[![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
-[![Linux](https://img.shields.io/badge/Linux-supported-blue.svg)](#)
+[![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](docs/MCP-USAGE.md)
+[![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](docs/STORAGE-BACKENDS.md)
 
 <p>
-  <a href="#install">Install</a> ·
-  <a href="#visual-graph-viewer">Viewer</a> ·
-  <a href="#configure-agents">Configure Agents</a> ·
-  <a href="#initialize-a-project">Initialize</a> ·
-  <a href="#storage-backend-sqlite-or-postgresql">PostgreSQL</a> ·
-  <a href="#mcp-tools">MCP Tools</a> ·
-  <a href="#token-savings-benchmark">Benchmarks</a> ·
-  <a href="#cli-reference">CLI</a> ·
+  <a href="#quickstart">Quickstart</a> ·
+  <a href="#why-cartograph">Why</a> ·
+  <a href="#storage">Storage</a> ·
+  <a href="#viewer">Viewer</a> ·
+  <a href="#docs">Docs</a> ·
+  <a href="#command-map">Commands</a> ·
   <a href="#supported-languages--file-formats">Languages</a>
 </p>
 
-<br />
-
 </div>
 
-Cartograph builds a local-first knowledge graph of your codebase and exposes it to MCP-compatible agents. SQLite is the default storage backend; PostgreSQL is available as an opt-in backend. Instead of repeatedly scanning files, agents can ask structured questions about symbols, call graphs, changed tests, hotspots, and code health.
+Cartograph builds a local knowledge graph of your codebase and exposes it
+through CLI commands, MCP tools, and a TypeScript API. Agents can ask for
+symbols, callers, impact radius, affected tests, hotspots, code-health
+findings, SQL/env references, and semantic matches without repeatedly scanning
+the same files.
 
-It works with Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, and any client that can start a stdio MCP server.
+SQLite is the zero-config default. PostgreSQL is available when you want
+shared/external storage, managed backups, operational database controls, or
+native pgvector search.
 
-> Cartograph is a fork of [codegraph](https://github.com/colbymchenry/codegraph) by Colby Mchenry, used under the MIT License. It keeps the local graph-indexing foundation and adds optional OpenAI-compatible HTTP tiers for embedding, chat, summaries, and rerank. See [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md) for full credits.
+> Cartograph is a fork of [codegraph](https://github.com/colbymchenry/codegraph)
+> by Colby Mchenry, used under the MIT License. See
+> [ACKNOWLEDGEMENTS.md](./ACKNOWLEDGEMENTS.md).
 
-## Start Here
-
-| Step | Command | Result |
-|---|---|---|
-| 1. Install | `curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh \| sh` or source install below | Puts `cartograph` on PATH |
-| 2. Configure your agent | `cartograph install` | Writes MCP config for supported clients |
-| 3. Index a project | `cartograph admin init -i` | Creates `.cartograph/` and builds the graph |
-| 4. Check readiness | `cartograph status --verbose` | Shows freshness, hotspots, biomarkers, and feature readiness |
-
-| What you need | Where to go |
-|---|---|
-| Agent setup details | [Configure Agents](#configure-agents) |
-| LLM-backed features | [Initialize a Project](#initialize-a-project) |
-| PostgreSQL / pgvector storage | [Storage Backend](#storage-backend-sqlite-or-postgresql) |
-| Non-built-in MCP clients | [Other MCP Clients](#other-mcp-clients) |
-| Full command catalog | [CLI Reference](#cli-reference) |
-
-## 60-Second Quickstart
+## Quickstart
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
@@ -64,9 +47,60 @@ cartograph admin init -i
 cartograph status --verbose
 ```
 
-That gives you a local graph index immediately. Run `cartograph install` when you want an AI agent to use the same graph through MCP.
+Then connect your agent:
 
-PostgreSQL is opt-in. Use it when you want the graph in an external/shared database, managed backups, operational DB controls, or native pgvector search:
+```bash
+cartograph install
+```
+
+The installer detects and configures Claude Code, Cursor, Codex CLI,
+opencode, Hermes, Gemini CLI, Antigravity, and Kiro. It writes MCP config plus
+agent instructions where the target supports them.
+
+Source install for development:
+
+```bash
+git clone https://github.com/adder-factory/cartograph.git
+cd cartograph
+bun install
+bun link
+```
+
+## Why Cartograph
+
+| Problem | Cartograph gives agents |
+|---|---|
+| "Where is this implemented?" | Name, regex, env-var, SQL-ref, semantic, and intent search over the indexed graph |
+| "What happens if I edit this?" | Callers, callees, impact radius, related symbols, co-change history, and affected tests |
+| "Is this risky?" | Biomarkers, Code Health, hotspots, churn, coverage joins, dependency audit, and trust checks |
+| "What should I read first?" | A route plan from `cartograph context --format plan`, then exact source only when needed |
+| "What changed in my worktree?" | `cartograph compare-to-ref` structural delta and new finding summary before handoff |
+
+Core graph features do **not** need an LLM. Optional OpenAI-compatible LLM tiers
+power summaries, embeddings, semantic search, `ask`, and rerank.
+
+## Use It From
+
+| Surface | Start here |
+|---|---|
+| Human CLI | `cartograph status --verbose`, `cartograph find`, `cartograph graph`, `cartograph review` |
+| MCP agent | `cartograph serve --mcp` or `cartograph install` |
+| Local viewer | `cartograph viewer .` |
+| Library API | `Cartograph.init('/path/to/project')` |
+
+Cartograph's MCP server exposes all 36 registered tools. The default `core`
+profile is smaller; the full 36-tool server is available with
+`cartograph serve --mcp --profile full`.
+
+## Storage
+
+SQLite is the default and works immediately:
+
+```bash
+cartograph admin init -i
+```
+
+PostgreSQL is opt-in:
 
 ```bash
 docker run --rm -d --name cartograph-postgres \
@@ -85,39 +119,31 @@ cartograph admin init -i \
 cartograph doctor .
 ```
 
-For an existing SQLite-backed project, use `cartograph admin storage-migrate`; see [Storage Backend](#storage-backend-sqlite-or-postgresql).
-
-Source install for development:
+Move an existing SQLite graph to PostgreSQL:
 
 ```bash
-git clone https://github.com/adder-factory/cartograph.git
-cd cartograph
-bun install
-bun link
+cartograph admin storage-migrate . \
+  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
+  --database-schema cartograph \
+  --database-pgvector auto
 ```
 
-## At A Glance
+See [Storage Backends](docs/STORAGE-BACKENDS.md) for pgvector modes,
+production grants, hosted TLS notes, and migration details.
 
-| Area | What Cartograph does |
-|---|---|
-| Graph index | Stores files, symbols, edges, references, metrics, and derived signals in SQLite by default or PostgreSQL by choice |
-| Query surfaces | Exposes the same graph through CLI commands, MCP stdio tools, and a library API |
-| Freshness | Runs MCP startup sync and debounced file-watch sync through `@parcel/watcher` |
-| Code health | Computes biomarkers, hotspots, churn, coverage joins, dependency audits, and risk reviews |
-| Optional LLMs | Adds summaries, embeddings, semantic search, ask, and rerank through OpenAI-compatible HTTP providers |
-| Agent support | Installer targets Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI, Antigravity, and Kiro |
+Local storage benchmark, run 2026-06-07 with Bun 1.3.14 on `darwin arm64`:
 
-> **No LLM required for the core graph.** Indexing, symbol search, call graphs, impacted tests, biomarkers, hotspots, dependency audits, and CLI/MCP operation run without an LLM. LLMs are optional and only power summaries, embeddings, semantic search, `ask`, and rerank.
+| Backend | Init median | Write median | Read median | Total median | DB size |
+|---|---:|---:|---:|---:|---:|
+| SQLite | 7 ms | 70 ms | 35 ms | 112 ms | 2.12 MB |
+| PostgreSQL | 102 ms | 241 ms | 470 ms | 795 ms | 7.46 MB |
 
-## Status Snapshot
+Workload: 200 files, 1,600 nodes, 3,200 candidate edges, 40 read iterations,
+three fresh runs per backend. SQLite remains the fastest local single-writer
+default; PostgreSQL is for shared/external storage, database operations, hosted
+backups, and native pgvector search.
 
-<p align="center">
-  <img src="docs/assets/status-verbose.svg" alt="Example cartograph status --verbose output" width="760">
-</p>
-
-## Visual Graph Viewer
-
-Cartograph also ships a local graph viewer for humans. It uses the same configured graph index as the CLI and MCP server, then renders the code graph as an interactive workspace.
+## Viewer
 
 ```bash
 cartograph viewer .
@@ -128,917 +154,137 @@ cartograph viewer .
   <img src="docs/assets/viewer.png" alt="Cartograph graph viewer showing symbol detail, source, graph tools, and code health" width="920">
 </p>
 
-Use the viewer when you want to inspect the graph directly:
+The viewer is local-only and uses the same graph index as the CLI and MCP
+server. Use it to inspect symbol neighborhoods, source, callers, callees,
+health, coverage, and graph layout directly.
 
-| Viewer Area | What it helps with |
-|---|---|
-| Graph canvas | Navigate symbol neighborhoods, edge types, graph density, layout, minimap, and exports |
-| Back / forward history | Move through previously selected symbols without losing context |
-| Detail pane | Read signature, file path, health, centrality, coverage, docstring, callers, callees, findings, and coverage tabs |
-| Source pane | View and copy the selected symbol's source beside the graph |
-| Diagnostics | Capture graph layout, visibility, overlap, edge, and rendering state for bug reports |
-
-The viewer is intentionally local-only: it starts an HTTP server on localhost, serves static assets from the checkout, and does not require an LLM. Optional Ask and semantic features use the same configured OpenAI-compatible tiers as the rest of Cartograph.
-
-## Install
-
-Cartograph runs on [Bun](https://bun.sh) >= 1.3. It is distributed from source for now; the npm package is not published yet.
-
-> Until npm publishing is enabled, install from a source checkout and use `bun link`. The interactive installer uses the same source-linked command when it wires agents to Cartograph.
+## Common Workflows
 
 ```bash
-git clone https://github.com/adder-factory/cartograph.git
-cd cartograph
-bun install
-bun link
+# First-time setup with LLM backend checks
+cartograph setup .
+cartograph doctor --fix .
+
+# Find and inspect code
+cartograph find "AuthService" --by name --mode fuzzy
+cartograph graph AuthService --direction impact
+cartograph node AuthService --include-callers --include-tests
+
+# Review current work
+cartograph review context --diff "$(git diff)"
+cartograph affected --include-commands
+cartograph compare-to-ref --findings-delta
+
+# MCP server controls
+cartograph serve --mcp --profile core
+cartograph serve --mcp --profile full --low-tokens-default
+cartograph mcp-budget
 ```
 
-That puts the `cartograph` command on your PATH.
-
-Standalone installers are also available from GitHub Releases:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
-# Windows PowerShell:
-# irm https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 | iex
-```
-
-## Configure Agents
-
-Run the installer once. It detects installed agents, writes their MCP config, and adds Cartograph usage instructions where the agent supports them.
-
-```bash
-cartograph install
-```
-
-The installer can configure:
-
-| Target | Files managed |
-|---|---|
-| Claude Code | MCP entry, optional permissions, and `CLAUDE.md` instructions (`~/.claude...` or project-local equivalents) |
-| Cursor | MCP entry (`~/.cursor/mcp.json` or `.cursor/mcp.json`); project-local installs also write `.cursor/rules/cartograph.mdc` |
-| Codex CLI | `~/.codex/config.toml`, `~/.codex/AGENTS.md` |
-| opencode | `~/.config/opencode/opencode.json` or project-local `opencode.json` |
-| Hermes | `$HERMES_HOME/config.yaml`, falling back to `~/.hermes/config.yaml` |
-| Gemini CLI | MCP entry plus `GEMINI.md` instructions (`~/.gemini...` or project-local equivalents) |
-| Antigravity | `~/.gemini/config/mcp_config.json` or legacy `~/.gemini/antigravity/mcp_config.json` |
-| Kiro | MCP entry plus steering instructions (`~/.kiro...` or project-local equivalents) |
-
-Non-interactive examples:
-
-```bash
-cartograph install --yes
-cartograph install --target=cursor,claude --yes
-cartograph install --target=auto --location=local
-cartograph install --print-config codex
-```
-
-| Flag | Values | Default |
-|---|---|---|
-| `--target` | `auto`, `all`, `none`, or csv (`claude,cursor,...`) | prompt |
-| `--location` | `global`, `local` | prompt |
-| `--yes` | Use defaults for scripting | prompt every step |
-| `--no-permissions` | Skip Claude auto-allow list | permissions on |
-| `--print-config <id>` | Print one target snippet and exit | - |
-
-Restart your agent after installation so it loads the MCP server.
-
-## Initialize a Project
-
-From the project you want indexed:
-
-```bash
-cd your-project
-cartograph admin init -i
-```
-
-That uses SQLite, the zero-config default. To keep the graph in PostgreSQL instead, start with the [Storage Backend](#storage-backend-sqlite-or-postgresql) flags before the first init.
-
-For LLM-backed features such as summaries, semantic search, ask, and rerank, configure an OpenAI-compatible backend. `doctor --fix` creates `.cartograph/`, downloads missing GGUF models for the recommended llama-cpp path, writes a starter config, and points you at the managed backend commands.
-
-```bash
-cartograph doctor --fix /path/to/your/project
-
-# Start local llama-server tiers, smoke real LLM requests, then verify:
-cartograph backend start /path/to/your/project
-cartograph llm smoke /path/to/your/project
-cartograph doctor /path/to/your/project
-
-# If startup fails:
-cartograph backend logs /path/to/your/project --tier embed
-```
-
-Common backend choices:
-
-| Backend | Good for |
-|---|---|
-| Ollama | Simple local setup; models load on demand |
-| llama-cpp `llama-server` | Explicit per-tier local servers; best control |
-| Apple MLX / LM Studio / vLLM / LocalAI | Any OpenAI-compatible local endpoint |
-| Cloud OpenAI-compatible provider | When you prefer hosted chat, embedding, or rerank tiers |
-
-## Key Features
-
-| | |
-|---|---|
-| **Smart Context Building** | One tool call returns entry points, related symbols, and code snippets for a task |
-| **Full-Text + Intent Search** | Find code by name, regex, env var, SQL table, semantic similarity, or summary intent |
-| **Impact Analysis** | Trace callers, callees, and the full impact radius of any symbol before making changes |
-| **Fresh Indexes** | Native file watching keeps the graph current with debounced auto-sync |
-| **Broad Language Coverage** | 37 language modes, including TS/JS, Python, Go, Rust, Java, C/C++, C#, Ruby, PHP, Swift, Kotlin, Scala, Vue, Svelte, SQL, GraphQL, HCL, Prisma, XML, YAML, and more |
-| **Local-First Architecture** | Source indexing and graph storage stay local; LLM tiers can be local or cloud-hosted |
-
-## Terminal Examples
-
-```bash
-$ cartograph status --verbose
-Cartograph Status
-Project: /path/to/project
-Files: 939    Nodes: 18,494    Edges: 73,510
-Backend: bun:sqlite + sqlite-vec
-Index: up to date
-```
-
-```bash
-$ cartograph find "readReviewDiffInput" --by name --mode exact
-readReviewDiffInput  function  src/bin/commands/review.ts:25
-```
-
-```bash
-$ cartograph review risk --top-n 3
-# Risk review
-- Biomarkers: highest-severity findings first
-- Hotspots: high centrality x churn files
-- Coverage gaps: structurally important low-coverage symbols
-```
-
-```bash
-$ cartograph review trust
-# Trust self-check
-- Freshness: whether the graph is current enough for broad analysis
-- Coverage: whether LCOV data is loaded
-- LLMs: whether ask, summary, and embedding tiers are configured
-```
-
-<details>
-<summary><strong>Manual Setup (Alternative)</strong></summary>
-
-**Install from source:**
-```bash
-git clone https://github.com/adder-factory/cartograph.git && cd cartograph && bun install && bun link
-```
-
-**Add to `~/.claude.json`:**
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-**Add to `~/.claude/settings.json` (optional, for auto-allow):**
-```json
-{
-  "permissions": {
-    "allow": [
-      "mcp__cartograph__cartograph_find",
-      "mcp__cartograph__cartograph_context",
-      "mcp__cartograph__cartograph_graph",
-      "mcp__cartograph__cartograph_node",
-      "mcp__cartograph__cartograph_at_range",
-      "mcp__cartograph__cartograph_status"
-    ]
-  }
-}
-```
-
-</details>
-
-<details>
-<summary><strong>Global Instructions Reference</strong></summary>
-
-The installer writes these instructions into each target's agent-instructions file where supported:
-
-```markdown
-## Cartograph
-
-Cartograph builds a semantic knowledge graph of codebases for faster, smarter code exploration.
-
-### If `.cartograph/` exists in the project
-
-The dividing line for WHERE to call a tool is **output source-volume** — does the call return full source bodies into your context?
-
-**Source-dumping tools — `cartograph_explore`, `cartograph_context`, `cartograph_node({code: true})` — return large source sections. Don't call them directly in the main session; spawn an Explore agent** for any exploration question (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns.
-
-**When spawning Explore agents**, include this instruction in the prompt:
-
-> This project has Cartograph initialized (.cartograph/ exists). Use `cartograph_explore` as your PRIMARY tool — it returns full source code sections from all relevant files in one call.
->
-> **Rules:**
-> 1. Follow the explore call budget in the `cartograph_explore` tool description — it scales automatically based on project size.
-> 2. Do NOT re-read files that cartograph_explore already returned source code for. The source sections are complete and authoritative.
-> 3. Only fall back to grep/glob/read for files listed under "Additional relevant files" if you need more detail, or if cartograph returned no results.
-
-**The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
-
-For the smallest useful output, pass `lowTokens: true` in MCP or `--low-tokens` in the CLI for supported high-volume tools: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Server operators can make this the default for supported MCP tools with `cartograph serve --mcp --low-tokens-default`; callers can still pass `lowTokens: false` for one regular response.
-
-Use `cartograph_context({format: "plan"})` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use `cartograph_affected({includeCommands: true})` for affected tests plus package-script verification commands, then `cartograph_compare_to_ref({findingsDelta: true})` before reporting done. If a stale `cartograph_node({code: true})` result is intentional, pass `liveSource: true` to read the current file from disk using indexed line ranges.
-
-If you control the MCP server launch, run `cartograph mcp-budget` to measure startup load. The default MCP profile is `core`; use `--profile full` for the complete toolbox, or `--profile read-only`, `--profile review`, `--no-write-tools`, and repeated `--disable-tool <name>` for narrower surfaces.
-
-| Tool | Use For |
-|------|----------|
-| `cartograph_find` | Find symbols by name / regex / env-var / SQL ref (`by:` slice + `mode:`) |
-| `cartograph_graph({direction: 'callers'\|'callees'})` | Trace call flow |
-| `cartograph_graph({direction: 'impact'})` | Check what's affected before editing |
-| `cartograph_context({format: "plan"})` | Plan the route and next MCP calls before source-heavy exploration |
-| `cartograph_node` | A single symbol's details (omit `code: true` to stay metadata-only; use `liveSource: true` for stale live slices) |
-| `cartograph_at_range` | Symbols overlapping a file:line span (PR-review hunks) |
-| `cartograph_affected({includeCommands: true})` | Affected tests plus verification commands after edits |
-| `cartograph_session({action: "audit"})` | Review a session's tool-use pattern and missed close-out calls |
-| `cartograph_biomarkers` / `cartograph_status` | Risk findings per symbol / index health |
-
-### If `.cartograph/` does NOT exist
-
-At the start of a session, ask the user if they'd like to initialize Cartograph:
-
-"I notice this project doesn't have Cartograph initialized. Would you like me to run `cartograph admin init -i` to build a code knowledge graph?"
-```
-
-</details>
-
----
-
-## How It Works
-
-```mermaid
-flowchart LR
-  source["Project source files"]
-  scan["Scan files<br/>apply include / exclude globs"]
-  extract["ExtractionOrchestrator<br/>detect languages<br/>parse with tree-sitter WASM workers<br/>emit symbols, raw edges, refs"]
-  store[("Graph DB<br/>SQLite default or PostgreSQL<br/>nodes / edges / files<br/>SQLite vec or pgvector accelerators when available")]
-  enrich["Enrichment passes<br/>reference resolution<br/>framework and index hooks<br/>biomarkers, churn, tests, coverage"]
-
-  source --> scan --> extract --> store --> enrich --> store
-
-  classDef input fill:#eff6ff,stroke:#2563eb,color:#172554
-  classDef process fill:#f0fdf4,stroke:#16a34a,color:#052e16
-  classDef storage fill:#fefce8,stroke:#ca8a04,color:#422006
-  classDef enrich fill:#faf5ff,stroke:#9333ea,color:#3b0764
-  class source input
-  class scan,extract process
-  class store storage
-  class enrich enrich
-```
-
-```mermaid
-flowchart TB
-  db[("Graph DB<br/>SQLite default or PostgreSQL")]
-
-  subgraph surfaces["Query surfaces"]
-    cli["CLI<br/>cartograph ..."]
-    mcp["MCP stdio tools<br/>cartograph_*"]
-    api["Library API<br/>Cartograph.open / init"]
-  end
-
-  subgraph freshness["Freshness"]
-    startup["MCP startup sync"]
-    watcher["@parcel/watcher<br/>debounced file events"]
-    sync["Incremental sync<br/>changed files only"]
-  end
-
-  subgraph llm["Optional OpenAI-compatible LLM tiers"]
-    summaries["summaries"]
-    embeddings["embeddings"]
-    ask["ask"]
-    rerank["rerank"]
-  end
-
-  cli --> db
-  mcp --> db
-  api --> db
-  startup --> sync --> db
-  watcher --> sync
-  db --> summaries
-  db --> embeddings
-  db --> ask
-  db --> rerank
-
-  classDef db fill:#fefce8,stroke:#ca8a04,color:#422006
-  classDef surface fill:#eff6ff,stroke:#2563eb,color:#172554
-  classDef fresh fill:#f0fdf4,stroke:#16a34a,color:#052e16
-  classDef optional fill:#faf5ff,stroke:#9333ea,color:#3b0764
-  class db db
-  class cli,mcp,api surface
-  class startup,watcher,sync fresh
-  class summaries,embeddings,ask,rerank optional
-```
-
-1. **Extraction** — `ExtractionOrchestrator` scans included files, detects languages, and parses source with [tree-sitter](https://tree-sitter.github.io/) WASM grammars. Language-specific extractors emit files, symbols, raw edges, and unresolved references.
-
-2. **Storage** — The graph is stored in SQLite by default (`.cartograph/cartograph.db`). Set `database.provider: "postgres"` with a PostgreSQL URL to store the same graph in PostgreSQL instead. SQLite uses FTS/RTree/sqlite-vec accelerators when available; PostgreSQL uses native GIN indexes and optional pgvector acceleration, with HNSW/in-memory fallbacks when pgvector is unavailable.
-
-3. **Enrichment** — After extraction, Cartograph resolves references and runs index hooks for derived signals such as framework edges, tests, churn, co-change, coverage, centrality, and biomarkers.
-
-4. **Query Surfaces** — CLI commands, MCP tools, and the library API all read the same graph. Tools such as `cartograph_find`, `cartograph_graph`, `cartograph_review`, and `cartograph_status` are structured query layers over the database.
-
-5. **Auto-Sync** — The MCP server runs a startup sync, then watches your project through `@parcel/watcher`. Changes are debounced, filtered to indexable files, and incrementally synced.
-
-6. **Optional LLM Tiers** — Summaries, embeddings, semantic search, `ask`, and rerank use OpenAI-compatible HTTP providers configured in `.cartograph/config.json`. The core index and graph queries do not require an LLM.
-
----
-
-## CLI Reference
-
-```bash
-cartograph                         # Run interactive installer
-cartograph install                 # Run installer (explicit)
-cartograph setup [path]            # One-shot bootstrap: admin init + install-models + doctor (--minimal, --no-models, --database-provider postgres)
-cartograph doctor [path]           # Diagnose install state (--fix to auto-apply remediations)
-cartograph admin init [path]       # Initialize in a project (-i / --index; --database-provider postgres for PostgreSQL)
-cartograph admin storage-migrate [path] # Move an existing SQLite project to PostgreSQL
-cartograph admin uninit [path]     # Remove Cartograph from a project (--force to skip prompt)
-cartograph admin index [path]      # Full (re)index of the project
-cartograph admin sync [path]       # Incremental update
-cartograph status [path]           # Show index status and statistics
-cartograph find [query]            # Find symbols by name / regex / env-var / SQL ref (--by, --mode, --kind, --limit)
-cartograph ask <question> [path]   # Ask a natural-language question about the codebase (needs an LLM)
-cartograph backend <subcommand>    # Manage configured local llama-server processes (status / start / stop / logs)
-cartograph llm                     # Local LLM setup utilities (`setup`, `smoke`)
-cartograph digest                  # "Land in a new repo" overview — hotspots, health, entry points
-cartograph files [dir]             # Show file structure (--format, --pattern, --max-depth, --json)
-cartograph context <task>          # Build context for AI (--format, --max-nodes)
-cartograph affected [files...]     # Find test files affected by changes (see below)
-cartograph review <subcommand>     # context / neighbors / risk / agent-audit / trust
-cartograph serve --mcp             # Start MCP server
-```
-
-Operator acceptance smokes:
-
-```bash
-bun run test:managed-backend-smoke  # requires llama-server + minimal GGUFs; skips when unavailable
-bun run test:clean-install:docker   # copies the repo into a clean Bun container and runs setup/index/doctor
-```
-
-Additional query and maintenance commands are available for deeper workflows:
-
-```bash
-cartograph at-range                # Symbols overlapping file:line ranges or diff hunks
-cartograph graph                   # Call/dependency graph traversal
-cartograph node                    # Symbol details, optionally with code and related data
-cartograph biomarkers              # Static-analysis findings and Code Health
-cartograph coverage                # Coverage joined to symbols
-cartograph hotspots                # Churn × centrality file triage
-cartograph dead-code               # Potentially-dead symbol candidates
-cartograph deps                    # package.json dependency audit
-cartograph tests-for               # Tests covering a symbol or files
-cartograph entry-points            # Routes, CLI commands, MCP tools, and public exports
-cartograph changed-since           # File drift since index time or a supplied timestamp
-cartograph compare-to-ref          # End-of-task structural and finding delta
-cartograph trace-to-culprits       # Stack trace → likely fix sites
-cartograph imports                 # Import statement audit
-cartograph sql                     # Read-only SQL escape hatch
-cartograph explore                 # Deep topic exploration
-cartograph module                  # Directory/module summary
-cartograph role                    # Symbol role classification
-cartograph blame                   # Symbol-level git blame
-cartograph history                 # Symbol-level co-change
-cartograph similar                 # Embedding-cosine peers
-cartograph propose-rename          # Rename plan with call sites and mentions
-cartograph note                    # Persistent notes/bookmarks
-cartograph session                 # Session state and macros
-cartograph summaries               # Agent-bridge summary pull/save
-cartograph local-chat              # Delegate bulk prose to local LLM
-cartograph discover                # Find other .cartograph indexes
-cartograph playbook                # Print the MCP tool playbook
-cartograph mcp-budget              # Measure MCP tools/list + initialize load
-cartograph viewer                  # Open the local graph viewer
-```
-
-### `cartograph affected`
-
-Traces import dependencies transitively to find which test files are affected by changed source files.
-
-```bash
-cartograph affected                                  # Derive changed files from git diff HEAD
-cartograph affected src/utils.ts src/api.ts         # Pass files as arguments
-git diff --name-only | cartograph affected --stdin   # Pipe from git diff
-cartograph affected src/auth.ts --filter "e2e/*"     # Custom test file pattern
-cartograph affected --include-commands              # Include package-script verification commands
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `-p, --project-path <path>` | Project path | current directory |
-| `--files <paths...>` | Alias for the positional file arguments | — |
-| `--stdin` | Read file list from stdin | `false` |
-| `-d, --depth <n>` | Max dependency traversal depth | `5` |
-| `-f, --filter <glob>` | Custom glob to identify test files | auto-detect |
-| `--include-commands` | Include package-script verification commands for affected tests plus `typecheck` / `lint` when present | `false` |
-| `--include-tests` | Include test-file targets while walking dependents; affected output still reports tests | `false` |
-| `-j, --json` | Output as JSON | `false` |
-| `-q, --quiet` | Output file paths only | `false` |
-
-Paths passed explicitly that aren't in the index are rejected with an error and a non-zero exit code.
-
-**CI/hook example:**
-
-```bash
-#!/usr/bin/env bash
-AFFECTED=$(git diff --name-only HEAD | cartograph affected --stdin --quiet)
-if [ -n "$AFFECTED" ]; then
-  npx vitest run $AFFECTED
-fi
-```
-
----
-
-## MCP Tools
-
-When running as an MCP server, Cartograph defaults to the compressed `core` profile for MCP-compatible AI assistants. The opt-in `full` profile exposes all 36 registered tools. Most sessions start with the same small set:
-
-| Start With | Use It When You Need |
-|---|---|
-| `cartograph_status` | A quick health check, index stats, feature readiness, and optional hotspot / biomarker rollups |
-| `cartograph_find` | Symbols, regex content, env-var reads, or SQL references |
-| `cartograph_graph` | Callers, callees, blast radius, shortest paths, or embedding-similar symbols |
-| `cartograph_node` | One symbol's signature, summary, source preview, callers, callees, tests, or biomarkers |
-| `cartograph_context({format: "plan"})` | Low-token route plan with concrete next MCP calls before source-heavy context |
-| `cartograph_review` | Diff review, sister implementations, risk triage, trust self-checks, or agent-prone biomarker audit |
-
-For edit sessions, a compact default chain is:
+For agents, a good edit-session chain is:
 
 ```text
 cartograph_context({format: "plan"})
-→ follow the top next action
+→ follow the suggested next action
 → cartograph_affected({includeCommands: true})
 → cartograph_compare_to_ref({findingsDelta: true})
 ```
 
-Use `cartograph_session({action: "audit"})` to review a prior session's tool-use pattern, repeated calls, and missed close-out steps. Use `cartograph_node({code: true, liveSource: true})` only when a stale source warning is intentional and you want the current disk slice using indexed line ranges.
-
-### MCP Load Context
-
-MCP clients request `tools/list` when the server starts, and many clients place those tool names, descriptions, and input schemas into the model's available-tool context. Cartograph compacts the advertised descriptions before returning `tools/list` and keeps the MCP `initialize` instructions to a short first-tool guide; call `cartograph_playbook` when an agent needs the full tool-selection playbook. The default `core` profile advertises the common coding-agent tools. On this repository, the default core 22-tool list currently serializes to 44,900 chars, or about 11.2k estimated tokens using the same characters / 4 estimator as the benchmark below. Including the compact initialize guide, the measured core startup load is 47,439 chars, or about 11.9k estimated tokens. The opt-in full 36-tool profile is 63,964 `tools/list` chars and 66,503 combined startup chars, or about 16.6k estimated tokens.
-
-Measure the current surface with `cartograph mcp-budget` or `bun run measure:mcp-load`. The report includes tool count, `tools/list`, initialize, combined startup load, the on-demand full playbook size, and the largest schema contributors. Pass `--profile`, `--no-write-tools`, `--disable-tool`, `--top`, or `--json` to inspect a specific server shape. For CI, run `bun run check:mcp-load`; it prints the same budget report plus PASS/FAIL and exits non-zero when either the hard guard or the smaller release target is exceeded. Before a release or quarterly tool-surface audit, run `bun run check:release` for typecheck, formatting/lint, MCP load, biomarkers, and the fast test suite.
-
-That startup schema cost is separate from per-call output tokens, so `lowTokens: true` and `--low-tokens-default` reduce tool results but do not shrink the advertised tool list.
-
-For power-user, focused, or read-only agents, choose the advertised surface at server launch:
-
-```bash
-cartograph serve --mcp --profile full
-cartograph serve --mcp --profile core
-cartograph serve --mcp --profile read-only
-cartograph serve --mcp --profile review
-cartograph serve --mcp --no-write-tools
-cartograph serve --mcp --disable-tool cartograph_ask --disable-tool cartograph_local_chat
-```
-
-Profiles are advertised-tool filters: `core` is the default common coding-agent lookup and change-impact surface, `full` exposes every registered tool, `review` focuses diff/risk/test workflows, and `read-only` advertises read-capable tools while blocking mutating branches of mixed tools. Profiles compose with `--no-write-tools` and repeated `--disable-tool <name>`.
-
-In the same measurement, `--profile full --no-write-tools` and `--profile read-only` reduced the full list to 35 tools and 61,047 combined startup chars, or about 15.3k estimated tokens including initialize instructions. Mixed tools such as coverage, notes, sessions, summaries, and role lookup stay visible when they have read-only branches; mutating branches return a write-gate error. The registry and load-budget tests guard both limits: no more than 45 advertised tools, no more than 65 KB of serialized `tools/list` schema, no more than 68 KB total for `tools/list` plus initialize instructions, and a smaller release target below those hard ceilings.
-
-### Token Savings Benchmark
-
-Supported high-volume tools accept `lowTokens: true` over MCP and `--low-tokens` on the matching CLI commands: `cartograph_find`, `cartograph_graph`, `cartograph_context`, `cartograph_explore`, `cartograph_at_range`, `cartograph_node`, `cartograph_files`, and `cartograph_imports`. MCP servers can also launch with `--low-tokens-default` so supported tools behave as if `lowTokens: true` was passed unless a call explicitly passes `lowTokens: false`. In a local measurement on this repository, `lowTokens: true` reduced representative MCP response output by about 57% versus regular Cartograph output, with source-heavy exploration cases saving roughly 78-89%.
-
-Re-run the benchmark with `bun run benchmark:tokens`. Lower is better; counts are estimated as characters / 4, so treat them as directional rather than tokenizer-exact:
-
-| Scenario | Regular | Low-token | Baseline | vs Regular | vs Baseline |
-|---|---:|---:|---:|---:|---:|
-| Symbol lookup: `find handleFind` | ~345 | ~172 | ~881 | -50% | -80% |
-| Call graph: `graph callers handleFind` | ~42 | ~37 | N/A | -12% | N/A |
-| Dispatch context: `cartograph_find` | ~2,307 | ~513 | ~3,752 | -78% | -86% |
-| Topic survey: find internals | ~8,750 | ~937 | ~3,752 | -89% | -75% |
-| Range lookup: `find.ts` dispatch | ~55 | ~25 | ~616 | -55% | -96% |
-| Node batch: find-tool symbols | ~617 | ~534 | ~327 | -13% | +63% |
-| File overview: project tree | ~3,745 | ~822 | ~8,817 | -78% | -91% |
-| Import audit: whole project | ~3,338 | ~671 | ~241,102 | -80% | -99.7% |
-
-`Baseline` is the closest `rg` / grep-style text query used by the benchmark. `N/A` means there is no fair text-only equivalent.
-
-Exact single-file text search can still be cheaper when you already know the file and string. Cartograph's savings show up when the agent needs structured context instead of raw matching source lines.
-
-### Tool Families
-
-| Family | Tools | Try |
-|---|---|---|
-| Explore | `cartograph_find`, `cartograph_files`, `cartograph_node`, `cartograph_graph`, `cartograph_context`, `cartograph_digest`, `cartograph_explore`, `cartograph_module`, `cartograph_ask`, `cartograph_local_chat` | [`cartograph find`](#terminal-examples), `cartograph graph`, `cartograph context` |
-| Review & Risk | `cartograph_review`, `cartograph_biomarkers`, `cartograph_coverage`, `cartograph_hotspots`, `cartograph_dead_code`, `cartograph_deps`, `cartograph_trace_to_culprits` | [`cartograph review risk`](#terminal-examples), `cartograph biomarkers` |
-| Tests & Change Impact | `cartograph_affected`, `cartograph_tests_for`, `cartograph_compare_to_ref`, `cartograph_changed_since`, `cartograph_at_range`, `cartograph_entry_points` | [`cartograph affected`](#cartograph-affected), `cartograph compare-to-ref` |
-| History & Refactors | `cartograph_blame`, `cartograph_history`, `cartograph_propose_rename`, `cartograph_imports`, `cartograph_sql` | `cartograph blame`, `cartograph propose-rename` |
-| Operations | `cartograph_status`, `cartograph_admin`, `cartograph_playbook`, `cartograph_session`, `cartograph_note`, `cartograph_summaries`, `cartograph_role`, `cartograph_discover` | [`cartograph status`](#terminal-examples), `cartograph playbook` |
-
-The opt-in full 36-tool server is intentionally broader than the first six tools above, but the families keep related workflows close together. Call `cartograph_playbook` or run `cartograph playbook` for the complete tool contract, argument shapes, and selection guidance.
-
-### CLI / MCP Pairings
-
-| Need | CLI | MCP |
-|---|---|---|
-| Find symbols, regex content, env vars, or SQL refs | `cartograph find` | `cartograph_find` |
-| Trace callers, callees, impact, or symbol paths | `cartograph graph` | `cartograph_graph` |
-| Gather task-specific code context | `cartograph context --format plan` | `cartograph_context({format: "plan"})` |
-| Review a diff, inspect project risk, or check analysis readiness | `cartograph review` | `cartograph_review` |
-| Check index health and project rollups | `cartograph status --verbose` | `cartograph_status({ verbose: true })` |
-| Find tests affected by source edits | `cartograph affected --include-commands` | `cartograph_affected({includeCommands: true})` |
-| Compare the final worktree to a ref | `cartograph compare-to-ref` | `cartograph_compare_to_ref` |
-| Audit a prior agent session | `cartograph session audit` | `cartograph_session({action: "audit"})` |
-
-### Example Agent Prompts
-
-```text
-Use Cartograph to find the riskiest code touched by my current diff and tell me what tests to run.
-```
-
-```text
-Before editing auth, use Cartograph to inspect callers, hotspots, biomarkers, and related tests.
-```
-
-```text
-Review this diff with Cartograph for blast radius, sister implementations, and co-change warnings.
-```
-
-```text
-Use Cartograph to find where billing routes enter the system, then summarize the implementation path.
-```
-
----
-
-## Other MCP Clients
-
-The MCP server runs over **stdio** and works with any MCP-compatible client — not just Claude Code. The interactive installer can write configs for the built-in targets; use the manual setup below for clients outside that list or for hand-managed configs.
-
-**Common steps for every client:**
-
-```bash
-# install Cartograph from source first (see Install) so `cartograph` is on PATH
-cd your-project
-cartograph admin init -i                     # initialize + index this project
-```
-
-Then point your MCP client at `cartograph serve --mcp` using whatever config shape it expects:
-
-### opencode
-
-In `opencode.json` (project) or `~/.config/opencode/opencode.json` (global):
-
-```json
-{
-  "$schema": "https://opencode.ai/config.json",
-  "mcp": {
-    "cartograph": {
-      "type": "local",
-      "command": ["cartograph", "serve", "--mcp"],
-      "enabled": true
-    }
-  }
-}
-```
-
-### Cursor
-
-In `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (project):
-
-```json
-{
-  "mcpServers": {
-    "cartograph": {
-      "type": "stdio",
-      "command": "cartograph",
-      "args": ["serve", "--mcp"]
-    }
-  }
-}
-```
-
-### LangChain (`MultiServerMCPClient`)
-
-The Cartograph server speaks stdio, not SSE — pass `transport: "stdio"`:
-
-```python
-from langchain_mcp_adapters.client import MultiServerMCPClient
-
-client = MultiServerMCPClient({
-    "cartograph": {
-        "command": "cartograph",
-        "args": ["serve", "--mcp"],
-        "transport": "stdio",
-    }
-})
-tools = await client.get_tools()
-```
-
-### Claude Agent SDK
-
-Pass the server in `mcpServers` (TypeScript) or `mcp_servers` (Python) when calling `query()`:
-
-```python
-from claude_agent_sdk import query, ClaudeAgentOptions
-
-options = ClaudeAgentOptions(
-    mcp_servers={
-        "cartograph": {
-            "command": "cartograph",
-            "args": ["serve", "--mcp"],
-        }
-    },
-    allowed_tools=["mcp__cartograph__*"],
-)
-
-async for message in query(prompt="Where is auth handled?", options=options):
-    ...
-```
-
-### Anything else (generic stdio MCP)
-
-Most MCP clients (Continue, Zed, custom integrations, etc.) accept some variation of `command` + `args`. The values are always:
-
-| Field | Value |
-|-------|-------|
-| Command | `cartograph` |
-| Args | `["serve", "--mcp"]` |
-| Transport | `stdio` |
-
-The server reads the project root from the MCP `initialize` request's `rootUri` (set by the client when it connects). If your client doesn't send a `rootUri`, pass the project path explicitly:
-
-```bash
-cartograph serve --mcp --project-path /absolute/path/to/project
-```
-
-Useful server controls:
-
-```bash
-cartograph serve --mcp --profile full
-cartograph serve --mcp --profile core
-cartograph serve --mcp --profile read-only
-cartograph serve --mcp --profile review
-cartograph serve --mcp --no-write-tools
-cartograph serve --mcp --allow-stale-default
-cartograph serve --mcp --low-tokens-default
-cartograph serve --mcp --disable-tool cartograph_ask
-cartograph serve --mcp --no-startup-sync
-cartograph serve --mcp --daemon --project-path /absolute/path/to/project
-```
-
-`--daemon` starts or attaches to one shared per-project MCP daemon and leaves the client-facing process as a stdio proxy. Use it when several agents attach to the same indexed project and you want one watcher, one SQLite writer, and one warm tool cache.
-
-> **Note:** Cartograph's MCP server does **not** speak SSE/HTTP. If your client only supports `url` + `transport: "sse"`, you'll need to wrap stdio with a bridge like [supergateway](https://github.com/supercorp-ai/supergateway).
-
----
-
-## Library Usage
-
-```typescript
-import Cartograph from '@adder-factory/cartograph';
-
-// Initialize a fresh index, or open an existing one:
-const cg = await Cartograph.init('/path/to/project');
-// const cg = await Cartograph.open('/path/to/project');
-
-await cg.indexAll({
-  onProgress: (p) => console.log(`${p.phase}: ${p.current}/${p.total}`),
-});
-
-// Look up symbols, then traverse the graph via the typed accessors:
-const [node] = cg.queries.getNodesByFile('src/auth/login.ts');
-const callers = cg.internals.traverser.getCallers(node.id);
-const impact = cg.internals.traverser.getImpactRadius(node.id, 2);
-const context = await cg.internals.contextBuilder.buildContext('fix login bug', {
-  maxNodes: 20,
-  includeCode: true,
-});
-
-await cg.sync();      // incremental update
-cg.watcher.start();   // auto-sync on file changes
-cg.watcher.stop();    // stop watching
-cg.close();
-```
-
----
-
-## Configuration
-
-The `.cartograph/config.json` file controls indexing and derived-signal passes. A minimal hand-authored config usually only needs overrides; omitted fields fall back to the built-in defaults.
-
-```json
-{
-  "version": 1,
-  "rootDir": ".",
-  "languages": ["typescript", "javascript"],
-  "exclude": ["**/node_modules/**", "**/dist/**", "**/build/**", "**/*.min.js"],
-  "frameworks": [],
-  "maxFileSize": 5242880,
-  "extractDocstrings": true,
-  "trackCallSites": true,
-  "enableCentrality": true,
-  "enableChurn": true,
-  "enableCoChange": true
-}
-```
-
-| Option | Description | Default |
-|--------|-------------|---------|
-| `rootDir` | Root directory relative to the project path | `"."` |
-| `include` | Glob patterns to index; derived from the language registry if omitted | language defaults |
-| `languages` | Languages to index (auto-detected if empty) | `[]` |
-| `exclude` | Glob patterns to ignore | dependency, build, cache, fixture, and generated-output defaults |
-| `maxFileSize` | Skip files larger than this (bytes) | `5242880` (5MB) |
-
-### Storage Backend: SQLite or PostgreSQL
-
-SQLite is the default and needs no configuration. To initialize a project on PostgreSQL, pass the storage flags during setup/init:
-
-```bash
-# local PostgreSQL for development / evaluation:
-docker run --rm -d --name cartograph-postgres \
-  -e POSTGRES_USER=cartograph \
-  -e POSTGRES_PASSWORD=cartograph \
-  -e POSTGRES_DB=cartograph \
-  -p 5432:5432 \
-  pgvector/pgvector:pg16
-
-cartograph admin init -i \
-  --database-provider postgres \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph \
-  --database-pgvector auto \
-  --database-query-timeout-ms 120000
-
-# or the one-shot bootstrap:
-cartograph setup . --database-provider postgres --database-url "$DATABASE_URL"
-```
-
-The same choice can be hand-authored in `.cartograph/config.json`:
-
-```json
-{
-  "database": {
-    "provider": "postgres",
-    "url": "postgres://user:pass@localhost:5432/cartograph",
-    "schema": "cartograph",
-    "pgvector": "auto",
-    "queryTimeoutMs": 120000,
-    "connectionTimeoutSeconds": 30,
-    "maxConnections": 1
-  }
-}
-```
-
-Environment fallbacks are supported for secrets and deployment overrides: `CARTOGRAPH_DATABASE_PROVIDER=postgres`, `CARTOGRAPH_DATABASE_URL` or `DATABASE_URL`, `CARTOGRAPH_DATABASE_SCHEMA`, `CARTOGRAPH_DATABASE_PGVECTOR=auto|off|require`, `CARTOGRAPH_DATABASE_QUERY_TIMEOUT_MS`, `CARTOGRAPH_DATABASE_CONNECTION_TIMEOUT_SECONDS`, `CARTOGRAPH_DATABASE_MAX_CONNECTIONS`, and `CARTOGRAPH_DATABASE_SSL`.
-
-The focused operator guide lives in [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md).
-
-PostgreSQL initialization expects a database the connection URL can reach, and a schema name Cartograph can create/use. PostgreSQL storage currently supports fresh schema bootstrap rather than in-place PostgreSQL schema migrations; use a new schema for upgrades that need a rebuild. If you intentionally reset or drop the configured schema, remove the local PostgreSQL sentinel `.cartograph/cartograph.db` and run `cartograph admin init` again. Use one schema per project to keep indexes, `hnsw_meta`, and cleanup isolated.
-
-For production, create the database/user outside Cartograph and grant the configured role ownership or equivalent privileges on the project schema. `cartograph doctor` verifies connectivity, schema version, runtime DML writes, and whether the role can create/drop a probe table for init/rebuild workflows. A minimal dedicated-role shape is:
-
-```sql
-CREATE SCHEMA cartograph AUTHORIZATION cartograph;
-GRANT USAGE, CREATE ON SCHEMA cartograph TO cartograph;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA cartograph TO cartograph;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA cartograph TO cartograph;
-ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
-  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO cartograph;
-ALTER DEFAULT PRIVILEGES IN SCHEMA cartograph
-  GRANT USAGE, SELECT ON SEQUENCES TO cartograph;
-```
-
-For hosted PostgreSQL, prefer putting certificate mode in the URL (`?sslmode=require`, `verify-ca`, or `verify-full`). The `database.ssl` / `CARTOGRAPH_DATABASE_SSL=true` knob only forces TLS on/off; URL `sslmode` is the right place for certificate-verification policy.
-
-`database.pgvector` defaults to `auto`: Cartograph tries `CREATE EXTENSION IF NOT EXISTS vector`, mirrors embeddings into per-dimension `vector(n)` tables when the extension is available, and otherwise keeps using BYTEA storage with HNSW/in-memory fallbacks. Use `require` when native pgvector search is mandatory and you want initialization/doctor to fail if the extension is missing. Use `off` to disable pgvector entirely.
-
-To move an existing SQLite-backed project to PostgreSQL without reindexing:
-
-```bash
-cartograph admin storage-migrate . \
-  --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph
-```
-
-The migration command requires a fresh/nonexistent PostgreSQL schema. Pass `--force` only when you intentionally want Cartograph to drop and recreate the target schema. The old SQLite file is kept as a timestamped `.sqlite-backup.*` next to `.cartograph/cartograph.db`, and the project config is updated to `database.provider: "postgres"`.
-
-PostgreSQL-specific performance behavior:
-
-- High-volume node and edge writes use PostgreSQL set-based JSON batch inserts.
-- Symbol search uses PostgreSQL GIN full-text indexes over name, qualified name, signature, and docstring, with `ILIKE` as a fallback tier.
-- Signature-token ownership uses a PostgreSQL GIN full-text index on signatures.
-- Semantic search and `similar_to` edge builds use pgvector on PostgreSQL when `database.pgvector` is active. Canonical embeddings still live as `BYTEA`; pgvector tables are an optional native mirror and can be rebuilt from the canonical rows.
-- If pgvector is unavailable, PostgreSQL falls back to the existing USearch/HNSW path when the optional `usearch` dependency is available, then the in-memory embedding scan for query-time semantic search.
-- SQLite-only RTree/sqlite-vec tables remain SQLite-only. Range queries and vector fallbacks use backend-specific compatibility paths.
-
-#### SQLite vs PostgreSQL Benchmark
-
-Use `bench/storage-backends.mts` to compare the two storage backends on the same machine:
-
-```bash
-CARTOGRAPH_BENCH_POSTGRES_URL=postgres://user:pass@localhost:5432/cartograph \
-  bun bench/storage-backends.mts
-```
-
-Local result from June 7, 2026 on darwin arm64, Bun 1.3.14, PostgreSQL 16 in Docker, synthetic workload of 200 files / 1,600 nodes / 3,200 candidate edges / 40 read iterations, median of 3 fresh runs:
-
-| Backend | Init median | Write median | Read median | Total median | Storage |
-|---|---:|---:|---:|---:|---:|
-| SQLite | 7 ms | 70 ms | 36 ms | 112 ms | 2.12 MB |
-| PostgreSQL | 145 ms | 298 ms | 351 ms | 758 ms | 6.76 MB |
-
-Interpretation: SQLite remains the fastest default for local single-writer indexing. PostgreSQL batches high-volume node and edge writes with native set-based inserts and uses native GIN full-text search, but Docker/remote connection overhead still makes it slower for local-only workloads. PostgreSQL is the better fit when you want external/shared storage, operational database controls, managed backups, or native pgvector search.
+## Docs
+
+| Need | Go to |
+|---|---|
+| PostgreSQL, pgvector, migration, storage benchmark | [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md) |
+| CLI command reference | [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md) |
+| MCP setup, profiles, load budget, client snippets | [docs/MCP-USAGE.md](docs/MCP-USAGE.md) |
+| Configuration and advanced options | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
+| Language/framework matrix | [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) |
+| Troubleshooting | [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) |
+| Add a language | [docs/ADDING-A-LANGUAGE.md](docs/ADDING-A-LANGUAGE.md) |
+| Architecture rules | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+
+## Command Map
 
 <details>
-<summary><strong>Advanced config options</strong></summary>
+<summary><strong>Show top-level CLI commands</strong></summary>
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `frameworks` | Framework hints for extraction/resolution | `[]` |
-| `extractDocstrings` | Extract docstrings from code | `true` |
-| `trackCallSites` | Track call site locations | `true` |
-| `enableCentrality` / `enableBetweenness` | Compute graph centrality signals; betweenness is opt-in | `true` / `false` |
-| `enableChurn` / `enableIssueHistory` / `enableCoChange` | Mine git-derived change signals | `true` |
-| `enableConfigRefs` / `enableSqlRefs` / `enableBuildContextRefs` / `enableStringImports` | Add derived reference edges from non-call domains | `true` |
-| `indexSubmodules` | Recurse into git submodules | `true` |
-| `dependenciesAllowlist` | Packages never flagged by `cartograph deps` | `[]` |
-| `database.provider` | Storage backend: `sqlite` or `postgres` | `sqlite` |
-| `database.url` | PostgreSQL connection URL when `database.provider` is `postgres` | unset |
-| `database.schema` | PostgreSQL schema name | `public` |
-| `database.pgvector` | Optional native pgvector mode: `auto`, `off`, or `require` | `auto` |
-| `database.maxConnections` | PostgreSQL pool cap | `1` |
-| `database.connectionTimeoutSeconds` | PostgreSQL connection timeout | `30` |
-| `database.queryTimeoutMs` | Adapter wait timeout and PostgreSQL `statement_timeout` | `120000` |
-| `database.idleTimeoutSeconds` | Close idle PostgreSQL connections after this many seconds | Bun default |
-| `database.maxLifetimeSeconds` | Recycle PostgreSQL connections after this many seconds | Bun default |
-| `database.ssl` | Force PostgreSQL TLS on/off; prefer URL `sslmode=` for verification modes | URL/default |
+| Command | Use for |
+|---|---|
+| `cartograph admin` | Project lifecycle, indexing, setup, doctor, storage migration, and LLM admin actions |
+| `cartograph affected` | Find test files affected by changed source files |
+| `cartograph ask` | Ask natural-language questions about the codebase with an LLM |
+| `cartograph at-range` | Resolve file:line ranges or diff hunks to indexed symbols |
+| `cartograph backend` | Manage configured local llama-server processes |
+| `cartograph biomarkers` | Static-analysis findings and Code Health |
+| `cartograph blame` | Symbol-level git blame |
+| `cartograph changed-since` | File drift since index time or timestamp |
+| `cartograph compare-to-ref` | End-of-task structural and finding delta |
+| `cartograph context` | Task-specific context and route plans |
+| `cartograph coverage` | Per-symbol coverage joined to graph data |
+| `cartograph dead-code` | Potentially-dead symbol candidates |
+| `cartograph deps` | package.json dependency audit |
+| `cartograph digest` | "Land in a new repo" overview |
+| `cartograph discover` | Find other `.cartograph` indexes |
+| `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
+| `cartograph explore` | Deep topic exploration |
+| `cartograph files` | Indexed file tree and summaries |
+| `cartograph find` | Symbol, content, env-var, and SQL-ref search |
+| `cartograph graph` | Call/dependency graph traversal |
+| `cartograph history` | Symbol-level co-change |
+| `cartograph hotspots` | Churn x centrality triage |
+| `cartograph imports` | Import statement graph data |
+| `cartograph install` | Configure MCP server entries for supported agents |
+| `cartograph llm` | Interactive local/cloud LLM provider setup |
+| `cartograph local-chat` | Delegate bulk prose to a local LLM |
+| `cartograph mcp-budget` | Measure MCP startup payload size |
+| `cartograph module` | Directory/module summary |
+| `cartograph node` | Symbol details, optionally with source and related data |
+| `cartograph note` | Persistent annotations/bookmarks |
+| `cartograph playbook` | Tool-selection playbook |
+| `cartograph propose-rename` | Rename plan with call sites and mentions |
+| `cartograph review` | Diff, neighbor, risk, audit, and trust review helpers |
+| `cartograph role` | Symbol role classification |
+| `cartograph serve` | Start the MCP server |
+| `cartograph session` | Session state, macros, and audits |
+| `cartograph setup` | One-shot bootstrap: init, models, doctor |
+| `cartograph similar` | Embedding-cosine peers of a symbol |
+| `cartograph sql` | Read-only SQL escape hatch |
+| `cartograph status` | Index status and feature readiness |
+| `cartograph summaries` | Pull/save agent-written summaries |
+| `cartograph tests-for` | Tests covering a symbol or files |
+| `cartograph trace-to-culprits` | Stack trace to likely fix sites |
+| `cartograph viewer` | Local graph viewer |
 
 </details>
 
-## What Cartograph Is Not
-
-| Expectation | Reality |
-|---|---|
-| Hosted SaaS | Cartograph is local-first; the graph database is local SQLite by default or your configured PostgreSQL instance |
-| Test replacement | It helps find affected tests and risk areas, but your test suite remains the source of truth |
-| LLM-only reviewer | Review tools are deterministic graph queries first; LLM features are optional enrichment |
-| Cloud dependency | Core indexing and graph tools work offline after dependencies are installed |
-
 ## Supported Languages & File Formats
 
-Cartograph currently supports **37 language modes**. Frameworks and embedded DSLs are listed separately below so the core language matrix stays readable.
+Cartograph supports **37 language modes**. Framework-aware and derived signals
+are listed separately so the core language matrix stays readable.
 
 <details>
 <summary><strong>Show language matrix</strong></summary>
 
-| Language | Extension | Status |
-|----------|-----------|--------|
-| TypeScript | `.ts`, `.mts`, `.cts` | Full support |
-| TSX | `.tsx` | Full support |
-| JavaScript | `.js`, `.mjs`, `.cjs` | Full support |
-| JSX | `.jsx` | Full support |
-| Python | `.py`, `.pyw` | Full support |
-| Go | `.go` | Full support |
-| Rust | `.rs` | Full support |
-| Java | `.java` | Full support |
-| C# | `.cs` | Full support |
-| PHP | `.php`, `.module`, `.install`, `.theme`, `.inc` | Full support |
-| Ruby | `.rb`, `.rake` | Full support |
-| C | `.c`, `.h` | Full support |
-| C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Full support |
-| Objective-C | `.m`, `.mm` | Full support (multi-keyword selector reconstruction, React-Native/Expo bridging) |
-| Swift | `.swift` | Full support |
-| Kotlin | `.kt`, `.kts` | Full support |
-| Dart | `.dart` | Full support |
-| Svelte | `.svelte` | Full support (script extraction, Svelte 5 runes, SvelteKit routes) |
-| Vue | `.vue` | Full support (Single-File Components — `<script>` / `<script setup>` extraction) |
-| Liquid | `.liquid` | Full support |
-| Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` | Full support (classes, records, interfaces, enums, DFM/FMX form files) |
-| Scala | `.scala`, `.sc` | Full support |
-| ReScript | `.res`, `.resi` | Full support |
-| R | `.r`, `.R` | Full support |
-| Lua | `.lua` | Full support (`function M:foo()` colon syntax → `method` nodes) |
-| Luau | `.luau` | Full support (Lua extraction plus Luau type aliases and typed signatures) |
-| Elixir | `.ex`, `.exs` | Baseline support via the `tags.scm` fallback extractor (definitions + call references) |
-| Bash | `.sh`, `.bash` | Full support (functions, variables, command calls) |
-| Zsh | `.zsh`, `.zshrc`, `.zshenv`, `.zprofile`, `.zlogin` | Full support (functions, variables, command calls) |
-| Fish | `.fish` | Full support (functions, variables, command calls) |
-| GraphQL | `.graphql`, `.gql` | Full support (SDL — types, fields, enums, interfaces) |
-| SQL | `.sql`, `.ddl`, `.dml` | Full support (DDL — tables, views, functions, foreign keys) |
-| HCL / Terraform | `.tf`, `.tfvars`, `.hcl` | Full support (resources, variables, outputs) |
-| Prisma | `.prisma` | Full support (models, composite types, enums → struct / field / enum_member) |
-| Java Properties | `.properties` | Full support (configuration keys and values) |
-| XML (MyBatis) | `.xml` | Scoped support for MyBatis mapper/config files |
-| YAML | `.yaml`, `.yml` | Grammar-loaded support for framework route/config resolvers |
+| Language | Extensions / scope |
+|---|---|
+| TypeScript / TSX | `.ts`, `.mts`, `.cts`, `.tsx` |
+| JavaScript / JSX | `.js`, `.mjs`, `.cjs`, `.jsx` |
+| Python | `.py`, `.pyw` |
+| Go | `.go` |
+| Rust | `.rs` |
+| Java / Kotlin / Scala | `.java`, `.kt`, `.kts`, `.scala`, `.sc` |
+| C / C++ / C# | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs` |
+| Objective-C / Swift | `.m`, `.mm`, `.swift` |
+| PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
+| Dart / ReScript / R / Lua / Luau / Elixir | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs` |
+| Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
+| Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
+| Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
+| GraphQL / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
 
 </details>
 
 ## Framework-Aware Signals
-
-Cartograph indexes plain language structure first, then adds framework-aware nodes and edges when the project shape matches a registered resolver.
 
 | Ecosystem | Signals |
 |---|---|
@@ -1046,55 +292,38 @@ Cartograph indexes plain language structure first, then adds framework-aware nod
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| Java / Kotlin / Scala | Spring route/config references, Play `conf/routes`, and MyBatis Java/XML bindings |
-| Go / Rust / C# / Swift | Common route and framework entry-point patterns, including Cargo workspace crate aliases for Rust |
-| Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, and Fabric/Paper view components |
+| JVM | Spring route/config references, Play routes, and MyBatis Java/XML bindings |
+| Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
+| Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |
 
 ## Embedded DSLs & Derived Signals
 
 | Signal | What gets added |
 |---|---|
-| Zod / Pydantic | Schema structs, fields, and enum members inside TS/JS or Python hosts |
+| Zod / Pydantic | Schema structs, fields, and enum members |
 | GraphQL SDL | Types, fields, enums, interfaces, and references |
-| Prisma | Models, composite types, enums, fields, and enum members |
-| SQL | Tables, views, functions, triggers, schemas, and table references |
+| Prisma / SQL | Models, tables, views, functions, triggers, schemas, and table references |
 | Config / env refs | Env-var, config-key, feature-flag, and build-context reference edges |
 | Tests / coverage / history | Test edges, lcov joins, churn, issue history, co-change, and hotspot signals |
 
-Want to add another language? See [`docs/ADDING-A-LANGUAGE.md`](docs/ADDING-A-LANGUAGE.md) — it walks through sourcing a tree-sitter grammar, probing the AST, choosing between the OO and self-contained extractor patterns, and the worked examples in the existing extractors.
+See [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) for the full matrix.
 
-## Development Checks
+## What Cartograph Is Not
 
-Scripts used by `.github/workflows/check.yml` must run on a stock GitHub runner after the workflow's setup steps. Nonstandard tools must either be installed by the workflow or have a fallback. Keep fast tools such as `rg` as the preferred local path, but pair them with `git grep` or a Node filesystem traversal before calling the script from CI. Run `npm run check:ci-portability` to verify the current CI entrypoints.
-
-## Troubleshooting
-
-**"Cartograph not initialized"** — Run `cartograph admin init` in your project directory first.
-
-**Indexing is slow** — Check that `node_modules` and other large directories are excluded. Large generated files can also dominate a run; lower `maxFileSize` in `.cartograph/config.json` to skip them.
-
-**Vector search is slow / `⚠ no sqlite-vec`** — On the SQLite backend, vector similarity (semantic/intent search and `similar`) is accelerated by the optional [`sqlite-vec`](https://github.com/asg017/sqlite-vec) extension. Run `cartograph status` and look at the `Backend:` line:
-
-- `Backend: bun:sqlite + sqlite-vec` — the accelerated path, nothing to do.
-- `Backend: bun:sqlite ⚠ no sqlite-vec` — the extension didn't load, so vector search falls back to a slower in-memory brute-force scan. `sqlite-vec` ships prebuilt binaries for darwin/linux (x64 + arm64) and windows-x64; on other platforms the brute-force path is expected. A clean `bun install` usually re-fetches the prebuilt for your platform.
-- `Backend: postgres` — PostgreSQL storage is active; native PostgreSQL full-text indexes are used for symbol search, pgvector is used when available/configured, and SQLite-only RTree/sqlite-vec accelerators are bypassed.
-
-If status says USearch is unavailable, SQLite `similar_to` edge builds fall back to the vec0 brute-force path. PostgreSQL `similar_to` edge builds use pgvector when available, then USearch/HNSW. A clean `bun install` re-fetches the optional `usearch` accelerator.
-
-**MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `cartograph serve --mcp` works from the command line.
-
-**Missing symbols** — The MCP server auto-syncs on save (wait a couple seconds). Run `cartograph admin sync` manually if needed. Check that the file's language is supported and isn't excluded by config patterns.
+| Expectation | Reality |
+|---|---|
+| Hosted SaaS | Cartograph is local-first; the graph database is local SQLite by default or your configured PostgreSQL instance |
+| Test replacement | It finds affected tests and risks; your test suite remains the source of truth |
+| LLM-only reviewer | Review tools are deterministic graph queries first; LLM features are optional |
+| Cloud dependency | Core indexing and graph tools work offline after dependencies are installed |
 
 ## License
 
 MIT
 
----
-
 <div align="center">
 
-**Made for the Claude Code community**
-
-[Report Bug](https://github.com/adder-factory/cartograph/issues) · [Request Feature](https://github.com/adder-factory/cartograph/issues)
+[Report Bug](https://github.com/adder-factory/cartograph/issues) ·
+[Request Feature](https://github.com/adder-factory/cartograph/issues)
 
 </div>

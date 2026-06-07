@@ -166,5 +166,18 @@ CARTOGRAPH_BENCH_POSTGRES_URL=postgres://user:pass@localhost:5432/cartograph \
   bun bench/storage-backends.mts
 ```
 
-See `bench/README.md` and the README storage section for the current local
-SQLite vs PostgreSQL comparison.
+Reference run from 2026-06-07, Bun 1.3.14, `darwin arm64`, three fresh runs
+per backend:
+
+| Backend | Init median | Write median | Read median | Total median | DB size |
+|---|---:|---:|---:|---:|---:|
+| SQLite | 7 ms | 70 ms | 35 ms | 112 ms | 2.12 MB |
+| PostgreSQL | 102 ms | 241 ms | 470 ms | 795 ms | 7.46 MB |
+
+Workload: 200 files, 1,600 nodes, 3,200 candidate edges, 40 read iterations.
+Treat this as a machine- and workload-specific reference point. SQLite remains
+the fastest local single-writer default in this workload; PostgreSQL is the
+choice for shared/external storage, database operations, hosted backups, and
+native pgvector search.
+
+See `bench/README.md` for benchmark knobs and caveats.
