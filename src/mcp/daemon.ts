@@ -21,6 +21,7 @@ const DAEMON_START_TIMEOUT_MS = 5_000;
 const DAEMON_CONNECT_POLL_MS = 100;
 const HELLO_TIMEOUT_MS = 2_000;
 const MAX_HELLO_BYTES = 4096;
+const DAEMON_LOCK_STARTUP_GRACE_MS = DAEMON_START_TIMEOUT_MS;
 
 export interface SharedMcpDaemonOptions {
   projectPath?: string | undefined;
@@ -47,6 +48,11 @@ interface DaemonRuntime {
   clients: number;
   idleTimer: NodeJS.Timeout | null;
   stopping: boolean;
+}
+
+interface DaemonSocketTarget {
+  socketPath: string;
+  lock: DaemonLockInfo | null;
 }
 
 export function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Promise<void> {
@@ -186,13 +192,14 @@ async function ensureDaemonSocket(projectRoot: string, options: SharedMcpDaemonO
 }
 
 function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> {
-  const socketPath = resolveDaemonSocketTarget(projectRoot);
-  if (!socketPath) return Promise.resolve(null);
-  const socket = net.createConnection(socketPath);
+  const target = resolveDaemonSocketTarget(projectRoot);
+  if (!target) return Promise.resolve(null);
+  const socket = net.createConnection(target.socketPath);
   return readHelloLine(socket)
     .then((hello) => acceptDaemonSocket(socket, hello))
-    .catch(() => {
+    .catch((err) => {
       socket.destroy();
+      retireUnreachableDaemonLock(projectRoot, target.lock, err);
       return null;
     });
 }
@@ -279,15 +286,18 @@ function prepareDaemonLock(
   return tryAcquireDaemonLock(projectRoot);
 }
 
-function resolveDaemonSocketTarget(projectRoot: string): string | null {
+function resolveDaemonSocketTarget(projectRoot: string): DaemonSocketTarget | null {
   const lock = readLockInfo(projectRoot);
   if (lock && !isProcessAlive(lock.pid)) {
     removeStaleLock(projectRoot, lock);
     return null;
   }
   const socketPath = lock?.socketPath || getDaemonSocketPath(projectRoot);
-  if (process.platform !== 'win32' && !fs.existsSync(socketPath)) return null;
-  return socketPath;
+  if (process.platform !== 'win32' && !fs.existsSync(socketPath)) {
+    retireUnreachableDaemonLock(projectRoot, lock, new Error(`daemon socket is missing at ${socketPath}`));
+    return null;
+  }
+  return { socketPath, lock };
 }
 
 function readLockInfo(projectRoot: string): DaemonLockInfo | null {
@@ -311,6 +321,27 @@ function removeStaleLock(projectRoot: string, info: DaemonLockInfo | null): void
       /* absent */
     }
   }
+}
+
+function retireUnreachableDaemonLock(projectRoot: string, info: DaemonLockInfo | null, err: unknown): void {
+  if (!info || !isDaemonConnectFailure(err) || !isDaemonLockPastStartupGrace(info)) return;
+  process.stderr.write(
+    `[Cartograph MCP] Removing stale daemon lock for pid ${info.pid}; ` +
+      `socket is unreachable after startup grace. Retrying daemon start.\n`,
+  );
+  removeStaleLock(projectRoot, info);
+}
+
+function isDaemonLockPastStartupGrace(info: DaemonLockInfo): boolean {
+  if (info.startedAt <= 0) return true;
+  return info.startedAt > 0 && Date.now() - info.startedAt > DAEMON_LOCK_STARTUP_GRACE_MS;
+}
+
+function isDaemonConnectFailure(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  if (code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'EPIPE') return true;
+  return err.message.startsWith('daemon socket is missing');
 }
 
 function cleanupStaleSocket(socketPath: string): void {

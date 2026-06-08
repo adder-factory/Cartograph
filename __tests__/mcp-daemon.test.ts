@@ -4,6 +4,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
+import { encodeLockInfo, getDaemonPidPath, getDaemonSocketPath } from '../src/mcp/daemon-paths.js';
 
 const repoRoot = path.join(__dirname, '..');
 const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
@@ -153,6 +154,37 @@ describe('shared MCP daemon', () => {
         });
 
         expect(exchange.stderr).not.toContain('Attached to shared daemon');
+        child.stdin.end();
+        await waitForExit(child, 5_000);
+        child = null;
+      } finally {
+        if (child && child.exitCode === null) child.kill('SIGTERM');
+        cleanupDaemon(dir);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
+
+  it(
+    'retires an old live-pid lock when the daemon socket is unreachable',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-daemon-stale-lock-'));
+      let child: ChildProcessWithoutNullStreams | null = null;
+      try {
+        const cg = Cartograph.initSync(dir, { config: { include: ['**/*.ts'], exclude: [] } });
+        cg.close();
+        writeStaleLivePidLock(dir);
+
+        const exchange = startDaemonProxy(dir);
+        child = exchange.child;
+        await exchange.attached;
+
+        const daemonPid = readDaemonPid(dir);
+        expect(daemonPid).toBeGreaterThan(0);
+        expect(daemonPid).not.toBe(process.pid);
+        expect(exchange.stderr).toContain('Removing stale daemon lock');
+
         child.stdin.end();
         await waitForExit(child, 5_000);
         child = null;
@@ -322,6 +354,18 @@ function cleanupDaemon(projectRoot: string): void {
       /* already exited */
     }
   }
+}
+
+function writeStaleLivePidLock(projectRoot: string): void {
+  fs.writeFileSync(
+    getDaemonPidPath(projectRoot),
+    encodeLockInfo({
+      pid: process.pid,
+      version: 'stale-test',
+      socketPath: getDaemonSocketPath(projectRoot),
+      startedAt: Date.now() - 60_000,
+    }),
+  );
 }
 
 function readDaemonPid(projectRoot: string): number {
