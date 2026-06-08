@@ -20,6 +20,7 @@ import { ScoreTrace } from './score-trace.js';
 import { extractSymbolsFromQuery } from './query-symbols.js';
 import { buildTaskContext, extractCodeBlocks } from './task-context.js';
 import type { ContextBuilderState } from './builder-state.js';
+import { findSourceTextContextCandidates } from './source-text.js';
 import { HIGH_VALUE_NODE_KINDS, normalizeBuildOptions, normalizeFindOptions, pickSearchKinds } from './options.js';
 import {
   CENTRALITY_BOOST_WEIGHT,
@@ -731,11 +732,20 @@ function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQu
   // lose it to FTS hits on the query's other tokens (FRICTION-AF).
   exactMatches = cbPromoteExactNameMatches({ st, symbolsFromQuery, exactMatches, opts });
   const textResults = cbRunMultiTermTextSearch(st, rankingQuery, opts);
+  const sourceTextResults = findSourceTextContextCandidates({
+    projectRoot: st.projectRoot,
+    queries: st.queries,
+    query: rankingQuery,
+    nodeKinds: opts.nodeKinds,
+    isTestQuery,
+  });
   let searchResults = mergeSearchChannels(exactMatches, textResults);
   // `explain` instrumentation: snapshot scores at each pass boundary.
   // Purely observational — every `trace?.snapshot` is a no-op unless
   // the caller opted into `explain: true`.
   trace?.snapshot('lexical-merge', searchResults);
+  searchResults = mergeSearchChannels(searchResults, sourceTextResults);
+  trace?.snapshot('source-text', searchResults);
 
   // Approach (a): when the MCP layer detected a behaviour-shaped task
   // (`how/when/why does X happen`), it pre-runs the same hybrid FTS +
@@ -748,7 +758,10 @@ function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQu
   // ask uses contains it; merging it in lets context surface it too.
   searchResults = cbMergeExtraCandidates(searchResults, opts.extraCandidates);
   trace?.snapshot('semantic-extras', searchResults);
-  const extraIds: ReadonlySet<string> = new Set((opts.extraCandidates ?? []).map((e) => e.node.id));
+  const extraIds: ReadonlySet<string> = new Set([
+    ...(opts.extraCandidates ?? []).map((e) => e.node.id),
+    ...sourceTextResults.map((e) => e.node.id),
+  ]);
 
   if (!isTestQuery) {
     for (const result of searchResults) {
