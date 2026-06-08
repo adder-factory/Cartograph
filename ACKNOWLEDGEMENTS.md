@@ -60,17 +60,26 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | clojure | [oakmac/tree-sitter-clojure](https://github.com/oakmac/tree-sitter-clojure) | MIT |
 | common_lisp | [theHamsta/tree-sitter-commonlisp](https://github.com/theHamsta/tree-sitter-commonlisp) | MIT |
 | cpp | [tree-sitter/tree-sitter-cpp](https://github.com/tree-sitter/tree-sitter-cpp) | MIT |
+| css | [tree-sitter/tree-sitter-css](https://github.com/tree-sitter/tree-sitter-css) | MIT |
 | cuda | [tree-sitter-grammars/tree-sitter-cuda](https://github.com/tree-sitter-grammars/tree-sitter-cuda) | MIT |
 | c_sharp | [tree-sitter/tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | MIT |
+| embedded_template | [tree-sitter/tree-sitter-embedded-template](https://github.com/tree-sitter/tree-sitter-embedded-template) | MIT |
 | ruby | [tree-sitter/tree-sitter-ruby](https://github.com/tree-sitter/tree-sitter-ruby) | MIT |
 | bash (also serves zsh) | [tree-sitter/tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) | MIT |
 | php | [tree-sitter/tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | MIT |
 | apex | [aheber/tree-sitter-sfapex](https://github.com/aheber/tree-sitter-sfapex) | MIT |
+| haskell | [tree-sitter/tree-sitter-haskell](https://github.com/tree-sitter/tree-sitter-haskell) | MIT |
+| html | [tree-sitter/tree-sitter-html](https://github.com/tree-sitter/tree-sitter-html) | MIT |
+| jsdoc | [tree-sitter/tree-sitter-jsdoc](https://github.com/tree-sitter/tree-sitter-jsdoc) | MIT |
+| json | [tree-sitter/tree-sitter-json](https://github.com/tree-sitter/tree-sitter-json) | MIT |
+| julia | [tree-sitter/tree-sitter-julia](https://github.com/tree-sitter/tree-sitter-julia) | MIT |
 | kotlin | [fwcd/tree-sitter-kotlin](https://github.com/fwcd/tree-sitter-kotlin) | MIT |
 | lean | [Julian/tree-sitter-lean](https://github.com/Julian/tree-sitter-lean) | MIT |
+| luau | [tree-sitter-grammars/tree-sitter-luau](https://github.com/tree-sitter-grammars/tree-sitter-luau) | MIT |
 | scala | [tree-sitter/tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | MIT |
 | swift | [alex-pinkus/tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | MIT |
 | objc | [jiyee/tree-sitter-objc](https://github.com/jiyee/tree-sitter-objc) | MIT |
+| ocaml, ocaml_interface | [tree-sitter/tree-sitter-ocaml](https://github.com/tree-sitter/tree-sitter-ocaml) | MIT |
 | hcl | [tree-sitter-grammars/tree-sitter-hcl](https://github.com/tree-sitter-grammars/tree-sitter-hcl) | Apache-2.0 |
 | lua | [tree-sitter-grammars/tree-sitter-lua](https://github.com/tree-sitter-grammars/tree-sitter-lua) | MIT |
 | sql | [DerekStride/tree-sitter-sql](https://github.com/DerekStride/tree-sitter-sql) | MIT |
@@ -84,10 +93,12 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
 | nix | [nix-community/tree-sitter-nix](https://github.com/nix-community/tree-sitter-nix) | MIT |
 | pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |
+| regex | [tree-sitter/tree-sitter-regex](https://github.com/tree-sitter/tree-sitter-regex) | MIT |
 | rescript | [rescript-lang/tree-sitter-rescript](https://github.com/rescript-lang/tree-sitter-rescript) | MIT |
 | elixir | [elixir-lang/tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) | Apache-2.0 |
 | yaml | [tree-sitter-grammars/tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT |
 | solidity | tree-sitter-solidity by Joran Honig | MIT |
+| verilog | [tree-sitter/tree-sitter-verilog](https://github.com/tree-sitter/tree-sitter-verilog) | MIT |
 | vbnet | [CodeAnt-AI/tree-sitter-vb-dotnet](https://github.com/CodeAnt-AI/tree-sitter-vb-dotnet) | MIT |
 
 Each compiled `.wasm` carries the license of its originating grammar (MIT except `hcl` and `elixir`, which are Apache-2.0, and `abap`, which is ISC). Grammar attributions are derived from `scripts/build-grammar-wasm.ts`; if a project has moved or a license has changed, please open an issue and we'll correct the credit.

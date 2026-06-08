@@ -54,6 +54,13 @@ shard_fails() {
   grep -oE "^ +[0-9]+ fail" "$1" | grep -oE "[0-9]+" | tail -1 || echo 0
 }
 
+sum_count() {
+  # $1 = log path, $2 = pass|fail|skip. Used for retry logs, which
+  # concatenate many one-file runs and therefore need summing rather
+  # than tailing the last summary line.
+  grep -oE "^ +[0-9]+ $2" "$1" | grep -oE "[0-9]+" | awk '{ n += $1 } END { print n + 0 }'
+}
+
 retry_won_shard() {
   # $1 = shard index. `retried` contains shards whose failed files all
   # passed in fresh per-file processes.
@@ -93,6 +100,28 @@ if [ "$RETRY" -gt 0 ]; then
     f=$(shard_fails "$log")
     status="${shard_status[$i]:-0}"
     if [ "${f:-0}" -gt 0 ] || [ "$status" -ne 0 ]; then
+      if [ "$status" -ne 0 ] && ! grep -qE "^Ran " "$log"; then
+        echo "=== shard $i exited $status before printing a summary; retrying the whole shard (up to $RETRY attempts) ==="
+        mv "$log" "$log.first"
+        shard_passed=false
+        attempt=0
+        while [ "$attempt" -lt "$RETRY" ]; do
+          attempt=$((attempt+1))
+          bun test --isolate --shard="$i/$N" --timeout 30000 $PATTERN > "$log" 2>&1
+          if [ "$?" -eq 0 ]; then
+            shard_passed=true
+            retried+=("$i")
+            echo "  -> shard $i passed as a whole on attempt $attempt"
+            break
+          fi
+        done
+        if $shard_passed; then
+          continue
+        fi
+        echo "  -> shard $i still failed/crashed after whole-shard retries; treating as failed"
+        continue
+      fi
+
       # Extract failed file paths. bun:test prints `<path>:` headers
       # only for files with output (typically failed). Heuristic:
       # every `__tests__/X.test.ts:` header in the log is a file
@@ -159,7 +188,18 @@ for i in $(seq 1 "$N"); do
     s=$(grep -oE "^ +[0-9]+ skip" "$first_log" | grep -oE "[0-9]+" | tail -1)
     summary=$(grep -E "^Ran " "$first_log" | tail -1)
     if $retry_won; then
-      p=$((${p:-0} + ${f:-0}))
+      if [ -z "${summary:-}" ]; then
+        # The shard process can crash before its final summary. When
+        # the whole shard then passes in a fresh isolated retry, count
+        # the retry summary so the aggregate is not misleadingly shown
+        # as pass=0 for the recovered shard.
+        p=$(sum_count "$log" pass)
+        s=$(sum_count "$log" skip)
+        summary=$(grep -E "^Ran " "$log" | tail -1)
+        summary="${summary:-retried shard in a fresh process}"
+      else
+        p=$((${p:-0} + ${f:-0}))
+      fi
       f=0
     fi
   else

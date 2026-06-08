@@ -20,6 +20,7 @@ import {
   filterFilesByDir,
   registerFilesCommand as registerFilesFeatureCommand,
 } from '../../features/files/index.js';
+import { registerModuleCommand as registerModuleFeatureCommand } from '../../features/module/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { registerGraphExportCommand as registerGraphExportFeatureCommand } from '../../features/graph-export/index.js';
 import type { CliArgumentOptionCommand } from '../../features/shared/cli-command.js';
@@ -146,6 +147,13 @@ function registerFileSymbolsReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
+function registerModuleReadCommand(deps: ReadCommandDeps): void {
+  registerModuleFeatureCommand({
+    ...deps,
+    writeLine: out,
+  });
+}
+
 function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   registerAffectedFeatureCommand({
     ...deps,
@@ -181,6 +189,7 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerFilesReadCommand(deps);
   registerFileDepsReadCommand(deps);
   registerFileSymbolsReadCommand(deps);
+  registerModuleReadCommand(deps);
   registerGraphExportReadCommand(deps);
   registerAffectedReadCommand(deps);
 }

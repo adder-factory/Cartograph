@@ -2,6 +2,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import * as edgeQueries from '../src/db/queries-edges.js';
+import * as metadataQueries from '../src/db/queries-metadata.js';
+import * as searchQueries from '../src/db/queries-search.js';
+import * as edgeHelpers from '../src/index-hooks/edge-resolution-helpers.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 const state = {
@@ -12,38 +16,23 @@ const state = {
   yielded: 0,
 };
 
-vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
-  PER_FILE_YIELD_INTERVAL: 2,
-  yieldToEventLoop: vi.fn(async () => {
-    state.yielded++;
-  }),
-  collectTargets: vi.fn(() => state.targets),
-  lookupSymbolByNameInFile: vi.fn(() => null),
-  resolveTargetFile: vi.fn(() => null),
-  refreshEdgesHook: vi.fn(async () => {}),
-}));
-
-vi.mock('../src/db/queries-edges.js', () => ({
-  insertEdges: vi.fn((_queries: unknown, edges: unknown[]) => {
-    state.inserted.push(edges);
-    return edges;
-  }),
-}));
-
-vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
-    state.metadata.set(key, value);
-  }),
-}));
-
-vi.mock('../src/db/queries-search.js', () => ({
-  getSymbolNameIndexByFile: vi.fn(
-    (_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map(),
-  ),
-  getNodesByName: vi.fn(() => []),
-  getNodesByNameAndFile: vi.fn(() => []),
-}));
+vi.spyOn(edgeHelpers, 'yieldToEventLoop').mockImplementation(async () => {
+  state.yielded++;
+});
+vi.spyOn(edgeHelpers, 'collectTargets').mockImplementation((() => state.targets) as never);
+vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edges: unknown[]) => {
+  state.inserted.push(edges);
+  return edges;
+}) as never);
+vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
+  ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
+);
+vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown, key: string, value: string) => {
+  state.metadata.set(key, value);
+}) as never);
+vi.spyOn(searchQueries, 'getSymbolNameIndexByFile').mockImplementation(
+  ((_queries: unknown, filePath: string) => state.nameIndexes.get(filePath) ?? new Map()) as never,
+);
 
 const { HOOK, DYNAMIC_DISPATCH_ALGO_VERSION, dynamicDispatchInternalsForTest } = await import(
   '../src/index-hooks/dynamic-dispatch.js'

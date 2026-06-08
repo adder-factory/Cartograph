@@ -6,11 +6,25 @@ import { pathFilterStripHint } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
-import { type ToolOutcome, ok } from './_outcome.js';
+import { type ToolOutcome, err, ok } from './_outcome.js';
 
 import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
+import {
+  FILE_DEPS_DIRECTIONS,
+  MAX_FILE_DEPS_LIMIT,
+  collectFileDeps,
+  renderFileDeps,
+} from '../../features/file-deps/index.js';
+import {
+  MAX_FILE_SYMBOL_LIMIT,
+  collectFileSymbols,
+  parseFileSymbolKinds,
+  renderFileSymbols,
+  resolveIndexedFilePath,
+} from '../../features/file-symbols/index.js';
 import { type DirRollup, buildDirRollup, filterFilesByDir } from '../../features/files/runtime.js';
+import { LIST_ALL_DEFAULT_LIMIT, runModuleSummary } from '../../features/module/index.js';
 import {
   type FileTreeNode,
   buildFileTree,
@@ -291,12 +305,52 @@ const filesSchema = z.object({
   dir: z.string().optional().describe('Filter to files under this directory path. Defaults to all files.'),
   pattern: z.string().optional().describe('Filter files by glob pattern (e.g. "*.tsx", "**/*.test.ts").'),
   format: z
-    .enum(['tree', 'flat', 'grouped', 'summary'])
+    .enum(['tree', 'flat', 'grouped', 'summary', 'symbols', 'deps', 'module'])
     .optional()
     .describe(
       'Output: "tree" (hierarchical, default), "flat" (alphabetical), "grouped" (by language), ' +
-        '"summary" (per-directory file/symbol-count rollup, sorted by symbol density).',
+        '"summary" (per-directory file/symbol-count rollup), "symbols" (one-file outline), ' +
+        '"deps" (one-file dependencies/dependents), or "module" (directory/module summary).',
     ),
+  file: z
+    .string()
+    .min(1)
+    .optional()
+    .describe(
+      'For format="symbols" or format="deps": project-relative indexed file path, or an absolute path inside the project.',
+    ),
+  kinds: z
+    .string()
+    .optional()
+    .describe('For format="symbols": comma-separated node kinds to include, e.g. class,function,method.'),
+  includeParameters: z
+    .boolean()
+    .optional()
+    .describe('For format="symbols": include parameter nodes. Defaults to false.'),
+  includeImports: z
+    .boolean()
+    .optional()
+    .describe('For format="symbols": include import/export nodes. Defaults to false.'),
+  direction: z
+    .enum(FILE_DEPS_DIRECTIONS)
+    .optional()
+    .describe('For format="deps": dependencies, dependents, or both (default).'),
+  symbols: z
+    .boolean()
+    .optional()
+    .describe('For format="deps": include a short defines section. Defaults to true; pass false to omit.'),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      `For format="symbols"/"deps": cap returned rows in [1, ${MAX_FILE_SYMBOL_LIMIT}]. For format="module": cap cached directory summaries when no dirPath is supplied.`,
+    ),
+  dirPath: z
+    .string()
+    .optional()
+    .describe('For format="module": project-relative directory path. When omitted, lists cached directory summaries.'),
   metadata: z.boolean().optional().describe('Include language and symbol count per file (default true).'),
   maxDepth: z
     .number()
@@ -327,13 +381,43 @@ const filesSchema = z.object({
 });
 
 type FilesArgs = z.infer<typeof filesSchema>;
+type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
+
+interface HandleFileListingFormatArgs {
+  ctx: ToolCtx;
+  args: FilesArgs;
+  format: FileListFormat;
+  lowTokens: boolean;
+}
+
+function empty(message: string) {
+  return ok(renderToolResponse({ body: '', empty: { message } }));
+}
 
 async function handleFiles(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> {
+  const lowTokens = args.lowTokens === true;
+  const format = args.format ?? defaultFilesFormat(lowTokens);
+  switch (format) {
+    case 'symbols':
+      return handleFileSymbolsFormat(ctx, args);
+    case 'deps':
+      return handleFileDepsFormat(ctx, args);
+    case 'module':
+      return handleModuleFormat(ctx, args);
+    default:
+      return handleFileListingFormat({ ctx, args, format, lowTokens });
+  }
+}
+
+function defaultFilesFormat(lowTokens: boolean): FileListFormat {
+  return lowTokens ? 'summary' : 'tree';
+}
+
+async function handleFileListingFormat(input: HandleFileListingFormatArgs): Promise<ToolOutcome> {
+  const { ctx, args, format, lowTokens } = input;
   const cg = ctx.getCartograph(args.projectPath);
   const pathFilter = args.dir;
   const pattern = args.pattern;
-  const lowTokens = args.lowTokens === true;
-  const format = args.format ?? (lowTokens ? 'summary' : 'tree');
   // `metadata` is the canonical key (default true); accept legacy
   // `includeMetadata` as a fallback so older MCP clients keep working.
   // An explicit `includeMetadata: false` still wins over the `metadata`
@@ -424,9 +508,81 @@ async function handleFiles(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> 
   );
 }
 
+function branchLimitInRange(limit: number | undefined, max: number, branch: string): ToolOutcome | null {
+  if (limit === undefined || limit <= max) return null;
+  return err(`\`limit\` for format="${branch}" must be an integer between 1 and ${max}.`);
+}
+
+async function handleFileSymbolsFormat(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> {
+  if (!args.file) return err('`file` is required when `format` is "symbols".');
+  const limitError = branchLimitInRange(args.limit, MAX_FILE_SYMBOL_LIMIT, 'symbols');
+  if (limitError) return limitError;
+
+  const cg = ctx.getCartograph(args.projectPath);
+  const indexedFiles = getAllFilesWithSymbolCount(cg.queries);
+  const resolved = resolveIndexedFilePath({ file: args.file, projectRoot: cg.projectRoot, indexedFiles });
+  if (!resolved.ok) return empty(resolved.message);
+  const kinds = parseFileSymbolKinds(args.kinds);
+  if (!kinds.ok) return err(kinds.message);
+  const result = collectFileSymbols({
+    nodes: cg.queries.getNodesByFile(resolved.filePath),
+    kinds: kinds.kinds,
+    includeParameters: args.includeParameters === true,
+    includeImports: args.includeImports === true,
+    limit: args.limit,
+    lowTokens: args.lowTokens === true,
+  });
+  return ok(
+    renderToolResponse({
+      body: renderFileSymbols({
+        filePath: resolved.filePath,
+        result,
+        note: resolved.note,
+        lowTokens: args.lowTokens === true,
+      }),
+    }),
+  );
+}
+
+async function handleFileDepsFormat(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> {
+  if (!args.file) return err('`file` is required when `format` is "deps".');
+  const limitError = branchLimitInRange(args.limit, MAX_FILE_DEPS_LIMIT, 'deps');
+  if (limitError) return limitError;
+
+  const cg = ctx.getCartograph(args.projectPath);
+  const indexedFiles = getAllFilesWithSymbolCount(cg.queries);
+  const resolved = resolveIndexedFilePath({ file: args.file, projectRoot: cg.projectRoot, indexedFiles });
+  if (!resolved.ok) return empty(resolved.message);
+  const result = collectFileDeps({
+    filePath: resolved.filePath,
+    dependencies: cg.internals.graphManager.getFileDependencies(resolved.filePath),
+    dependents: cg.internals.graphManager.getFileDependents(resolved.filePath),
+    nodes: cg.queries.getNodesByFile(resolved.filePath),
+    direction: args.direction,
+    symbols: args.symbols,
+    limit: args.limit,
+    lowTokens: args.lowTokens === true,
+  });
+  return ok(
+    renderToolResponse({
+      body: renderFileDeps({ result, note: resolved.note, lowTokens: args.lowTokens === true }),
+    }),
+  );
+}
+
+async function handleModuleFormat(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> {
+  const cg = ctx.getCartograph(args.projectPath);
+  const outcome = runModuleSummary(cg, {
+    dirPath: args.dirPath ?? args.dir,
+    limit: args.limit ?? LIST_ALL_DEFAULT_LIMIT,
+  });
+  if (!outcome.ok) return err(outcome.message);
+  return ok(renderToolResponse({ body: outcome.body }));
+}
+
 /** Dispatch the format string to its renderer; default is `tree`. */
 interface RenderFilesByFormatArgs {
-  format: 'tree' | 'flat' | 'grouped' | 'summary';
+  format: FileListFormat;
   files: FileRow[];
   includeMetadata: boolean;
   maxDepth: number | undefined;
@@ -448,9 +604,9 @@ function renderFilesByFormat(args: RenderFilesByFormatArgs): string {
 export const FILES_TOOL = defineTool({
   name: 'cartograph_files',
   description:
-    'Indexed-file tree view with language + symbol count — faster than shell `find` for project structure. ' +
+    'Indexed file and directory surface — project tree, grouped/summary views, one-file symbols, one-file dependencies, and directory/module summaries. ' +
     'Filter by `dir` prefix or `pattern` glob (e.g. `**/*.test.ts`). ' +
-    'Format: `tree` (default) | `flat` | `grouped` (by language) | `summary`. ' +
+    'Format: `tree` (default) | `flat` | `grouped` | `summary` | `symbols` | `deps` | `module`. ' +
     '`lowTokens: true` defaults to summary format, no metadata, and a shallow depth cap. ' +
     'The `flat` format folds a per-file LLM summary under each row when the listing is ≤80 files.',
   schema: filesSchema,

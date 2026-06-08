@@ -31,7 +31,7 @@ ergonomics.
 
 ```
 MCP tools:    src/mcp/tools/*.ts → src/mcp/tools/registry.ts
-CLI commands: src/bin/cartograph.ts → program / adminCmd / summariesCmd / reviewCmd
+CLI commands: src/bin/commands/*.ts + src/features/*/cli.ts → src/bin/cartograph.ts
 ```
 
 100% of alignable capabilities are mirrored on both surfaces.
@@ -49,14 +49,19 @@ admin (init / uninit / index / sync / unlock / migrate / storage-migrate /
        install-models / doctor / llm-plan / llm-apply / llm-tune)
 affected, ask, at-range, biomarkers, blame, changed-since,
 compare-to-ref, context, coverage, dead-code, deps, digest,
-discover, entry-points, explore, file-deps, file-symbols, files, find, graph, history,
-hotspots, imports, local-chat, module, node, note, playbook,
+discover, entry-points, explore, files, find, graph, history,
+hotspots, imports, local-chat, node, note, playbook,
 propose-rename, review (context / neighbors / risk / agent-audit / trust),
 role, session (create / resume / list / delete / macro_save /
 macro_run / macro_list / macro_delete), sql, status,
 summaries (pending / save),
 sync-if-dirty, tests-for, trace-to-culprits
 ```
+
+`cartograph file-deps`, `cartograph file-symbols`, and `cartograph module`
+survive as CLI shortcuts for human ergonomics. MCP callers use the folded
+`cartograph_files` modes instead:
+`{format: "deps" | "symbols" | "module"}`.
 
 `cartograph similar <symbol>` is an extra CLI-only shortcut — it has no
 standalone MCP tool; it routes through `cartograph_graph({direction:
@@ -88,8 +93,19 @@ deprecated `--mode static|judge` alias.
 - **`cartograph llm setup`** — interactive provider config wizard.
   Configures OpenAI-compatible local/cloud providers and prompts on
   conflicts.
+- **`cartograph llm smoke`** — sends real tiny requests to configured
+  LLM tiers. It is CLI-only because it is an operator health check for
+  local/cloud credentials and backend processes, not a graph query.
 - **`cartograph viewer`** — web UI; HTTP server on a port. Out of
   MCP scope.
+- **`cartograph backend`** — managed local `llama-server` process
+  lifecycle (`status` / `start` / `stop` / `logs`). MCP-side doctor and
+  status report backend readiness, but process spawning/log tailing
+  remains a human/operator CLI concern.
+- **`cartograph file-deps`, `cartograph file-symbols`, `cartograph module`**
+  — ergonomic CLI shortcuts. MCP-side they are folded into
+  `cartograph_files({format: 'deps'|'symbols'|'module'})` to keep the
+  advertised tool count at 35.
 
 ### Family-action pattern (CLI subcommands)
 
@@ -103,7 +119,8 @@ summaries <pending|save>
 review    <context|neighbors|risk|agent-audit|trust>
 note      <add|list|delete>
 session   <create|resume|list|delete|macro_save|macro_run|macro_list|macro_delete>
-llm       <setup>
+llm       <setup|smoke>
+backend   <status|start|stop|logs>
 ```
 
 ## Verification recipes
@@ -121,8 +138,7 @@ grep -E "^\s*name:\s*'cartograph_" src/mcp/tools/*.ts \
 ### List CLI commands
 
 ```bash
-grep -E "^\s*\.command\('" src/bin/cartograph.ts \
-  | sed -E "s/.*command\('([a-z-]+)( |').*/\1/" | sort -u
+NO_COLOR=1 bun src/bin/cartograph.ts --help
 ```
 
 ### Cross-reference
@@ -131,8 +147,9 @@ Each MCP tool name (sans `cartograph_`) should match one CLI command,
 modulo underscore vs dash (`cartograph_at_range` ↔ `cartograph
 at-range`). Family subcommands appear at multiple lines because
 Commander mounts each under its parent — that's expected; check
-the parent-command mounting (`adminCmd` / `summariesCmd` /
-`reviewCmd`) before flagging an apparent mismatch.
+`src/bin/commands/*.ts`, the relevant `src/features/*/cli.ts`, and the
+parent-command wiring in `src/bin/_cli-core.ts` before flagging an apparent
+mismatch.
 
 ### Playbook coverage
 
@@ -195,6 +212,7 @@ new public tool name:
    startup payload even when no new tool name was added.
 
 Recent example: `cartograph_context({task: "<task>", format: "plan"})`,
+`cartograph_files({format: "deps"|"symbols"|"module"})`,
 `cartograph_affected({includeCommands: true})`,
 `cartograph_node({liveSource: true})`, and
 `cartograph_session({action: "audit"})` were added as family

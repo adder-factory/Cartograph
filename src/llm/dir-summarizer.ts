@@ -467,7 +467,7 @@ export function detectDirectoryPattern(
  * output, which is what makes the `content_hash` cache key stable.
  *
  * The output is intentionally tight (2-3 sentences) — readers of
- * `cartograph_module` skim, and the LLM path's `MAX_SUMMARY_CHARS=600`
+ * `cartograph_files({format: 'module'})` skim, and the LLM path's `MAX_SUMMARY_CHARS=600`
  * budget is an upper bound, not a target. Top-3 files by symbol count
  * give a representative sample without trying to enumerate the whole
  * directory.

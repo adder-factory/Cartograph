@@ -82,8 +82,6 @@ describe('MCP tool registry — single source of truth', () => {
       'cartograph_discover',
       'cartograph_entry_points',
       'cartograph_explore',
-      'cartograph_file_deps',
-      'cartograph_file_symbols',
       'cartograph_files',
       // cartograph_find subsumes the pre-merge cartograph_search /
       // cartograph_grep / cartograph_string_refs tools (2026-05-11
@@ -97,7 +95,6 @@ describe('MCP tool registry — single source of truth', () => {
       'cartograph_hotspots',
       'cartograph_imports',
       'cartograph_local_chat',
-      'cartograph_module',
       'cartograph_node',
       'cartograph_note',
       'cartograph_playbook',
@@ -194,5 +191,8 @@ describe('MCP tool registry — single source of truth', () => {
     expect(RETIRED_TOOL_NAMES.has('cartograph_callers')).toBe(true);
     expect(RETIRED_TOOL_NAMES.has('cartograph_callees')).toBe(true);
     expect(RETIRED_TOOL_NAMES.has('cartograph_search')).toBe(true);
+    expect(RETIRED_TOOL_NAMES.has('cartograph_file_deps')).toBe(true);
+    expect(RETIRED_TOOL_NAMES.has('cartograph_file_symbols')).toBe(true);
+    expect(RETIRED_TOOL_NAMES.has('cartograph_module')).toBe(true);
   });
 });

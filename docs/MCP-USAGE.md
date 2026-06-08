@@ -99,6 +99,9 @@ aggregate session/tool counts without raw request or response bodies.
 For `cartograph_context`, send `task` as the canonical prompt parameter;
 `query` is accepted as an alias for MCP clients that already model search-like
 calls around a `query` field.
+For file-focused lookups, use `cartograph_files`: `format: "symbols"` for a
+one-file outline, `format: "deps"` for local dependencies/dependents, and
+`format: "module"` for directory summaries.
 
 ## Load Budget
 
@@ -115,14 +118,14 @@ is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 24 tools | 44,195 | ~11,049 |
-| initialize instructions | 2,862 | ~716 |
-| combined startup load | 47,057 | ~11,765 |
-| full playbook, on demand | 14,236 | ~3,559 |
+| tools/list, 21 tools | 41,869 | ~10,468 |
+| initialize instructions | 3,099 | ~775 |
+| combined startup load | 44,968 | ~11,242 |
+| full playbook, on demand | 14,785 | ~3,697 |
 
-The full 38-tool profile is 61,977 `tools/list` chars and 64,812 combined
+The full 35-tool profile is 59,651 `tools/list` chars and 62,750 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 37 tools, 56,946 `tools/list` chars, and 59,781
+reduce the full list to 34 tools, 54,620 `tools/list` chars, and 57,719
 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the

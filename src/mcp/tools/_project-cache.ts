@@ -8,7 +8,7 @@
  *
  *   1. Aliased path → Cartograph map (multiple input paths can point
  *      at the same resolved root + the same CG instance).
- *   2. FIFO eviction by RESOLVED ROOT once MAX_CACHED_PROJECTS is hit
+ *   2. LRU eviction by RESOLVED ROOT once MAX_CACHED_PROJECTS is hit
  *      so a parent-dir launch that ends up querying many subprojects
  *      can't leak everything we ever opened.
  *   3. Watcher lifecycle for cached CGs — start on first open, stop
@@ -65,7 +65,7 @@ export class ProjectCache {
     // a subdir-projectPath + the resolved root both map to the same
     // instance).
     cgsByPath: new Map<string, Cartograph>(),
-    // Insertion-ordered set of RESOLVED ROOTS — used for FIFO eviction.
+    // Insertion-ordered set of RESOLVED ROOTS — used for LRU eviction.
     cachedRoots: new Map<string, true>(),
     watchedRoots: new Set<string>(),
     // Per-resolved-root fingerprint of the SQLite file at open time. A
@@ -97,7 +97,10 @@ export class ProjectCache {
    */
   getOrOpen(projectPath: string): Cartograph {
     const cached = this.st.cgsByPath.get(projectPath);
-    if (cached && this.isCachedHandleFresh(cached)) return cached;
+    if (cached && this.isCachedHandleFresh(cached)) {
+      this.touchCachedRoot(cached);
+      return cached;
+    }
     if (cached) {
       // Stale handle (DB file inode/size changed since open). Evict the
       // resolved-root entry and every alias that pointed at the same CG,
@@ -118,6 +121,7 @@ export class ProjectCache {
     const cachedByRoot = this.st.cgsByPath.get(resolvedRoot);
     if (cachedByRoot && this.isCachedHandleFresh(cachedByRoot)) {
       this.st.cgsByPath.set(projectPath, cachedByRoot);
+      this.touchRoot(resolvedRoot);
       return cachedByRoot;
     }
     if (cachedByRoot) this.evictByRoot(resolvedRoot);
@@ -201,12 +205,9 @@ export class ProjectCache {
   }
 
   /**
-   * FIFO eviction: drop the OLDEST cached explicit-project entry when
+   * LRU eviction: drop the least-recently-used cached explicit-project entry when
    * adding a new one would push the cache past MAX_CACHED_PROJECTS.
    * Closes the cg + stops its watcher + drops all alias keys.
-   * (Picked FIFO over LRU because in practice the agent either stays
-   * on one project — `--default-project` — or rotates through a few;
-   * LRU bumping adds complexity without meaningful win in either case.)
    */
   private evictOldestIfFull(): void {
     while (this.st.cachedRoots.size >= MAX_CACHED_PROJECTS) {
@@ -217,6 +218,20 @@ export class ProjectCache {
       if (oldest === undefined) return;
       this.evictByRoot(oldest);
     }
+  }
+
+  private touchCachedRoot(cg: Cartograph): void {
+    try {
+      this.touchRoot(resolvePath(cg.projectRoot));
+    } catch {
+      /* stale/half-closed cached handle; freshness check handles reopening */
+    }
+  }
+
+  private touchRoot(root: string): void {
+    if (!this.st.cachedRoots.has(root)) return;
+    this.st.cachedRoots.delete(root);
+    this.st.cachedRoots.set(root, true);
   }
 
   /**

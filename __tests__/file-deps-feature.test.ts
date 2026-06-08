@@ -12,7 +12,7 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): str
   return result.content[0]!.text;
 }
 
-describe('cartograph_file_deps', () => {
+describe('cartograph_files format=deps', () => {
   let tempDir: string;
   let cg: Cartograph;
   let handler: ToolHandler;
@@ -51,12 +51,14 @@ describe('cartograph_file_deps', () => {
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('is registered as an MCP tool', () => {
-    expect(getToolModules().map((mod) => mod.definition.name)).toContain('cartograph_file_deps');
+  it('is folded into cartograph_files rather than registered as a standalone MCP tool', () => {
+    const names = getToolModules().map((mod) => mod.definition.name);
+    expect(names).toContain('cartograph_files');
+    expect(names).not.toContain('cartograph_file_deps');
   });
 
   it('shows dependencies, dependents, and defined symbols for one file', async () => {
-    const text = textOf(await handler.execute('cartograph_file_deps', { file: 'src/service.ts' }));
+    const text = textOf(await handler.execute('cartograph_files', { format: 'deps', file: 'src/service.ts' }));
     expect(text).toContain('File dependencies for `src/service.ts`');
     expect(text).toContain('### Depends On (1)');
     expect(text).toContain('`src/dep.ts`');
@@ -69,14 +71,20 @@ describe('cartograph_file_deps', () => {
 
   it('can restrict output to dependencies only', async () => {
     const text = textOf(
-      await handler.execute('cartograph_file_deps', { file: 'src/service.ts', direction: 'dependencies' }),
+      await handler.execute('cartograph_files', {
+        format: 'deps',
+        file: 'src/service.ts',
+        direction: 'dependencies',
+      }),
     );
     expect(text).toContain('### Depends On (1)');
     expect(text).not.toContain('### Depended On By');
   });
 
   it('uses compact rows with lowTokens', async () => {
-    const text = textOf(await handler.execute('cartograph_file_deps', { file: 'src/service.ts', lowTokens: true }));
+    const text = textOf(
+      await handler.execute('cartograph_files', { format: 'deps', file: 'src/service.ts', lowTokens: true }),
+    );
     expect(text).toContain('deps src/service.ts');
     expect(text).toContain('dep src/dep.ts');
     expect(text).toContain('by src/consumer.ts');
@@ -85,13 +93,13 @@ describe('cartograph_file_deps', () => {
 
   it('accepts an absolute path inside the project', async () => {
     const text = textOf(
-      await handler.execute('cartograph_file_deps', { file: path.join(tempDir, 'src', 'service.ts') }),
+      await handler.execute('cartograph_files', { format: 'deps', file: path.join(tempDir, 'src', 'service.ts') }),
     );
     expect(text).toContain('File dependencies for `src/service.ts`');
   });
 
   it('returns a clean empty message when the file is not indexed', async () => {
-    const text = textOf(await handler.execute('cartograph_file_deps', { file: 'src/missing.ts' }));
+    const text = textOf(await handler.execute('cartograph_files', { format: 'deps', file: 'src/missing.ts' }));
     expect(text).toContain('No indexed file matched "src/missing.ts"');
     expect(text).toContain('cartograph_files');
   });
