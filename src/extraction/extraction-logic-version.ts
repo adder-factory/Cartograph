@@ -170,6 +170,7 @@ export const EXTRACTION_LOGIC_VERSION = computeAlgoHash('src/extraction/extracti
   // alongside a real extractor edit that DOES flip the hash).
   './languages/registry',
   './languages/apex',
+  './languages/arkts',
   './languages/aura',
   './languages/bash',
   './languages/c-cpp',

@@ -77,6 +77,7 @@ interface Grammar {
  */
 const GRAMMARS: Grammar[] = [
   { wasm: 'apex', pkg: 'tree-sitter-sfapex', subdir: 'apex', sample: 'public class A {}\n', vendored: true },
+  { wasm: 'arkts', pkg: 'tree-sitter-arkts', sample: '@Component\nstruct A { build() {} }\n', vendored: true },
   { wasm: 'typescript', pkg: 'tree-sitter-typescript', subdir: 'typescript', sample: 'const x: number = 1;' },
   { wasm: 'tsx', pkg: 'tree-sitter-typescript', subdir: 'tsx', sample: 'const x = <div/>;' },
   { wasm: 'javascript', pkg: 'tree-sitter-javascript', sample: 'const x = 1;' },
@@ -86,6 +87,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'java', pkg: 'tree-sitter-java', sample: 'class A {}\n' },
   { wasm: 'c', pkg: 'tree-sitter-c', sample: 'int main(){return 0;}\n' },
   { wasm: 'cpp', pkg: 'tree-sitter-cpp', sample: 'int main(){return 0;}\n' },
+  { wasm: 'cuda', pkg: 'tree-sitter-cuda', sample: '__global__ void kernel() {}\n', vendored: true },
   { wasm: 'css', pkg: 'tree-sitter-css', sample: '.a { color: red; }\n' },
   { wasm: 'ruby', pkg: 'tree-sitter-ruby', sample: 'x = 1\n' },
   { wasm: 'bash', pkg: 'tree-sitter-bash', sample: 'x=1\n' },

@@ -29,9 +29,10 @@ import type { LanguageDef } from './types.js';
 // Imports — one per language, alphabetical by name
 // =====================================================================
 import { APEX_DEF } from './apex.js';
+import { ARKTS_DEF } from './arkts.js';
 import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
-import { C_DEF, CPP_DEF } from './c-cpp.js';
+import { C_DEF, CPP_DEF, CUDA_DEF } from './c-cpp.js';
 import { CSHARP_DEF } from './csharp.js';
 import { CSS_DEF } from './css.js';
 import { DART_DEF } from './dart.js';
@@ -87,11 +88,13 @@ import { ZSH_DEF } from './zsh.js';
 // =====================================================================
 const ALL_DEFS: readonly LanguageDef[] = [
   APEX_DEF,
+  ARKTS_DEF,
   AURA_DEF,
   BASH_DEF,
   C_DEF,
   CPP_DEF,
   CSHARP_DEF,
+  CUDA_DEF,
   CSS_DEF,
   DART_DEF,
   ELIXIR_DEF,

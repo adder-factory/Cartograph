@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 54 language modes. The registry is the source of truth:
+Cartograph supports 56 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -19,11 +19,13 @@ does not yet extract language-specific symbols from that grammar.
 | Language mode | Extensions / scope | Extractor path |
 |---|---|---|
 | Apex | `.cls`, `.trigger` | Tree-sitter |
+| ArkTS | `.ets` | Tree-sitter |
 | Aura | `.cmp`, `.app`, `.evt`, `.intf`, `.design`, `.auradoc` in Aura source paths or Aura markup | Custom extractor |
 | Bash | `.sh`, `.bash` | Tree-sitter |
 | C | `.c`, `.h` | Tree-sitter |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Tree-sitter |
 | C# | `.cs` | Tree-sitter |
+| CUDA | `.cu`, `.cuh` | Tree-sitter |
 | CSS | `.css` | Tree-sitter parser-only |
 | Dart | `.dart` | Tree-sitter |
 | Elixir | `.ex`, `.exs` | Tree-sitter |
