@@ -265,7 +265,7 @@ function extractDecoratorCallArgs(
  *  stripped. Handles single/double/backtick delimiters AND the
  *  `string_fragment` (TS/JS) / `string_content` (Kotlin) child the
  *  grammars use when the literal contains escape sequences. */
-function readStringLiteralValue(node: SyntaxNode, source: string): string | null {
+export function readStringLiteralValue(node: SyntaxNode, source: string): string | null {
   // TS/JS grammar: a string node has a `string_fragment` child holding
   // the unquoted payload (handles `'a\nb'` correctly — `\n` is one
   // source char). Kotlin uses `string_content` for the same role.
