@@ -23,7 +23,7 @@
 
 import { z } from 'zod';
 import { lowTokensField, projectPathField } from './_common-fields.js';
-import { numArg } from '../../utils.js';
+import { numArg, validatePathWithinRootReal } from '../../utils.js';
 import { type AtRangeFieldName, textResult, validateStringOutcome } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import type { ToolCtx } from './types.js';
@@ -156,25 +156,10 @@ function applyAtRangeLowTokens(args: AtRangeToolArgs): AtRangeToolArgs {
   return out;
 }
 
-/**
- * Validate that a file path is within the project root. Returns null if valid,
- * or an error message string if the path escapes the project root.
- *
- * Known limitation: this uses `path.resolve` only — symlinks within the
- * project root that point OUTSIDE the root will pass this check (the
- * resolved path is the symlink's location, not its target). For typical
- * agent-facing scoping that's the right behavior (symlinks are an
- * uncommon hostile vector here), but if the project has untrusted
- * symlinks consider `fs.realpathSync` on both sides instead.
- */
 function validateFileWithinRoot(projectRoot: string, filePath: string): string | null {
-  const resolved = path.resolve(projectRoot, filePath);
-  const normalizedRoot = path.resolve(projectRoot);
-  // Ensure resolved path starts with root followed by path separator, or equals root exactly
-  if (resolved === normalizedRoot || resolved.startsWith(normalizedRoot + path.sep)) {
-    return null;
-  }
-  return `file path '${filePath}' is outside the project root.`;
+  return validatePathWithinRootReal(projectRoot, filePath)
+    ? null
+    : `file path '${filePath}' is outside the project root.`;
 }
 
 function toIndexedFilePath(projectRoot: string, filePath: string): string {

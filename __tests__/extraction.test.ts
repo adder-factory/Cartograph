@@ -5572,6 +5572,23 @@ describe('Directory Exclusion', () => {
     expect(files.every((f) => !f.includes('.git'))).toBe(true);
   });
 
+  it('survives non-UTF8 bytes in .gitignore without aborting scan', () => {
+    execFileSync('git', ['init'], { cwd: tempDir, stdio: 'pipe' });
+    fs.writeFileSync(
+      path.join(tempDir, '.gitignore'),
+      Buffer.concat([Buffer.from('src/\n'), Buffer.from([0xff, 0xfe]), Buffer.from('[bad\n')]),
+    );
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tempDir, 'src', 'ignored.ts'), 'export const ignored = 1;\n');
+    fs.writeFileSync(path.join(tempDir, 'visible.ts'), 'export const visible = 1;\n');
+
+    const config = { ...DEFAULT_CONFIG, rootDir: tempDir, include: ['**/*.ts'], exclude: [] };
+    const files = scanDirectory(tempDir, config);
+
+    expect(files).toContain('visible.ts');
+    expect(files).not.toContain('src/ignored.ts');
+  });
+
   it('includes files from gitignored embedded repositories', () => {
     execFileSync('git', ['init'], { cwd: tempDir, stdio: 'pipe' });
     fs.writeFileSync(path.join(tempDir, '.gitignore'), 'embedded/\n');
