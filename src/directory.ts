@@ -6,6 +6,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { readUtf8ControlFile } from './control-file-text.js';
 
 /**
  * Cartograph directory name
@@ -169,7 +170,8 @@ function ensureProjectGitignoresCartographDir(projectRoot: string): void {
       fs.writeFileSync(gitignorePath, `${PROJECT_GITIGNORE_COMMENT}\n${PROJECT_GITIGNORE_ENTRY}\n`, 'utf-8');
       return;
     }
-    const existing = fs.readFileSync(gitignorePath, 'utf-8');
+    const existing = readUtf8ControlFile(gitignorePath, { label: 'project .gitignore', onUnreadable: 'warn' });
+    if (existing === null) return;
     if (gitignoreCoversCartographDir(existing)) return;
     // Append, guaranteeing a newline before our block so we never glue
     // the entry onto a trailing line that lacked a final newline.

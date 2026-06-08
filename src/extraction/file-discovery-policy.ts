@@ -5,6 +5,7 @@ import type { CartographConfig } from '../types.js';
 import { logDebug } from '../errors.js';
 import { matchesGlob as globMatches } from '../glob.js';
 import { normalizePath } from '../utils.js';
+import { readUtf8ControlFile } from '../control-file-text.js';
 
 const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
 
@@ -265,13 +266,8 @@ export function hasCartographIgnoreMarker(dir: string): boolean {
 function loadLocalIgnorePolicy(rootDir: string): LocalIgnorePolicy {
   const ignorePath = path.join(rootDir, LOCAL_IGNORE_FILE);
   if (!fs.existsSync(ignorePath)) return { rules: [], hasIncludeRules: false };
-  let text: string;
-  try {
-    text = fs.readFileSync(ignorePath, 'utf-8');
-  } catch (error) {
-    logDebug('Skipping unreadable local ignore override file', { path: ignorePath, error: String(error) });
-    return { rules: [], hasIncludeRules: false };
-  }
+  const text = readUtf8ControlFile(ignorePath, { label: 'local ignore override file', onUnreadable: 'warn' });
+  if (text === null) return { rules: [], hasIncludeRules: false };
 
   const rules = text
     .split(/\r?\n/)
