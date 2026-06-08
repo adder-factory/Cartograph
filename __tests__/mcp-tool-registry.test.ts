@@ -6,6 +6,7 @@
  * with the wrong shape).
  */
 import { describe, it, expect } from 'vitest';
+import { getLanguageDefs } from '../src/extraction/languages/registry.js';
 import { MCP_LOAD_BUDGET_LIMITS, MCP_LOAD_BUDGET_TARGETS } from '../src/mcp/load-budget.js';
 import { FULL_PLAYBOOK, SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { getToolModules, tools as registryTools } from '../src/mcp/tools/registry.js';
@@ -146,7 +147,7 @@ describe('MCP tool registry — single source of truth', () => {
     expect(text).toMatch(/cartograph_playbook/);
     expect(SERVER_INSTRUCTIONS).toMatch(/compact startup guide/);
     expect(SERVER_INSTRUCTIONS).toMatch(/cartograph_playbook/);
-    expect(SERVER_INSTRUCTIONS).toMatch(/56 language modes/);
+    expect(SERVER_INSTRUCTIONS).toContain(`${getLanguageDefs().length} language modes`);
   });
 
   it('execute() reports unknown-tool errors', async () => {

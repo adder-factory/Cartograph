@@ -1,3 +1,7 @@
+import { getLanguageDefs } from '../extraction/languages/registry.js';
+
+const LANGUAGE_MODE_COUNT = getLanguageDefs().length;
+
 /**
  * Compact instructions emitted in the MCP `initialize` response.
  *
@@ -10,7 +14,7 @@ export const SERVER_INSTRUCTIONS = `# Cartograph — compact startup guide
 
 Cartograph is an indexed code graph. Use it before broad file reads, then
 open files directly only when you need exact current source. It indexes
-56 language modes, including TypeScript/JavaScript, ArkTS, Python, Go, Rust,
+${LANGUAGE_MODE_COUNT} language modes, including TypeScript/JavaScript, ArkTS, Python, Go, Rust,
 Java, C/C++, C#, CUDA, PHP, Ruby, Swift, Kotlin, Groovy, Solidity, SQL,
 GraphQL, Svelte, Vue, and more.
 
