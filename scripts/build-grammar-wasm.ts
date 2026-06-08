@@ -87,6 +87,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'java', pkg: 'tree-sitter-java', sample: 'class A {}\n' },
   { wasm: 'c', pkg: 'tree-sitter-c', sample: 'int main(){return 0;}\n' },
   { wasm: 'clojure', pkg: 'tree-sitter-clojure', sample: '(defn greet [name] (str name))\n' },
+  { wasm: 'common_lisp', pkg: 'tree-sitter-commonlisp', sample: '(defun greet (name) name)\n' },
   { wasm: 'cpp', pkg: 'tree-sitter-cpp', sample: 'int main(){return 0;}\n' },
   { wasm: 'cuda', pkg: 'tree-sitter-cuda', sample: '__global__ void kernel() {}\n', vendored: true },
   { wasm: 'css', pkg: 'tree-sitter-css', sample: '.a { color: red; }\n' },

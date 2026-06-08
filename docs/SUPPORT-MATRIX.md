@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 60 language modes. The registry is the source of truth:
+Cartograph supports 61 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -24,6 +24,7 @@ does not yet extract language-specific symbols from that grammar.
 | Bash | `.sh`, `.bash` | Tree-sitter |
 | C | `.c`, `.h` | Tree-sitter |
 | Clojure / ClojureScript | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` | Tree-sitter |
+| Common Lisp | `.lisp`, `.lsp`, `.l`, `.cl`, `.asd`, `.ros` | Tree-sitter |
 | C++ | `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx` | Tree-sitter |
 | C# | `.cs` | Tree-sitter |
 | CUDA | `.cu`, `.cuh` | Tree-sitter |

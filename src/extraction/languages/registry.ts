@@ -34,6 +34,7 @@ import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
 import { C_DEF, CPP_DEF, CUDA_DEF } from './c-cpp.js';
 import { CLOJURE_DEF } from './clojure.js';
+import { COMMON_LISP_DEF } from './common-lisp.js';
 import { CSHARP_DEF } from './csharp.js';
 import { CSS_DEF } from './css.js';
 import { DART_DEF } from './dart.js';
@@ -97,6 +98,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   BASH_DEF,
   C_DEF,
   CLOJURE_DEF,
+  COMMON_LISP_DEF,
   CPP_DEF,
   CSHARP_DEF,
   CUDA_DEF,

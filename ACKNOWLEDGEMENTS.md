@@ -19,9 +19,10 @@ queries, generic supertype normalization for inheritance edges, `.ignore`
 indexing overrides for gitignored local source, binary/invalid ignore-file
 resilience, OpenTofu `.tofu` detection, GLSL shader indexing,
 Groovy/Solidity indexing, ArkTS/CUDA indexing, HLSL shader indexing, Nix
-expression indexing, Clojure/ClojureScript indexing, TypeScript generic
-string-literal contract symbols, non-ASCII context-query keyword extraction,
-and context lookup from code-like source strings. Those ideas, along with
+expression indexing, Clojure/ClojureScript indexing, Common Lisp indexing,
+TypeScript generic string-literal contract symbols, non-ASCII context-query
+keyword extraction, and context lookup from code-like source strings. Those
+ideas, along with
 PowerShell CLI completion
 support, were reimplemented inside Cartograph's current feature-slice
 architecture; CodeIgniter 3 routing and magic model/library property support was
@@ -53,6 +54,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | java | [tree-sitter/tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | MIT |
 | c | [tree-sitter/tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | MIT |
 | clojure | [oakmac/tree-sitter-clojure](https://github.com/oakmac/tree-sitter-clojure) | MIT |
+| common_lisp | [theHamsta/tree-sitter-commonlisp](https://github.com/theHamsta/tree-sitter-commonlisp) | MIT |
 | cpp | [tree-sitter/tree-sitter-cpp](https://github.com/tree-sitter/tree-sitter-cpp) | MIT |
 | cuda | [tree-sitter-grammars/tree-sitter-cuda](https://github.com/tree-sitter-grammars/tree-sitter-cuda) | MIT |
 | c_sharp | [tree-sitter/tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | MIT |
