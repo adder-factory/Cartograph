@@ -22,7 +22,7 @@ cartograph status [path] --json    # automation shape: version, index path,
 cartograph viewer [path]           # local graph viewer
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
-cartograph completions bash        # shell completions: bash, zsh, fish
+cartograph completions bash        # shell completions: bash, zsh, fish, powershell
 ```
 
 Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
@@ -34,8 +34,9 @@ For Claude Code, `--location=local` uses Claude's private project scope:
 `.claude/settings.local.json` and `CLAUDE.local.md` stay in the repository
 worktree and are added to `.gitignore`.
 
-Install completions by sourcing the generated script in your shell startup
-file, for example `cartograph completions zsh`.
+Install completions by loading the generated script in your shell startup file,
+for example `cartograph completions zsh` or `cartograph completions powershell`
+in your PowerShell profile.
 
 Use `cartograph install --command <path>` when a GUI-launched agent cannot
 resolve `cartograph` from PATH. The installer writes that executable path into

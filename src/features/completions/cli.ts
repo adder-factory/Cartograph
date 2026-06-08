@@ -23,7 +23,7 @@ export interface CompletionsCommandDeps {
 export function registerCompletionsCommand(deps: CompletionsCommandDeps): void {
   const visible = deps.program
     .command('completions <shell>')
-    .description('Print shell completion setup for bash, zsh, or fish') as CompletionCliCommand;
+    .description('Print shell completion setup for bash, zsh, fish, or PowerShell') as CompletionCliCommand;
 
   visible.alias?.('completion');
   visible.action((shellValue: string) => {
