@@ -47,6 +47,7 @@ export type MetadataKey =
   | 'last_mined_string_imports_algo_version'
   | 'last_mined_build_context_refs_algo_version'
   | 'last_mined_value_ref_edges_algo_version'
+  | 'last_mined_dynamic_dispatch_algo_version'
   | 'last_mined_go_implements_algo_version'
   | 'last_mined_nestjs_routes_algo_version'
   | 'last_mined_spring_value_binding_algo_version'

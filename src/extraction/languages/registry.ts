@@ -28,8 +28,10 @@ import type { LanguageDef } from './types.js';
 // =====================================================================
 // Imports — one per language, alphabetical by name
 // =====================================================================
+import { ABAP_DEF } from './abap.js';
 import { APEX_DEF } from './apex.js';
 import { ARKTS_DEF } from './arkts.js';
+import { ASTRO_DEF } from './astro.js';
 import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
 import { C_DEF, CPP_DEF, CUDA_DEF } from './c-cpp.js';
@@ -57,6 +59,7 @@ import { JUPYTER_DEF } from './jupyter.js';
 import { JSX_DEF } from './jsx.js';
 import { JULIA_DEF } from './julia.js';
 import { KOTLIN_DEF } from './kotlin.js';
+import { LEAN_DEF } from './lean.js';
 import { LIQUID_DEF } from './liquid.js';
 import { LUA_DEF } from './lua.js';
 import { LUAU_DEF } from './luau.js';
@@ -81,6 +84,7 @@ import { SVELTE_DEF } from './svelte.js';
 import { SWIFT_DEF } from './swift.js';
 import { TSX_DEF } from './tsx.js';
 import { TYPESCRIPT_DEF } from './typescript.js';
+import { VBNET_DEF } from './vbnet.js';
 import { VERILOG_DEF } from './verilog.js';
 import { VISUALFORCE_DEF } from './visualforce.js';
 import { VUE_DEF } from './vue.js';
@@ -92,8 +96,10 @@ import { ZSH_DEF } from './zsh.js';
 // Registry — alphabetical by name
 // =====================================================================
 const ALL_DEFS: readonly LanguageDef[] = [
+  ABAP_DEF,
   APEX_DEF,
   ARKTS_DEF,
+  ASTRO_DEF,
   AURA_DEF,
   BASH_DEF,
   C_DEF,
@@ -123,6 +129,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   JSX_DEF,
   JULIA_DEF,
   KOTLIN_DEF,
+  LEAN_DEF,
   LIQUID_DEF,
   LUA_DEF,
   LUAU_DEF,
@@ -147,6 +154,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   SWIFT_DEF,
   TSX_DEF,
   TYPESCRIPT_DEF,
+  VBNET_DEF,
   VERILOG_DEF,
   VISUALFORCE_DEF,
   VUE_DEF,

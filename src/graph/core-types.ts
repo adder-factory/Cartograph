@@ -50,8 +50,10 @@ export type EdgeKind =
   | 'def_use';
 
 export type Language =
+  | 'abap'
   | 'apex'
   | 'arkts'
+  | 'astro'
   | 'aura'
   | 'typescript'
   | 'javascript'
@@ -72,6 +74,7 @@ export type Language =
   | 'ruby'
   | 'swift'
   | 'kotlin'
+  | 'lean'
   | 'dart'
   | 'embedded_template'
   | 'svelte'
@@ -107,6 +110,7 @@ export type Language =
   | 'prisma'
   | 'properties'
   | 'solidity'
+  | 'vbnet'
   | 'verilog'
   | 'visualforce'
   | 'xml'

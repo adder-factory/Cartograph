@@ -3,9 +3,9 @@
  *
  * Multi-target: writes MCP server config + instructions for the
  * agents the user picks (Claude Code, Cursor, Codex CLI, GitHub
- * Copilot CLI, CodeWhale, opencode, Hermes, Gemini CLI, Antigravity,
- * Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code,
- * Reasonix).
+ * Copilot CLI, CodeBuddy, CodeWhale, opencode, Hermes, Gemini CLI,
+ * Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob,
+ * Kimi Code, Pi Agent, Reasonix).
  * Defaults to the Claude-only behavior for backwards compatibility
  * when no targets are explicitly chosen and nothing else is detected.
  *

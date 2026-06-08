@@ -21,10 +21,12 @@ resilience, OpenTofu `.tofu` detection, GLSL shader indexing,
 Groovy/Solidity indexing, ArkTS/CUDA indexing, HLSL shader indexing, Nix
 expression indexing, Clojure/ClojureScript indexing, Common Lisp indexing,
 CodeWhale installer targeting, TypeScript generic string-literal contract
-symbols, non-ASCII context-query keyword extraction, and context lookup from
-code-like source strings. Those ideas, along with
-PowerShell CLI completion
-support, were reimplemented inside Cartograph's current feature-slice
+symbols, non-ASCII context-query keyword extraction, context lookup from
+code-like source strings, CodeBuddy/Pi MCP target evaluation, ABAP/abapGit,
+VB.NET, Astro, and Lean language support, Angular/Flutter/Symfony/NeuG
+framework/resource extraction, and heuristic dynamic-dispatch synthesis. Those
+ideas, along with PowerShell CLI completion support, were reimplemented inside
+Cartograph's current feature-slice
 architecture; CodeIgniter 3 routing and magic model/library property support was
 likewise implemented as a native Cartograph resolver. No upstream patch code was
 copied blindly. Public
@@ -46,7 +48,9 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | Grammar (.wasm) | Upstream project | License |
 |---|---|---|
 | typescript, tsx | [tree-sitter/tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript) | MIT |
+| abap | [mkoval1/tree-sitter-abap](https://github.com/mkoval1/tree-sitter-abap) | ISC |
 | arkts | [harmony-contrib/tree-sitter-arkts](https://github.com/harmony-contrib/tree-sitter-arkts) | MIT |
+| astro | [virchau13/tree-sitter-astro](https://github.com/virchau13/tree-sitter-astro) | MIT |
 | javascript (also serves jsx) | [tree-sitter/tree-sitter-javascript](https://github.com/tree-sitter/tree-sitter-javascript) | MIT |
 | python | [tree-sitter/tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) | MIT |
 | go | [tree-sitter/tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) | MIT |
@@ -63,6 +67,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | php | [tree-sitter/tree-sitter-php](https://github.com/tree-sitter/tree-sitter-php) | MIT |
 | apex | [aheber/tree-sitter-sfapex](https://github.com/aheber/tree-sitter-sfapex) | MIT |
 | kotlin | [fwcd/tree-sitter-kotlin](https://github.com/fwcd/tree-sitter-kotlin) | MIT |
+| lean | [Julian/tree-sitter-lean](https://github.com/Julian/tree-sitter-lean) | MIT |
 | scala | [tree-sitter/tree-sitter-scala](https://github.com/tree-sitter/tree-sitter-scala) | MIT |
 | swift | [alex-pinkus/tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) | MIT |
 | objc | [jiyee/tree-sitter-objc](https://github.com/jiyee/tree-sitter-objc) | MIT |
@@ -83,8 +88,9 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | elixir | [elixir-lang/tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) | Apache-2.0 |
 | yaml | [tree-sitter-grammars/tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT |
 | solidity | tree-sitter-solidity by Joran Honig | MIT |
+| vbnet | [CodeAnt-AI/tree-sitter-vb-dotnet](https://github.com/CodeAnt-AI/tree-sitter-vb-dotnet) | MIT |
 
-Each compiled `.wasm` carries the license of its originating grammar (MIT except `hcl` and `elixir`, which are Apache-2.0). Grammar attributions are derived from `scripts/build-grammar-wasm.ts`; if a project has moved or a license has changed, please open an issue and we'll correct the credit.
+Each compiled `.wasm` carries the license of its originating grammar (MIT except `hcl` and `elixir`, which are Apache-2.0, and `abap`, which is ISC). Grammar attributions are derived from `scripts/build-grammar-wasm.ts`; if a project has moved or a license has changed, please open an issue and we'll correct the credit.
 
 Additionally, `src/extraction/tags/elixir.scm` is vendored verbatim from **tree-sitter-elixir**'s `queries/tags.scm` (Apache-2.0).
 

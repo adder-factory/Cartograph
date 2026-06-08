@@ -80,6 +80,20 @@ similar extraction or resolver gaps:
   on those receivers and synthesizes local `app.route('/prefix', router)`
   mounted paths. This avoids broadening Express's `app|router` regex and keeps
   language gating explicit.
+- **Literal route arrays/maps are framework extractors, not import-resolver
+  hacks.** Angular (`src/resolution/frameworks/angular.ts`) and Flutter
+  (`src/resolution/frameworks/flutter.ts`) synthesize `route` nodes from
+  static route declarations and emit unresolved refs to routed components.
+  Keep these scanners conservative: literal route paths, bounded object/window
+  parsing, explicit `languages`, and package/file detection in `detect()`.
+- **Controller-string frameworks should claim only their controller ref shape.**
+  Symfony (`src/resolution/frameworks/symfony.ts`) emits YAML/PHP route nodes
+  and claims `Controller::method` strings so the normal prefilter lets its
+  resolver see those names. Avoid broad `claimsReference()` patterns.
+- **Resource-oriented packages can be resource extractors.** NeuG support
+  (`src/resolution/frameworks/neug.ts`) mines literal Python graph resources
+  into `kind:'resource'` nodes only after dependency/import detection. Do not
+  invent runtime graph semantics when the package API is dynamic.
 - **Spring config annotations stay in the Spring config-binding hook.**
   `@ConditionalOnProperty` reads `Node.decoratorArgs` alongside `@Value`,
   normalizes `prefix + name/value`, and emits `references` edges to
@@ -336,6 +350,11 @@ Provenance: BACKLOG.md "B12 sub-channel 4"; tests in
   are existing nodes; the match key is a parsed string), `kind:'calls'` +
   `confidence:'INFERRED'` + `metadata.synthesizedBy`, with a fan-out cap
   (`EVENT_FANOUT_CAP=6`) to skip too-generic names.
+- **Dynamic dispatch tables are inferred calls, not extracted calls.**
+  `dynamic-dispatch` (`src/index-hooks/dynamic-dispatch.ts`) scans same-file
+  TS/JS object/Map tables such as `HANDLERS[kind]?.()` and emits bounded
+  `calls` edges with `confidence:'INFERRED'`. Keep the fanout cap low and
+  same-file only unless a later resolver can prove cross-file table imports.
 
 Provenance: BACKLOG.md "B12 sub-channel 5" + "F#85"; tests in
 `__tests__/rn-event-channel.test.ts` + `__tests__/hook-algo-versions.test.ts`.

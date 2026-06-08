@@ -46,6 +46,33 @@ done
 bun test __tests__/tree-sitter-upstream-languages.test.ts __tests__/language-registry.test.ts
 ```
 
+## Codegraph-Idea Language Tranche (2026-06-08)
+
+These assets add ABAP/abapGit, Astro, Lean, and VB.NET support. ABAP, Astro,
+and Lean were built from pinned Git commits because their npm packages do not
+ship a bundled WASM artifact. VB.NET was built from its npm package.
+
+| Asset | SHA-256 | Source package target | Package integrity / source pin | Repository | License |
+|---|---|---|---|---|---|
+| `src/extraction/wasm/abap.wasm` | `1081a6862be801e076df86b32318665497f46a7883bd26e49174b50b9fb3f4c9` | `tree-sitter-abap@1.0.0` | Git commit `c7604df9e25d56ae879fa25694fd9f2ddbab05d8` | `https://github.com/mkoval1/tree-sitter-abap` | ISC |
+| `src/extraction/wasm/astro.wasm` | `e9e2949d21b7dc33bd11cc58a78d7038b1ae8f640aa6c46872c6a72f38158778` | `tree-sitter-astro@0.0.1` | Git commit `213f6e6973d9b456c6e50e86f19f66877e7ef0ee` | `https://github.com/virchau13/tree-sitter-astro` | MIT |
+| `src/extraction/wasm/lean.wasm` | `cbaf45e3dfad3d5c025352ce9b97895748313d4b2dc238ea554a5cdd0c503191` | `tree-sitter-lean@0.2.0` | Git commit `5255dc53a4e4f423f1978018ab430b6f9100f645` | `https://github.com/Julian/tree-sitter-lean` | MIT |
+| `src/extraction/wasm/vbnet.wasm` | `a54f7e5919476f119e0ac65054ca9b9307d156970defe70a5489b5d72c2f7fbb` | `tree-sitter-vb-dotnet@0.1.9` | `sha512-Qau+yoj2BTsZNWFUlfQ23X6gNfDC/P3TXFiKdKAUK1bUrHwIngD2mfLYgtqNZQ4C7RP/M9pvcYx7g7fddviYhg==` | `https://github.com/CodeAnt-AI/tree-sitter-vb-dotnet` | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps \
+  tree-sitter-vb-dotnet@0.1.9 \
+  github:virchau13/tree-sitter-astro#213f6e6973d9b456c6e50e86f19f66877e7ef0ee \
+  github:Julian/tree-sitter-lean#5255dc53a4e4f423f1978018ab430b6f9100f645 \
+  github:mkoval1/tree-sitter-abap#c7604df9e25d56ae879fa25694fd9f2ddbab05d8
+for g in abap astro lean vbnet; do
+  bun scripts/build-grammar-wasm.ts --only="$g" --force-build
+done
+bun test __tests__/borrowed-language-support.test.ts __tests__/language-registry.test.ts
+```
+
 ## HLSL
 
 | Field | Value |

@@ -42,6 +42,7 @@ import { HOOK as BUILD_CONTEXT_REFS_HOOK } from './build-context-refs.js';
 import { HOOK as CONFIG_REFS_HOOK } from './config-refs.js';
 import { HOOK as ISSUE_HISTORY_HOOK } from './issue-history.js';
 import { HOOK as SQL_REFS_HOOK } from './sql-refs.js';
+import { HOOK as DYNAMIC_DISPATCH_HOOK } from './dynamic-dispatch.js';
 import { HOOK as DYNAMIC_IMPORT_EDGES_HOOK } from './dynamic-import-edges.js';
 import { HOOK as RE_EXPORT_EDGES_HOOK } from './re-export-edges.js';
 import { HOOK as STRING_IMPORTS_HOOK } from './string-imports.js';
@@ -145,6 +146,7 @@ const HOOK_GROUPS: ReadonlyArray<{ readonly group: 'A' | 'B' | 'C'; readonly hoo
     hooks: [
       BUILD_CONTEXT_REFS_HOOK,
       CONFIG_REFS_HOOK,
+      DYNAMIC_DISPATCH_HOOK,
       DYNAMIC_IMPORT_EDGES_HOOK,
       RE_EXPORT_EDGES_HOOK,
       SQL_REFS_HOOK,

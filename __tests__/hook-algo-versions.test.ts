@@ -19,6 +19,7 @@ import { NESTJS_ROUTES_ALGO_VERSION } from '../src/index-hooks/nestjs-routes.js'
 import { MYBATIS_BINDING_ALGO_VERSION } from '../src/index-hooks/mybatis-binding.js';
 import { SPRING_VALUE_BINDING_ALGO_VERSION } from '../src/index-hooks/spring-value-binding.js';
 import { VALUE_REF_EDGES_ALGO_VERSION } from '../src/index-hooks/value-ref-edges.js';
+import { DYNAMIC_DISPATCH_ALGO_VERSION } from '../src/index-hooks/dynamic-dispatch.js';
 import { FABRIC_NATIVE_IMPL_ALGO_VERSION } from '../src/index-hooks/fabric-native-impl.js';
 import { RN_EVENT_CHANNEL_ALGO_VERSION } from '../src/index-hooks/rn-event-channel.js';
 
@@ -34,6 +35,7 @@ const HOOK_ALGO_VERSIONS: Readonly<Record<string, string>> = {
   'mybatis-binding': MYBATIS_BINDING_ALGO_VERSION,
   'spring-value-binding': SPRING_VALUE_BINDING_ALGO_VERSION,
   'value-ref-edges': VALUE_REF_EDGES_ALGO_VERSION,
+  'dynamic-dispatch': DYNAMIC_DISPATCH_ALGO_VERSION,
   'fabric-native-impl': FABRIC_NATIVE_IMPL_ALGO_VERSION,
   'rn-event-channel': RN_EVENT_CHANNEL_ALGO_VERSION,
 };

@@ -25,6 +25,7 @@ export type TargetId =
   | 'codex'
   | 'copilot'
   | 'codewhale'
+  | 'codebuddy'
   | 'zed'
   | 'opencode'
   | 'hermes'
@@ -36,6 +37,7 @@ export type TargetId =
   | 'qoder'
   | 'bob'
   | 'kimi'
+  | 'pi'
   | 'reasonix';
 
 /**

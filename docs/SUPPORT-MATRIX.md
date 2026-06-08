@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 61 language modes. The registry is the source of truth:
+Cartograph supports 65 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -18,8 +18,10 @@ does not yet extract language-specific symbols from that grammar.
 
 | Language mode | Extensions / scope | Extractor path |
 |---|---|---|
+| ABAP | `.abap` | Tree-sitter |
 | Apex | `.cls`, `.trigger` | Tree-sitter |
 | ArkTS | `.ets` | Tree-sitter |
+| Astro | `.astro` | Tree-sitter plus frontmatter/template extractor |
 | Aura | `.cmp`, `.app`, `.evt`, `.intf`, `.design`, `.auradoc` in Aura source paths or Aura markup | Custom extractor |
 | Bash | `.sh`, `.bash` | Tree-sitter |
 | C | `.c`, `.h` | Tree-sitter |
@@ -49,6 +51,7 @@ does not yet extract language-specific symbols from that grammar.
 | JSX | `.jsx` | Tree-sitter |
 | Julia | `.jl` | Tree-sitter tags query |
 | Kotlin | `.kt`, `.kts` | Tree-sitter |
+| Lean | `.lean` | Tree-sitter |
 | Liquid | `.liquid` | Custom extractor |
 | Lua | `.lua` | Tree-sitter |
 | Luau | `.luau` | Tree-sitter |
@@ -73,6 +76,7 @@ does not yet extract language-specific symbols from that grammar.
 | Swift | `.swift` | Tree-sitter |
 | TSX | `.tsx` | Tree-sitter |
 | TypeScript | `.ts`, `.mts`, `.cts` | Tree-sitter |
+| VB.NET | `.vb` | Tree-sitter |
 | Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
 | Visualforce | `.page`, `.component` | Custom extractor |
 | Vue | `.vue` | Custom extractor |
@@ -84,6 +88,10 @@ Special cases:
 
 - Play Framework route files at `conf/routes` and `conf/*.routes` are treated
   as YAML so route declarations can be extracted.
+- abapGit-style `*.clas.abap` / `*.intf.abap` paths are covered through the
+  `.abap` extension; implementation blocks provide ABAP method containment.
+- Astro files emit a component node, extract TypeScript frontmatter, and mine
+  PascalCase template component references plus expression calls.
 - Salesforce DX source roots such as `force-app/main/default` are recognized.
   Apex `.cls` / `.trigger` files use a tree-sitter grammar, while Aura and
   Visualforce markup use custom extractors for controller refs, component refs,
@@ -116,14 +124,15 @@ Special cases:
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
-| Python | Django, Flask, and FastAPI route/controller patterns |
-| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, and CodeIgniter 3 routes/controller/model/library conventions |
+| JavaScript / TypeScript | Angular routes, Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
+| Python | Django, Flask, FastAPI route/controller patterns, and NeuG graph resource landmarks |
+| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, Symfony routes/controllers, and CodeIgniter 3 routes/controller/model/library conventions |
 | Ruby | Rails routes and controller conventions |
 | JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids, Kotlin/Scala source extraction |
 | Go | Gin, Echo, Chi, net/http, Cobra commands, interface implementation edges |
 | Rust | Framework and route patterns recognized by the Rust resolver |
 | C# | ASP.NET route/controller patterns |
+| Dart / Flutter | `MaterialApp.routes` and `GoRoute(path:)` route nodes with widget references |
 | Swift / Apple | SwiftUI, UIKit, Vapor, Swift/Objective-C bridge edges |
 | React Native / Expo | Legacy bridge, TurboModules, Expo Modules, Fabric/Paper view components and native implementation edges |
 | Salesforce | LWC `@salesforce/apex` imports, LWC/Aura component refs, Aura client/server actions, Visualforce controller/actions |
@@ -140,6 +149,7 @@ framework, so generic codebases do not pay the full resolver cost.
 | Prisma / SQL | Models, tables, views, functions, triggers, schemas, and table references |
 | Env/config refs | Env-var, config-key, feature-flag, and build-context reference edges |
 | Dynamic imports | String import and dynamic import edges |
+| Dynamic dispatch | Bounded TS/JS object/Map dispatch-table call edges marked `INFERRED` |
 | Re-exports | Barrel-file and re-export edges |
 | Tests | Import-based test edges and test-name signals |
 | Coverage | LCOV joins to file and symbol records |

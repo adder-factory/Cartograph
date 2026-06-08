@@ -762,7 +762,8 @@ export function tsExtractStruct(ext: TreeSitterExtractor, node: SyntaxNode): voi
   if (!ext.extractor) return;
 
   // Skip forward declarations and type references (no body = not a definition)
-  const body = getChildByField(node, ext.extractor.bodyField);
+  const body =
+    ext.extractor.resolveBody?.(node, ext.extractor.bodyField) ?? getChildByField(node, ext.extractor.bodyField);
   if (!body) return;
 
   const name = extractName(node, ext.source, ext.extractor);

@@ -76,8 +76,20 @@ interface Grammar {
  * later language-slice additions).
  */
 const GRAMMARS: Grammar[] = [
+  {
+    wasm: 'abap',
+    pkg: 'tree-sitter-abap',
+    sample: 'CLASS zcl_demo DEFINITION.\nENDCLASS.\n',
+    vendored: true,
+  },
   { wasm: 'apex', pkg: 'tree-sitter-sfapex', subdir: 'apex', sample: 'public class A {}\n', vendored: true },
   { wasm: 'arkts', pkg: 'tree-sitter-arkts', sample: '@Component\nstruct A { build() {} }\n', vendored: true },
+  {
+    wasm: 'astro',
+    pkg: 'tree-sitter-astro',
+    sample: '---\nconst title = "Hi";\n---\n<h1>{title}</h1>\n',
+    vendored: true,
+  },
   { wasm: 'typescript', pkg: 'tree-sitter-typescript', subdir: 'typescript', sample: 'const x: number = 1;' },
   { wasm: 'tsx', pkg: 'tree-sitter-typescript', subdir: 'tsx', sample: 'const x = <div/>;' },
   { wasm: 'javascript', pkg: 'tree-sitter-javascript', sample: 'const x = 1;' },
@@ -110,6 +122,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'jsdoc', pkg: 'tree-sitter-jsdoc', sample: '/** Adds one. */\n' },
   { wasm: 'json', pkg: 'tree-sitter-json', sample: '{ "x": 1 }\n' },
   { wasm: 'julia', pkg: 'tree-sitter-julia', sample: 'module M\nx = 1\nend\n' },
+  { wasm: 'lean', pkg: 'tree-sitter-lean', sample: 'def hello : Nat := 1\n', vendored: true },
   { wasm: 'lua', pkg: '@tree-sitter-grammars/tree-sitter-lua', sample: 'local x = 1\n' },
   {
     wasm: 'luau',
@@ -125,6 +138,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'ocaml_interface', pkg: 'tree-sitter-ocaml', sample: 'val x : int\n', tagsScm: true },
   { wasm: 'prisma', pkg: 'tree-sitter-prisma', sample: 'model A {\n  id Int @id\n}\n' },
   { wasm: 'regex', pkg: 'tree-sitter-regex', sample: '^[a-z]+$\n' },
+  { wasm: 'vbnet', pkg: 'tree-sitter-vb-dotnet', sample: 'Public Class Greeter\nEnd Class\n' },
   { wasm: 'verilog', pkg: 'tree-sitter-verilog', sample: 'module top; endmodule\n' },
   // ── currently vendored — source packages not in package.json ──────
   // dart: `tree-sitter-dart@1.0.0` ships a BUNDLED `tree-sitter-dart.wasm`
