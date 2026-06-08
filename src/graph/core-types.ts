@@ -62,6 +62,7 @@ export type Language =
   | 'rust'
   | 'java'
   | 'c'
+  | 'clojure'
   | 'cpp'
   | 'csharp'
   | 'cuda'

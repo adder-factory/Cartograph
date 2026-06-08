@@ -692,7 +692,7 @@ describe('CLI uninit', () => {
 // =============================================================================
 
 describe('Tree-sitter web-tree-sitter (WASM) setup (re-adopted 2026-05-17)', () => {
-  it('should use web-tree-sitter as a runtime dep with 49 grammar .wasm files in-repo', () => {
+  it('should use web-tree-sitter as a runtime dep with 50 grammar .wasm files in-repo', () => {
     const pkgPath = path.join(__dirname, '..', 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
 
@@ -704,7 +704,7 @@ describe('Tree-sitter web-tree-sitter (WASM) setup (re-adopted 2026-05-17)', () 
     expect(pkg.dependencies['tree-sitter-wasms']).toBeUndefined();
     expect(pkg.devDependencies?.['tree-sitter-wasms']).toBeUndefined();
 
-    // 49 grammar .wasm files ship in-repo (25 from the web-tree-sitter
+    // 50 grammar .wasm files ship in-repo (25 from the web-tree-sitter
     // re-adoption + elixir.wasm — tags.scm fallback extractor, 2026-05-17;
     // prisma.wasm — 2026-05-19; yaml.wasm — F#62 Drupal routing.yml
     // resolver, 2026-05-26; objc.wasm — F#65 Objective-C language,
@@ -715,12 +715,13 @@ describe('Tree-sitter web-tree-sitter (WASM) setup (re-adopted 2026-05-17)', () 
     // Codegraph-inspired language coverage, 2026-06-08; arkts.wasm +
     // cuda.wasm — follow-on language coverage, 2026-06-08; hlsl.wasm —
     // HLSL shader support, 2026-06-08; nix.wasm — Nix expression
+    // indexing, 2026-06-08; clojure.wasm — Clojure/ClojureScript
     // indexing, 2026-06-08).
     // Exact count, not a lower bound; a regression dropping any grammar
     // should fail this guard.
     const wasmDir = path.join(__dirname, '..', 'src', 'extraction', 'wasm');
     const wasms = fs.readdirSync(wasmDir).filter((f) => f.endsWith('.wasm'));
-    expect(wasms.length).toBe(49);
+    expect(wasms.length).toBe(50);
   });
 
   it('should carry web-tree-sitter as a runtime dependency, not dev-only', () => {

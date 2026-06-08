@@ -33,6 +33,7 @@ import { ARKTS_DEF } from './arkts.js';
 import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
 import { C_DEF, CPP_DEF, CUDA_DEF } from './c-cpp.js';
+import { CLOJURE_DEF } from './clojure.js';
 import { CSHARP_DEF } from './csharp.js';
 import { CSS_DEF } from './css.js';
 import { DART_DEF } from './dart.js';
@@ -95,6 +96,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   AURA_DEF,
   BASH_DEF,
   C_DEF,
+  CLOJURE_DEF,
   CPP_DEF,
   CSHARP_DEF,
   CUDA_DEF,
