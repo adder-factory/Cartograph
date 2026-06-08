@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 57 language modes. The registry is the source of truth:
+Cartograph supports 58 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -32,6 +32,7 @@ does not yet extract language-specific symbols from that grammar.
 | ERB / EJS | `.erb`, `.ejs`, `.eta`, `.etlua` | Tree-sitter parser-only |
 | Fish | `.fish` | Tree-sitter |
 | GLSL | `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese` | Tree-sitter |
+| HLSL | `.hlsl`, `.hlsli`, `.fx`, `.fxh` | Tree-sitter |
 | Go | `.go` | Tree-sitter |
 | GraphQL | `.graphql`, `.gql` | Tree-sitter |
 | Groovy | `.groovy`, `.gradle` | Tree-sitter |

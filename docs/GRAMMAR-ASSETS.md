@@ -46,6 +46,25 @@ done
 bun test __tests__/tree-sitter-upstream-languages.test.ts __tests__/language-registry.test.ts
 ```
 
+## HLSL
+
+| Field | Value |
+|---|---|
+| Checked-in asset | `src/extraction/wasm/hlsl.wasm` |
+| SHA-256 | `4b78f6b5121164ea5c02935864f314fb118ed286d0f4d91582fd91457cb6db2a` |
+| Source package target | `tree-sitter-hlsl@0.2.0` |
+| Package integrity | `sha512-nwPhvXJjBueq32kYSjrqc5NgqajCkllHeSlHp0VrGRwe+Dk5jSa2yoTE1+BHy/INVKOIigT4/gqW6DgWFoApeg==` |
+| Repository | `https://github.com/tree-sitter-grammars/tree-sitter-hlsl` |
+| License | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false tree-sitter-hlsl@0.2.0
+bun scripts/build-grammar-wasm.ts --only=hlsl --force-build
+bun test __tests__/glsl-extraction.test.ts __tests__/language-registry.test.ts
+```
+
 ## Apex / Salesforce
 
 | Field | Value |

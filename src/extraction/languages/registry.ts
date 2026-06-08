@@ -45,6 +45,7 @@ import { GRAPHQL_DEF } from './graphql.js';
 import { GROOVY_DEF } from './groovy.js';
 import { HASKELL_DEF } from './haskell.js';
 import { HCL_DEF } from './hcl.js';
+import { HLSL_DEF } from './hlsl.js';
 import { HTML_DEF } from './html.js';
 import { JAVA_DEF } from './java.js';
 import { JAVASCRIPT_DEF } from './javascript.js';
@@ -107,6 +108,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   GROOVY_DEF,
   HASKELL_DEF,
   HCL_DEF,
+  HLSL_DEF,
   HTML_DEF,
   JAVA_DEF,
   JAVASCRIPT_DEF,

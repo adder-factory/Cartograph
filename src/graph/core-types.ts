@@ -77,6 +77,7 @@ export type Language =
   | 'liquid'
   | 'haskell'
   | 'html'
+  | 'hlsl'
   | 'jsdoc'
   | 'json'
   | 'jupyter'
