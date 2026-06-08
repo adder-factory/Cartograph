@@ -324,7 +324,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **65 language modes**. Framework-aware and derived signals
+Cartograph supports **70 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -346,6 +346,7 @@ are listed separately so the core language matrix stays readable.
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
 | Salesforce | `.cls`, `.trigger`, plus Aura/Visualforce markup extensions in Salesforce source paths |
+| BG3 modding data | `.lsx`, `.lsf`, `.lsfx`, `.lsefx`, `.tbl`, `.stats`, `.mei`, `.lsj`, `.ann`, `.anc`, `.khn`, `.div`, BG3 Stats/Generated `.txt`, BG3 Story goal `.txt`, BG3 Localization XML |
 | Dart / ReScript / R / Lua / Luau / Elixir / Lean | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs`, `.lean` |
 | Haskell / Julia / OCaml | `.hs`, `.jl`, `.ml`, `.mli` |
 | HTML / CSS / ERB / EJS | `.html`, `.htm`, `.css`, `.erb`, `.ejs`, `.eta`, `.etlua` |
