@@ -47,6 +47,10 @@ function setHome(dir: string): { restore: () => void } {
   };
 }
 
+function localMcpArgs(): string[] {
+  return ['serve', '--mcp', '--project-path', path.resolve(process.cwd())];
+}
+
 describe('Installer targets — contract', () => {
   let tmpHome: string;
   let tmpCwd: string;
@@ -387,7 +391,7 @@ describe('Installer targets — Claude specifics', () => {
     expect(config.projects[path.resolve(process.cwd())].mcpServers.cartograph).toEqual({
       type: 'stdio',
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
     });
     expect(fs.existsSync(path.join(tmpCwd, '.claude.json'))).toBe(false);
   });
@@ -561,7 +565,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(config.mcpServers.cartograph).toEqual({
       type: 'stdio',
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
       tools: ['*'],
     });
   });
@@ -574,7 +578,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     const config = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.zed', 'settings.json'), 'utf-8'));
     expect(config.context_servers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
     });
     expect(config.mcpServers).toBeUndefined();
   });
@@ -671,46 +675,46 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(factoryConfig.mcpServers.cartograph).toEqual({
       type: 'stdio',
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
       disabled: false,
     });
 
     const rovoConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.rovodev', 'mcp.json'), 'utf-8'));
     expect(rovoConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
       transport: 'stdio',
     });
 
     const qoderConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.qoder', 'settings.local.json'), 'utf-8'));
     expect(qoderConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
     });
 
     const codewhaleConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.codewhale', 'mcp.json'), 'utf-8'));
     expect(codewhaleConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
     });
 
     const bobConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.bob', 'mcp.json'), 'utf-8'));
     expect(bobConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
       disabled: false,
     });
 
     const kimiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kimi-code', 'mcp.json'), 'utf-8'));
     expect(kimiConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
     });
 
     const piConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.pi', 'mcp.json'), 'utf-8'));
     expect(piConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
-      args: ['serve', '--mcp'],
+      args: localMcpArgs(),
       transport: 'stdio',
     });
 

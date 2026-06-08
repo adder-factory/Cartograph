@@ -25,7 +25,9 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import {
   getHomeDir,
   getMcpCommand,
+  getMcpServerArgs,
   jsonDeepEqual,
+  mcpCommandOptionsForLocation,
   readJsonFile,
   writeJsonFile,
   type McpCommandOptions,
@@ -59,7 +61,7 @@ function getOpencodeServerEntry(options: McpCommandOptions = {}): {
 } {
   return {
     type: 'local',
-    command: [getMcpCommand(options), 'serve', '--mcp'],
+    command: [getMcpCommand(options), ...getMcpServerArgs(options)],
     enabled: true,
   };
 }
@@ -85,7 +87,7 @@ class OpencodeTarget implements AgentTarget {
     const file = configPath(loc);
     const existing = readJsonFile(file);
     const before = existing['mcp']?.cartograph;
-    const after = getOpencodeServerEntry(opts);
+    const after = getOpencodeServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
     if (jsonDeepEqual(before, after)) {
       return { files: [{ path: file, action: 'unchanged' }] };
@@ -122,7 +124,7 @@ class OpencodeTarget implements AgentTarget {
     const snippet = JSON.stringify(
       {
         $schema: OPENCODE_SCHEMA_URL,
-        mcp: { cartograph: getOpencodeServerEntry(opts) },
+        mcp: { cartograph: getOpencodeServerEntry(mcpCommandOptionsForLocation(loc, opts)) },
       },
       null,
       2,

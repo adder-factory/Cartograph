@@ -14,7 +14,14 @@
 
 import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
-import { getMcpServerConfig, jsonDeepEqual, readJsonFile, writeJsonFile, type McpCommandOptions } from './shared.js';
+import {
+  getMcpServerConfig,
+  jsonDeepEqual,
+  mcpCommandOptionsForLocation,
+  readJsonFile,
+  writeJsonFile,
+  type McpCommandOptions,
+} from './shared.js';
 
 export interface WriteMcpEntryJsonArgs {
   /** Resolve the absolute path to the agent's JSON config file. */
@@ -25,8 +32,8 @@ export interface WriteMcpEntryJsonArgs {
   command?: string | undefined;
 }
 
-function targetEntry(args: WriteMcpEntryJsonArgs): Record<string, unknown> {
-  const options = { command: args.command };
+function targetEntry(loc: Location, args: WriteMcpEntryJsonArgs): Record<string, unknown> {
+  const options = mcpCommandOptionsForLocation(loc, { command: args.command });
   return args.entry?.(options) ?? getMcpServerConfig(options);
 }
 
@@ -52,7 +59,7 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
   const file = args.resolvePath(loc);
   const existing = readJsonFile(file);
   const before = existing['mcpServers']?.cartograph;
-  const after = targetEntry(args);
+  const after = targetEntry(loc, args);
 
   if (jsonDeepEqual(before, after)) {
     // Already exactly what we'd write — preserve byte-identical file.

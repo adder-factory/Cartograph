@@ -51,7 +51,7 @@ describe('cartograph_files --format=summary (B15)', () => {
   it('emits a summary table with directory rollups', async () => {
     const text = textOf(await handler.runHandler('cartograph_files', { format: 'summary' }));
     expect(text).toContain('Project Summary');
-    expect(text).toContain('| Directory | Files | Nodes |');
+    expect(text).toContain('| Directory | Files | Symbols |');
     expect(text).toContain('`src/`');
     expect(text).toContain('`src/dense/`');
     expect(text).toContain('`src/sparse/`');

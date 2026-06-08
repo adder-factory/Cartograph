@@ -198,8 +198,10 @@ function graphLayoutDiagnostics(label = '') {
   let badBoxCount = 0;
   let shortEndpointCount = 0;
   visibleEdges.forEach((edge) => {
-    const sourceVisible = edge.source().style('display') !== 'none' && !edge.source().hasClass('collapse-hidden');
-    const targetVisible = edge.target().style('display') !== 'none' && !edge.target().hasClass('collapse-hidden');
+    const source = edge.source();
+    const target = edge.target();
+    const sourceVisible = source.style('display') !== 'none' && !source.hasClass('collapse-hidden');
+    const targetVisible = target.style('display') !== 'none' && !target.hasClass('collapse-hidden');
     if (!sourceVisible || !targetVisible) hiddenEndpointCount++;
     const box = edge.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
     if (
@@ -210,6 +212,7 @@ function graphLayoutDiagnostics(label = '') {
     ) {
       badBoxCount++;
     }
+    if (source.id() === target.id()) return;
     const sourceEndpoint = edge.renderedSourceEndpoint?.();
     const targetEndpoint = edge.renderedTargetEndpoint?.();
     if (!sourceEndpoint || !targetEndpoint) return;

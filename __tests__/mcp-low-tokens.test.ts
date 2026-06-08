@@ -202,7 +202,7 @@ describe('MCP lowTokens option', () => {
     const text = textOf(await handler.execute('cartograph_files', { lowTokens: true }));
 
     expect(text).toContain('## Project Summary');
-    expect(text).toContain('| Directory | Files | Nodes |');
+    expect(text).toContain('| Directory | Files | Symbols |');
     expect(text).not.toContain('## Project Structure');
     expect(text).not.toContain('(typescript,');
     expectTokenBudget(text, 260);

@@ -10,7 +10,13 @@
 
 import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
-import { atomicWriteFileSync, getMcpServerConfig, jsonDeepEqual, type McpCommandOptions } from './shared.js';
+import {
+  atomicWriteFileSync,
+  getMcpServerConfig,
+  jsonDeepEqual,
+  mcpCommandOptionsForLocation,
+  type McpCommandOptions,
+} from './shared.js';
 
 export interface WriteMcpEntryJsoncArgs {
   resolvePath: (loc: Location) => string;
@@ -40,8 +46,8 @@ interface ReadObjectPropertyArgs {
   previousComma: number | null;
 }
 
-function targetEntry(args: WriteMcpEntryJsoncArgs): Record<string, unknown> {
-  const options = { command: args.command };
+function targetEntry(loc: Location, args: WriteMcpEntryJsoncArgs): Record<string, unknown> {
+  const options = mcpCommandOptionsForLocation(loc, { command: args.command });
   return args.entry?.(options) ?? getMcpServerConfig(options);
 }
 
@@ -54,7 +60,7 @@ export function detectMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs,
 export function writeMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs): WriteResult['files'][number] {
   const file = args.resolvePath(loc);
   const existed = fs.existsSync(file);
-  const after = targetEntry(args);
+  const after = targetEntry(loc, args);
 
   if (!existed) {
     writeJsoncFile(file, `${formatRootWithMcpServers(after)}\n`);

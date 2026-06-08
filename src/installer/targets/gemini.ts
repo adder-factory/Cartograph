@@ -19,6 +19,7 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import {
   getHomeDir,
   getMcpServerConfig,
+  mcpCommandOptionsForLocation,
   readJsonFile,
   removeMarkedSection,
   writeMarkedInstructionsFile,
@@ -93,7 +94,11 @@ class GeminiTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { mcpServers: { cartograph: getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

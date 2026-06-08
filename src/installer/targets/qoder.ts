@@ -19,6 +19,8 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import {
   getHomeDir,
   getMcpCommand,
+  getMcpServerArgs,
+  mcpCommandOptionsForLocation,
   readJsonFile,
   writeJsonFile,
   writePermissionsAllowList,
@@ -46,7 +48,7 @@ function settingsJsonPath(loc: Location): string {
 function getQoderServerEntry(options: McpCommandOptions = {}): { command: string; args: string[] } {
   return {
     command: getMcpCommand(options),
-    args: ['serve', '--mcp'],
+    args: getMcpServerArgs(options),
   };
 }
 
@@ -86,7 +88,11 @@ class QoderTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getQoderServerEntry(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { mcpServers: { cartograph: getQoderServerEntry(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
