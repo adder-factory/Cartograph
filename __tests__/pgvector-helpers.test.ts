@@ -51,9 +51,9 @@ describe('pgvector helper fallbacks', () => {
 
     const available = new FakePgvectorDb();
     expect(bootstrapPgvector(available.db, POSTGRES_DATABASE)).toBe(true);
-    expect(available.execs.some((sql) => sql.includes('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public'))).toBe(
-      true,
-    );
+    expect(
+      available.execs.some((sql) => sql.includes('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public')),
+    ).toBe(true);
     expect(available.execs).not.toContain('ALTER EXTENSION vector SET SCHEMA public');
   });
 
