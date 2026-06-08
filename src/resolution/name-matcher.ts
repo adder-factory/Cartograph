@@ -7,6 +7,8 @@
 import type { Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping } from './types.js';
 import { escapeRegExp, splitIdentifierTokens } from '../utils.js';
+import { findCppOutOfClassMethod } from './cpp-out-of-class-method.js';
+import { computePathProximity } from './path-proximity.js';
 
 /**
  * Common builtin/global method names in TS/JS that frequently collide
@@ -916,16 +918,7 @@ function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: Resolution
   const parsed = parseReturnedReceiverCall(ref.referenceName);
   if (!parsed) return null;
 
-  const inner = matchMethodCall(
-    {
-      ...ref,
-      referenceName: `${parsed.objectOrClass}.${parsed.factoryMethod}`,
-    },
-    context,
-  );
-  if (!inner) return null;
-
-  const factoryNode = context.getNodesByName(parsed.factoryMethod).find((n) => n.id === inner.targetNodeId);
+  const factoryNode = findReturnedReceiverFactoryNode(parsed, ref, context);
   const returnType = inferCallableReturnType(factoryNode);
   if (!returnType) return null;
   const receiverName = returnedReceiverName(returnType, parsed.objectOrClass);
@@ -939,6 +932,51 @@ function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: Resolution
     confidence: INSTANCE_RECEIVER_CONFIDENCE,
     resolvedBy: 'instance-method',
   });
+}
+
+function findReturnedReceiverFactoryNode(
+  parsed: ReturnedReceiverCall,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): Node | undefined {
+  return (
+    findReceiverFactoryByMethodName(parsed, ref, context) ?? findReceiverFactoryByQualifiedName(parsed, ref, context)
+  );
+}
+
+function findReceiverFactoryByMethodName(
+  parsed: ReturnedReceiverCall,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): Node | undefined {
+  const qualifiedName = `${parsed.objectOrClass}::${parsed.factoryMethod}`;
+  return context
+    .getNodesByName(parsed.factoryMethod)
+    .find((node) => isReceiverFactoryNode({ node, parsed, ref, qualifiedName }));
+}
+
+function findReceiverFactoryByQualifiedName(
+  parsed: ReturnedReceiverCall,
+  ref: UnresolvedRef,
+  context: ResolutionContext,
+): Node | undefined {
+  const qualifiedName = `${parsed.objectOrClass}::${parsed.factoryMethod}`;
+  return [...context.getNodesByName(qualifiedName), ...context.getNodesByQualifiedName(qualifiedName)].find((node) =>
+    isReceiverFactoryNode({ node, parsed, ref, qualifiedName }),
+  );
+}
+
+function isReceiverFactoryNode(args: {
+  node: Node;
+  parsed: ReturnedReceiverCall;
+  ref: UnresolvedRef;
+  qualifiedName: string;
+}): boolean {
+  const { node, parsed, ref, qualifiedName } = args;
+  if (node.kind !== 'method' && node.kind !== 'function') return false;
+  if (!isCompatibleLanguage(ref.language, node.language)) return false;
+  if (node.name === qualifiedName || node.qualifiedName === qualifiedName) return true;
+  return node.name === parsed.factoryMethod && node.qualifiedName.includes(parsed.objectOrClass);
 }
 
 function returnedReceiverName(returnType: string, objectOrClass: string): string {
@@ -1059,9 +1097,9 @@ function findMethodOnClassByName(args: FindMethodOnClassByNameArgs): ResolvedRef
     : candidates;
 
   for (const classNode of ordered) {
-    const methodNode = context
-      .getNodesInFile(classNode.filePath)
-      .find((n) => n.kind === 'method' && n.name === methodName && n.qualifiedName.includes(classNode.name));
+    const methodNode =
+      findMethodInClassFile({ classNode, methodName, context }) ??
+      findCppOutOfClassMethod({ classNode, methodName, ref, context });
     if (!methodNode) continue;
 
     return resolveMethodCandidate({
@@ -1078,6 +1116,17 @@ function findMethodOnClassByName(args: FindMethodOnClassByNameArgs): ResolvedRef
     });
   }
   return null;
+}
+
+function findMethodInClassFile(args: {
+  classNode: Node;
+  methodName: string;
+  context: ResolutionContext;
+}): Node | undefined {
+  const { classNode, methodName, context } = args;
+  return context
+    .getNodesInFile(classNode.filePath)
+    .find((n) => n.kind === 'method' && n.name === methodName && n.qualifiedName.includes(classNode.name));
 }
 
 interface ReceiverFallbackArgs {
@@ -1230,28 +1279,6 @@ function pickBestByWordOverlap<T extends { id: string; qualifiedName: string; la
     }
   }
   return best ? { method: best, score: bestScore } : null;
-}
-
-/**
- * Compute directory proximity between two file paths.
- * Returns a score based on the number of shared directory segments.
- * Higher score = closer in directory tree.
- */
-function computePathProximity(filePath1: string, filePath2: string): number {
-  const dir1 = filePath1.split('/').slice(0, -1);
-  const dir2 = filePath2.split('/').slice(0, -1);
-
-  let shared = 0;
-  for (let i = 0; i < Math.min(dir1.length, dir2.length); i++) {
-    if (dir1[i] === dir2[i]) {
-      shared++;
-    } else {
-      break;
-    }
-  }
-
-  // Each shared directory segment contributes 15 points, capped at 80
-  return Math.min(shared * 15, 80);
 }
 
 interface BestMatchResult {
