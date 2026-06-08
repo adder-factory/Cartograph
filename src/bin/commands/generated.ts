@@ -105,15 +105,6 @@ function registerInspectionGeneratedCommands(): void {
 }
 
 function registerModuleGeneratedCommands(): void {
-  // `--dir <path>` aliases the `dirPath` positional so the MCP shape
-  // `cartograph module --dir src/sync` parses (mirrors the MCP arg
-  // name shortening — the MCP schema field is `dirPath` but agents
-  // frequently want the shorter `--dir`).
-  registerGeneratedCommand('cartograph_module', {
-    positionalFields: ['dirPath'],
-    shortFlags: { limit: '-l' },
-    aliasFlags: { dir: 'dirPath' },
-  });
   // `imports` — `[file]` positional + `--file <path>` alias both
   // route to the MCP `pathFilter` field (MCP `pathFilter` is a prefix;
   // passing a full file path matches exactly that file in practice).

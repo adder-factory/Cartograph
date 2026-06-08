@@ -150,7 +150,6 @@ const SMOKE_EXTRA_ARGS: Record<string, Record<string, unknown>> = {
   cartograph_at_range: { file: 'src/alpha.ts', startLine: 1, endLine: 5 },
   cartograph_sql: { query: 'SELECT COUNT(*) AS n FROM nodes' },
   cartograph_role: {},
-  cartograph_module: { dirPath: 'src' },
   cartograph_blame: { symbol: 'fixtureAlpha' },
   cartograph_history: { symbol: 'fixtureAlpha' },
   cartograph_tests_for: { symbol: 'fixtureAlpha' },
@@ -493,6 +492,28 @@ const BRANCH_ARG_CONSUMPTION_CASES: ReadonlyArray<{
     name: 'review risk consumes pathFilter',
     tool: 'cartograph_review',
     args: { mode: 'risk', pathFilter: 'src/', topN: 3 },
+  },
+  {
+    name: 'files symbols format consumes one-file outline args',
+    tool: 'cartograph_files',
+    args: {
+      format: 'symbols',
+      file: 'src/alpha.ts',
+      kinds: 'function,method',
+      includeParameters: true,
+      includeImports: true,
+      limit: 5,
+    },
+  },
+  {
+    name: 'files deps format consumes dependency args',
+    tool: 'cartograph_files',
+    args: { format: 'deps', file: 'src/alpha.ts', direction: 'dependencies', symbols: false, limit: 5 },
+  },
+  {
+    name: 'files module format consumes directory summary args',
+    tool: 'cartograph_files',
+    args: { format: 'module', dirPath: 'src', limit: 5 },
   },
 ];
 

@@ -16,6 +16,10 @@ cartograph install-hooks --command "$(command -v cartograph)"
 cartograph install-hooks --remove
 cartograph setup [path]            # init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
+cartograph backend status [path]   # managed local llama-server status
+cartograph backend start [path]    # start configured local llama-server tiers
+cartograph backend stop [path]     # stop managed backend processes
+cartograph backend logs [path]     # tail backend logs; add --tier embed|ask|rerank
 cartograph status [path]           # index status and feature readiness
 cartograph status [path] --json    # automation shape: version, index path,
                                    # last indexed timestamp, counts, rollups
@@ -160,7 +164,7 @@ These require configured OpenAI-compatible chat/embedding providers:
 
 ```sh
 cartograph llm setup
-cartograph llm smoke
+cartograph llm smoke --timeout-ms 60000
 cartograph ask "How does auth work?"
 cartograph local-chat "Summarize this report"
 cartograph summaries pending

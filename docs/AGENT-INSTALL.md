@@ -62,7 +62,9 @@ Optional follow-up tasks:
 
 ```text
 Configure Cartograph's optional LLM features for semantic search and ask.
-Start with `cartograph llm setup`, then run `cartograph doctor .`.
+Start with `cartograph llm setup`, run `cartograph backend start .` when the
+chosen preset uses managed local llama-server tiers, then run
+`cartograph llm smoke .` and `cartograph doctor .`.
 ```
 
 ```text

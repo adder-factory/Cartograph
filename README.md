@@ -132,8 +132,8 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Local viewer | `cartograph viewer .` |
 | Library API | `Cartograph.init('/path/to/project')` |
 
-Cartograph's MCP server exposes all 38 registered tools. The default `core`
-profile is smaller; the full 38-tool server is available with
+Cartograph's MCP server exposes all 35 registered tools. The default `core`
+profile is smaller; the full 35-tool server is available with
 `cartograph serve --mcp --profile full`.
 
 ## Storage
@@ -291,7 +291,7 @@ win.
 | `cartograph imports` | Import statement graph data |
 | `cartograph install` | Configure MCP server entries for supported agents |
 | `cartograph install-hooks` | Install managed git hooks for quiet background sync |
-| `cartograph llm` | Interactive local/cloud LLM provider setup |
+| `cartograph llm` | Local/cloud LLM provider setup and smoke checks |
 | `cartograph local-chat` | Delegate bulk prose to a local LLM |
 | `cartograph mcp-budget` | Measure MCP startup payload size |
 | `cartograph module` | Directory/module summary |

@@ -83,13 +83,12 @@ export const reviewCmd = program
     'Review / triage helpers (mirrors cartograph_review MCP tool). Subcommands: context (diff-driven structural review) / neighbors (semantic lookalikes) / risk (project-wide triage) / agent-audit (agent-prone biomarkers) / trust (readiness self-check).',
   );
 
-// `llm setup` is the only remaining LLM provisioning command. Kept
-// as a subcommand under `llm` so the surface stays extensible (e.g.
-// future `llm test`, `llm list-models`) without renaming.
+// LLM provider setup and smoke checks live under `llm` so the surface
+// stays extensible (e.g. future `llm list-models`) without renaming.
 export const llmCmd = program
   .command('llm')
-  .summary('Interactive local or cloud LLM provider setup')
-  .description('Local-LLM utilities: provider setup.');
+  .summary('Local/cloud LLM setup and smoke checks')
+  .description('Local/cloud LLM utilities: provider setup and smoke checks.');
 
 /**
  * cartograph session <action>

@@ -52,8 +52,6 @@ import { DIGEST_TOOL } from './digest.js';
 import { DISCOVER_TOOL } from './discover.js';
 import { ENTRY_POINTS_TOOL } from './entry-points.js';
 import { EXPLORE_TOOL } from './explore.js';
-import { FILE_DEPS_TOOL } from './file-deps.js';
-import { FILE_SYMBOLS_TOOL } from './file-symbols.js';
 import { FILES_TOOL } from './files.js';
 // cartograph_find subsumes the pre-merge cartograph_search /
 // cartograph_grep / cartograph_string_refs tools (2026-05-11). The three
@@ -71,7 +69,6 @@ import { HISTORY_TOOL } from './history.js';
 import { HOTSPOTS_TOOL } from './hotspots.js';
 import { IMPORTS_TOOL } from './imports.js';
 import { LOCAL_CHAT_TOOL } from './local-chat.js';
-import { MODULE_TOOL } from './module.js';
 import { NODE_TOOL } from './node.js';
 import { NOTE_TOOL } from './note.js';
 import { PLAYBOOK_TOOL } from './playbook.js';
@@ -135,8 +132,6 @@ const ENTRIES: ToolModule[] = [
   DISCOVER_TOOL,
   ENTRY_POINTS_TOOL,
   EXPLORE_TOOL,
-  FILE_DEPS_TOOL,
-  FILE_SYMBOLS_TOOL,
   FILES_TOOL,
   FIND_TOOL,
   GRAPH_TOOL,
@@ -144,7 +139,6 @@ const ENTRIES: ToolModule[] = [
   HOTSPOTS_TOOL,
   IMPORTS_TOOL,
   LOCAL_CHAT_TOOL,
-  MODULE_TOOL,
   NODE_TOOL,
   NOTE_TOOL,
   PLAYBOOK_TOOL,
@@ -218,6 +212,10 @@ export const RETIRED_TOOL_NAMES: ReadonlySet<string> = new Set([
   // summaries-family (pre-2026-05-08 agent-bridge tools)
   'cartograph_pending_summaries',
   'cartograph_save_summaries',
+  // 2026-06-08 files-family consolidation
+  'cartograph_file_deps',
+  'cartograph_file_symbols',
+  'cartograph_module',
 ]);
 
 /**

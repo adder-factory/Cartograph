@@ -187,7 +187,7 @@ import type { DeadCodeCandidate } from '../src/llm/dead-code.js';
 import { buildImportsGroupSpec } from '../src/mcp/tools/imports.js';
 import { buildSearchFuzzySpec } from '../src/mcp/tools/_search-fuzzy.js';
 import { buildSearchSemanticConceptSpec, buildSearchSemanticSymbolSpec } from '../src/mcp/tools/_search-semantic.js';
-import { buildModuleReportSpec, buildModuleSummariesSpec } from '../src/mcp/tools/module.js';
+import { buildModuleReportSpec, buildModuleSummariesSpec } from '../src/features/module/runtime.js';
 import { buildGrepFileSpec } from '../src/mcp/tools/_grep.js';
 import { buildCalleesGroupSpec } from '../src/mcp/tools/_callees.js';
 import { CALLERS_CONSTRUCTOR_HINT, CALLERS_NO_CALLERS_NOTE, buildCallersGroupSpec } from '../src/mcp/tools/_callers.js';

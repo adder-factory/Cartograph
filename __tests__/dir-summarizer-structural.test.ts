@@ -12,8 +12,8 @@
  * These tests cover the two pure helpers (`detectDirectoryPattern`,
  * `buildStructuralDirectorySummary`) — the wiring inside
  * `summariseOneDir` is exercised indirectly by the existing
- * `dir-summarizer.test.ts` truncation tests + the cartograph_module
- * MCP smoke check on next sync.
+ * `dir-summarizer.test.ts` truncation tests + the files/module MCP
+ * smoke check on next sync.
  */
 
 import { describe, it, expect } from 'vitest';

@@ -10,7 +10,7 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): str
   return result.content[0]!.text;
 }
 
-describe('cartograph_file_symbols', () => {
+describe('cartograph_files format=symbols', () => {
   let tempDir: string;
   let cg: Cartograph;
   let handler: ToolHandler;
@@ -43,12 +43,14 @@ describe('cartograph_file_symbols', () => {
     if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
-  it('is registered as an MCP tool', () => {
-    expect(getToolModules().map((mod) => mod.definition.name)).toContain('cartograph_file_symbols');
+  it('is folded into cartograph_files rather than registered as a standalone MCP tool', () => {
+    const names = getToolModules().map((mod) => mod.definition.name);
+    expect(names).toContain('cartograph_files');
+    expect(names).not.toContain('cartograph_file_symbols');
   });
 
   it('lists symbols for one indexed file without import or parameter noise by default', async () => {
-    const text = textOf(await handler.execute('cartograph_file_symbols', { file: 'src/service.ts' }));
+    const text = textOf(await handler.execute('cartograph_files', { format: 'symbols', file: 'src/service.ts' }));
     expect(text).toContain('Symbols in `src/service.ts`');
     expect(text).toContain('BillingService');
     expect(text).toContain('run');
@@ -59,20 +61,20 @@ describe('cartograph_file_symbols', () => {
 
   it('can include import/export nodes on request', async () => {
     const text = textOf(
-      await handler.execute('cartograph_file_symbols', { file: 'src/service.ts', includeImports: true }),
+      await handler.execute('cartograph_files', { format: 'symbols', file: 'src/service.ts', includeImports: true }),
     );
     expect(text).toContain('| 1 | import |');
   });
 
   it('accepts an absolute path inside the project', async () => {
     const text = textOf(
-      await handler.execute('cartograph_file_symbols', { file: path.join(tempDir, 'src', 'service.ts') }),
+      await handler.execute('cartograph_files', { format: 'symbols', file: path.join(tempDir, 'src', 'service.ts') }),
     );
     expect(text).toContain('Symbols in `src/service.ts`');
   });
 
   it('returns a clean empty message when the file is not indexed', async () => {
-    const text = textOf(await handler.execute('cartograph_file_symbols', { file: 'src/missing.ts' }));
+    const text = textOf(await handler.execute('cartograph_files', { format: 'symbols', file: 'src/missing.ts' }));
     expect(text).toContain('No indexed file matched "src/missing.ts"');
     expect(text).toContain('cartograph_files');
   });

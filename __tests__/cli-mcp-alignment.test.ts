@@ -132,6 +132,14 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // pre/post hooks can no-op cheaply; MCP sessions already have direct
   // access to `cartograph_admin({action: 'sync'})` when they want sync.
   'sync_if_dirty',
+
+  // These CLI shortcuts survive the 2026-06-08 files-family
+  // consolidation. MCP callers use the single `cartograph_files`
+  // family with `format: 'deps' | 'symbols' | 'module'`; humans keep
+  // the narrower top-level commands because they read naturally.
+  'file_deps',
+  'file_symbols',
+  'module',
 ]);
 
 // ── helpers ───────────────────────────────────────────────────
@@ -300,10 +308,24 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   admin: new Set(['action', 'confirm', 'clearParseCacheLanguage', 'summarizeLimit']),
 
   // `cartograph files` carries hand-rendered tree / flat / grouped /
-  // summary layouts; the MCP `path` field is REMOVED (rejected at
-  // the schema boundary — use `dir`), and `includeMetadata` is the
-  // legacy alias for the current `metadata` flag.
-  files: new Set(['path', 'includeMetadata']),
+  // summary layouts plus the folded one-file and module-summary modes.
+  // The old CLI shortcuts (`file-deps`, `file-symbols`, `module`) still
+  // cover those folded modes for humans, so their mode-specific args
+  // are not required on the `cartograph files` command itself. The MCP
+  // `path` field is REMOVED (rejected at the schema boundary — use
+  // `dir`), and `includeMetadata` is the legacy alias for `metadata`.
+  files: new Set([
+    'path',
+    'includeMetadata',
+    'file',
+    'kinds',
+    'includeParameters',
+    'includeImports',
+    'direction',
+    'symbols',
+    'limit',
+    'dirPath',
+  ]),
 
   // `cartograph review` is a subcommand family (`review context` /
   // `review neighbors` / `review risk` / `review agent-audit` /

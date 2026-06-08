@@ -90,8 +90,8 @@ references that become graph edges after cross-file resolution.
   `embedded_template`, `haskell`, `html`, `jsdoc`, `json`, `julia`,
   `ocaml`, `ocaml_interface`, `regex`, and `verilog`.
 - Added Salesforce fixtures for `apex`, `aura`, and `visualforce`.
-- Added the missing `luau` fixture so the fixture tree matches the full
-  registry.
+- Added the missing `luau` fixture so that expansion tranche's fixture tree
+  matched the registry at the time.
 - Expanded the parity guard to require 51 fixtures and to distinguish
   symbol-emitting modes from documented parser-only modes.
 - Updated `scripts/extraction-coverage.ts` so parser-only modes are reported as

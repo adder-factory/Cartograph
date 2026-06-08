@@ -142,9 +142,9 @@ describe('Stress-test-fixes handler outputs', () => {
   });
 
   // -------------------------------------------------------------
-  // Fix J — handleModule actionable empty-state hint
+  // Fix J — files module format actionable empty-state hint
   // -------------------------------------------------------------
-  describe('handleModule (Fix J)', () => {
+  describe('cartograph_files format=module (Fix J)', () => {
     it('reports N/M summarised + populate action when no dir summary cached', async () => {
       fs.mkdirSync(path.join(tempDir, 'src/feature'), { recursive: true });
       fs.writeFileSync(
@@ -154,7 +154,7 @@ describe('Stress-test-fixes handler outputs', () => {
       cg = await Cartograph.init(tempDir, { index: true });
       handler = new ToolHandler(cg);
 
-      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/feature' });
+      const r = await handler.runHandler('cartograph_files', { format: 'module', dirPath: 'src/feature' });
       const text = textOf(r);
       expect(text).toContain('"src/feature"');
       // 0 of N summarised; should report ratio + populate action.
@@ -183,7 +183,7 @@ describe('Stress-test-fixes handler outputs', () => {
       cg = await Cartograph.init(tempDir, { index: true });
       handler = new ToolHandler(cg);
 
-      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/feature' });
+      const r = await handler.runHandler('cartograph_files', { format: 'module', dirPath: 'src/feature' });
       const text = textOf(r);
       expect(text).toContain('Coupling');
       expect(text).toContain('1 intra-dir, 1 inbound, 1 outbound');
@@ -208,7 +208,7 @@ describe('Stress-test-fixes handler outputs', () => {
         model: 'test',
       });
 
-      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/feature' });
+      const r = await handler.runHandler('cartograph_files', { format: 'module', dirPath: 'src/feature' });
       const text = textOf(r);
       // The dangling bare ellipsis must be gone; an explicit marker present.
       expect(text).not.toMatch(/the …/);
@@ -232,7 +232,7 @@ describe('Stress-test-fixes handler outputs', () => {
         model: 'test',
       });
 
-      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/feature' });
+      const r = await handler.runHandler('cartograph_files', { format: 'module', dirPath: 'src/feature' });
       const text = textOf(r);
       // Clean clip: ellipsis dropped, no truncation marker needed.
       expect(text).toContain('It also shapes responses.');
@@ -249,7 +249,7 @@ describe('Stress-test-fixes handler outputs', () => {
       cg = await Cartograph.init(tempDir, { index: true });
       handler = new ToolHandler(cg);
 
-      const r = await handler.runHandler('cartograph_module', { dirPath: 'src/empty' });
+      const r = await handler.runHandler('cartograph_files', { format: 'module', dirPath: 'src/empty' });
       const text = textOf(r);
       expect(text).toContain('no summarisable symbols');
     });

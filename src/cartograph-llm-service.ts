@@ -422,7 +422,7 @@ export class CartographLlmService {
     // `admin sync` runs as part of `runChatGroup`. That left
     // `directory_summaries` stale after content edits — operators
     // running `summarize` to refresh prose got surprised when
-    // `cartograph_module` still served old paragraphs. Run it here so
+    // `cartograph_files({format: 'module'})` still served old paragraphs. Run it here so
     // both surfaces produce the same end state. Cheap when no
     // directories changed (content-hash short-circuits the LLM call).
     if (!options.signal?.aborted) {

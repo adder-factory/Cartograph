@@ -12,6 +12,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
+import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -84,23 +85,20 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
   let parentDir: string;
   const PROJECT_COUNT = 18; // exceeds MAX_CACHED_PROJECTS=16 by 2
 
+  async function initEmptyProject(projectDir: string): Promise<void> {
+    await fsp.mkdir(projectDir, { recursive: true });
+    const cg = await Cartograph.init(projectDir, { config: { llm: { endpoint: '' } } });
+    cg.close();
+  }
+
   beforeEach(async () => {
     parentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lru-'));
-    // Build PROJECT_COUNT minimal cartograph projects.
+    // Build PROJECT_COUNT initialized projects. These tests exercise
+    // cache eviction only, so indexing source fixtures would just make
+    // the suite sensitive to unrelated extractor/runtime cost.
     for (let i = 0; i < PROJECT_COUNT; i++) {
       const sub = path.join(parentDir, `p${i}`);
-      fs.mkdirSync(path.join(sub, 'src'), { recursive: true });
-      fs.writeFileSync(path.join(sub, 'src', 'a.ts'), `export function f${i}() { return ${i}; }\n`);
-      fs.writeFileSync(path.join(sub, '.gitignore'), '.cartograph/\n');
-      git(sub, 'init', '-q');
-      git(sub, 'config', 'user.email', 't@t');
-      git(sub, 'config', 'user.name', 't');
-      git(sub, 'config', 'commit.gpgsign', 'false');
-      git(sub, 'add', '.');
-      git(sub, 'commit', '-q', '-m', 'init');
-      const cg = await Cartograph.init(sub, { config: { llm: { endpoint: '' } } });
-      await cg.indexAll({ summarize: false });
-      cg.close();
+      await initEmptyProject(sub);
     }
   });
 
@@ -124,7 +122,7 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     handler.closeAll();
   });
 
-  it('most-recently-used project survives eviction', async () => {
+  it('least-recently-used project is evicted first', async () => {
     const handler = new ToolHandler(null);
     // Open p0 first, then 17 others. p0 should evict.
     await handler.execute('cartograph_status', { projectPath: path.join(parentDir, 'p0') });
@@ -136,6 +134,24 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     const roots = [...cachedRoots];
     expect(roots.some((r) => r.endsWith('/p0'))).toBe(false);
     expect(roots.some((r) => r.endsWith(`/p${PROJECT_COUNT - 1}`))).toBe(true);
+    handler.closeAll();
+  });
+
+  it('most-recently-used project survives eviction', async () => {
+    const handler = new ToolHandler(null);
+    for (let i = 0; i < 16; i++) {
+      await handler.execute('cartograph_status', { projectPath: path.join(parentDir, `p${i}`) });
+    }
+
+    // Touch p0 before adding p16. True LRU should evict p1, not p0.
+    await handler.execute('cartograph_status', { projectPath: path.join(parentDir, 'p0') });
+    await handler.execute('cartograph_status', { projectPath: path.join(parentDir, 'p16') });
+
+    const { cachedRoots } = handler.getProjectCacheSnapshot();
+    const roots = [...cachedRoots];
+    expect(roots.some((r) => r.endsWith('/p0'))).toBe(true);
+    expect(roots.some((r) => r.endsWith('/p1'))).toBe(false);
+    expect(roots.some((r) => r.endsWith('/p16'))).toBe(true);
     handler.closeAll();
   });
 });
