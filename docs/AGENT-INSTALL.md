@@ -40,8 +40,8 @@ configuration, indexes the repository, and skips the interactive LLM wizard in
 commands work without an LLM backend.
 
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid,
-Rovo Dev, and Qoder CLI.
+Copilot CLI, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
+Droid, Rovo Dev, and Qoder CLI.
 
 Optional follow-up tasks:
 

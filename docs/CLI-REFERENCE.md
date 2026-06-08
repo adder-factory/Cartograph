@@ -22,8 +22,8 @@ cartograph completions bash        # shell completions: bash, zsh, fish
 ```
 
 Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
-`opencode`, `hermes`, `gemini`, `antigravity`, `kiro`, `factory`, `rovo`, and
-`qoder`.
+`zed`, `opencode`, `hermes`, `gemini`, `antigravity`, `kiro`, `factory`,
+`rovo`, and `qoder`.
 
 Install completions by sourcing the generated script in your shell startup
 file, for example `cartograph completions zsh`.

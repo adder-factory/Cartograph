@@ -12,8 +12,9 @@ For most users, the installer is easier:
 cartograph install
 ```
 
-It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI, opencode,
-Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and Qoder CLI.
+It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI, Zed,
+opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and
+Qoder CLI.
 
 ## Agent-Assisted Install
 
@@ -167,6 +168,21 @@ cartograph serve --mcp --project-path /absolute/path/to/project
 The installer honors `COPILOT_HOME` for the global Copilot configuration
 directory. You can also add the same server interactively with Copilot CLI's
 `/mcp add` flow and then run `/mcp reload`.
+
+### Zed
+
+`~/.config/zed/settings.json` or `.zed/settings.json`:
+
+```json
+{
+  "context_servers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
 
 ### opencode
 
