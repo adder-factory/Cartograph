@@ -351,7 +351,7 @@ are listed separately so the core language matrix stays readable.
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, and MyBatis Java/XML bindings |
+| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, and MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids |
 | Salesforce | Apex classes/methods/triggers, LWC component bundles and Apex imports, Aura controllers/actions, Visualforce routes/actions |
 | Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |

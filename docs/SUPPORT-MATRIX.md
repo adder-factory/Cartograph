@@ -116,7 +116,7 @@ Special cases:
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, MyBatis Java/XML bindings, Kotlin/Scala source extraction |
+| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids, Kotlin/Scala source extraction |
 | Go | Gin, Echo, Chi, net/http, Cobra commands, interface implementation edges |
 | Rust | Framework and route patterns recognized by the Rust resolver |
 | C# | ASP.NET route/controller patterns |

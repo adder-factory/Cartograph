@@ -157,6 +157,52 @@ public interface UserMapper {
     expect(insertEdges.length).toBe(1);
   });
 
+  it('links SqlSessionTemplate statement-id calls to matching XML statements', async () => {
+    const javaDir = path.join(tempDir, 'src', 'main', 'java', 'com', 'example', 'order', 'dao', 'impl');
+    fs.mkdirSync(javaDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(javaDir, 'OrderAttributeDaoImpl.java'),
+      `package com.example.order.dao.impl;
+
+import com.example.order.dao.OrderAttributeDao;
+
+public class OrderAttributeDaoImpl {
+  private static final String SQL_NS = OrderAttributeDao.class.getName() + "Mapper";
+
+  public void deleteByOrderId(String orderId) {
+    getSqlSessionTemplate().delete(SQL_NS + ".deleteByOrderId", orderId);
+  }
+}
+`,
+    );
+
+    const resourcesDir = path.join(tempDir, 'src', 'main', 'resources', 'mapper');
+    fs.mkdirSync(resourcesDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(resourcesDir, 'OrderAttributeDaoMapper.xml'),
+      `<mapper namespace="com.example.order.dao.OrderAttributeDaoMapper">
+  <delete id="deleteByOrderId">DELETE FROM order_attribute WHERE order_id = #{orderId}</delete>
+</mapper>
+`,
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+
+    const javaMethod = getNodesByKind(cg.queries, 'method').find(
+      (m) => m.language === 'java' && m.name === 'deleteByOrderId',
+    );
+    const xmlMethod = getNodesByKind(cg.queries, 'method').find(
+      (m) => m.language === 'xml' && m.qualifiedName === 'OrderAttributeDaoMapper::deleteByOrderId',
+    );
+    expect(javaMethod).toBeDefined();
+    expect(xmlMethod).toBeDefined();
+
+    const templateEdges = getOutgoingEdges(cg.queries, javaMethod!.id).filter(
+      (e) => e.target === xmlMethod!.id && e.metadata?.synthesizedBy === 'mybatis-template-binding',
+    );
+    expect(templateEdges.length).toBe(1);
+  });
+
   it('does not emit a Java<->XML edge when names do not match', async () => {
     fs.writeFileSync(
       path.join(tempDir, 'OtherMapper.java'),
