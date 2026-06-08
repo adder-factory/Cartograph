@@ -58,6 +58,7 @@ import { KOTLIN_DEF } from './kotlin.js';
 import { LIQUID_DEF } from './liquid.js';
 import { LUA_DEF } from './lua.js';
 import { LUAU_DEF } from './luau.js';
+import { NIX_DEF } from './nix.js';
 import { OBJC_DEF } from './objc.js';
 import { OCAML_DEF } from './ocaml.js';
 import { OCAML_INTERFACE_DEF } from './ocaml-interface.js';
@@ -121,6 +122,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   LIQUID_DEF,
   LUA_DEF,
   LUAU_DEF,
+  NIX_DEF,
   OBJC_DEF,
   OCAML_DEF,
   OCAML_INTERFACE_DEF,

@@ -65,6 +65,25 @@ bun scripts/build-grammar-wasm.ts --only=hlsl --force-build
 bun test __tests__/glsl-extraction.test.ts __tests__/language-registry.test.ts
 ```
 
+## Nix
+
+| Field | Value |
+|---|---|
+| Checked-in asset | `src/extraction/wasm/nix.wasm` |
+| SHA-256 | `c61e4d1e557e59527032524e4945f9222042939c7e53e6b9b78a800d866826b5` |
+| Source package target | `tree-sitter-nix@0.0.2` |
+| Package integrity | `sha512-rPYc7NUi6hPOyFSoVdCVC9feqBk0kJ0Z3ftTWXo1ubyyKzPM5tJP6mD6xYl0gN45oh9GHGzvTbOmmwIk0XOj5A==` |
+| Repository | `https://github.com/nix-community/tree-sitter-nix` |
+| License | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false tree-sitter-nix@0.0.2
+bun scripts/build-grammar-wasm.ts --only=nix --force-build
+bun test __tests__/nix-extraction.test.ts __tests__/language-registry.test.ts
+```
+
 ## Apex / Salesforce
 
 | Field | Value |
