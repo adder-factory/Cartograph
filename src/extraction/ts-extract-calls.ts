@@ -676,12 +676,25 @@ function resolveQualifiedInvocationName(
   nameField: SyntaxNode,
   objectField: SyntaxNode,
 ): string {
+  const methodName = getNodeText(nameField, ext.source);
+  if (ext.language === 'php' && isPhpCallReceiver(objectField)) {
+    const receiverCallName = tsResolveCalleeName(ext, objectField);
+    if (receiverCallName) return `${receiverCallName}().${methodName}`;
+  }
   let receiverName = getNodeText(objectField, ext.source).replace(/^\$/, '');
   if ((ext.language === 'java' || ext.language === 'kotlin') && objectField.type === 'field_access') {
     const inner = unwrapJavaThisFieldAccess(objectField, ext.source);
     if (inner !== null) receiverName = inner;
   }
-  return tsQualifyCallReceiver(getNodeText(nameField, ext.source), receiverName, METHOD_INVOCATION_SKIP_RECEIVERS);
+  return tsQualifyCallReceiver(methodName, receiverName, METHOD_INVOCATION_SKIP_RECEIVERS);
+}
+
+function isPhpCallReceiver(node: SyntaxNode): boolean {
+  return (
+    node.type === 'function_call_expression' ||
+    node.type === 'member_call_expression' ||
+    node.type === 'scoped_call_expression'
+  );
 }
 
 function resolveObjcMessageName(ext: TreeSitterExtractor, node: SyntaxNode): string {

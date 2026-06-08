@@ -905,7 +905,7 @@ interface ReturnedReceiverCall {
 }
 
 function parseReturnedReceiverCall(refName: string): ReturnedReceiverCall | null {
-  const match = /^(\w+)\.(\w+)\(\)\.(\w+)$/.exec(refName);
+  const match = /^(\w+)(?:\.|::)(\w+)\([^)]*\)\.(\w+)$/.exec(refName);
   if (!match) return null;
   const [, objectOrClass, factoryMethod, methodName] = match;
   if (!objectOrClass || !factoryMethod || !methodName) return null;
@@ -928,9 +928,10 @@ function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: Resolution
   const factoryNode = context.getNodesByName(parsed.factoryMethod).find((n) => n.id === inner.targetNodeId);
   const returnType = inferCallableReturnType(factoryNode);
   if (!returnType) return null;
+  const receiverName = returnedReceiverName(returnType, parsed.objectOrClass);
 
   return findReceiverMethod({
-    receiverName: returnType,
+    receiverName,
     methodName: parsed.methodName,
     ref,
     context,
@@ -940,11 +941,15 @@ function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: Resolution
   });
 }
 
+function returnedReceiverName(returnType: string, objectOrClass: string): string {
+  return returnType === 'self' || returnType === 'static' ? objectOrClass : returnType;
+}
+
 function inferCallableReturnType(node: Node | undefined): string | null {
   if (!node?.signature) return null;
-  const colonReturn = /:\s*([A-Za-z_$][A-Za-z0-9_$:.]*)/.exec(node.signature);
+  const colonReturn = /:\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*)/.exec(node.signature);
   if (colonReturn?.[1]) return normalizeReturnTypeName(colonReturn[1]);
-  const arrowReturn = /->\s*([A-Za-z_$][A-Za-z0-9_$:.]*)/.exec(node.signature);
+  const arrowReturn = /->\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*)/.exec(node.signature);
   if (arrowReturn?.[1]) return normalizeReturnTypeName(arrowReturn[1]);
 
   const leadingReturn = /^\s*(?:const\s+)?([A-Za-z_$][A-Za-z0-9_$:.]*)[\s*&]*\(/.exec(node.signature);
@@ -955,7 +960,7 @@ function inferCallableReturnType(node: Node | undefined): string | null {
 function normalizeReturnTypeName(raw: string): string | null {
   const cleaned = trimReturnTypeDecorators(raw);
   if (!cleaned || cleaned === 'void') return null;
-  const segments = cleaned.split(/[:.]/);
+  const segments = cleaned.split(/[:.\\]/);
   return segments.at(-1) ?? null;
 }
 
@@ -968,7 +973,7 @@ function trimReturnTypeDecorators(raw: string): string {
 }
 
 function isReturnTypeTrimChar(ch: string): boolean {
-  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '&' || ch === '*';
+  return ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r' || ch === '&' || ch === '*' || ch === '?';
 }
 
 interface FindReceiverMethodArgs {
