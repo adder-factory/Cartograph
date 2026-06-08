@@ -89,6 +89,12 @@ similar extraction or resolver gaps:
   Keep submodule/embedded-repo discovery in `src/extraction/file-discovery-policy.ts`
   and let `src/extraction/index.ts` decide only when to use git-backed scan
   versus filesystem fallback.
+- **CodeIgniter 3 route and magic-property refs stay namespaced.** The
+  resolver emits `ci3:*` references from `application/config/routes.php`,
+  convention-dispatched controller methods, and `$this->load` model/library
+  calls. Keep those refs inside `src/resolution/frameworks/codeigniter.ts`
+  so generic PHP name matching does not learn CI3's dynamic `$this->...`
+  property conventions.
 
 ### Cross-language bridging + framework-resolver hooks (B12 arc — 2026-05-29)
 

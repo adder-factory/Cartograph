@@ -5,6 +5,7 @@
  */
 
 import type { FrameworkResolver, ResolutionContext } from '../types.js';
+import { codeIgniterResolver } from './codeigniter.js';
 import { drupalResolver } from './drupal.js';
 import { laravelResolver } from './laravel.js';
 import { expressResolver } from './express.js';
@@ -35,6 +36,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   // PHP
   laravelResolver,
   drupalResolver,
+  codeIgniterResolver,
   // JavaScript/TypeScript
   expressResolver,
   honoResolver,
@@ -99,6 +101,7 @@ export function detectFrameworks(context: ResolutionContext): FrameworkResolver[
 
 // Re-export framework resolvers
 export { laravelResolver, FACADE_MAPPINGS } from './laravel.js';
+export { codeIgniterResolver } from './codeigniter.js';
 export { expressResolver } from './express.js';
 export { honoResolver } from './hono.js';
 export { bunServeResolver } from './bun-serve.js';

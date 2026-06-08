@@ -351,7 +351,7 @@ are listed separately so the core language matrix stays readable.
 |---|---|
 | JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
 | Python | Django, Flask, and FastAPI route/controller patterns |
-| PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
+| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, and CodeIgniter 3 routes/controller/model/library conventions |
 | Ruby | Rails routes and controller conventions |
 | JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, and MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids |
 | Salesforce | Apex classes/methods/triggers, LWC component bundles and Apex imports, Aura controllers/actions, Visualforce routes/actions |

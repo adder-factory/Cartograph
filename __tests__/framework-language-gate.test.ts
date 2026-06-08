@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { vaporResolver, swiftUIResolver, uikitResolver } from '../src/resolution/frameworks/swift.js';
 import { swiftObjcBridgeResolver } from '../src/resolution/frameworks/swift-objc.js';
+import { codeIgniterResolver } from '../src/resolution/frameworks/codeigniter.js';
 import { expressResolver } from '../src/resolution/frameworks/express.js';
 import { honoResolver } from '../src/resolution/frameworks/hono.js';
 import { djangoResolver, flaskResolver, fastapiResolver } from '../src/resolution/frameworks/python.js';
@@ -69,6 +70,10 @@ describe('framework resolver language gates', () => {
 
   it('Play declares languages: [scala, java, yaml]', () => {
     expect(playResolver.languages).toEqual(['scala', 'java', 'yaml']);
+  });
+
+  it('CodeIgniter declares languages: [php]', () => {
+    expect(codeIgniterResolver.languages).toEqual(['php']);
   });
 
   it('Vapor regex still matches a Swift `.get("path")` body even though it\'s gated by language', () => {

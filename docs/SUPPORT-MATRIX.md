@@ -114,7 +114,7 @@ Special cases:
 |---|---|
 | JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
 | Python | Django, Flask, and FastAPI route/controller patterns |
-| PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
+| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, and CodeIgniter 3 routes/controller/model/library conventions |
 | Ruby | Rails routes and controller conventions |
 | JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids, Kotlin/Scala source extraction |
 | Go | Gin, Echo, Chi, net/http, Cobra commands, interface implementation edges |
