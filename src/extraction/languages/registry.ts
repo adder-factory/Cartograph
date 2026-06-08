@@ -50,6 +50,7 @@ import { JAVA_DEF } from './java.js';
 import { JAVASCRIPT_DEF } from './javascript.js';
 import { JSDOC_DEF } from './jsdoc.js';
 import { JSON_DEF } from './json.js';
+import { JUPYTER_DEF } from './jupyter.js';
 import { JSX_DEF } from './jsx.js';
 import { JULIA_DEF } from './julia.js';
 import { KOTLIN_DEF } from './kotlin.js';
@@ -111,6 +112,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   JAVASCRIPT_DEF,
   JSDOC_DEF,
   JSON_DEF,
+  JUPYTER_DEF,
   JSX_DEF,
   JULIA_DEF,
   KOTLIN_DEF,

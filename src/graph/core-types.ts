@@ -79,6 +79,7 @@ export type Language =
   | 'html'
   | 'jsdoc'
   | 'json'
+  | 'jupyter'
   | 'julia'
   | 'lua'
   | 'luau'

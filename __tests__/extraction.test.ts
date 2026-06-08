@@ -138,6 +138,10 @@ describe('Language Detection', () => {
     expect(detectLanguage('main.dart')).toBe('dart');
   });
 
+  it('should detect Jupyter notebooks', () => {
+    expect(detectLanguage('analysis.ipynb')).toBe('jupyter');
+  });
+
   it('should return unknown for unsupported extensions', () => {
     expect(detectLanguage('styles.unsupported')).toBe('unknown');
     expect(detectLanguage('data.nope')).toBe('unknown');
@@ -166,6 +170,7 @@ describe('Language Support', () => {
     expect(languages).toContain('swift');
     expect(languages).toContain('kotlin');
     expect(languages).toContain('dart');
+    expect(languages).toContain('jupyter');
   });
 });
 

@@ -220,6 +220,7 @@ export const VALID_LANGUAGES = [
   'html',
   'jsdoc',
   'json',
+  'jupyter',
   'julia',
   'lua',
   'luau',

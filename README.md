@@ -304,7 +304,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **56 language modes**. Framework-aware and derived signals
+Cartograph supports **57 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -329,7 +329,7 @@ are listed separately so the core language matrix stays readable.
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
 | GraphQL / GLSL / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
-| JSON / JSDoc / Regex / Verilog | `.json`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
+| JSON / Jupyter / JSDoc / Regex / Verilog | `.json`, `.ipynb`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
 </details>
 
