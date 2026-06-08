@@ -55,9 +55,9 @@ cartograph install
 ```
 
 The installer detects and configures Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid,
-Rovo Dev, and Qoder CLI. It writes MCP config plus agent instructions where
-the target supports them.
+Copilot CLI, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
+Droid, Rovo Dev, and Qoder CLI. It writes MCP config plus agent instructions
+where the target supports them.
 
 Or give this task to your coding agent:
 

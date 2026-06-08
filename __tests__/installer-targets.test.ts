@@ -112,6 +112,9 @@ describe('Installer targets — contract', () => {
             if (target.id === 'opencode') {
               delete seed.mcpServers;
               seed.mcp = { other: { type: 'local', command: ['x'], enabled: true } };
+            } else if (target.id === 'zed') {
+              delete seed.mcpServers;
+              seed.context_servers = { other: { command: 'x' } };
             }
             fs.writeFileSync(jsonPath, JSON.stringify(seed, null, 2) + '\n');
 
@@ -121,6 +124,9 @@ describe('Installer targets — contract', () => {
             if (target.id === 'opencode') {
               expect(after.mcp.other).toBeDefined();
               expect(after.mcp.cartograph).toBeDefined();
+            } else if (target.id === 'zed') {
+              expect(after.context_servers.other).toBeDefined();
+              expect(after.context_servers.cartograph).toBeDefined();
             } else {
               expect(after.mcpServers.other).toBeDefined();
               expect(after.mcpServers.cartograph).toBeDefined();
@@ -296,6 +302,7 @@ describe('Installer targets — registry', () => {
     expect(getTarget('cursor')?.id).toBe('cursor');
     expect(getTarget('codex')?.id).toBe('codex');
     expect(getTarget('copilot')?.id).toBe('copilot');
+    expect(getTarget('zed')?.id).toBe('zed');
     expect(getTarget('opencode')?.id).toBe('opencode');
     // F#61 — multi-target installer additions.
     expect(getTarget('hermes')?.id).toBe('hermes');
@@ -320,7 +327,7 @@ describe('Installer targets — registry', () => {
   });
 });
 
-describe('Installer targets — Copilot, opencode, Factory, Rovo, and Qoder specifics', () => {
+describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder specifics', () => {
   let tmpHome: string;
   let tmpCwd: string;
   let origCwd: string;
@@ -341,12 +348,15 @@ describe('Installer targets — Copilot, opencode, Factory, Rovo, and Qoder spec
     fs.rmSync(tmpCwd, { recursive: true, force: true });
   });
 
-  it('uses documented paths for Copilot and opencode', () => {
+  it('uses documented paths for Copilot, Zed, and opencode', () => {
     const copilot = getTarget('copilot')!;
+    const zed = getTarget('zed')!;
     const opencode = getTarget('opencode')!;
 
     expect(copilot.describePaths('global')).toEqual([path.join(tmpHome, '.copilot', 'mcp-config.json')]);
     expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(zed.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'zed', 'settings.json')]);
+    expect(zed.describePaths('local')).toEqual([path.join(process.cwd(), '.zed', 'settings.json')]);
     expect(opencode.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'opencode', 'opencode.json')]);
 
     fs.mkdirSync(path.join(process.cwd(), '.github'), { recursive: true });
@@ -382,6 +392,35 @@ describe('Installer targets — Copilot, opencode, Factory, Rovo, and Qoder spec
       args: ['serve', '--mcp'],
       tools: ['*'],
     });
+  });
+
+  it('writes the Zed context_servers entry shape', () => {
+    const zed = getTarget('zed')!;
+
+    zed.install('local', { autoAllow: false });
+
+    const config = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.zed', 'settings.json'), 'utf-8'));
+    expect(config.context_servers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+    });
+    expect(config.mcpServers).toBeUndefined();
+  });
+
+  it('honors XDG_CONFIG_HOME for the Zed global settings directory', () => {
+    const zed = getTarget('zed')!;
+    const prev = process.env['XDG_CONFIG_HOME'];
+    const xdgHome = mkTmpDir('xdg-home');
+    process.env['XDG_CONFIG_HOME'] = xdgHome;
+    try {
+      expect(zed.describePaths('global')).toEqual([path.join(xdgHome, 'zed', 'settings.json')]);
+      zed.install('global', { autoAllow: false });
+      expect(fs.existsSync(path.join(xdgHome, 'zed', 'settings.json'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env['XDG_CONFIG_HOME'];
+      else process.env['XDG_CONFIG_HOME'] = prev;
+      fs.rmSync(xdgHome, { recursive: true, force: true });
+    }
   });
 
   it('uses disjoint default paths for Factory, Rovo, and Qoder targets', () => {
