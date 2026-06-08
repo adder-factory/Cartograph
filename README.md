@@ -55,9 +55,9 @@ cartograph install
 ```
 
 The installer detects and configures Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
-Droid, Rovo Dev, and Qoder CLI. It writes MCP config plus agent instructions
-where the target supports them.
+Copilot CLI, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
+Factory Droid, Rovo Dev, and Qoder CLI. It writes MCP config plus agent
+instructions where the target supports them.
 
 For Claude Code, `--location=local` is private to you and the current project:
 the MCP entry is written under this project in `~/.claude.json`, permissions go

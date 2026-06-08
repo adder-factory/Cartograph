@@ -24,6 +24,7 @@ export type TargetId =
   | 'cursor'
   | 'codex'
   | 'copilot'
+  | 'codewhale'
   | 'zed'
   | 'opencode'
   | 'hermes'
