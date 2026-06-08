@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 56 language modes. The registry is the source of truth:
+Cartograph supports 57 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -42,6 +42,7 @@ does not yet extract language-specific symbols from that grammar.
 | JavaScript | `.js`, `.mjs`, `.cjs`, `.xsjs`, `.xsjslib` | Tree-sitter |
 | JSDoc | `.jsdoc` | Tree-sitter parser-only |
 | JSON | `.json` | Tree-sitter parser-only |
+| Jupyter Notebook | `.ipynb` | Tree-sitter parser-only via JSON grammar |
 | JSX | `.jsx` | Tree-sitter |
 | Julia | `.jl` | Tree-sitter tags query |
 | Kotlin | `.kt`, `.kts` | Tree-sitter |
