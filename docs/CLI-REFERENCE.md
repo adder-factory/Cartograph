@@ -89,6 +89,7 @@ cartograph node AuthService --include-callers --include-tests
 cartograph context "fix login timeout" --format plan
 cartograph explore billing routes
 cartograph files src --format tree
+cartograph file-deps src/billing/service.ts
 cartograph file-symbols src/billing/service.ts
 cartograph module src/billing
 cartograph entry-points
