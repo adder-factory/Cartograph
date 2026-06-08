@@ -63,6 +63,7 @@ export type Language =
   | 'java'
   | 'c'
   | 'clojure'
+  | 'common_lisp'
   | 'cpp'
   | 'csharp'
   | 'cuda'

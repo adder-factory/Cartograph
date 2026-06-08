@@ -103,6 +103,25 @@ bun scripts/build-grammar-wasm.ts --only=clojure --force-build
 bun test __tests__/clojure-extraction.test.ts __tests__/language-registry.test.ts
 ```
 
+## Common Lisp
+
+| Field | Value |
+|---|---|
+| Checked-in asset | `src/extraction/wasm/common_lisp.wasm` |
+| SHA-256 | `eb7f0bbb4e0ad4e7184591f128d87ed016f80aac0eef374b7877e93cedfce7d5` |
+| Source package target | `tree-sitter-commonlisp@0.4.1` |
+| Package integrity | `sha512-owvpVac4HiCt0vAAndrDRGL9YgIFjNVvrEIf1/9x15TZwjKTsTGuldD7C2myV/pOU3zeaHEoSNUvY+DftpLRLQ==` |
+| Repository | `https://github.com/theHamsta/tree-sitter-commonlisp` |
+| License | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps tree-sitter-commonlisp@0.4.1
+bun scripts/build-grammar-wasm.ts --only=common_lisp --force-build
+bun test __tests__/common-lisp-extraction.test.ts __tests__/language-registry.test.ts
+```
+
 ## Apex / Salesforce
 
 | Field | Value |
