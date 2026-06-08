@@ -131,8 +131,8 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Local viewer | `cartograph viewer .` |
 | Library API | `Cartograph.init('/path/to/project')` |
 
-Cartograph's MCP server exposes all 37 registered tools. The default `core`
-profile is smaller; the full 37-tool server is available with
+Cartograph's MCP server exposes all 38 registered tools. The default `core`
+profile is smaller; the full 38-tool server is available with
 `cartograph serve --mcp --profile full`.
 
 ## Storage
@@ -280,6 +280,7 @@ win.
 | `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
 | `cartograph explore` | Deep topic exploration |
 | `cartograph export` | Graph artifact export: JSON, DOT, Mermaid, Cytoscape |
+| `cartograph file-deps` | Local file dependencies and dependents for one indexed file |
 | `cartograph file-symbols` | Symbols in one indexed file |
 | `cartograph files` | Indexed file tree and summaries |
 | `cartograph find` | Symbol, content, env-var, and SQL-ref search |

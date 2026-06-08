@@ -14,11 +14,11 @@ disambiguation, embedded repository indexing, MCP resource/prompt probes,
 installer auto-allow permissions, aggregate session usage, and quieter daemon
 attachment, SAP XSJS import support, Hono route extraction, and Spring
 `@ConditionalOnProperty` config-key linkage, MyBatis `SqlSessionTemplate`
-statement-id linkage, file-scoped symbol listing, generic supertype
-normalization for inheritance edges, `.ignore` indexing overrides for gitignored
-local source, binary/invalid ignore-file resilience, GLSL shader indexing,
-Groovy/Solidity indexing, ArkTS/CUDA indexing, and TypeScript generic
-string-literal contract symbols. Those ideas were reimplemented inside
+statement-id linkage, file-scoped symbol listing, file-scoped dependency
+queries, generic supertype normalization for inheritance edges, `.ignore`
+indexing overrides for gitignored local source, binary/invalid ignore-file
+resilience, GLSL shader indexing, Groovy/Solidity indexing, ArkTS/CUDA indexing,
+and TypeScript generic string-literal contract symbols. Those ideas were reimplemented inside
 Cartograph's current feature-slice architecture; no upstream patch code was
 copied blindly. Public Codegraph issue #602 specifically informed the git-hook
 freshness workflow; Cartograph's implementation uses managed hook blocks, Git
