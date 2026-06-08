@@ -39,7 +39,7 @@ const ChunkBackfillRowSchema = z.object({
 const PgvectorHitRowSchema = z.object({ node_id: z.string(), distance: z.number() });
 
 const pgvectorAvailableQuery = defineQuery({
-  sql: "SELECT CASE WHEN to_regtype('vector') IS NULL THEN 0 ELSE 1 END AS ok",
+  sql: "SELECT CASE WHEN to_regtype('public.vector') IS NULL THEN 0 ELSE 1 END AS ok",
   params: NoParams,
   row: OkRowSchema,
 });
@@ -89,22 +89,26 @@ const KnnParams = z.object({
   fetch: z.number(),
 });
 
-function storeBackfillQueryFor(_name: string) {
+function storeBackfillQueryFor(name: string) {
   return defineQuery({
-    sql: `SELECT rowid AS r, body_hash, model, grain, embedding
-            FROM embedding_store
-           WHERE LENGTH(embedding) = @byteLen`,
+    sql: `SELECT es.rowid AS r, es.body_hash, es.model, es.grain, es.embedding
+            FROM embedding_store es
+            LEFT JOIN ${name} p ON p.store_rowid = es.rowid
+           WHERE LENGTH(es.embedding) = @byteLen
+             AND p.store_rowid IS NULL`,
     params: BackfillLenParams,
     row: StoreBackfillRowSchema,
     options: { validateRows: 'first' },
   });
 }
 
-function chunkBackfillQueryFor(_name: string) {
+function chunkBackfillQueryFor(name: string) {
   return defineQuery({
-    sql: `SELECT rowid AS r, node_id, embedding_model, embedding
-            FROM symbol_chunk_embeddings
-           WHERE LENGTH(embedding) = @byteLen`,
+    sql: `SELECT sce.rowid AS r, sce.node_id, sce.embedding_model, sce.embedding
+            FROM symbol_chunk_embeddings sce
+            LEFT JOIN ${name} p ON p.chunk_rowid = sce.rowid
+           WHERE LENGTH(sce.embedding) = @byteLen
+             AND p.chunk_rowid IS NULL`,
     params: BackfillLenParams,
     row: ChunkBackfillRowSchema,
     options: { validateRows: 'first' },
@@ -114,7 +118,7 @@ function chunkBackfillQueryFor(_name: string) {
 function upsertStorePgvectorQueryFor(name: string) {
   return defineQuery({
     sql: `INSERT INTO ${name} (store_rowid, body_hash, model, grain, embedding)
-          VALUES (@rowid, @bodyHash, @model, @grain, @embedding::vector)
+          VALUES (@rowid, @bodyHash, @model, @grain, @embedding::public.vector)
           ON CONFLICT(store_rowid) DO UPDATE SET
             body_hash = excluded.body_hash,
             model = excluded.model,
@@ -128,7 +132,7 @@ function upsertStorePgvectorQueryFor(name: string) {
 function upsertChunkPgvectorQueryFor(name: string) {
   return defineQuery({
     sql: `INSERT INTO ${name} (chunk_rowid, node_id, embedding_model, embedding)
-          VALUES (@rowid, @nodeId, @model, @embedding::vector)
+          VALUES (@rowid, @nodeId, @model, @embedding::public.vector)
           ON CONFLICT(chunk_rowid) DO UPDATE SET
             node_id = excluded.node_id,
             embedding_model = excluded.embedding_model,
@@ -140,14 +144,14 @@ function upsertChunkPgvectorQueryFor(name: string) {
 
 function findSimilarStoreAllQueryFor(name: string) {
   return defineQuery({
-    sql: `SELECT r.node_id AS node_id, p.embedding <=> @embedding::vector AS distance
+    sql: `SELECT r.node_id AS node_id, p.embedding <=> @embedding::public.vector AS distance
             FROM ${name} p
             JOIN embedding_refs r
               ON r.body_hash = p.body_hash
              AND r.model = p.model
              AND r.grain = p.grain
            WHERE p.model = @model
-           ORDER BY p.embedding <=> @embedding::vector
+           ORDER BY p.embedding <=> @embedding::public.vector
            LIMIT @fetch`,
     params: KnnParams,
     row: PgvectorHitRowSchema,
@@ -156,7 +160,7 @@ function findSimilarStoreAllQueryFor(name: string) {
 
 function findSimilarStoreSymbolQueryFor(name: string) {
   return defineQuery({
-    sql: `SELECT r.node_id AS node_id, p.embedding <=> @embedding::vector AS distance
+    sql: `SELECT r.node_id AS node_id, p.embedding <=> @embedding::public.vector AS distance
             FROM ${name} p
             JOIN embedding_refs r
               ON r.body_hash = p.body_hash
@@ -164,7 +168,7 @@ function findSimilarStoreSymbolQueryFor(name: string) {
              AND r.grain = p.grain
            WHERE p.model = @model
              AND p.grain = 'symbol'
-           ORDER BY p.embedding <=> @embedding::vector
+           ORDER BY p.embedding <=> @embedding::public.vector
            LIMIT @fetch`,
     params: KnnParams,
     row: PgvectorHitRowSchema,
@@ -173,10 +177,10 @@ function findSimilarStoreSymbolQueryFor(name: string) {
 
 function findSimilarChunkQueryFor(name: string) {
   return defineQuery({
-    sql: `SELECT node_id, embedding <=> @embedding::vector AS distance
+    sql: `SELECT node_id, embedding <=> @embedding::public.vector AS distance
             FROM ${name}
            WHERE embedding_model = @model
-           ORDER BY embedding <=> @embedding::vector
+           ORDER BY embedding <=> @embedding::public.vector
            LIMIT @fetch`,
     params: KnnParams,
     row: PgvectorHitRowSchema,
@@ -319,7 +323,12 @@ export function bootstrapPgvector(db: SqliteDatabase, database: DatabaseConfig):
   }
 
   try {
-    db.exec('CREATE EXTENSION IF NOT EXISTS vector');
+    db.exec('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public');
+    if (!isPgvectorAvailable(db)) {
+      pgvectorAvailableByDb.delete(db);
+      db.exec('ALTER EXTENSION vector SET SCHEMA public');
+      pgvectorAvailableByDb.delete(db);
+    }
   } catch (err) {
     pgvectorAvailableByDb.set(db, false);
     if (mode === 'require') {
@@ -404,14 +413,14 @@ function pgvectorCreateTableSql(kind: PgvectorMirrorTableKind, name: string, dim
       body_hash TEXT NOT NULL,
       model TEXT NOT NULL,
       grain TEXT NOT NULL CHECK (grain IN ('symbol', 'file')),
-      embedding vector(${dim}) NOT NULL
+      embedding public.vector(${dim}) NOT NULL
     )`;
   }
   return `CREATE TABLE IF NOT EXISTS ${name} (
       chunk_rowid BIGINT PRIMARY KEY REFERENCES symbol_chunk_embeddings(rowid) ON DELETE CASCADE,
       node_id TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
       embedding_model TEXT NOT NULL,
-      embedding vector(${dim}) NOT NULL
+      embedding public.vector(${dim}) NOT NULL
     )`;
 }
 
