@@ -67,6 +67,12 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // because the viewer is a standalone web UI, not a tool call.
   'viewer',
 
+  // `cartograph export` writes graph artifacts (JSON, DOT, Mermaid,
+  // Cytoscape) to stdout or disk. MCP sessions already have graph
+  // traversal tools for interactive use; this command is a CLI artifact
+  // generator like viewer/scip-export rather than a separate MCP tool.
+  'export',
+
   // `cartograph llm setup` is CLI-side LLM provisioning — installer-style
   // flow that needs a TTY (clack prompts) and has no MCP analogue.
   'llm',

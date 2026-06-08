@@ -76,6 +76,7 @@ cartograph find "AuthService" --by name --mode fuzzy
 cartograph find "process.env.API_KEY" --by content
 cartograph graph AuthService --direction callers
 cartograph graph AuthService --direction impact --hops 2
+cartograph export --format mermaid --kind class,method --edge-kind calls --out graph.mmd
 cartograph node AuthService --include-callers --include-tests
 cartograph context "fix login timeout" --format plan
 cartograph explore billing routes

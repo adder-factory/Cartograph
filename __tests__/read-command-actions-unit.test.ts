@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { registerReadCommands } from '../src/bin/commands/read.js';
+import type { FileRecord, Node } from '../src/types.js';
 
 const actions = new Map<string, (...args: any[]) => unknown>();
 const calls: Array<{ tool: string; args: unknown; projectPath?: string }> = [];
@@ -12,6 +13,49 @@ let projectPath: string;
 function projectHasCartographDb(projectPath: string): boolean {
   return fs.existsSync(path.join(projectPath, '.cartograph', 'cartograph.db'));
 }
+
+const SOURCE_NODE_COUNT = 2;
+const TEST_NODE_COUNT = 1;
+const SOURCE_FILE_SIZE = 10;
+const TEST_FILE_SIZE = 8;
+const FIXTURE_TIMESTAMP = 1;
+
+const indexedFiles: FileRecord[] = [
+  {
+    path: 'src/a.ts',
+    contentHash: 'source-hash',
+    language: 'typescript',
+    nodeCount: SOURCE_NODE_COUNT,
+    size: SOURCE_FILE_SIZE,
+    modifiedAt: FIXTURE_TIMESTAMP,
+    indexedAt: FIXTURE_TIMESTAMP,
+  },
+  {
+    path: 'test/a.test.ts',
+    contentHash: 'test-hash',
+    language: 'typescript',
+    nodeCount: TEST_NODE_COUNT,
+    size: TEST_FILE_SIZE,
+    modifiedAt: FIXTURE_TIMESTAMP,
+    indexedAt: FIXTURE_TIMESTAMP,
+  },
+];
+
+const exportNodes: Node[] = [
+  {
+    id: 'function:a',
+    kind: 'function',
+    name: 'a',
+    qualifiedName: 'a',
+    filePath: 'src/a.ts',
+    language: 'typescript',
+    startLine: FIXTURE_TIMESTAMP,
+    endLine: 3,
+    startColumn: 0,
+    endColumn: FIXTURE_TIMESTAMP,
+    updatedAt: FIXTURE_TIMESTAMP,
+  },
+];
 
 class FakeCommand {
   constructor(private readonly name = 'program') {}
@@ -75,10 +119,10 @@ function loadReadCommandActions(): void {
     loadCartograph: async () => ({ default: { open: async () => fakeCg } }),
     runViaMCP: async (tool: string, args: unknown, projectPath?: string) => calls.push({ tool, args, projectPath }),
     isInitialized: projectHasCartographDb,
-    getAllFilesWithSymbolCount: () => [
-      { path: 'src/a.ts', language: 'typescript', nodeCount: 2, size: 10 },
-      { path: 'test/a.test.ts', language: 'typescript', nodeCount: 1, size: 8 },
-    ],
+    getAllFilesWithSymbolCount: () => indexedFiles,
+    getAllNodes: () => exportNodes,
+    getAllEdges: () => [],
+    getAllFiles: () => [indexedFiles[0]!],
     getFileSummaries: () => new Map([['src/a.ts', 'source file summary']]),
     filterFilesByDir: (files, dir) => files.filter((f) => f.path.startsWith(dir)),
     buildDirRollup: () => ({ totalFiles: 1, totalSymbols: 2, rows: [{ dir: 'src', files: 1, symbols: 2 }] }),
@@ -144,7 +188,7 @@ describe('read command action bodies', () => {
     ]);
   });
 
-  it('runs status, files, and affected actions against opened Cartograph data', async () => {
+  it('runs status, files, export, and affected actions against opened Cartograph data', async () => {
     const originalWrite = process.stdout.write;
     process.stdout.write = ((chunk: string | Uint8Array) => {
       stdout.push(chunk.toString());
@@ -157,6 +201,10 @@ describe('read command action bodies', () => {
         dir: 'src',
         format: 'flat',
         metadata: true,
+      });
+      await actions.get('export [path]')!(projectPath, {
+        format: 'json',
+        limit: '5',
       });
       await actions.get('affected [files...]')!(['src/a.ts'], {
         projectPath,
@@ -173,6 +221,8 @@ describe('read command action bodies', () => {
     expect(text).toContain('Files (1)');
     expect(text).toContain('src/a.ts');
     expect(text).toContain('source file summary');
+    expect(text).toContain('"formatVersion": 1');
+    expect(text).toContain('"exportedNodes": 1');
     expect(text).toContain('"affectedTests":');
     expect(text).toContain('test/a.test.ts');
     expect(fakeCg.close).toHaveBeenCalled();
