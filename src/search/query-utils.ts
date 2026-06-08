@@ -147,6 +147,7 @@ const MIN_STEM_LENGTH = 3;
  *  Distinct from `MIN_STEM_LENGTH` (FTS prefix-stem floor) — happens
  *  to share the value, but governs a different stage. */
 const MIN_TOKEN_LENGTH = 3;
+const MIN_NON_ASCII_TOKEN_LENGTH = 2;
 
 /** A stemming rule: drop `suffix`, accept inputs of at least `minTermLength` chars. */
 interface StemRule {
@@ -358,6 +359,27 @@ function isAsciiDigit(char: string): boolean {
   return char >= '0' && char <= '9';
 }
 
+function containsNonAscii(value: string): boolean {
+  return Array.from(value).some((char) => (char.codePointAt(0) ?? 0) > 0x7f);
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
+}
+
+function isMeaningfulSearchToken(value: string): boolean {
+  const minLength = containsNonAscii(value) ? MIN_NON_ASCII_TOKEN_LENGTH : MIN_TOKEN_LENGTH;
+  return codePointLength(value) >= minLength && !STOP_WORDS.has(value);
+}
+
+function isAsciiToken(value: string): boolean {
+  return Array.from(value).every((char) => (char.codePointAt(0) ?? 0) <= 0x7f);
+}
+
+function splitQueryWords(query: string): string[] {
+  return query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+}
+
 export function extractSearchTerms(query: string, options?: { stems?: boolean }): string[] {
   const includeStems = options?.stems !== false;
   const tokens = new Set<string>();
@@ -371,12 +393,11 @@ export function extractSearchTerms(query: string, options?: { stems?: boolean })
     .replaceAll(/([a-z])([A-Z])/g, '$1 $2')
     .replaceAll(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
     .replaceAll(/[_.]+/g, ' ');
-  const words = normalised.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  const words = splitQueryWords(normalised);
 
   for (const word of words) {
     const lower = word.toLowerCase();
-    if (lower.length < MIN_TOKEN_LENGTH) continue;
-    if (STOP_WORDS.has(lower)) continue;
+    if (!isMeaningfulSearchToken(lower)) continue;
     tokens.add(lower);
   }
 
@@ -398,6 +419,7 @@ export function extractSearchTerms(query: string, options?: { stems?: boolean })
 function computeNonShadowingStems(tokens: ReadonlySet<string>): Set<string> {
   const stems = new Set<string>();
   for (const token of tokens) {
+    if (!isAsciiToken(token)) continue;
     for (const variant of getStemVariants(token)) {
       if (tokens.has(variant)) continue;
       if (STOP_WORDS.has(variant)) continue;
