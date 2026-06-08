@@ -11,6 +11,7 @@ import type { AgentTarget, Location, TargetId } from './types.js';
 import { claudeTarget } from './claude.js';
 import { cursorTarget } from './cursor.js';
 import { codexTarget } from './codex.js';
+import { codeBuddyTarget } from './codebuddy.js';
 import { copilotTarget } from './copilot.js';
 import { codeWhaleTarget } from './codewhale.js';
 import { zedTarget } from './zed.js';
@@ -24,12 +25,14 @@ import { rovoTarget } from './rovo.js';
 import { qoderTarget } from './qoder.js';
 import { bobTarget } from './bob.js';
 import { kimiTarget } from './kimi.js';
+import { piTarget } from './pi.js';
 import { reasonixTarget } from './reasonix.js';
 
 export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   claudeTarget,
   cursorTarget,
   codexTarget,
+  codeBuddyTarget,
   copilotTarget,
   codeWhaleTarget,
   zedTarget,
@@ -43,6 +46,7 @@ export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   qoderTarget,
   bobTarget,
   kimiTarget,
+  piTarget,
   reasonixTarget,
 ]);
 

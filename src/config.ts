@@ -191,8 +191,10 @@ export function getConfigPath(projectRoot: string): string {
  * instead of silently rejecting valid configs at runtime.
  */
 export const VALID_LANGUAGES = [
+  'abap',
   'apex',
   'arkts',
+  'astro',
   'aura',
   'typescript',
   'javascript',
@@ -211,6 +213,7 @@ export const VALID_LANGUAGES = [
   'ruby',
   'swift',
   'kotlin',
+  'lean',
   'dart',
   'embedded_template',
   'svelte',
@@ -248,6 +251,7 @@ export const VALID_LANGUAGES = [
   'prisma',
   'properties',
   'solidity',
+  'vbnet',
   'verilog',
   'visualforce',
   'xml',

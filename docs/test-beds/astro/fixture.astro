@@ -1,0 +1,10 @@
+---
+import Layout from './Layout.astro';
+const title = 'Home';
+function greet(name: string) {
+  return name;
+}
+---
+<Layout title={title}>
+  <h1>{greet(title)}</h1>
+</Layout>

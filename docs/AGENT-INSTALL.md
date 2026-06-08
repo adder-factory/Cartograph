@@ -54,8 +54,9 @@ written to `.claude/settings.local.json`, and instructions are written to
 `CLAUDE.local.md`. Cartograph adds those local project files to `.gitignore`.
 
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
-Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, and Reasonix.
+Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,
+Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi
+Agent, and Reasonix.
 
 Optional follow-up tasks:
 

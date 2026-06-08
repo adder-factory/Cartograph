@@ -13,8 +13,9 @@ cartograph install
 ```
 
 It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI,
-CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
-Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, and Reasonix.
+CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
+Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi Agent, and
+Reasonix.
 
 ## Agent-Assisted Install
 
@@ -115,8 +116,8 @@ is:
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
 | tools/list, 24 tools | 44,195 | ~11,049 |
-| initialize instructions | 2,835 | ~709 |
-| combined startup load | 47,030 | ~11,758 |
+| initialize instructions | 2,862 | ~716 |
+| combined startup load | 47,057 | ~11,765 |
 | full playbook, on demand | 14,236 | ~3,559 |
 
 The full 38-tool profile is 61,977 `tools/list` chars and 64,812 combined
@@ -216,6 +217,25 @@ For team-shared Claude MCP config, use a project `.mcp.json` with the standard
 The installer honors `COPILOT_HOME` for the global Copilot configuration
 directory. You can also add the same server interactively with Copilot CLI's
 `/mcp add` flow and then run `/mcp reload`.
+
+### CodeBuddy
+
+`~/.codebuddy/.mcp.json`, `~/.codebuddy/mcp.json`, or project `.mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "type": "stdio",
+      "command": "cartograph",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
+
+The installer uses a JSONC-preserving writer for CodeBuddy so comments and
+trailing commas in existing config files are kept.
 
 ### CodeWhale
 
@@ -349,6 +369,25 @@ workspace.
   }
 }
 ```
+
+### Pi Agent
+
+`~/.pi/agent/mcp.json`, `$PI_CODING_AGENT_DIR/mcp.json`, or `.pi/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "transport": "stdio"
+    }
+  }
+}
+```
+
+Pi support is adapter-backed: install the Pi MCP adapter or extension package
+before expecting Pi Agent to consume the config file.
 
 ### Reasonix
 

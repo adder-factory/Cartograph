@@ -309,6 +309,7 @@ describe('Installer targets — registry', () => {
     expect(getTarget('cursor')?.id).toBe('cursor');
     expect(getTarget('codex')?.id).toBe('codex');
     expect(getTarget('copilot')?.id).toBe('copilot');
+    expect(getTarget('codebuddy')?.id).toBe('codebuddy');
     expect(getTarget('zed')?.id).toBe('zed');
     expect(getTarget('opencode')?.id).toBe('opencode');
     // F#61 — multi-target installer additions.
@@ -321,6 +322,7 @@ describe('Installer targets — registry', () => {
     expect(getTarget('qoder')?.id).toBe('qoder');
     expect(getTarget('bob')?.id).toBe('bob');
     expect(getTarget('kimi')?.id).toBe('kimi');
+    expect(getTarget('pi')?.id).toBe('pi');
     expect(getTarget('reasonix')?.id).toBe('reasonix');
     expect(getTarget('not-a-real-target')).toBeUndefined();
   });
@@ -426,13 +428,19 @@ describe('Installer targets — JSON MCP target specifics', () => {
     fs.rmSync(tmpCwd, { recursive: true, force: true });
   });
 
-  it('uses documented paths for Copilot, Zed, and opencode', () => {
+  it('uses documented paths for Copilot, CodeBuddy, Pi, Zed, and opencode', () => {
     const copilot = getTarget('copilot')!;
+    const codebuddy = getTarget('codebuddy')!;
+    const pi = getTarget('pi')!;
     const zed = getTarget('zed')!;
     const opencode = getTarget('opencode')!;
 
     expect(copilot.describePaths('global')).toEqual([path.join(tmpHome, '.copilot', 'mcp-config.json')]);
     expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(codebuddy.describePaths('global')).toEqual([path.join(tmpHome, '.codebuddy', '.mcp.json')]);
+    expect(codebuddy.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(pi.describePaths('global')).toEqual([path.join(tmpHome, '.pi', 'agent', 'mcp.json')]);
+    expect(pi.describePaths('local')).toEqual([path.join(process.cwd(), '.pi', 'mcp.json')]);
     expect(zed.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'zed', 'settings.json')]);
     expect(zed.describePaths('local')).toEqual([path.join(process.cwd(), '.zed', 'settings.json')]);
     expect(opencode.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'opencode', 'opencode.json')]);
@@ -440,6 +448,92 @@ describe('Installer targets — JSON MCP target specifics', () => {
     fs.mkdirSync(path.join(process.cwd(), '.github'), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), '.github', 'mcp.json'), '{}\n');
     expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.github', 'mcp.json')]);
+  });
+
+  it('preserves JSONC comments and trailing commas for CodeBuddy and Pi configs', () => {
+    const codebuddy = getTarget('codebuddy')!;
+    const pi = getTarget('pi')!;
+    const codebuddyPath = path.join(tmpCwd, '.mcp.json');
+    const piPath = path.join(tmpCwd, '.pi', 'mcp.json');
+
+    fs.mkdirSync(path.dirname(piPath), { recursive: true });
+    fs.writeFileSync(
+      codebuddyPath,
+      [
+        '{',
+        '  // keep this user note',
+        '  "mcpServers": {',
+        '    "other": { "command": "x" },',
+        '  },',
+        '  "settings": { "mode": "manual" },',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      piPath,
+      [
+        '{',
+        '  "settings": {',
+        '    "toolPrefix": "mcp", // adapter setting',
+        '  },',
+        '  "mcpServers": {',
+        '    "existing": { "command": "y" }',
+        '  }',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    expect(codebuddy.install('local', { autoAllow: false }).files[0]!.action).toBe('updated');
+    expect(pi.install('local', { autoAllow: false }).files[0]!.action).toBe('updated');
+
+    const codebuddyAfter = fs.readFileSync(codebuddyPath, 'utf-8');
+    expect(codebuddyAfter).toContain('// keep this user note');
+    expect(codebuddyAfter).toContain('"other": { "command": "x" }');
+    expect(codebuddyAfter).toContain('"cartograph"');
+    expect(codebuddy.detect('local').alreadyConfigured).toBe(true);
+
+    const piAfter = fs.readFileSync(piPath, 'utf-8');
+    expect(piAfter).toContain('// adapter setting');
+    expect(piAfter).toContain('"existing": { "command": "y" }');
+    expect(piAfter).toContain('"transport": "stdio"');
+    expect(pi.detect('local').alreadyConfigured).toBe(true);
+
+    expect(codebuddy.uninstall('local').files[0]!.action).toBe('removed');
+    expect(pi.uninstall('local').files[0]!.action).toBe('removed');
+    expect(fs.readFileSync(codebuddyPath, 'utf-8')).toContain('// keep this user note');
+    expect(fs.readFileSync(piPath, 'utf-8')).toContain('// adapter setting');
+  });
+
+  it('honors CodeBuddy MCP path priority and PI_CODING_AGENT_DIR', () => {
+    const codebuddy = getTarget('codebuddy')!;
+    const pi = getTarget('pi')!;
+    const legacyCodeBuddyPath = path.join(tmpHome, '.codebuddy', 'mcp.json');
+    const piAgentDir = mkTmpDir('pi-agent-dir');
+    const prevPiDir = process.env['PI_CODING_AGENT_DIR'];
+
+    fs.mkdirSync(path.dirname(legacyCodeBuddyPath), { recursive: true });
+    fs.writeFileSync(legacyCodeBuddyPath, '{ "mcpServers": {} }\n');
+    process.env['PI_CODING_AGENT_DIR'] = piAgentDir;
+
+    try {
+      expect(codebuddy.describePaths('global')).toEqual([legacyCodeBuddyPath]);
+      codebuddy.install('global', { autoAllow: false });
+      expect(JSON.parse(fs.readFileSync(legacyCodeBuddyPath, 'utf-8')).mcpServers.cartograph).toBeDefined();
+
+      expect(pi.describePaths('global')).toEqual([path.join(piAgentDir, 'mcp.json')]);
+      pi.install('global', { autoAllow: false });
+      expect(JSON.parse(fs.readFileSync(path.join(piAgentDir, 'mcp.json'), 'utf-8')).mcpServers.cartograph).toEqual({
+        command: 'cartograph',
+        args: ['serve', '--mcp'],
+        transport: 'stdio',
+      });
+    } finally {
+      if (prevPiDir === undefined) delete process.env['PI_CODING_AGENT_DIR'];
+      else process.env['PI_CODING_AGENT_DIR'] = prevPiDir;
+      fs.rmSync(piAgentDir, { recursive: true, force: true });
+    }
   });
 
   it('honors COPILOT_HOME for the Copilot global config directory', () => {
@@ -501,13 +595,14 @@ describe('Installer targets — JSON MCP target specifics', () => {
     }
   });
 
-  it('uses disjoint default paths for Factory, Rovo, Qoder, CodeWhale, Bob, Kimi, and Reasonix targets', () => {
+  it('uses disjoint default paths for Factory, Rovo, Qoder, CodeWhale, Bob, Kimi, Pi, and Reasonix targets', () => {
     const factory = getTarget('factory')!;
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;
     const codewhale = getTarget('codewhale')!;
     const bob = getTarget('bob')!;
     const kimi = getTarget('kimi')!;
+    const pi = getTarget('pi')!;
     const reasonix = getTarget('reasonix')!;
 
     const paths = [
@@ -523,6 +618,8 @@ describe('Installer targets — JSON MCP target specifics', () => {
       ...bob.describePaths('local'),
       ...kimi.describePaths('global'),
       ...kimi.describePaths('local'),
+      ...pi.describePaths('global'),
+      ...pi.describePaths('local'),
       ...reasonix.describePaths('global'),
     ];
 
@@ -536,6 +633,8 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(bob.describePaths('local')).toEqual([path.join(process.cwd(), '.bob', 'mcp.json')]);
     expect(kimi.describePaths('global')).toEqual([path.join(tmpHome, '.kimi-code', 'mcp.json')]);
     expect(kimi.describePaths('local')).toEqual([path.join(process.cwd(), '.kimi-code', 'mcp.json')]);
+    expect(pi.describePaths('global')).toEqual([path.join(tmpHome, '.pi', 'agent', 'mcp.json')]);
+    expect(pi.describePaths('local')).toEqual([path.join(process.cwd(), '.pi', 'mcp.json')]);
     expect(reasonix.describePaths('global')).toEqual([path.join(tmpHome, '.reasonix', 'config.json')]);
     expect(reasonix.supportsLocation('local')).toBe(false);
   });
@@ -556,6 +655,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     const codewhale = getTarget('codewhale')!;
     const bob = getTarget('bob')!;
     const kimi = getTarget('kimi')!;
+    const pi = getTarget('pi')!;
     const reasonix = getTarget('reasonix')!;
 
     factory.install('local', { autoAllow: false });
@@ -564,6 +664,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     codewhale.install('local', { autoAllow: false });
     bob.install('local', { autoAllow: false });
     kimi.install('local', { autoAllow: false });
+    pi.install('local', { autoAllow: false });
     reasonix.install('global', { autoAllow: false });
 
     const factoryConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.factory', 'mcp.json'), 'utf-8'));
@@ -606,6 +707,13 @@ describe('Installer targets — JSON MCP target specifics', () => {
       args: ['serve', '--mcp'],
     });
 
+    const piConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.pi', 'mcp.json'), 'utf-8'));
+    expect(piConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      transport: 'stdio',
+    });
+
     const reasonixConfig = JSON.parse(fs.readFileSync(path.join(tmpHome, '.reasonix', 'config.json'), 'utf-8'));
     expect(reasonixConfig.mcpServers.cartograph).toEqual({
       command: 'cartograph',
@@ -618,6 +726,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     const command = '/opt/cartograph/bin/cartograph';
 
     getTarget('claude')!.install('local', { autoAllow: false, command });
+    getTarget('codebuddy')!.install('local', { autoAllow: false, command });
     getTarget('copilot')!.install('local', { autoAllow: false, command });
     getTarget('zed')!.install('local', { autoAllow: false, command });
     getTarget('opencode')!.install('local', { autoAllow: false, command });
@@ -627,6 +736,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     getTarget('codewhale')!.install('local', { autoAllow: false, command });
     getTarget('bob')!.install('local', { autoAllow: false, command });
     getTarget('kimi')!.install('local', { autoAllow: false, command });
+    getTarget('pi')!.install('local', { autoAllow: false, command });
     getTarget('gemini')!.install('local', { autoAllow: false, command });
     getTarget('kiro')!.install('local', { autoAllow: false, command });
     getTarget('codex')!.install('global', { autoAllow: false, command });
@@ -638,6 +748,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(claudeConfig.projects[path.resolve(process.cwd())].mcpServers.cartograph.command).toBe(command);
     const copilotConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.mcp.json'), 'utf-8'));
     expect(copilotConfig.mcpServers.cartograph.command).toBe(command);
+    expect(copilotConfig.mcpServers.cartograph.tools).toEqual(['*']);
     const zedConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.zed', 'settings.json'), 'utf-8'));
     expect(zedConfig.context_servers.cartograph.command).toBe(command);
     const opencodeConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, 'opencode.json'), 'utf-8'));
@@ -654,6 +765,8 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(bobConfig.mcpServers.cartograph.command).toBe(command);
     const kimiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kimi-code', 'mcp.json'), 'utf-8'));
     expect(kimiConfig.mcpServers.cartograph.command).toBe(command);
+    const piConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.pi', 'mcp.json'), 'utf-8'));
+    expect(piConfig.mcpServers.cartograph.command).toBe(command);
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.gemini', 'settings.json'), 'utf-8'));
     expect(geminiConfig.mcpServers.cartograph.command).toBe(command);
     const kiroConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kiro', 'settings', 'mcp.json'), 'utf-8'));

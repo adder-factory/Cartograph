@@ -54,6 +54,7 @@ describe('G9 hook-group invariance', () => {
     'build-context-refs',
     'config-refs',
     'dynamic-import-edges',
+    'dynamic-dispatch',
     're-export-edges',
     'sql-refs',
     'string-imports',

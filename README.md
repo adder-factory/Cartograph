@@ -55,8 +55,9 @@ cartograph install
 ```
 
 The installer detects and configures Claude Code, Cursor, Codex CLI, GitHub
-Copilot CLI, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
-Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, and Reasonix. It
+Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,
+Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi
+Agent, and Reasonix. It
 writes MCP config plus agent instructions where the target supports them.
 
 For Claude Code, `--location=local` is private to you and the current project:
@@ -316,7 +317,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **61 language modes**. Framework-aware and derived signals
+Cartograph supports **65 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -324,6 +325,7 @@ are listed separately so the core language matrix stays readable.
 
 | Language | Extensions / scope |
 |---|---|
+| ABAP | `.abap` |
 | TypeScript / TSX | `.ts`, `.mts`, `.cts`, `.tsx` |
 | JavaScript / JSX / ArkTS | `.js`, `.mjs`, `.cjs`, `.xsjs`, `.xsjslib`, `.jsx`, `.ets` |
 | Python | `.py`, `.pyw` |
@@ -331,15 +333,16 @@ are listed separately so the core language matrix stays readable.
 | Rust | `.rs` |
 | Java / Kotlin / Scala / Groovy | `.java`, `.kt`, `.kts`, `.scala`, `.sc`, `.groovy`, `.gradle` |
 | C / C++ / C# / CUDA | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs`, `.cu`, `.cuh` |
+| VB.NET | `.vb` |
 | Clojure / ClojureScript | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` |
 | Common Lisp | `.lisp`, `.lsp`, `.l`, `.cl`, `.asd`, `.ros` |
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
 | Salesforce | `.cls`, `.trigger`, plus Aura/Visualforce markup extensions in Salesforce source paths |
-| Dart / ReScript / R / Lua / Luau / Elixir | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs` |
+| Dart / ReScript / R / Lua / Luau / Elixir / Lean | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs`, `.lean` |
 | Haskell / Julia / OCaml | `.hs`, `.jl`, `.ml`, `.mli` |
 | HTML / CSS / ERB / EJS | `.html`, `.htm`, `.css`, `.erb`, `.ejs`, `.eta`, `.etlua` |
-| Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
+| Astro / Svelte / Vue / Liquid | `.astro`, `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
 | GraphQL / GLSL / HLSL / Nix / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.hlsl`, `.hlsli`, `.fx`, `.fxh`, `.nix`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.tofu`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
@@ -351,13 +354,13 @@ are listed separately so the core language matrix stays readable.
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
-| Python | Django, Flask, and FastAPI route/controller patterns |
-| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, and CodeIgniter 3 routes/controller/model/library conventions |
+| JavaScript / TypeScript | Angular routes, Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
+| Python | Django, Flask, FastAPI route/controller patterns, and NeuG graph resource landmarks |
+| PHP | Laravel facades/routes, Drupal routes/services/hooks/plugins/service tags, Symfony routes/controllers, and CodeIgniter 3 routes/controller/model/library conventions |
 | Ruby | Rails routes and controller conventions |
 | JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, and MyBatis Java/XML bindings including `SqlSessionTemplate` statement ids |
 | Salesforce | Apex classes/methods/triggers, LWC component bundles and Apex imports, Aura controllers/actions, Visualforce routes/actions |
-| Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
+| Go / Rust / C# / Dart / Swift | Common route and entry-point patterns, Flutter routes, Cargo workspace crate aliases |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |
 
 Static resolution also handles language-specific ownership and call shapes,
@@ -373,6 +376,7 @@ chained calls.
 | GraphQL SDL | Types, fields, enums, interfaces, and references |
 | Prisma / SQL | Models, tables, views, functions, triggers, schemas, and table references |
 | Config / env refs | Env-var, config-key, feature-flag, and build-context reference edges |
+| Dynamic dispatch | Bounded TS/JS dispatch-table call edges with inferred confidence |
 | Tests / coverage / history | Test edges, lcov joins, churn, issue history, co-change, and hotspot signals |
 
 See [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) for the full matrix.

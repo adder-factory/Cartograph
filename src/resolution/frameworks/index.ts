@@ -5,12 +5,15 @@
  */
 
 import type { FrameworkResolver, ResolutionContext } from '../types.js';
+import { angularResolver } from './angular.js';
 import { codeIgniterResolver } from './codeigniter.js';
 import { drupalResolver } from './drupal.js';
 import { laravelResolver } from './laravel.js';
 import { expressResolver } from './express.js';
+import { flutterResolver } from './flutter.js';
 import { honoResolver } from './hono.js';
 import { bunServeResolver } from './bun-serve.js';
+import { neugResolver } from './neug.js';
 import { reactResolver } from './react.js';
 import { salesforceResolver } from './salesforce.js';
 import { svelteResolver } from './svelte.js';
@@ -23,6 +26,7 @@ import { rustResolver } from './rust.js';
 import { playResolver } from './play.js';
 import { aspnetResolver } from './csharp.js';
 import { swiftUIResolver, uikitResolver, vaporResolver } from './swift.js';
+import { symfonyResolver } from './symfony.js';
 import { swiftObjcBridgeResolver } from './swift-objc.js';
 import { reactNativeBridgeResolver } from './react-native.js';
 import { expoModulesResolver } from './expo-modules.js';
@@ -37,7 +41,9 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   laravelResolver,
   drupalResolver,
   codeIgniterResolver,
+  symfonyResolver,
   // JavaScript/TypeScript
+  angularResolver,
   expressResolver,
   honoResolver,
   bunServeResolver,
@@ -50,6 +56,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   djangoResolver,
   flaskResolver,
   fastapiResolver,
+  neugResolver,
   // Ruby
   railsResolver,
   // Java
@@ -61,6 +68,8 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   rustResolver,
   // C#
   aspnetResolver,
+  // Dart
+  flutterResolver,
   // Swift
   swiftUIResolver,
   uikitResolver,
@@ -101,10 +110,13 @@ export function detectFrameworks(context: ResolutionContext): FrameworkResolver[
 
 // Re-export framework resolvers
 export { laravelResolver, FACADE_MAPPINGS } from './laravel.js';
+export { angularResolver } from './angular.js';
 export { codeIgniterResolver } from './codeigniter.js';
 export { expressResolver } from './express.js';
 export { honoResolver } from './hono.js';
+export { flutterResolver } from './flutter.js';
 export { bunServeResolver } from './bun-serve.js';
+export { neugResolver } from './neug.js';
 export { reactResolver } from './react.js';
 export { salesforceResolver } from './salesforce.js';
 export { svelteResolver } from './svelte.js';
@@ -116,5 +128,6 @@ export { playResolver } from './play.js';
 export { goResolver } from './go.js';
 export { rustResolver } from './rust.js';
 export { aspnetResolver } from './csharp.js';
+export { symfonyResolver } from './symfony.js';
 export { swiftUIResolver, uikitResolver, vaporResolver } from './swift.js';
 export { cliCommanderResolver } from './cli.js';
