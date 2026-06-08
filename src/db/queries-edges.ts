@@ -59,6 +59,8 @@ const EdgeRowSchema = z.object({
   confidence: z.string().nullable(),
 }) satisfies z.ZodType<EdgeRow>;
 
+const NoParams = z.object({});
+
 // ─── Typed query definitions (module-level; bound per-DB lazily) ──────────
 
 const insertEdgeQuery = defineQuery({
@@ -88,6 +90,12 @@ const getEdgesBySourceQuery = defineQuery({
 const getEdgesByTargetQuery = defineQuery({
   sql: 'SELECT * FROM edges WHERE target = @targetId',
   params: z.object({ targetId: z.string() }),
+  row: EdgeRowSchema,
+});
+
+const getAllEdgesQuery = defineQuery({
+  sql: 'SELECT * FROM edges ORDER BY id',
+  params: NoParams,
   row: EdgeRowSchema,
 });
 
@@ -137,6 +145,7 @@ declare module './queries.js' {
     deleteAllEdgesByKind?: TypedQuery<{ kind: string }, never>;
     getEdgesBySource?: TypedQuery<{ sourceId: string }, EdgeRow>;
     getEdgesByTarget?: TypedQuery<{ targetId: string }, EdgeRow>;
+    getAllEdges?: TypedQuery<Record<string, never>, EdgeRow>;
     getOutgoingEdgesByKinds?: TypedQuery<{ sourceId: string; kindsJson: string }, EdgeRow>;
     getIncomingEdgesByKinds?: TypedQuery<{ targetId: string; kindsJson: string }, EdgeRow>;
     findEdgesBetweenNodes?: TypedQuery<{ idsJson: string }, EdgeRow>;
@@ -235,6 +244,12 @@ export function insertEdges(qb: QueryBuilder, edges: Edge[]): Edge[] {
     query.runBatch(paramsList);
   })();
   return insertable;
+}
+
+/** Get every edge in insertion order. Intended for whole-graph export surfaces. */
+export function getAllEdges(qb: QueryBuilder): Edge[] {
+  qb.queries.getAllEdges ??= getAllEdgesQuery(qb.db);
+  return qb.queries.getAllEdges.all({}).map(rowToEdge);
 }
 
 /**

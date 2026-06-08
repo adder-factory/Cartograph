@@ -4,7 +4,9 @@
  * decomposition.
  */
 import * as fs from 'node:fs';
-import { getAllFilesWithSymbolCount } from '../../db/queries-files.js';
+import { getAllFiles, getAllFilesWithSymbolCount } from '../../db/queries-files.js';
+import { getAllNodes } from '../../db/queries.js';
+import { getAllEdges } from '../../db/queries-edges.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
 import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
@@ -17,6 +19,7 @@ import {
   registerFilesCommand as registerFilesFeatureCommand,
 } from '../../features/files/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
+import { registerGraphExportCommand as registerGraphExportFeatureCommand } from '../../features/graph-export/index.js';
 import type { CliArgumentOptionCommand } from '../../features/shared/cli-command.js';
 import { registerStatusCommand as registerStatusFeatureCommand } from '../../features/status/index.js';
 import { isInitialized } from '../../directory.js';
@@ -55,6 +58,9 @@ export interface ReadCommandDeps {
   runViaMCP: typeof runViaMCP;
   isInitialized: typeof isInitialized;
   getAllFilesWithSymbolCount: typeof getAllFilesWithSymbolCount;
+  getAllNodes: typeof getAllNodes;
+  getAllEdges: typeof getAllEdges;
+  getAllFiles: typeof getAllFiles;
   getFileSummaries: typeof getFileSummaries;
   filterFilesByDir: typeof filterFilesByDir;
   buildDirRollup: typeof buildDirRollup;
@@ -72,6 +78,9 @@ const defaultReadCommandDeps: ReadCommandDeps = {
   runViaMCP,
   isInitialized,
   getAllFilesWithSymbolCount,
+  getAllNodes,
+  getAllEdges,
+  getAllFiles,
   getFileSummaries,
   filterFilesByDir,
   buildDirRollup,
@@ -140,6 +149,13 @@ function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
+function registerGraphExportReadCommand(deps: ReadCommandDeps): void {
+  registerGraphExportFeatureCommand({
+    ...deps,
+    writeLine: out,
+  });
+}
+
 export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandDeps): void {
   registerAtRangeReadCommand(deps);
   registerAskReadCommand(deps);
@@ -147,6 +163,7 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
+  registerGraphExportReadCommand(deps);
   registerAffectedReadCommand(deps);
 }
 

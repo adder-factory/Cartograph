@@ -271,6 +271,7 @@ win.
 | `cartograph discover` | Find other `.cartograph` indexes |
 | `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
 | `cartograph explore` | Deep topic exploration |
+| `cartograph export` | Graph artifact export: JSON, DOT, Mermaid, Cytoscape |
 | `cartograph files` | Indexed file tree and summaries |
 | `cartograph find` | Symbol, content, env-var, and SQL-ref search |
 | `cartograph graph` | Call/dependency graph traversal |
