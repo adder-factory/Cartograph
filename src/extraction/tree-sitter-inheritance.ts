@@ -200,12 +200,29 @@ interface PushInheritanceRefArgs {
   posNode: SyntaxNode;
 }
 
+function normalizeInheritanceReferenceName(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return trimmed;
+  const genericStart = firstGenericArgumentStart(trimmed);
+  if (genericStart < 0) return trimmed;
+  const head = trimmed.slice(0, genericStart).trimEnd();
+  return head || trimmed;
+}
+
+function firstGenericArgumentStart(value: string): number {
+  const angle = value.indexOf('<');
+  const bracket = value.indexOf('[');
+  if (angle < 0) return bracket;
+  if (bracket < 0) return angle;
+  return Math.min(angle, bracket);
+}
+
 /** Append an inheritance unresolved-reference (extends or implements). */
 function pushInheritanceRef(args: PushInheritanceRefArgs): void {
   const { extractor, classId, name, kind, posNode } = args;
   extractor.unresolvedReferences.push({
     fromNodeId: classId,
-    referenceName: name,
+    referenceName: normalizeInheritanceReferenceName(name),
     referenceKind: kind,
     line: posNode.startPosition.row + 1,
     column: posNode.startPosition.column,
