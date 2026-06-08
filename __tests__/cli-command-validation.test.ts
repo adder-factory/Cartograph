@@ -171,13 +171,18 @@ describe('CLI command validation contracts', () => {
     expect(fish.code).toBe(0);
     expect(fish.out).toContain('complete -c cartograph');
     expect(fish.out).toContain('cartograph __complete');
+
+    const powershell = runCli(['completions', 'powershell']);
+    expect(powershell.code).toBe(0);
+    expect(powershell.out).toContain('Register-ArgumentCompleter -Native -CommandName cartograph');
+    expect(powershell.out).toContain('cartograph __complete');
   });
 
   it('rejects unsupported completion shells cleanly', () => {
-    const { out, code } = runCli(['completions', 'powershell']);
+    const { out, code } = runCli(['completions', 'nushell']);
     expect(code).not.toBe(0);
-    expect(out).toContain('Unsupported completion shell "powershell"');
-    expect(out).toContain('bash, zsh, fish');
+    expect(out).toContain('Unsupported completion shell "nushell"');
+    expect(out).toContain('bash, zsh, fish, powershell');
   });
 
   it('offers command and option candidates through the hidden completion helper', () => {

@@ -1,4 +1,4 @@
-export const COMPLETION_SHELLS = ['bash', 'zsh', 'fish'] as const;
+export const COMPLETION_SHELLS = ['bash', 'zsh', 'fish', 'powershell'] as const;
 
 export type CompletionShell = (typeof COMPLETION_SHELLS)[number];
 
@@ -49,6 +49,8 @@ export function renderCompletionScript(shell: CompletionShell, commandName = 'ca
       return renderZshCompletion(commandName);
     case 'fish':
       return renderFishCompletion(commandName);
+    case 'powershell':
+      return renderPowerShellCompletion(commandName);
   }
 }
 
@@ -148,5 +150,25 @@ function __cartograph_complete
 end
 
 complete -c ${commandName} -f -a "(__cartograph_complete)"
+`;
+}
+
+function renderPowerShellCompletion(commandName: string): string {
+  return `# ${commandName} shell completion for PowerShell
+Register-ArgumentCompleter -Native -CommandName ${commandName} -ScriptBlock {
+  param($wordToComplete, $commandAst, $cursorPosition)
+
+  $words = @($commandAst.CommandElements | ForEach-Object { $_.ToString() })
+  if ($words.Count -le 1) {
+    $words = @()
+  } else {
+    $words = $words[1..($words.Count - 1)]
+  }
+
+  $completions = & ${commandName} __complete @words 2>$null
+  foreach ($completion in $completions) {
+    [System.Management.Automation.CompletionResult]::new($completion, $completion, 'ParameterValue', $completion)
+  }
+}
 `;
 }

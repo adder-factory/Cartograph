@@ -270,7 +270,7 @@ win.
 | `cartograph blame` | Symbol-level git blame |
 | `cartograph changed-since` | File drift since index time or timestamp |
 | `cartograph compare-to-ref` | End-of-task structural and finding delta |
-| `cartograph completions` | Shell completion scripts for Bash, Zsh, and Fish |
+| `cartograph completions` | Shell completion scripts for Bash, Zsh, Fish, and PowerShell |
 | `cartograph context` | Task-specific context and route plans |
 | `cartograph coverage` | Per-symbol coverage joined to graph data |
 | `cartograph dead-code` | Potentially-dead symbol candidates |
