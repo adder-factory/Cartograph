@@ -21,6 +21,13 @@ function warnOnBiomarkerErrors(phase: string, errors: number): void {
   }
 }
 
+export function biomarkerSyncFilePaths(result: SyncResult, coldCache: boolean): string[] | undefined {
+  if (coldCache) return undefined;
+  const changedFilePaths = result.changedFilePaths;
+  if (changedFilePaths === undefined || changedFilePaths.length === 0) return undefined;
+  return changedFilePaths;
+}
+
 export const HOOK: IndexHook = {
   name: 'biomarkers',
   async afterIndexAll(ctx) {
@@ -51,7 +58,7 @@ export const HOOK: IndexHook = {
     // afterSync with zero changed files still runs a full pass — minor
     // one-shot cost in exchange for the self-heal property.
     const cold = isBiomarkerCacheCold(ctx.queries);
-    const filePaths = cold ? undefined : result.changedFilePaths;
+    const filePaths = biomarkerSyncFilePaths(result, cold);
     const r = await analyseProject(ctx.queries, ctx.projectRoot, filePaths === undefined ? {} : { filePaths });
     logDebug('Biomarkers: sync', {
       files: r.filesScanned,
