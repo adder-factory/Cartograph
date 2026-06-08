@@ -296,6 +296,9 @@ For an existing SQLite project, use `cartograph admin storage-migrate
 /path/to/project --database-url <postgres-url> --database-schema <schema>`
 and restart any MCP server attached to the old SQLite database. The PostgreSQL
 target schema must be fresh or intentionally recreated with `--force`.
+To move a PostgreSQL-backed project back to local SQLite, use
+`cartograph admin storage-migrate /path/to/project --database-provider sqlite`
+and restart any MCP server attached to the old PostgreSQL database.
 
 ---
 
@@ -508,6 +511,13 @@ cartograph setup --minimal /path/to/the/users/project \
   --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
   --database-schema cartograph \
   --database-pgvector auto
+```
+
+To move an existing PostgreSQL-backed project back to SQLite:
+
+```sh
+cartograph admin storage-migrate /path/to/the/users/project \
+  --database-provider sqlite
 ```
 
 If the user picked Ollama instead, after the `setup` step:

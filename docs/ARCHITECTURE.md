@@ -54,8 +54,10 @@ These are the current owner modules future sessions should preserve:
   statement-oriented; `bench/sqlite-driver.mts` is the benchmark gate for
   revisiting that choice.
 - PostgreSQL storage is fresh-schema bootstrap only for now. Do not route it
-  through SQLite's forward migration chain; use `admin storage-migrate` for
-  SQLite-to-PostgreSQL moves and require a fresh/nonexistent target schema.
+  through SQLite's forward migration chain. Use `admin storage-migrate` for
+  storage moves: SQLite-to-PostgreSQL requires a fresh/nonexistent target
+  schema, and PostgreSQL-to-SQLite copies the active PostgreSQL graph into a
+  fresh SQLite database before swapping config.
 - PostgreSQL-specific acceleration belongs at the storage/query boundary:
   schema-postgres indexes, pgvector mirror/query helpers, the PostgreSQL
   adapter/worker translation layer, or query helpers that already branch on

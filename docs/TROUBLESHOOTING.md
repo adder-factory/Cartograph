@@ -217,8 +217,9 @@ cartograph at-range path/to/file.ts 10 30
 
 ## Storage Migration Problems
 
-`cartograph admin storage-migrate` expects a fresh or nonexistent PostgreSQL
-schema. If the schema already contains Cartograph tables, migration stops.
+When migrating to PostgreSQL, `cartograph admin storage-migrate` expects a
+fresh or nonexistent PostgreSQL schema. If the schema already contains
+Cartograph tables, migration stops.
 
 Use `--force` only when you intend Cartograph to drop and recreate the target
 schema:
@@ -232,6 +233,11 @@ cartograph admin storage-migrate /path/to/project \
 ```
 
 Restart any MCP server attached to the old SQLite database after migration.
+
+When migrating back to SQLite, use `--database-provider sqlite`. Cartograph
+writes a temporary SQLite database first, validates it, then swaps it into
+place. If the command fails before the swap, the existing PostgreSQL config and
+sentinel remain active.
 
 ## Database Lock Or Concurrent Process
 

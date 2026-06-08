@@ -73,3 +73,10 @@ Use PostgreSQL 18+, follow `docs/STORAGE-BACKENDS.md`, preserve the existing
 graph with `cartograph admin storage-migrate`, and run `cartograph doctor .`
 afterward.
 ```
+
+```text
+Move Cartograph storage from PostgreSQL back to SQLite for this repository.
+Use `cartograph admin storage-migrate --database-provider sqlite`, run
+`cartograph doctor .` afterward, and restart any MCP server attached to the old
+database.
+```

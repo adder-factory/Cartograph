@@ -2,6 +2,7 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { loadConfig, saveConfig } from '../../config.js';
 import {
+  type DatabaseProvider,
   isPostgresServerVersionSupported,
   postgresMinimumVersionRemediation,
   postgresServerVersionInfoFromRow,
@@ -18,13 +19,31 @@ export interface StorageMigrationOptions {
   force?: boolean;
 }
 
-export interface StorageMigrationSummary {
+export interface StorageMigrationSummaryBase {
   tablesCopied: number;
   rowsCopied: number;
-  sqliteBackupPath: string;
   configPath: string;
+  sourceProvider: DatabaseProvider;
+  targetProvider: DatabaseProvider;
+}
+
+export interface SqliteToPostgresMigrationSummary extends StorageMigrationSummaryBase {
+  sourceProvider: 'sqlite';
+  targetProvider: 'postgres';
+  sqliteBackupPath: string;
   postgresSchema: string;
 }
+
+export interface PostgresToSqliteMigrationSummary extends StorageMigrationSummaryBase {
+  sourceProvider: 'postgres';
+  targetProvider: 'sqlite';
+  sqlitePath: string;
+  postgresSchema: string;
+  postgresSentinelBackupPath: string;
+  configBackupPath: string;
+}
+
+export type StorageMigrationSummary = SqliteToPostgresMigrationSummary | PostgresToSqliteMigrationSummary;
 
 export type StorageMigrationResult =
   | { ok: true; summary: StorageMigrationSummary }
@@ -157,6 +176,8 @@ export async function migrateSqliteProjectToPostgres(
       summary: {
         tablesCopied,
         rowsCopied,
+        sourceProvider: 'sqlite',
+        targetProvider: 'postgres',
         sqliteBackupPath,
         configPath: path.join(projectPath, '.cartograph', 'config.json'),
         postgresSchema: database.schema ?? 'public',
@@ -174,7 +195,89 @@ export async function migrateSqliteProjectToPostgres(
   }
 }
 
+export async function migratePostgresProjectToSqlite(options: {
+  projectPath: string;
+}): Promise<StorageMigrationResult> {
+  const projectPath = path.resolve(options.projectPath);
+  const existingConfig = loadConfig(projectPath);
+  const database = resolveDatabaseConfig(existingConfig.database);
+  if (database.provider !== 'postgres') {
+    return failure(
+      'already-sqlite',
+      'This project is already configured for SQLite storage.',
+      'Run `cartograph status` to verify the current backend.',
+    );
+  }
+
+  const dbPath = getDatabasePath(projectPath);
+  const suffix = timestampSuffix();
+  const sqliteTempPath = `${dbPath}.sqlite-rebuild.${suffix}.tmp.db`;
+  let source: DatabaseConnection | undefined;
+  let target: DatabaseConnection | undefined;
+  try {
+    await removeDatabaseFiles(sqliteTempPath);
+    source = DatabaseConnection.open(dbPath, { database });
+    target = DatabaseConnection.initialize(sqliteTempPath, { database: { provider: 'sqlite' } });
+
+    const copied = copyStorageTables(source, target);
+    assertCopiedRowCounts(source, target);
+    assertSqliteForeignKeys(target);
+    finalizeSqliteDatabase(target);
+    const rowsCopied = copied.reduce((sum, table) => sum + table.rows, 0);
+    const tablesCopied = copied.filter((table) => table.rows > 0).length;
+
+    source.close();
+    source = undefined;
+    target.close();
+    target = undefined;
+
+    const configPath = path.join(projectPath, '.cartograph', 'config.json');
+    const configBackupPath = `${configPath}.pre-sqlite-${suffix}.bak`;
+    await fs.copyFile(configPath, configBackupPath);
+
+    const postgresSentinelBackupPath = await backupCurrentDatabaseFile(dbPath, `postgres-sentinel-backup.${suffix}`);
+    await renameDatabaseFiles(sqliteTempPath, dbPath);
+
+    const nextConfig = { ...existingConfig };
+    delete nextConfig.database;
+    saveConfig(projectPath, nextConfig);
+
+    return {
+      ok: true,
+      summary: {
+        tablesCopied,
+        rowsCopied,
+        sourceProvider: 'postgres',
+        targetProvider: 'sqlite',
+        sqlitePath: dbPath,
+        configPath,
+        postgresSchema: database.schema ?? 'public',
+        postgresSentinelBackupPath,
+        configBackupPath,
+      },
+    };
+  } catch (err) {
+    await removeDatabaseFiles(sqliteTempPath);
+    return failure(
+      'migration-failed',
+      err instanceof Error ? err.message : String(err),
+      'Verify the PostgreSQL source is reachable and the project is not being concurrently reconfigured, then retry.',
+    );
+  } finally {
+    source?.close();
+    target?.close();
+  }
+}
+
 export function storageMigrationSuccessMessage(summary: StorageMigrationSummary): string {
+  if (summary.targetProvider === 'sqlite') {
+    return (
+      `Migrated ${summary.rowsCopied} row${summary.rowsCopied === 1 ? '' : 's'} across ` +
+      `${summary.tablesCopied} table${summary.tablesCopied === 1 ? '' : 's'} from PostgreSQL schema ` +
+      `"${summary.postgresSchema}" to SQLite database ${summary.sqlitePath}. ` +
+      `PostgreSQL sentinel backup: ${summary.postgresSentinelBackupPath}`
+    );
+  }
   return (
     `Migrated ${summary.rowsCopied} row${summary.rowsCopied === 1 ? '' : 's'} across ` +
     `${summary.tablesCopied} table${summary.tablesCopied === 1 ? '' : 's'} to PostgreSQL schema ` +
@@ -262,7 +365,7 @@ function copyStorageTables(source: DatabaseConnection, target: DatabaseConnectio
     for (const table of MIGRATABLE_TABLES) {
       copied.push(copyTable(sourceDb, targetDb, table));
     }
-    resetPostgresSequences(target);
+    if (target.getBackend() === 'postgres') resetPostgresSequences(target);
   })();
 
   return copied;
@@ -303,6 +406,41 @@ function columnNames(db: ReturnType<DatabaseConnection['getDb']>, table: string)
   return (db.prepare(`PRAGMA table_info(${quoteIdent(table)})`).all() as ColumnInfo[]).map((col) => col.name);
 }
 
+function assertCopiedRowCounts(source: DatabaseConnection, target: DatabaseConnection): void {
+  const mismatches: string[] = [];
+  for (const table of MIGRATABLE_TABLES) {
+    const sourceCount = countRows(source.getDb(), table);
+    const targetCount = countRows(target.getDb(), table);
+    if (sourceCount !== targetCount) mismatches.push(`${table}: source=${sourceCount}, target=${targetCount}`);
+  }
+  if (mismatches.length > 0) throw new Error(`Row-count mismatches after copy: ${mismatches.join('; ')}`);
+}
+
+function countRows(db: ReturnType<DatabaseConnection['getDb']>, table: string): number {
+  const row = db.prepare(`SELECT COUNT(*) AS n FROM ${quoteIdent(table)}`).get() as { n?: number | string } | null;
+  return typeof row?.n === 'number' ? row.n : Number(row?.n ?? 0);
+}
+
+function assertSqliteForeignKeys(target: DatabaseConnection): void {
+  if (target.getDb().dialect !== 'sqlite') return;
+  const rows = target.getDb().prepare('PRAGMA foreign_key_check').all();
+  if (rows.length > 0) throw new Error(`SQLite foreign_key_check failed: ${JSON.stringify(rows.slice(0, 20))}`);
+}
+
+function finalizeSqliteDatabase(target: DatabaseConnection): void {
+  if (target.getDb().dialect !== 'sqlite') return;
+  try {
+    target.getDb().prepare('PRAGMA wal_checkpoint(TRUNCATE)').all();
+  } catch {
+    /* best effort */
+  }
+  try {
+    target.getDb().prepare('PRAGMA optimize').all();
+  } catch {
+    /* best effort */
+  }
+}
+
 function resetPostgresSequences(target: DatabaseConnection): void {
   const db = target.getDb();
   for (const [table, column] of SERIAL_ID_COLUMNS) {
@@ -317,11 +455,13 @@ function resetPostgresSequences(target: DatabaseConnection): void {
 
 async function backupSqliteDatabase(dbPath: string): Promise<string> {
   const backupPath = `${dbPath}.sqlite-backup.${timestampSuffix()}`;
-  await fs.rename(dbPath, backupPath);
-  for (const suffix of ['-wal', '-shm']) {
-    const sidecar = `${dbPath}${suffix}`;
-    await renameIfExists(sidecar, `${backupPath}${suffix}`);
-  }
+  await renameDatabaseFiles(dbPath, backupPath);
+  return backupPath;
+}
+
+async function backupCurrentDatabaseFile(dbPath: string, label: string): Promise<string> {
+  const backupPath = `${dbPath}.${label}`;
+  await renameDatabaseFiles(dbPath, backupPath);
   return backupPath;
 }
 
@@ -371,6 +511,19 @@ async function renameIfExists(sourcePath: string, targetPath: string): Promise<v
   } catch (err) {
     if (!isNodeErrorCode(err, 'ENOENT')) throw err;
   }
+}
+
+async function renameDatabaseFiles(sourcePath: string, targetPath: string): Promise<void> {
+  await fs.rename(sourcePath, targetPath);
+  for (const suffix of ['-wal', '-shm']) {
+    await renameIfExists(`${sourcePath}${suffix}`, `${targetPath}${suffix}`);
+  }
+}
+
+async function removeDatabaseFiles(dbPath: string): Promise<void> {
+  await fs.rm(dbPath, { force: true });
+  await fs.rm(`${dbPath}-wal`, { force: true });
+  await fs.rm(`${dbPath}-shm`, { force: true });
 }
 
 function isNodeErrorCode(err: unknown, code: string): boolean {

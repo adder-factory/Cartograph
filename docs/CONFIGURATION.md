@@ -92,6 +92,11 @@ CARTOGRAPH_DATABASE_MAX_CONNECTIONS=1
 CARTOGRAPH_DATABASE_SSL=true
 ```
 
+For a local SQLite project, omit the `database` block or set
+`database.provider` to `sqlite`. To copy an existing PostgreSQL-backed graph
+back to SQLite and remove the PostgreSQL config, run
+`cartograph admin storage-migrate --database-provider sqlite`.
+
 See [Storage Backends](STORAGE-BACKENDS.md) for setup and migration.
 
 ## LLM Options

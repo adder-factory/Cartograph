@@ -1,6 +1,10 @@
 import { databaseConfigFromOptionInput, type DatabaseConfig, resolveDatabaseConfig } from '../../db/database-config.js';
 import { errMsg } from '../../errors.js';
-import { migrateSqliteProjectToPostgres, storageMigrationSuccessMessage } from './runtime.js';
+import {
+  migratePostgresProjectToSqlite,
+  migrateSqliteProjectToPostgres,
+  storageMigrationSuccessMessage,
+} from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliOptionCommand;
@@ -14,6 +18,7 @@ export interface AdminStorageMigrateCommandDeps {
 }
 
 interface StorageMigrateCommandOptions {
+  databaseProvider?: string;
   databaseUrl?: string;
   databaseSchema?: string;
   databasePgvector?: string;
@@ -29,8 +34,9 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
   adminCmd
     .command('storage-migrate [path]')
     .description(
-      'Migrate a SQLite-backed Cartograph project to PostgreSQL storage, with optional pgvector acceleration. Requires a fresh PostgreSQL schema unless --force is passed.',
+      'Migrate Cartograph storage between SQLite and PostgreSQL. PostgreSQL targets require a fresh schema unless --force is passed.',
     )
+    .option('--database-provider <provider>', 'Target storage backend: postgres (default) or sqlite')
     .option(
       '--database-url <url>',
       'PostgreSQL connection URL; required unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set',
@@ -44,32 +50,32 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
     .option('--force', 'Drop the target PostgreSQL schema before migrating')
     .action(async (pathArg: string | undefined, options: StorageMigrateCommandOptions) => {
       const projectPath = resolveProjectPath(pathArg);
-      const databaseInput = databaseConfigFromOptionInput({
-        databaseProvider: 'postgres',
-        databaseUrl: options.databaseUrl,
-        databaseSchema: options.databaseSchema,
-        databasePgvector: options.databasePgvector,
-        databaseMaxConnections: options.databaseMaxConnections,
-        databaseQueryTimeoutMs: options.databaseQueryTimeoutMs,
-        databaseConnectionTimeoutSeconds: options.databaseConnectionTimeoutSeconds,
-        databaseSsl: options.databaseSsl,
-      });
-      if (!databaseInput) {
-        error('PostgreSQL database URL is required.');
-        process.exit(1);
-      }
       let database: DatabaseConfig;
       try {
+        const databaseInput = databaseConfigFromOptionInput({
+          databaseProvider: options.databaseProvider ?? 'postgres',
+          databaseUrl: options.databaseUrl,
+          databaseSchema: options.databaseSchema,
+          databasePgvector: options.databasePgvector,
+          databaseMaxConnections: options.databaseMaxConnections,
+          databaseQueryTimeoutMs: options.databaseQueryTimeoutMs,
+          databaseConnectionTimeoutSeconds: options.databaseConnectionTimeoutSeconds,
+          databaseSsl: options.databaseSsl,
+        });
+        if (!databaseInput) throw new Error('PostgreSQL database URL is required.');
         database = resolveDatabaseConfig(databaseInput);
       } catch (err) {
         error(errMsg(err));
         process.exit(1);
       }
-      const result = await migrateSqliteProjectToPostgres({
-        projectPath,
-        database,
-        force: options.force === true,
-      });
+      const result =
+        database.provider === 'sqlite'
+          ? await migratePostgresProjectToSqlite({ projectPath })
+          : await migrateSqliteProjectToPostgres({
+              projectPath,
+              database,
+              force: options.force === true,
+            });
       if (!result.ok) {
         const remediation = result.error.remediation ? ` ${result.error.remediation}` : '';
         error(`${result.error.message}${remediation}`);
@@ -77,6 +83,6 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
       }
       success(storageMigrationSuccessMessage(result.summary));
       info(`Updated config: ${result.summary.configPath}`);
-      info('Restart any MCP server still attached to the old SQLite database.');
+      info(`Restart any MCP server still attached to the old ${result.summary.sourceProvider} database.`);
     });
 }
