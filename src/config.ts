@@ -239,6 +239,7 @@ export const VALID_LANGUAGES = [
   'zsh',
   'fish',
   'glsl',
+  'hlsl',
   'graphql',
   'groovy',
   'prisma',

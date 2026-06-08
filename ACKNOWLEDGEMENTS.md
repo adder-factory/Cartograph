@@ -18,8 +18,8 @@ statement-id linkage, file-scoped symbol listing, file-scoped dependency
 queries, generic supertype normalization for inheritance edges, `.ignore`
 indexing overrides for gitignored local source, binary/invalid ignore-file
 resilience, GLSL shader indexing, Groovy/Solidity indexing, ArkTS/CUDA indexing,
-TypeScript generic string-literal contract symbols, and non-ASCII context-query
-keyword extraction, and context lookup from code-like source strings. Those
+HLSL shader indexing, TypeScript generic string-literal contract symbols, and
+non-ASCII context-query keyword extraction, and context lookup from code-like source strings. Those
 ideas, along with PowerShell CLI completion support, were reimplemented inside
 Cartograph's current feature-slice architecture; CodeIgniter 3 routing and
 magic model/library property support was likewise implemented as a native
@@ -68,6 +68,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | dart | [UserNobody14/tree-sitter-dart](https://github.com/UserNobody14/tree-sitter-dart) | MIT |
 | fish | [esdmr/tree-sitter-fish](https://github.com/esdmr/tree-sitter-fish) | MIT |
 | glsl | [theHamsta/tree-sitter-glsl](https://github.com/theHamsta/tree-sitter-glsl) | MIT |
+| hlsl | [tree-sitter-grammars/tree-sitter-hlsl](https://github.com/tree-sitter-grammars/tree-sitter-hlsl) | MIT |
 | groovy | [amaanq/tree-sitter-groovy](https://github.com/amaanq/tree-sitter-groovy) | MIT |
 | graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
 | pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |

@@ -99,6 +99,11 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'embedded_template', pkg: 'tree-sitter-embedded-template', sample: '<%= user.name %>\n' },
   { wasm: 'haskell', pkg: 'tree-sitter-haskell', sample: 'module M where\nx = 1\n' },
   { wasm: 'html', pkg: 'tree-sitter-html', sample: '<main><h1>Hello</h1></main>\n' },
+  {
+    wasm: 'hlsl',
+    pkg: 'tree-sitter-hlsl',
+    sample: 'float4 main(float4 pos : POSITION) : SV_Position { return pos; }\n',
+  },
   { wasm: 'hcl', pkg: '@tree-sitter-grammars/tree-sitter-hcl', sample: 'x = 1\n' },
   { wasm: 'jsdoc', pkg: 'tree-sitter-jsdoc', sample: '/** Adds one. */\n' },
   { wasm: 'json', pkg: 'tree-sitter-json', sample: '{ "x": 1 }\n' },
