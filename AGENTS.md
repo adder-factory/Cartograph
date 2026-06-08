@@ -336,18 +336,33 @@ host AI assistant:
 
 ### Claude Code
 
-`~/.claude/mcp.json` (or `<project>/.mcp.json`):
+Preferred private per-project install:
+
+```sh
+cartograph install --yes --target=claude --location=local
+```
+
+That writes the MCP server into `~/.claude.json` under the current project's
+path. Manual equivalent:
 
 ```json
 {
-  "mcpServers": {
-    "cartograph": {
-      "command": "cartograph",
-      "args": ["serve", "--mcp", "--project-path", "/abs/path/to/project"]
+  "projects": {
+    "/abs/path/to/project": {
+      "mcpServers": {
+        "cartograph": {
+          "type": "stdio",
+          "command": "cartograph",
+          "args": ["serve", "--mcp", "--project-path", "/abs/path/to/project"]
+        }
+      }
     }
   }
 }
 ```
+
+For team-shared Claude MCP config, use `<project>/.mcp.json` with the standard
+top-level `mcpServers` shape.
 
 Restart Claude Code (`/restart`) so it picks up the new server.
 

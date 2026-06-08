@@ -109,7 +109,10 @@ describe('Installer targets — contract', () => {
             fs.mkdirSync(path.dirname(jsonPath), { recursive: true });
             const seed: Record<string, any> = { mcpServers: { other: { command: 'x' } } };
             // opencode uses `mcp` not `mcpServers`. Match its shape too.
-            if (target.id === 'opencode') {
+            if (target.id === 'claude' && location === 'local') {
+              delete seed.mcpServers;
+              seed.projects = { [path.resolve(process.cwd())]: { mcpServers: { other: { command: 'x' } } } };
+            } else if (target.id === 'opencode') {
               delete seed.mcpServers;
               seed.mcp = { other: { type: 'local', command: ['x'], enabled: true } };
             } else if (target.id === 'zed') {
@@ -121,7 +124,11 @@ describe('Installer targets — contract', () => {
             target.install(location, { autoAllow: true });
 
             const after = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-            if (target.id === 'opencode') {
+            if (target.id === 'claude' && location === 'local') {
+              const projectConfig = after.projects[path.resolve(process.cwd())];
+              expect(projectConfig.mcpServers.other).toBeDefined();
+              expect(projectConfig.mcpServers.cartograph).toBeDefined();
+            } else if (target.id === 'opencode') {
               expect(after.mcp.other).toBeDefined();
               expect(after.mcp.cartograph).toBeDefined();
             } else if (target.id === 'zed') {
@@ -324,6 +331,74 @@ describe('Installer targets — registry', () => {
 
   it('resolveTargetFlag throws on unknown id', () => {
     expect(() => resolveTargetFlag('claude,bogus', 'global')).toThrow(/Unknown --target/);
+  });
+});
+
+describe('Installer targets — Claude specifics', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('home');
+    tmpCwd = mkTmpDir('cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  it('uses current Claude Code paths for user and private local scopes', () => {
+    const claude = getTarget('claude')!;
+    const cwd = process.cwd();
+
+    expect(claude.describePaths('global')).toEqual([
+      path.join(tmpHome, '.claude.json'),
+      path.join(tmpHome, '.claude', 'settings.json'),
+      path.join(tmpHome, '.claude', 'CLAUDE.md'),
+    ]);
+    expect(claude.describePaths('local')).toEqual([
+      path.join(tmpHome, '.claude.json'),
+      path.join(cwd, '.claude', 'settings.local.json'),
+      path.join(cwd, 'CLAUDE.local.md'),
+      path.join(cwd, '.gitignore'),
+    ]);
+  });
+
+  it('writes Claude local MCP under the current project entry in ~/.claude.json', () => {
+    const claude = getTarget('claude')!;
+
+    claude.install('local', { autoAllow: true });
+
+    const config = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude.json'), 'utf-8'));
+    expect(config.mcpServers).toBeUndefined();
+    expect(config.projects[path.resolve(process.cwd())].mcpServers.cartograph).toEqual({
+      type: 'stdio',
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+    });
+    expect(fs.existsSync(path.join(tmpCwd, '.claude.json'))).toBe(false);
+  });
+
+  it('writes Claude local permissions, instructions, and ignore entries as private project files', () => {
+    const claude = getTarget('claude')!;
+
+    claude.install('local', { autoAllow: true });
+
+    const settings = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.claude', 'settings.local.json'), 'utf-8'));
+    expect(settings.permissions.allow).toContain('mcp__cartograph__cartograph_find');
+    const instructions = fs.readFileSync(path.join(tmpCwd, 'CLAUDE.local.md'), 'utf-8');
+    expect(instructions).toContain('<!-- CARTOGRAPH_START -->');
+    const gitignore = fs.readFileSync(path.join(tmpCwd, '.gitignore'), 'utf-8');
+    expect(gitignore).toContain('CLAUDE.local.md');
+    expect(gitignore).toContain('.claude/settings.local.json');
   });
 });
 

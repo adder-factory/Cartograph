@@ -1,16 +1,16 @@
 /**
  * Claude Code target — the historical default. Writes:
  *
- *   - MCP server entry to `~/.claude.json` (global) or
- *     `./.claude.json` (local).
+ *   - MCP server entry to `~/.claude.json`; for local installs the entry is
+ *     nested under `projects[<cwd>]`.
  *   - Permissions to `~/.claude/settings.json` (global) or
- *     `./.claude/settings.json` (local), gated on `autoAllow`.
+ *     `./.claude/settings.local.json` (local), gated on `autoAllow`.
  *   - Instructions to `~/.claude/CLAUDE.md` (global) or
- *     `./.claude/CLAUDE.md` (local).
+ *     `./CLAUDE.local.md` (local).
  *
- * All paths and shapes ported verbatim from the original
- * `config-writer.ts` so existing Claude Code installs upgrade in
- * place — no migration on disk required.
+ * This follows Claude Code's current user/local/project scope split. The
+ * exported writer functions at the bottom intentionally preserve the legacy
+ * `config-writer.ts` behavior for downstream callers that still import them.
  */
 
 import * as fs from 'node:fs';
@@ -20,6 +20,7 @@ import {
   atomicWriteFileSync,
   getHomeDir,
   getMcpServerConfig,
+  jsonDeepEqual,
   readJsonFile,
   removeMarkedSection,
   replaceOrAppendMarkedSection,
@@ -29,36 +30,159 @@ import {
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 
+const CLAUDE_LOCAL_GITIGNORE_ENTRIES = ['CLAUDE.local.md', '.claude/settings.local.json'] as const;
+
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.claude') : path.join(process.cwd(), '.claude');
 }
-function mcpJsonPath(loc: Location): string {
-  return loc === 'global' ? path.join(getHomeDir(), '.claude.json') : path.join(process.cwd(), '.claude.json');
+function claudeJsonPath(_loc: Location): string {
+  return path.join(getHomeDir(), '.claude.json');
 }
-function settingsJsonPath(loc: Location): string {
+function scopedSettingsJsonPath(loc: Location): string {
+  if (loc === 'local') return path.join(configDir(loc), 'settings.local.json');
   return path.join(configDir(loc), 'settings.json');
 }
-function instructionsPath(loc: Location): string {
+function scopedInstructionsPath(loc: Location): string {
+  if (loc === 'local') return path.join(process.cwd(), 'CLAUDE.local.md');
   return path.join(configDir(loc), 'CLAUDE.md');
+}
+function legacyMcpJsonPath(loc: Location): string {
+  return loc === 'global' ? path.join(getHomeDir(), '.claude.json') : path.join(process.cwd(), '.claude.json');
+}
+function legacySettingsJsonPath(loc: Location): string {
+  return path.join(configDir(loc), 'settings.json');
+}
+function legacyInstructionsPath(loc: Location): string {
+  return path.join(configDir(loc), 'CLAUDE.md');
+}
+function projectKey(): string {
+  return path.resolve(process.cwd());
+}
+
+function objectRecord(value: unknown): Record<string, any> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, any>;
+}
+
+function ensureObject(parent: Record<string, any>, key: string): Record<string, any> {
+  const current = objectRecord(parent[key]);
+  if (current) return current;
+  const next: Record<string, any> = {};
+  parent[key] = next;
+  return next;
+}
+
+function localProjectConfig(config: Record<string, any>): Record<string, any> | null {
+  const projects = objectRecord(config['projects']);
+  if (!projects) return null;
+  return objectRecord(projects[projectKey()]);
+}
+
+function hasScopedMcpEntry(loc: Location, config: Record<string, any>): boolean {
+  if (loc === 'global') return !!config['mcpServers']?.cartograph;
+  const projectConfig = localProjectConfig(config);
+  return !!projectConfig?.['mcpServers']?.cartograph;
+}
+
+function writeScopedMcpEntry(loc: Location): WriteResult['files'][number] {
+  if (loc === 'global') return writeMcpEntryJson(loc, { resolvePath: claudeJsonPath });
+
+  const file = claudeJsonPath(loc);
+  const existing = readJsonFile(file);
+  const before = localProjectConfig(existing)?.['mcpServers']?.cartograph;
+  const after = getMcpServerConfig();
+  if (jsonDeepEqual(before, after)) {
+    return { path: file, action: 'unchanged' };
+  }
+
+  const existed = fs.existsSync(file);
+  const projectConfig = ensureObject(ensureObject(existing, 'projects'), projectKey());
+  ensureObject(projectConfig, 'mcpServers')['cartograph'] = after;
+  writeJsonFile(file, existing);
+  return { path: file, action: before || existed ? 'updated' : 'created' };
+}
+
+function removeScopedMcpEntry(loc: Location): WriteResult['files'][number] {
+  if (loc === 'global') return removeTopLevelMcpEntry(loc);
+
+  const file = claudeJsonPath(loc);
+  const config = readJsonFile(file);
+  const projects = objectRecord(config['projects']);
+  const projectConfig = projects ? objectRecord(projects[projectKey()]) : null;
+  const mcpServers = projectConfig ? objectRecord(projectConfig['mcpServers']) : null;
+  if (!mcpServers?.['cartograph']) {
+    return { path: file, action: 'not-found' };
+  }
+
+  delete mcpServers['cartograph'];
+  if (Object.keys(mcpServers).length === 0) {
+    delete projectConfig!['mcpServers'];
+  }
+  if (projectConfig && Object.keys(projectConfig).length === 0) {
+    delete projects![projectKey()];
+  }
+  if (projects && Object.keys(projects).length === 0) {
+    delete config['projects'];
+  }
+  writeJsonFile(file, config);
+  return { path: file, action: 'removed' };
+}
+
+function removeTopLevelMcpEntry(loc: Location): WriteResult['files'][number] {
+  const mcpPath = claudeJsonPath(loc);
+  const config = readJsonFile(mcpPath);
+  if (!config['mcpServers']?.cartograph) {
+    return { path: mcpPath, action: 'not-found' };
+  }
+  delete config['mcpServers'].cartograph;
+  if (Object.keys(config['mcpServers']).length === 0) {
+    delete config['mcpServers'];
+  }
+  writeJsonFile(mcpPath, config);
+  return { path: mcpPath, action: 'removed' };
+}
+
+function writeScopedPermissionsEntry(loc: Location): WriteResult['files'][number] {
+  return writePermissionsAllowList(scopedSettingsJsonPath(loc));
+}
+
+function writeScopedInstructionsEntry(loc: Location): WriteResult['files'][number] {
+  return writeInstructionsFile(scopedInstructionsPath(loc));
+}
+
+function writeLocalGitignoreEntries(): WriteResult['files'][number] {
+  const file = path.join(process.cwd(), '.gitignore');
+  const created = !fs.existsSync(file);
+  const content = created ? '' : fs.readFileSync(file, 'utf-8');
+  const lines = new Set(content.split(/\r?\n/).map((line) => line.trim()));
+  const missing = CLAUDE_LOCAL_GITIGNORE_ENTRIES.filter((entry) => !lines.has(entry));
+  if (missing.length === 0 && !created) {
+    return { path: file, action: 'unchanged' };
+  }
+
+  const base = content.trimEnd();
+  const next = [base, ...missing].filter((part) => part.length > 0).join('\n') + '\n';
+  atomicWriteFileSync(file, next);
+  return { path: file, action: created ? 'created' : 'updated' };
 }
 
 class ClaudeCodeTarget implements AgentTarget {
   readonly id = 'claude' as const;
   readonly displayName = 'Claude Code';
-  readonly docsUrl = 'https://docs.claude.com/en/docs/claude-code';
+  readonly docsUrl = 'https://code.claude.com/docs/en';
 
   supportsLocation(_loc: Location): boolean {
     return true;
   }
 
   detect(loc: Location): DetectionResult {
-    const mcpPath = mcpJsonPath(loc);
+    const mcpPath = claudeJsonPath(loc);
     const config = readJsonFile(mcpPath);
-    const alreadyConfigured = !!config['mcpServers']?.cartograph;
+    const alreadyConfigured = hasScopedMcpEntry(loc, config);
     // For "installed" we infer from the existence of either the dir
     // (global) or the project marker file (local). Cheap and avoids
     // shelling out to `claude --version`.
-    const dirExists = fs.existsSync(configDir(loc));
+    const dirExists = fs.existsSync(configDir('global'));
     const mcpExists = fs.existsSync(mcpPath);
     const installed = dirExists || mcpExists;
     return { installed, alreadyConfigured, configPath: mcpPath };
@@ -68,15 +192,19 @@ class ClaudeCodeTarget implements AgentTarget {
     const files: WriteResult['files'] = [];
 
     // 1. MCP server entry
-    files.push(writeMcpEntry(loc));
+    files.push(writeScopedMcpEntry(loc));
 
     // 2. Permissions (only when autoAllow)
     if (opts.autoAllow) {
-      files.push(writePermissionsEntry(loc));
+      files.push(writeScopedPermissionsEntry(loc));
     }
 
     // 3. CLAUDE.md instructions
-    files.push(writeInstructionsEntry(loc));
+    files.push(writeScopedInstructionsEntry(loc));
+
+    if (loc === 'local') {
+      files.push(writeLocalGitignoreEntries());
+    }
 
     return { files };
   }
@@ -85,21 +213,10 @@ class ClaudeCodeTarget implements AgentTarget {
     const files: WriteResult['files'] = [];
 
     // 1. MCP server entry
-    const mcpPath = mcpJsonPath(loc);
-    const config = readJsonFile(mcpPath);
-    if (config['mcpServers']?.cartograph) {
-      delete config['mcpServers'].cartograph;
-      if (Object.keys(config['mcpServers']).length === 0) {
-        delete config['mcpServers'];
-      }
-      writeJsonFile(mcpPath, config);
-      files.push({ path: mcpPath, action: 'removed' });
-    } else {
-      files.push({ path: mcpPath, action: 'not-found' });
-    }
+    files.push(removeScopedMcpEntry(loc));
 
     // 2. Permissions
-    const settingsPath = settingsJsonPath(loc);
+    const settingsPath = scopedSettingsJsonPath(loc);
     const settings = readJsonFile(settingsPath);
     if (Array.isArray(settings['permissions']?.allow)) {
       const before = settings['permissions'].allow.length;
@@ -123,7 +240,7 @@ class ClaudeCodeTarget implements AgentTarget {
     }
 
     // 3. Instructions
-    const instr = instructionsPath(loc);
+    const instr = scopedInstructionsPath(loc);
     const action = removeMarkedSection(instr, CARTOGRAPH_SECTION_START, CARTOGRAPH_SECTION_END);
     files.push({ path: instr, action });
 
@@ -131,13 +248,22 @@ class ClaudeCodeTarget implements AgentTarget {
   }
 
   printConfig(loc: Location): string {
-    const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig() } }, null, 2);
+    const target = claudeJsonPath(loc);
+    const snippet =
+      loc === 'local'
+        ? JSON.stringify(
+            { projects: { [projectKey()]: { mcpServers: { cartograph: getMcpServerConfig() } } } },
+            null,
+            2,
+          )
+        : JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig() } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc), settingsJsonPath(loc), instructionsPath(loc)];
+    const paths = [claudeJsonPath(loc), scopedSettingsJsonPath(loc), scopedInstructionsPath(loc)];
+    if (loc === 'local') paths.push(path.join(process.cwd(), '.gitignore'));
+    return paths;
   }
 }
 
@@ -149,11 +275,11 @@ class ClaudeCodeTarget implements AgentTarget {
  * cause side effects callers don't expect.
  */
 export function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath });
+  return writeMcpEntryJson(loc, { resolvePath: legacyMcpJsonPath });
 }
 
 export function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
-  return writePermissionsAllowList(settingsJsonPath(loc));
+  return writePermissionsAllowList(legacySettingsJsonPath(loc));
 }
 
 /** Where the legacy unmarked Cartograph section ends. Pulled out of
@@ -165,7 +291,10 @@ function computeSectionEnd(content: string, sectionStart: number, nextHeader: Re
 }
 
 export function writeInstructionsEntry(loc: Location): WriteResult['files'][number] {
-  const file = instructionsPath(loc);
+  return writeInstructionsFile(legacyInstructionsPath(loc));
+}
+
+function writeInstructionsFile(file: string): WriteResult['files'][number] {
   // Ensure config dir exists (for global ~/.claude/).
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });

@@ -132,6 +132,40 @@ If the client does not send `rootUri`, pass the project explicitly:
 cartograph serve --mcp --project-path /absolute/path/to/project
 ```
 
+### Claude Code
+
+Use the installer for the current Claude Code scopes:
+
+```sh
+cartograph install --yes --target=claude --location=local
+```
+
+Local Claude MCP scope is private per project and is stored in `~/.claude.json`
+under the current project path:
+
+```json
+{
+  "projects": {
+    "/absolute/path/to/project": {
+      "mcpServers": {
+        "cartograph": {
+          "type": "stdio",
+          "command": "cartograph",
+          "args": ["serve", "--mcp"]
+        }
+      }
+    }
+  }
+}
+```
+
+The same local install writes Claude permissions to
+`.claude/settings.local.json`, writes Cartograph instructions to
+`CLAUDE.local.md`, and adds both local project files to `.gitignore`.
+
+For team-shared Claude MCP config, use a project `.mcp.json` with the standard
+`mcpServers` shape.
+
 ### Cursor
 
 `~/.cursor/mcp.json` or `.cursor/mcp.json`:

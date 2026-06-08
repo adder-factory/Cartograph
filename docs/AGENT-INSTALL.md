@@ -39,6 +39,11 @@ configuration, indexes the repository, and skips the interactive LLM wizard in
 `--yes` mode. Core search, graph, impact, review, status, and affected-test
 commands work without an LLM backend.
 
+For Claude Code, local install follows Claude's private project scope: the MCP
+server is stored under the current project in `~/.claude.json`, permissions are
+written to `.claude/settings.local.json`, and instructions are written to
+`CLAUDE.local.md`. Cartograph adds those local project files to `.gitignore`.
+
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
 Copilot CLI, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
 Droid, Rovo Dev, and Qoder CLI.
