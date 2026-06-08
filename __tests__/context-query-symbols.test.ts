@@ -37,6 +37,19 @@ describe('extractSymbolsFromQuery', () => {
     expect(symbols).not.toContain('app..isPackaged');
     expect(symbols).not.toContain('3bad.name');
   });
+
+  it('keeps non-ASCII identifier tokens for context lookup', () => {
+    const symbols = extractSymbolsFromQuery('로그인 흐름에서 인증확인 호출을 보여줘');
+
+    expect(symbols).toEqual(expect.arrayContaining(['로그인', '인증확인']));
+  });
+
+  it('does not let ASCII prose handling change when Unicode support is present', () => {
+    const symbols = extractSymbolsFromQuery('show PaymentService and 로그인 for app.isPackaged');
+
+    expect(symbols).toEqual(expect.arrayContaining(['PaymentService', 'app.isPackaged', '로그인']));
+    expect(symbols).not.toContain('show');
+  });
 });
 
 describe('suppressProjectNameQueryNoise', () => {

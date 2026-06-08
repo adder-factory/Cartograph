@@ -22,7 +22,7 @@ import { QueryBuilder } from '../src/db/queries.js';
 import { searchNodes } from '../src/db/queries-search.js';
 import type { Node } from '../src/types.js';
 import { splitIdentifierTokens, buildNameSubwords } from '../src/utils.js';
-import { filterStopwords, STOP_WORDS } from '../src/search/query-utils.js';
+import { extractSearchTerms, filterStopwords, STOP_WORDS } from '../src/search/query-utils.js';
 import { runMigrations, getCurrentVersion } from '../src/db/migrations.js';
 import { createDatabase } from '../src/db/sqlite-adapter.js';
 
@@ -152,6 +152,31 @@ describe('filterStopwords (shared with query-utils.ts)', () => {
     // `get` / `set` / `find` could be method names; never treated as stopwords.
     expect(filterStopwords(['get', 'set', 'find', 'name'])).toEqual(['get', 'set', 'find', 'name']);
     expect(STOP_WORDS.has('get')).toBe(false);
+  });
+});
+
+describe('extractSearchTerms', () => {
+  it('preserves existing ASCII tokenization behavior', () => {
+    const terms = extractSearchTerms('how does getUserName parse user_profile data', { stems: false });
+
+    expect(terms).toEqual(expect.arrayContaining(['getusername', 'get', 'user', 'name', 'user_profile', 'profile']));
+    expect(terms).not.toContain('how');
+    expect(terms).not.toContain('does');
+  });
+
+  it('keeps non-ASCII query terms instead of splitting them away', () => {
+    const terms = extractSearchTerms('로그인 인증확인 사용자관리자', { stems: false });
+
+    expect(terms).toEqual(['로그인', '인증확인', '사용자관리자']);
+  });
+
+  it('uses a two-character floor for non-ASCII terms while keeping the ASCII floor at three', () => {
+    const terms = extractSearchTerms('가 로그인 ab abc 用户 用', { stems: false });
+
+    expect(terms).toEqual(expect.arrayContaining(['로그인', 'abc', '用户']));
+    expect(terms).not.toContain('가');
+    expect(terms).not.toContain('ab');
+    expect(terms).not.toContain('用');
   });
 });
 

@@ -14,6 +14,8 @@ interface RegexSpec {
   minLength: number;
 }
 
+const MIN_NON_ASCII_QUERY_TOKEN_LENGTH = 2;
+
 const QUERY_STOPWORDS = new Set([
   'the',
   'and',
@@ -179,10 +181,30 @@ export function extractSymbolsFromQuery(query: string): string[] {
   collectRegexMatches(query, { pattern: /\b([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)\b/g, minLength: 1 }, symbols);
   collectRegexMatches(query, { pattern: /\b([A-Z]{2,})\b/g, minLength: 1 }, symbols);
   collectRegexMatches(query, { pattern: /\b([a-z][a-z0-9]{2,})\b/g, minLength: 1 }, symbols);
+  collectNonAsciiIdentifierTokens(query, symbols);
 
   collectDottedIdentifierCandidates(query, symbols);
 
   return Array.from(symbols).filter((s) => !QUERY_STOPWORDS.has(s.toLowerCase()));
+}
+
+function collectNonAsciiIdentifierTokens(text: string, symbols: Set<string>): void {
+  let match: RegExpExecArray | null;
+  const pattern = /[\p{L}\p{N}_]+/gu;
+  while ((match = pattern.exec(text)) !== null) {
+    const token = match[0];
+    if (!containsNonAscii(token)) continue;
+    if (codePointLength(token) < MIN_NON_ASCII_QUERY_TOKEN_LENGTH) continue;
+    symbols.add(token);
+  }
+}
+
+function containsNonAscii(value: string): boolean {
+  return Array.from(value).some((char) => (char.codePointAt(0) ?? 0) > 0x7f);
+}
+
+function codePointLength(value: string): number {
+  return Array.from(value).length;
 }
 
 function addDotPathAndParts(symbols: Set<string>, path: string): void {

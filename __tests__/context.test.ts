@@ -625,3 +625,50 @@ describe('Context Builder — exact-name promotion (FRICTION-AF)', () => {
     expect(extractishSeeds.length).toBeLessThan(entryNames.length);
   });
 });
+
+describe('Context Builder — non-ASCII query terms', () => {
+  let testDir: string;
+  let cg: Cartograph;
+
+  beforeEach(async () => {
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-context-unicode-'));
+    const srcDir = path.join(testDir, 'src');
+    fs.mkdirSync(srcDir);
+
+    fs.writeFileSync(
+      path.join(srcDir, 'auth.ts'),
+      `export function 로그인(사용자명: string): boolean {
+  return 인증확인(사용자명);
+}
+
+export function 인증확인(사용자명: string): boolean {
+  return 사용자명.length > 0;
+}
+
+export class 사용자관리자 {
+  생성하기(이름: string): string {
+    return 이름;
+  }
+}
+`,
+    );
+
+    cg = Cartograph.initSync(testDir, { config: { include: ['**/*.ts'], exclude: [] } });
+    await cg.indexAll();
+  });
+
+  afterEach(() => {
+    if (cg) cg.close();
+    if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+  });
+
+  it('surfaces Korean symbols for Korean context queries', async () => {
+    const result = await cg.internals.contextBuilder.buildContext('로그인 인증확인 흐름', { format: 'json' });
+    const parsed = JSON.parse(result as string);
+    const entryNames: string[] = parsed.entryPoints.map((n: { name: string }) => n.name);
+    const nodeNames: string[] = parsed.nodes.map((n: { name: string }) => n.name);
+
+    expect(entryNames).toContain('로그인');
+    expect(nodeNames).toEqual(expect.arrayContaining(['로그인', '인증확인']));
+  });
+});
