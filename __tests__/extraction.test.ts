@@ -684,6 +684,42 @@ interface Foo<K, V> extends Map<K, V> { extra: number; }
       .map((r) => r.referenceName);
     expect(extendsRefs).toContain('Map');
   });
+
+  it('normalizes generic class supertypes before unresolved inheritance refs are stored', () => {
+    const result = extractFromSource(
+      'repo.ts',
+      `
+class BaseRepo<T> {}
+interface Disposable<T> {}
+class UserRepo extends BaseRepo<User> implements Disposable<User> {}
+`,
+    );
+    const inheritanceRefs = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'extends' || r.referenceKind === 'implements')
+      .map((r) => r.referenceName);
+    expect(inheritanceRefs).toContain('BaseRepo');
+    expect(inheritanceRefs).toContain('Disposable');
+    expect(inheritanceRefs).not.toContain('BaseRepo<User>');
+    expect(inheritanceRefs).not.toContain('Disposable<User>');
+  });
+
+  it('normalizes JVM generic supertypes in shared extends/implements handlers', () => {
+    const result = extractFromSource(
+      'UserRepo.java',
+      `
+class BaseRepo<T> {}
+interface Handler<T> {}
+class UserRepo extends BaseRepo<User> implements Handler<User> {}
+`,
+    );
+    const inheritanceRefs = result.unresolvedReferences
+      .filter((r) => r.referenceKind === 'extends' || r.referenceKind === 'implements')
+      .map((r) => r.referenceName);
+    expect(inheritanceRefs).toContain('BaseRepo');
+    expect(inheritanceRefs).toContain('Handler');
+    expect(inheritanceRefs).not.toContain('BaseRepo<User>');
+    expect(inheritanceRefs).not.toContain('Handler<User>');
+  });
 });
 
 describe('Arrow Function Export Extraction', () => {
