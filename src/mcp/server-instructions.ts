@@ -41,7 +41,7 @@ Freshness:
 - End edit-touching turns with \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done.
 
 Storage:
-- SQLite is the default. PostgreSQL storage requires PostgreSQL 18+. Initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\` or migrate with \`action: "storage-migrate"\`.
+- SQLite is the default. PostgreSQL storage requires PostgreSQL 18+. Initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\`, migrate SQLite to PostgreSQL with \`action: "storage-migrate"\` plus PostgreSQL options, or migrate PostgreSQL back to SQLite with \`action: "storage-migrate", databaseProvider: "sqlite"\`.
 
 LLM backends:
 - MCP doctor/status report configured backend readiness. The CLI-only \`cartograph backend status|start|stop|logs\` and \`cartograph llm smoke\` commands manage and verify local/cloud LLM processes outside the MCP session.
@@ -99,7 +99,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"Summarise / review a PR diff"** → \`cartograph_review({mode: 'context'})\`; sister implementations → \`mode: 'neighbors'\`; project risk → \`mode: 'risk'\`; trust self-check → \`mode: 'trust'\`; agent-prone detector audit → \`mode: 'agent-audit'\`; "what did I change structurally?" → \`cartograph_compare_to_ref\`.
 - **"Plan a rename"** → \`cartograph_propose_rename\` (every call site + doc mention + confidence).
 - **"Is the index ready / how big?"** → \`cartograph_status\` (\`verbose: true\` folds in top hotspots + biomarkers).
-- **"Set up or move storage?"** → \`cartograph_admin({action: 'init'})\` for a new project; pass \`databaseProvider: 'postgres'\`, \`databaseUrl\`, \`databaseSchema\`, and \`databasePgvector: 'auto'|'off'|'require'\` for PostgreSQL 18+. Use \`cartograph_admin({action: 'storage-migrate'})\` to move an existing SQLite graph to PostgreSQL.
+- **"Set up or move storage?"** → \`cartograph_admin({action: 'init'})\` for a new project; pass \`databaseProvider: 'postgres'\`, \`databaseUrl\`, \`databaseSchema\`, and \`databasePgvector: 'auto'|'off'|'require'\` for PostgreSQL 18+. Use \`cartograph_admin({action: 'storage-migrate'})\` plus PostgreSQL options to move SQLite to PostgreSQL, or \`databaseProvider: 'sqlite'\` to move PostgreSQL back to SQLite.
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` (read-only escape hatch; \`schema: true\` first).
 - **"What other cartograph indices are on this machine?"** → \`cartograph_discover\`.
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
@@ -117,7 +117,7 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 - **Route a task cheaply**: \`cartograph_context({task: "<task>", format: "plan"})\` → follow the top \`metadata.nextActions\` call → escalate to source only when the target is clear.
 - **Onboard to a topic**: \`cartograph_context({task: "<task>", format: "plan"})\` first; still unclear? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
 - **Onboard to a new repo**: \`cartograph_digest\` → \`cartograph_entry_points\`.
-- **Initialize with PostgreSQL**: use PostgreSQL 18+, then \`cartograph_admin({action: 'init', projectPath, databaseProvider: 'postgres', databaseUrl, databaseSchema: 'cartograph', databasePgvector: 'auto'})\` → \`cartograph_admin({action: 'doctor', projectPath})\`; for an existing SQLite graph, use \`action: 'storage-migrate'\` and restart attached MCP servers.
+- **Initialize with PostgreSQL**: use PostgreSQL 18+, then \`cartograph_admin({action: 'init', projectPath, databaseProvider: 'postgres', databaseUrl, databaseSchema: 'cartograph', databasePgvector: 'auto'})\` → \`cartograph_admin({action: 'doctor', projectPath})\`; for an existing SQLite graph, use \`action: 'storage-migrate'\` and restart attached MCP servers. To return to SQLite, use \`cartograph_admin({action: 'storage-migrate', projectPath, databaseProvider: 'sqlite'})\`.
 - **Bring up local LLMs**: \`cartograph admin llm-plan\` / \`cartograph admin llm-apply --preset <id>\` or \`cartograph llm setup\` → \`cartograph backend status\` / \`cartograph backend start\` for managed local llama-server tiers → \`cartograph llm smoke\` → \`cartograph doctor\`. MCP can diagnose with \`cartograph_admin({action: 'doctor'})\`, but process spawning and log tailing are CLI/operator actions.
 - **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'trust'})\` before relying on broad graph answers; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
 - **Refactor planning**: \`cartograph_find\` → \`cartograph_biomarkers\` (Code Health) → \`cartograph_coverage\` (tests) → \`cartograph_graph({direction: 'impact'})\` (blast radius) → \`cartograph_propose_rename\`.

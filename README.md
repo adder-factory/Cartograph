@@ -172,6 +172,13 @@ cartograph admin storage-migrate . \
   --database-pgvector auto
 ```
 
+Move a PostgreSQL-backed project back to local SQLite:
+
+```bash
+cartograph admin storage-migrate . \
+  --database-provider sqlite
+```
+
 See [Storage Backends](docs/STORAGE-BACKENDS.md) for the PostgreSQL 18+
 minimum, pgvector modes, production grants, hosted TLS notes, and migration
 details.

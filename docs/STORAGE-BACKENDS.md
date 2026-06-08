@@ -110,7 +110,7 @@ Canonical embeddings remain in Cartograph's regular BYTEA storage. pgvector
 tables are native mirrors used for PostgreSQL vector search and can be rebuilt
 from the canonical rows.
 
-## Migrate Existing SQLite Project
+## Migrate Existing Projects
 
 Use `storage-migrate` when a project already has a SQLite-backed graph and you
 want PostgreSQL without reindexing:
@@ -130,6 +130,23 @@ uninitialized.
 
 Restart any MCP server that was attached to the old SQLite database after the
 migration finishes.
+
+To move a PostgreSQL-backed project back to the default local SQLite database,
+target SQLite explicitly:
+
+```sh
+cartograph admin storage-migrate /path/to/project \
+  --database-provider sqlite
+```
+
+Cartograph copies the current PostgreSQL rows into a fresh SQLite database,
+validates the row counts and SQLite foreign keys, swaps the new database into
+`.cartograph/cartograph.db`, removes the `database` block from
+`.cartograph/config.json`, and keeps timestamped backups of the old PostgreSQL
+sentinel and config file next to the project database.
+
+Restart any MCP server that was attached to the old PostgreSQL database after
+the migration finishes.
 
 ## Doctor And Status
 

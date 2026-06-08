@@ -17,7 +17,10 @@ import { findSimilarViaPgvector, isPgvectorAvailable } from '../src/db/pgvector-
 import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
 import { buildSimilarToEdges } from '../src/embeddings/similar-edges.js';
 import { isHnswAvailable } from '../src/embeddings/hnsw-index.js';
-import { migrateSqliteProjectToPostgres } from '../src/features/admin-storage-migrate/runtime.js';
+import {
+  migratePostgresProjectToSqlite,
+  migrateSqliteProjectToPostgres,
+} from '../src/features/admin-storage-migrate/runtime.js';
 import { runDoctor } from '../src/installer/doctor.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
 
@@ -252,6 +255,29 @@ describePostgres('PostgreSQL database provider', () => {
       expect(getOutgoingEdges(pgCg.queries, 'n:migrate-source')[0]?.target).toBe('n:migrate-target');
     } finally {
       pgCg.close();
+    }
+
+    const reverseResult = await migratePostgresProjectToSqlite({ projectPath: currentDir });
+
+    expect(reverseResult.ok).toBe(true);
+    if (!reverseResult.ok) throw new Error(reverseResult.error.message);
+    expect(reverseResult.summary.targetProvider).toBe('sqlite');
+    if (reverseResult.summary.targetProvider !== 'sqlite') throw new Error('expected SQLite migration summary');
+    expect(fs.existsSync(reverseResult.summary.sqlitePath)).toBe(true);
+    expect(fs.existsSync(reverseResult.summary.postgresSentinelBackupPath)).toBe(true);
+    expect(fs.existsSync(reverseResult.summary.configBackupPath)).toBe(true);
+    expect(JSON.parse(fs.readFileSync(path.join(currentDir, '.cartograph', 'config.json'), 'utf-8')).database).toBe(
+      undefined,
+    );
+
+    const reopenedSqliteCg = Cartograph.openSync(currentDir);
+    try {
+      expect(reopenedSqliteCg.db.getBackend()).toBe('bun-sqlite');
+      expect(reopenedSqliteCg.getConfig().database).toBeUndefined();
+      expect(reopenedSqliteCg.queries.getNodeById('n:migrate-source')?.name).toBe('source');
+      expect(getOutgoingEdges(reopenedSqliteCg.queries, 'n:migrate-source')[0]?.target).toBe('n:migrate-target');
+    } finally {
+      reopenedSqliteCg.close();
     }
   });
 

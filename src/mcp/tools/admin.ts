@@ -426,19 +426,24 @@ async function handleStorageMigrate(ctx: ToolCtx, args: Record<string, unknown>)
     return err('action=storage-migrate: `projectPath` must be a non-empty absolute project path.');
   }
   try {
-    const databaseInput = databaseConfigFromOptionInput({ ...args, databaseProvider: 'postgres' });
+    const databaseInput = databaseConfigFromOptionInput({
+      ...args,
+      databaseProvider: args['databaseProvider'] ?? 'postgres',
+    });
     if (!databaseInput) return err('action=storage-migrate: PostgreSQL database URL is required.');
     const database = resolveDatabaseConfig(databaseInput);
     const pathMod = await import('node:path');
     ctx.closeProjectsMatching(pathMod.resolve(projectPath));
-    const { migrateSqliteProjectToPostgres, storageMigrationSuccessMessage } = await import(
-      '../../features/admin-storage-migrate/runtime.js'
-    );
-    const result = await migrateSqliteProjectToPostgres({
-      projectPath,
-      database,
-      force: args['force'] === true,
-    });
+    const { migratePostgresProjectToSqlite, migrateSqliteProjectToPostgres, storageMigrationSuccessMessage } =
+      await import('../../features/admin-storage-migrate/runtime.js');
+    const result =
+      database.provider === 'sqlite'
+        ? await migratePostgresProjectToSqlite({ projectPath })
+        : await migrateSqliteProjectToPostgres({
+            projectPath,
+            database,
+            force: args['force'] === true,
+          });
     if (!result.ok) {
       const remediation = result.error.remediation ? ` ${result.error.remediation}` : '';
       return err(`${result.error.message}${remediation}`);
@@ -451,7 +456,7 @@ async function handleStorageMigrate(ctx: ToolCtx, args: Record<string, unknown>)
           '',
           `- ${storageMigrationSuccessMessage(result.summary)}`,
           `- Updated config: \`${result.summary.configPath}\``,
-          '- Restart any MCP server still attached to the old SQLite database.',
+          `- Restart any MCP server still attached to the old ${result.summary.sourceProvider} database.`,
         ].join('\n'),
       ),
     );
@@ -894,14 +899,14 @@ const adminSchema = z.object({
     // shape `z.enum` requires. The dispatch table is the sole source.
     .enum(ADMIN_ACTION_NAMES as [string, ...string[]])
     .describe(
-      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move SQLite storage to PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
+      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move storage between SQLite and PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
     ),
   path: z.string().optional().describe('(action=init / action=uninit) Absolute path to the project directory.'),
   databaseProvider: z
     .string()
     .optional()
     .describe(
-      '(action=init / storage-migrate) Storage backend: `sqlite` (default) or `postgres`. `postgresql` is accepted as an alias.',
+      '(action=init) Storage backend: `sqlite` (default) or `postgres`. (action=storage-migrate) Target backend: `postgres` default, or `sqlite` to move a PostgreSQL project back to local SQLite. `postgresql` is accepted as an alias.',
     ),
   databaseUrl: z
     .string()
@@ -951,7 +956,7 @@ const adminSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      '(action=index) Clear structural data (nodes, edges, refs) before re-indexing; LLM caches survive via content-hash fallback. (action=storage-migrate) Drop the target PostgreSQL schema before copying. Default false.',
+      '(action=index) Clear structural data (nodes, edges, refs) before re-indexing; LLM caches survive via content-hash fallback. (action=storage-migrate to PostgreSQL) Drop the target PostgreSQL schema before copying. Default false.',
     ),
   clearParseCache: z
     .boolean()

@@ -59,7 +59,7 @@ cartograph admin init [path]       # create .cartograph/
 cartograph admin init -i [path]    # initialize and index
 cartograph admin sync [path]       # incremental update
 cartograph admin index [path]      # full reindex
-cartograph admin storage-migrate   # SQLite -> PostgreSQL
+cartograph admin storage-migrate   # SQLite <-> PostgreSQL
 cartograph admin unlock            # clear stale lock
 cartograph admin prune-store       # clean old orphaned LLM store rows
 ```
@@ -72,6 +72,13 @@ cartograph admin init -i \
   --database-url "$DATABASE_URL" \
   --database-schema cartograph \
   --database-pgvector auto
+```
+
+`admin storage-migrate` defaults to a PostgreSQL target when PostgreSQL flags
+are provided. To move an existing PostgreSQL-backed project back to SQLite, run:
+
+```sh
+cartograph admin storage-migrate /path/to/project --database-provider sqlite
 ```
 
 See [Storage Backends](STORAGE-BACKENDS.md).
