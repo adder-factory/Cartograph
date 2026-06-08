@@ -37,10 +37,12 @@ import {
 import { extractName, tsExtractFunction, tsExtractEnumMembers, tsVisitVariableInitializer } from './tree-sitter.js';
 import { extractTypeRefsFromSubtree } from './tree-sitter-typerefs.js';
 import { extractInheritance } from './tree-sitter-inheritance.js';
+import { readStringLiteralValue } from './ts-extract-calls.js';
 import type { TreeSitterExtractor } from './tree-sitter.js';
 
 /** Truncation cap for the initializer-signature column on variable / constant nodes. */
 const INIT_SIGNATURE_MAX = 100;
+const TS_TYPE_ARG_STRING_SYMBOL_LANGUAGES: ReadonlySet<string> = new Set(['typescript', 'tsx']);
 
 // ── Variables ──────────────────────────────────────────────────────
 
@@ -624,11 +626,79 @@ function extractPlainTypeAlias(extractor: TreeSitterExtractor, node: SyntaxNode,
     node,
     extra: compact({ docstring: ctx.docstring, isExported: ctx.isExported }),
   });
-  if (typeAliasNode && TYPE_ANNOTATION_LANGUAGES.has(extractor.language)) {
-    const value = getChildByField(node, 'value');
-    if (value) extractTypeRefsFromSubtree({ extractor, node: value, fromNodeId: typeAliasNode.id });
+  const value = getChildByField(node, 'value');
+  if (typeAliasNode && value && TYPE_ANNOTATION_LANGUAGES.has(extractor.language)) {
+    extractTypeRefsFromSubtree({ extractor, node: value, fromNodeId: typeAliasNode.id });
+  }
+  if (typeAliasNode && value) {
+    extractTypeArgumentStringSymbols({
+      extractor,
+      value,
+      typeAliasNodeId: typeAliasNode.id,
+      isExported: ctx.isExported,
+    });
   }
   return false;
+}
+
+interface TypeArgStringExtractionArgs {
+  extractor: TreeSitterExtractor;
+  value: SyntaxNode;
+  typeAliasNodeId: string;
+  isExported: boolean | undefined;
+}
+
+interface TypeArgStringSymbolCtx {
+  extractor: TreeSitterExtractor;
+  isExported: boolean | undefined;
+}
+
+function extractTypeArgumentStringSymbols(args: TypeArgStringExtractionArgs): void {
+  const { extractor, value, typeAliasNodeId, isExported } = args;
+  if (!TS_TYPE_ARG_STRING_SYMBOL_LANGUAGES.has(extractor.language)) return;
+  extractor.nodeStack.push(typeAliasNodeId);
+  try {
+    visitTypeArgStringSymbols(value, { extractor, isExported });
+  } finally {
+    extractor.nodeStack.pop();
+  }
+}
+
+function visitTypeArgStringSymbols(node: SyntaxNode, ctx: TypeArgStringSymbolCtx): void {
+  if (node.type === 'generic_type') extractGenericStringArgs(node, ctx);
+  for (const child of node.namedChildren) {
+    if (child) visitTypeArgStringSymbols(child, ctx);
+  }
+}
+
+function extractGenericStringArgs(genericType: SyntaxNode, ctx: TypeArgStringSymbolCtx): void {
+  const typeArgs = genericType.namedChildren.find((child) => child?.type === 'type_arguments');
+  if (!typeArgs) return;
+  const genericName = genericType.namedChildren.find((child) => child?.type === 'type_identifier');
+  const genericNameText = genericName ? getNodeText(genericName, ctx.extractor.source) : 'generic';
+
+  for (const typeArg of typeArgs.namedChildren) {
+    if (!typeArg) continue;
+    const stringNode = getStringLiteralTypeArgNode(typeArg);
+    if (!stringNode) continue;
+    const name = readStringLiteralValue(stringNode, ctx.extractor.source);
+    if (!name) continue;
+    ctx.extractor.createNode({
+      kind: 'property',
+      name,
+      node: stringNode,
+      extra: compact({
+        signature: `${genericNameText}<${getNodeText(typeArg, ctx.extractor.source)}>`,
+        isExported: ctx.isExported,
+      }),
+    });
+  }
+}
+
+function getStringLiteralTypeArgNode(typeArg: SyntaxNode): SyntaxNode | null {
+  if (typeArg.type === 'string') return typeArg;
+  if (typeArg.type !== 'literal_type') return null;
+  return typeArg.namedChildren.find((child) => child?.type === 'string') ?? null;
 }
 
 // ── Imports ───────────────────────────────────────────────────────

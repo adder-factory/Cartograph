@@ -92,6 +92,9 @@ Special cases:
   `_posts`, and `_drafts`.
 - C# primary constructors are extracted as constructor-shaped method nodes, and
   C# generic/qualified type references are mined from type positions.
+- TypeScript type aliases index direct string-literal generic arguments as
+  alias-contained property symbols, which covers typed RPC/service contract
+  tuples such as `Service<'method_name', Req, Resp>`.
 - Go receiver methods are associated with same-package structs even when the
   struct and methods live in different files, so implementation and owner edges
   are available after the post-index hooks run.

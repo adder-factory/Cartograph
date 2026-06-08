@@ -1945,6 +1945,52 @@ type Internal = string;
     expect(exported).toHaveLength(2);
     expect(exported.map((n) => n.name).sort(byString)).toEqual(['DateFormat', 'UnitSystem']);
   });
+
+  it('indexes TypeScript string-literal generic arguments as alias-contained contract properties', () => {
+    const code = `
+export interface Service<Name extends string, Req, Resp> {
+  name: Name;
+  request: Req;
+  response: Resp;
+}
+
+export type MyServiceList = [
+  Service<
+    'query_apply_record',
+    { pageNo: number; pageSize: number },
+    { success: boolean }
+  >,
+  Service<
+    'apply_confirm',
+    { code: string },
+    { success: boolean }
+  >
+];
+`;
+    const result = extractFromSource('services/api.ts', code);
+    const alias = result.nodes.find((n) => n.kind === 'type_alias' && n.name === 'MyServiceList');
+    const contractProps = result.nodes.filter(
+      (n) => n.kind === 'property' && n.qualifiedName?.startsWith('MyServiceList::'),
+    );
+
+    expect(contractProps.map((n) => n.name).sort(byString)).toEqual(['apply_confirm', 'query_apply_record']);
+    expect(contractProps.every((n) => n.isExported)).toBe(true);
+    expect(contractProps.every((n) => n.signature?.startsWith('Service<'))).toBe(true);
+    expect(
+      contractProps.every((prop) =>
+        result.edges.some((edge) => edge.kind === 'contains' && edge.source === alias?.id && edge.target === prop.id),
+      ),
+    ).toBe(true);
+  });
+
+  it('does not turn plain TypeScript string-literal unions into contract properties', () => {
+    const code = `
+export type UnitSystem = 'metric' | 'imperial';
+`;
+    const result = extractFromSource('config.ts', code);
+
+    expect(result.nodes.filter((n) => n.kind === 'property' && ['metric', 'imperial'].includes(n.name))).toEqual([]);
+  });
 });
 
 describe('Exported Variable Extraction', () => {
