@@ -453,9 +453,3 @@ function stringEnd(text: string, start: number): number {
   }
   return text.length;
 }
-
-export const jsoncWriterInternalsForTest = {
-  parseJsoncText,
-  upsertMcpServerEntry,
-  removeMcpServerEntry,
-};

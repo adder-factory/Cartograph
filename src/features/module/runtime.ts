@@ -39,7 +39,7 @@ const TOP_ROLES = 5;
 const TOP_EXPORTS = 8;
 /** Minimum summarised-symbol count before the footer says a paragraph can be cached. */
 const MIN_SUMMARISED_FOR_PARAGRAPH = 3;
-/** Multiplier used to render a 0-1 fraction as a percent in the role-mix output. */
+/** Multiplier used to render a fraction as whole-percent text. */
 const PCT_MULTIPLIER = 100;
 
 interface ExportNode {

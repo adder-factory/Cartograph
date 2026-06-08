@@ -30,6 +30,11 @@ import {
 const SUPPORTED_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 const MAX_DISPATCH_FANOUT = 10;
 const DECLARATION_RE = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=/g;
+const CLOSE_BY_OPEN: Readonly<Record<string, string>> = {
+  '{': '}',
+  '[': ']',
+  '(': ')',
+};
 
 export const DYNAMIC_DISPATCH_ALGO_VERSION = computeAlgoHash('src/index-hooks/dynamic-dispatch.ts', [
   './dynamic-dispatch',
@@ -308,10 +313,7 @@ function findMatching(content: string, openIndex: number): number | null {
 }
 
 function matchingClose(open: string | undefined): string | null {
-  if (open === '{') return '}';
-  if (open === '[') return ']';
-  if (open === '(') return ')';
-  return null;
+  return open ? (CLOSE_BY_OPEN[open] ?? null) : null;
 }
 
 function skipStringOrComment(content: string, index: number): number {

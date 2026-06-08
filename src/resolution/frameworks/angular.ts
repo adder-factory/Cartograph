@@ -11,6 +11,7 @@ import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
 import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkReference } from './reference.js';
 
 const ANGULAR_LANGUAGES = ['typescript'] as const;
 const ROUTE_PATH_RE = /\bpath\s*:\s*(['"])(.*?)\1/g;
@@ -66,13 +67,14 @@ export const angularResolver: FrameworkResolver = {
 
       const component = COMPONENT_RE.exec(routeObject)?.[1];
       if (component) {
-        references.push(makeReference(routeNode, component, 'references'));
+        references.push(makeFrameworkReference(routeNode, component, 'references'));
       }
 
       const lazyImport = extractLazyImport(routeObject);
       if (lazyImport) {
-        references.push(makeReference(routeNode, lazyImport.source, 'imports'));
-        if (lazyImport.exportName) references.push(makeReference(routeNode, lazyImport.exportName, 'references'));
+        references.push(makeFrameworkReference(routeNode, lazyImport.source, 'imports'));
+        if (lazyImport.exportName)
+          references.push(makeFrameworkReference(routeNode, lazyImport.exportName, 'references'));
       }
     }
 
@@ -185,18 +187,6 @@ function makeRouteNode(args: {
     endColumn: Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1)) + args.routePath.length,
     signature: `Angular route ${args.routePath}`,
     updatedAt: Date.now(),
-  };
-}
-
-function makeReference(node: Node, name: string, kind: UnresolvedReference['referenceKind']): UnresolvedReference {
-  return {
-    fromNodeId: node.id,
-    referenceName: name,
-    referenceKind: kind,
-    line: node.startLine,
-    column: node.startColumn,
-    filePath: node.filePath,
-    language: node.language,
   };
 }
 
