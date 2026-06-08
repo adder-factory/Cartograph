@@ -49,7 +49,7 @@ admin (init / uninit / index / sync / unlock / migrate / storage-migrate /
        install-models / doctor / llm-plan / llm-apply / llm-tune)
 affected, ask, at-range, biomarkers, blame, changed-since,
 compare-to-ref, context, coverage, dead-code, deps, digest,
-discover, entry-points, explore, files, find, graph, history,
+discover, entry-points, explore, file-symbols, files, find, graph, history,
 hotspots, imports, local-chat, module, node, note, playbook,
 propose-rename, review (context / neighbors / risk / agent-audit / trust),
 role, session (create / resume / list / delete / macro_save /

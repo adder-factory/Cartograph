@@ -60,6 +60,7 @@ const EXPECTED_HAND_BUILT_TOOLS: ReadonlySet<string> = new Set<string>([
   // structural-fix-C followup tasks.
   'cartograph_status', // reason: hand-built; pre-generator
   'cartograph_files', // reason: hand-built; pre-generator
+  'cartograph_file_symbols', // reason: hand-built; pre-generator
   'cartograph_at_range', // reason: hand-built; pre-generator
   'cartograph_ask', // reason: hand-built; pre-generator
   'cartograph_affected', // reason: hand-built; pre-generator

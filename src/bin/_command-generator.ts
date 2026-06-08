@@ -260,7 +260,7 @@ const PROJECT_PATH_FIELD = 'projectPath';
  *
  * @throws if `mod` is not a `defineTool` module (no Zod schema) — a
  *   legacy hand-written-JSON-Schema tool has no schema to generate
- *   from. P4 made all 36 tools Zod-backed, so in practice every
+ *   from. P4 made all registered tools Zod-backed, so in practice every
  *   registry module qualifies.
  */
 export function buildGeneratedCommand(
