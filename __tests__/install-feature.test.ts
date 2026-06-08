@@ -3,6 +3,7 @@ import {
   installerRunOptions,
   printConfigLocation,
   registerInstallCommand,
+  validateInstallCommand,
   validateInstallLocation,
 } from '../src/features/install/index.js';
 
@@ -15,12 +16,15 @@ describe('install feature runtime', () => {
       ok: false,
       error: '--location must be "global" or "local" (got "bad").',
     });
+    expect(validateInstallCommand('  /bin/cartograph  ')).toEqual({ ok: true, command: '/bin/cartograph' });
+    expect(validateInstallCommand('  ')).toEqual({ ok: false, error: '--command must not be blank.' });
     expect(installerRunOptions({ target: 'auto', location: 'global', yes: true, permissions: true })).toEqual({
       target: 'auto',
       location: 'global',
       autoAllow: true,
       yes: true,
     });
+    expect(installerRunOptions({ command: '  /bin/cartograph  ' })).toEqual({ command: '/bin/cartograph' });
     expect(installerRunOptions({ permissions: false })).toEqual({ autoAllow: false });
   });
 });
@@ -34,7 +38,13 @@ describe('install feature CLI', () => {
       error: (message) => calls.push(`error:${message}`),
       writeStdout: (message) => calls.push(`stdout:${message}`),
       loadInstallerTargets: async () => ({
-        getTarget: (id) => (id === 'claude' ? { printConfig: (location: string) => `config:${location}` } : null),
+        getTarget: (id) =>
+          id === 'claude'
+            ? {
+                printConfig: (location: string, options?: { command?: string }) =>
+                  `config:${location}:${options?.command}`,
+              }
+            : null,
         listTargetIds: () => ['claude', 'cursor'],
       }),
       loadInstaller: async () => ({
@@ -42,12 +52,18 @@ describe('install feature CLI', () => {
       }),
     });
 
-    await actions.get('install')!({ printConfig: 'claude', location: 'local' });
-    await actions.get('install')!({ target: 'auto', location: 'global', yes: true, permissions: true });
+    await actions.get('install')!({ printConfig: 'claude', location: 'local', command: '/bin/cartograph' });
+    await actions.get('install')!({
+      target: 'auto',
+      location: 'global',
+      yes: true,
+      permissions: true,
+      command: '/bin/cartograph',
+    });
 
     expect(calls).toEqual([
-      'stdout:config:local',
-      'install:{"target":"auto","location":"global","autoAllow":true,"yes":true}',
+      'stdout:config:local:/bin/cartograph',
+      'install:{"target":"auto","location":"global","command":"/bin/cartograph","autoAllow":true,"yes":true}',
     ]);
   });
 });

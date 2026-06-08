@@ -13,7 +13,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
+import {
+  getHomeDir,
+  getMcpCommand,
+  jsonDeepEqual,
+  readJsonFile,
+  removeNestedJsonEntry,
+  writeJsonFile,
+  type McpCommandOptions,
+} from './shared.js';
 
 const ZED_DOCS_URL = 'https://zed.dev/docs/assistant/model-context-protocol';
 
@@ -29,9 +37,9 @@ function settingsJsonPath(loc: Location): string {
   return path.join(configDir(loc), 'settings.json');
 }
 
-function getZedContextServerEntry(): { command: string; args: string[] } {
+function getZedContextServerEntry(options: McpCommandOptions = {}): { command: string; args: string[] } {
   return {
-    command: 'cartograph',
+    command: getMcpCommand(options),
     args: ['serve', '--mcp'],
   };
 }
@@ -52,9 +60,9 @@ class ZedTarget implements AgentTarget {
     return { installed, alreadyConfigured: !!config['context_servers']?.cartograph, configPath: file };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     return {
-      files: [writeContextServerEntry(loc)],
+      files: [writeContextServerEntry(loc, opts)],
       notes: ['Open Zed Agent Settings to verify the cartograph context server is active.'],
     };
   }
@@ -63,9 +71,9 @@ class ZedTarget implements AgentTarget {
     return { files: [removeContextServerEntry(loc)] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ context_servers: { cartograph: getZedContextServerEntry() } }, null, 2);
+    const snippet = JSON.stringify({ context_servers: { cartograph: getZedContextServerEntry(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -74,11 +82,11 @@ class ZedTarget implements AgentTarget {
   }
 }
 
-function writeContextServerEntry(loc: Location): WriteResult['files'][number] {
+function writeContextServerEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
   const existing = readJsonFile(file);
   const before = existing['context_servers']?.cartograph;
-  const after = getZedContextServerEntry();
+  const after = getZedContextServerEntry(opts);
 
   if (jsonDeepEqual(before, after)) return { path: file, action: 'unchanged' };
 
@@ -90,18 +98,7 @@ function writeContextServerEntry(loc: Location): WriteResult['files'][number] {
 }
 
 function removeContextServerEntry(loc: Location): WriteResult['files'][number] {
-  const file = settingsJsonPath(loc);
-  const config = readJsonFile(file);
-  if (!config['context_servers']?.cartograph) {
-    return { path: file, action: 'not-found' };
-  }
-
-  delete config['context_servers'].cartograph;
-  if (Object.keys(config['context_servers']).length === 0) {
-    delete config['context_servers'];
-  }
-  writeJsonFile(file, config);
-  return { path: file, action: 'removed' };
+  return removeNestedJsonEntry(settingsJsonPath(loc), 'context_servers', 'cartograph');
 }
 
 export const zedTarget: AgentTarget = new ZedTarget();

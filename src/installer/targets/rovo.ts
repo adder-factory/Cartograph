@@ -15,8 +15,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir } from './shared.js';
-import { detectMcpEntryJson, removeMcpEntryJson, writeMcpEntryJson } from './write-mcp-entry-json.js';
+import { getHomeDir, getMcpCommand, type McpCommandOptions } from './shared.js';
+import {
+  detectMcpEntryJson,
+  removeMcpEntryJson,
+  writeMcpEntryJson,
+  type WriteMcpEntryJsonArgs,
+} from './write-mcp-entry-json.js';
 
 const ROVO_DOCS_URL = 'https://support.atlassian.com/rovo/docs/connect-to-an-mcp-server-in-rovo-dev-cli/';
 
@@ -36,15 +41,17 @@ function mcpJsonPath(loc: Location): string {
   return configuredMcpPath(loc) ?? defaultMcpJsonPath(loc);
 }
 
-function getRovoServerEntry(): { command: string; args: string[]; transport: string } {
+function getRovoServerEntry(options: McpCommandOptions = {}): { command: string; args: string[]; transport: string } {
   return {
-    command: 'cartograph',
+    command: getMcpCommand(options),
     args: ['serve', '--mcp'],
     transport: 'stdio',
   };
 }
 
-const ROVO_MCP_CONFIG = { resolvePath: mcpJsonPath, entry: getRovoServerEntry };
+function rovoMcpConfig(command?: string): WriteMcpEntryJsonArgs {
+  return { resolvePath: mcpJsonPath, entry: getRovoServerEntry, command };
+}
 
 class RovoDevTarget implements AgentTarget {
   readonly id = 'rovo' as const;
@@ -58,24 +65,24 @@ class RovoDevTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = mcpJsonPath(loc);
     const installed = fs.existsSync(configDir(loc)) || fs.existsSync(file);
-    return detectMcpEntryJson(loc, ROVO_MCP_CONFIG, installed);
+    return detectMcpEntryJson(loc, rovoMcpConfig(), installed);
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     const notes =
       loc === 'local'
         ? ['Point Rovo Dev config at .rovodev/mcp.json if your local profile does not already load it.']
         : ['Restart Rovo Dev or use /mcp to reload server changes.'];
-    return { files: [writeMcpEntry(loc)], notes };
+    return { files: [writeMcpEntry(loc, opts)], notes };
   }
 
   uninstall(loc: Location): WriteResult {
     return { files: [removeMcpEntry(loc)] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getRovoServerEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getRovoServerEntry(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -137,12 +144,12 @@ function stripMatchingQuotes(value: string): string {
   return value.slice(1, -1);
 }
 
-function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, ROVO_MCP_CONFIG);
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  return writeMcpEntryJson(loc, rovoMcpConfig(opts.command));
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return removeMcpEntryJson(loc, ROVO_MCP_CONFIG);
+  return removeMcpEntryJson(loc, rovoMcpConfig());
 }
 
 export const rovoTarget: AgentTarget = new RovoDevTarget();

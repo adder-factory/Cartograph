@@ -549,6 +549,51 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
     });
   });
 
+  it('writes a custom command path across target-specific MCP config shapes', () => {
+    const command = '/opt/cartograph/bin/cartograph';
+
+    getTarget('claude')!.install('local', { autoAllow: false, command });
+    getTarget('copilot')!.install('local', { autoAllow: false, command });
+    getTarget('zed')!.install('local', { autoAllow: false, command });
+    getTarget('opencode')!.install('local', { autoAllow: false, command });
+    getTarget('factory')!.install('local', { autoAllow: false, command });
+    getTarget('rovo')!.install('local', { autoAllow: false, command });
+    getTarget('qoder')!.install('local', { autoAllow: false, command });
+    getTarget('gemini')!.install('local', { autoAllow: false, command });
+    getTarget('kiro')!.install('local', { autoAllow: false, command });
+    getTarget('codex')!.install('global', { autoAllow: false, command });
+    getTarget('hermes')!.install('global', { autoAllow: false, command });
+    getTarget('antigravity')!.install('global', { autoAllow: false, command });
+
+    const claudeConfig = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude.json'), 'utf-8'));
+    expect(claudeConfig.projects[path.resolve(process.cwd())].mcpServers.cartograph.command).toBe(command);
+    const copilotConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.mcp.json'), 'utf-8'));
+    expect(copilotConfig.mcpServers.cartograph.command).toBe(command);
+    const zedConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.zed', 'settings.json'), 'utf-8'));
+    expect(zedConfig.context_servers.cartograph.command).toBe(command);
+    const opencodeConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, 'opencode.json'), 'utf-8'));
+    expect(opencodeConfig.mcp.cartograph.command[0]).toBe(command);
+    const factoryConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.factory', 'mcp.json'), 'utf-8'));
+    expect(factoryConfig.mcpServers.cartograph.command).toBe(command);
+    const rovoConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.rovodev', 'mcp.json'), 'utf-8'));
+    expect(rovoConfig.mcpServers.cartograph.command).toBe(command);
+    const qoderConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.qoder', 'settings.local.json'), 'utf-8'));
+    expect(qoderConfig.mcpServers.cartograph.command).toBe(command);
+    const geminiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.gemini', 'settings.json'), 'utf-8'));
+    expect(geminiConfig.mcpServers.cartograph.command).toBe(command);
+    const kiroConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kiro', 'settings', 'mcp.json'), 'utf-8'));
+    expect(kiroConfig.mcpServers.cartograph.command).toBe(command);
+    const codexToml = fs.readFileSync(path.join(tmpHome, '.codex', 'config.toml'), 'utf-8');
+    expect(codexToml).toContain(`command = "${command}"`);
+    const hermesYaml = fs.readFileSync(path.join(tmpHome, '.hermes', 'config.yaml'), 'utf-8');
+    expect(hermesYaml).toContain(`command: ${command}`);
+    const antigravityConfig = JSON.parse(
+      fs.readFileSync(path.join(tmpHome, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'),
+    );
+    expect(antigravityConfig.mcpServers.cartograph.command).toBe(command);
+    expect(getTarget('copilot')!.printConfig('local', { command })).toContain(`"command": "${command}"`);
+  });
+
   it('qoder writes and removes auto-allow permissions when requested', () => {
     const qoder = getTarget('qoder')!;
     qoder.install('local', { autoAllow: true });

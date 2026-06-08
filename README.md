@@ -64,6 +64,13 @@ the MCP entry is written under this project in `~/.claude.json`, permissions go
 to `.claude/settings.local.json`, and Cartograph instructions go to
 `CLAUDE.local.md` with both local files added to `.gitignore`.
 
+If your MCP client is launched from a GUI shell that cannot find `cartograph`,
+write an absolute executable path into the config:
+
+```bash
+cartograph install --command "$(command -v cartograph)"
+```
+
 Or give this task to your coding agent:
 
 ```text
@@ -74,6 +81,9 @@ curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/insta
 Then, from this repository, run:
 cartograph install --yes --target=auto --location=local
 cartograph status --verbose
+
+If the agent or MCP host cannot find `cartograph` on PATH, retry install with:
+cartograph install --yes --target=auto --location=local --command "$(command -v cartograph)"
 
 Report changed files, status output, and whether I need to restart the agent.
 Do not configure LLMs, download models, migrate storage, or switch to

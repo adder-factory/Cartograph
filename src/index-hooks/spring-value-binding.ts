@@ -133,6 +133,13 @@ interface ConditionalAnnotatedNode {
   decoratorArgs: DecoratorArgsEntry;
 }
 
+interface ConfigKeyReference {
+  sourceId: string;
+  sourceStartLine: number;
+  keys: string[];
+  synthesizedBy: string;
+}
+
 /**
  * Walk the graph: find every JVM field or property node whose
  * `decorators` contains `Value` and whose `decorator_args` has a
@@ -247,13 +254,11 @@ function refresh(ctx: IndexHookContext): void {
     // Collect every distinct key referenced across all @Value fields,
     // batch the constant-node lookup, then build edges field-by-field.
     const allKeys: string[] = [];
-    const perField = collectValueKeyRefs(fields, allKeys);
-    const perConditional = collectConditionalKeyRefs(conditionals, allKeys);
+    const keyRefs = [...collectValueKeyRefs(fields, allKeys), ...collectConditionalKeyRefs(conditionals, allKeys)];
     const lookup = lookupConstantNodes(ctx, allKeys);
 
     const newEdges: Edge[] = [];
-    pushValueEdges(newEdges, perField, lookup);
-    pushConditionalEdges(newEdges, perConditional, lookup);
+    pushConfigReferenceEdges(newEdges, keyRefs, lookup);
     if (newEdges.length > 0) insertEdges(ctx.queries, newEdges);
   } catch (err) {
     logDebug(`spring-value-binding refresh failed: ${errMsg(err)}`);
@@ -261,63 +266,58 @@ function refresh(ctx: IndexHookContext): void {
   stamp(ctx);
 }
 
-function collectValueKeyRefs(fields: readonly ValueAnnotatedNode[], allKeys: string[]) {
-  const perField: Array<{ field: ValueAnnotatedNode; keys: string[] }> = [];
+function collectValueKeyRefs(fields: readonly ValueAnnotatedNode[], allKeys: string[]): ConfigKeyReference[] {
+  const refs: ConfigKeyReference[] = [];
   for (const field of fields) {
     const keys = extractConfigKeys(field.argString);
-    perField.push({ field, keys });
+    refs.push({
+      sourceId: field.fieldId,
+      sourceStartLine: field.fieldStartLine,
+      keys,
+      synthesizedBy: 'spring-value-binding',
+    });
     for (const k of keys) allKeys.push(k);
   }
-  return perField;
+  return refs;
 }
 
-function collectConditionalKeyRefs(conditionals: readonly ConditionalAnnotatedNode[], allKeys: string[]) {
-  const perConditional: Array<{ conditional: ConditionalAnnotatedNode; keys: string[] }> = [];
+function collectConditionalKeyRefs(
+  conditionals: readonly ConditionalAnnotatedNode[],
+  allKeys: string[],
+): ConfigKeyReference[] {
+  const refs: ConfigKeyReference[] = [];
   for (const conditional of conditionals) {
     const keys = extractConditionalConfigKeys(conditional.decoratorArgs);
-    perConditional.push({ conditional, keys });
+    refs.push({
+      sourceId: conditional.sourceId,
+      sourceStartLine: conditional.sourceStartLine,
+      keys,
+      synthesizedBy: 'spring-conditional-on-property-binding',
+    });
     for (const k of keys) allKeys.push(k);
   }
-  return perConditional;
+  return refs;
 }
 
-function pushValueEdges(
+function pushConfigReferenceEdges(
   newEdges: Edge[],
-  perField: ReadonlyArray<{ field: ValueAnnotatedNode; keys: string[] }>,
+  refs: readonly ConfigKeyReference[],
   lookup: Map<string, string[]>,
 ): void {
-  for (const { field, keys } of perField) {
-    for (const key of keys) {
-      pushConfigEdges(newEdges, {
-        sourceId: field.fieldId,
-        line: field.fieldStartLine,
+  for (const ref of refs) {
+    for (const key of ref.keys) {
+      pushConfigEdgesToTargets(newEdges, {
+        sourceId: ref.sourceId,
+        line: ref.sourceStartLine,
         key,
         targets: lookup.get(key),
-        synthesizedBy: 'spring-value-binding',
+        synthesizedBy: ref.synthesizedBy,
       });
     }
   }
 }
 
-function pushConditionalEdges(
-  newEdges: Edge[],
-  perConditional: ReadonlyArray<{ conditional: ConditionalAnnotatedNode; keys: string[] }>,
-  lookup: Map<string, string[]>,
-): void {
-  for (const { conditional, keys } of perConditional) {
-    for (const key of keys) {
-      pushConfigEdges(newEdges, {
-        sourceId: conditional.sourceId,
-        line: conditional.sourceStartLine,
-        key,
-        targets: lookup.get(key),
-        synthesizedBy: 'spring-conditional-on-property-binding',
-      });
-    }
-  }
-}
-
-function pushConfigEdges(
+function pushConfigEdgesToTargets(
   newEdges: Edge[],
   args: {
     sourceId: string;

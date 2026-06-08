@@ -17,10 +17,13 @@ agent. Use non-interactive commands where possible.
    cartograph install --yes --target=auto --location=local
    cartograph status --verbose
 
-3. If no local agent config file was created, retry global agent wiring:
+3. If the MCP host cannot find `cartograph` on PATH, retry local wiring with:
+   cartograph install --yes --target=auto --location=local --command "$(command -v cartograph)"
+
+4. If no local agent config file was created, retry global agent wiring:
    cartograph install --yes --target=auto --location=global
 
-4. Report the exact files created or changed, whether `.cartograph/` was
+5. Report the exact files created or changed, whether `.cartograph/` was
    initialized, the `cartograph status --verbose` result, and whether I need to
    restart the coding agent.
 

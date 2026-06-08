@@ -16,8 +16,20 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, readJsonFile, writeJsonFile, writePermissionsAllowList } from './shared.js';
-import { detectMcpEntryJson, removeMcpEntryJson, writeMcpEntryJson } from './write-mcp-entry-json.js';
+import {
+  getHomeDir,
+  getMcpCommand,
+  readJsonFile,
+  writeJsonFile,
+  writePermissionsAllowList,
+  type McpCommandOptions,
+} from './shared.js';
+import {
+  detectMcpEntryJson,
+  removeMcpEntryJson,
+  writeMcpEntryJson,
+  type WriteMcpEntryJsonArgs,
+} from './write-mcp-entry-json.js';
 
 const QODER_DOCS_URL = 'https://docs.qoder.com/en/cli/mcp-servers';
 
@@ -31,14 +43,16 @@ function settingsJsonPath(loc: Location): string {
     : path.join(configDir(loc), 'settings.local.json');
 }
 
-function getQoderServerEntry(): { command: string; args: string[] } {
+function getQoderServerEntry(options: McpCommandOptions = {}): { command: string; args: string[] } {
   return {
-    command: 'cartograph',
+    command: getMcpCommand(options),
     args: ['serve', '--mcp'],
   };
 }
 
-const QODER_MCP_CONFIG = { resolvePath: settingsJsonPath, entry: getQoderServerEntry };
+function qoderMcpConfig(command?: string): WriteMcpEntryJsonArgs {
+  return { resolvePath: settingsJsonPath, entry: getQoderServerEntry, command };
+}
 
 class QoderTarget implements AgentTarget {
   readonly id = 'qoder' as const;
@@ -52,11 +66,11 @@ class QoderTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = settingsJsonPath(loc);
     const installed = fs.existsSync(configDir(loc)) || fs.existsSync(file);
-    return detectMcpEntryJson(loc, QODER_MCP_CONFIG, installed);
+    return detectMcpEntryJson(loc, qoderMcpConfig(), installed);
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    const files: WriteResult['files'] = [writeMcpEntry(loc)];
+    const files: WriteResult['files'] = [writeMcpEntry(loc, opts)];
     if (opts.autoAllow) {
       files.push(writePermissionsEntry(loc));
     }
@@ -70,9 +84,9 @@ class QoderTarget implements AgentTarget {
     return { files: [removeMcpEntry(loc), removePermissionsEntry(loc)] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getQoderServerEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getQoderServerEntry(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -81,8 +95,8 @@ class QoderTarget implements AgentTarget {
   }
 }
 
-function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, QODER_MCP_CONFIG);
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  return writeMcpEntryJson(loc, qoderMcpConfig(opts.command));
 }
 
 function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
@@ -90,7 +104,7 @@ function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return removeMcpEntryJson(loc, QODER_MCP_CONFIG);
+  return removeMcpEntryJson(loc, qoderMcpConfig());
 }
 
 function removePermissionsEntry(loc: Location): WriteResult['files'][number] {

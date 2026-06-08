@@ -68,6 +68,8 @@ interface RunInstallerOptions {
    * autoAllow=true, target=auto. For scripting / CI.
    */
   yes?: boolean;
+  /** Optional executable path/name to write into MCP config entries. */
+  command?: string | undefined;
 }
 
 /**
@@ -95,7 +97,7 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
   }
 
   const autoAllow = await resolveAutoAllow({ clack, opts, useDefaults, targets });
-  installTargetsAt({ clack, targets, location, autoAllow });
+  installTargetsAt({ clack, targets, location, autoAllow, command: opts.command });
 
   if (location === 'local') {
     await initializeLocalProject(clack, { deferLlmSetup: useDefaults });
@@ -217,6 +219,7 @@ interface InstallTargetsArgs {
   targets: AgentTarget[];
   location: Location;
   autoAllow: boolean;
+  command?: string | undefined;
 }
 
 /**
@@ -224,13 +227,13 @@ interface InstallTargetsArgs {
  * and surface any target-supplied notes.
  */
 function installTargetsAt(args: InstallTargetsArgs): void {
-  const { clack, targets, location, autoAllow } = args;
+  const { clack, targets, location, autoAllow, command } = args;
   for (const target of targets) {
     if (!target.supportsLocation(location)) {
       clack.log.warn(`${target.displayName}: skipped — does not support --location=${location}.`);
       continue;
     }
-    const result = target.install(location, { autoAllow });
+    const result = target.install(location, { autoAllow, command });
     for (const file of result.files) {
       let verb = 'Updated';
       if (file.action === 'unchanged') {

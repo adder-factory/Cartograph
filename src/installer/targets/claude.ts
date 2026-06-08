@@ -23,6 +23,7 @@ import {
   jsonDeepEqual,
   readJsonFile,
   removeMarkedSection,
+  removeNestedJsonEntry,
   replaceOrAppendMarkedSection,
   writePermissionsAllowList,
   writeJsonFile,
@@ -84,13 +85,13 @@ function hasScopedMcpEntry(loc: Location, config: Record<string, any>): boolean 
   return !!projectConfig?.['mcpServers']?.cartograph;
 }
 
-function writeScopedMcpEntry(loc: Location): WriteResult['files'][number] {
-  if (loc === 'global') return writeMcpEntryJson(loc, { resolvePath: claudeJsonPath });
+function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  if (loc === 'global') return writeMcpEntryJson(loc, { resolvePath: claudeJsonPath, command: opts.command });
 
   const file = claudeJsonPath(loc);
   const existing = readJsonFile(file);
   const before = localProjectConfig(existing)?.['mcpServers']?.cartograph;
-  const after = getMcpServerConfig();
+  const after = getMcpServerConfig(opts);
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
   }
@@ -129,17 +130,7 @@ function removeScopedMcpEntry(loc: Location): WriteResult['files'][number] {
 }
 
 function removeTopLevelMcpEntry(loc: Location): WriteResult['files'][number] {
-  const mcpPath = claudeJsonPath(loc);
-  const config = readJsonFile(mcpPath);
-  if (!config['mcpServers']?.cartograph) {
-    return { path: mcpPath, action: 'not-found' };
-  }
-  delete config['mcpServers'].cartograph;
-  if (Object.keys(config['mcpServers']).length === 0) {
-    delete config['mcpServers'];
-  }
-  writeJsonFile(mcpPath, config);
-  return { path: mcpPath, action: 'removed' };
+  return removeNestedJsonEntry(claudeJsonPath(loc), 'mcpServers', 'cartograph');
 }
 
 function writeScopedPermissionsEntry(loc: Location): WriteResult['files'][number] {
@@ -192,7 +183,7 @@ class ClaudeCodeTarget implements AgentTarget {
     const files: WriteResult['files'] = [];
 
     // 1. MCP server entry
-    files.push(writeScopedMcpEntry(loc));
+    files.push(writeScopedMcpEntry(loc, opts));
 
     // 2. Permissions (only when autoAllow)
     if (opts.autoAllow) {
@@ -247,16 +238,16 @@ class ClaudeCodeTarget implements AgentTarget {
     return { files };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = claudeJsonPath(loc);
     const snippet =
       loc === 'local'
         ? JSON.stringify(
-            { projects: { [projectKey()]: { mcpServers: { cartograph: getMcpServerConfig() } } } },
+            { projects: { [projectKey()]: { mcpServers: { cartograph: getMcpServerConfig(opts) } } } },
             null,
             2,
           )
-        : JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig() } }, null, 2);
+        : JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

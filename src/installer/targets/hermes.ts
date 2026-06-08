@@ -38,7 +38,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { atomicWriteFileSync, getHomeDir } from './shared.js';
+import { atomicWriteFileSync, getHomeDir, getMcpCommand, type McpCommandOptions } from './shared.js';
 import { escapeRegExp } from '../../utils.js';
 
 type LineRange = { start: number; end: number };
@@ -66,7 +66,7 @@ class HermesTarget implements AgentTarget {
     };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     if (loc !== 'global') {
       return {
         files: [],
@@ -74,7 +74,7 @@ class HermesTarget implements AgentTarget {
       };
     }
     return {
-      files: [writeHermesConfig()],
+      files: [writeHermesConfig(opts)],
       notes: ['Start a new Hermes session for MCP changes to take effect.'],
     };
   }
@@ -95,14 +95,14 @@ class HermesTarget implements AgentTarget {
     return { files: [{ path: file, action: 'removed' }] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     if (loc !== 'global') {
       return '# Hermes Agent uses $HERMES_HOME/config.yaml; use --location=global.\n';
     }
     return [
       `# Add to ${configPath()}`,
       '',
-      renderCartographMcpBlock().join('\n'),
+      renderCartographMcpBlock(opts).join('\n'),
       '',
       'platform_toolsets:',
       '  cli:',
@@ -133,11 +133,11 @@ function readText(file: string): string {
   }
 }
 
-function writeHermesConfig(): WriteResult['files'][number] {
+function writeHermesConfig(opts: InstallOptions): WriteResult['files'][number] {
   const file = configPath();
   const existed = fs.existsSync(file);
   const before = readText(file);
-  const afterMcp = upsertCartographMcpServer(before);
+  const afterMcp = upsertCartographMcpServer(before, opts);
   const after = upsertCartographToolset(afterMcp);
 
   if (after === before) {
@@ -254,10 +254,15 @@ function isListChildContinuation(line: string): boolean {
   return indent === 2 && /^ {2}- /.test(line);
 }
 
-function renderCartographMcpChild(): string[] {
+function yamlScalar(value: string): string {
+  if (/^[A-Za-z0-9_./:-]+$/.test(value)) return value;
+  return JSON.stringify(value);
+}
+
+function renderCartographMcpChild(options: McpCommandOptions = {}): string[] {
   return [
     '  cartograph:',
-    '    command: cartograph',
+    `    command: ${yamlScalar(getMcpCommand(options))}`,
     '    args:',
     '      - serve',
     '      - --mcp',
@@ -267,8 +272,8 @@ function renderCartographMcpChild(): string[] {
   ];
 }
 
-function renderCartographMcpBlock(): string[] {
-  return ['mcp_servers:', ...renderCartographMcpChild()];
+function renderCartographMcpBlock(options: McpCommandOptions = {}): string[] {
+  return ['mcp_servers:', ...renderCartographMcpChild(options)];
 }
 
 function hasCartographMcpServer(content: string): boolean {
@@ -277,16 +282,16 @@ function hasCartographMcpServer(content: string): boolean {
   return !!parent && !!childRange(lines, parent, 'cartograph');
 }
 
-function upsertCartographMcpServer(content: string): string {
+function upsertCartographMcpServer(content: string, options: McpCommandOptions = {}): string {
   const lines = splitLines(content);
   const parent = topLevelRange(lines, 'mcp_servers');
   const child = parent ? childRange(lines, parent, 'cartograph') : null;
-  const replacement = renderCartographMcpChild();
+  const replacement = renderCartographMcpChild(options);
 
   if (!parent) {
     if (lines.length > 0 && lines.at(-1) === '') lines.pop();
     if (lines.length > 0) lines.push('');
-    lines.push(...renderCartographMcpBlock());
+    lines.push(...renderCartographMcpBlock(options));
     return joinLines(lines);
   }
 

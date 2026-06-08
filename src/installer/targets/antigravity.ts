@@ -33,7 +33,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
+import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile, type McpCommandOptions } from './shared.js';
 
 function unifiedConfigDir(): string {
   return path.join(getHomeDir(), '.gemini', 'config');
@@ -76,7 +76,8 @@ function preferredMcpConfigPath(): string {
  * interactive shell PATH is consulted — that's the right PATH for
  * finding nvm-managed installs.
  */
-function resolveCartographCommand(): string {
+function resolveCartographCommand(options: McpCommandOptions = {}): string {
+  if (options.command) return options.command;
   if (process.platform !== 'darwin') return 'cartograph';
   try {
     const resolved = execSync('command -v cartograph || which cartograph', {
@@ -96,9 +97,9 @@ function resolveCartographCommand(): string {
  * the shared `getMcpServerConfig()` because Antigravity (a) rejects
  * the `type` field and (b) needs an absolute command path on macOS.
  */
-function buildAntigravityEntry(): { command: string; args: string[] } {
+function buildAntigravityEntry(options: McpCommandOptions = {}): { command: string; args: string[] } {
   return {
-    command: resolveCartographCommand(),
+    command: resolveCartographCommand(options),
     args: ['serve', '--mcp'],
   };
 }
@@ -125,7 +126,7 @@ class AntigravityTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: file };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     if (loc !== 'global') {
       return {
         files: [],
@@ -133,7 +134,7 @@ class AntigravityTarget implements AgentTarget {
       };
     }
     const files: WriteResult['files'] = [];
-    files.push(writeMcpEntry());
+    files.push(writeMcpEntry(opts));
     // Migrate a stale legacy entry to the unified file if both exist —
     // prevents two competing cartograph configs.
     const legacyCleanup = cleanupLegacyEntry();
@@ -162,12 +163,12 @@ class AntigravityTarget implements AgentTarget {
     return { files };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     if (loc !== 'global') {
       return '# Antigravity IDE has no project-local config — use --location=global.\n';
     }
     const file = preferredMcpConfigPath();
-    const snippet = JSON.stringify({ mcpServers: { cartograph: buildAntigravityEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: buildAntigravityEntry(opts) } }, null, 2);
     return `# Add to ${file}\n\n${snippet}\n`;
   }
 
@@ -177,14 +178,14 @@ class AntigravityTarget implements AgentTarget {
   }
 }
 
-function writeMcpEntry(): WriteResult['files'][number] {
+function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
   const file = preferredMcpConfigPath();
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   const existing = readJsonFile(file);
   const before = existing['mcpServers']?.cartograph;
-  const after = buildAntigravityEntry();
+  const after = buildAntigravityEntry(opts);
 
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
