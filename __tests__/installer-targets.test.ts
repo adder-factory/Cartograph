@@ -354,6 +354,22 @@ describe('Installer targets — Copilot, opencode, Factory, Rovo, and Qoder spec
     expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.github', 'mcp.json')]);
   });
 
+  it('honors COPILOT_HOME for the Copilot global config directory', () => {
+    const copilot = getTarget('copilot')!;
+    const prev = process.env['COPILOT_HOME'];
+    const copilotHome = mkTmpDir('copilot-home');
+    process.env['COPILOT_HOME'] = copilotHome;
+    try {
+      expect(copilot.describePaths('global')).toEqual([path.join(copilotHome, 'mcp-config.json')]);
+      copilot.install('global', { autoAllow: false });
+      expect(fs.existsSync(path.join(copilotHome, 'mcp-config.json'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env['COPILOT_HOME'];
+      else process.env['COPILOT_HOME'] = prev;
+      fs.rmSync(copilotHome, { recursive: true, force: true });
+    }
+  });
+
   it('writes the Copilot MCP entry with an explicit all-tools allowlist', () => {
     const copilot = getTarget('copilot')!;
 

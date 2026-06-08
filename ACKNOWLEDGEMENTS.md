@@ -14,7 +14,8 @@ disambiguation, embedded repository indexing, MCP resource/prompt probes,
 installer auto-allow permissions, aggregate session usage, and quieter daemon
 attachment, SAP XSJS import support, Hono route extraction, and Spring
 `@ConditionalOnProperty` config-key linkage, `.ignore` indexing overrides for
-gitignored local source, and GLSL shader indexing. Those ideas were
+gitignored local source, GLSL shader indexing, and Groovy/Solidity indexing.
+Those ideas were
 reimplemented inside Cartograph's current feature-slice architecture; no
 upstream patch code was copied blindly.
 
@@ -56,11 +57,13 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | dart | [UserNobody14/tree-sitter-dart](https://github.com/UserNobody14/tree-sitter-dart) | MIT |
 | fish | [esdmr/tree-sitter-fish](https://github.com/esdmr/tree-sitter-fish) | MIT |
 | glsl | [theHamsta/tree-sitter-glsl](https://github.com/theHamsta/tree-sitter-glsl) | MIT |
+| groovy | [amaanq/tree-sitter-groovy](https://github.com/amaanq/tree-sitter-groovy) | MIT |
 | graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
 | pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |
 | rescript | [rescript-lang/tree-sitter-rescript](https://github.com/rescript-lang/tree-sitter-rescript) | MIT |
 | elixir | [elixir-lang/tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) | Apache-2.0 |
 | yaml | [tree-sitter-grammars/tree-sitter-yaml](https://github.com/tree-sitter-grammars/tree-sitter-yaml) | MIT |
+| solidity | tree-sitter-solidity by Joran Honig | MIT |
 
 Each compiled `.wasm` carries the license of its originating grammar (MIT except `hcl` and `elixir`, which are Apache-2.0). Grammar attributions are derived from `scripts/build-grammar-wasm.ts`; if a project has moved or a license has changed, please open an issue and we'll correct the credit.
 

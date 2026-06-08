@@ -164,6 +164,10 @@ cartograph serve --mcp --project-path /absolute/path/to/project
 }
 ```
 
+The installer honors `COPILOT_HOME` for the global Copilot configuration
+directory. You can also add the same server interactively with Copilot CLI's
+`/mcp add` flow and then run `/mcp reload`.
+
 ### opencode
 
 `opencode.json` or `~/.config/opencode/opencode.json`:

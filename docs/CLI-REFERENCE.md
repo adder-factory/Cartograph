@@ -52,8 +52,8 @@ Indexing commands accept `--max-file-size <size>` when generated files or
 large fixtures need a one-off cap change. Values can be bytes (`1048576`) or
 use a binary suffix such as `512kb` or `10mb`. The default remains 5 MiB and
 explicit overrides are capped at 10 MiB. On `admin init`, the value is saved
-as `config.maxFileSize`; on `admin index`, `admin sync`, and `admin
-embed-only`, it applies only to that run.
+as `config.maxFileSize`; on `admin index`, `admin sync`, `admin embed-only`,
+and `sync-if-dirty`, it applies only to that run.
 
 ## Search And Navigation
 

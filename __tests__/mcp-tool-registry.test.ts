@@ -146,7 +146,7 @@ describe('MCP tool registry — single source of truth', () => {
     expect(text).toMatch(/cartograph_playbook/);
     expect(SERVER_INSTRUCTIONS).toMatch(/compact startup guide/);
     expect(SERVER_INSTRUCTIONS).toMatch(/cartograph_playbook/);
-    expect(SERVER_INSTRUCTIONS).toMatch(/30\+ languages/);
+    expect(SERVER_INSTRUCTIONS).toMatch(/54 language modes/);
   });
 
   it('execute() reports unknown-tool errors', async () => {

@@ -288,7 +288,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **52 language modes**. Framework-aware and derived signals
+Cartograph supports **54 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -301,7 +301,7 @@ are listed separately so the core language matrix stays readable.
 | Python | `.py`, `.pyw` |
 | Go | `.go` |
 | Rust | `.rs` |
-| Java / Kotlin / Scala | `.java`, `.kt`, `.kts`, `.scala`, `.sc` |
+| Java / Kotlin / Scala / Groovy | `.java`, `.kt`, `.kts`, `.scala`, `.sc`, `.groovy`, `.gradle` |
 | C / C++ / C# | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs` |
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
@@ -312,7 +312,7 @@ are listed separately so the core language matrix stays readable.
 | Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
-| GraphQL / GLSL / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
+| GraphQL / GLSL / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
 | JSON / JSDoc / Regex / Verilog | `.json`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
 </details>

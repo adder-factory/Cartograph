@@ -109,6 +109,7 @@ const GRAMMARS: Grammar[] = [
     vendored: true,
   },
   { wasm: 'sql', pkg: '@derekstride/tree-sitter-sql', sample: 'SELECT 1;\n' },
+  { wasm: 'solidity', pkg: 'tree-sitter-solidity', sample: 'contract A { function run() public {} }\n' },
   { wasm: 'r', pkg: '@davisvaughan/tree-sitter-r', sample: 'x <- 1\n' },
   { wasm: 'ocaml', pkg: 'tree-sitter-ocaml', sample: 'let x = 1\n', tagsScm: true },
   { wasm: 'ocaml_interface', pkg: 'tree-sitter-ocaml', sample: 'val x : int\n', tagsScm: true },
@@ -125,6 +126,7 @@ const GRAMMARS: Grammar[] = [
   { wasm: 'dart', pkg: 'tree-sitter-dart', sample: 'void main() {}\n', vendored: true },
   { wasm: 'fish', pkg: '@esdmr/tree-sitter-fish', sample: 'set x 1\n', vendored: true },
   { wasm: 'glsl', pkg: 'tree-sitter-glsl', sample: 'void main() { gl_Position = vec4(1.0); }\n', vendored: true },
+  { wasm: 'groovy', pkg: 'tree-sitter-groovy', sample: 'class A { def run() { helper() } }\n', vendored: true },
   // graphql: ⚠ `tree-sitter-graphql@1.0.0` on npm is a DIFFERENT grammar
   // dialect — it emits PascalCase node types (`Document`, `ObjectType-
   // Definition`, `Name`, …). cartograph's `GraphqlExtractor` is written
