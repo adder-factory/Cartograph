@@ -84,6 +84,7 @@ describe('README drift guard', () => {
       'docs/CLI-REFERENCE.md',
       'docs/CONFIGURATION.md',
       'docs/GRAMMAR-ASSETS.md',
+      'docs/GRAPH-EXPORT-FORMATS.md',
       'docs/MCP-USAGE.md',
       'docs/STORAGE-BACKENDS.md',
       'docs/SUPPORT-MATRIX.md',
