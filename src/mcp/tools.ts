@@ -54,8 +54,8 @@ export { getExploreBudget } from './tools/explore-budget.js';
 
 // Keep the handshake-published `tools/list` payload comfortably below
 // the load-budget guard while preserving enough field help for agents.
-const MCP_TOOL_DESCRIPTION_MAX_CHARS = 240;
-const MCP_SCHEMA_DESCRIPTION_MAX_CHARS = 110;
+const MCP_TOOL_DESCRIPTION_MAX_CHARS = 220;
+const MCP_SCHEMA_DESCRIPTION_MAX_CHARS = 90;
 const TRUNCATED_DESCRIPTION_SUFFIX = '...';
 
 function compactMcpDescription(text: string, maxChars: number): string {

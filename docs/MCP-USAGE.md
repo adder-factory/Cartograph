@@ -110,14 +110,14 @@ is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 22 tools | 44,899 | ~11,225 |
-| initialize instructions | 2,622 | ~656 |
-| combined startup load | 47,521 | ~11,881 |
-| full playbook, on demand | 13,526 | ~3,382 |
+| tools/list, 23 tools | 42,949 | ~10,737 |
+| initialize instructions | 2,835 | ~709 |
+| combined startup load | 45,784 | ~11,446 |
+| full playbook, on demand | 13,913 | ~3,479 |
 
-The full 36-tool profile is 63,971 `tools/list` chars and 66,593 combined
+The full 37-tool profile is 60,731 `tools/list` chars and 63,566 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 35 tools, 58,516 `tools/list` chars, and 61,138
+reduce the full list to 36 tools, 55,700 `tools/list` chars, and 58,535
 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the

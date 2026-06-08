@@ -13,6 +13,7 @@ import { registerAffectedCommand as registerAffectedFeatureCommand } from '../..
 import { registerAskCommand as registerAskFeatureCommand } from '../../features/ask/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
 import { registerDigestCommand } from '../../features/digest/index.js';
+import { registerFileSymbolsCommand as registerFileSymbolsFeatureCommand } from '../../features/file-symbols/index.js';
 import {
   buildDirRollup,
   filterFilesByDir,
@@ -130,6 +131,13 @@ function registerFilesReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
+function registerFileSymbolsReadCommand(deps: ReadCommandDeps): void {
+  registerFileSymbolsFeatureCommand({
+    ...deps,
+    writeLine: out,
+  });
+}
+
 function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   registerAffectedFeatureCommand({
     ...deps,
@@ -163,6 +171,7 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
+  registerFileSymbolsReadCommand(deps);
   registerGraphExportReadCommand(deps);
   registerAffectedReadCommand(deps);
 }

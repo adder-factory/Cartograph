@@ -52,6 +52,7 @@ import { DIGEST_TOOL } from './digest.js';
 import { DISCOVER_TOOL } from './discover.js';
 import { ENTRY_POINTS_TOOL } from './entry-points.js';
 import { EXPLORE_TOOL } from './explore.js';
+import { FILE_SYMBOLS_TOOL } from './file-symbols.js';
 import { FILES_TOOL } from './files.js';
 // cartograph_find subsumes the pre-merge cartograph_search /
 // cartograph_grep / cartograph_string_refs tools (2026-05-11). The three
@@ -133,6 +134,7 @@ const ENTRIES: ToolModule[] = [
   DISCOVER_TOOL,
   ENTRY_POINTS_TOOL,
   EXPLORE_TOOL,
+  FILE_SYMBOLS_TOOL,
   FILES_TOOL,
   FIND_TOOL,
   GRAPH_TOOL,

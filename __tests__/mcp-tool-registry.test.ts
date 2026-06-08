@@ -82,6 +82,7 @@ describe('MCP tool registry — single source of truth', () => {
       'cartograph_discover',
       'cartograph_entry_points',
       'cartograph_explore',
+      'cartograph_file_symbols',
       'cartograph_files',
       // cartograph_find subsumes the pre-merge cartograph_search /
       // cartograph_grep / cartograph_string_refs tools (2026-05-11

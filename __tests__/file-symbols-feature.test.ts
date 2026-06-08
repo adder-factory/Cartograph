@@ -1,0 +1,79 @@
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { Cartograph } from '../src/index.js';
+import { ToolHandler } from '../src/mcp/tools.js';
+import { getToolModules } from '../src/mcp/tools/registry.js';
+
+function textOf(result: { content: Array<{ type: string; text: string }> }): string {
+  return result.content[0]!.text;
+}
+
+describe('cartograph_file_symbols', () => {
+  let tempDir: string;
+  let cg: Cartograph;
+  let handler: ToolHandler;
+
+  beforeEach(async () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-file-symbols-'));
+    fs.mkdirSync(path.join(tempDir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(tempDir, 'src', 'service.ts'),
+      [
+        "import { dep } from './dep';",
+        'export class BillingService {',
+        '  run(accountId: string): number {',
+        '    return dep(accountId);',
+        '  }',
+        '}',
+        'export function helper(): string {',
+        "  return 'ok';",
+        '}',
+      ].join('\n'),
+    );
+    fs.writeFileSync(path.join(tempDir, 'src', 'dep.ts'), 'export function dep(input: string): number { return 1; }\n');
+    cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+    handler = new ToolHandler(cg);
+  });
+
+  afterEach(() => {
+    handler?.closeAll();
+    cg?.close();
+    if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('is registered as an MCP tool', () => {
+    expect(getToolModules().map((mod) => mod.definition.name)).toContain('cartograph_file_symbols');
+  });
+
+  it('lists symbols for one indexed file without import or parameter noise by default', async () => {
+    const text = textOf(await handler.execute('cartograph_file_symbols', { file: 'src/service.ts' }));
+    expect(text).toContain('Symbols in `src/service.ts`');
+    expect(text).toContain('BillingService');
+    expect(text).toContain('run');
+    expect(text).toContain('helper');
+    expect(text).not.toContain('| 1 | import |');
+    expect(text).not.toContain('| 3 | parameter | accountId');
+  });
+
+  it('can include import/export nodes on request', async () => {
+    const text = textOf(
+      await handler.execute('cartograph_file_symbols', { file: 'src/service.ts', includeImports: true }),
+    );
+    expect(text).toContain('| 1 | import |');
+  });
+
+  it('accepts an absolute path inside the project', async () => {
+    const text = textOf(
+      await handler.execute('cartograph_file_symbols', { file: path.join(tempDir, 'src', 'service.ts') }),
+    );
+    expect(text).toContain('Symbols in `src/service.ts`');
+  });
+
+  it('returns a clean empty message when the file is not indexed', async () => {
+    const text = textOf(await handler.execute('cartograph_file_symbols', { file: 'src/missing.ts' }));
+    expect(text).toContain('No indexed file matched "src/missing.ts"');
+    expect(text).toContain('cartograph_files');
+  });
+});
