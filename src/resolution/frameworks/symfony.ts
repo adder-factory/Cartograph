@@ -11,6 +11,7 @@ import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
 import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkReference } from './reference.js';
 
 const SYMFONY_LANGUAGES = ['php', 'yaml'] as const;
 const PHP_ROUTE_ATTR_RE = /#\[\s*Route\s*\(([\s\S]*?)\)\s*\]/g;
@@ -100,7 +101,7 @@ function extractPhpAttributeRoutes(
     nodes.push(routeNode);
 
     const nearbyMethod = readFollowingMethodName(safe, PHP_ROUTE_ATTR_RE.lastIndex);
-    if (nearbyMethod) references.push(makeReference(routeNode, nearbyMethod, 'calls'));
+    if (nearbyMethod) references.push(makeFrameworkReference(routeNode, nearbyMethod, 'calls'));
   }
   return { nodes, references };
 }
@@ -125,7 +126,7 @@ function extractYamlRoutes(filePath: string, content: string): { nodes: Node[]; 
       language: 'yaml',
     });
     nodes.push(routeNode);
-    if (controller) references.push(makeReference(routeNode, controller.trim(), 'calls'));
+    if (controller) references.push(makeFrameworkReference(routeNode, controller.trim(), 'calls'));
   }
   return { nodes, references };
 }
@@ -200,18 +201,6 @@ function makeRouteNode(args: {
     endColumn: column + args.name.length,
     signature: args.signature,
     updatedAt: Date.now(),
-  };
-}
-
-function makeReference(node: Node, name: string, kind: UnresolvedReference['referenceKind']): UnresolvedReference {
-  return {
-    fromNodeId: node.id,
-    referenceName: name,
-    referenceKind: kind,
-    line: node.startLine,
-    column: node.startColumn,
-    filePath: node.filePath,
-    language: node.language,
   };
 }
 

@@ -10,6 +10,7 @@ import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
 import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkReference } from './reference.js';
 
 const FLUTTER_LANGUAGES = ['dart'] as const;
 
@@ -70,7 +71,7 @@ function collectMaterialRoutes(args: CollectArgs): void {
       signature: `Flutter route ${routePath}`,
     });
     args.nodes.push(routeNode);
-    if (route.widget) args.references.push(makeReference(routeNode, route.widget));
+    if (route.widget) args.references.push(makeFrameworkReference(routeNode, route.widget));
   }
 }
 
@@ -85,7 +86,7 @@ function collectGoRoutes(args: CollectArgs): void {
       signature: `Flutter GoRoute ${routePath}`,
     });
     args.nodes.push(routeNode);
-    if (route.widget) args.references.push(makeReference(routeNode, route.widget));
+    if (route.widget) args.references.push(makeFrameworkReference(routeNode, route.widget));
   }
 }
 
@@ -183,18 +184,6 @@ function makeRouteNode(args: {
     endColumn: column + args.routePath.length,
     signature: args.signature,
     updatedAt: Date.now(),
-  };
-}
-
-function makeReference(node: Node, name: string): UnresolvedReference {
-  return {
-    fromNodeId: node.id,
-    referenceName: name,
-    referenceKind: 'references',
-    line: node.startLine,
-    column: node.startColumn,
-    filePath: node.filePath,
-    language: node.language,
   };
 }
 
