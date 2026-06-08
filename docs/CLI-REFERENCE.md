@@ -26,6 +26,7 @@ cartograph status [path] --json    # automation shape: version, index path,
 cartograph viewer [path]           # local graph viewer
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
+cartograph playbook                # tool-selection playbook
 cartograph completions bash        # shell completions: bash, zsh, fish, powershell
 ```
 
