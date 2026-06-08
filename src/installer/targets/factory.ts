@@ -15,8 +15,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir } from './shared.js';
-import { detectMcpEntryJson, removeMcpEntryJson, writeMcpEntryJson } from './write-mcp-entry-json.js';
+import { getHomeDir, getMcpServerConfig, type McpCommandOptions } from './shared.js';
+import {
+  detectMcpEntryJson,
+  removeMcpEntryJson,
+  writeMcpEntryJson,
+  type WriteMcpEntryJsonArgs,
+} from './write-mcp-entry-json.js';
 
 const FACTORY_DOCS_URL = 'https://docs.factory.ai/cli/configuration/mcp';
 
@@ -28,16 +33,22 @@ function mcpJsonPath(loc: Location): string {
   return path.join(configDir(loc), 'mcp.json');
 }
 
-function getFactoryServerEntry(): { type: string; command: string; args: string[]; disabled: boolean } {
+function getFactoryServerEntry(options: McpCommandOptions = {}): {
+  type: string;
+  command: string;
+  args: string[];
+  disabled: boolean;
+} {
+  const base = getMcpServerConfig(options);
   return {
-    type: 'stdio',
-    command: 'cartograph',
-    args: ['serve', '--mcp'],
+    ...base,
     disabled: false,
   };
 }
 
-const FACTORY_MCP_CONFIG = { resolvePath: mcpJsonPath, entry: getFactoryServerEntry };
+function factoryMcpConfig(command?: string): WriteMcpEntryJsonArgs {
+  return { resolvePath: mcpJsonPath, entry: getFactoryServerEntry, command };
+}
 
 class FactoryDroidTarget implements AgentTarget {
   readonly id = 'factory' as const;
@@ -51,12 +62,12 @@ class FactoryDroidTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = mcpJsonPath(loc);
     const installed = fs.existsSync(configDir(loc)) || fs.existsSync(file);
-    return detectMcpEntryJson(loc, FACTORY_MCP_CONFIG, installed);
+    return detectMcpEntryJson(loc, factoryMcpConfig(), installed);
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     return {
-      files: [writeMcpEntry(loc)],
+      files: [writeMcpEntry(loc, opts)],
       notes: ['Droid reloads MCP config changes automatically; restart the session if tools do not appear.'],
     };
   }
@@ -65,9 +76,9 @@ class FactoryDroidTarget implements AgentTarget {
     return { files: [removeMcpEntry(loc)] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getFactoryServerEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getFactoryServerEntry(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -76,12 +87,12 @@ class FactoryDroidTarget implements AgentTarget {
   }
 }
 
-function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, FACTORY_MCP_CONFIG);
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  return writeMcpEntryJson(loc, factoryMcpConfig(opts.command));
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return removeMcpEntryJson(loc, FACTORY_MCP_CONFIG);
+  return removeMcpEntryJson(loc, factoryMcpConfig());
 }
 
 export const factoryTarget: AgentTarget = new FactoryDroidTarget();

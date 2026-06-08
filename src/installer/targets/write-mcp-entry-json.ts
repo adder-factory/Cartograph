@@ -14,17 +14,20 @@
 
 import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
-import { getMcpServerConfig, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
+import { getMcpServerConfig, jsonDeepEqual, readJsonFile, writeJsonFile, type McpCommandOptions } from './shared.js';
 
 export interface WriteMcpEntryJsonArgs {
   /** Resolve the absolute path to the agent's JSON config file. */
   resolvePath: (loc: Location) => string;
   /** Optional per-client MCP entry shape. Defaults to the standard stdio entry. */
-  entry?: () => Record<string, unknown>;
+  entry?: (options?: McpCommandOptions) => Record<string, unknown>;
+  /** Optional executable path/name to write instead of `cartograph`. */
+  command?: string | undefined;
 }
 
 function targetEntry(args: WriteMcpEntryJsonArgs): Record<string, unknown> {
-  return args.entry?.() ?? getMcpServerConfig();
+  const options = { command: args.command };
+  return args.entry?.(options) ?? getMcpServerConfig(options);
 }
 
 export function detectMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs, installed: boolean): DetectionResult {

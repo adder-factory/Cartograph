@@ -10,6 +10,7 @@ cartograph install                 # configure supported agents
 cartograph install --yes --target=auto --location=local
 cartograph install --yes --target=auto --location=global
 cartograph install --print-config codex
+cartograph install --command /absolute/path/to/cartograph
 cartograph setup [path]            # init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph status [path]           # index status and feature readiness
@@ -32,6 +33,10 @@ worktree and are added to `.gitignore`.
 
 Install completions by sourcing the generated script in your shell startup
 file, for example `cartograph completions zsh`.
+
+Use `cartograph install --command <path>` when a GUI-launched agent cannot
+resolve `cartograph` from PATH. The installer writes that executable path into
+each MCP config entry while keeping the normal `serve --mcp` args.
 
 ## Admin
 

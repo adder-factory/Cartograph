@@ -26,6 +26,13 @@ cartograph install --yes --target=auto --location=local
 cartograph status --verbose
 ```
 
+If the agent process cannot resolve `cartograph` from PATH, pass the absolute
+executable path that should be written into MCP configs:
+
+```sh
+cartograph install --yes --target=auto --location=local --command "$(command -v cartograph)"
+```
+
 If the current agent has no supported local config path, retry global wiring:
 
 ```sh
@@ -125,6 +132,9 @@ advertised startup schema.
 | Command | `cartograph` |
 | Args | `["serve", "--mcp"]` |
 | Transport | `stdio` |
+
+Use `cartograph install --command /absolute/path/to/cartograph` to write a
+custom command value into supported client configs.
 
 If the client does not send `rootUri`, pass the project explicitly:
 

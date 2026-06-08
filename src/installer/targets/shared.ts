@@ -33,15 +33,23 @@ export function getHomeDir(): string {
   return process.env['HOME'] ?? process.env['USERPROFILE'] ?? os.homedir();
 }
 
+export interface McpCommandOptions {
+  command?: string | undefined;
+}
+
+export function getMcpCommand(options: McpCommandOptions = {}): string {
+  return options.command ?? 'cartograph';
+}
+
 /**
  * The MCP-server config block cartograph injects. Same shape across
  * all JSON-shaped agent configs (Claude, Cursor, opencode), only the
  * surrounding wrapper differs. Codex (TOML) builds its own block.
  */
-export function getMcpServerConfig(): { type: string; command: string; args: string[] } {
+export function getMcpServerConfig(options: McpCommandOptions = {}): { type: string; command: string; args: string[] } {
   return {
     type: 'stdio',
-    command: 'cartograph',
+    command: getMcpCommand(options),
     args: ['serve', '--mcp'],
   };
 }
@@ -176,6 +184,25 @@ export function writeMarkedInstructionsFile(filePath: string): 'created' | 'upda
  */
 export function writeJsonFile(filePath: string, data: Record<string, any>): void {
   atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+}
+
+export function removeNestedJsonEntry(
+  filePath: string,
+  parentKey: string,
+  entryKey: string,
+): WriteResult['files'][number] {
+  const config = readJsonFile(filePath);
+  const parent = config[parentKey];
+  if (parent === null || typeof parent !== 'object' || Array.isArray(parent) || !parent[entryKey]) {
+    return { path: filePath, action: 'not-found' };
+  }
+
+  delete parent[entryKey];
+  if (Object.keys(parent).length === 0) {
+    delete config[parentKey];
+  }
+  writeJsonFile(filePath, config);
+  return { path: filePath, action: 'removed' };
 }
 
 /** Element-by-element array equality. Only called once both sides are

@@ -342,6 +342,12 @@ Preferred private per-project install:
 cartograph install --yes --target=claude --location=local
 ```
 
+If the host cannot find `cartograph` on PATH, pass an absolute executable path:
+
+```sh
+cartograph install --yes --target=claude --location=local --command "$(command -v cartograph)"
+```
+
 That writes the MCP server into `~/.claude.json` under the current project's
 path. Manual equivalent:
 

@@ -54,10 +54,10 @@ class KiroTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: file };
   }
 
-  install(_loc: Location, _opts: InstallOptions): WriteResult {
+  install(_loc: Location, opts: InstallOptions): WriteResult {
     const loc = _loc;
     const files: WriteResult['files'] = [];
-    files.push(writeMcpEntry(loc), writeSteeringEntry(loc));
+    files.push(writeMcpEntry(loc, opts), writeSteeringEntry(loc));
     return {
       files,
       notes: ['Restart Kiro for MCP changes to take effect.'],
@@ -85,9 +85,9 @@ class KiroTarget implements AgentTarget {
     return { files };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -96,8 +96,8 @@ class KiroTarget implements AgentTarget {
   }
 }
 
-function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath });
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath, command: opts.command });
 }
 
 /**

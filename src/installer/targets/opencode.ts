@@ -22,7 +22,14 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile } from './shared.js';
+import {
+  getHomeDir,
+  getMcpCommand,
+  jsonDeepEqual,
+  readJsonFile,
+  writeJsonFile,
+  type McpCommandOptions,
+} from './shared.js';
 
 /** opencode's JSON-schema URL — referenced when stamping new configs
  *  and printing the suggested snippet. Module-scoped so the methods
@@ -45,10 +52,14 @@ function configPath(loc: Location): string {
   return loc === 'global' ? path.join(globalConfigDir(), 'opencode.json') : path.join(process.cwd(), 'opencode.json');
 }
 
-function getOpencodeServerEntry(): { type: string; command: string[]; enabled: boolean } {
+function getOpencodeServerEntry(options: McpCommandOptions = {}): {
+  type: string;
+  command: string[];
+  enabled: boolean;
+} {
   return {
     type: 'local',
-    command: ['cartograph', 'serve', '--mcp'],
+    command: [getMcpCommand(options), 'serve', '--mcp'],
     enabled: true,
   };
 }
@@ -70,11 +81,11 @@ class OpencodeTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: file };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     const file = configPath(loc);
     const existing = readJsonFile(file);
     const before = existing['mcp']?.cartograph;
-    const after = getOpencodeServerEntry();
+    const after = getOpencodeServerEntry(opts);
 
     if (jsonDeepEqual(before, after)) {
       return { files: [{ path: file, action: 'unchanged' }] };
@@ -106,12 +117,12 @@ class OpencodeTarget implements AgentTarget {
     return { files: [{ path: file, action: 'removed' }] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = configPath(loc);
     const snippet = JSON.stringify(
       {
         $schema: OPENCODE_SCHEMA_URL,
-        mcp: { cartograph: getOpencodeServerEntry() },
+        mcp: { cartograph: getOpencodeServerEntry(opts) },
       },
       null,
       2,

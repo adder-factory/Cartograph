@@ -11,8 +11,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir } from './shared.js';
-import { detectMcpEntryJson, removeMcpEntryJson, writeMcpEntryJson } from './write-mcp-entry-json.js';
+import { getHomeDir, getMcpServerConfig, type McpCommandOptions } from './shared.js';
+import {
+  detectMcpEntryJson,
+  removeMcpEntryJson,
+  writeMcpEntryJson,
+  type WriteMcpEntryJsonArgs,
+} from './write-mcp-entry-json.js';
 
 const COPILOT_DOCS_URL = 'https://docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers';
 
@@ -32,16 +37,22 @@ function mcpJsonPath(loc: Location): string {
   return loc === 'global' ? path.join(userConfigDir(), 'mcp-config.json') : projectMcpJsonPath();
 }
 
-function getCopilotServerEntry(): { type: string; command: string; args: string[]; tools: string[] } {
+function getCopilotServerEntry(options: McpCommandOptions = {}): {
+  type: string;
+  command: string;
+  args: string[];
+  tools: string[];
+} {
+  const base = getMcpServerConfig(options);
   return {
-    type: 'stdio',
-    command: 'cartograph',
-    args: ['serve', '--mcp'],
+    ...base,
     tools: ['*'],
   };
 }
 
-const COPILOT_MCP_CONFIG = { resolvePath: mcpJsonPath, entry: getCopilotServerEntry };
+function copilotMcpConfig(command?: string): WriteMcpEntryJsonArgs {
+  return { resolvePath: mcpJsonPath, entry: getCopilotServerEntry, command };
+}
 
 class CopilotTarget implements AgentTarget {
   readonly id = 'copilot' as const;
@@ -59,23 +70,23 @@ class CopilotTarget implements AgentTarget {
         ? fs.existsSync(userConfigDir()) || fs.existsSync(file)
         : fs.existsSync(path.join(process.cwd(), '.mcp.json')) ||
           fs.existsSync(path.join(process.cwd(), '.github', 'mcp.json'));
-    return detectMcpEntryJson(loc, COPILOT_MCP_CONFIG, installed);
+    return detectMcpEntryJson(loc, copilotMcpConfig(), installed);
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     return {
-      files: [writeMcpEntryJson(loc, COPILOT_MCP_CONFIG)],
+      files: [writeMcpEntryJson(loc, copilotMcpConfig(opts.command))],
       notes: ['Run /mcp reload in Copilot CLI, or start a new session.'],
     };
   }
 
   uninstall(loc: Location): WriteResult {
-    return { files: [removeMcpEntryJson(loc, COPILOT_MCP_CONFIG)] };
+    return { files: [removeMcpEntryJson(loc, copilotMcpConfig())] };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getCopilotServerEntry() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getCopilotServerEntry(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

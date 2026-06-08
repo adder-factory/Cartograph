@@ -60,9 +60,9 @@ class GeminiTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: file };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     const files: WriteResult['files'] = [];
-    files.push(writeMcpEntry(loc), writeInstructionsEntry(loc));
+    files.push(writeMcpEntry(loc, opts), writeInstructionsEntry(loc));
     return { files };
   }
 
@@ -91,9 +91,9 @@ class GeminiTarget implements AgentTarget {
     return { files };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig() } }, null, 2);
+    const snippet = JSON.stringify({ mcpServers: { cartograph: getMcpServerConfig(opts) } }, null, 2);
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -102,8 +102,8 @@ class GeminiTarget implements AgentTarget {
   }
 }
 
-function writeMcpEntry(loc: Location): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, { resolvePath: settingsJsonPath });
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  return writeMcpEntryJson(loc, { resolvePath: settingsJsonPath, command: opts.command });
 }
 
 function writeInstructionsEntry(loc: Location): WriteResult['files'][number] {

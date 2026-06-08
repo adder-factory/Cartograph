@@ -66,7 +66,7 @@ class CodexTarget implements AgentTarget {
     return { installed, alreadyConfigured, configPath: tomlPath };
   }
 
-  install(loc: Location, _opts: InstallOptions): WriteResult {
+  install(loc: Location, opts: InstallOptions): WriteResult {
     if (loc !== 'global') {
       return {
         files: [],
@@ -75,7 +75,7 @@ class CodexTarget implements AgentTarget {
     }
     const files: WriteResult['files'] = [];
 
-    files.push(writeMcpEntry(), writeInstructionsEntry());
+    files.push(writeMcpEntry(opts), writeInstructionsEntry());
 
     return { files };
   }
@@ -93,11 +93,11 @@ class CodexTarget implements AgentTarget {
     return { files };
   }
 
-  printConfig(loc: Location): string {
+  printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     if (loc !== 'global') {
       return '# Codex CLI has no project-local config — use --location=global.\n';
     }
-    const block = buildCartographBlock();
+    const block = buildCartographBlock(opts);
     return `# Add to ${tomlConfigPath()}\n\n${block}\n`;
   }
 
@@ -128,20 +128,20 @@ function removeTomlConfigEntry(tomlPath: string): WriteResult['files'][number] {
   return { path: tomlPath, action: 'removed' };
 }
 
-function buildCartographBlock(): string {
-  const mcp = getMcpServerConfig();
+function buildCartographBlock(opts: Pick<InstallOptions, 'command'> = {}): string {
+  const mcp = getMcpServerConfig(opts);
   return buildTomlTable(TOML_HEADER, {
     command: mcp.command,
     args: mcp.args,
   });
 }
 
-function writeMcpEntry(): WriteResult['files'][number] {
+function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
   const file = tomlConfigPath();
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  const block = buildCartographBlock();
+  const block = buildCartographBlock(opts);
   // Single read — `existing === ''` derives both "is the file empty
   // or absent" and "what was its content," avoiding a TOCTOU window
   // between two `fs.existsSync` calls.

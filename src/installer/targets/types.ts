@@ -81,6 +81,12 @@ export interface InstallOptions {
    * target has no permissions concept this option is a no-op.
    */
   autoAllow: boolean;
+  /**
+   * Optional executable path/name to write into MCP config entries.
+   * Defaults to `cartograph`. Useful when GUI-launched agents cannot
+   * resolve the linked binary through their environment PATH.
+   */
+  command?: string | undefined;
 }
 
 export interface AgentTarget {
@@ -113,7 +119,7 @@ export interface AgentTarget {
    * target. Used by `cartograph install --print-config <id>` and by
    * the README. Must NOT touch the filesystem.
    */
-  printConfig(loc: Location): string;
+  printConfig(loc: Location, opts?: Pick<InstallOptions, 'command'>): string;
   /** Filesystem paths this target would write to at this location. */
   describePaths(loc: Location): string[];
 }

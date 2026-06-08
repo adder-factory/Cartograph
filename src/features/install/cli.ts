@@ -2,6 +2,7 @@ import { errMsg } from '../../errors.js';
 import {
   installerRunOptions,
   printConfigLocation,
+  validateInstallCommand,
   validateInstallLocation,
   type InstallOptions,
   type InstallerRunOptions,
@@ -15,7 +16,9 @@ export interface InstallCommandDeps {
   error: (message: string) => void;
   writeStdout: (message: string) => void;
   loadInstallerTargets: () => Promise<{
-    getTarget: (id: string) => { printConfig: (location: string) => string } | null | undefined;
+    getTarget: (
+      id: string,
+    ) => { printConfig: (location: string, options?: { command?: string | undefined }) => string } | null | undefined;
     listTargetIds: () => string[];
   }>;
   loadInstaller: () => Promise<{ runInstallerWithOptions: (opts: InstallerRunOptions) => Promise<void> }>;
@@ -35,6 +38,7 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
     .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')
     .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code and Qoder CLI)')
+    .option('--command <path>', 'Command/path to write into MCP config entries instead of "cartograph"')
     .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
     .action((opts: InstallOptions) => runInstallCommand(opts, deps));
 
@@ -45,6 +49,7 @@ Examples:
   cartograph install
   cartograph install --yes --target=auto --location=local
   cartograph install --yes --target=auto --location=global
+  cartograph install --yes --target=all --command /absolute/path/to/cartograph
   cartograph install --print-config codex
   cartograph install --print-config copilot
   cartograph install --print-config qoder
@@ -54,6 +59,12 @@ Examples:
 
 async function runInstallCommand(options: InstallOptions, deps: InstallCommandDeps): Promise<void> {
   const { error, loadInstaller, loadInstallerTargets, writeStdout } = deps;
+  const command = validateInstallCommand(options.command);
+  if (!command.ok) {
+    error(command.error);
+    process.exit(1);
+  }
+
   if (options.printConfig) {
     const { getTarget, listTargetIds } = await loadInstallerTargets();
     const target = getTarget(options.printConfig);
@@ -62,7 +73,7 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
       error(`Unknown target "${options.printConfig}". Known: ${known}.`);
       process.exit(1);
     }
-    writeStdout(target.printConfig(printConfigLocation(options.location)));
+    writeStdout(target.printConfig(printConfigLocation(options.location), { command: command.command }));
     return;
   }
 
@@ -74,7 +85,7 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
 
   const { runInstallerWithOptions } = await loadInstaller();
   try {
-    await runInstallerWithOptions(installerRunOptions(options));
+    await runInstallerWithOptions(installerRunOptions({ ...options, command: command.command }));
   } catch (err) {
     error(errMsg(err));
     process.exit(1);
