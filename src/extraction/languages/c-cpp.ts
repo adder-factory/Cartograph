@@ -50,7 +50,8 @@ function includeModuleName(node: SyntaxNode, source: string): string | null {
 }
 
 function cLikeFunctionSignature(node: SyntaxNode, source: string): string | undefined {
-  const params = getChildByField(node, 'parameters');
+  const declarator = getChildByField(node, 'declarator');
+  const params = getChildByField(node, 'parameters') ?? (declarator ? getChildByField(declarator, 'parameters') : null);
   if (!params) return undefined;
   const returnType = getChildByField(node, 'type');
   const paramsText = getNodeText(params, source);
@@ -442,4 +443,12 @@ export const CPP_DEF: LanguageDef = {
   extensions: ['.cpp', '.cc', '.cxx', '.hpp', '.hxx'],
   includeGlobs: ['**/*.cpp', '**/*.cc', '**/*.cxx', '**/*.hpp', '**/*.hxx'],
   grammar: { wasmFile: 'cpp.wasm', extractor: cppExtractor },
+};
+
+export const CUDA_DEF: LanguageDef = {
+  name: 'cuda',
+  displayName: 'CUDA',
+  extensions: ['.cu', '.cuh'],
+  includeGlobs: ['**/*.cu', '**/*.cuh'],
+  grammar: { wasmFile: 'cuda.wasm', extractor: cExtractor },
 };

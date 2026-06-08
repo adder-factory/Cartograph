@@ -51,6 +51,7 @@ export type EdgeKind =
 
 export type Language =
   | 'apex'
+  | 'arkts'
   | 'aura'
   | 'typescript'
   | 'javascript'
@@ -63,6 +64,7 @@ export type Language =
   | 'c'
   | 'cpp'
   | 'csharp'
+  | 'cuda'
   | 'css'
   | 'php'
   | 'ruby'

@@ -192,6 +192,7 @@ export function getConfigPath(projectRoot: string): string {
  */
 export const VALID_LANGUAGES = [
   'apex',
+  'arkts',
   'aura',
   'typescript',
   'javascript',
@@ -204,6 +205,7 @@ export const VALID_LANGUAGES = [
   'c',
   'cpp',
   'csharp',
+  'cuda',
   'css',
   'php',
   'ruby',

@@ -14,8 +14,8 @@ disambiguation, embedded repository indexing, MCP resource/prompt probes,
 installer auto-allow permissions, aggregate session usage, and quieter daemon
 attachment, SAP XSJS import support, Hono route extraction, and Spring
 `@ConditionalOnProperty` config-key linkage, `.ignore` indexing overrides for
-gitignored local source, GLSL shader indexing, and Groovy/Solidity indexing.
-Those ideas were
+gitignored local source, GLSL shader indexing, Groovy/Solidity indexing, and
+ArkTS/CUDA indexing. Those ideas were
 reimplemented inside Cartograph's current feature-slice architecture; no
 upstream patch code was copied blindly.
 
@@ -33,6 +33,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | Grammar (.wasm) | Upstream project | License |
 |---|---|---|
 | typescript, tsx | [tree-sitter/tree-sitter-typescript](https://github.com/tree-sitter/tree-sitter-typescript) | MIT |
+| arkts | [harmony-contrib/tree-sitter-arkts](https://github.com/harmony-contrib/tree-sitter-arkts) | MIT |
 | javascript (also serves jsx) | [tree-sitter/tree-sitter-javascript](https://github.com/tree-sitter/tree-sitter-javascript) | MIT |
 | python | [tree-sitter/tree-sitter-python](https://github.com/tree-sitter/tree-sitter-python) | MIT |
 | go | [tree-sitter/tree-sitter-go](https://github.com/tree-sitter/tree-sitter-go) | MIT |
@@ -40,6 +41,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | java | [tree-sitter/tree-sitter-java](https://github.com/tree-sitter/tree-sitter-java) | MIT |
 | c | [tree-sitter/tree-sitter-c](https://github.com/tree-sitter/tree-sitter-c) | MIT |
 | cpp | [tree-sitter/tree-sitter-cpp](https://github.com/tree-sitter/tree-sitter-cpp) | MIT |
+| cuda | [tree-sitter-grammars/tree-sitter-cuda](https://github.com/tree-sitter-grammars/tree-sitter-cuda) | MIT |
 | c_sharp | [tree-sitter/tree-sitter-c-sharp](https://github.com/tree-sitter/tree-sitter-c-sharp) | MIT |
 | ruby | [tree-sitter/tree-sitter-ruby](https://github.com/tree-sitter/tree-sitter-ruby) | MIT |
 | bash (also serves zsh) | [tree-sitter/tree-sitter-bash](https://github.com/tree-sitter/tree-sitter-bash) | MIT |
