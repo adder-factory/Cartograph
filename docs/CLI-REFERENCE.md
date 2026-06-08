@@ -85,6 +85,9 @@ cartograph module src/billing
 cartograph entry-points
 ```
 
+See [Graph Export Formats](GRAPH-EXPORT-FORMATS.md) for the JSON and
+Cytoscape artifact contracts.
+
 ## Review And Risk
 
 ```sh

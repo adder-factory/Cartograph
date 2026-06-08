@@ -240,6 +240,7 @@ win.
 | Pasteable task for a coding agent to install Cartograph | [docs/AGENT-INSTALL.md](docs/AGENT-INSTALL.md) |
 | PostgreSQL, pgvector, migration, storage benchmark | [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md) |
 | CLI command reference | [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md) |
+| Graph export artifact formats | [docs/GRAPH-EXPORT-FORMATS.md](docs/GRAPH-EXPORT-FORMATS.md) |
 | MCP setup, profiles, load budget, client snippets | [docs/MCP-USAGE.md](docs/MCP-USAGE.md) |
 | Configuration and advanced options | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | Language/framework matrix | [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) |
