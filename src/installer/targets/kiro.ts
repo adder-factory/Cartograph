@@ -20,14 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import {
-  atomicWriteFileSync,
-  getHomeDir,
-  getMcpServerConfig,
-  mcpCommandOptionsForLocation,
-  readJsonFile,
-  writeJsonFile,
-} from './shared.js';
+import { atomicWriteFileSync, getHomeDir, readJsonFile, renderMcpServersPrintConfig, writeJsonFile } from './shared.js';
 import { INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 
@@ -93,13 +86,7 @@ class KiroTarget implements AgentTarget {
   }
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
-    const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify(
-      { mcpServers: { cartograph: getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts)) } },
-      null,
-      2,
-    );
-    return `# Add to ${target}\n\n${snippet}\n`;
+    return renderMcpServersPrintConfig(mcpJsonPath(loc), loc, opts);
   }
 
   describePaths(loc: Location): string[] {
