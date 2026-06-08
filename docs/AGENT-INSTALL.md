@@ -55,7 +55,7 @@ written to `.claude/settings.local.json`, and instructions are written to
 
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
 Copilot CLI, CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
-Factory Droid, Rovo Dev, and Qoder CLI.
+Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, and Reasonix.
 
 Optional follow-up tasks:
 

@@ -33,7 +33,7 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
     )
     .option(
       '-t, --target <ids>',
-      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,copilot,zed,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder.',
+      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,copilot,zed,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder,bob,kimi,reasonix.',
     )
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
     .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')

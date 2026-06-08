@@ -319,6 +319,9 @@ describe('Installer targets — registry', () => {
     expect(getTarget('factory')?.id).toBe('factory');
     expect(getTarget('rovo')?.id).toBe('rovo');
     expect(getTarget('qoder')?.id).toBe('qoder');
+    expect(getTarget('bob')?.id).toBe('bob');
+    expect(getTarget('kimi')?.id).toBe('kimi');
+    expect(getTarget('reasonix')?.id).toBe('reasonix');
     expect(getTarget('not-a-real-target')).toBeUndefined();
   });
 
@@ -498,11 +501,14 @@ describe('Installer targets — JSON MCP target specifics', () => {
     }
   });
 
-  it('uses disjoint default paths for Factory, Rovo, Qoder, and CodeWhale targets', () => {
+  it('uses disjoint default paths for Factory, Rovo, Qoder, CodeWhale, Bob, Kimi, and Reasonix targets', () => {
     const factory = getTarget('factory')!;
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;
     const codewhale = getTarget('codewhale')!;
+    const bob = getTarget('bob')!;
+    const kimi = getTarget('kimi')!;
+    const reasonix = getTarget('reasonix')!;
 
     const paths = [
       ...factory.describePaths('global'),
@@ -513,6 +519,11 @@ describe('Installer targets — JSON MCP target specifics', () => {
       ...qoder.describePaths('local'),
       ...codewhale.describePaths('global'),
       ...codewhale.describePaths('local'),
+      ...bob.describePaths('global'),
+      ...bob.describePaths('local'),
+      ...kimi.describePaths('global'),
+      ...kimi.describePaths('local'),
+      ...reasonix.describePaths('global'),
     ];
 
     expect(new Set(paths).size).toBe(paths.length);
@@ -521,6 +532,21 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(qoder.describePaths('local')).toEqual([path.join(process.cwd(), '.qoder', 'settings.local.json')]);
     expect(codewhale.describePaths('global')).toEqual([path.join(tmpHome, '.codewhale', 'mcp.json')]);
     expect(codewhale.describePaths('local')).toEqual([path.join(process.cwd(), '.codewhale', 'mcp.json')]);
+    expect(bob.describePaths('global')).toEqual([path.join(tmpHome, '.bob', 'mcp_settings.json')]);
+    expect(bob.describePaths('local')).toEqual([path.join(process.cwd(), '.bob', 'mcp.json')]);
+    expect(kimi.describePaths('global')).toEqual([path.join(tmpHome, '.kimi-code', 'mcp.json')]);
+    expect(kimi.describePaths('local')).toEqual([path.join(process.cwd(), '.kimi-code', 'mcp.json')]);
+    expect(reasonix.describePaths('global')).toEqual([path.join(tmpHome, '.reasonix', 'config.json')]);
+    expect(reasonix.supportsLocation('local')).toBe(false);
+  });
+
+  it('reasonix is detected only for the supported global install location', () => {
+    const reasonix = getTarget('reasonix')!;
+    fs.mkdirSync(path.join(tmpHome, '.reasonix'), { recursive: true });
+
+    expect(reasonix.detect('global').installed).toBe(true);
+    expect(reasonix.detect('local').installed).toBe(false);
+    expect(reasonix.supportsLocation('local')).toBe(false);
   });
 
   it('writes each target-specific MCP entry shape', () => {
@@ -528,11 +554,17 @@ describe('Installer targets — JSON MCP target specifics', () => {
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;
     const codewhale = getTarget('codewhale')!;
+    const bob = getTarget('bob')!;
+    const kimi = getTarget('kimi')!;
+    const reasonix = getTarget('reasonix')!;
 
     factory.install('local', { autoAllow: false });
     rovo.install('local', { autoAllow: false });
     qoder.install('local', { autoAllow: false });
     codewhale.install('local', { autoAllow: false });
+    bob.install('local', { autoAllow: false });
+    kimi.install('local', { autoAllow: false });
+    reasonix.install('global', { autoAllow: false });
 
     const factoryConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.factory', 'mcp.json'), 'utf-8'));
     expect(factoryConfig.mcpServers.cartograph).toEqual({
@@ -560,6 +592,26 @@ describe('Installer targets — JSON MCP target specifics', () => {
       command: 'cartograph',
       args: ['serve', '--mcp'],
     });
+
+    const bobConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.bob', 'mcp.json'), 'utf-8'));
+    expect(bobConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      disabled: false,
+    });
+
+    const kimiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kimi-code', 'mcp.json'), 'utf-8'));
+    expect(kimiConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+    });
+
+    const reasonixConfig = JSON.parse(fs.readFileSync(path.join(tmpHome, '.reasonix', 'config.json'), 'utf-8'));
+    expect(reasonixConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      disabled: false,
+    });
   });
 
   it('writes a custom command path across target-specific MCP config shapes', () => {
@@ -573,11 +625,14 @@ describe('Installer targets — JSON MCP target specifics', () => {
     getTarget('rovo')!.install('local', { autoAllow: false, command });
     getTarget('qoder')!.install('local', { autoAllow: false, command });
     getTarget('codewhale')!.install('local', { autoAllow: false, command });
+    getTarget('bob')!.install('local', { autoAllow: false, command });
+    getTarget('kimi')!.install('local', { autoAllow: false, command });
     getTarget('gemini')!.install('local', { autoAllow: false, command });
     getTarget('kiro')!.install('local', { autoAllow: false, command });
     getTarget('codex')!.install('global', { autoAllow: false, command });
     getTarget('hermes')!.install('global', { autoAllow: false, command });
     getTarget('antigravity')!.install('global', { autoAllow: false, command });
+    getTarget('reasonix')!.install('global', { autoAllow: false, command });
 
     const claudeConfig = JSON.parse(fs.readFileSync(path.join(tmpHome, '.claude.json'), 'utf-8'));
     expect(claudeConfig.projects[path.resolve(process.cwd())].mcpServers.cartograph.command).toBe(command);
@@ -595,6 +650,10 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(qoderConfig.mcpServers.cartograph.command).toBe(command);
     const codewhaleConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.codewhale', 'mcp.json'), 'utf-8'));
     expect(codewhaleConfig.mcpServers.cartograph.command).toBe(command);
+    const bobConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.bob', 'mcp.json'), 'utf-8'));
+    expect(bobConfig.mcpServers.cartograph.command).toBe(command);
+    const kimiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kimi-code', 'mcp.json'), 'utf-8'));
+    expect(kimiConfig.mcpServers.cartograph.command).toBe(command);
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.gemini', 'settings.json'), 'utf-8'));
     expect(geminiConfig.mcpServers.cartograph.command).toBe(command);
     const kiroConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kiro', 'settings', 'mcp.json'), 'utf-8'));
@@ -607,7 +666,25 @@ describe('Installer targets — JSON MCP target specifics', () => {
       fs.readFileSync(path.join(tmpHome, '.gemini', 'antigravity', 'mcp_config.json'), 'utf-8'),
     );
     expect(antigravityConfig.mcpServers.cartograph.command).toBe(command);
+    const reasonixConfig = JSON.parse(fs.readFileSync(path.join(tmpHome, '.reasonix', 'config.json'), 'utf-8'));
+    expect(reasonixConfig.mcpServers.cartograph.command).toBe(command);
     expect(getTarget('copilot')!.printConfig('local', { command })).toContain(`"command": "${command}"`);
+  });
+
+  it('kimi honors KIMI_CODE_HOME for the global MCP config directory', () => {
+    const kimi = getTarget('kimi')!;
+    const prev = process.env['KIMI_CODE_HOME'];
+    const kimiHome = mkTmpDir('kimi-home');
+    process.env['KIMI_CODE_HOME'] = kimiHome;
+    try {
+      expect(kimi.describePaths('global')).toEqual([path.join(kimiHome, 'mcp.json')]);
+      kimi.install('global', { autoAllow: false });
+      expect(fs.existsSync(path.join(kimiHome, 'mcp.json'))).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env['KIMI_CODE_HOME'];
+      else process.env['KIMI_CODE_HOME'] = prev;
+      fs.rmSync(kimiHome, { recursive: true, force: true });
+    }
   });
 
   it('qoder writes and removes auto-allow permissions when requested', () => {

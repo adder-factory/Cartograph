@@ -27,7 +27,7 @@ cartograph completions bash        # shell completions: bash, zsh, fish, powersh
 
 Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
 `codewhale`, `zed`, `opencode`, `hermes`, `gemini`, `antigravity`, `kiro`,
-`factory`, `rovo`, and `qoder`.
+`factory`, `rovo`, `qoder`, `bob`, `kimi`, and `reasonix`.
 
 For Claude Code, `--location=local` uses Claude's private project scope:
 `~/.claude.json` stores the project-scoped MCP entry, while

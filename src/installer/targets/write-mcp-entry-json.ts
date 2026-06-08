@@ -1,6 +1,6 @@
 /**
  * Shared implementation for reading/writing the cartograph MCP-server entry
- * into JSON-shaped agent configs (Claude Code, Cursor).
+ * into JSON-shaped agent configs.
  *
  * Most JSON targets use a `{mcpServers: {cartograph: {...}}}` wrapper and
  * the same "file-existence → 'created' vs 'updated'" action idiom.

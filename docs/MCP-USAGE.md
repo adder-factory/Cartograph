@@ -14,7 +14,7 @@ cartograph install
 
 It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI,
 CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
-Droid, Rovo Dev, and Qoder CLI.
+Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, and Reasonix.
 
 ## Agent-Assisted Install
 
@@ -314,6 +314,60 @@ the profile does not already load that file.
   }
 }
 ```
+
+### IBM Bob
+
+`~/.bob/mcp_settings.json` or `.bob/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "disabled": false
+    }
+  }
+}
+```
+
+Enable MCP servers in Bob settings if this is the first MCP server for the
+workspace.
+
+### Kimi Code
+
+`~/.kimi-code/mcp.json`, `$KIMI_CODE_HOME/mcp.json`, or
+`.kimi-code/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
+
+### Reasonix
+
+`~/.reasonix/config.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "disabled": false
+    }
+  }
+}
+```
+
+Reasonix stores MCP servers in its global config; project `.reasonix/`
+directories are for project-scoped skills, memory, hooks, and settings.
 
 ### LangChain
 

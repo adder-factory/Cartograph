@@ -22,6 +22,9 @@ import { kiroTarget } from './kiro.js';
 import { factoryTarget } from './factory.js';
 import { rovoTarget } from './rovo.js';
 import { qoderTarget } from './qoder.js';
+import { bobTarget } from './bob.js';
+import { kimiTarget } from './kimi.js';
+import { reasonixTarget } from './reasonix.js';
 
 export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   claudeTarget,
@@ -38,6 +41,9 @@ export const ALL_TARGETS: readonly AgentTarget[] = Object.freeze([
   factoryTarget,
   rovoTarget,
   qoderTarget,
+  bobTarget,
+  kimiTarget,
+  reasonixTarget,
 ]);
 
 export function getTarget(id: string): AgentTarget | undefined {
