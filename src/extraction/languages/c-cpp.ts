@@ -57,6 +57,53 @@ function cLikeFunctionSignature(node: SyntaxNode, source: string): string | unde
   return returnType ? `${getNodeText(returnType, source)} ${paramsText}` : paramsText;
 }
 
+function previousNamedSibling(node: SyntaxNode): SyntaxNode | null {
+  const parent = node.parent;
+  if (!parent) return null;
+  let previous: SyntaxNode | null = null;
+  for (const child of parent.namedChildren) {
+    if (!child) continue;
+    if (child.startIndex === node.startIndex) return previous;
+    previous = child;
+  }
+  return null;
+}
+
+function isIdentifierText(value: string): boolean {
+  return /^[A-Za-z_]\w*$/.test(value);
+}
+
+/**
+ * tree-sitter-c can split `API_MACRO RET_TYPE name(ARG_MACRO) { ... }`
+ * into a preceding `declaration` (`API_MACRO RET_TYPE`) plus a
+ * `function_definition` whose `type` field is the real function name and
+ * whose declarator is just `(ARG_MACRO)`. Recover only that split shape.
+ */
+function recoverMacroDecoratedFunctionName(node: SyntaxNode, source: string): string | null {
+  if (node.type !== 'function_definition' || node.hasError) return null;
+  if (previousNamedSibling(node)?.type !== 'declaration') return null;
+  const nameNode = getChildByField(node, 'type');
+  const declarator = getChildByField(node, 'declarator');
+  const body = getChildByField(node, 'body');
+  if (!nameNode || !declarator || !body) return null;
+  if (declarator.type !== 'parenthesized_declarator') return null;
+  const name = getNodeText(nameNode, source).trim();
+  return isIdentifierText(name) ? name : null;
+}
+
+function visitMacroDecoratedFunction(node: SyntaxNode, ctx: ExtractorContext): boolean {
+  const name = recoverMacroDecoratedFunctionName(node, ctx.source);
+  if (!name) return false;
+  const functionNode = ctx.createNode({
+    kind: 'function',
+    name,
+    node,
+  });
+  const body = getChildByField(node, 'body');
+  if (functionNode && body) ctx.visitFunctionBody(body, functionNode.id);
+  return true;
+}
+
 const cExtractor: LanguageExtractor = {
   functionTypes: ['function_definition'],
   classTypes: [],
@@ -82,7 +129,7 @@ const cExtractor: LanguageExtractor = {
   // graph with edges to non-symbols.
   returnField: 'type',
   getSignature: cLikeFunctionSignature,
-  visitNode: (node, ctx) => extractCPreprocDefConstant(node, ctx),
+  visitNode: (node, ctx) => extractCPreprocDefConstant(node, ctx) || visitMacroDecoratedFunction(node, ctx),
   resolveTypeAliasKind: (node, _source) => {
     // C typedef: `typedef enum { ... } name;` or `typedef struct { ... } name;`
     // The inner enum_specifier/struct_specifier is anonymous, but we want the typedef name
@@ -367,6 +414,7 @@ const cppExtractor: LanguageExtractor = {
     // `#define` constants share the C path; tree-sitter-cpp inherits
     // preprocessor nodes from C so the same hook applies.
     if (extractCPreprocDefConstant(node, ctx)) return true;
+    if (visitMacroDecoratedFunction(node, ctx)) return true;
     // Re-route macro-obscured class/struct declarations.
     // Tree-sitter misparses `MACRO_NAME\nclass Foo { ... }` as a
     // function_definition (the macro becomes the "return type").

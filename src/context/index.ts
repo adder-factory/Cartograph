@@ -37,7 +37,12 @@ import {
 } from './scoring.js';
 import { expandTypeHierarchy, expandViaTraversal, finaliseSubgraph, resolveImportsToDefinitions } from './subgraph.js';
 import { extractNodeSourceCode } from './source-code.js';
-import { extractSearchTerms, scorePathRelevance, getStemVariants } from '../search/query-utils.js';
+import {
+  extractSearchTerms,
+  getStemVariants,
+  scorePathRelevance,
+  suppressProjectNameQueryNoise,
+} from '../search/query-utils.js';
 
 /**
  * Shared context threaded through the CamelCase + compound scoring helpers.
@@ -707,8 +712,9 @@ function cbAppendCamelCaseAndCompoundMatches(st: ContextBuilderState, args: Came
  */
 function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQueryArgs): SearchResult[] {
   const { query, opts, isTestQuery, trace } = qargs;
-  const symbolsFromQuery = extractSymbolsFromQuery(query);
-  logDebug('Extracted symbols from query', { query, symbols: symbolsFromQuery });
+  const rankingQuery = suppressProjectNameQueryNoise(query, st.projectRoot);
+  const symbolsFromQuery = extractSymbolsFromQuery(rankingQuery);
+  logDebug('Extracted symbols from query', { query, rankingQuery, symbols: symbolsFromQuery });
 
   let exactMatches = cbRunExactSymbolSearch(st, symbolsFromQuery, opts);
   exactMatches = cbAppendPrefixDefinitionMatches(st, { symbolsFromQuery, exactMatches, opts });
@@ -724,7 +730,7 @@ function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQu
   // specific indexed symbol name should anchor the seed set rather than
   // lose it to FTS hits on the query's other tokens (FRICTION-AF).
   exactMatches = cbPromoteExactNameMatches({ st, symbolsFromQuery, exactMatches, opts });
-  const textResults = cbRunMultiTermTextSearch(st, query, opts);
+  const textResults = cbRunMultiTermTextSearch(st, rankingQuery, opts);
   let searchResults = mergeSearchChannels(exactMatches, textResults);
   // `explain` instrumentation: snapshot scores at each pass boundary.
   // Purely observational — every `trace?.snapshot` is a no-op unless
@@ -750,9 +756,9 @@ function cbCollectAndScoreCandidates(st: ContextBuilderState, qargs: CandidateQu
     }
     trace?.snapshot('test-penalty', searchResults);
   }
-  cbBoostMultiTermCoOccurrence({ searchResults, query, exactMatches, extraIds });
+  cbBoostMultiTermCoOccurrence({ searchResults, query: rankingQuery, exactMatches, extraIds });
   trace?.snapshot('co-occurrence', searchResults);
-  cbAppendCamelCaseAndCompoundMatches(st, { searchResults, symbolsFromQuery, query, isTestQuery, opts });
+  cbAppendCamelCaseAndCompoundMatches(st, { searchResults, symbolsFromQuery, query: rankingQuery, isTestQuery, opts });
   trace?.snapshot('camel-compound', searchResults);
 
   applyCentralityBoost(searchResults, CENTRALITY_BOOST_WEIGHT);
@@ -791,7 +797,7 @@ export class ContextBuilder {
 
   /** Snapshot of the builder's immutable dependencies for module-scope helpers. */
   private state(): ContextBuilderState {
-    return { queries: this.queries, traverser: this.traverser };
+    return { projectRoot: this.projectRoot, queries: this.queries, traverser: this.traverser };
   }
 
   /**

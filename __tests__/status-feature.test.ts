@@ -20,6 +20,18 @@ describe('status feature runtime', () => {
     expect(uninitialized).toContain('Project: /repo');
     expect(uninitialized).toContain('Not initialized');
 
+    const uninitializedJson = JSON.parse(
+      stripAnsi(captureOutput(() => printer.printUninitializedStatus('/repo', { json: true }))),
+    );
+    expect(uninitializedJson).toMatchObject({
+      initialized: false,
+      cartographVersion: expect.any(String),
+      projectPath: '/repo',
+      indexPath: expect.stringContaining('.cartograph'),
+      lastIndexedAt: null,
+      lastIndexedAtIso: null,
+    });
+
     const json = stripAnsi(
       captureOutput(() =>
         printer.printStatusJson({
@@ -37,7 +49,12 @@ describe('status feature runtime', () => {
     const parsed = JSON.parse(json);
     expect(parsed).toMatchObject({
       initialized: true,
+      cartographVersion: expect.any(String),
       projectPath: '/repo',
+      indexPath: expect.stringContaining('.cartograph'),
+      databasePath: '/repo/.cartograph/cartograph.db',
+      lastIndexedAt: 1234,
+      lastIndexedAtIso: '1970-01-01T00:00:01.234Z',
       fileCount: 3,
       pendingChanges: { added: 1, modified: 1, removed: 0, healFlagged: 0 },
     });
@@ -187,6 +204,12 @@ function fakeCg(backend = 'bun-sqlite') {
     db: {
       getBackend: () => backend,
       hasVecExtension: () => backend !== 'postgres',
+      getPath: () => '/repo/.cartograph/cartograph.db',
+      getDb: () => ({
+        prepare: () => ({
+          get: () => ({ lastIndexedAt: 1234 }),
+        }),
+      }),
     },
     queries: {},
   };

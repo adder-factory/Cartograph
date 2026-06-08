@@ -79,9 +79,20 @@
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\""
   },
   "keywords": [
+    "ai-coding-agents",
     "code-intelligence",
+    "code-search",
+    "developer-tools",
     "knowledge-graph",
-    "static-analysis"
+    "local-first",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "semantic-search",
+    "sqlite",
+    "static-analysis",
+    "tree-sitter",
+    "typescript"
   ],
   "author": "Adder Factory",
   "license": "MIT",

@@ -4,6 +4,7 @@
  * bin/cartograph.ts decomposition.
  */
 import { isInitialized as defaultIsInitialized } from '../../directory.js';
+import { hasUncommittedChanges as defaultHasUncommittedChanges } from '../../git-utils.js';
 import type { CliOptionCommand } from '../../features/shared/cli-command.js';
 import {
   program as cliProgram,
@@ -25,10 +26,13 @@ import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../featu
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
 import { registerPlaybookCommand } from '../../features/playbook/index.js';
 import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
+import { registerSyncIfDirtyCommand, type SyncIfDirtyCommandDeps } from '../../features/sync-if-dirty/index.js';
 import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
 import { registerViewerCommand, type ViewerServerModule } from '../../features/viewer/index.js';
 
 type CommandLike = CliOptionCommand;
+type SyncIfDirtyCartographModule = Awaited<ReturnType<SyncIfDirtyCommandDeps['loadCartograph']>>;
+type LifecycleCartographModule = SetupCartographModule & SyncIfDirtyCartographModule;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;
@@ -54,8 +58,9 @@ export interface LifecycleCommandDeps {
   writeStderr: (message?: string) => void;
   assignIntArg: (args: AssignNumericArgInput) => boolean;
   runViaMCP: (tool: string, args: Record<string, unknown>, projectPath?: string) => Promise<void>;
-  loadCartograph: () => Promise<SetupCartographModule>;
+  loadCartograph: () => Promise<LifecycleCartographModule>;
   isInitialized: (projectPath: string) => boolean;
+  hasUncommittedChanges: (projectPath: string) => boolean;
   loadMcpServer: () => Promise<{ MCPServer: new (opts: unknown) => { start: () => Promise<void> } }>;
   loadMcpDaemon: () => Promise<{
     runSharedMcpDaemonProcess: (opts: unknown) => Promise<void>;
@@ -128,8 +133,9 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   },
   assignIntArg: cliAssignIntArg,
   runViaMCP: cliRunViaMCP,
-  loadCartograph: cliLoadCartograph as () => Promise<SetupCartographModule>,
+  loadCartograph: cliLoadCartograph as () => Promise<LifecycleCartographModule>,
   isInitialized: defaultIsInitialized,
+  hasUncommittedChanges: defaultHasUncommittedChanges,
   loadMcpServer: (() => import('../../mcp/index.js')) as LifecycleCommandDeps['loadMcpServer'],
   loadMcpDaemon: (() => import('../../mcp/daemon.js')) as LifecycleCommandDeps['loadMcpDaemon'],
   loadInstallerTargets: (() =>
@@ -163,6 +169,16 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
   registerLlmSetupCommand(deps);
   registerLlmSmokeCommand(deps);
   registerTraceToCulpritsCommand(deps);
+  registerSyncIfDirtyCommand({
+    program: deps.program,
+    resolveProjectPath: deps.resolveProjectPath,
+    isInitialized: deps.isInitialized,
+    hasUncommittedChanges: deps.hasUncommittedChanges,
+    loadCartograph: deps.loadCartograph,
+    info: deps.info,
+    error: deps.error,
+    writeStderr: deps.writeStderr,
+  });
   registerPlaybookCommand(deps);
   registerViewerCommand(deps);
   registerBackendCommand(deps);

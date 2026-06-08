@@ -19,7 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
-import { getCartographPermissions } from '../src/installer/targets/shared.js';
+import { atomicWriteFileSync, getCartographPermissions, removeMarkedSection } from '../src/installer/targets/shared.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
@@ -168,6 +168,68 @@ describe('Installer permissions', () => {
   });
 });
 
+describe('Installer shared writer symlink handling', () => {
+  it('writes through an existing symlink instead of replacing it', () => {
+    const dir = mkTmpDir('symlink');
+    try {
+      const target = path.join(dir, 'shared.md');
+      const link = path.join(dir, 'AGENTS.md');
+      fs.writeFileSync(target, 'old\n');
+      if (!trySymlink(target, link)) return;
+
+      atomicWriteFileSync(link, 'new\n');
+
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(target, 'utf-8')).toBe('new\n');
+      expect(fs.readFileSync(link, 'utf-8')).toBe('new\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes through a dangling relative symlink by creating the target', () => {
+    const dir = mkTmpDir('dangling-symlink');
+    try {
+      const target = path.join(dir, 'shared', 'AGENTS.md');
+      const link = path.join(dir, 'AGENTS.md');
+      if (!trySymlink(path.join('shared', 'AGENTS.md'), link)) return;
+
+      atomicWriteFileSync(link, 'created\n');
+
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(target, 'utf-8')).toBe('created\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('removes marked content through a symlink without deleting the symlink', () => {
+    const dir = mkTmpDir('symlink-remove');
+    try {
+      const target = path.join(dir, 'shared.md');
+      const link = path.join(dir, 'AGENTS.md');
+      fs.writeFileSync(target, 'before\n<!-- START -->\nmanaged\n<!-- END -->\nafter\n');
+      if (!trySymlink(target, link)) return;
+
+      expect(removeMarkedSection(link, '<!-- START -->', '<!-- END -->')).toBe('removed');
+
+      expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+      expect(fs.readFileSync(target, 'utf-8')).toBe('before\n\nafter\n');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+function trySymlink(target: string, link: string): boolean {
+  try {
+    fs.symlinkSync(target, link);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 describe('Installer targets — partial-state idempotency', () => {
   let tmpHome: string;
   let tmpCwd: string;
@@ -233,6 +295,7 @@ describe('Installer targets — registry', () => {
     expect(getTarget('claude')?.id).toBe('claude');
     expect(getTarget('cursor')?.id).toBe('cursor');
     expect(getTarget('codex')?.id).toBe('codex');
+    expect(getTarget('copilot')?.id).toBe('copilot');
     expect(getTarget('opencode')?.id).toBe('opencode');
     // F#61 — multi-target installer additions.
     expect(getTarget('hermes')?.id).toBe('hermes');
@@ -257,7 +320,7 @@ describe('Installer targets — registry', () => {
   });
 });
 
-describe('Installer targets — Factory, Rovo, and Qoder specifics', () => {
+describe('Installer targets — Copilot, opencode, Factory, Rovo, and Qoder specifics', () => {
   let tmpHome: string;
   let tmpCwd: string;
   let origCwd: string;
@@ -278,7 +341,34 @@ describe('Installer targets — Factory, Rovo, and Qoder specifics', () => {
     fs.rmSync(tmpCwd, { recursive: true, force: true });
   });
 
-  it('uses disjoint default paths for all three targets', () => {
+  it('uses documented paths for Copilot and opencode', () => {
+    const copilot = getTarget('copilot')!;
+    const opencode = getTarget('opencode')!;
+
+    expect(copilot.describePaths('global')).toEqual([path.join(tmpHome, '.copilot', 'mcp-config.json')]);
+    expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(opencode.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'opencode', 'opencode.json')]);
+
+    fs.mkdirSync(path.join(process.cwd(), '.github'), { recursive: true });
+    fs.writeFileSync(path.join(process.cwd(), '.github', 'mcp.json'), '{}\n');
+    expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.github', 'mcp.json')]);
+  });
+
+  it('writes the Copilot MCP entry with an explicit all-tools allowlist', () => {
+    const copilot = getTarget('copilot')!;
+
+    copilot.install('local', { autoAllow: false });
+
+    const config = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.mcp.json'), 'utf-8'));
+    expect(config.mcpServers.cartograph).toEqual({
+      type: 'stdio',
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+      tools: ['*'],
+    });
+  });
+
+  it('uses disjoint default paths for Factory, Rovo, and Qoder targets', () => {
     const factory = getTarget('factory')!;
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;

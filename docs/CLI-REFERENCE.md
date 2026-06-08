@@ -13,13 +13,16 @@ cartograph install --print-config codex
 cartograph setup [path]            # init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph status [path]           # index status and feature readiness
+cartograph status [path] --json    # automation shape: version, index path,
+                                   # last indexed timestamp, counts, rollups
 cartograph viewer [path]           # local graph viewer
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
 ```
 
-Supported install target ids: `claude`, `cursor`, `codex`, `opencode`,
-`hermes`, `gemini`, `antigravity`, `kiro`, `factory`, `rovo`, and `qoder`.
+Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
+`opencode`, `hermes`, `gemini`, `antigravity`, `kiro`, `factory`, `rovo`, and
+`qoder`.
 
 ## Admin
 
@@ -45,10 +48,12 @@ cartograph admin init -i \
 
 See [Storage Backends](STORAGE-BACKENDS.md).
 
-Indexing commands accept `--max-file-size <bytes>` when generated files or
-large fixtures need a one-off cap change. On `admin init`, the value is saved
-as `config.maxFileSize`; on `admin index`, `admin sync`, and
-`admin embed-only`, it applies only to that run.
+Indexing commands accept `--max-file-size <size>` when generated files or
+large fixtures need a one-off cap change. Values can be bytes (`1048576`) or
+use a binary suffix such as `512kb` or `10mb`. The default remains 5 MiB and
+explicit overrides are capped at 10 MiB. On `admin init`, the value is saved
+as `config.maxFileSize`; on `admin index`, `admin sync`, and `admin
+embed-only`, it applies only to that run.
 
 ## Search And Navigation
 
@@ -103,7 +108,11 @@ cartograph affected --include-commands
 cartograph tests-for AuthService
 cartograph compare-to-ref --findings-delta
 cartograph changed-since
+cartograph sync-if-dirty --quiet
 ```
+
+`sync-if-dirty` is a compatibility command for hooks that should avoid work on
+clean git trees. Prefer `cartograph admin sync` for normal interactive syncs.
 
 ## History And Refactors
 

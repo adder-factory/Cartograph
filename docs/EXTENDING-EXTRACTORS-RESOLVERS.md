@@ -68,6 +68,23 @@ similar extraction or resolver gaps:
   `val`/`var` declarations plus `type_of` refs; the resolver reads JVM-style
   field signatures and package directives to disambiguate imports even when the
   source file name does not mirror the package path.
+- **Extension-only JavaScript dialects should reuse the JavaScript slice.**
+  SAP HANA XSJS files (`.xsjs`, `.xsjslib`) use the existing JavaScript
+  tree-sitter extractor plus JS-family import resolver extension probing. Do
+  not create a new language mode unless the dialect needs distinct grammar or
+  symbol semantics.
+- **Receiver-specific JS frameworks need their own resolver when the receiver
+  set is framework-defined.** Hono route extraction first identifies
+  `new Hono()` / `new OpenAPIHono()` variables, then matches route calls only
+  on those receivers and synthesizes local `app.route('/prefix', router)`
+  mounted paths. This avoids broadening Express's `app|router` regex and keeps
+  language gating explicit.
+- **Spring config annotations stay in the Spring config-binding hook.**
+  `@ConditionalOnProperty` reads `Node.decoratorArgs` alongside `@Value`,
+  normalizes `prefix + name/value`, and emits `references` edges to
+  `.properties` constants with a distinct `synthesizedBy` marker. Add future
+  Spring config annotations in that hook unless they need a separate storage
+  contract.
 - **Nested git repositories are file-discovery policy, not orchestrator logic.**
   Keep submodule/embedded-repo discovery in `src/extraction/file-discovery-policy.ts`
   and let `src/extraction/index.ts` decide only when to use git-backed scan

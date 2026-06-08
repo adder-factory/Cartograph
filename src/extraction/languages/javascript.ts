@@ -97,7 +97,7 @@ import type { LanguageDef } from './types.js';
 export const JAVASCRIPT_DEF: LanguageDef = {
   name: 'javascript',
   displayName: 'JavaScript',
-  extensions: ['.js', '.mjs', '.cjs'],
-  includeGlobs: ['**/*.js', '**/*.mjs', '**/*.cjs'],
+  extensions: ['.js', '.mjs', '.cjs', '.xsjs', '.xsjslib'],
+  includeGlobs: ['**/*.js', '**/*.mjs', '**/*.cjs', '**/*.xsjs', '**/*.xsjslib'],
   grammar: { wasmFile: 'javascript.wasm', extractor: javascriptExtractor },
 };

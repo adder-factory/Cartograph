@@ -2,11 +2,9 @@
  * Spring `@Value` config-key linkage hook (B11/F#64c, 2026-05-26).
  *
  * Second consumer of B9 (`Node.decoratorArgs`) — generalises the
- * B10/NestJS pattern beyond routing. Walks JVM (java/kotlin) field +
- * property nodes whose `decorators` array contains `Value`, reads the
- * placeholder string from `decoratorArgs.find(a => a.name === 'Value')
- * ?.argStrings[0]`, and emits a `references` edge from the field to
- * the matching `constant` node mined by the `.properties` extractor.
+ * B10/NestJS pattern beyond routing. Walks JVM (java/kotlin) nodes whose
+ * Spring config annotations name properties and emits `references` edges
+ * to matching `constant` nodes mined by the `.properties` extractor.
  *
  * Example:
  *
@@ -18,6 +16,9 @@
  *     private int cacheTtl;
  *
  *   → references edge: cacheTtl (field) → app.cache.ttl (constant)
+ *
+ * Also links `@ConditionalOnProperty(name = "k")` / `prefix = "p"`
+ * annotations from class or method nodes to the same property constants.
  *
  * Placeholder shapes supported in v1:
  *   - `${key}`               — bare reference
@@ -46,7 +47,7 @@ import { getMetadata, setMetadata } from '../db/queries-metadata.js';
 import { logDebug, errMsg } from '../errors.js';
 import { insertEdges } from '../db/queries-edges.js';
 import type { SyncResult } from '../extraction/index.js';
-import type { Edge } from '../types.js';
+import type { DecoratorArgsEntry, Edge, NodeKind } from '../types.js';
 import { parseDecoratorArgsJson } from './_decorator-args.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers re-mine. */
@@ -57,6 +58,8 @@ const LAST_MINED_KEY = 'last_mined_spring_value_binding_algo_version';
 
 /** JVM languages whose field/property nodes carry `@Value` decorators. */
 const JVM_LANGUAGES: ReadonlySet<string> = new Set(['java', 'kotlin']);
+const CONDITIONAL_NODE_KINDS: readonly NodeKind[] = ['class', 'method', 'function'];
+const DOT_CHAR = '.';
 
 /** Match every `${key}` (with optional `:default` suffix) in a string.
  *  The inner `[^}]+` is greedy-bounded by `}` so nested `${...}` won't
@@ -82,11 +85,52 @@ function extractConfigKeys(argString: string): string[] {
   return keys;
 }
 
+function extractConditionalConfigKeys(entry: DecoratorArgsEntry): string[] {
+  const named = entry.namedArgs ?? {};
+  const prefix = named['prefix'] ?? '';
+  const keys = new Set<string>();
+  for (const positional of entry.argStrings) addConditionalConfigKey(keys, prefix, positional);
+  addConditionalConfigKey(keys, prefix, named['name']);
+  addConditionalConfigKey(keys, prefix, named['value']);
+  return [...keys];
+}
+
+function addConditionalConfigKey(keys: Set<string>, prefix: string, rawName: string | undefined): void {
+  const trimmed = rawName?.trim();
+  if (!trimmed) return;
+  keys.add(joinPropertyKey(prefix, trimmed));
+}
+
+function joinPropertyKey(prefix: string, name: string): string {
+  const cleanPrefix = trimTrailingDots(prefix.trim());
+  const cleanName = trimLeadingDots(name.trim());
+  if (!cleanPrefix) return cleanName;
+  if (!cleanName) return cleanPrefix;
+  return `${cleanPrefix}.${cleanName}`;
+}
+
+function trimTrailingDots(value: string): string {
+  let end = value.length;
+  while (end > 0 && value[end - 1] === DOT_CHAR) end--;
+  return value.slice(0, end);
+}
+
+function trimLeadingDots(value: string): string {
+  let start = 0;
+  while (start < value.length && value[start] === DOT_CHAR) start++;
+  return value.slice(start);
+}
+
 interface ValueAnnotatedNode {
   fieldId: string;
-  fieldFilePath: string;
   fieldStartLine: number;
   argString: string;
+}
+
+interface ConditionalAnnotatedNode {
+  sourceId: string;
+  sourceStartLine: number;
+  decoratorArgs: DecoratorArgsEntry;
 }
 
 /**
@@ -99,8 +143,7 @@ function collectValueAnnotatedNodes(ctx: IndexHookContext): ValueAnnotatedNode[]
   const langsJson = JSON.stringify([...JVM_LANGUAGES]);
   const rows = ctx.queries.db
     .prepare(
-      `SELECT id, file_path AS filePath, start_line AS startLine,
-              decorator_args AS decoratorArgs
+      `SELECT id, start_line AS startLine, decorator_args AS decoratorArgs
        FROM nodes
        WHERE kind IN ('field', 'property')
          AND language IN (SELECT value FROM json_each(@langsJson))
@@ -113,7 +156,6 @@ function collectValueAnnotatedNodes(ctx: IndexHookContext): ValueAnnotatedNode[]
     )
     .all({ langsJson }) as Array<{
     id: string;
-    filePath: string;
     startLine: number;
     decoratorArgs: string | null;
   }>;
@@ -126,9 +168,44 @@ function collectValueAnnotatedNodes(ctx: IndexHookContext): ValueAnnotatedNode[]
     if (!argString) continue;
     out.push({
       fieldId: row.id,
-      fieldFilePath: row.filePath,
       fieldStartLine: row.startLine,
       argString,
+    });
+  }
+  return out;
+}
+
+function collectConditionalAnnotatedNodes(ctx: IndexHookContext): ConditionalAnnotatedNode[] {
+  const langsJson = JSON.stringify([...JVM_LANGUAGES]);
+  const kindsJson = JSON.stringify(CONDITIONAL_NODE_KINDS);
+  const rows = ctx.queries.db
+    .prepare(
+      `SELECT id, start_line AS startLine, decorator_args AS decoratorArgs
+       FROM nodes
+       WHERE kind IN (SELECT value FROM json_each(@kindsJson))
+         AND language IN (SELECT value FROM json_each(@langsJson))
+         AND decorators IS NOT NULL
+         AND decorator_args IS NOT NULL
+         AND EXISTS (
+           SELECT 1 FROM json_each(decorators)
+           WHERE json_each.value = 'ConditionalOnProperty'
+         )`,
+    )
+    .all({ kindsJson, langsJson }) as Array<{
+    id: string;
+    startLine: number;
+    decoratorArgs: string | null;
+  }>;
+
+  const out: ConditionalAnnotatedNode[] = [];
+  for (const row of rows) {
+    const args = parseDecoratorArgsJson(row.decoratorArgs);
+    const entry = args.find((a) => a.name === 'ConditionalOnProperty');
+    if (!entry) continue;
+    out.push({
+      sourceId: row.id,
+      sourceStartLine: row.startLine,
+      decoratorArgs: entry,
     });
   }
   return out;
@@ -161,7 +238,8 @@ function lookupConstantNodes(ctx: IndexHookContext, keys: readonly string[]): Ma
 function refresh(ctx: IndexHookContext): void {
   try {
     const fields = collectValueAnnotatedNodes(ctx);
-    if (fields.length === 0) {
+    const conditionals = collectConditionalAnnotatedNodes(ctx);
+    if (fields.length === 0 && conditionals.length === 0) {
       stamp(ctx);
       return;
     }
@@ -169,35 +247,97 @@ function refresh(ctx: IndexHookContext): void {
     // Collect every distinct key referenced across all @Value fields,
     // batch the constant-node lookup, then build edges field-by-field.
     const allKeys: string[] = [];
-    const perField: Array<{ field: ValueAnnotatedNode; keys: string[] }> = [];
-    for (const field of fields) {
-      const keys = extractConfigKeys(field.argString);
-      perField.push({ field, keys });
-      for (const k of keys) allKeys.push(k);
-    }
+    const perField = collectValueKeyRefs(fields, allKeys);
+    const perConditional = collectConditionalKeyRefs(conditionals, allKeys);
     const lookup = lookupConstantNodes(ctx, allKeys);
 
     const newEdges: Edge[] = [];
-    for (const { field, keys } of perField) {
-      for (const key of keys) {
-        const targets = lookup.get(key);
-        if (!targets) continue;
-        for (const targetId of targets) {
-          newEdges.push({
-            source: field.fieldId,
-            target: targetId,
-            kind: 'references',
-            line: field.fieldStartLine,
-            metadata: { synthesizedBy: 'spring-value-binding', configKey: key },
-          });
-        }
-      }
-    }
+    pushValueEdges(newEdges, perField, lookup);
+    pushConditionalEdges(newEdges, perConditional, lookup);
     if (newEdges.length > 0) insertEdges(ctx.queries, newEdges);
   } catch (err) {
     logDebug(`spring-value-binding refresh failed: ${errMsg(err)}`);
   }
   stamp(ctx);
+}
+
+function collectValueKeyRefs(fields: readonly ValueAnnotatedNode[], allKeys: string[]) {
+  const perField: Array<{ field: ValueAnnotatedNode; keys: string[] }> = [];
+  for (const field of fields) {
+    const keys = extractConfigKeys(field.argString);
+    perField.push({ field, keys });
+    for (const k of keys) allKeys.push(k);
+  }
+  return perField;
+}
+
+function collectConditionalKeyRefs(conditionals: readonly ConditionalAnnotatedNode[], allKeys: string[]) {
+  const perConditional: Array<{ conditional: ConditionalAnnotatedNode; keys: string[] }> = [];
+  for (const conditional of conditionals) {
+    const keys = extractConditionalConfigKeys(conditional.decoratorArgs);
+    perConditional.push({ conditional, keys });
+    for (const k of keys) allKeys.push(k);
+  }
+  return perConditional;
+}
+
+function pushValueEdges(
+  newEdges: Edge[],
+  perField: ReadonlyArray<{ field: ValueAnnotatedNode; keys: string[] }>,
+  lookup: Map<string, string[]>,
+): void {
+  for (const { field, keys } of perField) {
+    for (const key of keys) {
+      pushConfigEdges(newEdges, {
+        sourceId: field.fieldId,
+        line: field.fieldStartLine,
+        key,
+        targets: lookup.get(key),
+        synthesizedBy: 'spring-value-binding',
+      });
+    }
+  }
+}
+
+function pushConditionalEdges(
+  newEdges: Edge[],
+  perConditional: ReadonlyArray<{ conditional: ConditionalAnnotatedNode; keys: string[] }>,
+  lookup: Map<string, string[]>,
+): void {
+  for (const { conditional, keys } of perConditional) {
+    for (const key of keys) {
+      pushConfigEdges(newEdges, {
+        sourceId: conditional.sourceId,
+        line: conditional.sourceStartLine,
+        key,
+        targets: lookup.get(key),
+        synthesizedBy: 'spring-conditional-on-property-binding',
+      });
+    }
+  }
+}
+
+function pushConfigEdges(
+  newEdges: Edge[],
+  args: {
+    sourceId: string;
+    line: number;
+    key: string;
+    targets: string[] | undefined;
+    synthesizedBy: string;
+  },
+): void {
+  const { sourceId, line, key, targets, synthesizedBy } = args;
+  if (!targets) return;
+  for (const targetId of targets) {
+    newEdges.push({
+      source: sourceId,
+      target: targetId,
+      kind: 'references',
+      line,
+      metadata: { synthesizedBy, configKey: key },
+    });
+  }
 }
 
 function stamp(ctx: IndexHookContext): void {

@@ -753,6 +753,38 @@ describe('Resolution Module', () => {
       expect(result).toBe('src/helpers.ts');
     });
 
+    it('resolves SAP XSJS JavaScript imports', () => {
+      const context: ResolutionContext = {
+        getNodesInFile: () => [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByLowerName: () => [],
+        getNodesByKind: () => [],
+        fileExists: (p) => p === 'server/lib/session.xsjslib' || p === 'server/services/index.xsjs',
+        readFile: () => null,
+        getProjectRoot: () => '',
+        getAllFiles: () => ['server/lib/session.xsjslib', 'server/services/index.xsjs'],
+        getImportMappings: () => [],
+      };
+
+      expect(
+        resolveImportPath({
+          importPath: './lib/session',
+          fromFile: 'server/bootstrap.xsjs',
+          language: 'javascript',
+          context,
+        }),
+      ).toBe('server/lib/session.xsjslib');
+      expect(
+        resolveImportPath({
+          importPath: './services',
+          fromFile: 'server/bootstrap.ts',
+          language: 'typescript',
+          context,
+        }),
+      ).toBe('server/services/index.xsjs');
+    });
+
     it('resolves Python dotted package imports to project files', () => {
       const context: ResolutionContext = {
         getNodesInFile: () => [],
@@ -1501,6 +1533,37 @@ function processDate(input: string): string {
       expect(runNode).toBeDefined();
       const callers = cg.internals.traverser.getCallers(runNode!.id);
       expect(callers.some((c) => c.node.name === 'main' && c.node.filePath === 'app/main.py')).toBe(true);
+    });
+
+    it('resolves Python imported-module aliases to module member calls', async () => {
+      fs.mkdirSync(path.join(tempDir, 'pkg'), { recursive: true });
+      fs.mkdirSync(path.join(tempDir, 'app'), { recursive: true });
+      fs.writeFileSync(path.join(tempDir, 'pkg', '__init__.py'), '');
+      fs.writeFileSync(path.join(tempDir, 'pkg', 'helpers.py'), 'def run():\n    return 1\n');
+      fs.writeFileSync(
+        path.join(tempDir, 'app', 'main.py'),
+        [
+          'import pkg.helpers as helper_mod',
+          'from pkg import helpers as from_helper',
+          '',
+          'def via_import_alias():',
+          '    return helper_mod.run()',
+          '',
+          'def via_from_alias():',
+          '    return from_helper.run()',
+          '',
+        ].join('\n'),
+      );
+
+      cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+
+      const runNode = getNodesByKind(cg.queries, 'function').find(
+        (n) => n.name === 'run' && n.filePath === 'pkg/helpers.py',
+      );
+      expect(runNode).toBeDefined();
+      const callers = cg.internals.traverser.getCallers(runNode!.id);
+      expect(callers.some((c) => c.node.name === 'via_import_alias' && c.node.filePath === 'app/main.py')).toBe(true);
+      expect(callers.some((c) => c.node.name === 'via_from_alias' && c.node.filePath === 'app/main.py')).toBe(true);
     });
 
     it('resolves call-chain methods through the intermediate method return type', async () => {

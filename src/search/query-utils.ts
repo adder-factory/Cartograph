@@ -407,6 +407,46 @@ function computeNonShadowingStems(tokens: ReadonlySet<string>): Set<string> {
   return stems;
 }
 
+function escapeRegExp(value: string): string {
+  return value.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+}
+
+function projectNameNoiseTokens(projectRoot: string): string[] {
+  const base = path.basename(projectRoot).toLowerCase();
+  const tokens = base.split(/[^a-z0-9]+/).filter((token) => token.length >= MIN_TOKEN_LENGTH && !STOP_WORDS.has(token));
+  return [...new Set(tokens)];
+}
+
+/**
+ * Drop a standalone project-name token from broad natural-language
+ * ranking queries when enough other anchors remain.
+ *
+ * A repo/product name is often present because the user names the
+ * project ("in cartograph, how does sync work?"). Treating that word
+ * as a normal FTS term can over-promote unrelated symbols whose name
+ * happens to carry the project name. The guard is conservative:
+ * stripping happens only when at least two non-project search terms
+ * remain, so focused queries like "Cartograph class" keep their
+ * literal anchor.
+ */
+export function suppressProjectNameQueryNoise(query: string, projectRoot: string): string {
+  const noiseTokens = projectNameNoiseTokens(projectRoot);
+  if (noiseTokens.length === 0) return query;
+
+  const terms = extractSearchTerms(query, { stems: false });
+  const noise = new Set(noiseTokens);
+  const nonNoiseTerms = terms.filter((term) => !noise.has(term));
+  if (nonNoiseTerms.length < 2) return query;
+
+  let cleaned = query;
+  for (const token of noiseTokens) {
+    const pattern = new RegExp(`(^|[^A-Za-z0-9_])${escapeRegExp(token)}(?=$|[^A-Za-z0-9_])`, 'gi');
+    cleaned = cleaned.replaceAll(pattern, '$1');
+  }
+  cleaned = cleaned.replaceAll(/\s+/g, ' ').trim();
+  return cleaned || query;
+}
+
 /**
  * Heuristic: query looks like a route / endpoint path.
  * E.g. "/api/generate", "/v1/users", "GET /healthz".

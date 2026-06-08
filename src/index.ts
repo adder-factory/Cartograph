@@ -7,6 +7,7 @@
 
 import * as path from 'node:path';
 import type { CartographConfig } from './types.js';
+import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from './default-config.js';
 import { DatabaseConnection, getDatabasePath, dbRunMaintenance } from './db/index.js';
 import { QueryBuilder, clearAll, clearStructural, getStats } from './db/queries.js';
 import {
@@ -417,12 +418,16 @@ function cgRunMaintenancePhase(cg: Cartograph, result: IndexResult): number {
   return Date.now() - maintStart;
 }
 
+function cgAssertMaxFileSize(maxFileSize: number, fieldName: string): void {
+  if (!Number.isSafeInteger(maxFileSize) || maxFileSize < 1 || maxFileSize > MAX_INDEX_FILE_SIZE) {
+    throw new Error(`${fieldName} must be between 1 byte and ${MAX_INDEX_FILE_SIZE_LABEL} (got ${maxFileSize})`);
+  }
+}
+
 function cgApplyTransientIndexConfig(cg: CartographCore, options: IndexOptions): () => void {
   const maxFileSize = options.maxFileSize;
   if (maxFileSize === undefined) return () => {};
-  if (!Number.isSafeInteger(maxFileSize) || maxFileSize < 1) {
-    throw new Error(`IndexOptions.maxFileSize must be a positive integer byte count (got ${maxFileSize})`);
-  }
+  cgAssertMaxFileSize(maxFileSize, 'IndexOptions.maxFileSize');
   const previousMaxFileSize = cg.config.maxFileSize;
   cg.config.maxFileSize = maxFileSize;
   return () => {
@@ -940,6 +945,9 @@ export class Cartograph extends CartographCore {
    * Update configuration
    */
   updateConfig(updates: Partial<CartographConfig>): void {
+    if (updates.maxFileSize !== undefined) {
+      cgAssertMaxFileSize(updates.maxFileSize, 'CartographConfig.maxFileSize');
+    }
     Object.assign(this.config, updates);
     saveConfig(this.projectRoot, this.config);
     // Recreate orchestrator and resolver with new config

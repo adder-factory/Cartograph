@@ -8,6 +8,7 @@ import type { FrameworkResolver, ResolutionContext } from '../types.js';
 import { drupalResolver } from './drupal.js';
 import { laravelResolver } from './laravel.js';
 import { expressResolver } from './express.js';
+import { honoResolver } from './hono.js';
 import { bunServeResolver } from './bun-serve.js';
 import { reactResolver } from './react.js';
 import { salesforceResolver } from './salesforce.js';
@@ -36,6 +37,7 @@ const FRAMEWORK_RESOLVERS: FrameworkResolver[] = [
   drupalResolver,
   // JavaScript/TypeScript
   expressResolver,
+  honoResolver,
   bunServeResolver,
   reactResolver,
   salesforceResolver,
@@ -98,6 +100,7 @@ export function detectFrameworks(context: ResolutionContext): FrameworkResolver[
 // Re-export framework resolvers
 export { laravelResolver, FACADE_MAPPINGS } from './laravel.js';
 export { expressResolver } from './express.js';
+export { honoResolver } from './hono.js';
 export { bunServeResolver } from './bun-serve.js';
 export { reactResolver } from './react.js';
 export { salesforceResolver } from './salesforce.js';

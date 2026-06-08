@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Cartograph, FileLock } from '../src/index.js';
 import { getAllFiles } from '../src/db/queries-files.js';
+import { MAX_INDEX_FILE_SIZE } from '../src/default-config.js';
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-'));
@@ -129,6 +130,26 @@ describe('Cartograph lifecycle API', () => {
             .sort(),
         ).toEqual(['src/small.ts']);
         expect(cg.getConfig().maxFileSize).toBe(configuredMaxFileSize);
+      } finally {
+        cg.close();
+      }
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('rejects per-call maxFileSize overrides above the hard cap', async () => {
+    const dir = tempDir();
+    try {
+      writeProject(dir);
+      const cg = Cartograph.initSync(dir, {
+        config: { enableWatcher: false, maxFileSize: 1024 * 1024 },
+      });
+      try {
+        await expect(cg.indexAll({ summarize: false, maxFileSize: MAX_INDEX_FILE_SIZE + 1 })).rejects.toThrow(
+          /IndexOptions\.maxFileSize must be between 1 byte and 10mb/,
+        );
+        expect(cg.getConfig().maxFileSize).toBe(1024 * 1024);
       } finally {
         cg.close();
       }

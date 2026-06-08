@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { DEFAULT_CONFIG } from '../src/types.js';
+import { MAX_INDEX_FILE_SIZE } from '../src/default-config.js';
 import { loadConfig } from '../src/config.js';
 import { getCartographDir, validateDirectory } from '../src/directory.js';
 import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
@@ -242,6 +243,34 @@ describe('Cartograph Foundation', () => {
       // Verify persistence
       const config = loadConfig(tempDir);
       expect(config.maxFileSize).toBe(999999);
+    });
+
+    it('rejects maxFileSize values above the hard cap before persisting them', () => {
+      const cg = Cartograph.initSync(tempDir);
+      try {
+        const previous = cg.getConfig().maxFileSize;
+
+        expect(() => cg.updateConfig({ maxFileSize: MAX_INDEX_FILE_SIZE + 1 })).toThrow(
+          /CartographConfig\.maxFileSize must be between 1 byte and 10mb/,
+        );
+
+        expect(cg.getConfig().maxFileSize).toBe(previous);
+        expect(loadConfig(tempDir).maxFileSize).toBe(previous);
+      } finally {
+        cg.close();
+      }
+    });
+
+    it('rejects hand-edited maxFileSize values above the hard cap on load', () => {
+      const cg = Cartograph.initSync(tempDir);
+      cg.close();
+
+      const configPath = path.join(tempDir, '.cartograph', 'config.json');
+      const edited = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      edited.maxFileSize = MAX_INDEX_FILE_SIZE + 1;
+      fs.writeFileSync(configPath, JSON.stringify(edited, null, 2));
+
+      expect(() => loadConfig(tempDir)).toThrow(/maxFileSize must be at most 10mb/);
     });
 
     it('unions the persisted include list with registry-derived globs on load (G14)', () => {
@@ -477,6 +506,27 @@ describe('Database Connection', () => {
     const dbPath = path.join(tempDir, 'nonexistent.db');
 
     expect(() => DatabaseConnection.open(dbPath)).toThrow(/not found/i);
+  });
+
+  it('rejects malformed database paths before opening SQLite', () => {
+    expect(() => DatabaseConnection.initialize(path.join(tempDir, 'cartograph.sqlite'))).toThrow(
+      /expected a \.db file/,
+    );
+    expect(() => DatabaseConnection.initialize(`${tempDir}/../escape.db`)).toThrow(/path traversal segments/);
+    expect(() => DatabaseConnection.initialize(`bad\0path.db`)).toThrow(/non-empty \.db file path/);
+  });
+
+  it('rejects directories and symlinked files as database paths', () => {
+    const dirPath = path.join(tempDir, 'directory.db');
+    fs.mkdirSync(dirPath);
+    expect(() => DatabaseConnection.initialize(dirPath)).toThrow(/got a directory/);
+
+    if (process.platform === 'win32') return;
+    const targetPath = path.join(tempDir, 'target.db');
+    fs.writeFileSync(targetPath, '');
+    const linkPath = path.join(tempDir, 'link.db');
+    fs.symlinkSync(targetPath, linkPath);
+    expect(() => DatabaseConnection.open(linkPath)).toThrow(/symlinked database file/);
   });
 
   it('refuses to silently migrate when autoMigrate is unset (clear error mentions admin migrate)', () => {

@@ -2,9 +2,9 @@
  * Cartograph Interactive Installer
  *
  * Multi-target: writes MCP server config + instructions for the
- * agents the user picks (Claude Code, Cursor, Codex CLI, opencode,
- * Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev,
- * Qoder CLI).
+ * agents the user picks (Claude Code, Cursor, Codex CLI, GitHub
+ * Copilot CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro,
+ * Factory Droid, Rovo Dev, Qoder CLI).
  * Defaults to the Claude-only behavior for backwards compatibility
  * when no targets are explicitly chosen and nothing else is detected.
  *

@@ -175,4 +175,35 @@ public class ApiClient {
     );
     expect(edges.length).toBe(1);
   });
+
+  it('links @ConditionalOnProperty prefix/name annotations to matching config keys', async () => {
+    fs.writeFileSync(path.join(tempDir, 'application.properties'), 'feature.payments.enabled=true\n');
+    fs.writeFileSync(
+      path.join(tempDir, 'PaymentsAutoConfig.java'),
+      `import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+
+@ConditionalOnProperty(prefix = "feature.payments", name = "enabled", havingValue = "true")
+public class PaymentsAutoConfig {
+}
+`,
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true, config: { llm: { endpoint: '' } } });
+
+    const configConst = getNodesByKind(cg.queries, 'constant').find(
+      (c) => c.language === 'properties' && c.qualifiedName === 'feature.payments.enabled',
+    );
+    const configClass = getNodesByKind(cg.queries, 'class').find(
+      (c) => c.language === 'java' && c.name === 'PaymentsAutoConfig',
+    );
+    expect(configConst).toBeDefined();
+    expect(configClass).toBeDefined();
+
+    const edges = getOutgoingEdges(cg.queries, configClass!.id).filter(
+      (e) => e.kind === 'references' && e.target === configConst!.id,
+    );
+    expect(edges.length).toBe(1);
+    expect(edges[0]!.metadata?.synthesizedBy).toBe('spring-conditional-on-property-binding');
+    expect(edges[0]!.metadata?.configKey).toBe('feature.payments.enabled');
+  });
 });

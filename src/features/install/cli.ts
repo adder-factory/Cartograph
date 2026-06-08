@@ -30,7 +30,7 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
     )
     .option(
       '-t, --target <ids>',
-      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder.',
+      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,copilot,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder.',
     )
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
     .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')
@@ -46,6 +46,7 @@ Examples:
   cartograph install --yes --target=auto --location=local
   cartograph install --yes --target=auto --location=global
   cartograph install --print-config codex
+  cartograph install --print-config copilot
   cartograph install --print-config qoder
 `,
   );

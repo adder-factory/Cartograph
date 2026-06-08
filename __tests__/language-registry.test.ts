@@ -192,4 +192,11 @@ describe('lookup helpers', () => {
     expect(getLanguageDefByExtension('.mts')?.name).toBe('typescript');
     expect(getLanguageDefByExtension('.cts')?.name).toBe('typescript');
   });
+
+  it('JavaScript registers SAP HANA XSJS extensions', () => {
+    const def = getLanguageDefByName('javascript');
+    expect(def?.extensions).toEqual(expect.arrayContaining(['.xsjs', '.xsjslib']));
+    expect(getLanguageDefByExtension('.xsjs')?.name).toBe('javascript');
+    expect(getLanguageDefByExtension('.xsjslib')?.name).toBe('javascript');
+  });
 });

@@ -7,6 +7,7 @@ import type * as graph from '../graph/index.js';
  * own per-call inputs explicitly.
  */
 export interface ContextBuilderState {
+  projectRoot: string;
   queries: QueryBuilder;
   traverser: graph.GraphTraverser;
 }

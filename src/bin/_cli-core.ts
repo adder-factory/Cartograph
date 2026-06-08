@@ -610,7 +610,7 @@ export function printIndexResult(
   const sizeSkips = result.errors.filter((e) => e.code === 'size_exceeded').length;
   if (sizeSkips > 0) {
     clack.log.warn(
-      `Skipped ${formatNumber(sizeSkips)} files exceeding maxFileSize — see .cartograph/errors.log; raise the cap in .cartograph/config.json if intentional`,
+      `Skipped ${formatNumber(sizeSkips)} files exceeding maxFileSize — see .cartograph/errors.log; raise the cap up to 10mb or exclude the file if intentional`,
     );
   }
 

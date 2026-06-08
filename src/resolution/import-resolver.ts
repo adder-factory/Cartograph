@@ -24,6 +24,8 @@ const EXTENSION_RESOLUTION: Record<string, string[]> = {
     '.jsx',
     '.mjs',
     '.cjs',
+    '.xsjs',
+    '.xsjslib',
     '/index.ts',
     '/index.tsx',
     '/index.mts',
@@ -32,8 +34,23 @@ const EXTENSION_RESOLUTION: Record<string, string[]> = {
     '/index.jsx',
     '/index.mjs',
     '/index.cjs',
+    '/index.xsjs',
+    '/index.xsjslib',
   ],
-  javascript: ['.js', '.jsx', '.mjs', '.cjs', '/index.js', '/index.jsx', '/index.mjs', '/index.cjs'],
+  javascript: [
+    '.js',
+    '.jsx',
+    '.mjs',
+    '.cjs',
+    '.xsjs',
+    '.xsjslib',
+    '/index.js',
+    '/index.jsx',
+    '/index.mjs',
+    '/index.cjs',
+    '/index.xsjs',
+    '/index.xsjslib',
+  ],
   tsx: [
     '.tsx',
     '.ts',
@@ -44,6 +61,8 @@ const EXTENSION_RESOLUTION: Record<string, string[]> = {
     '.jsx',
     '.mjs',
     '.cjs',
+    '.xsjs',
+    '.xsjslib',
     '/index.tsx',
     '/index.ts',
     '/index.mts',
@@ -52,8 +71,23 @@ const EXTENSION_RESOLUTION: Record<string, string[]> = {
     '/index.jsx',
     '/index.mjs',
     '/index.cjs',
+    '/index.xsjs',
+    '/index.xsjslib',
   ],
-  jsx: ['.jsx', '.js', '.mjs', '.cjs', '/index.jsx', '/index.js', '/index.mjs', '/index.cjs'],
+  jsx: [
+    '.jsx',
+    '.js',
+    '.mjs',
+    '.cjs',
+    '.xsjs',
+    '.xsjslib',
+    '/index.jsx',
+    '/index.js',
+    '/index.mjs',
+    '/index.cjs',
+    '/index.xsjs',
+    '/index.xsjslib',
+  ],
   python: ['.py', '/__init__.py'],
   go: ['.go'],
   rust: ['.rs', '/mod.rs'],
@@ -1084,7 +1118,7 @@ function pickLocalImport(ref: UnresolvedRef, imports: ImportMapping[]): ImportMa
   for (const imp of imports) {
     if (imp.localName === ref.referenceName) return imp;
     if (imp.isNamespace && ref.referenceName.startsWith(imp.localName + '.')) return imp;
-    if (isPythonImportedModuleAttribute(ref, imp)) return imp;
+    if (getPythonImportedModuleAttribute(ref, imp)) return imp;
   }
   return null;
 }
@@ -1099,16 +1133,23 @@ function pickAliasedSameLineImport(ref: UnresolvedRef, imports: ImportMapping[])
 }
 
 /**
- * Python's `from pkg import helpers; helpers.run()` imports the
- * submodule as a local binding. The mapping is not a namespace import
- * syntactically, but when the call is attribute-qualified and the
- * submodule resolves to a real project file, it should behave like one.
+ * Python's `from pkg import helpers; helpers.run()` and
+ * `import pkg.helpers as h; h.run()` both import a module as a local
+ * binding. Resolve the module path plus member name when the reference
+ * is attribute-qualified.
  */
-function isPythonImportedModuleAttribute(ref: UnresolvedRef, imp: ImportMapping): boolean {
-  if (ref.language !== 'python') return false;
-  if (imp.isNamespace) return false;
-  if (imp.localName !== imp.exportedName) return false;
-  return ref.referenceName.startsWith(`${imp.localName}.`);
+function getPythonImportedModuleAttribute(
+  ref: UnresolvedRef,
+  imp: ImportMapping,
+): { modulePath: string; memberName: string } | null {
+  if (ref.language !== 'python') return null;
+  if (!ref.referenceName.startsWith(`${imp.localName}.`)) return null;
+  const memberName = ref.referenceName.slice(imp.localName.length + 1);
+  if (!memberName || memberName.includes('.')) return null;
+
+  if (imp.isNamespace) return { modulePath: imp.source, memberName };
+  const modulePath = isOnlyDots(imp.source) ? `${imp.source}${imp.exportedName}` : `${imp.source}.${imp.exportedName}`;
+  return { modulePath, memberName };
 }
 
 /**
@@ -1232,13 +1273,11 @@ function resolvePythonImportedModuleAttribute(
   imp: ImportMapping,
   context: ResolutionContext,
 ): ResolvedRef | null {
-  if (!isPythonImportedModuleAttribute(ref, imp)) return null;
-  const memberName = ref.referenceName.slice(imp.localName.length + 1);
-  if (!memberName || memberName.includes('.')) return null;
+  const moduleAttribute = getPythonImportedModuleAttribute(ref, imp);
+  if (!moduleAttribute) return null;
 
-  const modulePath = isOnlyDots(imp.source) ? `${imp.source}${imp.exportedName}` : `${imp.source}.${imp.exportedName}`;
   const resolvedPath = resolveImportPath({
-    importPath: modulePath,
+    importPath: moduleAttribute.modulePath,
     fromFile: ref.filePath,
     language: ref.language,
     context,
@@ -1246,10 +1285,15 @@ function resolvePythonImportedModuleAttribute(
   if (!resolvedPath) return null;
 
   const targetNode =
-    findPythonModuleMember(context, resolvedPath, memberName) ??
+    findPythonModuleMember(context, resolvedPath, moduleAttribute.memberName) ??
     findExportedSymbol({
       filePath: resolvedPath,
-      want: { isDefault: false, isNamespace: true, exportedName: imp.exportedName, memberName },
+      want: {
+        isDefault: false,
+        isNamespace: true,
+        exportedName: imp.exportedName,
+        memberName: moduleAttribute.memberName,
+      },
       language: ref.language,
       context,
       visited: new Set(),
