@@ -22,6 +22,7 @@ const DAEMON_CONNECT_POLL_MS = 100;
 const HELLO_TIMEOUT_MS = 2_000;
 const MAX_HELLO_BYTES = 4096;
 const DAEMON_LOCK_STARTUP_GRACE_MS = DAEMON_START_TIMEOUT_MS;
+const WINDOWS_PIPE_PREFLIGHT_TIMEOUT_MS = 250;
 
 export interface SharedMcpDaemonOptions {
   projectPath?: string | undefined;
@@ -64,20 +65,29 @@ export function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Prom
   }
 
   const runtime = createDaemonRuntime(projectRoot, lock.info.socketPath, options);
-  cleanupStaleSocket(runtime.socketPath);
-  runtime.server = createDaemonServer(runtime);
-
-  return listenDaemonServer(runtime.server, runtime.socketPath).then(() => {
-    if (!chmodDaemonSocket(runtime.socketPath)) {
+  return preflightDaemonSocketForListen(runtime.socketPath).then((state) => {
+    if (state === 'active') {
       process.stderr.write(
-        `[Cartograph daemon] Warning: could not restrict daemon socket permissions for ${runtime.socketPath}.\n`,
+        `[Cartograph daemon] Existing daemon named pipe is active at ${runtime.socketPath}; exiting child.\n`,
       );
+      cleanupDaemonRuntime(runtime);
+      process.exit(0);
+      return;
     }
-    process.stderr.write(`[Cartograph daemon] Listening on ${runtime.socketPath} (pid ${process.pid}).\n`);
-    void runtime.mcp.tryInitializeDefault(projectRoot);
-    armDaemonIdleTimer(runtime);
-    process.on('SIGINT', () => stopDaemon(runtime, 'SIGINT'));
-    process.on('SIGTERM', () => stopDaemon(runtime, 'SIGTERM'));
+
+    runtime.server = createDaemonServer(runtime);
+    return listenDaemonServer(runtime.server, runtime.socketPath).then(() => {
+      if (!chmodDaemonSocket(runtime.socketPath)) {
+        process.stderr.write(
+          `[Cartograph daemon] Warning: could not restrict daemon socket permissions for ${runtime.socketPath}.\n`,
+        );
+      }
+      process.stderr.write(`[Cartograph daemon] Listening on ${runtime.socketPath} (pid ${process.pid}).\n`);
+      void runtime.mcp.tryInitializeDefault(projectRoot);
+      armDaemonIdleTimer(runtime);
+      process.on('SIGINT', () => stopDaemon(runtime, 'SIGINT'));
+      process.on('SIGTERM', () => stopDaemon(runtime, 'SIGTERM'));
+    });
   });
 }
 
@@ -344,13 +354,55 @@ function isDaemonConnectFailure(err: unknown): boolean {
   return err.message.startsWith('daemon socket is missing');
 }
 
-function cleanupStaleSocket(socketPath: string): void {
-  if (process.platform === 'win32') return;
+type DaemonSocketPreflightState = 'ready' | 'active';
+
+interface DaemonSocketPreflightDeps {
+  platform?: NodeJS.Platform;
+  unlink?: (socketPath: string) => void;
+  probeWindowsNamedPipe?: (socketPath: string) => Promise<boolean>;
+}
+
+export async function preflightDaemonSocketForListen(
+  socketPath: string,
+  deps: DaemonSocketPreflightDeps = {},
+): Promise<DaemonSocketPreflightState> {
+  const platform = deps.platform ?? process.platform;
+  if (platform === 'win32') {
+    const active = await (deps.probeWindowsNamedPipe ?? isWindowsNamedPipeActive)(socketPath);
+    return active ? 'active' : 'ready';
+  }
   try {
-    fs.unlinkSync(socketPath);
+    (deps.unlink ?? fs.unlinkSync)(socketPath);
   } catch {
     /* stale socket absent */
   }
+  return 'ready';
+}
+
+function isWindowsNamedPipeActive(socketPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection(socketPath);
+    let settled = false;
+    const timer = setTimeout(() => finish(false), WINDOWS_PIPE_PREFLIGHT_TIMEOUT_MS);
+    timer.unref?.();
+
+    const finish = (active: boolean): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(active);
+    };
+
+    socket.once('connect', () => finish(true));
+    socket.once('error', (err) => finish(isBusyWindowsNamedPipeError(err)));
+  });
+}
+
+function isBusyWindowsNamedPipeError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'EBUSY' || code === 'EACCES' || code === 'EPERM';
 }
 
 export function chmodDaemonSocket(socketPath: string): boolean {

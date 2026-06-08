@@ -357,4 +357,86 @@ describe('F#57 JVM FQN-based same-name disambiguation', () => {
     expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-b/');
     expect(target?.filePath.replaceAll('\\', '/')).not.toContain('mod-a/');
   });
+
+  it('Kotlin wildcard import disambiguates same-name receiver classes by package', async () => {
+    const aDir = path.join(tempDir, 'mod-a/src/main/kotlin/com/example/a');
+    const bDir = path.join(tempDir, 'mod-b/src/main/kotlin/com/example/b');
+    const callerDir = path.join(tempDir, 'mod-c/src/main/kotlin/com/example/c');
+    fs.mkdirSync(aDir, { recursive: true });
+    fs.mkdirSync(bDir, { recursive: true });
+    fs.mkdirSync(callerDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(aDir, 'Service.kt'),
+      'package com.example.a\nclass Service { fun run(): String { return "a" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(bDir, 'Service.kt'),
+      'package com.example.b\nclass Service { fun run(): String { return "b" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(callerDir, 'Caller.kt'),
+      [
+        'package com.example.c',
+        '',
+        'import com.example.b.*',
+        '',
+        'class Caller {',
+        '  private val service: Service = Service()',
+        '  fun go(): String = service.run()',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true });
+
+    const go = getNodesByKind(cg.queries, 'method').find((n) => n.qualifiedName.endsWith('Caller::go'));
+    expect(go).toBeDefined();
+    const target = getOutgoingEdges(cg.queries, go!.id)
+      .map((edge) => cg!.queries.getNodeById(edge.target))
+      .find((node) => node?.name === 'run');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-b/');
+    expect(target?.filePath.replaceAll('\\', '/')).not.toContain('mod-a/');
+  });
+
+  it('Kotlin same-package class beats same-name class from another package without imports', async () => {
+    const aDir = path.join(tempDir, 'mod-a/src/main/kotlin/com/example/a');
+    const bDir = path.join(tempDir, 'mod-b/src/main/kotlin/com/example/b');
+    const callerDir = path.join(tempDir, 'mod-c/src/main/kotlin/com/example/b');
+    fs.mkdirSync(aDir, { recursive: true });
+    fs.mkdirSync(bDir, { recursive: true });
+    fs.mkdirSync(callerDir, { recursive: true });
+
+    fs.writeFileSync(
+      path.join(aDir, 'Service.kt'),
+      'package com.example.a\nclass Service { fun run(): String { return "a" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(bDir, 'Service.kt'),
+      'package com.example.b\nclass Service { fun run(): String { return "b" } }\n',
+    );
+    fs.writeFileSync(
+      path.join(callerDir, 'Caller.kt'),
+      [
+        'package com.example.b',
+        '',
+        'class Caller {',
+        '  private val service: Service = Service()',
+        '  fun go(): String = service.run()',
+        '}',
+        '',
+      ].join('\n'),
+    );
+
+    cg = await Cartograph.init(tempDir, { index: true });
+
+    const go = getNodesByKind(cg.queries, 'method').find((n) => n.qualifiedName.endsWith('Caller::go'));
+    expect(go).toBeDefined();
+    const target = getOutgoingEdges(cg.queries, go!.id)
+      .map((edge) => cg!.queries.getNodeById(edge.target))
+      .find((node) => node?.name === 'run');
+    expect(target?.filePath.replaceAll('\\', '/')).toContain('mod-b/');
+    expect(target?.filePath.replaceAll('\\', '/')).not.toContain('mod-a/');
+  });
 });

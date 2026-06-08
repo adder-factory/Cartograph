@@ -66,8 +66,9 @@ similar extraction or resolver gaps:
 - **Kotlin property receiver typing belongs in the JVM name matcher.** The
   extractor emits typed `field` nodes for class-body and primary-constructor
   `val`/`var` declarations plus `type_of` refs; the resolver reads JVM-style
-  field signatures and package directives to disambiguate imports even when the
-  source file name does not mirror the package path.
+  field signatures and package directives to disambiguate explicit imports,
+  same-package classes, and wildcard imports even when the source file name does
+  not mirror the package path.
 - **Extension-only JavaScript dialects should reuse the JavaScript slice.**
   SAP HANA XSJS files (`.xsjs`, `.xsjslib`) use the existing JavaScript
   tree-sitter extractor plus JS-family import resolver extension probing. Do
