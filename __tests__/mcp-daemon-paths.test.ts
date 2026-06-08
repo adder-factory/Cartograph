@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { chmodDaemonSocket } from '../src/mcp/daemon.js';
+import { chmodDaemonSocket, preflightDaemonSocketForListen } from '../src/mcp/daemon.js';
 import {
   decodeLockInfo,
   encodeLockInfo,
@@ -56,5 +56,36 @@ describe('MCP daemon path helpers', () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('preflight removes stale POSIX socket files before listen', async () => {
+    const removed: string[] = [];
+
+    await expect(
+      preflightDaemonSocketForListen('/tmp/cartograph-stale.sock', {
+        platform: 'linux',
+        unlink: (socketPath) => removed.push(socketPath),
+      }),
+    ).resolves.toBe('ready');
+
+    expect(removed).toEqual(['/tmp/cartograph-stale.sock']);
+  });
+
+  it('preflight treats an active Windows named pipe as an existing daemon', async () => {
+    await expect(
+      preflightDaemonSocketForListen(String.raw`\\.\pipe\cartograph-test`, {
+        platform: 'win32',
+        probeWindowsNamedPipe: async () => true,
+      }),
+    ).resolves.toBe('active');
+  });
+
+  it('preflight allows Windows listen when the named pipe is not active', async () => {
+    await expect(
+      preflightDaemonSocketForListen(String.raw`\\.\pipe\cartograph-test`, {
+        platform: 'win32',
+        probeWindowsNamedPipe: async () => false,
+      }),
+    ).resolves.toBe('ready');
   });
 });

@@ -8,6 +8,14 @@ import type { Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping } from './types.js';
 import { escapeRegExp, splitIdentifierTokens } from '../utils.js';
 import { findCppOutOfClassMethod } from './cpp-out-of-class-method.js';
+import {
+  buildJvmImportHints,
+  classNodeMatchesJvmFqn,
+  isJvmLang,
+  jvmClassLookupName,
+  preferredJvmFqnForReceiver,
+  type JvmImportHints,
+} from './jvm-import-hints.js';
 import { computePathProximity } from './path-proximity.js';
 
 /**
@@ -170,17 +178,6 @@ const TS_JS_BUILTIN_PROTOTYPE_METHODS: ReadonlySet<string> = new Set([
  *  languages share `regex.exec` / `array.find` / etc. */
 const TS_JS_FAMILY_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 
-/** JVM languages that can cross-resolve at the source level — a
- *  Kotlin file `import com.example.JavaService;` legitimately
- *  resolves into Java sources, and vice versa. Used to relax the
- *  same-language candidate filter for Java↔Kotlin only (#314
- *  follow-up); JS/TS-family etc. keep strict same-language matching. */
-const JVM_LANGS: ReadonlySet<string> = new Set(['java', 'kotlin']);
-
-function isJvmLang(language: string): boolean {
-  return JVM_LANGS.has(language);
-}
-
 function isTsJsFamilyLang(language: string): boolean {
   return TS_JS_FAMILY_LANGS.has(language);
 }
@@ -193,43 +190,6 @@ function isTsJsFamilyLang(language: string): boolean {
 function isCompatibleLanguage(refLanguage: string, candidateLanguage: string): boolean {
   if (refLanguage === candidateLanguage) return true;
   return isJvmLang(refLanguage) && isJvmLang(candidateLanguage);
-}
-
-/**
- * Build a localName → FQN map from a file's `kind:'import'` graph
- * nodes. Java/Kotlin import nodes carry the FQN as `name` (per the
- * tree-sitter extractor); Kotlin `import com.example.Foo as Bar`
- * surfaces the alias via `extra.alias`. The localName is the alias
- * when present, else the last dot-segment of the FQN. Wildcard
- * imports (`import com.example.*`) are skipped — no single local
- * name to bind.
- *
- * Cost: one graph-by-file lookup + a small linear pass over the
- * file's import nodes (typically <30). No regex over source content,
- * no caching needed at this scale.
- */
-/** Kotlin `import com.example.Foo as Bar` — extract the local alias
- *  from an already-tree-sitter-captured import statement. The match
- *  runs against the single import line's `signature` text, NOT against
- *  full source content. Java has no `as` form so this is always
- *  undefined for Java imports. */
-const KOTLIN_IMPORT_ALIAS_RE = /\bas\s+(\w+)\s*;?\s*$/;
-
-function extractKotlinAlias(signature: string | undefined): string | undefined {
-  if (!signature) return undefined;
-  const m = KOTLIN_IMPORT_ALIAS_RE.exec(signature);
-  return m?.[1];
-}
-
-/** When an import FQN is found via the localName map, use the FQN's
- *  last dot-segment as the class-lookup name — not the localName. This
- *  matters for Kotlin aliases (`Foo as Bar`): `getNodesByName("Bar")`
- *  finds nothing, but `getNodesByName("Foo")` reaches the actual class
- *  node. For unaliased imports the localName equals the last segment so
- *  the substitution is a no-op. */
-function jvmClassLookupName(localName: string, importFqn: string | undefined): string {
-  if (!importFqn) return localName;
-  return importFqn.substring(importFqn.lastIndexOf('.') + 1) || localName;
 }
 
 function normalizeJvmReceiverType(raw: string): string | null {
@@ -455,77 +415,6 @@ function findEnclosingClassField(receiverName: string, ref: UnresolvedRef, conte
         n.endLine <= enclosing.endLine,
     ) ?? null
   );
-}
-
-function buildJvmImportFqnMap(filePath: string, context: ResolutionContext): Map<string, string> {
-  const map = new Map<string, string>();
-  for (const node of context.getNodesInFile(filePath)) {
-    if (node.kind !== 'import') continue;
-    if (!isJvmLang(node.language)) continue;
-    const fqn = node.name;
-    if (!fqn || fqn.endsWith('.*') || isWildcardJvmImportSignature(node.signature)) continue;
-    // Kotlin alias parsed from the single captured `signature` line —
-    // tree-sitter already tokenized the import statement; this regex
-    // operates on that one-line substring, not on source content.
-    const alias = node.language === 'kotlin' ? extractKotlinAlias(node.signature) : undefined;
-    const localName = alias ?? fqn.substring(fqn.lastIndexOf('.') + 1);
-    if (localName) map.set(localName, fqn);
-  }
-  return map;
-}
-
-function isWildcardJvmImportSignature(signature: string | undefined): boolean {
-  let trimmed = signature?.trim();
-  if (!trimmed) return false;
-  if (trimmed.endsWith(';')) trimmed = trimmed.slice(0, -1).trimEnd();
-  return trimmed.endsWith('.*');
-}
-
-/**
- * Whether a class file's path matches an imported FQN's expected
- * location (`com.example.Foo` → `com/example/Foo.{java,kt}`). The
- * actual file may live under any source root (`src/main/java/`,
- * `src/`, a Maven submodule path), so we suffix-match. Path
- * separators are normalised so a Windows path doesn't false-miss.
- */
-function fqnMatchesFilePath(filePath: string, fqn: string): boolean {
-  const dotsToSlashes = fqn.replaceAll('.', '/');
-  const fp = filePath.replaceAll('\\', '/');
-  // Require either a path-segment boundary before the FQN suffix
-  // (`/com/example/Foo.java`) or the file IS exactly the FQN path
-  // (root-level layout). A bare `endsWith(dotsToSlashes + ext)` would
-  // false-match `abcom/example/Foo.java` for `com.example.Foo`.
-  return (
-    fp === `${dotsToSlashes}.java` ||
-    fp === `${dotsToSlashes}.kt` ||
-    fp.endsWith(`/${dotsToSlashes}.java`) ||
-    fp.endsWith(`/${dotsToSlashes}.kt`)
-  );
-}
-
-function fqnMatchesJvmPackage(classNode: Node, fqn: string, context: ResolutionContext): boolean {
-  if (!isJvmLang(classNode.language)) return false;
-  const className = fqn.substring(fqn.lastIndexOf('.') + 1);
-  if (classNode.name !== className) return false;
-  const expectedPackage = fqn.slice(0, Math.max(0, fqn.length - className.length - 1));
-  if (!expectedPackage) return false;
-  const source = context.readFile(classNode.filePath);
-  if (!source) return false;
-  return readJvmPackageName(source) === expectedPackage;
-}
-
-function readJvmPackageName(source: string): string | null {
-  for (const rawLine of source.split('\n')) {
-    const line = rawLine.trimStart();
-    if (!line.startsWith('package ')) continue;
-    const packageName = firstTokenBeforeAny(line.slice('package '.length).trimStart(), '; \t\r\n');
-    return packageName || null;
-  }
-  return null;
-}
-
-function classNodeMatchesJvmFqn(classNode: Node, fqn: string, context: ResolutionContext): boolean {
-  return fqnMatchesFilePath(classNode.filePath, fqn) || fqnMatchesJvmPackage(classNode, fqn, context);
 }
 
 // matchByExactName confidence values. Single-match resolution gets the
@@ -845,7 +734,7 @@ interface MethodCallMatchArgs extends SimpleMethodCall {
   ref: UnresolvedRef;
   context: ResolutionContext;
   capitalizedReceiver: string;
-  jvmImportFqnMap: Map<string, string> | undefined;
+  jvmImportHints: JvmImportHints | undefined;
 }
 
 function parseSimpleMethodCall(refName: string): SimpleMethodCall | null {
@@ -864,18 +753,18 @@ function buildMethodCallMatchArgs(
     ref,
     context,
     capitalizedReceiver: parsed.objectOrClass.charAt(0).toUpperCase() + parsed.objectOrClass.slice(1),
-    jvmImportFqnMap: isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined,
+    jvmImportHints: isJvmLang(ref.language) ? buildJvmImportHints(ref.filePath, context) : undefined,
   };
 }
 
 function matchDirectReceiverMethod(args: MethodCallMatchArgs): ResolvedRef | null {
-  const { objectOrClass, methodName, ref, context, jvmImportFqnMap } = args;
+  const { objectOrClass, methodName, ref, context, jvmImportHints } = args;
   return findReceiverMethod({
     receiverName: objectOrClass,
     methodName,
     ref,
     context,
-    jvmImportFqnMap,
+    jvmImportHints,
     confidence: QUALIFIED_RECEIVER_CONFIDENCE,
     resolvedBy: 'qualified-name',
   });
@@ -928,7 +817,7 @@ function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: Resolution
     methodName: parsed.methodName,
     ref,
     context,
-    jvmImportFqnMap: isJvmLang(ref.language) ? buildJvmImportFqnMap(ref.filePath, context) : undefined,
+    jvmImportHints: isJvmLang(ref.language) ? buildJvmImportHints(ref.filePath, context) : undefined,
     confidence: INSTANCE_RECEIVER_CONFIDENCE,
     resolvedBy: 'instance-method',
   });
@@ -1019,14 +908,14 @@ interface FindReceiverMethodArgs {
   methodName: string;
   ref: UnresolvedRef;
   context: ResolutionContext;
-  jvmImportFqnMap: Map<string, string> | undefined;
+  jvmImportHints: JvmImportHints | undefined;
   confidence: number;
   resolvedBy: 'qualified-name' | 'instance-method';
 }
 
 function findReceiverMethod(args: FindReceiverMethodArgs): ResolvedRef | null {
-  const { receiverName, methodName, ref, context, jvmImportFqnMap, confidence, resolvedBy } = args;
-  const preferredFqn = jvmImportFqnMap?.get(receiverName);
+  const { receiverName, methodName, ref, context, jvmImportHints, confidence, resolvedBy } = args;
+  const preferredFqn = preferredJvmFqnForReceiver(receiverName, context, jvmImportHints);
   return findMethodOnClassByName({
     className: jvmClassLookupName(receiverName, preferredFqn),
     methodName,
@@ -1135,7 +1024,7 @@ interface ReceiverFallbackArgs {
   methodName: string;
   ref: UnresolvedRef;
   context: ResolutionContext;
-  jvmImportFqnMap: Map<string, string> | undefined;
+  jvmImportHints: JvmImportHints | undefined;
 }
 
 interface InferredFieldReceiverArgs extends ReceiverFallbackArgs {
@@ -1143,21 +1032,21 @@ interface InferredFieldReceiverArgs extends ReceiverFallbackArgs {
 }
 
 function findCapitalizedReceiverMethod(args: ReceiverFallbackArgs): ResolvedRef | null {
-  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap } = args;
+  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportHints } = args;
   if (capitalizedReceiver === objectOrClass) return null;
   return findReceiverMethod({
     receiverName: capitalizedReceiver,
     methodName,
     ref,
     context,
-    jvmImportFqnMap,
+    jvmImportHints,
     confidence: INSTANCE_RECEIVER_CONFIDENCE,
     resolvedBy: 'instance-method',
   });
 }
 
 function findInferredFieldReceiverMethod(args: InferredFieldReceiverArgs): ResolvedRef | null {
-  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportFqnMap, inferType } = args;
+  const { objectOrClass, capitalizedReceiver, methodName, ref, context, jvmImportHints, inferType } = args;
   const inferredType = inferType(objectOrClass, ref, context);
   if (!inferredType || inferredType === objectOrClass || inferredType === capitalizedReceiver) return null;
   return findReceiverMethod({
@@ -1165,7 +1054,7 @@ function findInferredFieldReceiverMethod(args: InferredFieldReceiverArgs): Resol
     methodName,
     ref,
     context,
-    jvmImportFqnMap,
+    jvmImportHints,
     confidence: INSTANCE_RECEIVER_CONFIDENCE,
     resolvedBy: 'instance-method',
   });

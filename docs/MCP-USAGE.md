@@ -63,6 +63,10 @@ surface. `full` exposes every registered tool. `review` focuses diff/risk/test
 workflows. `read-only` advertises read-capable tools and blocks mutating
 branches of mixed tools.
 
+Shared daemon mode uses a per-project Unix socket on POSIX and a per-project
+named pipe on Windows. Startup retires stale lock/socket state and treats an
+active Windows named pipe as an already-running daemon instead of racing it.
+
 The server advertises MCP `tools`, `resources`, and `prompts` capabilities.
 Cartograph's public surface is still tool-first; `resources/list`,
 `resources/templates/list`, and `prompts/list` return empty lists so clients
