@@ -1,5 +1,5 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
-import { getNodeText } from '../tree-sitter-helpers.js';
+import { getNodeText, getChildByField } from '../tree-sitter-helpers.js';
 import type { LanguageExtractor } from '../tree-sitter-types.js';
 
 const PHP_FILE_INCLUDE_TYPES = new Set([
@@ -26,6 +26,13 @@ const phpExtractor: LanguageExtractor = {
   bodyField: 'body',
   paramsField: 'parameters',
   returnField: 'return_type',
+  getSignature: (node, source) => {
+    const params = getChildByField(node, 'parameters');
+    if (!params) return undefined;
+    const returnType = getChildByField(node, 'return_type');
+    const paramsText = getNodeText(params, source);
+    return returnType ? `${paramsText}: ${getNodeText(returnType, source)}` : paramsText;
+  },
   classifyClassNode: (node) => {
     return node.type === 'trait_declaration' ? 'trait' : 'class';
   },

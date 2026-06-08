@@ -297,7 +297,7 @@ function extractGoVariables(extractor: TreeSitterExtractor, node: SyntaxNode, do
     if (!nameNode?.type || nameNode.type !== 'identifier') continue;
     const valueNode = spec.namedChildCount > 1 ? spec.namedChild(spec.namedChildCount - 1) : null;
     const name = getNodeText(nameNode, extractor.source);
-    extractor.createNode({
+    const varNode = extractor.createNode({
       kind: declKind,
       name,
       node: spec,
@@ -307,6 +307,7 @@ function extractGoVariables(extractor: TreeSitterExtractor, node: SyntaxNode, do
         isExported: /^[A-Z]/.test(name),
       }),
     });
+    if (varNode) tsVisitVariableInitializer(extractor, varNode.id, getChildByField(spec, 'value'));
   }
   if (node.type === 'short_var_declaration') {
     // `:=` only appears inside function bodies in Go, so these are
