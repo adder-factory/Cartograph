@@ -40,6 +40,7 @@ app.cache.size = 1024
 server.port:8080
 ! exclamation comment
 db.url = jdbc:postgresql://localhost/x
+db.password = super-secret-value
 `,
     );
 
@@ -47,15 +48,15 @@ db.url = jdbc:postgresql://localhost/x
 
     const constants = getNodesByKind(cg.queries, 'constant').filter((c) => c.language === 'properties');
     const keys = constants.map((c) => c.qualifiedName).sort(byString);
-    expect(keys).toEqual(['app.cache.size', 'app.cache.ttl', 'db.url', 'server.port']);
+    expect(keys).toEqual(['app.cache.size', 'app.cache.ttl', 'db.password', 'db.url', 'server.port']);
 
-    // Signatures carry the value.
-    const ttl = constants.find((c) => c.name === 'app.cache.ttl');
-    expect(ttl?.signature).toBe('60');
-    const port = constants.find((c) => c.name === 'server.port');
-    expect(port?.signature).toBe('8080');
-    const url = constants.find((c) => c.name === 'db.url');
-    expect(url?.signature).toBe('jdbc:postgresql://localhost/x');
+    // Values are intentionally not copied into indexed symbol signatures:
+    // properties files often contain credentials and connection strings.
+    for (const constant of constants) {
+      expect(constant.signature).toBeUndefined();
+    }
+    expect(JSON.stringify(constants)).not.toContain('super-secret-value');
+    expect(JSON.stringify(constants)).not.toContain('jdbc:postgresql://localhost/x');
   });
 
   it('links @Value("${app.cache.ttl}") to the matching constant', async () => {

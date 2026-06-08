@@ -20,8 +20,9 @@
  *     backslash AND the next char (lossless v1 — full unescape can land
  *     when a consumer needs the post-escape value)
  *   - whitespace between key and separator is stripped
- *   - whitespace right after the separator is stripped (the value
- *     itself is taken to end-of-line, no rtrim)
+ *   - values are parsed only far enough to find key boundaries; they
+ *     are deliberately not stored in graph nodes because properties
+ *     files commonly carry credentials and connection strings
  *
  * Deferred to v2 (documented; uncomment + extend when a real corpus
  * surfaces the need):
@@ -46,7 +47,6 @@ import { generateNodeId } from '../tree-sitter-helpers.js';
 
 interface ParsedLine {
   key: string;
-  value: string;
   lineNumber: number;
   keyStartColumn: number;
 }
@@ -76,14 +76,6 @@ function parseKeyEscape(line: string, i: number): { text: string; nextIdx: numbe
   const next = line[i + 1] ?? '';
   const text = isEscapedKeyChar(next) ? next : ch + next;
   return { text, nextIdx: i + 2 };
-}
-
-function valueStartAfterSeparator(rawLine: string, separatorIdx: number): number {
-  if (!isPropertiesWhitespace(rawLine[separatorIdx])) return separatorIdx + 1;
-
-  let j = separatorIdx;
-  while (j < rawLine.length && isPropertiesWhitespace(rawLine[j])) j++;
-  return j < rawLine.length && isPropertiesSeparator(rawLine[j]) ? j + 1 : j;
 }
 
 /**
@@ -123,7 +115,7 @@ function parseKey(line: string, startCol: number): { key: string; separatorIdx: 
 }
 
 /**
- * Parse one `.properties` source line into a (key, value) pair.
+ * Parse one `.properties` source line into a key-bearing entry.
  * Returns null when the line is a comment, empty, or otherwise
  * unparseable as a key/value entry.
  */
@@ -136,19 +128,7 @@ function parseLine(rawLine: string, lineNumber: number): ParsedLine | null {
 
   const parsed = parseKey(rawLine, startCol);
   if (!parsed) return null;
-  const { key, separatorIdx } = parsed;
-
-  // Skip whitespace between key and separator (Java spec: a bare
-  // whitespace terminator counts as the separator; an `=` or `:`
-  // following whitespace is still the separator and is consumed once).
-  // If the separator char was whitespace, scan forward to see if
-  // there's an `=` or `:` after the whitespace run — Java treats
-  // `key = value` as separator `=`, not separator ` `.
-  let valueStart = valueStartAfterSeparator(rawLine, separatorIdx);
-  // Strip leading whitespace from the value.
-  while (valueStart < rawLine.length && isPropertiesWhitespace(rawLine[valueStart])) valueStart++;
-  const value = rawLine.substring(valueStart);
-  return { key, value, lineNumber, keyStartColumn: startCol };
+  return { key: parsed.key, lineNumber, keyStartColumn: startCol };
 }
 
 function propertiesExtract(filePath: string, source: string): ExtractionResult {
@@ -197,7 +177,6 @@ function propertiesExtract(filePath: string, source: string): ExtractionResult {
       endLine: parsed.lineNumber,
       startColumn: parsed.keyStartColumn,
       endColumn: rawLine.length,
-      signature: parsed.value,
       updatedAt: now,
     });
     edges.push({ source: fileId, target: id, kind: 'contains' });

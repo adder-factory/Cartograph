@@ -508,6 +508,41 @@ describe('handleAtRange — bulk ranges form', () => {
     cg.close();
   });
 
+  it('symlink escape in single-range form is rejected before index lookup', async () => {
+    const outsideDir = createTempDir();
+    const outsideFile = path.join(outsideDir, 'outside.ts');
+    const symlinkPath = path.join(testDir, 'linked.ts');
+    fs.writeFileSync(outsideFile, 'export function outside() { return 1; }\n');
+    try {
+      fs.symlinkSync(outsideFile, symlinkPath);
+    } catch {
+      cleanupTempDir(outsideDir);
+      return;
+    }
+
+    const { Cartograph } = await import('../src/index.js');
+    const { ToolHandler } = await import('../src/mcp/tools.js');
+
+    const cg = Cartograph.initSync(testDir);
+    const handler = new ToolHandler(cg);
+
+    try {
+      const result = await handler.execute('cartograph_at_range', {
+        file: 'linked.ts',
+        startLine: 1,
+        endLine: 1,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toMatch(/outside the project root/);
+      expect(result.content[0]?.text).not.toMatch(/File not indexed/);
+    } finally {
+      handler.closeAll();
+      cg.close();
+      cleanupTempDir(outsideDir);
+    }
+  });
+
   it('bulk form with one out-of-root range — entire call fails', async () => {
     const { Cartograph } = await import('../src/index.js');
     const { ToolHandler } = await import('../src/mcp/tools.js');
@@ -531,6 +566,43 @@ describe('handleAtRange — bulk ranges form', () => {
 
     handler.closeAll();
     cg.close();
+  });
+
+  it('symlink escape in bulk form is rejected with the range index', async () => {
+    const outsideDir = createTempDir();
+    const outsideFile = path.join(outsideDir, 'outside.ts');
+    const symlinkPath = path.join(testDir, 'linked.ts');
+    fs.writeFileSync(outsideFile, 'export function outside() { return 1; }\n');
+    try {
+      fs.symlinkSync(outsideFile, symlinkPath);
+    } catch {
+      cleanupTempDir(outsideDir);
+      return;
+    }
+
+    const { Cartograph } = await import('../src/index.js');
+    const { ToolHandler } = await import('../src/mcp/tools.js');
+
+    const cg = Cartograph.initSync(testDir);
+    const handler = new ToolHandler(cg);
+
+    try {
+      const result = await handler.execute('cartograph_at_range', {
+        ranges: [
+          { file: 'src/a.ts', startLine: 1, endLine: 1 },
+          { file: 'linked.ts', startLine: 1, endLine: 1 },
+        ],
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0]?.text).toMatch(/ranges\[1\]/);
+      expect(result.content[0]?.text).toMatch(/outside the project root/);
+      expect(result.content[0]?.text).not.toMatch(/File not indexed/);
+    } finally {
+      handler.closeAll();
+      cg.close();
+      cleanupTempDir(outsideDir);
+    }
   });
 
   it('bulk form with some empty ranges renders empty-range subsections', async () => {
