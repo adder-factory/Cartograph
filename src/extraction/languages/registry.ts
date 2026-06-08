@@ -41,6 +41,7 @@ import { FISH_DEF } from './fish.js';
 import { GLSL_DEF } from './glsl.js';
 import { GO_DEF } from './go.js';
 import { GRAPHQL_DEF } from './graphql.js';
+import { GROOVY_DEF } from './groovy.js';
 import { HASKELL_DEF } from './haskell.js';
 import { HCL_DEF } from './hcl.js';
 import { HTML_DEF } from './html.js';
@@ -69,6 +70,7 @@ import { RUBY_DEF } from './ruby.js';
 import { RUST_DEF } from './rust.js';
 import { SCALA_DEF } from './scala.js';
 import { SQL_DEF } from './sql.js';
+import { SOLIDITY_DEF } from './solidity.js';
 import { SVELTE_DEF } from './svelte.js';
 import { SWIFT_DEF } from './swift.js';
 import { TSX_DEF } from './tsx.js';
@@ -98,6 +100,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   GLSL_DEF,
   GO_DEF,
   GRAPHQL_DEF,
+  GROOVY_DEF,
   HASKELL_DEF,
   HCL_DEF,
   HTML_DEF,
@@ -126,6 +129,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   RUST_DEF,
   SCALA_DEF,
   SQL_DEF,
+  SOLIDITY_DEF,
   SVELTE_DEF,
   SWIFT_DEF,
   TSX_DEF,

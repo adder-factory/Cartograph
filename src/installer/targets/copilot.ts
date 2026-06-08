@@ -17,6 +17,8 @@ import { detectMcpEntryJson, removeMcpEntryJson, writeMcpEntryJson } from './wri
 const COPILOT_DOCS_URL = 'https://docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers';
 
 function userConfigDir(): string {
+  const override = process.env['COPILOT_HOME'];
+  if (override) return path.resolve(override);
   return path.join(getHomeDir(), '.copilot');
 }
 

@@ -10,8 +10,9 @@ export const SERVER_INSTRUCTIONS = `# Cartograph — compact startup guide
 
 Cartograph is an indexed code graph. Use it before broad file reads, then
 open files directly only when you need exact current source. It indexes
-30+ languages, including TypeScript/JavaScript, Python, Go, Rust, Java,
-C/C++, C#, PHP, Ruby, Swift, Kotlin, SQL, GraphQL, Svelte, Vue, and more.
+54 language modes, including TypeScript/JavaScript, Python, Go, Rust, Java,
+C/C++, C#, PHP, Ruby, Swift, Kotlin, Groovy, Solidity, SQL, GraphQL, Svelte,
+Vue, and more.
 
 Default path:
 - \`cartograph_status\` when project readiness, freshness, active server profile, or LLM setup is uncertain.
