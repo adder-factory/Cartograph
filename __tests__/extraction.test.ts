@@ -4373,6 +4373,31 @@ int countClients(void) { return 0; }
       expect(builtinRefs).toHaveLength(0);
     });
 
+    it('keeps C++ functions with std::string parameters named after the function', () => {
+      const code = `
+#include <string>
+
+int deal_command(std::string interfaceName, int flag) {
+  return 0;
+}
+
+int create_oss_version_node(string& local_ip, string& port) {
+  return 0;
+}
+
+int connect_zookeeper() {
+  return 0;
+}
+`;
+      const result = extractFromSource('src/test_parser.cpp', code);
+      const functions = result.nodes.filter((n) => n.kind === 'function').map((n) => n.name);
+
+      expect(functions).toContain('deal_command');
+      expect(functions).toContain('create_oss_version_node');
+      expect(functions).toContain('connect_zookeeper');
+      expect(result.nodes.some((n) => n.kind === 'method' && n.name === 'string')).toBe(false);
+    });
+
     it('indexes C/C++ functions with leading export-style macros', () => {
       const code = 'API_EXPORT int api_foo(void) { return 1; }\n';
       const cResult = extractFromSource('src/api.c', code, 'c');

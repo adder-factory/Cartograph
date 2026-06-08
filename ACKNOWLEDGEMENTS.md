@@ -13,9 +13,10 @@ additional MCP client targets, Salesforce stack support, Kotlin property/import
 disambiguation, embedded repository indexing, MCP resource/prompt probes,
 installer auto-allow permissions, aggregate session usage, and quieter daemon
 attachment, SAP XSJS import support, Hono route extraction, and Spring
-`@ConditionalOnProperty` config-key linkage. Those ideas were reimplemented
-inside Cartograph's current feature-slice architecture; no upstream patch code
-was copied blindly.
+`@ConditionalOnProperty` config-key linkage, `.ignore` indexing overrides for
+gitignored local source, and GLSL shader indexing. Those ideas were
+reimplemented inside Cartograph's current feature-slice architecture; no
+upstream patch code was copied blindly.
 
 ## tree-sitter
 
@@ -54,6 +55,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | prisma | [victorhqc/tree-sitter-prisma](https://github.com/victorhqc/tree-sitter-prisma) | MIT |
 | dart | [UserNobody14/tree-sitter-dart](https://github.com/UserNobody14/tree-sitter-dart) | MIT |
 | fish | [esdmr/tree-sitter-fish](https://github.com/esdmr/tree-sitter-fish) | MIT |
+| glsl | [theHamsta/tree-sitter-glsl](https://github.com/theHamsta/tree-sitter-glsl) | MIT |
 | graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
 | pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |
 | rescript | [rescript-lang/tree-sitter-rescript](https://github.com/rescript-lang/tree-sitter-rescript) | MIT |

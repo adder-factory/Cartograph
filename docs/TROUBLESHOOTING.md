@@ -58,6 +58,26 @@ Common causes:
 - A long-running MCP session still has an old database handle after storage was
   migrated. Restart the host session.
 
+## Gitignored Source Is Missing
+
+Cartograph uses Git-visible files as the default source set. If valuable local
+source is hidden by `.gitignore`, add a root `.ignore` override with a negated
+pattern:
+
+```gitignore
+!customer/
+!Pods/
+```
+
+Then run:
+
+```sh
+cartograph admin sync .
+```
+
+The override is local to Cartograph indexing. Explicit `exclude` config entries
+and `.cartographignore` marker directories still win.
+
 ## PostgreSQL Cannot Connect
 
 Run:

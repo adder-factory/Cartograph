@@ -177,6 +177,7 @@ export const EXTRACTION_LOGIC_VERSION = computeAlgoHash('src/extraction/extracti
   './languages/dart',
   './languages/elixir',
   './languages/fish',
+  './languages/glsl',
   './languages/go',
   './languages/graphql',
   './languages/hcl',

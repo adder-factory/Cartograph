@@ -47,6 +47,12 @@ submodules, for example a checked-out SDK under a parent-ignored `vendor/` or
 stay outside the graph. `indexSubmodules: false` disables both submodule and
 embedded-repository recursion.
 
+Cartograph also reads a root `.ignore` file as a local indexing override after
+Git discovery. Non-negated patterns hide matching paths from Cartograph, while
+negated patterns such as `!customer/` re-include local source that `.gitignore`
+hides. This does not change Git semantics and does not override explicit
+Cartograph `exclude` patterns or `.cartographignore` marker directories.
+
 `maxFileSize` can also be set from the CLI. `cartograph admin init
 --max-file-size <size>` writes it into the initial config; `admin index`,
 `admin sync`, `admin embed-only`, and `sync-if-dirty` accept the same flag as a

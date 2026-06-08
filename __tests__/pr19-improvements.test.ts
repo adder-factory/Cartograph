@@ -692,7 +692,7 @@ describe('CLI uninit', () => {
 // =============================================================================
 
 describe('Tree-sitter web-tree-sitter (WASM) setup (re-adopted 2026-05-17)', () => {
-  it('should use web-tree-sitter as a runtime dep with 42 grammar .wasm files in-repo', () => {
+  it('should use web-tree-sitter as a runtime dep with 43 grammar .wasm files in-repo', () => {
     const pkgPath = path.join(__dirname, '..', 'package.json');
     const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
 
@@ -704,18 +704,19 @@ describe('Tree-sitter web-tree-sitter (WASM) setup (re-adopted 2026-05-17)', () 
     expect(pkg.dependencies['tree-sitter-wasms']).toBeUndefined();
     expect(pkg.devDependencies?.['tree-sitter-wasms']).toBeUndefined();
 
-    // 42 grammar .wasm files ship in-repo (25 from the web-tree-sitter
+    // 43 grammar .wasm files ship in-repo (25 from the web-tree-sitter
     // re-adoption + elixir.wasm — tags.scm fallback extractor, 2026-05-17;
     // prisma.wasm — 2026-05-19; yaml.wasm — F#62 Drupal routing.yml
     // resolver, 2026-05-26; objc.wasm — F#65 Objective-C language,
     // 2026-05-26; luau.wasm — Luau language support, 2026-06-05;
     // upstream Tree-sitter parser coverage tranche, 2026-06-07;
-    // apex.wasm — Salesforce Apex support, 2026-06-07).
+    // apex.wasm — Salesforce Apex support, 2026-06-07; glsl.wasm —
+    // GLSL shader support, 2026-06-08).
     // Exact count, not a lower bound; a regression dropping any grammar
     // should fail this guard.
     const wasmDir = path.join(__dirname, '..', 'src', 'extraction', 'wasm');
     const wasms = fs.readdirSync(wasmDir).filter((f) => f.endsWith('.wasm'));
-    expect(wasms.length).toBe(42);
+    expect(wasms.length).toBe(43);
   });
 
   it('should carry web-tree-sitter as a runtime dependency, not dev-only', () => {

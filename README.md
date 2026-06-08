@@ -212,6 +212,12 @@ cartograph_context({task: "<task>", format: "plan"})
 → cartograph_compare_to_ref({findingsDelta: true})
 ```
 
+Cartograph starts from Git-visible files, then applies local indexing policy.
+A root `.ignore` file can re-include useful gitignored source with negated
+patterns such as `!customer/` without changing repository semantics; explicit
+Cartograph `exclude` entries and `.cartographignore` marker directories still
+win.
+
 ## Docs
 
 | Need | Go to |
@@ -282,7 +288,7 @@ cartograph_context({task: "<task>", format: "plan"})
 
 ## Supported Languages & File Formats
 
-Cartograph supports **51 language modes**. Framework-aware and derived signals
+Cartograph supports **52 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -306,7 +312,7 @@ are listed separately so the core language matrix stays readable.
 | Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
-| GraphQL / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
+| GraphQL / GLSL / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
 | JSON / JSDoc / Regex / Verilog | `.json`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
 </details>
