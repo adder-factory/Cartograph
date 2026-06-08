@@ -46,6 +46,13 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // equivalent because the installer needs a TTY for clack prompts.
   'install',
 
+  // `cartograph completions <shell>` prints shell integration scripts,
+  // and `cartograph __complete` is the hidden helper those scripts call.
+  // Both are CLI bootstrap surfaces that only make sense before/around
+  // invoking the CLI, not inside an MCP session.
+  'completions',
+  '__complete',
+
   // `cartograph serve` starts the MCP server itself — meaningless to
   // expose via MCP (you'd already be inside an MCP session).
   'serve',
