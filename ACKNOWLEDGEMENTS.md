@@ -14,8 +14,8 @@ disambiguation, embedded repository indexing, MCP resource/prompt probes,
 installer auto-allow permissions, aggregate session usage, and quieter daemon
 attachment, SAP XSJS import support, Hono route extraction, and Spring
 `@ConditionalOnProperty` config-key linkage, `.ignore` indexing overrides for
-gitignored local source, GLSL shader indexing, Groovy/Solidity indexing, and
-ArkTS/CUDA indexing. Those ideas were
+gitignored local source, binary/invalid ignore-file resilience, GLSL shader
+indexing, Groovy/Solidity indexing, and ArkTS/CUDA indexing. Those ideas were
 reimplemented inside Cartograph's current feature-slice architecture; no
 upstream patch code was copied blindly.
 

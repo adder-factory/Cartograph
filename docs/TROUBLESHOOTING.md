@@ -79,6 +79,11 @@ cartograph admin sync .
 The override is local to Cartograph indexing. Explicit `exclude` config entries
 and `.cartographignore` marker directories still win.
 
+If Cartograph warns that `.ignore` or `.gitignore` is binary or invalid UTF-8,
+restore or rewrite that file as plain UTF-8 text. Cartograph skips the corrupt
+control file and continues indexing instead of applying unpredictable ignore
+rules.
+
 ## PostgreSQL Cannot Connect
 
 Run:

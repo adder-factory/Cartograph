@@ -23,6 +23,7 @@ import { MAX_INDEX_FILE_SIZE } from '../src/default-config.js';
 import { loadConfig } from '../src/config.js';
 import { getCartographDir, validateDirectory } from '../src/directory.js';
 import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
+import { defaultLogger, setLogger, silentLogger } from '../src/errors.js';
 
 // Create a temporary directory for each test
 function createTempDir(): string {
@@ -398,6 +399,27 @@ describe('Cartograph Foundation', () => {
       cg.close();
 
       expect(fs.readFileSync(gitignorePath, 'utf-8')).toBe(original);
+    });
+
+    it('does not append into a binary or invalid UTF-8 .gitignore', () => {
+      const gitignorePath = path.join(tempDir, '.gitignore');
+      const original = Buffer.from([0xff, 0xfe, 0x00, 0x5b, 0x99]);
+      const warningContexts: Array<Record<string, unknown> | undefined> = [];
+      fs.writeFileSync(gitignorePath, original);
+      setLogger({
+        ...silentLogger,
+        warn: (_message, context) => warningContexts.push(context),
+      });
+
+      try {
+        const cg = Cartograph.initSync(tempDir);
+        cg.close();
+
+        expect(fs.readFileSync(gitignorePath)).toEqual(original);
+        expect(warningContexts.some((context) => context?.['path'] === gitignorePath)).toBe(true);
+      } finally {
+        setLogger(defaultLogger);
+      }
     });
   });
 

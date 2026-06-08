@@ -17,6 +17,7 @@ import { scanDirectory } from '../src/extraction/index.js';
 import { getFileByPath } from '../src/db/queries-files.js';
 import { DEFAULT_CONFIG, type CartographConfig } from '../src/types.js';
 import Cartograph from '../src/index.js';
+import { defaultLogger, setLogger, silentLogger } from '../src/errors.js';
 
 function tempDir(prefix: string): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
@@ -123,6 +124,28 @@ describe('.cartographignore marker (bug #3)', () => {
       const files = scanDirectory(dir, config);
       expect(files).toContain('src/app.ts');
       expect(files).not.toContain('src/local-only.ts');
+    });
+
+    it('skips binary root .ignore overrides with a path-bearing warning', () => {
+      const warningContexts: Array<Record<string, unknown> | undefined> = [];
+      setLogger({
+        ...silentLogger,
+        warn: (_message, context) => warningContexts.push(context),
+      });
+
+      try {
+        fs.writeFileSync(path.join(dir, '.gitignore'), 'customer/\n');
+        fs.writeFileSync(path.join(dir, '.ignore'), Buffer.from([0xff, 0xfe, 0x00, 0x5b]));
+        fs.mkdirSync(path.join(dir, 'customer'));
+        fs.writeFileSync(path.join(dir, 'customer', 'adapter.ts'), 'export const c = 1;');
+
+        const files = scanDirectory(dir, config);
+        expect(files).toContain('src/app.ts');
+        expect(files).not.toContain('customer/adapter.ts');
+        expect(warningContexts.some((context) => context?.['path'] === path.join(dir, '.ignore'))).toBe(true);
+      } finally {
+        setLogger(defaultLogger);
+      }
     });
   });
 
