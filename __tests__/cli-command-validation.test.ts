@@ -156,6 +156,44 @@ describe('CLI command validation contracts', () => {
     }
   });
 
+  it('prints installable shell completion scripts', () => {
+    const bash = runCli(['completions', 'bash']);
+    expect(bash.code).toBe(0);
+    expect(bash.out).toContain('complete -o default -F _cartograph_completion cartograph');
+    expect(bash.out).toContain('cartograph __complete');
+
+    const zsh = runCli(['completion', 'zsh']);
+    expect(zsh.code).toBe(0);
+    expect(zsh.out).toContain('#compdef cartograph');
+    expect(zsh.out).toContain('cartograph __complete');
+
+    const fish = runCli(['completions', 'fish']);
+    expect(fish.code).toBe(0);
+    expect(fish.out).toContain('complete -c cartograph');
+    expect(fish.out).toContain('cartograph __complete');
+  });
+
+  it('rejects unsupported completion shells cleanly', () => {
+    const { out, code } = runCli(['completions', 'powershell']);
+    expect(code).not.toBe(0);
+    expect(out).toContain('Unsupported completion shell "powershell"');
+    expect(out).toContain('bash, zsh, fish');
+  });
+
+  it('offers command and option candidates through the hidden completion helper', () => {
+    const topLevel = runCli(['__complete', 'sta']);
+    expect(topLevel.code).toBe(0);
+    expect(topLevel.out.split('\n')).toContain('status');
+
+    const admin = runCli(['__complete', 'admin', 'sy']);
+    expect(admin.code).toBe(0);
+    expect(admin.out.split('\n')).toContain('sync');
+
+    const statusOption = runCli(['__complete', 'status', '--j']);
+    expect(statusOption.code).toBe(0);
+    expect(statusOption.out.split('\n')).toContain('--json');
+  });
+
   it(
     'suppresses EPIPE noise when output is piped to head',
     () => {

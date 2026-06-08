@@ -19,6 +19,7 @@ import {
 } from '../_cli-core.js';
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
+import { registerCompletionsCommand, type CompletionCliCommand } from '../../features/completions/index.js';
 import { registerDoctorCommand, type DoctorResult, type DoctorRunOptions } from '../../features/doctor/index.js';
 import { registerInstallCommand } from '../../features/install/index.js';
 import { registerLlmSetupCommand } from '../../features/llm-setup/index.js';
@@ -184,4 +185,9 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
   registerBackendCommand(deps);
   registerDoctorCommand(deps);
   registerSetupCommand(deps);
+  registerCompletionsCommand({
+    program: deps.program as unknown as CompletionCliCommand,
+    error: deps.error,
+    writeStdout: deps.writeStdout,
+  });
 }
