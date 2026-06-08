@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import {
   type FileTreeNode,
   buildFileTree,
@@ -92,6 +93,23 @@ export interface RenderFileSummaryArgs {
   style?: Pick<FilesRenderStyle, 'bold' | 'cyan' | 'dim'>;
 }
 
+export interface RenderMcpFilesOutputArgs {
+  format: FileListFormat;
+  files: FileListing;
+  includeMetadata: boolean;
+  maxDepth: number | undefined;
+  dirFilter: string | undefined;
+  projectFileCount: number | undefined;
+  flatSummaries?: ReadonlyMap<string, string> | undefined;
+}
+
+export interface BuildFilesNoMatchesMessageArgs {
+  allFiles: ReadonlyArray<FileListingRow>;
+  dir: string | undefined;
+  pattern: string | undefined;
+  projectRoot: string;
+}
+
 interface AppendFlatFileLinesArgs {
   lines: string[];
   file: FileListingRow;
@@ -120,9 +138,11 @@ interface RenderCliTreeArgs {
 
 type CliTreeStyle = Pick<FilesRenderStyle, 'dim' | 'cyan'>;
 
+export const MAX_FILES_FOR_INLINE_SUMMARY = 80;
+export const LOW_TOKEN_FILES_MAX_DEPTH = 3;
+
 const VALID_FILE_FORMATS: FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
 const SUMMARY_DIR_LABEL_WIDTH = 40;
-const LOW_TOKEN_FILES_MAX_DEPTH = 3;
 const identityStyle: FilesRenderStyle = {
   bold: (s) => s,
   dim: (s) => s,
@@ -247,6 +267,69 @@ export function filterFilesByPattern({ files, options, filterFilesByDir }: Filte
   return filtered.filter((f) => regex.test(f.path));
 }
 
+export function buildFilesNoMatchesMessage(args: BuildFilesNoMatchesMessageArgs): string {
+  const dirHint = buildFilesEmptyDirHint(args.allFiles, args.dir, args.projectRoot);
+  const unsupported = args.pattern ? detectUnsupportedGlobConstruct(args.pattern) : undefined;
+  const patternHint = unsupported
+    ? `\n\n> _\`pattern\` "${args.pattern}" contains ${unsupported}, which is NOT honored. Only \`*\` / \`?\` / \`**\` glob syntax is supported — unsupported metacharacters are treated as literals. Use a simpler pattern (\`*.ts\`, \`**/*.test.ts\`)._`
+    : '';
+  return `No files found matching the criteria.${dirHint}${patternHint}`;
+}
+
+export function buildFilesEmptyDirHint(
+  allFiles: ReadonlyArray<FileListingRow>,
+  dir: string | undefined,
+  projectRoot: string,
+): string {
+  if (!dir) return '';
+  const absoluteHint = buildAbsoluteDirHint(allFiles, dir, projectRoot);
+  if (absoluteHint) return absoluteHint;
+  const leadingSlashHint = buildLeadingSlashDirHint(allFiles, dir);
+  if (leadingSlashHint) return leadingSlashHint;
+  return buildRootBasenameDirHint(allFiles, dir, projectRoot);
+}
+
+function buildAbsoluteDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: string, projectRoot: string): string {
+  if (!path.isAbsolute(dir)) return '';
+  const normRoot = projectRoot.replace(/\/+$/, '');
+  if (dir !== normRoot && !dir.startsWith(normRoot + '/')) return '';
+
+  const stripped = dir === normRoot ? '' : dir.slice(normRoot.length + 1);
+  if (stripped.length > 0 && filterFilesByDir(allFiles, stripped).length === 0) return '';
+
+  const suggestion = stripped.length === 0 ? '(omit `dir`)' : `"${stripped}"`;
+  return `\n\n> _\`dir\` "${dir}" looks like an absolute path inside the project. Did you mean ${suggestion}? Path filters are project-relative._`;
+}
+
+function buildLeadingSlashDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: string): string {
+  if (!dir.startsWith('/')) return '';
+  const stripped = dir.replace(/^\/+/, '');
+  if (stripped.length === 0 || filterFilesByDir(allFiles, stripped).length === 0) return '';
+  return `\n\n> _\`dir\` "${dir}" matched 0 files. Did you mean "${stripped}"? Path filters are index-relative — drop the leading "/"._`;
+}
+
+function buildRootBasenameDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: string, projectRoot: string): string {
+  const slash = dir.indexOf('/');
+  if (slash <= 0) return '';
+  const head = dir.slice(0, slash);
+  const rootBasename = path.basename(projectRoot);
+  if (!rootBasename || head !== rootBasename) return '';
+  const stripped = dir.slice(slash + 1);
+  if (stripped.length === 0 || filterFilesByDir(allFiles, stripped).length === 0) return '';
+  return (
+    `\n\n> _\`dir\` "${dir}" matched 0 files. ` +
+    `Did you mean "${stripped}"? Path filters are index-relative ` +
+    `(project root is "${rootBasename}")._`
+  );
+}
+
+export function detectUnsupportedGlobConstruct(pattern: string): string | undefined {
+  if (/[[\]]/.test(pattern)) return '`[...]` character classes';
+  if (/\{[^}]*\}/.test(pattern)) return '`{a,b}` alternation';
+  if (pattern.startsWith('!')) return 'leading `!` negation';
+  return undefined;
+}
+
 export function buildFilesJsonRows(files: FileListing): Array<{
   path: string;
   language: string;
@@ -294,6 +377,98 @@ export function renderFilesOutput(args: RenderFilesOutputArgs): string[] {
         }),
       ];
   }
+}
+
+export function renderFilesMcpOutput(args: RenderMcpFilesOutputArgs): string {
+  switch (args.format) {
+    case 'flat':
+      return formatMcpFilesFlat(args.files, args.includeMetadata, args.flatSummaries);
+    case 'grouped':
+      return formatMcpFilesGrouped(args.files, args.includeMetadata);
+    case 'summary':
+      return formatMcpFilesSummary(args);
+    default:
+      return formatMcpFilesTree(args.files, args.includeMetadata, args.maxDepth);
+  }
+}
+
+function formatMcpFilesFlat(
+  files: FileListing,
+  includeMetadata: boolean,
+  summaries?: ReadonlyMap<string, string>,
+): string {
+  const lines: string[] = [`## Files (${files.length})`, ''];
+  const sortedFiles = [...files].sort((a, b) => a.path.localeCompare(b.path));
+  for (const file of sortedFiles) {
+    if (includeMetadata) {
+      lines.push(`- ${file.path} (${file.language}, ${file.nodeCount} symbols)`);
+    } else {
+      lines.push(`- ${file.path}`);
+    }
+    const summary = summaries?.get(file.path);
+    if (summary) lines.push(`    ${summary}`);
+  }
+  return lines.join('\n');
+}
+
+function formatMcpFilesGrouped(files: FileListing, includeMetadata: boolean): string {
+  const lines: string[] = [`## Files by Language (${files.length} total)`, ''];
+  const byLang = groupFilesByLanguage(files);
+  for (const [lang, langFiles] of sortLanguageGroups(byLang)) {
+    lines.push(`### ${lang} (${langFiles.length})`);
+    const sortedLangFiles = [...langFiles].sort((a, b) => a.path.localeCompare(b.path));
+    for (const file of sortedLangFiles) {
+      if (includeMetadata) {
+        lines.push(`- ${file.path} (${file.nodeCount} symbols)`);
+      } else {
+        lines.push(`- ${file.path}`);
+      }
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function formatMcpFilesSummary(args: RenderMcpFilesOutputArgs): string {
+  const rollup = buildDirRollup(args.files, args.maxDepth, args.dirFilter);
+  const header = buildMcpSummaryHeader(rollup, args.dirFilter, args.projectFileCount);
+  const lines: string[] = [
+    header,
+    '',
+    'Directory rollups — file + symbol counts per directory, sorted by symbol density.',
+    '',
+    '| Directory | Files | Symbols |',
+    '|-----------|------:|--------:|',
+  ];
+  for (const row of rollup.rows) {
+    const label = row.dir === null ? '(root)' : `${row.dir}/`;
+    lines.push(`| \`${label}\` | ${row.files} | ${row.symbols} |`);
+  }
+  return lines.join('\n');
+}
+
+function buildMcpSummaryHeader(
+  rollup: DirRollup,
+  dirFilter: string | undefined,
+  projectFileCount: number | undefined,
+): string {
+  const filterPrefix = dirFilter ? dirFilter.replace(/\/+$/, '') : null;
+  if (!filterPrefix) {
+    return `## Project Summary (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols)`;
+  }
+  const base = `## Subtree Summary — \`${filterPrefix}/\` (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols`;
+  const showProjectTotal =
+    projectFileCount !== undefined && projectFileCount !== 0 && projectFileCount !== rollup.totalFiles;
+  const suffix = showProjectTotal ? `; project-wide total ${projectFileCount} files)` : ')';
+  return base + suffix;
+}
+
+function formatMcpFilesTree(files: FileListing, includeMetadata: boolean, maxDepth?: number): string {
+  return [
+    `## Project Structure (${files.length} files)`,
+    '',
+    ...renderFileTree({ files, includeMetadata, maxDepth }),
+  ].join('\n');
 }
 
 export function renderFlatFiles({

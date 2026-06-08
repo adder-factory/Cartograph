@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 const state = {
@@ -12,6 +13,15 @@ const state = {
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
+  collectTargets: vi.fn((ctx: IndexHookContext, options: { scope: 'all' } | { scope: 'files'; files: string[] }) => {
+    if (options.scope === 'all') {
+      return getAllFiles(ctx.queries).map((file) => ({ path: file.path, language: file.language }));
+    }
+    return options.files
+      .map((filePath) => getFileByPath(ctx.queries, filePath))
+      .filter((file): file is NonNullable<typeof file> => file !== null)
+      .map((file) => ({ path: file.path, language: file.language }));
+  }),
   yieldToEventLoop: vi.fn(async () => {}),
   refreshEdgesHook: vi.fn(
     async (args: {

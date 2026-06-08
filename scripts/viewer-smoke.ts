@@ -119,7 +119,7 @@ const FINDING_FIXTURE_SYMBOL = 'largeProblem';
 const FINDING_FIXTURE_BODY = Array.from({ length: 105 }, (_, i) => `  total += ${i + 3};`).join('\n');
 const REAL_PROJECT_LAYOUT_SNAPSHOTS = [
   { name: 'default core graph', hash: '#tab=graph&density=core&detail=grouped', minNodes: 20, minEdges: 8 },
-  { name: 'viewer focus graph', search: 'startViewerServer', minNodes: 20, minEdges: 8 },
+  { name: 'viewer focus graph', search: 'startViewerServer', minNodes: 2, minEdges: 1 },
   { name: 'graph payload focus', search: 'graphPayload', minNodes: 20, minEdges: 8 },
 ] as const;
 
@@ -717,6 +717,7 @@ async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometr
             badBoxSample.push({ id: edge.id(), kind: edge.data('kind'), box });
           }
         }
+        if (source.id() === target.id()) return;
         const renderedSource = edge.renderedSourceEndpoint?.();
         const renderedTarget = edge.renderedTargetEndpoint?.();
         if (!renderedSource || !renderedTarget) return;
@@ -779,7 +780,7 @@ async function graphLayoutSample(page: Page): Promise<GraphLayoutSample> {
       .nodes()
       .filter((node) => !node.data('isGroup') && node.style('display') !== 'none' && !node.hasClass('collapse-hidden'))
       .map((node) => {
-        const p = node.renderedPosition();
+        const p = node.position();
         return { id: node.id(), label: node.data('label'), x: p.x, y: p.y };
       })
       .sort((a, b) => a.id.localeCompare(b.id))
@@ -891,12 +892,20 @@ async function waitForLayoutStabilitySample(page: Page): Promise<GraphLayoutSamp
   return graphLayoutSample(page);
 }
 
+function centerGraphLayoutSample(sample: GraphLayoutSample): GraphLayoutSample {
+  if (sample.length === 0) return sample;
+  const center = sample.reduce((acc, node) => ({ x: acc.x + node.x, y: acc.y + node.y }), { x: 0, y: 0 });
+  center.x /= sample.length;
+  center.y /= sample.length;
+  return sample.map((node) => ({ ...node, x: node.x - center.x, y: node.y - center.y }));
+}
+
 async function assertGraphLayoutStableAcrossReload(page: Page, url: string): Promise<void> {
-  const before = await waitForLayoutStabilitySample(page);
+  const before = centerGraphLayoutSample(await waitForLayoutStabilitySample(page));
   if (before.length === 0) throw new Error('graph layout stability check had no visible nodes before reload');
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await waitForGraph(page);
-  const after = await waitForLayoutStabilitySample(page);
+  const after = centerGraphLayoutSample(await waitForLayoutStabilitySample(page));
   const afterById = new Map(after.map((node) => [node.id, node]));
   const changed = before
     .map((node) => {

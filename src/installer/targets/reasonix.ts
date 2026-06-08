@@ -15,7 +15,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, getMcpCommand, type McpCommandOptions } from './shared.js';
+import {
+  getHomeDir,
+  getMcpCommand,
+  getMcpServerArgs,
+  mcpCommandOptionsForLocation,
+  type McpCommandOptions,
+} from './shared.js';
 import {
   detectMcpEntryJson,
   removeMcpEntryJson,
@@ -40,7 +46,7 @@ function getReasonixServerEntry(options: McpCommandOptions = {}): {
 } {
   return {
     command: getMcpCommand(options),
-    args: ['serve', '--mcp'],
+    args: getMcpServerArgs(options),
     disabled: false,
   };
 }
@@ -80,7 +86,11 @@ class ReasonixTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = configJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getReasonixServerEntry(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { mcpServers: { cartograph: getReasonixServerEntry(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

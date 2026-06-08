@@ -16,7 +16,9 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import {
   getHomeDir,
   getMcpCommand,
+  getMcpServerArgs,
   jsonDeepEqual,
+  mcpCommandOptionsForLocation,
   readJsonFile,
   removeNestedJsonEntry,
   writeJsonFile,
@@ -40,7 +42,7 @@ function settingsJsonPath(loc: Location): string {
 function getZedContextServerEntry(options: McpCommandOptions = {}): { command: string; args: string[] } {
   return {
     command: getMcpCommand(options),
-    args: ['serve', '--mcp'],
+    args: getMcpServerArgs(options),
   };
 }
 
@@ -73,7 +75,11 @@ class ZedTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = settingsJsonPath(loc);
-    const snippet = JSON.stringify({ context_servers: { cartograph: getZedContextServerEntry(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { context_servers: { cartograph: getZedContextServerEntry(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 
@@ -86,7 +92,7 @@ function writeContextServerEntry(loc: Location, opts: InstallOptions): WriteResu
   const file = settingsJsonPath(loc);
   const existing = readJsonFile(file);
   const before = existing['context_servers']?.cartograph;
-  const after = getZedContextServerEntry(opts);
+  const after = getZedContextServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
   if (jsonDeepEqual(before, after)) return { path: file, action: 'unchanged' };
 

@@ -11,7 +11,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, getMcpServerConfig, type McpCommandOptions } from './shared.js';
+import { getHomeDir, getMcpServerConfig, mcpCommandOptionsForLocation, type McpCommandOptions } from './shared.js';
 import {
   detectMcpEntryJson,
   removeMcpEntryJson,
@@ -86,7 +86,11 @@ class CopilotTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsonPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getCopilotServerEntry(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { mcpServers: { cartograph: getCopilotServerEntry(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

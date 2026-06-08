@@ -19,7 +19,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, getMcpCommand, type McpCommandOptions } from './shared.js';
+import {
+  getHomeDir,
+  getMcpCommand,
+  getMcpServerArgs,
+  mcpCommandOptionsForLocation,
+  type McpCommandOptions,
+} from './shared.js';
 import {
   detectMcpEntryJsonc,
   removeMcpEntryJsonc,
@@ -47,7 +53,7 @@ function getCodeBuddyServerEntry(options: McpCommandOptions = {}): { type: strin
   return {
     type: 'stdio',
     command: getMcpCommand(options),
-    args: ['serve', '--mcp'],
+    args: getMcpServerArgs(options),
   };
 }
 
@@ -87,7 +93,11 @@ class CodeBuddyTarget implements AgentTarget {
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
     const target = mcpJsoncPath(loc);
-    const snippet = JSON.stringify({ mcpServers: { cartograph: getCodeBuddyServerEntry(opts) } }, null, 2);
+    const snippet = JSON.stringify(
+      { mcpServers: { cartograph: getCodeBuddyServerEntry(mcpCommandOptionsForLocation(loc, opts)) } },
+      null,
+      2,
+    );
     return `# Add to ${target}\n\n${snippet}\n`;
   }
 

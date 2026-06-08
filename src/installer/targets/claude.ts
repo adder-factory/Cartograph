@@ -21,6 +21,7 @@ import {
   getHomeDir,
   getMcpServerConfig,
   jsonDeepEqual,
+  mcpCommandOptionsForLocation,
   readJsonFile,
   removeMarkedSection,
   removeNestedJsonEntry,
@@ -91,7 +92,7 @@ function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['
   const file = claudeJsonPath(loc);
   const existing = readJsonFile(file);
   const before = localProjectConfig(existing)?.['mcpServers']?.cartograph;
-  const after = getMcpServerConfig(opts);
+  const after = getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts));
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
   }
@@ -243,7 +244,13 @@ class ClaudeCodeTarget implements AgentTarget {
     const snippet =
       loc === 'local'
         ? JSON.stringify(
-            { projects: { [projectKey()]: { mcpServers: { cartograph: getMcpServerConfig(opts) } } } },
+            {
+              projects: {
+                [projectKey()]: {
+                  mcpServers: { cartograph: getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts)) },
+                },
+              },
+            },
             null,
             2,
           )

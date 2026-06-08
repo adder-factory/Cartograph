@@ -352,7 +352,8 @@ function initializeGraphLayoutState() {
 }
 
 function graphFitClampBounds() {
-  return isMobileViewport() ? { min: 0.12, max: 0.96 } : { min: 0.12, max: 1.08 };
+  const min = typeof VIEWER_MIN_ZOOM === 'number' ? VIEWER_MIN_ZOOM : 0.04;
+  return isMobileViewport() ? { min, max: 0.96 } : { min, max: 1.08 };
 }
 
 function fitGraph() {

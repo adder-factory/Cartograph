@@ -35,10 +35,25 @@ export function getHomeDir(): string {
 
 export interface McpCommandOptions {
   command?: string | undefined;
+  projectPath?: string | undefined;
 }
 
 export function getMcpCommand(options: McpCommandOptions = {}): string {
   return options.command ?? 'cartograph';
+}
+
+export function getMcpServerArgs(options: McpCommandOptions = {}): string[] {
+  const args = ['serve', '--mcp'];
+  if (options.projectPath) args.push('--project-path', path.resolve(options.projectPath));
+  return args;
+}
+
+export function mcpCommandOptionsForLocation(
+  loc: 'global' | 'local',
+  options: McpCommandOptions = {},
+): McpCommandOptions {
+  if (loc !== 'local') return options;
+  return { ...options, projectPath: options.projectPath ?? process.cwd() };
 }
 
 /**
@@ -50,7 +65,7 @@ export function getMcpServerConfig(options: McpCommandOptions = {}): { type: str
   return {
     type: 'stdio',
     command: getMcpCommand(options),
-    args: ['serve', '--mcp'],
+    args: getMcpServerArgs(options),
   };
 }
 

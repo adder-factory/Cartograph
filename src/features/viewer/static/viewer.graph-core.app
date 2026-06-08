@@ -153,6 +153,8 @@ function fcoseLayoutOpts(overrides = {}) {
   return { ...base, ...overrides };
 }
 
+const VIEWER_MIN_ZOOM = 0.04;
+
 const cy = cytoscape({
   container: document.getElementById('cy'),
   elements: [
@@ -504,7 +506,7 @@ const cy = cytoscape({
   ],
   layout: fcoseLayoutOpts(),
   wheelSensitivity: 0.2,
-  minZoom: 0.12,
+  minZoom: VIEWER_MIN_ZOOM,
   maxZoom: 2.4,
 });
 
