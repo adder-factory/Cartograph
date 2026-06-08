@@ -1,14 +1,8 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import { getChildByField, getNodeText } from '../tree-sitter-helpers.js';
 import type { ExtractorContext, LanguageExtractor } from '../tree-sitter-types.js';
+import { addLanguageReference } from './reference-helpers.js';
 import type { LanguageDef } from './types.js';
-
-interface NixReferenceArgs {
-  node: SyntaxNode;
-  name: string;
-  kind: 'calls' | 'imports' | 'references';
-  ctx: ExtractorContext;
-}
 
 function attrpathName(node: SyntaxNode, source: string): string | null {
   const parts = node.namedChildren
@@ -77,7 +71,7 @@ function emitInheritedAttrs(node: SyntaxNode, ctx: ExtractorContext): boolean {
 function emitApplyCall(node: SyntaxNode, ctx: ExtractorContext): void {
   const target = callTargetName(getChildByField(node, 'function'), ctx.source);
   if (!target) return;
-  emitReference({ node, name: target, kind: 'calls', ctx });
+  addLanguageReference({ node, name: target, kind: 'calls', ctx });
   if (target === 'import') emitImport(node, ctx);
 }
 
@@ -91,7 +85,7 @@ function emitImport(node: SyntaxNode, ctx: ExtractorContext): void {
     node,
     extra: { signature: getNodeText(node, ctx.source).trim() },
   });
-  emitReference({ node, name: importPath, kind: 'imports', ctx });
+  addLanguageReference({ node, name: importPath, kind: 'imports', ctx });
 }
 
 function importPathText(node: SyntaxNode, source: string): string | null {
@@ -104,20 +98,7 @@ function importPathText(node: SyntaxNode, source: string): string | null {
 
 function emitExpressionReference(node: SyntaxNode, ctx: ExtractorContext): void {
   const target = callTargetName(node, ctx.source);
-  if (target) emitReference({ node, name: target, kind: 'references', ctx });
-}
-
-function emitReference(args: NixReferenceArgs): void {
-  const { node, name, kind, ctx } = args;
-  const fromNodeId = ctx.nodeStack.at(-1);
-  if (!fromNodeId) return;
-  ctx.addUnresolvedReference({
-    fromNodeId,
-    referenceName: name,
-    referenceKind: kind,
-    line: node.startPosition.row + 1,
-    column: node.startPosition.column,
-  });
+  if (target) addLanguageReference({ node, name: target, kind: 'references', ctx });
 }
 
 function callTargetName(node: SyntaxNode | null, source: string): string | null {

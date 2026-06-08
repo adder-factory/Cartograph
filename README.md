@@ -316,7 +316,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **59 language modes**. Framework-aware and derived signals
+Cartograph supports **60 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -331,6 +331,7 @@ are listed separately so the core language matrix stays readable.
 | Rust | `.rs` |
 | Java / Kotlin / Scala / Groovy | `.java`, `.kt`, `.kts`, `.scala`, `.sc`, `.groovy`, `.gradle` |
 | C / C++ / C# / CUDA | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs`, `.cu`, `.cuh` |
+| Clojure / ClojureScript | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` |
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
 | PHP / Ruby | `.php`, `.module`, `.install`, `.theme`, `.inc`, `.rb`, `.rake` |
 | Salesforce | `.cls`, `.trigger`, plus Aura/Visualforce markup extensions in Salesforce source paths |

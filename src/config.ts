@@ -238,6 +238,7 @@ export const VALID_LANGUAGES = [
   'bash',
   'zsh',
   'fish',
+  'clojure',
   'glsl',
   'hlsl',
   'nix',

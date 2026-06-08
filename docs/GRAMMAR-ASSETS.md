@@ -84,6 +84,25 @@ bun scripts/build-grammar-wasm.ts --only=nix --force-build
 bun test __tests__/nix-extraction.test.ts __tests__/language-registry.test.ts
 ```
 
+## Clojure / ClojureScript
+
+| Field | Value |
+|---|---|
+| Checked-in asset | `src/extraction/wasm/clojure.wasm` |
+| SHA-256 | `3c635e36fb807b7ae0bce07823307b2b8741290f8c2d7e48f61f46622dd41f14` |
+| Source package target | `tree-sitter-clojure@0.4.0` |
+| Package integrity | `sha512-Yzsu1Hwm9PZhl+FOEtY/WQxeal5CP1ZRLgEoYec50yXVn1SLXB1EQ8+zXI38l33Gecowl2XjYggA7DQzFi07Vw==` |
+| Repository | `https://github.com/oakmac/tree-sitter-clojure` |
+| License | MIT |
+
+Regenerate check:
+
+```sh
+npm install --no-save --package-lock=false --ignore-scripts tree-sitter-clojure@0.4.0
+bun scripts/build-grammar-wasm.ts --only=clojure --force-build
+bun test __tests__/clojure-extraction.test.ts __tests__/language-registry.test.ts
+```
+
 ## Apex / Salesforce
 
 | Field | Value |
