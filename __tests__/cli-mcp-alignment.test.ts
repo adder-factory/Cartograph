@@ -46,6 +46,12 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // equivalent because the installer needs a TTY for clack prompts.
   'install',
 
+  // `cartograph install-hooks` writes managed git hook snippets under
+  // `.git/hooks` so the local index is refreshed after pulls, checkouts,
+  // and rewrites. MCP sessions should request `cartograph_admin({action:
+  // 'sync'})` directly instead of mutating repository hooks.
+  'install_hooks',
+
   // `cartograph completions <shell>` prints shell integration scripts,
   // and `cartograph __complete` is the hidden helper those scripts call.
   // Both are CLI bootstrap surfaces that only make sense before/around

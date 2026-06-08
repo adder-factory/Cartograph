@@ -15,6 +15,7 @@ agent. Use non-interactive commands where possible.
 
 2. From my project repository, run:
    cartograph install --yes --target=auto --location=local
+   cartograph install-hooks --command "$(command -v cartograph)"
    cartograph status --verbose
 
 3. If the MCP host cannot find `cartograph` on PATH, retry local wiring with:
@@ -41,6 +42,11 @@ The local install command initializes `.cartograph/`, writes supported local MCP
 configuration, indexes the repository, and skips the interactive LLM wizard in
 `--yes` mode. Core search, graph, impact, review, status, and affected-test
 commands work without an LLM backend.
+
+`cartograph install-hooks` appends managed `post-merge`, `post-checkout`, and
+`post-rewrite` hook blocks so pulls, branch switches, and rebases trigger a
+quiet background sync. Existing hook content is preserved; remove the managed
+blocks with `cartograph install-hooks --remove`.
 
 For Claude Code, local install follows Claude's private project scope: the MCP
 server is stored under the current project in `~/.claude.json`, permissions are

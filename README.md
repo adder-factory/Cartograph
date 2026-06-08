@@ -71,6 +71,13 @@ write an absolute executable path into the config:
 cartograph install --command "$(command -v cartograph)"
 ```
 
+To keep the graph fresh after pulls, branch switches, and rebases, install the
+managed git hooks:
+
+```bash
+cartograph install-hooks --command "$(command -v cartograph)"
+```
+
 Or give this task to your coding agent:
 
 ```text
@@ -280,6 +287,7 @@ win.
 | `cartograph hotspots` | Churn x centrality triage |
 | `cartograph imports` | Import statement graph data |
 | `cartograph install` | Configure MCP server entries for supported agents |
+| `cartograph install-hooks` | Install managed git hooks for quiet background sync |
 | `cartograph llm` | Interactive local/cloud LLM provider setup |
 | `cartograph local-chat` | Delegate bulk prose to a local LLM |
 | `cartograph mcp-budget` | Measure MCP startup payload size |

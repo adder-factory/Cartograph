@@ -11,6 +11,9 @@ cartograph install --yes --target=auto --location=local
 cartograph install --yes --target=auto --location=global
 cartograph install --print-config codex
 cartograph install --command /absolute/path/to/cartograph
+cartograph install-hooks [path]    # keep index fresh after pull/checkout/rebase
+cartograph install-hooks --command "$(command -v cartograph)"
+cartograph install-hooks --remove
 cartograph setup [path]            # init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph status [path]           # index status and feature readiness
@@ -37,6 +40,11 @@ file, for example `cartograph completions zsh`.
 Use `cartograph install --command <path>` when a GUI-launched agent cannot
 resolve `cartograph` from PATH. The installer writes that executable path into
 each MCP config entry while keeping the normal `serve --mcp` args.
+
+Use `cartograph install-hooks` from a git working tree to append managed
+`post-merge`, `post-checkout`, and `post-rewrite` hook blocks that run
+`cartograph admin sync --quiet` in the background. Existing hook content is
+preserved, and `--remove` deletes only Cartograph's managed block.
 
 ## Admin
 

@@ -16,7 +16,8 @@
  *
  * Usage:
  *   cartograph                      Run interactive installer (when no args)
- *   cartograph install              Run interactive installer
+ *   cartograph install              Configure MCP client entries
+ *   cartograph install-hooks        Install managed git sync hooks
  *   cartograph admin init [path]    Initialize Cartograph in a project
  *   cartograph admin index [path]   Index all files in the project
  *   cartograph status [path]        Show index status
