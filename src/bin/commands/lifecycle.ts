@@ -21,6 +21,7 @@ import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
 import { registerCompletionsCommand, type CompletionCliCommand } from '../../features/completions/index.js';
 import { registerDoctorCommand, type DoctorResult, type DoctorRunOptions } from '../../features/doctor/index.js';
+import { registerInstallHooksCommand } from '../../features/git-hooks/index.js';
 import { registerInstallCommand } from '../../features/install/index.js';
 import { registerLlmSetupCommand } from '../../features/llm-setup/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
@@ -166,6 +167,12 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
     },
     loadInstallerTargets: deps.loadInstallerTargets,
     loadInstaller: deps.loadInstaller,
+  });
+  registerInstallHooksCommand({
+    program: deps.program,
+    resolveProjectPath: deps.resolveProjectPath,
+    error: deps.error,
+    writeStdout: deps.writeStdout,
   });
   registerLlmSetupCommand(deps);
   registerLlmSmokeCommand(deps);

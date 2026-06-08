@@ -18,7 +18,10 @@ gitignored local source, binary/invalid ignore-file resilience, GLSL shader
 indexing, Groovy/Solidity indexing, ArkTS/CUDA indexing, and TypeScript generic
 string-literal contract symbols. Those ideas were reimplemented inside
 Cartograph's current feature-slice architecture; no upstream patch code was
-copied blindly.
+copied blindly. Public Codegraph issue #602 specifically informed the
+git-hook freshness workflow; Cartograph's implementation uses managed hook
+blocks, Git hook-path resolution, idempotent installs, and managed-block
+removal rather than overwriting hooks.
 
 ## tree-sitter
 

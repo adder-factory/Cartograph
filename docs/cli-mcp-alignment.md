@@ -8,7 +8,7 @@ command has a corresponding MCP tool, with a small set of explicit
 exceptions documented below.
 
 This document is the source of truth for that mapping. Last
-re-verified **2026-06-07**. The mapping is also test-enforced —
+re-verified **2026-06-08**. The mapping is also test-enforced —
 `__tests__/cli-mcp-alignment.test.ts` fails if a tool gains/loses a
 CLI mirror.
 Branch-specific argument consumption is test-enforced in
@@ -77,8 +77,10 @@ deprecated `--mode static|judge` alias.
   form `cartograph admin doctor` exists for admin-family parity.
 - **`cartograph serve`** — IS the MCP server; can't run via MCP
   itself.
-- **`cartograph install`** — git-hooks installer; touches
-  `.git/hooks/`. Interactive prompts.
+- **`cartograph install`** — agent MCP installer; writes supported local or
+  global MCP client configuration. Interactive prompts.
+- **`cartograph install-hooks`** — git hook installer; touches `.git/hooks/`
+  and is intentionally CLI-only repository maintenance.
 - **`cartograph mcp-budget`** — measures the MCP connection payload
   before a session starts (`tools/list` + initialize instructions).
   Exposing it through MCP would measure the surface only after the
