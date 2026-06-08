@@ -69,6 +69,19 @@ export function getMcpServerConfig(options: McpCommandOptions = {}): { type: str
   };
 }
 
+export function renderMcpServersPrintConfig(
+  targetPath: string,
+  loc: 'global' | 'local',
+  options: McpCommandOptions = {},
+): string {
+  const snippet = JSON.stringify(
+    { mcpServers: { cartograph: getMcpServerConfig(mcpCommandOptionsForLocation(loc, options)) } },
+    null,
+    2,
+  );
+  return `# Add to ${targetPath}\n\n${snippet}\n`;
+}
+
 /**
  * Permissions list for Claude `settings.json`. Other targets that
  * have a permissions concept can compose this list directly. The

@@ -267,6 +267,12 @@ export function filterFilesByPattern({ files, options, filterFilesByDir }: Filte
   return filtered.filter((f) => regex.test(f.path));
 }
 
+function trimLeadingSlashes(value: string): string {
+  let start = 0;
+  while (start < value.length && value.codePointAt(start) === 47) start++;
+  return value.slice(start);
+}
+
 export function buildFilesNoMatchesMessage(args: BuildFilesNoMatchesMessageArgs): string {
   const dirHint = buildFilesEmptyDirHint(args.allFiles, args.dir, args.projectRoot);
   const unsupported = args.pattern ? detectUnsupportedGlobConstruct(args.pattern) : undefined;
@@ -291,7 +297,7 @@ export function buildFilesEmptyDirHint(
 
 function buildAbsoluteDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: string, projectRoot: string): string {
   if (!path.isAbsolute(dir)) return '';
-  const normRoot = projectRoot.replace(/\/+$/, '');
+  const normRoot = trimTrailingSlashes(projectRoot);
   if (dir !== normRoot && !dir.startsWith(normRoot + '/')) return '';
 
   const stripped = dir === normRoot ? '' : dir.slice(normRoot.length + 1);
@@ -303,7 +309,7 @@ function buildAbsoluteDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: stri
 
 function buildLeadingSlashDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: string): string {
   if (!dir.startsWith('/')) return '';
-  const stripped = dir.replace(/^\/+/, '');
+  const stripped = trimLeadingSlashes(dir);
   if (stripped.length === 0 || filterFilesByDir(allFiles, stripped).length === 0) return '';
   return `\n\n> _\`dir\` "${dir}" matched 0 files. Did you mean "${stripped}"? Path filters are index-relative — drop the leading "/"._`;
 }
@@ -324,8 +330,12 @@ function buildRootBasenameDirHint(allFiles: ReadonlyArray<FileListingRow>, dir: 
 }
 
 export function detectUnsupportedGlobConstruct(pattern: string): string | undefined {
-  if (/[[\]]/.test(pattern)) return '`[...]` character classes';
-  if (/\{[^}]*\}/.test(pattern)) return '`{a,b}` alternation';
+  if (pattern.includes('[') || pattern.includes(']')) return '`[...]` character classes';
+  let sawOpenBrace = false;
+  for (const char of pattern) {
+    if (char === '{') sawOpenBrace = true;
+    if (char === '}' && sawOpenBrace) return '`{a,b}` alternation';
+  }
   if (pattern.startsWith('!')) return 'leading `!` negation';
   return undefined;
 }
@@ -452,7 +462,7 @@ function buildMcpSummaryHeader(
   dirFilter: string | undefined,
   projectFileCount: number | undefined,
 ): string {
-  const filterPrefix = dirFilter ? dirFilter.replace(/\/+$/, '') : null;
+  const filterPrefix = dirFilter ? trimTrailingSlashes(dirFilter) : null;
   if (!filterPrefix) {
     return `## Project Summary (${rollup.totalFiles} files, ${rollup.totalSymbols} symbols)`;
   }
@@ -561,6 +571,9 @@ export function fileSummaryHeader(dir: string | undefined, totalFiles: number, t
   return `\nProject Summary (${totalFiles} files, ${totalSymbols} symbols):\n`;
 }
 
+export function trimTrailingSlashes(value: string): string;
+export function trimTrailingSlashes(value: undefined): undefined;
+export function trimTrailingSlashes(value: string | undefined): string | undefined;
 export function trimTrailingSlashes(value: string | undefined): string | undefined {
   if (value === undefined) return undefined;
   let end = value.length;
