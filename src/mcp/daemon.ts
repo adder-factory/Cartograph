@@ -62,7 +62,11 @@ export function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Prom
   runtime.server = createDaemonServer(runtime);
 
   return listenDaemonServer(runtime.server, runtime.socketPath).then(() => {
-    chmodDaemonSocket(runtime.socketPath);
+    if (!chmodDaemonSocket(runtime.socketPath)) {
+      process.stderr.write(
+        `[Cartograph daemon] Warning: could not restrict daemon socket permissions for ${runtime.socketPath}.\n`,
+      );
+    }
     process.stderr.write(`[Cartograph daemon] Listening on ${runtime.socketPath} (pid ${process.pid}).\n`);
     void runtime.mcp.tryInitializeDefault(projectRoot);
     armDaemonIdleTimer(runtime);
@@ -318,12 +322,13 @@ function cleanupStaleSocket(socketPath: string): void {
   }
 }
 
-function chmodDaemonSocket(socketPath: string): void {
-  if (process.platform === 'win32') return;
+export function chmodDaemonSocket(socketPath: string): boolean {
+  if (process.platform === 'win32') return true;
   try {
     fs.chmodSync(socketPath, 0o600);
+    return true;
   } catch {
-    /* best effort */
+    return false;
   }
 }
 

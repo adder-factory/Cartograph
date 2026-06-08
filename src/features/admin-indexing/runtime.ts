@@ -1,3 +1,5 @@
+import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from '../../default-config.js';
+
 export interface AdminIndexOptions {
   force?: boolean;
   quiet?: boolean;
@@ -60,6 +62,23 @@ const PHASE_LABEL_WIDTH = 14;
 const PHASE_DURATION_WIDTH = 8;
 const PHASE_PERCENT_WIDTH = 2;
 const POST_HOOK_LABEL_WIDTH = 12;
+const FILE_SIZE_UNITS: Readonly<Record<string, number>> = {
+  b: 1,
+  byte: 1,
+  bytes: 1,
+  k: 1024,
+  kb: 1024,
+  kib: 1024,
+  m: 1024 * 1024,
+  mb: 1024 * 1024,
+  mib: 1024 * 1024,
+};
+function maxFileSizeError(raw: string): MaxFileSizeResult {
+  return {
+    ok: false,
+    error: `--max-file-size must be between 1 byte and ${MAX_INDEX_FILE_SIZE_LABEL} (got "${raw}")`,
+  };
+}
 
 export function parseParseWorkersValue(raw: string | undefined): ParseWorkersResult {
   if (raw === undefined) return { ok: true, value: undefined };
@@ -73,12 +92,18 @@ export function parseParseWorkersValue(raw: string | undefined): ParseWorkersRes
 export function parseMaxFileSizeValue(raw: string | undefined): MaxFileSizeResult {
   if (raw === undefined) return { ok: true, value: undefined };
   const trimmed = raw.trim();
-  if (!/^\d+$/.test(trimmed)) {
-    return { ok: false, error: `--max-file-size must be a positive integer byte count (got "${raw}")` };
+  const match = /^(\d+)\s*([a-zA-Z]+)?$/.exec(trimmed);
+  if (!match) {
+    return maxFileSizeError(raw);
   }
-  const n = Number(trimmed);
-  if (!Number.isSafeInteger(n) || n < 1) {
-    return { ok: false, error: `--max-file-size must be a positive integer byte count (got "${raw}")` };
+  const unit = (match[2] ?? 'b').toLowerCase();
+  const multiplier = FILE_SIZE_UNITS[unit];
+  if (multiplier === undefined) {
+    return maxFileSizeError(raw);
+  }
+  const n = Number(match[1]) * multiplier;
+  if (!Number.isSafeInteger(n) || n < 1 || n > MAX_INDEX_FILE_SIZE) {
+    return maxFileSizeError(raw);
   }
   return { ok: true, value: n };
 }

@@ -114,6 +114,16 @@ export { main };
 `,
     );
 
+    fs.writeFileSync(
+      path.join(srcDir, 'siblings.ts'),
+      `
+export class SiblingOnly {
+  alpha(): void {}
+  beta(): void {}
+}
+`,
+    );
+
     fs.writeFileSync(path.join(srcDir, 'setup.ts'), `globalThis.__cartographGraphSetup = true;\n`);
     fs.writeFileSync(
       path.join(srcDir, 'side-effect.ts'),
@@ -321,6 +331,20 @@ export function boot(): void {
 
       expect(impact.nodes.size).toBeGreaterThan(0);
       expect(impact.nodes.has(formatValue.id)).toBe(true);
+    });
+
+    it('does not fan out from a method to unrelated sibling methods through parent contains edges', () => {
+      const methods = getNodesByKind(cg.queries, 'method');
+      const alpha = methods.find((n) => n.name === 'alpha' && n.filePath === 'src/siblings.ts');
+      const beta = methods.find((n) => n.name === 'beta' && n.filePath === 'src/siblings.ts');
+
+      expect(alpha).toBeDefined();
+      expect(beta).toBeDefined();
+
+      const impact = cg.internals.traverser.getImpactRadius(alpha!.id, 3);
+
+      expect(impact.nodes.has(alpha!.id)).toBe(true);
+      expect(impact.nodes.has(beta!.id)).toBe(false);
     });
   });
 

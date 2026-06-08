@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { extractSymbolsFromQuery } from '../src/context/query-symbols.js';
+import { suppressProjectNameQueryNoise } from '../src/search/query-utils.js';
 
 describe('extractSymbolsFromQuery', () => {
   it('extracts common identifier shapes from natural-language queries', () => {
@@ -35,5 +36,17 @@ describe('extractSymbolsFromQuery', () => {
 
     expect(symbols).not.toContain('app..isPackaged');
     expect(symbols).not.toContain('3bad.name');
+  });
+});
+
+describe('suppressProjectNameQueryNoise', () => {
+  it('drops standalone project-name tokens only from broad multi-anchor queries', () => {
+    expect(suppressProjectNameQueryNoise('cartograph watcher sync relevance', '/repo/cartograph')).toBe(
+      'watcher sync relevance',
+    );
+    expect(suppressProjectNameQueryNoise('Cartograph class', '/repo/cartograph')).toBe('Cartograph class');
+    expect(suppressProjectNameQueryNoise('cartograph_context schema', '/repo/cartograph')).toBe(
+      'cartograph_context schema',
+    );
   });
 });

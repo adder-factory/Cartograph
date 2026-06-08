@@ -136,6 +136,21 @@ describe('MCP lowTokens option', () => {
     expectTokenBudget(text, 1_200);
   });
 
+  it('cartograph_context accepts query as a task alias', async () => {
+    const text = textOf(await handler.execute('cartograph_context', { query: 'alpha', lowTokens: true }));
+
+    expect(text).toContain('## Code Context');
+    expect(text).toContain('**Query:** alpha');
+  });
+
+  it('cartograph_context reports blank task or query as a clean tool error', async () => {
+    const result = await handler.execute('cartograph_context', { task: '   ' });
+    const text = textOf(result);
+
+    expect(result.isError).toBe(true);
+    expect(text).toContain('requires `task` or `query`');
+  });
+
   it('cartograph_context format:plan emits route calls and nextActions metadata', async () => {
     const result = await handler.execute('cartograph_context', { task: 'alpha', format: 'plan', maxNodes: 5 });
     const text = textOf(result);

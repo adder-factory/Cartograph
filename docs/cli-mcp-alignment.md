@@ -55,12 +55,16 @@ propose-rename, review (context / neighbors / risk / agent-audit / trust),
 role, session (create / resume / list / delete / macro_save /
 macro_run / macro_list / macro_delete), sql, status,
 summaries (pending / save),
-tests-for, trace-to-culprits
+sync-if-dirty, tests-for, trace-to-culprits
 ```
 
 `cartograph similar <symbol>` is an extra CLI-only shortcut — it has no
 standalone MCP tool; it routes through `cartograph_graph({direction:
 'similar'})`.
+
+`cartograph sync-if-dirty` is also CLI-only. It exists for hook compatibility
+and delegates to the same sync runtime shape only when git reports source
+changes.
 
 `cartograph dead-code` and `cartograph coverage` take a `--via` classifier
 axis — `rule` / `llm` / `auto` (default). `dead-code` also accepts the
@@ -188,7 +192,7 @@ new public tool name:
    `bun run check:mcp-load`; extra schema text counts against the MCP
    startup payload even when no new tool name was added.
 
-Recent example: `cartograph_context({format: "plan"})`,
+Recent example: `cartograph_context({task: "<task>", format: "plan"})`,
 `cartograph_affected({includeCommands: true})`,
 `cartograph_node({liveSource: true})`, and
 `cartograph_session({action: "audit"})` were added as family

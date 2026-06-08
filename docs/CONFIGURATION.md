@@ -48,9 +48,11 @@ stay outside the graph. `indexSubmodules: false` disables both submodule and
 embedded-repository recursion.
 
 `maxFileSize` can also be set from the CLI. `cartograph admin init
---max-file-size <bytes>` writes it into the initial config; `admin index`,
-`admin sync`, and `admin embed-only` accept the same flag as a transient
-one-run override.
+--max-file-size <size>` writes it into the initial config; `admin index`,
+`admin sync`, `admin embed-only`, and `sync-if-dirty` accept the same flag as a
+transient one-run override. Values can be bytes or binary suffixes such as
+`512kb` or `10mb`. The default remains 5 MiB, and explicit config or CLI
+values are capped at 10 MiB.
 
 ## Storage Options
 

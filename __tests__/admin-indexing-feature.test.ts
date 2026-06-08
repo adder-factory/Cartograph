@@ -30,13 +30,24 @@ describe('admin indexing feature runtime', () => {
     });
     expect(parseMaxFileSizeValue(undefined)).toEqual({ ok: true, value: undefined });
     expect(parseMaxFileSizeValue('4096')).toEqual({ ok: true, value: 4096 });
+    expect(parseMaxFileSizeValue('512kb')).toEqual({ ok: true, value: 512 * 1024 });
+    expect(parseMaxFileSizeValue('2 MB')).toEqual({ ok: true, value: 2 * 1024 * 1024 });
+    expect(parseMaxFileSizeValue('10mb')).toEqual({ ok: true, value: 10 * 1024 * 1024 });
     expect(parseMaxFileSizeValue('0')).toEqual({
       ok: false,
-      error: '--max-file-size must be a positive integer byte count (got "0")',
+      error: '--max-file-size must be between 1 byte and 10mb (got "0")',
     });
     expect(parseMaxFileSizeValue('1e3')).toEqual({
       ok: false,
-      error: '--max-file-size must be a positive integer byte count (got "1e3")',
+      error: '--max-file-size must be between 1 byte and 10mb (got "1e3")',
+    });
+    expect(parseMaxFileSizeValue('1gb')).toEqual({
+      ok: false,
+      error: '--max-file-size must be between 1 byte and 10mb (got "1gb")',
+    });
+    expect(parseMaxFileSizeValue('11mb')).toEqual({
+      ok: false,
+      error: '--max-file-size must be between 1 byte and 10mb (got "11mb")',
     });
     expect(indexAllOptions({ force: true, profile: true }, 4, 4096)).toEqual({
       summarize: false,
@@ -130,7 +141,7 @@ describe('admin indexing feature CLI', () => {
       exit.mockRestore();
     }
 
-    expect(calls).toContain('error:--max-file-size must be a positive integer byte count (got "abc")');
+    expect(calls).toContain('error:--max-file-size must be between 1 byte and 10mb (got "abc")');
     expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
   });
 

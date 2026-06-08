@@ -122,19 +122,37 @@ function safeUnlinkSync(filePath: string): void {
   }
 }
 
+function resolveWritablePath(filePath: string): string {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (!stat.isSymbolicLink()) return filePath;
+    try {
+      return fs.realpathSync(filePath);
+    } catch {
+      const target = fs.readlinkSync(filePath);
+      return path.resolve(path.dirname(filePath), target);
+    }
+  } catch {
+    return filePath;
+  }
+}
+
 /**
  * Write a file atomically: write to `<path>.tmp.<pid>`, then rename.
  *
  * Prevents corruption if the process crashes mid-write. The temp
- * file is cleaned up on rename failure.
+ * file is cleaned up on rename failure. If `<path>` is a symlink,
+ * write through to its target so shared instruction/config symlinks
+ * survive re-install.
  */
 export function atomicWriteFileSync(filePath: string, content: string): void {
-  const dir = path.dirname(filePath);
+  const writePath = resolveWritablePath(filePath);
+  const dir = path.dirname(writePath);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  const tmpPath = filePath + '.tmp.' + process.pid;
+  const tmpPath = writePath + '.tmp.' + process.pid;
   try {
     fs.writeFileSync(tmpPath, content);
-    fs.renameSync(tmpPath, filePath);
+    fs.renameSync(tmpPath, writePath);
   } catch (err) {
     safeUnlinkSync(tmpPath);
     throw err;
@@ -278,7 +296,7 @@ export function removeMarkedSection(
 
   if (joined.trim() === '') {
     try {
-      fs.unlinkSync(filePath);
+      fs.unlinkSync(resolveWritablePath(filePath));
     } catch {
       /* ignore */
     }

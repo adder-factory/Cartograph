@@ -35,7 +35,7 @@ does not yet extract language-specific symbols from that grammar.
 | HCL / Terraform | `.tf`, `.tfvars`, `.hcl` | Tree-sitter |
 | HTML | `.html`, `.htm` | Tree-sitter parser-only |
 | Java | `.java` | Tree-sitter |
-| JavaScript | `.js`, `.mjs`, `.cjs` | Tree-sitter |
+| JavaScript | `.js`, `.mjs`, `.cjs`, `.xsjs`, `.xsjslib` | Tree-sitter |
 | JSDoc | `.jsdoc` | Tree-sitter parser-only |
 | JSON | `.json` | Tree-sitter parser-only |
 | JSX | `.jsx` | Tree-sitter |
@@ -93,6 +93,8 @@ Special cases:
   file import edges when they use string-literal paths.
 - Python `from pkg import module` calls can resolve through the imported module
   to top-level members in `pkg/module.py`.
+- SAP HANA XSJS `.xsjs` / `.xsjslib` files use the JavaScript extractor and
+  import resolver, including extensionless local imports.
 - Chained member calls can resolve through an intermediate method return type
   when Cartograph has a signature such as `build(): Committer` or
   `Committer build()`.
@@ -101,11 +103,11 @@ Special cases:
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Express routes, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
+| JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander/Yargs/CAC CLI commands |
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| JVM | Spring route/config references, Play routes, MyBatis Java/XML bindings, Kotlin/Scala source extraction |
+| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, MyBatis Java/XML bindings, Kotlin/Scala source extraction |
 | Go | Gin, Echo, Chi, net/http, Cobra commands, interface implementation edges |
 | Rust | Framework and route patterns recognized by the Rust resolver |
 | C# | ASP.NET route/controller patterns |

@@ -2,7 +2,7 @@
  * opencode target.
  *
  *   - MCP server entry to `~/.config/opencode/opencode.json` (global,
- *     XDG-style; `%APPDATA%/opencode/opencode.json` on Windows) or
+ *     XDG-style on every OS, matching opencode's docs) or
  *     `./opencode.json` (local).
  *   - No instructions file built in (opencode doesn't have a
  *     conventional agent-rules surface as of 2026-05).
@@ -33,11 +33,8 @@ const OPENCODE_SCHEMA_URL = 'https://opencode.ai/config.json';
 const OPENCODE_DOCS_URL = 'https://opencode.ai/docs/config';
 
 function globalConfigDir(): string {
-  if (process.platform === 'win32') {
-    const appData = process.env['APPDATA'] ?? path.join(getHomeDir(), 'AppData', 'Roaming');
-    return path.join(appData, 'opencode');
-  }
-  // XDG_CONFIG_HOME if set, else ~/.config — matches opencode's docs.
+  // XDG_CONFIG_HOME if set, else ~/.config — matches opencode's docs,
+  // including on Windows where `~` resolves to USERPROFILE/HOME.
   const xdgEnv = process.env['XDG_CONFIG_HOME'];
   const xdgSet = xdgEnv !== undefined && xdgEnv.trim().length > 0;
   const xdg = xdgSet ? xdgEnv : path.join(getHomeDir(), '.config');

@@ -10,6 +10,7 @@ import { matchesGlob } from './glob.js';
 import { isSafeRegex } from './regex.js';
 import { z } from 'zod';
 import { type CartographConfig, DEFAULT_CONFIG, type Language } from './types.js';
+import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from './default-config.js';
 import { normalizePath, compact } from './utils.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from './installer/default-endpoints.js';
 
@@ -405,8 +406,9 @@ const databaseConfigSchema = z
  * required (the fields `DEFAULT_CONFIG` guarantees post-merge); every
  * interface-optional field is `.optional()`, so a minimal user config
  * is never rejected newly. The only validation tightened beyond the
- * old code is the previously-unchecked `llm` block, where a bad
- * `provider` is now caught at load with a field-level message.
+ * old code is the `maxFileSize` range plus the previously-unchecked
+ * `llm` block, where a bad `provider` is now caught at load with a
+ * field-level message.
  */
 const CartographConfigSchema = z
   .object({
@@ -416,7 +418,11 @@ const CartographConfigSchema = z
     exclude: z.array(z.string()),
     languages: z.array(z.enum(VALID_LANGUAGES)),
     frameworks: z.array(frameworkHintSchema),
-    maxFileSize: z.number(),
+    maxFileSize: z
+      .number()
+      .int()
+      .min(1)
+      .max(MAX_INDEX_FILE_SIZE, { error: `maxFileSize must be at most ${MAX_INDEX_FILE_SIZE_LABEL}` }),
     extractDocstrings: z.boolean(),
     trackCallSites: z.boolean(),
     database: databaseConfigSchema.optional(),
@@ -493,6 +499,21 @@ function mergeConfig(defaults: CartographConfig, overrides: Partial<CartographCo
   return merged;
 }
 
+function assertValidCartographConfig(configPath: string, config: CartographConfig): void {
+  const result = CartographConfigSchema.safeParse(config);
+  if (!result.success) {
+    throw new Error(`Invalid configuration in ${configPath}:\n${z.prettifyError(result.error)}`);
+  }
+}
+
+function assertPersistableMaxFileSize(configPath: string, maxFileSize: number): void {
+  if (!Number.isSafeInteger(maxFileSize) || maxFileSize < 1 || maxFileSize > MAX_INDEX_FILE_SIZE) {
+    throw new Error(
+      `Invalid configuration in ${configPath}:\nmaxFileSize must be between 1 byte and ${MAX_INDEX_FILE_SIZE_LABEL}`,
+    );
+  }
+}
+
 /**
  * Load configuration from a project
  */
@@ -522,14 +543,11 @@ export function loadConfig(projectRoot: string): CartographConfig {
     const merged = mergeConfig(DEFAULT_CONFIG, migrated as Partial<CartographConfig>);
     merged.rootDir = projectRoot; // Always use actual project root
 
-    const result = CartographConfigSchema.safeParse(merged);
-    if (!result.success) {
-      // Validation-only: `merged` (not `result.data`) is returned so the
-      // `DEFAULT_CONFIG` getter-derived fields survive untouched. The
-      // formatted error names the offending field/path so the user can
-      // fix `config.json` without guessing.
-      throw new Error(`Invalid configuration in ${configPath}:\n${z.prettifyError(result.error)}`);
-    }
+    // Validation-only: `merged` (not parsed result data) is returned so
+    // the `DEFAULT_CONFIG` getter-derived fields survive untouched. The
+    // formatted error names the offending field/path so the user can fix
+    // `config.json` without guessing.
+    assertValidCartographConfig(configPath, merged);
 
     return merged;
   } catch (error) {
@@ -546,6 +564,8 @@ export function loadConfig(projectRoot: string): CartographConfig {
 export function saveConfig(projectRoot: string, config: CartographConfig): void {
   const configPath = getConfigPath(projectRoot);
   const dir = path.dirname(configPath);
+
+  assertPersistableMaxFileSize(configPath, config.maxFileSize);
 
   // Ensure directory exists
   if (!fs.existsSync(dir)) {

@@ -30,6 +30,31 @@ interface DatabaseOpenOptions {
   database?: CartographConfig['database'];
 }
 
+function assertValidDatabasePath(dbPath: string): string {
+  if (!dbPath || dbPath.includes('\0')) {
+    throw new Error('Invalid database path: path must be a non-empty .db file path');
+  }
+  const rawSegments = dbPath.split(/[\\/]+/);
+  if (rawSegments.includes('..')) {
+    throw new Error(`Invalid database path: path traversal segments are not allowed (${dbPath})`);
+  }
+  if (path.extname(dbPath).toLowerCase() !== '.db') {
+    throw new Error(`Invalid database path: expected a .db file (${dbPath})`);
+  }
+
+  const resolved = path.resolve(dbPath);
+  if (fs.existsSync(resolved)) {
+    const stat = fs.lstatSync(resolved);
+    if (stat.isSymbolicLink()) {
+      throw new Error(`Invalid database path: refusing to open symlinked database file (${dbPath})`);
+    }
+    if (stat.isDirectory()) {
+      throw new Error(`Invalid database path: expected a .db file, got a directory (${dbPath})`);
+    }
+  }
+  return resolved;
+}
+
 function createConfiguredDatabase(
   dbPath: string,
   options: DatabaseOpenOptions = {},
@@ -125,10 +150,11 @@ export class DatabaseConnection {
    * Initialize a new database at the given path
    */
   static initialize(dbPath: string, opts: DatabaseOpenOptions = {}): DatabaseConnection {
-    const dir = path.dirname(dbPath);
+    const resolvedDbPath = assertValidDatabasePath(dbPath);
+    const dir = path.dirname(resolvedDbPath);
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-    const { db, backend, vecLoaded, database } = createConfiguredDatabase(dbPath, opts);
+    const { db, backend, vecLoaded, database } = createConfiguredDatabase(resolvedDbPath, opts);
     if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
     const schemaPath = resolveAssetPath('db', db.dialect === 'postgres' ? 'schema-postgres.sql' : 'schema.sql');
@@ -156,11 +182,11 @@ export class DatabaseConnection {
       const pgvectorLoaded = bootstrapPgvector(db, database);
       bootstrapPgvectorTables(db, pgvectorLoaded);
     }
-    if (backend === 'postgres' && !fs.existsSync(dbPath)) {
-      fs.writeFileSync(dbPath, 'postgres provider sentinel\n', 'utf-8');
+    if (backend === 'postgres' && !fs.existsSync(resolvedDbPath)) {
+      fs.writeFileSync(resolvedDbPath, 'postgres provider sentinel\n', 'utf-8');
     }
 
-    return new DatabaseConnection({ db, dbPath, backend, vecLoaded });
+    return new DatabaseConnection({ db, dbPath: resolvedDbPath, backend, vecLoaded });
   }
 
   /**
@@ -178,13 +204,16 @@ export class DatabaseConnection {
     dbPath: string,
     opts: { autoMigrate?: boolean; database?: CartographConfig['database'] } = {},
   ): DatabaseConnection {
+    const resolvedDbPath = assertValidDatabasePath(dbPath);
     const database = resolveDatabaseConfig(opts.database);
-    if (database.provider === 'sqlite' && !fs.existsSync(dbPath)) throw new Error(`Database not found: ${dbPath}`);
+    if (database.provider === 'sqlite' && !fs.existsSync(resolvedDbPath)) {
+      throw new Error(`Database not found: ${resolvedDbPath}`);
+    }
 
-    const { db, backend, vecLoaded } = createConfiguredDatabase(dbPath, { database });
+    const { db, backend, vecLoaded } = createConfiguredDatabase(resolvedDbPath, { database });
     if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
-    const conn = new DatabaseConnection({ db, dbPath, backend, vecLoaded });
+    const conn = new DatabaseConnection({ db, dbPath: resolvedDbPath, backend, vecLoaded });
     const currentVersion = getCurrentVersion(db);
     if (currentVersion > CURRENT_SCHEMA_VERSION) {
       throw new Error(

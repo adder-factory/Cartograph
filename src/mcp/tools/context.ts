@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { lowTokensField, projectPathField, nonEmptyString } from './_common-fields.js';
+import { lowTokensField, projectPathField } from './_common-fields.js';
 import type { NextAction, ToolResult } from '../tool-types.js';
 import { getNodeCoverage } from '../../db/queries-coverage.js';
 import { getFindingsForNode } from '../../db/queries-findings.js';
@@ -20,7 +20,7 @@ import { textResult } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
-import { type ToolOutcome, ok } from './_outcome.js';
+import { type ToolOutcome, err, ok } from './_outcome.js';
 
 /**
  * Mark a Claude session as having consulted MCP tools.
@@ -594,7 +594,14 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
  * not stripped by `safeParse`.
  */
 const contextSchema = z.object({
-  task: nonEmptyString.describe('The task, bug, or feature to build context for'),
+  task: z
+    .string()
+    .optional()
+    .describe('Task, bug, or feature to build context for. Prefer short code anchors over broad prose.'),
+  query: z
+    .string()
+    .optional()
+    .describe('Alias for `task` for clients that send a query-shaped parameter. Prefer short code anchors.'),
   maxNodes: z.number().int().min(1).default(20).describe('Maximum symbols to include (default: 20)'),
   code: z.boolean().optional().describe('Include code snippets for key symbols (default: true)'),
   includeCode: z.boolean().optional().describe('Deprecated alias for `code`.'),
@@ -618,6 +625,15 @@ type ContextArgs = z.infer<typeof contextSchema>;
 
 const LOW_TOKEN_CONTEXT_MAX_NODES = 8;
 
+function resolveContextTask(args: Pick<ContextArgs, 'task' | 'query'>): string | null {
+  const rawTask = args.task;
+  const rawQuery = args.query;
+  const task = rawTask?.trim();
+  if (task) return task;
+  const query = rawQuery?.trim();
+  return query || null;
+}
+
 function shouldContextIncludeCode(args: {
   format: ContextFormat;
   codePreference: boolean | undefined;
@@ -629,7 +645,12 @@ function shouldContextIncludeCode(args: {
 }
 
 async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutcome> {
-  const task = args.task;
+  const task = resolveContextTask(args);
+  if (!task) {
+    return err(
+      'cartograph_context requires `task` or `query`; use a short code anchor like "watcher sync" or "AuthService login".',
+    );
+  }
 
   // Mark session as consulted (enables Grep/Glob/Bash)
   const sessionId = process.env['CLAUDE_SESSION_ID'];

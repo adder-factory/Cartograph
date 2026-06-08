@@ -54,10 +54,10 @@ Then connect your agent:
 cartograph install
 ```
 
-The installer detects and configures Claude Code, Cursor, Codex CLI,
-opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and
-Qoder CLI. It writes MCP config plus agent instructions where the target
-supports them.
+The installer detects and configures Claude Code, Cursor, Codex CLI, GitHub
+Copilot CLI, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid,
+Rovo Dev, and Qoder CLI. It writes MCP config plus agent instructions where
+the target supports them.
 
 Or give this task to your coding agent:
 
@@ -206,7 +206,7 @@ cartograph mcp-budget
 For agents, a good edit-session chain is:
 
 ```text
-cartograph_context({format: "plan"})
+cartograph_context({task: "<task>", format: "plan"})
 → follow the suggested next action
 → cartograph_affected({includeCommands: true})
 → cartograph_compare_to_ref({findingsDelta: true})
@@ -273,6 +273,7 @@ cartograph_context({format: "plan"})
 | `cartograph sql` | Read-only SQL escape hatch |
 | `cartograph status` | Index status and feature readiness |
 | `cartograph summaries` | Pull/save agent-written summaries |
+| `cartograph sync-if-dirty` | Hook compatibility sync that no-ops on clean git trees |
 | `cartograph tests-for` | Tests covering a symbol or files |
 | `cartograph trace-to-culprits` | Stack trace to likely fix sites |
 | `cartograph viewer` | Local graph viewer |
@@ -290,7 +291,7 @@ are listed separately so the core language matrix stays readable.
 | Language | Extensions / scope |
 |---|---|
 | TypeScript / TSX | `.ts`, `.mts`, `.cts`, `.tsx` |
-| JavaScript / JSX | `.js`, `.mjs`, `.cjs`, `.jsx` |
+| JavaScript / JSX | `.js`, `.mjs`, `.cjs`, `.xsjs`, `.xsjslib`, `.jsx` |
 | Python | `.py`, `.pyw` |
 | Go | `.go` |
 | Rust | `.rs` |
@@ -314,11 +315,11 @@ are listed separately so the core language matrix stays readable.
 
 | Ecosystem | Signals |
 |---|---|
-| JavaScript / TypeScript | Express routes, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
+| JavaScript / TypeScript | Express routes, Hono routes and mounted sub-routers, Bun.serve routes, React components, Vue/Nuxt aliases/routes, SvelteKit routes, Commander CLI commands |
 | Python | Django, Flask, and FastAPI route/controller patterns |
 | PHP | Laravel facades/routes and Drupal routes, services, hooks, plugins, and service tags |
 | Ruby | Rails routes and controller conventions |
-| JVM | Spring route/config references, Play routes, and MyBatis Java/XML bindings |
+| JVM | Spring route/config references including `@Value` and `@ConditionalOnProperty`, Play routes, and MyBatis Java/XML bindings |
 | Salesforce | Apex classes/methods/triggers, LWC component bundles and Apex imports, Aura controllers/actions, Visualforce routes/actions |
 | Go / Rust / C# / Swift | Common route and entry-point patterns, Cargo workspace crate aliases |
 | Apple / React Native | SwiftUI, UIKit, Vapor, Swift-Objective-C bridging, React Native legacy/TurboModules, Expo Modules, Fabric/Paper view components |

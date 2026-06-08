@@ -26,9 +26,12 @@
 import type { ExtractionResult } from './types.js';
 import type { Worker as NodeWorker } from 'node:worker_threads';
 import { mergeProfileEntries, type ProfileEntry } from './profile.js';
+import { errMsg } from '../errors.js';
 
 /** Race ceiling on a `worker.terminate()` Promise so we don't hang on a stuck WASM. */
 const TERMINATE_RACE_TIMEOUT_MS = 1000;
+/** Startup ceiling while a worker loads its requested tree-sitter grammars. */
+const GRAMMAR_LOAD_TIMEOUT_MS = 30_000;
 /** Base parse timeout — applied to every file regardless of size. */
 const BASE_PARSE_TIMEOUT_MS = 10_000;
 /** Per-100KB timeout extension — large files get scaled budgets. */
@@ -84,6 +87,8 @@ interface ParseWorkerPoolOptions {
   log: (msg: string) => void;
   /** Warning logger. The pool emits unexpected-exit / worker-error warnings here. */
   logWarn: (msg: string, ctx?: Record<string, unknown>) => void;
+  /** Test override for startup grammar-load handshakes. */
+  grammarLoadTimeoutMs?: number;
 }
 
 /** Runtime counters/queues for the pool — grouped to reduce field count. */
@@ -118,6 +123,52 @@ function poolRejectAllPending(state: PoolState, reason: string): void {
     state.pendingParses.delete(id);
     pending.reject(new Error(reason));
   }
+}
+
+function waitForWorkerGrammarLoad(worker: NodeWorker, languages: string[], timeoutMs: number): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      finish(new Error(`Timed out loading grammars after ${timeoutMs}ms`));
+    }, timeoutMs);
+    timer.unref?.();
+
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      worker.off('message', onMessage);
+      worker.off('error', onError);
+      worker.off('exit', onExit);
+    };
+    const finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (err) reject(err);
+      else resolve();
+    };
+    const onMessage = (msg: { type?: string; error?: string }): void => {
+      if (msg.type === 'grammars-loaded') {
+        finish();
+        return;
+      }
+      if (msg.type === 'grammars-load-failed') {
+        finish(new Error(msg.error || 'Worker failed to load grammars'));
+        return;
+      }
+      finish(new Error(`Unexpected message while loading grammars: ${msg.type ?? '<missing>'}`));
+    };
+    const onError = (err: Error): void => {
+      finish(new Error(`Worker error while loading grammars: ${err.message}`));
+    };
+    const onExit = (code: number): void => {
+      finish(new Error(`Worker exited with code ${code} while loading grammars`));
+    };
+
+    worker.on('message', onMessage);
+    worker.once('error', onError);
+    worker.once('exit', onExit);
+    worker.postMessage({ type: 'load-grammars', languages });
+  });
 }
 
 /** One record per file that crossed {@link SLOW_PARSE_WARN_MS}. */
@@ -301,13 +352,21 @@ export class ParseWorkerPool {
     const entry: WorkerEntry = { worker, parseCount: 0, busy: true, slotIndex, closing: false };
     this.workers[slotIndex] = entry;
     this.attachWorkerHandlers(entry);
-    await new Promise<void>((resolve, reject) => {
-      worker.once('message', (msg: { type: string }) => {
-        if (msg.type === 'grammars-loaded') resolve();
-        else reject(new Error(`Unexpected message: ${msg.type}`));
-      });
-      worker.postMessage({ type: 'load-grammars', languages: this.opts.neededLanguages });
-    });
+    try {
+      await waitForWorkerGrammarLoad(
+        worker,
+        this.opts.neededLanguages,
+        this.opts.grammarLoadTimeoutMs ?? GRAMMAR_LOAD_TIMEOUT_MS,
+      );
+    } catch (err) {
+      const message = errMsg(err);
+      entry.closing = true;
+      this.workers[slotIndex] = null;
+      this.opts.logWarn('Parse worker failed to load grammars', { slot: slotIndex, error: message });
+      poolNotifyIdle(this.state);
+      worker.terminate().catch(() => {});
+      throw new Error(`Parse worker failed to load grammars: ${message}`);
+    }
     entry.busy = false;
     poolNotifyIdle(this.state);
     return entry;

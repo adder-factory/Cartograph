@@ -59,8 +59,12 @@ parentPort!.on(
   'message',
   async (msg: { type: string; id?: number; filePath?: string; content?: string; languages?: Language[] }) => {
     if (msg.type === 'load-grammars') {
-      await loadGrammarsForLanguages(msg.languages!);
-      parentPort!.postMessage({ type: 'grammars-loaded' });
+      try {
+        await loadGrammarsForLanguages(msg.languages!);
+        parentPort!.postMessage({ type: 'grammars-loaded' });
+      } catch (err) {
+        parentPort!.postMessage({ type: 'grammars-load-failed', error: errMsg(err) });
+      }
     } else if (msg.type === 'parse') {
       const { id, filePath, content } = msg;
       try {

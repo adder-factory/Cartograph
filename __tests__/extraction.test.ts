@@ -83,6 +83,8 @@ describe('Language Detection', () => {
     expect(detectLanguage('index.js')).toBe('javascript');
     expect(detectLanguage('App.jsx')).toBe('jsx');
     expect(detectLanguage('config.mjs')).toBe('javascript');
+    expect(detectLanguage('server/bootstrap.xsjs')).toBe('javascript');
+    expect(detectLanguage('server/lib/session.xsjslib')).toBe('javascript');
   });
 
   it('should detect Python files', () => {
@@ -4378,6 +4380,14 @@ int countClients(void) { return 0; }
 
       expect(cResult.nodes.some((n) => n.kind === 'function' && n.name === 'api_foo')).toBe(true);
       expect(cppResult.nodes.some((n) => n.kind === 'function' && n.name === 'api_foo')).toBe(true);
+    });
+
+    it('recovers C functions whose API macro and return type are split into a preceding declaration', () => {
+      const code = 'AX_VIN_GLB_API AX_S32 AX_VIN_Init(AX_VOID) { return 0; }\n';
+      const result = extractFromSource('src/video.c', code, 'c');
+
+      expect(result.nodes.some((n) => n.kind === 'function' && n.name === 'AX_VIN_Init')).toBe(true);
+      expect(result.nodes.some((n) => n.kind === 'function' && n.name === '(AX_VOID)')).toBe(false);
     });
 
     it('does not extract function-like macros (preproc_function_def) as constants', () => {

@@ -133,8 +133,8 @@ function registerIndexCommand(deps: AdminIndexingCommandDeps): void {
         'it on big monorepos. Bench with --profile before settling on a value.',
     )
     .option(
-      '--max-file-size <bytes>',
-      'Transiently override config.maxFileSize for this index run. Use a positive integer byte count.',
+      '--max-file-size <size>',
+      'Transiently override config.maxFileSize for this index run. Use bytes or a kb/mb suffix, up to 10mb.',
     )
     .action((pathArg: string | undefined, options: AdminIndexOptions) => runAdminIndexCommand(pathArg, options, deps));
 }
@@ -335,8 +335,8 @@ function registerEmbedOnlyCommand(deps: AdminIndexingCommandDeps): void {
     .option('-q, --quiet', 'Suppress progress output')
     .option('-v, --verbose', 'Show detailed worker lifecycle and memory info')
     .option(
-      '--max-file-size <bytes>',
-      'Transiently override config.maxFileSize for this embed-only index run. Use a positive integer byte count.',
+      '--max-file-size <size>',
+      'Transiently override config.maxFileSize for this embed-only index run. Use bytes or a kb/mb suffix, up to 10mb.',
     )
     .action((pathArg: string | undefined, options: EmbedOnlyOptions) => runEmbedOnlyCommand(pathArg, options, deps));
 }
@@ -469,8 +469,8 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
     .description("Sync changes since last index (mirrors cartograph_admin MCP tool with action='sync')")
     .option('-q, --quiet', 'Suppress output (for git hooks)')
     .option(
-      '--max-file-size <bytes>',
-      'Transiently override config.maxFileSize for this sync run. Use a positive integer byte count.',
+      '--max-file-size <size>',
+      'Transiently override config.maxFileSize for this sync run. Use bytes or a kb/mb suffix, up to 10mb.',
     )
     .action(async (pathArg: string | undefined, options: { quiet?: boolean; maxFileSize?: string }) => {
       const projectPath = resolveProjectPath(pathArg);

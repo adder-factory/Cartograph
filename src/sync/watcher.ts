@@ -402,6 +402,31 @@ interface WatchEventCtx {
   scheduleFn: () => void;
 }
 
+const WATCHER_NOISE_BASENAMES: ReadonlySet<string> = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini', '.localized']);
+
+const WATCHER_NOISE_SUFFIXES: readonly string[] = [
+  '~',
+  '.bak',
+  '.cache',
+  '.db',
+  '.db-shm',
+  '.db-wal',
+  '.log',
+  '.pid',
+  '.swp',
+  '.swo',
+  '.temp',
+  '.tmp',
+];
+
+function watcherIsNoiseFile(relativePath: string): boolean {
+  const baseName = path.posix.basename(relativePath);
+  if (WATCHER_NOISE_BASENAMES.has(baseName)) return true;
+  if (baseName.startsWith('.#')) return true;
+  const lower = baseName.toLowerCase();
+  return WATCHER_NOISE_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+}
+
 /**
  * Handle one parcel-watcher event: normalise the absolute path back
  * to a project-relative path, apply filters, and schedule a sync
@@ -425,6 +450,7 @@ function watcherHandleFileEvent(ctx: WatchEventCtx, absPath: string): void {
 
   // Ignore .cartograph/ directory changes (our own DB writes).
   if (normalized === '.cartograph' || normalized.startsWith('.cartograph/')) return;
+  if (watcherIsNoiseFile(normalized)) return;
 
   // Detect HEAD-moving git operations (commit, checkout, rebase,
   // pull, reset) that leave the working tree unchanged but bump

@@ -1,6 +1,8 @@
 import { classifyChangedFiles, realModifiedCount as computeRealModified } from '../../changed-files-classify.js';
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
+import { getCartographDir } from '../../directory.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
+import { CARTOGRAPH_PACKAGE_VERSION } from '../../package-version.js';
 import { resolveStatusRollups } from './rollup-options.js';
 import { appendFeatureReadiness, appendInlineBiomarkers, appendInlineHotspots } from './rollups.js';
 
@@ -116,7 +118,17 @@ export function createStatusPrinter(deps: StatusPrinterDeps): StatusPrinter {
 
 export function printUninitializedStatus(deps: StatusPrinterDeps, projectPath: string, options: StatusOptions): void {
   if (options.json) {
-    writeStatusLine(deps, JSON.stringify({ initialized: false, projectPath }));
+    writeStatusLine(
+      deps,
+      JSON.stringify({
+        initialized: false,
+        cartographVersion: CARTOGRAPH_PACKAGE_VERSION,
+        projectPath,
+        indexPath: getCartographDir(projectPath),
+        lastIndexedAt: null,
+        lastIndexedAtIso: null,
+      }),
+    );
     return;
   }
   writeStatusLine(deps, deps.style.bold('\nCartograph Status\n'));
@@ -127,6 +139,7 @@ export function printUninitializedStatus(deps: StatusPrinterDeps, projectPath: s
 
 export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonArgs): void {
   const jsonRollups: string[] = [];
+  const lastIndexedAt = getLastIndexedAt(args.cg);
   args.rollups.appendFeatureReadiness(jsonRollups, args.cg, {
     summaryBreakdown: args.rollups.summaryBreakdown,
     surface: 'cli',
@@ -137,7 +150,12 @@ export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonAr
     deps,
     JSON.stringify({
       initialized: true,
+      cartographVersion: CARTOGRAPH_PACKAGE_VERSION,
       projectPath: args.projectPath,
+      indexPath: getCartographDir(args.projectPath),
+      databasePath: typeof args.cg.db.getPath === 'function' ? args.cg.db.getPath() : null,
+      lastIndexedAt,
+      lastIndexedAtIso: formatIndexedAtIso(lastIndexedAt),
       fileCount: args.stats.fileCount,
       nodeCount: args.stats.nodeCount,
       edgeCount: args.stats.edgeCount,
@@ -158,6 +176,23 @@ export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonAr
       rollups: jsonRollups.filter((line) => line !== ''),
     }),
   );
+}
+
+function getLastIndexedAt(cg: any): number | null {
+  try {
+    const row = cg.db.getDb().prepare('SELECT MAX(indexed_at) AS lastIndexedAt FROM files').get() as
+      | { lastIndexedAt?: unknown }
+      | undefined;
+    const value = row?.lastIndexedAt;
+    return typeof value === 'number' && Number.isFinite(value) ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function formatIndexedAtIso(value: number | null): string | null {
+  if (value === null) return null;
+  return new Date(value).toISOString();
 }
 
 export function printStatusHeader(deps: StatusPrinterDeps, projectPath: string): void {

@@ -420,7 +420,7 @@ function appendSuggestedQueriesSection(lines: string[], cg: Cartograph): void {
   }
   suggestions.push(
     '`cartograph_entry_points` — full top-of-stack breakdown',
-    '`cartograph_context "<task>"` — task-driven context for any specific area',
+    '`cartograph_context({task: "<task>"})` — task-driven context for any specific area',
     '`cartograph_find by=name <name>` — locate a specific symbol',
   );
 

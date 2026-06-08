@@ -175,7 +175,7 @@ Check:
 
 - The file extension is listed in [Support Matrix](SUPPORT-MATRIX.md).
 - The file is not excluded by `.cartograph/config.json` include/exclude globs.
-- The file is below `maxFileSize`.
+- The file is below `maxFileSize` (5 MiB by default, configurable up to 10 MiB).
 - The relevant framework resolver is detected by package files or source
   anchors.
 - Generated files may be excluded by default; remove or narrow the exclude rule

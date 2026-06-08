@@ -231,6 +231,25 @@ describe('FileWatcher', () => {
       watcher.stop();
     });
 
+    it('should ignore obvious editor and OS sidecar churn even with broad include globs', async () => {
+      const clock = new VirtualClock();
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 0, durationMs: 0 });
+      const watcher = new FileWatcher({
+        projectRoot: testDir,
+        config: { ...baseConfig, include: ['**/*'], exclude: [] },
+        syncFn,
+        options: { debounceMs: 200, clock },
+      });
+
+      watcher._injectFileEventForTest(path.join(testDir, '.DS_Store'));
+      watcher._injectFileEventForTest(path.join(testDir, 'src', 'index.ts.swp'));
+      watcher._injectFileEventForTest(path.join(testDir, 'src', 'build.log'));
+      watcher._injectFileEventForTest(path.join(testDir, '.cartograph', 'cartograph.db-wal'));
+      await tick(clock, 500);
+      expect(syncFn).not.toHaveBeenCalled();
+      watcher.stop();
+    });
+
     it('F#59 -- pre-excludes config.exclude dirs from parcel-watcher subscribe', async () => {
       // Pre-F#59 the watcher subscribed to the project root with NO
       // `ignore` option, so on Linux every excluded dir still consumed

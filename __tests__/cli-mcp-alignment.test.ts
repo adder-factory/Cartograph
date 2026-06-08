@@ -107,6 +107,12 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // Users who want programmatic install-flow control can call the
   // underlying actions individually via `cartograph_admin`.
   'setup',
+
+  // `cartograph sync-if-dirty` is a hook compatibility wrapper. It
+  // gates the existing sync implementation on local git dirtiness so
+  // pre/post hooks can no-op cheaply; MCP sessions already have direct
+  // access to `cartograph_admin({action: 'sync'})` when they want sync.
+  'sync_if_dirty',
 ]);
 
 // ── helpers ───────────────────────────────────────────────────

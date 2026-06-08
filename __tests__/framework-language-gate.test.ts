@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { vaporResolver, swiftUIResolver, uikitResolver } from '../src/resolution/frameworks/swift.js';
 import { swiftObjcBridgeResolver } from '../src/resolution/frameworks/swift-objc.js';
 import { expressResolver } from '../src/resolution/frameworks/express.js';
+import { honoResolver } from '../src/resolution/frameworks/hono.js';
 import { djangoResolver, flaskResolver, fastapiResolver } from '../src/resolution/frameworks/python.js';
 import { rustResolver } from '../src/resolution/frameworks/rust.js';
 import { goResolver } from '../src/resolution/frameworks/go.js';
@@ -42,6 +43,10 @@ describe('framework resolver language gates', () => {
 
   it('Express declares languages: [typescript, javascript, tsx, jsx]', () => {
     expect(expressResolver.languages).toEqual(['typescript', 'javascript', 'tsx', 'jsx']);
+  });
+
+  it('Hono declares languages: [typescript, javascript, tsx, jsx]', () => {
+    expect(honoResolver.languages).toEqual(['typescript', 'javascript', 'tsx', 'jsx']);
   });
 
   it('Django/Flask/FastAPI declare languages: [python]', () => {

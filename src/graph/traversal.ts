@@ -117,6 +117,7 @@ interface ImpactRecOpts {
   nodeId: string;
   maxDepth: number;
   currentDepth: number;
+  reachedViaIncomingContains?: boolean;
   nodes: Map<string, Node>;
   edges: Edge[];
   visited: Set<string>;
@@ -301,8 +302,9 @@ function traverserGetImpactRecursive(queries: QueryBuilder, args: ImpactRecOpts)
  * callers of contained methods appear in the impact set.
  */
 function traverserExpandImpactContainerChildren(queries: QueryBuilder, args: ImpactRecOpts): void {
-  const { nodeId, maxDepth, currentDepth, nodes, edges, visited, edgeKinds } = args;
+  const { nodeId, maxDepth, currentDepth, reachedViaIncomingContains, nodes, edges, visited, edgeKinds } = args;
   if (edgeKinds !== undefined && !edgeKinds.includes('contains')) return;
+  if (reachedViaIncomingContains) return;
   const focalNode = queries.getNodeById(nodeId);
   if (!focalNode || !CONTAINER_KINDS_FOR_IMPACT.has(focalNode.kind)) return;
   const containsEdges = getOutgoingEdges(queries, nodeId, ['contains']);
@@ -340,6 +342,7 @@ function traverserExpandImpactDependents(queries: QueryBuilder, args: ImpactRecO
       nodeId: sourceNode.id,
       maxDepth,
       currentDepth: currentDepth + 1,
+      reachedViaIncomingContains: edge.kind === 'contains',
       nodes,
       edges,
       visited,

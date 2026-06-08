@@ -12,8 +12,8 @@ For most users, the installer is easier:
 cartograph install
 ```
 
-It can configure Claude Code, Cursor, Codex CLI, opencode, Hermes, Gemini CLI,
-Antigravity, Kiro, Factory Droid, Rovo Dev, and Qoder CLI.
+It can configure Claude Code, Cursor, Codex CLI, GitHub Copilot CLI, opencode,
+Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid, Rovo Dev, and Qoder CLI.
 
 ## Agent-Assisted Install
 
@@ -66,7 +66,7 @@ Start with metadata tools before reading source:
 
 ```text
 cartograph_status
-cartograph_context({format: "plan"})
+cartograph_context({task: "<task>", format: "plan"})
 cartograph_find
 cartograph_graph
 cartograph_node without code
@@ -83,6 +83,9 @@ Use `cartograph_playbook` for the full tool-selection guide. Use
 `cartograph_session({action: "audit"})` to inspect whether an agent skipped
 important closeout steps, and `cartograph_session({action: "usage"})` for
 aggregate session/tool counts without raw request or response bodies.
+For `cartograph_context`, send `task` as the canonical prompt parameter;
+`query` is accepted as an alias for MCP clients that already model search-like
+calls around a `query` field.
 
 ## Load Budget
 
@@ -139,6 +142,23 @@ cartograph serve --mcp --project-path /absolute/path/to/project
       "type": "stdio",
       "command": "cartograph",
       "args": ["serve", "--mcp"]
+    }
+  }
+}
+```
+
+### GitHub Copilot CLI
+
+`~/.copilot/mcp-config.json`, `.mcp.json`, or `.github/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "cartograph": {
+      "type": "stdio",
+      "command": "cartograph",
+      "args": ["serve", "--mcp"],
+      "tools": ["*"]
     }
   }
 }

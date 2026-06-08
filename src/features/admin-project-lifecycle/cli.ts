@@ -77,8 +77,8 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
     .option('--database-connection-timeout-seconds <seconds>', 'PostgreSQL connection timeout in seconds (default: 30)')
     .option('--database-ssl', 'Force TLS for PostgreSQL connections (URL sslmode= is preferred for verification modes)')
     .option(
-      '--max-file-size <bytes>',
-      'Set config.maxFileSize during initialization. Use a positive integer byte count.',
+      '--max-file-size <size>',
+      'Set config.maxFileSize during initialization. Use bytes or a kb/mb suffix, up to 10mb.',
     )
     .action(async (pathArg: string | undefined, options: InitCommandOptions) => {
       const projectPath = resolveInitProjectPath(pathArg);

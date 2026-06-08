@@ -10,6 +10,7 @@ const stdout: string[] = [];
 const stderr: string[] = [];
 let projectPath: string;
 let failMcpServerLoad = false;
+let dirty = false;
 const DEFAULT_TEST_VIEWER_PORT = 8765;
 const TEST_MCP_TOOL_COUNT = 12;
 const TEST_STALE_BACKEND_PID = 1234;
@@ -61,8 +62,20 @@ function loadLifecycleCommandActions(): void {
     },
     runViaMCP: async (tool: string, args: Record<string, unknown>, projectPath?: string) =>
       calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
-    loadCartograph: async () => ({ default: { init: async () => ({ close: () => undefined }) } }),
+    loadCartograph: async () => ({
+      default: {
+        init: async () => ({ close: () => undefined }),
+        open: async (path: string, opts: unknown) => {
+          calls.push(`open:${path}:${JSON.stringify(opts)}`);
+          return {
+            sync: async (syncOpts: unknown) => calls.push(`sync:${JSON.stringify(syncOpts)}`),
+            close: () => calls.push('sync.close'),
+          };
+        },
+      },
+    }),
     isInitialized: projectHasCartographDb,
+    hasUncommittedChanges: () => dirty,
     loadMcpServer: async () => {
       if (failMcpServerLoad) throw new Error('mcp loader exploded');
       return {
@@ -194,6 +207,7 @@ describe('lifecycle command action bodies', () => {
     stdout.length = 0;
     stderr.length = 0;
     failMcpServerLoad = false;
+    dirty = false;
     process.exitCode = 0;
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-cli-'));
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
@@ -300,6 +314,22 @@ describe('lifecycle command action bodies', () => {
     expect(stdout.join('\n')).toContain('smoke report');
     expect(stdout.join('\n')).toContain('budget:');
     expect(text).toContain('open:http://localhost:0');
+  });
+
+  it('runs sync-if-dirty only when source changes are present', async () => {
+    await actions.get('program:sync-if-dirty [path]')!(projectPath, {});
+    expect(calls).toContain('info:No source changes detected; skipping sync');
+    expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+
+    calls.length = 0;
+    dirty = true;
+    await actions.get('program:sync-if-dirty [path]')!(projectPath, { quiet: true, maxFileSize: '2mb' });
+
+    expect(calls).toEqual([
+      `open:${projectPath}:{"autoMigrate":true}`,
+      `sync:{"summarize":false,"maxFileSize":2097152}`,
+      'sync.close',
+    ]);
   });
 
   it('routes backend lifecycle commands', async () => {

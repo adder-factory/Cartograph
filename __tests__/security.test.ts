@@ -251,14 +251,16 @@ describe('MCP Input Validation', () => {
     expect(result.content[0].text).toMatch(/`start` must be of type string|start: expected string/);
   });
 
-  it('should reject non-string task in cartograph_context', async () => {
+  it('should report missing task or query in cartograph_context', async () => {
     const result = await handler.execute('cartograph_context', { task: undefined });
     expect(result.isError).toBe(true);
-    // task is required by schema; missing required field message wins.
-    // `cartograph_context` is Zod-backed (campaign P4) — `formatZodError`
-    // renders a missing required field as `task: required`. The legacy
-    // alternatives are kept for any not-yet-migrated tool.
-    expect(result.content[0].text).toMatch(/Missing required argument `task`|`task` must be|task: required/);
+    expect(result.content[0].text).toContain('requires `task` or `query`');
+  });
+
+  it('should reject non-string task in cartograph_context', async () => {
+    const result = await handler.execute('cartograph_context', { task: 123 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/`task` must be of type string|task: expected string/);
   });
 
   it('should reject non-string start in cartograph_graph (impact)', async () => {

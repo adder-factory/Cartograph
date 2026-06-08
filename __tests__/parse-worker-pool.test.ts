@@ -27,6 +27,7 @@ type WorkerMessage = {
 class FakeWorker extends EventEmitter {
   static instances: FakeWorker[] = [];
   static autoParse = true;
+  static grammarMode: 'success' | 'failure' | 'silent' = 'success';
   readonly messages: WorkerMessage[] = [];
   terminated = false;
 
@@ -38,7 +39,11 @@ class FakeWorker extends EventEmitter {
   postMessage(msg: WorkerMessage): void {
     this.messages.push(msg);
     if (msg.type === 'load-grammars') {
-      queueMicrotask(() => this.emit('message', { type: 'grammars-loaded' }));
+      if (FakeWorker.grammarMode === 'success') {
+        queueMicrotask(() => this.emit('message', { type: 'grammars-loaded' }));
+      } else if (FakeWorker.grammarMode === 'failure') {
+        queueMicrotask(() => this.emit('message', { type: 'grammars-load-failed', error: 'bad wasm' }));
+      }
       return;
     }
     if (msg.type === 'parse' && FakeWorker.autoParse) {
@@ -60,7 +65,12 @@ class FakeWorker extends EventEmitter {
 }
 
 function makePool(
-  opts: { poolSize?: number; recycleInterval?: number; logWarns?: Array<Record<string, unknown>> } = {},
+  opts: {
+    poolSize?: number;
+    recycleInterval?: number;
+    logWarns?: Array<Record<string, unknown>>;
+    grammarLoadTimeoutMs?: number;
+  } = {},
 ) {
   const logs: string[] = [];
   const warnings = opts.logWarns ?? [];
@@ -70,6 +80,7 @@ function makePool(
     poolSize: opts.poolSize ?? 1,
     neededLanguages: ['typescript'],
     recycleInterval: opts.recycleInterval ?? 100,
+    grammarLoadTimeoutMs: opts.grammarLoadTimeoutMs,
     log: (msg) => logs.push(msg),
     logWarn: (msg, ctx) => warnings.push({ msg, ...(ctx ?? {}) }),
   });
@@ -80,6 +91,7 @@ describe('ParseWorkerPool', () => {
   beforeEach(() => {
     FakeWorker.instances = [];
     FakeWorker.autoParse = true;
+    FakeWorker.grammarMode = 'success';
   });
 
   it('spawns lazily, loads grammars, and resolves parse results', async () => {
@@ -144,6 +156,31 @@ describe('ParseWorkerPool', () => {
     FakeWorker.instances[0]!.emit('error', new Error('parser crashed'));
     await expect(errored).rejects.toThrow(/Worker error: parser crashed/);
     expect(warnings.some((warning) => String(warning.msg).includes('Parse worker error'))).toBe(true);
+  });
+
+  it('rejects and terminates a worker that reports grammar-load failure', async () => {
+    FakeWorker.grammarMode = 'failure';
+    const { pool, warnings } = makePool();
+
+    await expect(pool.requestParse('src/failure.ts', 'failure')).rejects.toThrow(/bad wasm/);
+
+    expect(FakeWorker.instances).toHaveLength(1);
+    expect(FakeWorker.instances[0]!.terminated).toBe(true);
+    expect(warnings.some((warning) => String(warning.msg).includes('failed to load grammars'))).toBe(true);
+  });
+
+  it('times out a silent grammar-load handshake and keeps the slot reusable', async () => {
+    FakeWorker.grammarMode = 'silent';
+    const { pool } = makePool({ grammarLoadTimeoutMs: 1 });
+
+    await expect(pool.requestParse('src/hang.ts', 'hang')).rejects.toThrow(/Timed out loading grammars/);
+    expect(FakeWorker.instances[0]!.terminated).toBe(true);
+
+    FakeWorker.grammarMode = 'success';
+    const result = await pool.requestParse('src/retry.ts', 'retry');
+
+    expect(result.filePath).toBe('src/retry.ts');
+    expect(FakeWorker.instances).toHaveLength(2);
   });
 
   it('rejects pending parses on unexpected worker exit', async () => {

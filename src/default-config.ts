@@ -17,6 +17,9 @@ import type { CartographConfig } from './types.js';
 import { getLanguageDefs } from './extraction/languages/registry.js';
 
 let _includeCache: string[] | null = null;
+export const MAX_INDEX_FILE_SIZE = 10 * 1024 * 1024;
+export const MAX_INDEX_FILE_SIZE_LABEL = '10mb';
+
 function buildIncludeGlobs(): string[] {
   if (_includeCache) return _includeCache;
   const seen = new Set<string>();
@@ -227,7 +230,8 @@ const baseConfig: CartographConfig = {
   ],
   languages: [],
   frameworks: [],
-  // 5 MB. Was 1 MB until 2026-05-01, when the GraphQL stress test
+  // 5 MB default, capped at 10 MB by config/CLI/API validation. Was
+  // 1 MB until 2026-05-01, when the GraphQL stress test
   // (github's public schema is 1.4 MB) hit a silent skip. Real-world
   // generated SDL, vendored bundles, and large data fixtures routinely
   // sit between 1 and 5 MB; raising the cap closes the silent footgun
