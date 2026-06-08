@@ -11,6 +11,7 @@ import { applyIssueAttributions, getSymbolCoChanges } from '../src/db/queries-hi
 import { getNodesAtRange } from '../src/db/queries-rtree.js';
 import { findSignatureTokenOwner, searchNodes } from '../src/db/queries-search.js';
 import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
+import { getWeightedSummaryCoverage, upsertSymbolSummary } from '../src/db/queries-summaries.js';
 import { resolveDatabaseConfig } from '../src/db/database-config.js';
 import { findSimilarViaPgvector, isPgvectorAvailable } from '../src/db/pgvector-helpers.js';
 import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
@@ -440,6 +441,96 @@ describePostgres('PostgreSQL database provider', () => {
 
     const tableList = currentConn.getDb().prepare('PRAGMA table_list').all() as Array<{ name: string }>;
     expect(tableList.map((row) => row.name)).toContain('nodes');
+  });
+
+  it('normalizes PostgreSQL aggregate aliases used by weighted summary coverage', () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-coverage-test-'));
+    currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const dbPath = path.join(currentDir, 'cartograph.db');
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+
+    currentConn = DatabaseConnection.initialize(dbPath, { database });
+    const qb = new QueryBuilder(currentConn.getDb(), currentConn.hasVecExtension());
+    upsertFile(qb, {
+      path: 'src/coverage.ts',
+      contentHash: 'hash-coverage',
+      language: 'typescript',
+      size: 120,
+      modifiedAt: Date.now(),
+      indexedAt: Date.now(),
+      nodeCount: 2,
+      errors: [],
+      commitCount: 0,
+      loc: 10,
+      firstSeenTs: null,
+      lastTouchedTs: null,
+      isTest: false,
+      needsReextract: false,
+    });
+    qb.insertNodes([
+      {
+        id: 'n:covered',
+        kind: 'function',
+        name: 'covered',
+        qualifiedName: 'covered',
+        filePath: 'src/coverage.ts',
+        language: 'typescript',
+        startLine: 1,
+        endLine: 5,
+        startColumn: 0,
+        endColumn: 1,
+        docstring: null,
+        signature: 'function covered()',
+        visibility: 'public',
+        isExported: true,
+        isAsync: false,
+        isStatic: false,
+        decorators: [],
+        decoratorArgs: null,
+        updatedAt: Date.now(),
+        centrality: 0.75,
+        betweenness: null,
+        bodyHash: 'body-covered',
+      },
+      {
+        id: 'n:uncovered',
+        kind: 'function',
+        name: 'uncovered',
+        qualifiedName: 'uncovered',
+        filePath: 'src/coverage.ts',
+        language: 'typescript',
+        startLine: 10,
+        endLine: 15,
+        startColumn: 0,
+        endColumn: 1,
+        docstring: null,
+        signature: 'function uncovered()',
+        visibility: 'public',
+        isExported: true,
+        isAsync: false,
+        isStatic: false,
+        decorators: [],
+        decoratorArgs: null,
+        updatedAt: Date.now(),
+        centrality: 0.25,
+        betweenness: null,
+        bodyHash: 'body-uncovered',
+      },
+    ]);
+    upsertSymbolSummary({
+      qb,
+      nodeId: 'n:covered',
+      contentHash: 'summary-covered',
+      summary: 'Covered test function.',
+      model: 'test-model',
+    });
+
+    expect(getWeightedSummaryCoverage(qb, new Set(['function']))).toMatchObject({
+      totalNodes: 2,
+      coveredNodes: 1,
+      totalWeight: 1,
+      coveredWeight: 0.75,
+    });
   });
 
   it('reports PostgreSQL storage as reachable in doctor', async () => {

@@ -131,7 +131,7 @@ CREATE TABLE IF NOT EXISTS co_changes (
   file_b TEXT NOT NULL,
   count INTEGER NOT NULL,
   PRIMARY KEY (file_a, file_b),
-  CHECK (file_a < file_b)
+  CHECK (file_a COLLATE "C" < file_b COLLATE "C")
 );
 CREATE INDEX IF NOT EXISTS idx_co_changes_b ON co_changes(file_b);
 

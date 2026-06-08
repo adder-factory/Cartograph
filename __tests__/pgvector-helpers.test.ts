@@ -51,7 +51,10 @@ describe('pgvector helper fallbacks', () => {
 
     const available = new FakePgvectorDb();
     expect(bootstrapPgvector(available.db, POSTGRES_DATABASE)).toBe(true);
-    expect(available.execs.some((sql) => sql.includes('CREATE EXTENSION IF NOT EXISTS vector'))).toBe(true);
+    expect(available.execs.some((sql) => sql.includes('CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public'))).toBe(
+      true,
+    );
+    expect(available.execs).not.toContain('ALTER EXTENSION vector SET SCHEMA public');
   });
 
   it('backfills, mirrors, and merges native pgvector hits when available', () => {
@@ -174,7 +177,7 @@ class FakePgvectorDb {
         return { changes: 1, lastInsertRowid: 0 };
       },
       get: () => {
-        if (sql.includes("to_regtype('vector')")) return { ok: this.options.available === false ? 0 : 1 };
+        if (sql.includes("to_regtype('public.vector')")) return { ok: this.options.available === false ? 0 : 1 };
         return undefined;
       },
       all: () => this.rowsFor(sql),
@@ -194,7 +197,7 @@ class FakePgvectorDb {
     if (sql.includes('SELECT DISTINCT LENGTH(embedding) AS len FROM symbol_chunk_embeddings')) {
       return [{ len: VECTOR_BYTES }];
     }
-    if (sql.includes('FROM embedding_store') && sql.includes('WHERE LENGTH(embedding)')) {
+    if (sql.includes('FROM embedding_store es') && sql.includes('WHERE LENGTH(es.embedding)')) {
       return [
         {
           r: STORE_ROWID,
@@ -205,7 +208,7 @@ class FakePgvectorDb {
         },
       ];
     }
-    if (sql.includes('FROM symbol_chunk_embeddings') && sql.includes('WHERE LENGTH(embedding)')) {
+    if (sql.includes('FROM symbol_chunk_embeddings sce') && sql.includes('WHERE LENGTH(sce.embedding)')) {
       return [
         {
           r: CHUNK_ROWID,

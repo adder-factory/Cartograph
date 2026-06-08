@@ -403,3 +403,12 @@ describe('ROLE_LABELS — schema.sql CHECK ↔ classifier.ts canonical export', 
     expect(new Set(labelsFromSchema)).toEqual(new Set(ROLE_LABELS));
   });
 });
+
+describe('PostgreSQL schema invariants', () => {
+  it('uses C collation for canonical co_changes pair ordering', () => {
+    const schemaPath = path.resolve(__dirname, '..', 'src', 'db', 'schema-postgres.sql');
+    const schema = fs.readFileSync(schemaPath, 'utf-8');
+
+    expect(schema).toContain('CHECK (file_a COLLATE "C" < file_b COLLATE "C")');
+  });
+});

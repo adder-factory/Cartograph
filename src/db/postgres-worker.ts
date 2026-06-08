@@ -119,9 +119,13 @@ const CANONICAL_ROW_KEYS: Record<string, string> = {
   commitsha: 'commitSha',
   commitshas: 'commitShas',
   configkey: 'configKey',
+  containerid: 'containerId',
   containerkind: 'containerKind',
+  containername: 'containerName',
   cooccurrences: 'coOccurrences',
+  coveragepct: 'coveragePct',
   currentversionrows: 'currentVersionRows',
+  decoratorargs: 'decoratorArgs',
   distinctfiles: 'distinctFiles',
   endcol: 'endCol',
   endline: 'endLine',
@@ -133,11 +137,19 @@ const CANONICAL_ROW_KEYS: Record<string, string> = {
   foreignaccesses: 'foreignAccesses',
   fromnodeid: 'fromNodeId',
   hitcount: 'hitCount',
+  importerfilepath: 'importerFilePath',
   issuenumber: 'issueNumber',
+  lastindexedat: 'lastIndexedAt',
   lasthitat: 'lastHitAt',
   lasttouchedts: 'lastTouchedTs',
   matchcount: 'matchCount',
   membercount: 'memberCount',
+  methoddecoratorargs: 'methodDecoratorArgs',
+  methoddecorators: 'methodDecorators',
+  methodfilepath: 'methodFilePath',
+  methodid: 'methodId',
+  methodname: 'methodName',
+  methodstartline: 'methodStartLine',
   modulename: 'moduleName',
   newestenqueuedat: 'newestEnqueuedAt',
   nodeid: 'nodeId',
@@ -146,6 +158,7 @@ const CANONICAL_ROW_KEYS: Record<string, string> = {
   parentname: 'parentName',
   parentnodeid: 'parentNodeId',
   promotednodeid: 'promotedNodeId',
+  qualifiedname: 'qualifiedName',
   referencekind: 'referenceKind',
   referencename: 'referenceName',
   riskscore: 'riskScore',
@@ -593,9 +606,11 @@ function normalizeRowKey(key: string): string {
 function shouldConvertNumericString(key: string, value: string): boolean {
   if (!/^-?\d+(\.\d+)?$/.test(value)) return false;
   return (
-    /^(c|n|count|row_count|max_rowid|max|min|avg|sum|r|score|version|applied_at)$/i.test(key) ||
-    /(^|_)(count|occurrences|dependents)$/i.test(key) ||
-    /(Count|Occurrences|Dependents)$/u.test(key)
+    /^(c|n|count|row_count|rows|total|pending|attempts|reads|max_rowid|max|min|avg|sum|r|score|version|applied_at)$/i.test(
+      key,
+    ) ||
+    /(^|_)(count|occurrences|dependents|nodes|files|edges|rows)$/i.test(key) ||
+    /(Count|Occurrences|Dependents|Nodes|Files|Edges|Rows)$/u.test(key)
   );
 }
 
