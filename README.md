@@ -59,6 +59,11 @@ Copilot CLI, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory
 Droid, Rovo Dev, and Qoder CLI. It writes MCP config plus agent instructions
 where the target supports them.
 
+For Claude Code, `--location=local` is private to you and the current project:
+the MCP entry is written under this project in `~/.claude.json`, permissions go
+to `.claude/settings.local.json`, and Cartograph instructions go to
+`CLAUDE.local.md` with both local files added to `.gitignore`.
+
 Or give this task to your coding agent:
 
 ```text
