@@ -189,6 +189,8 @@ export function getLanguageGrammar(language: Language): WasmLanguage | null {
  */
 export function detectLanguage(filePath: string, source?: string): Language {
   if (isPlayRoutesFile(filePath)) return 'yaml';
+  const pathLanguage = pathSpecificLanguage(filePath);
+  if (pathLanguage) return pathLanguage;
 
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   const lang = pathGatedLanguage(filePath, source, registryLanguageForExtension(ext));
@@ -218,6 +220,15 @@ export function detectLanguage(filePath: string, source?: string): Language {
 function registryLanguageForExtension(ext: string): Language {
   const def = getLanguageDefByExtension(ext);
   return (def?.name as Language) ?? 'unknown';
+}
+
+function pathSpecificLanguage(filePath: string): Language | null {
+  const normalized = filePath.replaceAll('\\', '/');
+  if (/(^|\/)Localization\/[^/]+\/.*\.loca\.xml$/i.test(normalized)) return 'bg3_resource';
+  if (/(^|\/)Localization\/[^/]+\/.*\.xml$/i.test(normalized)) return 'bg3_resource';
+  if (/(^|\/)Stats\/Generated\/.*\.txt$/i.test(normalized)) return 'bg3_stats';
+  if (/(^|\/)Story\/RawFiles\/Goals\/.*\.txt$/i.test(normalized)) return 'osiris';
+  return null;
 }
 
 function pathGatedLanguage(filePath: string, source: string | undefined, language: Language): Language {

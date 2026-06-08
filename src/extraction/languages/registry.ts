@@ -34,6 +34,7 @@ import { ARKTS_DEF } from './arkts.js';
 import { ASTRO_DEF } from './astro.js';
 import { AURA_DEF } from './aura.js';
 import { BASH_DEF } from './bash.js';
+import { BG3_ANUBIS_DEF, BG3_RESOURCE_DEF, BG3_STATS_DEF, KHN_DEF, OSIRIS_DEF } from './bg3.js';
 import { C_DEF, CPP_DEF, CUDA_DEF } from './c-cpp.js';
 import { CLOJURE_DEF } from './clojure.js';
 import { COMMON_LISP_DEF } from './common-lisp.js';
@@ -102,6 +103,9 @@ const ALL_DEFS: readonly LanguageDef[] = [
   ASTRO_DEF,
   AURA_DEF,
   BASH_DEF,
+  BG3_ANUBIS_DEF,
+  BG3_RESOURCE_DEF,
+  BG3_STATS_DEF,
   C_DEF,
   CLOJURE_DEF,
   COMMON_LISP_DEF,
@@ -128,6 +132,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   JUPYTER_DEF,
   JSX_DEF,
   JULIA_DEF,
+  KHN_DEF,
   KOTLIN_DEF,
   LEAN_DEF,
   LIQUID_DEF,
@@ -137,6 +142,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   OBJC_DEF,
   OCAML_DEF,
   OCAML_INTERFACE_DEF,
+  OSIRIS_DEF,
   PASCAL_DEF,
   PHP_DEF,
   PRISMA_DEF,

@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 65 language modes. The registry is the source of truth:
+Cartograph supports 70 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -24,6 +24,9 @@ does not yet extract language-specific symbols from that grammar.
 | Astro | `.astro` | Tree-sitter plus frontmatter/template extractor |
 | Aura | `.cmp`, `.app`, `.evt`, `.intf`, `.design`, `.auradoc` in Aura source paths or Aura markup | Custom extractor |
 | Bash | `.sh`, `.bash` | Tree-sitter |
+| BG3 Anubis | `.ann`, `.anc`, `Scripts/anubis/node/*.ann`, `Scripts/anubis/config/*.anc` | Custom extractor |
+| BG3 Resource Data | `.lsx`, `.lsf`, `.lsfx`, `.lsefx`, `.tbl`, `.stats`, `.mei`, `.lsj`, `Localization/*/*.xml` | Custom extractor |
+| BG3 Stats DSL | `Stats/Generated/**/*.txt`, `Stats/Generated/*.txt` | Custom extractor |
 | C | `.c`, `.h` | Tree-sitter |
 | Clojure / ClojureScript | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` | Tree-sitter |
 | Common Lisp | `.lisp`, `.lsp`, `.l`, `.cl`, `.asd`, `.ros` | Tree-sitter |
@@ -50,6 +53,7 @@ does not yet extract language-specific symbols from that grammar.
 | Jupyter Notebook | `.ipynb` | Tree-sitter parser-only via JSON grammar |
 | JSX | `.jsx` | Tree-sitter |
 | Julia | `.jl` | Tree-sitter tags query |
+| BG3 KHN / Thoth Lua | `.khn` | Lua grammar |
 | Kotlin | `.kt`, `.kts` | Tree-sitter |
 | Lean | `.lean` | Tree-sitter |
 | Liquid | `.liquid` | Custom extractor |
@@ -59,6 +63,7 @@ does not yet extract language-specific symbols from that grammar.
 | Objective-C | `.m`, `.mm` | Tree-sitter |
 | OCaml | `.ml` | Tree-sitter tags query |
 | OCaml Interface | `.mli` | Tree-sitter tags query |
+| Osiris Story | `.div`, `Story/RawFiles/Goals/*.txt` | Custom extractor |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` | Tree-sitter plus form-file extractor |
 | PHP | `.php`, `.module`, `.install`, `.theme`, `.inc` | Tree-sitter |
 | Prisma | `.prisma` | Tree-sitter |
@@ -88,6 +93,10 @@ Special cases:
 
 - Play Framework route files at `conf/routes` and `conf/*.routes` are treated
   as YAML so route declarations can be extracted.
+- BG3 Anubis `.ann` / `.anc` files, `Stats/Generated/**/*.txt`,
+  `Story/RawFiles/Goals/*.txt`, and `Localization/<language>/*.xml` paths use
+  BG3-specific extractors because several extensions are otherwise generic
+  text/XML or Lua-derived DSL files.
 - abapGit-style `*.clas.abap` / `*.intf.abap` paths are covered through the
   `.abap` extension; implementation blocks provide ABAP method containment.
 - Astro files emit a component node, extract TypeScript frontmatter, and mine
