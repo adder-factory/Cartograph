@@ -14,6 +14,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { scanDirectory } from '../src/extraction/index.js';
+import { getFileByPath } from '../src/db/queries-files.js';
 import { DEFAULT_CONFIG, type CartographConfig } from '../src/types.js';
 import Cartograph from '../src/index.js';
 
@@ -101,6 +102,28 @@ describe('.cartographignore marker (bug #3)', () => {
       const files = scanDirectory(dir, config);
       expect(files).not.toContain('generated/gen.ts');
     });
+
+    it('root .ignore negation re-includes a gitignored source directory', () => {
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'customer/\n');
+      fs.writeFileSync(path.join(dir, '.ignore'), '!customer/\n');
+      fs.mkdirSync(path.join(dir, 'customer'));
+      fs.writeFileSync(path.join(dir, 'customer', 'adapter.ts'), 'export const c = 1;');
+
+      const files = scanDirectory(dir, config);
+      expect(files).toContain('src/app.ts');
+      expect(files).toContain('customer/adapter.ts');
+    });
+
+    it('root .ignore can exclude a git-visible source file locally', () => {
+      fs.writeFileSync(path.join(dir, 'src', 'local-only.ts'), 'export const local = 1;');
+      git(dir, 'add', '-A');
+      git(dir, 'commit', '-m', 'add local-only');
+      fs.writeFileSync(path.join(dir, '.ignore'), 'src/local-only.ts\n');
+
+      const files = scanDirectory(dir, config);
+      expect(files).toContain('src/app.ts');
+      expect(files).not.toContain('src/local-only.ts');
+    });
   });
 
   describe('parity with non-git fallback (filesystem walk)', () => {
@@ -163,6 +186,48 @@ describe('.cartographignore marker (bug #3)', () => {
       const result = await cg.sync();
       expect(result.changedFilePaths).toContain('src/app.ts');
       expect(result.changedFilePaths ?? []).not.toContain('vendor/leaked.ts');
+    });
+  });
+
+  describe('root .ignore override sync path', () => {
+    let dir: string;
+    let cg: Cartograph;
+
+    beforeEach(async () => {
+      dir = tempDir('cartograph-local-ignore-sync-');
+      git(dir, 'init');
+      git(dir, 'config', 'user.email', 'test@test.com');
+      git(dir, 'config', 'user.name', 'Test');
+      git(dir, 'symbolic-ref', 'HEAD', 'refs/heads/main');
+
+      fs.writeFileSync(path.join(dir, '.gitignore'), 'customer/\n');
+      fs.writeFileSync(path.join(dir, '.ignore'), '!customer/\n');
+      fs.mkdirSync(path.join(dir, 'customer'));
+      fs.writeFileSync(path.join(dir, 'customer', 'client.ts'), 'export const client = 1;');
+      fs.writeFileSync(path.join(dir, 'main.ts'), 'export const main = 1;');
+
+      git(dir, 'add', '.gitignore', '.ignore', 'main.ts');
+      git(dir, 'commit', '-m', 'initial');
+
+      cg = Cartograph.initSync(dir, { config: { include: ['**/*.ts'], exclude: [] } });
+      await cg.indexAll();
+    });
+
+    afterEach(() => {
+      if (cg) cg.close();
+      if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
+    });
+
+    it('sync detects changed and new files under re-included gitignored dirs', async () => {
+      expect(getFileByPath(cg.queries, 'customer/client.ts')).not.toBeNull();
+
+      fs.writeFileSync(path.join(dir, 'customer', 'client.ts'), 'export const client = 2;');
+      fs.writeFileSync(path.join(dir, 'customer', 'extra.ts'), 'export const extra = 1;');
+
+      const result = await cg.sync();
+      expect(result.changedFilePaths).toContain('customer/client.ts');
+      expect(result.changedFilePaths).toContain('customer/extra.ts');
+      expect(getFileByPath(cg.queries, 'customer/extra.ts')).not.toBeNull();
     });
   });
 });

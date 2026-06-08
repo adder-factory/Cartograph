@@ -21,6 +21,7 @@ import * as path from 'node:path';
 import type { AsyncSubscription } from '@parcel/watcher';
 import type { CartographConfig } from '../types.js';
 import { shouldIncludeFile } from '../extraction/index.js';
+import { isExcludedByLocalIgnore, isLocalIgnoreControlPath } from '../extraction/file-discovery-policy.js';
 import { logDebug, logWarn } from '../errors.js';
 import { normalizePath } from '../utils.js';
 
@@ -452,6 +453,12 @@ function watcherHandleFileEvent(ctx: WatchEventCtx, absPath: string): void {
   if (normalized === '.cartograph' || normalized.startsWith('.cartograph/')) return;
   if (watcherIsNoiseFile(normalized)) return;
 
+  if (isLocalIgnoreControlPath(normalized)) {
+    st.hasChanges = true;
+    scheduleFn();
+    return;
+  }
+
   // Detect HEAD-moving git operations (commit, checkout, rebase,
   // pull, reset) that leave the working tree unchanged but bump
   // the indexed sha. Sync needs to re-stamp freshness even
@@ -465,6 +472,7 @@ function watcherHandleFileEvent(ctx: WatchEventCtx, absPath: string): void {
 
   // Filter against include/exclude patterns
   if (!shouldIncludeFile(normalized, config)) return;
+  if (isExcludedByLocalIgnore(projectRoot, normalized)) return;
 
   // F#60 — record this file's event so the staleness banner can
   // flag it. New entries get firstSeenMs; existing entries refresh

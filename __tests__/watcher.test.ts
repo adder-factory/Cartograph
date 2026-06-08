@@ -250,6 +250,43 @@ describe('FileWatcher', () => {
       watcher.stop();
     });
 
+    it('should sync when the root .ignore override changes', async () => {
+      const clock = new VirtualClock();
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 1, durationMs: 10 });
+      const watcher = new FileWatcher({
+        projectRoot: testDir,
+        config: baseConfig,
+        syncFn,
+        options: { debounceMs: 200, clock },
+      });
+
+      fs.writeFileSync(path.join(testDir, '.ignore'), '!customer/\n');
+      watcher._injectFileEventForTest(path.join(testDir, '.ignore'));
+
+      await tick(clock, 200);
+      expect(syncFn).toHaveBeenCalled();
+      watcher.stop();
+    });
+
+    it('should ignore source file events excluded by root .ignore', async () => {
+      const clock = new VirtualClock();
+      const syncFn = vi.fn().mockResolvedValue({ filesChanged: 0, durationMs: 0 });
+      const watcher = new FileWatcher({
+        projectRoot: testDir,
+        config: baseConfig,
+        syncFn,
+        options: { debounceMs: 200, clock },
+      });
+
+      fs.writeFileSync(path.join(testDir, '.ignore'), 'src/local-only.ts\n');
+      fs.writeFileSync(path.join(testDir, 'src', 'local-only.ts'), 'export const local = 1;');
+      watcher._injectFileEventForTest(path.join(testDir, 'src', 'local-only.ts'));
+
+      await tick(clock, 500);
+      expect(syncFn).not.toHaveBeenCalled();
+      watcher.stop();
+    });
+
     it('F#59 -- pre-excludes config.exclude dirs from parcel-watcher subscribe', async () => {
       // Pre-F#59 the watcher subscribed to the project root with NO
       // `ignore` option, so on Linux every excluded dir still consumed

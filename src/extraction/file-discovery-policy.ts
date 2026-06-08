@@ -18,6 +18,23 @@ export const GIT_LIST_MAX_BUFFER_BYTES = 50 * 1024 * 1024;
 /** Marker file name that indicates a directory and all children should be skipped. */
 export const CARTOGRAPH_IGNORE_MARKER = '.cartographignore';
 
+/** Root-local ignore override file. Negated patterns can re-include gitignored source. */
+export const LOCAL_IGNORE_FILE = '.ignore';
+
+type LocalIgnoreDecision = 'include' | 'exclude';
+
+interface LocalIgnoreRule {
+  pattern: string;
+  negated: boolean;
+  directoryOnly: boolean;
+  anchored: boolean;
+}
+
+interface LocalIgnorePolicy {
+  rules: LocalIgnoreRule[];
+  hasIncludeRules: boolean;
+}
+
 export interface EmbeddedRepoCollectionOptions {
   rootDir: string;
   config: CartographConfig;
@@ -99,6 +116,37 @@ export function collectEmbeddedRepoFilesInto(target: Set<string>, options: Embed
       target.add(filePath);
     }
   }
+}
+
+/**
+ * Apply root `.ignore` as a Cartograph-local layer after git discovery.
+ * Non-negated rules remove already-visible files; negated rules add matching
+ * filesystem files back into the set, including files hidden by `.gitignore`.
+ */
+export function applyLocalIgnoreOverridesInto(target: Set<string>, rootDir: string, config: CartographConfig): void {
+  const policy = loadLocalIgnorePolicy(rootDir);
+  if (policy.rules.length === 0) return;
+
+  for (const filePath of target) {
+    if (getLocalIgnoreDecision(policy, filePath) === 'exclude') target.delete(filePath);
+  }
+
+  if (!policy.hasIncludeRules) return;
+  for (const filePath of collectLocalIgnoreIncludedFiles(rootDir, config, policy)) {
+    target.add(filePath);
+  }
+}
+
+/** True when `filePath` is the root-local ignore override file. */
+export function isLocalIgnoreControlPath(filePath: string): boolean {
+  return normalizePath(filePath) === LOCAL_IGNORE_FILE;
+}
+
+/** True when a root `.ignore` rule explicitly excludes a path. */
+export function isExcludedByLocalIgnore(rootDir: string, filePath: string): boolean {
+  const policy = loadLocalIgnorePolicy(rootDir);
+  if (policy.rules.length === 0) return false;
+  return getLocalIgnoreDecision(policy, filePath) === 'exclude';
 }
 
 export function findEmbeddedGitRepositories(
@@ -212,6 +260,137 @@ export function isUnderCartographIgnoredDir(filePath: string, ignoredDirs: Set<s
 /** True when `dir` opts out of indexing with a `.cartographignore` marker. */
 export function hasCartographIgnoreMarker(dir: string): boolean {
   return fs.existsSync(path.join(dir, CARTOGRAPH_IGNORE_MARKER));
+}
+
+function loadLocalIgnorePolicy(rootDir: string): LocalIgnorePolicy {
+  const ignorePath = path.join(rootDir, LOCAL_IGNORE_FILE);
+  if (!fs.existsSync(ignorePath)) return { rules: [], hasIncludeRules: false };
+  let text: string;
+  try {
+    text = fs.readFileSync(ignorePath, 'utf-8');
+  } catch (error) {
+    logDebug('Skipping unreadable local ignore override file', { path: ignorePath, error: String(error) });
+    return { rules: [], hasIncludeRules: false };
+  }
+
+  const rules = text
+    .split(/\r?\n/)
+    .map(parseLocalIgnoreRule)
+    .filter((rule): rule is LocalIgnoreRule => rule !== null);
+  return { rules, hasIncludeRules: rules.some((rule) => rule.negated) };
+}
+
+function parseLocalIgnoreRule(rawLine: string): LocalIgnoreRule | null {
+  let line = rawLine.trim();
+  if (!line || line.startsWith('#')) return null;
+  if (line.startsWith(String.raw`\#`) || line.startsWith(String.raw`\!`)) {
+    line = line.slice(1);
+  }
+
+  let negated = false;
+  if (line.startsWith('!')) {
+    negated = true;
+    line = line.slice(1).trim();
+  }
+  if (!line) return null;
+
+  const anchored = line.startsWith('/');
+  while (line.startsWith('/')) line = line.slice(1);
+
+  const directoryOnly = line.endsWith('/');
+  while (line.endsWith('/')) line = line.slice(0, -1);
+
+  const pattern = normalizePath(line);
+  if (!pattern) return null;
+  return { pattern, negated, directoryOnly, anchored };
+}
+
+function collectLocalIgnoreIncludedFiles(
+  rootDir: string,
+  config: CartographConfig,
+  policy: LocalIgnorePolicy,
+): string[] {
+  const files: string[] = [];
+  const visitedDirs = new Set<string>();
+
+  const walk = (dir: string): void => {
+    const realDir = safeRealpath(dir);
+    if (!realDir || visitedDirs.has(realDir)) return;
+    visitedDirs.add(realDir);
+
+    if (hasCartographIgnoreMarker(dir)) return;
+
+    const entries = safeReaddir(dir);
+    if (!entries) return;
+    for (const entry of entries) {
+      if (entry.name === '.git' || entry.name === '.cartograph') continue;
+      const fullPath = path.join(dir, entry.name);
+      const relativePath = normalizePath(path.relative(rootDir, fullPath));
+      if (entry.isDirectory()) {
+        if (!isDirExcluded(relativePath, config.exclude)) walk(fullPath);
+      } else if (entry.isFile() && getLocalIgnoreDecision(policy, relativePath) === 'include') {
+        files.push(relativePath);
+      }
+    }
+  };
+
+  walk(rootDir);
+  return files;
+}
+
+function getLocalIgnoreDecision(policy: LocalIgnorePolicy, filePath: string): LocalIgnoreDecision | null {
+  let decision: LocalIgnoreDecision | null = null;
+  for (const rule of policy.rules) {
+    if (localIgnoreRuleMatches(rule, filePath)) decision = rule.negated ? 'include' : 'exclude';
+  }
+  return decision;
+}
+
+function localIgnoreRuleMatches(rule: LocalIgnoreRule, filePath: string): boolean {
+  const normalized = normalizePath(filePath);
+  if (rule.directoryOnly) return directoryRuleMatches(rule, normalized);
+  if (rule.pattern.includes('/')) return pathRuleMatches(rule, normalized);
+  return basenameRuleMatches(rule.pattern, normalized);
+}
+
+function directoryRuleMatches(rule: LocalIgnoreRule, filePath: string): boolean {
+  const pattern = rule.pattern;
+  if (rule.anchored || pattern.includes('/')) {
+    return pathMatchesPatternOrDescendant(filePath, pattern, rule.anchored);
+  }
+  return filePath.split('/').some((segment, index, segments) => {
+    if (!safeGlobMatches(segment, pattern)) return false;
+    return index < segments.length - 1;
+  });
+}
+
+function pathRuleMatches(rule: LocalIgnoreRule, filePath: string): boolean {
+  return pathMatchesPatternOrDescendant(filePath, rule.pattern, rule.anchored);
+}
+
+function pathMatchesPatternOrDescendant(filePath: string, pattern: string, anchored: boolean): boolean {
+  if (matchPathPattern(filePath, pattern, anchored)) return true;
+  return matchPathPattern(filePath, `${pattern}/**`, anchored);
+}
+
+function matchPathPattern(filePath: string, pattern: string, anchored: boolean): boolean {
+  if (safeGlobMatches(filePath, pattern)) return true;
+  return !anchored && safeGlobMatches(filePath, `**/${pattern}`);
+}
+
+function basenameRuleMatches(pattern: string, filePath: string): boolean {
+  const segments = filePath.split('/');
+  const basename = segments.at(-1) ?? '';
+  if (safeGlobMatches(basename, pattern)) return true;
+  return segments.slice(0, -1).some((segment) => safeGlobMatches(segment, pattern));
+}
+
+function safeGlobMatches(filePath: string, pattern: string): boolean {
+  try {
+    return globMatches(filePath, pattern);
+  } catch {
+    return false;
+  }
 }
 
 function parseGitLinesToPrefixedPaths(output: string | null, prefix: string): string[] {

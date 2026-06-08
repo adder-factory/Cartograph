@@ -235,6 +235,7 @@ export const VALID_LANGUAGES = [
   'bash',
   'zsh',
   'fish',
+  'glsl',
   'graphql',
   'prisma',
   'properties',

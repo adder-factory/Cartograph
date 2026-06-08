@@ -124,6 +124,7 @@ const GRAMMARS: Grammar[] = [
   // produces a clean ABI-14 grammar.
   { wasm: 'dart', pkg: 'tree-sitter-dart', sample: 'void main() {}\n', vendored: true },
   { wasm: 'fish', pkg: '@esdmr/tree-sitter-fish', sample: 'set x 1\n', vendored: true },
+  { wasm: 'glsl', pkg: 'tree-sitter-glsl', sample: 'void main() { gl_Position = vec4(1.0); }\n', vendored: true },
   // graphql: ⚠ `tree-sitter-graphql@1.0.0` on npm is a DIFFERENT grammar
   // dialect — it emits PascalCase node types (`Document`, `ObjectType-
   // Definition`, `Name`, …). cartograph's `GraphqlExtractor` is written

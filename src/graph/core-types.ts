@@ -94,6 +94,7 @@ export type Language =
   | 'bash'
   | 'zsh'
   | 'fish'
+  | 'glsl'
   | 'graphql'
   | 'prisma'
   | 'properties'

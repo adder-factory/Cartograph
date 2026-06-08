@@ -29,6 +29,7 @@ import {
   GIT_LIST_MAX_BUFFER_BYTES,
   GIT_LIST_TIMEOUT_MS,
   GIT_PROBE_TIMEOUT_MS,
+  applyLocalIgnoreOverridesInto,
   collectEmbeddedRepoFilesInto,
   collectSubmoduleFilesInto,
   findCartographIgnoredDirs,
@@ -321,6 +322,7 @@ function getGitVisibleFiles(rootDir: string, config: CartographConfig): Set<stri
       }
     }
 
+    applyLocalIgnoreOverridesInto(files, rootDir, config);
     return files;
   } catch {
     return null;
@@ -530,6 +532,7 @@ export function getGitChangedFiles(
       mergeEmbeddedRepoStatuses(rootDir, ctx, submodules);
     }
   }
+  mergeLocalIgnoreOverrideStatuses(rootDir, ctx);
 
   // A file present in both sets exists on disk now (working tree wins over
   // recorded deletion — e.g., file deleted in commit, then re-created
@@ -695,6 +698,17 @@ function mergeEmbeddedRepoStatuses(rootDir: string, ctx: PorcelainScanCtx, submo
     }
     const repoStatus = runGitStatusPorcelain(path.join(rootDir, repoPath));
     if (repoStatus !== null) parsePorcelainOutput(repoStatus, `${repoPath}/`, ctx);
+  }
+}
+
+function mergeLocalIgnoreOverrideStatuses(rootDir: string, ctx: PorcelainScanCtx): void {
+  const files = new Set<string>();
+  applyLocalIgnoreOverridesInto(files, rootDir, ctx.config);
+  for (const filePath of files) {
+    if (shouldIncludeFile(filePath, ctx.config) && !ctx.candidates.has(filePath)) {
+      ctx.candidates.set(filePath, 'modified');
+    }
+    ctx.deletions.delete(filePath);
   }
 }
 

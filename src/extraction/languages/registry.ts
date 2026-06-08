@@ -38,6 +38,7 @@ import { DART_DEF } from './dart.js';
 import { ELIXIR_DEF } from './elixir.js';
 import { EMBEDDED_TEMPLATE_DEF } from './embedded-template.js';
 import { FISH_DEF } from './fish.js';
+import { GLSL_DEF } from './glsl.js';
 import { GO_DEF } from './go.js';
 import { GRAPHQL_DEF } from './graphql.js';
 import { HASKELL_DEF } from './haskell.js';
@@ -94,6 +95,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   ELIXIR_DEF,
   EMBEDDED_TEMPLATE_DEF,
   FISH_DEF,
+  GLSL_DEF,
   GO_DEF,
   GRAPHQL_DEF,
   HASKELL_DEF,
