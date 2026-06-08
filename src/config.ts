@@ -240,6 +240,7 @@ export const VALID_LANGUAGES = [
   'fish',
   'glsl',
   'hlsl',
+  'nix',
   'graphql',
   'groovy',
   'prisma',

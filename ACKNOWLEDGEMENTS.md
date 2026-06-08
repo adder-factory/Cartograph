@@ -17,13 +17,15 @@ attachment, SAP XSJS import support, Hono route extraction, and Spring
 statement-id linkage, file-scoped symbol listing, file-scoped dependency
 queries, generic supertype normalization for inheritance edges, `.ignore`
 indexing overrides for gitignored local source, binary/invalid ignore-file
-resilience, GLSL shader indexing, Groovy/Solidity indexing, ArkTS/CUDA indexing,
-HLSL shader indexing, TypeScript generic string-literal contract symbols, and
-non-ASCII context-query keyword extraction, and context lookup from code-like source strings. Those
-ideas, along with PowerShell CLI completion support, were reimplemented inside
-Cartograph's current feature-slice architecture; CodeIgniter 3 routing and
-magic model/library property support was likewise implemented as a native
-Cartograph resolver. No upstream patch code was copied blindly. Public
+resilience, OpenTofu `.tofu` detection, GLSL shader indexing,
+Groovy/Solidity indexing, ArkTS/CUDA indexing, HLSL shader indexing, Nix
+expression indexing, TypeScript generic string-literal contract symbols,
+non-ASCII context-query keyword extraction, and context lookup from code-like
+source strings. Those ideas, along with PowerShell CLI completion
+support, were reimplemented inside Cartograph's current feature-slice
+architecture; CodeIgniter 3 routing and magic model/library property support was
+likewise implemented as a native Cartograph resolver. No upstream patch code was
+copied blindly. Public
 Codegraph issue #602 specifically informed the git-hook freshness workflow;
 Cartograph's implementation uses managed hook blocks, Git hook-path resolution,
 idempotent installs, and managed-block removal rather than overwriting hooks.
@@ -71,6 +73,7 @@ Cartograph ships pre-compiled WebAssembly grammars under `src/extraction/wasm/`,
 | hlsl | [tree-sitter-grammars/tree-sitter-hlsl](https://github.com/tree-sitter-grammars/tree-sitter-hlsl) | MIT |
 | groovy | [amaanq/tree-sitter-groovy](https://github.com/amaanq/tree-sitter-groovy) | MIT |
 | graphql | [bkegley/tree-sitter-graphql](https://github.com/bkegley/tree-sitter-graphql) | MIT |
+| nix | [nix-community/tree-sitter-nix](https://github.com/nix-community/tree-sitter-nix) | MIT |
 | pascal | [Isopod/tree-sitter-pascal](https://github.com/Isopod/tree-sitter-pascal) | MIT |
 | rescript | [rescript-lang/tree-sitter-rescript](https://github.com/rescript-lang/tree-sitter-rescript) | MIT |
 | elixir | [elixir-lang/tree-sitter-elixir](https://github.com/elixir-lang/tree-sitter-elixir) | Apache-2.0 |

@@ -9,9 +9,9 @@ import type { LanguageDef } from './types.js';
 
 export const HCL_DEF: LanguageDef = {
   name: 'hcl',
-  displayName: 'HCL / Terraform',
-  extensions: ['.tf', '.tfvars', '.hcl'],
-  includeGlobs: ['**/*.tf', '**/*.tfvars', '**/*.hcl'],
+  displayName: 'HCL / Terraform / OpenTofu',
+  extensions: ['.tf', '.tfvars', '.hcl', '.tofu'],
+  includeGlobs: ['**/*.tf', '**/*.tfvars', '**/*.hcl', '**/*.tofu'],
   // HCL needs both a tree-sitter parser AND a custom extractor — the
   // parse tree is standard but the extraction logic is bespoke.
   grammar: {

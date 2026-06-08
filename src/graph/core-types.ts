@@ -84,6 +84,7 @@ export type Language =
   | 'julia'
   | 'lua'
   | 'luau'
+  | 'nix'
   | 'objc'
   | 'ocaml'
   | 'ocaml_interface'

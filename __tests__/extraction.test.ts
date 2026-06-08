@@ -5926,6 +5926,7 @@ describe('HCL / Terraform Extraction', () => {
       expect(detectLanguage('main.tf')).toBe('hcl');
       expect(detectLanguage('terraform.tfvars')).toBe('hcl');
       expect(detectLanguage('config.hcl')).toBe('hcl');
+      expect(detectLanguage('main.tofu')).toBe('hcl');
     });
 
     it('should report HCL as supported', () => {

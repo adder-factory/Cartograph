@@ -115,6 +115,7 @@ const GRAMMARS: Grammar[] = [
     sample: 'export type User = { name: string }\nfunction greet(name: string): string\n  return name\nend\n',
     vendored: true,
   },
+  { wasm: 'nix', pkg: 'tree-sitter-nix', sample: '{ pkgs ? import <nixpkgs> {} }: pkgs.hello\n' },
   { wasm: 'sql', pkg: '@derekstride/tree-sitter-sql', sample: 'SELECT 1;\n' },
   { wasm: 'solidity', pkg: 'tree-sitter-solidity', sample: 'contract A { function run() public {} }\n' },
   { wasm: 'r', pkg: '@davisvaughan/tree-sitter-r', sample: 'x <- 1\n' },

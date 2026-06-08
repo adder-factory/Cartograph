@@ -316,7 +316,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **58 language modes**. Framework-aware and derived signals
+Cartograph supports **59 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -340,7 +340,7 @@ are listed separately so the core language matrix stays readable.
 | Svelte / Vue / Liquid | `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
 | Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
-| GraphQL / GLSL / HLSL / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.hlsl`, `.hlsli`, `.fx`, `.fxh`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
+| GraphQL / GLSL / HLSL / Nix / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.hlsl`, `.hlsli`, `.fx`, `.fxh`, `.nix`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.tofu`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
 | JSON / Jupyter / JSDoc / Regex / Verilog | `.json`, `.ipynb`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
 </details>
