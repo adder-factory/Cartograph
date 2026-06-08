@@ -20,9 +20,9 @@ indexing overrides for gitignored local source, binary/invalid ignore-file
 resilience, OpenTofu `.tofu` detection, GLSL shader indexing,
 Groovy/Solidity indexing, ArkTS/CUDA indexing, HLSL shader indexing, Nix
 expression indexing, Clojure/ClojureScript indexing, Common Lisp indexing,
-TypeScript generic string-literal contract symbols, non-ASCII context-query
-keyword extraction, and context lookup from code-like source strings. Those
-ideas, along with
+CodeWhale installer targeting, TypeScript generic string-literal contract
+symbols, non-ASCII context-query keyword extraction, and context lookup from
+code-like source strings. Those ideas, along with
 PowerShell CLI completion
 support, were reimplemented inside Cartograph's current feature-slice
 architecture; CodeIgniter 3 routing and magic model/library property support was

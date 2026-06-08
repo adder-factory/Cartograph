@@ -402,7 +402,7 @@ describe('Installer targets — Claude specifics', () => {
   });
 });
 
-describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder specifics', () => {
+describe('Installer targets — JSON MCP target specifics', () => {
   let tmpHome: string;
   let tmpCwd: string;
   let origCwd: string;
@@ -498,10 +498,11 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
     }
   });
 
-  it('uses disjoint default paths for Factory, Rovo, and Qoder targets', () => {
+  it('uses disjoint default paths for Factory, Rovo, Qoder, and CodeWhale targets', () => {
     const factory = getTarget('factory')!;
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;
+    const codewhale = getTarget('codewhale')!;
 
     const paths = [
       ...factory.describePaths('global'),
@@ -510,22 +511,28 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
       ...rovo.describePaths('local'),
       ...qoder.describePaths('global'),
       ...qoder.describePaths('local'),
+      ...codewhale.describePaths('global'),
+      ...codewhale.describePaths('local'),
     ];
 
     expect(new Set(paths).size).toBe(paths.length);
     expect(factory.describePaths('global')).toEqual([path.join(tmpHome, '.factory', 'mcp.json')]);
     expect(rovo.describePaths('local')).toEqual([path.join(process.cwd(), '.rovodev', 'mcp.json')]);
     expect(qoder.describePaths('local')).toEqual([path.join(process.cwd(), '.qoder', 'settings.local.json')]);
+    expect(codewhale.describePaths('global')).toEqual([path.join(tmpHome, '.codewhale', 'mcp.json')]);
+    expect(codewhale.describePaths('local')).toEqual([path.join(process.cwd(), '.codewhale', 'mcp.json')]);
   });
 
   it('writes each target-specific MCP entry shape', () => {
     const factory = getTarget('factory')!;
     const rovo = getTarget('rovo')!;
     const qoder = getTarget('qoder')!;
+    const codewhale = getTarget('codewhale')!;
 
     factory.install('local', { autoAllow: false });
     rovo.install('local', { autoAllow: false });
     qoder.install('local', { autoAllow: false });
+    codewhale.install('local', { autoAllow: false });
 
     const factoryConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.factory', 'mcp.json'), 'utf-8'));
     expect(factoryConfig.mcpServers.cartograph).toEqual({
@@ -547,6 +554,12 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
       command: 'cartograph',
       args: ['serve', '--mcp'],
     });
+
+    const codewhaleConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.codewhale', 'mcp.json'), 'utf-8'));
+    expect(codewhaleConfig.mcpServers.cartograph).toEqual({
+      command: 'cartograph',
+      args: ['serve', '--mcp'],
+    });
   });
 
   it('writes a custom command path across target-specific MCP config shapes', () => {
@@ -559,6 +572,7 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
     getTarget('factory')!.install('local', { autoAllow: false, command });
     getTarget('rovo')!.install('local', { autoAllow: false, command });
     getTarget('qoder')!.install('local', { autoAllow: false, command });
+    getTarget('codewhale')!.install('local', { autoAllow: false, command });
     getTarget('gemini')!.install('local', { autoAllow: false, command });
     getTarget('kiro')!.install('local', { autoAllow: false, command });
     getTarget('codex')!.install('global', { autoAllow: false, command });
@@ -579,6 +593,8 @@ describe('Installer targets — Copilot, Zed, opencode, Factory, Rovo, and Qoder
     expect(rovoConfig.mcpServers.cartograph.command).toBe(command);
     const qoderConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.qoder', 'settings.local.json'), 'utf-8'));
     expect(qoderConfig.mcpServers.cartograph.command).toBe(command);
+    const codewhaleConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.codewhale', 'mcp.json'), 'utf-8'));
+    expect(codewhaleConfig.mcpServers.cartograph.command).toBe(command);
     const geminiConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.gemini', 'settings.json'), 'utf-8'));
     expect(geminiConfig.mcpServers.cartograph.command).toBe(command);
     const kiroConfig = JSON.parse(fs.readFileSync(path.join(tmpCwd, '.kiro', 'settings', 'mcp.json'), 'utf-8'));
