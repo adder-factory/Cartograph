@@ -58,6 +58,10 @@ describe('audit-4 CLI argument-layer fixes', () => {
     const { out, code } = runCli(['ask', '--help']);
     expect(code).toBe(0);
     expect(out).toContain('--project-path');
+    expect(out).toContain('--mode');
+    expect(out).toContain('--prompt');
+    expect(out).toContain('--system');
+    expect(out).toContain('--max-tokens');
     expect(out).toMatch(/4096/);
     expect(out).toMatch(/range 4-30/);
   }, 60_000);

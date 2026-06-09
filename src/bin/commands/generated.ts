@@ -56,8 +56,9 @@ function registerFlatGeneratedCommands(): void {
   registerGeneratedCommand('cartograph_host', {
     commandName: 'discover',
     description:
-      "Find `.cartograph/` indexes under a parent path. Shortcut for `cartograph host --mode discover` and MCP `cartograph_host({mode: 'discover'})`.",
+      "Compatibility alias for `cartograph host --mode discover` and MCP `cartograph_host({mode: 'discover'})`.",
     summary: 'Find .cartograph indexes under a parent path',
+    hidden: true,
     positionalFields: ['path'],
     skipFields: ['mode', 'location', 'includeInstallTargets', 'lowTokens'],
     shortFlags: { maxDepth: '-d' },
@@ -67,8 +68,9 @@ function registerFlatGeneratedCommands(): void {
   registerGeneratedCommand('cartograph_ask', {
     commandName: 'local-chat',
     description:
-      "Delegate bulk prose to the configured local/summarize LLM without code retrieval. Shortcut for MCP `cartograph_ask({mode: 'local_chat'})`.",
+      "Compatibility alias for `cartograph ask --mode local_chat` and MCP `cartograph_ask({mode: 'local_chat'})`.",
     summary: 'Delegate bulk prose to the configured local/summarize LLM',
+    hidden: true,
     positionalFields: ['prompt'],
     skipFields: ['mode', 'question', 'retrieveK'],
     shortFlags: { system: '-s' },
@@ -116,8 +118,9 @@ function registerInspectionGeneratedCommands(): void {
   registerGeneratedCommand('cartograph_deps', {
     commandName: 'dependency-coverage',
     description:
-      "Report resolved and unresolved graph dependency coverage by language and edge kind. Shortcut for `cartograph deps --mode coverage` and MCP `cartograph_deps({mode: 'coverage'})`.",
+      "Compatibility alias for `cartograph deps --mode coverage` and MCP `cartograph_deps({mode: 'coverage'})`.",
     summary: 'Report graph dependency coverage by language and edge kind',
+    hidden: true,
     skipFields: ['mode'],
     runViaMcp: (_toolName, args, projectPath) =>
       runViaMCP('cartograph_deps', { ...args, mode: 'coverage' }, projectPath),
@@ -128,8 +131,9 @@ function registerInspectionGeneratedCommands(): void {
   registerGeneratedCommand('cartograph_host', {
     commandName: 'host-diagnostics',
     description:
-      "Report active MCP profile/tool visibility and installer target config detection. Shortcut for `cartograph host --mode diagnostics` and MCP `cartograph_host({mode: 'diagnostics'})`.",
+      "Compatibility alias for `cartograph host --mode diagnostics` and MCP `cartograph_host({mode: 'diagnostics'})`.",
     summary: 'Report MCP host/profile visibility and installer target diagnostics',
+    hidden: true,
     skipFields: ['mode', 'path', 'maxDepth'],
     runViaMcp: (_toolName, args, projectPath) =>
       runViaMCP('cartograph_host', { ...args, mode: 'diagnostics' }, projectPath),

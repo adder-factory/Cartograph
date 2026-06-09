@@ -687,6 +687,12 @@ export function registerGeneratedCommand(
   opts: GenerateCommandOptions & {
     parent?: Command;
     /**
+     * Register the command as a compatibility alias: it remains
+     * callable, but is hidden from root `--help` and public surface
+     * alignment checks.
+     */
+    hidden?: boolean;
+    /**
      * Custom dispatcher in place of the default {@link runViaMCP}. Use
      * when the generated command needs to post-process the MCP output
      * (e.g. append a CLI-side hint based on freshness state — handoff
@@ -701,8 +707,8 @@ export function registerGeneratedCommand(
   if (!mod) {
     throw new Error(`registerGeneratedCommand: unknown tool \`${toolName}\``);
   }
-  const { parent, runViaMcp: customRunner, ...genOpts } = opts;
+  const { parent, hidden, runViaMcp: customRunner, ...genOpts } = opts;
   const contractCli = getToolContract(mod)?.cli ?? {};
   const cmd = buildGeneratedCommand(mod, customRunner ?? runViaMCP, { ...contractCli, ...genOpts });
-  (parent ?? program).addCommand(cmd);
+  (parent ?? program).addCommand(cmd, hidden ? { hidden: true } : undefined);
 }
