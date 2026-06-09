@@ -25,6 +25,10 @@ cartograph backend logs [path]     # tail backend logs; add --tier embed|ask|rer
 cartograph status [path]           # index status and feature readiness
 cartograph status [path] --json    # automation shape: version, index path,
                                    # last indexed timestamp, counts, rollups
+cartograph host --mode diagnostics # MCP profile/tool and installer target signals
+cartograph host --mode discover    # find .cartograph indexes under a parent path
+cartograph host-diagnostics        # shortcut for host --mode diagnostics
+cartograph discover [path]         # shortcut for host --mode discover
 cartograph viewer [path]           # local graph viewer
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
@@ -125,6 +129,7 @@ cartograph biomarkers --min-severity warning
 cartograph hotspots
 cartograph dead-code
 cartograph deps
+cartograph dependency-coverage
 cartograph coverage AuthService
 cartograph trace-to-culprits --trace "$STACK_TRACE"
 ```
@@ -176,7 +181,7 @@ These require configured OpenAI-compatible chat/embedding providers:
 cartograph llm setup
 cartograph llm smoke --timeout-ms 60000
 cartograph ask "How does auth work?"
-cartograph local-chat "Summarize this report"
+cartograph local-chat "Summarize this report" # shortcut for cartograph_ask mode=local_chat
 cartograph summaries pending
 cartograph role
 ```

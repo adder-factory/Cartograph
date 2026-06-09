@@ -262,9 +262,10 @@ export function validateEmail(email: string): boolean {
       const text = result.content[0]?.text ?? '';
       const nextActions = result.metadata?.nextActions as Array<{ tool: string }> | undefined;
 
-      expect(text).toContain('cartograph_dependency_coverage');
+      expect(text).toContain('cartograph_deps');
       expect(text).toContain('"mode": "intent"');
-      expect(nextActions?.[0]?.tool).toBe('cartograph_dependency_coverage');
+      expect(nextActions?.[0]?.tool).toBe('cartograph_deps');
+      expect(nextActions?.[0]?.args).toMatchObject({ mode: 'coverage' });
     });
 
     it('should accept object input with title and description', async () => {

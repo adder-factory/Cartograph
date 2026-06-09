@@ -1,8 +1,8 @@
 /**
- * `cartograph_discover` — find every `.cartograph/` directory under a
- * root path. Useful for monorepos where the parent isn't indexed but
- * sub-projects are. Lets the agent enumerate available indices
- * without `find` / `ls` shell calls.
+ * `cartograph_host({mode: 'discover'})` — find every `.cartograph/`
+ * directory under a root path. Useful for monorepos where the parent
+ * isn't indexed but sub-projects are. Lets the agent enumerate
+ * available indices without `find` / `ls` shell calls.
  *
  * Borrowed from CartographContext's `discover_cartograph_contexts`
  * shape — same affordance, scoped to our `.cartograph/` directory
@@ -18,7 +18,6 @@ import { textResult } from './shared.js';
 import { renderMarkdownTable, type MarkdownTableSpec } from './_result-spec.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import type { ToolCtx } from './types.js';
-import { defineTool } from './_define-tool.js';
 import { NON_SOURCE_DIR_NAMES } from '../../path-class.js';
 
 // ESM-safe sync require for `bun:sqlite` — bare `require()` throws
@@ -32,9 +31,9 @@ const requireCjs = createRequire(import.meta.url);
 
 /** Default scan depth — covers most monorepo shapes (apps/X, packages/X)
  *  without descending into node_modules-deep trees. */
-const DEFAULT_MAX_DEPTH = 4;
+export const DEFAULT_DISCOVER_MAX_DEPTH = 4;
 /** Hard cap on max_depth to prevent unbounded fs scans. */
-const MAX_MAX_DEPTH = 10;
+export const MAX_DISCOVER_MAX_DEPTH = 10;
 
 interface DiscoveredContext {
   path: string;
@@ -294,7 +293,7 @@ export interface DiscoverContextsTableRow {
 }
 
 /**
- * Build the typed `ResultSpec` for the `cartograph_discover` results
+ * Build the typed `ResultSpec` for the discover results
  * table. Pure — call sites pass the already-walked + stat-enriched
  * contexts plus the search root (folded into the title) and the
  * optional failure footer (live data — built by the caller from
@@ -351,7 +350,7 @@ export function buildDiscoverContextsSpec(
 }
 
 /**
- * Zod schema for `cartograph_discover` — the structural-campaign-P3
+ * Zod schema for the discover branch — the structural-campaign-P3
  * proof-of-concept for the `defineTool` infrastructure. One schema is
  * the single source for the JSON `inputSchema`, the handler's arg
  * types, and (P8) the CLI `--max-depth` option.
@@ -372,14 +371,14 @@ const discoverSchema = z.object({
     .number()
     .int()
     .min(1)
-    .max(MAX_MAX_DEPTH)
-    .default(DEFAULT_MAX_DEPTH)
+    .max(MAX_DISCOVER_MAX_DEPTH)
+    .default(DEFAULT_DISCOVER_MAX_DEPTH)
     .describe('Max directory depth to scan; integer in [1, 10] (default 4, covers typical monorepo shapes).'),
 });
 
-type DiscoverArgs = z.infer<typeof discoverSchema>;
+export type DiscoverArgs = z.infer<typeof discoverSchema>;
 
-async function handleDiscover(ctx: ToolCtx, args: DiscoverArgs): Promise<ToolOutcome> {
+export async function handleDiscover(ctx: ToolCtx, args: DiscoverArgs): Promise<ToolOutcome> {
   const hasExplicitPath = typeof args.path === 'string' && args.path.length > 0;
   // Default: use the project root when the server has a default project
   // (matches CLI behaviour — CLI scans the cwd / project root, not the
@@ -443,16 +442,3 @@ function backfillActiveContextStats(
     return;
   }
 }
-
-export const DISCOVER_TOOL = defineTool({
-  name: 'cartograph_discover',
-  description:
-    'Monorepo discovery — find every `.cartograph/` under a parent path. ' +
-    'Returns `(path, file count, node count, indexed-at)` (stats best-effort). ' +
-    'Skips build/dependency dirs, dot-dirs, and test-fixture dirs. ' +
-    'Pass any returned path as `projectPath` on subsequent calls.',
-  schema: discoverSchema,
-  handle: handleDiscover,
-  // Project-agnostic: doesn't use ctx.getCartograph, no index to gate.
-  bypassFreshnessGate: true,
-});

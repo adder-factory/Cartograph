@@ -132,8 +132,8 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Local viewer | `cartograph viewer .` |
 | Library API | `Cartograph.init('/path/to/project')` |
 
-Cartograph registers 37 MCP tools. The default `core` profile advertises the
-14 most common coding-agent tools; the complete 37-tool surface is available
+Cartograph registers 34 MCP tools. The default `core` profile advertises the
+14 most common coding-agent tools; the complete 34-tool surface is available
 with `cartograph serve --mcp --profile full`.
 
 ## Storage
@@ -283,10 +283,10 @@ win.
 | `cartograph context` | Task-specific context and route plans |
 | `cartograph coverage` | Per-symbol coverage joined to graph data |
 | `cartograph dead-code` | Potentially-dead symbol candidates |
-| `cartograph dependency-coverage` | Resolved and unresolved graph dependency coverage by language and edge kind |
-| `cartograph deps` | package.json dependency audit |
+| `cartograph dependency-coverage` | CLI shortcut for graph dependency coverage (`cartograph deps --mode coverage`) |
+| `cartograph deps` | package.json dependency audit and graph dependency coverage |
 | `cartograph digest` | "Land in a new repo" overview |
-| `cartograph discover` | Find other `.cartograph` indexes |
+| `cartograph discover` | CLI shortcut to find other `.cartograph` indexes (`cartograph host --mode discover`) |
 | `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
 | `cartograph explore` | Deep topic exploration |
 | `cartograph export` | Graph artifact export: JSON, DOT, Mermaid, Cytoscape |
@@ -297,13 +297,14 @@ win.
 | `cartograph graph` | Call/dependency graph traversal |
 | `cartograph guide` | Compact first-use and daily-workflow guide |
 | `cartograph history` | Symbol-level co-change |
-| `cartograph host-diagnostics` | MCP host/profile visibility and installer target diagnostics |
+| `cartograph host` | Host diagnostics and `.cartograph` index discovery |
+| `cartograph host-diagnostics` | CLI shortcut for MCP host/profile visibility and installer target diagnostics |
 | `cartograph hotspots` | Churn x centrality triage |
 | `cartograph imports` | Import statement graph data |
 | `cartograph install` | Configure MCP server entries for supported agents |
 | `cartograph install-hooks` | Install managed git hooks for quiet background sync |
 | `cartograph llm` | Local/cloud LLM provider setup and smoke checks |
-| `cartograph local-chat` | Delegate bulk prose to a local LLM |
+| `cartograph local-chat` | CLI shortcut to delegate bulk prose to a local LLM |
 | `cartograph mcp-budget` | Measure MCP startup payload size |
 | `cartograph module` | Directory/module summary |
 | `cartograph node` | Symbol details, optionally with source and related data |

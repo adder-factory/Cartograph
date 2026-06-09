@@ -8,6 +8,7 @@ import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { buildAskOutput, groundCitations } from '../../features/ask/citations.js';
 import { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from '../../features/ask/constants.js';
+import { handleLocalChat } from './local-chat.js';
 export {
   buildAskOutput,
   buildCitationReport,
@@ -26,6 +27,7 @@ export { RETRIEVE_K_DEFAULT, RETRIEVE_K_MAX, RETRIEVE_K_MIN } from '../../featur
  * "at most 4096 characters" contract the legacy handler advertised.
  */
 const QUESTION_MAX_LENGTH = 4096;
+const LOCAL_CHAT_MAX_PROMPT_CHARS = 64_000;
 
 /**
  * Zod schema for `cartograph_ask`.
@@ -38,7 +40,16 @@ const QUESTION_MAX_LENGTH = 4096;
  * `clamp(numArg(...))` is dead code, removed.
  */
 const askSchema = z.object({
-  question: nonEmptyString.max(QUESTION_MAX_LENGTH).describe('Natural-language question about the codebase.'),
+  mode: z
+    .enum(['code', 'local_chat'])
+    .default('code')
+    .describe(
+      '`code` (default) asks a natural-language question about the indexed codebase. `local_chat` delegates bulk prose to the configured local/summarize LLM without reading the code index.',
+    ),
+  question: nonEmptyString
+    .max(QUESTION_MAX_LENGTH)
+    .optional()
+    .describe('(mode=code) Natural-language question about the codebase.'),
   retrieveK: z
     .number()
     .int()
@@ -48,12 +59,44 @@ const askSchema = z.object({
     .describe(
       `Candidate symbols fed to the model as context; integer in [${RETRIEVE_K_MIN}, ${RETRIEVE_K_MAX}] (default ${RETRIEVE_K_DEFAULT}).`,
     ),
+  prompt: z
+    .string()
+    .min(1)
+    .max(LOCAL_CHAT_MAX_PROMPT_CHARS)
+    .optional()
+    .describe('(mode=local_chat) User-side message to send to the local backend.'),
+  system: z
+    .string()
+    .optional()
+    .describe("(mode=local_chat) Optional system message shaping the local model's behavior."),
+  maxTokens: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe('(mode=local_chat) Optional positive-integer cap on output tokens.'),
   projectPath: projectPathField,
 });
 
 type AskToolArgs = z.infer<typeof askSchema>;
 
 async function handleAsk(ctx: ToolCtx, args: AskToolArgs): Promise<ToolOutcome> {
+  if (args.mode === 'local_chat') {
+    if (!args.prompt) {
+      return err('cartograph_ask mode=local_chat requires `prompt`.');
+    }
+    return handleLocalChat(ctx, {
+      prompt: args.prompt,
+      ...(args.system === undefined ? {} : { system: args.system }),
+      ...(args.maxTokens === undefined ? {} : { maxTokens: args.maxTokens }),
+      ...(args.projectPath === undefined ? {} : { projectPath: args.projectPath }),
+    });
+  }
+
+  if (!args.question) {
+    return err('cartograph_ask mode=code requires `question`.');
+  }
+
   // `question` (non-empty, ≤4096 chars) and `retrieveK` (integer in
   // [4, 30]) were validated at the dispatch boundary by `safeParse` —
   // no defensive clamp / validateString pass needed here.
@@ -84,9 +127,10 @@ async function handleAsk(ctx: ToolCtx, args: AskToolArgs): Promise<ToolOutcome> 
 export const ASK_TOOL = defineTool({
   name: 'cartograph_ask',
   description:
-    'LLM-mediated Q&A — natural-language question to a synthesised answer grounded in retrieved code. ' +
+    "LLM family. `mode: 'code'` is natural-language Q&A grounded in retrieved code. `mode: 'local_chat'` delegates bulk prose to the configured local/summarize LLM without code retrieval. " +
     'Hybrid lexical + semantic retrieval feeds the configured ask model. ' +
-    'Use for "how does X work?" / "why is this designed this way?".',
+    'Use code mode for "how does X work?" / "why is this designed this way?"; use local_chat for low-stakes summaries, drafts, or paraphrase checks.',
   schema: askSchema,
   handle: handleAsk,
+  bypassFreshnessGate: (args) => args['mode'] === 'local_chat',
 });

@@ -15,7 +15,7 @@
  * three different names for the same fact ("when was the index
  * built") — `'index_timestamp'` / `'indexed_at'` / `'last_index_at'`.
  * The dead-read variants returned null silently; the only signal was
- * `cartograph_discover` rendering `_?_` for the indexed-at column.
+ * host discover rendering `_?_` for the indexed-at column.
  */
 
 import { z } from 'zod';

@@ -1,5 +1,5 @@
 /**
- * `cartograph_discover` — find `.cartograph/` directories under a root.
+ * `cartograph_host({mode: 'discover'})` — find `.cartograph/` directories under a root.
  * Verifies discovery (finds initialized projects), no-match path
  * (helpful empty message), and depth bounding (skips deep dirs).
  */
@@ -10,11 +10,14 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 
-describe('cartograph_discover', () => {
+describe("cartograph_host mode='discover'", () => {
   let monorepo: string;
   let projectACg: Cartograph;
   let projectBCg: Cartograph;
   let handler: ToolHandler;
+
+  const executeDiscover = (args: Record<string, unknown>) =>
+    handler.execute('cartograph_host', { ...args, mode: 'discover' });
 
   beforeEach(async () => {
     monorepo = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-discover-'));
@@ -58,7 +61,7 @@ describe('cartograph_discover', () => {
   });
 
   it('finds both initialized contexts under the monorepo root', async () => {
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/2 cartograph contexts found/);
     // Paths must be ABSOLUTE so they are directly usable as `projectPath`.
@@ -80,7 +83,7 @@ describe('cartograph_discover', () => {
     // show real integer counts. The host `projectACg` is `apps/a`, so
     // its row is filled in via the live-connection path; `packages/b` is
     // a sibling read via `bun:sqlite` read-only open.
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
     // Pull all table-row stats columns: `| path | files | nodes | ts |`.
     // Each non-header row must have at least one numeric column.
@@ -99,7 +102,7 @@ describe('cartograph_discover', () => {
   });
 
   it('renders discovered paths as absolute', async () => {
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
     // Every backtick-quoted path in the table rows must be absolute.
     // Extract all `...` values from the table body (skip header row).
@@ -111,14 +114,14 @@ describe('cartograph_discover', () => {
   });
 
   it('skips node_modules even when a fake .cartograph is in there', async () => {
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
     // Should NOT report the node_modules/lib/.cartograph fake.
     expect(text).not.toMatch(/node_modules/);
   });
 
   it('skips stale test-fixture indices rooted under __tests__/fixtures', async () => {
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
     // The fixture index under __tests__/evaluation/fixtures/large must
     // not surface as a queryable "project" — it's a test artifact.
@@ -137,7 +140,7 @@ describe('cartograph_discover', () => {
     );
     fs.writeFileSync(path.join(pgProject, '.cartograph', 'cartograph.db'), 'postgres provider sentinel\n');
 
-    const result = await handler.execute('cartograph_discover', { path: monorepo });
+    const result = await executeDiscover({ path: monorepo });
     const text = result.content[0]?.text ?? '';
 
     expect(text).toMatch(/3 cartograph contexts found/);
@@ -149,7 +152,7 @@ describe('cartograph_discover', () => {
   it('returns a helpful empty message when no contexts are under the path', async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-discover-empty-'));
     try {
-      const result = await handler.execute('cartograph_discover', { path: empty });
+      const result = await executeDiscover({ path: empty });
       const text = result.content[0]?.text ?? '';
       expect(text).toMatch(/No cartograph contexts found/);
       expect(text).toMatch(/cartograph admin init/);
@@ -161,13 +164,13 @@ describe('cartograph_discover', () => {
   it('respects maxDepth', async () => {
     // Both apps/a and packages/b are at depth 2 (apps/a). With depth 1,
     // neither should surface — only the immediate children of monorepo.
-    const result = await handler.execute('cartograph_discover', { path: monorepo, maxDepth: 1 });
+    const result = await executeDiscover({ path: monorepo, maxDepth: 1 });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/No cartograph contexts found/);
   });
 
   it('rejects non-existent path', async () => {
-    const result = await handler.execute('cartograph_discover', {
+    const result = await executeDiscover({
       path: '/nonexistent/path/that/will/never/exist',
     });
     const text = result.content[0]?.text ?? '';

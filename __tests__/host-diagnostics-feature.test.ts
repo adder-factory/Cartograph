@@ -35,7 +35,8 @@ describe('host diagnostics', () => {
   it('runs through the MCP adapter without install-target filesystem detection', async () => {
     const handler = new ToolHandler(null, { profile: 'full' });
     const text = textOf(
-      await handler.execute('cartograph_host_diagnostics', {
+      await handler.execute('cartograph_host', {
+        mode: 'diagnostics',
         includeInstallTargets: false,
         lowTokens: true,
       }),

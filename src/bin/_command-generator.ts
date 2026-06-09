@@ -80,6 +80,17 @@ export interface GenerateCommandOptions {
    */
   readonly commandName?: string;
   /**
+   * CLI-specific description override. Defaults to the MCP tool
+   * description. Use this for ergonomic shortcut commands that route
+   * to one branch of a larger MCP family.
+   */
+  readonly description?: string;
+  /**
+   * CLI-specific one-line summary override. Defaults to a compact
+   * summary derived from the command description.
+   */
+  readonly summary?: string;
+  /**
    * Field names to NOT register as CLI options. `projectPath` is
    * always handled specially (registered as `-p, --project-path` and
    * routed to `runViaMCP`'s third argument), so callers never list
@@ -277,9 +288,8 @@ export function buildGeneratedCommand(
   }
   const spec = zodSchemaToCommandSpec(schema);
   const commandName = opts.commandName ?? defaultCommandName(mod.definition.name);
-  const cmd = new Command(commandName)
-    .description(mod.definition.description)
-    .summary(oneLineSummary(mod.definition.description));
+  const description = opts.description ?? mod.definition.description;
+  const cmd = new Command(commandName).description(description).summary(opts.summary ?? oneLineSummary(description));
   appendContractHelp(cmd, opts);
   const ctx: GenContext = { cmd, spec, mod, opts };
 

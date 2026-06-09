@@ -1,5 +1,5 @@
 /**
- * `cartograph_local_chat` — verifies the agent-facing surface that
+ * `cartograph_ask({mode: 'local_chat'})` — verifies the agent-facing surface that
  * lets the parent agent delegate bulk-prose subtasks to the user's
  * configured local LLM. Covers the happy path, the prompt-length
  * gate, and the unreachable-backend error shape.
@@ -14,20 +14,26 @@ import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { LlmClient } from '../src/llm/client.js';
-import { LOCAL_CHAT_TOOL } from '../src/mcp/tools/local-chat.js';
+import { ASK_TOOL } from '../src/mcp/tools/ask.js';
 
-describe('cartograph_local_chat — module flags', () => {
+describe("cartograph_ask mode='local_chat' — module flags", () => {
   it('bypasses the freshness gate (it relays a prompt, never reads the index)', () => {
     // local_chat does not query the code graph, so a stale index must
     // not block the LLM relay call. Task #39.
-    expect(LOCAL_CHAT_TOOL.bypassFreshnessGate).toBe(true);
+    const bypassFreshnessGate = ASK_TOOL.bypassFreshnessGate;
+    expect(typeof bypassFreshnessGate).toBe('function');
+    expect(typeof bypassFreshnessGate === 'function' ? bypassFreshnessGate({ mode: 'local_chat' }) : null).toBe(true);
+    expect(typeof bypassFreshnessGate === 'function' ? bypassFreshnessGate({ mode: 'code' }) : null).toBe(false);
   });
 });
 
-describe('cartograph_local_chat', () => {
+describe("cartograph_ask mode='local_chat'", () => {
   let dir: string;
   let cg: Cartograph;
   let handler: ToolHandler;
+
+  const executeLocalChat = (args: Record<string, unknown>) =>
+    handler.execute('cartograph_ask', { ...args, mode: 'local_chat' });
 
   beforeEach(async () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-local-chat-'));
@@ -66,7 +72,7 @@ describe('cartograph_local_chat', () => {
   });
 
   it('returns the local model reply with a model + duration trailer', async () => {
-    const result = await handler.execute('cartograph_local_chat', {
+    const result = await executeLocalChat({
       prompt: 'summarize this in one sentence',
     });
     const text = result.content[0]?.text ?? '';
@@ -76,12 +82,12 @@ describe('cartograph_local_chat', () => {
   });
 
   it('rejects empty prompts', async () => {
-    // cartograph_local_chat is now a Zod-backed `defineTool` module —
+    // cartograph_ask is a Zod-backed `defineTool` module —
     // an empty `prompt` fails `z.string().min(1)` at the dispatch
     // boundary and surfaces as a formatted `Invalid arguments` error.
-    const result = await handler.execute('cartograph_local_chat', { prompt: '' });
+    const result = await executeLocalChat({ prompt: '' });
     const text = result.content[0]?.text ?? '';
-    expect(text).toMatch(/Invalid arguments for `cartograph_local_chat`/);
+    expect(text).toMatch(/Invalid arguments for `cartograph_ask`/);
     expect(text).toMatch(/prompt: must be at least 1 character/);
   });
 
@@ -90,7 +96,7 @@ describe('cartograph_local_chat', () => {
     // `.max(64000)` rejects it at the dispatch boundary before the
     // service-side LOCAL_CHAT_MAX_PROMPT_CHARS layer is reached.
     const huge = 'x'.repeat(64_001);
-    const result = await handler.execute('cartograph_local_chat', { prompt: huge });
+    const result = await executeLocalChat({ prompt: huge });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/prompt: must be at most 64000 character/);
   });
@@ -99,7 +105,7 @@ describe('cartograph_local_chat', () => {
     // The spy echoes a fixed reply, but the system message
     // path going through cg.llm.localLlm shouldn't crash and the
     // result trailer still arrives.
-    const result = await handler.execute('cartograph_local_chat', {
+    const result = await executeLocalChat({
       prompt: 'do the thing',
       system: 'You are a helpful summarizer.',
     });
@@ -119,7 +125,7 @@ describe('cartograph_local_chat', () => {
       const cg2 = await Cartograph.init(dir2, {});
       const handler2 = new ToolHandler(cg2, { profile: 'full' });
       try {
-        const result = await handler2.execute('cartograph_local_chat', { prompt: 'hi' });
+        const result = await handler2.execute('cartograph_ask', { mode: 'local_chat', prompt: 'hi' });
         const text = result.content[0]?.text ?? '';
         expect(text).toMatch(/local_chat failed/);
         expect(text).toMatch(/summarize provider/);

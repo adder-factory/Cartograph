@@ -349,7 +349,7 @@ async function resolveAskChat(llm: NonNullable<CartographConfig['llm']>): Promis
 
 /**
  * Resolve the local-chat carve-out provider from the optional `localLlm`
- * block. When unset, cartograph_local_chat routes through the main
+ * block. When unset, the local-chat branch routes through the main
  * summarize backend.
  */
 async function resolveLocalChat(

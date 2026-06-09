@@ -4,7 +4,7 @@
  * Each tool ships its own self-contained `ToolModule` (definition +
  * `handle` function) in `./<name>.ts`, so adding an MCP tool is a
  * single-file addition for metadata, dispatch, and handler body. All
- * 36 handlers are migrated; `ToolHandler.execute()` dispatches via
+ * 34 handlers are migrated; `ToolHandler.execute()` dispatches via
  * `mod.handle(ctx, args)` directly.
  *
  * The registry (`./registry`) imports each module and exposes
@@ -128,12 +128,15 @@ export interface ToolModule {
   /**
    * When true, the freshness pre-flight gate in `execute()` is
    * skipped for this tool — the call dispatches even if the index is
-   * heavily stale. Use sparingly: only for tools where gate-blocking
-   * would create a deadlock (e.g. `cartograph_admin({action: 'sync'})`
-   * is the operation that fixes staleness; `cartograph_status` integrates
-   * freshness inline).
+   * heavily stale. A predicate form supports branch-specific bypass for
+   * family tools whose one mode does not read indexed data. Use
+   * sparingly: only for tools where gate-blocking would create a
+   * deadlock (e.g. `cartograph_admin({action: 'sync'})` is the
+   * operation that fixes staleness; `cartograph_status` integrates
+   * freshness inline) or a branch is project-operational rather than
+   * graph-querying.
    */
-  readonly bypassFreshnessGate?: boolean;
+  readonly bypassFreshnessGate?: boolean | ((args: Record<string, unknown>) => boolean);
   /**
    * When true, any stale index is treated as unsafe for this read tool.
    * The dispatcher refuses the call unless the user explicitly passes

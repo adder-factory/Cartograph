@@ -12,7 +12,7 @@ function textOf(result: { content: Array<{ type: string; text: string }> }): str
   return result.content[0]!.text;
 }
 
-describe('cartograph_dependency_coverage', () => {
+describe('cartograph_deps mode=coverage', () => {
   let tempDir: string;
   let cg: Cartograph;
   let handler: ToolHandler;
@@ -57,16 +57,17 @@ describe('cartograph_dependency_coverage', () => {
 
   it('is registered and reports resolved plus unresolved dependency counts', async () => {
     const names = getToolModules().map((mod) => mod.definition.name);
-    expect(names).toContain('cartograph_dependency_coverage');
+    expect(names).toContain('cartograph_deps');
+    expect(names).not.toContain('cartograph_dependency_coverage');
 
-    const text = textOf(await handler.execute('cartograph_dependency_coverage', { limit: 10 }));
+    const text = textOf(await handler.execute('cartograph_deps', { mode: 'coverage', limit: 10 }));
     expect(text).toContain('Dependency Coverage');
     expect(text).toContain('typescript/calls');
     expect(text).toContain('missingCall');
   });
 
   it('renders a compact low-token form', async () => {
-    const text = textOf(await handler.execute('cartograph_dependency_coverage', { lowTokens: true }));
+    const text = textOf(await handler.execute('cartograph_deps', { mode: 'coverage', lowTokens: true }));
     expect(text).toContain('coverage resolved=');
     expect(text).toContain('typescript|calls');
   });

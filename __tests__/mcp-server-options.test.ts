@@ -54,9 +54,9 @@ describe('MCP server-level options', () => {
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
       expect(names).not.toContain('cartograph_explore');
-      expect(names).not.toContain('cartograph_host_diagnostics');
+      expect(names).not.toContain('cartograph_host');
       expect(names).not.toContain('cartograph_session');
-      expect(names).not.toContain('cartograph_local_chat');
+      expect(names).not.toContain('cartograph_ask');
       expect(names).not.toContain('cartograph_note');
       handler.closeAll();
       explicitCoreHandler.closeAll();
@@ -79,12 +79,12 @@ describe('MCP server-level options', () => {
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
       expect(names).not.toContain('cartograph_explore');
-      expect(names).not.toContain('cartograph_host_diagnostics');
+      expect(names).not.toContain('cartograph_host');
       expect(names).not.toContain('cartograph_session');
-      expect(names).not.toContain('cartograph_local_chat');
+      expect(names).not.toContain('cartograph_ask');
       expect(names).not.toContain('cartograph_note');
 
-      const result = await handler.execute('cartograph_local_chat', { prompt: 'summarize' });
+      const result = await handler.execute('cartograph_ask', { mode: 'local_chat', prompt: 'summarize' });
       expect(result.content[0]?.text ?? '').toMatch(/profile `core`/);
       handler.closeAll();
     });
@@ -146,7 +146,7 @@ describe('MCP server-level options', () => {
       const names = handler.getTools().map((t) => t.name);
       expect(names).not.toContain('cartograph_find'); // explicit disable
       expect(names).not.toContain('cartograph_admin'); // write-class filter
-      expect(names).not.toContain('cartograph_local_chat'); // profile filter
+      expect(names).not.toContain('cartograph_ask'); // profile filter
       expect(names).toContain('cartograph_graph');
       handler.closeAll();
     });

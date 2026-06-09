@@ -57,7 +57,7 @@ const ZOD_SCHEMA_KEY = '__zodSchema' as const;
 
 /** Spec passed to {@link defineTool}. */
 export interface DefineToolSpec<S extends ToolZodSchema> {
-  /** Canonical tool name, e.g. `cartograph_discover`. */
+  /** Canonical tool name, e.g. `cartograph_host`. */
   readonly name: string;
   /** Human/agent-facing description shown in `tools/list`. */
   readonly description: string;
@@ -92,7 +92,7 @@ export interface DefineToolSpec<S extends ToolZodSchema> {
    */
   readonly handle: (ctx: ToolCtx, args: z.infer<S>) => Promise<ToolResult | ToolOutcome> | ToolResult | ToolOutcome;
   /** Mirrors {@link ToolModule.bypassFreshnessGate}. */
-  readonly bypassFreshnessGate?: boolean;
+  readonly bypassFreshnessGate?: boolean | ((args: Record<string, unknown>) => boolean);
   /** Mirrors {@link ToolModule.requiresFreshIndex}. */
   readonly requiresFreshIndex?: boolean | ((args: Record<string, unknown>) => boolean);
   /** Mirrors {@link ToolModule.isWriteTool}. */

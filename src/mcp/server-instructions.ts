@@ -35,7 +35,7 @@ Review / close-out:
 Token discipline:
 - Metadata tools are cheap. Source-heavy modes are \`cartograph_context\` and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
 - Pass \`lowTokens: true\` on supported high-volume tools, or rely on server \`--low-tokens-default\`; pass \`lowTokens: false\` for one regular response.
-- The default server profile is \`core\` (14 common tools) to keep the advertised tool surface small. Use \`--profile full\` for advanced tools such as digest, explore, imports, hotspots, sessions, and host diagnostics, or \`--profile read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` for narrower surfaces. Call \`cartograph_status\` to confirm the active shape.
+- The default server profile is \`core\` (14 common tools) to keep the advertised tool surface small. Use \`--profile full\` for advanced tools such as digest, explore, imports, hotspots, sessions, and \`cartograph_host\`, or \`--profile read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` for narrower surfaces. Call \`cartograph_status\` to confirm the active shape.
 
 Freshness:
 - The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional. For \`cartograph_node({code: true})\`, pass \`liveSource: true\` to explicitly read a stale file's current disk slice using indexed line ranges.
@@ -102,7 +102,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"Is the index ready / how big?"** → \`cartograph_status\` (\`verbose: true\` folds in top hotspots + biomarkers).
 - **"Set up or move storage?"** → \`cartograph_admin({action: 'init'})\` for a new project; pass \`databaseProvider: 'postgres'\`, \`databaseUrl\`, \`databaseSchema\`, and \`databasePgvector: 'auto'|'off'|'require'\` for PostgreSQL 18+. Use \`cartograph_admin({action: 'storage-migrate'})\` plus PostgreSQL options to move SQLite to PostgreSQL, or \`databaseProvider: 'sqlite'\` to move PostgreSQL back to SQLite.
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` under \`--profile full\` (read-only escape hatch; \`schema: true\` first).
-- **"What other cartograph indices are on this machine?"** → \`cartograph_discover\` under \`--profile full\`.
+- **"What other cartograph indices are on this machine?"** → \`cartograph_host({mode: 'discover'})\` under \`--profile full\`.
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
 - **"Did this agent navigate efficiently?"** → \`cartograph_session({action: "audit"})\` under \`--profile full\` (tool-use findings, repeated calls, missing test-selection/self-check steps); **"How much did this server session use?"** → \`cartograph_session({action: "usage"})\` under \`--profile full\` (aggregate counts/timings only, no raw args or result bodies).
 
@@ -128,7 +128,7 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 
 1. **Deterministic, sub-millisecond** — most tasks finish here: core has find / graph / node / at_range / status / biomarkers / affected / review / tests_for / files / context; full and review profiles add hotspots / changed_since / digest / entry_points / blame / trace_to_culprits / imports / deps / coverage and related triage tools. (\`context\`/\`explore\` are also tier-1-fast but source-heavy — see the delegation note above.)
 2. **Conditional on data**: \`cartograph_coverage\` needs a prior lcov load (\`mode: 'refresh'\` auto-discovers); \`cartograph_history\`/\`_blame\` need git history; \`cartograph_find({by: 'env'|'sql'})\` needs the mined string signals. Each returns clearly when the data isn't there.
-3. **LLM-mediated (needs a configured local LLM)**: \`cartograph_ask\` (RAG Q&A), \`cartograph_find({mode: 'semantic'})\`, \`cartograph_dead_code({via: 'llm'})\`, \`cartograph_role\`, \`cartograph_admin({action: 'summarize'|'embed'|'classify'})\`, \`cartograph_local_chat\` (delegate bulk prose to save Anthropic-token cost — low-stakes only). With NO local LLM, \`cartograph_summaries({action: 'pending'|'save'})\` lets you generate summaries yourself. Setup / repair / perf-tuning: \`cartograph doctor\`, \`cartograph_admin({action: 'llm-plan'|'doctor'|'llm-tune'})\`, \`cartograph backend status|start|stop|logs\`, and \`cartograph llm smoke\`.
+3. **LLM-mediated (needs a configured local LLM)**: \`cartograph_ask\` (RAG Q&A; \`mode: 'local_chat'\` delegates bulk prose to save Anthropic-token cost — low-stakes only), \`cartograph_find({mode: 'semantic'})\`, \`cartograph_dead_code({via: 'llm'})\`, \`cartograph_role\`, \`cartograph_admin({action: 'summarize'|'embed'|'classify'})\`. With NO local LLM, \`cartograph_summaries({action: 'pending'|'save'})\` lets you generate summaries yourself. Setup / repair / perf-tuning: \`cartograph doctor\`, \`cartograph_admin({action: 'llm-plan'|'doctor'|'llm-tune'})\`, \`cartograph backend status|start|stop|logs\`, and \`cartograph llm smoke\`.
 
 ## Anti-patterns
 

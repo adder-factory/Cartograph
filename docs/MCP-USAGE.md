@@ -94,7 +94,7 @@ cartograph_compare_to_ref({findingsDelta: true})
 
 Use `cartograph_playbook` for the full tool-selection guide. Start with
 `--profile full` when you need advanced tools such as digest, explore, imports,
-hotspots, sessions, or host diagnostics.
+hotspots, sessions, or `cartograph_host`.
 For `cartograph_context`, send `task` as the canonical prompt parameter;
 `query` is accepted as an alias for MCP clients that already model search-like
 calls around a `query` field.
@@ -118,14 +118,15 @@ is:
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
 | tools/list, 14 tools | 33,953 | ~8,489 |
-| initialize instructions | 3,345 | ~837 |
-| combined startup load | 37,298 | ~9,325 |
-| full playbook, on demand | 16,054 | ~4,014 |
+| initialize instructions | 3,346 | ~837 |
+| combined startup load | 37,299 | ~9,325 |
+| full playbook, on demand | 16,066 | ~4,017 |
 
-The full 37-tool profile is 61,910 `tools/list` chars and 65,255 combined
+The full 34-tool profile is 61,130 `tools/list` chars and 64,476 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 36 tools, 56,905 `tools/list` chars, and 60,250
-combined startup chars.
+reduce the full list to 33 tools, 56,125 `tools/list` chars, and 59,471
+combined startup chars. The review profile advertises 23 tools, 46,232
+`tools/list` chars, and 49,578 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the
 advertised startup schema.

@@ -48,7 +48,7 @@ export interface RecommendedModel {
 }
 
 /** Chat backend for the high-volume work: symbol summaries, classifier
- *  residue, commit-intent fallback, change-kind, cartograph_local_chat.
+ *  residue, commit-intent fallback, change-kind, local-chat.
  *  Mapped to `summarizeLlm` + `localLlm` slots. */
 export const RECOMMENDED_CHAT_SUMMARIZE: RecommendedModel = {
   filename: 'qwen2.5-coder-3b-instruct-q4_k_m.gguf',
