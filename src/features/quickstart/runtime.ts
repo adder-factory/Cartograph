@@ -3,6 +3,7 @@ import { errMsg } from '../../errors.js';
 const INDEX_ERROR_PREVIEW_LIMIT = 5;
 const MS_PER_SECOND = 1000;
 const SECONDS_PER_MINUTE = 60;
+const SHELL_SINGLE_QUOTE_ESCAPE = String.raw`'\''`;
 
 interface QuickstartIndexResult {
   success: boolean;
@@ -192,5 +193,5 @@ function formatDuration(ms: number): string {
 
 function shellQuote(value: string): string {
   if (/^[A-Za-z0-9_@%+=:,./-]+$/.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\''")}'`;
+  return `'${value.replaceAll("'", SHELL_SINGLE_QUOTE_ESCAPE)}'`;
 }
