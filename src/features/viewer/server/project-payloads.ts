@@ -38,6 +38,44 @@ export function statusPayload(ctx: RequestContext): unknown {
     head,
     languages,
     nodesByKind: stats.nodesByKind,
+    readiness: readinessPayload(ctx.projectPath, stats, indexedAt),
+  };
+}
+
+function readinessPayload(
+  projectPath: string,
+  stats: ReturnType<typeof qbGetStats>,
+  indexedAt: string | null,
+): { grade: 'ok' | 'warn' | 'err'; label: string; summary: string; nextSteps: string[] } {
+  if (!indexedAt) {
+    return {
+      grade: 'err',
+      label: 'Not indexed',
+      summary: 'No completed index timestamp is recorded.',
+      nextSteps: [`cartograph quickstart ${projectPath}`],
+    };
+  }
+  if (stats.fileCount === 0) {
+    return {
+      grade: 'err',
+      label: 'No files',
+      summary: 'The index exists but contains no files.',
+      nextSteps: ['Check include/exclude config, then run `cartograph quickstart .` again.'],
+    };
+  }
+  if (stats.nodeCount === 0) {
+    return {
+      grade: 'warn',
+      label: 'No symbols',
+      summary: 'Files are indexed, but no symbols were extracted.',
+      nextSteps: ['Check language support and file-size limits, then run `cartograph doctor .`.'],
+    };
+  }
+  return {
+    grade: 'ok',
+    label: 'Ready',
+    summary: `${stats.fileCount.toLocaleString()} files and ${stats.nodeCount.toLocaleString()} symbols indexed.`,
+    nextSteps: ['Use search, graph, health, compare, or agent trace views.'],
   };
 }
 

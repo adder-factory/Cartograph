@@ -44,7 +44,7 @@ native pgvector search.
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
 
 cd /path/to/your/project
-cartograph admin init -i
+cartograph quickstart .
 cartograph status --verbose
 ```
 
@@ -133,7 +133,7 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Library API | `Cartograph.init('/path/to/project')` |
 
 Cartograph's MCP server exposes all 37 registered tools. The default `core`
-profile is smaller; the full 37-tool server is available with
+profile advertises the 14 most common coding-agent tools; the full 37-tool server is available with
 `cartograph serve --mcp --profile full`.
 
 ## Storage
@@ -141,7 +141,7 @@ profile is smaller; the full 37-tool server is available with
 SQLite is the default and works immediately:
 
 ```bash
-cartograph admin init -i
+cartograph quickstart .
 ```
 
 PostgreSQL 18+ is opt-in:
@@ -214,6 +214,7 @@ health, coverage, and graph layout directly.
 
 ```bash
 # First-time setup with LLM backend checks
+cartograph quickstart .
 cartograph setup .
 cartograph doctor --fix .
 
@@ -294,6 +295,7 @@ win.
 | `cartograph files` | Indexed file tree and summaries |
 | `cartograph find` | Symbol, content, env-var, and SQL-ref search |
 | `cartograph graph` | Call/dependency graph traversal |
+| `cartograph guide` | Compact first-use and daily-workflow guide |
 | `cartograph history` | Symbol-level co-change |
 | `cartograph host-diagnostics` | MCP host/profile visibility and installer target diagnostics |
 | `cartograph hotspots` | Churn x centrality triage |
@@ -308,11 +310,12 @@ win.
 | `cartograph note` | Persistent annotations/bookmarks |
 | `cartograph playbook` | Tool-selection playbook |
 | `cartograph propose-rename` | Rename plan with call sites and mentions |
+| `cartograph quickstart` | Initialize, build the structural index, and run doctor |
 | `cartograph review` | Diff, neighbor, risk, audit, and trust review helpers |
 | `cartograph role` | Symbol role classification |
 | `cartograph serve` | Start the MCP server |
 | `cartograph session` | Session state, macros, and audits |
-| `cartograph setup` | One-shot bootstrap: init, models, doctor |
+| `cartograph setup` | LLM bootstrap: init, models, doctor |
 | `cartograph similar` | Embedding-cosine peers of a symbol |
 | `cartograph sql` | Read-only SQL escape hatch |
 | `cartograph status` | Index status and feature readiness |

@@ -31,9 +31,7 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
     .action(async (pathArg: string | undefined, options: { port?: string; open?: boolean }) => {
       const projectPath = resolveProjectPath(pathArg);
       if (!isInitialized(projectPath)) {
-        error(
-          `No Cartograph index at ${projectPath}. Run \`cartograph admin init\` and \`cartograph admin index\` first.`,
-        );
+        error(`No Cartograph index at ${projectPath}. Run \`cartograph quickstart ${projectPath}\` first.`);
         process.exit(1);
       }
 

@@ -119,7 +119,7 @@ describe.skipIf(!HAS_GIT)('cartograph_hotspots — categorized split', () => {
 
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -265,7 +265,7 @@ describe('cartograph_hotspots — empty-result diagnostic (friction #19)', () =>
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
 
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_hotspots', {});
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -293,7 +293,7 @@ describe('cartograph_hotspots — empty-result diagnostic (friction #19)', () =>
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
 
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_hotspots', { minCommits: 9999 });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';

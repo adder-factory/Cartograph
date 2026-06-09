@@ -39,7 +39,7 @@ describe('Delta mode (#16)', () => {
       ].join('\n'),
     );
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

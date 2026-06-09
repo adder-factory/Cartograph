@@ -403,7 +403,7 @@
           <div class="value" id="hc-info">261</div>
           <div class="sub" id="hc-info-sub">informational findings</div>
         </div>
-        <div class="health-metric ok">
+        <div class="health-metric">
           <div class="label">Total findings</div>
           <div class="value" id="hc-total">281</div>
           <div class="sub" id="hc-total-sub">across all biomarkers</div>
@@ -412,6 +412,11 @@
           <div class="label">Nodes flagged</div>
           <div class="value" id="hc-nodes">214</div>
           <div class="sub" id="hc-nodes-sub">distinct symbols with at least one finding</div>
+        </div>
+        <div class="health-metric" id="hc-readiness-card">
+          <div class="label">Index status</div>
+          <div class="value" id="hc-readiness">Ready</div>
+          <div class="sub" id="hc-readiness-sub">structural graph is usable</div>
         </div>
       </section>
     </div>
@@ -445,6 +450,14 @@
           <div class="health-row">
             <div><div class="name">Indexed symbols</div><div class="meta" id="hc-total-nodes-sub">nodes available to the viewer</div></div>
             <div class="value" id="hc-total-nodes">0</div>
+          </div>
+          <div class="health-row">
+            <div><div class="name">Readiness</div><div class="meta" id="hc-readiness-meta">doctor and index guidance</div></div>
+            <div class="value" id="hc-readiness-value">Ready</div>
+          </div>
+          <div class="health-row">
+            <div><div class="name">Next step</div><div class="meta" id="hc-readiness-next">Use search, graph, health, compare, or agent trace views.</div></div>
+            <div class="value">Guide</div>
           </div>
           <div class="health-row">
             <div><div class="name">Indexed files</div><div class="meta">files in this project index</div></div>

@@ -2131,7 +2131,7 @@
   }
   .health-score .value {
     margin-top: var(--s-3);
-    color: var(--ok);
+    color: var(--text);
     font-size: 52px;
     line-height: 1;
     font-weight: 750;
@@ -2157,9 +2157,15 @@
     background: var(--ok);
     border-radius: inherit;
   }
+  .health-score[data-health-grade="ok"] .value { color: var(--ok); }
+  .health-score[data-health-grade="warn"] .value { color: var(--warn); }
+  .health-score[data-health-grade="err"] .value { color: var(--err); }
+  .health-score[data-health-grade="ok"] .health-score-fill { background: var(--ok); }
+  .health-score[data-health-grade="warn"] .health-score-fill { background: var(--warn); }
+  .health-score[data-health-grade="err"] .health-score-fill { background: var(--err); }
   .health-metrics {
     display: grid;
-    grid-template-columns: repeat(5, minmax(130px, 1fr));
+    grid-template-columns: repeat(6, minmax(130px, 1fr));
     gap: var(--s-3);
   }
   .health-metric {

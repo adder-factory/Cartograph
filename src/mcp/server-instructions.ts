@@ -30,12 +30,12 @@ Review / close-out:
 - \`cartograph_review\`, \`cartograph_at_range\`, \`cartograph_affected\`, and \`cartograph_tests_for\` for diff context, line ranges, and test selection.
 - \`cartograph_affected({includeCommands: true})\` after edits when you want affected tests plus package-script verification commands.
 - \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting an edit-touching task as done.
-- \`cartograph_session({action: "audit"})\` for tool-use pattern review; \`action: "usage"\` for aggregate tool/session counts; \`cartograph_playbook\` for the full tool map.
+- \`cartograph_playbook\` for the full tool map when the default core set does not fit.
 
 Token discipline:
-- Metadata tools are cheap. Source-heavy modes are \`cartograph_context\`, \`cartograph_explore\`, and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
+- Metadata tools are cheap. Source-heavy modes are \`cartograph_context\` and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
 - Pass \`lowTokens: true\` on supported high-volume tools, or rely on server \`--low-tokens-default\`; pass \`lowTokens: false\` for one regular response.
-- The default server profile is \`core\` to keep the advertised tool surface small. Use \`--profile full\` for the complete toolbox, or \`--profile read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` for narrower surfaces. Call \`cartograph_status\` to confirm the active shape.
+- The default server profile is \`core\` (14 common tools) to keep the advertised tool surface small. Use \`--profile full\` for advanced tools such as digest, explore, imports, hotspots, sessions, and host diagnostics, or \`--profile read-only|review\`, \`--no-write-tools\`, and \`--disable-tool <name>\` for narrower surfaces. Call \`cartograph_status\` to confirm the active shape.
 
 Freshness:
 - The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional. For \`cartograph_node({code: true})\`, pass \`liveSource: true\` to explicitly read a stale file's current disk slice using indexed line ranges.

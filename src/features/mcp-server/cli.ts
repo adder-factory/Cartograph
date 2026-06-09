@@ -123,9 +123,11 @@ export function writeServeMcpGuidance(deps: Pick<McpServerCommandDeps, 'chalk' |
     chalk.cyan('  cartograph_node') + '      - Get symbol details; liveSource handles intentional stale slices',
   );
   writeStderr(chalk.cyan('  cartograph_affected') + '  - Find affected tests; includeCommands suggests verification');
-  writeStderr(chalk.cyan('  cartograph_session') + '   - Resume/audit sessions and manage macros');
   writeStderr(chalk.cyan('  cartograph_files') + '     - Get project file structure');
   writeStderr(chalk.cyan('  cartograph_status') + '    - Get index status');
+  writeStderr(
+    chalk.cyan('  --profile full') + '      - Add advanced tools such as explore, imports, sessions, and diagnostics',
+  );
 }
 
 function registerServeCommand(deps: McpServerCommandDeps): void {

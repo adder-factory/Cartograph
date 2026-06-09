@@ -14,7 +14,9 @@ cartograph install --command /absolute/path/to/cartograph
 cartograph install-hooks [path]    # keep index fresh after pull/checkout/rebase
 cartograph install-hooks --command "$(command -v cartograph)"
 cartograph install-hooks --remove
-cartograph setup [path]            # init + install-models + doctor
+cartograph quickstart [path]       # initialize + structural index + doctor; no model download
+cartograph guide                   # compact first-use and daily-workflow guide
+cartograph setup [path]            # LLM bootstrap: init + install-models + doctor
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph backend status [path]   # managed local llama-server status
 cartograph backend start [path]    # start configured local llama-server tiers

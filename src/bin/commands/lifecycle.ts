@@ -21,12 +21,14 @@ import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp
 import { registerBackendCommand, type BackendRuntimeModule } from '../../features/backend/index.js';
 import { registerCompletionsCommand, type CompletionCliCommand } from '../../features/completions/index.js';
 import { registerDoctorCommand, type DoctorResult, type DoctorRunOptions } from '../../features/doctor/index.js';
+import { registerGuideCommand } from '../../features/guide/index.js';
 import { registerInstallHooksCommand } from '../../features/git-hooks/index.js';
 import { registerInstallCommand } from '../../features/install/index.js';
 import { registerLlmSetupCommand } from '../../features/llm-setup/index.js';
 import { registerLlmSmokeCommand, type LlmSmokeRuntimeModule } from '../../features/llm-smoke/index.js';
 import { registerMcpServerCommands } from '../../features/mcp-server/index.js';
 import { registerPlaybookCommand } from '../../features/playbook/index.js';
+import { registerQuickstartCommand, type QuickstartCartographModule } from '../../features/quickstart/index.js';
 import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
 import { registerSyncIfDirtyCommand, type SyncIfDirtyCommandDeps } from '../../features/sync-if-dirty/index.js';
 import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
@@ -35,7 +37,7 @@ import { registerViewerCommand, type ViewerServerModule } from '../../features/v
 
 type CommandLike = CliOptionCommand;
 type SyncIfDirtyCartographModule = Awaited<ReturnType<SyncIfDirtyCommandDeps['loadCartograph']>>;
-type LifecycleCartographModule = SetupCartographModule & SyncIfDirtyCartographModule;
+type LifecycleCartographModule = SetupCartographModule & SyncIfDirtyCartographModule & QuickstartCartographModule;
 
 interface AssignNumericArgInput {
   args: Record<string, unknown>;
@@ -189,6 +191,8 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
     writeStderr: deps.writeStderr,
   });
   registerPlaybookCommand(deps);
+  registerGuideCommand(deps);
+  registerQuickstartCommand(deps);
   registerViewerCommand(deps);
   registerBackendCommand(deps);
   registerDoctorCommand(deps);

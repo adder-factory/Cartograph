@@ -166,7 +166,7 @@ describe('cartograph_status — project-root surfacing', () => {
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/No default cartograph project/);
     expect(text).toMatch(/projectPath/);
-    expect(text).toMatch(/cartograph init/);
+    expect(text).toMatch(/cartograph quickstart/);
   });
 
   it('throws an actionable error pointing at the supplied path when projectPath has no .cartograph/', async () => {

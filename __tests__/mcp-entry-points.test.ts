@@ -66,7 +66,7 @@ describe('cartograph_entry_points (#10)', () => {
     git(dir, 'commit', '-q', '-m', 'init');
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -197,7 +197,7 @@ program.command('test-only-fixture-cmd').action(() => {});
     git(cliDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(cliDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', {});
       const text = result.content[0]?.text ?? '';
@@ -245,7 +245,7 @@ export const DEMO_TOOL = {
     git(mcpDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(mcpDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', {});
       const text = result.content[0]?.text ?? '';
@@ -302,7 +302,7 @@ export const APPLE_TOOL = {
     git(mcpDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(mcpDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', {});
       const text = result.content[0]?.text ?? '';
@@ -356,7 +356,7 @@ export const DISPATCH = { handler: handleViaRef };
     git(refDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(refDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', { bucket: 'public_exports', limit: 200 });
       const text = result.content[0]?.text ?? '';
@@ -405,7 +405,7 @@ export const DISPATCH = { handler: handleViaRef };
     git(rDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(rDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', { bucket: 'routes' });
       const text = result.content[0]?.text ?? '';
@@ -455,7 +455,7 @@ export const DISPATCH = { handler: handleViaRef };
     git(rDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(rDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', {});
       const text = result.content[0]?.text ?? '';
@@ -486,7 +486,7 @@ export const DISPATCH = { handler: handleViaRef };
     git(empty, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(empty, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const result = await handler2.execute('cartograph_entry_points', {});
       const text = result.content[0]?.text ?? '';

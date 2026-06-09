@@ -254,7 +254,7 @@ export function parseFilesOutputOptions(options: {
 
 export function filterFilesForCli({ files, options, filterFilesByDir }: FilterFilesArgs): FilterFilesResult {
   if (files.length === 0) {
-    return { ok: false, reason: 'empty-index', message: 'No files indexed. Run "cartograph admin index" first.' };
+    return { ok: false, reason: 'empty-index', message: 'No files indexed. Run "cartograph quickstart" first.' };
   }
   const filtered = filterFilesByPattern({ files, options, filterFilesByDir });
   if (filtered.length > 0) return { ok: true, files: filtered };
@@ -278,11 +278,28 @@ function trimLeadingSlashes(value: string): string {
 
 export function buildFilesNoMatchesMessage(args: BuildFilesNoMatchesMessageArgs): string {
   const dirHint = buildFilesEmptyDirHint(args.allFiles, args.dir, args.projectRoot);
+  const patternFilteredHint = buildPatternFilteredHint(args);
   const unsupported = args.pattern ? detectUnsupportedGlobConstruct(args.pattern) : undefined;
   const patternHint = unsupported
     ? `\n\n> _\`pattern\` "${args.pattern}" contains ${unsupported}, which is NOT honored. Only \`*\` / \`?\` / \`**\` glob syntax is supported — unsupported metacharacters are treated as literals. Use a simpler pattern (\`*.ts\`, \`**/*.test.ts\`)._`
     : '';
-  return `No files found matching the criteria.${dirHint}${patternHint}`;
+  return `No files found matching the criteria.${dirHint}${patternFilteredHint}${patternHint}`;
+}
+
+function buildPatternFilteredHint(args: BuildFilesNoMatchesMessageArgs): string {
+  if (!args.pattern) return '';
+  const dirFiles = args.dir ? filterFilesByDir(args.allFiles, args.dir) : args.allFiles;
+  if (dirFiles.length === 0) return '';
+  const regexBody = globToSafeRegex(args.pattern);
+  if (regexBody === null) return '';
+  const regex = new RegExp(regexBody);
+  if (dirFiles.some((file) => regex.test(file.path))) return '';
+  const sample = dirFiles[0]?.path;
+  const sampleHint = sample ? ` Example under the current scope: \`${sample}\`.` : '';
+  return (
+    `\n\n> _The directory scope matched ${dirFiles.length} file${dirFiles.length === 1 ? '' : 's'}, ` +
+    `but \`pattern\` "${args.pattern}" filtered all of them out.${sampleHint} Omit \`pattern\` or try a broader glob such as \`**/*.ts\`._`
+  );
 }
 
 export function buildFilesEmptyDirHint(

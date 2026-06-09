@@ -203,7 +203,7 @@ function buildEmptyResultsResponse(
   const suggestionLine = suggestions.length > 0 ? ` Did you mean: ${suggestionNames}?` : '';
   const exploreHint =
     queryTokens.length >= 2
-      ? `\n\n> **Tip:** Multi-word queries are concept searches — try \`cartograph_explore\` for "${query}" to search across signatures and bodies.`
+      ? `\n\n> **Tip:** Multi-word queries are concept searches — try \`cartograph_context({task: "${query}", format: "plan"})\` first. Use \`cartograph_explore\` from \`--profile full\` for a broader source survey.`
       : '';
   // Include the kind filter when active — an agent reading "no results"
   // without that context has no signal that the filter is the reason.
@@ -551,7 +551,7 @@ export function buildConceptHintIfNeeded(query: string, results: ReadonlyArray<S
   // Pre-result hint: when the query shape suggests multi-symbol lookup.
   let preResult = '';
   if (rawTokens.length >= 2) {
-    preResult = `> **Multi-token query detected.** Top results match only the first non-qualified token. To search each name separately, call \`cartograph_find by:name\` per name. To search across signatures and bodies, use \`cartograph_explore\`.`;
+    preResult = `> **Multi-token query detected.** Top results match only the first non-qualified token. To search each name separately, call \`cartograph_find by:name\` per name. For concept searches, use \`cartograph_context({format: "plan"})\` first; \`cartograph_explore\` is available under \`--profile full\`.`;
   }
 
   // Post-result hint: when we have results but they poorly match the query tokens.
@@ -569,7 +569,7 @@ export function buildConceptHintIfNeeded(query: string, results: ReadonlyArray<S
     });
     // Only show post-result if results exist AND they match poorly AND no pre-result.
     if (wellMatched.length === 0 && results.length > 0 && preResult === '') {
-      postResult = `\n\n> **Tip:** Top results match only the first query token — for concept searches across signatures and bodies, try \`cartograph_explore\` with the same query.`;
+      postResult = `\n\n> **Tip:** Top results match only the first query token — for concept searches, try \`cartograph_context({format: "plan"})\` with the same query. Use \`cartograph_explore\` under \`--profile full\` for broader source surveys.`;
     }
   }
 

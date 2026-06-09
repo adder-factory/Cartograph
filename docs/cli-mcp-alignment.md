@@ -84,6 +84,12 @@ deprecated `--mode static|judge` alias.
   itself.
 - **`cartograph install`** — agent MCP installer; writes supported local or
   global MCP client configuration. Interactive prompts.
+- **`cartograph quickstart`** — human first-run shortcut. It initializes,
+  builds the structural index, runs doctor, and prints next commands.
+  MCP callers use `cartograph_admin({action: 'init'|'index'|'doctor'})`
+  directly.
+- **`cartograph guide`** — compact human CLI workflow guide. MCP sessions
+  receive initialize instructions and can call `cartograph_playbook`.
 - **`cartograph install-hooks`** — git hook installer; touches `.git/hooks/`
   and is intentionally CLI-only repository maintenance.
 - **`cartograph mcp-budget`** — measures the MCP connection payload
@@ -105,7 +111,7 @@ deprecated `--mode static|judge` alias.
 - **`cartograph file-deps`, `cartograph file-symbols`, `cartograph module`**
   — ergonomic CLI shortcuts. MCP-side they are folded into
   `cartograph_files({format: 'deps'|'symbols'|'module'})` to keep the
-  advertised tool count at 35.
+  advertised tool count bounded.
 
 ### Family-action pattern (CLI subcommands)
 

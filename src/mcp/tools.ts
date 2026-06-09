@@ -409,7 +409,7 @@ export class ToolHandler {
         throw new Error(
           'No default cartograph project for this MCP server.\n' +
             'Either: (a) restart the MCP server from a directory containing .cartograph/, ' +
-            '(b) run `cartograph init` in the current directory, or ' +
+            '(b) run `cartograph quickstart` in the current directory, or ' +
             '(c) pass `projectPath` pointing to a directory that already has .cartograph/.',
         );
       }

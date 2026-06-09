@@ -104,6 +104,14 @@ describe('cartograph_files — empty-result hints (handoff #5)', () => {
     expect(text).toContain('negation');
   });
 
+  it('explains when a pattern filters out an otherwise matching directory scope', async () => {
+    const result = await handler.runHandler('cartograph_files', { dir: 'src', pattern: '**/*.md' });
+    const text = textOf(result);
+    expect(text).toContain('directory scope matched 1 file');
+    expect(text).toContain('src/a.ts');
+    expect(text).toContain('filtered all of them out');
+  });
+
   it('does NOT emit the unsupported-glob hint on a normal `*`/`**` pattern that matches', async () => {
     const result = await handler.runHandler('cartograph_files', { pattern: '**/*.ts' });
     const text = textOf(result);

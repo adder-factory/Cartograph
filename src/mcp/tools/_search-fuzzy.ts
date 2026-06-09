@@ -169,7 +169,7 @@ export async function handleSearchFuzzy(ctx: ToolCtx, args: Record<string, unkno
   if (ranked.length === 0) {
     return ok(
       textResult(
-        `No fuzzy matches for "${query}" (max edit distance is bounded; try a longer / more specific stem, or fall back to \`cartograph_explore\` for concept searches).`,
+        `No fuzzy matches for "${query}" (max edit distance is bounded; try a longer / more specific stem, or use \`cartograph_context({task: "${query}", format: "plan"})\` for concept searches).`,
       ),
     );
   }
