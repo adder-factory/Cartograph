@@ -10,8 +10,11 @@ import { globToSafeRegex } from '../../utils.js';
 export interface FilesCommandOptions {
   projectPath?: string;
   dir?: string;
+  file?: string;
   pattern?: string;
   format?: string;
+  lineOffset?: string;
+  lineLimit?: string;
   maxDepth?: string;
   metadata?: boolean;
   json?: boolean;

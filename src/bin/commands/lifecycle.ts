@@ -30,6 +30,7 @@ import { registerPlaybookCommand } from '../../features/playbook/index.js';
 import { registerSetupCommand, type SetupCartographModule } from '../../features/setup/index.js';
 import { registerSyncIfDirtyCommand, type SyncIfDirtyCommandDeps } from '../../features/sync-if-dirty/index.js';
 import { registerTraceToCulpritsCommand } from '../../features/trace-to-culprits/index.js';
+import { registerUpgradeCommand } from '../../features/upgrade/index.js';
 import { registerViewerCommand, type ViewerServerModule } from '../../features/viewer/index.js';
 
 type CommandLike = CliOptionCommand;
@@ -191,6 +192,7 @@ export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLi
   registerViewerCommand(deps);
   registerBackendCommand(deps);
   registerDoctorCommand(deps);
+  registerUpgradeCommand(deps);
   registerSetupCommand(deps);
   registerCompletionsCommand({
     program: deps.program as unknown as CompletionCliCommand,

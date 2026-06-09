@@ -8,7 +8,7 @@ const PERCENT_SCALE = 100;
 const DEFAULT_TOP_CONTRIBUTORS = 10;
 
 export const MCP_LOAD_BUDGET_LIMITS = {
-  toolCount: 35,
+  toolCount: 37,
   toolsListChars: 65_000,
   combinedChars: 68_000,
 } as const;

@@ -199,7 +199,7 @@ const graphSchema = z.object({
     .optional()
     .describe(
       'Emit terse pipe-delimited `name|kind|path:line[|id:n_xxxxxxxx]` rows instead of markdown bullets. ' +
-        'Default false for one-hop callers/callees, true on BFS walks (`hops > 1`). Ignored on `direction: impact | both`.',
+        'Default false for one-hop callers/callees/impact, true on BFS walks (`hops > 1`).',
     ),
   fields: z
     .array(z.enum(['name', 'kind', 'path', 'line', 'id', 'role']))
@@ -279,6 +279,9 @@ function applyGraphLowTokens(args: GraphArgs): GraphArgs {
     out.compact = true;
     out.fields ??= LOW_TOKEN_GRAPH_FIELDS;
   }
+  if ((out.direction === 'impact' || out.direction === 'both') && out.compact !== false) {
+    out.compact = true;
+  }
   if (out.direction === 'similar' && out.k !== undefined && out.k > LOW_TOKEN_SIMILAR_K) {
     out.k = LOW_TOKEN_SIMILAR_K;
   }
@@ -331,13 +334,11 @@ function forwardImpactArgs(args: GraphArgs): Record<string, unknown> {
   delete out['direction'];
   delete out['rankBy'];
   delete out['maxNodes'];
-  delete out['compact'];
   delete out['fields'];
   delete out['since'];
   delete out['includeRoles'];
   delete out['symbols'];
   delete out['start'];
-  delete out['lowTokens'];
   return out;
 }
 

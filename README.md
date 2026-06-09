@@ -132,8 +132,8 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Local viewer | `cartograph viewer .` |
 | Library API | `Cartograph.init('/path/to/project')` |
 
-Cartograph's MCP server exposes all 35 registered tools. The default `core`
-profile is smaller; the full 35-tool server is available with
+Cartograph's MCP server exposes all 37 registered tools. The default `core`
+profile is smaller; the full 37-tool server is available with
 `cartograph serve --mcp --profile full`.
 
 ## Storage
@@ -282,6 +282,7 @@ win.
 | `cartograph context` | Task-specific context and route plans |
 | `cartograph coverage` | Per-symbol coverage joined to graph data |
 | `cartograph dead-code` | Potentially-dead symbol candidates |
+| `cartograph dependency-coverage` | Resolved and unresolved graph dependency coverage by language and edge kind |
 | `cartograph deps` | package.json dependency audit |
 | `cartograph digest` | "Land in a new repo" overview |
 | `cartograph discover` | Find other `.cartograph` indexes |
@@ -294,6 +295,7 @@ win.
 | `cartograph find` | Symbol, content, env-var, and SQL-ref search |
 | `cartograph graph` | Call/dependency graph traversal |
 | `cartograph history` | Symbol-level co-change |
+| `cartograph host-diagnostics` | MCP host/profile visibility and installer target diagnostics |
 | `cartograph hotspots` | Churn x centrality triage |
 | `cartograph imports` | Import statement graph data |
 | `cartograph install` | Configure MCP server entries for supported agents |
@@ -318,6 +320,7 @@ win.
 | `cartograph sync-if-dirty` | Hook compatibility sync that no-ops on clean git trees |
 | `cartograph tests-for` | Tests covering a symbol or files |
 | `cartograph trace-to-culprits` | Stack trace to likely fix sites |
+| `cartograph upgrade` | Check for a newer Cartograph release and print update steps |
 | `cartograph viewer` | Local graph viewer |
 
 </details>

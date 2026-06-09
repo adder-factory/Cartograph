@@ -8,6 +8,7 @@ import {
   buildMacroRunArgs,
   buildMacroSaveArgs,
   buildResumeSessionArgs,
+  buildUsageSessionArgs,
   type SessionArgResult,
 } from './runtime.js';
 import type { Command } from 'commander';
@@ -41,6 +42,7 @@ export function registerSessionCommand(deps: SessionCommandDeps): void {
   registerCreateCommand(deps);
   registerResumeCommand(deps);
   registerAuditCommand(deps);
+  registerUsageCommand(deps);
   registerListCommand(deps);
   registerDeleteCommand(deps);
   registerMacroSaveCommand(deps);
@@ -106,6 +108,16 @@ function registerSessionLookupCommand(deps: SessionCommandDeps, spec: SessionLoo
     .option('-l, --label <label>', spec.labelDescription)
     .action(async (idArg: string | undefined, options: { projectPath?: string; id?: string; label?: string }) => {
       await runSessionCall(spec.build(idArg, options), options.projectPath, deps);
+    });
+}
+
+function registerUsageCommand(deps: SessionCommandDeps): void {
+  deps.sessionCmd
+    .command('usage')
+    .description("Show aggregate MCP tool usage and timings (mirrors cartograph_session({action:'usage'}))")
+    .option('-p, --project-path <path>', 'Project path')
+    .action(async (options: { projectPath?: string }) => {
+      await runSessionCall(buildUsageSessionArgs(), options.projectPath, deps);
     });
 }
 

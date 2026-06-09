@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import Cartograph from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
+import { ToolHandler } from '../src/mcp/tools.js';
 
 describe('Context Builder', () => {
   let testDir: string;
@@ -248,6 +249,22 @@ export function validateEmail(email: string): boolean {
       expect(parsed.query).toBe('payment processing');
       expect(parsed.nodes).toBeDefined();
       expect(Array.isArray(parsed.nodes)).toBe(true);
+    });
+
+    it('routes broad cross-cutting plan queries through coverage and intent search first', async () => {
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_context', {
+        task: 'review whole codebase coverage and quality across tools',
+        format: 'plan',
+        code: false,
+      });
+      handler.closeAll();
+      const text = result.content[0]?.text ?? '';
+      const nextActions = result.metadata?.nextActions as Array<{ tool: string }> | undefined;
+
+      expect(text).toContain('cartograph_dependency_coverage');
+      expect(text).toContain('"mode": "intent"');
+      expect(nextActions?.[0]?.tool).toBe('cartograph_dependency_coverage');
     });
 
     it('should accept object input with title and description', async () => {

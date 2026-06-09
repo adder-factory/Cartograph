@@ -99,8 +99,10 @@ function registerInspectionGeneratedCommands(): void {
     runViaMcp: runCompareToRefViaMcp,
   });
   registerGeneratedCommand('cartograph_deps');
+  registerGeneratedCommand('cartograph_dependency_coverage');
   registerGeneratedCommand('cartograph_biomarkers', { shortFlags: { limit: '-l' } });
   registerGeneratedCommand('cartograph_hotspots', { shortFlags: { limit: '-l' } });
+  registerGeneratedCommand('cartograph_host_diagnostics');
   registerGeneratedCommand('cartograph_dead_code');
 }
 

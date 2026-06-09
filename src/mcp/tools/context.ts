@@ -163,6 +163,22 @@ function looksLikeFeatureRequest(task: string): boolean {
   return featureKeywords.some((k) => hasKeyword(k));
 }
 
+const CROSS_CUTTING_TASK_PATTERNS: ReadonlyArray<RegExp> = [
+  /\bwhole\s+codebase\b/i,
+  /\bentire\s+codebase\b/i,
+  /\bcross[-\s]?cutting\b/i,
+  /\ball\s+(?:tools|features|modules|languages|resolvers|extractors)\b/i,
+  /\bcoverage\b/i,
+  /\baudit\b/i,
+  /\bquality\b/i,
+  /\bissues?\s+and\s+prs?\b/i,
+  /\bpatterns?\s+across\b/i,
+];
+
+function looksLikeCrossCuttingTask(task: string): boolean {
+  return CROSS_CUTTING_TASK_PATTERNS.some((re) => re.test(task));
+}
+
 /**
  * Pick the single most-severe biomarker finding on a node. Returns
  * `null` when the findings table is absent (e.g. older indexes) or
@@ -404,12 +420,16 @@ function topContextNodes(context: TaskContext, limit: number): Node[] {
 
 function buildContextNextActions(context: TaskContext, task: string): NextAction[] {
   const nodes = topContextNodes(context, PLAN_ACTION_NODE_LIMIT);
+  const crossCutting = looksLikeCrossCuttingTask(task);
   if (nodes.length === 0) {
-    return [
+    const searchMode = crossCutting ? 'intent' : 'semantic';
+    const fallback: NextAction[] = [
       {
         tool: 'cartograph_find',
-        args: { by: 'name', mode: 'semantic', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
-        reason: 'Try a broader semantic symbol search because context found no entry symbols.',
+        args: { by: 'name', mode: searchMode, query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+        reason: crossCutting
+          ? 'Try concept-oriented retrieval because broad cross-cutting wording found no entry symbols.'
+          : 'Try a broader semantic symbol search because context found no entry symbols.',
         priority: PLAN_PRIORITY_PRIMARY,
       },
       {
@@ -419,11 +439,24 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
         priority: PLAN_PRIORITY_IMPACT,
       },
     ];
+    if (crossCutting) fallback.unshift(buildDependencyCoverageAction());
+    return fallback;
   }
 
   const primary = nodes[0]!;
   const rest = nodes.slice(1);
-  const actions: NextAction[] = [
+  const actions: NextAction[] = crossCutting
+    ? [
+        buildDependencyCoverageAction(),
+        {
+          tool: 'cartograph_find',
+          args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+          reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
+          priority: PLAN_PRIORITY_PRIMARY,
+        },
+      ]
+    : [];
+  actions.push(
     {
       tool: 'cartograph_node',
       args: {
@@ -434,7 +467,7 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
         includeTests: true,
       },
       reason: `Inspect the leading candidate \`${primary.name}\` with local risk and test signals.`,
-      priority: PLAN_PRIORITY_PRIMARY,
+      priority: crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_PRIMARY,
     },
     {
       tool: 'cartograph_graph',
@@ -447,15 +480,15 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
         lowTokens: true,
       },
       reason: `Map the blast radius around \`${primary.name}\` before editing.`,
-      priority: PLAN_PRIORITY_IMPACT,
+      priority: crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_IMPACT,
     },
     {
       tool: 'cartograph_tests_for',
       args: { symbol: primary.id },
       reason: `Find tests that directly or transitively cover \`${primary.name}\`.`,
-      priority: PLAN_PRIORITY_TESTS,
+      priority: crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_TESTS,
     },
-  ];
+  );
 
   if (rest.length > 0) {
     actions.push({
@@ -472,6 +505,15 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
     priority: PLAN_PRIORITY_FINAL_CHECK,
   });
   return actions;
+}
+
+function buildDependencyCoverageAction(): NextAction {
+  return {
+    tool: 'cartograph_dependency_coverage',
+    args: { lowTokens: true, limit: 20 },
+    reason: 'Measure graph resolution gaps before drilling into one symbol for a broad cross-cutting task.',
+    priority: PLAN_PRIORITY_PRIMARY,
+  };
 }
 
 function renderContextPlan(args: { task: string; context: TaskContext; nextActions: NextAction[] }): string {

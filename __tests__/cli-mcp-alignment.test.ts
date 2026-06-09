@@ -100,6 +100,12 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   'backend:stop',
   'backend:logs',
 
+  // `cartograph upgrade` checks package/checkout freshness and prints
+  // install-method-specific update steps. It is intentionally CLI-only:
+  // upgrading the process that may be serving MCP should happen outside
+  // the active MCP session.
+  'upgrade',
+
   // `cartograph similar <symbol>` routes through `cartograph_graph` with
   // `direction: 'similar'` (folded 2026-05-14, FRICTION-46 — the
   // standalone `cartograph_similar` MCP tool was retired to free a slot
@@ -317,7 +323,6 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   files: new Set([
     'path',
     'includeMetadata',
-    'file',
     'kinds',
     'includeParameters',
     'includeImports',
