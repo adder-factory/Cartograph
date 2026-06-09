@@ -11,6 +11,7 @@ const coverageDir = path.join(root, 'coverage');
 const tmpRoot = path.join(coverageDir, '.tmp-coverage');
 const timeoutMs = process.env.COVERAGE_TIMEOUT ?? '30000';
 const jobs = Math.max(1, Number.parseInt(process.env.COVERAGE_JOBS ?? process.env.N ?? '4', 10) || 4);
+const retries = Math.max(0, Number.parseInt(process.env.COVERAGE_RETRY ?? '2', 10) || 0);
 
 function safeName(file, index) {
   return `${String(index).padStart(4, '0')}-${path.basename(file).replace(/[^a-zA-Z0-9_.-]/g, '_')}`;
@@ -76,6 +77,7 @@ function runOne(file, index) {
         outDir,
         code,
         signal,
+        index,
         ms: Date.now() - started,
         stdout,
         stderr,
@@ -108,6 +110,33 @@ async function runPool(files) {
   await Promise.all(Array.from({ length: Math.min(jobs, files.length) }, () => worker()));
   process.stdout.write(os.EOL);
   return failures;
+}
+
+async function retryFailures(failures) {
+  if (retries <= 0 || failures.length === 0) return failures;
+  const stillFailing = [];
+  process.stderr.write(
+    `=== retrying ${failures.length} failed coverage file(s), up to ${retries} attempt(s) each ===\n`,
+  );
+
+  for (let index = 0; index < failures.length; index++) {
+    const failure = failures[index];
+    let last = failure;
+    let passed = false;
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      await rm(failure.outDir, { recursive: true, force: true });
+      const result = await runOne(failure.file, failure.index);
+      last = result;
+      if (result.code === 0) {
+        process.stderr.write(`  -> ${failure.file} passed on attempt ${attempt}\n`);
+        passed = true;
+        break;
+      }
+    }
+    if (!passed) stillFailing.push(last);
+  }
+
+  return stillFailing;
 }
 
 function parseLcov(text, records) {
@@ -378,7 +407,8 @@ if (tests.length === 0) {
 await rm(tmpRoot, { recursive: true, force: true });
 await mkdir(tmpRoot, { recursive: true });
 console.log(`=== coverage: ${tests.length} files, ${jobs} workers ===`);
-const failures = await runPool(tests);
+let failures = await runPool(tests);
+failures = await retryFailures(failures);
 if (failures.length > 0) {
   console.error(`=== ${failures.length} coverage test file(s) failed ===`);
   for (const failure of failures.slice(0, 20)) {

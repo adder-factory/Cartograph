@@ -133,6 +133,14 @@ run_sonar_quality_gate() {
   fi
 }
 
+run_unskipped_test_suite() {
+  STRESS=1 node scripts/with-postgres-test-env.mjs -- npm test
+}
+
+run_unskipped_coverage() {
+  STRESS=1 node scripts/with-postgres-test-env.mjs -- npm run test:coverage
+}
+
 run_step "CI portability" npm run check:ci-portability
 run_step "typecheck" npm run typecheck
 run_step "architecture + biome" npm run check
@@ -140,8 +148,8 @@ run_step "test mock hygiene" npm run test:mock-hygiene
 run_step "module leak canaries" npm run test:leaks
 run_step "MCP load budget" npm run check:mcp-load
 run_step "biomarker gate smoke" bun test __tests__/biomarker-gate.test.ts
-run_step "full test suite" npm test
-run_step "coverage" npm run test:coverage
+run_step "full test suite" run_unskipped_test_suite
+run_step "coverage" run_unskipped_coverage
 run_step "biomarkers 0/0/0" npm run check:biomarkers
 run_step "viewer smoke" npm run test:viewer-smoke:required
 run_step "Sonar scanner + quality gate" run_sonar_quality_gate

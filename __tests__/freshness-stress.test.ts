@@ -52,17 +52,18 @@ describeStress('Freshness Gate — concurrency stress', () => {
     await freshCg.indexAll();
 
     // Drift the stale project's HEAD by MORE than AUTO_SYNC_MAX_FILES
-    // (currently 5) so the inline auto-sync path doesn't kick in and
-    // erase the banner mid-run. Tests that auto-sync small drifts are
-    // exercised separately in `freshness-v2-stress.test.ts`.
-    for (let i = 0; i < 10; i++) {
+    // (currently 50) but below BLOCK_MAX_FILES (100), so the inline
+    // auto-sync path does not erase the banner mid-run and the heavy
+    // freshness block does not reject the query. Tests that auto-sync
+    // small drifts are exercised separately in `freshness-v2-stress.test.ts`.
+    for (let i = 0; i < 60; i++) {
       fs.writeFileSync(path.join(staleDir, 'src', `drift_${i}.ts`), `export const v${i} = ${i};\n`);
     }
     git(staleDir, 'add', '.');
     git(staleDir, 'commit', '-q', '-m', 'drift batch');
 
-    expect(staleCg.getFreshness()?.isStale).toBe(true);
-    expect(freshCg.getFreshness()?.isStale).toBe(false);
+    expect(staleCg.stats.getFreshness()?.isStale).toBe(true);
+    expect(freshCg.stats.getFreshness()?.isStale).toBe(false);
   }, 60000);
 
   afterAll(() => {
