@@ -3,116 +3,114 @@
 When the user says exactly `go`, read this file first and begin the first
 unchecked task below.
 
-## Current Goal
+## Current State
 
-Refactor the Cartograph viewer browser app into maintainable smaller modules
-without changing behavior.
+The CLI/MCP consolidation work is landed and pushed on `main`.
 
-The viewer has already been split from one large `index.html` into:
+Latest pushed commit:
 
-- `src/features/viewer/static/index.html` — markup only, currently about 387 lines.
-- `src/features/viewer/static/viewer.css` — extracted stylesheet.
-- `src/features/viewer/static/viewer.app` — extracted browser script, served as
-  `text/javascript` but intentionally not named `.js` so Cartograph does not
-  index the legacy browser script as source during the current transition.
+- `d79cd9c fix: remove retired CLI shortcuts`
 
-## First Checklist
+Recent related commits:
 
-- [ ] Inventory `src/features/viewer/static/viewer.app` into logical sections and propose
-      a small module boundary plan before editing. Keep the first pass
-      mechanical: state/store, API/fetch helpers, graph rendering/layout,
-      filters/grouping, detail/source panels, health dashboard, command palette,
-      exports/editor helpers, and bootstrapping.
-- [ ] Decide the module-loading strategy. Prefer native browser ES modules if it
-      can preserve current behavior without a bundler. Keep generated/legacy
-      static assets out of Cartograph indexing unless the browser code is also
-      made clean enough for the release biomarker gate.
-- [ ] Extract one low-risk module first, update `index.html`/server routes if
-      needed, and run `bun test __tests__/viewer.test.ts`.
-- [ ] Continue extracting modules in small batches, running the focused viewer
-      test after each batch and the Playwright smoke test after meaningful UI
-      movement.
-- [ ] Finish with the full verification list below and refresh the tmux viewer
-      session on port 8765.
+- `7190b58 fix: align CLI aliases with MCP modes`
+- `140e681 feat: consolidate MCP tool families`
 
-## Workspace
+The worktree was clean after `d79cd9c` was pushed.
 
-- Project root: `~/projects/cartograph`
-- Viewer URL used in the previous session: `http://localhost:8765/`
-- If the viewer is not running, start it with:
+## What Just Changed
 
-```sh
-bun src/bin/cartograph.ts viewer --no-open --port 8765 .
-```
+The retired top-level CLI shortcuts are no longer registered:
 
-## Recent Viewer Work Completed
+- `cartograph local-chat`
+- `cartograph dependency-coverage`
+- `cartograph discover`
+- `cartograph host-diagnostics`
 
-- Improved viewer graph polish: curved/non-straight edges, group collapse,
-  kind/health filtering, clickable callers/callees/findings, pointer cursor
-  affordances, reset-button overlap fix, selected-neighborhood highlighting,
-  graph exports, and health dashboard polish.
-- Added and expanded `scripts/viewer-smoke.ts` to exercise the major viewer
-  functions with Playwright.
-- Split static viewer assets:
-  - `index.html` links `viewer.css` and `viewer.app`.
-  - `src/features/viewer/server/` serves `/viewer.css` and `/viewer.app`.
-  - `scripts/copy-assets.mjs` already copies every file under
-    `src/features/viewer/static`, so no extra build rule was needed.
-- Optimized viewer static asset serving:
-  - CSS/app assets are preloaded once when the viewer server starts.
-  - Asset responses include `ETag` and `Cache-Control: no-cache`.
-  - Matching `If-None-Match` returns `304 Not Modified`.
+Canonical CLI/MCP-aligned forms remain:
+
+- `cartograph ask --mode local_chat`
+- `cartograph deps --mode coverage`
+- `cartograph host --mode discover`
+- `cartograph host --mode diagnostics`
+
+Docs/help/playbook updates were included:
+
+- README command map
+- `docs/CLI-REFERENCE.md`
+- `docs/MCP-USAGE.md`
+- `docs/cli-mcp-alignment.md`
+- `src/mcp/server-instructions.ts` (`cartograph_playbook`)
+- schema-guard stale-server recovery text
 
 ## Verification Already Run
 
-- `bun test __tests__/viewer.test.ts` passed.
+For `d79cd9c`:
+
 - `npm run typecheck` passed.
-- `PLAYWRIGHT_MODULE=/opt/homebrew/lib/node_modules/playwright/index.js npm run test:viewer-smoke` passed.
-- `npm run build` passed.
-- Final `npm run check:release` passed: `5076 pass / 0 fail / 18 skip`.
-- Cartograph compare reported `0` introduced per-file biomarker findings after
-  the final static-asset optimization.
-- Live route probe confirmed `GET /viewer.app` returns an ETag and a matching
-  `If-None-Match` returns `304 Not Modified`.
+- Focused command/docs/playbook tests passed: `141 pass / 0 fail`.
+- `npm run check` passed.
+- `npm run check:mcp-load` passed.
+- `npm run check:biomarkers` passed: `0 error / 0 warning / 0 info`.
+- `npm run test:fast` passed: `5619 pass / 0 fail / 28 skip`.
+- `bun src/bin/cartograph.ts compare-to-ref --findings-delta --include-biomarkers`
+  reported `0` introduced per-file biomarker findings.
+- Sonar scanner succeeded and quality gate was `OK`.
+  - CE task: `780c98a4-6de4-4ea7-bbbe-6aa4026f819e`
+  - Analysis: `5b95e1e4-6e1e-4878-9360-1d44696e338c`
 
-## Current Dirty Worktree Context
+Manual CLI checks confirmed the retired commands fail as unknown commands and
+canonical command help exposes the relevant `--mode` flags.
 
-Do not reset or discard these changes. They are expected from the current
-viewer/status/migration work unless the user explicitly asks otherwise.
+## First Checklist
 
-Modified files observed:
+- [ ] Re-check `git status --short` and confirm the session starts clean.
+- [ ] Read `AGENTS.md` and `docs/ARCHITECTURE.md`; preserve the feature-slice
+      shape.
+- [ ] If continuing CLI/MCP alignment, audit the remaining intentional CLI-only
+      shortcuts before editing:
+      - `file-deps`
+      - `file-symbols`
+      - `module`
+      - `similar`
+      - `doctor`
+      - `sync-if-dirty`
+- [ ] For `file-deps`, `file-symbols`, and `module`, first verify whether the
+      canonical `cartograph files --format deps|symbols|module` CLI paths are
+      behaviorally equivalent and ergonomic enough. If they are, consider
+      retiring those top-level shortcuts the same way the 2026-06-09 shortcuts
+      were retired.
+- [ ] Do not remove `doctor`, `similar`, or `sync-if-dirty` without a specific
+      product decision: they are currently documented as intentional CLI-only
+      human/operator conveniences.
+- [ ] If any CLI surface changes, update all matching surfaces together:
+      README, `docs/CLI-REFERENCE.md`, `docs/cli-mcp-alignment.md`,
+      `src/mcp/server-instructions.ts`, command help/tests, and MCP load docs
+      if the playbook size changes.
 
-- `NEXT_SESSION_GO.md`
-- `__tests__/config-fingerprints.test.ts`
-- `__tests__/no-llm-footer.test.ts`
-- `__tests__/viewer.test.ts`
-- `package.json`
-- `src/mcp/server-instructions.ts`
-- `src/mcp/tools/admin.ts`
-- `src/mcp/tools/status.ts`
-- `src/features/viewer/server/index.ts`
-- `src/features/viewer/static/index.html`
+## Recommended Verification For More CLI/MCP Surface Work
 
-Untracked files observed:
-
-- `__tests__/migrations-072.test.ts`
-- `__tests__/status-llm.test.ts`
-- `scripts/viewer-smoke.ts`
-- `src/mcp/tools/status-llm.ts`
-- `src/features/viewer/static/viewer.app`
-- `src/features/viewer/static/viewer.css`
-
-## Final Verification For The Module Split
-
-Run these before reporting done:
+Run focused checks first:
 
 ```sh
-bun test __tests__/viewer.test.ts
-PLAYWRIGHT_MODULE=/opt/homebrew/lib/node_modules/playwright/index.js npm run test:viewer-smoke
-npm run build
-npm run check:release
-git diff --check
+CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 \
+  bun test --timeout 60000 \
+  __tests__/cli-mcp-alignment.test.ts \
+  __tests__/tool-surface-smoke.test.ts \
+  __tests__/readme-drift.test.ts \
+  __tests__/mcp-tool-registry.test.ts
 ```
 
-Also run Cartograph compare with findings delta and confirm no introduced
-per-file biomarker findings in indexed files.
+Then run broader gates:
+
+```sh
+npm run typecheck
+npm run check
+npm run check:mcp-load
+npm run check:biomarkers
+npm run test:fast
+bun src/bin/cartograph.ts compare-to-ref --findings-delta --include-biomarkers
+```
+
+For changes intended to land on `main`, run Sonar using the local credentials
+from `AGENTS.md`, then check the quality gate by `analysisId` before pushing.
