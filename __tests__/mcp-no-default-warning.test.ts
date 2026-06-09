@@ -97,7 +97,7 @@ describe('MCPServer wrong-directory warning', () => {
     expect(stderr).toContain('gamma');
   });
 
-  it('zero candidates → "no projects found, run init first" hint', async () => {
+  it('zero candidates → "no projects found, run quickstart first" hint', async () => {
     // Empty parent dir — no children at all.
     const { MCPServer } = await import('../src/mcp/index.js');
     const server = new MCPServer();
@@ -106,7 +106,7 @@ describe('MCPServer wrong-directory warning', () => {
       await (server as any).tryInitializeDefault(parent);
     });
     expect(stderr).toContain('No cartograph projects found');
-    expect(stderr).toContain('cartograph admin init');
+    expect(stderr).toContain('cartograph quickstart');
   });
 
   it('default project found → no warning emitted', async () => {

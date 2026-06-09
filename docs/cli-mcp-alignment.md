@@ -8,7 +8,7 @@ command has a corresponding MCP tool, with a small set of explicit
 exceptions documented below.
 
 This document is the source of truth for that mapping. Last
-re-verified **2026-06-08**. The mapping is also test-enforced —
+re-verified **2026-06-09**. The mapping is also test-enforced —
 `__tests__/cli-mcp-alignment.test.ts` fails if a tool gains/loses a
 CLI mirror.
 Branch-specific argument consumption is test-enforced in

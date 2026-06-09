@@ -132,9 +132,9 @@ power summaries, embeddings, semantic search, `ask`, and rerank.
 | Local viewer | `cartograph viewer .` |
 | Library API | `Cartograph.init('/path/to/project')` |
 
-Cartograph's MCP server exposes all 37 registered tools. The default `core`
-profile advertises the 14 most common coding-agent tools; the full 37-tool server is available with
-`cartograph serve --mcp --profile full`.
+Cartograph registers 37 MCP tools. The default `core` profile advertises the
+14 most common coding-agent tools; the complete 37-tool surface is available
+with `cartograph serve --mcp --profile full`.
 
 ## Storage
 
@@ -213,7 +213,7 @@ health, coverage, and graph layout directly.
 ## Common Workflows
 
 ```bash
-# First-time setup with LLM backend checks
+# First-time graph setup, then optional LLM backend checks
 cartograph quickstart .
 cartograph setup .
 cartograph doctor --fix .

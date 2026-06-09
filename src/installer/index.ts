@@ -327,7 +327,7 @@ async function initializeLocalProject(
   } catch (err) {
     const msg = errMsg(err);
     clack.log.error(`Could not load native modules: ${msg}`);
-    clack.log.info('Skipping project initialization. Run "cartograph admin init -i" later.');
+    clack.log.info('Skipping project initialization. Run "cartograph quickstart ." later.');
     return;
   }
 

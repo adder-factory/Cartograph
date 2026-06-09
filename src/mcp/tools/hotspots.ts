@@ -606,7 +606,7 @@ function formatNoHotspotsMessage(cg: ReturnType<ToolCtx['getCartograph']>): stri
     // Churn tables unreadable — fall back to a generic, honest list.
     lines.push(
       'This typically means one of:',
-      '- The index has not been built yet — run `cartograph admin index`.',
+      '- The index has not been built yet — run `cartograph quickstart`.',
       '- The project has no git history, so churn data is unavailable.',
       '- `minCommits` / `minCentrality` / `recencyDays` excluded every file.',
     );
@@ -638,7 +638,7 @@ function formatNoHotspotsMessage(cg: ReturnType<ToolCtx['getCartograph']>): stri
   // No co_changes rows and no commit counts — churn was never mined.
   lines.push(
     'No churn data has been mined yet. This typically means one of:',
-    '- The index has not finished building — run `cartograph admin index`.',
+    '- The index has not finished building — run `cartograph quickstart` for first setup or `cartograph admin index` to rebuild.',
     '- The project has no git history (a fresh checkout or non-git tree).',
     '- `enableChurn` is disabled in `.cartograph/config.json`.',
   );
