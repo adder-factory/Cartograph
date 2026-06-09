@@ -68,7 +68,7 @@ export function formatSchemaMismatch(check: SchemaCompatCheck): string {
     `(\`npm run cli:dev -- <cmd>\` from a checkout, or \`npx cartograph <cmd>\`) — ` +
     `each invocation spawns a fresh process that loads current code. MCP requests ` +
     `through this stale server stay blocked until restart; use CLI mirrors where ` +
-    `available (for example \`cartograph local-chat\`, \`cartograph note list\`, ` +
-    `or \`cartograph session list\`).`
+    `available (for example \`cartograph ask --mode local_chat\`, ` +
+    `\`cartograph note list\`, or \`cartograph session list\`).`
   );
 }
