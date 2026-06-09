@@ -35,6 +35,11 @@ import {
   withDisambiguationBanner,
 } from './symbol-resolver.js';
 import { expandTestFileCallers } from '../../features/graph/callers/index.js';
+import {
+  MAX_SOURCE_READ_LINE_LIMIT,
+  sliceSourceText,
+  type SourceWindowOptions,
+} from '../../features/source-read/index.js';
 import { defineTool } from './_define-tool.js';
 import type { ToolCtx } from './types.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
@@ -130,6 +135,7 @@ interface FormatNodeDetailsArgs {
   node: Node;
   code: string | null;
   detail: DetailMode;
+  sourceWindowNote?: string | null;
   /**
    * When the file's on-disk content differs from the indexed snapshot,
    * the body is still rendered (it's the indexed snapshot) but this
@@ -244,6 +250,7 @@ function formatNodeDetails(args: FormatNodeDetailsArgs): string {
     node,
     code,
     detail,
+    sourceWindowNote = null,
     staleWarning = null,
     issues = [],
     testAssertions = { rows: [], fileLevelOnly: false, testFile: null },
@@ -254,6 +261,7 @@ function formatNodeDetails(args: FormatNodeDetailsArgs): string {
   appendTestAssertionsBlock(lines, node, testAssertions);
   if (code) {
     if (staleWarning) lines.push('', `> ⚠ ${staleWarning}`);
+    if (sourceWindowNote) lines.push('', `> ${sourceWindowNote}`);
     appendCodeBlock({ lines, node, code, detail, loc });
   }
   return lines.join('\n');
@@ -954,6 +962,7 @@ interface ProcessSymbolArgs {
   flags: IncludeFlags;
   lowTokens: boolean;
   liveSource: boolean;
+  sourceWindow: SourceWindowOptions;
   /** F#12 slice 2: when set, fall back to the nested-function manifest
    *  if findSymbol misses. Off by default — callers explicitly opt in
    *  via the `deep:true` MCP arg. */
@@ -989,8 +998,9 @@ async function tryRenderManifestDeepView(args: {
   detail: DetailMode;
   flags: IncludeFlags;
   liveSource: boolean;
+  sourceWindow: SourceWindowOptions;
 }): Promise<string | null> {
-  const { cg, symbol, includeCode, detail, flags, liveSource } = args;
+  const { cg, symbol, includeCode, detail, flags, liveSource, sourceWindow } = args;
   // Manifest names are bare identifiers; reject anything that wouldn't
   // be a single name token. Matches the same gate the find-empty
   // probe applies — keeps `kind:foo` and similar shapes from hitting
@@ -1018,6 +1028,7 @@ async function tryRenderManifestDeepView(args: {
         detail,
         flags,
         liveSource,
+        sourceWindow,
         lowTokens: false,
       });
       return `${card}\n\n> ✓ Promoted from F#12 manifest (was a nested fn in \`${primary.parentName ?? '?'}\`).`;
@@ -1148,7 +1159,7 @@ function inferFenceLanguage(filePath: string): string {
  * Preserves the legacy "no separator, no header" output for backward compatibility.
  */
 async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string }): Promise<ToolOutcome> {
-  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, liveSource, deep } = args;
+  const { ctx, cg, symbol, includeCode, detail, flags, lowTokens, liveSource, sourceWindow, deep } = args;
   const match = findSymbol(cg, symbol, ctx.refIds);
   if (!match) {
     // A `n_` UID the current process can't resolve is a cache miss,
@@ -1165,12 +1176,30 @@ async function processSingleSymbol(args: ProcessSymbolArgs & { symbol: string })
     // Without `deep` the standard "not found" message wins so the
     // default surface stays unchanged.
     if (deep) {
-      const manifest = await tryRenderManifestDeepView({ cg, symbol, includeCode, detail, flags, liveSource });
+      const manifest = await tryRenderManifestDeepView({
+        cg,
+        symbol,
+        includeCode,
+        detail,
+        flags,
+        liveSource,
+        sourceWindow,
+      });
       if (manifest !== null) return ok(textResult(manifest));
     }
     return ok(textResult(symbolNotFound(cg, symbol)));
   }
-  const rendered = await renderOneNode({ cg, symbol, match, includeCode, detail, flags, liveSource, lowTokens });
+  const rendered = await renderOneNode({
+    cg,
+    symbol,
+    match,
+    includeCode,
+    detail,
+    flags,
+    liveSource,
+    sourceWindow,
+    lowTokens,
+  });
   // The per-result stale-files note routes through the chokepoint's
   // `freshness` slot — it truncates the card body first, then appends
   // the note, so a long body can't push the stale warning off-budget.
@@ -1209,7 +1238,19 @@ function buildBatchFreshnessFooter(cg: Cartograph, notFound: number): string {
 async function processMultipleSymbols(
   args: ProcessSymbolArgs & { symbolList: string[]; lowTokenOmitted?: number },
 ): Promise<ToolOutcome> {
-  const { ctx, cg, symbolList, includeCode, detail, flags, lowTokens, liveSource, deep, lowTokenOmitted = 0 } = args;
+  const {
+    ctx,
+    cg,
+    symbolList,
+    includeCode,
+    detail,
+    flags,
+    lowTokens,
+    liveSource,
+    sourceWindow,
+    deep,
+    lowTokenOmitted = 0,
+  } = args;
   const seenIds = new Set<string>();
   const nodesShown: Node[] = [];
   const cards: string[] = [];
@@ -1226,6 +1267,7 @@ async function processMultipleSymbols(
       flags,
       lowTokens,
       liveSource,
+      sourceWindow,
       deep,
       seenIds,
     });
@@ -1292,6 +1334,7 @@ async function renderBatchSymbolCard(args: RenderBatchSymbolCardArgs): Promise<B
       detail,
       flags,
       liveSource: args.liveSource,
+      sourceWindow: args.sourceWindow,
       lowTokens,
     }),
   };
@@ -1312,6 +1355,7 @@ async function renderMissingBatchSymbolCard(args: RenderBatchSymbolCardArgs): Pr
       detail,
       flags,
       liveSource: args.liveSource,
+      sourceWindow: args.sourceWindow,
     });
     if (manifest !== null) return { kind: 'manifest', card: manifest };
   }
@@ -1344,7 +1388,21 @@ interface RenderOneNodeArgs {
   detail: DetailMode;
   flags: IncludeFlags;
   liveSource: boolean;
+  sourceWindow: SourceWindowOptions;
   lowTokens: boolean;
+}
+
+interface PreparedNodeCode {
+  code: string | null;
+  staleWarning: string | null;
+  sourceWindowNote: string | null;
+}
+
+interface PrepareNodeCodeArgs {
+  cg: ReturnType<ToolCtx['getCartograph']>;
+  node: Node;
+  liveSource: boolean;
+  sourceWindow: SourceWindowOptions;
 }
 
 /** Build the markdown card for one resolved match — header + details
@@ -1352,46 +1410,78 @@ interface RenderOneNodeArgs {
  *  code-omitted note. Pure renderer; the caller handles dedup, stale
  *  appendix, and final truncation. */
 async function renderOneNode(args: RenderOneNodeArgs): Promise<string> {
-  const { cg, match, includeCode, detail, flags, liveSource, lowTokens } = args;
-  let code: string | null = null;
-  let staleWarning: string | null = null;
-  if (includeCode) {
-    const fetched = await fetchNodeCode(cg, match.node, liveSource);
-    code = fetched.code;
-    staleWarning = fetched.staleWarning;
-  }
+  const { cg, match, includeCode, detail, flags, liveSource, sourceWindow, lowTokens } = args;
+  const preparedCode = includeCode
+    ? await prepareNodeCode({ cg, node: match.node, liveSource, sourceWindow })
+    : emptyPreparedNodeCode();
   const issues = getIssuesForNode(cg.queries, match.node.id);
   const testAssertions = lowTokens
     ? { rows: [], fileLevelOnly: false, testFile: null }
     : fetchTestAssertionsForFile(cg, match.node);
   const card = formatNodeDetails({
     node: match.node,
-    code,
+    code: preparedCode.code,
     detail,
-    staleWarning,
+    sourceWindowNote: preparedCode.sourceWindowNote,
+    staleWarning: preparedCode.staleWarning,
     issues,
     testAssertions,
     showBetweenness: flags.betweenness,
   });
-
-  // For file-kind nodes, append the cached LLM file summary when one
-  // exists. File nodes store the file path in `filePath` — the same
-  // column (`file_path`) used as the FK in `file_summaries`.
-  // When no summary is cached yet, render nothing (no noisy placeholder).
-  let fileSummaryBlock = '';
-  if (!lowTokens && match.node.kind === 'file') {
-    const fileSummaryRow = getFileSummary(cg.queries, match.node.filePath);
-    if (fileSummaryRow) {
-      fileSummaryBlock = `\n\n**Summary:** ${fileSummaryRow.summary}`;
-    }
-  }
-
+  const fileSummaryBlock = renderFileSummaryBlock(cg, match.node, lowTokens);
   const expansions = renderInlineExpansions(cg, match.node, flags);
   // Banner-at-top convention (structural fix #30): the disambiguation
   // note is the headline an agent reads BEFORE acting on the symbol
   // card. Pre-#30 this was appended after the body where it was easy
   // to scroll past.
   return withDisambiguationBanner(match.note, card + fileSummaryBlock + expansions);
+}
+
+function emptyPreparedNodeCode(): PreparedNodeCode {
+  return { code: null, staleWarning: null, sourceWindowNote: null };
+}
+
+async function prepareNodeCode(args: PrepareNodeCodeArgs): Promise<PreparedNodeCode> {
+  const { cg, node, liveSource, sourceWindow } = args;
+  const fetched = await fetchNodeCode(cg, node, liveSource);
+  if (!fetched.code || !hasSourceWindow(sourceWindow)) {
+    return { code: fetched.code, staleWarning: fetched.staleWarning, sourceWindowNote: null };
+  }
+  const windowed = applySourceWindow(fetched.code, sourceWindow, node.startLine);
+  return {
+    code: windowed.code,
+    staleWarning: fetched.staleWarning,
+    sourceWindowNote: windowed.note,
+  };
+}
+
+function hasSourceWindow(sourceWindow: SourceWindowOptions): boolean {
+  return sourceWindow.lineOffset !== undefined || sourceWindow.lineLimit !== undefined;
+}
+
+function applySourceWindow(
+  code: string,
+  sourceWindow: SourceWindowOptions,
+  nodeStartLine: number,
+): { code: string; note: string } {
+  const sliced = sliceSourceText(code, sourceWindow);
+  const range = sliced.startLine <= sliced.endLine ? `${sliced.startLine}-${sliced.endLine}` : 'empty';
+  const fileLine =
+    typeof nodeStartLine === 'number' && sliced.startLine <= sliced.endLine
+      ? nodeStartLine + sliced.startLine - 1
+      : null;
+  const fileLineSuffix = fileLine === null ? '' : `; starts at file line ${fileLine}`;
+  const moreSuffix = sliced.truncatedAfter ? `; more available with lineOffset: ${sliced.endLine}` : '';
+  return {
+    code: sliced.code,
+    note: `Showing source window ${range} of ${sliced.totalLines} symbol lines${fileLineSuffix}${moreSuffix}.`,
+  };
+}
+
+function renderFileSummaryBlock(cg: ReturnType<ToolCtx['getCartograph']>, node: Node, lowTokens: boolean): string {
+  if (lowTokens || node.kind !== 'file') return '';
+  const fileSummaryRow = getFileSummary(cg.queries, node.filePath);
+  return fileSummaryRow ? `\n\n**Summary:** ${fileSummaryRow.summary}` : '';
 }
 
 /**
@@ -1470,6 +1560,19 @@ const nodeSchema = z.object({
     .describe(
       'When `code: true` and the file is stale, explicitly return a live disk slice using the indexed line range. Default false.',
     ),
+  lineOffset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('When `code: true`, zero-based line offset within the symbol body. Defaults to 0.'),
+  lineLimit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SOURCE_READ_LINE_LIMIT)
+    .optional()
+    .describe(`When \`code: true\`, number of symbol-body lines to return, in [1, ${MAX_SOURCE_READ_LINE_LIMIT}].`),
   lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
@@ -1487,6 +1590,7 @@ async function handleNode(ctx: ToolCtx, args: NodeArgs): Promise<ToolOutcome> {
   const flags = parseIncludeFlags(args);
   const deep = args.deep === true;
   const liveSource = args.liveSource === true;
+  const sourceWindow: SourceWindowOptions = { lineOffset: args.lineOffset, lineLimit: args.lineLimit };
   const effectiveSymbols = lowTokens ? symbolList.slice(0, LOW_TOKEN_NODE_SYMBOLS) : symbolList;
   const lowTokenOmitted = symbolList.length - effectiveSymbols.length;
 
@@ -1494,7 +1598,7 @@ async function handleNode(ctx: ToolCtx, args: NodeArgs): Promise<ToolOutcome> {
   // header" output exactly so existing tests / consumers see no
   // change. Multi-symbol path renders one card per resolved node
   // separated by horizontal rules.
-  const sharedArgs = { ctx, cg, includeCode, detail, flags, lowTokens, liveSource, deep };
+  const sharedArgs = { ctx, cg, includeCode, detail, flags, lowTokens, liveSource, sourceWindow, deep };
   if (effectiveSymbols.length === 1) {
     return processSingleSymbol({ ...sharedArgs, symbol: effectiveSymbols[0]! });
   }

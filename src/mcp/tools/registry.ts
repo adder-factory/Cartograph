@@ -48,6 +48,7 @@ import { CONTEXT_TOOL } from './context.js';
 import { COVERAGE_TOOL } from './coverage.js';
 import { DEAD_CODE_TOOL } from './dead-code.js';
 import { DEPS_TOOL } from './deps.js';
+import { DEPENDENCY_COVERAGE_TOOL } from './dependency-coverage.js';
 import { DIGEST_TOOL } from './digest.js';
 import { DISCOVER_TOOL } from './discover.js';
 import { ENTRY_POINTS_TOOL } from './entry-points.js';
@@ -66,6 +67,7 @@ import { FIND_TOOL } from './find.js';
 // reachable only through `graph.ts`'s dispatcher.
 import { GRAPH_TOOL } from './graph.js';
 import { HISTORY_TOOL } from './history.js';
+import { HOST_DIAGNOSTICS_TOOL } from './host-diagnostics.js';
 import { HOTSPOTS_TOOL } from './hotspots.js';
 import { IMPORTS_TOOL } from './imports.js';
 import { LOCAL_CHAT_TOOL } from './local-chat.js';
@@ -128,6 +130,7 @@ const ENTRIES: ToolModule[] = [
   COVERAGE_TOOL,
   DEAD_CODE_TOOL,
   DEPS_TOOL,
+  DEPENDENCY_COVERAGE_TOOL,
   DIGEST_TOOL,
   DISCOVER_TOOL,
   ENTRY_POINTS_TOOL,
@@ -136,6 +139,7 @@ const ENTRIES: ToolModule[] = [
   FIND_TOOL,
   GRAPH_TOOL,
   HISTORY_TOOL,
+  HOST_DIAGNOSTICS_TOOL,
   HOTSPOTS_TOOL,
   IMPORTS_TOOL,
   LOCAL_CHAT_TOOL,

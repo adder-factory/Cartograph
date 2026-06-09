@@ -428,11 +428,13 @@ interface BuildImpactResponseArgs {
   includeTests: boolean;
   /** Explicit edge-kind filter forwarded from `cartograph_graph`. */
   edgeKind: EdgeKind | undefined;
+  /** Render a terse pipe-delimited impact summary instead of markdown detail. */
+  compact: boolean;
 }
 
 /** Aggregate, format, and wrap the impact result. Extracted from {@link handleImpact}. */
 function buildImpactResponse(args: BuildImpactResponseArgs): ToolResult {
-  const { cg, symbol, allMatches, depth, confidenceThreshold, includeTests, edgeKind } = args;
+  const { cg, symbol, allMatches, depth, confidenceThreshold, includeTests, edgeKind, compact } = args;
   // #8 confidence filter: drop edges below threshold AND prune nodes that
   // become unreachable from the root along surviving edges.
   // FRICTION-8 (impact path): also drop test-file targets unless the
@@ -446,6 +448,12 @@ function buildImpactResponse(args: BuildImpactResponseArgs): ToolResult {
     edgeKind,
   });
   const mergedImpact = { nodes: mergedNodes, edges: mergedEdges, roots: allMatches.nodes.map((n) => n.id) };
+  if (compact) {
+    return renderToolResponse({
+      body: formatImpactCompact({ symbol, impact: mergedImpact, depth }) + allMatches.note,
+      freshness: { cg, nodes: [...mergedNodes.values()] },
+    });
+  }
   const multiSource = perSource.length > 1;
   const base = formatImpact({ symbol, impact: mergedImpact, depth, multiSource });
   const withPerSource = multiSource ? injectAfterTitle(base, formatPerSourceImpact(perSource)) : base;
@@ -453,6 +461,29 @@ function buildImpactResponse(args: BuildImpactResponseArgs): ToolResult {
     body: withPerSource + allMatches.note,
     freshness: { cg, nodes: [...mergedNodes.values()] },
   });
+}
+
+function formatImpactCompact(args: FormatImpactArgs): string {
+  const { symbol, impact, depth } = args;
+  const byFile = new Map<string, number>();
+  for (const node of impact.nodes.values()) {
+    byFile.set(node.filePath, (byFile.get(node.filePath) ?? 0) + 1);
+  }
+  const fileRows = [...byFile.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 10);
+  const nodeRows = [...impact.nodes.values()]
+    .sort(
+      (a, b) =>
+        (b.centrality ?? 0) - (a.centrality ?? 0) || a.filePath.localeCompare(b.filePath) || a.startLine - b.startLine,
+    )
+    .slice(0, 20);
+  const lines = [
+    `impact|${symbol}|depth=${depth}|nodes=${impact.nodes.size}|edges=${impact.edges.length}|files=${byFile.size}`,
+  ];
+  for (const [file, count] of fileRows) lines.push(`file|${file}|count=${count}`);
+  for (const node of nodeRows) {
+    lines.push(`node|${node.name}|${node.kind}|${node.filePath}:${node.startLine}`);
+  }
+  return lines.join('\n');
 }
 
 export async function handleImpact(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
@@ -501,7 +532,18 @@ export async function handleImpact(ctx: ToolCtx, args: Record<string, unknown>):
 
   const edgeKind = typeof args['edgeKind'] === 'string' ? (args['edgeKind'] as EdgeKind) : undefined;
 
-  return ok(buildImpactResponse({ cg, symbol, allMatches, depth, confidenceThreshold, includeTests, edgeKind }));
+  return ok(
+    buildImpactResponse({
+      cg,
+      symbol,
+      allMatches,
+      depth,
+      confidenceThreshold,
+      includeTests,
+      edgeKind,
+      compact: args['compact'] === true || args['lowTokens'] === true,
+    }),
+  );
 }
 
 // IMPACT_TOOL export removed in the 2026-05-11 four-tool merge. The public

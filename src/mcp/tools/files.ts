@@ -30,6 +30,11 @@ import {
   type FileListFormat,
 } from '../../features/files/runtime.js';
 import { LIST_ALL_DEFAULT_LIMIT, runModuleSummary } from '../../features/module/index.js';
+import {
+  MAX_SOURCE_READ_LINE_LIMIT,
+  readIndexedFileSource,
+  renderSourceRead,
+} from '../../features/source-read/index.js';
 
 /** Hard cap on `maxDepth` — matches the schema-documented `[1, 20]` range. */
 const MAX_MAX_DEPTH = 20;
@@ -51,20 +56,33 @@ const filesSchema = z.object({
   dir: z.string().optional().describe('Filter to files under this directory path. Defaults to all files.'),
   pattern: z.string().optional().describe('Filter files by glob pattern (e.g. "*.tsx", "**/*.test.ts").'),
   format: z
-    .enum(['tree', 'flat', 'grouped', 'summary', 'symbols', 'deps', 'module'])
+    .enum(['tree', 'flat', 'grouped', 'summary', 'symbols', 'deps', 'module', 'read'])
     .optional()
     .describe(
       'Output: "tree" (hierarchical, default), "flat" (alphabetical), "grouped" (by language), ' +
         '"summary" (per-directory file/symbol-count rollup), "symbols" (one-file outline), ' +
-        '"deps" (one-file dependencies/dependents), or "module" (directory/module summary).',
+        '"deps" (one-file dependencies/dependents), "module" (directory/module summary), or "read" (line-window source).',
     ),
   file: z
     .string()
     .min(1)
     .optional()
     .describe(
-      'For format="symbols" or format="deps": project-relative indexed file path, or an absolute path inside the project.',
+      'For format="symbols", "deps", or "read": project-relative indexed file path, or an absolute path inside the project.',
     ),
+  lineOffset: z
+    .number()
+    .int()
+    .min(0)
+    .optional()
+    .describe('For format="read": zero-based source line offset. Defaults to 0.'),
+  lineLimit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_SOURCE_READ_LINE_LIMIT)
+    .optional()
+    .describe(`For format="read": number of source lines to return, in [1, ${MAX_SOURCE_READ_LINE_LIMIT}].`),
   kinds: z
     .string()
     .optional()
@@ -149,6 +167,8 @@ async function handleFiles(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> 
       return handleFileDepsFormat(ctx, args);
     case 'module':
       return handleModuleFormat(ctx, args);
+    case 'read':
+      return handleFileReadFormat(ctx, args);
     default:
       return handleFileListingFormat({ ctx, args, format, lowTokens });
   }
@@ -316,12 +336,27 @@ async function handleModuleFormat(ctx: ToolCtx, args: FilesArgs): Promise<ToolOu
   return ok(renderToolResponse({ body: outcome.body }));
 }
 
+async function handleFileReadFormat(ctx: ToolCtx, args: FilesArgs): Promise<ToolOutcome> {
+  if (!args.file) return err('`file` is required when `format` is "read".');
+  const cg = ctx.getCartograph(args.projectPath);
+  const indexedFiles = getAllFilesWithSymbolCount(cg.queries);
+  const outcome = readIndexedFileSource({
+    projectRoot: cg.projectRoot,
+    file: args.file,
+    indexedFiles,
+    lineOffset: args.lineOffset,
+    lineLimit: args.lineLimit,
+  });
+  if (!outcome.ok) return empty(outcome.message);
+  return ok(renderToolResponse({ body: renderSourceRead(outcome.result, args.lowTokens === true) }));
+}
+
 export const FILES_TOOL = defineTool({
   name: 'cartograph_files',
   description:
     'Indexed file and directory surface — project tree, grouped/summary views, one-file symbols, one-file dependencies, and directory/module summaries. ' +
     'Filter by `dir` prefix or `pattern` glob (e.g. `**/*.test.ts`). ' +
-    'Format: `tree` (default) | `flat` | `grouped` | `summary` | `symbols` | `deps` | `module`. ' +
+    'Format: `tree` (default) | `flat` | `grouped` | `summary` | `symbols` | `deps` | `module` | `read`. ' +
     '`lowTokens: true` defaults to summary format, no metadata, and a shallow depth cap. ' +
     'The `flat` format folds a per-file LLM summary under each row when the listing is ≤80 files.',
   schema: filesSchema,

@@ -9,6 +9,7 @@ import {
   buildMacroRunArgs,
   buildMacroSaveArgs,
   buildResumeSessionArgs,
+  buildUsageSessionArgs,
 } from '../src/features/session/runtime.js';
 
 describe('session feature runtime', () => {
@@ -27,6 +28,7 @@ describe('session feature runtime', () => {
     });
     expect(buildDeleteSessionArgs({ id: 's1' })).toEqual({ ok: true, args: { action: 'delete', id: 's1' } });
     expect(buildListSessionArgs({ limit: 5 })).toEqual({ ok: true, args: { action: 'list', limit: 5 } });
+    expect(buildUsageSessionArgs()).toEqual({ ok: true, args: { action: 'usage' } });
   });
 
   it('returns expected failures as values for invalid session inputs', () => {

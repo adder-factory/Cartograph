@@ -4,6 +4,7 @@ export type SessionAction =
   | 'audit'
   | 'list'
   | 'delete'
+  | 'usage'
   | 'macro_save'
   | 'macro_run'
   | 'macro_list'
@@ -68,6 +69,10 @@ export function buildDeleteSessionArgs(options: SessionIdentityOptions): Session
   if (options.id) args['id'] = options.id;
   if (options.label) args['label'] = options.label;
   return { ok: true, args };
+}
+
+export function buildUsageSessionArgs(): SessionArgResult {
+  return { ok: true, args: { action: 'usage' } };
 }
 
 export function buildMacroSaveArgs(options: MacroSaveOptions): SessionArgResult {

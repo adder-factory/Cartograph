@@ -534,6 +534,20 @@ describe('cartograph_walk — output format', () => {
     expect(text).not.toMatch(/\(0 nodes\)/);
   });
 
+  it('impact direction supports compact pipe-delimited output', async () => {
+    const result = await handler.execute('cartograph_graph', {
+      start: 'beta',
+      direction: 'impact',
+      compact: true,
+      hops: 1,
+    });
+    expect(result.isError).toBeFalsy();
+    const text = result.content[0]?.text ?? '';
+    expect(text).toContain('impact|beta|depth=1');
+    expect(text).toContain('file|src/b.ts|count=');
+    expect(text).toContain('node|beta|function|src/b.ts:');
+  });
+
   it("direction='both' is an alias for 'impact' — returns same bidirectional results", async () => {
     // 'both' should behave identically to 'impact'
     // Post-four-tool-merge: `direction: 'impact' | 'both'` always

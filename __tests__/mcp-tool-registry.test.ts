@@ -77,6 +77,7 @@ describe('MCP tool registry — single source of truth', () => {
       'cartograph_context',
       'cartograph_coverage',
       'cartograph_dead_code',
+      'cartograph_dependency_coverage',
       'cartograph_deps',
       'cartograph_digest',
       'cartograph_discover',
@@ -92,6 +93,7 @@ describe('MCP tool registry — single source of truth', () => {
       // (2026-05-11 four-tool merge).
       'cartograph_graph',
       'cartograph_history',
+      'cartograph_host_diagnostics',
       'cartograph_hotspots',
       'cartograph_imports',
       'cartograph_local_chat',
