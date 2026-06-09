@@ -57,10 +57,16 @@ function exitOnEpipe(error: unknown): void {
 process.stdout.on('error', exitOnEpipe);
 process.stderr.on('error', exitOnEpipe);
 
+function parseUnsignedDecimalInteger(raw: string): number | null {
+  if (!/^\d+$/u.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
 // Warn about unsupported Node.js versions (Node 25+ has V8 turboshaft WASM bugs)
 const nodeVersion = process.versions.node;
-const nodeMajor = Number.parseInt(nodeVersion.split('.')[0] ?? '0', 10);
-if (nodeMajor >= 25) {
+const nodeMajor = parseUnsignedDecimalInteger(nodeVersion.split('.')[0] ?? '');
+if (nodeMajor !== null && nodeMajor >= 25) {
   process.stderr.write(
     `\x1b[33m⚠\x1b[0m  Cartograph may crash on Node.js ${nodeVersion} due to a V8 WASM compiler bug in Node 25+.\n`,
   );

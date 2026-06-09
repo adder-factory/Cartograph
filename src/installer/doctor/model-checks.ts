@@ -22,7 +22,6 @@ import type { CheckResult } from './contract.js';
 const ENGINES_BUN_MIN = '1.3.0';
 const BUN_DOWNLOAD_URL = 'https://bun.sh';
 const SEMVER_COMPONENT_COUNT = 3;
-const SEMVER_RADIX = 10;
 const MAX_RENDERED_MISSING_MODEL_FILES = 4;
 
 interface PartialModelFile {
@@ -34,9 +33,25 @@ interface MissingConfiguredModelFile extends ConfiguredModelFile {
   readonly partialDownload: PartialModelFile | null;
 }
 
+function parseUnsignedDecimalInteger(raw: string): number | null {
+  if (!/^\d+$/u.test(raw)) return null;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+function parseSemverComponent(raw: string): number {
+  return parseUnsignedDecimalInteger(raw) ?? 0;
+}
+
+function parseSchemaVersion(raw: number | string | undefined): number | null {
+  if (typeof raw === 'number') return Number.isSafeInteger(raw) ? raw : null;
+  if (typeof raw === 'string') return parseUnsignedDecimalInteger(raw);
+  return null;
+}
+
 function compareSemver(a: string, b: string): number {
-  const pa = a.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
-  const pb = b.split('.').map((n) => Number.parseInt(n, SEMVER_RADIX));
+  const pa = a.split('.').map(parseSemverComponent);
+  const pb = b.split('.').map(parseSemverComponent);
   for (let i = 0; i < SEMVER_COMPONENT_COUNT; i++) {
     const ai = pa[i] ?? 0;
     const bi = pb[i] ?? 0;
@@ -357,7 +372,7 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
     const versionRows = await sql.unsafe(
       `SELECT version FROM ${schemaIdent}.schema_versions ORDER BY version DESC LIMIT 1`,
     );
-    const version = Number((versionRows[0] as { version?: number | string } | undefined)?.version ?? 0);
+    const version = parseSchemaVersion((versionRows[0] as { version?: number | string } | undefined)?.version);
     if (version !== CURRENT_SCHEMA_VERSION) {
       return {
         id: 'database-storage',

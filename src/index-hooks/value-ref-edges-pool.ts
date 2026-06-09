@@ -42,6 +42,7 @@
 import { fileURLToPath } from 'node:url';
 import { partitionRoundRobin } from '../utils.js';
 import { runWorkerSlice } from '../utils/worker-slice.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 import type { ValueRefEdgeRecord } from './value-ref-edge-scan.js';
 import type { ValueRefWorkerReply } from './value-ref-edges-worker.js';
 
@@ -67,8 +68,8 @@ const POOL_CEILING = 8;
 function resolveWorkerCount(): number {
   const raw = process.env['CARTOGRAPH_VALUE_REF_WORKERS'];
   if (raw !== undefined) {
-    const n = Number.parseInt(raw, 10);
-    if (Number.isFinite(n)) return Math.max(0, n);
+    const n = parseStrictUnsignedDecimalInteger(raw);
+    if (n !== null) return n;
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const os = require('node:os') as typeof import('node:os');

@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { readUtf8ControlFile } from './control-file-text.js';
+import { ensureOwnerOnlyFileMode, ensurePrivateDirectory, OWNER_ONLY_FILE_MODE } from './config.js';
 
 /**
  * Cartograph directory name
@@ -84,8 +85,10 @@ export function createDirectory(projectRoot: string): void {
     throw new Error(`Cartograph already initialized in ${projectRoot}`);
   }
 
-  // Create main directory (if it doesn't exist)
-  fs.mkdirSync(cartographDir, { recursive: true });
+  // Create main directory with owner-only permissions where the filesystem
+  // supports POSIX modes. `.cartograph/` can contain local endpoints and
+  // credentials in config backups.
+  ensurePrivateDirectory(cartographDir);
 
   // Create .gitignore inside .cartograph (if it doesn't exist)
   const gitignorePath = path.join(cartographDir, '.gitignore');
@@ -108,8 +111,9 @@ cache/
 .dirty
 `;
 
-    fs.writeFileSync(gitignorePath, gitignoreContent, 'utf-8');
+    fs.writeFileSync(gitignorePath, gitignoreContent, { encoding: 'utf-8', mode: OWNER_ONLY_FILE_MODE });
   }
+  ensureOwnerOnlyFileMode(gitignorePath);
 
   // Make sure the project's own `.gitignore` excludes `.cartograph/`.
   // Without this, a fresh repo surfaces the index DB / WAL / config as
@@ -247,10 +251,14 @@ export function validateDirectory(projectRoot: string): {
  */
 function ensureGitignoreFile(cartographDir: string, errors: string[]): void {
   const gitignorePath = path.join(cartographDir, '.gitignore');
-  if (fs.existsSync(gitignorePath)) return;
+  if (fs.existsSync(gitignorePath)) {
+    ensureOwnerOnlyFileMode(gitignorePath);
+    return;
+  }
   try {
     const gitignoreContent = `# Cartograph data files\n# These are local to each machine and should not be committed\n\n# Database\n*.db\n*.db-wal\n*.db-shm\n\n# Cache\ncache/\n\n# Logs\n*.log\n\n# Hook markers\n.dirty\n`;
-    fs.writeFileSync(gitignorePath, gitignoreContent, 'utf-8');
+    fs.writeFileSync(gitignorePath, gitignoreContent, { encoding: 'utf-8', mode: OWNER_ONLY_FILE_MODE });
+    ensureOwnerOnlyFileMode(gitignorePath);
   } catch {
     // Non-fatal: warn but don't block
     errors.push('.gitignore missing in .cartograph directory and could not be created');

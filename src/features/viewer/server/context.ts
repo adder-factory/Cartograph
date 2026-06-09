@@ -6,13 +6,14 @@ import type { GraphTraverser } from '../../../graph/traversal.js';
 export interface ViewerHandle {
   url: string;
   port: number;
+  apiToken: string;
   close: () => Promise<void>;
 }
 
 export interface ViewerOptions {
   /** Port to bind to. Pass 0 to let the OS pick a free port. */
   port?: number;
-  /** Bind host. Default '127.0.0.1' (localhost-only; there is no auth). */
+  /** Bind host. Default 'localhost' with token-protected APIs. */
   host?: string;
 }
 
@@ -23,6 +24,13 @@ export interface StaticAsset {
   readonly byteLength: number;
 }
 
+export interface ViewerSecurityContext {
+  readonly apiToken: string;
+  readonly allowedHostnames: readonly string[];
+  readonly allowedOrigins: readonly string[];
+  readonly port: number;
+}
+
 export interface RequestContext {
   projectPath: string;
   conn: DatabaseConnection;
@@ -30,6 +38,7 @@ export interface RequestContext {
   traverser: GraphTraverser;
   indexHtml: string;
   staticAssets: Record<string, StaticAsset>;
+  security: ViewerSecurityContext;
   cg?: Cartograph;
 }
 

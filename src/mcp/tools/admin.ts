@@ -998,9 +998,9 @@ const adminSchema = z.object({
     .int()
     .min(LLM_CONCURRENCY_BOUNDS.min)
     .max(LLM_CONCURRENCY_BOUNDS.max)
-    .default(LLM_CONCURRENCY_BOUNDS.default)
+    .optional()
     .describe(
-      `(action=summarize / embed / classify) Concurrent LLM / embedding requests for this single pass. Default ${LLM_CONCURRENCY_BOUNDS.default}, integer in [${LLM_CONCURRENCY_BOUNDS.min}, ${LLM_CONCURRENCY_BOUNDS.max}]. (action=llm-tune, write mode) Per-tier in-flight requests for the chosen \`tier\`; persists to config.json. Match to your \`llama-server --parallel N\` for that tier.`,
+      `(action=summarize / embed / classify) Concurrent LLM / embedding requests for this single pass. Omit for default ${LLM_CONCURRENCY_BOUNDS.default}, integer in [${LLM_CONCURRENCY_BOUNDS.min}, ${LLM_CONCURRENCY_BOUNDS.max}]. (action=llm-tune, write mode) Per-tier in-flight requests for the chosen \`tier\`; persists to config.json. Match to your \`llama-server --parallel N\` for that tier. For llm-tune read mode, omit both \`tier\` and \`concurrency\`.`,
     ),
   summarizeLimit: z
     .number()

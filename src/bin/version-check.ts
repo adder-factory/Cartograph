@@ -16,8 +16,14 @@
 /** Minimum supported Node for direct Node-based fallback execution. */
 const MIN_NODE: readonly [number, number, number] = [22, 5, 0];
 
+function parseVersionPart(raw: string): number {
+  if (!/^\d+$/u.test(raw)) return 0;
+  const n = Number(raw);
+  return Number.isSafeInteger(n) ? n : 0;
+}
+
 function isNodeTooOld(): boolean {
-  const cur = process.versions.node.split('.').map((n) => Number.parseInt(n, 10));
+  const cur = process.versions.node.split('.').map(parseVersionPart);
   for (let i = 0; i < MIN_NODE.length; i++) {
     const part = cur[i] ?? 0;
     if (part > MIN_NODE[i]!) return false; // newer at a higher-order part — OK

@@ -28,6 +28,14 @@ describe('admin indexing feature runtime', () => {
       ok: false,
       error: '--parse-workers must be a positive integer (got "0")',
     });
+    expect(parseParseWorkersValue('3x')).toEqual({
+      ok: false,
+      error: '--parse-workers must be a positive integer (got "3x")',
+    });
+    expect(parseParseWorkersValue('1e2')).toEqual({
+      ok: false,
+      error: '--parse-workers must be a positive integer (got "1e2")',
+    });
     expect(parseMaxFileSizeValue(undefined)).toEqual({ ok: true, value: undefined });
     expect(parseMaxFileSizeValue('4096')).toEqual({ ok: true, value: 4096 });
     expect(parseMaxFileSizeValue('512kb')).toEqual({ ok: true, value: 512 * 1024 });
@@ -40,6 +48,10 @@ describe('admin indexing feature runtime', () => {
     expect(parseMaxFileSizeValue('1e3')).toEqual({
       ok: false,
       error: '--max-file-size must be between 1 byte and 10mb (got "1e3")',
+    });
+    expect(parseMaxFileSizeValue('2 MB trailing')).toEqual({
+      ok: false,
+      error: '--max-file-size must be between 1 byte and 10mb (got "2 MB trailing")',
     });
     expect(parseMaxFileSizeValue('1gb')).toEqual({
       ok: false,

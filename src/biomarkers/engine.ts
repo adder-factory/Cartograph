@@ -19,6 +19,7 @@ import type { Finding, Severity } from './types.js';
 import { detectSecretsHandling } from '../llm/secrets-detector.js';
 import { stripJsComments } from '../resolution/import-resolver.js';
 import { escapeRegExp } from '../utils.js';
+import { parseStrictDecimalNumber } from '../strict-numeric.js';
 
 interface SymbolMetrics {
   /** LoC = endLine - startLine + 1 (the symbol's source span). */
@@ -1873,10 +1874,10 @@ function extractNumbersFromText(text: string): Set<string> {
     const raw = m[0];
     const before = cleaned.slice(0, m.index);
     if (PREFIX_SKIP.test(before)) continue;
-    const f = Number.parseFloat(raw);
-    if (Number.isFinite(f) && Number.isInteger(f) && f >= 1900 && f <= 2100) continue;
+    const f = parseStrictDecimalNumber(raw);
+    if (f !== null && Number.isInteger(f) && f >= 1900 && f <= 2100) continue;
     out.add(raw);
-    if (Number.isFinite(f)) out.add(String(f));
+    if (f !== null) out.add(String(f));
   }
   return out;
 }

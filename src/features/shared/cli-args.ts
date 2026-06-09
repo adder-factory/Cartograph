@@ -1,11 +1,19 @@
+import { parseStrictDecimalInteger } from '../../strict-numeric.js';
+
+export {
+  parseStrictDecimalInteger,
+  parseStrictNonNegativeDecimalNumber,
+  parseStrictUnsignedDecimalInteger,
+} from '../../strict-numeric.js';
+
 export function parseOptionalPositiveInt(
   raw: string | undefined,
   optionName: string,
   error: (message: string) => void,
 ): number | undefined | null {
   if (raw === undefined) return undefined;
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1) {
+  const n = parseStrictDecimalInteger(raw);
+  if (n === null || n < 1) {
     error(`${optionName} must be a positive integer`);
     process.exitCode = 1;
     return null;
@@ -25,8 +33,8 @@ export function parseIntegerValue(
   optionName: string,
   bounds: IntegerValueBounds = {},
 ): PositiveIntParseResult {
-  const n = Number(raw);
-  if (!Number.isInteger(n) || !Number.isFinite(n)) {
+  const n = parseStrictDecimalInteger(raw);
+  if (n === null) {
     return { ok: false, error: `Invalid value for ${optionName}: "${raw}" is not an integer` };
   }
   if (bounds.min !== undefined && n < bounds.min) {

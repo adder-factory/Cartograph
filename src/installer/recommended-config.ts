@@ -20,6 +20,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CartographConfig } from '../types.js';
+import { copyPrivateFileSync, ensurePrivateDirectory, writePrivateFileAtomic } from '../config.js';
 import {
   RECOMMENDED_CHAT_SUMMARIZE,
   RECOMMENDED_CHAT_ASK,
@@ -201,7 +202,7 @@ export interface WriteRecommendedLlmResult {
 export function writeRecommendedLlmConfig(options: WriteRecommendedLlmOptions): WriteRecommendedLlmResult {
   const configPath = path.join(options.projectRoot, '.cartograph', 'config.json');
   const dir = path.dirname(configPath);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  ensurePrivateDirectory(dir);
 
   let current: Record<string, unknown> | undefined;
   let backupPath: string | null = null;
@@ -218,7 +219,7 @@ export function writeRecommendedLlmConfig(options: WriteRecommendedLlmOptions): 
       current = undefined;
     }
     backupPath = `${configPath}.bak.${Date.now()}`;
-    fs.copyFileSync(configPath, backupPath);
+    copyPrivateFileSync(configPath, backupPath);
   }
 
   const recommended = buildRecommendedLlmConfig(options);
@@ -228,9 +229,7 @@ export function writeRecommendedLlmConfig(options: WriteRecommendedLlmOptions): 
   // file on disk matches the convention used by saveConfig.
   delete nextConfig['rootDir'];
 
-  const tmp = `${configPath}.tmp`;
-  fs.writeFileSync(tmp, JSON.stringify(nextConfig, null, 2), 'utf-8');
-  fs.renameSync(tmp, configPath);
+  writePrivateFileAtomic(configPath, JSON.stringify(nextConfig, null, 2));
 
   return { configPath, backupPath, diff };
 }

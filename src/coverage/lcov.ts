@@ -11,6 +11,8 @@
  * not count against coverage.
  */
 
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+
 export interface FileCoverage {
   filePath: string;
   /** Line number → execution count. */
@@ -50,9 +52,9 @@ function parseSfRecord(line: string): FileCoverage {
 function parseDaRecord(line: string, current: FileCoverage): void {
   const parts = line.slice(DA_PREFIX_LEN).split(',');
   if (parts.length < DA_MIN_PARTS) return;
-  const lineNum = Number.parseInt(parts[0]!, 10);
-  const hits = Number.parseInt(parts[1]!, 10);
-  if (!Number.isFinite(lineNum) || !Number.isFinite(hits)) return;
+  const lineNum = parseStrictUnsignedDecimalInteger(parts[0]!);
+  const hits = parseStrictUnsignedDecimalInteger(parts[1]!);
+  if (lineNum === null || hits === null) return;
   if (hits < 0) return;
   current.lineHits.set(lineNum, hits);
 }
@@ -60,14 +62,14 @@ function parseDaRecord(line: string, current: FileCoverage): void {
 function parseBrdaRecord(line: string, current: FileCoverage): void {
   const parts = line.slice(BRDA_PREFIX_LEN).split(',');
   if (parts.length < BRDA_MIN_PARTS) return;
-  const lineNum = Number.parseInt(parts[0]!, 10);
-  if (!Number.isFinite(lineNum)) return;
+  const lineNum = parseStrictUnsignedDecimalInteger(parts[0]!);
+  if (lineNum === null) return;
   const takenStr = parts[BRDA_TAKEN_IDX]!;
   // `-` means the branch was never reached at all (counted in total,
   // but not as taken). Numeric 0 means reached but not taken on this
   // side — same effect for our rollup.
-  const taken = takenStr === '-' ? 0 : Number.parseInt(takenStr, 10);
-  if (!Number.isFinite(taken)) return;
+  const taken = takenStr === '-' ? 0 : parseStrictUnsignedDecimalInteger(takenStr);
+  if (taken === null) return;
   const existing = current.branches.get(lineNum) ?? { taken: 0, total: 0 };
   existing.total += 1;
   if (taken > 0) existing.taken += 1;

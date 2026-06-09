@@ -628,6 +628,8 @@ export async function eoProcessOneFile(
 
   counters.processed++;
 
+  if (eoRecordDamagedParseWithoutPersisting(filePath, result, { errors, counters })) return;
+
   if (!eoTryStoreResult(st, { filePath, content, language, stats, result, errors, counters })) return;
 
   accumulateExtractionResult(filePath, result, { errors, counters });
@@ -791,7 +793,7 @@ export async function eoRetryFreshHeap(
       stillFailing.push(errEntry);
       return true;
     }
-    if (result.nodes.length > 0 || result.errors.length === 0) {
+    if (!eoParseDamageBlocksPersistence(result) && (result.nodes.length > 0 || result.errors.length === 0)) {
       const language = detectLanguage(filePath, content);
       const stats = await fsp.stat(fullPath);
       eoStoreExtractionResult(st, { filePath, content, language, stats, result });
@@ -840,7 +842,7 @@ export async function eoRetryStripped(
       return true;
     }
 
-    if (result.nodes.length > 0 || result.errors.length === 0) {
+    if (!eoParseDamageBlocksPersistence(result) && (result.nodes.length > 0 || result.errors.length === 0)) {
       const stats = await fsp.stat(fullPath);
       eoStoreExtractionResult(st, { filePath, content: fullContent, language, stats, result });
       eoApplyRetrySuccess(errEntry, result, { errors, counters });
@@ -1309,7 +1311,7 @@ function eoPersistFileExtraction(st: ExtractionOrchestratorState, p: EoPersistFi
       // ran BEFORE the decision query, so a real semantic edit got
       // misclassified as format-only by reading back its own just-
       // written hash.) See the corresponding NOTE in `eoRunParseOrCached`.
-      if (p.result.nodes.length > 0 || p.result.errors.length === 0) {
+      if (!eoParseDamageBlocksPersistence(p.result) && (p.result.nodes.length > 0 || p.result.errors.length === 0)) {
         profile('persist:putCachedParse', () =>
           putCachedParse({
             qb: st.queries,
@@ -1766,4 +1768,26 @@ function accumulateExtractionResult(filePath: string, result: ExtractionResult, 
   } else {
     counters.filesSkipped++;
   }
+}
+
+function eoParseDamageBlocksPersistence(result: ExtractionResult): boolean {
+  return result.errors.some((error) => error.severity === 'error');
+}
+
+function eoRecordDamagedParseWithoutPersisting(
+  filePath: string,
+  result: ExtractionResult,
+  acc: ExtractionAccumulator,
+): boolean {
+  if (!eoParseDamageBlocksPersistence(result)) return false;
+  for (const err of result.errors) {
+    if (!err.filePath) err.filePath = filePath;
+  }
+  acc.errors.push(...result.errors);
+  if (result.errors.some((e) => e.severity === 'error')) {
+    acc.counters.filesErrored++;
+  } else {
+    acc.counters.filesSkipped++;
+  }
+  return true;
 }

@@ -569,7 +569,7 @@ async function reloadGraphForDensity() {
   }
   try {
     setGraphState('loading', 'Loading graph...');
-    const r = await fetch(graphRequestUrl());
+    const r = await apiFetch(graphRequestUrl());
     if (!r.ok) {
       setGraphState('err', `Failed to load graph: HTTP ${r.status}`);
       return;

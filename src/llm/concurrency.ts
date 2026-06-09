@@ -8,6 +8,8 @@
  * times, three per surface).
  */
 
+import { parseStrictDecimalInteger } from '../strict-numeric.js';
+
 /** Inclusive bounds + default for the LLM-pass `concurrency` knob. */
 export const LLM_CONCURRENCY_BOUNDS = { min: 1, max: 16, default: 2 } as const;
 
@@ -19,8 +21,8 @@ export const LLM_CONCURRENCY_BOUNDS = { min: 1, max: 16, default: 2 } as const;
  */
 export function parseConcurrency(raw: unknown): number {
   let n = Number.NaN;
-  if (typeof raw === 'number') n = raw;
-  else if (typeof raw === 'string') n = Number.parseInt(raw, 10);
+  if (typeof raw === 'number' && Number.isInteger(raw)) n = raw;
+  else if (typeof raw === 'string') n = parseStrictDecimalInteger(raw) ?? Number.NaN;
   if (!Number.isFinite(n)) return LLM_CONCURRENCY_BOUNDS.default;
-  return Math.min(LLM_CONCURRENCY_BOUNDS.max, Math.max(LLM_CONCURRENCY_BOUNDS.min, Math.floor(n)));
+  return Math.min(LLM_CONCURRENCY_BOUNDS.max, Math.max(LLM_CONCURRENCY_BOUNDS.min, n));
 }

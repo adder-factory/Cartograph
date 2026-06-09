@@ -34,6 +34,7 @@ import { getFileByPath } from '../../db/queries-files.js';
 import { parseUnifiedDiff } from '../../compare/diff-parser.js';
 import * as path from 'node:path';
 import type { Node } from '../../types.js';
+import { parseStrictUnsignedDecimalInteger } from '../../strict-numeric.js';
 
 const DEFAULT_LIMIT = 20;
 const MAX_LIMIT = 200;
@@ -711,7 +712,7 @@ function classifyEmptyDiff(diff: string): {
     if (!m) continue;
     hunkCount++;
     // newLen absent → exactly one line per the unified-diff spec.
-    const newLen = m[1] === undefined ? 1 : Number.parseInt(m[1], 10);
+    const newLen = m[1] === undefined ? 1 : (parseStrictUnsignedDecimalInteger(m[1]) ?? 0);
     if (newLen === 0) pureDeletionCount++;
   }
   return { hunkCount, pureDeletionCount, hasFileHeader };

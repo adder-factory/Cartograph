@@ -23,6 +23,7 @@ import { fileURLToPath } from 'node:url';
 import { logDebug } from '../errors.js';
 import { partitionRoundRobin } from '../utils.js';
 import { runWorkerSlice } from '../utils/worker-slice.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 import type { PerFileResult, PerFileWorkerReply } from './per-file-worker.js';
 
 /** Below this file count, the in-main streamingDispatch path beats the
@@ -48,8 +49,8 @@ const POOL_CEILING = 8;
 function resolveWorkerCount(): number {
   const raw = process.env['CARTOGRAPH_BIOMARKER_PERFILE_WORKERS'];
   if (raw !== undefined) {
-    const n = Number.parseInt(raw, 10);
-    if (Number.isFinite(n)) return Math.max(0, n);
+    const n = parseStrictUnsignedDecimalInteger(raw);
+    if (n !== null) return n;
   }
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const os = require('node:os') as typeof import('node:os');

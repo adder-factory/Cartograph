@@ -139,8 +139,8 @@ function renderHealthDashboard(findings, hotspotsPayload) {
 async function loadHealthLive() {
   try {
     const [fr, hr] = await Promise.all([
-      fetch('/api/findings'),
-      fetch('/api/hotspots?limit=50'),
+      apiFetch('/api/findings'),
+      apiFetch('/api/hotspots?limit=50'),
     ]);
     if (!fr.ok) {
       setText('hc-health', 'Unavailable');

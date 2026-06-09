@@ -37,6 +37,16 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
+function expectOwnerOnlyFile(filePath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+}
+
+function expectOwnerOnlyDirectory(dirPath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(dirPath).mode & 0o777).toBe(0o700);
+}
+
 describe('Cartograph Foundation', () => {
   let tempDir: string;
 
@@ -76,6 +86,8 @@ describe('Cartograph Foundation', () => {
 
       const configPath = path.join(getCartographDir(tempDir), 'config.json');
       expect(fs.existsSync(configPath)).toBe(true);
+      expectOwnerOnlyDirectory(getCartographDir(tempDir));
+      expectOwnerOnlyFile(configPath);
 
       const config = cg.getConfig();
       expect(config.version).toBe(DEFAULT_CONFIG.version);

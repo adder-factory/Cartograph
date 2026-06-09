@@ -23,6 +23,16 @@ function cleanupTempDir(dir: string): void {
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function expectOwnerOnlyFile(filePath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+}
+
+function expectOwnerOnlyDirectory(dirPath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(dirPath).mode & 0o777).toBe(0o700);
+}
+
 describe('mergeRecommendedLlmConfig (FRICTION-11)', () => {
   it('overwrites recommended slots and preserves non-slot llm keys', () => {
     const current = {
@@ -167,6 +177,9 @@ describe('writeRecommendedLlmConfig (FRICTION-11)', () => {
     expect(result.backupPath).not.toBeNull();
     expect(fs.existsSync(result.backupPath!)).toBe(true);
     expect(result.backupPath!).toMatch(/\.bak\.\d+$/);
+    expectOwnerOnlyFile(configPath);
+    expectOwnerOnlyFile(result.backupPath!);
+    expectOwnerOnlyDirectory(path.dirname(configPath));
 
     const written = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
     expect(written.llm.summarizeLlm.provider).toBe('openai-compat');
@@ -188,6 +201,8 @@ describe('writeRecommendedLlmConfig (FRICTION-11)', () => {
       dir: path.join(tempDir, 'models'),
     });
     expect(result.backupPath).toBeNull();
+    expectOwnerOnlyFile(result.configPath);
+    expectOwnerOnlyDirectory(path.dirname(result.configPath));
     const written = JSON.parse(fs.readFileSync(result.configPath, 'utf-8'));
     expect(written.llm.summarizeLlm.provider).toBe('openai-compat');
   });

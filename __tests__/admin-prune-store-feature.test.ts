@@ -6,6 +6,7 @@ describe('admin prune-store feature runtime', () => {
     expect(parseMaxAgeDays(undefined, 30)).toEqual({ ok: true, value: 30 });
     expect(parseMaxAgeDays('0', 30)).toEqual({ ok: true, value: 0 });
     expect(parseMaxAgeDays('7.5', 30)).toEqual({ ok: true, value: 7.5 });
+    expect(parseMaxAgeDays('.5', 30)).toEqual({ ok: true, value: 0.5 });
     expect(parseMaxAgeDays('-1', 30)).toEqual({
       ok: false,
       error: "--max-age-days must be a non-negative number. Got '-1'.",
@@ -13,6 +14,18 @@ describe('admin prune-store feature runtime', () => {
     expect(parseMaxAgeDays('old', 30)).toEqual({
       ok: false,
       error: "--max-age-days must be a non-negative number. Got 'old'.",
+    });
+    expect(parseMaxAgeDays('7.5days', 30)).toEqual({
+      ok: false,
+      error: "--max-age-days must be a non-negative number. Got '7.5days'.",
+    });
+    expect(parseMaxAgeDays('1e3', 30)).toEqual({
+      ok: false,
+      error: "--max-age-days must be a non-negative number. Got '1e3'.",
+    });
+    expect(parseMaxAgeDays('   ', 30)).toEqual({
+      ok: false,
+      error: "--max-age-days must be a non-negative number. Got '   '.",
     });
   });
 });

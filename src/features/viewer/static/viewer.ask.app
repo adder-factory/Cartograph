@@ -58,7 +58,7 @@ function syncBiomarkerFilterClasses() {
 
 async function applyBiomarkerFilter(name, history) {
   try {
-    const r = await fetch(`/api/findings/${encodeURIComponent(name)}?limit=80`);
+    const r = await apiFetch(`/api/findings/${encodeURIComponent(name)}?limit=80`);
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       const msg = document.createElement('div');
@@ -241,7 +241,7 @@ async function submitAsk(question) {
       loading.textContent = 'Ask is only available in live mode (cartograph viewer CLI), not in the standalone mockup.';
       return;
     }
-    const r = await fetch('/api/ask', {
+    const r = await apiFetch('/api/ask', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question, symbol: target, selection: capturedSelection }),

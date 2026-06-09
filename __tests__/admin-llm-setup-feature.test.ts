@@ -18,6 +18,14 @@ describe('admin LLM setup feature runtime', () => {
       ok: false,
       error: '--concurrency must be a positive integer when --tier is set',
     });
+    expect(parseLlmTuneOverride({ tier: 'chat', concurrency: '4x' })).toEqual({
+      ok: false,
+      error: '--concurrency must be a positive integer when --tier is set',
+    });
+    expect(parseLlmTuneOverride({ tier: 'chat', concurrency: '1e2' })).toEqual({
+      ok: false,
+      error: '--concurrency must be a positive integer when --tier is set',
+    });
   });
 });
 

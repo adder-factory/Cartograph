@@ -24,6 +24,7 @@
  */
 
 import type { Migration, MigrationModule } from './types.js';
+import { parseStrictUnsignedDecimalInteger } from '../../strict-numeric.js';
 
 import { MIGRATION as MIG_001 } from './001-initial-schema.js';
 import { MIGRATION as MIG_002 } from './002-project-metadata.js';
@@ -214,7 +215,7 @@ function validateRegistered(refs: readonly ModuleRef[]): readonly Migration[] {
           `expected pattern NNN-kebab-name.ts (3-digit prefix, lowercase kebab-case body)`,
       );
     }
-    const version = Number.parseInt(m[1]!, 10);
+    const version = parseStrictUnsignedDecimalInteger(m[1]!) ?? 0;
     return {
       version,
       filename: r.filename,

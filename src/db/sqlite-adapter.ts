@@ -29,6 +29,7 @@
 
 import { createRequire } from 'node:module';
 import { errMsg } from '../errors.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 
 // `createRequire` lets ESM modules synchronously load `bun:sqlite` +
 // `sqlite-vec`. Dynamic `await import()` would force createDatabase to
@@ -116,7 +117,8 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function compareSqliteVersions(a: string, b: string): number {
-  const parse = (value: string): number[] => value.split('.').map((part) => Number.parseInt(part, 10));
+  const parse = (value: string): number[] =>
+    value.split('.').map((part) => parseStrictUnsignedDecimalInteger(part) ?? 0);
   const aa = parse(a);
   const bb = parse(b);
   for (let i = 0; i < 3; i++) {

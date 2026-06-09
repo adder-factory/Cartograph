@@ -20,11 +20,75 @@ export { VALID_LANGUAGES } from './config/languages.js';
  */
 const CONFIG_FILENAME = 'config.json';
 
+/** Owner-only mode for generated private config/metadata files. */
+export const OWNER_ONLY_FILE_MODE = 0o600;
+
+/** Owner-only mode for `.cartograph/` private project state. */
+export const OWNER_ONLY_DIRECTORY_MODE = 0o700;
+
 /**
  * Get the config file path for a project
  */
 export function getConfigPath(projectRoot: string): string {
   return path.join(projectRoot, '.cartograph', CONFIG_FILENAME);
+}
+
+/** Best-effort permission hardening. Some platforms/filesystems ignore chmod. */
+export function ensureOwnerOnlyFileMode(filePath: string): void {
+  try {
+    fs.chmodSync(filePath, OWNER_ONLY_FILE_MODE);
+  } catch {
+    // Permission tightening should never make config persistence fail on
+    // filesystems that do not support POSIX modes.
+  }
+}
+
+/** Best-effort owner-only mode for directories holding local private state. */
+export function ensureOwnerOnlyDirectoryMode(dirPath: string): void {
+  try {
+    fs.chmodSync(dirPath, OWNER_ONLY_DIRECTORY_MODE);
+  } catch {
+    // Best effort only; creation/writes still matter more than chmod support.
+  }
+}
+
+/** Ensure a private directory exists, then tighten its mode where practical. */
+export function ensurePrivateDirectory(dirPath: string): void {
+  if (!fs.existsSync(dirPath)) {
+    fs.mkdirSync(dirPath, { recursive: true, mode: OWNER_ONLY_DIRECTORY_MODE });
+  }
+  ensureOwnerOnlyDirectoryMode(dirPath);
+}
+
+/** Copy a private file while preserving backup behavior and tightening the new copy. */
+export function copyPrivateFileSync(fromPath: string, toPath: string): void {
+  fs.copyFileSync(fromPath, toPath);
+  ensureOwnerOnlyFileMode(toPath);
+}
+
+/**
+ * Atomic owner-only write: create a private temp file, chmod it
+ * best-effort, then rename over the target and chmod the final path.
+ */
+export function writePrivateFileAtomic(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  ensurePrivateDirectory(dir);
+
+  const tmpPath = `${filePath}.tmp.${process.pid}.${Date.now()}`;
+  try {
+    fs.writeFileSync(tmpPath, content, { encoding: 'utf-8', mode: OWNER_ONLY_FILE_MODE });
+    ensureOwnerOnlyFileMode(tmpPath);
+    fs.renameSync(tmpPath, filePath);
+    ensureOwnerOnlyFileMode(filePath);
+  } finally {
+    if (fs.existsSync(tmpPath)) {
+      try {
+        fs.unlinkSync(tmpPath);
+      } catch {
+        // Best effort cleanup for a failed write; preserve the original error.
+      }
+    }
+  }
 }
 
 // `isSafeRegex` lives in `src/regex.ts` (RE2-backed; linear-time;
@@ -125,25 +189,14 @@ export function loadConfig(projectRoot: string): CartographConfig {
  */
 export function saveConfig(projectRoot: string, config: CartographConfig): void {
   const configPath = getConfigPath(projectRoot);
-  const dir = path.dirname(configPath);
 
   assertPersistableMaxFileSize(configPath, config.maxFileSize);
-
-  // Ensure directory exists
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-  }
 
   // Create a copy without rootDir (it's always derived from project path)
   const toSave = { ...config };
   delete (toSave as Partial<CartographConfig>).rootDir;
 
-  const content = JSON.stringify(toSave, null, 2);
-
-  // Atomic write: write to temp file then rename to prevent partial/corrupt configs
-  const tmpPath = configPath + '.tmp';
-  fs.writeFileSync(tmpPath, content, 'utf-8');
-  fs.renameSync(tmpPath, configPath);
+  writePrivateFileAtomic(configPath, JSON.stringify(toSave, null, 2));
 }
 
 /**

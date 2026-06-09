@@ -1,5 +1,6 @@
 import { workerData } from 'node:worker_threads';
 import { parsePostgresWorkerJson } from './postgres-codec.js';
+import { SQL_IDENTIFIER_PATTERN, rewritePostgresAfterPlaceholders } from './postgres-worker-sql.js';
 
 interface WorkerInit {
   control: SharedArrayBuffer;
@@ -24,7 +25,6 @@ const WORKER_REQUEST = 1;
 const WORKER_RESPONSE = 2;
 const SAFE_IDENTIFIER_PATTERN = String.raw`(?:[A-Za-z]|_)\w*`;
 const SAFE_IDENTIFIER_RE = /^(?:[A-Za-z]|_)\w*$/;
-const SQL_IDENTIFIER_PATTERN = String.raw`(?:[A-Za-z]|_)[\w.]*`;
 const SQL_PARAMETER_PATTERN = String.raw`[@:$]?(?:[A-Za-z]|_)\w*|\?`;
 
 const NODE_BATCH_INSERT_SQL = `
@@ -372,7 +372,7 @@ function translateQuery(inputSql: string, rawParams: unknown[]): TranslatedQuery
   );
 
   const jsonEachPositions = normalizeJsonEachParams(text, params);
-  text = rewriteAfterPlaceholders(text, jsonEachPositions);
+  text = rewritePostgresAfterPlaceholders(text, jsonEachPositions);
   return { sql: text, params };
 }
 
@@ -527,33 +527,6 @@ function rewriteNoCaseCollations(sqlText: string): string {
     rewriteComparison,
   );
   return text;
-}
-
-function rewriteAfterPlaceholders(sqlText: string, jsonEachPositions: ReadonlySet<number>): string {
-  let text = sqlText;
-  text = text.replaceAll(/(\$\d+)\s+IS\s+NULL/gi, (_match, placeholder: string) => {
-    return `${placeholder}${nullCheckCast(placeholder, jsonEachPositions)} IS NULL`;
-  });
-  text = text.replaceAll(/(\$\d+)\s+IS\s+NOT\s+NULL/gi, (_match, placeholder: string) => {
-    return `${placeholder}${nullCheckCast(placeholder, jsonEachPositions)} IS NOT NULL`;
-  });
-  text = text.replaceAll(
-    /SELECT\s+value\s+FROM\s+json_each\((\$\d+)\)/gi,
-    'SELECT jsonb_array_elements_text($1::jsonb)',
-  );
-  text = text.replaceAll(
-    new RegExp(
-      String.raw`SELECT\s+CAST\(value\s+AS\s+INTEGER\)\s+FROM\s+json_each\((\$\d+)\)\s+WHERE\s+key\s*=\s*(${SQL_IDENTIFIER_PATTERN})`,
-      'gi',
-    ),
-    'SELECT value::integer FROM jsonb_each_text($1::jsonb) AS j(key, value) WHERE key = $2',
-  );
-  return text;
-}
-
-function nullCheckCast(placeholder: string, jsonEachPositions: ReadonlySet<number>): string {
-  const position = Number(placeholder.slice(1));
-  return jsonEachPositions.has(position) ? '::jsonb' : '::text';
 }
 
 function normalizeJsonEachParams(sqlText: string, params: unknown[]): Set<number> {

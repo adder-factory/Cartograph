@@ -35,6 +35,7 @@ import { promisify } from 'node:util';
 import { logDebug, errMsg } from '../errors.js';
 import { parseCommitDiff } from './parse-diff.js';
 import { getCurrentHeadSha, isShaReachable } from '../git-utils.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -141,8 +142,8 @@ export async function mineIssueCommits(rootDir: string, sinceSha: string | null)
     let match: RegExpExecArray | null;
     ISSUE_REGEX.lastIndex = 0;
     while ((match = ISSUE_REGEX.exec(messageBody)) !== null) {
-      const n = Number.parseInt(match[1]!, 10);
-      if (Number.isFinite(n) && n > 0) issues.add(n);
+      const n = parseStrictUnsignedDecimalInteger(match[1]!);
+      if (n !== null && n > 0) issues.add(n);
     }
     if (issues.size > 0) commits.push({ sha, issues: [...issues] });
   }

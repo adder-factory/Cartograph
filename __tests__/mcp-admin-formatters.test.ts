@@ -86,17 +86,23 @@ function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
   return result.content[0]?.text ?? '';
 }
 
-function fakeCtx(cg: unknown, progress: string[] = []) {
+function fakeCtx(cg: unknown, progress: string[] = [], opts: { defaultCg?: unknown } = {}) {
   const evicted: string[] = [];
+  const getCartograph = (projectPath?: string): unknown => {
+    if (projectPath && typeof cg === 'object' && cg !== null && !('projectRoot' in cg)) {
+      return { ...cg, projectRoot: projectPath };
+    }
+    return cg;
+  };
   return {
-    getCartograph: () => cg,
+    getCartograph,
     reportProgress: (current: number, total?: number, message?: string) =>
       progress.push(`${current}/${total}:${message}`),
     closeProjectsMatching: () => {},
     evictCachedProject: (projectPath: string) => evicted.push(projectPath),
     evicted,
     options: {},
-    defaultCg: null,
+    defaultCg: opts.defaultCg ?? null,
     projectCache: new Map(),
   } as any;
 }
@@ -465,6 +471,19 @@ describe('MCP admin formatter contracts', () => {
       expect(textOf(report)).toContain('8-core test host');
       expect(textOf(report)).toContain('| embed');
 
+      const defaultReport = await ADMIN_TOOL.handle(fakeCtx(cg, [], { defaultCg: { projectRoot: dir } }), {
+        action: 'llm-tune',
+      } as any);
+      expect(textOf(defaultReport)).toContain('LLM tuning');
+
+      const missingConcurrency = await ADMIN_TOOL.handle(fakeCtx(cg), {
+        action: 'llm-tune',
+        projectPath: dir,
+        tier: 'chat',
+      } as any);
+      expect(missingConcurrency.isError).toBe(true);
+      expect(textOf(missingConcurrency)).toContain('write mode requires `concurrency');
+
       const write = await ADMIN_TOOL.handle(fakeCtx(cg), {
         action: 'llm-tune',
         projectPath: dir,
@@ -473,6 +492,7 @@ describe('MCP admin formatter contracts', () => {
       } as any);
       expect(textOf(write)).toContain('Applied tuning override');
       expect(textOf(write)).toContain('summarizeLlm');
+      expect(write.isError).not.toBe(true);
       const updated = JSON.parse(fs.readFileSync(path.join(cartoDir, 'config.json'), 'utf-8'));
       expect(updated.llm.summarizeLlm.concurrency).toBe(4);
     } finally {

@@ -10,6 +10,8 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Cartograph from '../src/index.js';
+import { upsertFile } from '../src/db/queries-files.js';
+import { hashContent } from '../src/extraction/index.js';
 import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 
 describe('viewer HTTP server', () => {
@@ -17,6 +19,8 @@ describe('viewer HTTP server', () => {
   let cg: Cartograph;
   let handle: ViewerHandle;
   let gitCompareReady = false;
+  let outsideDir: string | null = null;
+  let symlinkEscapeReady = false;
 
   beforeAll(async () => {
     testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-viewer-test-'));
@@ -42,6 +46,8 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     );
     cg = Cartograph.initSync(testDir, { config: { include: ['src/**/*.ts'], exclude: [] } });
     await cg.indexAll();
+    outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-viewer-outside-'));
+    symlinkEscapeReady = addSymlinkEscapeFixture(cg, testDir, outsideDir);
     cg.close();
     gitCompareReady = createGitCompareFixture(testDir);
     handle = await startViewerServer(testDir, { port: 0 });
@@ -50,6 +56,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   afterAll(async () => {
     await handle.close();
     if (fs.existsSync(testDir)) fs.rmSync(testDir, { recursive: true, force: true });
+    if (outsideDir && fs.existsSync(outsideDir)) fs.rmSync(outsideDir, { recursive: true, force: true });
   });
 
   it('serves the static viewer HTML at /', async () => {
@@ -69,6 +76,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(scriptSrcs).toEqual([
       'viewer.demo-data.app',
       'viewer.state.app',
+      'viewer.api.app',
       'viewer.graph-core.app',
       'viewer.mobile-panels.app',
       'viewer.graph-layout.app',
@@ -125,6 +133,8 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body).toContain('<title>cartograph viewer</title>');
     expect(body).toContain('lucide v0.468.0');
     expect(body).toContain('viewer.state.app');
+    expect(body).toContain('viewer.api.app');
+    expect(body).toContain('function apiFetch');
     expect(body).toContain('viewer.mobile-panels.app');
     expect(body).toContain('viewer.graph-layout.app');
     expect(body).toContain('viewer.edge-inspection.app');
@@ -290,8 +300,17 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body).toContain('<!doctype html>');
   });
 
-  it('returns project metadata at /api/status', async () => {
+  it('rejects unauthorized API requests while leaving static assets readable', async () => {
     const res = await fetch(`${handle.url}api/status`);
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toMatchObject({ error: 'unauthorized' });
+
+    const asset = await fetch(`${handle.url}viewer.css`);
+    expect(asset.status).toBe(200);
+  });
+
+  it('returns project metadata at /api/status with the viewer token', async () => {
+    const res = await apiFetch(handle, 'api/status');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       projectRoot: string;
@@ -306,12 +325,21 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.languages).toContain('typescript');
   });
 
+  it('rejects API requests from foreign origins even with the viewer token', async () => {
+    const rejected = await apiFetch(handle, 'api/status', { headers: { origin: 'http://example.com' } });
+    expect(rejected.status).toBe(403);
+    await expect(rejected.json()).resolves.toMatchObject({ error: 'forbidden origin' });
+
+    const accepted = await apiFetch(handle, 'api/status', { headers: { origin: new URL(handle.url).origin } });
+    expect(accepted.status).toBe(200);
+  });
+
   it('returns a connected default graph when no focus is given', async () => {
     // The no-focus path now anchors on the highest-centrality node
     // and BFS-traverses outward, so every visible node is connected.
     // The response carries that anchor as `focus` (was null in the
     // earlier "top-N by centrality" implementation).
-    const res = await fetch(`${handle.url}api/graph`);
+    const res = await apiFetch(handle, 'api/graph');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       focus: string | null;
@@ -333,7 +361,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns the focus subgraph when focus= is given', async () => {
-    const res = await fetch(`${handle.url}api/graph?focus=compute&depth=2`);
+    const res = await apiFetch(handle, 'api/graph?focus=compute&depth=2');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       focus: string | null;
@@ -349,7 +377,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns all relationships among nodes included in a focus graph', async () => {
-    const res = await fetch(`${handle.url}api/graph?focus=alpha&depth=2&limit=20`);
+    const res = await apiFetch(handle, 'api/graph?focus=alpha&depth=2&limit=20');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       nodes: Array<{ id: string; label: string }>;
@@ -369,7 +397,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('caps graph payloads with mode and limit while preserving focus', async () => {
-    const res = await fetch(`${handle.url}api/graph?focus=compute&mode=focus&limit=2`);
+    const res = await apiFetch(handle, 'api/graph?focus=compute&mode=focus&limit=2');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       mode: string;
@@ -393,7 +421,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns autocomplete search results at /api/search', async () => {
-    const res = await fetch(`${handle.url}api/search?q=compute&limit=5`);
+    const res = await apiFetch(handle, 'api/search?q=compute&limit=5');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       query: string;
@@ -406,7 +434,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns the shortest path between two symbols at /api/path', async () => {
-    const res = await fetch(`${handle.url}api/path?from=alpha&to=gamma`);
+    const res = await apiFetch(handle, 'api/path?from=alpha&to=gamma');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       found: boolean;
@@ -423,7 +451,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns a focused impact graph at /api/impact', async () => {
-    const res = await fetch(`${handle.url}api/impact?focus=gamma&mode=callers&depth=2&limit=20`);
+    const res = await apiFetch(handle, 'api/impact?focus=gamma&mode=callers&depth=2&limit=20');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       focus: { label: string } | null;
@@ -441,13 +469,13 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns callee and combined impact graph modes at /api/impact', async () => {
-    const calleesRes = await fetch(`${handle.url}api/impact?focus=alpha&mode=callees&depth=2&limit=20`);
+    const calleesRes = await apiFetch(handle, 'api/impact?focus=alpha&mode=callees&depth=2&limit=20');
     expect(calleesRes.status).toBe(200);
     const callees = (await calleesRes.json()) as { mode: string; nodes: Array<{ label: string }> };
     expect(callees.mode).toBe('callees');
     expect(callees.nodes.map((node) => node.label)).toContain('gamma');
 
-    const bothRes = await fetch(`${handle.url}api/impact?focus=beta&mode=both&depth=1&limit=20`);
+    const bothRes = await apiFetch(handle, 'api/impact?focus=beta&mode=both&depth=1&limit=20');
     expect(bothRes.status).toBe(200);
     const both = (await bothRes.json()) as { mode: string; nodes: Array<{ label: string }> };
     expect(both.mode).toBe('both');
@@ -455,7 +483,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns changed files and indexed symbols at /api/compare', async () => {
-    const res = await fetch(`${handle.url}api/compare?limit=20`);
+    const res = await apiFetch(handle, 'api/compare?limit=20');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       gitAvailable: boolean;
@@ -473,7 +501,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns symbol detail at /api/symbol/:name', async () => {
-    const res = await fetch(`${handle.url}api/symbol/compute`);
+    const res = await apiFetch(handle, 'api/symbol/compute');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       label: string;
@@ -507,7 +535,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns source snippets at /api/source/:name', async () => {
-    const res = await fetch(`${handle.url}api/source/compute`);
+    const res = await apiFetch(handle, 'api/source/compute');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       source: string;
@@ -524,14 +552,23 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.source).toContain('return d;');
   });
 
+  it('rejects source reads through symlinks that escape the project root', async () => {
+    if (!symlinkEscapeReady) return;
+    const res = await apiFetch(handle, 'api/source/symlinkEscape');
+    expect(res.status).toBe(403);
+    const body = (await res.json()) as { error: string; source: string };
+    expect(body.error).toBe('path escapes project root');
+    expect(body.source).toBe('');
+  });
+
   it('returns coverage: null when no lcov has been loaded', async () => {
-    const res = await fetch(`${handle.url}api/symbol/compute`);
+    const res = await apiFetch(handle, 'api/symbol/compute');
     const body = (await res.json()) as { coverage: unknown };
     expect(body.coverage).toBeNull();
   });
 
   it('returns 404 for unknown symbol', async () => {
-    const res = await fetch(`${handle.url}api/symbol/__no_such_symbol__`);
+    const res = await apiFetch(handle, 'api/symbol/__no_such_symbol__');
     expect(res.status).toBe(404);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/unknown symbol/);
@@ -543,12 +580,12 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('rejects non-GET methods with 405', async () => {
-    const res = await fetch(`${handle.url}api/status`, { method: 'POST' });
+    const res = await apiFetch(handle, 'api/status', { method: 'POST' });
     expect(res.status).toBe(405);
   });
 
   it('returns project-wide findings rollup at /api/findings', async () => {
-    const res = await fetch(`${handle.url}api/findings`);
+    const res = await apiFetch(handle, 'api/findings');
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       totalFindings: number;
@@ -566,21 +603,21 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns hotspots at /api/hotspots', async () => {
-    const res = await fetch(`${handle.url}api/hotspots?limit=5`);
+    const res = await apiFetch(handle, 'api/hotspots?limit=5');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { hotspots: unknown[] };
     expect(Array.isArray(body.hotspots)).toBe(true);
   });
 
   it('returns recent sessions at /api/sessions (empty on a fresh DB)', async () => {
-    const res = await fetch(`${handle.url}api/sessions?limit=5`);
+    const res = await apiFetch(handle, 'api/sessions?limit=5');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sessions: unknown[] };
     expect(Array.isArray(body.sessions)).toBe(true);
   });
 
   it('returns session detail at /api/sessions/:id (empty calls for unknown id)', async () => {
-    const res = await fetch(`${handle.url}api/sessions/nonexistent-session-id`);
+    const res = await apiFetch(handle, 'api/sessions/nonexistent-session-id');
     expect(res.status).toBe(200);
     const body = (await res.json()) as { sessionId: string; calls: unknown[] };
     expect(body.sessionId).toBe('nonexistent-session-id');
@@ -588,14 +625,14 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('returns 400 on a malformed percent-encoded symbol id', async () => {
-    const res = await fetch(`${handle.url}api/symbol/%GG`);
+    const res = await apiFetch(handle, 'api/symbol/%GG');
     expect(res.status).toBe(400);
     const body = (await res.json()) as { error: string };
     expect(body.error).toMatch(/malformed/);
   });
 
   it('returns current LLM setup guidance when Ask has no configured backend', async () => {
-    const res = await fetch(`${handle.url}api/ask`, {
+    const res = await apiFetch(handle, 'api/ask', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question: 'How does compute work?', symbol: 'compute' }),
@@ -608,14 +645,14 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   });
 
   it('routes Ask requests by pathname and rejects oversized Ask bodies with JSON', async () => {
-    const routed = await fetch(`${handle.url}api/ask?debug=1`, {
+    const routed = await apiFetch(handle, 'api/ask?debug=1', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question: 'How does compute work?', symbol: 'compute' }),
     });
     expect(routed.status).toBe(503);
 
-    const oversized = await fetch(`${handle.url}api/ask`, {
+    const oversized = await apiFetch(handle, 'api/ask', {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ question: 'x'.repeat(70 * 1024) }),
@@ -624,6 +661,56 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     await expect(oversized.json()).resolves.toMatchObject({ error: 'body too large' });
   });
 });
+
+function apiFetch(handle: ViewerHandle, pathOrUrl: string, init: RequestInit = {}): Promise<Response> {
+  const headers = new Headers(init.headers);
+  headers.set('x-cartograph-viewer-token', handle.apiToken);
+  return fetch(new URL(pathOrUrl, handle.url), { ...init, headers, signal: init.signal ?? AbortSignal.timeout(5000) });
+}
+
+function addSymlinkEscapeFixture(cg: Cartograph, projectRoot: string, outsideDir: string): boolean {
+  const outsideSource = 'export function symlinkEscape(): string { return "outside"; }\n';
+  const outsideFile = path.join(outsideDir, 'escape.ts');
+  const linkRel = 'src/escape-link.ts';
+  const linkAbs = path.join(projectRoot, linkRel);
+  fs.writeFileSync(outsideFile, outsideSource);
+  try {
+    fs.symlinkSync(outsideFile, linkAbs);
+  } catch {
+    return false;
+  }
+  const now = Date.now();
+  upsertFile(cg.queries, {
+    path: linkRel,
+    contentHash: hashContent(outsideSource),
+    language: 'typescript',
+    size: Buffer.byteLength(outsideSource),
+    modifiedAt: now,
+    indexedAt: now,
+    nodeCount: 1,
+    errors: [],
+    commitCount: 0,
+    loc: 1,
+    firstSeenTs: null,
+    lastTouchedTs: null,
+    isTest: false,
+    needsReextract: false,
+  });
+  cg.queries.insertNode({
+    id: 'function:symlinkEscape',
+    kind: 'function',
+    name: 'symlinkEscape',
+    qualifiedName: 'symlinkEscape',
+    filePath: linkRel,
+    language: 'typescript',
+    startLine: 1,
+    endLine: 1,
+    startColumn: 0,
+    endColumn: 0,
+    updatedAt: now,
+  });
+  return true;
+}
 
 function createGitCompareFixture(dir: string): boolean {
   const run = (args: string[]) => spawnSync('git', args, { cwd: dir, encoding: 'utf8' });

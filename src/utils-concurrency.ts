@@ -19,6 +19,7 @@
  */
 
 import * as fs from 'node:fs';
+import { parseStrictUnsignedDecimalInteger } from './strict-numeric.js';
 
 /** Locks older than this are considered stale regardless of PID status. */
 const LOCK_STALE_TIMEOUT_MS = 2 * 60 * 1000;
@@ -63,14 +64,13 @@ interface LockMetadata {
 function readLockMetadata(lockPath: string): LockMetadata | null {
   try {
     const content = fs.readFileSync(lockPath, 'utf-8').trim();
-    const pid = Number.parseInt(content, 10);
-    // Reject non-positive PIDs: `parseInt` returning 0 (e.g. corrupt
-    // lock containing literal "0" or non-numeric junk before the
-    // first digit) would otherwise pass `Number.isFinite` and reach
+    const pid = parseStrictUnsignedDecimalInteger(content);
+    // Reject non-positive PIDs: a corrupt lock containing literal "0"
+    // would otherwise reach
     // `process.kill(0, 0)` — which on POSIX signals the current
     // process group rather than checking PID 0, permanently blocking
     // acquire() against a malformed lock file.
-    if (!Number.isFinite(pid) || pid <= 0) return null;
+    if (pid === null || pid <= 0) return null;
     const stat = fs.statSync(lockPath);
     return { pid, mtimeMs: stat.mtimeMs };
   } catch {
@@ -175,7 +175,7 @@ export class FileLock {
     try {
       // Only remove if we still own it (check PID)
       const content = fs.readFileSync(this.lockPath, 'utf-8').trim();
-      if (Number.parseInt(content, 10) === process.pid) {
+      if (parseStrictUnsignedDecimalInteger(content) === process.pid) {
         fs.unlinkSync(this.lockPath);
       }
     } catch {

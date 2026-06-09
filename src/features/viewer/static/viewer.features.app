@@ -524,7 +524,7 @@ async function runPathFinder() {
   setFeatureLoading('Path', 'Finding path...');
   try {
     const params = new URLSearchParams({ from, to });
-    const res = await fetch(`/api/path?${params.toString()}`);
+    const res = await apiFetch(`/api/path?${params.toString()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     if (payload.error) {
@@ -576,7 +576,7 @@ async function runImpactMode(mode) {
   setFeatureLoading('Impact', 'Loading impact graph...');
   try {
     const params = new URLSearchParams({ focus, mode, depth: '2', limit: '120' });
-    const res = await fetch(`/api/impact?${params.toString()}`);
+    const res = await apiFetch(`/api/impact?${params.toString()}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     if (payload.error) {
@@ -612,7 +612,7 @@ async function runCompareView() {
   setFeatureBusy('compare', true);
   setFeatureLoading('Compare', 'Loading compare view...');
   try {
-    const res = await fetch('/api/compare?limit=120');
+    const res = await apiFetch('/api/compare?limit=120');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
     if (payload.error && payload.gitAvailable === false) {
