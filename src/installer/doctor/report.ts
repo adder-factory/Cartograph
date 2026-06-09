@@ -46,8 +46,10 @@ function appendCheckLines(lines: string[], checks: ReadonlyArray<DoctorResult['c
 
 function appendStatusSummary(lines: string[], result: DoctorResult): void {
   const counts = countChecks(result.checks);
-  lines.push(`**Status:** ${statusLabel(result.overallStatus)}`);
-  lines.push(`**Checks:** ${counts.ok} ok · ${counts.warn} warn · ${counts.fail} fail`);
+  lines.push(
+    `**Status:** ${statusLabel(result.overallStatus)}`,
+    `**Checks:** ${counts.ok} ok · ${counts.warn} warn · ${counts.fail} fail`,
+  );
 }
 
 function appendNextSteps(lines: string[], result: DoctorResult): void {
@@ -64,7 +66,7 @@ function appendNextSteps(lines: string[], result: DoctorResult): void {
     return;
   }
   for (const step of steps) {
-    lines.push(`- ${step.replace(/\n/g, '\n  ')}`);
+    lines.push(`- ${step.replaceAll('\n', '\n  ')}`);
   }
 }
 
