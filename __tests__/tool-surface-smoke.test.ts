@@ -95,6 +95,7 @@ function collectCommandPaths(program: Command): string[][] {
 
 function visitCommandPaths(cmd: Command, prefix: string[], paths: string[][]): void {
   for (const sub of cmd.commands) {
+    if ((sub as { _hidden?: boolean })._hidden === true) continue;
     const subName = sub.name();
     if (!subName || subName === 'help') {
       continue;
@@ -599,4 +600,16 @@ describe('CLI surface — every command responds to --help', () => {
 
     expect(failures, `CLI --help failures:\n${failures.join('\n---\n')}`).toEqual([]);
   }, 600_000);
+
+  it('hidden compatibility aliases still respond to --help but stay out of root help', () => {
+    const hiddenAliases = ['dependency-coverage', 'discover', 'host-diagnostics', 'local-chat'];
+    const rootHelp = runCli(['--help']).out;
+    for (const alias of hiddenAliases) {
+      expect(rootHelp).not.toContain(`  ${alias}`);
+      const { out, code } = runCli([alias, '--help']);
+      expect(code).toBe(0);
+      expect(out).toMatch(/[Uu]sage:/);
+      expect(out).toContain('Compatibility alias');
+    }
+  }, 120_000);
 });

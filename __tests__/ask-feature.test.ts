@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
   ASK_QUESTION_MAX_LENGTH,
+  LOCAL_CHAT_PROMPT_MAX_LENGTH,
+  parseAskMode,
+  parseMaxTokens,
   parseRetrieveK,
   renderAskAnnotations,
+  resolveLocalChatPrompt,
   resolveAskProjectPath,
+  validateLocalChatPrompt,
   validateAskQuestion,
 } from '../src/features/ask/runtime.js';
 
@@ -19,6 +24,28 @@ describe('ask feature runtime', () => {
     });
   });
 
+  it('validates local-chat mode and prompt options', () => {
+    expect(parseAskMode(undefined)).toEqual({ ok: true, value: 'code' });
+    expect(parseAskMode('local_chat')).toEqual({ ok: true, value: 'local_chat' });
+    expect(parseAskMode('bulk')).toEqual({
+      ok: false,
+      error: "Invalid value for --mode: expected 'code' or 'local_chat'",
+    });
+    expect(validateLocalChatPrompt('Summarize this')).toEqual({ ok: true });
+    expect(validateLocalChatPrompt('   ')).toEqual({
+      ok: false,
+      error: 'ask local_chat: prompt must not be empty.',
+    });
+    expect(validateLocalChatPrompt('x'.repeat(LOCAL_CHAT_PROMPT_MAX_LENGTH + 1))).toEqual({
+      ok: false,
+      error: `ask local_chat: prompt must be at most ${LOCAL_CHAT_PROMPT_MAX_LENGTH} characters (got ${
+        LOCAL_CHAT_PROMPT_MAX_LENGTH + 1
+      }).`,
+    });
+    expect(resolveLocalChatPrompt('positional prompt', {})).toBe('positional prompt');
+    expect(resolveLocalChatPrompt('positional prompt', { prompt: 'flag prompt' })).toBe('flag prompt');
+  });
+
   it('parses retrieve limits within the ask tool bounds', () => {
     expect(parseRetrieveK(undefined)).toEqual({ ok: true, value: 12 });
     expect(parseRetrieveK('4')).toEqual({ ok: true, value: 4 });
@@ -28,6 +55,16 @@ describe('ask feature runtime', () => {
     expect(parseRetrieveK('many')).toEqual({
       ok: false,
       error: 'Invalid value for --retrieve-k: "many" is not an integer',
+    });
+  });
+
+  it('parses local-chat max token bounds strictly', () => {
+    expect(parseMaxTokens(undefined)).toEqual({ ok: true, value: undefined });
+    expect(parseMaxTokens('1')).toEqual({ ok: true, value: 1 });
+    expect(parseMaxTokens('0')).toEqual({ ok: false, error: 'Invalid value for --max-tokens: must be >= 1' });
+    expect(parseMaxTokens('1.5')).toEqual({
+      ok: false,
+      error: 'Invalid value for --max-tokens: "1.5" is not an integer',
     });
   });
 

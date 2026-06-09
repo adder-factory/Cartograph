@@ -63,12 +63,12 @@ survive as CLI shortcuts for human ergonomics. MCP callers use the folded
 `cartograph_files` modes instead:
 `{format: "deps" | "symbols" | "module"}`.
 
-`cartograph dependency-coverage`, `cartograph discover`,
-`cartograph host-diagnostics`, and `cartograph local-chat` also survive as CLI
-shortcuts for human ergonomics. MCP callers use folded modes instead:
-`cartograph_deps({mode: 'coverage'})`, `cartograph_host({mode: 'discover'})`,
-`cartograph_host({mode: 'diagnostics'})`, and
-`cartograph_ask({mode: 'local_chat'})`.
+The 2026-06-09 `dependency-coverage`, `discover`, `host-diagnostics`, and
+`local-chat` shortcuts were folded into canonical CLI/MCP modes:
+`cartograph deps --mode coverage`, `cartograph host --mode discover`,
+`cartograph host --mode diagnostics`, and `cartograph ask --mode local_chat`.
+The old top-level shortcut commands remain callable as hidden compatibility
+aliases, but they are not part of the public aligned surface.
 
 `cartograph similar <symbol>` is an extra CLI-only shortcut — it has no
 standalone MCP tool; it routes through `cartograph_graph({direction:
@@ -119,11 +119,6 @@ deprecated `--mode static|judge` alias.
   — ergonomic CLI shortcuts. MCP-side they are folded into
   `cartograph_files({format: 'deps'|'symbols'|'module'})` to keep the
   advertised tool count bounded.
-- **`cartograph dependency-coverage`, `cartograph discover`,
-  `cartograph host-diagnostics`, `cartograph local-chat`** — ergonomic CLI
-  shortcuts. MCP-side they are folded into `cartograph_deps`,
-  `cartograph_host`, and `cartograph_ask` modes to keep the advertised tool
-  count bounded.
 
 ### Family-action pattern (CLI subcommands)
 

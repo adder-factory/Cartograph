@@ -272,7 +272,7 @@ win.
 |---|---|
 | `cartograph admin` | Project lifecycle, indexing, setup, doctor, storage migration, and LLM admin actions |
 | `cartograph affected` | Find test files affected by changed source files |
-| `cartograph ask` | Ask natural-language questions about the codebase with an LLM |
+| `cartograph ask` | LLM-backed code Q&A and local-chat prose delegation |
 | `cartograph at-range` | Resolve file:line ranges or diff hunks to indexed symbols |
 | `cartograph backend` | Manage configured local llama-server processes |
 | `cartograph biomarkers` | Static-analysis findings and Code Health |
@@ -283,10 +283,8 @@ win.
 | `cartograph context` | Task-specific context and route plans |
 | `cartograph coverage` | Per-symbol coverage joined to graph data |
 | `cartograph dead-code` | Potentially-dead symbol candidates |
-| `cartograph dependency-coverage` | CLI shortcut for graph dependency coverage (`cartograph deps --mode coverage`) |
 | `cartograph deps` | package.json dependency audit and graph dependency coverage |
 | `cartograph digest` | "Land in a new repo" overview |
-| `cartograph discover` | CLI shortcut to find other `.cartograph` indexes (`cartograph host --mode discover`) |
 | `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
 | `cartograph explore` | Deep topic exploration |
 | `cartograph export` | Graph artifact export: JSON, DOT, Mermaid, Cytoscape |
@@ -298,13 +296,11 @@ win.
 | `cartograph guide` | Compact first-use and daily-workflow guide |
 | `cartograph history` | Symbol-level co-change |
 | `cartograph host` | Host diagnostics and `.cartograph` index discovery |
-| `cartograph host-diagnostics` | CLI shortcut for MCP host/profile visibility and installer target diagnostics |
 | `cartograph hotspots` | Churn x centrality triage |
 | `cartograph imports` | Import statement graph data |
 | `cartograph install` | Configure MCP server entries for supported agents |
 | `cartograph install-hooks` | Install managed git hooks for quiet background sync |
 | `cartograph llm` | Local/cloud LLM provider setup and smoke checks |
-| `cartograph local-chat` | CLI shortcut to delegate bulk prose to a local LLM |
 | `cartograph mcp-budget` | Measure MCP startup payload size |
 | `cartograph module` | Directory/module summary |
 | `cartograph node` | Symbol details, optionally with source and related data |

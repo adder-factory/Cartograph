@@ -62,12 +62,10 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // 'sync'})` directly instead of mutating repository hooks.
   'install_hooks',
 
-  // `cartograph completions <shell>` prints shell integration scripts,
-  // and `cartograph __complete` is the hidden helper those scripts call.
-  // Both are CLI bootstrap surfaces that only make sense before/around
-  // invoking the CLI, not inside an MCP session.
+  // `cartograph completions <shell>` prints shell integration scripts. This is
+  // a CLI bootstrap surface that only makes sense before/around invoking the
+  // CLI, not inside an MCP session.
   'completions',
-  '__complete',
 
   // `cartograph serve` starts the MCP server itself — meaningless to
   // expose via MCP (you'd already be inside an MCP session).
@@ -156,18 +154,6 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   'file_deps',
   'file_symbols',
   'module',
-
-  // These CLI shortcuts survive the 2026-06-09 tool-family
-  // consolidation. MCP callers use folded modes; humans keep the
-  // narrower top-level commands because they are easier to discover.
-  // - dependency-coverage → cartograph_deps({mode:'coverage'})
-  // - discover → cartograph_host({mode:'discover'})
-  // - host-diagnostics → cartograph_host({mode:'diagnostics'})
-  // - local-chat → cartograph_ask({mode:'local_chat'})
-  'dependency_coverage',
-  'discover',
-  'host_diagnostics',
-  'local_chat',
 ]);
 
 // ── helpers ───────────────────────────────────────────────────
@@ -187,12 +173,22 @@ function visitCliCommand(cmd: Command, prefix: string[], ids: Set<string>): void
   const name = cmd.name();
   // Skip the root program (no name) and the auto-injected `help` command.
   if (!name || name === 'help' || name === 'cartograph') {
-    for (const sub of cmd.commands) visitCliCommand(sub, prefix, ids);
+    for (const sub of cmd.commands) {
+      if (isHiddenCommand(sub)) continue;
+      visitCliCommand(sub, prefix, ids);
+    }
     return;
   }
   const path = [...prefix, cliToMcpName(name)];
   ids.add(path.join(':'));
-  for (const sub of cmd.commands) visitCliCommand(sub, path, ids);
+  for (const sub of cmd.commands) {
+    if (isHiddenCommand(sub)) continue;
+    visitCliCommand(sub, path, ids);
+  }
+}
+
+function isHiddenCommand(cmd: Command): boolean {
+  return (cmd as { _hidden?: boolean })._hidden === true;
 }
 
 /** Walk the commander tree and return every leaf-or-family
@@ -379,12 +375,8 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   summaries: new Set(['items']),
 
   // ── `affected` and `ask` ────────────────────────────────────────
-  // Both formerly `'*'`; per the #31 audit `affected` has no
-  // per-property carve-outs. `ask` is a hand-written code-Q&A command;
-  // its local-chat branch stays exposed as the ergonomic
-  // `cartograph local-chat` shortcut instead of adding branch-only
-  // flags to `cartograph ask`.
-  ask: new Set(['mode', 'prompt', 'system', 'maxTokens']),
+  // Both formerly `'*'`; per the #31 audit ALL their schema fields
+  // ARE mirrored on the CLI. No per-property carve-outs needed.
 
   // ── Permanent per-property carve-outs on generated commands ────
   // `allowStale` is injected into every tool's schema by the
