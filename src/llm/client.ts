@@ -172,7 +172,7 @@ export interface LlmEndpointConfig {
    *  `cartograph_ask` (MCP tool) + the web viewer's Ask-AI panel +
    *  the `cartograph_dead_code` LLM judge. User-facing field: `askLlm`. */
   askLlm?: ChatProviderConfig | null;
-  /** Optional separate provider for `cartograph_local_chat` — the
+  /** Optional separate provider for local-chat calls — the
    *  local-tier sibling delegated to for routine subtasks. User-facing
    *  field: `localLlm`. */
   localLlm?: ChatProviderConfig | null;
@@ -309,7 +309,7 @@ async function llmClientGetAskLlmBackend(
 
 /**
  * Resolve (and lazily instantiate) the local LLM backend. Mirrors
- * the askLlm helper. Used by `cartograph_local_chat` when the user
+ * the askLlm helper. Used by local-chat when the user
  * has split bulk-prose off the main summarization backend.
  */
 async function llmClientGetLocalLlmBackend(
@@ -412,7 +412,7 @@ export class LlmClient {
     // When the caller asked for the local LLM path AND a separate
     // localLlm provider was configured, route to that backend. This
     // is the bulk-prose carve-out (paraphrase verification, draft
-    // prose, file summarisation) used by `cartograph_local_chat`. When
+    // prose, file summarisation) used by local-chat. When
     // localLlm is unset, falls through to the main summarizeLlm backend
     // (legacy single-provider behaviour).
     if (useLocal && this.localLlmCfg) {
@@ -431,7 +431,7 @@ export class LlmClient {
   }
 
   /** Whether a separate `localLlm` backend is configured. Read by
-   *  `cartograph_local_chat` and the status display so callers can
+   *  local-chat and the status display so callers can
    *  surface the routing without inspecting `summarizeLlmCfg` directly. */
   hasLocalLlmOverride(): boolean {
     return this.localLlmCfg !== null;

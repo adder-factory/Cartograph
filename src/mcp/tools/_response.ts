@@ -140,8 +140,8 @@ export interface ToolResponseSpec {
   empty?: EmptyResultSpec;
   /**
    * Per-tool output budget override. Defaults to
-   * {@link MAX_OUTPUT_LENGTH} (15 KB). `cartograph_local_chat` and
-   * similar bulk-prose tools pass a higher cap.
+   * {@link MAX_OUTPUT_LENGTH} (15 KB). Local-chat and similar
+   * bulk-prose tools pass a higher cap.
    */
   maxLength?: number;
 }

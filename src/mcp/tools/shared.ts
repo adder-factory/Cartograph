@@ -178,8 +178,8 @@ export function appendMoreHint(rendered: string, hasMore: boolean, argName = 'li
  * by the suffix length when the line-boundary fallback fired.
  *
  * `maxLen` defaults to {@link MAX_OUTPUT_LENGTH}; callers serving
- * deliberately larger payloads (e.g. `cartograph_local_chat`'s bulk
- * prose) pass a higher cap so they get the same line-boundary cut.
+ * deliberately larger payloads (e.g. local-chat bulk prose) pass a
+ * higher cap so they get the same line-boundary cut.
  */
 export function truncateOutput(text: string, maxLen: number = MAX_OUTPUT_LENGTH): string {
   if (text.length <= maxLen) return text;

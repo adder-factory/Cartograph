@@ -224,7 +224,7 @@ interface FreshnessGateInput {
 
 export async function runFreshnessGate(input: FreshnessGateInput): Promise<FreshnessGateOutcome> {
   const { cg, mod, allowStale, args } = input;
-  if (!cg || mod?.bypassFreshnessGate) return PASS_THROUGH;
+  if (!cg || toolBypassesFreshnessGate(mod, args)) return PASS_THROUGH;
   const f = cg.stats.getFreshness();
   if (!f) return PASS_THROUGH;
 
@@ -274,6 +274,12 @@ export async function runFreshnessGate(input: FreshnessGateInput): Promise<Fresh
   // `cartograph sync`" (CLI). Rewrite to MCP-side guidance so an agent
   // reading the banner from the MCP transport gets the right call.
   return { blockResult: null, banner: freshnessRiskBannerForMcp(f), freshnessMeta: toFreshnessMetadata(f) };
+}
+
+function toolBypassesFreshnessGate(mod: ToolModule | undefined, args: Record<string, unknown>): boolean {
+  const flag = mod?.bypassFreshnessGate;
+  if (typeof flag === 'function') return flag(args);
+  return flag === true;
 }
 
 function toolRequiresFreshIndex(mod: ToolModule | undefined, args: Record<string, unknown>): boolean {

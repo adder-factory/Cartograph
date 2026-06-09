@@ -3,7 +3,7 @@ import { LlmClient } from '../src/llm/client.js';
 
 /**
  * `localLlm` routing — the optional config slot routes
- * `cartograph_local_chat` calls to a separate backend so users can
+ * `cartograph_ask({mode: 'local_chat'})` calls to a separate backend so users can
  * keep a larger model for bulk prose while the main backend runs a
  * small code-tuned model for summary passes.
  *

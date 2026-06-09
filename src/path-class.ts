@@ -174,7 +174,7 @@ export function isDiagnosticPath(filePath: string): boolean {
  * `.cartograph/` index dir.
  *
  * The single source of truth for "don't descend into this directory"
- * across the tree-walking tools (`cartograph_discover`,
+ * across the tree-walking tools (host discover,
  * `cartograph_changed_since`). Those two used to keep separate hand-
  * maintained sets that had silently drifted — one skipped `.turbo` but
  * not `.cartograph`, the other the reverse.

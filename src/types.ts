@@ -341,7 +341,7 @@ export interface CartographConfig {
           claudeBin?: string;
         };
 
-        /** Optional separate provider for `cartograph_local_chat` calls —
+        /** Optional separate provider for local-chat calls —
          *  the local-tier sibling. The agent routes coding subtasks here:
          *  paraphrase verification, draft prose, snippet classification,
          *  mechanical refactor previews, file summaries.

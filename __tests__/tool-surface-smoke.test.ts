@@ -111,11 +111,10 @@ function visitCommandPaths(cmd: Command, prefix: string[], paths: string[][]): v
  * numeric props — the fuzz only cares that the handler doesn't throw.
  */
 const SMOKE_SKIP_REASONS: Record<string, string> = {
-  // cartograph_local_chat / cartograph_ask delegate to a local LLM —
-  // no model is provisioned in CI, so the smoke call would either
-  // hang or fail on a network/model error unrelated to a regression.
-  // The handler is still fuzz-tested for crash-safety below.
-  cartograph_local_chat: 'delegates to a local LLM (no model in CI)',
+  // cartograph_ask delegates to a local LLM in both code and
+  // local_chat modes. No model is provisioned in CI, so the smoke call
+  // would either hang or fail on a network/model error unrelated to a
+  // regression. The handler is still fuzz-tested for crash-safety below.
   cartograph_ask: 'delegates to a local LLM (no model in CI)',
 };
 
@@ -133,6 +132,8 @@ const SMOKE_DISCRIMINATOR: Record<string, Record<string, string>> = {
   cartograph_coverage: { mode: 'ranked' }, // read-only ranked view
   cartograph_review: { mode: 'risk' }, // no-input project triage
   cartograph_find: { by: 'name' }, // name lookup is the cheapest slice
+  cartograph_deps: { mode: 'unused' }, // package audit path is local and fast
+  cartograph_host: { mode: 'diagnostics' }, // no filesystem discovery walk
 };
 
 /**
@@ -514,6 +515,21 @@ const BRANCH_ARG_CONSUMPTION_CASES: ReadonlyArray<{
     name: 'files module format consumes directory summary args',
     tool: 'cartograph_files',
     args: { format: 'module', dirPath: 'src', limit: 5 },
+  },
+  {
+    name: 'deps coverage consumes coverage args',
+    tool: 'cartograph_deps',
+    args: { mode: 'coverage', limit: 5, lowTokens: true },
+  },
+  {
+    name: 'host diagnostics consumes diagnostics args',
+    tool: 'cartograph_host',
+    args: { mode: 'diagnostics', location: 'local', includeInstallTargets: false, lowTokens: true },
+  },
+  {
+    name: 'host discover consumes discovery args',
+    tool: 'cartograph_host',
+    args: { mode: 'discover', path: 'src', maxDepth: 2 },
   },
 ];
 

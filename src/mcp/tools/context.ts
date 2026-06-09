@@ -509,8 +509,8 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
 
 function buildDependencyCoverageAction(): NextAction {
   return {
-    tool: 'cartograph_dependency_coverage',
-    args: { lowTokens: true, limit: 20 },
+    tool: 'cartograph_deps',
+    args: { mode: 'coverage', lowTokens: true, limit: 20 },
     reason: 'Measure graph resolution gaps before drilling into one symbol for a broad cross-cutting task.',
     priority: PLAN_PRIORITY_PRIMARY,
   };

@@ -156,6 +156,18 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   'file_deps',
   'file_symbols',
   'module',
+
+  // These CLI shortcuts survive the 2026-06-09 tool-family
+  // consolidation. MCP callers use folded modes; humans keep the
+  // narrower top-level commands because they are easier to discover.
+  // - dependency-coverage → cartograph_deps({mode:'coverage'})
+  // - discover → cartograph_host({mode:'discover'})
+  // - host-diagnostics → cartograph_host({mode:'diagnostics'})
+  // - local-chat → cartograph_ask({mode:'local_chat'})
+  'dependency_coverage',
+  'discover',
+  'host_diagnostics',
+  'local_chat',
 ]);
 
 // ── helpers ───────────────────────────────────────────────────
@@ -367,8 +379,12 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   summaries: new Set(['items']),
 
   // ── `affected` and `ask` ────────────────────────────────────────
-  // Both formerly `'*'`; per the #31 audit ALL their schema fields
-  // ARE mirrored on the CLI. No per-property carve-outs needed.
+  // Both formerly `'*'`; per the #31 audit `affected` has no
+  // per-property carve-outs. `ask` is a hand-written code-Q&A command;
+  // its local-chat branch stays exposed as the ergonomic
+  // `cartograph local-chat` shortcut instead of adding branch-only
+  // flags to `cartograph ask`.
+  ask: new Set(['mode', 'prompt', 'system', 'maxTokens']),
 
   // ── Permanent per-property carve-outs on generated commands ────
   // `allowStale` is injected into every tool's schema by the

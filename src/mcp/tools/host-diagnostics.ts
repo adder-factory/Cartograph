@@ -8,7 +8,6 @@ import {
   toHostDiagnosticTarget,
 } from '../../features/host-diagnostics/index.js';
 import { mcpServerProfileToolSet, resolveMcpServerProfile } from '../profiles.js';
-import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok } from './_outcome.js';
 import { renderToolResponse } from './_response.js';
 import { lowTokensField } from './_common-fields.js';
@@ -26,7 +25,7 @@ const hostDiagnosticsSchema = z.object({
   lowTokens: lowTokensField,
 });
 
-type HostDiagnosticsArgs = z.infer<typeof hostDiagnosticsSchema>;
+export type HostDiagnosticsArgs = z.infer<typeof hostDiagnosticsSchema>;
 
 function activeToolNames(ctx: ToolCtx): string[] {
   const profile = resolveMcpServerProfile(ctx.options.profile);
@@ -51,7 +50,7 @@ function collectTargets(location: 'global' | 'local' | 'both') {
   );
 }
 
-function handleHostDiagnostics(ctx: ToolCtx, args: HostDiagnosticsArgs): ToolOutcome {
+export function handleHostDiagnostics(ctx: ToolCtx, args: HostDiagnosticsArgs): ToolOutcome {
   const profile = resolveMcpServerProfile(ctx.options.profile);
   const report = buildHostDiagnostics({
     profile,
@@ -64,12 +63,3 @@ function handleHostDiagnostics(ctx: ToolCtx, args: HostDiagnosticsArgs): ToolOut
   const body = args.lowTokens === true ? renderHostDiagnosticsCompact(report) : renderHostDiagnostics(report);
   return ok(renderToolResponse({ body }));
 }
-
-export const HOST_DIAGNOSTICS_TOOL = defineTool({
-  name: 'cartograph_host_diagnostics',
-  description:
-    'Host adoption diagnostics — active MCP profile/tool visibility plus best-effort installer target config detection. Reports what can be verified locally; sub-agent visibility remains host-specific.',
-  schema: hostDiagnosticsSchema,
-  handle: handleHostDiagnostics,
-  bypassFreshnessGate: true,
-});

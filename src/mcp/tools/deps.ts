@@ -1,16 +1,37 @@
 import { z } from 'zod';
-import { projectPathField } from './_common-fields.js';
+import { lowTokensField, projectPathField } from './_common-fields.js';
 import { analyzeUnusedDeps } from '../../deps/unused.js';
 import { textResult } from './shared.js';
 import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok } from './_outcome.js';
+import { renderToolResponse } from './_response.js';
+import {
+  collectDependencyCoverage,
+  DEFAULT_DEPENDENCY_COVERAGE_LIMIT,
+  MAX_DEPENDENCY_COVERAGE_LIMIT,
+  renderDependencyCoverage,
+} from '../../features/dependency-coverage/index.js';
 
 /** Maximum number of used packages to show in deps response. */
 const DEPS_DISPLAY_LIMIT = 20;
 
 const depsSchema = z.object({
+  mode: z
+    .enum(['unused', 'coverage'])
+    .default('unused')
+    .describe(
+      '`unused` (default) audits package.json declarations; `coverage` reports graph dependency resolution coverage by language/kind.',
+    ),
+  limit: z
+    .number()
+    .int()
+    .min(1)
+    .max(MAX_DEPENDENCY_COVERAGE_LIMIT)
+    .default(DEFAULT_DEPENDENCY_COVERAGE_LIMIT)
+    .describe(`(mode=coverage) Max language/kind rows to return, in [1, ${MAX_DEPENDENCY_COVERAGE_LIMIT}].`),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
@@ -18,6 +39,10 @@ type DepsArgs = z.infer<typeof depsSchema>;
 
 async function handleDeps(ctx: ToolCtx, args: DepsArgs): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args.projectPath);
+  if (args.mode === 'coverage') {
+    const report = collectDependencyCoverage(cg.queries, args.limit);
+    return ok(renderToolResponse({ body: renderDependencyCoverage(report, args.lowTokens === true) }));
+  }
   const result = analyzeUnusedDeps(cg.queries, cg.projectRoot);
   return ok(textResult(formatDepsResponse(result)));
 }
@@ -196,7 +221,7 @@ export function buildDepsImportedPackagesSpec(
 export const DEPS_TOOL = defineTool({
   name: 'cartograph_deps',
   description:
-    "package.json dependency audit — flags declared deps that aren't actually used. Read-only.\n\n" +
+    "Dependency audit family. `mode: 'unused'` flags declared package.json deps that aren't actually used. `mode: 'coverage'` reports resolved/unresolved graph dependency coverage. Read-only.\n\n" +
     '"Used" = imported in JS/TS (static or dynamic, including dynamic imports of `optionalDependencies`), named in `package.json.scripts`, or listed in `CartographConfig.dependenciesAllowlist`. `@types/X` is kept when `X` is used. ' +
     'Also reports an `undeclared` bucket — packages imported in source but in no package.json bucket (a package whose `@types/` counterpart IS declared is treated as intentional). ' +
     'In a workspaces monorepo (npm/bun/yarn-classic `workspaces:` array or `{packages: [...]}` object), declared deps + scripts are unioned across all resolved workspace manifests; the header shows the manifest count when > 1.',

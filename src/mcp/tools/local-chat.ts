@@ -1,6 +1,7 @@
 /**
- * `cartograph_local_chat` — one-shot chat against the user's configured
- * local LLM (or whatever summarize backend `config.llm.summarizeLlm` points at).
+ * `cartograph_ask({mode: 'local_chat'})` — one-shot chat against the user's
+ * configured local LLM (or whatever summarize backend
+ * `config.llm.summarizeLlm` points at).
  *
  * Why this exists: the parent agent (Claude in Claude Code) can
  * delegate verification / mechanical work to Anthropic-side cheaper
@@ -22,7 +23,6 @@ import { projectPathField } from './_common-fields.js';
 import { errMsg } from '../../errors.js';
 import { displayModelName, textResult, truncateOutput } from './shared.js';
 import type { ToolCtx } from './types.js';
-import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { llmLocalChat } from '../../cartograph-llm-service.js';
 
@@ -43,7 +43,7 @@ const MAX_PROMPT_CHARS = 64_000;
 const LOCAL_CHAT_MAX_OUTPUT_LENGTH = 32_000;
 
 /**
- * Zod schema for `cartograph_local_chat`. `prompt` is
+ * Zod schema for the local-chat branch. `prompt` is
  * `.min(1).max(64000)` — an empty or over-long prompt is REJECTED at
  * the dispatch boundary, mirroring the service-side prompt cap.
  * `maxTokens` is `.int().min(1)` — a zero / negative / non-integer
@@ -68,7 +68,7 @@ const localChatSchema = z.object({
 
 type LocalChatArgs = z.infer<typeof localChatSchema>;
 
-async function handleLocalChat(ctx: ToolCtx, args: LocalChatArgs): Promise<ToolOutcome> {
+export async function handleLocalChat(ctx: ToolCtx, args: LocalChatArgs): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args.projectPath);
 
   // `prompt` is already a non-empty string ≤ 64k chars — Zod's
@@ -104,19 +104,3 @@ async function handleLocalChat(ctx: ToolCtx, args: LocalChatArgs): Promise<ToolO
     return err(`local_chat failed: ${errMsg(error_)}`);
   }
 }
-
-export const LOCAL_CHAT_TOOL = defineTool({
-  name: 'cartograph_local_chat',
-  description:
-    "Delegate bulk prose to the user's local LLM. " +
-    'Good for summarisation, draft prose, paraphrase check, snippet classification. ' +
-    'NOT for hard reasoning, executed-verbatim code, or user-visible output without review. ' +
-    '64k char prompt cap; fails loud when the backend is unreachable.',
-  schema: localChatSchema,
-  handle: handleLocalChat,
-  // local_chat relays a prompt straight to the configured LLM — it
-  // never reads the code index, so index staleness is irrelevant.
-  // Without this, a heavily-drifted index would block an LLM relay
-  // call that has nothing to do with the graph.
-  bypassFreshnessGate: true,
-});

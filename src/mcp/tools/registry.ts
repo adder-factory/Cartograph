@@ -48,9 +48,7 @@ import { CONTEXT_TOOL } from './context.js';
 import { COVERAGE_TOOL } from './coverage.js';
 import { DEAD_CODE_TOOL } from './dead-code.js';
 import { DEPS_TOOL } from './deps.js';
-import { DEPENDENCY_COVERAGE_TOOL } from './dependency-coverage.js';
 import { DIGEST_TOOL } from './digest.js';
-import { DISCOVER_TOOL } from './discover.js';
 import { ENTRY_POINTS_TOOL } from './entry-points.js';
 import { EXPLORE_TOOL } from './explore.js';
 import { FILES_TOOL } from './files.js';
@@ -67,10 +65,9 @@ import { FIND_TOOL } from './find.js';
 // reachable only through `graph.ts`'s dispatcher.
 import { GRAPH_TOOL } from './graph.js';
 import { HISTORY_TOOL } from './history.js';
-import { HOST_DIAGNOSTICS_TOOL } from './host-diagnostics.js';
+import { HOST_TOOL } from './host.js';
 import { HOTSPOTS_TOOL } from './hotspots.js';
 import { IMPORTS_TOOL } from './imports.js';
-import { LOCAL_CHAT_TOOL } from './local-chat.js';
 import { NODE_TOOL } from './node.js';
 import { NOTE_TOOL } from './note.js';
 import { PLAYBOOK_TOOL } from './playbook.js';
@@ -93,7 +90,7 @@ import { TRACE_TO_CULPRITS_TOOL } from './trace-to-culprits.js';
  * of touching 22 per-tool files.
  */
 function withAllowStale(mod: ToolModule): ToolModule {
-  if (mod.bypassFreshnessGate) return mod;
+  if (mod.bypassFreshnessGate === true) return mod;
   // A `defineTool` module carries a NON-enumerable `__zodSchema`
   // marker that the `{ ...mod }` spread below would drop. Capture it
   // first and re-attach it to the clone so the dispatcher still routes
@@ -130,19 +127,16 @@ const ENTRIES: ToolModule[] = [
   COVERAGE_TOOL,
   DEAD_CODE_TOOL,
   DEPS_TOOL,
-  DEPENDENCY_COVERAGE_TOOL,
   DIGEST_TOOL,
-  DISCOVER_TOOL,
   ENTRY_POINTS_TOOL,
   EXPLORE_TOOL,
   FILES_TOOL,
   FIND_TOOL,
   GRAPH_TOOL,
   HISTORY_TOOL,
-  HOST_DIAGNOSTICS_TOOL,
+  HOST_TOOL,
   HOTSPOTS_TOOL,
   IMPORTS_TOOL,
-  LOCAL_CHAT_TOOL,
   NODE_TOOL,
   NOTE_TOOL,
   PLAYBOOK_TOOL,
@@ -220,6 +214,11 @@ export const RETIRED_TOOL_NAMES: ReadonlySet<string> = new Set([
   'cartograph_file_deps',
   'cartograph_file_symbols',
   'cartograph_module',
+  // 2026-06-09 full-profile consolidation
+  'cartograph_dependency_coverage',
+  'cartograph_discover',
+  'cartograph_host_diagnostics',
+  'cartograph_local_chat',
 ]);
 
 /**

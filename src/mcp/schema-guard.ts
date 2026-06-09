@@ -66,8 +66,9 @@ export function formatSchemaMismatch(check: SchemaCompatCheck): string {
     `  1. Restart the MCP server (your MCP client will reconnect automatically).\n` +
     `  2. As an in-session fallback, run any \`cartograph <subcommand>\` via CLI ` +
     `(\`npm run cli:dev -- <cmd>\` from a checkout, or \`npx cartograph <cmd>\`) — ` +
-    `each invocation spawns a fresh process that loads current code. The MCP-only ` +
-    `tools (\`session\`, \`note\`, \`local_chat\`) have no CLI mirror; they stay ` +
-    `unreachable until the server restarts.`
+    `each invocation spawns a fresh process that loads current code. MCP requests ` +
+    `through this stale server stay blocked until restart; use CLI mirrors where ` +
+    `available (for example \`cartograph local-chat\`, \`cartograph note list\`, ` +
+    `or \`cartograph session list\`).`
   );
 }

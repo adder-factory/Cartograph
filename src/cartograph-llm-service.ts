@@ -597,7 +597,7 @@ export class CartographLlmService {
 /**
  * One-shot chat against the configured local backend, no retrieval,
  * no grounding, no special prompt template. The agent-facing surface
- * (`cartograph_local_chat`) routes here so bulk prose subtasks (file
+ * (`cartograph_ask({mode: 'local_chat'})`) routes here so bulk prose subtasks (file
  * summarization, draft prose, paraphrase verification) can run on the
  * user's local LLM instead of paying Anthropic-token cost.
  *
