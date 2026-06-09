@@ -120,7 +120,7 @@ is:
 | tools/list, 14 tools | 33,953 | ~8,489 |
 | initialize instructions | 3,346 | ~837 |
 | combined startup load | 37,299 | ~9,325 |
-| full playbook, on demand | 16,066 | ~4,017 |
+| full playbook, on demand | 16,282 | ~4,071 |
 
 The full 34-tool profile is 61,130 `tools/list` chars and 64,476 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`

@@ -63,12 +63,10 @@ survive as CLI shortcuts for human ergonomics. MCP callers use the folded
 `cartograph_files` modes instead:
 `{format: "deps" | "symbols" | "module"}`.
 
-The 2026-06-09 `dependency-coverage`, `discover`, `host-diagnostics`, and
-`local-chat` shortcuts were folded into canonical CLI/MCP modes:
+The retired `dependency-coverage`, `discover`, `host-diagnostics`, and
+`local-chat` top-level shortcuts are not registered. Use canonical modes:
 `cartograph deps --mode coverage`, `cartograph host --mode discover`,
 `cartograph host --mode diagnostics`, and `cartograph ask --mode local_chat`.
-The old top-level shortcut commands remain callable as hidden compatibility
-aliases, but they are not part of the public aligned surface.
 
 `cartograph similar <symbol>` is an extra CLI-only shortcut — it has no
 standalone MCP tool; it routes through `cartograph_graph({direction:
@@ -136,8 +134,7 @@ llm       <setup|smoke>
 backend   <status|start|stop|logs>
 ```
 
-Mode-discriminated families keep related MCP capabilities together while the
-CLI may retain narrow shortcut commands for common human flows:
+Mode-discriminated families keep related MCP and CLI capabilities together:
 
 ```
 files <format:tree|flat|grouped|summary|deps|symbols|module>

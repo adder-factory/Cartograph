@@ -272,7 +272,7 @@ win.
 |---|---|
 | `cartograph admin` | Project lifecycle, indexing, setup, doctor, storage migration, and LLM admin actions |
 | `cartograph affected` | Find test files affected by changed source files |
-| `cartograph ask` | LLM-backed code Q&A and local-chat prose delegation |
+| `cartograph ask` | LLM-backed code Q&A and bulk prose delegation |
 | `cartograph at-range` | Resolve file:line ranges or diff hunks to indexed symbols |
 | `cartograph backend` | Manage configured local llama-server processes |
 | `cartograph biomarkers` | Static-analysis findings and Code Health |

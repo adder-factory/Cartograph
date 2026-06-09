@@ -601,15 +601,13 @@ describe('CLI surface — every command responds to --help', () => {
     expect(failures, `CLI --help failures:\n${failures.join('\n---\n')}`).toEqual([]);
   }, 600_000);
 
-  it('hidden compatibility aliases still respond to --help but stay out of root help', () => {
-    const hiddenAliases = ['dependency-coverage', 'discover', 'host-diagnostics', 'local-chat'];
+  it('retired top-level shortcuts are not registered', () => {
+    const retiredShortcuts = ['dependency-coverage', 'discover', 'host-diagnostics', 'local-chat'];
     const rootHelp = runCli(['--help']).out;
-    for (const alias of hiddenAliases) {
-      expect(rootHelp).not.toContain(`  ${alias}`);
-      const { out, code } = runCli([alias, '--help']);
-      expect(code).toBe(0);
-      expect(out).toMatch(/[Uu]sage:/);
-      expect(out).toContain('Compatibility alias');
+    for (const shortcut of retiredShortcuts) {
+      expect(rootHelp).not.toContain(`  ${shortcut}`);
+      const { code } = runCli([shortcut, '--help']);
+      expect(code).not.toBe(0);
     }
   }, 120_000);
 });

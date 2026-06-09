@@ -2,7 +2,7 @@
  * CLI commands generated from each MCP tool's Zod schema — extracted from
  * the bin/cartograph.ts decomposition.
  */
-import { registerGeneratedCommand, runViaMCP, runViaMCPCapture } from '../_cli-core.js';
+import { registerGeneratedCommand, runViaMCPCapture } from '../_cli-core.js';
 import { makeCompareToRefMcpRunner } from '../../features/compare-to-ref/index.js';
 
 const runCompareToRefViaMcp = makeCompareToRefMcpRunner({
@@ -53,30 +53,6 @@ function registerFlatGeneratedCommands(): void {
     negatableFields: ['code'],
     shortFlags: { maxNodes: '-n', format: '-f' },
   });
-  registerGeneratedCommand('cartograph_host', {
-    commandName: 'discover',
-    description:
-      "Compatibility alias for `cartograph host --mode discover` and MCP `cartograph_host({mode: 'discover'})`.",
-    summary: 'Find .cartograph indexes under a parent path',
-    hidden: true,
-    positionalFields: ['path'],
-    skipFields: ['mode', 'location', 'includeInstallTargets', 'lowTokens'],
-    shortFlags: { maxDepth: '-d' },
-    runViaMcp: (_toolName, args, projectPath) =>
-      runViaMCP('cartograph_host', { ...args, mode: 'discover' }, projectPath),
-  });
-  registerGeneratedCommand('cartograph_ask', {
-    commandName: 'local-chat',
-    description:
-      "Compatibility alias for `cartograph ask --mode local_chat` and MCP `cartograph_ask({mode: 'local_chat'})`.",
-    summary: 'Delegate bulk prose to the configured local/summarize LLM',
-    hidden: true,
-    positionalFields: ['prompt'],
-    skipFields: ['mode', 'question', 'retrieveK'],
-    shortFlags: { system: '-s' },
-    runViaMcp: (_toolName, args, projectPath) =>
-      runViaMCP('cartograph_ask', { ...args, mode: 'local_chat' }, projectPath),
-  });
   registerGeneratedCommand('cartograph_propose_rename', {
     positionalFields: ['symbol', 'newName'],
     shortFlags: { limit: '-l' },
@@ -115,29 +91,9 @@ function registerInspectionGeneratedCommands(): void {
     runViaMcp: runCompareToRefViaMcp,
   });
   registerGeneratedCommand('cartograph_deps');
-  registerGeneratedCommand('cartograph_deps', {
-    commandName: 'dependency-coverage',
-    description:
-      "Compatibility alias for `cartograph deps --mode coverage` and MCP `cartograph_deps({mode: 'coverage'})`.",
-    summary: 'Report graph dependency coverage by language and edge kind',
-    hidden: true,
-    skipFields: ['mode'],
-    runViaMcp: (_toolName, args, projectPath) =>
-      runViaMCP('cartograph_deps', { ...args, mode: 'coverage' }, projectPath),
-  });
   registerGeneratedCommand('cartograph_biomarkers', { shortFlags: { limit: '-l' } });
   registerGeneratedCommand('cartograph_hotspots', { shortFlags: { limit: '-l' } });
   registerGeneratedCommand('cartograph_host');
-  registerGeneratedCommand('cartograph_host', {
-    commandName: 'host-diagnostics',
-    description:
-      "Compatibility alias for `cartograph host --mode diagnostics` and MCP `cartograph_host({mode: 'diagnostics'})`.",
-    summary: 'Report MCP host/profile visibility and installer target diagnostics',
-    hidden: true,
-    skipFields: ['mode', 'path', 'maxDepth'],
-    runViaMcp: (_toolName, args, projectPath) =>
-      runViaMCP('cartograph_host', { ...args, mode: 'diagnostics' }, projectPath),
-  });
   registerGeneratedCommand('cartograph_dead_code');
 }
 
