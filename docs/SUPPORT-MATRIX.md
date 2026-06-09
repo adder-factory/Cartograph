@@ -1,6 +1,6 @@
 # Support Matrix
 
-Cartograph supports 70 language modes. The registry is the source of truth:
+Cartograph supports 73 language modes. The registry is the source of truth:
 language definitions live in `src/extraction/languages/registry.ts`, and
 framework resolvers live in `src/resolution/frameworks/index.ts`.
 
@@ -38,6 +38,7 @@ does not yet extract language-specific symbols from that grammar.
 | Elixir | `.ex`, `.exs` | Tree-sitter |
 | ERB / EJS | `.erb`, `.ejs`, `.eta`, `.etlua` | Tree-sitter parser-only |
 | Fish | `.fish` | Tree-sitter |
+| F# | `.fs`, `.fsx` | Tree-sitter |
 | GLSL | `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese` | Tree-sitter |
 | HLSL | `.hlsl`, `.hlsli`, `.fx`, `.fxh` | Tree-sitter |
 | Go | `.go` | Tree-sitter |
@@ -66,6 +67,7 @@ does not yet extract language-specific symbols from that grammar.
 | Osiris Story | `.div`, `Story/RawFiles/Goals/*.txt` | Custom extractor |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` | Tree-sitter plus form-file extractor |
 | PHP | `.php`, `.module`, `.install`, `.theme`, `.inc` | Tree-sitter |
+| PowerShell | `.ps1`, `.psm1`, `.psd1` | Tree-sitter |
 | Prisma | `.prisma` | Tree-sitter |
 | Java Properties | `.properties` | Custom extractor |
 | Python | `.py`, `.pyw` | Tree-sitter |
@@ -81,6 +83,7 @@ does not yet extract language-specific symbols from that grammar.
 | Swift | `.swift` | Tree-sitter |
 | TSX | `.tsx` | Tree-sitter |
 | TypeScript | `.ts`, `.mts`, `.cts` | Tree-sitter |
+| Visual Basic 6 | `.bas`, `.frm`, `.ctl`, `.dob`, `.dsr`, `.pag`, `.vbp`, VB6 `.cls` by content | Custom extractor |
 | VB.NET | `.vb` | Tree-sitter |
 | Verilog / SystemVerilog | `.v`, `.vh`, `.sv`, `.svh` | Tree-sitter tags query |
 | Visualforce | `.page`, `.component` | Custom extractor |
@@ -106,6 +109,9 @@ Special cases:
   Visualforce markup use custom extractors for controller refs, component refs,
   fields, routes, and action calls. Aura/Visualforce extension detection is
   path/content gated so unrelated `.app` or `.component` files are not claimed.
+- Visual Basic 6 class modules also use `.cls`; Apex remains the extension
+  owner, and VB6 wins only when the source has VB6 IDE headers such as
+  `VERSION ... CLASS` or `Attribute VB_Name = "..."`.
 - Objective-C header files are detected by content so `.h` can resolve to C,
   C++, or Objective-C.
 - Liquid can also be detected from YAML front matter in `.html` / `.md` files

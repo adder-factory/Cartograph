@@ -2,19 +2,16 @@
 /**
  * Biomarker floor gate (Live-queue #3, 2026-05-29).
  *
- * The project's bar is **0 error / 0 warning** biomarker findings, with a
- * small intentional info floor (see CLAUDE.md "Biomarker conventions"). Until
- * this gate existed nothing gated biomarkers: CI ran only typecheck + biome,
- * and the per-commit discipline ran tests but not the biomarker floor — so
- * findings could silently accumulate (the 2026-05-28 drift to 5 err / 37 warn,
- * baseline 65, went undetected for exactly this reason).
+ * The project's bar is **0 error / 0 warning / 0 info** biomarker findings.
+ * Until this gate existed nothing gated biomarkers: CI ran only typecheck +
+ * biome, and the per-commit discipline ran tests but not the biomarker floor
+ * — so findings could silently accumulate (the 2026-05-28 drift to 5 err /
+ * 37 warn, baseline 65, went undetected for exactly this reason).
  *
  * This script (re)indexes the repo structurally and fails non-zero if ANY
- * error or warning finding exists. INFO is reported but NOT gated: per-symbol
- * info counts (e.g. `forof_await`) fluctuate across reindexes (a known
- * tool-reliability quirk — see project_stale_mcp_server_biomarker_clobber), so
- * gating info would be flaky; the stable, meaningful signal is err/warn, which
- * is the documented bar.
+ * biomarker finding exists, including info-level findings. If info counts
+ * fluctuate, treat that as detector/indexing drift to fix rather than a gate
+ * exception.
  *
  * It ALSO fails closed when the cross-file biomarker pass reported any rule
  * error/timeout (the `biomarker_cross_file_errors` metadata key, set by
@@ -92,13 +89,14 @@ function readBiomarkerGateState(databasePath) {
       counts[row.severity] = row.n;
     }
     const offenders =
-      counts.error + counts.warning > 0
+      counts.error + counts.warning + counts.info > 0
         ? db
             .query(
               `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
                FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
-               WHERE f.severity IN ('error', 'warning')
-               ORDER BY f.severity DESC, n.file_path, n.start_line`,
+               WHERE f.severity IN ('error', 'warning', 'info')
+               ORDER BY CASE f.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                        n.file_path, n.start_line`,
             )
             .all()
         : [];
@@ -155,7 +153,7 @@ if (!crossFileClean) {
       : `the cross-file error sentinel holds an unexpected value (${JSON.stringify(cfRaw)})`;
   console.error(
     `\nbiomarker-gate FAILED — ${detail}.\n` +
-      'Affected findings were preserved-but-stale (not refreshed), so the 0 error / 0 warning count above\n' +
+      'Affected findings were preserved-but-stale (not refreshed), so the 0/0/0 count above\n' +
       'cannot be trusted. Check the indexer log for "cross-file rule \'<kind>\' failed" WARN lines, fix the\n' +
       'rule (or the timeout), and re-run. See src/biomarkers/index.ts reconcileCrossFileRuleResult.',
   );
@@ -163,15 +161,15 @@ if (!crossFileClean) {
 }
 
 if (offenders.length > 0) {
-  console.error('\nbiomarker-gate FAILED — the floor is 0 error / 0 warning. Offending findings:');
+  console.error('\nbiomarker-gate FAILED — the floor is 0 error / 0 warning / 0 info. Offending findings:');
   for (const o of offenders) {
     console.error(`  [${o.severity}] ${o.biomarker} — ${o.name}  (${o.filePath})`);
   }
   console.error(
     '\nFix the code (extract helpers, named consts, etc.) — never raise a threshold or suppress.\n' +
-      'See CLAUDE.md "Biomarker conventions". Info findings are intentional-by-design and not gated.',
+      'See docs/ARCHITECTURE.md for the biomarker floor.',
   );
   process.exit(1);
 }
 
-console.log('biomarker-gate OK — 0 error / 0 warning.');
+console.log('biomarker-gate OK — 0 error / 0 warning / 0 info.');

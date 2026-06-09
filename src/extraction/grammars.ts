@@ -195,6 +195,11 @@ export function detectLanguage(filePath: string, source?: string): Language {
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   const lang = pathGatedLanguage(filePath, source, registryLanguageForExtension(ext));
 
+  // Salesforce Apex and VB6 both commonly use `.cls`. Keep Apex as the
+  // extension owner, but let VB6 class modules win when their IDE headers are
+  // present in the source text.
+  if (lang === 'apex' && ext === '.cls' && source && looksLikeVb6(source)) return 'vb6';
+
   // .h files could be C, C++, or Objective-C (F#65). Check source
   // content. ObjC wins when the file has `@interface` / `@implementation`
   // / `@protocol` / `@synthesize` declarations — those are unambiguous
@@ -240,6 +245,38 @@ function pathGatedLanguage(filePath: string, source: string | undefined, languag
   if (language === 'aura' && !isSalesforceAuraFile(filePath, source)) return 'unknown';
   if (language === 'visualforce' && !isSalesforceVisualforceFile(filePath, source)) return 'unknown';
   return language;
+}
+
+function looksLikeVb6(source: string): boolean {
+  const sample = source.substring(0, 8192);
+  let hasOptionExplicit = false;
+  let hasRoutine = false;
+  for (const rawLine of sample.split('\n')) {
+    const line = rawLine.trimStart().replaceAll('\r', '');
+    const lower = line.toLowerCase();
+    if (lower.startsWith('version ') && lower.includes(' class')) return true;
+    if (lower.startsWith('attribute vb_name') && lower.includes('=')) return true;
+    if (lower.startsWith('begin vb.')) return true;
+    if (lower.startsWith('option explicit')) hasOptionExplicit = true;
+    if (startsWithVb6Routine(lower)) hasRoutine = true;
+  }
+  return hasOptionExplicit && hasRoutine;
+}
+
+function startsWithVb6Routine(lowerLine: string): boolean {
+  const withoutVisibility = stripVb6Visibility(lowerLine);
+  return (
+    withoutVisibility.startsWith('sub ') ||
+    withoutVisibility.startsWith('function ') ||
+    withoutVisibility.startsWith('property ')
+  );
+}
+
+function stripVb6Visibility(lowerLine: string): string {
+  for (const visibility of ['public ', 'private ', 'friend ']) {
+    if (lowerLine.startsWith(visibility)) return lowerLine.slice(visibility.length);
+  }
+  return lowerLine;
 }
 
 function detectHeaderLanguage(source: string): Language {

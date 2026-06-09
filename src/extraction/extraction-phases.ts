@@ -75,17 +75,14 @@ import {
   type SyncState,
   type StoreExtractionParams,
   type ParseEnvironment,
-  LAST_SYNCED_HEAD_KEY,
   FILE_IO_BATCH_SIZE,
   POOL_SIZE_MAX,
   WORKER_RECYCLE_INTERVAL,
   DEFAULT_PARSE_POOL_SIZE,
   hashContent,
   buildParsePool,
-  scanDirectory,
-  scanDirectoryAsync,
-  type getGitChangedFiles,
 } from './index.js';
+import { LAST_SYNCED_HEAD_KEY, scanDirectory, scanDirectoryAsync, type getGitChangedFiles } from './file-scanner.js';
 import {
   applyConfigFingerprintInvalidationPlan,
   computeConfigFingerprintInvalidationPlan,

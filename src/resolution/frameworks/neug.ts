@@ -8,8 +8,9 @@
  */
 
 import type { Language, Node } from '../../types.js';
-import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
+import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkNodeAtOffset } from './node-builders.js';
 
 const NEUG_LANGUAGES = ['python'] as const;
 const NEUG_CALL_RE = /\b(?:(?:neug|ng)\.)?(Graph|Database|Vertex|Node|Edge|Relationship)\s*\(\s*(['"])([^'"]+)\2/g;
@@ -69,21 +70,14 @@ function makeResourceNode(args: {
   resourceType: string;
   language: Language;
 }): Node {
-  const lineOf = makeLineIndex(args.content);
-  const line = lineOf(args.offset);
-  const column = Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1));
-  return {
-    id: `neug:resource:${args.filePath}:${line}:${args.name}`,
+  return makeFrameworkNodeAtOffset({
+    idPrefix: 'neug:resource',
     kind: 'resource',
     name: args.name,
-    qualifiedName: `${args.filePath}#${args.name}`,
     filePath: args.filePath,
+    content: args.content,
+    offset: args.offset,
     language: args.language,
-    startLine: line,
-    endLine: line,
-    startColumn: column,
-    endColumn: column + args.name.length,
     signature: `NeuG ${args.resourceType}`,
-    updatedAt: Date.now(),
-  };
+  });
 }

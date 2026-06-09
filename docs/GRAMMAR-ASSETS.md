@@ -193,3 +193,38 @@ bun test __tests__/luau-extraction.test.ts __tests__/language-registry.test.ts
 If a regenerated asset changes this hash, inspect the Luau AST and extraction
 fixtures before committing it. A tree-sitter load test only proves the grammar
 loads; it does not prove Cartograph's extractor still sees the same node shapes.
+
+## F# And PowerShell
+
+| Field | F# | PowerShell |
+|---|---|---|
+| Checked-in asset | `src/extraction/wasm/fsharp.wasm` | `src/extraction/wasm/powershell.wasm` |
+| SHA-256 | `93777f440c9f59dedc8692b3de34b8d4f034eca4c69ceb662bacfbe83ad2b6cc` | `796124137f0500e59713fd9dccda6812ff73d25f22e33430b1c5af6e132efa5e` |
+| Source target | `ionide/tree-sitter-fsharp@0.3.0` release source tarball | `tree-sitter-powershell@0.26.4` |
+| Source/package integrity | Verify the vendored WASM hash above after building from the GitHub source tag. | `sha512-5RwNW/qN/cKArZY0znvTOG+OWSau7Agel5K0A8KQ5Nubw/4SyZ5KC02RKCaYcA2ur5UQ8esyxe9+6yXup2MXkw==` |
+| Upstream repository | `https://github.com/ionide/tree-sitter-fsharp` | `https://github.com/airbus-cert/tree-sitter-powershell` |
+| License | MIT | MIT |
+
+`tree-sitter-fsharp@0.1.0` exists on npm and still advertises
+`https://github.com/tree-sitter/tree-sitter-fsharp` in its metadata, but that
+URL is no longer live and the npm package trails the active Ionide upstream.
+Use the Ionide release source tarball when checking grammar freshness or
+regenerating the asset.
+
+Regenerate check:
+
+```sh
+tmpdir=$(mktemp -d)
+curl -fsSL https://github.com/ionide/tree-sitter-fsharp/archive/refs/tags/0.3.0.tar.gz |
+  tar -xz --strip-components=1 -C "$tmpdir"
+node_modules/.bin/tree-sitter build --wasm \
+  --output src/extraction/wasm/fsharp.wasm \
+  "$tmpdir/fsharp"
+rm -rf "$tmpdir"
+
+npm install --no-save --package-lock=false --ignore-scripts --legacy-peer-deps \
+  tree-sitter-powershell@0.26.4
+bun scripts/build-grammar-wasm.ts --only=powershell
+shasum -a 256 src/extraction/wasm/fsharp.wasm src/extraction/wasm/powershell.wasm
+bun test __tests__/fsharp-powershell-vb6-extraction.test.ts __tests__/language-registry.test.ts
+```

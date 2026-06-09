@@ -9,8 +9,10 @@
 
 import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
-import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
+import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkNodeAtOffset } from './node-builders.js';
+import { readQuoted } from './quoted.js';
 import { makeFrameworkReference } from './reference.js';
 
 const ANGULAR_LANGUAGES = ['typescript'] as const;
@@ -46,7 +48,6 @@ export const angularResolver: FrameworkResolver = {
     const safe = stripCommentsForRegex(content, 'typescript');
     if (!hasAngularRouteSignal(safe)) return { nodes: [], references: [] };
 
-    const lineOf = makeLineIndex(safe);
     const nodes: Node[] = [];
     const references: UnresolvedReference[] = [];
     ROUTE_PATH_RE.lastIndex = 0;
@@ -78,7 +79,7 @@ export const angularResolver: FrameworkResolver = {
       }
     }
 
-    return { nodes, references: dedupeReferences(references, lineOf) };
+    return { nodes, references: dedupeReferences(references) };
   },
 };
 
@@ -134,21 +135,6 @@ function readThenExport(snippet: string): string | null {
   return readIdentifier(snippet, dotIndex + 1);
 }
 
-function readQuoted(text: string, start: number): { value: string; end: number } | null {
-  const quote = text[start];
-  if (quote !== '"' && quote !== "'") return null;
-  let i = start + 1;
-  while (i < text.length) {
-    if (text[i] === '\\') {
-      i += 2;
-      continue;
-    }
-    if (text[i] === quote) return { value: text.slice(start + 1, i), end: i + 1 };
-    i++;
-  }
-  return null;
-}
-
 function readIdentifier(text: string, start: number): string | null {
   let i = skipWhitespace(text, start);
   const first = text[i];
@@ -172,25 +158,19 @@ function makeRouteNode(args: {
   routePath: string;
   language: Language;
 }): Node {
-  const lineOf = makeLineIndex(args.content);
-  const line = lineOf(args.offset);
-  return {
-    id: `angular:route:${args.filePath}:${line}:${args.routePath}`,
+  return makeFrameworkNodeAtOffset({
+    idPrefix: 'angular:route',
     kind: 'route',
     name: args.routePath,
-    qualifiedName: `${args.filePath}#${args.routePath}`,
     filePath: args.filePath,
+    content: args.content,
+    offset: args.offset,
     language: args.language,
-    startLine: line,
-    endLine: line,
-    startColumn: Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1)),
-    endColumn: Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1)) + args.routePath.length,
     signature: `Angular route ${args.routePath}`,
-    updatedAt: Date.now(),
-  };
+  });
 }
 
-function dedupeReferences(refs: UnresolvedReference[], _lineOf: (offset: number) => number): UnresolvedReference[] {
+function dedupeReferences(refs: UnresolvedReference[]): UnresolvedReference[] {
   const seen = new Set<string>();
   return refs.filter((ref) => {
     const key = `${ref.fromNodeId}:${ref.referenceKind}:${ref.referenceName}`;

@@ -6,10 +6,12 @@
  * references to widget classes used by the route builder.
  */
 
-import type { Language, Node } from '../../types.js';
+import type { Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
-import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
+import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkNodeAtOffset } from './node-builders.js';
+import { readQuoted } from './quoted.js';
 import { makeFrameworkReference } from './reference.js';
 
 const FLUTTER_LANGUAGES = ['dart'] as const;
@@ -61,29 +63,26 @@ function hasFlutterPubspecEntry(pubspec: string): boolean {
 }
 
 function collectMaterialRoutes(args: CollectArgs): void {
-  for (const route of readMaterialRouteEntries(args.content)) {
-    const routePath = normalizeFlutterRoutePath(route.path);
-    const routeNode = makeRouteNode({
-      filePath: args.filePath,
-      content: args.content,
-      offset: route.offset,
-      routePath,
-      signature: `Flutter route ${routePath}`,
-    });
-    args.nodes.push(routeNode);
-    if (route.widget) args.references.push(makeFrameworkReference(routeNode, route.widget));
-  }
+  collectFlutterRoutes(args, readMaterialRouteEntries(args.content), (routePath) => `Flutter route ${routePath}`);
 }
 
 function collectGoRoutes(args: CollectArgs): void {
-  for (const route of readGoRouteEntries(args.content)) {
+  collectFlutterRoutes(args, readGoRouteEntries(args.content), (routePath) => `Flutter GoRoute ${routePath}`);
+}
+
+function collectFlutterRoutes(
+  args: CollectArgs,
+  routes: Array<{ path: string; widget: string | null; offset: number }>,
+  signatureFor: (routePath: string) => string,
+): void {
+  for (const route of routes) {
     const routePath = normalizeFlutterRoutePath(route.path);
     const routeNode = makeRouteNode({
       filePath: args.filePath,
       content: args.content,
       offset: route.offset,
       routePath,
-      signature: `Flutter GoRoute ${routePath}`,
+      signature: signatureFor(routePath),
     });
     args.nodes.push(routeNode);
     if (route.widget) args.references.push(makeFrameworkReference(routeNode, route.widget));
@@ -168,23 +167,16 @@ function makeRouteNode(args: {
   routePath: string;
   signature: string;
 }): Node {
-  const lineOf = makeLineIndex(args.content);
-  const line = lineOf(args.offset);
-  const column = Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1));
-  return {
-    id: `flutter:route:${args.filePath}:${line}:${args.routePath}`,
+  return makeFrameworkNodeAtOffset({
+    idPrefix: 'flutter:route',
     kind: 'route',
     name: args.routePath,
-    qualifiedName: `${args.filePath}#${args.routePath}`,
     filePath: args.filePath,
-    language: 'dart' satisfies Language,
-    startLine: line,
-    endLine: line,
-    startColumn: column,
-    endColumn: column + args.routePath.length,
+    content: args.content,
+    offset: args.offset,
+    language: 'dart',
     signature: args.signature,
-    updatedAt: Date.now(),
-  };
+  });
 }
 
 function dedupeReferences(refs: UnresolvedReference[]): UnresolvedReference[] {
@@ -247,21 +239,6 @@ function matchingClose(open: string | undefined): string | null {
   if (open === '{') return '}';
   if (open === '[') return ']';
   if (open === '(') return ')';
-  return null;
-}
-
-function readQuoted(content: string, start: number): { value: string; end: number } | null {
-  const quote = content[start];
-  if (quote !== '"' && quote !== "'") return null;
-  let i = start + 1;
-  while (i < content.length) {
-    if (content[i] === '\\') {
-      i += 2;
-      continue;
-    }
-    if (content[i] === quote) return { value: content.slice(start + 1, i), end: i + 1 };
-    i++;
-  }
   return null;
 }
 

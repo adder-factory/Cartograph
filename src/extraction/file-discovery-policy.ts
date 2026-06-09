@@ -7,7 +7,7 @@ import { matchesGlob as globMatches } from '../glob.js';
 import { normalizePath } from '../utils.js';
 import { readUtf8ControlFile } from '../control-file-text.js';
 
-const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
+export const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
 
 // Git invocation timeouts and buffer sizes shared by the git-backed
 // full scan and changed-file scan.

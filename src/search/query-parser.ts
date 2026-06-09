@@ -124,12 +124,13 @@ const KIND_VALUES: ReadonlySet<string> = new Set<NodeKind>([
 
 /**
  * Single source of truth for the `lang:`/`language:` filter values
- * is `VALID_LANGUAGES` in config.ts (which has a compile-time
- * exhaustiveness check against the Language union). Importing the
- * array — instead of duplicating it here — closes a real drift bug
- * caught 2026-05-03: this set used to manually list ~20 of the 24
- * registered languages, so `lang:bash` / `lang:rescript` etc.
- * silently fell through to FTS text instead of filtering.
+ * is `VALID_LANGUAGES` from config/languages.ts, re-exported by
+ * config.ts for compatibility. It has a compile-time exhaustiveness
+ * check against the Language union. Importing the array instead of
+ * duplicating it here closes a real drift bug caught 2026-05-03:
+ * this set used to manually list ~20 of the 24 registered languages,
+ * so `lang:bash` / `lang:rescript` etc. silently fell through to FTS
+ * text instead of filtering.
  *
  * The `unknown` sentinel is filtered out: it's a valid Language
  * literal (used internally when extension detection fails) but

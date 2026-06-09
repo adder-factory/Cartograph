@@ -66,8 +66,9 @@ These are the current owner modules future sessions should preserve:
 - Search contracts live in `src/search/types.ts`.
 - Index file-discovery policy for git-visible files, submodules, embedded
   repositories, and `.cartographignore` directory mechanics lives in
-  `src/extraction/file-discovery-policy.ts`; the extraction orchestrator should
-  decide scan/sync flow, not own low-level repository discovery.
+  `src/extraction/file-discovery-policy.ts`; `src/extraction/file-scanner.ts`
+  consumes that policy for scan/change detection, while the extraction
+  orchestrator decides scan/sync flow.
 - Files feature filtering, rollup, and render runtime helpers live in
   `src/features/files/runtime.ts`; MCP and CLI adapters consume that feature
   runtime.
