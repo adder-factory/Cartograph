@@ -99,6 +99,7 @@ function dedupeReferences(refs: UnresolvedReference[]): UnresolvedReference[] {
 /** Member-access / chain node kinds with a `property` or `field` child. */
 const RECEIVER_CHAIN_TYPES: ReadonlySet<string> = new Set([
   'member_expression',
+  'member_access_expression',
   'attribute',
   'selector_expression',
   'navigation_expression',
@@ -141,10 +142,19 @@ export function extractLeafReceiverName(
     const name = getNodeText(node, source);
     return skipReceivers.has(name) ? null : name;
   }
+  if (node.type === 'generic_name') {
+    const name = readGenericReceiverHead(node, source);
+    return name && !skipReceivers.has(name) ? name : null;
+  }
   if (RECEIVER_CHAIN_TYPES.has(node.type)) {
     return tryReceiverFromChain(node, source, skipReceivers);
   }
   return null;
+}
+
+function readGenericReceiverHead(node: SyntaxNode, source: string): string | null {
+  const head = node.namedChildren.find((child) => child && RECEIVER_LEAF_KINDS.has(child.type));
+  return head ? getNodeText(head, source) : null;
 }
 
 /**

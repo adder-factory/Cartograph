@@ -501,9 +501,12 @@ interface MethodCallMatchArgs extends SimpleMethodCall {
 }
 
 function parseSimpleMethodCall(refName: string): SimpleMethodCall | null {
-  const match = /^(\w+)\.(\w+)$/.exec(refName) ?? /^(\w+)::(\w+)$/.exec(refName);
+  const match =
+    /^(\w+)\.(\w+)$/.exec(refName) ??
+    /^(\w+)::(\w+)$/.exec(refName) ??
+    /^([A-Za-z_$][A-Za-z0-9_$:.\\]*<[^>()]+>)(?:\.|::)(\w+)$/.exec(refName);
   if (!match?.[1] || !match[2]) return null;
-  return { objectOrClass: match[1], methodName: match[2] };
+  return { objectOrClass: normalizeReceiverTypeName(match[1]) ?? match[1], methodName: match[2] };
 }
 
 function buildMethodCallMatchArgs(
@@ -559,11 +562,13 @@ interface ReturnedReceiverCall {
 }
 
 function parseReturnedReceiverCall(refName: string): ReturnedReceiverCall | null {
-  const match = /^(\w+)(?:\.|::)(\w+)\([^)]*\)\.(\w+)$/.exec(refName);
+  const match =
+    /^(\w+)(?:\.|::)(\w+)\([^)]*\)\.(\w+)$/.exec(refName) ??
+    /^([A-Za-z_$][A-Za-z0-9_$:.\\]*<[^>()]+>)(?:\.|::)(\w+)\([^)]*\)\.(\w+)$/.exec(refName);
   if (!match) return null;
   const [, objectOrClass, factoryMethod, methodName] = match;
   if (!objectOrClass || !factoryMethod || !methodName) return null;
-  return { objectOrClass, factoryMethod, methodName };
+  return { objectOrClass: normalizeReceiverTypeName(objectOrClass) ?? objectOrClass, factoryMethod, methodName };
 }
 
 function matchReturnedReceiverMethodCall(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {
@@ -637,21 +642,62 @@ function returnedReceiverName(returnType: string, objectOrClass: string): string
 
 function inferCallableReturnType(node: Node | undefined): string | null {
   if (!node?.signature) return null;
-  const colonReturn = /:\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*)/.exec(node.signature);
+  const colonReturn = /:\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*(?:<[^>()]+>)?\??)/.exec(node.signature);
   if (colonReturn?.[1]) return normalizeReturnTypeName(colonReturn[1]);
-  const arrowReturn = /->\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*)/.exec(node.signature);
+  const arrowReturn = /->\s*([?\\A-Za-z_$][A-Za-z0-9_$:.\\]*(?:<[^>()]+>)?\??)/.exec(node.signature);
   if (arrowReturn?.[1]) return normalizeReturnTypeName(arrowReturn[1]);
 
-  const leadingReturn = /^\s*(?:const\s+)?([A-Za-z_$][A-Za-z0-9_$:.]*)[\s*&]*\(/.exec(node.signature);
+  const leadingReturn = /^\s*(?:const\s+)?([A-Za-z_$][A-Za-z0-9_$:.\\]*(?:<[^>()]+>)?\??)[\s*&]*\(/.exec(
+    node.signature,
+  );
   if (leadingReturn?.[1]) return normalizeReturnTypeName(leadingReturn[1]);
   return null;
 }
 
+function normalizeReceiverTypeName(raw: string): string | null {
+  return normalizeReturnTypeName(raw);
+}
+
 function normalizeReturnTypeName(raw: string): string | null {
-  const cleaned = trimReturnTypeDecorators(raw);
-  if (!cleaned || cleaned === 'void') return null;
-  const segments = cleaned.split(/[:.\\]/);
-  return segments.at(-1) ?? null;
+  const trimmed = trimReturnTypeDecorators(raw);
+  if (isArrayReturnType(trimmed)) return null;
+  const cleaned = stripGenericTypeArguments(trimmed);
+  if (!cleaned) return null;
+  const segments = cleaned.split(/::|[.\\]/);
+  const baseName = segments.at(-1);
+  if (!baseName || PRIMITIVE_RETURN_TYPES.has(baseName.toLowerCase())) return null;
+  return baseName;
+}
+
+function isArrayReturnType(raw: string): boolean {
+  return /\[\s*\]$/.test(raw);
+}
+
+const PRIMITIVE_RETURN_TYPES = new Set([
+  'bool',
+  'boolean',
+  'byte',
+  'char',
+  'decimal',
+  'double',
+  'dynamic',
+  'float',
+  'int',
+  'long',
+  'object',
+  'sbyte',
+  'short',
+  'string',
+  'uint',
+  'ulong',
+  'ushort',
+  'void',
+]);
+
+function stripGenericTypeArguments(raw: string): string {
+  const genericStart = raw.indexOf('<');
+  if (genericStart < 0) return raw;
+  return raw.slice(0, genericStart).trimEnd();
 }
 
 function trimReturnTypeDecorators(raw: string): string {

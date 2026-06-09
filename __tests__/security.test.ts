@@ -12,7 +12,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { FileLock } from '../src/utils.js';
+import { FileLock, validatePathWithinRootReal } from '../src/utils.js';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { shouldIncludeFile, scanDirectory } from '../src/extraction/index.js';
@@ -187,6 +187,29 @@ describe('Path Traversal Prevention', () => {
   it('should return null for non-existent node', async () => {
     const code = await cg.internals.contextBuilder.getCode('does-not-exist');
     expect(code).toBeNull();
+  });
+});
+
+describe('Path containment helpers', () => {
+  it('accepts descendants when the project root already ends with a path separator', () => {
+    const tempRoot = fs.realpathSync(os.tmpdir());
+    const filesystemRoot = path.parse(tempRoot).root;
+
+    expect(validatePathWithinRootReal(filesystemRoot, tempRoot)).toBe(tempRoot);
+  });
+
+  it('rejects sibling paths that only share a lexical prefix', () => {
+    const parent = createTempDir();
+    const sibling = `${parent}-sibling`;
+
+    try {
+      fs.mkdirSync(sibling);
+
+      expect(validatePathWithinRootReal(parent, sibling)).toBeNull();
+    } finally {
+      cleanupTempDir(parent);
+      cleanupTempDir(sibling);
+    }
   });
 });
 

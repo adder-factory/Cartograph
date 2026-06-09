@@ -4,7 +4,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { MCPServer, parseDebounceEnv, StdioTransport } from '../src/mcp/index.js';
+import {
+  MCPServer,
+  formatMcpToolAuditLine,
+  parseDebounceEnv,
+  shouldAuditMcpToolCalls,
+  StdioTransport,
+} from '../src/mcp/index.js';
 import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { ErrorCodes, type JsonRpcNotification, type JsonRpcRequest } from '../src/mcp/transport.js';
 
@@ -309,6 +315,36 @@ describe('MCPServer JSON-RPC request handling', () => {
     });
   });
 
+  it('emits opt-in tool-call audit lines without logging arguments', async () => {
+    const previousAudit = process.env['CARTOGRAPH_MCP_AUDIT_LOG'];
+    process.env['CARTOGRAPH_MCP_AUDIT_LOG'] = '1';
+    const server = new MCPServer({ disableStartupSync: true });
+
+    try {
+      await withServerHarness(server, async (harness) => {
+        const { stderr } = await withCapturedStderr(() =>
+          harness.request({
+            jsonrpc: '2.0',
+            id: 'audited-call',
+            method: 'tools/call',
+            params: {
+              name: 'cartograph_playbook',
+              arguments: { token: 'must-not-be-logged' },
+            },
+          }),
+        );
+
+        expect(stderr).toContain('Cartograph MCP audit');
+        expect(stderr).toContain('tool=cartograph_playbook');
+        expect(stderr).not.toContain('must-not-be-logged');
+        expect(stderr).not.toContain('arguments');
+      });
+    } finally {
+      if (previousAudit === undefined) delete process.env['CARTOGRAPH_MCP_AUDIT_LOG'];
+      else process.env['CARTOGRAPH_MCP_AUDIT_LOG'] = previousAudit;
+    }
+  });
+
   it('returns empty resource and prompt lists for MCP clients that ask', async () => {
     const server = new MCPServer({ disableStartupSync: true });
 
@@ -424,5 +460,23 @@ describe('parseDebounceEnv edge cases', () => {
   it('rejects non-integer numeric values even when they are in range', () => {
     expect(parseDebounceEnv('100.5')).toBeUndefined();
     expect(parseDebounceEnv('59999.5')).toBeUndefined();
+  });
+});
+
+describe('MCP tool-call audit helpers', () => {
+  it('accepts explicit truthy env values and ignores unset or false-like values', () => {
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: '1' })).toBe(true);
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: ' true ' })).toBe(true);
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: 'yes' })).toBe(true);
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: 'on' })).toBe(true);
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: '0' })).toBe(false);
+    expect(shouldAuditMcpToolCalls({ CARTOGRAPH_MCP_AUDIT_LOG: 'false' })).toBe(false);
+    expect(shouldAuditMcpToolCalls({})).toBe(false);
+  });
+
+  it('formats one compact line with only timestamp, pid, and tool name', () => {
+    expect(formatMcpToolAuditLine('cartograph_status', new Date('2026-06-09T00:00:00.000Z'), 42)).toBe(
+      '[Cartograph MCP audit] 2026-06-09T00:00:00.000Z pid=42 tool=cartograph_status\n',
+    );
   });
 });

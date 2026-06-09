@@ -12,6 +12,8 @@ import {
 } from '../src/features/git-hooks/index.js';
 
 let projectPath: string;
+const repoRoot = path.join(__dirname, '..');
+const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
 
 function initGitProject(): void {
   execFileSync('git', ['init'], { cwd: projectPath, stdio: 'ignore' });
@@ -85,6 +87,19 @@ describe('git hooks feature', () => {
     expect(parseGitHooksOption('pre-commit').ok).toBe(false);
     expect(validateGitHookCommand(' \n ').ok).toBe(false);
     expect(renderGitHookBlock("cartograph's bin")).toContain("cartograph'\\''s bin");
+  });
+
+  it('managed hook block calls a registered quiet admin sync command', () => {
+    const block = renderGitHookBlock('cartograph');
+    expect(block).toContain('"$cartograph_command" admin sync "$cartograph_root" --quiet');
+
+    const help = execFileSync('bun', [cliEntry, 'admin', 'sync', '--help'], {
+      cwd: repoRoot,
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    expect(help).toContain('Sync changes since last index');
+    expect(help).toContain('--quiet');
   });
 
   it('registers a CLI adapter that renders hook changes', () => {
