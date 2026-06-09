@@ -196,6 +196,46 @@ describe('shared MCP daemon', () => {
     },
     DAEMON_TEST_TIMEOUT_MS,
   );
+
+  it(
+    'cleans up daemon lock files after the last proxy disconnects',
+    async () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-mcp-daemon-idle-'));
+      let child: ChildProcessWithoutNullStreams | null = null;
+      try {
+        const cg = Cartograph.initSync(dir, { config: { include: ['**/*.ts'], exclude: [] } });
+        cg.close();
+
+        const exchange = startDaemonProxy(dir);
+        child = exchange.child;
+        await exchange.attached;
+        const daemonPid = readDaemonPid(dir);
+        expect(daemonPid).toBeGreaterThan(0);
+
+        sendInitializeAndList({ exchange, dir, clientName: 'idle-daemon-client', idOffset: 200 });
+        await waitUntil(() => exchange.responses.has(201) && exchange.responses.has(202), {
+          child,
+          stdout: () => exchange.stdout,
+          stderr: () => exchange.stderr,
+          timeoutMs: 10_000,
+        });
+
+        child.stdin.end();
+        await waitForExit(child, 5_000);
+        child = null;
+
+        await waitForCondition(() => !fs.existsSync(getDaemonPidPath(dir)) && !posixDaemonSocketExists(dir), {
+          timeoutMs: 10_000,
+          describe: () => `pid=${readDaemonPid(dir)} socket=${getDaemonSocketPath(dir)}`,
+        });
+      } finally {
+        if (child && child.exitCode === null) child.kill('SIGTERM');
+        cleanupDaemon(dir);
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    },
+    DAEMON_TEST_TIMEOUT_MS,
+  );
 });
 
 interface InitializeClientArgs {
@@ -332,6 +372,21 @@ async function waitUntil(
   throw new Error(`timed out waiting for daemon responses\nstdout:\n${opts.stdout()}\nstderr:\n${opts.stderr()}`);
 }
 
+async function waitForCondition(
+  predicate: () => boolean,
+  opts: {
+    timeoutMs: number;
+    describe: () => string;
+  },
+): Promise<void> {
+  const deadline = Date.now() + opts.timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await sleep(25);
+  }
+  throw new Error(`timed out waiting for daemon condition: ${opts.describe()}`);
+}
+
 function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<void> {
   return new Promise((resolve, reject) => {
     const timeout = setTimeout(() => {
@@ -376,6 +431,11 @@ function readDaemonPid(projectRoot: string): number {
   } catch {
     return 0;
   }
+}
+
+function posixDaemonSocketExists(projectRoot: string): boolean {
+  if (process.platform === 'win32') return false;
+  return fs.existsSync(getDaemonSocketPath(projectRoot));
 }
 
 function sleep(ms: number): Promise<void> {

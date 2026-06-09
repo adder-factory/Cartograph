@@ -204,6 +204,27 @@ export function parseDebounceEnv(raw: string | undefined): number | undefined {
 }
 
 /**
+ * Opt-in tool-call audit. This intentionally logs only timestamp, pid, and
+ * tool name — no args/results — so operators can debug "what did the MCP
+ * client call?" without leaking code or secrets to stderr logs.
+ */
+export function shouldAuditMcpToolCalls(env: NodeJS.ProcessEnv = process.env): boolean {
+  const raw = env['CARTOGRAPH_MCP_AUDIT_LOG'];
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+export function formatMcpToolAuditLine(toolName: string, now = new Date(), pid = process.pid): string {
+  return `[Cartograph MCP audit] ${now.toISOString()} pid=${pid} tool=${toolName}\n`;
+}
+
+function mcpAuditToolCall(toolName: string): void {
+  if (!shouldAuditMcpToolCalls()) return;
+  process.stderr.write(formatMcpToolAuditLine(toolName));
+}
+
+/**
  * Emit a stderr warning when the MCP server boots without a default project.
  * Sets `st.noDefaultProjectPreamble` with the agent-facing hint.
  */
@@ -450,6 +471,7 @@ async function mcpHandleToolsCall(
     return;
   }
 
+  mcpAuditToolCall(toolName);
   await server.retryInitIfNeeded();
   mcpEnsureTraceLogger(server.st, server.disableTrace);
 

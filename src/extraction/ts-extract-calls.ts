@@ -648,6 +648,7 @@ function tsResolveCalleeName(ext: TreeSitterExtractor, node: SyntaxNode): string
 
   if (
     func.type === 'member_expression' ||
+    func.type === 'member_access_expression' ||
     func.type === 'attribute' ||
     func.type === 'selector_expression' ||
     func.type === 'navigation_expression'
@@ -759,11 +760,15 @@ function tsResolveMemberCallName(ext: TreeSitterExtractor, func: SyntaxNode): st
   const receiver = getChildByField(func, 'object') || getChildByField(func, 'operand') || func.namedChild(0);
   const receiverName = receiver ? extractLeafReceiverName(receiver, ext.source, MEMBER_CALL_SKIP_RECEIVERS) : null;
   if (ext.language === 'go' && receiverName === 'C') return methodName;
-  if (!receiverName && receiver?.type === 'call_expression') {
+  if (!receiverName && receiver && isNestedCallReceiver(ext, receiver)) {
     const chainedReceiver = tsResolveCalleeName(ext, receiver);
     if (chainedReceiver) return `${chainedReceiver}().${methodName}`;
   }
   return tsQualifyCallReceiver(methodName, receiverName ?? '', MEMBER_CALL_SKIP_RECEIVERS);
+}
+
+function isNestedCallReceiver(ext: TreeSitterExtractor, node: SyntaxNode): boolean {
+  return ext.extractor?.callTypes.includes(node.type) ?? node.type === 'call_expression';
 }
 
 /**

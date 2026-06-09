@@ -23,6 +23,7 @@ Default path:
 - \`cartograph_context({task: "<task>", format: "plan"})\` to route an unfamiliar task before reading source.
 - \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
 - \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
+- \`cartograph_files\` for project tree, one-file symbol outlines (\`format: "symbols"\`), file deps, and module summaries.
 - \`cartograph_node\` for one symbol's metadata; use \`code: true\` only when source is needed.
 
 Review / close-out:

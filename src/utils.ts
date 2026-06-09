@@ -96,7 +96,8 @@ export function compact<const T extends object>(o: T): Compact<T> {
  * first); this helper does no resolution itself.
  */
 function pathContainsPath(parent: string, child: string): boolean {
-  return child === parent || child.startsWith(parent + path.sep);
+  const parentPrefix = parent.endsWith(path.sep) ? parent : parent + path.sep;
+  return child === parent || child.startsWith(parentPrefix);
 }
 
 /**

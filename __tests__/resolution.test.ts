@@ -1601,6 +1601,54 @@ export function go(): void {
       expect(wrongCallers.some((c) => c.node.name === 'go')).toBe(false);
     });
 
+    it('resolves C# generic and nullable returned-receiver call chains', async () => {
+      fs.writeFileSync(
+        path.join(tempDir, 'Sample.cs'),
+        `public class Box<T> {
+  public static Box<T> Create(T x) { return new Box<T>(); }
+  public void Unwrap() {}
+}
+public class Foo {
+  public static Foo? MaybeCreate() { return new Foo(); }
+  public void Bar() {}
+}
+public class Wrong {
+  public void Bar() {}
+}
+public class Runner {
+  public void Go() {
+    Foo.MaybeCreate().Bar();
+    Box<Foo>.Create(new Foo()).Unwrap();
+  }
+}
+`,
+      );
+
+      cg = await Cartograph.init(tempDir, {
+        index: true,
+        config: { llm: { endpoint: '' }, include: ['**/*.cs'], exclude: [] },
+      });
+
+      const methods = getNodesByKind(cg.queries, 'method');
+      const fooBar = methods.find((n) => n.qualifiedName === 'Foo::Bar');
+      const wrongBar = methods.find((n) => n.qualifiedName === 'Wrong::Bar');
+      const boxUnwrap = methods.find((n) => n.qualifiedName === 'Box::Unwrap');
+      const boxCreate = methods.find((n) => n.qualifiedName === 'Box::Create');
+      expect(fooBar).toBeDefined();
+      expect(wrongBar).toBeDefined();
+      expect(boxUnwrap).toBeDefined();
+      expect(boxCreate).toBeDefined();
+
+      const fooBarCallers = cg.internals.traverser.getCallers(fooBar!.id);
+      const wrongBarCallers = cg.internals.traverser.getCallers(wrongBar!.id);
+      const boxUnwrapCallers = cg.internals.traverser.getCallers(boxUnwrap!.id);
+      const boxCreateCallers = cg.internals.traverser.getCallers(boxCreate!.id);
+      expect(fooBarCallers.some((c) => c.node.qualifiedName === 'Runner::Go')).toBe(true);
+      expect(wrongBarCallers.some((c) => c.node.qualifiedName === 'Runner::Go')).toBe(false);
+      expect(boxUnwrapCallers.some((c) => c.node.qualifiedName === 'Runner::Go')).toBe(true);
+      expect(boxCreateCallers.some((c) => c.node.qualifiedName === 'Runner::Go')).toBe(true);
+    });
+
     // B3 (2026-05-23) — `resolveAndPersistBatched`'s progress counter
     // used to be `processed += batch.length`, which double-counted
     // handoff #10 orphan refs (name-matched but endpoint-check dropped)
