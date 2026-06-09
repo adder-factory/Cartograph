@@ -112,7 +112,7 @@ export class ProjectCache {
     if (!resolvedRoot) {
       throw new Error(
         `No .cartograph/ found at or above ${projectPath}. ` +
-          `Run \`cartograph init\` in that project first, or pass a different projectPath.`,
+          `Run \`cartograph quickstart\` in that project first, or pass a different projectPath.`,
       );
     }
 

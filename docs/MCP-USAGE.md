@@ -59,10 +59,10 @@ cartograph serve --mcp --low-tokens-default
 cartograph serve --mcp --daemon --project-path /absolute/path/to/project
 ```
 
-Profiles filter the advertised tool list. `core` is the common coding-agent
-surface. `full` exposes every registered tool. `review` focuses diff/risk/test
-workflows. `read-only` advertises read-capable tools and blocks mutating
-branches of mixed tools.
+Profiles filter the advertised tool list. `core` is the 14-tool common
+coding-agent surface. `full` exposes every registered tool. `review` focuses
+diff/risk/test workflows. `read-only` advertises read-capable tools and blocks
+mutating branches of mixed tools.
 
 Shared daemon mode uses a per-project Unix socket on POSIX and a per-project
 named pipe on Windows. Startup retires stale lock/socket state and treats an
@@ -92,10 +92,9 @@ cartograph_affected({includeCommands: true})
 cartograph_compare_to_ref({findingsDelta: true})
 ```
 
-Use `cartograph_playbook` for the full tool-selection guide. Use
-`cartograph_session({action: "audit"})` to inspect whether an agent skipped
-important closeout steps, and `cartograph_session({action: "usage"})` for
-aggregate session/tool counts without raw request or response bodies.
+Use `cartograph_playbook` for the full tool-selection guide. Start with
+`--profile full` when you need advanced tools such as digest, explore, imports,
+hotspots, sessions, or host diagnostics.
 For `cartograph_context`, send `task` as the canonical prompt parameter;
 `query` is accepted as an alias for MCP clients that already model search-like
 calls around a `query` field.
@@ -118,14 +117,14 @@ is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 21 tools | 41,869 | ~10,468 |
-| initialize instructions | 3,245 | ~812 |
-| combined startup load | 45,114 | ~11,279 |
+| tools/list, 14 tools | 33,953 | ~8,489 |
+| initialize instructions | 3,345 | ~837 |
+| combined startup load | 37,298 | ~9,325 |
 | full playbook, on demand | 14,973 | ~3,744 |
 
-The full 35-tool profile is 59,651 `tools/list` chars and 62,896 combined
+The full 37-tool profile is 61,910 `tools/list` chars and 65,255 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 34 tools, 54,620 `tools/list` chars, and 57,865
+reduce the full list to 36 tools, 56,905 `tools/list` chars, and 60,250
 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the

@@ -56,7 +56,7 @@ describe('Tooling-gaps #4: cartograph_imports tool', () => {
 
     cg = await Cartograph.init(testDir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -148,7 +148,7 @@ describe('cartograph_imports excludeFixtures defaults', () => {
 
     cg = await Cartograph.init(testDir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

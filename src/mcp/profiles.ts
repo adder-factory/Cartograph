@@ -12,31 +12,21 @@ export type McpServerProfile = (typeof MCP_SERVER_PROFILE_NAMES)[number];
 export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'core';
 
 export const MCP_SERVER_PROFILE_DESCRIPTION =
-  'MCP advertised-tool profile: core (default common coding-agent lookups), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
+  'MCP advertised-tool profile: core (default common coding-agent lookups, 14 tools), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
 
 const CORE_PROFILE_TOOLS = [
   'cartograph_admin',
   'cartograph_affected',
   'cartograph_at_range',
   'cartograph_biomarkers',
-  'cartograph_changed_since',
   'cartograph_compare_to_ref',
   'cartograph_context',
-  'cartograph_dependency_coverage',
-  'cartograph_digest',
-  'cartograph_entry_points',
-  'cartograph_explore',
   'cartograph_files',
   'cartograph_find',
   'cartograph_graph',
-  'cartograph_host_diagnostics',
-  'cartograph_hotspots',
-  'cartograph_imports',
   'cartograph_node',
   'cartograph_playbook',
-  'cartograph_propose_rename',
   'cartograph_review',
-  'cartograph_session',
   'cartograph_status',
   'cartograph_tests_for',
 ] as const;

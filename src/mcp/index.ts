@@ -80,7 +80,7 @@ const PROTOCOL_VERSION = '2024-11-05';
 interface MCPServerOptions {
   /** Default project path. Falls back to the client's rootUri at initialize time. */
   projectPath?: string | undefined;
-  /** Named advertised-tool profile. Defaults to `full`. */
+  /** Named advertised-tool profile. Defaults to `core`. */
   profile?: McpServerProfile | undefined;
   /**
    * Disable every write-class tool/branch (sync, embed, summarize).

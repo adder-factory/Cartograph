@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
+import { collectFileSymbols, renderFileSymbols } from '../src/features/file-symbols/runtime.js';
 
 function textOf(result: { content: Array<{ type: string; text: string }> }): string {
   return result.content[0]!.text;
@@ -64,6 +65,35 @@ describe('cartograph_files format=symbols', () => {
       await handler.execute('cartograph_files', { format: 'symbols', file: 'src/service.ts', includeImports: true }),
     );
     expect(text).toContain('| 1 | import |');
+  });
+
+  it('explains when default import filters hide the only requested rows', async () => {
+    const importText = textOf(
+      await handler.execute('cartograph_files', { format: 'symbols', file: 'src/service.ts', kinds: 'import' }),
+    );
+    expect(importText).toContain('includeImports: true');
+  });
+
+  it('explains when default parameter filters hide the only requested rows', () => {
+    const result = collectFileSymbols({
+      nodes: [
+        {
+          id: 'p',
+          name: 'accountId',
+          qualifiedName: 'BillingService.run.accountId',
+          kind: 'parameter',
+          language: 'typescript',
+          filePath: 'src/service.ts',
+          startLine: 3,
+          endLine: 3,
+          startColumn: 6,
+          endColumn: 15,
+        } as any,
+      ],
+      kinds: ['parameter'],
+    });
+    const parameterText = renderFileSymbols({ filePath: 'src/service.ts', result });
+    expect(parameterText).toContain('includeParameters: true');
   });
 
   it('accepts an absolute path inside the project', async () => {

@@ -12,7 +12,7 @@ Cartograph supports both storage backends:
 ## SQLite Default
 
 ```sh
-cartograph admin init -i /path/to/project
+cartograph quickstart /path/to/project
 cartograph status /path/to/project
 ```
 

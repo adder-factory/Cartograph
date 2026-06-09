@@ -29,20 +29,20 @@ Cartograph builds a semantic knowledge graph of codebases for faster, smarter co
 
 The dividing line for WHERE to call a tool is **output source-volume** — does the call return full source bodies into your context?
 
-**Source-dumping tools — \`cartograph_explore\`, \`cartograph_context\`, \`cartograph_node({code: true})\` — return large source sections. Don't call them directly in the main session; spawn an Explore agent** for any exploration question (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns.
+**Source-dumping modes — \`cartograph_context\` and \`cartograph_node({code: true})\` — can return large source sections. Don't call source-heavy modes directly in the main session when your host supports sub-agents; spawn an Explore agent** for broad exploration questions (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns. Servers launched with \`--profile full\` also expose \`cartograph_explore\` for broader source surveys.
 
 **When spawning Explore agents**, include this instruction in the prompt:
 
-> This project has Cartograph initialized (.cartograph/ exists). Use \`cartograph_explore\` as your PRIMARY tool — it returns full source code sections from all relevant files in one call.
+> This project has Cartograph initialized (.cartograph/ exists). Start with \`cartograph_context({task: "<task>", format: "plan"})\` to route the work, then use \`cartograph_files\`, \`cartograph_graph\`, and \`cartograph_node\` for focused lookups. If this MCP server is running with \`--profile full\`, use \`cartograph_explore\` for broad source surveys.
 >
 > **Rules:**
-> 1. Follow the explore call budget in the \`cartograph_explore\` tool description — it scales automatically based on project size.
-> 2. Do NOT re-read files that cartograph_explore already returned source code for. The source sections are complete and authoritative.
-> 3. Only fall back to grep/glob/read for files listed under "Additional relevant files" if you need more detail, or if cartograph returned no results.
+> 1. Prefer metadata calls before source-heavy calls.
+> 2. Do NOT re-read files that Cartograph already returned source code for. The source sections are complete and authoritative.
+> 3. Only fall back to grep/glob/read for files Cartograph identified if you need more detail, or if Cartograph returned no results.
 
 **The metadata-only tools return compact structured data — call them directly in the main session** (targeted lookups before making edits, not full exploration):
 
-For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_explore\`, \`cartograph_at_range\`, \`cartograph_node\`, \`cartograph_files\`, and \`cartograph_imports\`. This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
+For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_at_range\`, \`cartograph_node\`, and \`cartograph_files\` (plus \`cartograph_explore\` / \`cartograph_imports\` under \`--profile full\`). This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 
 Use \`cartograph_context({task: "<task>", format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_affected({includeCommands: true})\` for affected tests plus package-script verification commands, then \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
 
@@ -59,14 +59,14 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 | \`cartograph_node\` | A single symbol's details (omit \`code: true\` to stay metadata-only; use \`liveSource: true\` for stale live slices) |
 | \`cartograph_at_range\` | Symbols overlapping a file:line span (PR-review hunks) |
 | \`cartograph_affected({includeCommands: true})\` | Affected tests plus verification commands after edits |
-| \`cartograph_session({action: "audit"})\` | Review a session's tool-use pattern and missed close-out calls |
+| \`cartograph_playbook\` | Full tool-selection guide when the default core tools do not fit |
 | \`cartograph_biomarkers\` / \`cartograph_status\` | Risk findings per symbol / index health |
 
 ### If \`.cartograph/\` does NOT exist
 
 At the start of a session, ask the user if they'd like to initialize Cartograph:
 
-"I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph admin init -i\` to build a code knowledge graph?"
+"I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph quickstart .\` to build a code knowledge graph?"
 
 If they prefer PostgreSQL, use PostgreSQL 18+ and run \`cartograph admin init -i --database-provider postgres --database-url <url> --database-pgvector auto\` instead of the SQLite default.
 ${CARTOGRAPH_SECTION_END}`;

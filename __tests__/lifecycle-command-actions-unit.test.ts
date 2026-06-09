@@ -15,6 +15,16 @@ const DEFAULT_TEST_VIEWER_PORT = 8765;
 const TEST_MCP_TOOL_COUNT = 12;
 const TEST_STALE_BACKEND_PID = 1234;
 const TEST_STARTING_BACKEND_PID = 2345;
+const FAKE_INDEX_RESULT = {
+  success: true,
+  filesIndexed: 2,
+  filesSkipped: 0,
+  filesErrored: 0,
+  nodesCreated: 3,
+  edgesCreated: 4,
+  errors: [],
+  durationMs: 5,
+};
 
 function projectHasCartographDb(projectPath: string): boolean {
   return fs.existsSync(path.join(projectPath, '.cartograph', 'cartograph.db'));
@@ -64,11 +74,21 @@ function loadLifecycleCommandActions(): void {
       calls.push(`mcp:${tool}:${JSON.stringify(args)}:${projectPath ?? ''}`),
     loadCartograph: async () => ({
       default: {
-        init: async () => ({ close: () => undefined }),
+        init: async () => ({
+          indexAll: async (opts: unknown) => {
+            calls.push(`indexAll:${JSON.stringify(opts)}`);
+            return FAKE_INDEX_RESULT;
+          },
+          close: () => calls.push('init.close'),
+        }),
         open: async (path: string, opts: unknown) => {
           calls.push(`open:${path}:${JSON.stringify(opts)}`);
           return {
             sync: async (syncOpts: unknown) => calls.push(`sync:${JSON.stringify(syncOpts)}`),
+            indexAll: async (indexOpts: unknown) => {
+              calls.push(`indexAll:${JSON.stringify(indexOpts)}`);
+              return FAKE_INDEX_RESULT;
+            },
             close: () => calls.push('sync.close'),
           };
         },
@@ -283,7 +303,7 @@ describe('lifecycle command action bodies', () => {
     expect(calls.join('\n')).toContain('"autoAllow":true');
   });
 
-  it('routes llm setup, trace-to-culprits, playbook, mcp-budget, and viewer actions', async () => {
+  it('routes llm setup, trace-to-culprits, playbook, guide, mcp-budget, quickstart, and viewer actions', async () => {
     await actions.get('llm:setup [path]')!(projectPath);
     await actions.get('llm:smoke [path]')!(projectPath, { timeoutMs: '1234' });
     await actions.get('program:trace-to-culprits')!({
@@ -293,6 +313,7 @@ describe('lifecycle command action bodies', () => {
     });
 
     await actions.get('program:playbook')!();
+    await actions.get('program:guide')!();
     await actions.get('program:mcp-budget')!({
       profile: 'review',
       writeTools: false,
@@ -300,6 +321,7 @@ describe('lifecycle command action bodies', () => {
       top: '3',
     });
 
+    await actions.get('program:quickstart [path]')!(projectPath);
     await actions.get('program:viewer [path]')!(projectPath, { port: '0', open: true });
 
     const text = calls.join('\n');
@@ -307,12 +329,17 @@ describe('lifecycle command action bodies', () => {
     expect(text).toContain(`llm-smoke:{"projectPath":"${projectPath}","timeoutMs":1234}`);
     expect(text).toContain('mcp:cartograph_trace_to_culprits');
     expect(text).toContain('mcp-budget:');
+    expect(text).toContain(`open:${projectPath}:{"autoMigrate":true}`);
+    expect(text).toContain('indexAll:{"summarize":false}');
     expect(text).toContain('"profile":"review"');
     expect(text).toContain('"disableWriteTools":true');
     expect(text).toContain('"topContributors":3');
     expect(stdout.join('\n')).toContain('playbook text');
+    expect(stdout.join('\n')).toContain('cartograph quickstart');
+    expect(stdout.join('\n')).toContain('cartograph status --verbose');
     expect(stdout.join('\n')).toContain('smoke report');
     expect(stdout.join('\n')).toContain('budget:');
+    expect(stdout.join('\n')).toContain('cartograph quickstart');
     expect(text).toContain('open:http://localhost:0');
   });
 

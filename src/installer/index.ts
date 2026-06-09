@@ -104,7 +104,7 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     await initializeLocalProject(clack, { deferLlmSetup: useDefaults });
   }
   if (location === 'global') {
-    clack.note('cd your-project\ncartograph admin init -i', 'Quick start');
+    clack.note('cd your-project\ncartograph quickstart .', 'Quick start');
   }
 
   let finalNote = 'Done!';

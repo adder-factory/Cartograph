@@ -128,7 +128,7 @@ function renderSqlTableSites(opts: RenderSqlTableSitesArgs): ToolResult {
   const opSuffix = op ? ` (op=${op})` : '';
   const rawSites = getSqlRefsByTable(cg.queries, table, op ? { op } : {});
   if (rawSites.length === 0) {
-    return textResult(`No SQL refs found for table "${table}"${opSuffix}.`);
+    return textResult(`No SQL refs found for table "${table}"${opSuffix}.${sqlTableMissHint(cg, table, op)}`);
   }
   // Sort prod call sites before test call sites so `src/` rows appear first
   // under any `limit` — the DB returns alphabetically by file_path which puts
@@ -170,6 +170,27 @@ function renderSqlTableSites(opts: RenderSqlTableSitesArgs): ToolResult {
  *  this file — extracting it everywhere would be churn for no benefit. */
 function pluralS(n: number): string {
   return n === 1 ? '' : 's';
+}
+
+function sqlTableMissHint(
+  cg: ReturnType<ToolCtx['getCartograph']>,
+  table: string,
+  op: ReturnType<typeof parseSqlOp>,
+): string {
+  if (op) {
+    const otherSites = getSqlRefsByTable(cg.queries, table);
+    if (otherSites.length > 0) {
+      const counts = {
+        read: otherSites.filter((site) => site.op === 'read').length,
+        write: otherSites.filter((site) => site.op === 'write').length,
+        ddl: otherSites.filter((site) => site.op === 'ddl').length,
+      };
+      return ` The table exists under other ops: read=${counts.read}, write=${counts.write}, ddl=${counts.ddl}. Omit \`op\` or choose one of those ops.`;
+    }
+  }
+  const tables = getSqlTables(cg.queries, { limit: 5 }).map((row) => `\`${row.tableName}\``);
+  if (tables.length === 0) return ' No SQL tables are indexed; check `enableSqlRefs` and re-run indexing.';
+  return ` Known tables include: ${tables.join(', ')}.`;
 }
 
 export async function handleSqlRefs(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolResult> {

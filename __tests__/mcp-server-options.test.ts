@@ -47,11 +47,15 @@ describe('MCP server-level options', () => {
       const names = handler.getTools().map((t) => t.name);
       const explicitCoreNames = explicitCoreHandler.getTools().map((t) => t.name);
       expect(names.sort()).toEqual(explicitCoreNames.sort());
+      expect(names).toHaveLength(14);
       expect(names).toContain('cartograph_find');
       expect(names).toContain('cartograph_graph');
       expect(names).toContain('cartograph_context');
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
+      expect(names).not.toContain('cartograph_explore');
+      expect(names).not.toContain('cartograph_host_diagnostics');
+      expect(names).not.toContain('cartograph_session');
       expect(names).not.toContain('cartograph_local_chat');
       expect(names).not.toContain('cartograph_note');
       handler.closeAll();
@@ -74,6 +78,9 @@ describe('MCP server-level options', () => {
       expect(names).toContain('cartograph_context');
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
+      expect(names).not.toContain('cartograph_explore');
+      expect(names).not.toContain('cartograph_host_diagnostics');
+      expect(names).not.toContain('cartograph_session');
       expect(names).not.toContain('cartograph_local_chat');
       expect(names).not.toContain('cartograph_note');
 

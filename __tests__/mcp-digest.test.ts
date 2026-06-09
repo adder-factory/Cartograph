@@ -43,7 +43,7 @@ describe('cartograph_digest (#12)', () => {
     git(dir, 'commit', '-q', '-m', 'init');
     cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
     await cg.indexAll({ summarize: false });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {
@@ -143,7 +143,7 @@ describe('cartograph_digest (#12)', () => {
     git(cleanDir, 'commit', '-q', '-m', 'init');
     const cleanCg = await Cartograph.init(cleanDir, { config: { llm: { endpoint: '' } } });
     await cleanCg.indexAll({ summarize: false });
-    const cleanHandler = new ToolHandler(cleanCg);
+    const cleanHandler = new ToolHandler(cleanCg, { profile: 'full' });
     try {
       const result = await cleanHandler.execute('cartograph_digest', {});
       const text = result.content[0]?.text ?? '';
@@ -184,7 +184,7 @@ describe('cartograph_digest (#12)', () => {
     git(manyDir, 'commit', '-q', '-m', 'init');
     const manyCg = await Cartograph.init(manyDir, { config: { llm: { endpoint: '' } } });
     await manyCg.indexAll({ summarize: false });
-    const manyHandler = new ToolHandler(manyCg);
+    const manyHandler = new ToolHandler(manyCg, { profile: 'full' });
     try {
       const result = await manyHandler.execute('cartograph_digest', {});
       const text = result.content[0]?.text ?? '';
@@ -243,7 +243,7 @@ describe('cartograph_digest (#12)', () => {
     git2(refDir, 'commit', '-q', '-m', 'init');
     const cg2 = await Cartograph.init(refDir, { config: { llm: { endpoint: '' } } });
     await cg2.indexAll({ summarize: false });
-    const handler2 = new ToolHandler(cg2);
+    const handler2 = new ToolHandler(cg2, { profile: 'full' });
     try {
       const [digestResult, epResult] = await Promise.all([
         handler2.execute('cartograph_digest', {}),

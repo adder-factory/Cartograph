@@ -47,7 +47,7 @@ describe('cartograph_propose_rename (#17a)', () => {
       ].join('\n'),
     );
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

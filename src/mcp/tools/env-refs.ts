@@ -143,7 +143,7 @@ function renderEnvKeySites(opts: RenderEnvKeySitesArgs): ToolResult {
   const { cg, key, rawLimitArg, includeTests } = opts;
   const allSites = getConfigRefsByKey(cg.queries, key, { configKind: 'env' });
   if (allSites.length === 0) {
-    return textResult(`No reads found for env var "${key}".`);
+    return textResult(`No reads found for env var "${key}".${knownEnvKeysHint(cg)}`);
   }
   // Fixture-directory reads (docs/test-beds/, **/fixtures/) are not real
   // prod usage even though files.is_test = 0 — classify them as non-prod
@@ -179,6 +179,12 @@ function renderEnvKeySites(opts: RenderEnvKeySitesArgs): ToolResult {
     );
   }
   return textResult(truncateOutput(lines.join('\n')));
+}
+
+function knownEnvKeysHint(cg: ReturnType<ToolCtx['getCartograph']>): string {
+  const keys = getConfigKeys(cg.queries, { configKind: 'env', limit: 5 }).map((row) => `\`${row.configKey}\``);
+  if (keys.length === 0) return ' No env-var keys are indexed; check `enableConfigRefs` and re-run indexing.';
+  return ` Known env vars include: ${keys.join(', ')}.`;
 }
 
 export async function handleEnvRefs(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolResult> {

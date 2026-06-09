@@ -10,8 +10,8 @@ const REMEDIATION_ACTION_ICON: Record<RemediationStep['action'], string> = {
 };
 const OVERALL_STATUS_BLURB: Record<DoctorResult['overallStatus'], string> = {
   ok: '_All checks passed. cartograph is ready to use._',
-  warn: '_Doctor found non-blocking gaps. The checks above suggest next steps._',
-  fail: '_Doctor found blocking gaps. Fix the `✗` items above before using Cartograph._',
+  warn: '_Doctor found non-blocking gaps. The checks below suggest next steps._',
+  fail: '_Doctor found blocking gaps. Fix the `✗` items below before using Cartograph._',
 };
 
 function overallStatusBlurb(result: DoctorResult): string {
@@ -23,6 +23,10 @@ function overallStatusBlurb(result: DoctorResult): string {
 
 export function formatDoctorReport(result: DoctorResultWithFix): string {
   const lines: string[] = ['## cartograph doctor', ''];
+  const summaryResult = result.afterFix ?? result;
+  appendStatusSummary(lines, summaryResult);
+  appendNextSteps(lines, summaryResult);
+  lines.push('', result.afterFix ? '## Initial checks' : '## Checks', '');
   appendCheckLines(lines, result.checks);
   lines.push('', overallStatusBlurb(result));
   if (result.remediations !== undefined) appendFixOutcome(lines, result);
@@ -38,6 +42,55 @@ function appendCheckLines(lines: string[], checks: ReadonlyArray<DoctorResult['c
     lines.push(`${CHECK_STATUS_ICON[c.status]} **${c.name}** — ${c.detail}`);
     if (c.remediation) lines.push(`  → ${c.remediation}`);
   }
+}
+
+function appendStatusSummary(lines: string[], result: DoctorResult): void {
+  const counts = countChecks(result.checks);
+  lines.push(`**Status:** ${statusLabel(result.overallStatus)}`);
+  lines.push(`**Checks:** ${counts.ok} ok · ${counts.warn} warn · ${counts.fail} fail`);
+}
+
+function appendNextSteps(lines: string[], result: DoctorResult): void {
+  lines.push('', '## Next steps', '');
+  const steps = uniqueRemediations(result.checks);
+  if (steps.length === 0) {
+    if (result.overallStatus === 'ok' && result.projectChecksSkipped) {
+      lines.push(
+        '- Project checks were skipped. Run `cartograph doctor <project>` without `--no-project-checks` when you want repository-specific verification.',
+      );
+      return;
+    }
+    lines.push('- No action needed.');
+    return;
+  }
+  for (const step of steps) {
+    lines.push(`- ${step.replace(/\n/g, '\n  ')}`);
+  }
+}
+
+function countChecks(checks: ReadonlyArray<DoctorResult['checks'][number]>): Record<CheckStatus, number> {
+  const counts: Record<CheckStatus, number> = { ok: 0, warn: 0, fail: 0 };
+  for (const check of checks) counts[check.status]++;
+  return counts;
+}
+
+function statusLabel(status: DoctorResult['overallStatus']): string {
+  if (status === 'ok') return 'Ready';
+  if (status === 'warn') return 'Ready with follow-up';
+  return 'Blocked';
+}
+
+function uniqueRemediations(checks: ReadonlyArray<DoctorResult['checks'][number]>): string[] {
+  const seen = new Set<string>();
+  const steps: string[] = [];
+  for (const check of checks) {
+    if (check.status === 'ok' || !check.remediation) continue;
+    const step = check.remediation.trim();
+    if (!step || seen.has(step)) continue;
+    seen.add(step);
+    steps.push(step);
+  }
+  return steps;
 }
 
 function appendFixOutcome(lines: string[], result: DoctorResultWithFix): void {

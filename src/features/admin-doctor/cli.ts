@@ -25,9 +25,7 @@ export function registerAdminDoctorCommand(deps: AdminDoctorCommandDeps): void {
   const { adminCmd, error, loadDoctor, resolveProjectPath, writeStdout } = deps;
   adminCmd
     .command('doctor [path]')
-    .description(
-      "Diagnose install state, including storage backend reachability (mirrors cartograph_admin action='doctor')",
-    )
+    .description("Diagnose install state with actionable next steps (mirrors cartograph_admin action='doctor')")
     .option('--fix', 'Auto-apply fixable remediations')
     .option('--no-project-checks', 'Skip project init/config checks')
     .option('--skip-project-checks', 'Skip project init/config checks')

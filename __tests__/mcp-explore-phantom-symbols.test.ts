@@ -99,7 +99,7 @@ describe('FRICTION-9 — explore references: must not contain EdgeKind phantom s
     );
 
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

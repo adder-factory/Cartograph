@@ -38,10 +38,13 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
   program
     .command('setup [path]')
     .description(
-      'One-shot bootstrap: admin init + install-models + doctor. SQLite is default; pass --database-provider postgres for PostgreSQL/pgvector storage.',
+      'LLM bootstrap: admin init + install-models + doctor. For no-download structural indexing, use `cartograph quickstart`.',
     )
-    .option('--minimal', 'Install only the smallest viable model subset (embed + 3B chat) instead of the full set.')
-    .option('--no-models', 'Skip the install-models step (use when models are already present).')
+    .option(
+      '--minimal',
+      'Recommended local quickstart: install only the smallest viable model subset (embed + 3B chat).',
+    )
+    .option('--no-models', 'Skip model downloads for Ollama, cloud, or already-managed backends.')
     .option('--database-provider <provider>', 'Storage backend: sqlite (default) or postgres')
     .option(
       '--database-url <url>',

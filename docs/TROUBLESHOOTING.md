@@ -23,7 +23,7 @@ Cartograph not initialized in /path/to/project
 Fix:
 
 ```sh
-cartograph admin init -i /path/to/project
+cartograph quickstart /path/to/project
 cartograph status --verbose /path/to/project
 ```
 

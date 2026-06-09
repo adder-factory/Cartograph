@@ -46,7 +46,7 @@ describe('cartograph_dependency_coverage', () => {
         language: 'typescript',
       },
     ]);
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

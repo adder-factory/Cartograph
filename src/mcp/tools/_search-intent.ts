@@ -588,7 +588,7 @@ function computeCoverageHint(cg: any): string {
       // frame it as "tail not summarised yet", not "index incomplete".
       return `\n> intent-search ranks LLM summaries first (current coverage: ${coveragePercent}% — the rest summarise on demand as searches reference them). For a full pass now run \`cartograph admin summarize --all\`, or fall back to \`cartograph_find by='name' mode='exact'\` for name matches / \`cartograph_find by='content'\` for regex.`;
     }
-    return `\n> 0 hits at ${coveragePercent}% coverage — the concept may not be summarised yet, or may not exist in the codebase. Try \`cartograph_explore\` for a broader fallback.`;
+    return `\n> 0 hits at ${coveragePercent}% coverage — the concept may not be summarised yet, or may not exist in the codebase. Try \`cartograph_context({format: "plan"})\` first; use \`cartograph_explore\` under \`--profile full\` for a broader source fallback.`;
   } catch (err) {
     // Log and continue; don't fail if coverage calculation fails
     const errMsg = err instanceof Error ? err.message : String(err);

@@ -21,6 +21,42 @@ function percentage(part, total) {
   return Math.max(0, Math.min(100, (Number(part || 0) / total) * 100));
 }
 
+function healthGrade(score) {
+  if (score >= 8) return 'ok';
+  if (score >= 6) return 'warn';
+  return 'err';
+}
+
+function setHealthScoreGrade(grade) {
+  const score = document.querySelector('.health-score');
+  if (score) score.dataset.healthGrade = grade;
+  document.getElementById('health-view')?.setAttribute('data-health-grade', grade);
+}
+
+function setMetricGrade(el, grade) {
+  if (!el) return;
+  el.classList.remove('ok', 'warn', 'err');
+  if (grade) el.classList.add(grade);
+}
+
+function renderReadiness(status) {
+  const readiness = status?.readiness || {
+    grade: 'warn',
+    label: 'Unknown',
+    summary: 'Status endpoint did not return readiness details.',
+    nextSteps: ['Run `cartograph doctor .` from the project root.'],
+  };
+  setText('hc-readiness', readiness.label || 'Unknown');
+  setText('hc-readiness-sub', readiness.summary || '');
+  setText('hc-readiness-meta', readiness.summary || '');
+  setText('hc-readiness-value', readiness.label || 'Unknown');
+  const next = Array.isArray(readiness.nextSteps) && readiness.nextSteps.length > 0
+    ? readiness.nextSteps[0]
+    : 'No action needed.';
+  setText('hc-readiness-next', next);
+  setMetricGrade(document.getElementById('hc-readiness-card'), readiness.grade || 'warn');
+}
+
 function renderHealthSeverity(findings) {
   const counts = findings?.bySeverity || {};
   const severities = [
@@ -92,7 +128,7 @@ function renderHealthHotspots(hotspots) {
   `).join('');
 }
 
-function renderHealthDashboard(findings, hotspotsPayload) {
+function renderHealthDashboard(findings, hotspotsPayload, statusPayload = null) {
   const f = findings || {};
   const bySeverity = f.bySeverity || {};
   const hotspots = hotspotsPayload?.hotspots || [];
@@ -101,6 +137,8 @@ function renderHealthDashboard(findings, hotspotsPayload) {
   const nodesWithFindings = Number(f.nodesWithFindings || 0);
   const totalNodes = Number(f.totalNodes || 0);
   const totalFiles = Number(f.totalFiles || 0);
+  const grade = healthGrade(codeHealth);
+  setHealthScoreGrade(grade);
   setText('hc-health', `${codeHealth.toFixed(1)} / 10`);
   setText('hc-health-sub', totalFindings > 0
     ? `${formatNumber(nodesWithFindings)} flagged symbols out of ${formatNumber(totalNodes)} indexed`
@@ -108,7 +146,6 @@ function renderHealthDashboard(findings, hotspotsPayload) {
   const fill = document.getElementById('hc-health-fill');
   if (fill) {
     fill.style.width = `${Math.max(0, Math.min(100, codeHealth * 10))}%`;
-    fill.style.background = codeHealth >= 8 ? 'var(--ok)' : codeHealth >= 6 ? 'var(--warn)' : 'var(--err)';
   }
   setText('hc-errors', formatNumber(bySeverity.error || 0));
   setText('hc-errors-sub', 'error-tier findings');
@@ -127,9 +164,33 @@ function renderHealthDashboard(findings, hotspotsPayload) {
   setText('hc-hotspots-sub', hotspots[0]
     ? `top risk: ${hotspots[0].filePath}`
     : 'central + actively churning files');
+  renderReadiness(statusPayload);
   renderHealthSeverity(f);
   renderHealthBiomarkers(f.byBiomarker);
   renderHealthHotspots(hotspots);
+  document.getElementById('health-view')?.setAttribute('data-loaded', '1');
+}
+
+function renderHealthUnavailable(message, statusPayload = null) {
+  setHealthScoreGrade('err');
+  setText('hc-health', 'Unavailable');
+  setText('hc-health-sub', message);
+  const fill = document.getElementById('hc-health-fill');
+  if (fill) fill.style.width = '0%';
+  setText('hc-errors', '0');
+  setText('hc-errors-sub', 'not loaded');
+  setText('hc-warnings', '0');
+  setText('hc-warnings-sub', 'not loaded');
+  setText('hc-info', '0');
+  setText('hc-info-sub', 'not loaded');
+  setText('hc-total', '0');
+  setText('hc-total-sub', 'not loaded');
+  setText('hc-nodes', '0');
+  setText('hc-nodes-sub', 'not loaded');
+  renderReadiness(statusPayload);
+  renderHealthSeverity({ bySeverity: {} });
+  renderHealthBiomarkers({});
+  renderHealthHotspots([]);
   document.getElementById('health-view')?.setAttribute('data-loaded', '1');
 }
 
@@ -138,28 +199,24 @@ function renderHealthDashboard(findings, hotspotsPayload) {
     the static starter values legible. */
 async function loadHealthLive() {
   try {
-    const [fr, hr] = await Promise.all([
+    const [sr, fr, hr] = await Promise.all([
+      apiFetch('/api/status'),
       apiFetch('/api/findings'),
       apiFetch('/api/hotspots?limit=50'),
     ]);
+    const status = sr.ok ? await sr.json() : null;
     if (!fr.ok) {
-      setText('hc-health', 'Unavailable');
-      setText('hc-health-sub', `findings endpoint failed: HTTP ${fr.status}`);
-      const fill = document.getElementById('hc-health-fill');
-      if (fill) {
-        fill.style.width = '0%';
-        fill.style.background = 'var(--text-dim)';
-      }
+      renderHealthUnavailable(`findings endpoint failed: HTTP ${fr.status}`, status);
       const hotspots = hr.ok ? await hr.json() : null;
       renderHealthHotspots(hotspots?.hotspots || []);
-      document.getElementById('health-view')?.setAttribute('data-loaded', '1');
       return;
     }
     const findings = await fr.json();
     const hotspots = hr.ok ? await hr.json() : null;
-    renderHealthDashboard(findings, hotspots);
+    renderHealthDashboard(findings, hotspots, status);
   } catch (err) {
     console.warn('viewer: loadHealthLive failed', err);
+    renderHealthUnavailable('health endpoints unavailable');
   }
 }
 

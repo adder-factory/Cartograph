@@ -80,7 +80,7 @@ describe('template-literal / string-literal imports', () => {
   });
 
   it('cartograph_imports source=literal MCP path returns the same set', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_imports', { source: 'literal' });
     handler.closeAll();
     const text = result.content[0]?.text ?? '';
@@ -91,7 +91,7 @@ describe('template-literal / string-literal imports', () => {
   });
 
   it('source=all + target= excludes literals and surfaces a note', async () => {
-    const handler = new ToolHandler(cg);
+    const handler = new ToolHandler(cg, { profile: 'full' });
     const result = await handler.execute('cartograph_imports', {
       source: 'all',
       target: 'unresolvable',

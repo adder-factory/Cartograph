@@ -118,7 +118,7 @@ describe('cartograph_trace_to_culprits end-to-end', () => {
       ].join('\n'),
     );
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

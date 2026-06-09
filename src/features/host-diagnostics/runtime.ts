@@ -49,14 +49,13 @@ export function toHostDiagnosticTarget(input: {
 export function buildHostDiagnostics(args: BuildHostDiagnosticsArgs): HostDiagnosticsReport {
   const advertised = [...args.advertisedTools].sort((a, b) => a.localeCompare(b));
   const sessionToolAvailable = advertised.includes('cartograph_session');
-  const sourceHeavyGuidanceVisible =
-    advertised.includes('cartograph_context') && advertised.includes('cartograph_explore');
+  const sourceHeavyGuidanceVisible = advertised.includes('cartograph_context');
   const notes: string[] = [];
   if (!sessionToolAvailable) {
-    notes.push('Session analytics are not advertised in this MCP profile; use `--profile core` or `--profile full`.');
+    notes.push('Session analytics are not advertised in this MCP profile; use `--profile full`.');
   }
   if (!sourceHeavyGuidanceVisible) {
-    notes.push('Context/explore guidance is not fully visible in this profile.');
+    notes.push('Context route-planning guidance is not visible in this profile.');
   }
   if (args.targets.length === 0) {
     notes.push('Install-target detection was skipped.');

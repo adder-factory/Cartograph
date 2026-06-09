@@ -46,6 +46,16 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // equivalent because the installer needs a TTY for clack prompts.
   'install',
 
+  // `cartograph quickstart` is a human first-run shortcut: initialize,
+  // build the structural index, run doctor, then print next commands.
+  // MCP callers use the underlying `cartograph_admin({action:'init'|'index'|'doctor'})`
+  // actions directly because MCP has no streaming first-run workflow.
+  'quickstart',
+
+  // `cartograph guide` is compact human CLI guidance. MCP sessions get
+  // startup instructions plus `cartograph_playbook` instead.
+  'guide',
+
   // `cartograph install-hooks` writes managed git hook snippets under
   // `.git/hooks` so the local index is refreshed after pulls, checkouts,
   // and rewrites. MCP sessions should request `cartograph_admin({action:

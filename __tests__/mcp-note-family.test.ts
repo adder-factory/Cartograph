@@ -33,7 +33,7 @@ describe('cartograph_note family (#14)', () => {
       ].join('\n'),
     );
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

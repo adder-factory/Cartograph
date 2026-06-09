@@ -74,7 +74,7 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
       .then(() => true)
       .catch(() => false));
   if (!dbExists) {
-    throw new Error(`No cartograph DB at ${dbPath} — run \`cartograph init\` and \`cartograph index\` first.`);
+    throw new Error(`No cartograph DB at ${dbPath} — run \`cartograph quickstart ${projectPath}\` first.`);
   }
   const conn = DatabaseConnection.open(dbPath, { database: config.database });
   const queries = new QueryBuilder(conn.getDb());

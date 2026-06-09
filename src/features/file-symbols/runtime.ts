@@ -62,6 +62,9 @@ export interface FileSymbolsResult {
   symbols: FileSymbolRow[];
   total: number;
   limit: number;
+  hiddenImports: number;
+  hiddenParameters: number;
+  hiddenByKind: number;
 }
 
 export interface RenderFileSymbolsArgs {
@@ -125,6 +128,7 @@ function toFileSymbolRow(node: Node): FileSymbolRow {
 
 export function collectFileSymbols(options: CollectFileSymbolsOptions): FileSymbolsResult {
   const kindFilter = options.kinds && options.kinds.length > 0 ? new Set(options.kinds) : null;
+  const hidden = countHiddenFileSymbols(options, kindFilter);
   const all = options.nodes
     .filter((node) => includeNode(node, options, kindFilter))
     .sort(
@@ -137,7 +141,29 @@ export function collectFileSymbols(options: CollectFileSymbolsOptions): FileSymb
     )
     .map(toFileSymbolRow);
   const limit = fileSymbolLimit(options);
-  return { symbols: all.slice(0, limit), total: all.length, limit };
+  return { symbols: all.slice(0, limit), total: all.length, limit, ...hidden };
+}
+
+function countHiddenFileSymbols(
+  options: CollectFileSymbolsOptions,
+  kindFilter: ReadonlySet<NodeKind> | null,
+): Pick<FileSymbolsResult, 'hiddenImports' | 'hiddenParameters' | 'hiddenByKind'> {
+  let hiddenImports = 0;
+  let hiddenParameters = 0;
+  let hiddenByKind = 0;
+  for (const node of options.nodes) {
+    if (node.kind === 'file') continue;
+    if (!options.includeImports && (node.kind === 'import' || node.kind === 'export')) {
+      hiddenImports++;
+      continue;
+    }
+    if (!options.includeParameters && node.kind === 'parameter') {
+      hiddenParameters++;
+      continue;
+    }
+    if (kindFilter !== null && !kindFilter.has(node.kind)) hiddenByKind++;
+  }
+  return { hiddenImports, hiddenParameters, hiddenByKind };
 }
 
 function lineRange(symbol: FileSymbolRow): string {
@@ -168,6 +194,7 @@ export function renderFileSymbols(args: RenderFileSymbolsArgs): string {
   if (note) lines.push(`> ${note}`, '');
   if (result.total === 0) {
     lines.push('_No indexed symbols in this file with the requested filters._');
+    appendFileSymbolEmptyHints(lines, result);
     return lines.join('\n');
   }
   if (lowTokens) {
@@ -181,4 +208,26 @@ export function renderFileSymbols(args: RenderFileSymbolsArgs): string {
     lines.push(renderFileSymbolTableRow(symbol));
   }
   return lines.join('\n');
+}
+
+function appendFileSymbolEmptyHints(lines: string[], result: FileSymbolsResult): void {
+  const hints: string[] = [];
+  if (result.hiddenImports > 0) {
+    hints.push(
+      `${result.hiddenImports} import/export symbol${result.hiddenImports === 1 ? '' : 's'} hidden by default; pass \`includeImports: true\` or CLI \`--include-imports\`.`,
+    );
+  }
+  if (result.hiddenParameters > 0) {
+    hints.push(
+      `${result.hiddenParameters} parameter symbol${result.hiddenParameters === 1 ? '' : 's'} hidden by default; pass \`includeParameters: true\` or CLI \`--include-parameters\`.`,
+    );
+  }
+  if (result.hiddenByKind > 0) {
+    hints.push(
+      `${result.hiddenByKind} symbol${result.hiddenByKind === 1 ? '' : 's'} hidden by the kind filter; remove or broaden \`kinds\`.`,
+    );
+  }
+  if (hints.length === 0) return;
+  lines.push('');
+  for (const hint of hints) lines.push(`> _${hint}_`);
 }

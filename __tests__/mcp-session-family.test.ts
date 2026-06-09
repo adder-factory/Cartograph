@@ -33,7 +33,7 @@ describe('cartograph_session family (#13)', () => {
       ),
     );
     cg = await Cartograph.init(tempDir, { index: true });
-    handler = new ToolHandler(cg);
+    handler = new ToolHandler(cg, { profile: 'full' });
   });
 
   afterEach(() => {

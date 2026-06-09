@@ -12,7 +12,7 @@ describe('host diagnostics', () => {
       profile: 'core',
       writeToolsEnabled: true,
       lowTokensDefault: false,
-      advertisedTools: ['cartograph_context', 'cartograph_explore', 'cartograph_session'],
+      advertisedTools: ['cartograph_context', 'cartograph_session'],
       targets: [
         {
           id: 'codex',
@@ -33,7 +33,7 @@ describe('host diagnostics', () => {
   });
 
   it('runs through the MCP adapter without install-target filesystem detection', async () => {
-    const handler = new ToolHandler(null, { profile: 'core' });
+    const handler = new ToolHandler(null, { profile: 'full' });
     const text = textOf(
       await handler.execute('cartograph_host_diagnostics', {
         includeInstallTargets: false,
@@ -42,7 +42,7 @@ describe('host diagnostics', () => {
     );
     handler.closeAll();
 
-    expect(text).toContain('host profile=core');
+    expect(text).toContain('host profile=full');
     expect(text).toContain('session=yes');
     expect(text).toContain('configured=none');
   });
