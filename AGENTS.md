@@ -245,16 +245,24 @@ Same OpenAI-compat shape. Set each `*Llm.endpoint` accordingly.
 
 ---
 
-## Step 3 — bootstrap the install
+## Step 3 — bootstrap the project
 
 ```sh
-cartograph setup [project-path]
+cartograph quickstart [project-path]
 ```
 
-This runs three steps in order:
+This is the no-download first-run path. It runs three steps in order:
 
 1. `admin init` — creates `.cartograph/` in the project directory.
    SQLite is the zero-config storage default.
+2. `admin index` — builds the structural graph without summaries,
+   embeddings, or model downloads.
+3. `doctor` — verifies the install state and reports optional LLM gaps.
+
+Use `cartograph setup` only when the user wants Cartograph to bootstrap local
+LLM model files as part of install. That path runs:
+
+1. `admin init` — creates `.cartograph/` if needed.
 2. `install-models` — downloads the curated GGUF set into
    `~/.cartograph/models/`. ~7 GB for the full set; pass `--minimal`
    for the ~2.1 GB subset (embed + 3B chat, no 7B chat or reranker).
@@ -270,6 +278,9 @@ Option A above. If you picked Option B (Ollama), hand-edit each
 the Ollama model id.
 
 ```sh
+cartograph quickstart /path/to/project
+
+# Optional local-model bootstrap:
 cartograph setup --minimal /path/to/project
 ```
 
@@ -285,11 +296,14 @@ docker run --rm -d --name cartograph-postgres \
   -p 5432:5432 \
   pgvector/pgvector:pg18
 
-cartograph setup --minimal /path/to/project \
+cartograph admin init -i /path/to/project \
   --database-provider postgres \
   --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
   --database-schema cartograph \
   --database-pgvector auto
+
+# Optional local-model bootstrap after PostgreSQL init:
+cartograph setup --minimal /path/to/project
 ```
 
 For an existing SQLite project, use `cartograph admin storage-migrate
@@ -483,15 +497,18 @@ git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
 # 2. An OpenAI-compat backend. macOS quickstart:
 brew install llama.cpp  # OR: brew install ollama (simpler, auto-starts)
 
-# 3. Bootstrap with SQLite storage (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
+# 3. Bootstrap with SQLite storage and no model downloads
+cartograph quickstart /path/to/the/users/project
+
+# 4. Optional: download/write local model config (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
 cartograph setup --minimal /path/to/the/users/project
 
-# 4. Start the backends (one llama-server per port — paste each in its
+# 5. Start the backends (one llama-server per port — paste each in its
 #    own terminal):
 llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.gguf --port 8080 --embeddings &
 llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 &
 
-# 5. Verify
+# 6. Verify
 cartograph doctor /path/to/the/users/project
 ```
 
@@ -506,7 +523,7 @@ docker run --rm -d --name cartograph-postgres \
   -p 5432:5432 \
   pgvector/pgvector:pg18
 
-cartograph setup --minimal /path/to/the/users/project \
+cartograph admin init -i /path/to/the/users/project \
   --database-provider postgres \
   --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
   --database-schema cartograph \
@@ -520,7 +537,7 @@ cartograph admin storage-migrate /path/to/the/users/project \
   --database-provider sqlite
 ```
 
-If the user picked Ollama instead, after the `setup` step:
+If the user picked Ollama instead, after the `quickstart` step:
 
 ```sh
 ollama pull qwen2.5-coder:3b

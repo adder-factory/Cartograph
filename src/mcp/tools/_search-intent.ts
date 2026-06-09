@@ -148,8 +148,8 @@ function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
     const hasNoIndexedContent = summaryRows === 0 && docstringRows === 0 && testNameRows === 0;
     if (hasNoIndexedContent) {
       return err(
-        'mode=intent: no summaries, docstrings, or test names indexed — re-run `cartograph admin index` ' +
-          '(docstrings + test names are extracted automatically) and/or `cartograph admin summarize --all` to populate summaries.',
+        'mode=intent: no summaries, docstrings, or test names indexed — run `cartograph quickstart` for first setup, ' +
+          'or re-run `cartograph admin index` to rebuild extracted docstrings/test names. Use `cartograph admin summarize --all` to populate summaries.',
       );
     }
 

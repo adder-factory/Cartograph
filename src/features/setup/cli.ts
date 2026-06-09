@@ -42,7 +42,7 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
     )
     .option(
       '--minimal',
-      'Recommended local quickstart: install only the smallest viable model subset (embed + 3B chat).',
+      'Recommended local LLM bootstrap: install only the smallest viable model subset (embed + 3B chat).',
     )
     .option('--no-models', 'Skip model downloads for Ollama, cloud, or already-managed backends.')
     .option('--database-provider <provider>', 'Storage backend: sqlite (default) or postgres')

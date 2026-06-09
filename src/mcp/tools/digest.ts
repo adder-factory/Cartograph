@@ -112,7 +112,7 @@ export function buildDigestHotspotsSpec(
       `- \`${h.filePath}\` — risk ${h.riskScore.toFixed(SCORE_DECIMALS)} (${h.commitCount} commits, ${h.loc} LOC)`,
     emptyState: [
       '## 🔥 Hotspots',
-      "_No hotspot data — needs git history + centrality. Run `cartograph admin index` if you haven't._",
+      '_No hotspot data — needs git history + centrality. Run `cartograph quickstart` for a first index, or `cartograph admin index` to rebuild._',
       '',
     ].join('\n'),
   };
@@ -219,7 +219,8 @@ export function buildDigestBiomarkersSpec(
  *  copy separately (the alternative would be one mega emptyState
  *  with conditional logic the lint can't introspect). */
 export const DIGEST_BIOMARKER_STATE_NOTES: Record<Exclude<BiomarkerSectionState, 'populated'>, string> = {
-  'never-ran': '_No biomarker data — run `cartograph admin index` first._',
+  'never-ran':
+    '_No biomarker data — run `cartograph quickstart` for a first index, or `cartograph admin index` to rebuild._',
   pending: '_⏳ Biomarker pass pending — re-run after `cartograph admin sync` completes._',
   clean: '_Project clean ✓ — 0 biomarker findings across all detectors._',
 };

@@ -52,7 +52,8 @@ cartograph admin init -i /path/to/project \
 cartograph doctor /path/to/project
 ```
 
-The one-shot setup command accepts the same storage flags:
+If you are also bootstrapping local LLM model files, `setup` accepts the same
+storage flags:
 
 ```sh
 cartograph setup /path/to/project \

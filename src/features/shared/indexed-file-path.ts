@@ -33,7 +33,7 @@ export function resolveIndexedFilePath(args: ResolveIndexedFilePathArgs): Resolv
   const raw = args.file.trim();
   if (!raw) return { ok: false, message: '`file` must be a non-empty indexed file path.' };
   const indexedPaths = new Set(args.indexedFiles.map((file) => normalizeIndexedPath(file.path)));
-  if (indexedPaths.size === 0) return { ok: false, message: 'No files indexed. Run `cartograph admin index` first.' };
+  if (indexedPaths.size === 0) return { ok: false, message: 'No files indexed. Run `cartograph quickstart` first.' };
 
   const candidates = new Set<string>();
   const normalized = normalizeIndexedPath(raw);

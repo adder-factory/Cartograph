@@ -234,7 +234,7 @@ function buildNoDefaultProjectHint(candidates: string[], launchPath: string): st
     return (
       `No \`.cartograph/\` index exists at or under \`${launchPath}\`. Auto-sync (file watcher) is NOT running. ` +
       `Ask the user: "Did you start me from a project directory? Cartograph is per-project — the index needs to live in the project's own folder. ` +
-      `Should I run \`cartograph admin init\` here, or do you want to restart Claude Code from inside an already-indexed project?"`
+      `Should I run \`cartograph quickstart\` here, or do you want to restart Claude Code from inside an already-indexed project?"`
     );
   } else if (candidates.length === 1) {
     const only = candidates[0]!;
@@ -262,7 +262,7 @@ function writeNoDefaultProjectWarnings(candidates: string[], launchPath: string)
   if (candidates.length === 0) {
     process.stderr.write(
       `[Cartograph MCP] No cartograph projects found in immediate subdirectories either. ` +
-        `Run \`cartograph admin init\` in your project, then restart this server inside that project ` +
+        `Run \`cartograph quickstart\` in your project, then restart this server inside that project ` +
         `(or pass \`--project-path /path/to/project\`).\n`,
     );
   } else if (candidates.length === 1) {
