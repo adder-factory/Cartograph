@@ -124,6 +124,7 @@ const HANDLE_RE = /\b[Hh][0-9A-Fa-fGg]{12,}\b/g;
 
 const NON_SYMBOL_NODE_IDS = new Set(['root', 'children', 'Tags', 'SubClasses', 'SubClass', 'Object']);
 const GENERIC_XML_RESOURCE_TAGS = new Set([
+  'Settings',
   'effect',
   'component',
   'MultiEffectInfos',

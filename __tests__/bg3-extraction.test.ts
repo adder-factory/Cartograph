@@ -24,6 +24,7 @@ describe('BG3 extraction', () => {
     expect(detectLanguage('Mods/Demo/Scripts/anubis/node/Guard.ann')).toBe('bg3_anubis');
     expect(detectLanguage('Mods/Demo/Scripts/anubis/config/Guard.anc')).toBe('bg3_anubis');
     expect(detectLanguage('Public/Shared/RootTemplates/Sword.lsx')).toBe('bg3_resource');
+    expect(detectLanguage('Public/Shared/Assets/Weapons/Resources/Sword.xml')).toBe('bg3_resource');
     expect(detectLanguage('Mods/Demo/Localization/English/english.xml')).toBe('bg3_resource');
     expect(detectLanguage('Mods/Demo/Stats/Generated/Data/Status.txt')).toBe('bg3_stats');
     expect(detectLanguage('Mods/Demo/Story/RawFiles/Goals/Init.txt')).toBe('osiris');
@@ -110,6 +111,20 @@ describe('BG3 extraction', () => {
     expect(result.errors).toEqual([]);
     expect(nodeLabels(result)).toContain('resource:FX_Target');
     expect(refLabels(result)).toContain('references:h00a33f75ge607g4aa2ga34ag4e2849aa53f9');
+  });
+
+  it('extracts BG3 settings sidecar XML files as resources', () => {
+    const source = `
+<?xml version="1.0" encoding="utf-8"?>
+<Settings source="($SOURCE)\\WPN_Hand_Cannon_Revolver_03.GR2">
+  <SceneSettings />
+</Settings>
+`;
+
+    const result = extractFromSource('Public/Demo/Assets/Weapons/WPN_Hand_Cannon_Revolver_03.xml', source);
+
+    expect(result.errors).toEqual([]);
+    expect(nodeLabels(result)).toContain('resource:WPN_Hand_Cannon_Revolver_03');
   });
 
   it('skips binary BG3 resource payloads', () => {
