@@ -8,6 +8,7 @@ import type { RequestContext, StaticAsset } from './context.js';
 import { sendJson } from './http.js';
 
 const STATIC_DIR = resolveAssetPath('features', 'viewer', 'static');
+const VIEWER_TOKEN_META = '<meta name="cartograph-viewer-token" content="" />';
 
 interface SendStaticAssetArgs {
   readonly req: http.IncomingMessage;
@@ -22,7 +23,7 @@ interface StaticAssetHeaderOptions {
 
 export function sendIndexHtml(res: http.ServerResponse, ctx: RequestContext): void {
   res.writeHead(HTTP_OK, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(ctx.indexHtml);
+  res.end(indexHtmlWithToken(ctx.indexHtml, ctx.security.apiToken));
 }
 
 export function sendStaticAsset(args: SendStaticAssetArgs): void {
@@ -97,4 +98,14 @@ function contentTypeForStaticAsset(filename: string): string {
 function hashAssetEtag(body: string): string {
   const digest = createHash('sha256').update(body).digest('hex');
   return `"sha256-${digest}"`;
+}
+
+function indexHtmlWithToken(html: string, token: string): string {
+  const meta = `<meta name="cartograph-viewer-token" content="${escapeHtmlAttr(token)}" />`;
+  if (html.includes(VIEWER_TOKEN_META)) return html.replace(VIEWER_TOKEN_META, meta);
+  return html.replace('</head>', `${meta}\n</head>`);
+}
+
+function escapeHtmlAttr(value: string): string {
+  return value.replaceAll('&', '&amp;').replaceAll('"', '&quot;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
 }

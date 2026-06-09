@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseViewerPort, registerViewerCommand } from '../src/features/viewer/index.js';
+import { clampInt } from '../src/features/viewer/server/http.js';
 
 describe('viewer feature runtime', () => {
   it('parses the optional HTTP port as an explicit result', () => {
@@ -10,6 +11,23 @@ describe('viewer feature runtime', () => {
       ok: false,
       error: 'Invalid value for --port: "abc" is not a number',
     });
+    expect(parseViewerPort('8765x')).toEqual({
+      ok: false,
+      error: 'Invalid value for --port: "8765x" is not a number',
+    });
+    expect(parseViewerPort('1e3')).toEqual({
+      ok: false,
+      error: 'Invalid value for --port: "1e3" is not a number',
+    });
+  });
+
+  it('clamps HTTP integer query params only after exact decimal parsing', () => {
+    const bound = { min: 1, max: 10, default: 4 };
+    expect(clampInt('8', bound)).toBe(8);
+    expect(clampInt('-2', bound)).toBe(1);
+    expect(clampInt('99', bound)).toBe(10);
+    expect(clampInt('8x', bound)).toBe(4);
+    expect(clampInt('1e2', bound)).toBe(4);
   });
 });
 

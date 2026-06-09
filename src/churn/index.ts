@@ -36,6 +36,7 @@ import { logDebug, errMsg } from '../errors.js';
 import { validatePathWithinRootReal } from '../utils.js';
 import { computeAlgoHash } from '../algo-hash.js';
 import { getCurrentHeadSha, isShaReachable } from '../git-utils.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -263,7 +264,7 @@ function parseChurnTokens(raw: string, indexedFiles: Set<string>): Map<string, F
         flushChurnPaths({ deltas, curPaths, curTs, indexedFiles });
         curPaths = [];
       }
-      curTs = Number.parseInt(m[2]!, 10);
+      curTs = parseStrictUnsignedDecimalInteger(m[2]!) ?? 0;
       curActive = true;
     } else if (curActive) {
       // File path in current commit

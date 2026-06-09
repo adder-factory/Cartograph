@@ -441,7 +441,7 @@ describe('Round-two stress-test fixes', () => {
             enabled: true,
             embeddings: {
               provider: 'openai-compat',
-              endpoint: 'http://127.0.0.1:1/v1', // unreachable
+              endpoint: 'http://localhost:1/v1', // unreachable
               model: 'fake',
             },
           },

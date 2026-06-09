@@ -118,7 +118,7 @@ function graphRequestUrl(focus = null, depth = 2) {
 async function bootLive() {
   // Status → top-bar
   try {
-    const r = await fetch('/api/status');
+    const r = await apiFetch('/api/status');
     if (r.ok) {
       const s = await r.json();
       liveProjectRoot = s.projectRoot || '';
@@ -134,7 +134,7 @@ async function bootLive() {
   // Replace the hardcoded graph with /api/graph (no focus → top-central neighborhood)
   try {
     setGraphState('loading', 'Loading graph...');
-    const r = await fetch(graphRequestUrl());
+    const r = await apiFetch(graphRequestUrl());
     if (!r.ok) {
       setGraphState('err', `Failed to load graph: HTTP ${r.status}`);
       return;
@@ -179,7 +179,7 @@ async function loadSessionsLive() {
   const picker = document.getElementById('session-picker');
   tl.innerHTML = '<div class="empty">Loading sessions...</div>';
   try {
-    const sr = await fetch('/api/sessions?limit=20');
+    const sr = await apiFetch('/api/sessions?limit=20');
     if (!sr.ok) throw new Error(`status ${sr.status}`);
     liveSessions = (await sr.json()).sessions ?? [];
     if (liveSessions.length === 0) {
@@ -213,7 +213,7 @@ async function loadSession(sessionId) {
   const tl = document.getElementById('trace-list');
   tl.innerHTML = '<div class="empty">Loading session calls...</div>';
   try {
-    const dr = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    const dr = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
     if (!dr.ok) throw new Error(`status ${dr.status}`);
     const detail = await dr.json();
     liveTraceCalls = detail.calls ?? [];
@@ -300,7 +300,7 @@ async function searchAndFocus(query) {
   const trimmed = query.trim();
   if (!trimmed) return;
   try {
-    const symRes = await fetch(`/api/symbol/${encodeURIComponent(trimmed)}`);
+    const symRes = await apiFetch(`/api/symbol/${encodeURIComponent(trimmed)}`);
     if (!symRes.ok) { input.classList.add('error'); return; }
     const sym = await symRes.json();
     await focusGraphOnSymbol(sym.id, sym.label);
@@ -341,7 +341,7 @@ async function focusGraphOnSymbol(symbolId, label = symbolId) {
   const requestSeq = ++graphFocusRequestSeq;
   const isCurrentGraphRequest = () => requestSeq === graphFocusRequestSeq;
   setGraphState('loading', `Loading neighborhood for ${label}...`);
-  const graphRes = await fetch(graphRequestUrl(symbolId, 2));
+  const graphRes = await apiFetch(graphRequestUrl(symbolId, 2));
   if (!isCurrentGraphRequest()) return;
   if (!graphRes.ok) {
     setGraphState('err', `Failed to load neighborhood: HTTP ${graphRes.status}`);
@@ -457,7 +457,7 @@ async function loadSearchSuggestions(query) {
   }
   searchSuggestAbort = new AbortController();
   try {
-    const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&limit=8`, { signal: searchSuggestAbort.signal });
+    const res = await apiFetch(`/api/search?q=${encodeURIComponent(q)}&limit=8`, { signal: searchSuggestAbort.signal });
     if (requestSeq !== searchSuggestSeq || searchInputEl.value.trim() !== q) return;
     if (!res.ok) {
       renderSearchSuggest([], `Search failed: HTTP ${res.status}`);

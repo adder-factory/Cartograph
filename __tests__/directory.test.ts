@@ -28,6 +28,16 @@ function touchDb(root = dir): void {
   fs.writeFileSync(path.join(getCartographDir(root), 'cartograph.db'), '');
 }
 
+function expectOwnerOnlyFile(filePath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
+}
+
+function expectOwnerOnlyDirectory(dirPath: string): void {
+  if (process.platform === 'win32') return;
+  expect(fs.statSync(dirPath).mode & 0o777).toBe(0o700);
+}
+
 describe('directory management helpers', () => {
   it('initialization requires a .cartograph directory and database file', () => {
     expect(isInitialized(dir)).toBe(false);
@@ -64,6 +74,8 @@ describe('directory management helpers', () => {
     const projectIgnore = fs.readFileSync(path.join(dir, '.gitignore'), 'utf-8');
 
     expect(metaIgnore).toContain('*.db');
+    expectOwnerOnlyDirectory(getCartographDir(dir));
+    expectOwnerOnlyFile(path.join(getCartographDir(dir), '.gitignore'));
     expect(projectIgnore).toContain('node_modules\n');
     expect(projectIgnore).toContain(PROJECT_GITIGNORE_COMMENT);
     expect(projectIgnore.match(new RegExp(`${PROJECT_GITIGNORE_ENTRY.replace('.', '\\.')}`, 'g'))).toHaveLength(1);
@@ -130,5 +142,6 @@ describe('directory management helpers', () => {
 
     expect(result).toEqual({ valid: true, errors: [] });
     expect(fs.existsSync(path.join(getCartographDir(dir), '.gitignore'))).toBe(true);
+    expectOwnerOnlyFile(path.join(getCartographDir(dir), '.gitignore'));
   });
 });

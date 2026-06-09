@@ -1,4 +1,5 @@
 import { errMsg } from '../../errors.js';
+import { copyPrivateFileSync, writePrivateFileAtomic } from '../../config.js';
 import { type ToolOutcome, err, ok } from './_outcome.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
@@ -147,16 +148,44 @@ const LLM_TIER_TO_CONFIG_KEY: Record<LlmTier, LlmTierConfigKey> = {
   reranker: 'rerankerLlm',
 };
 
-export async function handleLlmTune(_ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
-  const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : process.cwd();
+export async function handleLlmTune(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
+  const projectPathResult = resolveLlmTuneProjectPath(ctx, args);
+  if (!projectPathResult.ok) return err(projectPathResult.error);
+  const projectPath = projectPathResult.projectPath;
   const tier = typeof args['tier'] === 'string' ? args['tier'] : null;
   const concurrency = typeof args['concurrency'] === 'number' ? args['concurrency'] : null;
   const { describeHardware, recommendedTuning } = await import('../../installer/hardware-tuning.js');
   const tuning = recommendedTuning();
   if (tier !== null) {
-    return writeLlmTuneOverride({ projectPath, tier, concurrency });
+    const result = await writeLlmTuneOverride({ projectPath, tier, concurrency });
+    if (result.ok) ctx.evictCachedProject(projectPath);
+    return result;
   }
   return renderLlmTuneReport({ projectPath, hw: describeHardware(), tuning });
+}
+
+type LlmTuneProjectPathResult =
+  | { readonly ok: true; readonly projectPath: string }
+  | { readonly ok: false; readonly error: string };
+
+function resolveLlmTuneProjectPath(ctx: ToolCtx, args: Record<string, unknown>): LlmTuneProjectPathResult {
+  const explicitProjectPath = args['projectPath'];
+  try {
+    if (typeof explicitProjectPath === 'string') {
+      return { ok: true, projectPath: ctx.getCartograph(explicitProjectPath).projectRoot };
+    }
+    if (ctx.defaultCg) {
+      return { ok: true, projectPath: ctx.defaultCg.projectRoot };
+    }
+    return {
+      ok: false,
+      error:
+        'llm-tune requires `projectPath` when the MCP server has no default project. ' +
+        'Pass the initialized project root explicitly.',
+    };
+  } catch (error_) {
+    return { ok: false, error: `llm-tune: could not resolve project: ${errMsg(error_)}` };
+  }
 }
 
 interface WriteLlmTuneOverrideArgs {
@@ -201,10 +230,8 @@ async function writeLlmTuneOverride(args: WriteLlmTuneOverrideArgs): Promise<Too
     llm[configKey] = tierBlock;
     parsed['llm'] = llm;
     const backupPath = `${configPath}.bak.${Date.now()}`;
-    await fsp.copyFile(configPath, backupPath);
-    const tmp = `${configPath}.tmp`;
-    await fsp.writeFile(tmp, JSON.stringify(parsed, null, 2), 'utf-8');
-    await fsp.rename(tmp, configPath);
+    copyPrivateFileSync(configPath, backupPath);
+    writePrivateFileAtomic(configPath, JSON.stringify(parsed, null, 2));
     return ok(
       textResult(buildOverrideAppliedReport({ tier, configKey, previous, concurrency, configPath, backupPath })),
     );

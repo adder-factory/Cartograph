@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { CARTOGRAPH_DIR, PROJECT_GITIGNORE_COMMENT, PROJECT_GITIGNORE_ENTRY } from './directory.js';
+import { parseStrictUnsignedDecimalInteger } from './strict-numeric.js';
 
 const GIT_EXEC_OPTIONS = {
   encoding: 'utf-8' as const,
@@ -177,8 +178,7 @@ export function gitCommitCount(rootDir: string): number | null {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     }).trim();
-    const n = Number.parseInt(out, 10);
-    return Number.isFinite(n) ? n : null;
+    return parseStrictUnsignedDecimalInteger(out);
   } catch {
     return null;
   }

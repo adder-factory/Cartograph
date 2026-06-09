@@ -1,4 +1,5 @@
 import type * as http from 'node:http';
+import { parseStrictDecimalInteger } from '../../shared/cli-args.js';
 import type { IntBound } from './constants.js';
 
 export function sendJson(res: http.ServerResponse, code: number, body: unknown): void {
@@ -8,8 +9,8 @@ export function sendJson(res: http.ServerResponse, code: number, body: unknown):
 
 export function clampInt(v: string | null, bound: IntBound): number {
   if (!v) return bound.default;
-  const n = Number.parseInt(v, 10);
-  if (!Number.isFinite(n)) return bound.default;
+  const n = parseStrictDecimalInteger(v);
+  if (n === null) return bound.default;
   return Math.max(bound.min, Math.min(bound.max, n));
 }
 

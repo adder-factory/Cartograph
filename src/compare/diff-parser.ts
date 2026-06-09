@@ -10,6 +10,8 @@
  * silently — callers check whether any ranges were produced.
  */
 
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+
 /** A single contiguous line range extracted from a unified diff hunk. */
 export interface DiffRange {
   /** Repo-relative path (leading `b/` stripped). */
@@ -97,9 +99,10 @@ function parseHunkRange(line: string, currentFile: string): DiffRange | null {
   if (!hunkMatch) return null;
   const newStartRaw = hunkMatch[1];
   if (newStartRaw === undefined) return null;
-  const newStart = Number.parseInt(newStartRaw, 10);
+  const newStart = parseStrictUnsignedDecimalInteger(newStartRaw);
+  if (newStart === null) return null;
   // newLen is absent when exactly one line; defaults to 1 per the unified diff spec
-  const newLen = hunkMatch[2] === undefined ? 1 : Number.parseInt(hunkMatch[2], 10);
+  const newLen = hunkMatch[2] === undefined ? 1 : (parseStrictUnsignedDecimalInteger(hunkMatch[2]) ?? 0);
   if (newLen === 0) return null;
   return { file: currentFile, startLine: newStart, endLine: newStart + newLen - 1 };
 }

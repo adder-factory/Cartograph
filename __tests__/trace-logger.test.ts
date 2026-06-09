@@ -97,6 +97,58 @@ describe('TraceLogger', () => {
     expect(calls[0]?.argsJson).toMatch(/truncated/);
   });
 
+  it('redacts secret-bearing args and endpoint credentials before persistence', () => {
+    const t = new TraceLogger(qb);
+    t.log({
+      toolName: 'cartograph_admin',
+      args: {
+        action: 'llm-apply',
+        apiKey: 'sk-live-argument',
+        endpoint: 'https://trace-user:trace-pass@example.test/v1?api_key=sk-query&safe=1',
+        nested: {
+          headers: { Authorization: 'Bearer trace-header-token' },
+          accessToken: 'trace-access-token',
+        },
+      },
+      result: {
+        content: [
+          {
+            type: 'text',
+            text:
+              'Wrote endpoint https://viewer-user:viewer-pass@example.test/v1?token=result-token and apiKey=sk-result\n' +
+              'second line not stored',
+          },
+        ],
+      },
+      durationMs: 1,
+    });
+
+    const call = callsForSession(qb, t.sessionId)[0]!;
+    const args = JSON.parse(call.argsJson) as {
+      apiKey: string;
+      endpoint: string;
+      nested: { headers: { Authorization: string }; accessToken: string };
+    };
+
+    expect(args.apiKey).toBe('[redacted]');
+    expect(args.nested.accessToken).toBe('[redacted]');
+    expect(args.nested.headers.Authorization).toBe('[redacted]');
+    expect(args.endpoint).toContain('https://redacted:redacted@example.test/v1');
+    expect(args.endpoint).toContain('safe=1');
+
+    const persisted = `${call.argsJson}\n${call.resultSummary}`;
+    expect(persisted).not.toContain('sk-live-argument');
+    expect(persisted).not.toContain('trace-pass');
+    expect(persisted).not.toContain('sk-query');
+    expect(persisted).not.toContain('trace-header-token');
+    expect(persisted).not.toContain('trace-access-token');
+    expect(persisted).not.toContain('viewer-pass');
+    expect(persisted).not.toContain('result-token');
+    expect(persisted).not.toContain('sk-result');
+    expect(call.resultSummary).toContain('https://redacted:redacted@example.test/v1');
+    expect(call.resultSummary).toContain('apiKey=[redacted]');
+  });
+
   it('pruneToolCalls keeps only the newest N rows', () => {
     const t = new TraceLogger(qb);
     for (let i = 0; i < 20; i++) {

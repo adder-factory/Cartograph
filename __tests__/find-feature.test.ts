@@ -149,8 +149,8 @@ describe('find feature runtime', () => {
       error: 'Invalid value for --limit: "1.5" is not an integer',
     });
     expect(buildFindMcpArgs('x', { by: 'name', limit: '1e2' })).toEqual({
-      ok: true,
-      args: { by: 'name', mode: 'exact', query: 'x', limit: 100 },
+      ok: false,
+      error: 'Invalid value for --limit: "1e2" is not an integer',
     });
   });
 

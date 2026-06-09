@@ -4,7 +4,7 @@ import { OpenAiSdkChatBackend } from '../src/llm/openai-sdk-chat-client.js';
 import { OpenAiSdkEmbeddingClient } from '../src/llm/openai-sdk-embedding-client.js';
 import { OpenAiSdkRerankerClient } from '../src/llm/openai-sdk-reranker-client.js';
 
-const LOOPBACK_HOST = '127.0.0.1';
+const LOOPBACK_HOST = 'localhost';
 const BACKEND_TIMEOUT_MS = 5_000;
 const CHAT_MAX_TOKENS = 32;
 const HTTP_OK = 200;

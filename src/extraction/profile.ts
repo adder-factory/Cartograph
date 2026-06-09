@@ -21,8 +21,11 @@
  * JSDoc already calls out the suspect (main-thread store bound at scale).
  */
 
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+
 const ON = process.env['CARTOGRAPH_EXTRACTION_PROFILE'] === '1';
-const OUTLIER_MS = Number.parseInt(process.env['CARTOGRAPH_EXTRACTION_PROFILE_OUTLIER_MS'] ?? '1000', 10);
+const OUTLIER_MS =
+  parseStrictUnsignedDecimalInteger(process.env['CARTOGRAPH_EXTRACTION_PROFILE_OUTLIER_MS'] ?? '') ?? 1000;
 
 interface Bucket {
   count: number;

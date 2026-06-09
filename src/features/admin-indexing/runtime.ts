@@ -1,4 +1,5 @@
 import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from '../../default-config.js';
+import { parseStrictDecimalInteger, parseStrictUnsignedDecimalInteger } from '../shared/cli-args.js';
 
 export interface AdminIndexOptions {
   force?: boolean;
@@ -82,8 +83,8 @@ function maxFileSizeError(raw: string): MaxFileSizeResult {
 
 export function parseParseWorkersValue(raw: string | undefined): ParseWorkersResult {
   if (raw === undefined) return { ok: true, value: undefined };
-  const n = Number.parseInt(raw, 10);
-  if (!Number.isInteger(n) || n < 1) {
+  const n = parseStrictDecimalInteger(raw);
+  if (n === null || n < 1) {
     return { ok: false, error: `--parse-workers must be a positive integer (got "${raw}")` };
   }
   return { ok: true, value: n };
@@ -101,7 +102,11 @@ export function parseMaxFileSizeValue(raw: string | undefined): MaxFileSizeResul
   if (multiplier === undefined) {
     return maxFileSizeError(raw);
   }
-  const n = Number(match[1]) * multiplier;
+  const quantity = parseStrictUnsignedDecimalInteger(match[1]!);
+  if (quantity === null) {
+    return maxFileSizeError(raw);
+  }
+  const n = quantity * multiplier;
   if (!Number.isSafeInteger(n) || n < 1 || n > MAX_INDEX_FILE_SIZE) {
     return maxFileSizeError(raw);
   }

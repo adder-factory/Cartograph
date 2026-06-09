@@ -199,7 +199,7 @@ backups, and native pgvector search.
 
 ```bash
 cartograph viewer .
-# open http://127.0.0.1:8765/
+# open http://localhost:8765/
 ```
 
 <p align="center">

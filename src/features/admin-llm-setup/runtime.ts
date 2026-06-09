@@ -1,3 +1,5 @@
+import { parseStrictDecimalInteger } from '../shared/cli-args.js';
+
 export type LlmSetupTier = 'embed' | 'chat' | 'ask' | 'reranker';
 
 export type LlmTuneOverrideParseResult =
@@ -11,8 +13,8 @@ export function parseLlmTuneOverride(options: { tier?: string; concurrency?: str
     return { ok: false, error: '--tier must be one of embed, chat, ask, reranker' };
   }
 
-  const concurrency = Number.parseInt(options.concurrency ?? '', 10);
-  if (!Number.isInteger(concurrency) || concurrency < 1) {
+  const concurrency = parseStrictDecimalInteger(options.concurrency ?? '');
+  if (concurrency === null || concurrency < 1) {
     return { ok: false, error: '--concurrency must be a positive integer when --tier is set' };
   }
 

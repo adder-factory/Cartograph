@@ -5,11 +5,13 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parsePostgresWorkerJson } from '../src/db/postgres-codec.js';
 import { PostgresAdapter } from '../src/db/postgres-adapter.js';
+import { rewritePostgresAfterPlaceholders } from '../src/db/postgres-worker-sql.js';
 
 interface Harness {
   readonly adapter: PostgresAdapter;
   readonly captured: unknown[];
   readonly terminated: () => number;
+  readonly bridgeDirExists: () => boolean;
   readonly cleanup: () => void;
 }
 
@@ -155,6 +157,10 @@ describe('PostgresAdapter worker bridge', () => {
     const timeout = makeHarness([], 'timeout');
     try {
       expect(() => timeout.adapter.call({ op: 'exec', sql: 'SELECT pg_sleep(1)' })).toThrow('timed out');
+      expect(timeout.adapter.open).toBe(false);
+      expect(timeout.terminated()).toBe(1);
+      expect(timeout.bridgeDirExists()).toBe(false);
+      expect(() => timeout.adapter.call({ op: 'exec', sql: 'SELECT 1' })).toThrow('PostgreSQL connection is closed');
     } finally {
       timeout.cleanup();
     }
@@ -172,6 +178,41 @@ describe('PostgresAdapter worker bridge', () => {
     } finally {
       failed.cleanup();
     }
+  });
+});
+
+describe('Postgres worker SQL rewrite', () => {
+  it('preserves the matched json_each placeholder when it is not $1', () => {
+    const rewritten = rewritePostgresAfterPlaceholders(
+      'SELECT * FROM nodes WHERE kind = $1 AND id IN (SELECT value FROM json_each($2)) AND language = $3',
+      new Set([2]),
+    );
+
+    expect(rewritten).toContain('id IN (SELECT jsonb_array_elements_text($2::jsonb))');
+    expect(rewritten).not.toContain('jsonb_array_elements_text($1::jsonb)');
+  });
+
+  it('preserves json_each object placeholders and key expressions in integer lookups', () => {
+    const rewrittenColumnKey = rewritePostgresAfterPlaceholders(
+      [
+        'SELECT COALESCE(',
+        '  (SELECT CAST(value AS INTEGER) FROM json_each($3) WHERE key = nodes.kind),',
+        '  $1',
+        ') FROM nodes WHERE language = $2',
+      ].join(' '),
+      new Set([3]),
+    );
+    const rewrittenPlaceholderKey = rewritePostgresAfterPlaceholders(
+      'SELECT CAST(value AS INTEGER) FROM json_each($5) WHERE key = $4',
+      new Set([5]),
+    );
+
+    expect(rewrittenColumnKey).toContain('jsonb_each_text($3::jsonb)');
+    expect(rewrittenColumnKey).toContain('WHERE key = nodes.kind');
+    expect(rewrittenColumnKey).not.toContain('jsonb_each_text($1::jsonb)');
+    expect(rewrittenColumnKey).not.toContain('WHERE key = $2');
+    expect(rewrittenPlaceholderKey).toContain('jsonb_each_text($5::jsonb)');
+    expect(rewrittenPlaceholderKey).toContain('WHERE key = $4');
   });
 });
 
@@ -228,6 +269,7 @@ function makeHarness(responses: unknown[], waitMode: WorkerWaitMode = 'normal'):
     adapter,
     captured,
     terminated: () => terminated,
+    bridgeDirExists: () => fs.existsSync(dir),
     cleanup: () => {
       fs.rmSync(dir, { recursive: true, force: true });
     },

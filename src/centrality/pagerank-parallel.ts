@@ -45,6 +45,7 @@
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { PR_DAMPING, PR_ITERATIONS } from './index.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 
 interface NodeRef {
   readonly id: string;
@@ -81,8 +82,8 @@ export const DEFAULT_PARALLEL_EDGE_THRESHOLD = 500_000;
 function resolveEdgeThreshold(): number {
   const raw = process.env['CARTOGRAPH_PAGERANK_PARALLEL_EDGE_THRESHOLD'];
   if (!raw) return DEFAULT_PARALLEL_EDGE_THRESHOLD;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PARALLEL_EDGE_THRESHOLD;
+  const n = parseStrictUnsignedDecimalInteger(raw);
+  return n !== null && n > 0 ? n : DEFAULT_PARALLEL_EDGE_THRESHOLD;
 }
 
 /** True when the env override forces the serial path regardless of
@@ -362,8 +363,8 @@ const DEFAULT_ITERATION_TIMEOUT_MS = 60_000;
 function resolveIterationTimeoutMs(): number {
   const raw = process.env['CARTOGRAPH_PAGERANK_ITERATION_TIMEOUT_MS'];
   if (!raw) return DEFAULT_ITERATION_TIMEOUT_MS;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_ITERATION_TIMEOUT_MS;
+  const n = parseStrictUnsignedDecimalInteger(raw);
+  return n !== null && n > 0 ? n : DEFAULT_ITERATION_TIMEOUT_MS;
 }
 
 /** Race the workers' "done" replies for one PageRank iteration. The

@@ -34,6 +34,7 @@ import {
   type BetweennessOpts,
   type BetweennessResult,
 } from './betweenness.js';
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 
 /** Edge-count floor above which the parallel path makes sense. Below it,
  *  per-worker spawn cost (~50-200 ms) dominates the per-source compute. */
@@ -52,15 +53,15 @@ const DEFAULT_WORKER_TIMEOUT_MS = 60_000;
 function resolveEdgeThreshold(): number {
   const raw = process.env['CARTOGRAPH_BETWEENNESS_PARALLEL_EDGE_THRESHOLD'];
   if (!raw) return DEFAULT_PARALLEL_EDGE_THRESHOLD;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_PARALLEL_EDGE_THRESHOLD;
+  const n = parseStrictUnsignedDecimalInteger(raw);
+  return n !== null && n > 0 ? n : DEFAULT_PARALLEL_EDGE_THRESHOLD;
 }
 
 function resolveWorkerTimeoutMs(): number {
   const raw = process.env['CARTOGRAPH_BETWEENNESS_WORKER_TIMEOUT_MS'];
   if (!raw) return DEFAULT_WORKER_TIMEOUT_MS;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : DEFAULT_WORKER_TIMEOUT_MS;
+  const n = parseStrictUnsignedDecimalInteger(raw);
+  return n !== null && n > 0 ? n : DEFAULT_WORKER_TIMEOUT_MS;
 }
 
 /** Forced-serial escape hatch for A/B benching. */

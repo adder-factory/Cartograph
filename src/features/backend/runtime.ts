@@ -13,7 +13,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { loadConfig } from '../../config.js';
 import { isProcessAlive } from '../../utils-concurrency.js';
 import { LLAMA_SERVER_RERANK_FLAG } from '../../installer/llm-setup-catalog.js';
@@ -29,6 +29,8 @@ const PID_FILE_SCHEMA_VERSION = 1;
 const STOP_WAIT_MS = 3000;
 const STOP_POLL_MS = 100;
 const DEFAULT_LOG_TAIL_LINES = 80;
+const SPAWN_CONFIRM_TIMEOUT_MS = 1000;
+const LOG_TAIL_MAX_BYTES = 512 * 1024;
 
 export interface ConfiguredModelFile {
   readonly tier: LlmTierKey;
@@ -287,9 +289,13 @@ export async function startBackends(options: BackendStartOptions): Promise<Backe
       skipped.push({ row, reason: `endpoint already reachable at ${row.spec.endpoint}; assuming external process` });
       continue;
     }
-    const child = spawnDetachedBackend(row);
-    await writePidFile(row, child.pid ?? 0);
-    started.push(row);
+    try {
+      const child = await spawnDetachedBackend(row);
+      await writePidFile(row, child.pid);
+      started.push(row);
+    } catch (err) {
+      skipped.push({ row, reason: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   const after = await backendStatus(options.projectPath, backendStatusOptions);
@@ -312,6 +318,13 @@ export async function stopBackends(options: BackendStopOptions): Promise<Backend
     if (!row.pidAlive) {
       await removePidFile(row.pidFilePath);
       skipped.push({ row, reason: `stale pid file removed for pid ${pid}` });
+      continue;
+    }
+    if (!pidRecordMatchesSpec(row)) {
+      skipped.push({
+        row,
+        reason: `pid file does not match current backend spec; refusing to signal pid ${pid}`,
+      });
       continue;
     }
     process.kill(pid, 'SIGTERM');
@@ -412,7 +425,7 @@ async function writePidFile(row: BackendStatusRow, pid: number): Promise<void> {
       null,
       2,
     ),
-    'utf8',
+    { encoding: 'utf8', mode: 0o600 },
   );
 }
 
@@ -425,20 +438,76 @@ function openLogFd(logPath: string): number {
   return fs.openSync(logPath, 'a');
 }
 
-function spawnDetachedBackend(row: BackendStatusRow): ReturnType<typeof spawn> {
+async function spawnDetachedBackend(row: BackendStatusRow): Promise<{ pid: number }> {
   const stdoutFd = openLogFd(row.logPath);
   const stderrFd = openLogFd(row.logPath);
+  let child: ChildProcess;
   try {
-    const child = spawn(row.spec.command, row.spec.args, {
+    child = spawn(row.spec.command, row.spec.args, {
       detached: true,
       stdio: ['ignore', stdoutFd, stderrFd],
     });
-    child.unref();
-    return child;
   } finally {
     fs.closeSync(stdoutFd);
     fs.closeSync(stderrFd);
   }
+  await waitForSpawn(child, row.spec.command);
+  const pid = child.pid;
+  if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+    throw new Error(`failed to start ${row.spec.command}: child process did not report a pid`);
+  }
+  child.unref();
+  return { pid };
+}
+
+function waitForSpawn(child: ChildProcess, command: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(onTimeout, SPAWN_CONFIRM_TIMEOUT_MS);
+    timer.unref?.();
+
+    function detachListeners(): void {
+      clearTimeout(timer);
+      child.off('spawn', onSpawn);
+      child.off('error', onError);
+    }
+
+    function onTimeout(): void {
+      detachListeners();
+      resolve();
+    }
+
+    function onSpawn(): void {
+      detachListeners();
+      resolve();
+    }
+
+    function onError(err: Error): void {
+      detachListeners();
+      reject(new Error(`failed to start ${command}: ${err.message}`));
+    }
+
+    child.once('spawn', onSpawn);
+    child.once('error', onError);
+  });
+}
+
+function pidRecordMatchesSpec(row: BackendStatusRow): boolean {
+  const record = row.pidRecord;
+  if (!record) return false;
+  return (
+    record.command === row.spec.command &&
+    arraysEqual(record.args, row.spec.args) &&
+    record.endpoint === row.spec.endpoint &&
+    record.modelPath === row.spec.modelPath
+  );
+}
+
+function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
+  if (left.length !== right.length) return false;
+  for (let i = 0; i < left.length; i++) {
+    if (left[i] !== right[i]) return false;
+  }
+  return true;
 }
 
 async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
@@ -500,10 +569,27 @@ async function pathExists(filePath: string): Promise<boolean> {
 }
 
 async function tailTextFile(filePath: string, maxLines: number): Promise<string> {
-  const text = await fsp.readFile(filePath, 'utf8');
+  const safeMaxLines = Math.max(0, Math.floor(maxLines));
+  if (safeMaxLines === 0) return '';
+  const handle = await fsp.open(filePath, 'r');
+  let text: string;
+  try {
+    const stat = await handle.stat();
+    const start = Math.max(0, stat.size - LOG_TAIL_MAX_BYTES);
+    const length = stat.size - start;
+    const buffer = Buffer.alloc(length);
+    const { bytesRead } = await handle.read(buffer, 0, length, start);
+    text = buffer.subarray(0, bytesRead).toString('utf8');
+    if (start > 0) {
+      const firstNewline = text.indexOf('\n');
+      text = firstNewline >= 0 ? text.slice(firstNewline + 1) : '';
+    }
+  } finally {
+    await handle.close();
+  }
   const lines = text.split(/\r?\n/);
   return lines
-    .slice(Math.max(0, lines.length - maxLines))
+    .slice(Math.max(0, lines.length - safeMaxLines))
     .join('\n')
     .trimEnd();
 }

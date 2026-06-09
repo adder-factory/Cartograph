@@ -29,9 +29,8 @@ interface BuildMetricsBlockArgs {
 export function sourcePayload(ctx: RequestContext, idOrName: string): SourcePayload | null {
   const node = resolveSymbolToNode(ctx.queries, idOrName);
   if (!node) return null;
-  const abs = path.resolve(ctx.projectPath, node.filePath);
-  const root = path.resolve(ctx.projectPath);
-  if (!abs.startsWith(root + path.sep) && abs !== root) {
+  const resolved = resolveSourcePath(ctx.projectPath, node.filePath);
+  if (!resolved.ok && resolved.reason === 'escapes') {
     return {
       source: '',
       startLine: node.startLine,
@@ -40,18 +39,15 @@ export function sourcePayload(ctx: RequestContext, idOrName: string): SourcePayl
       error: 'path escapes project root',
     };
   }
+  if (!resolved.ok) {
+    return unreadableSourcePayload(node);
+  }
   let lines: string[];
   try {
-    lines = fs.readFileSync(abs, 'utf-8').split('\n');
+    lines = fs.readFileSync(resolved.path, 'utf-8').split('\n');
   } catch (err) {
     logDebug('viewer: source read failed', { path: node.filePath, err: errMsg(err) });
-    return {
-      source: '',
-      startLine: node.startLine,
-      endLine: node.endLine,
-      language: node.language,
-      error: 'unreadable',
-    };
+    return unreadableSourcePayload(node);
   }
   const start = Math.max(1, node.startLine);
   const end = Math.min(lines.length, node.endLine);
@@ -164,4 +160,37 @@ function dedupNodes(nodes: ReadonlyArray<Record<string, unknown>>): Record<strin
     out.push(n);
   }
   return out;
+}
+
+type SourcePathResolution =
+  | { readonly ok: true; readonly path: string }
+  | { readonly ok: false; readonly reason: 'escapes' | 'unreadable' };
+
+function resolveSourcePath(projectRoot: string, filePath: string): SourcePathResolution {
+  const root = path.resolve(projectRoot);
+  const lexical = path.resolve(root, filePath);
+  if (!pathContainsPath(root, lexical)) return { ok: false, reason: 'escapes' };
+  try {
+    const realRoot = fs.realpathSync(root);
+    const realFile = fs.realpathSync(lexical);
+    return pathContainsPath(realRoot, realFile) ? { ok: true, path: realFile } : { ok: false, reason: 'escapes' };
+  } catch (err) {
+    logDebug('viewer: source realpath failed', { path: filePath, err: errMsg(err) });
+    return { ok: false, reason: 'unreadable' };
+  }
+}
+
+function unreadableSourcePayload(node: Node): SourcePayload {
+  return {
+    source: '',
+    startLine: node.startLine,
+    endLine: node.endLine,
+    language: node.language,
+    error: 'unreadable',
+  };
+}
+
+function pathContainsPath(parent: string, child: string): boolean {
+  const prefix = parent.endsWith(path.sep) ? parent : `${parent}${path.sep}`;
+  return child === parent || child.startsWith(prefix);
 }

@@ -8,6 +8,7 @@ import {
   GRAPH_DEPTH,
   HOTSPOTS_LIMIT,
   HTTP_BAD_REQUEST,
+  HTTP_FORBIDDEN,
   HTTP_METHOD_NOT_ALLOWED,
   HTTP_NOT_FOUND,
   HTTP_OK,
@@ -39,6 +40,7 @@ import {
   sessionsPayload,
   statusPayload,
 } from './project-payloads.js';
+import { checkViewerRequest } from './security.js';
 
 interface GetRoute {
   match: (path: string) => RegExpExecArray | true | null;
@@ -162,8 +164,7 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
   },
   {
     match: (p) => /^\/api\/source\/(.+)$/.exec(p),
-    handle: (m, _u, res, ctx) =>
-      respondWithIdLookup({ rawId: (m as RegExpExecArray)[1]!, res, ctx, lookup: sourcePayload }),
+    handle: (m, _u, res, ctx) => respondWithSourceLookup({ rawId: (m as RegExpExecArray)[1]!, res, ctx }),
   },
   {
     match: (p) => /^\/api\/symbol\/(.+)$/.exec(p),
@@ -178,6 +179,11 @@ export async function handleRequest(
   ctx: RequestContext,
 ): Promise<void> {
   const url = new URL(req.url ?? '/', URL_PARSE_BASE);
+  const requestCheck = checkViewerRequest(req, url, ctx);
+  if (!requestCheck.ok) {
+    sendJson(res, requestCheck.status, { error: requestCheck.error });
+    return;
+  }
   if (req.method === 'POST' && url.pathname === '/api/ask') {
     await handleAskRequest(req, res, ctx);
     return;
@@ -205,6 +211,19 @@ function respondWithIdLookup(args: RespondWithIdLookupArgs): void {
     return;
   }
   sendJson(res, HTTP_OK, payload);
+}
+
+function respondWithSourceLookup(args: Pick<RespondWithIdLookupArgs, 'rawId' | 'res' | 'ctx'>): void {
+  const { rawId, res, ctx } = args;
+  const id = decodeIdParam(rawId, res);
+  if (id === null) return;
+  const payload = sourcePayload(ctx, id);
+  if (!payload) {
+    sendJson(res, HTTP_NOT_FOUND, { error: `unknown symbol: ${id}` });
+    return;
+  }
+  const status = payload.error === 'path escapes project root' ? HTTP_FORBIDDEN : HTTP_OK;
+  sendJson(res, status, payload);
 }
 
 function decodeIdParam(rawId: string, res: http.ServerResponse): string | null {

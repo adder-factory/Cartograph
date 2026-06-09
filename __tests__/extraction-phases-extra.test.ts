@@ -323,6 +323,34 @@ describe('extraction phase orchestration branches', () => {
     expect(errors[0]?.message).toContain('database is locked');
   });
 
+  it('records syntax-damaged partial parses without replacing the stored graph', async () => {
+    const count = counters();
+    const errors: ExtractionError[] = [];
+
+    await eoProcessOneFile(state(), {
+      filePath: 'src/damaged.ts',
+      content: 'export function damaged( {\n',
+      stats: stats(),
+      error: null,
+      total: 1,
+      errors,
+      counters: count,
+      onProgress: undefined,
+      requestParse: async () =>
+        parsedResult({
+          errors: [{ message: 'Syntax error at line 1', severity: 'error', code: 'syntax_error' }],
+        }),
+    });
+
+    expect(calls.some((call) => call.name === 'insertNodes')).toBe(false);
+    expect(calls.some((call) => call.name === 'upsertFile')).toBe(false);
+    expect(calls.some((call) => call.name === 'putCachedParse')).toBe(false);
+    expect(count).toMatchObject({ processed: 1, filesErrored: 1, filesIndexed: 0, totalNodes: 0, totalEdges: 0 });
+    expect(errors).toEqual([
+      { message: 'Syntax error at line 1', severity: 'error', code: 'syntax_error', filePath: 'src/damaged.ts' },
+    ]);
+  });
+
   it('classifies parser-produced warning-only and error-only empty results after the no-store branch', async () => {
     const count = counters();
     const errors: ExtractionError[] = [];

@@ -7,6 +7,8 @@ describe('doctor Cartograph process parsing', () => {
       [
         'no-whitespace',
         'not-a-pid cartograph serve --mcp',
+        '104x cartograph serve --mcp',
+        '1e2 cartograph serve --mcp',
         '101 /usr/local/bin/cartograph admin index',
         '102 /usr/local/bin/cartograph serve --mcp',
         '103 node unrelated.js',

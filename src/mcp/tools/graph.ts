@@ -53,6 +53,7 @@ import type { ToolCtx } from './types.js';
 import type { RefIdCache } from './_id-cache.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
+import { parseStrictDecimalInteger } from '../../strict-numeric.js';
 
 import { CALLERS_MAX_SYMBOLS, handleCallers } from './_callers.js';
 import { handleCallees } from './_callees.js';
@@ -408,8 +409,8 @@ export function normaliseImpactHopsAdvice(text: string, effectiveDepth: number):
 function coerceHops(hopsRaw: unknown): number {
   if (typeof hopsRaw === 'number' && Number.isFinite(hopsRaw)) return hopsRaw;
   if (typeof hopsRaw === 'string') {
-    const n = Number.parseInt(hopsRaw, 10);
-    if (Number.isFinite(n)) return n;
+    const n = parseStrictDecimalInteger(hopsRaw);
+    if (n !== null) return n;
   }
   return IMPACT_DEFAULT_DEPTH;
 }

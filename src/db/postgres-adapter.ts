@@ -127,23 +127,21 @@ export class PostgresAdapter implements SqliteDatabase {
     } catch {
       /* worker is already gone */
     }
-    this.state.open = false;
-    terminateWorker(this.state.worker);
-    try {
-      fs.rmSync(this.state.dir, { recursive: true, force: true });
-    } catch {
-      /* temp cleanup is best effort */
-    }
+    this.closeBridge();
   }
 
   call(request: WorkerRequest): WorkerResponse {
-    if (!this.state.open && request.op !== 'close') throw new Error('PostgreSQL connection is closed');
+    if (!this.state.open) throw new Error('PostgreSQL connection is closed');
     fs.writeFileSync(this.state.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
     Atomics.store(this.state.control, 0, WORKER_REQUEST);
     Atomics.notify(this.state.control, 0);
     const wait = Atomics.wait(this.state.control, 0, WORKER_REQUEST, this.state.queryTimeoutMs);
-    if (wait === 'timed-out') throw new Error(`PostgreSQL query timed out after ${this.state.queryTimeoutMs}ms`);
+    if (wait === 'timed-out') {
+      this.closeBridge();
+      throw new Error(`PostgreSQL query timed out after ${this.state.queryTimeoutMs}ms; connection has been closed`);
+    }
     if (Atomics.load(this.state.control, 0) !== WORKER_RESPONSE) {
+      this.closeBridge();
       throw new Error('PostgreSQL worker returned an invalid state');
     }
     const raw = fs.readFileSync(this.state.responsePath, 'utf-8');
@@ -152,10 +150,21 @@ export class PostgresAdapter implements SqliteDatabase {
     if (!response.ok) throw new Error(response.error ?? 'PostgreSQL query failed');
     return response;
   }
+
+  private closeBridge(): void {
+    if (!this.state.open) return;
+    this.state.open = false;
+    terminateWorker(this.state.worker);
+    try {
+      fs.rmSync(this.state.dir, { recursive: true, force: true });
+    } catch {
+      /* temp cleanup is best effort */
+    }
+  }
 }
 
 function terminateWorker(worker: Worker): void {
-  void worker.terminate();
+  void worker.terminate().catch(() => undefined);
 }
 
 class PostgresStatement implements SqliteStatement {

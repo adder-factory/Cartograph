@@ -13,6 +13,8 @@
  * Pure module: no DB or filesystem access. Safe to test in isolation.
  */
 
+import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+
 export type FileStatus = 'added' | 'modified' | 'deleted' | 'renamed';
 
 export interface Hunk {
@@ -54,8 +56,6 @@ const HUNK_RE = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 // quotes; both are stripped via `unquote` before use.
 const DIFF_HEADER_RE = /^diff --git (?:"a\/(.+)"|a\/(\S+)) (?:"b\/(.+)"|b\/(\S+))$/;
 
-/** Decimal radix for parseInt — named so the literal 10 doesn't repeat. */
-const RADIX_DECIMAL = 10;
 /** Default `count` field when a hunk header omits it (single-line change). */
 const DEFAULT_HUNK_COUNT = 1;
 
@@ -207,10 +207,10 @@ function dpAppendHunk(st: DiffParserState, hunkMatch: RegExpExecArray): void {
   }
   const [, oldStartRaw, oldCountRaw, newStartRaw, newCountRaw] = hunkMatch;
   const hunk: Hunk = {
-    oldStart: Number.parseInt(oldStartRaw ?? '0', RADIX_DECIMAL),
-    oldCount: oldCountRaw === undefined ? DEFAULT_HUNK_COUNT : Number.parseInt(oldCountRaw, RADIX_DECIMAL),
-    newStart: Number.parseInt(newStartRaw ?? '0', RADIX_DECIMAL),
-    newCount: newCountRaw === undefined ? DEFAULT_HUNK_COUNT : Number.parseInt(newCountRaw, RADIX_DECIMAL),
+    oldStart: parseStrictUnsignedDecimalInteger(oldStartRaw ?? '0') ?? 0,
+    oldCount: oldCountRaw === undefined ? DEFAULT_HUNK_COUNT : (parseStrictUnsignedDecimalInteger(oldCountRaw) ?? 0),
+    newStart: parseStrictUnsignedDecimalInteger(newStartRaw ?? '0') ?? 0,
+    newCount: newCountRaw === undefined ? DEFAULT_HUNK_COUNT : (parseStrictUnsignedDecimalInteger(newCountRaw) ?? 0),
     addedLines: 0,
     removedLines: 0,
   };

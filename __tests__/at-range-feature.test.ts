@@ -58,6 +58,26 @@ describe('at-range feature runtime', () => {
       ok: false,
       error: "Invalid --ranges spec 'bad' — expected 'file:startLine-endLine'.",
     });
+    expect(parseRangeSpecs('src/a.ts:1e2-3')).toEqual({
+      ok: false,
+      error: "Invalid --ranges spec 'src/a.ts:1e2-3' — expected 'file:startLine-endLine'.",
+    });
+    expect(
+      buildAtRangeMcpArgs({
+        file: 'src/a.ts',
+        startLine: '1',
+        endLine: '2',
+        options: { limit: '2x' },
+      }),
+    ).toEqual({ ok: false, error: 'Invalid value for --limit: "2x" is not an integer' });
+    expect(
+      buildAtRangeMcpArgs({
+        file: 'src/a.ts',
+        startLine: '1e2',
+        endLine: '2',
+        options: {},
+      }),
+    ).toEqual({ ok: false, error: 'startLine and endLine must be numbers.' });
     expect(
       buildAtRangeMcpArgs({
         file: 'src/a.ts',

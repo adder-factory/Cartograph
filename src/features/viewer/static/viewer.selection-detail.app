@@ -61,7 +61,7 @@ let symbolSelectRequestSeq = 0;
 async function selectSymbolLive(symbolId) {
   const requestSeq = ++symbolSelectRequestSeq;
   try {
-    const r = await fetch(`/api/symbol/${encodeURIComponent(symbolId)}`);
+    const r = await apiFetch(`/api/symbol/${encodeURIComponent(symbolId)}`);
     if (!r.ok) return;
     const p = await r.json();
     if (requestSeq !== symbolSelectRequestSeq) return;

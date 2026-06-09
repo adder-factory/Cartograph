@@ -1,4 +1,4 @@
-import { parsePositiveIntValue } from '../shared/cli-args.js';
+import { parsePositiveIntValue, parseStrictUnsignedDecimalInteger } from '../shared/cli-args.js';
 
 export interface AtRangeOptions {
   projectPath?: string;
@@ -21,7 +21,6 @@ export interface BuildAtRangeArgsInput {
 export type AtRangeArgsResult = { ok: true; args: Record<string, unknown> } | { ok: false; error: string };
 
 const DEFAULT_LIMIT = '20';
-const DECIMAL_RADIX = 10;
 
 export function buildAtRangeMcpArgs(input: BuildAtRangeArgsInput): AtRangeArgsResult {
   const { file, startLine, endLine, options } = input;
@@ -96,10 +95,15 @@ export function parseRangeSpecs(raw: string): ParseRangeSpecsResult {
     if (!match) {
       return { ok: false, error: `Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.` };
     }
+    const startLine = parseStrictUnsignedDecimalInteger(match[2]!);
+    const endLine = parseStrictUnsignedDecimalInteger(match[3]!);
+    if (startLine === null || endLine === null) {
+      return { ok: false, error: `Invalid --ranges spec '${spec}' — expected 'file:startLine-endLine'.` };
+    }
     ranges.push({
       file: match[1]!,
-      startLine: Number.parseInt(match[2]!, DECIMAL_RADIX),
-      endLine: Number.parseInt(match[3]!, DECIMAL_RADIX),
+      startLine,
+      endLine,
     });
   }
   if (ranges.length === 0) return { ok: false, error: '--ranges had no valid `file:startLine-endLine` specs.' };

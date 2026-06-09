@@ -17,6 +17,7 @@ import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import * as https from 'node:https';
+import * as crypto from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import { RECOMMENDED_MODELS, MODELS_DIR_DEFAULT, type RecommendedModel } from '../llm/recommended-models.js';
 import { runSequential } from '../utils/async-iteration.js';
@@ -61,15 +62,13 @@ export async function installRecommendedModels(options: InstallModelsOptions = {
   await runSequential(models, async (model) => {
     const target = path.join(dir, model.filename);
     paths.set(model, target);
-    if (
-      skipExisting &&
-      (await fsp
-        .access(target)
-        .then(() => true)
-        .catch(() => false))
-    ) {
-      skipped.push(model);
-      return true;
+    if (skipExisting && (await fileExists(target))) {
+      const verification = await verifyModelFile(target, model);
+      if (verification.ok) {
+        skipped.push(model);
+        return true;
+      }
+      await fsp.rm(target, { force: true });
     }
     await downloadOne(model, target, onProgress);
     downloaded.push(model);
@@ -102,6 +101,9 @@ const MAX_REDIRECT_HOPS = 5;
 /** Initial hop counter passed to the recursive `request` helper. */
 const INITIAL_HOP = 0;
 
+/** Socket idle timeout. Large active downloads keep resetting this timer. */
+const DOWNLOAD_SOCKET_TIMEOUT_MS = 60_000;
+
 interface DownloadState {
   downloaded: number;
   total: number;
@@ -110,6 +112,7 @@ interface DownloadState {
 interface DownloadResponseArgs {
   res: IncomingMessage;
   model: RecommendedModel;
+  currentUrl: string;
   state: DownloadState;
   out: fs.WriteStream;
   emit: (downloaded: number, total: number) => void;
@@ -119,7 +122,7 @@ interface DownloadResponseArgs {
 }
 
 function handleDownloadResponse(args: DownloadResponseArgs): void {
-  const { res, model, state, out, emit, request, hops, reject } = args;
+  const { res, model, currentUrl, state, out, emit, request, hops, reject } = args;
   // HF serves a redirect to a CDN; follow up to MAX_REDIRECT_HOPS hops.
   if (
     res.statusCode &&
@@ -128,17 +131,35 @@ function handleDownloadResponse(args: DownloadResponseArgs): void {
     res.headers.location
   ) {
     res.resume();
-    request(res.headers.location, hops + 1);
+    request(resolveRedirectUrl(currentUrl, res.headers.location), hops + 1);
     return;
   }
   if (res.statusCode !== HTTP_OK) {
-    reject(new Error(`HTTP ${res.statusCode} fetching ${model.filename}`));
+    const err = new Error(`HTTP ${res.statusCode} fetching ${model.filename}`);
+    reject(err);
+    out.destroy(err);
     res.resume();
     return;
   }
-  state.total = Number(res.headers['content-length'] ?? 0);
+  const total = parseContentLength(res.headers['content-length']);
+  if (total !== null && total !== model.sizeBytes) {
+    const err = new Error(
+      `unexpected size for ${model.filename}: server reported ${total} bytes, expected ${model.sizeBytes}`,
+    );
+    reject(err);
+    out.destroy(err);
+    res.resume();
+    return;
+  }
+  state.total = total ?? 0;
   res.on('data', (chunk: Buffer) => {
     state.downloaded += chunk.length;
+    if (state.downloaded > model.sizeBytes) {
+      reject(new Error(`download for ${model.filename} exceeded expected size ${model.sizeBytes} bytes`));
+      res.destroy();
+      out.destroy();
+      return;
+    }
     emit(state.downloaded, state.total);
   });
   res.pipe(out);
@@ -179,24 +200,42 @@ async function downloadOne(
     }
   };
 
+  const initialUrl = assertHttpsDownloadUrl(model.hfUrl);
+
   try {
     await new Promise<void>((resolve, reject) => {
-      const out = fs.createWriteStream(tmp);
+      const out = fs.createWriteStream(tmp, { mode: 0o600 });
       const state: DownloadState = { downloaded: 0, total: 0 };
 
       const request = (url: string, hops: number): void => {
         if (hops > MAX_REDIRECT_HOPS) {
-          reject(new Error(`too many redirects fetching ${model.filename}`));
+          const err = new Error(`too many redirects fetching ${model.filename}`);
+          reject(err);
+          out.destroy(err);
           return;
         }
-        const req = https.get(url, (res) =>
-          handleDownloadResponse({ res, model, state, out, emit, request, hops, reject }),
+        let parsedUrl: string;
+        try {
+          parsedUrl = assertHttpsDownloadUrl(url);
+        } catch (err) {
+          reject(err);
+          out.destroy(err instanceof Error ? err : new Error(String(err)));
+          return;
+        }
+        const req = https.get(parsedUrl, (res) =>
+          handleDownloadResponse({ res, model, currentUrl: parsedUrl, state, out, emit, request, hops, reject }),
         );
-        req.on('error', reject);
-        out.on('finish', () => resolve());
-        out.on('error', reject);
+        req.setTimeout(DOWNLOAD_SOCKET_TIMEOUT_MS, () => {
+          req.destroy(new Error(`timed out fetching ${model.filename} after ${DOWNLOAD_SOCKET_TIMEOUT_MS}ms idle`));
+        });
+        req.on('error', (err) => {
+          out.destroy(err);
+          reject(err);
+        });
       };
-      request(model.hfUrl, INITIAL_HOP);
+      out.once('finish', () => resolve());
+      out.once('error', reject);
+      request(initialUrl, INITIAL_HOP);
     });
   } catch (err) {
     await fsp.rm(tmp, { force: true }).catch(() => {
@@ -205,5 +244,65 @@ async function downloadOne(
     throw err;
   }
 
+  await verifyModelFile(tmp, model).then((verification) => {
+    if (!verification.ok) throw new Error(verification.reason);
+  });
   await fsp.rename(tmp, target);
+}
+
+async function fileExists(filePath: string): Promise<boolean> {
+  return fsp
+    .access(filePath)
+    .then(() => true)
+    .catch(() => false);
+}
+
+async function verifyModelFile(
+  filePath: string,
+  model: RecommendedModel,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const stat = await fsp.stat(filePath).catch((err) => ({ error: err instanceof Error ? err.message : String(err) }));
+  if ('error' in stat) return { ok: false, reason: `${model.filename} is not readable: ${stat.error}` };
+  if (stat.size !== model.sizeBytes) {
+    return {
+      ok: false,
+      reason: `${model.filename} has ${stat.size} bytes, expected ${model.sizeBytes}`,
+    };
+  }
+  const digest = await sha256File(filePath);
+  if (digest !== model.sha256) {
+    return {
+      ok: false,
+      reason: `${model.filename} sha256 ${digest} did not match expected ${model.sha256}`,
+    };
+  }
+  return { ok: true };
+}
+
+function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const input = fs.createReadStream(filePath);
+    input.on('data', (chunk) => hash.update(chunk));
+    input.once('error', reject);
+    input.once('end', () => resolve(hash.digest('hex')));
+  });
+}
+
+function parseContentLength(value: string | string[] | undefined): number | null {
+  if (Array.isArray(value)) return parseContentLength(value[0]);
+  if (value === undefined) return null;
+  if (!/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : null;
+}
+
+function assertHttpsDownloadUrl(url: string): string {
+  const parsed = new URL(url);
+  if (parsed.protocol !== 'https:') throw new Error(`refusing non-HTTPS model download URL: ${url}`);
+  return parsed.toString();
+}
+
+function resolveRedirectUrl(baseUrl: string, location: string): string {
+  return new URL(location, baseUrl).toString();
 }

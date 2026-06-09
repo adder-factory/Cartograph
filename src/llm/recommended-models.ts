@@ -39,6 +39,10 @@ export interface RecommendedModel {
   /** Approximate on-disk size in MB. Used by the installer for the
    *  "this download is ~Nm MB" prompt. */
   readonly sizeMb: number;
+  /** Exact expected byte size of the canonical GGUF. */
+  readonly sizeBytes: number;
+  /** SHA-256 digest of the canonical GGUF. */
+  readonly sha256: string;
   /** Short human-readable description shown in status / config UIs. */
   readonly description: string;
 }
@@ -51,6 +55,8 @@ export const RECOMMENDED_CHAT_SUMMARIZE: RecommendedModel = {
   hfUrl:
     'https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf',
   sizeMb: 2000,
+  sizeBytes: 2104932800,
+  sha256: '724fb256bec1ff062b2f65e4569e871ad2e95ab2a3989723d1769c54294730b7',
   description: 'Qwen2.5-Coder-3B-Instruct — high-volume chat (summaries, classifier residue, bulk prose)',
 };
 
@@ -62,6 +68,8 @@ export const RECOMMENDED_CHAT_ASK: RecommendedModel = {
   hfUrl:
     'https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf',
   sizeMb: 4500,
+  sizeBytes: 4683073536,
+  sha256: '509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c',
   description: 'Qwen2.5-Coder-7B-Instruct — higher-stakes Q&A (cartograph_ask)',
 };
 
@@ -74,6 +82,8 @@ export const RECOMMENDED_EMBED: RecommendedModel = {
   hfUrl:
     'https://huggingface.co/second-state/jina-embeddings-v2-base-code-GGUF/resolve/main/jina-embeddings-v2-base-code-Q4_K_M.gguf',
   sizeMb: 110,
+  sizeBytes: 109451680,
+  sha256: 'cc1b9c936e806c5b3a4fa437903cd538ff9839e948870cb44be49825fe00fee1',
   description: 'jina-embeddings-v2-base-code — code-tuned 768-dim embedding',
 };
 
@@ -83,6 +93,8 @@ export const RECOMMENDED_RERANKER: RecommendedModel = {
   filename: 'bge-reranker-v2-m3-Q4_K_M.gguf',
   hfUrl: 'https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf',
   sizeMb: 420,
+  sizeBytes: 438376864,
+  sha256: 'e186a244ed455b4ab66ec64339ce7427a6ae13f5c0b5e544de96e50f0f8b3673',
   description: 'bge-reranker-v2-m3 — cross-encoder rerank for retrieval',
 };
 

@@ -13,10 +13,11 @@ import { loadConfig } from '../../../config.js';
 import { GraphTraverser } from '../../../graph/traversal.js';
 import { logDebug, errMsg } from '../../../errors.js';
 import { loadIndexHtml, loadStaticAssets } from './assets.js';
-import { DEFAULT_PORT, HTTP_INTERNAL_ERROR, HTTP_SCHEME } from './constants.js';
+import { DEFAULT_HOST, DEFAULT_PORT, HTTP_INTERNAL_ERROR, HTTP_SCHEME } from './constants.js';
 import type { RequestContext, ViewerHandle, ViewerOptions } from './context.js';
 import { sendJson } from './http.js';
 import { handleRequest } from './routes.js';
+import { createViewerApiToken, createViewerSecurityContext, formatHostForViewerUrl } from './security.js';
 
 export type { ViewerHandle } from './context.js';
 
@@ -24,10 +25,19 @@ function isAddrObject(addr: ReturnType<import('node:http').Server['address']>): 
   return typeof addr === 'object' && addr !== null;
 }
 
-function listenServer(server: http.Server, host: string, port: number): Promise<void> {
+interface ListenServerArgs {
+  readonly server: http.Server;
+  readonly host: string;
+  readonly port: number;
+  readonly onListening: () => void;
+}
+
+function listenServer(args: ListenServerArgs): Promise<void> {
+  const { server, host, port, onListening } = args;
   return new Promise<void>((resolve, reject) => {
     server.once('error', reject);
     server.listen(port, host, () => {
+      onListening();
       server.removeListener('error', reject);
       resolve();
     });
@@ -69,6 +79,7 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
   const conn = DatabaseConnection.open(dbPath, { database: config.database });
   const queries = new QueryBuilder(conn.getDb());
   const traverser = new GraphTraverser(queries);
+  const apiToken = createViewerApiToken();
   const ctx: RequestContext = {
     projectPath,
     conn,
@@ -76,6 +87,7 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
     traverser,
     indexHtml: loadIndexHtml(),
     staticAssets: loadStaticAssets(),
+    security: createViewerSecurityContext(opts.host ?? DEFAULT_HOST, opts.port ?? DEFAULT_PORT, apiToken),
   };
 
   const server = http.createServer((req, res) => {
@@ -85,15 +97,22 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
     });
   });
 
-  const host = opts.host ?? '127.0.0.1';
+  const host = opts.host ?? DEFAULT_HOST;
   const requestedPort = opts.port ?? DEFAULT_PORT;
-  await listenServer(server, host, requestedPort);
+  let port = requestedPort;
+  await listenServer({
+    server,
+    host,
+    port: requestedPort,
+    onListening: () => {
+      const addr = server.address();
+      port = isAddrObject(addr) ? addr.port : requestedPort;
+      ctx.security = createViewerSecurityContext(host, port, apiToken);
+    },
+  });
+  const url = `${HTTP_SCHEME}${formatHostForViewerUrl(host)}:${port}/`;
 
-  const addr = server.address();
-  const port = isAddrObject(addr) ? addr.port : requestedPort;
-  const url = `${HTTP_SCHEME}${host}:${port}/`;
-
-  return { url, port, close: makeViewerClose(server, ctx, conn) };
+  return { url, port, apiToken, close: makeViewerClose(server, ctx, conn) };
 }
 
 export function openInBrowser(url: string): void {

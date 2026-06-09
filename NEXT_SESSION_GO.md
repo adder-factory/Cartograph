@@ -38,7 +38,7 @@ The viewer has already been split from one large `index.html` into:
 ## Workspace
 
 - Project root: `/Users/adderclaudedev/projects/cartograph`
-- Viewer URL used in the previous session: `http://127.0.0.1:8765/`
+- Viewer URL used in the previous session: `http://localhost:8765/`
 - If the viewer is not running, start it with:
 
 ```sh

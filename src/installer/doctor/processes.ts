@@ -71,10 +71,11 @@ function parsePsLine(line: string): CartographProcessRow | null {
   const pidEnd = findFirstShellWhitespace(trimmed);
   if (pidEnd <= 0) return null;
   const pidText = trimmed.slice(0, pidEnd);
-  if (!isUnsignedIntegerText(pidText)) return null;
+  const pid = parseUnsignedIntegerText(pidText);
+  if (pid === null) return null;
   const commandStart = skipShellWhitespace(trimmed, pidEnd);
   const command = trimmed.slice(commandStart);
-  return command ? { pid: Number.parseInt(pidText, 10), command } : null;
+  return command ? { pid, command } : null;
 }
 
 function isRelevantCartographProcess(command: string, projectPath: string): boolean {
@@ -122,11 +123,13 @@ function skipShellWhitespace(value: string, start: number): number {
   return pos;
 }
 
-function isUnsignedIntegerText(value: string): boolean {
+function parseUnsignedIntegerText(value: string): number | null {
   for (const ch of value) {
-    if (ch < '0' || ch > '9') return false;
+    if (ch < '0' || ch > '9') return null;
   }
-  return value.length > 0;
+  if (value.length === 0) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
 }
 
 function isCartographExecutableToken(token: string): boolean {

@@ -340,7 +340,7 @@ async function loadSourceLive(symbolId) {
   document.getElementById('d-code-summary').textContent = 'Loading source...';
   codeEl.textContent = 'Loading source...';
   try {
-    const r = await fetch(`/api/source/${encodeURIComponent(symbolId)}`);
+    const r = await apiFetch(`/api/source/${encodeURIComponent(symbolId)}`);
     if (!isCurrentSourceRequest()) return;
     if (!r.ok) {
       document.getElementById('d-code-summary').textContent = 'Source unavailable';

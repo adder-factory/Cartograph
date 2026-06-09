@@ -5,6 +5,7 @@ export interface IntBound {
 }
 
 export const DEFAULT_PORT = 8765;
+export const DEFAULT_HOST = 'localhost';
 export const HTTP_SCHEME = 'http://';
 export const URL_PARSE_BASE = `${HTTP_SCHEME}localhost`;
 export const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
@@ -12,6 +13,8 @@ export const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/g
 export const HTTP_OK = 200;
 export const HTTP_NOT_MODIFIED = 304;
 export const HTTP_BAD_REQUEST = 400;
+export const HTTP_UNAUTHORIZED = 401;
+export const HTTP_FORBIDDEN = 403;
 export const HTTP_NOT_FOUND = 404;
 export const HTTP_METHOD_NOT_ALLOWED = 405;
 export const HTTP_PAYLOAD_TOO_LARGE = 413;

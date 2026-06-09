@@ -56,6 +56,17 @@ export function parseGitLinesToPaths(output: string | null): string[] {
   return paths;
 }
 
+/** Parse NUL-delimited git path output (`git ls-files -z`). */
+export function parseGitNulToPaths(output: string | Buffer | null): string[] {
+  if (!output || output.length === 0) return [];
+  const text = typeof output === 'string' ? output : output.toString('utf8');
+  const paths: string[] = [];
+  for (const item of text.split('\0')) {
+    if (item) paths.push(normalizePath(item));
+  }
+  return paths;
+}
+
 /**
  * Enumerate all initialized submodule paths recursively, relative to
  * `rootDir`. Returns [] when there are no submodules or the command
@@ -81,14 +92,13 @@ export function getGitSubmodules(rootDir: string): string[] {
  */
 export function getNestedGitRepoFiles(rootDir: string, repoPath: string): string[] {
   try {
-    const output = execFileSync(GIT_BINARY, ['ls-files', '-co', '--exclude-standard'], {
+    const output = execFileSync(GIT_BINARY, ['ls-files', '-z', '-co', '--exclude-standard'], {
       cwd: path.join(rootDir, repoPath),
-      encoding: 'utf-8',
       timeout: GIT_LIST_TIMEOUT_MS,
       maxBuffer: GIT_LIST_MAX_BUFFER_BYTES,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    return parseGitLinesToPrefixedPaths(output, repoPath);
+    return parseGitNulToPrefixedPaths(output, repoPath);
   } catch {
     return [];
   }
@@ -389,14 +399,8 @@ function safeGlobMatches(filePath: string, pattern: string): boolean {
   }
 }
 
-function parseGitLinesToPrefixedPaths(output: string | null, prefix: string): string[] {
-  if (!output) return [];
-  const paths: string[] = [];
-  for (const line of output.split('\n')) {
-    const trimmed = line.trim();
-    if (trimmed) paths.push(normalizePath(`${prefix}/${trimmed}`));
-  }
-  return paths;
+function parseGitNulToPrefixedPaths(output: string | Buffer | null, prefix: string): string[] {
+  return parseGitNulToPaths(output).map((filePath) => normalizePath(`${prefix}/${filePath}`));
 }
 
 function hasGitMetadata(dir: string): boolean {

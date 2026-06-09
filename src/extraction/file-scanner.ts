@@ -6,6 +6,7 @@ import { logDebug } from '../errors.js';
 import { normalizePath } from '../utils.js';
 import { getCurrentHeadSha, isCartographMetaPath } from '../git-utils.js';
 import { matchesGlob as globMatches } from '../glob.js';
+import { parseStrictOctalInteger } from '../strict-numeric.js';
 import {
   GIT_LIST_MAX_BUFFER_BYTES,
   GIT_LIST_TIMEOUT_MS,
@@ -21,7 +22,7 @@ import {
   hasCartographIgnoreMarker,
   isDirExcluded,
   isUnderCartographIgnoredDir,
-  parseGitLinesToPaths,
+  parseGitNulToPaths,
   safeReaddir,
   safeRealpath,
 } from './file-discovery-policy.js';
@@ -98,14 +99,13 @@ function getGitVisibleFiles(rootDir: string, config: CartographConfig): Set<stri
     }
 
     // -c = cached (tracked), -o = others (untracked), --exclude-standard = respect .gitignore
-    const output = execFileSync(GIT_BINARY, ['ls-files', '-co', '--exclude-standard'], {
+    const output = execFileSync(GIT_BINARY, ['ls-files', '-z', '-co', '--exclude-standard'], {
       cwd: rootDir,
-      encoding: 'utf-8',
       timeout: GIT_LIST_TIMEOUT_MS,
       maxBuffer: GIT_LIST_MAX_BUFFER_BYTES,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    const files = new Set<string>(parseGitLinesToPaths(output));
+    const files = new Set<string>(parseGitNulToPaths(output));
 
     if (config.indexSubmodules !== false) {
       const submodules = new Set(getGitSubmodules(rootDir));
@@ -178,7 +178,6 @@ interface GitChangesResult {
 /** Maximum digits (3) in a C-style octal escape (`\377` = byte 255). */
 const MAX_OCTAL_ESCAPE_DIGITS = 3;
 /** Base for octal escape parsing. */
-const OCTAL_BASE = 8;
 /**
  * C-style backslash-letter escape map → ASCII byte values (BEL, BS,
  * TAB, LF, VT, FF, CR, double-quote, backslash). Anything outside
@@ -213,7 +212,7 @@ function parseOctalEscape(body: string, i: number): [number, number] {
     j++;
     peek = body[j];
   }
-  return [octal.length - 1, Number.parseInt(octal, OCTAL_BASE)];
+  return [octal.length - 1, parseStrictOctalInteger(octal) ?? -1];
 }
 
 /**
