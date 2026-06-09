@@ -44,6 +44,7 @@ import { DART_DEF } from './dart.js';
 import { ELIXIR_DEF } from './elixir.js';
 import { EMBEDDED_TEMPLATE_DEF } from './embedded-template.js';
 import { FISH_DEF } from './fish.js';
+import { FSHARP_DEF } from './fsharp.js';
 import { GLSL_DEF } from './glsl.js';
 import { GO_DEF } from './go.js';
 import { GRAPHQL_DEF } from './graphql.js';
@@ -70,6 +71,7 @@ import { OCAML_DEF } from './ocaml.js';
 import { OCAML_INTERFACE_DEF } from './ocaml-interface.js';
 import { PASCAL_DEF } from './pascal.js';
 import { PHP_DEF } from './php.js';
+import { POWERSHELL_DEF } from './powershell.js';
 import { PRISMA_DEF } from './prisma.js';
 import { PROPERTIES_DEF } from './properties.js';
 import { PYTHON_DEF } from './python.js';
@@ -85,6 +87,7 @@ import { SVELTE_DEF } from './svelte.js';
 import { SWIFT_DEF } from './swift.js';
 import { TSX_DEF } from './tsx.js';
 import { TYPESCRIPT_DEF } from './typescript.js';
+import { VB6_DEF } from './vb6.js';
 import { VBNET_DEF } from './vbnet.js';
 import { VERILOG_DEF } from './verilog.js';
 import { VISUALFORCE_DEF } from './visualforce.js';
@@ -117,6 +120,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   ELIXIR_DEF,
   EMBEDDED_TEMPLATE_DEF,
   FISH_DEF,
+  FSHARP_DEF,
   GLSL_DEF,
   GO_DEF,
   GRAPHQL_DEF,
@@ -145,6 +149,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   OSIRIS_DEF,
   PASCAL_DEF,
   PHP_DEF,
+  POWERSHELL_DEF,
   PRISMA_DEF,
   PROPERTIES_DEF,
   PYTHON_DEF,
@@ -160,6 +165,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
   SWIFT_DEF,
   TSX_DEF,
   TYPESCRIPT_DEF,
+  VB6_DEF,
   VBNET_DEF,
   VERILOG_DEF,
   VISUALFORCE_DEF,

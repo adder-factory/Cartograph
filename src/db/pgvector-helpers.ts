@@ -89,30 +89,49 @@ const KnnParams = z.object({
   fetch: z.number(),
 });
 
+interface BackfillSqlArgs {
+  selectList: string;
+  sourceTable: string;
+  sourceAlias: string;
+  mirrorRowColumn: 'store_rowid' | 'chunk_rowid';
+}
+
+const STORE_BACKFILL_SQL_ARGS: BackfillSqlArgs = {
+  selectList: 'es.rowid AS r, es.body_hash, es.model, es.grain, es.embedding',
+  sourceTable: 'embedding_store',
+  sourceAlias: 'es',
+  mirrorRowColumn: 'store_rowid',
+};
+
+const CHUNK_BACKFILL_SQL_ARGS: BackfillSqlArgs = {
+  selectList: 'sce.rowid AS r, sce.node_id, sce.embedding_model, sce.embedding',
+  sourceTable: 'symbol_chunk_embeddings',
+  sourceAlias: 'sce',
+  mirrorRowColumn: 'chunk_rowid',
+};
+
+function backfillSqlFor(name: string, args: BackfillSqlArgs): string {
+  const selectList = args.selectList;
+  const sourceTable = args.sourceTable;
+  const sourceAlias = args.sourceAlias;
+  const mirrorRowColumn = args.mirrorRowColumn;
+  return `SELECT ${selectList}
+            FROM ${sourceTable} ${sourceAlias}
+            LEFT JOIN ${name} p ON p.${mirrorRowColumn} = ${sourceAlias}.rowid
+           WHERE LENGTH(${sourceAlias}.embedding) = @byteLen
+             AND p.${mirrorRowColumn} IS NULL`;
+}
+
+function defineBackfillQuery<RSchema extends z.ZodType>(sql: string, row: RSchema) {
+  return defineQuery({ sql, params: BackfillLenParams, row, options: { validateRows: 'first' } });
+}
+
 function storeBackfillQueryFor(name: string) {
-  return defineQuery({
-    sql: `SELECT es.rowid AS r, es.body_hash, es.model, es.grain, es.embedding
-            FROM embedding_store es
-            LEFT JOIN ${name} p ON p.store_rowid = es.rowid
-           WHERE LENGTH(es.embedding) = @byteLen
-             AND p.store_rowid IS NULL`,
-    params: BackfillLenParams,
-    row: StoreBackfillRowSchema,
-    options: { validateRows: 'first' },
-  });
+  return defineBackfillQuery(backfillSqlFor(name, STORE_BACKFILL_SQL_ARGS), StoreBackfillRowSchema);
 }
 
 function chunkBackfillQueryFor(name: string) {
-  return defineQuery({
-    sql: `SELECT sce.rowid AS r, sce.node_id, sce.embedding_model, sce.embedding
-            FROM symbol_chunk_embeddings sce
-            LEFT JOIN ${name} p ON p.chunk_rowid = sce.rowid
-           WHERE LENGTH(sce.embedding) = @byteLen
-             AND p.chunk_rowid IS NULL`,
-    params: BackfillLenParams,
-    row: ChunkBackfillRowSchema,
-    options: { validateRows: 'first' },
-  });
+  return defineBackfillQuery(backfillSqlFor(name, CHUNK_BACKFILL_SQL_ARGS), ChunkBackfillRowSchema);
 }
 
 function upsertStorePgvectorQueryFor(name: string) {

@@ -19,7 +19,6 @@
  * are pure commander metadata-building, cheap to run at import time.
  */
 import { Command } from 'commander';
-import { z } from 'zod';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { isInitialized } from '../directory.js';
@@ -32,6 +31,20 @@ import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-g
 import { getToolModules } from '../mcp/tools/registry.js';
 import { getToolContract } from '../mcp/tools/_tool-contract.js';
 import { resolveAssetPath } from '../assets.js';
+import { chalk, error, formatDuration, formatNumber } from './cli-output.js';
+
+export {
+  chalk,
+  colors,
+  createVerboseProgress,
+  error,
+  formatDuration,
+  formatNumber,
+  info,
+  success,
+  warn,
+} from './cli-output.js';
+export { assignFloatArg, assignIntArg, type AssignNumericArgArgs } from './cli-args.js';
 
 // Lazy-load heavy modules (Cartograph, runInstaller) to keep CLI startup fast.
 export async function loadCartograph(): Promise<typeof import('../index.js')> {
@@ -113,37 +126,6 @@ export const sessionCmd = program
 // Version from package.json
 const packageJson = JSON.parse(fs.readFileSync(resolveAssetPath('package.json'), 'utf-8'));
 
-// =============================================================================
-// ANSI Color Helpers (avoid chalk ESM issues)
-// =============================================================================
-
-export const colors = {
-  reset: '\x1b[0m',
-  bold: '\x1b[1m',
-  dim: '\x1b[2m',
-  red: '\x1b[31m',
-  green: '\x1b[32m',
-  yellow: '\x1b[33m',
-  blue: '\x1b[34m',
-  cyan: '\x1b[36m',
-  magenta: '\x1b[35m',
-  white: '\x1b[37m',
-  gray: '\x1b[90m',
-};
-
-export const chalk = {
-  bold: (s: string) => `${colors.bold}${s}${colors.reset}`,
-  dim: (s: string) => `${colors.dim}${s}${colors.reset}`,
-  red: (s: string) => `${colors.red}${s}${colors.reset}`,
-  green: (s: string) => `${colors.green}${s}${colors.reset}`,
-  yellow: (s: string) => `${colors.yellow}${s}${colors.reset}`,
-  blue: (s: string) => `${colors.blue}${s}${colors.reset}`,
-  cyan: (s: string) => `${colors.cyan}${s}${colors.reset}`,
-  magenta: (s: string) => `${colors.magenta}${s}${colors.reset}`,
-  white: (s: string) => `${colors.white}${s}${colors.reset}`,
-  gray: (s: string) => `${colors.gray}${s}${colors.reset}`,
-};
-
 program
   .name('cartograph')
   .description('Code intelligence and knowledge graph for any codebase')
@@ -185,32 +167,8 @@ export function resolveProjectPath(pathArg?: string): string {
   return absolutePath;
 }
 
-/**
- * Format a number with commas
- */
-export function formatNumber(n: number): string {
-  return n.toLocaleString();
-}
-
-const MS_PER_SECOND = 1000;
-const SECONDS_PER_MINUTE = 60;
-
 /** Multiplier converting a 0..1 fraction to a 0..100 integer percent. */
 const FRACTION_TO_PERCENT = 100;
-
-/**
- * Per-step percentage delta required before logging a new progress
- * line in --verbose mode. Logging every increment floods the
- * terminal; 5% strikes a balance between resolution and noise.
- */
-const VERBOSE_PROGRESS_PCT_STEP = 5;
-
-/**
- * Scanning-phase log cadence: emit a line every N files when no
- * total is known yet. Smaller values flood, larger values look hung
- * on slow scans.
- */
-const VERBOSE_SCANNING_LOG_INTERVAL = 1000;
 
 /**
  * Heartbeat interval (ms) for the background-summarisation progress
@@ -218,79 +176,6 @@ const VERBOSE_SCANNING_LOG_INTERVAL = 1000;
  * hang; 15s lets the user see steady progress without spamming.
  */
 const SUMMARY_TICKER_INTERVAL_MS = 15_000;
-
-/**
- * Format duration in milliseconds to human readable
- */
-export function formatDuration(ms: number): string {
-  if (ms < MS_PER_SECOND) {
-    return `${ms}ms`;
-  }
-  const seconds = ms / MS_PER_SECOND;
-  if (seconds < SECONDS_PER_MINUTE) {
-    return `${seconds.toFixed(1)}s`;
-  }
-  const minutes = Math.floor(seconds / SECONDS_PER_MINUTE);
-  const remainingSeconds = seconds % SECONDS_PER_MINUTE;
-  return `${minutes}m ${remainingSeconds.toFixed(0)}s`;
-}
-
-// Shimmer progress renderer (runs in a worker thread for smooth animation)
-// Imported at top of file from '../ui/shimmer-progress'
-
-/**
- * Create a plain-text progress callback for --verbose mode.
- * No animations, no ANSI tricks — just timestamped lines to stdout.
- */
-export function createVerboseProgress(): (progress: {
-  phase: string;
-  current: number;
-  total: number;
-  currentFile?: string;
-}) => void {
-  let lastPhase = '';
-  let lastPct = -1;
-  const startTime = Date.now();
-
-  return (progress) => {
-    const elapsed = ((Date.now() - startTime) / MS_PER_SECOND).toFixed(1);
-
-    if (progress.phase !== lastPhase) {
-      lastPhase = progress.phase;
-      lastPct = -1;
-      process.stdout.write(`[${elapsed}s] Phase: ${progress.phase}\n`);
-    }
-
-    if (progress.total > 0) {
-      const pct = Math.floor((progress.current / progress.total) * FRACTION_TO_PERCENT);
-      // Log every VERBOSE_PROGRESS_PCT_STEP percent to keep output manageable
-      if (pct >= lastPct + VERBOSE_PROGRESS_PCT_STEP || progress.current === progress.total) {
-        lastPct = pct;
-        const currentFileSuffix = progress.currentFile ? ` — ${progress.currentFile}` : '';
-        process.stdout.write(`[${elapsed}s]   ${progress.current}/${progress.total} (${pct}%)${currentFileSuffix}\n`);
-      }
-    } else if (progress.current > 0) {
-      // Scanning phase (no total yet) — log periodically
-      if (progress.current % VERBOSE_SCANNING_LOG_INTERVAL === 0 || progress.current === 1) {
-        process.stdout.write(`[${elapsed}s]   ${formatNumber(progress.current)} files found\n`);
-      }
-    }
-  };
-}
-
-/**
- * Print success message
- */
-export function success(message: string): void {
-  console.log(chalk.green('✓') + ' ' + message);
-}
-
-/**
- * Print error message
- */
-export function error(message: string): void {
-  console.error(chalk.red('✗') + ' ' + message);
-}
 
 /**
  * Wire a styled unknown-subcommand handler onto a family command group
@@ -352,121 +237,6 @@ export function installFamilyActionAlias(group: import('commander').Command, fam
     // form. Nothing to rewrite; bail out of the scan.
     return;
   }
-}
-
-/**
- * Print info message
- */
-export function info(message: string): void {
-  console.log(chalk.blue('ℹ') + ' ' + message);
-}
-
-/**
- * Print warning message
- */
-export function warn(message: string): void {
-  console.log(chalk.yellow('⚠') + ' ' + message);
-}
-
-/** Optional inclusive numeric bounds for `assignIntArg` / `assignFloatArg`. */
-interface NumericArgBounds {
-  min?: number;
-  max?: number;
-}
-
-/**
- * Bundled arguments for `assignIntArg` / `assignFloatArg` — collapses
- * the prior 5 positional params into one object so call sites stay
- * readable and the long_parameter_list biomarker doesn't fire.
- *
- * - `args` — the MCP-arg bag the parsed value is written into on success.
- * - `key` — the property on `args` to set.
- * - `raw` — the raw CLI string; `undefined` / `''` is a no-op success.
- * - `optionName` — the user-facing flag name used in error messages.
- * - `opts` — optional inclusive `min` / `max` range validation.
- */
-export interface AssignNumericArgArgs {
-  args: Record<string, unknown>;
-  key: string;
-  raw: string | undefined;
-  optionName: string;
-  opts?: NumericArgBounds;
-}
-
-/**
- * Shared body for `assignIntArg` / `assignFloatArg`. Gate-parse-assigns
- * a CLI numeric arg: when `raw` is unset it leaves `args` untouched and
- * returns `true`; when it fails to parse or falls outside the optional
- * `min` / `max` bounds it prints a clean error, sets
- * `process.exitCode = 1`, and returns `false`; otherwise it writes the
- * parsed value to `args[key]` and returns `true`.
- *
- * `schema` supplies the int-vs-float Zod coercion and `noun` is the
- * error wording ("integer" / "number") — the only bits that differ
- * between the two public entry points.
- */
-function assignNumericArg(
-  { args, key, raw, optionName, opts }: AssignNumericArgArgs,
-  schema: z.ZodType<number>,
-  noun: string,
-): boolean {
-  if (raw === undefined || raw === '') return true;
-  const parsed = schema.safeParse(raw);
-  if (!parsed.success || !Number.isFinite(parsed.data)) {
-    error(`Invalid value for ${optionName}: "${raw}" is not ${noun === 'integer' ? 'an' : 'a'} ${noun}`);
-    process.exitCode = 1;
-    return false;
-  }
-  const n = parsed.data;
-  if (opts?.min !== undefined && n < opts.min) {
-    error(`Invalid value for ${optionName}: must be >= ${opts.min}`);
-    process.exitCode = 1;
-    return false;
-  }
-  if (opts?.max !== undefined && n > opts.max) {
-    error(`Invalid value for ${optionName}: must be <= ${opts.max}`);
-    process.exitCode = 1;
-    return false;
-  }
-  args[key] = n;
-  return true;
-}
-
-/**
- * Gate-parse-assign helper for the common `if (options.x) args['x'] =
- * parseInt(options.x, 10)` CLI forwarding pattern. When `raw` is set
- * but is not a valid integer (non-numeric, trailing garbage like
- * `12abc`, or fractional) it prints a clean error, sets
- * `process.exitCode = 1`, and returns `false` — the caller MUST `return` from its action
- * handler. When `raw` is unset it leaves `args` untouched and returns
- * `true`. Centralising this stops `NaN` from leaking into the MCP layer.
- *
- * Pass `opts.min` / `opts.max` for inclusive range validation — an
- * out-of-range value is rejected with the same clean-error contract so
- * negative / zero limits can't silently clamp to 1 downstream.
- */
-export function assignIntArg(a: AssignNumericArgArgs): boolean {
-  // `z.coerce.number().int()` rejects a non-integer AND any trailing
-  // garbage — `parseInt('12abc', 10)` used to silently yield `12`,
-  // letting `--limit 12abc` through. `.int()` also rejects a
-  // fractional (`12.9`) and non-finite input.
-  return assignNumericArg(a, z.coerce.number().int(), 'integer');
-}
-
-/**
- * `assignIntArg` sibling for `parseFloat`-class CLI options (centrality
- * / score thresholds etc.). Same contract: rejects input that is not a
- * finite number (non-numeric, or trailing garbage like `1.5x`)
- * with a clean error + `process.exitCode = 1` and a `false` return so
- * `NaN` can't leak into the MCP layer. Pass `opts.min` / `opts.max` for
- * inclusive range validation (e.g. `{min: 0, max: 1}` for 0-1 scores).
- */
-export function assignFloatArg(a: AssignNumericArgArgs): boolean {
-  // `z.coerce.number()` rejects trailing garbage that `parseFloat`
-  // silently truncated (`parseFloat('1.5x')` used to yield `1.5`);
-  // the shared `Number.isFinite` guard additionally rejects
-  // `Infinity` / `NaN`.
-  return assignNumericArg(a, z.coerce.number(), 'number');
 }
 
 /**

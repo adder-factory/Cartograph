@@ -515,9 +515,10 @@ async function renameIfExists(sourcePath: string, targetPath: string): Promise<v
 
 async function renameDatabaseFiles(sourcePath: string, targetPath: string): Promise<void> {
   await fs.rename(sourcePath, targetPath);
-  for (const suffix of ['-wal', '-shm']) {
-    await renameIfExists(`${sourcePath}${suffix}`, `${targetPath}${suffix}`);
-  }
+  await Promise.all([
+    renameIfExists(`${sourcePath}-wal`, `${targetPath}-wal`),
+    renameIfExists(`${sourcePath}-shm`, `${targetPath}-shm`),
+  ]);
 }
 
 async function removeDatabaseFiles(dbPath: string): Promise<void> {

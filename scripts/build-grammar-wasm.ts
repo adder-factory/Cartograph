@@ -149,6 +149,16 @@ const GRAMMARS: Grammar[] = [
   // produces a clean ABI-14 grammar.
   { wasm: 'dart', pkg: 'tree-sitter-dart', sample: 'void main() {}\n', vendored: true },
   { wasm: 'fish', pkg: '@esdmr/tree-sitter-fish', sample: 'set x 1\n', vendored: true },
+  // fsharp: npm only exposes a stale 0.1.0 package whose repository
+  // metadata points at a dead URL. The checked-in WASM is built from the
+  // Ionide 0.3.0 release source tarball; see docs/GRAMMAR-ASSETS.md.
+  {
+    wasm: 'fsharp',
+    pkg: 'tree-sitter-fsharp',
+    subdir: 'fsharp',
+    sample: 'module Demo\nlet add x y = x + y\n',
+    vendored: true,
+  },
   { wasm: 'glsl', pkg: 'tree-sitter-glsl', sample: 'void main() { gl_Position = vec4(1.0); }\n', vendored: true },
   { wasm: 'groovy', pkg: 'tree-sitter-groovy', sample: 'class A { def run() { helper() } }\n', vendored: true },
   // graphql: ⚠ `tree-sitter-graphql@1.0.0` on npm is a DIFFERENT grammar
@@ -164,6 +174,7 @@ const GRAMMARS: Grammar[] = [
   // grammar is a tracked follow-up.
   { wasm: 'graphql', pkg: 'tree-sitter-graphql', sample: 'type Q { a: Int }\n', vendored: true },
   { wasm: 'pascal', pkg: 'tree-sitter-pascal', sample: 'begin end.\n', vendored: true },
+  { wasm: 'powershell', pkg: 'tree-sitter-powershell', sample: 'function Invoke-Demo { Get-Date }\n', vendored: true },
   { wasm: 'rescript', pkg: 'tree-sitter-rescript', sample: 'let x = 1\n', vendored: true },
   // elixir: onboarded 2026-05-17 via the tags.scm fallback extractor —
   // the new-language onramp's first validation language. The

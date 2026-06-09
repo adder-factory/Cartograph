@@ -8,6 +8,7 @@
 import type { Node as SyntaxNode } from 'web-tree-sitter';
 import * as crypto from 'node:crypto';
 import type { NodeKind } from '../types.js';
+import type { ExtractorContext } from './tree-sitter-types.js';
 
 /**
  * Generate a stable node ID.
@@ -79,6 +80,36 @@ export function createIdFactory(filePath: string): NodeIdFactory {
  */
 export function getNodeText(node: SyntaxNode, source: string): string {
   return source.substring(node.startIndex, node.endIndex);
+}
+
+export function getFirstNodeLine(node: SyntaxNode, source: string, maxLength = 160): string | undefined {
+  const line = getNodeText(node, source).split(/\r?\n/, 1)[0]?.trim();
+  return line ? line.slice(0, maxLength) : undefined;
+}
+
+interface EmitScopedSyntaxNodeArgs {
+  ctx: ExtractorContext;
+  kind: NodeKind;
+  name: string;
+  node: SyntaxNode;
+  visitBody: () => void;
+  signature?: string;
+}
+
+export function emitScopedSyntaxNode(args: EmitScopedSyntaxNodeArgs): boolean {
+  const { ctx, kind, name, node, visitBody } = args;
+  const signature = args.signature ?? getFirstNodeLine(node, ctx.source);
+  const created = ctx.createNode({
+    kind,
+    name,
+    node,
+    ...(signature ? { extra: { signature } } : {}),
+  });
+  if (!created) return false;
+  ctx.pushScope(created.id);
+  visitBody();
+  ctx.popScope();
+  return true;
 }
 
 /**
@@ -192,6 +223,20 @@ export function findChildByTypes(node: SyntaxNode, types: ReadonlyArray<string>)
     if (child && types.includes(child.type)) return child;
   }
   return null;
+}
+
+/**
+ * Return the first descendant whose node type matches `type`, including the
+ * root node itself. Used by small language hooks whose grammars wrap names in
+ * different intermediate nodes.
+ */
+export function findDescendantByType(node: SyntaxNode, type: string): SyntaxNode | undefined {
+  if (node.type === type) return node;
+  for (const child of node.namedChildren) {
+    const hit = findDescendantByType(child, type);
+    if (hit) return hit;
+  }
+  return undefined;
 }
 
 /**

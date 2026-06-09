@@ -9,8 +9,9 @@
 
 import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
-import { makeLineIndex, stripCommentsForRegex } from '../../utils.js';
+import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { makeFrameworkNodeAtOffset } from './node-builders.js';
 import { makeFrameworkReference } from './reference.js';
 
 const SYMFONY_LANGUAGES = ['php', 'yaml'] as const;
@@ -185,23 +186,16 @@ function makeRouteNode(args: {
   signature: string;
   language: Language;
 }): Node {
-  const lineOf = makeLineIndex(args.content);
-  const line = lineOf(args.offset);
-  const column = Math.max(0, args.offset - (args.content.lastIndexOf('\n', args.offset - 1) + 1));
-  return {
-    id: `symfony:route:${args.filePath}:${line}:${args.name}`,
+  return makeFrameworkNodeAtOffset({
+    idPrefix: 'symfony:route',
     kind: 'route',
     name: args.name,
-    qualifiedName: `${args.filePath}#${args.name}`,
     filePath: args.filePath,
+    content: args.content,
+    offset: args.offset,
     language: args.language,
-    startLine: line,
-    endLine: line,
-    startColumn: column,
-    endColumn: column + args.name.length,
     signature: args.signature,
-    updatedAt: Date.now(),
-  };
+  });
 }
 
 function lineOffset(content: string, lineIndex: number): number {

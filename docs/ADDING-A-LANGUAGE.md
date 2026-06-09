@@ -22,19 +22,25 @@ surface, but no language-specific symbols are emitted yet. Reach for Path C firs
 when a usable tags query exists; use Path D only when the grammar is valuable for
 coverage or future injections but has no useful standalone tags yet.
 
-All four patterns share the same setup steps (1–4) and only diverge at the
-extractor itself (step 5).
+Grammar-backed patterns share setup steps 1–4 and diverge at the extractor
+itself in step 5. Pure custom extractors for formats without a tree-sitter
+grammar can skip the WASM build in step 1 and register a `customExtractor`
+only.
 
 ---
 
-## 1. Source a tree-sitter WASM grammar
+## 1. Source a tree-sitter WASM grammar, when the language has one
 
 Cartograph parses everything via [`web-tree-sitter`](https://www.npmjs.com/package/web-tree-sitter),
-so the grammar must be available as a `.wasm` file. Every grammar cartograph
+so grammar-backed language modes need a `.wasm` file. Every grammar cartograph
 ships is **vendored** in `src/extraction/wasm/`, named `<lang>.wasm` (e.g.
 `python.wasm`, `c_sharp.wasm`) — there is no external grammar package. The
 build's `copy-assets` script copies every `.wasm` from that directory into
 `dist/extraction/wasm/` so the grammars ship inside the npm package.
+
+If no suitable tree-sitter grammar exists, use a custom extractor with no
+`grammar` field. The registry and scanner support that shape; examples include
+Liquid and Visual Basic 6.
 
 ### Produce the `.wasm`
 
@@ -67,9 +73,12 @@ confirm before committing the wasm and note the source/version in a header
 comment so the provenance is recoverable later. Keep checked-in grammar asset
 provenance in `docs/GRAMMAR-ASSETS.md`.
 
-**Count guard.** `__tests__/pr19-improvements.test.ts` asserts an *exact*
-count of vendored `.wasm` files (a "did a grammar get dropped?" tripwire).
-Adding one fails it — bump the expected count there (it's a one-line `toBe`).
+**Guards.** `__tests__/language-registry.test.ts` checks grammar-backed
+registry shape, `__tests__/readme-drift.test.ts` checks the documented language
+count and support-matrix names, and `__tests__/language-coverage.test.ts`
+checks that each test-bed fixture emits the expected graph floor.
+`__tests__/pr19-improvements.test.ts` also asserts the exact number of vendored
+`.wasm` files; adding a grammar asset requires bumping that expected count.
 
 ---
 
@@ -165,7 +174,7 @@ const ALL_DEFS: readonly LanguageDef[] = [
 ```
 
 **Step 3c — Add `'foo'` to the `Language` union (`src/graph/core-types.ts`) AND to
-`VALID_LANGUAGES` (`src/config.ts`)** — two lines, two files:
+`VALID_LANGUAGES` (`src/config/languages.ts`)** — two lines, two files:
 
 ```ts
 // src/graph/core-types.ts
@@ -175,7 +184,7 @@ export type Language =
   | 'foo'                  // ← add here
   | 'unknown';
 
-// src/config.ts — VALID_LANGUAGES must stay in sync with the union.
+// src/config/languages.ts — VALID_LANGUAGES must stay in sync with the union.
 // A compile-time guard (`_LanguageCoverageOk`) fails the typecheck in
 // step 4 if you add to one and not the other.
 const VALID_LANGUAGES = [
@@ -282,9 +291,13 @@ intercepts `binary_operator` assignments and emits the function manually via
 
 ## 5b. Path B — Custom extractor class
 
-Use this when the language is declarative (HCL, SQL, dbt) or has a fundamentally
-different shape than functions/classes/methods (Liquid templates, Pascal `.dfm` form
-files). Create `src/extraction/<lang>-extractor.ts`:
+Use this when the language is declarative (HCL, SQL, dbt), has a fundamentally
+different shape than functions/classes/methods (Liquid templates, Pascal `.dfm`
+form files), or has no suitable tree-sitter grammar. For a small extractor,
+keeping the class next to the language definition in
+`src/extraction/languages/<lang>.ts` is fine; split to
+`src/extraction/<lang>-extractor.ts` or a feature-local subfolder when the file
+gets large enough to need that boundary.
 
 ```ts
 import type { Edge, ExtractionError, ExtractionResult, Node, UnresolvedReference } from '../types.js';
@@ -494,9 +507,8 @@ the resolver pass matches them across files using the `name-matcher` and
 
 ## 7. Tests
 
-Tests live in `__tests__/extraction.test.ts`, grouped by language with a
-`describe('<Language> Extraction', ...)` block. Use `extractFromSource` directly
-for unit-style tests:
+Add a focused test under `__tests__/` for the new language or language tranche.
+Use `extractFromSource` directly for unit-style tests:
 
 ```ts
 import { extractFromSource } from '../src/extraction';
@@ -531,7 +543,7 @@ particular attention to:
 Run the focused language guards first, then the fast suite:
 
 ```bash
-bun test --timeout 30000 __tests__/language-coverage.test.ts __tests__/pr19-improvements.test.ts
+bun test --timeout 30000 __tests__/language-coverage.test.ts __tests__/language-registry.test.ts __tests__/readme-drift.test.ts
 bun run test:fast
 ```
 

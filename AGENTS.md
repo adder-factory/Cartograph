@@ -553,5 +553,6 @@ the report.
 - `src/llm/openai-sdk-{chat,embedding,reranker}-client.ts` — the
   three HTTP clients. Each follows the same constructor / `isReachable`
   / error-wrapping pattern.
-- `src/config.ts` — `migrateLegacyProviderValue` handles the legacy
-  `'nllc'` / `'local'` auto-translation at config-load time.
+- `src/config/legacy-llm-migration.ts` — `migrateLegacyProviderValue`
+  handles the legacy `'nllc'` / `'local'` auto-translation at
+  config-load time.

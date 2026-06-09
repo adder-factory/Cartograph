@@ -41,13 +41,15 @@ function writeCleanArchitectureFixture(root: string): void {
   );
   writeFile(root, '.github/workflows/check.yml', 'steps:\n  - run: npm run check\n');
   writeFile(root, 'docs/ARCHITECTURE.md', 'check:architecture scripts/check-architecture.mjs file-discovery-policy.ts');
+  writeFile(root, 'src/extraction/index.ts', "export { scanDirectory } from './file-scanner.js';\n");
   writeFile(
     root,
-    'src/extraction/index.ts',
+    'src/extraction/file-scanner.ts',
     "import { findCartographIgnoredDirs } from './file-discovery-policy.js';\n",
   );
   writeFile(root, 'src/extraction/file-discovery-policy.ts', 'export const policy = true;\n');
   writeFile(root, 'src/resolution/name-matcher.ts', 'export const matcher = true;\n');
+  writeFile(root, 'src/resolution/name-matcher-receivers.ts', 'export const receivers = true;\n');
   writeFile(root, 'src/mcp/tools.ts', 'export const tools = true;\n');
   writeFile(root, 'src/db/queries-search.ts', 'export const search = true;\n');
   writeFile(root, 'src/context/index.ts', 'export const context = true;\n');
@@ -86,7 +88,7 @@ describe('architecture gate', () => {
     try {
       writeCleanArchitectureFixture(dir);
       writeFile(dir, 'src/common/helpers.ts', 'export const drift = true;\n');
-      fs.appendFileSync(path.join(dir, 'src/extraction/index.ts'), 'function findCartographIgnoredDirs() {}\n');
+      fs.appendFileSync(path.join(dir, 'src/extraction/file-scanner.ts'), 'function findCartographIgnoredDirs() {}\n');
       writeFile(
         dir,
         'src/resolution/frameworks/bad.ts',

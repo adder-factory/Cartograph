@@ -17,13 +17,18 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 const SKIP_DIRS = new Set(['.git', '.cartograph', 'node_modules', 'dist', 'build', 'coverage', 'release']);
 
 const CENTRAL_FILE_BUDGETS = new Map([
-  ['src/extraction/index.ts', 1400],
-  ['src/resolution/name-matcher.ts', 1450],
-  ['src/mcp/tools.ts', 1000],
-  ['src/db/queries-search.ts', 2100],
-  ['src/context/index.ts', 950],
-  ['src/bin/_cli-core.ts', 980],
+  ['src/config.ts', 240],
+  ['src/extraction/index.ts', 720],
+  ['src/extraction/file-scanner.ts', 760],
+  ['src/extraction/languages/registry.ts', 230],
+  ['src/resolution/name-matcher.ts', 1150],
+  ['src/resolution/name-matcher-receivers.ts', 300],
+  ['src/mcp/tools.ts', 700],
+  ['src/db/queries-search.ts', 1950],
+  ['src/context/index.ts', 250],
+  ['src/bin/_cli-core.ts', 760],
   ['src/db/queries.ts', 1030],
+  ['src/installer/targets/shared.ts', 80],
 ]);
 
 const ALLOWED_SHARED_DIRS = new Set(['src/features/shared']);
@@ -228,16 +233,19 @@ function checkFrameworkResolvers(rootDir, failures) {
 }
 
 function checkExtractionPolicyOwnership(rootDir, failures) {
-  const relPath = 'src/extraction/index.ts';
-  const source = readText(rootDir, relPath);
-  if (!source.includes("from './file-discovery-policy.js'")) {
-    failures.push(`${relPath} must consume file-discovery-policy.ts for repository discovery decisions.`);
+  const scannerPath = 'src/extraction/file-scanner.ts';
+  const scannerSource = readText(rootDir, scannerPath);
+  if (!scannerSource.includes("from './file-discovery-policy.js'")) {
+    failures.push(`${scannerPath} must consume file-discovery-policy.ts for repository discovery decisions.`);
   }
 
-  for (const name of EXTRACTION_POLICY_FUNCTIONS) {
-    const definitionPattern = new RegExp(`\\b(?:function|const)\\s+${name}\\b`);
-    if (definitionPattern.test(source)) {
-      failures.push(`${relPath} defines ${name}; repository discovery policy belongs in file-discovery-policy.ts.`);
+  for (const relPath of ['src/extraction/index.ts', scannerPath]) {
+    const source = readText(rootDir, relPath);
+    for (const name of EXTRACTION_POLICY_FUNCTIONS) {
+      const definitionPattern = new RegExp(`\\b(?:function|const)\\s+${name}\\b`);
+      if (definitionPattern.test(source)) {
+        failures.push(`${relPath} defines ${name}; repository discovery policy belongs in file-discovery-policy.ts.`);
+      }
     }
   }
 }

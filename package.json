@@ -75,6 +75,7 @@
     "check:ci-portability": "node scripts/check-ci-portability.mjs",
     "check:mcp-load": "bun scripts/check-mcp-load-budget.ts",
     "check:release": "bash scripts/release-audit.sh",
+    "quality:full": "bash scripts/quality-full.sh",
     "measure:mcp-load": "bun scripts/measure-mcp-load.ts",
     "benchmark:tokens": "bun scripts/benchmark-token-savings.ts",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\""

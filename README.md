@@ -324,7 +324,7 @@ win.
 
 ## Supported Languages & File Formats
 
-Cartograph supports **70 language modes**. Framework-aware and derived signals
+Cartograph supports **73 language modes**. Framework-aware and derived signals
 are listed separately so the core language matrix stays readable.
 
 <details>
@@ -340,7 +340,7 @@ are listed separately so the core language matrix stays readable.
 | Rust | `.rs` |
 | Java / Kotlin / Scala / Groovy | `.java`, `.kt`, `.kts`, `.scala`, `.sc`, `.groovy`, `.gradle` |
 | C / C++ / C# / CUDA | `.c`, `.h`, `.cpp`, `.cc`, `.cxx`, `.hpp`, `.hxx`, `.cs`, `.cu`, `.cuh` |
-| VB.NET | `.vb` |
+| VB.NET / Visual Basic 6 | `.vb`, `.bas`, `.frm`, `.ctl`, `.dob`, `.dsr`, `.pag`, `.vbp`, VB6 `.cls` by content |
 | Clojure / ClojureScript | `.clj`, `.cljs`, `.cljc`, `.edn`, `.bb` |
 | Common Lisp | `.lisp`, `.lsp`, `.l`, `.cl`, `.asd`, `.ros` |
 | Objective-C / Swift | `.m`, `.mm`, `.swift` |
@@ -348,11 +348,11 @@ are listed separately so the core language matrix stays readable.
 | Salesforce | `.cls`, `.trigger`, plus Aura/Visualforce markup extensions in Salesforce source paths |
 | BG3 modding data | `.lsx`, `.lsf`, `.lsfx`, `.lsefx`, `.tbl`, `.stats`, `.mei`, `.lsj`, `.ann`, `.anc`, `.khn`, `.div`, BG3 Stats/Generated `.txt`, BG3 Story goal `.txt`, BG3 Localization XML |
 | Dart / ReScript / R / Lua / Luau / Elixir / Lean | `.dart`, `.res`, `.resi`, `.r`, `.R`, `.lua`, `.luau`, `.ex`, `.exs`, `.lean` |
-| Haskell / Julia / OCaml | `.hs`, `.jl`, `.ml`, `.mli` |
+| F# / Haskell / Julia / OCaml | `.fs`, `.fsx`, `.hs`, `.jl`, `.ml`, `.mli` |
 | HTML / CSS / ERB / EJS | `.html`, `.htm`, `.css`, `.erb`, `.ejs`, `.eta`, `.etlua` |
 | Astro / Svelte / Vue / Liquid | `.astro`, `.svelte`, `.vue`, `.liquid` |
 | Pascal / Delphi | `.pas`, `.dpr`, `.dpk`, `.lpr`, `.dfm`, `.fmx` |
-| Bash / Zsh / Fish | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish` |
+| Bash / Zsh / Fish / PowerShell | `.sh`, `.bash`, `.zsh`, `.zshrc`, `.fish`, `.ps1`, `.psm1`, `.psd1` |
 | GraphQL / GLSL / HLSL / Nix / Solidity / SQL / HCL / Prisma / Properties / XML / YAML | `.graphql`, `.gql`, `.glsl`, `.vert`, `.frag`, `.comp`, `.geom`, `.tesc`, `.tese`, `.hlsl`, `.hlsli`, `.fx`, `.fxh`, `.nix`, `.sol`, `.sql`, `.tf`, `.tfvars`, `.hcl`, `.tofu`, `.prisma`, `.properties`, `.xml`, `.yaml`, `.yml` |
 | JSON / Jupyter / JSDoc / Regex / Verilog | `.json`, `.ipynb`, `.jsdoc`, `.regex`, `.regexp`, `.v`, `.vh`, `.sv`, `.svh` |
 
