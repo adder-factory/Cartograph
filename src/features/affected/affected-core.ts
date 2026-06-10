@@ -10,10 +10,10 @@
  * wrong answers on Go / Python / Rust / Java repos and drifted from the
  * MCP tool's polyglot `isTestPath` + `is_test` flag + test-name mining.
  */
-import type { QueryBuilder } from './db/queries.js';
-import { getAllFiles } from './db/queries-files.js';
-import { getFilesWithTestNames } from './db/queries-test-names.js';
-import { isTestPath } from './utils.js';
+import type { QueryBuilder } from '../../db/queries.js';
+import { getAllFiles } from '../../db/queries-files.js';
+import { getFilesWithTestNames } from '../../db/queries-test-names.js';
+import { isTestPath } from '../../utils.js';
 
 /** Default BFS depth through the dependents graph. */
 export const DEFAULT_DEPTH = 5;

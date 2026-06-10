@@ -1,15 +1,9 @@
 /**
- * Shared ASCII file-tree renderer.
- *
- * Both the MCP tool (`src/mcp/tools/files.ts`) and the CLI
- * (`src/bin/cartograph.ts`) render an identical tree structure — the
- * only differences are:
- *   - the concrete node type (generic `TNode`)
- *   - what happens per leaf (MCP pushes to a `string[]`; CLI calls
- *     `console.log` with chalk colouring)
- *
- * This module owns the shared recursion skeleton so neither caller
- * has to duplicate the prefix / indent / last-child logic.
+ * ASCII file-tree renderer for the `files` feature slice (consumed by
+ * `features/files/runtime.ts`, which drives both the MCP and CLI file
+ * listings). Generic over the node type (`TNode`) and the per-leaf action
+ * (MCP pushes to a `string[]`; the CLI logs with chalk colouring), so the
+ * prefix / indent / last-child recursion lives in exactly one place.
  */
 
 /** A node in the indexed-file path-trie. */
