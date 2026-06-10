@@ -28,6 +28,17 @@ import { readFile } from 'node:fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import type { Language } from '../types.js';
 import { getLanguageDefs, getLanguageDefByExtension, getLanguageDefByName } from './languages/registry.js';
+import {
+  clearParserCache,
+  getLanguageGrammar,
+  getParser,
+  getUnavailableGrammarErrors,
+  hasLoadedGrammar,
+  isGrammarKnown,
+  markGrammarUnavailable,
+  resetParser,
+  setLoadedGrammar,
+} from './grammar-cache.js';
 import { errMsg, logWarn } from '../errors.js';
 import { resolveAssetPath } from '../assets.js';
 
@@ -79,13 +90,6 @@ export const EXTENSION_MAP: Record<string, Language> = new Proxy({} as Record<st
   },
 });
 
-/**
- * Caches for loaded grammars and parsers.
- */
-const parserCache = new Map<Language, Parser>();
-const languageCache = new Map<Language, WasmLanguage>();
-const unavailableGrammarErrors = new Map<Language, string>();
-
 let parserInitialized = false;
 
 /**
@@ -121,7 +125,7 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
   for (const lang of languages) {
     if (seen.has(lang)) continue;
     seen.add(lang);
-    if (languageCache.has(lang) || unavailableGrammarErrors.has(lang)) continue;
+    if (isGrammarKnown(lang)) continue;
     const def = getLanguageDefByName(lang);
     if (!def?.grammar) continue;
     toLoad.push({ lang, wasmFile: def.grammar.wasmFile });
@@ -134,11 +138,11 @@ export async function loadGrammarsForLanguages(languages: Language[]): Promise<v
     try {
       const wasmPath = resolveAssetPath('extraction', 'wasm', wasmFile);
       const language = await WasmLanguage.load(await readFile(wasmPath));
-      languageCache.set(lang, language);
+      setLoadedGrammar(lang, language);
     } catch (error) {
       const message = errMsg(error);
       logWarn(`Failed to load ${lang} grammar — parsing will be unavailable: ${message}`);
-      unavailableGrammarErrors.set(lang, message);
+      markGrammarUnavailable(lang, message);
     }
   }
 }
@@ -154,35 +158,11 @@ export async function loadAllGrammars(): Promise<void> {
   await loadGrammarsForLanguages(allLanguages);
 }
 
-/**
- * Get a parser for the specified language. Returns synchronously from
- * the pre-loaded cache. Caller must have called loadGrammarsForLanguages()
- * for the language first.
- */
-export function getParser(language: Language): Parser | null {
-  if (parserCache.has(language)) {
-    return parserCache.get(language)!;
-  }
-  const lang = languageCache.get(language);
-  if (!lang) {
-    return null;
-  }
-  const parser = new Parser();
-  parser.setLanguage(lang);
-  parserCache.set(language, parser);
-  return parser;
-}
-
-/**
- * Get the loaded web-tree-sitter `Language` (grammar) object for a
- * language, or null when its grammar hasn't been loaded. Needed by
- * query-driven extractors (`TagsQueryExtractor`) which construct a
- * `Query` — that requires the `Language` object directly, not the
- * `Parser`. `getParser` is the right call for plain parsing.
- */
-export function getLanguageGrammar(language: Language): WasmLanguage | null {
-  return languageCache.get(language) ?? null;
-}
+// getParser / getLanguageGrammar / resetParser / clearParserCache /
+// getUnavailableGrammarErrors now live in the registry-free leaf
+// `grammar-cache.ts` (re-exported below) so extractors can read a parser
+// without importing this registry-coupled module — see grammar-cache.ts.
+export { getParser, getLanguageGrammar, resetParser, clearParserCache, getUnavailableGrammarErrors };
 
 /**
  * Detect language from file extension.
@@ -369,7 +349,7 @@ export function isGrammarLoaded(language: Language): boolean {
   const def = getLanguageDefByName(language);
   if (!def) return false;
   if (!def.grammar) return true; // custom extractor — always available
-  return languageCache.has(language);
+  return hasLoadedGrammar(language);
 }
 
 /**
@@ -377,56 +357,6 @@ export function isGrammarLoaded(language: Language): boolean {
  */
 export function getSupportedLanguages(): Language[] {
   return getLanguageDefs().map((d) => d.name as Language);
-}
-
-/**
- * Reset the cached parser for a language to reclaim WASM heap memory.
- * The tree-sitter WASM runtime accumulates fragmented memory over
- * thousands of parses. Deleting and recreating the Parser instance
- * forces the WASM heap to reset, preventing "memory access out of
- * bounds" crashes in large repos. `languageCache` is intentionally
- * kept — the next getParser() rebuilds a fresh Parser from it without
- * re-reading the `.wasm`.
- */
-export function resetParser(language: Language): void {
-  const old = parserCache.get(language);
-  if (old) {
-    old.delete();
-    parserCache.delete(language);
-  }
-}
-
-/**
- * Clear the per-language Parser cache (useful for testing).
- *
- * Note: `languageCache` and the `Parser.init()` runtime are
- * intentionally NOT cleared — the WASM `Language` modules are
- * expensive to load and stay cached so a subsequent `getParser` call
- * can rebuild a fresh `Parser` instance without re-reading the .wasm
- * file. There is deliberately no full-reset entry point: nothing in
- * the codebase needs to tear the WASM runtime down, and a test that
- * truly wants a clean slate re-imports the module.
- */
-export function clearParserCache(): void {
-  for (const parser of parserCache.values()) {
-    try {
-      parser.delete();
-    } catch {
-      /* ignore */
-    }
-  }
-  parserCache.clear();
-  unavailableGrammarErrors.clear();
-}
-
-/**
- * Snapshot of recorded grammar-load errors keyed by language. Used
- * by status / diagnostic surfaces to explain why a file's language
- * is unsupported at parse time. Empty when every requested grammar
- * loaded cleanly.
- */
-export function getUnavailableGrammarErrors(): Record<string, string> {
-  return Object.fromEntries(unavailableGrammarErrors);
 }
 
 /**

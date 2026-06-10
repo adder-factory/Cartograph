@@ -2,7 +2,7 @@ import type { Node as SyntaxNode, Tree } from 'web-tree-sitter';
 import type { ExtractionResult } from './types.js';
 import type { NodeKind } from '../types.js';
 import { getNodeText } from './tree-sitter-helpers.js';
-import { getParser } from './grammars.js';
+import { getParser } from './grammar-cache.js';
 import { errMsg } from '../errors.js';
 import { StandaloneExtractor } from './standalone-extractor.js';
 

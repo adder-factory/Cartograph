@@ -4,7 +4,7 @@ import type { Node as SyntaxNode, QueryMatch, Tree } from 'web-tree-sitter';
 import type { ExtractionResult } from './types.js';
 import type { Language, NodeKind } from '../types.js';
 import { getNodeText, type NodeIdFactory } from './tree-sitter-helpers.js';
-import { getParser, getLanguageGrammar } from './grammars.js';
+import { getParser, getLanguageGrammar } from './grammar-cache.js';
 import { errMsg } from '../errors.js';
 import { StandaloneExtractor } from './standalone-extractor.js';
 import { resolveAssetPath } from '../assets.js';
