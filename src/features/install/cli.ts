@@ -55,6 +55,34 @@ Examples:
   cartograph install --print-config qoder
 `,
   );
+
+  program
+    .command('uninstall')
+    .description(
+      'Remove cartograph MCP entries from installed agents (default: global). The package preuninstall hook is not run by npm v7+/bun, so the source/standalone uninstall paths call this.',
+    )
+    .option('-l, --location <where>', 'Which entries to remove: "global" or "local". Default: global', 'global')
+    .action((opts: { location?: string }) => runUninstallCommand(opts, deps));
+}
+
+async function runUninstallCommand(options: { location?: string }, deps: InstallCommandDeps): Promise<void> {
+  const location = options.location === 'local' ? 'local' : 'global';
+  try {
+    const { ALL_TARGETS } = await import('../../installer/targets/registry.js');
+    let removed = 0;
+    for (const target of ALL_TARGETS) {
+      if (!target.supportsLocation(location)) continue;
+      try {
+        target.uninstall(location);
+        removed++;
+      } catch {
+        // Each target is independently safe-to-skip.
+      }
+    }
+    deps.writeStdout(`Removed cartograph ${location} MCP entries from ${removed} agent target(s).`);
+  } catch (err) {
+    deps.error(`uninstall failed: ${errMsg(err)}`);
+  }
 }
 
 async function runInstallCommand(options: InstallOptions, deps: InstallCommandDeps): Promise<void> {
