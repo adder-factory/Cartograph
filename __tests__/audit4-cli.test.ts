@@ -69,7 +69,10 @@ describe('audit-4 CLI argument-layer fixes', () => {
   it('files --help shows folded module and one-file flags', () => {
     const { out, code } = runCli(['files', '--help']);
     expect(code).toBe(0);
-    expect(out).toContain('[path]');
+    // positional renamed from [path] to [target] to avoid colliding with
+    // the retired MCP `path` field (which would make the CLI<->MCP
+    // alignment test pass vacuously).
+    expect(out).toContain('[target]');
     expect(out).toContain('--format');
     expect(out).toContain('--dir-path');
     expect(out).toContain('--file');
