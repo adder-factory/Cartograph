@@ -2,11 +2,15 @@
 /**
  * Cartograph preuninstall cleanup script
  *
- * Runs automatically when `npm uninstall -g @adder-factory/cartograph`
- * is called. Loops over every known agent target's `uninstall(loc)`
- * for the global location only — local-location entries live inside
- * project working trees and aren't ours to nuke at npm-uninstall
- * time.
+ * Loops over every known agent target's `uninstall(loc)` for the global
+ * location only — local-location entries live inside project working
+ * trees and aren't ours to nuke.
+ *
+ * NOTE: npm v7+ and bun do NOT run `(pre|post)uninstall` lifecycle
+ * scripts, so the `preuninstall` package.json hook does not fire on a
+ * modern `npm uninstall -g` / `bun remove`. Invoke this explicitly from
+ * the source uninstall path (`install.sh --uninstall`) so global agent
+ * MCP entries are actually removed.
  *
  * This script must never throw — a failed cleanup must not block
  * uninstall.
