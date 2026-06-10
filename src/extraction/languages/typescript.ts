@@ -3,6 +3,15 @@ import type { LanguageExtractor } from '../tree-sitter-types.js';
 import type { LanguageDef } from './types.js';
 import { resolveClassFieldFunctionBody, tryExtractFunctionDeclarationAsComponent } from './js-function-helpers.js';
 
+const EXPORT_SCOPE_BOUNDARY_TYPES = new Set([
+  'arrow_function',
+  'function_expression',
+  'function_declaration',
+  'method_definition',
+  'class_declaration',
+  'class_body',
+]);
+
 export const typescriptExtractor: LanguageExtractor = {
   functionTypes: [
     'function_declaration',
@@ -59,13 +68,15 @@ export const typescriptExtractor: LanguageExtractor = {
     // interface contract — never reached at runtime under current callers
     // but kept so future refactors that pass undefined don't silently crash.
     if (!node) return false;
-    // Walk the parent chain to find an export_statement ancestor.
-    // This correctly handles deeply nested nodes like arrow functions
-    // inside variable declarations: `export const X = () => { ... }`
-    // where the arrow_function is 3 levels deep under export_statement.
+    // Walk the parent chain to find an export_statement ancestor, but
+    // stop at enclosing function/class boundaries. This still handles
+    // `export const X = () => { ... }`, while keeping local handlers
+    // inside exported React components from inheriting the component's
+    // exportedness.
     let current = node.parent;
     while (current) {
       if (current.type === 'export_statement') return true;
+      if (EXPORT_SCOPE_BOUNDARY_TYPES.has(current.type)) return false;
       current = current.parent;
     }
     return false;

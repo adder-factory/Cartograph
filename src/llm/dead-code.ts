@@ -172,15 +172,18 @@ function isGoConventionLive(node: Node): boolean {
 
 /**
  * Whether a path is exempt from dead-code suspicion: test, script, and
- * benchmark code is expected to carry uncalled symbols. Fixtures are
- * deliberately NOT included — `findGraphCandidates` callers that want
- * fixture orphans dropped pass `isFixturePath` through the `isExempt`
- * hook (fixture orphans sort first by file_path and would otherwise
- * eat a small `max` budget; see that parameter's doc).
+ * benchmark code is expected to carry uncalled symbols, and `generated`
+ * code (`*.gen.*` / `*.generated.*`) exposes framework-required symbols
+ * consumed by codegen / declaration-merging rather than explicit imports
+ * (see `path-class.ts`), so it must not be reported as dead hand-written
+ * API. Fixtures are deliberately NOT included — `findGraphCandidates`
+ * callers that want fixture orphans dropped pass `isFixturePath` through
+ * the `isExempt` hook (fixture orphans sort first by file_path and would
+ * otherwise eat a small `max` budget; see that parameter's doc).
  */
 function isSuspicionExemptPath(filePath: string): boolean {
   const c = pathCategory(filePath);
-  return c === 'test' || c === 'script' || c === 'benchmark';
+  return c === 'test' || c === 'script' || c === 'benchmark' || c === 'generated';
 }
 
 const DEFAULT_CONCURRENCY = 8;

@@ -1285,6 +1285,96 @@ export function aggregate(order: Order): number {
     }
   });
 
+  it('does not flag workspace package exports consumed through package subpath imports', async () => {
+    fs.mkdirSync(path.join(dir, 'packages/shared/src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'apps/client/src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ name: 'workspace-unused-export', workspaces: ['apps/*', 'packages/*'] }),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'packages/shared/package.json'),
+      JSON.stringify({
+        name: '@workspace/shared',
+        exports: {
+          './schema': './src/schema.ts',
+        },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(dir, 'packages/shared/src/schema.ts'),
+      `export const UsedSchema = { parse(value: unknown): unknown { return value; } };\n`,
+    );
+    fs.writeFileSync(
+      path.join(dir, 'apps/client/src/main.ts'),
+      `import { UsedSchema } from '@workspace/shared/schema';\nexport const parsed = UsedSchema.parse('ok');\n`,
+    );
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const findings = getFindingsRanked(cg.queries, {
+        biomarker: 'unused_export',
+        minSeverity: 'info',
+        limit: 100,
+      });
+      expect(findings.find((r) => r.name === 'UsedSchema')).toBeUndefined();
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('does not flag local handlers inside exported TSX components as unused exports', async () => {
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'src/component.tsx'),
+      `export const SearchBox = () => {\n` +
+        `  const onKeyDown = (event: { key: string }): void => {\n` +
+        `    if (event.key === 'Enter') console.log('search');\n` +
+        `  };\n` +
+        `  return <input onKeyDown={onKeyDown} />;\n` +
+        `};\n`,
+    );
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const findings = getFindingsRanked(cg.queries, {
+        biomarker: 'unused_export',
+        minSeverity: 'info',
+        limit: 100,
+      });
+      expect(findings.find((r) => r.name === 'onKeyDown')).toBeUndefined();
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('does not merge module header comments into a constant docstring across a blank line', async () => {
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, 'src/config.ts'),
+      `// Module header mentions phase 2 and 33 preferences.\n` +
+        `// Those numbers describe the file, not the constant below.\n` +
+        `\n` +
+        `// DEBOUNCE_MS batches writes before persistence.\n` +
+        `export const DEBOUNCE_MS = 400;\n`,
+    );
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const findings = getFindingsRanked(cg.queries, {
+        biomarker: 'stale_doc',
+        minSeverity: 'info',
+        limit: 100,
+      });
+      expect(findings.find((r) => r.name === 'DEBOUNCE_MS')).toBeUndefined();
+    } finally {
+      cg.close();
+    }
+  });
+
   it('annotates findings with surfaceReason — full-pass after indexAll, stats+ranked agree (G3 fix)', async () => {
     // Pin migration 061 + the G3 fix: after a full pass, both mode=stats
     // and mode=ranked should report consistent surface-reason labels.

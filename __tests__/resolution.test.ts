@@ -1161,6 +1161,28 @@ import { baz, qux } from './baz.js';
       expect(mappings.some((m) => m.localName === 'bar')).toBe(true);
     });
 
+    it('extractImportMappings — normalizes TypeScript type-only import specifiers', () => {
+      const content = `
+import type DefaultShape from './default-shape.js';
+import type { Foo, Bar as LocalBar } from './types.js';
+import { type Baz, type Qux as LocalQux, Runtime } from './mixed.js';
+`;
+
+      const mappings = extractImportMappings('src/index.ts', content, 'typescript');
+
+      expect(mappings.find((m) => m.localName === 'DefaultShape')).toMatchObject({
+        exportedName: 'default',
+        source: './default-shape.js',
+        isDefault: true,
+      });
+      expect(mappings.find((m) => m.localName === 'Foo')).toMatchObject({ exportedName: 'Foo' });
+      expect(mappings.find((m) => m.localName === 'LocalBar')).toMatchObject({ exportedName: 'Bar' });
+      expect(mappings.find((m) => m.localName === 'Baz')).toMatchObject({ exportedName: 'Baz' });
+      expect(mappings.find((m) => m.localName === 'LocalQux')).toMatchObject({ exportedName: 'Qux' });
+      expect(mappings.find((m) => m.localName === 'Runtime')).toMatchObject({ exportedName: 'Runtime' });
+      expect(mappings.some((m) => m.localName === 'type' || m.localName.startsWith('type '))).toBe(false);
+    });
+
     it('should extract Python import mappings', () => {
       const content = `
 from utils import helper

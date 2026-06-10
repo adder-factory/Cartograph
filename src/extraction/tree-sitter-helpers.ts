@@ -138,6 +138,11 @@ function isDecorativeRuleLine(line: string): boolean {
   return DECORATIVE_RULE_RE.test(line.replaceAll(/\s+/g, ''));
 }
 
+function hasBlankLineBetween(left: SyntaxNode, right: SyntaxNode, source: string): boolean {
+  const gap = source.slice(left.endIndex, right.startIndex);
+  return /\r?\n\s*\r?\n/.test(gap);
+}
+
 /**
  * Get the docstring/comment preceding a node.
  *
@@ -161,8 +166,10 @@ export function getPrecedingDocstring(node: SyntaxNode, source: string): string 
   }
   let sibling = target.previousNamedSibling;
   const comments: string[] = [];
+  let closerNode = target;
 
   while (sibling) {
+    if (hasBlankLineBetween(sibling, closerNode, source)) break;
     if (
       sibling.type === 'comment' ||
       sibling.type === 'line_comment' ||
@@ -170,6 +177,7 @@ export function getPrecedingDocstring(node: SyntaxNode, source: string): string 
       sibling.type === 'documentation_comment'
     ) {
       comments.unshift(getNodeText(sibling, source));
+      closerNode = sibling;
       sibling = sibling.previousNamedSibling;
     } else {
       break;

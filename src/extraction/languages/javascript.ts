@@ -2,6 +2,15 @@ import { getChildByField, getNodeText } from '../tree-sitter-helpers.js';
 import type { LanguageExtractor } from '../tree-sitter-types.js';
 import { resolveClassFieldFunctionBody, tryExtractFunctionDeclarationAsComponent } from './js-function-helpers.js';
 
+const EXPORT_SCOPE_BOUNDARY_TYPES = new Set([
+  'arrow_function',
+  'function_expression',
+  'function_declaration',
+  'method_definition',
+  'class_declaration',
+  'class_body',
+]);
+
 export const javascriptExtractor: LanguageExtractor = {
   functionTypes: [
     'function_declaration',
@@ -42,6 +51,7 @@ export const javascriptExtractor: LanguageExtractor = {
     let current = node.parent;
     while (current) {
       if (current.type === 'export_statement') return true;
+      if (EXPORT_SCOPE_BOUNDARY_TYPES.has(current.type)) return false;
       current = current.parent;
     }
     return false;
