@@ -110,17 +110,35 @@ function pathContainsPath(parent: string, child: string): boolean {
  * validatePathWithinRoot for hot paths where symlink TOCTOU isn't relevant.
  */
 export function validatePathWithinRootReal(projectRoot: string, filePath: string): string | null {
-  const resolved = path.resolve(projectRoot, filePath);
   const normalizedRoot = path.resolve(projectRoot);
+  let realRoot: string;
+  try {
+    realRoot = fs.realpathSync(normalizedRoot);
+  } catch {
+    // realpath of the root itself failed (broken symlink, permissions) —
+    // fall back to lexical containment; downstream reads fail naturally.
+    const resolved = path.resolve(normalizedRoot, filePath);
+    return pathContainsPath(normalizedRoot, resolved) ? resolved : null;
+  }
+  return validatePathWithinRealRoot(normalizedRoot, realRoot, filePath);
+}
+
+/**
+ * Like {@link validatePathWithinRootReal} but with the realpath'd root
+ * precomputed by the caller, so a BATCH caller (e.g. the freshness drift
+ * scan over a 10k-file repo) realpaths the constant project root ONCE per
+ * scan instead of once per file — halving the realpath syscalls on a hot,
+ * synchronous MCP-gate path.
+ */
+export function validatePathWithinRealRoot(normalizedRoot: string, realRoot: string, filePath: string): string | null {
+  const resolved = path.resolve(normalizedRoot, filePath);
   if (!pathContainsPath(normalizedRoot, resolved)) return null;
   try {
     const realPath = fs.realpathSync(resolved);
-    const realRoot = fs.realpathSync(normalizedRoot);
     return pathContainsPath(realRoot, realPath) ? realPath : null;
   } catch {
-    // realpath failures (broken symlink, permissions) — return the lexically-
-    // resolved path. The downstream readFileSync will fail naturally and the
-    // caller already handles read errors.
+    // realpath of the file failed — return the lexically-resolved path; the
+    // downstream readFileSync will fail naturally and callers handle it.
     return resolved;
   }
 }
