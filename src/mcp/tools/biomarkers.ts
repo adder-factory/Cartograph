@@ -476,7 +476,7 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
       }),
     );
   }
-  const lines = renderRankedFindingsTable(rows, biomarker, minSeverity, args.lowTokens === true);
+  const lines = renderRankedFindingsTable(rows, { biomarker, minSeverity, lowTokens: args.lowTokens === true });
   // SQL LIMIT — `rows.length === limit` is a heuristic for "cap hit".
   // False positive when total findings exactly equals the cap; cheap.
   const hasMore = rows.length >= limit;
@@ -632,10 +632,9 @@ function renderRankedFindingsTable(
     centrality: number | null;
     surfaceReason: 'full-pass' | 'partial-rescan' | 'cached';
   }>,
-  biomarker: string | undefined,
-  minSeverity: BiomarkerSeverity,
-  lowTokens = false,
+  opts: { biomarker: string | undefined; minSeverity: BiomarkerSeverity; lowTokens?: boolean },
 ): string[] {
+  const { biomarker, minSeverity, lowTokens = false } = opts;
   if (lowTokens) {
     // Compact pipe rows — no markdown table or multi-paragraph preamble.
     // Columns: name|kind|biomarker|severity|metric|centrality|path
