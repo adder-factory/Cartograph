@@ -58,15 +58,12 @@ summaries (pending / save),
 sync-if-dirty, tests-for, trace-to-culprits
 ```
 
-`cartograph file-deps`, `cartograph file-symbols`, and `cartograph module`
-survive as CLI shortcuts for human ergonomics. MCP callers use the folded
-`cartograph_files` modes instead:
-`{format: "deps" | "symbols" | "module"}`.
-
-The retired `dependency-coverage`, `discover`, `host-diagnostics`, and
-`local-chat` top-level shortcuts are not registered. Use canonical modes:
-`cartograph deps --mode coverage`, `cartograph host --mode discover`,
-`cartograph host --mode diagnostics`, and `cartograph ask --mode local_chat`.
+The retired `dependency-coverage`, `discover`, `file-deps`, `file-symbols`,
+`host-diagnostics`, `local-chat`, and `module` top-level shortcuts are not
+registered. Use canonical modes: `cartograph deps --mode coverage`,
+`cartograph host --mode discover`, `cartograph files --format deps`,
+`cartograph files --format symbols`, `cartograph host --mode diagnostics`,
+`cartograph ask --mode local_chat`, and `cartograph files --format module`.
 
 `cartograph similar <symbol>` is an extra CLI-only shortcut — it has no
 standalone MCP tool; it routes through `cartograph_graph({direction:
@@ -113,11 +110,6 @@ deprecated `--mode static|judge` alias.
   lifecycle (`status` / `start` / `stop` / `logs`). MCP-side doctor and
   status report backend readiness, but process spawning/log tailing
   remains a human/operator CLI concern.
-- **`cartograph file-deps`, `cartograph file-symbols`, `cartograph module`**
-  — ergonomic CLI shortcuts. MCP-side they are folded into
-  `cartograph_files({format: 'deps'|'symbols'|'module'})` to keep the
-  advertised tool count bounded.
-
 ### Family-action pattern (CLI subcommands)
 
 Family-action is the convention for tools whose surface naturally
@@ -137,7 +129,7 @@ backend   <status|start|stop|logs>
 Mode-discriminated families keep related MCP and CLI capabilities together:
 
 ```
-files <format:tree|flat|grouped|summary|deps|symbols|module>
+files <format:tree|flat|grouped|summary|deps|symbols|module|read>
 deps  <mode:unused|coverage>
 host  <mode:diagnostics|discover>
 ask   <mode:code|local_chat>

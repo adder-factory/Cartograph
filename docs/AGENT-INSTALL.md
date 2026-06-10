@@ -48,10 +48,14 @@ commands work without an LLM backend.
 quiet background sync. Existing hook content is preserved; remove the managed
 blocks with `cartograph install-hooks --remove`.
 
-For Claude Code, local install follows Claude's private project scope: the MCP
-server is stored under the current project in `~/.claude.json`, permissions are
-written to `.claude/settings.local.json`, and instructions are written to
-`CLAUDE.local.md`. Cartograph adds those local project files to `.gitignore`.
+For local installs, generated project config and instruction files are added to
+`.gitignore` because local MCP entries can contain absolute checkout paths and
+personal agent rules. Local MCP server args include
+`--project-path <this-project>` where the client config is project-scoped. This
+avoids a global MCP entry defaulting to whichever project was installed last.
+Claude Code is a special case: the private project-scoped MCP entry is stored in
+`~/.claude.json`, while permissions and instructions stay in the worktree as
+gitignored files.
 
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
 Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,

@@ -13,14 +13,11 @@ import { registerAffectedCommand as registerAffectedFeatureCommand } from '../..
 import { registerAskCommand as registerAskFeatureCommand } from '../../features/ask/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';
 import { registerDigestCommand } from '../../features/digest/index.js';
-import { registerFileDepsCommand as registerFileDepsFeatureCommand } from '../../features/file-deps/index.js';
-import { registerFileSymbolsCommand as registerFileSymbolsFeatureCommand } from '../../features/file-symbols/index.js';
 import {
   buildDirRollup,
   filterFilesByDir,
   registerFilesCommand as registerFilesFeatureCommand,
 } from '../../features/files/index.js';
-import { registerModuleCommand as registerModuleFeatureCommand } from '../../features/module/index.js';
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { registerGraphExportCommand as registerGraphExportFeatureCommand } from '../../features/graph-export/index.js';
 import type { CliArgumentOptionCommand } from '../../features/shared/cli-command.js';
@@ -133,27 +130,6 @@ function registerFilesReadCommand(deps: ReadCommandDeps): void {
   });
 }
 
-function registerFileDepsReadCommand(deps: ReadCommandDeps): void {
-  registerFileDepsFeatureCommand({
-    ...deps,
-    writeLine: out,
-  });
-}
-
-function registerFileSymbolsReadCommand(deps: ReadCommandDeps): void {
-  registerFileSymbolsFeatureCommand({
-    ...deps,
-    writeLine: out,
-  });
-}
-
-function registerModuleReadCommand(deps: ReadCommandDeps): void {
-  registerModuleFeatureCommand({
-    ...deps,
-    writeLine: out,
-  });
-}
-
 function registerAffectedReadCommand(deps: ReadCommandDeps): void {
   registerAffectedFeatureCommand({
     ...deps,
@@ -187,9 +163,6 @@ export function registerReadCommands(deps: ReadCommandDeps = defaultReadCommandD
   registerFindCommand(deps);
   registerDigestCommand(deps);
   registerFilesReadCommand(deps);
-  registerFileDepsReadCommand(deps);
-  registerFileSymbolsReadCommand(deps);
-  registerModuleReadCommand(deps);
   registerGraphExportReadCommand(deps);
   registerAffectedReadCommand(deps);
 }

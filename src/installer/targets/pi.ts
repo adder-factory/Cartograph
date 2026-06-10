@@ -29,6 +29,7 @@ import {
   writeMcpEntryJsonc,
   type WriteMcpEntryJsoncArgs,
 } from './write-mcp-entry-jsonc.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const PI_DOCS_URL = 'https://pi.dev/packages/pi-mcp-adapter';
 
@@ -72,12 +73,16 @@ class PiTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntry(loc, opts)],
-      notes: [
-        'Pi requires `pi install npm:pi-mcp-adapter` or `pi install npm:pi-mcp-extension` before MCP config is loaded.',
-      ],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntry(loc, opts)],
+        notes: [
+          'Pi requires `pi install npm:pi-mcp-adapter` or `pi install npm:pi-mcp-extension` before MCP config is loaded.',
+        ],
+      },
+      [mcpJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -95,7 +100,9 @@ class PiTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

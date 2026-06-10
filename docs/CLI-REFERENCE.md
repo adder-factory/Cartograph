@@ -39,10 +39,13 @@ Supported install target ids: `claude`, `cursor`, `codex`, `copilot`,
 `antigravity`, `kiro`, `factory`, `rovo`, `qoder`, `bob`, `kimi`, `pi`, and
 `reasonix`.
 
-For Claude Code, `--location=local` uses Claude's private project scope:
-`~/.claude.json` stores the project-scoped MCP entry, while
-`.claude/settings.local.json` and `CLAUDE.local.md` stay in the repository
-worktree and are added to `.gitignore`.
+For `--location=local`, generated project config and instruction files are
+added to `.gitignore` because local MCP entries can contain absolute checkout
+paths and personal agent rules. Local MCP server args are pinned with
+`--project-path` where the client config is project-scoped. Claude Code is a
+special case: `~/.claude.json` stores the private project-scoped MCP entry,
+while `.claude/settings.local.json` and `CLAUDE.local.md` stay in the
+repository worktree as gitignored files.
 
 Install completions by loading the generated script in your shell startup file,
 for example `cartograph completions zsh` or `cartograph completions powershell`
@@ -107,9 +110,9 @@ cartograph node AuthService --include-callers --include-tests
 cartograph context "fix login timeout" --format plan
 cartograph explore billing routes
 cartograph files src --format tree
-cartograph file-deps src/billing/service.ts
-cartograph file-symbols src/billing/service.ts
-cartograph module src/billing
+cartograph files src/billing/service.ts --format deps
+cartograph files src/billing/service.ts --format symbols
+cartograph files src/billing --format module
 cartograph entry-points
 ```
 

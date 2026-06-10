@@ -105,8 +105,7 @@ export interface AgentTarget {
   /**
    * Whether this target supports the given install location.
    *
-   * Some agents (Codex CLI as of 2026-05) have no project-local
-   * config concept — only a single `~/.codex/` dir. Returning false
+   * Some agents have no project-local config concept. Returning false
    * for an unsupported (target, location) pair lets the orchestrator
    * skip cleanly with a clear message.
    */

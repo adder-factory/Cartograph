@@ -29,6 +29,7 @@ import {
   writePermissionsAllowList,
   writeJsonFile,
 } from './shared.js';
+import { writeProjectGitignoreEntries } from './gitignore.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 
@@ -142,22 +143,6 @@ function writeScopedInstructionsEntry(loc: Location): WriteResult['files'][numbe
   return writeInstructionsFile(scopedInstructionsPath(loc));
 }
 
-function writeLocalGitignoreEntries(): WriteResult['files'][number] {
-  const file = path.join(process.cwd(), '.gitignore');
-  const created = !fs.existsSync(file);
-  const content = created ? '' : fs.readFileSync(file, 'utf-8');
-  const lines = new Set(content.split(/\r?\n/).map((line) => line.trim()));
-  const missing = CLAUDE_LOCAL_GITIGNORE_ENTRIES.filter((entry) => !lines.has(entry));
-  if (missing.length === 0 && !created) {
-    return { path: file, action: 'unchanged' };
-  }
-
-  const base = content.trimEnd();
-  const next = [base, ...missing].filter((part) => part.length > 0).join('\n') + '\n';
-  atomicWriteFileSync(file, next);
-  return { path: file, action: created ? 'created' : 'updated' };
-}
-
 class ClaudeCodeTarget implements AgentTarget {
   readonly id = 'claude' as const;
   readonly displayName = 'Claude Code';
@@ -195,7 +180,7 @@ class ClaudeCodeTarget implements AgentTarget {
     files.push(writeScopedInstructionsEntry(loc));
 
     if (loc === 'local') {
-      files.push(writeLocalGitignoreEntries());
+      files.push(writeProjectGitignoreEntries(CLAUDE_LOCAL_GITIGNORE_ENTRIES));
     }
 
     return { files };

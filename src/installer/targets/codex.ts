@@ -6,10 +6,10 @@
  *     the narrow serializer in `./toml.ts`.
  *   - Instructions to `~/.codex/AGENTS.md`.
  *
- * Codex CLI as of 2026-05 has no project-local config concept —
- * everything lives under `~/.codex/`. `supportsLocation('local')`
- * returns false; the orchestrator skips Codex when the user picks
- * the local install location.
+ * Codex supports project-scoped `.codex/config.toml` in trusted
+ * projects. For local installs we write only that project config and
+ * pin the Cartograph server to the current project via `--project-path`;
+ * project guidance stays in the repository's normal AGENTS.md files.
  *
  * No permissions concept.
  */
@@ -24,19 +24,22 @@ import {
   removeMarkedSection,
   writeMarkedInstructionsFile,
 } from './shared.js';
+import { writeProjectGitignoreEntries } from './gitignore.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START } from '../instructions-template.js';
 import { buildTomlTable, removeTomlTable, upsertTomlTable } from './toml.js';
+import { mcpCommandOptionsForLocation } from './mcp-config.js';
 
 const TOML_HEADER = 'mcp_servers.cartograph';
+const CODEX_LOCAL_GITIGNORE_ENTRIES = ['.codex/config.toml'];
 
-function configDir(): string {
-  return path.join(getHomeDir(), '.codex');
+function configDir(loc: Location): string {
+  return loc === 'global' ? path.join(getHomeDir(), '.codex') : path.join(process.cwd(), '.codex');
 }
-function tomlConfigPath(): string {
-  return path.join(configDir(), 'config.toml');
+function tomlConfigPath(loc: Location): string {
+  return path.join(configDir(loc), 'config.toml');
 }
 function instructionsPath(): string {
-  return path.join(configDir(), 'AGENTS.md');
+  return path.join(configDir('global'), 'AGENTS.md');
 }
 
 class CodexTarget implements AgentTarget {
@@ -44,15 +47,12 @@ class CodexTarget implements AgentTarget {
   readonly displayName = 'Codex CLI';
   readonly docsUrl = 'https://github.com/openai/codex';
 
-  supportsLocation(loc: Location): boolean {
-    return loc === 'global';
+  supportsLocation(_loc: Location): boolean {
+    return true;
   }
 
   detect(loc: Location): DetectionResult {
-    if (loc !== 'global') {
-      return { installed: false, alreadyConfigured: false };
-    }
-    const tomlPath = tomlConfigPath();
+    const tomlPath = tomlConfigPath(loc);
     let alreadyConfigured = false;
     if (fs.existsSync(tomlPath)) {
       try {
@@ -62,29 +62,28 @@ class CodexTarget implements AgentTarget {
         /* ignore */
       }
     }
-    const installed = fs.existsSync(configDir());
+    const installed = fs.existsSync(configDir('global')) || (loc === 'local' && fs.existsSync(configDir('local')));
     return { installed, alreadyConfigured, configPath: tomlPath };
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    if (loc !== 'global') {
-      return {
-        files: [],
-        notes: ['Codex CLI has no project-local config — re-run with --location=global to install.'],
-      };
-    }
     const files: WriteResult['files'] = [];
 
-    files.push(writeMcpEntry(opts), writeInstructionsEntry());
+    files.push(writeMcpEntry(loc, opts));
+    if (loc === 'global') {
+      files.push(writeInstructionsEntry());
+    } else {
+      files.push(writeProjectGitignoreEntries(CODEX_LOCAL_GITIGNORE_ENTRIES));
+    }
 
     return { files };
   }
 
   uninstall(loc: Location): WriteResult {
-    if (loc !== 'global') return { files: [] };
     const files: WriteResult['files'] = [];
 
-    files.push(removeTomlConfigEntry(tomlConfigPath()));
+    files.push(removeTomlConfigEntry(tomlConfigPath(loc)));
+    if (loc !== 'global') return { files };
 
     const instr = instructionsPath();
     const instrAction = removeMarkedSection(instr, CARTOGRAPH_SECTION_START, CARTOGRAPH_SECTION_END);
@@ -94,16 +93,13 @@ class CodexTarget implements AgentTarget {
   }
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
-    if (loc !== 'global') {
-      return '# Codex CLI has no project-local config — use --location=global.\n';
-    }
-    const block = buildCartographBlock(opts);
-    return `# Add to ${tomlConfigPath()}\n\n${block}\n`;
+    const block = buildCartographBlock(loc, opts);
+    return `# Add to ${tomlConfigPath(loc)}\n\n${block}\n`;
   }
 
   describePaths(loc: Location): string[] {
-    if (loc !== 'global') return [];
-    return [tomlConfigPath(), instructionsPath()];
+    if (loc === 'global') return [tomlConfigPath(loc), instructionsPath()];
+    return [tomlConfigPath(loc), path.join(process.cwd(), '.gitignore')];
   }
 }
 
@@ -128,20 +124,20 @@ function removeTomlConfigEntry(tomlPath: string): WriteResult['files'][number] {
   return { path: tomlPath, action: 'removed' };
 }
 
-function buildCartographBlock(opts: Pick<InstallOptions, 'command'> = {}): string {
-  const mcp = getMcpServerConfig(opts);
+function buildCartographBlock(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
+  const mcp = getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts));
   return buildTomlTable(TOML_HEADER, {
     command: mcp.command,
     args: mcp.args,
   });
 }
 
-function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
-  const file = tomlConfigPath();
+function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
+  const file = tomlConfigPath(loc);
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  const block = buildCartographBlock(opts);
+  const block = buildCartographBlock(loc, opts);
   // Single read — `existing === ''` derives both "is the file empty
   // or absent" and "what was its content," avoiding a TOCTOU window
   // between two `fs.existsSync` calls.

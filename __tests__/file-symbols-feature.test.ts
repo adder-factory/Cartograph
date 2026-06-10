@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { getAllFilesWithSymbolCount } from '../src/db/queries-files.js';
+import { buildDirRollup, filterFilesByDir, runFilesCommand } from '../src/features/files/index.js';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
@@ -107,5 +109,42 @@ describe('cartograph_files format=symbols', () => {
     const text = textOf(await handler.execute('cartograph_files', { format: 'symbols', file: 'src/missing.ts' }));
     expect(text).toContain('No indexed file matched "src/missing.ts"');
     expect(text).toContain('cartograph_files');
+  });
+
+  it('CLI files --format symbols renders JSON through the same runtime', async () => {
+    const lines: string[] = [];
+    await runFilesCommand(
+      {
+        program: null as never,
+        error: (message) => lines.push(`error:${message}`),
+        info: (message) => lines.push(`info:${message}`),
+        resolveProjectPath: () => tempDir,
+        loadCartograph: async () => ({
+          default: {
+            open: async () => ({
+              projectRoot: cg.projectRoot,
+              queries: cg.queries,
+              internals: cg.internals,
+              close: () => undefined,
+            }),
+          },
+        }),
+        isInitialized: () => true,
+        getAllFilesWithSymbolCount,
+        getFileSummaries: () => new Map(),
+        filterFilesByDir,
+        buildDirRollup,
+        runViaMCP: async () => undefined,
+        writeLine: (message = '') => lines.push(message),
+      },
+      'src/service.ts',
+      { format: 'symbols', json: true },
+    );
+    const parsed = JSON.parse(lines.at(-1)!) as {
+      file: string;
+      symbols: Array<{ name: string }>;
+    };
+    expect(parsed.file).toBe('src/service.ts');
+    expect(parsed.symbols.map((symbol) => symbol.name)).toContain('BillingService');
   });
 });

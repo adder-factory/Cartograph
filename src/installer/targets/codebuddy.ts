@@ -32,6 +32,7 @@ import {
   writeMcpEntryJsonc,
   type WriteMcpEntryJsoncArgs,
 } from './write-mcp-entry-jsonc.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const CODEBUDDY_DOCS_URL = 'https://www.codebuddy.ai/docs/cli/mcp';
 
@@ -81,10 +82,14 @@ class CodeBuddyTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntry(loc, opts)],
-      notes: ['Restart CodeBuddy, or run its MCP reload command if an active session supports it.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntry(loc, opts)],
+        notes: ['Restart CodeBuddy, or run its MCP reload command if an active session supports it.'],
+      },
+      [mcpJsoncPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -102,7 +107,9 @@ class CodeBuddyTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsoncPath(loc)];
+    const paths = [mcpJsoncPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

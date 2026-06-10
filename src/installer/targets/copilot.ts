@@ -18,6 +18,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const COPILOT_DOCS_URL = 'https://docs.github.com/copilot/how-tos/copilot-cli/customize-copilot/add-mcp-servers';
 
@@ -74,10 +75,14 @@ class CopilotTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntryJson(loc, copilotMcpConfig(opts.command))],
-      notes: ['Run /mcp reload in Copilot CLI, or start a new session.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntryJson(loc, copilotMcpConfig(opts.command))],
+        notes: ['Run /mcp reload in Copilot CLI, or start a new session.'],
+      },
+      [mcpJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -95,7 +100,9 @@ class CopilotTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

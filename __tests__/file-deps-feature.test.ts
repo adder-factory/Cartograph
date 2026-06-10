@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { getAllFilesWithSymbolCount } from '../src/db/queries-files.js';
-import { runFileDepsCommand } from '../src/features/file-deps/index.js';
+import { buildDirRollup, filterFilesByDir, runFilesCommand } from '../src/features/files/index.js';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
@@ -104,9 +104,9 @@ describe('cartograph_files format=deps', () => {
     expect(text).toContain('cartograph_files');
   });
 
-  it('CLI command renders JSON through the same runtime', async () => {
+  it('CLI files --format deps renders JSON through the same runtime', async () => {
     const lines: string[] = [];
-    await runFileDepsCommand(
+    await runFilesCommand(
       {
         program: null as never,
         error: (message) => lines.push(`error:${message}`),
@@ -124,10 +124,14 @@ describe('cartograph_files format=deps', () => {
         }),
         isInitialized: () => true,
         getAllFilesWithSymbolCount,
+        getFileSummaries: () => new Map(),
+        filterFilesByDir,
+        buildDirRollup,
+        runViaMCP: async () => undefined,
         writeLine: (message = '') => lines.push(message),
       },
       'src/service.ts',
-      { json: true },
+      { format: 'deps', json: true },
     );
     const parsed = JSON.parse(lines.at(-1)!) as {
       dependencies: string[];

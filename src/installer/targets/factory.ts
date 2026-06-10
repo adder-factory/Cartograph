@@ -22,6 +22,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const FACTORY_DOCS_URL = 'https://docs.factory.ai/cli/configuration/mcp';
 
@@ -66,10 +67,14 @@ class FactoryDroidTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntry(loc, opts)],
-      notes: ['Droid reloads MCP config changes automatically; restart the session if tools do not appear.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntry(loc, opts)],
+        notes: ['Droid reloads MCP config changes automatically; restart the session if tools do not appear.'],
+      },
+      [mcpJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -87,7 +92,9 @@ class FactoryDroidTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

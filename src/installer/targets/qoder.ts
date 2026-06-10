@@ -32,6 +32,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, writeProjectGitignoreFileEntries } from './gitignore.js';
 
 const QODER_DOCS_URL = 'https://docs.qoder.com/en/cli/mcp-servers';
 
@@ -76,6 +77,9 @@ class QoderTarget implements AgentTarget {
     if (opts.autoAllow) {
       files.push(writePermissionsEntry(loc));
     }
+    if (loc === 'local') {
+      files.push(writeProjectGitignoreFileEntries([settingsJsonPath(loc)]));
+    }
     return {
       files,
       notes: ['Run /mcp reload in an active Qoder session, or start a new session.'],
@@ -97,7 +101,9 @@ class QoderTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [settingsJsonPath(loc)];
+    const paths = [settingsJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

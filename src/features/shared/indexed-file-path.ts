@@ -4,6 +4,12 @@ export interface ResolveIndexedFilePathArgs {
   file: string;
   projectRoot: string;
   indexedFiles: readonly { path: string }[];
+  /**
+   * How to refer to the file-listing command in the no-match hint.
+   * Defaults to the MCP tool name; CLI callers pass `cartograph files`
+   * so a CLI user isn't pointed at an MCP tool they can't invoke.
+   */
+  inspectHint?: string;
 }
 
 export type ResolveIndexedFilePathResult =
@@ -60,5 +66,6 @@ export function resolveIndexedFilePath(args: ResolveIndexedFilePathArgs): Resolv
       message: `\`file\` "${raw}" is ambiguous; matches ${matches.length} indexed files. Pass the full project-relative path.`,
     };
   }
-  return { ok: false, message: `No indexed file matched "${raw}". Use \`cartograph_files\` to inspect indexed paths.` };
+  const inspectHint = args.inspectHint ?? 'cartograph_files';
+  return { ok: false, message: `No indexed file matched "${raw}". Use \`${inspectHint}\` to inspect indexed paths.` };
 }

@@ -10,12 +10,19 @@ import { globToSafeRegex } from '../../utils.js';
 export interface FilesCommandOptions {
   projectPath?: string;
   dir?: string;
+  dirPath?: string;
   file?: string;
   pattern?: string;
   format?: string;
   lineOffset?: string;
   lineLimit?: string;
   maxDepth?: string;
+  kinds?: string;
+  includeParameters?: boolean;
+  includeImports?: boolean;
+  direction?: string;
+  symbols?: boolean;
+  limit?: string;
   metadata?: boolean;
   json?: boolean;
   lowTokens?: boolean;
@@ -30,6 +37,8 @@ export interface FileListingRow {
 
 export type FileListing = FileListingRow[];
 export type FileListFormat = 'tree' | 'flat' | 'grouped' | 'summary';
+export type FileBranchFormat = 'symbols' | 'deps' | 'module' | 'read';
+export type FilesFormat = FileListFormat | FileBranchFormat;
 
 export interface DirRollupRow {
   dir: string | null;
@@ -144,7 +153,9 @@ type CliTreeStyle = Pick<FilesRenderStyle, 'dim' | 'cyan'>;
 export const MAX_FILES_FOR_INLINE_SUMMARY = 80;
 export const LOW_TOKEN_FILES_MAX_DEPTH = 3;
 
-const VALID_FILE_FORMATS: FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
+export const VALID_FILE_LIST_FORMATS: readonly FileListFormat[] = ['tree', 'flat', 'grouped', 'summary'];
+export const VALID_FILE_BRANCH_FORMATS: readonly FileBranchFormat[] = ['symbols', 'deps', 'module', 'read'];
+export const VALID_FILE_FORMATS: readonly FilesFormat[] = [...VALID_FILE_LIST_FORMATS, ...VALID_FILE_BRANCH_FORMATS];
 const SUMMARY_DIR_LABEL_WIDTH = 40;
 const identityStyle: FilesRenderStyle = {
   bold: (s) => s,
@@ -226,7 +237,17 @@ export function buildEffectiveFilesOptions(
   dirArg: string | undefined,
   options: FilesCommandOptions,
 ): FilesCommandOptions {
-  return options.dir || !dirArg ? options : { ...options, dir: dirArg };
+  if (!dirArg) return options;
+  switch (options.format) {
+    case 'deps':
+    case 'symbols':
+    case 'read':
+      return options.file ? options : { ...options, file: dirArg };
+    case 'module':
+      return options.dir || options.dirPath ? options : { ...options, dirPath: dirArg };
+    default:
+      return options.dir ? options : { ...options, dir: dirArg };
+  }
 }
 
 export function parseFilesOutputOptions(options: {
@@ -235,7 +256,7 @@ export function parseFilesOutputOptions(options: {
   lowTokens?: boolean;
 }): FilesOutputOptionsResult {
   const format = (options.format ?? (options.lowTokens ? 'summary' : 'tree')) as FileListFormat;
-  if (!VALID_FILE_FORMATS.includes(format)) {
+  if (!VALID_FILE_LIST_FORMATS.includes(format)) {
     return {
       ok: false,
       error: `Invalid value for --format: "${format}" — valid values: ${VALID_FILE_FORMATS.join(', ')}`,

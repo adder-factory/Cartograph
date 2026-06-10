@@ -32,6 +32,7 @@ import {
   writeJsonFile,
   type McpCommandOptions,
 } from './shared.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 /** opencode's JSON-schema URL — referenced when stamping new configs
  *  and printing the suggested snippet. Module-scoped so the methods
@@ -90,7 +91,7 @@ class OpencodeTarget implements AgentTarget {
     const after = getOpencodeServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
     if (jsonDeepEqual(before, after)) {
-      return { files: [{ path: file, action: 'unchanged' }] };
+      return withLocalGitignoreFileEntries(loc, { files: [{ path: file, action: 'unchanged' }] }, [file]);
     }
 
     const created = !fs.existsSync(file);
@@ -98,9 +99,13 @@ class OpencodeTarget implements AgentTarget {
     if (!existing['mcp']) existing['mcp'] = {};
     existing['mcp'].cartograph = after;
     writeJsonFile(file, existing);
-    return {
-      files: [{ path: file, action: created ? 'created' : 'updated' }],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [{ path: file, action: created ? 'created' : 'updated' }],
+      },
+      [file],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -133,7 +138,9 @@ class OpencodeTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [configPath(loc)];
+    const paths = [configPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 
