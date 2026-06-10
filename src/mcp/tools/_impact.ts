@@ -66,9 +66,17 @@ function filterImpactByConfidence(impact: Subgraph, rootId: string, threshold: n
   // BFS along surviving edges — both forward and backward, since
   // getImpactRadius returns a bidirectional neighborhood.
   const adj = new Map<string, string[]>();
+  // get-or-create + push (NOT spread-and-reassign): a spread copies the
+  // node's whole accumulated neighbour array per edge, which is O(degree²)
+  // and explodes on hub nodes (10–20k incoming edges) at scale.
+  const pushNeighbor = (from: string, to: string): void => {
+    let list = adj.get(from);
+    if (!list) adj.set(from, (list = []));
+    list.push(to);
+  };
   for (const e of survivingEdges) {
-    adj.set(e.source, [...(adj.get(e.source) ?? []), e.target]);
-    adj.set(e.target, [...(adj.get(e.target) ?? []), e.source]);
+    pushNeighbor(e.source, e.target);
+    pushNeighbor(e.target, e.source);
   }
   const queue = [rootId];
   while (queue.length > 0) {
