@@ -122,16 +122,16 @@ is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 14 tools | 33,953 | ~8,489 |
+| tools/list, 14 tools | 33,739 | ~8,435 |
 | initialize instructions | 3,346 | ~837 |
-| combined startup load | 37,299 | ~9,325 |
+| combined startup load | 37,085 | ~9,272 |
 | full playbook, on demand | 16,282 | ~4,071 |
 
-The full 34-tool profile is 61,130 `tools/list` chars and 64,476 combined
+The full 34-tool profile is 60,422 `tools/list` chars and 63,768 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 33 tools, 56,125 `tools/list` chars, and 59,471
-combined startup chars. The review profile advertises 23 tools, 46,232
-`tools/list` chars, and 49,578 combined startup chars.
+reduce the full list to 33 tools, 55,471 `tools/list` chars, and 58,817
+combined startup chars. The review profile advertises 23 tools, 45,729
+`tools/list` chars, and 49,075 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the
 advertised startup schema.

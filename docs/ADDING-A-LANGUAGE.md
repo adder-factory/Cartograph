@@ -287,7 +287,7 @@ the scope stack, and emits nodes/edges.
 **Worked example: R** (`src/extraction/languages/r.ts`). R's `function_definition`
 has no name (it's anonymous), so `functionTypes` is empty and the `visitNode` hook
 intercepts `binary_operator` assignments and emits the function manually via
-`ctx.createNode('function', name, ...)`.
+`ctx.createNode({ kind: 'function', name, node })`.
 
 ## 5b. Path B — Custom extractor class
 
@@ -299,23 +299,22 @@ keeping the class next to the language definition in
 `src/extraction/<lang>-extractor.ts` or a feature-local subfolder when the file
 gets large enough to need that boundary.
 
+Custom extractors extend `StandaloneExtractor`
+(`src/extraction/standalone-extractor.ts`), the abstract base that owns the
+`protected` accumulator fields (`nodes`, `edges`, `unresolvedReferences`,
+`errors`), the `idFactory`, and the shared `result(startTime)` /
+`createFileNode(language)` / `tryVisit(...)` helpers — so subclasses only
+write the walk:
+
 ```ts
-import type { Edge, ExtractionError, ExtractionResult, Node, UnresolvedReference } from '../types.js';
-import { getParser } from './grammars.js';
-import { generateNodeId, getNodeText } from './tree-sitter-helpers.js';
+import type { ExtractionResult } from './types.js';
+import { getParser } from './grammar-cache.js';
+import { getNodeText } from './tree-sitter-helpers.js';
+import { StandaloneExtractor } from './standalone-extractor.js';
 
-export class FooExtractor {
-  private filePath: string;
-  private source: string;
-  private nodes: Node[] = [];
-  private edges: Edge[] = [];
-  private unresolvedReferences: UnresolvedReference[] = [];
-  private errors: ExtractionError[] = [];
-
-  constructor(filePath: string, source: string) {
-    this.filePath = filePath;
-    this.source = source;
-  }
+export class FooExtractor extends StandaloneExtractor {
+  // filePath, source, nodes, edges, unresolvedReferences, errors, idFactory
+  // are all provided by StandaloneExtractor's constructor — no need to redeclare.
 
   extract(): ExtractionResult {
     const startTime = Date.now();
@@ -328,25 +327,16 @@ export class FooExtractor {
     if (!tree) { ... return this.result(startTime); }
 
     try {
-      const fileNodeId = this.createFileNode();
+      const fileNodeId = this.createFileNode('foo').id;
       // Walk the AST, emit nodes via this.nodes.push and this.edges.push
       // Emit references via this.unresolvedReferences.push so the resolver
-      // pass can match them across files.
+      // pass can match them across files. Wrap per-node visits in
+      // this.tryVisit(...) so a single bad node records an error and keeps going.
       ...
       return this.result(startTime);
     } finally {
       tree.delete();   // ← important: tree-sitter trees back onto WASM memory
     }
-  }
-
-  private result(startTime: number): ExtractionResult {
-    return {
-      nodes: this.nodes,
-      edges: this.edges,
-      unresolvedReferences: this.unresolvedReferences,
-      errors: this.errors,
-      durationMs: Date.now() - startTime,
-    };
   }
 }
 ```

@@ -213,7 +213,7 @@ all four (each in its own terminal / tmux pane / systemd unit):
 
 ```sh
 # Embedding (always required)
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.gguf --port 8080 --embeddings
+llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings
 
 # Chat: summarize + local
 llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081
@@ -222,7 +222,7 @@ llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --por
 llama-server -m ~/.cartograph/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf --port 8082
 
 # Reranker (optional — improves semantic search precision)
-llama-server -m ~/.cartograph/models/bge-reranker-v2-m3.gguf --port 8083 --rerank
+llama-server -m ~/.cartograph/models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8083 --rerank
 ```
 
 ### Option B — Ollama (simpler; auto-loads models on demand)
@@ -271,8 +271,9 @@ LLM model files as part of install. That path runs:
 3. `doctor` — verifies the install state.
 
 The recommended `.cartograph/config.json` is written by
-`cartograph admin install-models --write-config` (or pass that flag to
-`setup`). It points all tiers at the `localhost:808x` ports from
+`cartograph admin install-models --write-config` (or automatically by
+`cartograph setup` whenever it installs models — i.e. unless
+`--no-models` is passed). It points all tiers at the `localhost:808x` ports from
 Option A above. If you picked Option B (Ollama), hand-edit each
 `*Llm.endpoint` to `http://localhost:11434` and each `*Llm.model` to
 the Ollama model id.
@@ -444,7 +445,7 @@ The configured `embeddingLlm.endpoint` isn't reachable. Two paths:
 
 1. Start a backend at that URL. If you're on the recommended
    llama-cpp setup: `llama-server -m
-   ~/.cartograph/models/jina-embeddings-v2-base-code.gguf --port 8080
+   ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080
    --embeddings`.
 2. If `cartograph doctor` ALSO reports a "Detected LLM backends" line
    listing what IS running (e.g. "Ollama at http://localhost:11434
@@ -505,7 +506,7 @@ cartograph setup --minimal /path/to/the/users/project
 
 # 5. Start the backends (one llama-server per port — paste each in its
 #    own terminal):
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.gguf --port 8080 --embeddings &
+llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings &
 llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 &
 
 # 6. Verify

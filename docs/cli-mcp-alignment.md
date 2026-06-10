@@ -8,7 +8,7 @@ command has a corresponding MCP tool, with a small set of explicit
 exceptions documented below.
 
 This document is the source of truth for that mapping. Last
-re-verified **2026-06-09**. The mapping is also test-enforced —
+re-verified **2026-06-10**. The mapping is also test-enforced —
 `__tests__/cli-mcp-alignment.test.ts` fails if a tool gains/loses a
 CLI mirror.
 Branch-specific argument consumption is test-enforced in
@@ -52,8 +52,8 @@ compare-to-ref, context, coverage, dead-code, deps, digest,
 entry-points, explore, files, find, graph, history, host,
 hotspots, imports, node, note, playbook,
 propose-rename, review (context / neighbors / risk / agent-audit / trust),
-role, session (create / resume / list / delete / macro_save /
-macro_run / macro_list / macro_delete), sql, status,
+role, session (create / resume / audit / usage / list / delete /
+macro_save / macro_run / macro_list / macro_delete), sql, status,
 summaries (pending / save),
 sync-if-dirty, tests-for, trace-to-culprits
 ```
@@ -121,7 +121,7 @@ admin     <init|uninit|index|sync|unlock|migrate|storage-migrate|build-similarit
 summaries <pending|save>
 review    <context|neighbors|risk|agent-audit|trust>
 note      <add|list|delete>
-session   <create|resume|list|delete|macro_save|macro_run|macro_list|macro_delete>
+session   <create|resume|audit|usage|list|delete|macro_save|macro_run|macro_list|macro_delete>
 llm       <setup|smoke>
 backend   <status|start|stop|logs>
 ```
