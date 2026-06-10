@@ -27,12 +27,10 @@ vi.spyOn(pagerankParallel, 'computePageRankParallel').mockImplementation((async 
   return { scores: new Map([['n1', 0.75]]) };
 }) as never);
 
-vi.spyOn(nodeQueries, 'getAllNodes').mockImplementation((() => state.nodes) as never);
+vi.spyOn(nodeQueries, 'getAllNodeIds').mockImplementation((() => state.nodes) as never);
 
-vi.spyOn(centralityQueries, 'clearCentrality').mockImplementation((() =>
-  state.calls.push({ name: 'clearCentrality' })) as never);
-vi.spyOn(centralityQueries, 'applyCentralityScores').mockImplementation(((_queries: unknown, scores: unknown) =>
-  state.calls.push({ name: 'applyCentralityScores', value: scores })) as never);
+vi.spyOn(centralityQueries, 'reapplyCentralityScores').mockImplementation(((_queries: unknown, scores: unknown) =>
+  state.calls.push({ name: 'reapplyCentralityScores', value: scores })) as never);
 
 vi.spyOn(metadataQueries, 'getMetadata').mockImplementation(
   ((_queries: unknown, key: string) => state.metadata.get(key) ?? null) as never,
@@ -44,6 +42,8 @@ vi.spyOn(metadataQueries, 'setMetadata').mockImplementation(((_queries: unknown,
 
 vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
   state.calls.push({ name: 'logDebug', value: message })) as never);
+vi.spyOn(errorModule, 'logWarn').mockImplementation(((message: string) =>
+  state.calls.push({ name: 'logWarn', value: message })) as never);
 
 const { HOOK } = await import('../src/index-hooks/centrality.js');
 
@@ -107,15 +107,10 @@ describe('centrality hook', () => {
     ]);
   });
 
-  it('computes serial PageRank, clears stale scores, applies scores, and stamps the fingerprint', async () => {
+  it('computes serial PageRank, atomically reapplies scores, and stamps the fingerprint', async () => {
     await HOOK.afterIndexAll(ctx());
 
-    expect(state.calls.map((call) => call.name)).toEqual([
-      'computePageRank',
-      'clearCentrality',
-      'applyCentralityScores',
-      'setMetadata',
-    ]);
+    expect(state.calls.map((call) => call.name)).toEqual(['computePageRank', 'reapplyCentralityScores', 'setMetadata']);
     expect(state.metadata.get('last_centrality_fingerprint')).toBe(expectedFingerprint());
   });
 
@@ -133,6 +128,6 @@ describe('centrality hook', () => {
 
     await HOOK.afterIndexAll(ctx());
 
-    expect(state.calls).toEqual([{ name: 'logDebug', value: 'centrality hook failed: db unavailable' }]);
+    expect(state.calls).toEqual([{ name: 'logWarn', value: 'centrality hook failed: db unavailable' }]);
   });
 });

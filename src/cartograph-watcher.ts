@@ -30,6 +30,14 @@ export class CartographWatcher {
       config: this.cg.config,
       syncFn: async () => {
         const result = await this.cg.sync();
+        if (result.lockContention) {
+          // Another process holds the index lock, so this sync did NO
+          // work. Throw so watcherFlush takes its failure path (roll the
+          // in-flight files back into pendingFiles, keep the staleness
+          // banner, apply backoff) instead of recording a phantom
+          // successful sync that silently drops staleness tracking.
+          throw new Error('index sync skipped: lock held by another process');
+        }
         const filesChanged = result.filesAdded + result.filesModified + result.filesRemoved;
         return { filesChanged, durationMs: result.durationMs };
       },

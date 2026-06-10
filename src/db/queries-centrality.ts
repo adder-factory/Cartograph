@@ -67,45 +67,49 @@ declare module './queries.js' {
   }
 }
 
-/**
- * Persist centrality scores for the given nodes. No-op when `scores`
- * is empty. Wraps the per-row UPDATE in a single transaction so a
- * full pass over a 6 K-node graph is one fsync, not 6 K. Clears the
- * node cache so subsequent reads see the new centrality values.
- */
-export function applyCentralityScores(qb: QueryBuilder, scores: Map<string, number>): void {
+/** Run the per-node centrality UPDATEs. Caller owns the transaction and
+ *  the node-cache invalidation — shared by {@link applyCentralityScores}
+ *  and {@link reapplyCentralityScores} so the loop has one definition.
+ *  `runBatch` is one round-trip on Postgres (vs one temp-file+Atomics IPC
+ *  hop per row through the sync-over-async bridge); on SQLite it falls
+ *  back to the same per-row loop. */
+function runCentralityUpdates(qb: QueryBuilder, scores: Map<string, number>): void {
   if (scores.size === 0) return;
   qb.queries.updateCentrality ??= updateCentralityQuery(qb.db);
-  const stmt = qb.queries.updateCentrality;
-  qb.db.transaction(() => {
-    for (const [id, score] of scores) {
-      stmt.run({ id, centrality: score });
-    }
-  })();
-  qb.nodeCache.clear();
+  qb.queries.updateCentrality.runBatch(Array.from(scores, ([id, score]) => ({ id, centrality: score })));
 }
 
-/** Set every node's centrality back to NULL. Used before a full re-rank. */
-export function clearCentrality(qb: QueryBuilder): void {
-  qb.db.exec('UPDATE nodes SET centrality = NULL');
+/**
+ * Atomically replace all centrality scores: NULL every node then apply
+ * `scores` inside ONE transaction. A concurrent reader therefore never
+ * observes the transient all-NULL window (the low_coverage cross-file
+ * rule filters on `centrality >= ?`, and ranked-mode `minCentrality`
+ * reads it — both can run in worker threads during the centrality pass),
+ * and a failure mid-apply rolls back to the prior scores rather than
+ * leaving every node NULL for the whole index generation. Wraps the
+ * UPDATEs in one transaction (one fsync per pass) and clears the node
+ * cache so subsequent reads see the new values.
+ */
+export function reapplyCentralityScores(qb: QueryBuilder, scores: Map<string, number>): void {
+  qb.db.transaction(() => {
+    qb.db.exec('UPDATE nodes SET centrality = NULL');
+    runCentralityUpdates(qb, scores);
+  })();
   qb.nodeCache.clear();
 }
 
 /**
  * Persist sampled betweenness scores. Same transaction-wrapped UPDATE
- * pattern as {@link applyCentralityScores} — one fsync per pass, not
+ * pattern as {@link reapplyCentralityScores} — one fsync per pass, not
  * one per node. Clears the node cache so subsequent reads pick up the
  * new betweenness column values.
  */
 export function applyBetweennessScores(qb: QueryBuilder, scores: Map<string, number>): void {
   if (scores.size === 0) return;
   qb.queries.updateBetweenness ??= updateBetweennessQuery(qb.db);
-  const stmt = qb.queries.updateBetweenness;
-  qb.db.transaction(() => {
-    for (const [id, score] of scores) {
-      stmt.run({ id, betweenness: score });
-    }
-  })();
+  const updates = Array.from(scores, ([id, score]) => ({ id, betweenness: score }));
+  // runBatch: one round-trip on Postgres, per-row loop fallback on SQLite.
+  qb.db.transaction(() => qb.queries.updateBetweenness?.runBatch(updates))();
   qb.nodeCache.clear();
 }
 

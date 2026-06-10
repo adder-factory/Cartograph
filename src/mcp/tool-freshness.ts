@@ -184,30 +184,51 @@ async function toolHandlerAttemptAutoSync(
     const timeout = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => reject(new Error('auto-sync timeout')), AUTO_SYNC_TIMEOUT_MS);
     });
+    let syncResult: import('../extraction/index.js').SyncResult;
     try {
-      await Promise.race([cg.sync({ summarize: false }), timeout]);
+      syncResult = await Promise.race([cg.sync({ summarize: false }), timeout]);
     } finally {
       if (timeoutId) clearTimeout(timeoutId);
     }
+    if (syncResult.lockContention) {
+      // The sync was SKIPPED — another process holds the index lock, so
+      // nothing was synced and the index is still stale. Don't emit a
+      // "✓ Auto-synced" banner; fall through to the stale-fallback path.
+      return autoSyncStaleFallback(f, 'lock');
+    }
     const f2 = cg.stats.getFreshness();
-    const syncedCount = freshnessSyncCandidateCount(f);
+    // Report the count of files the sync ACTUALLY touched, not the
+    // pre-sync candidate estimate (which over- or under-counts).
+    const syncedCount = syncResult.filesAdded + syncResult.filesModified + syncResult.filesRemoved;
     return {
-      banner: `> ✓ Auto-synced ${syncedCount ?? '?'} file(s) before query.`,
+      banner: `> ✓ Auto-synced ${syncedCount} file(s) before query.`,
       freshnessMeta: f2 ? toFreshnessMetadata(f2, { autoSynced: true }) : null,
     };
   } catch {
-    // Auto-sync timed out or threw. Fall back to the original stale
-    // banner BUT extend it with explicit MCP-side remediation guidance
-    // — the original banner says "run cartograph sync" (CLI), which is
-    // not what an agent reading the banner from MCP should do.
-    const cliHint = /run `cartograph sync`\.?$/;
-    const baseBanner = f.banner ? f.banner.replace(cliHint, '').trimEnd() : freshnessRiskBannerForMcp(f);
-    const augmented = baseBanner
-      ? baseBanner +
-        ` Auto-sync exceeded ${AUTO_SYNC_TIMEOUT_MS}ms — call \`cartograph_admin({action: 'sync'})\` to refresh manually.`
-      : null;
-    return { banner: augmented, freshnessMeta: toFreshnessMetadata(f) };
+    return autoSyncStaleFallback(f, 'timeout');
   }
+}
+
+/**
+ * Stale-banner fallback for an auto-sync that did NOT refresh the index —
+ * either it timed out / threw (`'timeout'`) or it was skipped because
+ * another process holds the index lock (`'lock'`). Replaces the CLI
+ * "run `cartograph sync`" hint (wrong for an agent reading from MCP)
+ * with the matching MCP-side remediation, and reports the metadata as
+ * still-stale rather than auto-synced.
+ */
+function autoSyncStaleFallback(
+  f: FreshnessInfo,
+  reason: 'timeout' | 'lock',
+): { banner: string | null; freshnessMeta: import('./tool-types.js').FreshnessMetadata | null } {
+  const cliHint = /run `cartograph sync`\.?$/;
+  const baseBanner = f.banner ? f.banner.replace(cliHint, '').trimEnd() : freshnessRiskBannerForMcp(f);
+  const suffix =
+    reason === 'lock'
+      ? " Auto-sync skipped — another process holds the index lock; call `cartograph_admin({action: 'sync'})` once it frees."
+      : ` Auto-sync exceeded ${AUTO_SYNC_TIMEOUT_MS}ms — call \`cartograph_admin({action: 'sync'})\` to refresh manually.`;
+  const augmented = baseBanner ? baseBanner + suffix : null;
+  return { banner: augmented, freshnessMeta: toFreshnessMetadata(f) };
 }
 
 /**

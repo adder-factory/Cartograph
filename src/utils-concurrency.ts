@@ -25,6 +25,19 @@ import { parseStrictUnsignedDecimalInteger } from './strict-numeric.js';
 const LOCK_STALE_TIMEOUT_MS = 2 * 60 * 1000;
 
 /**
+ * While a lock is held, its mtime is refreshed on this cadence so a
+ * legitimately-held lock never crosses {@link LOCK_STALE_TIMEOUT_MS} and
+ * gets force-cleared out from under a live holder mid-pass (index/sync
+ * passes routinely run several minutes; the hook phase budget alone is
+ * 30 minutes). Comfortably under the stale window so a couple of missed
+ * ticks (event-loop busy) still leave the lock fresh.
+ */
+const LOCK_HEARTBEAT_MS = 30 * 1000;
+
+/** Per-process counter making each stale-lock tombstone name unique. */
+let staleLockTombstoneSeq = 0;
+
+/**
  * Thrown when an `acquire()` finds the lock already held by a live
  * process within the staleness window. Typed (rather than a plain
  * `Error` distinguished by `message.includes(...)`) so callers and
@@ -116,6 +129,7 @@ function forceUnlinkLock(lockPath: string): void {
 export class FileLock {
   private readonly lockPath: string;
   private held = false;
+  private heartbeat: ReturnType<typeof setInterval> | null = null;
 
   constructor(lockPath: string) {
     this.lockPath = lockPath;
@@ -137,7 +151,10 @@ export class FileLock {
 
     const meta = readLockMetadata(this.lockPath);
     if (meta === null) {
-      forceUnlinkLock(this.lockPath);
+      // Corrupt/unreadable lock — clear atomically too (same race as the
+      // stale path: a plain unlink could delete a fresh lock a faster
+      // contender just wrote at lockPath).
+      this.atomicClearLock();
       return;
     }
 
@@ -145,7 +162,49 @@ export class FileLock {
       throw new LockHeldError(meta.pid, this.lockPath);
     }
 
-    forceUnlinkLock(this.lockPath);
+    this.atomicClearLock();
+  }
+
+  /**
+   * Clear the lock file atomically: rename it to a unique tombstone, then
+   * unlink THAT. A plain `unlink(lockPath)` is check-then-act — if two
+   * contenders both judge the lock clearable, the slower one's unlink
+   * would delete the FRESH lock the faster one just created at lockPath,
+   * leaving two live holders. Only one renamer can win the rename of the
+   * original path; the loser gets ENOENT and bails.
+   */
+  private atomicClearLock(): void {
+    const tombstone = `${this.lockPath}.stale-${process.pid}-${staleLockTombstoneSeq++}`;
+    try {
+      fs.renameSync(this.lockPath, tombstone);
+    } catch {
+      // Another contender already cleared/renamed it; nothing to unlink.
+      return;
+    }
+    forceUnlinkLock(tombstone);
+  }
+
+  /** Refresh the lock's mtime on an unref'd interval so a long-held lock
+   *  stays inside the staleness window (see {@link LOCK_HEARTBEAT_MS}). */
+  private startHeartbeat(): void {
+    this.stopHeartbeat();
+    this.heartbeat = setInterval(() => {
+      try {
+        const now = new Date();
+        fs.utimesSync(this.lockPath, now, now);
+      } catch {
+        // Lock vanished or a permission flap — nothing to refresh.
+      }
+    }, LOCK_HEARTBEAT_MS);
+    // Don't keep the process alive solely for the heartbeat.
+    this.heartbeat.unref?.();
+  }
+
+  private stopHeartbeat(): void {
+    if (this.heartbeat !== null) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
   }
 
   /** Acquire the lock. Throws `LockHeldError` if the lock is held by
@@ -157,6 +216,7 @@ export class FileLock {
     try {
       fs.writeFileSync(this.lockPath, String(process.pid), { flag: 'wx' });
       this.held = true;
+      this.startHeartbeat();
     } catch (err: unknown) {
       if (isErrnoCode(err, 'EEXIST')) {
         // Race: another process grabbed the lock between our
@@ -171,6 +231,7 @@ export class FileLock {
 
   /** Release the lock */
   release(): void {
+    this.stopHeartbeat();
     if (!this.held) return;
     try {
       // Only remove if we still own it (check PID)
