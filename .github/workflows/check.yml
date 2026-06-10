@@ -91,6 +91,14 @@ jobs:
       - name: Module leak canaries
         run: npm run test:leaks
 
+      # Curated serial pure-unit suite. The full parallel-shard suite is
+      # still excluded (Bun bus-errors under parallel native-worker load),
+      # but these deterministic, index-free, worker-free unit tests run
+      # serially with no bus-error risk and catch functional regressions
+      # that typecheck/biome/biomarkers miss. Expand incrementally.
+      - name: Unit tests (serial subset)
+        run: npm run test:ci-unit
+
       # Biomarker floor: 0 error / 0 warning. Indexes the repo structurally
       # (serial mode for determinism) and fails on any err/warn finding.
       - name: Biomarker floor (0 err / 0 warn)
