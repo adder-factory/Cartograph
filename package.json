@@ -83,7 +83,7 @@
     "measure:mcp-load": "bun scripts/measure-mcp-load.ts",
     "benchmark:tokens": "bun scripts/benchmark-token-savings.ts",
     "clean": "node -e \"import('node:fs').then(({rmSync})=>rmSync('dist',{recursive:true,force:true}))\"",
-    "test:ci-unit": "CARTOGRAPH_HOOKS_IN_PROCESS=1 bun test --isolate __tests__/postgres-worker-sql.test.ts __tests__/tool-schema-defaults.test.ts __tests__/schema-parity.test.ts __tests__/framework-anchor-uniqueness.test.ts __tests__/edge-confidence.test.ts __tests__/path-class.test.ts __tests__/import-classifier.test.ts __tests__/define-tool.test.ts __tests__/search-query-parser.test.ts"
+    "test:ci-unit": "bash scripts/test-ci-unit.sh"
   },
   "keywords": [
     "ai-coding-agents",
