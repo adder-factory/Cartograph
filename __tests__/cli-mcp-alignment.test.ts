@@ -21,9 +21,10 @@
  * and the two sets are compared minus an explicit asymmetric allowlist.
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Command } from 'commander';
 import { getToolModules } from '../src/mcp/tools/registry.js';
@@ -779,10 +780,25 @@ describe('CLI behaviour parity (spawned)', () => {
   const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
   const indexed = fs.existsSync(path.join(repoRoot, '.cartograph'));
 
+  // DISPOSABLE index copy for the DESTRUCTIVE sql tests below. They fire
+  // `DELETE FROM nodes` to prove the read-only gate rejects it — but if
+  // that gate ever regresses, running against the dev's live `.cartograph`
+  // would wipe their real index. Copy it to a throwaway dir so the blast
+  // radius is the copy, not the live index.
+  let disposableRoot: string | undefined;
+  beforeAll(() => {
+    if (!indexed) return;
+    disposableRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-parity-'));
+    fs.cpSync(path.join(repoRoot, '.cartograph'), path.join(disposableRoot, '.cartograph'), { recursive: true });
+  });
+  afterAll(() => {
+    if (disposableRoot && fs.existsSync(disposableRoot)) fs.rmSync(disposableRoot, { recursive: true, force: true });
+  });
+
   it.skipIf(!indexed)(
     'sql exits non-zero on a rejected write query',
     () => {
-      const { code } = runCli(cliEntry, repoRoot, ['sql', 'DELETE FROM nodes']);
+      const { code } = runCli(cliEntry, disposableRoot!, ['sql', 'DELETE FROM nodes']);
       expect(code).not.toBe(0);
     },
     60_000,
@@ -791,7 +807,7 @@ describe('CLI behaviour parity (spawned)', () => {
   it.skipIf(!indexed)(
     'sql exits non-zero on an invalid (no such table) query',
     () => {
-      const { code } = runCli(cliEntry, repoRoot, ['sql', 'SELECT * FROM no_such_table_xyz']);
+      const { code } = runCli(cliEntry, disposableRoot!, ['sql', 'SELECT * FROM no_such_table_xyz']);
       expect(code).not.toBe(0);
     },
     60_000,
