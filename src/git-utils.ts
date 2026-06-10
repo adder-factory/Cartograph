@@ -4,9 +4,21 @@ import * as path from 'node:path';
 import { CARTOGRAPH_DIR, PROJECT_GITIGNORE_COMMENT, PROJECT_GITIGNORE_ENTRY } from './directory.js';
 import { parseStrictUnsignedDecimalInteger } from './strict-numeric.js';
 
+/**
+ * Without an explicit `maxBuffer`, `execFileSync` caps stdout at Node's
+ * 1 MiB default and throws `ENOBUFS` past it. Several callers here run
+ * `git status --porcelain -uall` / `git diff --name-status` whose output
+ * scales with the size of the dirty tree, and the surrounding catches
+ * swallow the throw — so on a large or very dirty repo the change/dirty
+ * set would be silently undercounted. 64 MiB matches the log buffer cap
+ * and is far above any realistic name-status / porcelain payload.
+ */
+const GIT_EXEC_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
 const GIT_EXEC_OPTIONS = {
   encoding: 'utf-8' as const,
   timeout: 5000,
+  maxBuffer: GIT_EXEC_MAX_BUFFER_BYTES,
   stdio: ['pipe', 'pipe', 'pipe'] as ('pipe' | 'inherit' | 'ignore')[],
 };
 
@@ -399,7 +411,7 @@ function classifyDiffLine(line: string, byPath: Map<string, ChangeKind>): void {
 
 function parseGitDiffNameStatus(rootDir: string, sha: string, byPath: Map<string, ChangeKind>): boolean {
   try {
-    const committed = execFileSync('git', ['diff', '--name-status', `${sha}..HEAD`], {
+    const committed = execFileSync('git', ['diff', '--name-status', '--end-of-options', `${sha}..HEAD`], {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     });
@@ -467,7 +479,7 @@ export function getChangeBreakdownSince(rootDir: string, sha: string): ChangeBre
  */
 export function countCommitsAhead(rootDir: string, sha: string): number | null {
   try {
-    const out = execFileSync('git', ['rev-list', '--count', `${sha}..HEAD`], {
+    const out = execFileSync('git', ['rev-list', '--count', '--end-of-options', `${sha}..HEAD`], {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     }).trim();
@@ -617,7 +629,7 @@ export function getFileFollowEarliestTs(rootDir: string, relPath: string): strin
  */
 export function isShaReachable(rootDir: string, sha: string): boolean {
   try {
-    execFileSync('git', ['cat-file', '-e', `${sha}^{commit}`], {
+    execFileSync('git', ['cat-file', '-e', '--end-of-options', `${sha}^{commit}`], {
       cwd: rootDir,
       timeout: 5000,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -640,7 +652,7 @@ export function isShaReachable(rootDir: string, sha: string): boolean {
  */
 export function getFileAtRef(rootDir: string, ref: string, relPath: string): string | null {
   try {
-    const out = execFileSync('git', ['show', `${ref}:${relPath}`], {
+    const out = execFileSync('git', ['show', '--end-of-options', `${ref}:${relPath}`], {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
       maxBuffer: GIT_LOG_BUFFER_BYTES,
@@ -674,7 +686,7 @@ export function getFileAtRef(rootDir: string, ref: string, relPath: string): str
 export function listChangedFilesSince(rootDir: string, ref: string): string[] | null {
   const byPath = new Map<string, ChangeKind>();
   try {
-    const diff = execFileSync('git', ['diff', '--name-status', '--no-renames', ref], {
+    const diff = execFileSync('git', ['diff', '--name-status', '--no-renames', '--end-of-options', ref], {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     });
@@ -724,13 +736,17 @@ export function getCommitSubjects(rootDir: string, shas: readonly string[]): Map
     const chunk = shas.slice(i, i + COMMIT_SUBJECT_CHUNK);
     let raw: string;
     try {
-      raw = execFileSync('git', ['log', '--no-walk', '--ignore-missing', '--format=tformat:%H%x1f%s%x1e', ...chunk], {
-        cwd: rootDir,
-        encoding: 'utf-8',
-        timeout: GIT_LOG_TIMEOUT_MS,
-        maxBuffer: GIT_LOG_MAX_BUFFER_BYTES,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+      raw = execFileSync(
+        'git',
+        ['log', '--no-walk', '--ignore-missing', '--format=tformat:%H%x1f%s%x1e', '--end-of-options', ...chunk],
+        {
+          cwd: rootDir,
+          encoding: 'utf-8',
+          timeout: GIT_LOG_TIMEOUT_MS,
+          maxBuffer: GIT_LOG_MAX_BUFFER_BYTES,
+          stdio: ['pipe', 'pipe', 'pipe'],
+        },
+      );
     } catch {
       continue;
     }

@@ -38,6 +38,10 @@ import {
 } from '../biomarkers/index.js';
 import type { Finding } from '../biomarkers/types.js';
 
+/** Buffer cap for `git diff --name-only` output — far above any realistic
+ *  changed-file list, but bounded so a pathological repo can't OOM. */
+const GIT_DIFF_MAX_BUFFER_BYTES = 64 * 1024 * 1024;
+
 /**
  * Symbol kinds that represent meaningful structural changes for an
  * agent self-report. `file` / `module` / `namespace` rotate every
@@ -437,9 +441,13 @@ function diffEdgeLists({ beforeNodes, beforeEdges, afterNodes, afterEdges }: Dif
  */
 function listChangedFilesBetween(rootDir: string, base: string, head: string): string[] | null {
   try {
-    const out = execFileSync('git', ['diff', '--name-only', '--no-renames', `${base}..${head}`], {
+    const out = execFileSync('git', ['diff', '--name-only', '--no-renames', '--end-of-options', `${base}..${head}`], {
       encoding: 'utf-8',
       timeout: 5000,
+      // `--end-of-options` stops git from parsing a leading-dash `base`
+      // (the client-supplied ref) as an option — e.g. an injected
+      // `--output=/path` that would otherwise write/truncate that file.
+      maxBuffer: GIT_DIFF_MAX_BUFFER_BYTES,
       stdio: ['pipe', 'pipe', 'pipe'],
       cwd: rootDir,
     });
