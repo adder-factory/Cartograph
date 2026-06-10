@@ -17,6 +17,15 @@ import { getOutgoingEdges, getIncomingEdges } from '../db/queries-edges.js';
  * the limit cuts in. Callers who really want unlimited depth can pass
  * `maxDepth: Infinity` explicitly.
  */
+/**
+ * Node-count ceiling for an impact traversal. Unlike BFS/DFS (which cap on
+ * `limit`), `getImpactRadius` was depth-only, so a hub symbol on a large
+ * repo (a logger/util with 10k+ dependents) could materialize a huge
+ * fraction of the whole graph into memory — ×50 matches on the MCP impact
+ * path. Bounded here; callers wanting more pass an explicit `maxNodes`.
+ */
+const DEFAULT_IMPACT_MAX_NODES = 2000;
+
 const DEFAULT_OPTIONS: Required<TraversalOptions> = {
   maxDepth: 10,
   edgeKinds: [],
@@ -117,6 +126,8 @@ interface ImpactRecOpts {
   nodeId: string;
   maxDepth: number;
   currentDepth: number;
+  /** Stop expanding once `nodes.size` reaches this — see {@link DEFAULT_IMPACT_MAX_NODES}. */
+  maxNodes: number;
   reachedViaIncomingContains?: boolean;
   nodes: Map<string, Node>;
   edges: Edge[];
@@ -289,8 +300,8 @@ function traverserGetCallWalkRecursive(
 }
 
 function traverserGetImpactRecursive(queries: QueryBuilder, args: ImpactRecOpts): void {
-  const { nodeId, maxDepth, currentDepth, visited } = args;
-  if (currentDepth >= maxDepth || visited.has(nodeId)) return;
+  const { nodeId, maxDepth, currentDepth, maxNodes, nodes, visited } = args;
+  if (currentDepth >= maxDepth || visited.has(nodeId) || nodes.size >= maxNodes) return;
   visited.add(nodeId);
   traverserExpandImpactContainerChildren(queries, args);
   traverserExpandImpactDependents(queries, args);
@@ -311,6 +322,7 @@ function traverserExpandImpactContainerChildren(queries: QueryBuilder, args: Imp
   if (containsEdges.length === 0) return;
   const children = queries.getNodesByIds(containsEdges.map((e) => e.target));
   for (const edge of containsEdges) {
+    if (nodes.size >= args.maxNodes) break;
     const childNode = children.get(edge.target);
     if (!childNode || visited.has(childNode.id)) continue;
     nodes.set(childNode.id, childNode);
@@ -319,6 +331,7 @@ function traverserExpandImpactContainerChildren(queries: QueryBuilder, args: Imp
       nodeId: childNode.id,
       maxDepth,
       currentDepth,
+      maxNodes: args.maxNodes,
       nodes,
       edges,
       visited,
@@ -334,6 +347,7 @@ function traverserExpandImpactDependents(queries: QueryBuilder, args: ImpactRecO
   if (incomingEdges.length === 0) return;
   const sources = queries.getNodesByIds(incomingEdges.map((e) => e.source));
   for (const edge of incomingEdges) {
+    if (nodes.size >= args.maxNodes) break;
     const sourceNode = sources.get(edge.source);
     if (!sourceNode || nodes.has(sourceNode.id)) continue;
     nodes.set(sourceNode.id, sourceNode);
@@ -342,6 +356,7 @@ function traverserExpandImpactDependents(queries: QueryBuilder, args: ImpactRecO
       nodeId: sourceNode.id,
       maxDepth,
       currentDepth: currentDepth + 1,
+      maxNodes: args.maxNodes,
       reachedViaIncomingContains: edge.kind === 'contains',
       nodes,
       edges,
@@ -570,7 +585,16 @@ export class GraphTraverser {
     const edges: Edge[] = [];
     const visited = new Set<string>();
     nodes.set(focalNode.id, focalNode);
-    traverserGetImpactRecursive(this.queries, { nodeId, maxDepth, currentDepth: 0, nodes, edges, visited, edgeKinds });
+    traverserGetImpactRecursive(this.queries, {
+      nodeId,
+      maxDepth,
+      currentDepth: 0,
+      maxNodes: DEFAULT_IMPACT_MAX_NODES,
+      nodes,
+      edges,
+      visited,
+      edgeKinds,
+    });
     return { nodes, edges, roots: [nodeId] };
   }
 

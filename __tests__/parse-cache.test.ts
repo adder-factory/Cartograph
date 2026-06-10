@@ -101,14 +101,12 @@ describe('parse_cache helpers', () => {
     ).toBeNull();
   });
 
-  it('evicts oldest 25% when over the row cap', () => {
+  // Fill `count` cache rows via the public putCachedParse (so the payload
+  // round-trips through the version envelope), back-dating generated_at so
+  // eviction has a deterministic chronological order to drop.
+  function fillRows(count: number): void {
     const sample = { nodes: [], edges: [], unresolvedReferences: [], errors: [], durationMs: 0 };
-    // Fill 12 rows via the public putCachedParse so the payload
-    // round-trips through the version envelope, then back-date each
-    // generated_at via a direct UPDATE so eviction has a deterministic
-    // chronological order to drop. Eviction with maxRows=8 should
-    // drop ceil(12 * 0.25) = 3 rows (the three oldest).
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < count; i++) {
       putCachedParse({
         qb: cg.queries,
         contentHash: `hash-${i}`,
@@ -120,13 +118,26 @@ describe('parse_cache helpers', () => {
         .prepare('UPDATE parse_cache SET generated_at = ? WHERE content_hash = ?')
         .run(1000 + i, `hash-${i}`);
     }
-    const dropped = evictParseCacheIfOversized(cg.queries, 8);
+  }
+
+  it('does NOT evict LIVE rows even above the raw row floor (anti-thrash)', () => {
+    // 12 current-version rows with a raw floor of 8 → effective cap is
+    // max(8, ceil(12 × 1.5)) = 18, so the live cache survives. The old
+    // fixed-cap behaviour evicted 25% of the live cache every pass on a
+    // repo with more files than the cap — a re-parse thrash.
+    fillRows(12);
+    expect(evictParseCacheIfOversized(cg.queries, 8)).toBe(0);
+    expect(getParseCacheStats(cg.queries).rows).toBe(12);
+  });
+
+  it('evicts oldest 25% when over the BYTE cap', () => {
+    fillRows(12);
+    // A 1-byte cap forces eviction regardless of row count; drops
+    // ceil(12 × 0.25) = 3 oldest rows.
+    const dropped = evictParseCacheIfOversized(cg.queries, 8, 1);
     expect(dropped).toBe(3);
     const stats = getParseCacheStats(cg.queries);
     expect(stats.rows).toBe(9);
-    // Surviving entries were all written by `putCachedParse`, which
-    // stamps the current PAYLOAD_VERSION (a 16-hex source hash now,
-    // derived from src/types.ts content).
     expect(stats.currentVersion).toMatch(/^[0-9a-f]{16}$/);
     expect(stats.currentVersionRows).toBe(9);
     expect(stats.staleVersionRows).toBe(0);

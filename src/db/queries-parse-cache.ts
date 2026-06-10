@@ -99,10 +99,17 @@ const ExtractionResultSchema = z
   })
   .loose();
 
-/** Default LRU cap. Tuned for medium codebases (~5k files): under
- *  this we don't bother evicting; at this we drop the oldest 25% in
- *  one shot to amortise the SELECT...DELETE round-trip. */
+/** Default LRU floor. Under this we don't evict; the cap is scaled ABOVE
+ *  the live (current-version) entry count so a >20k-file repo doesn't
+ *  evict its own live cache every pass — see evictParseCacheIfOversized. */
 const DEFAULT_MAX_ROWS = 20_000;
+
+/** Headroom over the live entry count before row-eviction kicks in. */
+const LIVE_ROWS_HEADROOM = 1.5;
+
+/** Byte ceiling: even under the row cap, a repo with huge payloads
+ *  (~33 KB/row observed) could sit at hundreds of MB. Evict on bytes too. */
+const DEFAULT_MAX_BYTES = 512 * 1024 * 1024;
 
 // ─── Typed query schemas + definitions ────────────────────────────────────
 
@@ -113,7 +120,6 @@ const NoParams = z.object({});
  * holds the JSON string we deserialise outside SQLite.
  */
 const PayloadRowSchema = z.object({ payload: z.string().nullable() });
-const CountRowSchema = z.object({ n: z.number() });
 const CacheStatsRowSchema = z.object({
   rows: z.number(),
   sizeBytes: z.number(),
@@ -175,12 +181,6 @@ const putCachedParseQuery = defineQuery({
   row: z.never(),
 });
 
-const parseCacheCountQuery = defineQuery({
-  sql: 'SELECT COUNT(*) AS n FROM parse_cache',
-  params: NoParams,
-  row: CountRowSchema,
-});
-
 const evictParseCacheQuery = defineQuery({
   sql: `DELETE FROM parse_cache
         WHERE rowid IN (
@@ -238,7 +238,6 @@ declare module './queries.js' {
       },
       never
     >;
-    parseCacheCount?: TypedQuery<Record<string, never>, { n: number }>;
     evictParseCache?: TypedQuery<{ dropCount: number }, never>;
     clearParseCacheByLang?: TypedQuery<{ language: string }, never>;
     clearParseCacheByFilePath?: TypedQuery<{ filePath: string }, never>;
@@ -371,17 +370,27 @@ export function getLatestStructHashForFile(qb: QueryBuilder, filePath: string, l
 }
 
 /**
- * Drop the oldest 25% of entries when the table exceeds `maxRows`.
- * Called by the indexer at the END of a full pass — single eviction
- * pass per indexAll keeps the per-row write fast (no eviction probe
- * on every put). 25% batch size amortises the sort+delete cost over
- * many subsequent inserts.
+ * Drop the oldest 25% of entries when the table is oversized. Called by
+ * the indexer at the END of a full pass (single eviction probe keeps the
+ * per-row write fast). 25% batch size amortises the sort+delete cost.
+ *
+ * "Oversized" is BOTH:
+ *   - rows beyond `max(maxRows, ceil(liveRows × 1.5))` — scaling the cap
+ *     above the live (current-version) entry count so a >20k-file repo
+ *     doesn't evict 25% of its OWN live cache every pass (a re-parse
+ *     thrash the fixed 20k cap caused), while still trimming stale rows;
+ *   - bytes beyond `maxBytes` — a fixed row count says nothing about
+ *     payload size, which can reach hundreds of MB before the row cap.
  */
-export function evictParseCacheIfOversized(qb: QueryBuilder, maxRows: number = DEFAULT_MAX_ROWS): number {
-  qb.queries.parseCacheCount ??= parseCacheCountQuery(qb.db);
-  const countRow = qb.queries.parseCacheCount.get({});
-  if (!countRow || countRow.n <= maxRows) return 0;
-  const dropCount = Math.ceil(countRow.n * 0.25);
+export function evictParseCacheIfOversized(
+  qb: QueryBuilder,
+  maxRows: number = DEFAULT_MAX_ROWS,
+  maxBytes: number = DEFAULT_MAX_BYTES,
+): number {
+  const stats = getParseCacheStats(qb);
+  const effectiveMaxRows = Math.max(maxRows, Math.ceil(stats.currentVersionRows * LIVE_ROWS_HEADROOM));
+  if (stats.rows <= effectiveMaxRows && stats.sizeBytes <= maxBytes) return 0;
+  const dropCount = Math.ceil(stats.rows * 0.25);
   qb.queries.evictParseCache ??= evictParseCacheQuery(qb.db);
   const info = qb.queries.evictParseCache.run({ dropCount });
   return info.changes;
