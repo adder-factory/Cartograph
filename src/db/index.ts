@@ -167,12 +167,27 @@ export class DatabaseConnection {
     // migration 057).
     if (db.dialect === 'sqlite') verifySchemaIntegrity(db);
 
+    // `initialize` is the FRESH-database path: schema.sql builds every
+    // table at CURRENT_SCHEMA_VERSION, so a genuinely fresh DB has an
+    // empty schema_versions (version 0) and we stamp it current. But
+    // schema.sql is all `CREATE TABLE IF NOT EXISTS`, so if it ran over a
+    // NON-EMPTY DB already at an older version, those CREATEs no-oped and
+    // the physical schema is still behind — stamping CURRENT here would
+    // claim migrations ran that didn't, and `open()` would then never
+    // migrate it (the version claims current). Refuse loudly instead.
     const currentVersion = getCurrentVersion(db);
-    if (currentVersion < CURRENT_SCHEMA_VERSION) {
+    if (currentVersion === 0) {
       db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)').run(
         CURRENT_SCHEMA_VERSION,
         Date.now(),
         'Initial schema includes all migrations',
+      );
+    } else if (currentVersion < CURRENT_SCHEMA_VERSION) {
+      throw new Error(
+        `Refusing to initialize over an existing schema v${currentVersion} (binary is v${CURRENT_SCHEMA_VERSION}). ` +
+          `\`init\` only stamps a fresh database; this DB is behind and its tables were not migrated by schema.sql ` +
+          `(all CREATE TABLE IF NOT EXISTS). Run \`cartograph admin migrate\` to upgrade it, or initialize against ` +
+          `an empty database / schema.`,
       );
     }
 

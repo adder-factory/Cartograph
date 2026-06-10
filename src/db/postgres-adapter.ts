@@ -113,11 +113,28 @@ export class PostgresAdapter implements SqliteDatabase {
         return result;
       } catch (err) {
         this.state.txDepth--;
-        if (this.state.txDepth === 0) this.exec('ROLLBACK');
-        else this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+        this.rollbackBestEffort(savepoint);
         throw err;
       }
     };
+  }
+
+  /**
+   * Roll back the current transaction/savepoint best-effort, NEVER letting
+   * a rollback failure replace the caller's original error. A query timeout
+   * closes the bridge (`call()` sets `state.open = false`), so a follow-up
+   * ROLLBACK would throw "PostgreSQL connection is closed" and mask the real
+   * timeout diagnostic — so skip it when the connection is already gone and
+   * swallow any rollback throw.
+   */
+  private rollbackBestEffort(savepoint: string): void {
+    if (!this.state.open) return;
+    try {
+      if (this.state.txDepth === 0) this.exec('ROLLBACK');
+      else this.exec(`ROLLBACK TO SAVEPOINT ${savepoint}`);
+    } catch {
+      // Rollback failed; the caller's original error is the diagnostic payload.
+    }
   }
 
   close(): void {
