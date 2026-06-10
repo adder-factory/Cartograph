@@ -8,6 +8,7 @@ import { MCPServer } from './index.js';
 import { SocketTransport } from './transport.js';
 import type { McpServerProfile } from './profiles.js';
 import { CARTOGRAPH_PACKAGE_VERSION } from './version.js';
+import { isAcceptableDaemonHello, isDaemonConnectFailure, isDaemonLockPastStartupGrace } from './daemon-logic.js';
 import {
   type DaemonLockInfo,
   decodeLockInfo,
@@ -215,7 +216,7 @@ function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> 
 }
 
 function acceptDaemonSocket(socket: net.Socket, hello: DaemonHello): net.Socket | null {
-  if (hello.cartograph === CARTOGRAPH_PACKAGE_VERSION && hello.protocol === 1) return socket;
+  if (isAcceptableDaemonHello(hello.cartograph, hello.protocol, CARTOGRAPH_PACKAGE_VERSION)) return socket;
   process.stderr.write(
     `[Cartograph MCP] Shared daemon version/protocol mismatch ` +
       `(daemon ${hello.cartograph}, local ${CARTOGRAPH_PACKAGE_VERSION}); using direct mode.\n`,
@@ -334,7 +335,7 @@ function removeStaleLock(projectRoot: string, info: DaemonLockInfo | null): void
 }
 
 function retireUnreachableDaemonLock(projectRoot: string, info: DaemonLockInfo | null, err: unknown): void {
-  if (!info || !isDaemonConnectFailure(err) || !isDaemonLockPastStartupGrace(info)) return;
+  if (!info || !isDaemonConnectFailure(err) || !isDaemonLockPastStartupGraceInfo(info)) return;
   process.stderr.write(
     `[Cartograph MCP] Removing stale daemon lock for pid ${info.pid}; ` +
       `socket is unreachable after startup grace. Retrying daemon start.\n`,
@@ -342,16 +343,8 @@ function retireUnreachableDaemonLock(projectRoot: string, info: DaemonLockInfo |
   removeStaleLock(projectRoot, info);
 }
 
-function isDaemonLockPastStartupGrace(info: DaemonLockInfo): boolean {
-  if (info.startedAt <= 0) return true;
-  return info.startedAt > 0 && Date.now() - info.startedAt > DAEMON_LOCK_STARTUP_GRACE_MS;
-}
-
-function isDaemonConnectFailure(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
-  const code = (err as NodeJS.ErrnoException).code;
-  if (code === 'ENOENT' || code === 'ECONNREFUSED' || code === 'EPIPE') return true;
-  return err.message.startsWith('daemon socket is missing');
+function isDaemonLockPastStartupGraceInfo(info: DaemonLockInfo): boolean {
+  return isDaemonLockPastStartupGrace(info.startedAt, DAEMON_LOCK_STARTUP_GRACE_MS, Date.now());
 }
 
 type DaemonSocketPreflightState = 'ready' | 'active';
