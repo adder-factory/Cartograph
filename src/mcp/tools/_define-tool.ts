@@ -142,6 +142,13 @@ export interface ZodToolModule extends ToolModule {
 export function toJsonSchema(schema: ToolZodSchema): ToolDefinition['inputSchema'] {
   const generated = z.toJSONSchema(schema, {
     target: 'draft-7',
+    // `io: 'input'` describes the PRE-parse shape: a field with a
+    // `.default()` is optional on input (the default is applied during
+    // `safeParse`), so it must NOT appear in `required`. The Zod
+    // default (`io: 'output'`) describes the post-parse object where
+    // defaulted fields always exist, which wrongly advertised every
+    // `.default()` param as required to strict MCP clients.
+    io: 'input',
   }) as Record<string, unknown>;
   delete generated['$schema'];
   delete generated['additionalProperties'];

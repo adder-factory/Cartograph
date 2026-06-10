@@ -12,10 +12,11 @@
  * call site for each pass — the runner inside `runHooks*` walks
  * every registered hook automatically.
  *
- * On main today there are NO hooks registered (this file ships
- * the framework only). PRs adding derived-signal passes
- * (centrality, churn, issue-history, config-refs, sql-refs,
- * cochange) each register their hook here.
+ * The live execution plan is HOOK_GROUPS below (28 hooks across
+ * groups A/B/C — biomarkers, centrality, churn, issue-history,
+ * config-refs, sql-refs, cochange, tests-edges, and the rest). A PR
+ * adding a derived-signal pass registers its hook into the matching
+ * group there.
  */
 
 import type { IndexHook, IndexHookContext, IndexHookOutcome } from './types.js';
