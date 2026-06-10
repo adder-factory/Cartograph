@@ -22,7 +22,7 @@
  */
 
 import { z } from 'zod';
-import { projectPathField, batchedSymbols, BATCHED_SYMBOLS_MAX } from './_common-fields.js';
+import { projectPathField, batchedSymbols, BATCHED_SYMBOLS_MAX, lowTokensField } from './_common-fields.js';
 import {
   getFindingsForNode,
   getFindingsRanked,
@@ -433,6 +433,7 @@ interface RankedModeArgs {
   minMetric?: number | undefined;
   maxMetric?: number | undefined;
   excludeFile?: string | undefined;
+  lowTokens?: boolean | undefined;
 }
 
 /**
@@ -475,7 +476,7 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
       }),
     );
   }
-  const lines = renderRankedFindingsTable(rows, biomarker, minSeverity);
+  const lines = renderRankedFindingsTable(rows, biomarker, minSeverity, args.lowTokens === true);
   // SQL LIMIT — `rows.length === limit` is a heuristic for "cap hit".
   // False positive when total findings exactly equals the cap; cheap.
   const hasMore = rows.length >= limit;
@@ -633,7 +634,19 @@ function renderRankedFindingsTable(
   }>,
   biomarker: string | undefined,
   minSeverity: BiomarkerSeverity,
+  lowTokens = false,
 ): string[] {
+  if (lowTokens) {
+    // Compact pipe rows — no markdown table or multi-paragraph preamble.
+    // Columns: name|kind|biomarker|severity|metric|centrality|path
+    const out = [`# code-health ranked (${minSeverity}+, top ${rows.length})${biomarker ? ` [${biomarker}]` : ''}`];
+    const dp = chooseCentralityDecimals(rows);
+    for (const r of rows) {
+      const cen = r.centrality == null ? '-' : r.centrality.toFixed(dp);
+      out.push(`${r.name}|${r.kind}|${r.biomarker}|${r.severity}|${r.metric}|${cen}|${r.filePath}`);
+    }
+    return out;
+  }
   const headerNote = biomarker ? ` — \`${biomarker}\` only` : '';
   const tableHeader = biomarker
     ? '| # | Symbol | Kind | File | Severity | Metric | Centrality | Surface |'
@@ -732,6 +745,7 @@ const biomarkersSchema = z.object({
     .describe(
       `For mode='ranked': max rows (default ${RANKED_LIMIT_DEFAULT}; integer in [1, ${RANKED_LIMIT_MAX}], out-of-range rejected).`,
     ),
+  lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
 
