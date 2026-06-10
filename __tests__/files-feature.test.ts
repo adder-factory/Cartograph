@@ -17,6 +17,18 @@ describe('files feature runtime', () => {
   it('normalizes positional dir and parses output options as values', () => {
     expect(buildEffectiveFilesOptions('src', {})).toEqual({ dir: 'src' });
     expect(buildEffectiveFilesOptions('src', { dir: 'test' })).toEqual({ dir: 'test' });
+    expect(buildEffectiveFilesOptions('src/a.ts', { format: 'symbols' })).toEqual({
+      format: 'symbols',
+      file: 'src/a.ts',
+    });
+    expect(buildEffectiveFilesOptions('src/a.ts', { format: 'deps' })).toEqual({
+      format: 'deps',
+      file: 'src/a.ts',
+    });
+    expect(buildEffectiveFilesOptions('src', { format: 'module' })).toEqual({
+      format: 'module',
+      dirPath: 'src',
+    });
     expect(parseFilesOutputOptions({ lowTokens: true })).toEqual({ ok: true, format: 'summary', maxDepth: 3 });
     expect(parseFilesOutputOptions({ format: 'flat', maxDepth: '2' })).toEqual({
       ok: true,
@@ -25,7 +37,8 @@ describe('files feature runtime', () => {
     });
     expect(parseFilesOutputOptions({ format: 'wide' })).toEqual({
       ok: false,
-      error: 'Invalid value for --format: "wide" — valid values: tree, flat, grouped, summary',
+      error:
+        'Invalid value for --format: "wide" — valid values: tree, flat, grouped, summary, symbols, deps, module, read',
     });
     expect(parseFilesOutputOptions({ maxDepth: '0' })).toEqual({
       ok: false,

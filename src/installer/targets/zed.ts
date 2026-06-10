@@ -7,7 +7,7 @@
  *   - No instructions file; Zed has Agent Settings and profiles for
  *     MCP tool selection/permissions.
  *
- * Docs: https://zed.dev/docs/assistant/model-context-protocol
+ * Docs: https://zed.dev/docs/ai/mcp
  */
 
 import * as fs from 'node:fs';
@@ -24,8 +24,9 @@ import {
   writeJsonFile,
   type McpCommandOptions,
 } from './shared.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
-const ZED_DOCS_URL = 'https://zed.dev/docs/assistant/model-context-protocol';
+const ZED_DOCS_URL = 'https://zed.dev/docs/ai/mcp';
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(globalConfigBaseDir(), 'zed') : path.join(process.cwd(), '.zed');
@@ -63,10 +64,14 @@ class ZedTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeContextServerEntry(loc, opts)],
-      notes: ['Open Zed Agent Settings to verify the cartograph context server is active.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeContextServerEntry(loc, opts)],
+        notes: ['Open Zed Agent Settings to verify the cartograph context server is active.'],
+      },
+      [settingsJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -84,7 +89,9 @@ class ZedTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [settingsJsonPath(loc)];
+    const paths = [settingsJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

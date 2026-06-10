@@ -23,6 +23,7 @@ import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResul
 import { atomicWriteFileSync, getHomeDir, readJsonFile, renderMcpServersPrintConfig, writeJsonFile } from './shared.js';
 import { INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
+import { projectGitignorePath, writeProjectGitignoreFileEntries } from './gitignore.js';
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.kiro') : path.join(process.cwd(), '.kiro');
@@ -58,6 +59,9 @@ class KiroTarget implements AgentTarget {
     const loc = _loc;
     const files: WriteResult['files'] = [];
     files.push(writeMcpEntry(loc, opts), writeSteeringEntry(loc));
+    if (loc === 'local') {
+      files.push(writeProjectGitignoreFileEntries([mcpJsonPath(loc), steeringPath(loc)]));
+    }
     return {
       files,
       notes: ['Restart Kiro for MCP changes to take effect.'],
@@ -90,7 +94,9 @@ class KiroTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc), steeringPath(loc)];
+    const paths = [mcpJsonPath(loc), steeringPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

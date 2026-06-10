@@ -119,8 +119,8 @@ export interface GenerateCommandOptions {
    * Field names to render as POSITIONAL arguments instead of
    * `--<name> <value>` flags — the P8-wave extension for commands
    * whose schema field is naturally a positional on the CLI
-   * (`module [dirPath]`, `imports [file]`, `node <symbols...>`,
-   * `blame <symbol>`).
+   * (`files [path] --format module`, `imports [file]`,
+   * `node <symbols...>`, `blame <symbol>`).
    *
    * Each entry is the camelCase Zod field name. A REQUIRED scalar
    * field renders as `<name>`; an OPTIONAL scalar as `[name]`; a

@@ -602,7 +602,15 @@ describe('CLI surface — every command responds to --help', () => {
   }, 600_000);
 
   it('retired top-level shortcuts are not registered', () => {
-    const retiredShortcuts = ['dependency-coverage', 'discover', 'host-diagnostics', 'local-chat'];
+    const retiredShortcuts = [
+      'dependency-coverage',
+      'discover',
+      'file-deps',
+      'file-symbols',
+      'host-diagnostics',
+      'local-chat',
+      'module',
+    ];
     const rootHelp = runCli(['--help']).out;
     for (const shortcut of retiredShortcuts) {
       expect(rootHelp).not.toContain(`  ${shortcut}`);

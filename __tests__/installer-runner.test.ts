@@ -90,6 +90,23 @@ describe('runInstallerWithOptions', () => {
     expect(fs.readFileSync(agentsPath, 'utf-8')).toContain('Cartograph');
   });
 
+  it('writes selected Codex target configuration locally under the project', async () => {
+    await runInstallerWithOptions({
+      yes: true,
+      location: 'local',
+      target: 'codex',
+      autoAllow: false,
+    });
+
+    const configPath = path.join(tmpCwd, '.codex', 'config.toml');
+    expect(fs.existsSync(configPath)).toBe(true);
+    expect(fs.readFileSync(configPath, 'utf-8')).toContain(
+      `args = ["serve", "--mcp", "--project-path", "${path.resolve(process.cwd())}"]`,
+    );
+    expect(fs.readFileSync(path.join(tmpCwd, '.gitignore'), 'utf-8')).toContain('.codex/config.toml');
+    expect(listFiles(tmpHome)).toEqual([]);
+  });
+
   it('rejects unknown target ids before writing files', async () => {
     await expect(
       runInstallerWithOptions({ yes: true, location: 'global', target: 'codex,missing-agent' }),

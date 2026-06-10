@@ -27,6 +27,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const BOB_DOCS_URL = 'https://bob.ibm.com/docs/ide/configuration/mcp/mcp-in-bob';
 
@@ -70,10 +71,14 @@ class BobTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntry(loc, opts)],
-      notes: ['Enable MCP servers in Bob settings if this is the first MCP server for the workspace.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntry(loc, opts)],
+        notes: ['Enable MCP servers in Bob settings if this is the first MCP server for the workspace.'],
+      },
+      [mcpJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -91,7 +96,9 @@ class BobTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

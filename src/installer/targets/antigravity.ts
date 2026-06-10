@@ -107,7 +107,7 @@ function buildAntigravityEntry(options: McpCommandOptions = {}): { command: stri
 class AntigravityTarget implements AgentTarget {
   readonly id = 'antigravity' as const;
   readonly displayName = 'Antigravity IDE';
-  readonly docsUrl = 'https://antigravity.google';
+  readonly docsUrl = 'https://antigravity.google/docs/mcp';
 
   supportsLocation(loc: Location): boolean {
     return loc === 'global';

@@ -27,6 +27,7 @@ import {
 } from './shared.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import { projectGitignorePath, writeProjectGitignoreFileEntries } from './gitignore.js';
 
 function mcpJsonPath(loc: Location): string {
   return loc === 'global'
@@ -88,6 +89,7 @@ class CursorTarget implements AgentTarget {
 
     if (loc === 'local') {
       files.push(writeRulesEntry());
+      files.push(writeProjectGitignoreFileEntries([mcpJsonPath(loc), rulesPath()]));
     }
 
     return {
@@ -128,6 +130,7 @@ class CursorTarget implements AgentTarget {
   describePaths(loc: Location): string[] {
     const paths = [mcpJsonPath(loc)];
     if (loc === 'local') paths.push(rulesPath());
+    if (loc === 'local') paths.push(projectGitignorePath());
     return paths;
   }
 }

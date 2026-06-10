@@ -28,6 +28,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const ROVO_DOCS_URL = 'https://support.atlassian.com/rovo/docs/connect-to-an-mcp-server-in-rovo-dev-cli/';
 
@@ -79,7 +80,7 @@ class RovoDevTarget implements AgentTarget {
       loc === 'local'
         ? ['Point Rovo Dev config at .rovodev/mcp.json if your local profile does not already load it.']
         : ['Restart Rovo Dev or use /mcp to reload server changes.'];
-    return { files: [writeMcpEntry(loc, opts)], notes };
+    return withLocalGitignoreFileEntries(loc, { files: [writeMcpEntry(loc, opts)], notes }, [mcpJsonPath(loc)]);
   }
 
   uninstall(loc: Location): WriteResult {
@@ -97,7 +98,9 @@ class RovoDevTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

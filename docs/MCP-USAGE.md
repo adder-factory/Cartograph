@@ -44,6 +44,11 @@ cartograph install --yes --target=auto --location=global
 initializes `.cartograph/`, indexes the repository, and defers optional LLM
 setup instead of opening the interactive provider wizard.
 
+Generated local project config and instruction files are added to `.gitignore`
+because they can contain absolute checkout paths and personal agent rules. Local
+MCP server args include `--project-path <this-project>` where the client config
+is project-scoped.
+
 The full copy-paste task for users is in
 [Agent-Assisted Install](AGENT-INSTALL.md).
 
@@ -144,6 +149,11 @@ advertised startup schema.
 Use `cartograph install --command /absolute/path/to/cartograph` to write a
 custom command value into supported client configs.
 
+The snippets below show minimal manual configs. `cartograph install
+--location=local` writes the same target-specific shapes but pins project-scoped
+server args with `--project-path /absolute/path/to/project` and gitignores
+generated project-local files.
+
 If the client does not send `rootUri`, pass the project explicitly:
 
 ```sh
@@ -169,7 +179,7 @@ under the current project path:
         "cartograph": {
           "type": "stdio",
           "command": "cartograph",
-          "args": ["serve", "--mcp"]
+          "args": ["serve", "--mcp", "--project-path", "/absolute/path/to/project"]
         }
       }
     }
@@ -183,6 +193,28 @@ The same local install writes Claude permissions to
 
 For team-shared Claude MCP config, use a project `.mcp.json` with the standard
 `mcpServers` shape.
+
+### Codex CLI
+
+Use the installer for Codex's user-global or trusted project-local config:
+
+```sh
+cartograph install --yes --target=codex --location=local
+```
+
+Local Codex installs write `.codex/config.toml` in the current project and pin
+Cartograph to that project:
+
+```toml
+[mcp_servers.cartograph]
+command = "cartograph"
+args = ["serve", "--mcp", "--project-path", "/absolute/path/to/project"]
+```
+
+Use `--location=global` only when one global Cartograph default is acceptable,
+or keep passing `projectPath` explicitly in MCP calls. The installer adds the
+generated `.codex/config.toml` to `.gitignore` because it contains an absolute
+local path.
 
 ### Cursor
 

@@ -66,10 +66,13 @@ describe('audit-4 CLI argument-layer fixes', () => {
     expect(out).toMatch(/range 4-30/);
   }, 60_000);
 
-  it('module --help shows [dirPath] is optional and --limit exists', () => {
-    const { out, code } = runCli(['module', '--help']);
+  it('files --help shows folded module and one-file flags', () => {
+    const { out, code } = runCli(['files', '--help']);
     expect(code).toBe(0);
-    expect(out).toContain('[dirPath]');
+    expect(out).toContain('[path]');
+    expect(out).toContain('--format');
+    expect(out).toContain('--dir-path');
+    expect(out).toContain('--file');
     expect(out).toContain('--limit');
   }, 60_000);
 
@@ -135,9 +138,9 @@ describe('audit-4 CLI argument-layer fixes', () => {
   );
 
   it.skipIf(!indexed)(
-    'module with no dirPath reaches the list-all summaries path',
+    'files --format module with no dirPath reaches the list-all summaries path',
     () => {
-      const { out, code } = runCli(['module']);
+      const { out, code } = runCli(['files', '--format', 'module']);
       expect(code).toBe(0);
       expect(out).toMatch(/Module summaries|No module summaries cached yet/);
     },

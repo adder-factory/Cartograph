@@ -29,6 +29,7 @@ import {
   writeMcpEntryJson,
   type WriteMcpEntryJsonArgs,
 } from './write-mcp-entry-json.js';
+import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
 
 const CODEWHALE_DOCS_URL = 'https://codewhale.net/en/install';
 
@@ -67,10 +68,14 @@ class CodeWhaleTarget implements AgentTarget {
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
-    return {
-      files: [writeMcpEntry(loc, opts)],
-      notes: ['Start a new CodeWhale session for MCP changes to take effect.'],
-    };
+    return withLocalGitignoreFileEntries(
+      loc,
+      {
+        files: [writeMcpEntry(loc, opts)],
+        notes: ['Start a new CodeWhale session for MCP changes to take effect.'],
+      },
+      [mcpJsonPath(loc)],
+    );
   }
 
   uninstall(loc: Location): WriteResult {
@@ -88,7 +93,9 @@ class CodeWhaleTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [mcpJsonPath(loc)];
+    const paths = [mcpJsonPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

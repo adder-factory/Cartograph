@@ -27,6 +27,7 @@ import {
 } from './shared.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START } from '../instructions-template.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
+import { projectGitignorePath, writeProjectGitignoreFileEntries } from './gitignore.js';
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.gemini') : path.join(process.cwd(), '.gemini');
@@ -64,6 +65,9 @@ class GeminiTarget implements AgentTarget {
   install(loc: Location, opts: InstallOptions): WriteResult {
     const files: WriteResult['files'] = [];
     files.push(writeMcpEntry(loc, opts), writeInstructionsEntry(loc));
+    if (loc === 'local') {
+      files.push(writeProjectGitignoreFileEntries([settingsJsonPath(loc), instructionsPath(loc)]));
+    }
     return { files };
   }
 
@@ -103,7 +107,9 @@ class GeminiTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    return [settingsJsonPath(loc), instructionsPath(loc)];
+    const paths = [settingsJsonPath(loc), instructionsPath(loc)];
+    if (loc === 'local') paths.push(projectGitignorePath());
+    return paths;
   }
 }
 

@@ -51,6 +51,19 @@ function localMcpArgs(): string[] {
   return ['serve', '--mcp', '--project-path', path.resolve(process.cwd())];
 }
 
+function localGitignorePath(): string {
+  return path.join(process.cwd(), '.gitignore');
+}
+
+function withLocalGitignore(paths: string[]): string[] {
+  return [...paths, localGitignorePath()];
+}
+
+function isInsideProject(file: string): boolean {
+  const relative = path.relative(process.cwd(), file);
+  return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
 describe('Installer targets — contract', () => {
   let tmpHome: string;
   let tmpCwd: string;
@@ -97,6 +110,27 @@ describe('Installer targets — contract', () => {
             const second = target.install(location, { autoAllow: true });
             for (const file of second.files) {
               expect(file.action).toBe('unchanged');
+            }
+          });
+
+          it('keeps local generated project files out of version control', () => {
+            if (location !== 'local') return;
+
+            const result = target.install(location, { autoAllow: true });
+            const projectFiles = [
+              ...new Set(
+                result.files
+                  .map((file) => file.path)
+                  .filter((file) => file !== localGitignorePath())
+                  .filter(isInsideProject)
+                  .map((file) => path.relative(process.cwd(), file).split(path.sep).join('/')),
+              ),
+            ];
+            if (projectFiles.length === 0) return;
+
+            const gitignore = fs.readFileSync(localGitignorePath(), 'utf-8');
+            for (const file of projectFiles) {
+              expect(gitignore).toContain(file);
             }
           });
 
@@ -411,6 +445,71 @@ describe('Installer targets — Claude specifics', () => {
   });
 });
 
+describe('Installer targets — Codex specifics', () => {
+  let tmpHome: string;
+  let tmpCwd: string;
+  let origCwd: string;
+  let homeRestore: { restore: () => void };
+
+  beforeEach(() => {
+    tmpHome = mkTmpDir('home');
+    tmpCwd = mkTmpDir('cwd');
+    origCwd = process.cwd();
+    process.chdir(tmpCwd);
+    homeRestore = setHome(tmpHome);
+  });
+
+  afterEach(() => {
+    homeRestore.restore();
+    process.chdir(origCwd);
+    fs.rmSync(tmpHome, { recursive: true, force: true });
+    fs.rmSync(tmpCwd, { recursive: true, force: true });
+  });
+
+  it('supports user-global and trusted project-local config paths', () => {
+    const codex = getTarget('codex')!;
+    const cwd = path.resolve(process.cwd());
+
+    expect(codex.supportsLocation('global')).toBe(true);
+    expect(codex.supportsLocation('local')).toBe(true);
+    expect(codex.describePaths('global')).toEqual([
+      path.join(tmpHome, '.codex', 'config.toml'),
+      path.join(tmpHome, '.codex', 'AGENTS.md'),
+    ]);
+    expect(codex.describePaths('local')).toEqual([
+      path.join(cwd, '.codex', 'config.toml'),
+      path.join(cwd, '.gitignore'),
+    ]);
+  });
+
+  it('writes Codex local MCP config with an explicit project path', () => {
+    const codex = getTarget('codex')!;
+
+    codex.install('local', { autoAllow: false });
+
+    const localConfig = fs.readFileSync(path.join(tmpCwd, '.codex', 'config.toml'), 'utf-8');
+    expect(localConfig).toContain('[mcp_servers.cartograph]');
+    expect(localConfig).toContain('command = "cartograph"');
+    expect(localConfig).toContain(`args = ["serve", "--mcp", "--project-path", "${path.resolve(process.cwd())}"]`);
+    expect(fs.existsSync(path.join(tmpHome, '.codex', 'config.toml'))).toBe(false);
+    expect(fs.existsSync(path.join(tmpHome, '.codex', 'AGENTS.md'))).toBe(false);
+    expect(fs.readFileSync(path.join(tmpCwd, '.gitignore'), 'utf-8')).toContain('.codex/config.toml');
+  });
+
+  it('preserves sibling Codex TOML tables when installing locally', () => {
+    const codex = getTarget('codex')!;
+    const configPath = path.join(tmpCwd, '.codex', 'config.toml');
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, ['[mcp_servers.other]', 'command = "other"', 'args = ["serve"]', ''].join('\n'));
+
+    codex.install('local', { autoAllow: false });
+
+    const localConfig = fs.readFileSync(configPath, 'utf-8');
+    expect(localConfig).toContain('[mcp_servers.other]');
+    expect(localConfig).toContain('[mcp_servers.cartograph]');
+  });
+});
+
 describe('Installer targets — JSON MCP target specifics', () => {
   let tmpHome: string;
   let tmpCwd: string;
@@ -440,18 +539,21 @@ describe('Installer targets — JSON MCP target specifics', () => {
     const opencode = getTarget('opencode')!;
 
     expect(copilot.describePaths('global')).toEqual([path.join(tmpHome, '.copilot', 'mcp-config.json')]);
-    expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(copilot.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.mcp.json')]));
     expect(codebuddy.describePaths('global')).toEqual([path.join(tmpHome, '.codebuddy', '.mcp.json')]);
-    expect(codebuddy.describePaths('local')).toEqual([path.join(process.cwd(), '.mcp.json')]);
+    expect(codebuddy.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.mcp.json')]));
     expect(pi.describePaths('global')).toEqual([path.join(tmpHome, '.pi', 'agent', 'mcp.json')]);
-    expect(pi.describePaths('local')).toEqual([path.join(process.cwd(), '.pi', 'mcp.json')]);
+    expect(pi.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.pi', 'mcp.json')]));
     expect(zed.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'zed', 'settings.json')]);
-    expect(zed.describePaths('local')).toEqual([path.join(process.cwd(), '.zed', 'settings.json')]);
+    expect(zed.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.zed', 'settings.json')]));
     expect(opencode.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'opencode', 'opencode.json')]);
+    expect(opencode.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), 'opencode.json')]));
 
     fs.mkdirSync(path.join(process.cwd(), '.github'), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), '.github', 'mcp.json'), '{}\n');
-    expect(copilot.describePaths('local')).toEqual([path.join(process.cwd(), '.github', 'mcp.json')]);
+    expect(copilot.describePaths('local')).toEqual(
+      withLocalGitignore([path.join(process.cwd(), '.github', 'mcp.json')]),
+    );
   });
 
   it('preserves JSONC comments and trailing commas for CodeBuddy and Pi configs', () => {
@@ -627,18 +729,25 @@ describe('Installer targets — JSON MCP target specifics', () => {
       ...reasonix.describePaths('global'),
     ];
 
-    expect(new Set(paths).size).toBe(paths.length);
+    const targetConfigPaths = paths.filter((targetPath) => targetPath !== localGitignorePath());
+    expect(new Set(targetConfigPaths).size).toBe(targetConfigPaths.length);
     expect(factory.describePaths('global')).toEqual([path.join(tmpHome, '.factory', 'mcp.json')]);
-    expect(rovo.describePaths('local')).toEqual([path.join(process.cwd(), '.rovodev', 'mcp.json')]);
-    expect(qoder.describePaths('local')).toEqual([path.join(process.cwd(), '.qoder', 'settings.local.json')]);
+    expect(rovo.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.rovodev', 'mcp.json')]));
+    expect(qoder.describePaths('local')).toEqual(
+      withLocalGitignore([path.join(process.cwd(), '.qoder', 'settings.local.json')]),
+    );
     expect(codewhale.describePaths('global')).toEqual([path.join(tmpHome, '.codewhale', 'mcp.json')]);
-    expect(codewhale.describePaths('local')).toEqual([path.join(process.cwd(), '.codewhale', 'mcp.json')]);
+    expect(codewhale.describePaths('local')).toEqual(
+      withLocalGitignore([path.join(process.cwd(), '.codewhale', 'mcp.json')]),
+    );
     expect(bob.describePaths('global')).toEqual([path.join(tmpHome, '.bob', 'mcp_settings.json')]);
-    expect(bob.describePaths('local')).toEqual([path.join(process.cwd(), '.bob', 'mcp.json')]);
+    expect(bob.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.bob', 'mcp.json')]));
     expect(kimi.describePaths('global')).toEqual([path.join(tmpHome, '.kimi-code', 'mcp.json')]);
-    expect(kimi.describePaths('local')).toEqual([path.join(process.cwd(), '.kimi-code', 'mcp.json')]);
+    expect(kimi.describePaths('local')).toEqual(
+      withLocalGitignore([path.join(process.cwd(), '.kimi-code', 'mcp.json')]),
+    );
     expect(pi.describePaths('global')).toEqual([path.join(tmpHome, '.pi', 'agent', 'mcp.json')]);
-    expect(pi.describePaths('local')).toEqual([path.join(process.cwd(), '.pi', 'mcp.json')]);
+    expect(pi.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.pi', 'mcp.json')]));
     expect(reasonix.describePaths('global')).toEqual([path.join(tmpHome, '.reasonix', 'config.json')]);
     expect(reasonix.supportsLocation('local')).toBe(false);
   });
@@ -832,7 +941,7 @@ describe('Installer targets — JSON MCP target specifics', () => {
     );
 
     const expected = path.join(process.cwd(), '.rovodev', 'custom-mcp.json');
-    expect(rovo.describePaths('local')).toEqual([expected]);
+    expect(rovo.describePaths('local')).toEqual(withLocalGitignore([expected]));
 
     rovo.install('local', { autoAllow: false });
     const config = JSON.parse(fs.readFileSync(expected, 'utf-8'));
