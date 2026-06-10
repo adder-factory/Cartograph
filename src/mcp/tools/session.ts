@@ -47,7 +47,10 @@ import {
 } from '../../db/queries-trace.js';
 import { saveMacro, getMacro, listMacros, bumpMacroRun, deleteMacro, type MacroStep } from '../../db/queries-macros.js';
 import { textResult, truncateOutput } from './shared.js';
-import { getToolModule } from './registry.js';
+// From the leaf lookup, NOT registry.js — registry imports SESSION_TOOL to
+// build its ENTRIES, so importing getToolModule from registry here would
+// re-create the runtime cycle this split removes.
+import { getToolModule } from './_tool-lookup.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';

@@ -33,6 +33,7 @@
 import type { ToolDefinition } from '../tool-types.js';
 import { allowStaleProperty } from '../tool-types.js';
 import type { ToolModule } from './types.js';
+import { registerToolModule } from './_tool-lookup.js';
 import { getZodSchema, reattachZodSchema } from './_define-tool.js';
 import { getToolContract, reattachToolContract } from './_tool-contract.js';
 
@@ -151,8 +152,10 @@ const ENTRIES: ToolModule[] = [
   TRACE_TO_CULPRITS_TOOL,
 ].map(withAllowStale);
 
-const byName: Map<string, ToolModule> = new Map();
-for (const mod of ENTRIES) byName.set(mod.definition.name, mod);
+// Populate the leaf name→module lookup. Family tools read it via
+// `_tool-lookup.ts` (NOT this registry) so they don't import the registry
+// that imports them — see _tool-lookup.ts for the cycle this breaks.
+for (const mod of ENTRIES) registerToolModule(mod);
 
 /**
  * The canonical set of MCP tool names — derived from the live
@@ -161,7 +164,7 @@ for (const mod of ENTRIES) byName.set(mod.definition.name, mod);
  * `__tests__/tool-name-references.test.ts`) consume this so a tool
  * rename / merge / retirement is a single-source change.
  */
-export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(byName.keys());
+export const KNOWN_TOOL_NAMES: ReadonlySet<string> = new Set(ENTRIES.map((mod) => mod.definition.name));
 
 /**
  * Tool names that were retired by a merge or fold-in. Allowed inside
@@ -277,9 +280,10 @@ export function getToolModules(): readonly ToolModule[] {
   return ENTRIES;
 }
 
-export function getToolModule(name: string): ToolModule | undefined {
-  return byName.get(name);
-}
+// Re-exported from the leaf lookup so existing `registry.getToolModule`
+// importers keep working; family tools should import it from
+// `./_tool-lookup.js` directly to avoid the registry import cycle.
+export { getToolModule } from './_tool-lookup.js';
 
 /**
  * The `tools[]` array advertised in MCP `list_tools`. Built once at

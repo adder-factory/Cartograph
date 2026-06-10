@@ -1,13 +1,11 @@
 /**
  * @internal Spec builders + format helpers for `cartograph_session`.
  *
- * Split out of `session.ts` to break a load-order cycle:
- *   session.ts → registry.ts → session.ts (SESSION_TOOL).
- * The cycle exists at runtime for `getToolModule` lookups, but any
- * direct importer of `session.ts` (e.g. the wording-lint test) trips
- * the TDZ before SESSION_TOOL is initialised. Hoisting the spec
- * builders + their `fmtTs` helper here gives the test a registry-free
- * import path.
+ * Split out of `session.ts` so a direct importer (e.g. the wording-lint
+ * test) gets the spec builders without `session.ts`'s heavier handler
+ * surface. (The former session.ts → registry.ts → session.ts runtime
+ * cycle for `getToolModule` is gone — session.ts now reads the leaf
+ * `_tool-lookup.ts` instead of the registry.)
  *
  * `session.ts` re-imports `fmtTs` from this file so the
  * timestamp format stays a single source of truth.
