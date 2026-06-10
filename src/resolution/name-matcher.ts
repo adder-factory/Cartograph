@@ -248,9 +248,12 @@ function matchByFilePath(ref: UnresolvedRef, context: ResolutionContext): Resolv
   const exactMatch = fileNodes.find((n) => n.qualifiedName === ref.referenceName || n.filePath === ref.referenceName);
   if (exactMatch) return filePathResolvedRef(ref, exactMatch.id, FILE_PATH_EXACT_CONFIDENCE);
 
-  // Fall back to suffix match (e.g., ref="snippets/foo.liquid" matches "src/snippets/foo.liquid")
+  // Fall back to suffix match (e.g., ref="snippets/foo.liquid" matches
+  // "src/snippets/foo.liquid"). Require a `/` path-segment boundary so
+  // ref="snippets/foo.liquid" does NOT match "src/mysnippets/foo.liquid".
+  const suffixNeedle = `/${ref.referenceName}`;
   const suffixMatch = fileNodes.find(
-    (n) => n.qualifiedName.endsWith(ref.referenceName) || n.filePath.endsWith(ref.referenceName),
+    (n) => n.qualifiedName.endsWith(suffixNeedle) || n.filePath.endsWith(suffixNeedle),
   );
   if (suffixMatch) return filePathResolvedRef(ref, suffixMatch.id, FILE_PATH_SUFFIX_CONFIDENCE);
 
@@ -444,8 +447,12 @@ function matchByQualifiedName(ref: UnresolvedRef, context: ResolutionContext): R
   const lastName = parts.at(-1);
   if (lastName) {
     const partialCandidates = context.getNodesByName(lastName);
+    const rn = ref.referenceName;
     for (const candidate of partialCandidates) {
-      if (candidate.qualifiedName.endsWith(ref.referenceName)) {
+      // Require a `::`/`.` separator boundary so `Bar::create` doesn't
+      // suffix-match the unrelated `FooBar::create` (the F#80 bug class).
+      const qn = candidate.qualifiedName;
+      if (qn === rn || qn.endsWith(`::${rn}`) || qn.endsWith(`.${rn}`)) {
         return {
           original: ref,
           targetNodeId: candidate.id,

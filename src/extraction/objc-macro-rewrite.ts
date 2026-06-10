@@ -181,7 +181,12 @@ export function rewriteReactNativeMacros(source: string): string {
       i = openParen + 1;
       continue;
     }
-    chars ??= Array.from(source);
+    // `split('')` splits by UTF-16 code UNIT, keeping `chars` index-aligned
+    // with `i`/`openParen`/`closeParen` (all code-unit offsets). `Array.from`
+    // would split by code POINT, so any astral char (e.g. an emoji in a
+    // comment) before a macro shifts every later index and corrupts the
+    // rewrite — losing the selector's first letter and unbalancing parens.
+    chars ??= source.split('');
 
     rewriteMacroInvocation({ source, chars, start: i, spec, openParen, closeParen });
     i = closeParen + 1;

@@ -29,7 +29,6 @@ describe('classifyConfidence', () => {
     expect(classifyConfidence('import', 0.9)).toBe('EXTRACTED');
     expect(classifyConfidence('qualified-name', 0.5)).toBe('EXTRACTED');
     expect(classifyConfidence('file-path', 0.5)).toBe('EXTRACTED');
-    expect(classifyConfidence('exact-match', 0.5)).toBe('EXTRACTED');
   });
 
   it('maps heuristic resolvers to INFERRED', () => {
@@ -37,10 +36,16 @@ describe('classifyConfidence', () => {
     expect(classifyConfidence('instance-method', 0.9)).toBe('INFERRED');
   });
 
-  it('framework rules split on score (≥0.85 = EXTRACTED, else INFERRED)', () => {
+  it('framework AND exact-match split on score (≥0.85 = EXTRACTED, else INFERRED)', () => {
     expect(classifyConfidence('framework', 0.9)).toBe('EXTRACTED');
     expect(classifyConfidence('framework', 0.85)).toBe('EXTRACTED');
     expect(classifyConfidence('framework', 0.7)).toBe('INFERRED');
+    // exact-match: a same-language single match (~0.9) stays EXTRACTED,
+    // but the cross-language (0.5) / low-proximity (0.4) heuristic tiers
+    // demote to INFERRED rather than masquerading as concrete.
+    expect(classifyConfidence('exact-match', 0.9)).toBe('EXTRACTED');
+    expect(classifyConfidence('exact-match', 0.5)).toBe('INFERRED');
+    expect(classifyConfidence('exact-match', 0.4)).toBe('INFERRED');
   });
 
   it('AMBIGUOUS short-circuits when tieMargin < threshold (B3)', () => {

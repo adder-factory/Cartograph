@@ -228,7 +228,14 @@ function unquoteGitPath(raw: string): string {
   for (let i = 0; i < body.length; i++) {
     const ch = body[i];
     if (ch !== '\\') {
-      bytes.push(body.codePointAt(i) ?? 0);
+      // Re-emit the char's UTF-8 BYTES, not its raw code point. A literal
+      // non-ASCII char (present only with git `core.quotepath=false`)
+      // would otherwise be truncated mod 256 by `Buffer.from(bytes)` —
+      // corrupting é (233), 中 (20013), emoji, etc. ASCII is unchanged
+      // (one byte == code point).
+      const cp = body.codePointAt(i) ?? 0;
+      for (const b of Buffer.from(String.fromCodePoint(cp), 'utf8')) bytes.push(b);
+      if (cp > 0xffff) i++; // astral char spans two UTF-16 code units
       continue;
     }
     const next = body[++i];
