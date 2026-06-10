@@ -8,7 +8,7 @@
  *
  * @example
  * ```typescript
- * import { MCPServer } from 'cartograph';
+ * import { MCPServer } from 'cartograph/mcp';
  *
  * // New (object) signature — preferred:
  * const server = new MCPServer({ projectPath: '/path/to/project' });

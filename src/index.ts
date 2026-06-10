@@ -82,7 +82,11 @@ export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } 
 export { FileWatcher } from './sync/index.js';
 export type { WatchOptions, WatcherStats } from './sync/index.js';
 export type { FreshnessInfo } from './freshness.js';
-export { MCPServer } from './mcp/index.js';
+// NOTE: MCPServer is intentionally NOT re-exported here. This facade is the
+// kernel; re-exporting the MCP server created a runtime import cycle
+// (index → mcp/index → index) that eagerly pulled the entire ~150-module
+// tool surface into every CLI/library consumer of the core. Import it from
+// the `cartograph/mcp` subpath instead.
 
 /**
  * Options for initializing a new Cartograph project
@@ -380,6 +384,21 @@ async function cgRunPostIndexHooksPhase(
   const hooksStart = Date.now();
   const outcomes = await cgRunHookPhase(cg, 'indexAll');
   const postHooksMs = Date.now() - hooksStart;
+  // Fold failed/timed-out hook outcomes into result.errors so a degraded
+  // index (e.g. biomarkers, centrality, and tests-edges all failed) is
+  // visible to CLI and MCP callers instead of only stderr logWarn lines
+  // an MCP-driven index never surfaces. success stays true (post-index
+  // hooks are best-effort) — the errors just make the degradation
+  // observable.
+  for (const o of outcomes) {
+    if (o.error) {
+      result.errors.push({
+        message: `post-index hook '${o.name}' failed: ${o.error.message}`,
+        severity: 'warning',
+        code: 'post_index_hook_failed',
+      });
+    }
+  }
   if (!options.profile) return { postHooksMs, postHooksByHook: undefined };
   const postHooksByHook: Record<string, number> = {};
   for (const o of outcomes) postHooksByHook[o.name] = o.durationMs;
