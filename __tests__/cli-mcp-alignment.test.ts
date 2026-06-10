@@ -46,6 +46,11 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // equivalent because the installer needs a TTY for clack prompts.
   'install',
 
+  // `cartograph uninstall` removes agent MCP entries (the package
+  // preuninstall hook is dead under npm v7+/bun). CLI-only: an MCP
+  // server removing its own host's MCP entries is self-defeating.
+  'uninstall',
+
   // `cartograph quickstart` is a human first-run shortcut: initialize,
   // build the structural index, run doctor, then print next commands.
   // MCP callers use the underlying `cartograph_admin({action:'init'|'index'|'doctor'})`
@@ -327,7 +332,13 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // summary layouts plus folded one-file and module-summary modes. The
   // mode-specific args are mirrored on the CLI now. `includeMetadata`
   // is the legacy MCP alias for `metadata`; the CLI uses `--no-metadata`.
-  files: new Set(['includeMetadata']),
+  // `path`: TOMBSTONE. The CLI positional is `files [path]`, but the MCP
+  // tool RETIRED its `path` field (it rejects it, pointing at `dir`).
+  // Without this explicit carve-out the mirror would be satisfied by the
+  // coincidental name match between the CLI positional and the rejected
+  // MCP field — i.e. pass vacuously. Carved out so the collision is
+  // documented, not silently green.
+  files: new Set(['includeMetadata', 'path']),
 
   // `cartograph review` is a subcommand family (`review context` /
   // `review neighbors` / `review risk` / `review agent-audit` /

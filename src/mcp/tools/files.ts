@@ -135,7 +135,8 @@ const filesSchema = z.object({
   path: z
     .any()
     .refine((v) => v === undefined, {
-      error: '`path` was retired — use `dir` (same semantics). The legacy alias is no longer accepted.',
+      error:
+        '`path` was retired. Use `dir` (directory filter), `file` (one-file symbols/deps/read), or `dirPath` (module summary) — whichever the format needs. The legacy alias is no longer accepted.',
     })
     .optional()
     .describe('REMOVED — use `dir` instead. Passing `path` is rejected.'),

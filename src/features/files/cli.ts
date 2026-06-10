@@ -85,7 +85,7 @@ interface ParseOptionalReadIntegerArgs {
 
 export function registerFilesCommand(deps: FilesCommandDeps): void {
   deps.program
-    .command('files [path]')
+    .command('files [target]')
     .description('Show indexed file structure, file details, or directory/module summaries')
     .option('-p, --project-path <path>', 'Project path')
     .option('--dir <dir>', 'Filter to files under this directory')
