@@ -109,11 +109,20 @@ interface ResolveImportArgs {
   context: ResolutionContext;
 }
 
+type WorkspacePackageExport = {
+  readonly packageDir: string;
+  readonly exports: unknown;
+};
+
+const workspacePackageCache = new WeakMap<ResolutionContext, Map<string, WorkspacePackageExport>>();
+
 /**
  * Resolve an import path to an actual file
  */
 export function resolveImportPath(args: ResolveImportArgs): string | null {
   const { importPath, fromFile, language, context } = args;
+  const workspacePackagePath = resolveWorkspacePackageImport({ importPath, language, context });
+  if (workspacePackagePath !== null) return workspacePackagePath;
   // Skip external/npm packages — but pass the context so the
   // bare-specifier heuristic can consult the project's tsconfig
   // alias map first (custom prefixes like `@components/*` would
@@ -132,6 +141,102 @@ export function resolveImportPath(args: ResolveImportArgs): string | null {
 
   // Handle absolute/aliased imports (like @/ or src/)
   return resolveAliasedImport({ importPath, language, context, projectRoot });
+}
+
+function resolveWorkspacePackageImport(args: {
+  importPath: string;
+  language: Language;
+  context: ResolutionContext;
+}): string | null {
+  const { importPath, language, context } = args;
+  if (!isJsFamily(language)) return null;
+  const packageName = packageNameFromSpecifier(importPath);
+  if (packageName === null) return null;
+  const packages = getWorkspacePackages(context);
+  const workspacePackage = packages.get(packageName);
+  if (workspacePackage === undefined) return null;
+
+  const subpath = importPath === packageName ? '.' : `.${importPath.slice(packageName.length)}`;
+  const exportedTarget = resolvePackageExportTarget(workspacePackage.exports, subpath);
+  const candidate = exportedTarget ?? (subpath === '.' ? './index' : subpath);
+  const packageRelative = stripLeadingDotSlash(path.posix.join(workspacePackage.packageDir, candidate));
+  return resolveProjectRelativeCandidate({ candidate: packageRelative, language, context });
+}
+
+function getWorkspacePackages(context: ResolutionContext): Map<string, WorkspacePackageExport> {
+  const cached = workspacePackageCache.get(context);
+  if (cached !== undefined) return cached;
+  const packages = new Map<string, WorkspacePackageExport>();
+  for (const filePath of context.getAllFiles()) {
+    if (!filePath.endsWith('package.json') || filePath.includes('node_modules/')) continue;
+    const pkg = parseWorkspacePackageJson(context.readFile(filePath));
+    if (pkg === null) continue;
+    packages.set(pkg.name, {
+      packageDir: path.posix.dirname(filePath),
+      exports: pkg.exports,
+    });
+  }
+  workspacePackageCache.set(context, packages);
+  return packages;
+}
+
+function parseWorkspacePackageJson(content: string | null): { name: string; exports: unknown } | null {
+  if (content === null) return null;
+  try {
+    const parsed = JSON.parse(content) as { name?: unknown; exports?: unknown };
+    if (typeof parsed.name !== 'string' || parsed.name.length === 0) return null;
+    return { name: parsed.name, exports: parsed.exports ?? null };
+  } catch {
+    return null;
+  }
+}
+
+function packageNameFromSpecifier(importPath: string): string | null {
+  if (importPath.startsWith('.') || importPath.length === 0) return null;
+  const parts = importPath.split('/');
+  if (importPath.startsWith('@')) {
+    if (parts.length < 2 || !parts[0] || !parts[1]) return null;
+    return `${parts[0]}/${parts[1]}`;
+  }
+  return parts[0] || null;
+}
+
+function resolvePackageExportTarget(exportsField: unknown, subpath: string): string | null {
+  if (typeof exportsField === 'string') return subpath === '.' ? exportsField : null;
+  if (exportsField === null || typeof exportsField !== 'object' || Array.isArray(exportsField)) return null;
+  const exportsRecord = exportsField as Record<string, unknown>;
+  const entry = exportsRecord[subpath];
+  return packageExportEntryToString(entry);
+}
+
+function packageExportEntryToString(entry: unknown): string | null {
+  if (typeof entry === 'string') return entry;
+  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return null;
+  const record = entry as Record<string, unknown>;
+  for (const key of ['types', 'import', 'default']) {
+    const hit = packageExportEntryToString(record[key]);
+    if (hit !== null) return hit;
+  }
+  return null;
+}
+
+function stripLeadingDotSlash(value: string): string {
+  return value.startsWith('./') ? value.slice(2) : value;
+}
+
+function resolveProjectRelativeCandidate(args: {
+  candidate: string;
+  language: Language;
+  context: ResolutionContext;
+}): string | null {
+  const { candidate, language, context } = args;
+  if (context.fileExists(candidate)) return candidate;
+  const extensions = EXTENSION_RESOLUTION[language] || [''];
+  for (const ext of extensions) {
+    const candidateWithExt = `${candidate}${ext}`;
+    if (context.fileExists(candidateWithExt)) return candidateWithExt;
+  }
+  return null;
 }
 
 /**
@@ -439,7 +544,7 @@ interface PushNamedImportsArgs {
 function pushNamedImports(args: PushNamedImportsArgs): void {
   const { out, source, namesList, aliasRegex, line } = args;
   for (const raw of namesList.split(',')) {
-    const name = raw.trim();
+    const name = normalizeTypeOnlyImportSpecifier(raw.trim());
     if (!name) continue;
     const alias = aliasRegex.exec(name);
     if (alias) {
@@ -462,6 +567,10 @@ function pushNamedImports(args: PushNamedImportsArgs): void {
       });
     }
   }
+}
+
+function normalizeTypeOnlyImportSpecifier(name: string): string {
+  return name.replace(/^type\s+/, '');
 }
 
 interface Es6ImportClause {
@@ -497,7 +606,14 @@ function extractNamespaceAlias(clause: string): string | null {
 function extractDefaultImportName(clause: string): string | null {
   const beforeSpecialImport = clause.split(/[,{*]/, 1)[0]?.trim();
   if (!beforeSpecialImport) return null;
-  return /^\w+$/.test(beforeSpecialImport) ? beforeSpecialImport : null;
+  const normalized = normalizeTypeOnlyDefaultImport(beforeSpecialImport);
+  if (normalized === null) return null;
+  return /^\w+$/.test(normalized) ? normalized : null;
+}
+
+function normalizeTypeOnlyDefaultImport(name: string): string | null {
+  if (name === 'type') return null;
+  return name.replace(/^type\s+/, '');
 }
 
 interface Es6ImportMatch {

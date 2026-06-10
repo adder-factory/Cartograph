@@ -32,7 +32,7 @@
  * five divergent ones.
  */
 
-export type PathCategory = 'production' | 'test' | 'fixture' | 'script' | 'benchmark';
+export type PathCategory = 'production' | 'test' | 'fixture' | 'script' | 'benchmark' | 'generated';
 
 /* Fixture directories / files: synthetic code that feeds a test or an
  * extraction suite. `docs/test-beds/` holds the per-language extraction
@@ -108,6 +108,12 @@ const TEST_PATTERNS: readonly RegExp[] = [
 /* Performance benchmarks. `benches/` is the Rust/Cargo convention. */
 const BENCHMARK_PATTERNS: readonly RegExp[] = [/(^|\/)bench(es|marks?)?\//i];
 
+/* Generated source files. These often expose framework-required types
+ * that are consumed by code generation or declaration merging rather
+ * than explicit imports, so production code-health rules should not
+ * report them as dead hand-written API. */
+const GENERATED_PATTERNS: readonly RegExp[] = [/\.gen\.[a-z0-9]+$/i, /\.generated\.[a-z0-9]+$/i];
+
 /* Diagnostic / one-off code: demo runners, generators, example /
  * sample code. Written as flat top-level functions because that's the
  * most readable shape for an ad-hoc tool — no callers, deliberate
@@ -137,6 +143,7 @@ export function pathCategory(filePath: string): PathCategory {
   if (FIXTURE_PATTERNS.some((re) => re.test(filePath))) return 'fixture';
   if (TEST_PATTERNS.some((re) => re.test(filePath))) return 'test';
   if (BENCHMARK_PATTERNS.some((re) => re.test(filePath))) return 'benchmark';
+  if (GENERATED_PATTERNS.some((re) => re.test(filePath))) return 'generated';
   if (SCRIPT_PATTERNS.some((re) => re.test(filePath))) return 'script';
   return 'production';
 }

@@ -69,6 +69,12 @@ describe('pathCategory()', () => {
     expect(pathCategory('src/bench/perf.ts')).toBe('benchmark');
   });
 
+  it('classifies generated files as generated', () => {
+    expect(pathCategory('src/routeTree.gen.ts')).toBe('generated');
+    expect(pathCategory('src/api.generated.ts')).toBe('generated');
+    expect(pathCategory('src/general.ts')).toBe('production');
+  });
+
   it('classifies scripts, examples, samples, and demos as script', () => {
     expect(pathCategory('scripts/build.ts')).toBe('script');
     expect(pathCategory('script/build.ts')).toBe('script');
@@ -165,13 +171,14 @@ describe('isFixturePath() — fixture only', () => {
 });
 
 describe('isDiagnosticPath() — any non-production', () => {
-  it('is true for test, fixture, script, and benchmark paths', () => {
+  it('is true for test, fixture, script, benchmark, and generated paths', () => {
     expect(isDiagnosticPath('src/foo.test.ts')).toBe(true);
     expect(isDiagnosticPath('docs/test-beds/ts/x.ts')).toBe(true);
     expect(isDiagnosticPath('scripts/build.ts')).toBe(true);
     expect(isDiagnosticPath('bench/run.ts')).toBe(true);
     expect(isDiagnosticPath('examples/main.ts')).toBe(true);
     expect(isDiagnosticPath('pkg/handler_test.go')).toBe(true);
+    expect(isDiagnosticPath('src/routeTree.gen.ts')).toBe(true);
   });
 
   it('is false for production code', () => {
