@@ -85,3 +85,6 @@ __tests__/evaluation/fixtures/large/
 docs/archive/
 
 nul
+
+# Flaky-test survivor log (scripts/test-parallel.sh RETRY pass)
+.flake-log

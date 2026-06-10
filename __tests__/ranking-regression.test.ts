@@ -7,9 +7,12 @@
  * trigger a sync" stopped surfacing the gating function `watcherHandle
  * FileEvent`). This test makes that mechanical: a curated corpus of
  * (query → expected ranking) cases over a purpose-built fixture
- * (`fixtures/ranking-corpus.ts`), run as part of `npm test` (and the
- * `test:eval` script), so a scorer change that regresses ranking turns
- * a test red.
+ * (`evaluation/fixtures/ranking-corpus.ts`), run as part of `npm test`
+ * (this file lives at the top level of `__tests__/` so the default
+ * `__tests__/*.test.ts` shard glob picks it up — it is NOT under
+ * `__tests__/evaluation/`, which the default suite does not scan) and
+ * the `test:eval` script, so a scorer change that regresses ranking
+ * turns a test red.
  *
  * Every assertion is **entry-point (root) based** and ranking-sensitive
  * — a symbol merely present in the result subgraph proves little
@@ -35,9 +38,9 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { Cartograph } from '../../src/index.js';
-import { searchNodes } from '../../src/db/queries-search.js';
-import { RANKING_FIXTURE_FILES } from './fixtures/ranking-corpus.js';
+import { Cartograph } from '../src/index.js';
+import { searchNodes } from '../src/db/queries-search.js';
+import { RANKING_FIXTURE_FILES } from './evaluation/fixtures/ranking-corpus.js';
 
 let testDir: string;
 let cg: Cartograph;
