@@ -40,6 +40,11 @@ set -uo pipefail
 N="${N:-8}"
 PATTERN="${SHARD_PATTERN:-__tests__/*.test.ts}"
 RETRY="${RETRY:-3}"   # max retries per failed file in the file-grain pass
+# Append-only record of files that FAILED in a parallel shard but PASSED in
+# isolation on retry (i.e. flaked). Without this, the EXIT trap wipes the
+# shard logs and a chronically order-dependent test is reclassified as a
+# harmless flake every run with no trail. Repeat offenders show up here.
+FLAKE_LOG="${FLAKE_LOG:-.flake-log}"
 TMP_DIR="${TMPDIR:-/tmp}/bun-test-shards-$$"
 mkdir -p "$TMP_DIR"
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -145,6 +150,13 @@ if [ "$RETRY" -gt 0 ]; then
           if [ "$?" -eq 0 ]; then
             passed=true
             echo "  -> $ff passed on attempt $attempt"
+            # Persist the flake before the EXIT trap wipes the shard logs,
+            # with a first-failure excerpt so a real order-dependent bug
+            # hiding behind the retry is traceable across runs.
+            {
+              echo "[$(date -u +%FT%TZ)] flake-survived: $ff (failed in shard $i, passed in isolation on attempt $attempt)"
+              grep -A2 -F "$ff" "$log.first" 2>/dev/null | head -6
+            } >> "$FLAKE_LOG" 2>/dev/null || true
             break
           fi
         done
