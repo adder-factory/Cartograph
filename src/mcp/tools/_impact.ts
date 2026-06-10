@@ -71,7 +71,10 @@ function filterImpactByConfidence(impact: Subgraph, rootId: string, threshold: n
   // and explodes on hub nodes (10–20k incoming edges) at scale.
   const pushNeighbor = (from: string, to: string): void => {
     let list = adj.get(from);
-    if (!list) adj.set(from, (list = []));
+    if (!list) {
+      list = [];
+      adj.set(from, list);
+    }
     list.push(to);
   };
   for (const e of survivingEdges) {

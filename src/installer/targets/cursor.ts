@@ -88,8 +88,7 @@ class CursorTarget implements AgentTarget {
     files.push(writeMcpEntry(loc, opts));
 
     if (loc === 'local') {
-      files.push(writeRulesEntry());
-      files.push(writeProjectGitignoreFileEntries([mcpJsonPath(loc), rulesPath()]));
+      files.push(writeRulesEntry(), writeProjectGitignoreFileEntries([mcpJsonPath(loc), rulesPath()]));
     }
 
     return {

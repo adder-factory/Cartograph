@@ -952,7 +952,7 @@ export function clearAll(qb: QueryBuilder): void {
 // `clearStructural` (the --force structural wipe) lives in its own module
 // (imported above for clearAll's use) to keep this god-module under its
 // line budget; re-exported here so callers keep importing it from queries.
-export { clearStructural };
+export { clearStructural } from './queries-clear.js';
 
 /**
  * All indexed import nodes — one row per import statement /
