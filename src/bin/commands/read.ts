@@ -8,7 +8,7 @@ import { getAllFiles, getAllFilesWithSymbolCount } from '../../db/queries-files.
 import { getAllNodes } from '../../db/queries.js';
 import { getAllEdges } from '../../db/queries-edges.js';
 import { getFileSummaries } from '../../db/queries-file-summaries.js';
-import { buildIndexedPathSets, findAffectedTests } from '../../affected-core.js';
+import { buildIndexedPathSets, findAffectedTests } from '../../features/affected/affected-core.js';
 import { registerAffectedCommand as registerAffectedFeatureCommand } from '../../features/affected/index.js';
 import { registerAskCommand as registerAskFeatureCommand } from '../../features/ask/index.js';
 import { registerAtRangeCommand as registerAtRangeFeatureCommand } from '../../features/at-range/index.js';

@@ -36,7 +36,7 @@ import {
   DEFAULT_DEPTH,
   buildIndexedPathSets,
   findAffectedTests,
-} from '../../affected-core.js';
+} from '../../features/affected/affected-core.js';
 
 /**
  * Hard ceiling on the BFS `depth` arg. The CLI `--depth` uses

@@ -1,4 +1,4 @@
-import { DEFAULT_DEPTH } from '../../affected-core.js';
+import { DEFAULT_DEPTH } from './affected-core.js';
 import { globToSafeRegex } from '../../utils.js';
 
 export interface AffectedOptions {

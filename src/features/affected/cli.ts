@@ -1,4 +1,4 @@
-import { DEFAULT_DEPTH, type AffectedCoreInput, type IndexedPathSets } from '../../affected-core.js';
+import { DEFAULT_DEPTH, type AffectedCoreInput, type IndexedPathSets } from './affected-core.js';
 import type { PackageManager } from '../../package-scripts.js';
 import { errMsg } from '../../errors.js';
 import {

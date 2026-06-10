@@ -4,7 +4,7 @@ import {
   buildFileTree,
   compareFileTreeChildren,
   recurseFileTreeChildren as sharedRecurseFileTreeChildren,
-} from '../../file-tree-render.js';
+} from './file-tree-render.js';
 import { globToSafeRegex } from '../../utils.js';
 
 export interface FilesCommandOptions {
