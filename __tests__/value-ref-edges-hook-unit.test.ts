@@ -3,10 +3,26 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as dbIndex from '../src/db/index.js';
+import { insertEdges } from '../src/db/queries-edges.js';
+import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import * as metadataQueries from '../src/db/queries-metadata.js';
 import * as searchQueries from '../src/db/queries-search.js';
 import * as errorModule from '../src/errors.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
+
+type TargetOptions = { scope: 'all' } | { scope: 'files'; files: string[] };
+
+// Used by the refreshEdgesHook fallback when this mock leaks into another
+// test's indexAll (module-leak canary). Mirrors the real collectTargets.
+function realCollectTargets(ctx: IndexHookContext, options: TargetOptions) {
+  if (options.scope === 'all') {
+    return getAllFiles(ctx.queries).map((file) => ({ path: file.path, language: file.language }));
+  }
+  return options.files
+    .map((filePath) => getFileByPath(ctx.queries, filePath))
+    .filter((file): file is NonNullable<typeof file> => file !== null)
+    .map((file) => ({ path: file.path, language: file.language }));
+}
 
 const state = {
   refreshCalls: [] as Array<{ hookName: string; options: unknown; edges: unknown[] }>,
@@ -52,10 +68,18 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   refreshEdgesHook: vi.fn(
     async (args: {
       ctx: IndexHookContext;
-      options: unknown;
+      options: TargetOptions;
       hookName: string;
       buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
     }) => {
+      // Foreign hook: this mock has leaked into another test's indexAll
+      // (module-leak canary). Replicate the real refreshEdgesHook so we
+      // don't poison its cross-file edges.
+      if (args.hookName !== 'value-ref-edges') {
+        const edges = await args.buildEdges(args.ctx, realCollectTargets(args.ctx, args.options));
+        if (edges.length > 0) insertEdges(args.ctx.queries, edges as never);
+        return;
+      }
       const edges = await args.buildEdges(args.ctx, [
         { path: 'src/a.ts', language: 'typescript' },
         { path: 'src/b.js', language: 'javascript' },

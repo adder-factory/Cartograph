@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { insertEdges } from '../src/db/queries-edges.js';
 import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
@@ -11,25 +12,38 @@ const state = {
   symbols: new Map<string, string>(),
 };
 
+type TargetOptions = { scope: 'all' } | { scope: 'files'; files: string[] };
+
+// Shared by the collectTargets mock and the refreshEdgesHook fallback below.
+function realCollectTargets(ctx: IndexHookContext, options: TargetOptions) {
+  if (options.scope === 'all') {
+    return getAllFiles(ctx.queries).map((file) => ({ path: file.path, language: file.language }));
+  }
+  return options.files
+    .map((filePath) => getFileByPath(ctx.queries, filePath))
+    .filter((file): file is NonNullable<typeof file> => file !== null)
+    .map((file) => ({ path: file.path, language: file.language }));
+}
+
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
   PER_FILE_YIELD_INTERVAL: 2,
-  collectTargets: vi.fn((ctx: IndexHookContext, options: { scope: 'all' } | { scope: 'files'; files: string[] }) => {
-    if (options.scope === 'all') {
-      return getAllFiles(ctx.queries).map((file) => ({ path: file.path, language: file.language }));
-    }
-    return options.files
-      .map((filePath) => getFileByPath(ctx.queries, filePath))
-      .filter((file): file is NonNullable<typeof file> => file !== null)
-      .map((file) => ({ path: file.path, language: file.language }));
-  }),
+  collectTargets: vi.fn((ctx: IndexHookContext, options: TargetOptions) => realCollectTargets(ctx, options)),
   yieldToEventLoop: vi.fn(async () => {}),
   refreshEdgesHook: vi.fn(
     async (args: {
       ctx: IndexHookContext;
-      options: unknown;
+      options: TargetOptions;
       hookName: string;
       buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
     }) => {
+      // Foreign hook: this mock has leaked into another test's indexAll
+      // (module-leak canary). Replicate the real refreshEdgesHook so we
+      // don't poison its cross-file edges.
+      if (args.hookName !== 're-export-edges') {
+        const edges = await args.buildEdges(args.ctx, realCollectTargets(args.ctx, args.options));
+        if (edges.length > 0) insertEdges(args.ctx.queries, edges as never);
+        return;
+      }
       const edges = await args.buildEdges(args.ctx, [
         { path: 'src/barrel.ts', language: 'typescript' },
         { path: 'src/ignored.py', language: 'python' },

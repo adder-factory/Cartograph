@@ -65,6 +65,11 @@ vi.mock('../src/git-utils.js', () => ({
 vi.mock('../src/errors.js', () => ({
   errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
   logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
+  // Complete the mock so a leaked partial doesn't poison later test files
+  // whose import chain needs these (the module-leak canary). errors.ts
+  // exports logWarn alongside logDebug; omitting it broke modules that
+  // `import { logWarn } from '../errors.js'` when this mock leaked.
+  logWarn: vi.fn(),
 }));
 
 const { HOOK } = await import('../src/index-hooks/cochange.js');
