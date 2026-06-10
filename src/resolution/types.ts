@@ -133,9 +133,14 @@ function classifyByResolvedType(resolvedBy: ResolvedRef['resolvedBy'], score: nu
     case 'import':
     case 'qualified-name':
     case 'file-path':
-    case 'exact-match':
     case 'fqn-disambiguated':
       return 'EXTRACTED';
+    // Score-gate exact-match like framework: a same-language single match
+    // scores ~0.9 (EXTRACTED), but the cross-language (0.5, "usually
+    // coincidental") and low-proximity (0.4, "least-bad guess") tiers are
+    // heuristic and must NOT land in the concrete-only EXTRACTED bucket
+    // that `minConfidence: 'EXTRACTED'` advertises.
+    case 'exact-match':
     case 'framework':
       return score >= 0.85 ? 'EXTRACTED' : 'INFERRED';
     case 'instance-method':

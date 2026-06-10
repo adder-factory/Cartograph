@@ -50,6 +50,19 @@ describe('rewriteReactNativeMacros — length invariant', () => {
     // `RCT_EXPORT_METHOD` is preceded by `_` (an ident char) → not a macro.
     expect(rewriteReactNativeMacros(src)).toBe(src);
   });
+
+  it('preserves the selector when an astral char (emoji) precedes the macro', () => {
+    // The mutable buffer must be split by UTF-16 code UNIT (`split('')`),
+    // not code POINT (`Array.from`): an emoji ahead of the macro otherwise
+    // shifts every index, dropping the selector's first letter and
+    // unbalancing parens. Regression guard for that off-by-codepoint bug.
+    const src = '// log 🔥 marker\nRCT_EXPORT_METHOD(getValue:(NSString *)key) {\n}';
+    const out = rewriteReactNativeMacros(src);
+    expect(out.length).toBe(src.length);
+    expect(out).toContain('getValue:');
+    expect(out).not.toContain('R- (void)');
+    expect(out).toContain('🔥');
+  });
 });
 
 describe('rewriteReactNativeMacros — produces parseable methods (F#82b)', () => {

@@ -24,7 +24,13 @@ const CONTROLLER_REF_RE = /(?:^|\\)(\w+Controller)::(\w+)$/;
 export const symfonyResolver: FrameworkResolver = {
   name: 'symfony',
   languages: SYMFONY_LANGUAGES,
-  anchors: ['#[Route', 'Route(', 'controller:', '_controller:', 'symfony/framework-bundle'],
+  // `resource:` covers controller-less route YAML (a `controllers:`
+  // resource-import block, prefix imports — none of which contain the
+  // `controller:` substring), so `extractYamlRoutes` isn't skipped by the
+  // anchor pre-filter on those files. (`path:` is intentionally NOT added
+  // here — it is globally owned by the angular resolver, and framework
+  // anchors must be unique; `resource:` is the controller-less signal.)
+  anchors: ['#[Route', 'Route(', 'controller:', '_controller:', 'resource:', 'symfony/framework-bundle'],
 
   detect(context: ResolutionContext): boolean {
     if (context.fileExists('symfony.lock') || context.fileExists('bin/console')) return true;

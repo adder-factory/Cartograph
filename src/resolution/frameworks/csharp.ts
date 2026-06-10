@@ -22,11 +22,14 @@ export const aspnetResolver: FrameworkResolver = {
     '[HttpPatch',
     '[HttpDelete',
     '[Route',
-    '.MapGet(',
-    '.MapPost(',
-    '.MapPut(',
-    '.MapPatch(',
-    '.MapDelete(',
+    // No trailing `(`: the minimal-API regex tolerates whitespace before
+    // the paren (`app.MapGet ("/x")`), so anchoring on `.MapGet` (not
+    // `.MapGet(`) keeps the pre-filter from skipping that whitespace style.
+    '.MapGet',
+    '.MapPost',
+    '.MapPut',
+    '.MapPatch',
+    '.MapDelete',
   ],
 
   detect(context: ResolutionContext): boolean {
