@@ -5,7 +5,7 @@ import type { QueryBuilder } from './db/queries.js';
 import { getMetadata } from './db/queries-metadata.js';
 import { getAllFiles } from './db/queries-files.js';
 import type { FileRecord } from './types.js';
-import { validatePathWithinRootReal } from './utils.js';
+import { validatePathWithinRealRoot } from './utils.js';
 import { logWarn } from './errors.js';
 import { getCurrentHeadSha, getChangeBreakdownSince, countCommitsAhead, type ChangeBreakdown } from './git-utils.js';
 
@@ -338,8 +338,24 @@ function baseInfo(opts: {
  * keeps us from crying wolf in that case. Returns false (not stale) when
  * the file can't be read — assume the indexer will catch it next sync.
  */
+/** Realpath-resolve a project root once (for a batch stale scan). */
+function resolveRealRoot(rootDir: string): { normalizedRoot: string; realRoot: string } {
+  const normalizedRoot = path.resolve(rootDir);
+  try {
+    return { normalizedRoot, realRoot: fs.realpathSync(normalizedRoot) };
+  } catch {
+    return { normalizedRoot, realRoot: normalizedRoot };
+  }
+}
+
 export function isFileStale(rootDir: string, file: FileRecord): boolean {
-  const fullPath = validatePathWithinRootReal(rootDir, file.path);
+  const { normalizedRoot, realRoot } = resolveRealRoot(rootDir);
+  return isFileStaleWithRoot(normalizedRoot, realRoot, file);
+}
+
+/** Staleness check with the realpath'd root precomputed — see getStaleFiles. */
+function isFileStaleWithRoot(normalizedRoot: string, realRoot: string, file: FileRecord): boolean {
+  const fullPath = validatePathWithinRealRoot(normalizedRoot, realRoot, file.path);
   if (!fullPath) {
     // Defense-in-depth: a DB row whose path now resolves outside the
     // root means either an old (pre-validation) write or a between-
@@ -371,9 +387,12 @@ export function isFileStale(rootDir: string, file: FileRecord): boolean {
  * Used by symbol-level handlers to flag stale results.
  */
 export function getStaleFiles(rootDir: string, files: FileRecord[]): string[] {
+  // Realpath the constant project root ONCE per scan, not once per file —
+  // this runs synchronously on the gated MCP path over every indexed file.
+  const { normalizedRoot, realRoot } = resolveRealRoot(rootDir);
   const stale: string[] = [];
   for (const file of files) {
-    if (isFileStale(rootDir, file)) {
+    if (isFileStaleWithRoot(normalizedRoot, realRoot, file)) {
       stale.push(file.path);
     }
   }
