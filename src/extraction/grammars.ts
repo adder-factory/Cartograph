@@ -28,16 +28,15 @@ import { readFile } from 'node:fs/promises';
 import { Parser, Language as WasmLanguage } from 'web-tree-sitter';
 import type { Language } from '../types.js';
 import { getLanguageDefs, getLanguageDefByExtension, getLanguageDefByName } from './languages/registry.js';
-import {
+import { hasLoadedGrammar, isGrammarKnown, markGrammarUnavailable, setLoadedGrammar } from './grammar-cache.js';
+// Pure re-exports (not used locally) so callers keep importing them from
+// grammars.js while the implementations live in the registry-free leaf.
+export {
   clearParserCache,
   getLanguageGrammar,
   getParser,
   getUnavailableGrammarErrors,
-  hasLoadedGrammar,
-  isGrammarKnown,
-  markGrammarUnavailable,
   resetParser,
-  setLoadedGrammar,
 } from './grammar-cache.js';
 import { errMsg, logWarn } from '../errors.js';
 import { resolveAssetPath } from '../assets.js';
@@ -157,12 +156,6 @@ export async function loadAllGrammars(): Promise<void> {
     .map((d) => d.name as Language);
   await loadGrammarsForLanguages(allLanguages);
 }
-
-// getParser / getLanguageGrammar / resetParser / clearParserCache /
-// getUnavailableGrammarErrors now live in the registry-free leaf
-// `grammar-cache.ts` (re-exported below) so extractors can read a parser
-// without importing this registry-coupled module — see grammar-cache.ts.
-export { getParser, getLanguageGrammar, resetParser, clearParserCache, getUnavailableGrammarErrors };
 
 /**
  * Detect language from file extension.

@@ -638,7 +638,8 @@ function renderRankedFindingsTable(
   if (lowTokens) {
     // Compact pipe rows — no markdown table or multi-paragraph preamble.
     // Columns: name|kind|biomarker|severity|metric|centrality|path
-    const out = [`# code-health ranked (${minSeverity}+, top ${rows.length})${biomarker ? ` [${biomarker}]` : ''}`];
+    const biomarkerTag = biomarker ? ` [${biomarker}]` : '';
+    const out = [`# code-health ranked (${minSeverity}+, top ${rows.length})${biomarkerTag}`];
     const dp = chooseCentralityDecimals(rows);
     for (const r of rows) {
       const cen = r.centrality == null ? '-' : r.centrality.toFixed(dp);
