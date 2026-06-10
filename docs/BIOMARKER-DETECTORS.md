@@ -1,8 +1,8 @@
 # Biomarker detector reference
 
 Per-detector thresholds + semantics for all 33 cartograph biomarker
-detectors. Extracted from CLAUDE.md to keep the agent-facing project
-guide tight. Definitions live in `src/biomarkers/engine.ts`; this
+detectors. Split out from the agent-facing project guide (`AGENTS.md`)
+to keep it tight. Definitions live in `src/biomarkers/engine.ts`; this
 file is the human-readable index.
 
 A finding fires at metric **≥** the value below; clear by landing
@@ -36,8 +36,8 @@ strictly below.
   regenerate with `bun test --coverage`, re-ingest via `cartograph
   coverage --mode refresh`, then full reindex.
 - `duplicate_code` — exact (Type-1) / near (Type-2) / partial (Type-3)
-  / semantic (Type-4) clones. See "findDuplicateCode peel-exact-first"
-  in CLAUDE.md for the bucketing fix.
+  / semantic (Type-4) clones. See `src/biomarkers/duplicate-code.ts` for
+  the per-tier bucketing logic.
 
 ## Anti-pattern tier (B17/B19/B20/B21 — added 2026-05-23)
 
@@ -70,8 +70,9 @@ write a test in `__tests__/anti-pattern-detectors.test.ts`.
 ## G26 agent-prone tier (added 2026-05-24c/25)
 
 Twelve detectors targeting code patterns AI agents disproportionately
-produce. Filter to just this subset via `cartograph_review({mode: 'agent-audit'})`
-or `cartograph review agent-audit`.
+produce. Surface them — alongside the four anti-pattern-tier detectors
+above (B17/B19/B20/B21), for 16 agent-prone biomarkers total — via
+`cartograph_review({mode: 'agent-audit'})` or `cartograph review agent-audit`.
 
 ### Phase 1 (2026-05-24c)
 

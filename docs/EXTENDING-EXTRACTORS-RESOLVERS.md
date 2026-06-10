@@ -25,7 +25,7 @@ Companion arc to G16; surfaced 15+ real bugs by hunting against ollama (807 .go 
 
 Provenance: `[[project_session_handoff_2026_05_23d_ollama_bug_hunt]]`.
 
-Provenance + reviewer findings: `docs/STRUCTURAL-CAMPAIGN-BACKLOG.md` section D.
+Provenance + reviewer findings: structural-campaign backlog section D (codegraph-lineage; not carried into the Cartograph repo).
 
 ### Upstream Codegraph review pass (2026-06-07)
 
@@ -219,7 +219,9 @@ synthesizers) and any ObjC-macro-based or codegen-spec resolver:
   `\{([\s\S]*?)\}` truncates at an inline object type
   (`getConstants(): {x: string};` — real in RN's `NativeDeviceInfo`), dropping
   later methods; a greedy last-`}` over-captures trailing code. Walk braces from
-  the opening `{` to the depth-0 close (`extractSpecInterfaceBody`). Normalize
+  the opening `{` to the depth-0 close (the shared
+  `extractInterfaceBody(src, 'Spec')` in `src/resolution/_interface-body.ts` —
+  see the Fabric channel below). Normalize
   CRLF→LF first. Gate the `.ts` scan on the codegen `Native*`/`*Spec` filename
   convention (non-lossy — codegen requires that naming) to bound the per-pass
   read.
@@ -339,10 +341,15 @@ Provenance: BACKLOG.md "B12 sub-channel 4"; tests in
   hashes NOTHING — it returns the empty-input SHA constant for every caller, so
   the hook's `*_ALGO_VERSION` never changes on a logic edit and its self-heal
   silently no-ops (re-mines only on first run + changed-file syncs; a logic
-  change then needs a manual `admin index`). **Pass the hook's own source
-  basename(s):** `computeAlgoHash(import.meta.url, ['./my-hook'])`, plus any
+  change then needs a manual `admin index`). **Pass a stable repo-relative
+  source path plus the hook's own sibling basename(s):**
+  `computeAlgoHash('src/index-hooks/my-hook.ts', ['./my-hook'])`, plus any
   sibling module whose logic the hook depends on (rn-event-channel adds
-  `'../resolution/rn-event-bridge'`). `__tests__/hook-algo-versions.test.ts`
+  `'../resolution/rn-event-bridge'`). (The first arg is a repo-relative path
+  string, NOT `import.meta.url` — `src/algo-hash.ts` accepts a `file:` URL only
+  for back-compat, since compiled standalone bundles can't recover module source
+  from Bun's virtual `import.meta.url`; every shipped hook now passes the path
+  literal.) `__tests__/hook-algo-versions.test.ts`
   guards every hook against regressing to `[]`. (All 10 `src/index-hooks/*`
   hooks shipped with the `[]` no-op until this fix; the curated string-miners
   under `src/<miner>/index.ts` always passed `['./index']` correctly.)
