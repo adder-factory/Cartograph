@@ -21,6 +21,27 @@ $zip = Join-Path $tmp 'cartograph.zip'
 Write-Host "Installing Cartograph $version ($target)..."
 Invoke-WebRequest -Uri $url -OutFile $zip
 
+# Verify the archive against the release's SHA256SUMS before extracting an
+# executable. Set CARTOGRAPH_SKIP_CHECKSUM=1 to bypass (not recommended).
+if ($env:CARTOGRAPH_SKIP_CHECKSUM -ne '1') {
+  $sumsUrl = "https://github.com/$repo/releases/download/$version/SHA256SUMS"
+  $sumsPath = Join-Path $tmp 'SHA256SUMS'
+  try {
+    Invoke-WebRequest -Uri $sumsUrl -OutFile $sumsPath
+  } catch {
+    throw "cartograph: could not fetch SHA256SUMS for verification ($sumsUrl). Set CARTOGRAPH_SKIP_CHECKSUM=1 to install without verification."
+  }
+  $assetName = "cartograph-$target.zip"
+  $expectedLine = Get-Content $sumsPath | Where-Object { $_ -match [regex]::Escape($assetName) } | Select-Object -First 1
+  if (-not $expectedLine) { throw "cartograph: no checksum for $assetName in SHA256SUMS." }
+  $expected = ($expectedLine -split '\s+')[0].ToLower()
+  $actual = (Get-FileHash -Algorithm SHA256 -Path $zip).Hash.ToLower()
+  if ($expected -ne $actual) {
+    throw "cartograph: CHECKSUM MISMATCH - refusing to install.`n  expected $expected`n  actual   $actual"
+  }
+  Write-Host 'Verified checksum.'
+}
+
 $dest = Join-Path $installDir 'current'
 if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
 New-Item -ItemType Directory -Force -Path $dest | Out-Null

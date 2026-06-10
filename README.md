@@ -41,6 +41,8 @@ native pgvector search.
 ## Quickstart
 
 ```bash
+# Prebuilt install (requires a published GitHub release; until then use the
+# source install below). Verifies the download against SHA256SUMS.
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
 
 cd /path/to/your/project
@@ -57,13 +59,17 @@ cartograph install
 The installer detects and configures Claude Code, Cursor, Codex CLI, GitHub
 Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,
 Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi
-Agent, and Reasonix. It
-writes MCP config plus agent instructions where the target supports them.
+Agent, and Reasonix. It writes MCP config plus agent instructions where the
+target supports them.
 
-For Claude Code, `--location=local` is private to you and the current project:
-the MCP entry is written under this project in `~/.claude.json`, permissions go
-to `.claude/settings.local.json`, and Cartograph instructions go to
-`CLAUDE.local.md` with both local files added to `.gitignore`.
+For `--location=local`, generated project config and instruction files are
+added to `.gitignore` because local MCP entries can contain absolute checkout
+paths and personal agent rules. Local MCP server args are pinned with
+`--project-path <this-repo>` where the client config is project-scoped, so
+sessions in other repositories do not inherit the wrong Cartograph default.
+Claude Code is a special case: its private local MCP entry lives under the
+current project in `~/.claude.json`, while local permissions and instructions
+stay in the worktree as gitignored files.
 
 If your MCP client is launched from a GUI shell that cannot find `cartograph`,
 write an absolute executable path into the config:
@@ -288,9 +294,7 @@ win.
 | `cartograph entry-points` | Routes, CLI commands, MCP tools, and public exports |
 | `cartograph explore` | Deep topic exploration |
 | `cartograph export` | Graph artifact export: JSON, DOT, Mermaid, Cytoscape |
-| `cartograph file-deps` | Local file dependencies and dependents for one indexed file |
-| `cartograph file-symbols` | Symbols in one indexed file |
-| `cartograph files` | Indexed file tree and summaries |
+| `cartograph files` | Indexed file tree, one-file symbols/deps, and directory summaries |
 | `cartograph find` | Symbol, content, env-var, and SQL-ref search |
 | `cartograph graph` | Call/dependency graph traversal |
 | `cartograph guide` | Compact first-use and daily-workflow guide |
@@ -302,7 +306,6 @@ win.
 | `cartograph install-hooks` | Install managed git hooks for quiet background sync |
 | `cartograph llm` | Local/cloud LLM provider setup and smoke checks |
 | `cartograph mcp-budget` | Measure MCP startup payload size |
-| `cartograph module` | Directory/module summary |
 | `cartograph node` | Symbol details, optionally with source and related data |
 | `cartograph note` | Persistent annotations/bookmarks |
 | `cartograph playbook` | Tool-selection playbook |
