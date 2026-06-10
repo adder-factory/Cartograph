@@ -15,6 +15,7 @@ import type { Node, Edge, FileRecord, NodeKind, EdgeKind, Language } from '../ty
 import type { GraphStats } from './types.js';
 import { buildNameSubwords } from '../utils.js';
 import { logWarn } from '../errors.js';
+import { clearStructural } from './queries-clear.js';
 
 /**
  * Database row types (snake_case from SQLite)
@@ -478,6 +479,14 @@ const getAllNodesQuery = defineQuery({
   row: NodeRowSchema,
 });
 
+const NodeIdRowSchema = z.object({ id: z.string() });
+
+const getAllNodeIdsQuery = defineQuery({
+  sql: 'SELECT id FROM nodes',
+  params: NoParams,
+  row: NodeIdRowSchema,
+});
+
 const StatsCountsRowSchema = z.object({
   node_count: z.number(),
   edge_count: z.number(),
@@ -597,6 +606,7 @@ export interface QueryRegistry {
   getAllNodeNames?: TypedQuery<Record<string, never>, { name: string }>;
   getNodesByKind?: TypedQuery<{ kind: string }, NodeRow>;
   getAllNodes?: TypedQuery<Record<string, never>, NodeRow>;
+  getAllNodeIds?: TypedQuery<Record<string, never>, { id: string }>;
   getStatsCounts?: TypedQuery<Record<string, never>, StatsCountsRow>;
   getStatsNodesByKind?: TypedQuery<Record<string, never>, KindCountRow>;
   getStatsNodesByKindLanguage?: TypedQuery<Record<string, never>, KindLanguageCountRow>;
@@ -864,6 +874,17 @@ export function getAllNodes(qb: QueryBuilder): Node[] {
 }
 
 /**
+ * All node ids only. For passes that read just `node.id` (PageRank,
+ * betweenness) — avoids hydrating full rows (docstrings, signatures,
+ * source spans) into memory as ballast, which on a 500k–1M-node graph
+ * is hundreds of MB per recompute.
+ */
+export function getAllNodeIds(qb: QueryBuilder): { id: string }[] {
+  qb.queries.getAllNodeIds ??= getAllNodeIdsQuery(qb.db);
+  return qb.queries.getAllNodeIds.all({});
+}
+
+/**
  * Get graph statistics.
  */
 export function getStats(qb: QueryBuilder): GraphStats {
@@ -928,49 +949,10 @@ export function clearAll(qb: QueryBuilder): void {
   })();
 }
 
-/**
- * Clear ONLY structural data — nodes, edges, files, unresolved
- * refs, co-changes, and node-id-keyed analyses (coverage, health
- * findings) that would otherwise reference dead nodes.
- *
- * LLM-derived caches are LEFT IN PLACE so the next index run can
- * short-circuit unchanged symbols via the content-hash cache lookup.
- *
- * Side-effect: stale rows in summaries/embeddings whose node_id no
- * longer exists become orphans, reachable only by content-hash
- * lookup until either (a) a future re-index re-uses them, or
- * (b) clearAll() (full reset) wipes everything.
- */
-export function clearStructural(qb: QueryBuilder): void {
-  qb.nodeCache.clear();
-  qb.db.exec('PRAGMA foreign_keys = OFF');
-  try {
-    qb.db.transaction(() => {
-      qb.db.exec('DELETE FROM unresolved_refs');
-      qb.db.exec('DELETE FROM edges');
-      qb.db.exec('DELETE FROM symbol_issues');
-      qb.db.exec('DELETE FROM config_refs');
-      qb.db.exec('DELETE FROM sql_refs');
-      qb.db.exec('DELETE FROM build_context_refs');
-      qb.db.exec('DELETE FROM string_imports');
-      qb.db.exec('DELETE FROM node_coverage');
-      qb.db.exec('DELETE FROM code_health_findings');
-      qb.db.exec('DELETE FROM nodes');
-      qb.db.exec('DELETE FROM files');
-      qb.db.exec('DELETE FROM co_changes');
-      qb.db.exec(
-        `DELETE FROM project_metadata
-         WHERE key LIKE 'biomarker_file_state_%'
-            OR key IN (
-              'last_centrality_fingerprint',
-              'last_mined_issues_head'
-            )`,
-      );
-    })();
-  } finally {
-    qb.db.exec('PRAGMA foreign_keys = ON');
-  }
-}
+// `clearStructural` (the --force structural wipe) lives in its own module
+// (imported above for clearAll's use) to keep this god-module under its
+// line budget; re-exported here so callers keep importing it from queries.
+export { clearStructural };
 
 /**
  * All indexed import nodes — one row per import statement /

@@ -1,6 +1,12 @@
 import { workerData } from 'node:worker_threads';
 import { parsePostgresWorkerJson } from './postgres-codec.js';
-import { SQL_IDENTIFIER_PATTERN, rewritePostgresAfterPlaceholders } from './postgres-worker-sql.js';
+import {
+  SQL_IDENTIFIER_PATTERN,
+  offsetInsideLiteral,
+  rewritePlainLikeToILike,
+  rewritePostgresAfterPlaceholders,
+  stringLiteralSpans,
+} from './postgres-worker-sql.js';
 
 interface WorkerInit {
   control: SharedArrayBuffer;
@@ -352,9 +358,15 @@ function translateQuery(inputSql: string, rawParams: unknown[]): TranslatedQuery
   const namedPositions = new Map<string, number>();
   let positional = 0;
 
+  // Substitute placeholders only OUTSIDE single-quoted string literals so
+  // a literal like `'%?%'` or `'tag:@name'` is never mistaken for a bind
+  // marker (which would shift every positional param). Spans are computed
+  // on the pre-substitution text; `replaceAll` reports offsets into it.
+  const literalSpans = stringLiteralSpans(text);
   text = text.replaceAll(
     new RegExp(String.raw`([@:$])(${SAFE_IDENTIFIER_PATTERN})|\?`, 'g'),
-    (match, prefix: string | undefined, name: string | undefined, offset) => {
+    (match, prefix: string | undefined, name: string | undefined, offset: number) => {
+      if (offsetInsideLiteral(offset, literalSpans)) return match;
       if (match === '?') {
         params.push(bound.positional[positional++]);
         return `$${params.length}`;
@@ -414,6 +426,7 @@ function rewriteSql(inputSql: string): string {
   text = text.replaceAll(/strftime\('%s',\s*'now'\)\s*\*\s*1000/gi, '(extract(epoch from now()) * 1000)');
   text = text.replaceAll(/\bHAVING\s+coOccurrences\s*>=/gi, 'HAVING COUNT(*) >=');
   text = rewriteNoCaseCollations(text);
+  text = rewritePlainLikeToILike(text);
   text = rewriteGroupConcat(text);
   return text;
 }

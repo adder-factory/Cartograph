@@ -146,6 +146,12 @@ export function databaseConfigFromOptionInput(input: DatabaseOptionInput): Carto
 export function postgresSqlOptions(database: DatabaseConfig): Bun.SQL.Options {
   const connection: Record<string, string | boolean | number> = { application_name: 'cartograph' };
   if (database.queryTimeoutMs !== undefined) connection['statement_timeout'] = database.queryTimeoutMs;
+  // Set search_path as a startup parameter so EVERY pooled / reconnected
+  // connection lands on the configured schema. A one-time bootstrap `SET`
+  // is per-connection, so pool growth (max > 1), idle/lifetime recycling,
+  // or a reconnect after a server restart would otherwise silently route
+  // queries to `public` instead of the project's schema.
+  if (database.schema) connection['search_path'] = `${database.schema}, public`;
   const options: Bun.SQL.Options = {
     url: database.url!,
     adapter: 'postgres',
