@@ -25,10 +25,10 @@
 import type { IndexHook, IndexHookContext } from './registry.js';
 import { computePageRank, PR_DAMPING, PR_EDGE_KINDS, PR_ITERATIONS } from '../centrality/index.js';
 import { computePageRankParallel, shouldUseParallel } from '../centrality/pagerank-parallel.js';
-import { getAllNodes } from '../db/queries.js';
-import { applyCentralityScores, clearCentrality } from '../db/queries-centrality.js';
+import { getAllNodeIds } from '../db/queries.js';
+import { reapplyCentralityScores } from '../db/queries-centrality.js';
 import { getMetadata, setMetadata } from '../db/queries-metadata.js';
-import { logDebug, errMsg } from '../errors.js';
+import { logDebug, logWarn, errMsg } from '../errors.js';
 
 const FINGERPRINT_KEY = 'last_centrality_fingerprint';
 
@@ -95,7 +95,8 @@ async function recompute(ctx: IndexHookContext): Promise<void> {
       logDebug('centrality hook: graph unchanged (fingerprint match), skipping recompute');
       return;
     }
-    const nodes = getAllNodes(ctx.queries);
+    // id-only: PageRank reads only node.id, so don't hydrate full rows.
+    const nodes = getAllNodeIds(ctx.queries);
     if (nodes.length === 0) return;
     const edgeRows = ctx.db
       .getDb()
@@ -110,8 +111,12 @@ async function recompute(ctx: IndexHookContext): Promise<void> {
     const result = shouldUseParallel(edgeRows.length)
       ? await computePageRankParallel(nodes, edgeRows)
       : computePageRank(nodes, edgeRows);
-    clearCentrality(ctx.queries);
-    applyCentralityScores(ctx.queries, result.scores);
+    // Atomic clear→apply in ONE transaction so a concurrent reader never
+    // observes the transient all-NULL window (low_coverage filters on
+    // `centrality >= ?`, ranked-mode `minCentrality` reads it; both can
+    // run in worker threads during this pass) and a failure mid-apply
+    // rolls back to the prior scores instead of leaving every node NULL.
+    reapplyCentralityScores(ctx.queries, result.scores);
     // Store the fingerprint we computed BEFORE the apply step.
     // `applyCentralityScores` UPDATEs nodes.centrality but neither
     // the SQL (`UPDATE nodes SET centrality = ? WHERE id = ?`) nor
@@ -121,7 +126,11 @@ async function recompute(ctx: IndexHookContext): Promise<void> {
     // COUNT/MAX query.
     setMetadata(ctx.queries, FINGERPRINT_KEY, fingerprint);
   } catch (err) {
-    logDebug(`centrality hook failed: ${errMsg(err)}`);
+    // logWarn (not logDebug): a failed centrality pass degrades ranked
+    // biomarkers (minCentrality), result ordering, and low_coverage until
+    // the next sync self-heals — that's worth surfacing, like the other
+    // hooks' failure logs.
+    logWarn(`centrality hook failed: ${errMsg(err)}`);
   }
 }
 

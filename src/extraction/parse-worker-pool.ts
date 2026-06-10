@@ -429,7 +429,14 @@ export class ParseWorkerPool {
     for (let i = 0; i < this.workers.length; i++) {
       const e = this.workers[i];
       if (!e || e.busy) continue;
-      if (e.parseCount < this.opts.recycleInterval) return { kind: 'claimed', worker: e };
+      if (e.parseCount < this.opts.recycleInterval) {
+        // Claim the slot SYNCHRONOUSLY (no await between the `busy` check
+        // above and this set), so a concurrent requestParse → pickWorker
+        // can't scan the same idle slot and co-claim it. requestParse's
+        // own `entry.busy = true` is then just a redundant re-assert.
+        e.busy = true;
+        return { kind: 'claimed', worker: e };
+      }
       await this.recycleWorkerAt(i);
       return { kind: 'recycled' };
     }
