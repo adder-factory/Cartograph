@@ -43,6 +43,42 @@ const HEALTH_BORDER = {
   healthy: 'rgba(11,15,23,0.5)',
 };
 function fillForKind(kind) { return KIND_FILL[kind] ?? KIND_DEFAULT_FILL; }
+
+/* Shape = kind family, redundant with fill hue so the encoding holds
+   for color-blind users and in screenshots:
+   circles = callables · rounded squares = type containers · diamonds =
+   contracts · rectangles = files/modules · barrels = data stores ·
+   hexagons = entry points · tags = module wiring. */
+const KIND_SHAPE = {
+  class: 'round-rectangle', struct: 'round-rectangle', enum: 'round-rectangle',
+  interface: 'diamond', trait: 'diamond', type_alias: 'diamond', protocol: 'diamond',
+  file: 'rectangle', module: 'rectangle', namespace: 'rectangle',
+  table: 'barrel', resource: 'barrel',
+  route: 'round-hexagon', component: 'round-hexagon',
+  import: 'round-tag', export: 'round-tag',
+};
+function shapeForKind(kind) { return KIND_SHAPE[kind] ?? 'ellipse'; }
+
+/* Hub emphasis: a faint kind-colored halo that grows with PageRank
+   centrality, so load-bearing symbols read at a glance even when the
+   size difference is subtle. Zero below the threshold — leaves stay
+   clean. State classes (focus, pinned, path/impact, …) override the
+   underlay wholesale, so the halo never fights selection styling. */
+const HUB_GLOW_MIN_CENTRALITY = 0.002;
+const HUB_GLOW_MAX_CENTRALITY = 0.02;
+function hubGlowStrength(centrality) {
+  const c = Math.max(0, Math.min(HUB_GLOW_MAX_CENTRALITY, centrality || 0));
+  if (c < HUB_GLOW_MIN_CENTRALITY) return 0;
+  return (c - HUB_GLOW_MIN_CENTRALITY) / (HUB_GLOW_MAX_CENTRALITY - HUB_GLOW_MIN_CENTRALITY);
+}
+function hubGlowOpacity(centrality) {
+  const t = hubGlowStrength(centrality);
+  return t === 0 ? 0 : 0.07 + t * 0.1;
+}
+function hubGlowPadding(centrality) {
+  const t = hubGlowStrength(centrality);
+  return t === 0 ? 0 : Math.round(5 + t * 9);
+}
 function borderForHealth(health) { return HEALTH_BORDER[health] ?? HEALTH_BORDER.healthy; }
 function borderWidthForHealth(health) {
   if (health === 'error') return 3;
@@ -182,7 +218,9 @@ const cy = cytoscape({
       style: {
         'label': 'data(label)',
         'background-color': ele => fillForKind(ele.data('kind')),
-        'background-opacity': 0.94,
+        // Files/modules are context, symbols are content — let the
+        // containers recede a touch so colored symbols pop.
+        'background-opacity': ele => (KIND_SHAPE[ele.data('kind')] === 'rectangle' ? 0.72 : 0.94),
         'color': '#dde3ee',
         'font-size': 12,
         'font-weight': 500,
@@ -192,21 +230,19 @@ const cy = cytoscape({
         'text-margin-y': 4,
         'text-wrap': 'ellipsis',
         'text-max-width': 140,
-        'text-background-color': '#0b0f17',
-        'text-background-opacity': 0.55,
-        'text-background-padding': 3,
-        'text-background-shape': 'round-rectangle',
+        // Outline labels instead of background boxes: same contrast on
+        // the dark canvas without the haze of gray rectangles at density.
+        'text-outline-color': '#0b0f17',
+        'text-outline-width': 2,
+        'text-background-opacity': 0,
         'border-width': ele => borderWidthForHealth(ele.data('health')),
         'border-color': ele => borderForHealth(ele.data('health')),
         'width':  ele => sizeForCentrality(ele.data('centrality')),
         'height': ele => sizeForCentrality(ele.data('centrality')),
-        'shape':  ele => {
-          const k = ele.data('kind');
-          if (k === 'class' || k === 'struct' || k === 'enum') return 'round-rectangle';
-          if (k === 'interface' || k === 'trait' || k === 'type' || k === 'type_alias') return 'diamond';
-          if (k === 'file' || k === 'module' || k === 'namespace') return 'rectangle';
-          return 'ellipse';
-        },
+        'shape':  ele => shapeForKind(ele.data('kind')),
+        'underlay-color': ele => fillForKind(ele.data('kind')),
+        'underlay-opacity': ele => hubGlowOpacity(ele.data('centrality')),
+        'underlay-padding': ele => hubGlowPadding(ele.data('centrality')),
         'transition-property': 'background-color, border-color, border-width, opacity, width, height',
         'transition-duration': '200ms',
       }
@@ -390,7 +426,7 @@ const cy = cytoscape({
       selector: 'node.label-key',
       style: {
         'font-size': 13,
-        'text-background-opacity': 0.82,
+        'text-outline-width': 2.5,
         'z-index': 80,
       }
     },
