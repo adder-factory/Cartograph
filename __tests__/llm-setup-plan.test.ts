@@ -192,6 +192,25 @@ describe('applyLlmSetupChoice', () => {
     expect(written.llm.embeddingLlm.model).toBe('text-embedding-3-small');
   });
 
+  it('cloud-openrouter writes chat tiers pointing at openrouter.ai and leaves the embedding tier unset', async () => {
+    const result = await applyLlmSetupChoice({ projectRoot, preset: 'cloud-openrouter' });
+    expect(result.applied).toBe(true);
+    const written = readConfig() as unknown as {
+      llm: {
+        summarizeLlm: { provider: string; endpoint?: string; apiKey?: string; model: string };
+        askLlm: { endpoint?: string };
+        embeddingLlm?: unknown;
+      };
+    };
+    expect(written.llm.summarizeLlm.provider).toBe('openai-compat');
+    expect(written.llm.summarizeLlm.endpoint).toBe('https://openrouter.ai/api');
+    // The key must stay in OPENROUTER_API_KEY, never in the committed config.
+    expect(written.llm.summarizeLlm.apiKey).toBeUndefined();
+    expect(written.llm.askLlm.endpoint).toBe('https://openrouter.ai/api');
+    // Chat-first surface: no embedding tier, semantic search stays off.
+    expect(written.llm.embeddingLlm).toBeUndefined();
+  });
+
   it('cloud-openai-compat writes a template config with sentinel placeholders the user must hand-edit', async () => {
     const result = await applyLlmSetupChoice({ projectRoot, preset: 'cloud-openai-compat' });
     expect(result.applied).toBe(true);

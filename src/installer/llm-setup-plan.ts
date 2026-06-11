@@ -53,6 +53,8 @@ import {
   LLAMA_SERVER_RERANKER_ENDPOINT,
   CLOUD_OPENAI_PUBLIC_ENDPOINT,
   CLOUD_OPENAI_KEYS_URL,
+  CLOUD_OPENROUTER_PUBLIC_ENDPOINT,
+  CLOUD_OPENROUTER_KEYS_URL,
   OPENAI_COMPAT_PLACEHOLDER_ENDPOINT,
 } from './default-endpoints.js';
 import type { CartographConfig } from '../types.js';
@@ -98,6 +100,7 @@ export type SetupPresetId =
   | 'install-llama-cpp'
   | 'install-mlx'
   | 'cloud-openai'
+  | 'cloud-openrouter'
   | 'cloud-openai-compat'
   | 'hybrid-claude-bridge'
   | 'hybrid-anthropic-api'
@@ -113,6 +116,17 @@ const CLOUD_OPENAI_MODELS = {
   embed: 'text-embedding-3-small',
   summarize: 'gpt-4o-mini',
   ask: 'gpt-4o',
+} as const;
+
+/** Recommended OpenRouter models per tier — same cost/quality framing
+ *  as {@link CLOUD_OPENAI_MODELS}: summarize is the cheap bulk tier,
+ *  ask the higher-stakes tier. OpenRouter ids are `vendor/model`; any
+ *  of its hundreds of hosted models can be swapped in per tier in the
+ *  written config. No embed entry — OpenRouter's surface is
+ *  chat-first, so the preset leaves the embedding tier unset. */
+const CLOUD_OPENROUTER_MODELS = {
+  summarize: 'google/gemini-2.5-flash-lite',
+  ask: 'anthropic/claude-haiku-4.5',
 } as const;
 
 /** What the planner observed + what it recommends. Returned by
@@ -226,6 +240,7 @@ function buildPresets(args: BuildPresetsArgs): SetupPreset[] {
     buildInstallLlamaCppPreset(localGgufPresence),
     buildInstallMlxPreset(),
     buildCloudOpenAiPreset(),
+    buildCloudOpenRouterPreset(),
     buildCloudOpenAiCompatPreset(),
   );
 
@@ -360,6 +375,32 @@ function buildCloudOpenAiConfig(): NonNullable<CartographConfig['llm']> {
   };
 }
 
+function buildCloudOpenRouterConfig(): NonNullable<CartographConfig['llm']> {
+  // Endpoint is explicit (the OpenAI SDK has no OpenRouter default);
+  // `apiKey` is omitted so the provider resolver reads
+  // OPENROUTER_API_KEY from env — keeps the secret out of the
+  // committed config file. Embedding/reranker tiers are left unset:
+  // OpenRouter's surface is chat-first, so semantic search stays off
+  // unless the user pairs a local or cloud embedding provider.
+  return {
+    summarizeLlm: {
+      provider: 'openai-compat',
+      endpoint: CLOUD_OPENROUTER_PUBLIC_ENDPOINT,
+      model: CLOUD_OPENROUTER_MODELS.summarize,
+    },
+    localLlm: {
+      provider: 'openai-compat',
+      endpoint: CLOUD_OPENROUTER_PUBLIC_ENDPOINT,
+      model: CLOUD_OPENROUTER_MODELS.summarize,
+    },
+    askLlm: {
+      provider: 'openai-compat',
+      endpoint: CLOUD_OPENROUTER_PUBLIC_ENDPOINT,
+      model: CLOUD_OPENROUTER_MODELS.ask,
+    },
+  };
+}
+
 function buildCloudOpenAiCompatTemplateConfig(): NonNullable<CartographConfig['llm']> {
   // Placeholder values are sentinels doctor will flag as unreachable
   // so the user sees a concrete remediation instead of silent breakage.
@@ -445,6 +486,29 @@ function buildCloudOpenAiPreset(): SetupPreset {
     nextSteps: hasKey
       ? ['cartograph doctor   # verify (OPENAI_API_KEY already set in env)']
       : [`export OPENAI_API_KEY=sk-...   # get one at ${CLOUD_OPENAI_KEYS_URL}`, 'cartograph doctor   # verify'],
+    requiresInstall: !hasKey,
+  };
+}
+
+function buildCloudOpenRouterPreset(): SetupPreset {
+  const hasKey = typeof process.env['OPENROUTER_API_KEY'] === 'string';
+  return {
+    id: 'cloud-openrouter',
+    label: hasKey
+      ? '☁️ Cloud OpenRouter (OPENROUTER_API_KEY detected — ready to use)'
+      : '☁️ Cloud OpenRouter (set OPENROUTER_API_KEY first)',
+    description:
+      `One Bearer key in front of hundreds of hosted models (OpenAI, Anthropic, Google, Qwen, DeepSeek, ...). ` +
+      `Chat tiers only — summarize via ${CLOUD_OPENROUTER_MODELS.summarize}, ask via ` +
+      `${CLOUD_OPENROUTER_MODELS.ask}; pair a local or cloud embedding provider for semantic search. ` +
+      `Best for trying cloud models without per-vendor accounts. Pay-per-token.`,
+    summary: `Chat tiers → ${CLOUD_OPENROUTER_PUBLIC_ENDPOINT} (${CLOUD_OPENROUTER_MODELS.summarize} / ${CLOUD_OPENROUTER_MODELS.ask})`,
+    nextSteps: hasKey
+      ? ['cartograph doctor   # verify (OPENROUTER_API_KEY already set in env)']
+      : [
+          `export OPENROUTER_API_KEY=sk-or-...   # get one at ${CLOUD_OPENROUTER_KEYS_URL}`,
+          'cartograph doctor   # verify',
+        ],
     requiresInstall: !hasKey,
   };
 }
@@ -742,6 +806,9 @@ function buildConfigForPreset(
   if (id === 'cloud-openai') {
     return buildCloudOpenAiConfig();
   }
+  if (id === 'cloud-openrouter') {
+    return buildCloudOpenRouterConfig();
+  }
   if (id === 'cloud-openai-compat') {
     return buildCloudOpenAiCompatTemplateConfig();
   }
@@ -807,6 +874,7 @@ export const AVAILABLE_PRESETS: ReadonlyArray<SetupPresetId> = [
   'install-llama-cpp',
   'install-mlx',
   'cloud-openai',
+  'cloud-openrouter',
   'cloud-openai-compat',
   'hybrid-claude-bridge',
   'hybrid-anthropic-api',
