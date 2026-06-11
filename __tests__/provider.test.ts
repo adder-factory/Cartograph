@@ -179,6 +179,67 @@ describe('resolveLlmProviders', () => {
     }
   });
 
+  it('openai-compat chat with an openrouter.ai endpoint and no apiKey uses OPENROUTER_API_KEY', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-from-env';
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            endpoint: 'https://openrouter.ai/api',
+            model: 'google/gemini-2.5-flash-lite',
+          },
+        }),
+      );
+      expect(r?.summarizeLlm?.provider).toBe('openai-compat');
+      expect((r?.summarizeLlm as { apiKey?: string }).apiKey).toBe('sk-or-from-env');
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat chat with an openrouter.ai endpoint and no key anywhere disables chat at resolution time', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    delete process.env.OPENROUTER_API_KEY;
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            endpoint: 'https://openrouter.ai/api',
+            model: 'google/gemini-2.5-flash-lite',
+          },
+        }),
+      );
+      expect(r?.summarizeLlm).toBeFalsy();
+    } finally {
+      if (saved !== undefined) process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
+  it('openai-compat chat with a non-OpenRouter endpoint never picks up OPENROUTER_API_KEY', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-must-not-leak';
+    try {
+      const r = await resolveLlmProviders(
+        baseConfig({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            endpoint: 'http://localhost:8081',
+            model: '/fake/chat.gguf',
+          },
+        }),
+      );
+      expect(r?.summarizeLlm?.provider).toBe('openai-compat');
+      expect((r?.summarizeLlm as { apiKey?: string }).apiKey).toBeUndefined();
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
   it('unknown embedding provider returns null (not silently coerced)', async () => {
     const r = await resolveLlmProviders(
       baseConfig({

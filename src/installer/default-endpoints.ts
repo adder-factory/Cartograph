@@ -46,6 +46,17 @@ export const CLOUD_OPENAI_PUBLIC_ENDPOINT = 'https://api.openai.com';
  *  next-steps for users who haven't set OPENAI_API_KEY yet. */
 export const CLOUD_OPENAI_KEYS_URL = 'https://platform.openai.com/api-keys';
 
+/** OpenRouter public API base — one Bearer key in front of hundreds
+ *  of hosted models behind an OpenAI-compat chat surface. Written into
+ *  the cloud-openrouter preset's config explicitly (the OpenAI SDK
+ *  has no OpenRouter default); the SDK base-URL normaliser appends
+ *  the `/v1` suffix. */
+export const CLOUD_OPENROUTER_PUBLIC_ENDPOINT = 'https://openrouter.ai/api';
+
+/** OpenRouter's API-key creation URL — surfaced in the setup-planner
+ *  next-steps for users who haven't set OPENROUTER_API_KEY yet. */
+export const CLOUD_OPENROUTER_KEYS_URL = 'https://openrouter.ai/keys';
+
 /** Cloud-openai-compat preset placeholder. The wizard writes this
  *  into the config as a "you must edit this" sentinel; doctor
  *  flags it as unreachable so the user sees an actionable

@@ -115,3 +115,35 @@ cartograph llm smoke .
 
 Common backend choices are Ollama, llama-cpp `llama-server`, Apple MLX, LM
 Studio, vLLM, LocalAI, and cloud OpenAI-compatible providers.
+
+For cloud, two presets are first-class: `cloud-openai` (reads `OPENAI_API_KEY`
+from the environment) and `cloud-openrouter` (one key in front of hundreds of
+hosted models; set `OPENROUTER_API_KEY`, get one at <https://openrouter.ai/keys>).
+Apply either with `cartograph admin llm-apply --preset <id>` or pick it in the
+wizard. The OpenRouter preset configures the chat tiers only — pair a local or
+cloud embedding provider if you want semantic search:
+
+```json
+{
+  "llm": {
+    "summarizeLlm": {
+      "provider": "openai-compat",
+      "endpoint": "https://openrouter.ai/api",
+      "model": "google/gemini-2.5-flash-lite"
+    },
+    "askLlm": {
+      "provider": "openai-compat",
+      "endpoint": "https://openrouter.ai/api",
+      "model": "anthropic/claude-haiku-4.5"
+    },
+    "embeddingLlm": {
+      "provider": "openai-compat",
+      "endpoint": "http://localhost:8080",
+      "model": "jina-embeddings-v2-base-code"
+    }
+  }
+}
+```
+
+Any other OpenAI-compatible cloud (together.ai, fireworks.ai, groq, ...) works
+through the generic `cloud-openai-compat` template with an explicit `apiKey`.

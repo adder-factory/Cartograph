@@ -9,7 +9,9 @@
  *                        override (llama-server / Ollama / mlx_lm /
  *                        cloud OpenAI-compat); needs `endpoint`
  *                        (local) or `apiKey` / `OPENAI_API_KEY`
- *                        (cloud); model = backend identifier
+ *                        (cloud; openrouter.ai endpoints also accept
+ *                        `OPENROUTER_API_KEY`); model = backend
+ *                        identifier
  *     2. claude-bridge — `claude` CLI subprocess
  *     3. anthropic-api — Anthropic HTTPS; needs ANTHROPIC_API_KEY
  *     4. (none)        — LLM chat features off
@@ -42,7 +44,7 @@ import type { ChatProvider, ChatProviderConfig, EmbeddingProviderConfig, LlmEndp
 import { findOnPath } from './claude-bridge.js';
 import { compact } from '../utils.js';
 import { logWarn } from '../errors.js';
-import { LLAMA_SERVER_DEFAULT_ENDPOINT } from '../installer/default-endpoints.js';
+import { CLOUD_OPENROUTER_KEYS_URL, LLAMA_SERVER_DEFAULT_ENDPOINT } from '../installer/default-endpoints.js';
 
 /** Default summarize model when claude-bridge is selected but model is unset. */
 export const DEFAULT_CLAUDE_CHAT_MODEL = 'claude-haiku-4-5';
@@ -209,16 +211,59 @@ async function resolveChatAnthropicApi(c: {
   };
 }
 
+/** OpenRouter is endpoint-configured (unlike cloud OpenAI, whose SDK
+ *  default applies when `endpoint` is omitted) but still cloud — let
+ *  OPENROUTER_API_KEY stand in for `apiKey` so the secret stays out
+ *  of the committed config file. Hostname-gated so the env key never
+ *  leaks to other endpoints. */
+function isOpenRouterEndpoint(endpoint: string): boolean {
+  try {
+    return new URL(endpoint).hostname === 'openrouter.ai';
+  } catch {
+    return false;
+  }
+}
+
 function resolveOpenAiCompatApiKey(
   configuredApiKey: string | undefined,
   endpoint: string | undefined,
 ): string | undefined {
-  return configuredApiKey ?? (endpoint ? undefined : process.env['OPENAI_API_KEY']);
+  if (configuredApiKey) {
+    return configuredApiKey;
+  }
+  if (!endpoint) {
+    return process.env['OPENAI_API_KEY'];
+  }
+  if (isOpenRouterEndpoint(endpoint)) {
+    return process.env['OPENROUTER_API_KEY'];
+  }
+  return undefined;
+}
+
+/** An openrouter.ai endpoint with no resolvable key would 401 on
+ *  every request — surface that at resolution time (like the
+ *  no-endpoint/no-key case) instead of at first call. Returns true
+ *  when the tier should be disabled. */
+function warnIfOpenRouterKeyMissing(args: {
+  endpoint: string | undefined;
+  apiKey: string | undefined;
+  configLabel: string;
+  capability: string;
+}): boolean {
+  const { endpoint, apiKey, configLabel, capability } = args;
+  if (!endpoint || apiKey || !isOpenRouterEndpoint(endpoint)) {
+    return false;
+  }
+  logWarn(
+    `resolveLlmProviders: ${configLabel}.provider="openai-compat" points at OpenRouter but neither \`apiKey\` nor OPENROUTER_API_KEY is set; ${capability} disabled. Get a key at ${CLOUD_OPENROUTER_KEYS_URL}.`,
+  );
+  return true;
 }
 
 /** Resolve openai-compat HTTP chat configuration. Requires `model`
  *  AND either `endpoint` (for local backends) OR `apiKey` /
- *  `OPENAI_API_KEY` (for cloud OpenAI / together.ai / fireworks.ai).
+ *  `OPENAI_API_KEY` (for cloud OpenAI / together.ai / fireworks.ai;
+ *  openrouter.ai endpoints also fall back to `OPENROUTER_API_KEY`).
  *  The backend client itself re-validates these on construction; we
  *  drop early here so the trace line surfaces the misconfiguration in
  *  the resolver report instead of failing on first call. */
@@ -239,6 +284,9 @@ async function resolveChatOpenAiCompat(c: {
     logWarn(
       `resolveLlmProviders: summarizeLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server), \`apiKey\`, or OPENAI_API_KEY (cloud OpenAI-compat). None set; chat disabled.`,
     );
+    return null;
+  }
+  if (warnIfOpenRouterKeyMissing({ endpoint: c.endpoint, apiKey, configLabel: 'summarizeLlm', capability: 'chat' })) {
     return null;
   }
   return {
@@ -396,6 +444,9 @@ function resolveEmbeddings(llm: NonNullable<CartographConfig['llm']>): Resolved<
       logWarn(
         `resolveLlmProviders: embeddingLlm.provider="openai-compat" requires either \`endpoint\` (local backend URL, e.g. ${LLAMA_SERVER_DEFAULT_ENDPOINT} for llama-server), \`apiKey\`, or OPENAI_API_KEY (cloud OpenAI-compat). None set; embedding disabled.`,
       );
+      return null;
+    }
+    if (warnIfOpenRouterKeyMissing({ endpoint, apiKey, configLabel: 'embeddingLlm', capability: 'embedding' })) {
       return null;
     }
     return {
