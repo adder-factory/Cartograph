@@ -907,7 +907,32 @@ if (!LIVE_MODE) {
   });
 }
 
-cy.on('render pan zoom resize layoutstop add remove position data style', requestGraphMinimapDraw);
+/* Structural changes redraw immediately (rAF-coalesced); continuous
+   pan/zoom/render/position streams are throttled to ~10 Hz with a
+   trailing draw — a full minimap repaint per frame (with per-element
+   computed-style reads) is measurable jank at all-density. */
+const MINIMAP_CONTINUOUS_DRAW_INTERVAL_MS = 100;
+let minimapLastContinuousDraw = 0;
+let minimapTrailingTimer = 0;
+
+function requestGraphMinimapDrawThrottled() {
+  const now = performance.now();
+  const elapsed = now - minimapLastContinuousDraw;
+  if (elapsed >= MINIMAP_CONTINUOUS_DRAW_INTERVAL_MS) {
+    minimapLastContinuousDraw = now;
+    requestGraphMinimapDraw();
+    return;
+  }
+  if (minimapTrailingTimer) return;
+  minimapTrailingTimer = setTimeout(() => {
+    minimapTrailingTimer = 0;
+    minimapLastContinuousDraw = performance.now();
+    requestGraphMinimapDraw();
+  }, MINIMAP_CONTINUOUS_DRAW_INTERVAL_MS - elapsed);
+}
+
+cy.on('layoutstop add remove data style resize', requestGraphMinimapDraw);
+cy.on('render pan zoom position', requestGraphMinimapDrawThrottled);
 renderSavedViews();
 syncGraphSnapshotControls();
 setTimeout(requestGraphMinimapDraw, 80);

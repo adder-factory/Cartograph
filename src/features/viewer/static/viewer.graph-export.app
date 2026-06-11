@@ -27,8 +27,11 @@ function downloadDataUrl(filename, dataUrl) {
 }
 
 function visibleGraphNodes() {
+  // Group nodes are excluded outright: expanded groups are container
+  // chrome, and collapsed groups are display:none (their collapsedProxy
+  // is the visible artifact and is not flagged isGroup).
   return cy.nodes().filter((n) =>
-    (!n.data('isGroup') || n.hasClass('collapsed')) &&
+    !n.data('isGroup') &&
     n.style('display') !== 'none' &&
     !n.hasClass('collapse-hidden')
   );
