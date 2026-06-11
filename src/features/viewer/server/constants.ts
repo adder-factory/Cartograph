@@ -4,11 +4,13 @@ export interface IntBound {
   readonly default: number;
 }
 
+import { resolveGitBinary } from '../../../git-utils.js';
+
 export const DEFAULT_PORT = 8765;
 export const DEFAULT_HOST = 'localhost';
 export const HTTP_SCHEME = 'http://';
 export const URL_PARSE_BASE = `${HTTP_SCHEME}localhost`;
-export const GIT_BINARY = process.platform === 'win32' ? 'git.exe' : '/usr/bin/git';
+export const GIT_BINARY = resolveGitBinary();
 
 export const HTTP_OK = 200;
 export const HTTP_NOT_MODIFIED = 304;

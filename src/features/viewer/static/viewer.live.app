@@ -123,8 +123,14 @@ async function bootLive() {
       const s = await r.json();
       liveProjectRoot = s.projectRoot || '';
       document.querySelector('.topbar .path').textContent = s.projectRoot;
-      document.querySelector('.topbar .stats').innerHTML =
+      const statsEl = document.querySelector('.topbar .stats');
+      statsEl.innerHTML =
         `<b>${s.files}</b> files · <b>${s.nodes.toLocaleString()}</b> nodes · <b>${s.edges.toLocaleString()}</b> edges`;
+      const indexedBits = [
+        s.indexedAt ? `Indexed ${formatRelative(s.indexedAt)}` : null,
+        s.head ? `HEAD ${String(s.head).slice(0, 7)}` : null,
+      ].filter(Boolean);
+      if (indexedBits.length > 0) statsEl.setAttribute('data-tooltip', indexedBits.join(' · '));
       renderFileScopeFilters(s.dirs);
     }
   } catch (err) { console.debug('status endpoint unavailable', err); }

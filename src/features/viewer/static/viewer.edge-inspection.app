@@ -118,6 +118,15 @@ function renderEdgeSubpanel(sub = 'source') {
   `;
 }
 
+/* Ask scope when an edge is inspected: the chip says "this edge", so
+   the POST must describe the edge too — not silently fall back to the
+   last selected symbol. */
+function activeEdgeAskTarget() {
+  if (detailMode !== 'edge' || !selectedEdgeCache) return null;
+  const d = selectedEdgeCache;
+  return `the ${d.kind} edge from ${d.source.label} to ${d.target.label}`;
+}
+
 function renderEdgeDetail(edge) {
   const detail = edgeDetailPayload(edge);
   selectedEdgeCache = detail;
@@ -135,6 +144,7 @@ function renderEdgeDetail(edge) {
   document.getElementById('m-loc').textContent = '—';
   document.getElementById('m-cyc').textContent = '—';
   document.getElementById('m-nest').textContent = '—';
+  document.getElementById('m-params').textContent = '—';
   document.getElementById('m-commits').textContent = '—';
   document.getElementById('m-first').textContent = '—';
   document.getElementById('m-last').textContent = '—';

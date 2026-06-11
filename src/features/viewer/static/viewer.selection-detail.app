@@ -110,6 +110,7 @@ async function selectSymbolLive(symbolId) {
     document.getElementById('m-loc').textContent     = m.loc ?? '—';
     document.getElementById('m-cyc').textContent     = m.cyclomatic ?? '—';
     document.getElementById('m-nest').textContent    = m.maxNesting ?? '—';
+    document.getElementById('m-params').textContent  = m.paramCount ?? '—';
     document.getElementById('m-first').textContent   = formatRelative(m.fileFirstSeenTs);
     document.getElementById('m-last').textContent    = formatRelative(m.fileLastTouchedTs);
     document.getElementById('m-commits').textContent = m.fileCommits ?? '—';
@@ -192,6 +193,7 @@ function clearCurrentSelection() {
   document.getElementById('m-loc').textContent = '—';
   document.getElementById('m-cyc').textContent = '—';
   document.getElementById('m-nest').textContent = '—';
+  document.getElementById('m-params').textContent = '—';
   document.getElementById('m-first').textContent = '—';
   document.getElementById('m-last').textContent = '—';
   document.getElementById('m-commits').textContent = '—';

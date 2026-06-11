@@ -1957,6 +1957,14 @@
     border: 1px solid rgba(95,173,255,.2);
   }
   .askpanel-msg .ask-link:hover { background: rgba(95,173,255,.18); border-color: var(--accent); }
+  .askpanel-msg .ask-citations {
+    margin-top: 8px;
+    padding-top: 6px;
+    border-top: 1px solid var(--line-soft);
+    color: var(--text-muted);
+    font-size: 11px;
+    line-height: 1.7;
+  }
   .askpanel-msg .ask-link.clear-filter {
     color: var(--text-muted);
     background: transparent;

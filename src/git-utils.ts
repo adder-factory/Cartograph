@@ -26,6 +26,18 @@ const GIT_EXEC_OPTIONS = {
 const FIRST_LINE_NUMBER = 1;
 
 /**
+ * Git binary for spawn/exec callers that want a stable absolute path.
+ * Prefers the conventional `/usr/bin/git` when it exists (deterministic,
+ * immune to PATH games), but falls back to PATH lookup — on NixOS,
+ * Homebrew-only layouts, and minimal containers git lives elsewhere and
+ * the hard pin made every git-backed feature silently degrade.
+ */
+export function resolveGitBinary(): string {
+  if (process.platform === 'win32') return 'git.exe';
+  return fs.existsSync('/usr/bin/git') ? '/usr/bin/git' : 'git';
+}
+
+/**
  * True when `filePath` is inside the `.cartograph/` index directory.
  * Anything under it (`cartograph.db`, WAL/SHM sidecars, `config.json`,
  * `cache/`, logs) is cartograph's own metadata, never project source —
