@@ -14,10 +14,10 @@ source. Cartograph runs as a CLI, an MCP server, and a TypeScript library.
 [![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](docs/STORAGE-BACKENDS.md)
 
 [Why](#why-cartograph) ·
-[Install](#install) ·
-[Quickstart](#quickstart) ·
+[Get started](#get-started) ·
 [Capabilities](#capabilities) ·
 [Usage](#usage) ·
+[Viewer](#local-viewer) ·
 [Languages &amp; storage](#languages-and-storage) ·
 [Docs](#documentation)
 
@@ -49,14 +49,17 @@ The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,
 semantic search, `ask`, and rerank.
 
-## Install
+## Get started
+
+Install the `cartograph` binary once, then run the installer inside each
+project — install and setup are one flow.
+
+### 1. Install the CLI
 
 > No prebuilt GitHub release is published yet, so install from source. Once a
 > release exists, the `install.sh` / `install.ps1` scripts below will fetch a
 > prebuilt binary and verify it against the release `SHA256SUMS` (set
 > `CARTOGRAPH_SKIP_CHECKSUM=1` to bypass verification).
-
-### From source (current path)
 
 Requires [Bun](https://bun.sh) `>= 1.3`.
 
@@ -68,6 +71,16 @@ bun link
 ```
 
 `bun link` puts `cartograph` on your `PATH`. Verify with `cartograph --version`.
+
+Once a release is published, the script install becomes:
+
+```bash
+# Verifies the download against the release SHA256SUMS before installing.
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+```
+
+A PowerShell equivalent (`install.ps1`) and an agent-driven install flow are
+documented in [Agent-Assisted Install](docs/AGENT-INSTALL.md).
 
 To update a source install later:
 
@@ -81,17 +94,7 @@ the working tree is dirty, the branch has diverged from its upstream, or HEAD
 is detached. Restart any running MCP sessions afterwards so they load the new
 code.
 
-### Prebuilt (after a release is published)
-
-```bash
-# Verifies the download against the release SHA256SUMS before installing.
-curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
-```
-
-A PowerShell equivalent (`install.ps1`) and an agent-driven install flow are
-documented in [Agent-Assisted Install](docs/AGENT-INSTALL.md).
-
-## Quickstart
+### 2. Set up your project
 
 One command from inside your project does the whole setup — MCP config for
 detected agents, `.cartograph/` init, the structural index, and managed git
@@ -112,6 +115,10 @@ SQLite is the zero-config default; nothing else is required to start querying:
 cartograph status --verbose
 cartograph find "SymbolName" --mode fuzzy
 ```
+
+From here, explore the indexed graph visually in the
+[local viewer](#local-viewer) — one of Cartograph's main features
+(`cartograph viewer .`, full guide in [docs/VIEWER.md](docs/VIEWER.md)).
 
 To index a project *without* touching any agent config, use
 `cartograph index .` (init + index + readiness check only; previously named

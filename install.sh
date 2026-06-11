@@ -47,7 +47,7 @@ trap 'rm -rf "$tmp"' EXIT
 echo "Installing Cartograph $version ($target)..."
 curl -fsSL "$url" -o "$tmp/cartograph.tar.gz" || {
   echo "cartograph: download failed: $url" >&2
-  echo "cartograph: (no prebuilt for '$target'? install from source: https://github.com/$REPO#install)" >&2
+  echo "cartograph: (no prebuilt for '$target'? install from source: https://github.com/$REPO#get-started)" >&2
   exit 1
 }
 
