@@ -125,13 +125,17 @@ const TRACE = [
    real per-project dirs from /api/status instead. */
 function demoScopeDirs() {
   const buckets = new Map();
+  const seenFiles = new Set();
   NODES.forEach((n) => {
     const file = n.file || '';
     const slash = file.indexOf('/');
     if (slash <= 0) return;
     const prefix = file.slice(0, slash + 1);
     const bucket = buckets.get(prefix) || { prefix, files: 0, nodes: 0 };
-    bucket.files += 1;
+    if (!seenFiles.has(file)) {
+      seenFiles.add(file);
+      bucket.files += 1;
+    }
     bucket.nodes += 1;
     buckets.set(prefix, bucket);
   });
