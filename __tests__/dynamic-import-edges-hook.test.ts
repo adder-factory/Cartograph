@@ -10,6 +10,12 @@ import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import * as realHelpers from '../src/index-hooks/edge-resolution-helpers.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
+/* Value snapshots taken NOW — before the vi.mock() calls below execute.
+   Factory bodies must not read the live namespaces: bun rebinds existing
+   namespace imports to the mock, so `realX.fn()` inside a factory would
+   call the mock itself (infinite recursion). */
+const REAL_HELPERS = { ...realHelpers };
+
 const state = {
   active: false,
   refreshCalls: [] as Array<{ hookName: string; options: unknown; edges: unknown[] }>,
@@ -31,7 +37,7 @@ function realCollectTargets(ctx: IndexHookContext, options: TargetOptions) {
 }
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
-  ...realHelpers,
+  ...REAL_HELPERS,
   PER_FILE_YIELD_INTERVAL: 2,
   collectTargets: vi.fn((ctx: IndexHookContext, options: TargetOptions) => realCollectTargets(ctx, options)),
   yieldToEventLoop: vi.fn(async () => {}),
@@ -46,7 +52,7 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       // indexAll (module-leak canary): run the REAL implementation so
       // its cross-file edges aren't poisoned.
       if (!state.active || args.hookName !== 'dynamic-import-edges') {
-        await realHelpers.refreshEdgesHook(args as never);
+        await REAL_HELPERS.refreshEdgesHook(args as never);
         return;
       }
       const edges = await args.buildEdges(args.ctx, [
@@ -58,11 +64,11 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
     },
   ),
-  resolveTargetFile: vi.fn((...args: Parameters<typeof realHelpers.resolveTargetFile>) =>
-    state.active ? (state.targets.get(`${args[0]}:${args[1]}`) ?? null) : realHelpers.resolveTargetFile(...args),
+  resolveTargetFile: vi.fn((...args: Parameters<typeof REAL_HELPERS.resolveTargetFile>) =>
+    state.active ? (state.targets.get(`${args[0]}:${args[1]}`) ?? null) : REAL_HELPERS.resolveTargetFile(...args),
   ),
-  lookupSymbolByNameInFile: vi.fn((...args: Parameters<typeof realHelpers.lookupSymbolByNameInFile>) =>
-    state.active ? (state.symbols.get(`${args[2]}:${args[1]}`) ?? null) : realHelpers.lookupSymbolByNameInFile(...args),
+  lookupSymbolByNameInFile: vi.fn((...args: Parameters<typeof REAL_HELPERS.lookupSymbolByNameInFile>) =>
+    state.active ? (state.symbols.get(`${args[2]}:${args[1]}`) ?? null) : REAL_HELPERS.lookupSymbolByNameInFile(...args),
   ),
 }));
 

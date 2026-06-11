@@ -15,6 +15,20 @@ import * as realQueriesCommitIntents from '../src/db/queries-commit-intents.js';
 import * as realGitUtils from '../src/git-utils.js';
 import * as realErrors from '../src/errors.js';
 
+/* Value snapshots taken NOW — before the vi.mock() calls below execute.
+   Factory bodies must not read the live namespaces: bun rebinds existing
+   namespace imports to the mock, so `realX.fn()` inside a factory would
+   call the mock itself (infinite recursion, observed as "Maximum call
+   stack size exceeded" in paired runs on Linux). */
+const REAL_COCHANGE = { ...realCochange };
+const REAL_QUERIES_FILES = { ...realQueriesFiles };
+const REAL_QUERIES_HISTORY = { ...realQueriesHistory };
+const REAL_QUERIES_METADATA = { ...realQueriesMetadata };
+const REAL_COMMIT_INTENT = { ...realCommitIntent };
+const REAL_QUERIES_COMMIT_INTENTS = { ...realQueriesCommitIntents };
+const REAL_GIT_UTILS = { ...realGitUtils };
+const REAL_ERRORS = { ...realErrors };
+
 const state = {
   active: false,
   commitCount: 3 as number | null,
@@ -31,9 +45,9 @@ const state = {
 };
 
 vi.mock('../src/cochange/index.js', () => ({
-  ...realCochange,
-  mineCoChanges: vi.fn(async (...args: Parameters<typeof realCochange.mineCoChanges>) => {
-    if (!state.active) return realCochange.mineCoChanges(...args);
+  ...REAL_COCHANGE,
+  mineCoChanges: vi.fn(async (...args: Parameters<typeof REAL_COCHANGE.mineCoChanges>) => {
+    if (!state.active) return REAL_COCHANGE.mineCoChanges(...args);
     const [, indexedFiles, sinceSha] = args;
     state.calls.push({ name: 'mineCoChanges', value: { indexedFiles: [...indexedFiles], sinceSha } });
     const next = state.mineResults.shift();
@@ -43,31 +57,31 @@ vi.mock('../src/cochange/index.js', () => ({
 }));
 
 vi.mock('../src/db/queries-files.js', () => ({
-  ...realQueriesFiles,
-  getAllFiles: vi.fn((...args: Parameters<typeof realQueriesFiles.getAllFiles>) =>
-    state.active ? (state.files as never) : realQueriesFiles.getAllFiles(...args),
+  ...REAL_QUERIES_FILES,
+  getAllFiles: vi.fn((...args: Parameters<typeof REAL_QUERIES_FILES.getAllFiles>) =>
+    state.active ? (state.files as never) : REAL_QUERIES_FILES.getAllFiles(...args),
   ),
 }));
 
 vi.mock('../src/db/queries-history.js', () => ({
-  ...realQueriesHistory,
-  applyCoChangeDeltas: vi.fn((...args: Parameters<typeof realQueriesHistory.applyCoChangeDeltas>) => {
-    if (!state.active) return realQueriesHistory.applyCoChangeDeltas(...args);
+  ...REAL_QUERIES_HISTORY,
+  applyCoChangeDeltas: vi.fn((...args: Parameters<typeof REAL_QUERIES_HISTORY.applyCoChangeDeltas>) => {
+    if (!state.active) return REAL_QUERIES_HISTORY.applyCoChangeDeltas(...args);
     state.calls.push({ name: 'applyCoChangeDeltas', value: args[1] });
   }),
-  clearCoChanges: vi.fn((...args: Parameters<typeof realQueriesHistory.clearCoChanges>) => {
-    if (!state.active) return realQueriesHistory.clearCoChanges(...args);
+  clearCoChanges: vi.fn((...args: Parameters<typeof REAL_QUERIES_HISTORY.clearCoChanges>) => {
+    if (!state.active) return REAL_QUERIES_HISTORY.clearCoChanges(...args);
     state.calls.push({ name: 'clearCoChanges' });
   }),
 }));
 
 vi.mock('../src/db/queries-metadata.js', () => ({
-  ...realQueriesMetadata,
-  getMetadata: vi.fn((...args: Parameters<typeof realQueriesMetadata.getMetadata>) =>
-    state.active ? (state.metadata.get(args[1]) ?? null) : realQueriesMetadata.getMetadata(...args),
+  ...REAL_QUERIES_METADATA,
+  getMetadata: vi.fn((...args: Parameters<typeof REAL_QUERIES_METADATA.getMetadata>) =>
+    state.active ? (state.metadata.get(args[1]) ?? null) : REAL_QUERIES_METADATA.getMetadata(...args),
   ),
-  setMetadata: vi.fn((...args: Parameters<typeof realQueriesMetadata.setMetadata>) => {
-    if (!state.active) return realQueriesMetadata.setMetadata(...args);
+  setMetadata: vi.fn((...args: Parameters<typeof REAL_QUERIES_METADATA.setMetadata>) => {
+    if (!state.active) return REAL_QUERIES_METADATA.setMetadata(...args);
     const [, key, value] = args;
     state.calls.push({ name: 'setMetadata', value: { key, value } });
     state.metadata.set(key, value);
@@ -75,9 +89,9 @@ vi.mock('../src/db/queries-metadata.js', () => ({
 }));
 
 vi.mock('../src/llm/commit-intent.js', () => ({
-  ...realCommitIntent,
-  classifyCommitMessage: vi.fn((...args: Parameters<typeof realCommitIntent.classifyCommitMessage>) => {
-    if (!state.active) return realCommitIntent.classifyCommitMessage(...args);
+  ...REAL_COMMIT_INTENT,
+  classifyCommitMessage: vi.fn((...args: Parameters<typeof REAL_COMMIT_INTENT.classifyCommitMessage>) => {
+    if (!state.active) return REAL_COMMIT_INTENT.classifyCommitMessage(...args);
     const [subject] = args;
     return {
       intent: subject.includes('fix') ? 'bugfix' : 'feature',
@@ -87,28 +101,28 @@ vi.mock('../src/llm/commit-intent.js', () => ({
 }));
 
 vi.mock('../src/db/queries-commit-intents.js', () => ({
-  ...realQueriesCommitIntents,
-  recordCommitIntents: vi.fn((...args: Parameters<typeof realQueriesCommitIntents.recordCommitIntents>) => {
-    if (!state.active) return realQueriesCommitIntents.recordCommitIntents(...args);
+  ...REAL_QUERIES_COMMIT_INTENTS,
+  recordCommitIntents: vi.fn((...args: Parameters<typeof REAL_QUERIES_COMMIT_INTENTS.recordCommitIntents>) => {
+    if (!state.active) return REAL_QUERIES_COMMIT_INTENTS.recordCommitIntents(...args);
     state.calls.push({ name: 'recordCommitIntents', value: args[1] });
   }),
-  clearCommitIntents: vi.fn((...args: Parameters<typeof realQueriesCommitIntents.clearCommitIntents>) => {
-    if (!state.active) return realQueriesCommitIntents.clearCommitIntents(...args);
+  clearCommitIntents: vi.fn((...args: Parameters<typeof REAL_QUERIES_COMMIT_INTENTS.clearCommitIntents>) => {
+    if (!state.active) return REAL_QUERIES_COMMIT_INTENTS.clearCommitIntents(...args);
     state.calls.push({ name: 'clearCommitIntents' });
   }),
 }));
 
 vi.mock('../src/git-utils.js', () => ({
-  ...realGitUtils,
-  gitCommitCount: vi.fn((...args: Parameters<typeof realGitUtils.gitCommitCount>) =>
-    state.active ? state.commitCount : realGitUtils.gitCommitCount(...args),
+  ...REAL_GIT_UTILS,
+  gitCommitCount: vi.fn((...args: Parameters<typeof REAL_GIT_UTILS.gitCommitCount>) =>
+    state.active ? state.commitCount : REAL_GIT_UTILS.gitCommitCount(...args),
   ),
 }));
 
 vi.mock('../src/errors.js', () => ({
-  ...realErrors,
-  logDebug: vi.fn((...args: Parameters<typeof realErrors.logDebug>) => {
-    if (!state.active) return realErrors.logDebug(...args);
+  ...REAL_ERRORS,
+  logDebug: vi.fn((...args: Parameters<typeof REAL_ERRORS.logDebug>) => {
+    if (!state.active) return REAL_ERRORS.logDebug(...args);
     state.calls.push({ name: 'logDebug', value: args[0] });
   }),
 }));

@@ -14,6 +14,13 @@ import * as realHelpers from '../src/index-hooks/edge-resolution-helpers.js';
 import * as realPool from '../src/index-hooks/value-ref-edges-pool.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
+/* Value snapshots taken NOW — before the vi.mock() calls below execute.
+   Factory bodies must not read the live namespaces: bun rebinds existing
+   namespace imports to the mock, so `realX.fn()` inside a factory would
+   call the mock itself (infinite recursion). */
+const REAL_HELPERS = { ...realHelpers };
+const REAL_POOL = { ...realPool };
+
 type TargetOptions = { scope: 'all' } | { scope: 'files'; files: string[] };
 
 const state = {
@@ -45,22 +52,22 @@ vi.spyOn(searchQueries, 'getSymbolNameIndexByFile').mockImplementation(
 );
 
 vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
-  ...realPool,
-  shouldUseValueRefWorkers: vi.fn((...args: Parameters<typeof realPool.shouldUseValueRefWorkers>) =>
-    state.active ? state.useWorkers : realPool.shouldUseValueRefWorkers(...args),
+  ...REAL_POOL,
+  shouldUseValueRefWorkers: vi.fn((...args: Parameters<typeof REAL_POOL.shouldUseValueRefWorkers>) =>
+    state.active ? state.useWorkers : REAL_POOL.shouldUseValueRefWorkers(...args),
   ),
-  buildValueRefEdgesInWorkers: vi.fn(async (...args: Parameters<typeof realPool.buildValueRefEdgesInWorkers>) => {
-    if (!state.active) return realPool.buildValueRefEdgesInWorkers(...args);
+  buildValueRefEdgesInWorkers: vi.fn(async (...args: Parameters<typeof REAL_POOL.buildValueRefEdgesInWorkers>) => {
+    if (!state.active) return REAL_POOL.buildValueRefEdgesInWorkers(...args);
     state.calls.push({ name: 'buildValueRefEdgesInWorkers', value: args[0] });
     return state.workerResult as never;
   }),
 }));
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
-  ...realHelpers,
+  ...REAL_HELPERS,
   PER_FILE_YIELD_INTERVAL: 2,
   yieldToEventLoop: vi.fn(async () => {
-    if (!state.active) return realHelpers.yieldToEventLoop();
+    if (!state.active) return REAL_HELPERS.yieldToEventLoop();
     state.calls.push({ name: 'yieldToEventLoop' });
   }),
   refreshEdgesHook: vi.fn(
@@ -74,7 +81,7 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       // indexAll (module-leak canary): run the REAL implementation so
       // its cross-file edges aren't poisoned.
       if (!state.active || args.hookName !== 'value-ref-edges') {
-        await realHelpers.refreshEdgesHook(args as never);
+        await REAL_HELPERS.refreshEdgesHook(args as never);
         return;
       }
       const edges = await args.buildEdges(args.ctx, [
