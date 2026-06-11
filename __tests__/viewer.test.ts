@@ -318,11 +318,18 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       nodes: number;
       edges: number;
       languages: string[];
+      dirs: Array<{ prefix: string; files: number; nodes: number }>;
     };
     expect(body.projectRoot).toBe(testDir);
     expect(body.files).toBeGreaterThan(0);
     expect(body.nodes).toBeGreaterThan(0);
     expect(body.languages).toContain('typescript');
+    // The file-scope rail renders from these per-project buckets — the
+    // viewer must never hardcode a directory layout.
+    const srcBucket = body.dirs.find((d) => d.prefix === 'src/');
+    expect(srcBucket).toBeDefined();
+    expect(srcBucket!.files).toBeGreaterThan(0);
+    expect(srcBucket!.nodes).toBeGreaterThan(0);
   });
 
   it('rejects API requests from foreign origins even with the viewer token', async () => {

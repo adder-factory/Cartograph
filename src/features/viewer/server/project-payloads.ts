@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { getAllFilesWithSymbolCount } from '../../../db/queries-files.js';
 import { getFindingsRanked, getFindingsStats } from '../../../db/queries-findings.js';
 import { getHotspots } from '../../../db/queries-history.js';
 import { getMetadata } from '../../../db/queries-metadata.js';
@@ -38,8 +39,36 @@ export function statusPayload(ctx: RequestContext): unknown {
     head,
     languages,
     nodesByKind: stats.nodesByKind,
+    dirs: scopeDirsPayload(ctx),
     readiness: readinessPayload(ctx.projectPath, stats, indexedAt),
   };
+}
+
+/** Cap on scope-filter rows; the viewer adds its own "everything else" row. */
+const SCOPE_DIR_LIMIT = 12;
+
+/**
+ * Top-level directory buckets for the viewer's "File scope" rail,
+ * ordered by symbol count. Repo-root files (no `/` in the path) are
+ * deliberately omitted — the viewer's "everything else" row covers
+ * them. The rail used to be hardcoded to this repo's own `src/…`
+ * layout, which blanked the graph on any project shaped differently.
+ */
+export function scopeDirsPayload(ctx: RequestContext): Array<{ prefix: string; files: number; nodes: number }> {
+  const buckets = new Map<string, { files: number; nodes: number }>();
+  for (const file of getAllFilesWithSymbolCount(ctx.queries)) {
+    const slash = file.path.indexOf('/');
+    if (slash <= 0) continue;
+    const prefix = file.path.slice(0, slash + 1);
+    const bucket = buckets.get(prefix) ?? { files: 0, nodes: 0 };
+    bucket.files += 1;
+    bucket.nodes += file.nodeCount;
+    buckets.set(prefix, bucket);
+  }
+  return [...buckets.entries()]
+    .map(([prefix, bucket]) => ({ prefix, ...bucket }))
+    .sort((a, b) => b.nodes - a.nodes || a.prefix.localeCompare(b.prefix))
+    .slice(0, SCOPE_DIR_LIMIT);
 }
 
 function readinessPayload(

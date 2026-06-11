@@ -42,7 +42,7 @@ function currentGraphFilterState() {
   return {
     density: viewerGraphMode('densityMode', graphDensityMode),
     detail: viewerGraphMode('detailGroupingMode', detailGroupingMode),
-    hiddenKinds: hiddenKindIndexes(),
+    hiddenKinds: hiddenKindKeys(),
     health: checkedHashValues('[data-filter-health]', 'filterHealth'),
     files: checkedHashValues('[data-filter-scope]', 'filterScope'),
     edges: checkedHashValues('[data-filter-edge]', 'filterEdge'),

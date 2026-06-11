@@ -158,10 +158,11 @@
         <div class="kind-chip" data-filter-kinds="function"           data-active="1" data-tooltip="Toggle function nodes"><span class="legend-dot" style="background:#5fadff"></span> function <span class="count" data-kind-count>0</span></div>
         <div class="kind-chip" data-filter-kinds="method"             data-active="1" data-tooltip="Toggle method nodes"><span class="legend-dot" style="background:#4cd1be"></span> method <span class="count" data-kind-count>0</span></div>
         <div class="kind-chip" data-filter-kinds="class,struct,enum"  data-active="1" data-tooltip="Toggle class, struct, and enum nodes"><span class="legend-dot" style="background:#c084fc;border-radius:2px"></span> class · struct · enum <span class="count" data-kind-count>0</span></div>
-        <div class="kind-chip" data-filter-kinds="interface,type,type_alias,trait" data-active="1" data-tooltip="Toggle interface, type, and trait nodes"><span class="legend-dot" style="background:#a3e635;transform:rotate(45deg)"></span> interface · type · trait <span class="count" data-kind-count>0</span></div>
-        <div class="kind-chip" data-filter-kinds="variable,constant,field,property,parameter" data-active="1" data-tooltip="Toggle variable, field, property, and parameter nodes"><span class="legend-dot" style="background:#fbbf24"></span> variable · constant <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="interface,type_alias,trait,protocol" data-active="1" data-tooltip="Toggle interface, type, trait, and protocol nodes"><span class="legend-dot" style="background:#a3e635;transform:rotate(45deg)"></span> interface · type · trait <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="variable,constant,field,property,parameter,enum_member" data-active="1" data-tooltip="Toggle variable, field, property, parameter, and enum-member nodes"><span class="legend-dot" style="background:#fbbf24"></span> variable · constant <span class="count" data-kind-count>0</span></div>
         <div class="kind-chip" data-filter-kinds="file,module,namespace" data-active="1" data-tooltip="Toggle file, module, and namespace nodes"><span class="legend-dot" style="background:#94a3b8;border-radius:2px"></span> file · module <span class="count" data-kind-count>0</span></div>
-        <div class="kind-chip" data-filter-kinds="route,component"    data-active="1" data-tooltip="Toggle route and component nodes"><span class="legend-dot" style="background:#f472b6"></span> route · component <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="import,export" data-active="1" data-tooltip="Toggle import and export nodes"><span class="legend-dot" style="background:#94a3b8;transform:rotate(45deg)"></span> import · export <span class="count" data-kind-count>0</span></div>
+        <div class="kind-chip" data-filter-kinds="route,component,table,resource" data-active="1" data-tooltip="Toggle route, component, table, and resource nodes"><span class="legend-dot" style="background:#f472b6"></span> route · component <span class="count" data-kind-count>0</span></div>
       </div>
     </section>
 
@@ -192,16 +193,11 @@
 
     <section class="rail-section">
       <div class="rail-title">File scope <span class="rail-hint">all on by default</span></div>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/extraction/" checked> src/extraction/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/mcp/"        checked> src/mcp/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/db/"         checked> src/db/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/llm/"        checked> src/llm/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/biomarkers/" checked> src/biomarkers/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/resolution/" checked> src/resolution/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/graph/"      checked> src/graph/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/context/"    checked> src/context/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/sync/"       checked> src/sync/</label>
-      <label class="rail-row"><input type="checkbox" data-filter-scope="src/" checked> <i>everything else under src/</i></label>
+      <!-- Rows are rendered per-project from the index's top-level
+           directories (status payload `dirs`) — never hardcode them. -->
+      <div id="file-scope-filters">
+        <div class="rail-row">Loading files...</div>
+      </div>
     </section>
 
     <section class="rail-section">

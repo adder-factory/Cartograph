@@ -91,4 +91,7 @@ globalThis.__cartographViewerSmoke = {
    has been initialized. */
 syncEdgeKindFilters();
 if (LIVE_MODE) void bootLive();
-else selectSymbol('extractFromSource');
+else {
+  renderFileScopeFilters(demoScopeDirs());
+  selectSymbol('extractFromSource');
+}
