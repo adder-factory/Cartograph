@@ -773,7 +773,9 @@ function relayoutAndFit() {
     watchdogRetried,
   };
   if (typeof validateGraphState === 'function') validateGraphState('layout');
-  // afterWatchdog was computed two lines up — reuse it rather than
-  // paying a third full overlap/geometry pass per relayout.
-  syncGraphDiagnosticsPanel(afterWatchdog);
+  // Reuse afterWatchdog rather than paying a third full overlap pass —
+  // but re-attach the just-assigned watchdog state, since
+  // graphLayoutWatchdogDiagnostics nulls the embedded copy (recursion
+  // guard) and the panel/health pill read diagnostics.layoutWatchdog.
+  syncGraphDiagnosticsPanel({ ...afterWatchdog, layoutWatchdog: graphLayoutWatchdogState });
 }

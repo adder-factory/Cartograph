@@ -139,7 +139,14 @@ function writeHashState() {
   const hiddenKinds = hiddenKindKeys();
   if (hiddenKinds.length > 0) parts.push(`hideKinds=${encodeURIComponent(hiddenKinds.join(','))}`);
   parts.push(`health=${encodeURIComponent(checkedHashValues('[data-filter-health]', 'filterHealth').join(','))}`);
-  parts.push(`files=${encodeURIComponent(checkedHashValues('[data-filter-scope]', 'filterScope').join(','))}`);
+  // Omit files= when every scope row is checked (the default): scope
+  // prefixes are per-project, so an all-on link from one project must
+  // not pin another project's rail to whichever prefixes happen to
+  // overlap. Absent files= restores as all-on.
+  const scopeInputs = Array.from(document.querySelectorAll('[data-filter-scope]'));
+  if (scopeInputs.some((el) => !el.checked)) {
+    parts.push(`files=${encodeURIComponent(checkedHashValues('[data-filter-scope]', 'filterScope').join(','))}`);
+  }
   parts.push(`edges=${encodeURIComponent(checkedHashValues('[data-filter-edge]', 'filterEdge').join(','))}`);
   const next = '#' + parts.join('&');
   if (location.hash !== next) {
