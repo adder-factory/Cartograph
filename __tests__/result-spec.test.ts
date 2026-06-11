@@ -455,7 +455,7 @@ describe('migrated-tool wording alignment (#32)', () => {
 
   it('digest hotspots spec empty-state names the recovery action', () => {
     const spec = buildDigestHotspotsSpec([]);
-    expect(spec.emptyState).toMatch(/`cartograph quickstart`/i);
+    expect(spec.emptyState).toMatch(/`cartograph index`/i);
     expect(spec.emptyState).toMatch(/`cartograph admin index`/i);
     expect(spec.emptyState).toMatch(/🔥 Hotspots/);
   });

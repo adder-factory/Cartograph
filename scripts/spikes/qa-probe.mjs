@@ -15,7 +15,7 @@ import process from 'node:process';
 
 const target = path.resolve(process.argv[2] ?? process.cwd());
 if (!fs.existsSync(path.join(target, '.cartograph'))) {
-  console.error(`qa-probe: ${target} is not initialized. Run \`cartograph setup ${target}\` first.`);
+  console.error(`qa-probe: ${target} is not initialized. Run \`cartograph index ${target}\` first.`);
   process.exit(1);
 }
 

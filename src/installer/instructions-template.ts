@@ -66,7 +66,7 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 
 At the start of a session, ask the user if they'd like to initialize Cartograph:
 
-"I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph quickstart .\` to build a code knowledge graph?"
+"I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph index .\` to build a code knowledge graph?"
 
 If they prefer PostgreSQL, use PostgreSQL 18+ and run \`cartograph admin init -i --database-provider postgres --database-url <url> --database-pgvector auto\` instead of the SQLite default.
 ${CARTOGRAPH_SECTION_END}`;

@@ -275,7 +275,7 @@ export function parseFilesOutputOptions(options: {
 
 export function filterFilesForCli({ files, options, filterFilesByDir }: FilterFilesArgs): FilterFilesResult {
   if (files.length === 0) {
-    return { ok: false, reason: 'empty-index', message: 'No files indexed. Run "cartograph quickstart" first.' };
+    return { ok: false, reason: 'empty-index', message: 'No files indexed. Run "cartograph index" first.' };
   }
   const filtered = filterFilesByPattern({ files, options, filterFilesByDir });
   if (filtered.length > 0) return { ok: true, files: filtered };

@@ -52,11 +52,13 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // server removing its own host's MCP entries is self-defeating.
   'uninstall',
 
-  // `cartograph quickstart` is a human first-run shortcut: initialize,
-  // build the structural index, run doctor, then print next commands.
-  // MCP callers use the underlying `cartograph_admin({action:'init'|'index'|'doctor'})`
-  // actions directly because MCP has no streaming first-run workflow.
-  'quickstart',
+  // `cartograph index` (renamed from `quickstart` 2026-06-11; the old
+  // name remains a working alias) is a human first-run shortcut:
+  // initialize, build the structural index, run doctor, then print
+  // next commands. MCP callers use the underlying
+  // `cartograph_admin({action:'init'|'index'|'doctor'})` actions
+  // directly because MCP has no streaming first-run workflow.
+  'index',
 
   // `cartograph guide` is compact human CLI guidance. MCP sessions get
   // startup instructions plus `cartograph_playbook` instead.
@@ -95,8 +97,13 @@ const KNOWN_ASYMMETRIC = new Set<string>([
 
   // `cartograph llm setup` is CLI-side LLM provisioning — installer-style
   // flow that needs a TTY (clack prompts) and has no MCP analogue.
+  // `cartograph llm install` (renamed from top-level `setup` 2026-06-11;
+  // the old name remains a hidden deprecated alias) is the
+  // non-interactive sibling: model downloads + recommended config +
+  // doctor — same TTY-era progress streaming, no MCP analogue.
   'llm',
   'llm:setup',
+  'llm:install',
 
   // `cartograph llm smoke` sends tiny real requests to configured
   // local/cloud backends. MCP setup diagnostics stay under
@@ -138,14 +145,9 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // every other diagnostic / lifecycle action lives.
   'doctor',
 
-  // `cartograph setup` is CLI-only: a TTY-bound bootstrap that
-  // orchestrates init + install-models + doctor with streaming
-  // progress per step. An MCP equivalent would need to either
-  // block until completion (multi-minute install) or invent a
-  // streaming protocol — neither matches the existing MCP contract.
-  // Users who want programmatic install-flow control can call the
-  // underlying actions individually via `cartograph_admin`.
-  'setup',
+  // (Top-level `cartograph setup` became a HIDDEN deprecated alias of
+  // `cartograph llm install` on 2026-06-11 — hidden commands are
+  // skipped by the CLI walk, so it needs no allowlist entry.)
 
   // `cartograph sync-if-dirty` is a hook compatibility wrapper. It
   // gates the existing sync implementation on local git dirtiness so

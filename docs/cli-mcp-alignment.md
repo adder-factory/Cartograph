@@ -86,7 +86,7 @@ deprecated `--mode static|judge` alias.
   itself.
 - **`cartograph install`** — agent MCP installer; writes supported local or
   global MCP client configuration. Interactive prompts.
-- **`cartograph quickstart`** — human first-run shortcut. It initializes,
+- **`cartograph index`** — human first-run shortcut. It initializes,
   builds the structural index, runs doctor, and prints next commands.
   MCP callers use `cartograph_admin({action: 'init'|'index'|'doctor'})`
   directly.

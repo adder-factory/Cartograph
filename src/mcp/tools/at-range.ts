@@ -415,7 +415,7 @@ async function handleAtRangeSingle(
       // is a real empty answer and stays a success result (exit 0).
       return err(
         `File not indexed: "${indexedFilePath}" is not in the cartograph index. ` +
-          'Run `cartograph quickstart` for first setup, `cartograph admin sync`/`cartograph admin index` to add new files, or check the path is relative to the project root.',
+          'Run `cartograph index` for first setup, `cartograph admin sync`/`cartograph admin index` to add new files, or check the path is relative to the project root.',
       );
     }
     return ok(

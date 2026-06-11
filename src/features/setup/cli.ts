@@ -6,40 +6,64 @@ type CommandLike = CliOptionCommand;
 
 export interface SetupCommandDeps extends Omit<SetupRuntimeDeps, 'writeProgress'> {
   program: CommandLike;
+  llmCmd: CommandLike;
   resolveProjectPath: (pathArg?: string) => string;
   writeStdout: (message?: string) => void;
   writeProgress?: (message: string) => void;
 }
 
 /**
- * cartograph setup [path]
+ * cartograph llm install [path]  (deprecated alias: cartograph setup)
  *
- * One-shot bootstrap for first-time users. Runs:
+ * One-shot LLM bootstrap for first-time users. Runs:
  *   1. admin init (if .cartograph/ missing)
  *   2. install-models (if no GGUFs present; honors --minimal — used
  *      with a llama-server pointing at the downloaded GGUFs)
  *   3. doctor (final verification — surfaces missing HTTP backend)
  *
  * Idempotent — each step skips when its precondition is already met,
- * so re-running setup on a partially-installed environment is safe.
+ * so re-running on a partially-installed environment is safe.
+ *
+ * Renamed from top-level `cartograph setup` (2026-06-11): the bare
+ * name read as the general setup command, when its job is the local
+ * LLM stack — the general one-command setup is `cartograph install`.
+ * The old name stays registered as a hidden deprecated alias.
  *
  * Pre-2026-05-24c this also ran an `install-shim` step for the
  * in-process libcgshim pathway; that pathway was deleted in step 4c
- * of the LLM HTTP migration. Setup now assumes the user runs
+ * of the LLM HTTP migration. The flow now assumes the user runs
  * `llama-server` (or another OpenAI-compat backend) themselves — the
  * doctor step prints a remediation line with the exact command if
  * not detected.
  *
- * Direct implementation rather than runViaMCP because setup runs
- * BEFORE the MCP server is reachable.
+ * Direct implementation rather than runViaMCP because the bootstrap
+ * runs BEFORE the MCP server is reachable.
  */
 export function registerSetupCommand(deps: SetupCommandDeps): void {
-  const { program, resolveProjectPath, writeStdout } = deps;
-  program
-    .command('setup [path]')
-    .description(
-      'LLM bootstrap: admin init + install-models + doctor. For no-download structural indexing, use `cartograph quickstart`.',
-    )
+  configureSetupCommand(
+    deps.llmCmd
+      .command('install [path]')
+      .description(
+        'Install the recommended local LLM stack: admin init + model downloads + config + doctor. ' +
+          'Interactive provider choice: `cartograph llm setup`. Index without models: `cartograph index`.',
+      ),
+    deps,
+    { deprecatedInvocation: false },
+  );
+  configureSetupCommand(
+    deps.program.command('setup [path]', { hidden: true }).description('Deprecated alias of `cartograph llm install`.'),
+    deps,
+    { deprecatedInvocation: true },
+  );
+}
+
+function configureSetupCommand(
+  command: CommandLike,
+  deps: SetupCommandDeps,
+  variant: { deprecatedInvocation: boolean },
+): void {
+  const { resolveProjectPath, writeStdout } = deps;
+  command
     .option(
       '--minimal',
       'Recommended local LLM bootstrap: install only the smallest viable model subset (embed + 3B chat).',
@@ -57,16 +81,17 @@ export function registerSetupCommand(deps: SetupCommandDeps): void {
     .option('--database-connection-timeout-seconds <seconds>', 'PostgreSQL connection timeout in seconds (default: 30)')
     .option('--database-ssl', 'Force TLS for PostgreSQL connections (URL sslmode= is preferred for verification modes)')
     .action(async (pathArg: string | undefined, options: SetupCommandOptions) => {
+      const writeProgress = deps.writeProgress ?? ((message: string) => process.stderr.write(message));
+      if (variant.deprecatedInvocation) {
+        writeProgress('note: `cartograph setup` is now `cartograph llm install`; the old name keeps working.\n');
+      }
       const projectPath = resolveProjectPath(pathArg);
       const setupOptions: RunSetupOptions = { projectPath };
       if (options.minimal === true) setupOptions.minimal = true;
       if (options.models !== undefined) setupOptions.models = options.models;
       const database = databaseConfigFromOptionInput(options);
       if (database) setupOptions.database = database;
-      const result = await runSetup(setupOptions, {
-        ...deps,
-        writeProgress: deps.writeProgress ?? ((message: string) => process.stderr.write(message)),
-      });
+      const result = await runSetup(setupOptions, { ...deps, writeProgress });
       writeStdout('\n' + result.doctorReport);
       if (result.doctor.overallStatus === 'fail') process.exit(1);
     });

@@ -5,7 +5,7 @@ export interface CliCommand {
 }
 
 export interface CliOptionCommand extends CliCommand {
-  command(name: string): CliOptionCommand;
+  command(name: string, opts?: { hidden?: boolean }): CliOptionCommand;
   description(text: string): CliOptionCommand;
   option(...args: unknown[]): CliOptionCommand;
   addHelpText?(position: string, text: string): CliOptionCommand;

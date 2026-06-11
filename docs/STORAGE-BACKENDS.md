@@ -12,7 +12,7 @@ Cartograph supports both storage backends:
 ## SQLite Default
 
 ```sh
-cartograph quickstart /path/to/project
+cartograph index /path/to/project
 cartograph status /path/to/project
 ```
 
@@ -56,7 +56,7 @@ If you are also bootstrapping local LLM model files, `setup` accepts the same
 storage flags:
 
 ```sh
-cartograph setup /path/to/project \
+cartograph llm install /path/to/project \
   --database-provider postgres \
   --database-url "$DATABASE_URL" \
   --database-schema cartograph \

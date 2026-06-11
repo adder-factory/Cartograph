@@ -57,7 +57,7 @@ describe('files feature runtime', () => {
     expect(filterFilesForCli({ files: [], options: {}, filterFilesByDir: testFilterFilesByDir })).toEqual({
       ok: false,
       reason: 'empty-index',
-      message: 'No files indexed. Run "cartograph quickstart" first.',
+      message: 'No files indexed. Run "cartograph index" first.',
     });
     expect(filterFilesForCli({ files, options: { dir: 'missing' }, filterFilesByDir: testFilterFilesByDir })).toEqual({
       ok: false,
