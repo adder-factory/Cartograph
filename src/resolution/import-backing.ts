@@ -9,6 +9,22 @@
 import type { ImportMapping, ResolutionContext, UnresolvedRef } from './types.js';
 import { isCompatibleLanguage } from './name-matcher-receivers.js';
 
+export interface ImportBackingArgs {
+  readonly ref: UnresolvedRef;
+  readonly context: ResolutionContext;
+  /** Bare callee name for unqualified calls, or the receiver identifier for `receiver.method` calls. */
+  readonly localName: string;
+  /**
+   * The answer when the import lookup itself throws. Each caller
+   * suppresses an edge on a DIFFERENT truth value, but an import-lookup
+   * failure must never cause suppression of a possibly-real edge — so
+   * the builtin-suppression callers pass `true` ("assume backed" keeps
+   * their edge) while the cross-language gate passes `false` ("assume
+   * unbacked" keeps its edge).
+   */
+  readonly failureDefault: boolean;
+}
+
 /**
  * F2 — true when `localName` is imported into `ref`'s file under that
  * local binding (`import { map } from './util.js'`). A genuine same-
@@ -18,23 +34,9 @@ import { isCompatibleLanguage } from './name-matcher-receivers.js';
  * imported value is a real cross-module receiver. Namespace imports
  * (`import * as x`) DO count for the receiver case: `x.set()` legitimately
  * targets the namespace's `set` export.
- *
- * Pass the bare callee name for unqualified calls, or the receiver
- * identifier for `receiver.method` calls.
- *
- * `failureDefault` is the answer when the import lookup itself throws.
- * Each caller suppresses an edge on a DIFFERENT truth value, but an
- * import-lookup failure must never cause suppression of a possibly-real
- * edge — so the builtin-suppression callers pass `true` ("assume
- * backed" keeps their edge) while the cross-language gate passes
- * `false` ("assume unbacked" keeps its edge).
  */
-export function hasConcreteImportBacking(
-  ref: UnresolvedRef,
-  context: ResolutionContext,
-  localName: string,
-  failureDefault = true,
-): boolean {
+export function hasConcreteImportBacking(args: ImportBackingArgs): boolean {
+  const { ref, context, localName, failureDefault } = args;
   let imports: ImportMapping[];
   try {
     imports = context.getImportMappings(ref.filePath, ref.language);
@@ -65,5 +67,5 @@ export function isImportShadowedCrossLanguageMatch(
   if (name.includes('.') || name.includes('::') || name.includes('/')) return false;
   // failureDefault false: when the import lookup throws, fail open and
   // keep the (penalized) cross-language match rather than suppressing.
-  return hasConcreteImportBacking(ref, context, name, false);
+  return hasConcreteImportBacking({ ref, context, localName: name, failureDefault: false });
 }
