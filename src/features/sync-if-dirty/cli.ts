@@ -27,9 +27,7 @@ export interface SyncIfDirtyCommandDeps {
 export function registerSyncIfDirtyCommand(deps: SyncIfDirtyCommandDeps): void {
   deps.program
     .command('sync-if-dirty [path]')
-    .description(
-      'Compatibility hook command: run admin sync when the working tree is dirty or the index lags HEAD',
-    )
+    .description('Compatibility hook command: run admin sync when the working tree is dirty or the index lags HEAD')
     .option('-q, --quiet', 'Suppress output (for hooks)')
     .option(
       '--max-file-size <size>',
