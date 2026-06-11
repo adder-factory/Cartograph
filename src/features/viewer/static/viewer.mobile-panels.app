@@ -117,18 +117,52 @@ MOBILE_MQ.addEventListener?.('change', () => {
 });
 
 /* Keyboard shortcuts. `/` focuses search, `Esc` clears selection,
-   `+/-/0` mirror graph zoom, and Alt+arrows mirror history. */
+   `+/-/0` mirror graph zoom, Alt+arrows mirror history, and the
+   `g g` / `g t` / `g h` chords (advertised in the command palette)
+   switch tabs. */
+let pendingChordKey = null;
+let pendingChordTimer = null;
+const CHORD_TABS = { g: 'graph', t: 'trace', h: 'health' };
+
+function clearPendingChord() {
+  pendingChordKey = null;
+  if (pendingChordTimer) { clearTimeout(pendingChordTimer); pendingChordTimer = null; }
+}
+
 document.addEventListener('keydown', (e) => {
   const target = e.target;
   const inField = target instanceof HTMLElement &&
     (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable);
+  if (!inField && !e.metaKey && !e.ctrlKey && !e.altKey) {
+    if (pendingChordKey === 'g') {
+      const view = CHORD_TABS[e.key.toLowerCase()];
+      clearPendingChord();
+      if (view) {
+        e.preventDefault();
+        clickTab(view);
+        return;
+      }
+    } else if (e.key === 'g') {
+      pendingChordKey = 'g';
+      pendingChordTimer = setTimeout(clearPendingChord, 1000);
+      return;
+    }
+  } else if (pendingChordKey) {
+    clearPendingChord();
+  }
   if (e.key === '/' && !inField) {
     e.preventDefault();
     document.getElementById('search-input')?.focus();
     return;
   }
   if (e.key === 'Escape') {
-    if (inField) target.blur();
+    // Escape inside a field (search box, palette, ask input) only
+    // dismisses the field-local UI — it must not also destroy the
+    // user's symbol selection and detail panes.
+    if (inField || e.defaultPrevented) {
+      if (inField) target.blur();
+      return;
+    }
     if (typeof clearCurrentSelection === 'function') clearCurrentSelection();
     else {
       currentSymbolId = null;

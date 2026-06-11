@@ -79,7 +79,7 @@ function graphElementsFromPayload(g) {
   const edges = (g.edges ?? []).map((e) => ({
     data: { id: edgeElementId(e.source, e.target, e.kind), source: e.source, target: e.target, kind: e.kind },
   }));
-  return [...groups.values(), ...nodes, ...edges];
+  return dedupeElementsById([...groups.values(), ...nodes, ...edges]);
 }
 
 function renderGraphPayload(g, counterHtml) {
@@ -297,18 +297,19 @@ async function activateLiveTraceStep(i) {
 async function searchAndFocus(query) {
   const input = document.getElementById('search-input');
   input.classList.remove('error');
-  if (!LIVE_MODE) { input.classList.add('error'); return; }
+  if (!LIVE_MODE) { input.classList.add('error'); return false; }
   const trimmed = query.trim();
-  if (!trimmed) return;
+  if (!trimmed) return false;
   try {
     const symRes = await apiFetch(`/api/symbol/${encodeURIComponent(trimmed)}`);
-    if (!symRes.ok) { input.classList.add('error'); return; }
+    if (!symRes.ok) { input.classList.add('error'); return false; }
     const sym = await symRes.json();
-    await focusGraphOnSymbol(sym.id, sym.label);
+    return await focusGraphOnSymbol(sym.id, sym.label);
   } catch (err) {
     console.warn('viewer: searchAndFocus failed', err);
     input.classList.add('error');
     setGraphState('err', `Search failed: ${String(err)}`);
+    return false;
   }
 }
 
@@ -338,30 +339,39 @@ document.getElementById('graph-trail').addEventListener('click', (e) => {
 });
 
 async function focusGraphOnSymbol(symbolId, label = symbolId) {
-  if (!LIVE_MODE || !symbolId) return;
+  if (!LIVE_MODE || !symbolId) return false;
   const requestSeq = ++graphFocusRequestSeq;
   const isCurrentGraphRequest = () => requestSeq === graphFocusRequestSeq;
   setGraphState('loading', `Loading neighborhood for ${label}...`);
-  const graphRes = await apiFetch(graphRequestUrl(symbolId, 2));
-  if (!isCurrentGraphRequest()) return;
-  if (!graphRes.ok) {
-    setGraphState('err', `Failed to load neighborhood: HTTP ${graphRes.status}`);
-    return;
+  try {
+    const graphRes = await apiFetch(graphRequestUrl(symbolId, 2));
+    if (!isCurrentGraphRequest()) return false;
+    if (!graphRes.ok) {
+      setGraphState('err', `Failed to load neighborhood: HTTP ${graphRes.status}`);
+      return false;
+    }
+    const g = await graphRes.json();
+    if (!isCurrentGraphRequest()) return false;
+    if (g.error) {
+      setGraphState('err', g.error);
+      return false;
+    }
+    currentSymbolId = g.focus || symbolId;
+    syncViewerSelectionState(currentSymbolId, liveSymbolCache);
+    renderGraphPayload(
+      g,
+      `Showing ${g.nodes.length} nodes · ${(g.edges ?? []).length} edges · focus <b style="color:var(--text)">${escapeHtml(label)}</b>`,
+    );
+    pushGraphTrail(g.focus || symbolId, label);
+    await selectSymbolLive(g.focus || symbolId);
+    return true;
+  } catch (err) {
+    // Without this, a network blip left the "Loading neighborhood…"
+    // overlay up forever (no path back to setGraphState(null)).
+    console.warn('viewer: focusGraphOnSymbol failed', err);
+    if (isCurrentGraphRequest()) setGraphState('err', `Failed to load neighborhood: ${String(err)}`);
+    return false;
   }
-  const g = await graphRes.json();
-  if (!isCurrentGraphRequest()) return;
-  if (g.error) {
-    setGraphState('err', g.error);
-    return;
-  }
-  currentSymbolId = g.focus || symbolId;
-  syncViewerSelectionState(currentSymbolId, liveSymbolCache);
-  renderGraphPayload(
-    g,
-    `Showing ${g.nodes.length} nodes · ${(g.edges ?? []).length} edges · focus <b style="color:var(--text)">${escapeHtml(label)}</b>`,
-  );
-  pushGraphTrail(g.focus || symbolId, label);
-  await selectSymbolLive(g.focus || symbolId);
 }
 
 const searchInputEl = document.getElementById('search-input');

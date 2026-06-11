@@ -35,9 +35,6 @@ const KIND_FILL = {
   resource:   '#94a3b8',
 };
 const KIND_DEFAULT_FILL = '#5fadff';
-const HEALTH_FILL = { // legacy lookup for old code paths that haven't migrated
-  error: '#ef4444', warning: '#f59e0b', info: '#60a5fa', healthy: '#2c9c6a',
-};
 /* Border color signals health. Healthy = no visible ring. */
 const HEALTH_BORDER = {
   error:   '#ef4444',
@@ -112,6 +109,20 @@ function edgeElementId(source, target, kind, prefix = 'edge') {
   return `${prefix}:${hashString(`${source}\n${target}\n${kind || 'edge'}`)}`;
 }
 
+/* Drop elements whose id was already seen. cytoscape() and cy.add()
+   THROW on a duplicate id — one repeated edge tuple from a payload (or
+   a 32-bit hash collision) would otherwise blank the entire graph. */
+function dedupeElementsById(elements) {
+  const seen = new Set();
+  return elements.filter((el) => {
+    const id = el?.data?.id;
+    if (id == null) return true;
+    if (seen.has(id)) return false;
+    seen.add(id);
+    return true;
+  });
+}
+
 /* Node size scales with PageRank centrality: hubs visibly bigger
    than leaves. sqrt mapping gives perceptual range without the
    biggest hub eating the canvas. Top centrality on this codebase is
@@ -161,10 +172,10 @@ const VIEWER_MIN_ZOOM = 0.04;
 
 const cy = cytoscape({
   container: document.getElementById('cy'),
-  elements: [
+  elements: dedupeElementsById([
     ...NODES.map(n => ({ data: { id: n.id, label: n.label, kind: n.kind, health: n.health, file: n.file, centrality: n.centrality || 0 } })),
     ...EDGES.map(([s, t, k]) => ({ data: { id: edgeElementId(s, t, k), source: s, target: t, kind: k } })),
-  ],
+  ]),
   style: [
     {
       selector: 'node',

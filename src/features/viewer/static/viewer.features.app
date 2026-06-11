@@ -471,7 +471,10 @@ async function loadSavedView() {
     return;
   }
   setSavedViewStatus(`Loading ${view.name || 'saved view'}...`, 'info');
-  location.hash = view.hash || '#';
+  // replaceState, not location.hash: a hash assignment pushes a
+  // history entry AND fires hashchange, whose listener would race a
+  // second apply/fetch pipeline against the explicit one below.
+  history.replaceState(null, '', view.hash || '#');
   const state = readHashState();
   applyHashStateControls(state);
   if (LIVE_MODE && state.focus) await focusGraphOnSymbol(state.focus, state.focus);
@@ -615,7 +618,10 @@ async function runCompareView() {
     const res = await apiFetch('/api/compare?limit=120');
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
-    if (payload.error && payload.gitAvailable === false) {
+    // Any server-side error must surface — rendering the normal path
+    // with an empty list reads as an affirmative "No changes against
+    // HEAD." (gitAvailable only matters for wording, not routing.)
+    if (payload.error) {
       renderFeaturePanel('Compare', '', [], payload.error, { state: 'error' });
       return;
     }

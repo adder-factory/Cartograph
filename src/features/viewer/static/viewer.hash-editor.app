@@ -175,18 +175,7 @@ async function copyToClipboard(text, btn) {
       console.debug('clipboard fallback failed', fallbackErr);
     }
   }
-  if (btn) {
-    const label = actionButtonLabel(btn);
-    const orig = label?.textContent || btn.textContent;
-    if (label) label.textContent = 'Copied';
-    else btn.textContent = 'Copied';
-    btn.classList.add('copied');
-    setTimeout(() => {
-      if (label) label.textContent = orig;
-      else btn.textContent = orig;
-      btn.classList.remove('copied');
-    }, 1200);
-  }
+  flashActionButton(btn, 'Copied');
 }
 
 function actionButtonLabel(btn) {
@@ -194,16 +183,21 @@ function actionButtonLabel(btn) {
   return btn.querySelector('span:not(.icon-fallback)') || null;
 }
 
+/* Stores the pristine label and pending timer on the element — a
+   second click within the flash window must restore the original
+   label, not the flash text it happened to capture. */
 function flashActionButton(btn, text = 'Done') {
   if (!btn) return;
   const label = actionButtonLabel(btn);
-  const orig = label?.textContent || btn.textContent;
-  if (label) label.textContent = text;
-  else btn.textContent = text;
+  const target = label || btn;
+  if (btn._flashTimer) clearTimeout(btn._flashTimer);
+  if (btn._flashOrigLabel === undefined) btn._flashOrigLabel = target.textContent;
+  target.textContent = text;
   btn.classList.add('copied');
-  setTimeout(() => {
-    if (label) label.textContent = orig;
-    else btn.textContent = orig;
+  btn._flashTimer = setTimeout(() => {
+    target.textContent = btn._flashOrigLabel;
+    btn._flashOrigLabel = undefined;
+    btn._flashTimer = null;
     btn.classList.remove('copied');
   }, 1200);
 }
@@ -286,12 +280,14 @@ document.getElementById('btn-copy-link').addEventListener('click', (e) => {
    client. Defaults to cartograph_node (good detail-fetch); the
    user can edit the tool name in the result. */
 document.getElementById('btn-copy-mcp').addEventListener('click', (e) => {
-  const sym = liveSymbolCache?.label || (LIVE_MODE ? null : 'extractFromSource');
+  const sym = liveSymbolCache?.label
+    || document.getElementById('d-name')?.textContent?.trim()
+    || null;
   if (!sym) return;
   const snippet = JSON.stringify({
     tool: 'cartograph_node',
     args: { symbol: sym, code: true },
-    note: 'Replace `tool` with cartograph_callers / cartograph_callees / cartograph_impact / cartograph_biomarkers as needed.',
+    note: 'For callers/callees/impact use cartograph_graph with direction: "callers" | "callees" | "impact"; findings live in cartograph_biomarkers.',
   }, null, 2);
   copyToClipboard(snippet, e.currentTarget);
 });
