@@ -5,9 +5,10 @@
  */
 
 import type { Node } from '../types.js';
-import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping } from './types.js';
+import type { UnresolvedRef, ResolvedRef, ResolutionContext } from './types.js';
 import { splitIdentifierTokens } from '../utils.js';
 import { findCppOutOfClassMethod } from './cpp-out-of-class-method.js';
+import { hasConcreteImportBacking, isImportShadowedCrossLanguageMatch } from './import-backing.js';
 import {
   buildJvmImportHints,
   classNodeMatchesJvmFqn,
@@ -182,7 +183,9 @@ const TS_JS_BUILTIN_PROTOTYPE_METHODS: ReadonlySet<string> = new Set([
 
 // matchByExactName confidence values. Single-match resolution gets the
 // highest confidence; cross-language single-match drops because cross-
-// language same-name matches are usually coincidental. For multi-match,
+// language same-name matches are usually coincidental (and when the
+// bare name is import-backed, `isImportShadowedCrossLanguageMatch`
+// suppresses the incompatible-language match entirely). For multi-match,
 // a high path-proximity match is "probably right"; a low-proximity one
 // is "least-bad guess".
 const EXACT_MATCH_SAME_LANG_CONFIDENCE = 0.9;
@@ -286,31 +289,6 @@ function isFalseBuiltinTsJsMatch(ref: UnresolvedRef, proximity: number): boolean
 }
 
 /**
- * F2 — true when `localName` is imported into `ref`'s file under that
- * local binding (`import { map } from './util.js'`). A genuine same-
- * name import is concrete EXTRACTED-confidence backing, so the builtin-
- * method suppression must NOT fire — `map(...)` then really does call
- * the imported `map`, and `someMap.set(...)` where `someMap` is an
- * imported value is a real cross-module receiver. Namespace imports
- * (`import * as x`) DO count for the receiver case: `x.set()` legitimately
- * targets the namespace's `set` export.
- *
- * Pass the bare callee name for unqualified calls, or the receiver
- * identifier for `receiver.method` calls.
- */
-function hasConcreteImportBacking(ref: UnresolvedRef, context: ResolutionContext, localName: string): boolean {
-  let imports: ImportMapping[];
-  try {
-    imports = context.getImportMappings(ref.filePath, ref.language);
-  } catch {
-    // Conservative: an import-lookup failure must not cause suppression
-    // of a possibly-real edge. Treat as "backing unknown → assume backed".
-    return true;
-  }
-  return imports.some((imp) => imp.localName === localName);
-}
-
-/**
  * F2 — true when a `calls` reference is a BARE, unqualified builtin
  * prototype-method name (`map.set(x)` → `set`, chained `.map().filter()`
  * → `map`/`filter`) with no concrete import backing. Such a ref must
@@ -386,6 +364,7 @@ function matchByExactName(ref: UnresolvedRef, context: ResolutionContext): Resol
   // If only one match, use it — but penalize cross-language matches
   if (candidates.length === 1) {
     const isCrossLanguage = candidates[0]!.language !== ref.language;
+    if (isCrossLanguage && isImportShadowedCrossLanguageMatch(ref, context, candidates[0]!)) return null;
     return {
       original: ref,
       targetNodeId: candidates[0]!.id,
@@ -397,6 +376,7 @@ function matchByExactName(ref: UnresolvedRef, context: ResolutionContext): Resol
   // Multiple matches - try to narrow down
   const { best: bestMatch, runnerUp } = findBestMatch(ref, candidates, context);
   if (!bestMatch) return null;
+  if (bestMatch.language !== ref.language && isImportShadowedCrossLanguageMatch(ref, context, bestMatch)) return null;
 
   const proximity = computePathProximity(ref.filePath, bestMatch.filePath);
   const confidence = confidenceFromProximity(proximity);
@@ -1106,6 +1086,7 @@ function matchFuzzy(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef
 
   if (finalCandidates.length === 1) {
     const isCrossLanguage = finalCandidates[0]!.language !== ref.language;
+    if (isCrossLanguage && isImportShadowedCrossLanguageMatch(ref, context, finalCandidates[0]!)) return null;
     return {
       original: ref,
       targetNodeId: finalCandidates[0]!.id,
