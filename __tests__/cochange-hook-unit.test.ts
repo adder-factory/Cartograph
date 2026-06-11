@@ -1,7 +1,22 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { IndexHookContext } from '../src/index-hooks/registry.js';
+// Real-module namespaces captured BEFORE the vi.mock calls below (bun does
+// not hoist vi.mock, so these bind the genuine implementations). Every mock
+// spreads its real module and delegates to it whenever this suite is not
+// actively running — bun caches modules per process, so a partial or
+// state-backed mock would otherwise poison later test files (the
+// module-leak canary runs this file before the MCP canaries).
+import * as realCochange from '../src/cochange/index.js';
+import * as realQueriesFiles from '../src/db/queries-files.js';
+import * as realQueriesHistory from '../src/db/queries-history.js';
+import * as realQueriesMetadata from '../src/db/queries-metadata.js';
+import * as realCommitIntent from '../src/llm/commit-intent.js';
+import * as realQueriesCommitIntents from '../src/db/queries-commit-intents.js';
+import * as realGitUtils from '../src/git-utils.js';
+import * as realErrors from '../src/errors.js';
 
 const state = {
+  active: false,
   commitCount: 3 as number | null,
   files: [] as Array<{ path: string }>,
   metadata: new Map<string, string>(),
@@ -16,8 +31,10 @@ const state = {
 };
 
 vi.mock('../src/cochange/index.js', () => ({
-  LAST_MINED_HEAD_KEY: 'last_mined_cochange_head',
-  mineCoChanges: vi.fn(async (_root: string, indexedFiles: Set<string>, sinceSha: string | null) => {
+  ...realCochange,
+  mineCoChanges: vi.fn(async (...args: Parameters<typeof realCochange.mineCoChanges>) => {
+    if (!state.active) return realCochange.mineCoChanges(...args);
+    const [, indexedFiles, sinceSha] = args;
     state.calls.push({ name: 'mineCoChanges', value: { indexedFiles: [...indexedFiles], sinceSha } });
     const next = state.mineResults.shift();
     if (!next) throw new Error('missing mine result');
@@ -26,50 +43,74 @@ vi.mock('../src/cochange/index.js', () => ({
 }));
 
 vi.mock('../src/db/queries-files.js', () => ({
-  getAllFiles: vi.fn(() => state.files),
+  ...realQueriesFiles,
+  getAllFiles: vi.fn((...args: Parameters<typeof realQueriesFiles.getAllFiles>) =>
+    state.active ? (state.files as never) : realQueriesFiles.getAllFiles(...args),
+  ),
 }));
 
 vi.mock('../src/db/queries-history.js', () => ({
-  applyCoChangeDeltas: vi.fn((_queries: unknown, deltas: unknown) =>
-    state.calls.push({ name: 'applyCoChangeDeltas', value: deltas }),
-  ),
-  clearCoChanges: vi.fn(() => state.calls.push({ name: 'clearCoChanges' })),
+  ...realQueriesHistory,
+  applyCoChangeDeltas: vi.fn((...args: Parameters<typeof realQueriesHistory.applyCoChangeDeltas>) => {
+    if (!state.active) return realQueriesHistory.applyCoChangeDeltas(...args);
+    state.calls.push({ name: 'applyCoChangeDeltas', value: args[1] });
+  }),
+  clearCoChanges: vi.fn((...args: Parameters<typeof realQueriesHistory.clearCoChanges>) => {
+    if (!state.active) return realQueriesHistory.clearCoChanges(...args);
+    state.calls.push({ name: 'clearCoChanges' });
+  }),
 }));
 
 vi.mock('../src/db/queries-metadata.js', () => ({
-  getMetadata: vi.fn((_queries: unknown, key: string) => state.metadata.get(key) ?? null),
-  setMetadata: vi.fn((_queries: unknown, key: string, value: string) => {
+  ...realQueriesMetadata,
+  getMetadata: vi.fn((...args: Parameters<typeof realQueriesMetadata.getMetadata>) =>
+    state.active ? (state.metadata.get(args[1]) ?? null) : realQueriesMetadata.getMetadata(...args),
+  ),
+  setMetadata: vi.fn((...args: Parameters<typeof realQueriesMetadata.setMetadata>) => {
+    if (!state.active) return realQueriesMetadata.setMetadata(...args);
+    const [, key, value] = args;
     state.calls.push({ name: 'setMetadata', value: { key, value } });
     state.metadata.set(key, value);
   }),
 }));
 
 vi.mock('../src/llm/commit-intent.js', () => ({
-  classifyCommitMessage: vi.fn((subject: string) => ({
-    intent: subject.includes('fix') ? 'bugfix' : 'feature',
-    score: subject.includes('fix') ? 0.9 : 0.7,
-  })),
+  ...realCommitIntent,
+  classifyCommitMessage: vi.fn((...args: Parameters<typeof realCommitIntent.classifyCommitMessage>) => {
+    if (!state.active) return realCommitIntent.classifyCommitMessage(...args);
+    const [subject] = args;
+    return {
+      intent: subject.includes('fix') ? 'bugfix' : 'feature',
+      score: subject.includes('fix') ? 0.9 : 0.7,
+    } as never;
+  }),
 }));
 
 vi.mock('../src/db/queries-commit-intents.js', () => ({
-  recordCommitIntents: vi.fn((_queries: unknown, rows: unknown) =>
-    state.calls.push({ name: 'recordCommitIntents', value: rows }),
-  ),
-  clearCommitIntents: vi.fn(() => state.calls.push({ name: 'clearCommitIntents' })),
+  ...realQueriesCommitIntents,
+  recordCommitIntents: vi.fn((...args: Parameters<typeof realQueriesCommitIntents.recordCommitIntents>) => {
+    if (!state.active) return realQueriesCommitIntents.recordCommitIntents(...args);
+    state.calls.push({ name: 'recordCommitIntents', value: args[1] });
+  }),
+  clearCommitIntents: vi.fn((...args: Parameters<typeof realQueriesCommitIntents.clearCommitIntents>) => {
+    if (!state.active) return realQueriesCommitIntents.clearCommitIntents(...args);
+    state.calls.push({ name: 'clearCommitIntents' });
+  }),
 }));
 
 vi.mock('../src/git-utils.js', () => ({
-  gitCommitCount: vi.fn(() => state.commitCount),
+  ...realGitUtils,
+  gitCommitCount: vi.fn((...args: Parameters<typeof realGitUtils.gitCommitCount>) =>
+    state.active ? state.commitCount : realGitUtils.gitCommitCount(...args),
+  ),
 }));
 
 vi.mock('../src/errors.js', () => ({
-  errMsg: (err: unknown) => (err instanceof Error ? err.message : String(err)),
-  logDebug: vi.fn((message: string) => state.calls.push({ name: 'logDebug', value: message })),
-  // Complete the mock so a leaked partial doesn't poison later test files
-  // whose import chain needs these (the module-leak canary). errors.ts
-  // exports logWarn alongside logDebug; omitting it broke modules that
-  // `import { logWarn } from '../errors.js'` when this mock leaked.
-  logWarn: vi.fn(),
+  ...realErrors,
+  logDebug: vi.fn((...args: Parameters<typeof realErrors.logDebug>) => {
+    if (!state.active) return realErrors.logDebug(...args);
+    state.calls.push({ name: 'logDebug', value: args[0] });
+  }),
 }));
 
 const { HOOK } = await import('../src/index-hooks/cochange.js');
@@ -79,12 +120,20 @@ function ctx(config: Record<string, unknown> = {}): IndexHookContext {
 }
 
 beforeEach(() => {
+  state.active = true;
   state.commitCount = 3;
   state.files = [{ path: 'src/a.ts' }, { path: 'src/b.ts' }];
   state.metadata.clear();
   state.mineResults = [];
   state.calls = [];
   vi.clearAllMocks();
+});
+
+// Hand the mocked modules back to their real implementations once this
+// suite finishes — a later test file in the same bun process must see
+// genuine behavior (module-leak canary).
+afterAll(() => {
+  state.active = false;
 });
 
 describe('cochange hook', () => {

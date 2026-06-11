@@ -3,28 +3,21 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as dbIndex from '../src/db/index.js';
-import { insertEdges } from '../src/db/queries-edges.js';
-import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
 import * as metadataQueries from '../src/db/queries-metadata.js';
 import * as searchQueries from '../src/db/queries-search.js';
 import * as errorModule from '../src/errors.js';
+// Real modules captured BEFORE vi.mock (bun does not hoist) — the mocks
+// below delegate to them whenever this suite is not actively running, so
+// a leaked factory can't poison another test file's hooks (module-leak
+// canary). The spies above are already leak-safe via restoreAllMocks.
+import * as realHelpers from '../src/index-hooks/edge-resolution-helpers.js';
+import * as realPool from '../src/index-hooks/value-ref-edges-pool.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 type TargetOptions = { scope: 'all' } | { scope: 'files'; files: string[] };
 
-// Used by the refreshEdgesHook fallback when this mock leaks into another
-// test's indexAll (module-leak canary). Mirrors the real collectTargets.
-function realCollectTargets(ctx: IndexHookContext, options: TargetOptions) {
-  if (options.scope === 'all') {
-    return getAllFiles(ctx.queries).map((file) => ({ path: file.path, language: file.language }));
-  }
-  return options.files
-    .map((filePath) => getFileByPath(ctx.queries, filePath))
-    .filter((file): file is NonNullable<typeof file> => file !== null)
-    .map((file) => ({ path: file.path, language: file.language }));
-}
-
 const state = {
+  active: false,
   refreshCalls: [] as Array<{ hookName: string; options: unknown; edges: unknown[] }>,
   metadata: new Map<string, string>(),
   calls: [] as Array<{ name: string; value?: unknown }>,
@@ -52,19 +45,24 @@ vi.spyOn(searchQueries, 'getSymbolNameIndexByFile').mockImplementation(
 );
 
 vi.mock('../src/index-hooks/value-ref-edges-pool.js', () => ({
-  shouldUseValueRefWorkers: vi.fn(() => state.useWorkers),
-  buildValueRefEdgesInWorkers: vi.fn(async (args: unknown) => {
-    state.calls.push({ name: 'buildValueRefEdgesInWorkers', value: args });
-    return state.workerResult;
+  ...realPool,
+  shouldUseValueRefWorkers: vi.fn((...args: Parameters<typeof realPool.shouldUseValueRefWorkers>) =>
+    state.active ? state.useWorkers : realPool.shouldUseValueRefWorkers(...args),
+  ),
+  buildValueRefEdgesInWorkers: vi.fn(async (...args: Parameters<typeof realPool.buildValueRefEdgesInWorkers>) => {
+    if (!state.active) return realPool.buildValueRefEdgesInWorkers(...args);
+    state.calls.push({ name: 'buildValueRefEdgesInWorkers', value: args[0] });
+    return state.workerResult as never;
   }),
 }));
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
+  ...realHelpers,
   PER_FILE_YIELD_INTERVAL: 2,
-  collectTargets: vi.fn(),
-  lookupSymbolByNameInFile: vi.fn(),
-  yieldToEventLoop: vi.fn(async () => state.calls.push({ name: 'yieldToEventLoop' })),
-  resolveTargetFile: vi.fn(),
+  yieldToEventLoop: vi.fn(async () => {
+    if (!state.active) return realHelpers.yieldToEventLoop();
+    state.calls.push({ name: 'yieldToEventLoop' });
+  }),
   refreshEdgesHook: vi.fn(
     async (args: {
       ctx: IndexHookContext;
@@ -72,12 +70,11 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       hookName: string;
       buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
     }) => {
-      // Foreign hook: this mock has leaked into another test's indexAll
-      // (module-leak canary). Replicate the real refreshEdgesHook so we
-      // don't poison its cross-file edges.
-      if (args.hookName !== 'value-ref-edges') {
-        const edges = await args.buildEdges(args.ctx, realCollectTargets(args.ctx, args.options));
-        if (edges.length > 0) insertEdges(args.ctx.queries, edges as never);
+      // Foreign hook, or this mock leaked into another test file's
+      // indexAll (module-leak canary): run the REAL implementation so
+      // its cross-file edges aren't poisoned.
+      if (!state.active || args.hookName !== 'value-ref-edges') {
+        await realHelpers.refreshEdgesHook(args as never);
         return;
       }
       const edges = await args.buildEdges(args.ctx, [
@@ -112,6 +109,7 @@ function ctx(projectRoot: string): IndexHookContext {
 }
 
 beforeEach(() => {
+  state.active = true;
   state.refreshCalls = [];
   state.metadata.clear();
   state.calls = [];
@@ -123,6 +121,9 @@ beforeEach(() => {
 });
 
 afterAll(() => {
+  // Spies restore to the real implementations; the factory mocks above
+  // delegate to real once the flag drops (module-leak canary).
+  state.active = false;
   vi.restoreAllMocks();
 });
 
