@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -114,5 +115,51 @@ describe('runInstallerWithOptions', () => {
 
     expect(listFiles(tmpHome)).toEqual([]);
     expect(listFiles(tmpCwd)).toEqual([]);
+  });
+
+  function gitInit(cwd: string): void {
+    execFileSync('git', ['init', '-q'], { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+
+  it('installs managed git hooks for local installs in a git worktree', async () => {
+    gitInit(tmpCwd);
+
+    await runInstallerWithOptions({ yes: true, location: 'local', target: 'none' });
+
+    for (const hook of ['post-merge', 'post-checkout', 'post-rewrite']) {
+      const hookPath = path.join(tmpCwd, '.git', 'hooks', hook);
+      expect(fs.existsSync(hookPath)).toBe(true);
+      expect(fs.readFileSync(hookPath, 'utf-8')).toContain('>>> cartograph install-hooks >>>');
+    }
+  });
+
+  it('propagates the resolved --command into the managed git hooks', async () => {
+    gitInit(tmpCwd);
+
+    await runInstallerWithOptions({
+      yes: true,
+      location: 'local',
+      target: 'none',
+      command: '/custom/bin/cartograph',
+    });
+
+    const hookContent = fs.readFileSync(path.join(tmpCwd, '.git', 'hooks', 'post-merge'), 'utf-8');
+    expect(hookContent).toContain("cartograph_command='/custom/bin/cartograph'");
+  });
+
+  it('honors hooks=false (--no-hooks) on local installs', async () => {
+    gitInit(tmpCwd);
+
+    await runInstallerWithOptions({ yes: true, location: 'local', target: 'none', hooks: false });
+
+    expect(fs.existsSync(path.join(tmpCwd, '.cartograph'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpCwd, '.git', 'hooks', 'post-merge'))).toBe(false);
+  });
+
+  it('skips git hooks without failing outside a git worktree', async () => {
+    await runInstallerWithOptions({ yes: true, location: 'local', target: 'none' });
+
+    expect(fs.existsSync(path.join(tmpCwd, '.cartograph'))).toBe(true);
+    expect(fs.existsSync(path.join(tmpCwd, '.git'))).toBe(false);
   });
 });

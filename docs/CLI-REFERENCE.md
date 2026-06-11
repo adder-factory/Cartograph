@@ -6,13 +6,13 @@ runtime reference. This page groups the top-level commands by workflow.
 ## Setup And Operations
 
 ```sh
-cartograph install                 # configure supported agents
-cartograph install --yes --target=auto --location=local
-cartograph install --yes --target=auto --location=global
+cartograph install                 # interactive agent setup
+cartograph install --yes --location=local   # one command: MCP config + init + index + git hooks
+cartograph install --yes --location=global  # MCP config only, available in all projects
+cartograph install --yes --location=local --no-hooks
 cartograph install --print-config codex
 cartograph install --command /absolute/path/to/cartograph
-cartograph install-hooks [path]    # keep index fresh after pull/checkout/rebase
-cartograph install-hooks --command "$(command -v cartograph)"
+cartograph install-hooks [path]    # manage the git hooks separately
 cartograph install-hooks --remove
 cartograph upgrade                 # check for a newer Cartograph (alias: update)
 cartograph upgrade --apply         # fast-forward a source checkout + bun install
@@ -53,14 +53,17 @@ Install completions by loading the generated script in your shell startup file,
 for example `cartograph completions zsh` or `cartograph completions powershell`
 in your PowerShell profile.
 
-Use `cartograph install --command <path>` when a GUI-launched agent cannot
-resolve `cartograph` from PATH. The installer writes that executable path into
-each MCP config entry while keeping the normal `serve --mcp` args.
+When `cartograph` is not resolvable on PATH at install time, the installer
+pins an absolute executable path into each MCP config entry automatically
+(keeping the normal `serve --mcp` args). Use `cartograph install --command
+<path>` to set the path explicitly, e.g. when the MCP host's GUI shell has a
+different PATH than your terminal.
 
-Use `cartograph install-hooks` from a git working tree to append managed
-`post-merge`, `post-checkout`, and `post-rewrite` hook blocks that run
-`cartograph admin sync --quiet` in the background. Existing hook content is
-preserved, and `--remove` deletes only Cartograph's managed block.
+Local installs append managed `post-merge`, `post-checkout`, and
+`post-rewrite` hook blocks that run `cartograph admin sync --quiet` in the
+background; skip with `--no-hooks`. `cartograph install-hooks` manages the
+same blocks separately (existing hook content is preserved, and `--remove`
+deletes only Cartograph's managed block).
 
 ## Admin
 

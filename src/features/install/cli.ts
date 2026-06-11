@@ -29,16 +29,20 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
   const install = program
     .command('install')
     .description(
-      'Install cartograph MCP server into one or more agents. For agent-run setup, use --yes --target=auto --location=local.',
+      'Configure cartograph for one or more agents (MCP config; local installs also init + index + git hooks). One-command agent setup: --yes --location=local.',
     )
     .option(
       '-t, --target <ids>',
-      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,copilot,codebuddy,codewhale,zed,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder,bob,kimi,pi,reasonix.',
+      'Target agent(s): comma-separated ids, or "auto"|"all"|"none". Known ids include claude,cursor,codex,copilot,codebuddy,codewhale,zed,opencode,hermes,gemini,antigravity,kiro,factory,rovo,qoder,bob,kimi,pi,reasonix. Default with --yes: auto.',
     )
     .option('-l, --location <where>', 'Install location: "global" or "local". Default: prompt')
     .option('-y, --yes', 'Non-interactive for agents/CI: defaults to --location=global --target=auto, auto-allow on')
     .option('--no-permissions', 'Skip writing the auto-allow permissions list (Claude Code and Qoder CLI)')
-    .option('--command <path>', 'Command/path to write into MCP config entries instead of "cartograph"')
+    .option('--no-hooks', 'Skip installing managed git hooks on local installs')
+    .option(
+      '--command <path>',
+      'Command/path to write into MCP config entries. Default: "cartograph", or a pinned absolute path when cartograph is not on PATH',
+    )
     .option('--print-config <id>', 'Print MCP config snippet for the named agent and exit (no file writes)')
     .action((opts: InstallOptions) => runInstallCommand(opts, deps));
 
@@ -46,13 +50,11 @@ export function registerInstallCommand(deps: InstallCommandDeps): void {
     'after',
     `
 Examples:
-  cartograph install
-  cartograph install --yes --target=auto --location=local
-  cartograph install --yes --target=auto --location=global
+  cartograph install                          # interactive
+  cartograph install --yes --location=local   # one-command agent setup: MCP + init + index + git hooks
+  cartograph install --yes --location=global  # MCP config only, available in all projects
   cartograph install --yes --target=all --command /absolute/path/to/cartograph
   cartograph install --print-config codex
-  cartograph install --print-config copilot
-  cartograph install --print-config qoder
 `,
   );
 

@@ -354,13 +354,16 @@ host AI assistant:
 
 ### Claude Code
 
-Preferred private per-project install:
+Preferred private per-project install (also initializes, indexes, and
+installs the managed git hooks; add `--no-hooks` to skip them):
 
 ```sh
 cartograph install --yes --target=claude --location=local
 ```
 
-If the host cannot find `cartograph` on PATH, pass an absolute executable path:
+When `cartograph` is not resolvable on PATH, the installer pins an absolute
+executable path into the MCP config automatically. To set it explicitly
+(e.g. the host's GUI shell has a different PATH than this terminal):
 
 ```sh
 cartograph install --yes --target=claude --location=local --command "$(command -v cartograph)"
