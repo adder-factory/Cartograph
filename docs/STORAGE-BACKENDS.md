@@ -52,8 +52,8 @@ cartograph admin init -i /path/to/project \
 cartograph doctor /path/to/project
 ```
 
-If you are also bootstrapping local LLM model files, `setup` accepts the same
-storage flags:
+If you are also bootstrapping local LLM model files, `llm install` accepts the
+same storage flags:
 
 ```sh
 cartograph llm install /path/to/project \

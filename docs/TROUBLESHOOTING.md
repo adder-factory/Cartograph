@@ -27,8 +27,8 @@ cartograph index /path/to/project
 cartograph status --verbose /path/to/project
 ```
 
-For PostgreSQL storage, pass the storage flags during `admin init` or `setup`
-before the first index:
+For PostgreSQL storage, pass the storage flags during `admin init` or
+`llm install` before the first index:
 
 ```sh
 cartograph admin init -i /path/to/project \
