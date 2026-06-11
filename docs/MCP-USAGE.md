@@ -23,26 +23,23 @@ For a coding agent working inside the user's project, prefer the
 non-interactive local install:
 
 ```sh
-cartograph install --yes --target=auto --location=local
+cartograph install --yes --location=local
 cartograph status --verbose
-```
-
-If the agent process cannot resolve `cartograph` from PATH, pass the absolute
-executable path that should be written into MCP configs:
-
-```sh
-cartograph install --yes --target=auto --location=local --command "$(command -v cartograph)"
 ```
 
 If the current agent has no supported local config path, retry global wiring:
 
 ```sh
-cartograph install --yes --target=auto --location=global
+cartograph install --yes --location=global
 ```
 
-`--yes` makes the command suitable for agents and CI. In local mode it
-initializes `.cartograph/`, indexes the repository, and defers optional LLM
-setup instead of opening the interactive provider wizard.
+`--yes` makes the command suitable for agents and CI: it auto-detects
+installed agent targets (`--target=auto`), and in local mode initializes
+`.cartograph/`, indexes the repository, installs the managed git hooks
+(`--no-hooks` to skip), and defers optional LLM setup instead of opening the
+interactive provider wizard. When `cartograph` is not resolvable on PATH, an
+absolute executable path is pinned into the generated MCP configs
+automatically; override with `--command <path>`.
 
 Generated local project config and instruction files are added to `.gitignore`
 because they can contain absolute checkout paths and personal agent rules. Local

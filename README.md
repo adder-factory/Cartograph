@@ -93,48 +93,45 @@ documented in [Agent-Assisted Install](docs/AGENT-INSTALL.md).
 
 ## Quickstart
 
+One command from inside your project does the whole setup — MCP config for
+detected agents, `.cartograph/` init, the structural index, and managed git
+hooks:
+
 ```bash
 cd /path/to/your/project
+cartograph install --yes --location=local
+```
 
-# Initialize and build the structural index, then run a readiness check.
-cartograph quickstart .
+Prefer prompts? Run plain `cartograph` (or `cartograph install`) for the
+interactive version of the same flow — it offers to link the binary onto
+`PATH`, lets you pick agents and location, and asks before touching git hooks.
+
+SQLite is the zero-config default; nothing else is required to start querying:
+
+```bash
 cartograph status --verbose
+cartograph find "SymbolName" --mode fuzzy
 ```
 
-`cartograph quickstart` initializes the project, indexes it, and runs `doctor`.
-SQLite is the zero-config default; nothing else is required to start querying.
+To index a project *without* touching any agent config, use
+`cartograph quickstart .` (init + index + readiness check only).
 
-### Connect an agent
+### What the installer writes
 
-```bash
-cartograph install
-```
-
-The installer detects and configures supported agents, writing MCP server
-configuration plus agent instructions where the target supports them. Supported
-targets are Claude Code, Cursor, Codex CLI, GitHub Copilot CLI, CodeBuddy,
-CodeWhale, Zed, opencode, Hermes, Gemini CLI, Antigravity, Kiro, Factory Droid,
-Rovo Dev, Qoder CLI, IBM Bob, Kimi Code, Pi Agent, and Reasonix.
-
-For non-interactive or agent-run setup:
-
-```bash
-cartograph install --yes --target=auto --location=local
-```
-
-If your MCP client launches from a GUI shell that cannot find `cartograph` on
-`PATH`, pin an absolute path into the config:
-
-```bash
-cartograph install --command "$(command -v cartograph)"
-```
-
-To keep the graph fresh across pulls, branch switches, and rebases, install the
-managed git hooks:
-
-```bash
-cartograph install-hooks --command "$(command -v cartograph)"
-```
+- **MCP server config plus agent instructions** for detected agents, where the
+  target supports them. Supported targets: Claude Code, Cursor, Codex CLI,
+  GitHub Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,
+  Antigravity, Kiro, Factory Droid, Rovo Dev, Qoder CLI, IBM Bob, Kimi Code,
+  Pi Agent, and Reasonix. Pick explicitly with `--target=<ids>`.
+- **Managed git hooks** (`post-merge`, `post-checkout`, `post-rewrite`) so
+  pulls, branch switches, and rebases keep the index fresh. Skip with
+  `--no-hooks`; manage later with `cartograph install-hooks [--remove]`.
+- If `cartograph` is not resolvable on `PATH`, the installer pins an absolute
+  path into the generated config automatically; override with
+  `--command <path>`.
+- With `--location=global` the MCP config is written once for all projects and
+  the project-local steps (init, index, hooks) are skipped — run
+  `cartograph quickstart .` per project instead.
 
 Configuration written for `--location=local` (project-scoped MCP entries and
 instruction files) is added to `.gitignore`, because it can contain absolute

@@ -5,48 +5,50 @@ index:
 
 ```text
 Install Cartograph for this repository and wire it into my current coding
-agent. Use non-interactive commands where possible.
+agent. Use non-interactive commands.
 
-1. If `cartograph --version` fails, install Cartograph:
-   curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
-   If that release install is unavailable, use the source fallback:
+1. If `cartograph --version` fails, install Cartograph from source
+   (requires Bun >= 1.3):
    git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
    cd /tmp/cartograph && bun install && bun link
 
-2. From my project repository, run:
-   cartograph install --yes --target=auto --location=local
-   cartograph install-hooks --command "$(command -v cartograph)"
+2. From my project repository, run the one-command setup, then verify:
+   cartograph install --yes --location=local
    cartograph status --verbose
 
-3. If the MCP host cannot find `cartograph` on PATH, retry local wiring with:
-   cartograph install --yes --target=auto --location=local --command "$(command -v cartograph)"
+3. If no local agent config file was created, retry global agent wiring:
+   cartograph install --yes --location=global
 
-4. If no local agent config file was created, retry global agent wiring:
-   cartograph install --yes --target=auto --location=global
-
-5. Report the exact files created or changed, whether `.cartograph/` was
-   initialized, the `cartograph status --verbose` result, and whether I need to
-   restart the coding agent.
+4. Report the exact files created or changed (including git hooks), whether
+   `.cartograph/` was initialized, the `cartograph status --verbose` result,
+   and whether I need to restart the coding agent.
 
 Do not download LLM models, configure cloud credentials, migrate storage, or
 switch to PostgreSQL unless I ask for those separately.
 ```
 
-For PowerShell users, replace the install command in step 1 with:
+Once a prebuilt GitHub release exists, step 1 can instead use the standalone
+installer (`install.sh`, or `install.ps1` for PowerShell):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+```
 
 ```powershell
 iwr https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 -useb | iex
 ```
 
-The local install command initializes `.cartograph/`, writes supported local MCP
-configuration, indexes the repository, and skips the interactive LLM wizard in
-`--yes` mode. Core search, graph, impact, review, status, and affected-test
-commands work without an LLM backend.
+The one-command local setup initializes `.cartograph/`, writes supported local
+MCP configuration, indexes the repository, installs the managed git hooks, and
+skips the interactive LLM wizard in `--yes` mode. Core search, graph, impact,
+review, status, and affected-test commands work without an LLM backend. If
+`cartograph` is not resolvable on PATH, the installer pins an absolute path
+into the generated config automatically; override with `--command <path>`.
 
-`cartograph install-hooks` appends managed `post-merge`, `post-checkout`, and
-`post-rewrite` hook blocks so pulls, branch switches, and rebases trigger a
-quiet background sync. Existing hook content is preserved; remove the managed
-blocks with `cartograph install-hooks --remove`.
+The managed `post-merge`, `post-checkout`, and `post-rewrite` hook blocks make
+pulls, branch switches, and rebases trigger a quiet background sync. Existing
+hook content is preserved. Skip them at install time with `--no-hooks`, and
+add or remove them later with `cartograph install-hooks [--remove]`.
 
 For local installs, generated project config and instruction files are added to
 `.gitignore` because local MCP entries can contain absolute checkout paths and

@@ -7,6 +7,7 @@ export interface InstallOptions {
   permissions?: boolean;
   printConfig?: string;
   command?: string | undefined;
+  hooks?: boolean;
 }
 
 export interface InstallerRunOptions {
@@ -15,6 +16,7 @@ export interface InstallerRunOptions {
   autoAllow?: boolean;
   yes?: boolean;
   command?: string | undefined;
+  hooks?: boolean;
 }
 
 export type InstallLocationResult = { ok: true; location: InstallLocation | undefined } | { ok: false; error: string };
@@ -50,6 +52,9 @@ export function installerRunOptions(options: InstallOptions): InstallerRunOption
   // should become an orchestrator auto-allow value.
   if (options.permissions === false) runOptions.autoAllow = false;
   else if (options.yes) runOptions.autoAllow = true;
+
+  // Same negated-flag shape: only an explicit `--no-hooks` opts out.
+  if (options.hooks === false) runOptions.hooks = false;
 
   if (options.yes !== undefined) runOptions.yes = options.yes;
   return runOptions;

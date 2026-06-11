@@ -71,6 +71,8 @@ interface RunInstallerOptions {
   yes?: boolean;
   /** Optional executable path/name to write into MCP config entries. */
   command?: string | undefined;
+  /** Set false (`--no-hooks`) to skip managed git hooks on local installs. */
+  hooks?: boolean | undefined;
 }
 
 /**
@@ -98,10 +100,12 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
   }
 
   const autoAllow = await resolveAutoAllow({ clack, opts, useDefaults, targets });
-  installTargetsAt({ clack, targets, location, autoAllow, command: opts.command });
+  const command = opts.command ?? (await resolveFallbackCommand(clack));
+  installTargetsAt({ clack, targets, location, autoAllow, command });
 
   if (location === 'local') {
     await initializeLocalProject(clack, { deferLlmSetup: useDefaults });
+    await maybeInstallProjectHooks({ clack, useDefaults, hooks: opts.hooks, command });
   }
   if (location === 'global') {
     clack.note('cd your-project\ncartograph quickstart .', 'Quick start');
@@ -170,6 +174,130 @@ async function maybeInstallGlobally(clack: ClackApi, useDefaults: boolean): Prom
         `(${errMsg(err)})`,
     );
   }
+}
+
+/**
+ * Default command resolution for MCP entries and git hooks. When
+ * `cartograph` resolves on PATH, return undefined so generated configs
+ * keep the portable bare name. When it does not (commonly: the
+ * checkout was bun-linked but Bun's global bin dir is missing from
+ * PATH, or a standalone binary is being run from an arbitrary
+ * directory), pin an absolute path so MCP hosts launched from GUI
+ * shells still find it — previously this required users to pass
+ * `--command "$(command -v cartograph)"` by hand.
+ */
+async function resolveFallbackCommand(clack: ClackApi): Promise<string | undefined> {
+  if (findOnPath('cartograph')) return undefined;
+  const pinned = standaloneBinaryPath() ?? (await bunGlobalShimPath());
+  if (pinned) {
+    clack.log.info(`'cartograph' is not on PATH — pinning ${tildify(pinned)} into the generated config.`);
+    return pinned;
+  }
+  return undefined;
+}
+
+/**
+ * Scan PATH for an executable without spawning it — a `cartograph
+ * --version` probe would boot the whole CLI just to test resolvability
+ * (and, under a redirected test $HOME, scatter runtime cache files).
+ */
+function findOnPath(name: string): string | undefined {
+  for (const dir of (process.env['PATH'] ?? '').split(path.delimiter)) {
+    if (!dir) continue;
+    for (const candidate of executableNameCandidates(name)) {
+      const full = path.join(dir, candidate);
+      if (isExecutableFile(full)) return full;
+    }
+  }
+  return undefined;
+}
+
+function executableNameCandidates(name: string): string[] {
+  return process.platform === 'win32' ? [`${name}.exe`, `${name}.cmd`, name] : [name];
+}
+
+/**
+ * The `isFile()` guard matters: on POSIX, X_OK on a directory tests
+ * search permission, so a stray directory named `cartograph` on PATH
+ * would otherwise count as the executable (same pattern as
+ * `tryExecutableCandidate` in llm/claude-bridge.ts).
+ */
+function isExecutableFile(candidate: string): boolean {
+  try {
+    if (!fs.statSync(candidate).isFile()) return false;
+    fs.accessSync(candidate, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Bun standalone executables run with argv[1] under the virtual /$bunfs/ root. */
+function standaloneBinaryPath(): string | undefined {
+  return process.argv[1]?.startsWith('/$bunfs/') ? process.execPath : undefined;
+}
+
+/** The `bun link` shim location, when present but not on PATH. */
+async function bunGlobalShimPath(): Promise<string | undefined> {
+  try {
+    const { stdout } = await promisify(execFile)('bun', ['pm', 'bin', '-g']);
+    const binDir = stdout.trim();
+    for (const candidate of executableNameCandidates('cartograph')) {
+      const shim = path.join(binDir, candidate);
+      if (isExecutableFile(shim)) return shim;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+interface MaybeInstallProjectHooksArgs {
+  clack: ClackApi;
+  useDefaults: boolean;
+  hooks: boolean | undefined;
+  command: string | undefined;
+}
+
+/**
+ * Local-install step: append the managed git hook blocks so pulls,
+ * branch switches, and rebases keep the index fresh. Skipped with
+ * `--no-hooks`, outside a git worktree, or when declined
+ * interactively. Hook trouble never fails the install — the index
+ * still works, just without automatic sync.
+ */
+async function maybeInstallProjectHooks(args: MaybeInstallProjectHooksArgs): Promise<void> {
+  const { clack, useDefaults, command } = args;
+  if (args.hooks === false) {
+    clack.log.info('Skipped git hooks (--no-hooks). Run `cartograph install-hooks` later to add them.');
+    return;
+  }
+  const projectPath = process.cwd();
+  const { gitWorktreeRoot } = await import('../git-utils.js');
+  if (!gitWorktreeRoot(projectPath)) {
+    clack.log.info('Not a git worktree — skipped git hooks. Run `cartograph install-hooks` after `git init`.');
+    return;
+  }
+  if (!useDefaults) {
+    const confirmed = assertNotCancelled(
+      clack,
+      await clack.confirm({
+        message: 'Install managed git hooks? (keeps the index fresh after pull / checkout / rebase)',
+        initialValue: true,
+      }),
+    );
+    if (!confirmed) {
+      clack.log.info('Skipped git hooks. Run `cartograph install-hooks` later to add them.');
+      return;
+    }
+  }
+  const { installGitHooks } = await import('../features/git-hooks/index.js');
+  const result = installGitHooks({ projectPath, command });
+  if (!result.ok) {
+    clack.log.warn(`Git hooks not installed: ${result.error.message}`);
+    return;
+  }
+  clack.log.success(`Git hooks: ${result.changes.map((change) => `${change.hook} ${change.status}`).join(', ')}`);
 }
 
 /** Step 2: pick the install location, honoring `--location` and `--yes` flags. */

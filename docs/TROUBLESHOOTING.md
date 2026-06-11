@@ -53,8 +53,9 @@ Common causes:
 - The host config points at a relative project path. Use an absolute
   `--project-path`.
 - The `cartograph` binary is not on the host process PATH. Use `bun link` for a
-  source checkout or run `cartograph install --command "$(command -v cartograph)"`
-  to write an absolute command path into supported MCP configs.
+  source checkout, or re-run `cartograph install` — it pins an absolute command
+  path into supported MCP configs automatically when `cartograph` is not
+  resolvable; `--command <path>` sets the path explicitly.
 - The host is using HTTP/SSE MCP settings. Cartograph's server is stdio MCP.
 - A long-running MCP session still has an old database handle after storage was
   migrated. Restart the host session.

@@ -26,6 +26,9 @@ describe('install feature runtime', () => {
     });
     expect(installerRunOptions({ command: '  /bin/cartograph  ' })).toEqual({ command: '/bin/cartograph' });
     expect(installerRunOptions({ permissions: false })).toEqual({ autoAllow: false });
+    // Only an explicit --no-hooks travels; the default true stays sparse.
+    expect(installerRunOptions({ hooks: false })).toEqual({ hooks: false });
+    expect(installerRunOptions({ hooks: true })).toEqual({});
   });
 });
 
