@@ -11,6 +11,12 @@ const stderr: string[] = [];
 let projectPath: string;
 let failMcpServerLoad = false;
 let dirty = false;
+// Minimal FreshnessInfo shape — sync-if-dirty's gate reads isStale +
+// contentDriftedFiles (via hasFreshnessRisk) only.
+let freshness: { isStale: boolean; contentDriftedFiles: number | null } | null = {
+  isStale: false,
+  contentDriftedFiles: 0,
+};
 const DEFAULT_TEST_VIEWER_PORT = 8765;
 const TEST_MCP_TOOL_COUNT = 12;
 const TEST_STALE_BACKEND_PID = 1234;
@@ -90,6 +96,7 @@ function loadLifecycleCommandActions(): void {
               return FAKE_INDEX_RESULT;
             },
             close: () => calls.push('sync.close'),
+            stats: { getFreshness: () => freshness as never },
           };
         },
       },
@@ -228,6 +235,7 @@ describe('lifecycle command action bodies', () => {
     stderr.length = 0;
     failMcpServerLoad = false;
     dirty = false;
+    freshness = { isStale: false, contentDriftedFiles: 0 };
     process.exitCode = 0;
     projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-cli-'));
     fs.mkdirSync(path.join(projectPath, '.cartograph'), { recursive: true });
@@ -343,12 +351,24 @@ describe('lifecycle command action bodies', () => {
     expect(text).toContain('open:http://localhost:0');
   });
 
-  it('runs sync-if-dirty only when source changes are present', async () => {
+  it('runs sync-if-dirty only when the tree is dirty or the index lags HEAD', async () => {
+    // Clean tree + in-sync index: the gate opens the graph to consult
+    // freshness (and must close it), but does NOT sync.
     await actions.get('program:sync-if-dirty [path]')!(projectPath, {});
-    expect(calls).toContain('info:No source changes detected; skipping sync');
-    expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    expect(calls).toContain('info:No source changes and index in sync with HEAD; skipping sync');
+    expect(calls.some((call) => call.startsWith('sync:'))).toBe(false);
+    expect(calls).toContain('sync.close');
+
+    // Clean tree but HEAD moved since the last index (commits/merges/
+    // checkouts/rebases) — the original bug: this must sync now.
+    calls.length = 0;
+    freshness = { isStale: true, contentDriftedFiles: 0 };
+    await actions.get('program:sync-if-dirty [path]')!(projectPath, {});
+    expect(calls).toContain('sync:{"summarize":false}');
+    expect(calls).toContain('sync.close');
 
     calls.length = 0;
+    freshness = { isStale: false, contentDriftedFiles: 0 };
     dirty = true;
     await actions.get('program:sync-if-dirty [path]')!(projectPath, { quiet: true, maxFileSize: '2mb' });
 

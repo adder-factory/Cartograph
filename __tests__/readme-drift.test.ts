@@ -10,6 +10,8 @@ import { getToolModules } from '../src/mcp/tools/registry.js';
 const root = path.resolve(import.meta.dir, '..');
 const readme = fs.readFileSync(path.join(root, 'README.md'), 'utf8');
 const supportMatrix = fs.readFileSync(path.join(root, 'docs/SUPPORT-MATRIX.md'), 'utf8');
+const cliReference = fs.readFileSync(path.join(root, 'docs/CLI-REFERENCE.md'), 'utf8');
+const mcpUsage = fs.readFileSync(path.join(root, 'docs/MCP-USAGE.md'), 'utf8');
 const standaloneBuilder = fs.readFileSync(path.join(root, 'scripts/build-standalone.mjs'), 'utf8');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')) as {
   files?: string[];
@@ -37,15 +39,19 @@ describe('README drift guard', () => {
     const toolCount = getToolModules().length;
     const languageCount = getSupportedLanguages().length;
 
-    expect(readme).toContain(`registers ${toolCount} MCP tools`);
-    expect(readme).toContain(`complete ${toolCount}-tool surface`);
+    expect(readme).toContain(`registers **${toolCount} MCP tools**`);
+    expect(mcpUsage).toContain(`full ${toolCount}-tool profile`);
     expect(readme).toContain(`supports **${languageCount} language modes**`);
   });
 
   it('documents every top-level CLI command from --help', () => {
-    const missing = topLevelCommandsFromHelp().filter((cmd) => !readme.includes(`cartograph ${cmd}`));
+    // The README intentionally shows a curated sample and delegates the
+    // full command list to docs/CLI-REFERENCE.md — drift is checked
+    // against the pair.
+    const documented = `${readme}\n${cliReference}`;
+    const missing = topLevelCommandsFromHelp().filter((cmd) => !documented.includes(`cartograph ${cmd}`));
 
-    expect(missing, `README is missing top-level CLI command(s): ${missing.join(', ')}`).toEqual([]);
+    expect(missing, `README + CLI reference are missing top-level CLI command(s): ${missing.join(', ')}`).toEqual([]);
   });
 
   it('mentions every installer target exposed by the registry', () => {
@@ -58,10 +64,9 @@ describe('README drift guard', () => {
   });
 
   it('keeps the support matrix split into languages, frameworks, and derived signals', () => {
-    expect(readme).toContain('## Supported Languages & File Formats');
-    expect(readme).toContain('<summary><strong>Show language matrix</strong></summary>');
-    expect(readme).toContain('## Framework-Aware Signals');
-    expect(readme).toContain('## Embedded DSLs & Derived Signals');
+    expect(supportMatrix).toContain('## Languages');
+    expect(supportMatrix).toContain('## Framework-Aware Signals');
+    expect(supportMatrix).toContain('## Embedded DSLs And Derived Signals');
   });
 
   it('keeps the detailed support matrix in sync with language registry names', () => {

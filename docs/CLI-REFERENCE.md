@@ -119,6 +119,9 @@ cartograph files src/billing/service.ts --format deps
 cartograph files src/billing/service.ts --format symbols
 cartograph files src/billing --format module
 cartograph entry-points
+cartograph at-range src/auth/service.ts 40 80
+cartograph at-range --diff -          # symbols overlapping a unified diff (stdin)
+cartograph digest                     # "land in a new repo" overview
 ```
 
 See [Graph Export Formats](GRAPH-EXPORT-FORMATS.md) for the JSON and
