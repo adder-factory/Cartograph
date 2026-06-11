@@ -53,7 +53,7 @@ const PRISM_LANG = {
   typescript: 'typescript', tsx: 'tsx', javascript: 'javascript', jsx: 'jsx',
   python: 'python', go: 'go', rust: 'rust', java: 'java', c: 'c', cpp: 'cpp',
   csharp: 'csharp', php: 'php', ruby: 'ruby', swift: 'swift', kotlin: 'kotlin',
-  scala: 'scala', dart: 'dart', sql: 'sql', graphql: 'graphql', svelte: 'svelte',
+  scala: 'scala', dart: 'dart', sql: 'sql', graphql: 'graphql', svelte: 'markup',
   lua: 'lua', r: 'r', bash: 'bash',
 };
 function prismLangFor(lang) { return PRISM_LANG[lang] || 'none'; }
@@ -382,19 +382,56 @@ async function loadSourceLive(symbolId) {
   }
 }
 
-/* Walk the Prism-rendered HTML and add a `<span class="lineno">`
-   prefix to each line. We insert at the start of every line by
-   splitting on newlines AT THE TEXT LEVEL — Prism wraps tokens
-   but doesn't wrap lines. Approach: replace the code element's
-   innerHTML with one wrapped per line. */
+/* Rebuild the Prism-rendered DOM as per-line HTML with a TOP-LEVEL
+   `<span class="lineno">` prefix on every line. Prism wraps tokens but
+   not lines, and a single token CAN span lines (block comments,
+   template literals, multi-line strings) — the old innerHTML.split('\n')
+   severed those token tags, so re-parsing nested every later gutter
+   span inside the token and gutters inherited token styling (e.g.
+   comment italics). Instead, split element subtrees at newlines,
+   re-wrapping each line's slice in clones of its ancestor tag. */
 function decorateLineNumbers(codeEl, startLine) {
-  const html = codeEl.innerHTML;
-  const lines = html.split('\n');
+  const lines = splitNodeHtmlByLine(codeEl);
   const padW = String(startLine + lines.length - 1).length;
   codeEl.innerHTML = lines.map((line, i) => {
     const ln = String(startLine + i).padStart(padW, ' ');
     return `<span class="lineno">${ln}</span>${line}`;
   }).join('\n');
+}
+
+function escapeCodeText(text) {
+  return text.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;');
+}
+
+/* → array of single-line HTML strings (no newline inside any entry).
+   An element spanning N lines contributes a clone of its open/close
+   tags to each of those lines. */
+function splitNodeHtmlByLine(node) {
+  const lines = [''];
+  node.childNodes.forEach((child) => {
+    if (child.nodeType === Node.TEXT_NODE) {
+      const parts = String(child.textContent).split('\n');
+      lines[lines.length - 1] += escapeCodeText(parts[0]);
+      for (let i = 1; i < parts.length; i++) lines.push(escapeCodeText(parts[i]));
+      return;
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) return;
+    const shell = child.cloneNode(false).outerHTML;
+    const closeAt = shell.lastIndexOf('</');
+    if (closeAt === -1) {
+      // Void element (no close tag) — can't span lines; emit as-is.
+      lines[lines.length - 1] += shell;
+      return;
+    }
+    const open = shell.slice(0, closeAt);
+    const close = shell.slice(closeAt);
+    splitNodeHtmlByLine(child).forEach((lineHtml, i) => {
+      const wrapped = `${open}${lineHtml}${close}`;
+      if (i === 0) lines[lines.length - 1] += wrapped;
+      else lines.push(wrapped);
+    });
+  });
+  return lines;
 }
 
 /* In-code search. Walks the rendered code's text nodes and wraps
