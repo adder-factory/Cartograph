@@ -164,9 +164,21 @@ function graphSvgText() {
     const label = escapeHtml(String(n.data('label') || n.id()));
     const halfW = width / 2;
     const halfH = height / 2;
-    const shape = isGroup || isDetailBucket || ['class', 'struct', 'enum', 'file', 'module', 'namespace'].includes(n.data('kind'))
-      ? svgRect({ x: (p.x - halfW).toFixed(1), y: (p.y - halfH).toFixed(1), width: width.toFixed(1), height: height.toFixed(1), rx: 7, fill, stroke, 'stroke-width': 2 })
-      : `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${halfW.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+    // Mirrors KIND_SHAPE's families approximately: rects for type
+    // containers and files, diamonds for contracts, circles for the
+    // rest (barrel/hexagon/tag render as circles in the export).
+    const kind = n.data('kind');
+    const isRectKind = ['class', 'struct', 'enum', 'file', 'module', 'namespace'].includes(kind);
+    const isDiamondKind = ['interface', 'trait', 'type_alias', 'protocol'].includes(kind);
+    let shape;
+    if (isGroup || isDetailBucket || isRectKind) {
+      shape = svgRect({ x: (p.x - halfW).toFixed(1), y: (p.y - halfH).toFixed(1), width: width.toFixed(1), height: height.toFixed(1), rx: 7, fill, stroke, 'stroke-width': 2 });
+    } else if (isDiamondKind) {
+      const points = `${p.x.toFixed(1)},${(p.y - halfH).toFixed(1)} ${(p.x + halfW).toFixed(1)},${p.y.toFixed(1)} ${p.x.toFixed(1)},${(p.y + halfH).toFixed(1)} ${(p.x - halfW).toFixed(1)},${p.y.toFixed(1)}`;
+      shape = `<polygon points="${points}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+    } else {
+      shape = `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="${halfW.toFixed(1)}" fill="${fill}" stroke="${stroke}" stroke-width="2" />`;
+    }
     return `${shape}<text x="${p.x.toFixed(1)}" y="${(p.y + halfH + 15).toFixed(1)}" fill="#dde3ee" font-size="11" text-anchor="middle">${label}</text>`;
   }).join('\n');
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="${minX} ${minY} ${width} ${height}">
