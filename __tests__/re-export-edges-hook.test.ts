@@ -1,12 +1,17 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { insertEdges } from '../src/db/queries-edges.js';
 import { getAllFiles, getFileByPath } from '../src/db/queries-files.js';
+// Real helpers captured BEFORE vi.mock (bun does not hoist) — the mock
+// below delegates to them whenever this suite is not actively running,
+// so a leaked mock can't starve another test file's hooks of real
+// import/symbol resolution (module-leak canary).
+import * as realHelpers from '../src/index-hooks/edge-resolution-helpers.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 
 const state = {
+  active: false,
   refreshCalls: [] as Array<{ hookName: string; options: unknown; edges: unknown[] }>,
   targets: new Map<string, string>(),
   symbols: new Map<string, string>(),
@@ -26,6 +31,7 @@ function realCollectTargets(ctx: IndexHookContext, options: TargetOptions) {
 }
 
 vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
+  ...realHelpers,
   PER_FILE_YIELD_INTERVAL: 2,
   collectTargets: vi.fn((ctx: IndexHookContext, options: TargetOptions) => realCollectTargets(ctx, options)),
   yieldToEventLoop: vi.fn(async () => {}),
@@ -36,12 +42,11 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       hookName: string;
       buildEdges: (ctx: IndexHookContext, files: Array<{ path: string; language: string }>) => Promise<unknown[]>;
     }) => {
-      // Foreign hook: this mock has leaked into another test's indexAll
-      // (module-leak canary). Replicate the real refreshEdgesHook so we
-      // don't poison its cross-file edges.
-      if (args.hookName !== 're-export-edges') {
-        const edges = await args.buildEdges(args.ctx, realCollectTargets(args.ctx, args.options));
-        if (edges.length > 0) insertEdges(args.ctx.queries, edges as never);
+      // Foreign hook, or this mock leaked into another test file's
+      // indexAll (module-leak canary): run the REAL implementation so
+      // its cross-file edges aren't poisoned.
+      if (!state.active || args.hookName !== 're-export-edges') {
+        await realHelpers.refreshEdgesHook(args as never);
         return;
       }
       const edges = await args.buildEdges(args.ctx, [
@@ -53,9 +58,11 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
       state.refreshCalls.push({ hookName: args.hookName, options: args.options, edges });
     },
   ),
-  resolveTargetFile: vi.fn((fileDir: string, source: string) => state.targets.get(`${fileDir}:${source}`) ?? null),
-  lookupSymbolByNameInFile: vi.fn(
-    (_ctx: IndexHookContext, name: string, targetFile: string) => state.symbols.get(`${targetFile}:${name}`) ?? null,
+  resolveTargetFile: vi.fn((...args: Parameters<typeof realHelpers.resolveTargetFile>) =>
+    state.active ? (state.targets.get(`${args[0]}:${args[1]}`) ?? null) : realHelpers.resolveTargetFile(...args),
+  ),
+  lookupSymbolByNameInFile: vi.fn((...args: Parameters<typeof realHelpers.lookupSymbolByNameInFile>) =>
+    state.active ? (state.symbols.get(`${args[2]}:${args[1]}`) ?? null) : realHelpers.lookupSymbolByNameInFile(...args),
   ),
 }));
 
@@ -71,7 +78,14 @@ function ctx(projectRoot: string): IndexHookContext {
   return { projectRoot, queries: {}, config: {} } as IndexHookContext;
 }
 
+afterAll(() => {
+  // Return the mocked helpers to real behavior for later test files in
+  // the same bun process (module-leak canary).
+  state.active = false;
+});
+
 beforeEach(() => {
+  state.active = true;
   state.refreshCalls = [];
   state.targets.clear();
   state.symbols.clear();
