@@ -60,7 +60,7 @@ describe('viewer feature CLI', () => {
 
     expect(calls).toEqual([
       'command:viewer [path]',
-      'description:Open the local web viewer for the indexed graph',
+      'description:Open the local web viewer (graph visualization, impact tools, health) for the indexed graph',
       'option:-p, --port <n>',
       'option:--no-open',
       'start:/repo:{"port":0}',
