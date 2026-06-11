@@ -174,15 +174,24 @@ let currentSymbolId = null;   // selected node id in either live or file:// mode
 syncViewerSelectionState(currentSymbolId, liveSymbolCache);
 syncViewerGraphState({ lastPayload: lastGraphPayload });
 
+/* Sequence guard shared by the session list and session detail
+   fetches — rapid picker changes / repeated tab activations
+   otherwise leave whichever response resolved LAST on screen,
+   regardless of which session the picker shows. */
+let sessionRequestSeq = 0;
+
 async function loadSessionsLive() {
   const tl = document.getElementById('trace-list');
   const sessLabel = document.getElementById('session-label');
   const picker = document.getElementById('session-picker');
+  const requestSeq = ++sessionRequestSeq;
   tl.innerHTML = '<div class="empty">Loading sessions...</div>';
   try {
     const sr = await apiFetch('/api/sessions?limit=20');
+    if (requestSeq !== sessionRequestSeq) return;
     if (!sr.ok) throw new Error(`status ${sr.status}`);
     liveSessions = (await sr.json()).sessions ?? [];
+    if (requestSeq !== sessionRequestSeq) return;
     if (liveSessions.length === 0) {
       sessLabel.textContent = '— no recorded sessions yet —';
       sessLabel.style.display = '';
@@ -198,9 +207,13 @@ async function loadSessionsLive() {
     }).join('');
     picker.style.display = '';
     sessLabel.style.display = 'none';
-    // Auto-load the latest (first) session.
-    picker.value = liveSessions[0].id;
-    await loadSession(liveSessions[0].id);
+    // Keep the user's chosen session when it still exists in the
+    // refreshed list (tab re-activation used to force-reset to the
+    // latest); otherwise fall back to the latest.
+    const previous = picker.dataset.selectedSession;
+    const selected = previous && liveSessions.some((s) => s.id === previous) ? previous : liveSessions[0].id;
+    picker.value = selected;
+    await loadSession(selected);
   } catch (err) {
     console.warn('viewer: loadSessionsLive failed', err);
     tl.innerHTML = `<div class="empty">Failed to load sessions: ${escapeHtml(String(err))}</div>`;
@@ -212,11 +225,16 @@ async function loadSessionsLive() {
     persisted tool_count for the divergence check. */
 async function loadSession(sessionId) {
   const tl = document.getElementById('trace-list');
+  const picker = document.getElementById('session-picker');
+  if (picker) picker.dataset.selectedSession = sessionId;
+  const requestSeq = ++sessionRequestSeq;
   tl.innerHTML = '<div class="empty">Loading session calls...</div>';
   try {
     const dr = await apiFetch(`/api/sessions/${encodeURIComponent(sessionId)}`);
+    if (requestSeq !== sessionRequestSeq) return;
     if (!dr.ok) throw new Error(`status ${dr.status}`);
     const detail = await dr.json();
+    if (requestSeq !== sessionRequestSeq) return;
     liveTraceCalls = detail.calls ?? [];
     liveTraceActiveStep = -1;
     const meta = liveSessions.find((s) => s.id === sessionId);

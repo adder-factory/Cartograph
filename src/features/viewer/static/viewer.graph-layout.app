@@ -392,7 +392,14 @@ cy.on('dragfree', 'node', (evt) => {
   syncLayoutControls();
 });
 
-cy.on('zoom', () => updateLabelVisibility());
+let labelVisibilityRaf = 0;
+cy.on('zoom', () => {
+  if (labelVisibilityRaf) return;
+  labelVisibilityRaf = requestAnimationFrame(() => {
+    labelVisibilityRaf = 0;
+    updateLabelVisibility();
+  });
+});
 
 function fitAndClamp(zMin, zMax) {
   const elements = visibleGraphElements();
@@ -421,10 +428,11 @@ function updateLabelVisibility() {
   const zoom = cy.zoom();
   const dense = visibleNodes.length > 28 || zoom < 0.64;
   const labelBudget = zoom < 0.46 ? 10 : zoom < 0.7 ? 18 : 30;
+  const incidentCounts = new Map(visibleNodes.map((n) => [n.id(), visibleIncidentEdgeCount(n)]));
   const ranked = visibleNodes
     .slice()
     .sort((a, b) =>
-      visibleIncidentEdgeCount(b) - visibleIncidentEdgeCount(a) ||
+      (incidentCounts.get(b.id()) || 0) - (incidentCounts.get(a.id()) || 0) ||
       (b.data('centrality') || 0) - (a.data('centrality') || 0) ||
       String(a.data('label')).localeCompare(String(b.data('label'))),
     )
@@ -582,6 +590,8 @@ function relaxLayoutNodeCollisions() {
   if (nodes.length < 2) return;
   const radii = new Map(nodes.map((node) => [node.id(), layoutCollisionRadius(node)]));
   const maxIterations = layoutQualityConfig().collisionIterations || LAYOUT_COLLISION_ITERATIONS;
+  cy.startBatch();
+  try {
   for (let iter = 0; iter < maxIterations; iter++) {
     let maxMove = 0;
     for (let i = 0; i < nodes.length; i++) {
@@ -623,6 +633,9 @@ function relaxLayoutNodeCollisions() {
       }
     }
     if (maxMove < LAYOUT_COLLISION_MIN_MOVE) break;
+  }
+  } finally {
+    cy.endBatch();
   }
 }
 
@@ -760,5 +773,7 @@ function relayoutAndFit() {
     watchdogRetried,
   };
   if (typeof validateGraphState === 'function') validateGraphState('layout');
-  syncGraphDiagnosticsPanel();
+  // afterWatchdog was computed two lines up — reuse it rather than
+  // paying a third full overlap/geometry pass per relayout.
+  syncGraphDiagnosticsPanel(afterWatchdog);
 }
