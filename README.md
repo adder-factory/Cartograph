@@ -69,6 +69,18 @@ bun link
 
 `bun link` puts `cartograph` on your `PATH`. Verify with `cartograph --version`.
 
+To update a source install later:
+
+```bash
+cartograph upgrade          # check how far behind the checkout is
+cartograph upgrade --apply  # fast-forward + bun install, with safety guards
+```
+
+`cartograph update` is an alias. The update is refused (nothing is touched) if
+the working tree is dirty, the branch has diverged from its upstream, or HEAD
+is detached. Restart any running MCP sessions afterwards so they load the new
+code.
+
 ### Prebuilt (after a release is published)
 
 ```bash

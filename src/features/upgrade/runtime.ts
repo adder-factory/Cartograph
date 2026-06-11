@@ -1,12 +1,18 @@
+export type InstallMethodKind = 'source' | 'standalone' | 'package' | 'unknown';
+
 export interface UpgradeCheckOptions {
   currentVersion: string;
   latestVersion?: string | undefined;
   fetchLatestVersion?: (() => Promise<string> | string) | undefined;
   apply?: boolean | undefined;
+  /** Non-source install kind, used to tailor the printed update steps.
+   *  Source checkouts route through `runSourceUpgrade` instead. */
+  method?: Exclude<InstallMethodKind, 'source'> | undefined;
 }
 
 export interface UpgradeCheckResult {
-  status: 'current' | 'update_available' | 'unknown';
+  status: 'current' | 'update_available' | 'updated' | 'blocked' | 'unknown';
+  method?: InstallMethodKind | undefined;
   currentVersion: string;
   latestVersion: string | null;
   applyRequested: boolean;
@@ -19,6 +25,8 @@ export interface UpgradeCheckResult {
 const NPM_REGISTRY_PROTOCOL = 'https:';
 const NPM_REGISTRY_HOST = 'registry.npmjs.org';
 const NPM_VERSION_FETCH_TIMEOUT_MS = 10_000;
+
+const STANDALONE_INSTALLER_URL = 'https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh';
 
 export async function checkUpgrade(options: UpgradeCheckOptions): Promise<UpgradeCheckResult> {
   const applyRequested = options.apply === true;
@@ -35,14 +43,13 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
   if (!latestVersion) {
     return {
       status: 'unknown',
+      method: options.method,
       currentVersion: options.currentVersion,
       latestVersion: null,
       applyRequested,
       applied: false,
       message: 'Latest Cartograph version is unknown.',
-      nextSteps: [
-        'Check your package manager or repository remote, then restart any running MCP server after updating.',
-      ],
+      nextSteps: updateStepsForMethod(options.method),
       warning,
     };
   }
@@ -51,6 +58,7 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
   if (cmp >= 0) {
     return {
       status: 'current',
+      method: options.method,
       currentVersion: options.currentVersion,
       latestVersion,
       applyRequested,
@@ -62,21 +70,37 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
 
   return {
     status: 'update_available',
+    method: options.method,
     currentVersion: options.currentVersion,
     latestVersion,
     applyRequested,
     applied: false,
     message: `Cartograph ${latestVersion} is available (current ${options.currentVersion}).`,
-    nextSteps: applyRequested
-      ? [
-          '`--apply` is intentionally plan-only for source checkouts in this release.',
-          'Update with your install method (`git pull && bun install && bun link`, or reinstall the package), then restart MCP clients.',
-        ]
-      : [
-          'Run `cartograph upgrade --apply` to print install-method-specific update steps.',
-          'After updating, restart any MCP client/server process so it loads the new code.',
-        ],
+    nextSteps: [
+      ...(applyRequested ? ['In-place `--apply` is only available for source checkouts.'] : []),
+      ...updateStepsForMethod(options.method),
+    ],
   };
+}
+
+/** Update steps for installs that cannot be fast-forwarded in place. */
+function updateStepsForMethod(method: UpgradeCheckOptions['method']): string[] {
+  if (method === 'standalone') {
+    return [
+      `Re-run the standalone installer: \`curl -fsSL ${STANDALONE_INSTALLER_URL} | sh\`.`,
+      'Restart any running MCP server/client sessions so they load the updated code.',
+    ];
+  }
+  if (method === 'package') {
+    return [
+      'Update via your package manager, e.g. `bun update -g @adder-factory/cartograph` or `npm install -g @adder-factory/cartograph@latest`.',
+      'Restart any running MCP server/client sessions so they load the updated code.',
+    ];
+  }
+  return [
+    'Update with your install method (`git pull && bun install` in a source checkout, or reinstall the package).',
+    'Restart any running MCP server/client sessions so they load the updated code.',
+  ];
 }
 
 export async function fetchLatestNpmVersion(packageName = '@adder-factory/cartograph'): Promise<string> {

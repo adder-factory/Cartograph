@@ -114,10 +114,10 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   'backend:stop',
   'backend:logs',
 
-  // `cartograph upgrade` checks package/checkout freshness and prints
-  // install-method-specific update steps. It is intentionally CLI-only:
-  // upgrading the process that may be serving MCP should happen outside
-  // the active MCP session.
+  // `cartograph upgrade` checks package/checkout freshness and, with
+  // `--apply`, fast-forwards a source checkout and reinstalls its
+  // dependencies. It is intentionally CLI-only: upgrading the process
+  // that may be serving MCP should happen outside the active MCP session.
   'upgrade',
 
   // `cartograph similar <symbol>` routes through `cartograph_graph` with
