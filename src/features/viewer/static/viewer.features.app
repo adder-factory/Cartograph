@@ -239,6 +239,10 @@ let featureRequestSeq = 0;
 
 function clearFeatureOverlay(opts = {}) {
   featureRequestSeq++;
+  // The bump above tells any in-flight feature fetch to discard its
+  // response — including its finally-block cleanup, so the loading
+  // banner must be cleared here or it would stay up forever.
+  clearFeatureLoading();
   const hidePanel = opts.hidePanel !== false;
   cy.nodes().removeClass(FEATURE_ELEMENT_CLASSES);
   cy.edges().removeClass(FEATURE_EDGE_CLASSES);

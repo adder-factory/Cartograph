@@ -131,6 +131,7 @@ function demoScopeDirs() {
     if (slash <= 0) return;
     const prefix = file.slice(0, slash + 1);
     const bucket = buckets.get(prefix) || { prefix, files: 0, nodes: 0 };
+    bucket.files += 1;
     bucket.nodes += 1;
     buckets.set(prefix, bucket);
   });
