@@ -62,9 +62,30 @@ const JS_RESERVED_HEAD: ReadonlySet<string> = new Set([
 const MAX_WS_RUN = 200;
 const WS = String.raw`\s{0,${MAX_WS_RUN}}`;
 
-export const CALL_ARG_RE = new RegExp(`(?<=[(,]${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,)])`, 'g');
+/** Bare identifier in call-argument OR array-element position. The
+ *  square brackets cover dispatch tables built as array literals —
+ *  `new Map([['save', doSave]])`, `const STEPS = [stepOne, stepTwo]`
+ *  — which the call/pair passes can't see. */
+export const CALL_ARG_RE = new RegExp(String.raw`(?<=[(,\[]${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,)\]])`, 'g');
 export const PAIR_VALUE_RE = new RegExp(
   `(?<=[{,]${WS}[a-zA-Z_$][a-zA-Z_$0-9]{0,${MAX_WS_RUN}}${WS}:${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}[,}])`,
+  'g',
+);
+
+/** Braced bare-identifier values after `=`: JSX attribute callbacks
+ *  (`onSubmit={submit}`, `render={Row}`). Member expressions
+ *  (`={this.save}`, `={handlers.save}`) are out of scope — their head
+ *  segment resolves through other edge kinds. The `=` anchor keeps
+ *  this off object literals and block statements. */
+export const JSX_ATTR_VALUE_RE = new RegExp(String.raw`(?<==${WS}\{${WS})([a-zA-Z_$][a-zA-Z_$0-9]*)(?=${WS}\})`, 'g');
+
+/** Parenthesised ternary used as a callee: `(pretty ? a : b)(args)`.
+ *  Both arms are function references the structural extraction can't
+ *  see (the callee is a conditional_expression, not a name). The
+ *  condition part excludes `( ) ? :` so nested ternaries and optional
+ *  chaining never confuse the match. */
+export const INVOKED_TERNARY_RE = new RegExp(
+  String.raw`\([^()?:]{0,${MAX_WS_RUN}}\?${WS}([a-zA-Z_$][a-zA-Z_$0-9]*)${WS}:${WS}([a-zA-Z_$][a-zA-Z_$0-9]*)${WS}\)${WS}\(`,
   'g',
 );
 
@@ -83,15 +104,18 @@ export function collectValueRefMatches(args: CollectValueRefMatchesArgs): void {
   re.lastIndex = 0;
   let m: RegExpExecArray | null;
   while ((m = re.exec(cleaned)) !== null) {
-    const name = m[1];
-    if (!name || JS_RESERVED_HEAD.has(name)) continue;
-    if (seenNames.has(name)) continue;
-    seenNames.add(name);
-    const targetId = nameIndex.get(name);
-    if (!targetId) continue;
-    const key = `${fileNodeId}->${targetId}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    edges.push({ source: fileNodeId, target: targetId, kind: 'references' });
+    // Multi-group patterns (INVOKED_TERNARY_RE) capture one identifier
+    // per group; single-group patterns just iterate once.
+    for (const name of m.slice(1)) {
+      if (!name || JS_RESERVED_HEAD.has(name)) continue;
+      if (seenNames.has(name)) continue;
+      seenNames.add(name);
+      const targetId = nameIndex.get(name);
+      if (!targetId) continue;
+      const key = `${fileNodeId}->${targetId}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({ source: fileNodeId, target: targetId, kind: 'references' });
+    }
   }
 }

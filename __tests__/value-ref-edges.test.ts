@@ -128,6 +128,60 @@ describe('value-ref-edges hook (handoff #7)', () => {
     expect(refs.length).toBe(0);
   });
 
+  it('emits a `references` edge for a JSX-attribute callback (onSubmit={submit})', async () => {
+    // 2026-06-11 dead-code audit shape 1: handlers bound only through
+    // JSX attributes had zero incoming edges and were flagged dead.
+    fs.writeFileSync(
+      path.join(dir, 'src', 'form.tsx'),
+      `function submit(): void {}\n` +
+        `export function Form() {\n` +
+        `  return <form onSubmit={submit}><button type="submit" /></form>;\n` +
+        `}\n`,
+    );
+    cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    await cg.indexAll({ summarize: false });
+
+    expect(refsToSymbol('submit', 'src/form.tsx').length).toBeGreaterThan(0);
+  });
+
+  it('emits `references` edges for both arms of an invoked ternary ((a ? f : g)(x))', async () => {
+    // 2026-06-11 dead-code audit shape 2: the callee is a
+    // conditional_expression, so neither arm got a calls edge.
+    fs.writeFileSync(
+      path.join(dir, 'src', 'ternary.ts'),
+      `function renderPretty(v: string): string { return v; }\n` +
+        `function renderPlain(v: string): string { return v; }\n` +
+        `export function render(pretty: boolean, v: string): string {\n` +
+        `  return (pretty ? renderPretty : renderPlain)(v);\n` +
+        `}\n`,
+    );
+    cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    await cg.indexAll({ summarize: false });
+
+    expect(refsToSymbol('renderPretty', 'src/ternary.ts').length).toBeGreaterThan(0);
+    expect(refsToSymbol('renderPlain', 'src/ternary.ts').length).toBeGreaterThan(0);
+  });
+
+  it('emits `references` edges for functions stored as array elements (Map dispatch tables)', async () => {
+    // 2026-06-11 dead-code audit shape 3: dispatch tables built from
+    // array literals — `new Map([['save', doSave]])` — referenced the
+    // function only inside `[...]`, which no prior pass matched.
+    fs.writeFileSync(
+      path.join(dir, 'src', 'table.ts'),
+      `function doSave(): void {}\n` +
+        `function doDelete(): void {}\n` +
+        `export const HANDLERS = new Map<string, () => void>([\n` +
+        `  ['save', doSave],\n` +
+        `  ['delete', doDelete],\n` +
+        `]);\n`,
+    );
+    cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    await cg.indexAll({ summarize: false });
+
+    expect(refsToSymbol('doSave', 'src/table.ts').length).toBeGreaterThan(0);
+    expect(refsToSymbol('doDelete', 'src/table.ts').length).toBeGreaterThan(0);
+  });
+
   it('skips reserved keywords like `if` / `return` / `typeof`', async () => {
     // The regex would otherwise capture `return(x)` as if `return`
     // were a function name. The JS_RESERVED_HEAD set guards against

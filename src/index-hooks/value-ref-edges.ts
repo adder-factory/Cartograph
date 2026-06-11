@@ -17,6 +17,14 @@
  * `.refine(fn)` / `.transform(fn)` / `.parse(fn)` / `{ key: fn }`
  * couldn't be ignored by the dead-code judge any longer.
  *
+ * The 2026-06-11 dead-code audit (~98% false positives on a JSX-heavy
+ * app) added three more shapes the structural pass can't see:
+ *
+ *   `<form onSubmit={submit}>`            — JSX attribute callback
+ *   `(pretty ? renderA : renderB)(value)` — invoked-ternary callee
+ *   `new Map([['save', doSave]])`         — array-element refs
+ *                                            (dispatch tables / step lists)
+ *
  * Approach mirrors `re-export-edges` and `dynamic-import-edges`: a
  * regex pass over the stripped source, lookup the identifier against
  * symbols defined in the same file, and emit a `references` edge from
@@ -39,6 +47,11 @@
  *     conservative — a live function looks slightly MORE alive, never
  *     spuriously dead — so the dead-code rule's correctness is
  *     preserved either way.
+ *
+ *   - Array destructuring (`const [myFn, b] = xs`) matches the
+ *     array-element pass, so a destructured binding that shadows a
+ *     same-file function name emits a spurious edge. Same conservative
+ *     direction as the string-literal caveat.
  *
  *   - Stale edges are NOT cleared when a usage is removed in-place:
  *     `refreshEdgesHook` only INSERTs (idempotent via the UNIQUE
@@ -69,6 +82,8 @@ import { getSymbolNameIndexByFile } from '../db/queries-search.js';
 import { buildValueRefEdgesInWorkers, shouldUseValueRefWorkers } from './value-ref-edges-pool.js';
 import {
   CALL_ARG_RE,
+  INVOKED_TERNARY_RE,
+  JSX_ATTR_VALUE_RE,
   PAIR_VALUE_RE,
   SUPPORTED_VALUE_REF_LANGS,
   collectValueRefMatches,
@@ -83,6 +98,9 @@ import {
  *  STRING_IMPORTS_ALGO_VERSION / BUILD_CONTEXT_REFS_ALGO_VERSION. */
 export const VALUE_REF_EDGES_ALGO_VERSION = computeAlgoHash('src/index-hooks/value-ref-edges.ts', [
   './value-ref-edges',
+  // The regexes + match loop live in the scan module — a pattern change
+  // there must re-mine existing projects exactly like a change here.
+  './value-ref-edge-scan',
 ]);
 const LAST_MINED_KEY = 'last_mined_value_ref_edges_algo_version';
 
@@ -169,7 +187,7 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
   return { edges, isPartial: false };
 }
 
-/** Run both regex passes against one file's stripped source and
+/** Run the regex passes against one file's stripped source and
  *  push (source, target) `references` edges into `edges`. */
 function collectEdgesFromFile(args: {
   ctx: IndexHookContext;
@@ -191,6 +209,8 @@ function collectEdgesFromFile(args: {
   const baseArgs = { cleaned, fileNodeId, seenNames, seen, edges, nameIndex };
   collectValueRefMatches({ ...baseArgs, re: CALL_ARG_RE });
   collectValueRefMatches({ ...baseArgs, re: PAIR_VALUE_RE });
+  collectValueRefMatches({ ...baseArgs, re: JSX_ATTR_VALUE_RE });
+  collectValueRefMatches({ ...baseArgs, re: INVOKED_TERNARY_RE });
 }
 
 export const HOOK: IndexHook = {
