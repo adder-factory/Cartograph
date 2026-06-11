@@ -674,6 +674,10 @@ async function resetGraphView() {
   document.querySelectorAll('[data-filter-health], [data-filter-scope]').forEach((input) => {
     input.checked = true;
   });
+  // Programmatic .checked writes fire no change event — explicitly take
+  // ownership so a later overlay clear can't restore a stale snapshot
+  // over the user's reset.
+  userOwnsEdgeKindFilters();
   setAllEdgeKindFilters(true);
   setGraphEdgeLensMode('all', { apply: false });
   breadcrumbScope = null;
