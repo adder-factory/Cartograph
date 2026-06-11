@@ -48,18 +48,23 @@ function setCheckedHashValues(selector, datasetKey, raw) {
   });
 }
 
-function hiddenKindIndexes() {
+/* Hidden chips serialize as their first kind token (stable across
+   chip reorders/insertions, unlike the positional indexes used
+   before). Reads accept the legacy numeric-index form too so old
+   saved views keep working. */
+function hiddenKindKeys() {
   return Array.from(document.querySelectorAll('#kind-chips .kind-chip'))
-    .map((chip, i) => chip.dataset.active === '1' ? null : String(i))
+    .map((chip) => chip.dataset.active === '1' ? null : (kindSetForChip(chip)[0] || null))
     .filter((v) => v !== null);
 }
 
-function setHiddenKindIndexes(raw) {
+function setHiddenKindsFromHash(raw) {
   const values = hashList(raw);
   if (values === null) return;
   const hidden = new Set(values);
   document.querySelectorAll('#kind-chips .kind-chip').forEach((chip, i) => {
-    chip.dataset.active = hidden.has(String(i)) ? '0' : '1';
+    const key = kindSetForChip(chip)[0] || '';
+    chip.dataset.active = hidden.has(key) || hidden.has(String(i)) ? '0' : '1';
   });
 }
 
@@ -81,11 +86,11 @@ function applyHashStateControls(s) {
     if (s.edgeLens && Object.hasOwn(EDGE_LENS_MODES, s.edgeLens)) {
       setGraphEdgeLensMode(s.edgeLens, { apply: false });
     }
-    setHiddenKindIndexes(s.hideKinds);
+    setHiddenKindsFromHash(s.hideKinds);
     setEdgeKindsFromHash(s.edges);
     setCollapsedGroupsFromHash(s.collapsedGroups || s.collapsed);
     setCheckedHashValues('[data-filter-health]', 'filterHealth', s.health);
-    setCheckedHashValues('[data-filter-scope]', 'filterScope', s.files);
+    setFileScopesFromHash(s.files);
     breadcrumbScope = s.scope || s.crumb || null;
     syncViewerGraphState({ breadcrumbScope });
     const input = document.getElementById('search-input');
@@ -131,7 +136,7 @@ function writeHashState() {
   if (scope) parts.push(`scope=${encodeURIComponent(scope)}`);
   const collapsed = collapsedGroupList();
   if (collapsed.length > 0) parts.push(`collapsedGroups=${encodeURIComponent(collapsed.join(','))}`);
-  const hiddenKinds = hiddenKindIndexes();
+  const hiddenKinds = hiddenKindKeys();
   if (hiddenKinds.length > 0) parts.push(`hideKinds=${encodeURIComponent(hiddenKinds.join(','))}`);
   parts.push(`health=${encodeURIComponent(checkedHashValues('[data-filter-health]', 'filterHealth').join(','))}`);
   parts.push(`files=${encodeURIComponent(checkedHashValues('[data-filter-scope]', 'filterScope').join(','))}`);

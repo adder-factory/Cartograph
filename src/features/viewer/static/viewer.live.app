@@ -125,6 +125,7 @@ async function bootLive() {
       document.querySelector('.topbar .path').textContent = s.projectRoot;
       document.querySelector('.topbar .stats').innerHTML =
         `<b>${s.files}</b> files · <b>${s.nodes.toLocaleString()}</b> nodes · <b>${s.edges.toLocaleString()}</b> edges`;
+      renderFileScopeFilters(s.dirs);
     }
   } catch (err) { console.debug('status endpoint unavailable', err); }
 

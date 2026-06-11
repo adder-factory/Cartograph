@@ -185,7 +185,10 @@ function simplifyViewerRail() {
   const kindSection = sectionForControl('kind-chips');
   const edgeSection = sectionForControl('edge-kind-filters');
   const healthSection = sectionWithChild('[data-filter-health]');
-  const scopeSection = sectionWithChild('[data-filter-scope]');
+  // Anchor on the container id — scope rows render after boot (per-
+  // project dirs), so a row selector would find nothing here and the
+  // rail rebuild would silently drop the section.
+  const scopeSection = sectionForControl('file-scope-filters');
   const diagnosticsSection = sectionForControl('btn-graph-diagnostics');
   const legendSection = Array.from(rail.querySelectorAll(':scope > .rail-section')).find((section) =>
     section.querySelector('.rail-title')?.textContent?.trim().startsWith('Health (border)')

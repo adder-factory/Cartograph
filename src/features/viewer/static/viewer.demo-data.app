@@ -119,3 +119,20 @@ const TRACE = [
   { delta: '+126ms', step: 8, tool: 'cartograph_coverage',  args: 'mode: "symbol", symbol: "extractFromSource"',
     result: '85% covered', focus: 'extractFromSource', subgraph: ['extractFromSource'] },
 ];
+
+/* File-scope rows for the file:// demo — derived from the demo nodes'
+   own paths so the rail matches what the canvas shows. Live mode gets
+   real per-project dirs from /api/status instead. */
+function demoScopeDirs() {
+  const buckets = new Map();
+  NODES.forEach((n) => {
+    const file = n.file || '';
+    const slash = file.indexOf('/');
+    if (slash <= 0) return;
+    const prefix = file.slice(0, slash + 1);
+    const bucket = buckets.get(prefix) || { prefix, files: 0, nodes: 0 };
+    bucket.nodes += 1;
+    buckets.set(prefix, bucket);
+  });
+  return [...buckets.values()].sort((a, b) => b.nodes - a.nodes || a.prefix.localeCompare(b.prefix));
+}

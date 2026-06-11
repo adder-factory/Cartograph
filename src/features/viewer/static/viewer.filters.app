@@ -25,6 +25,12 @@ const DETAIL_KIND_LABELS = {
   enum_member: 'enum members',
 };
 let pendingHashEdgeKinds = null;
+/* File-scope rows are rendered per-project (status payload `dirs`,
+   or demo data in file:// mode). The sentinel value marks the
+   "everything else" row covering files outside every listed prefix. */
+const FILE_SCOPE_REST = '(other)';
+let fileScopePrefixes = [];
+let pendingHashFileScopes = null;
 let graphDensityMode = (() => {
   try {
     const saved = localStorage.getItem(DENSITY_KEY);
@@ -321,6 +327,74 @@ function syncEdgeKindFilters() {
   `).join('');
 }
 
+/* ── File scope ──
+   Rows come from the project's own top-level directories (status
+   payload `dirs` in live mode, demo dirs in file:// mode), plus an
+   "everything else" row for files outside every listed prefix. The
+   rail used to be hardcoded to this repo's `src/…` layout, which
+   blanked the graph on any differently-shaped project. */
+
+function setFileScopesFromHash(raw) {
+  const values = hashList(raw);
+  if (values === null) return;
+  pendingHashFileScopes = values;
+  const inputs = Array.from(document.querySelectorAll('[data-filter-scope]'));
+  if (inputs.length === 0) return;
+  applyFileScopeSelection(inputs, values);
+  pendingHashFileScopes = null;
+}
+
+/* A stale deep link can list prefixes from another project (or the old
+   hardcoded rail). When nothing in the hash matches a rendered row,
+   fall back to all-on rather than silently blanking the graph. */
+function applyFileScopeSelection(inputs, values) {
+  const selected = new Set(values);
+  const anyMatch = inputs.some((input) => selected.has(input.dataset.filterScope));
+  inputs.forEach((input) => {
+    input.checked = anyMatch ? selected.has(input.dataset.filterScope) : true;
+  });
+}
+
+function renderFileScopeFilters(dirs) {
+  const container = document.getElementById('file-scope-filters');
+  if (!container) return;
+  const rows = (Array.isArray(dirs) ? dirs : []).filter((d) => d && typeof d.prefix === 'string' && d.prefix);
+  fileScopePrefixes = rows.map((d) => d.prefix);
+  if (rows.length === 0) {
+    container.innerHTML = '<div class="rail-row">No directories</div>';
+    return;
+  }
+  const items = rows.map((d) => `
+    <label class="rail-row" data-tooltip="Show or hide symbols under ${escapeHtml(d.prefix)}">
+      <input type="checkbox" data-filter-scope="${escapeHtml(d.prefix)}" checked> ${escapeHtml(d.prefix)}
+      <span class="count">${Number(d.nodes ?? 0).toLocaleString()}</span>
+    </label>
+  `);
+  items.push(`
+    <label class="rail-row" data-tooltip="Show or hide files outside the listed directories">
+      <input type="checkbox" data-filter-scope="${FILE_SCOPE_REST}" checked> <i>everything else</i>
+    </label>
+  `);
+  container.innerHTML = items.join('');
+  if (pendingHashFileScopes !== null) {
+    applyFileScopeSelection(Array.from(container.querySelectorAll('[data-filter-scope]')), pendingHashFileScopes);
+    pendingHashFileScopes = null;
+  }
+}
+
+/* Scope semantics: no rows rendered (payload missing) → scope never
+   hides anything. With rows, a node is visible when its file falls
+   under a checked prefix — or, for files outside every listed prefix,
+   when "everything else" is checked. Unchecking ALL rows hides
+   everything, consistent with the health filter. */
+function scopeFilterAllows(checkedScopes, totalScopeRows, file) {
+  if (totalScopeRows === 0 || file === '') return true;
+  if (fileScopePrefixes.some((p) => file.startsWith(p))) {
+    return checkedScopes.some((s) => s !== FILE_SCOPE_REST && file.startsWith(s));
+  }
+  return checkedScopes.includes(FILE_SCOPE_REST);
+}
+
 function kindSetForChip(chip) {
   return String(chip.dataset.filterKinds || '')
     .split(',')
@@ -372,8 +446,11 @@ function applyFilters() {
   // enum") and inactive chips contribute none. The legacy
   // data-filter-kind checkbox path is gone — chips replaced it.
   const kinds = new Set();
-  document.querySelectorAll('.kind-chip[data-active="1"]').forEach((chip) => {
-    kindSetForChip(chip).forEach((k) => kinds.add(k));
+  const chipClaimedKinds = new Set();
+  document.querySelectorAll('.kind-chip').forEach((chip) => {
+    const chipKinds = kindSetForChip(chip);
+    chipKinds.forEach((k) => chipClaimedKinds.add(k));
+    if (chip.dataset.active === '1') chipKinds.forEach((k) => kinds.add(k));
   });
   syncKindChipCounts();
   syncHealthFilterCounts();
@@ -381,8 +458,8 @@ function applyFilters() {
     Array.from(document.querySelectorAll('[data-filter-health]:checked'))
       .map(el => el.dataset.filterHealth)
   );
-  const scopes = Array.from(document.querySelectorAll('[data-filter-scope]:checked'))
-    .map(el => el.dataset.filterScope);
+  const scopeInputs = Array.from(document.querySelectorAll('[data-filter-scope]'));
+  const scopes = scopeInputs.filter((el) => el.checked).map((el) => el.dataset.filterScope);
   const edgeInputs = Array.from(document.querySelectorAll('[data-filter-edge]'));
   const edgeKinds = new Set(edgeInputs.filter((el) => el.checked).map((el) => el.dataset.filterEdge));
   if (typeof refreshPinnedLayoutForCurrentState === 'function') refreshPinnedLayoutForCurrentState();
@@ -400,9 +477,11 @@ function applyFilters() {
     const cent = LIVE_MODE
       ? (liveNodeIndex.get(n.id())?.centrality ?? 0)
       : (NODES.find(x => x.id === n.id())?.centrality ?? 0);
-    const inKind = kinds.has(kind);
+    // A kind no chip claims (a new node kind the chips haven't caught
+    // up with) stays visible rather than silently vanishing.
+    const inKind = kinds.has(kind) || !chipClaimedKinds.has(kind);
     const inHealth = healths.has(health);
-    const inScope = scopes.length === 0 || scopes.some(s => file.startsWith(s)) || file === '';
+    const inScope = scopeFilterAllows(scopes, scopeInputs.length, file);
     const inCent = cent >= minCentrality;
     // Breadcrumb scope is a stricter override on top of the rail
     // file-scope: when set, only nodes under that exact prefix
@@ -641,11 +720,19 @@ document.getElementById('edge-lens-control')?.addEventListener('click', (e) => {
   setGraphEdgeLensMode(btn.dataset.edgeLens);
 });
 
-document.querySelectorAll('[data-filter-health], [data-filter-scope]')
+document.querySelectorAll('[data-filter-health]')
   .forEach(el => el.addEventListener('change', () => {
     applyFilters();
     writeHashState();
   }));
+
+// Scope rows are rendered per-project after boot — delegate on the
+// container instead of binding each row.
+document.getElementById('file-scope-filters')?.addEventListener('change', (e) => {
+  if (!e.target.matches('[data-filter-scope]')) return;
+  applyFilters();
+  writeHashState();
+});
 
 document.getElementById('edge-kind-filters').addEventListener('change', (e) => {
   if (!e.target.matches('[data-filter-edge]')) return;

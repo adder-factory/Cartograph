@@ -22,9 +22,13 @@ const KIND_FILL = {
   property:   '#fbbf24',
   parameter:  '#fbbf24',
   detail_bucket: '#fbbf24',
+  enum_member: '#fbbf24',
+  protocol:   '#a3e635',
   file:       '#94a3b8', // slate
   module:     '#94a3b8',
   namespace:  '#94a3b8',
+  import:     '#94a3b8',
+  export:     '#94a3b8',
   route:      '#f472b6', // pink (entry-shaped)
   component:  '#f472b6',
   table:      '#94a3b8',
