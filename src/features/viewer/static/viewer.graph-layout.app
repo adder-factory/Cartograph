@@ -554,12 +554,8 @@ function seedForceLayoutPositions(salt = '') {
   });
 }
 
-function visibleLayoutContentNodes() {
-  return visibleGraphContentNodes().filter((node) => !node.data('detailBucket'));
-}
-
 function layoutCollisionNodes() {
-  return visibleLayoutContentNodes()
+  return visibleGraphContentNodes()
     .slice()
     .sort((a, b) => String(a.id()).localeCompare(String(b.id())))
     .slice(0, LAYOUT_COLLISION_MAX_NODES);
@@ -639,7 +635,7 @@ function relaxLayoutNodeCollisions() {
   }
 }
 
-function isDegenerateLinearLayout(nodes = visibleLayoutContentNodes()) {
+function isDegenerateLinearLayout(nodes = visibleGraphContentNodes()) {
   if (nodes.length < 8) return false;
   const positions = nodes.map((node) => node.position());
   const xs = positions.map((pos) => pos.x);

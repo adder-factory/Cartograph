@@ -15,7 +15,7 @@ function graphDiagnosticSpread(values) {
   return values.length > 0 ? Math.max(...values) - Math.min(...values) : 0;
 }
 
-function renderedNodeOverlapStats(nodes = visibleLayoutContentNodes()) {
+function renderedNodeOverlapStats(nodes = visibleGraphContentNodes()) {
   const boxes = nodes
     .map((node) => ({
       id: node.id(),
@@ -173,7 +173,7 @@ function validateGraphState(label = 'runtime', opts = {}) {
 }
 
 function graphLayoutDiagnostics(label = '') {
-  const visibleNodes = visibleLayoutContentNodes();
+  const visibleNodes = visibleGraphContentNodes();
   const positions = visibleNodes.map((node) => {
     const p = node.renderedPosition();
     return { id: node.id(), label: node.data('label'), x: p.x, y: p.y };

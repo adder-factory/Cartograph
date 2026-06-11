@@ -236,24 +236,6 @@ const cy = cytoscape({
       }
     },
     {
-      selector: 'node[isGroup].collapsed',
-      style: {
-        'background-opacity': 0.42,
-        'border-color': '#5fadff',
-        'border-style': 'solid',
-        'border-width': 1.5,
-        'color': '#dde3ee',
-        'text-valign': 'center',
-        'text-halign': 'center',
-        'text-margin-x': 0,
-        'text-margin-y': 0,
-        'text-background-color': '#0b0f17',
-        'text-background-opacity': 0.72,
-        'text-background-padding': 4,
-        'z-index': 25,
-      }
-    },
-    {
       selector: 'node[collapsedProxy]',
       style: {
         'label': 'data(label)',
