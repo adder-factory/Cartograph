@@ -297,7 +297,8 @@ async function maybeInstallProjectHooks(args: MaybeInstallProjectHooksArgs): Pro
     clack.log.warn(`Git hooks not installed: ${result.error.message}`);
     return;
   }
-  clack.log.success(`Git hooks: ${result.changes.map((change) => `${change.hook} ${change.status}`).join(', ')}`);
+  const hookSummary = result.changes.map((change) => `${change.hook} ${change.status}`).join(', ');
+  clack.log.success(`Git hooks: ${hookSummary}`);
 }
 
 /** Step 2: pick the install location, honoring `--location` and `--yes` flags. */
