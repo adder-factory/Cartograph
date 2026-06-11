@@ -320,7 +320,7 @@ function isUnbackedBuiltinMethodCall(ref: UnresolvedRef, context: ResolutionCont
   const name = ref.referenceName;
   if (name.includes('.') || name.includes('::') || name.includes('/')) return false;
   if (!TS_JS_BUILTIN_PROTOTYPE_METHODS.has(name)) return false;
-  return !hasConcreteImportBacking(ref, context, name);
+  return !hasConcreteImportBacking({ ref, context, localName: name, failureDefault: true });
 }
 
 /**
@@ -538,7 +538,7 @@ function shouldSuppressUnbackedBuiltinMethod(args: MethodCallMatchArgs): boolean
     isTsJsFamilyLang(ref.language) &&
     ref.referenceKind === 'calls' &&
     TS_JS_BUILTIN_PROTOTYPE_METHODS.has(methodName) &&
-    !hasConcreteImportBacking(ref, context, objectOrClass)
+    !hasConcreteImportBacking({ ref, context, localName: objectOrClass, failureDefault: true })
   );
 }
 
