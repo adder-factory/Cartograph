@@ -82,7 +82,11 @@ function createViewerStateStore(initial = {}) {
       if ('densityMode' in patch) state.graph.densityMode = patch.densityMode || 'core';
       if ('detailGroupingMode' in patch) state.graph.detailGroupingMode = patch.detailGroupingMode || 'grouped';
       if ('edgeLensMode' in patch) state.graph.edgeLensMode = patch.edgeLensMode || 'all';
-      if ('lastPayload' in patch) state.graph.lastPayload = cloneViewerStateValue(patch.lastPayload);
+      // lastPayload is stored by reference: both writers pass a fresh
+      // JSON clone they never mutate afterward, and a second full
+      // serialize/parse of a dense graph payload on the UI thread per
+      // focus change is the single biggest render-path allocation.
+      if ('lastPayload' in patch) state.graph.lastPayload = patch.lastPayload ?? null;
       if ('layoutQuality' in patch) state.graph.layoutQuality = patch.layoutQuality || 'balanced';
       if ('visibilityStats' in patch) state.graph.visibilityStats = cloneViewerStateValue(patch.visibilityStats);
       return state.graph;

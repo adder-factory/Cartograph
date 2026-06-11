@@ -363,12 +363,12 @@ function graphDiagnosticsRows(diagnostics) {
   ];
 }
 
-function syncGraphDiagnosticsPanel() {
+function syncGraphDiagnosticsPanel(precomputedDiagnostics = null) {
   const panel = document.getElementById('graph-diagnostics');
   const summary = document.getElementById('graph-diagnostics-summary');
   const button = document.getElementById('btn-graph-diagnostics');
   if (!panel && !summary && !button) return;
-  const diagnostics = graphLayoutDiagnostics('panel');
+  const diagnostics = precomputedDiagnostics || graphLayoutDiagnostics('panel');
   syncGraphHealthPill(diagnostics);
   if (summary) {
     const overlap = diagnostics.nodeOverlapCount > 0 ? ` · ${diagnostics.nodeOverlapCount} overlaps` : '';
@@ -438,10 +438,10 @@ function viewerBugReportPayload() {
     invariants: validateGraphState('bug-report'),
     layoutWatchdog: typeof graphLayoutWatchdogState === 'undefined' ? null : graphLayoutWatchdogState,
     graph: typeof graphJsonPayload === 'function'
-      ? {
-          edgeCount: graphJsonPayload().edges?.length || 0,
-          nodeCount: graphJsonPayload().nodes?.length || 0,
-        }
+      ? (() => {
+          const payload = graphJsonPayload();
+          return { edgeCount: payload.edges?.length || 0, nodeCount: payload.nodes?.length || 0 };
+        })()
       : null,
   };
 }

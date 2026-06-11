@@ -519,7 +519,11 @@ const cy = cytoscape({
       style: { 'opacity': 0.04 }
     },
   ],
-  layout: fcoseLayoutOpts(),
+  // 'grid' placeholder: the real force layout runs ~50ms later via the
+  // deferred relayoutAndFit (and again when live data replaces the demo
+  // elements) — a constructor-time 4000-iteration fCoSE run was pure
+  // discarded work on every page load.
+  layout: { name: 'grid', fit: true },
   wheelSensitivity: 0.2,
   minZoom: VIEWER_MIN_ZOOM,
   maxZoom: 2.4,

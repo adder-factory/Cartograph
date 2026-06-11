@@ -232,7 +232,13 @@ function ensureFeatureGraphElements(nodes = [], edges = []) {
   return { nodeIds, edgeIds, added };
 }
 
+/* Path/Impact/Compare share one panel and one overlay. Every overlay
+   clear bumps this token; an in-flight feature fetch from before the
+   clear must not paint its (now stale) response over the newer one. */
+let featureRequestSeq = 0;
+
 function clearFeatureOverlay(opts = {}) {
+  featureRequestSeq++;
   const hidePanel = opts.hidePanel !== false;
   cy.nodes().removeClass(FEATURE_ELEMENT_CLASSES);
   cy.edges().removeClass(FEATURE_EDGE_CLASSES);
@@ -523,13 +529,17 @@ async function runPathFinder() {
   }
   if (fromInput && !fromInput.value) fromInput.value = liveSymbolCache?.label || currentSymbolId || from;
   clearFeatureOverlay({ hidePanel: false });
+  const requestSeq = featureRequestSeq;
+  const isCurrent = () => requestSeq === featureRequestSeq;
   setFeatureBusy('path', true);
   setFeatureLoading('Path', 'Finding path...');
   try {
     const params = new URLSearchParams({ from, to });
     const res = await apiFetch(`/api/path?${params.toString()}`);
+    if (!isCurrent()) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
+    if (!isCurrent()) return;
     if (payload.error) {
       renderFeaturePanel('Path', '', [], payload.error, { state: 'error' });
       return;
@@ -546,11 +556,13 @@ async function runPathFinder() {
       { state: payload.found ? 'ready' : 'empty' },
     );
   } catch (err) {
-    renderFeaturePanel('Path', '', [], `Path failed: ${String(err)}`, { state: 'error' });
+    if (isCurrent()) renderFeaturePanel('Path', '', [], `Path failed: ${String(err)}`, { state: 'error' });
   } finally {
     setFeatureBusy('path', false);
-    clearFeatureLoading();
-    requestGraphMinimapDraw();
+    if (isCurrent()) {
+      clearFeatureLoading();
+      requestGraphMinimapDraw();
+    }
   }
 }
 
@@ -569,6 +581,8 @@ async function runImpactMode(mode) {
     return;
   }
   clearFeatureOverlay({ hidePanel: false });
+  const requestSeq = featureRequestSeq;
+  const isCurrent = () => requestSeq === featureRequestSeq;
   activeImpactMode = mode;
   document.querySelectorAll('[data-impact-mode]').forEach((button) => {
     const active = button.dataset.impactMode === mode;
@@ -580,8 +594,10 @@ async function runImpactMode(mode) {
   try {
     const params = new URLSearchParams({ focus, mode, depth: '2', limit: '120' });
     const res = await apiFetch(`/api/impact?${params.toString()}`);
+    if (!isCurrent()) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
+    if (!isCurrent()) return;
     if (payload.error) {
       renderFeaturePanel('Impact', '', [], payload.error, { state: 'error' });
       return;
@@ -598,11 +614,13 @@ async function runImpactMode(mode) {
       state: rows.length > 0 ? 'ready' : 'empty',
     });
   } catch (err) {
-    renderFeaturePanel('Impact', '', [], `Impact failed: ${String(err)}`, { state: 'error' });
+    if (isCurrent()) renderFeaturePanel('Impact', '', [], `Impact failed: ${String(err)}`, { state: 'error' });
   } finally {
     setFeatureBusy('impact', false);
-    clearFeatureLoading();
-    requestGraphMinimapDraw();
+    if (isCurrent()) {
+      clearFeatureLoading();
+      requestGraphMinimapDraw();
+    }
   }
 }
 
@@ -612,12 +630,16 @@ async function runCompareView() {
     return;
   }
   clearFeatureOverlay({ hidePanel: false });
+  const requestSeq = featureRequestSeq;
+  const isCurrent = () => requestSeq === featureRequestSeq;
   setFeatureBusy('compare', true);
   setFeatureLoading('Compare', 'Loading compare view...');
   try {
     const res = await apiFetch('/api/compare?limit=120');
+    if (!isCurrent()) return;
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const payload = await res.json();
+    if (!isCurrent()) return;
     // Any server-side error must surface — rendering the normal path
     // with an empty list reads as an affirmative "No changes against
     // HEAD." (gitAvailable only matters for wording, not routing.)
@@ -643,11 +665,13 @@ async function runCompareView() {
       state: rows.length > 0 ? 'ready' : 'empty',
     });
   } catch (err) {
-    renderFeaturePanel('Compare', '', [], `Compare failed: ${String(err)}`, { state: 'error' });
+    if (isCurrent()) renderFeaturePanel('Compare', '', [], `Compare failed: ${String(err)}`, { state: 'error' });
   } finally {
     setFeatureBusy('compare', false);
-    clearFeatureLoading();
-    requestGraphMinimapDraw();
+    if (isCurrent()) {
+      clearFeatureLoading();
+      requestGraphMinimapDraw();
+    }
   }
 }
 
