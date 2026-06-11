@@ -1,10 +1,12 @@
 import { errMsg } from '../../errors.js';
+import { hasFreshnessRisk, type FreshnessInfo } from '../../freshness.js';
 import { parseMaxFileSizeValue } from '../admin-indexing/runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 interface SyncIfDirtyGraph {
   sync: (opts: { summarize: false; maxFileSize?: number }) => Promise<unknown>;
   close: () => void;
+  stats: { getFreshness: () => FreshnessInfo | null };
 }
 
 export interface SyncIfDirtyCommandDeps {
@@ -25,7 +27,9 @@ export interface SyncIfDirtyCommandDeps {
 export function registerSyncIfDirtyCommand(deps: SyncIfDirtyCommandDeps): void {
   deps.program
     .command('sync-if-dirty [path]')
-    .description('Compatibility hook command: run admin sync only when git reports source changes')
+    .description(
+      'Compatibility hook command: run admin sync when the working tree is dirty or the index lags HEAD',
+    )
     .option('-q, --quiet', 'Suppress output (for hooks)')
     .option(
       '--max-file-size <size>',
@@ -56,13 +60,23 @@ export async function runSyncIfDirtyCommand(
       process.exit(1);
     }
 
-    if (!deps.hasUncommittedChanges(projectPath)) {
-      if (!options.quiet) deps.info('No source changes detected; skipping sync');
-      return;
-    }
-
+    const dirty = deps.hasUncommittedChanges(projectPath);
     const { default: Cartograph } = await deps.loadCartograph();
     cg = await Cartograph.open(projectPath, { autoMigrate: true });
+
+    if (!dirty) {
+      // A clean tree is not "nothing to do": commits, merges, checkouts,
+      // and rebases all move HEAD without dirtying the tree, and the
+      // index keeps answering from the old graph. Compare the indexed
+      // sha against HEAD (plus disk-vs-index content drift) before
+      // skipping. A never-stamped index (null) errs toward syncing.
+      const freshness = cg.stats.getFreshness();
+      if (freshness !== null && !hasFreshnessRisk(freshness)) {
+        if (!options.quiet) deps.info('No source changes and index in sync with HEAD; skipping sync');
+        return;
+      }
+    }
+
     await cg.sync({ summarize: false, ...(maxFileSize !== undefined && { maxFileSize }) });
     if (!options.quiet) deps.info('Synced changed files');
   } catch (err) {
