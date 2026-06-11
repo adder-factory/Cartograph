@@ -416,6 +416,8 @@ function splitNodeHtmlByLine(node) {
       return;
     }
     if (child.nodeType !== Node.ELEMENT_NODE) return;
+    // lastIndexOf('</') assumes no attribute value contains a literal
+    // '</' — true for Prism output, which only emits class attributes.
     const shell = child.cloneNode(false).outerHTML;
     const closeAt = shell.lastIndexOf('</');
     if (closeAt === -1) {

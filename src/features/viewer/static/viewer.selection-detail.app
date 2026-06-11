@@ -283,6 +283,7 @@ function selectSymbol(symbolId) {
     document.getElementById('m-loc').textContent     = n.metrics.loc;
     document.getElementById('m-cyc').textContent     = n.metrics.cyc;
     document.getElementById('m-nest').textContent    = n.metrics.nest;
+    document.getElementById('m-params').textContent  = n.metrics.params ?? '—';
     document.getElementById('m-first').textContent   = n.metrics.first;
     document.getElementById('m-last').textContent    = n.metrics.last;
     document.getElementById('m-commits').textContent = n.metrics.commits;
