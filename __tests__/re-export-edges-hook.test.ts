@@ -68,7 +68,9 @@ vi.mock('../src/index-hooks/edge-resolution-helpers.js', () => ({
     state.active ? (state.targets.get(`${args[0]}:${args[1]}`) ?? null) : REAL_HELPERS.resolveTargetFile(...args),
   ),
   lookupSymbolByNameInFile: vi.fn((...args: Parameters<typeof REAL_HELPERS.lookupSymbolByNameInFile>) =>
-    state.active ? (state.symbols.get(`${args[2]}:${args[1]}`) ?? null) : REAL_HELPERS.lookupSymbolByNameInFile(...args),
+    state.active
+      ? (state.symbols.get(`${args[2]}:${args[1]}`) ?? null)
+      : REAL_HELPERS.lookupSymbolByNameInFile(...args),
   ),
 }));
 
