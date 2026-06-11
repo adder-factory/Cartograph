@@ -196,7 +196,7 @@ describe('read command action bodies', () => {
     }) as typeof process.stdout.write;
     try {
       await actions.get('status [path]')!(projectPath, { json: true });
-      await actions.get('files [path]')!(undefined, {
+      await actions.get('files [target]')!(undefined, {
         projectPath,
         dir: 'src',
         format: 'flat',
