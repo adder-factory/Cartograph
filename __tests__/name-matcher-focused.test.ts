@@ -289,4 +289,63 @@ describe('name matcher focused resolver branches', () => {
     });
     expect(matchReference(ref({ referenceName: 'THING' }), context([variable]))).toBeNull();
   });
+
+  it('suppresses incompatible cross-language matches when the bare name is import-backed', () => {
+    // The describe-hub bug: `import { describe } from 'bun:test'` in a TS
+    // file + one ObjC method named `describe` in the project produced a
+    // phantom cross-language exact-match edge per test file.
+    const objcDescribe = node({
+      id: 'method:objc-describe',
+      name: 'describe',
+      kind: 'method',
+      qualifiedName: 'Fixture.describe',
+      language: 'objc',
+      filePath: 'docs/test-beds/objc/fixture.m',
+    });
+    const bunTestImport = [{ localName: 'describe', importedName: 'describe', source: 'bun:test' }] as never;
+    const importBacked = context([objcDescribe], { getImportMappings: () => bunTestImport });
+    expect(
+      matchReference(ref({ referenceName: 'describe', filePath: '__tests__/foo.test.ts' }), importBacked),
+    ).toBeNull();
+
+    // The fuzzy path must not re-create the edge at lower confidence
+    // either: exact-name lookup misses (node is `Describe`), the
+    // case-insensitive fuzzy lookup hits, and the same gate fires.
+    const objcDescribeUpper = node({
+      id: 'method:objc-describe-upper',
+      name: 'Describe',
+      kind: 'method',
+      qualifiedName: 'Fixture.Describe',
+      language: 'objc',
+      filePath: 'docs/test-beds/objc/fixture.m',
+    });
+    const fuzzyImportBacked = context([objcDescribeUpper], { getImportMappings: () => bunTestImport });
+    expect(
+      matchReference(ref({ referenceName: 'describe', filePath: '__tests__/foo.test.ts' }), fuzzyImportBacked),
+    ).toBeNull();
+
+    // Without import backing the cross-language single match still resolves
+    // at the penalized confidence — unchanged behavior.
+    expect(matchReference(ref({ referenceName: 'describe' }), context([objcDescribe]))).toMatchObject({
+      targetNodeId: 'method:objc-describe',
+      confidence: 0.5,
+      resolvedBy: 'exact-match',
+    });
+  });
+
+  it('keeps import-backed JVM cross-language exact matches (kotlin -> java)', () => {
+    const javaClass = node({
+      id: 'class:java-bar',
+      name: 'Bar',
+      kind: 'class',
+      qualifiedName: 'com.foo.Bar',
+      language: 'java',
+      filePath: 'src/main/java/com/foo/Bar.java',
+    });
+    const kotlinRef = ref({ referenceName: 'Bar', filePath: 'src/main/kotlin/com/foo/App.kt', language: 'kotlin' });
+    const ctx = context([javaClass], {
+      getImportMappings: () => [{ localName: 'Bar', importedName: 'Bar', source: 'com.foo.Bar' }] as never,
+    });
+    expect(matchReference(kotlinRef, ctx)).toMatchObject({ targetNodeId: 'class:java-bar' });
+  });
 });
