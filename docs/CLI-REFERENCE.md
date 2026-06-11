@@ -14,6 +14,8 @@ cartograph install --command /absolute/path/to/cartograph
 cartograph install-hooks [path]    # keep index fresh after pull/checkout/rebase
 cartograph install-hooks --command "$(command -v cartograph)"
 cartograph install-hooks --remove
+cartograph upgrade                 # check for a newer Cartograph (alias: update)
+cartograph upgrade --apply         # fast-forward a source checkout + bun install
 cartograph quickstart [path]       # initialize + structural index + doctor; no model download
 cartograph guide                   # compact first-use and daily-workflow guide
 cartograph setup [path]            # LLM bootstrap: init + install-models + doctor
