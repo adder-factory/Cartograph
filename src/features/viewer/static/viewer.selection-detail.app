@@ -86,15 +86,20 @@ async function selectSymbolLive(symbolId) {
     document.getElementById('d-cent').textContent = (p.centrality ?? 0).toFixed(4);
     const errs = (p.findings ?? []).filter(f => f.severity === 'error').length;
     const warns = (p.findings ?? []).filter(f => f.severity === 'warning').length;
+    const infos = (p.findings ?? []).filter(f => f.severity === 'info').length;
+    // Tiers mirror the graph's health coloring (and the file:// path's
+    // mapping): info-only findings are not a perfect 10.
     let health10 = '10/10';
     if (errs > 0) health10 = '3/10';
     else if (warns > 0) health10 = '6/10';
+    else if (infos > 0) health10 = '8/10';
     const healthEl = document.getElementById('d-health');
     healthEl.textContent = health10;
     let healthClass = 'ok';
     if (errs > 0) healthClass = 'err';
     else if (warns > 0) healthClass = 'warn';
     healthEl.className = `v ${healthClass}`;
+    if (typeof updateAskTarget === 'function') updateAskTarget(p.label || 'this symbol');
     document.getElementById('d-cov').textContent = p.coverage && p.coverage.ratio != null
       ? `${Math.round(p.coverage.ratio * 100)}%`
       : '—';

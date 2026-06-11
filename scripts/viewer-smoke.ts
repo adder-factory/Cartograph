@@ -2328,6 +2328,19 @@ async function assertTooltips(page: Page): Promise<void> {
 async function assertEscapeClearsSelection(page: Page): Promise<void> {
   await focusSymbolViaSearch(page, 'compute');
   await assertSelectedNeighborhood(page);
+  // After a search-driven focus the search input still owns keyboard
+  // focus. The first Escape only dismisses the field (blur) — it must
+  // NOT destroy the selection the user just made.
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(
+    () => {
+      const state = (globalThis as ViewerSmokeGlobal).__cartographViewerSmoke?.selectionState();
+      return state?.currentSymbolId !== null && document.activeElement?.id !== 'search-input';
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  // The second Escape (no field focused) clears the selection.
   await page.keyboard.press('Escape');
   await page.waitForFunction(
     () => {

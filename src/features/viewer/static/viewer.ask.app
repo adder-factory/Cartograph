@@ -13,7 +13,6 @@ const BIOMARKER_ALIASES = {
   'complex methods': 'complex_method', 'complex method': 'complex_method',
   'unused exports': 'unused_export', 'unused export': 'unused_export',
   'brain methods': 'brain_method', 'feature envies': 'feature_envy',
-  'errors': 'error', 'warnings': 'warning',
 };
 
 /* Try to interpret the question as a navigation command. Returns
@@ -69,6 +68,15 @@ async function applyBiomarkerFilter(name, history) {
     }
     const data = await r.json();
     const findings = data.findings || [];
+    if (findings.length === 0) {
+      // An empty filter set would dim every node — and applyFilters
+      // re-applies it on each render, so the dimmed state would stick.
+      const msg = document.createElement('div');
+      msg.className = 'askpanel-msg a';
+      msg.textContent = `No ${name} findings in this index.`;
+      history.appendChild(msg);
+      return;
+    }
     activeBiomarkerFilter = new Set(findings.map((f) => f.id));
     // Dim non-matching nodes; highlight matches.
     cy.nodes().removeClass('focus');
@@ -176,8 +184,6 @@ document.addEventListener('selectionchange', () => {
   const text = fragment.textContent ?? '';
   if (!text.trim()) return;
   capturedSelection = text;
-  capturedSelectionLines = text.split('\n').filter((l) => l.length > 0 || true).length;
-  // Recompute lines as the count of newlines + 1.
   capturedSelectionLines = (text.match(/\n/g)?.length ?? 0) + 1;
   updateAskSelectionChip();
 });
@@ -214,10 +220,12 @@ async function submitAsk(question) {
       if (intent.kind === 'biomarker') {
         await applyBiomarkerFilter(intent.name, history);
       } else if (intent.kind === 'symbol') {
-        await searchAndFocus(intent.name);
+        const focused = await searchAndFocus(intent.name);
         const ack = document.createElement('div');
-        ack.className = 'askpanel-msg a';
-        ack.innerHTML = `Focused on <a class="ask-link" data-symbol="${escapeHtml(intent.name)}">${escapeHtml(intent.name)}</a>.`;
+        ack.className = focused ? 'askpanel-msg a' : 'askpanel-msg err';
+        ack.innerHTML = focused
+          ? `Focused on <a class="ask-link" data-symbol="${escapeHtml(intent.name)}">${escapeHtml(intent.name)}</a>.`
+          : `No symbol named ${escapeHtml(intent.name)} found.`;
         history.appendChild(ack);
       }
     } finally {

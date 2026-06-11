@@ -280,7 +280,7 @@ function graphDiagnosticsWarnings(diagnostics) {
     );
   }
   if (diagnostics.invariantErrorCount > 0) {
-    warnings.push(`${diagnostics.invariantErrorCount} graph invariant errors`);
+    warnings.push(`${diagnostics.invariantErrorCount} graph invariant error${diagnostics.invariantErrorCount === 1 ? '' : 's'}`);
   }
   if (diagnostics.totalNodeCount >= 120 || diagnostics.visibleNodeCount >= 100) {
     warnings.push(`${diagnostics.visibleNodeCount}/${diagnostics.totalNodeCount || diagnostics.visibleNodeCount} nodes in view`);
@@ -309,9 +309,9 @@ function graphDiagnosticsAlertWarnings(diagnostics) {
     warnings.push('layout retried');
   }
   if (diagnostics.invariantErrorCount > 0) {
-    warnings.push(`${diagnostics.invariantErrorCount} invariant errors`);
+    warnings.push(`${diagnostics.invariantErrorCount} invariant error${diagnostics.invariantErrorCount === 1 ? '' : 's'}`);
   } else if (diagnostics.invariantWarningCount > 0) {
-    warnings.push(`${diagnostics.invariantWarningCount} invariant warnings`);
+    warnings.push(`${diagnostics.invariantWarningCount} invariant warning${diagnostics.invariantWarningCount === 1 ? '' : 's'}`);
   }
   if (diagnostics.nodeOverlapCount > 0) {
     warnings.push(`${diagnostics.nodeOverlapCount} overlaps`);
@@ -458,8 +458,10 @@ async function copyBugReportText(text) {
     document.body.appendChild(textarea);
     textarea.select();
     try {
-      document.execCommand('copy');
-      return true;
+      // execCommand reports failure via its return value, not a throw —
+      // returning true unconditionally showed "copied" with an empty
+      // clipboard.
+      return document.execCommand('copy');
     } finally {
       textarea.remove();
     }

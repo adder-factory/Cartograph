@@ -359,7 +359,7 @@ async function loadSourceLive(symbolId) {
     codeEl.className = `language-${lang}`;
     codeEl.textContent = String(p.source ?? '');
     document.getElementById('d-code-summary').textContent =
-      `Source · ${p.endLine - p.startLine + 1} lines · ${escapeHtml(p.file || '')}`;
+      `Source · ${p.endLine - p.startLine + 1} lines · ${p.file || ''}`;
     // Reflect the file's actual line range in the goto placeholder
     // so the user sees, e.g., "143 or 143-232" instead of an
     // arbitrary "10-50". Helps when scanning long methods.

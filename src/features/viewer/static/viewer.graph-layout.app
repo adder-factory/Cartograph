@@ -382,7 +382,10 @@ function zoomBy(factor) {
 
 cy.on('dragfree', 'node', (evt) => {
   const n = evt.target;
-  if (n.data('isGroup') || n.data('collapsedProxy')) return;
+  // detailBucket nodes are excluded from graphContentNodes(), so a
+  // locked bucket would be uncounted by "Unlock N pinned" and
+  // unreleasable — never pin them.
+  if (n.data('isGroup') || n.data('collapsedProxy') || n.data('detailBucket')) return;
   n.lock();
   n.addClass('pinned');
   savePinnedLayoutPositions();
@@ -644,7 +647,13 @@ function isDegenerateLinearLayout(nodes = visibleLayoutContentNodes()) {
 }
 
 function graphLayoutWatchdogDiagnostics(label) {
-  return typeof graphLayoutDiagnostics === 'function' ? graphLayoutDiagnostics(label) : null;
+  const diagnostics = typeof graphLayoutDiagnostics === 'function' ? graphLayoutDiagnostics(label) : null;
+  // Strip the embedded watchdog state: it contains the PREVIOUS
+  // before/after diagnostics, which embed the state before that, and
+  // so on — each relayout otherwise nests one level deeper until
+  // bug-report serialization runs out of memory.
+  if (diagnostics) diagnostics.layoutWatchdog = null;
+  return diagnostics;
 }
 
 function graphLayoutWatchdogReason(diagnostics) {
@@ -691,7 +700,9 @@ function graphLayoutWatchdogOptions(baseOptions) {
     numIter: veryHeavyGraph ? 7600 : heavyGraph ? 6600 : 5600,
     padding: fitPadding(),
     quality: 'proof',
-    randomize: true,
+    // randomize:false — runGraphLayout seeds salted positions for the
+    // watchdog retry; randomizing would throw that determinism away.
+    randomize: false,
     tilingPaddingHorizontal: groupBoost ? 74 : 56,
     tilingPaddingVertical: groupBoost ? 74 : 56,
   });
@@ -701,8 +712,11 @@ function runGraphLayout(options, salt = '') {
   if (isForceLayoutName(options.name)) seedForceLayoutPositions(salt);
   cy.layout(options).run();
   if (isForceLayoutName(options.name) && isDegenerateLinearLayout()) {
+    // randomize:false — the salted re-seed IS the retry's variation;
+    // randomize:true would discard those seeded positions and make the
+    // retry nondeterministic.
     seedForceLayoutPositions(`${salt}:linear-retry`);
-    cy.layout({ ...options, randomize: true }).run();
+    cy.layout({ ...options, randomize: false }).run();
   }
   relaxLayoutNodeCollisions();
   const bounds = graphFitClampBounds();

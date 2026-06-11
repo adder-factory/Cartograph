@@ -144,14 +144,21 @@ function renderEdgeDetail(edge) {
   renderEdgeSubpanel('source');
   updateAskTarget('this edge');
   syncMobilePanelButtons();
-  resizeGraphSoon();
+  // resize without refit — inspecting an edge while zoomed in must not
+  // snap the camera back to a full fit.
+  resizeGraphSoon(false);
   writeHashState();
   revealSelectionPanelOnMobile();
 }
 
 function clearEdgeInspectionClasses() {
-  cy.edges().removeClass('edge-inspected edge-muted');
-  cy.nodes().removeClass('edge-endpoint');
+  // Includes the hover classes: a node hidden or removed under the
+  // cursor never receives mouseout, so hover muting would otherwise
+  // dim the whole graph until the next hover.
+  cy.edges().removeClass('edge-inspected edge-muted edge-hover-muted');
+  cy.nodes().removeClass('edge-endpoint adjacent hovered');
+  const container = cy.container();
+  if (container) container.style.cursor = '';
 }
 
 function renderActiveEdgeInspection() {
