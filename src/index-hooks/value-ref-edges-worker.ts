@@ -36,6 +36,8 @@
 import { parentPort, threadId, workerData } from 'node:worker_threads';
 import {
   CALL_ARG_RE,
+  INVOKED_TERNARY_RE,
+  JSX_ATTR_VALUE_RE,
   PAIR_VALUE_RE,
   SUPPORTED_VALUE_REF_LANGS,
   collectValueRefMatches,
@@ -165,6 +167,8 @@ function collectEdgesFromWorkerFile(file: ValueRefWorkerInit['fileRecords'][numb
   collectValueRefMatches({ ...baseArgs, re: CALL_ARG_RE });
   const tAfterRe1 = VERBOSE ? Date.now() : 0;
   collectValueRefMatches({ ...baseArgs, re: PAIR_VALUE_RE });
+  collectValueRefMatches({ ...baseArgs, re: JSX_ATTR_VALUE_RE });
+  collectValueRefMatches({ ...baseArgs, re: INVOKED_TERNARY_RE });
   logVerboseFileTiming({ filePath: file.path, content, cleaned, fileT0, tAfterRead, tAfterStrip, tAfterRe1 });
 }
 
@@ -187,7 +191,7 @@ function logVerboseFileTiming(args: VerboseFileTimingArgs): void {
       `bytes=${content.length} cleaned=${cleaned.length} ` +
       `total=${tEnd - fileT0}ms read=${tAfterRead - fileT0}ms ` +
       `strip=${tAfterStrip - tAfterRead}ms re1=${tAfterRe1 - tAfterStrip}ms ` +
-      `re2=${tEnd - tAfterRe1}ms`,
+      `re2_4=${tEnd - tAfterRe1}ms`,
   );
 }
 
