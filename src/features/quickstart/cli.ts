@@ -12,10 +12,15 @@ export interface QuickstartCommandDeps extends QuickstartRuntimeDeps {
 }
 
 export function registerQuickstartCommand(deps: QuickstartCommandDeps): void {
-  deps.program
-    .command('quickstart [path]')
-    .description('Initialize and index the project without downloading models; LLM setup remains optional')
+  const command = deps.program.command('index [path]');
+  command.alias?.('quickstart');
+  command
+    .description('Initialize and index the project, then run a readiness check (no model downloads)')
     .action(async (pathArg: string | undefined) => {
+      // The pre-rename name keeps working; nudge toward the new one.
+      if (process.argv[2] === 'quickstart') {
+        deps.info('note: `cartograph quickstart` is now `cartograph index`; the old name keeps working.');
+      }
       const projectPath = deps.resolveProjectPath(pathArg);
       try {
         const result = await runQuickstart({ projectPath }, deps);

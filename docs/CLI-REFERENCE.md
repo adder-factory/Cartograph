@@ -16,9 +16,9 @@ cartograph install-hooks [path]    # manage the git hooks separately
 cartograph install-hooks --remove
 cartograph upgrade                 # check for a newer Cartograph (alias: update)
 cartograph upgrade --apply         # fast-forward a source checkout + bun install
-cartograph quickstart [path]       # initialize + structural index + doctor; no model download
+cartograph index [path]            # initialize + structural index + doctor (alias: quickstart)
 cartograph guide                   # compact first-use and daily-workflow guide
-cartograph setup [path]            # LLM bootstrap: init + install-models + doctor
+cartograph llm install [path]      # LLM bootstrap: init + install-models + doctor (was: setup)
 cartograph doctor [path]           # diagnose install/storage/LLM state
 cartograph backend status [path]   # managed local llama-server status
 cartograph backend start [path]    # start configured local llama-server tiers
@@ -77,7 +77,7 @@ cartograph admin unlock            # clear stale lock
 cartograph admin prune-store       # clean old orphaned LLM store rows
 ```
 
-PostgreSQL 18+ storage flags are available on `setup` and `admin init`:
+PostgreSQL 18+ storage flags are available on `llm install` and `admin init`:
 
 ```sh
 cartograph admin init -i \
@@ -184,7 +184,8 @@ cartograph similar AuthService
 These require configured OpenAI-compatible chat/embedding providers:
 
 ```sh
-cartograph llm setup
+cartograph llm install          # recommended local stack: models + config + doctor (was: cartograph setup)
+cartograph llm setup            # interactive provider wizard
 cartograph llm smoke --timeout-ms 60000
 cartograph ask "How does auth work?"
 cartograph ask --mode local_chat --prompt "Summarize this report"

@@ -52,7 +52,7 @@ function readinessPayload(
       grade: 'err',
       label: 'Not indexed',
       summary: 'No completed index timestamp is recorded.',
-      nextSteps: [`cartograph quickstart ${projectPath}`],
+      nextSteps: [`cartograph index ${projectPath}`],
     };
   }
   if (stats.fileCount === 0) {
@@ -60,7 +60,7 @@ function readinessPayload(
       grade: 'err',
       label: 'No files',
       summary: 'The index exists but contains no files.',
-      nextSteps: ['Check include/exclude config, then run `cartograph quickstart .` again.'],
+      nextSteps: ['Check include/exclude config, then run `cartograph index .` again.'],
     };
   }
   if (stats.nodeCount === 0) {

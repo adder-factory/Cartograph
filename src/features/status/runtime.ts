@@ -134,7 +134,7 @@ export function printUninitializedStatus(deps: StatusPrinterDeps, projectPath: s
   writeStatusLine(deps, deps.style.bold('\nCartograph Status\n'));
   deps.info(`Project: ${projectPath}`);
   deps.warn('Not initialized');
-  deps.info('Run "cartograph quickstart" to initialize and index');
+  deps.info('Run "cartograph index" to initialize and index');
 }
 
 export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonArgs): void {

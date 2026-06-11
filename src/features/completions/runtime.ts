@@ -16,6 +16,9 @@ export interface CompletionCommandLike {
   options: readonly CompletionOptionLike[];
   name(): string;
   aliases?(): string[];
+  /** Commander's internal hidden-command marker (`{ hidden: true }`
+   *  registrations, e.g. the deprecated `setup` alias). */
+  _hidden?: boolean;
 }
 
 export function parseCompletionShell(value: string): CompletionShell | null {
@@ -82,6 +85,9 @@ function commandNames(command: CompletionCommandLike): string[] {
   for (const subcommand of command.commands) {
     const name = subcommand.name();
     if (name === 'help' || name.startsWith('__')) continue;
+    // Hidden commands (deprecated aliases) stay resolvable when typed
+    // but are not offered as completions.
+    if (subcommand._hidden === true) continue;
     names.push(name, ...(subcommand.aliases?.() ?? []));
   }
   return names;

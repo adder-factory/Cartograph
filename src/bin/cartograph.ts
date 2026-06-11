@@ -147,13 +147,23 @@ function topLevelCommandSuggestion(input: string): string | undefined {
   return best.dist <= Math.max(3, Math.ceil(input.length / 3)) ? best.name : undefined;
 }
 
+/** Command names plus aliases — `cartograph update --help` must count
+ *  `update` (alias of `upgrade`) as known, not reject it. */
+function knownTopLevelNames(): Set<string> {
+  const known = new Set<string>();
+  for (const command of program.commands) {
+    if (command.name()) known.add(command.name());
+    for (const alias of command.aliases()) known.add(alias);
+  }
+  return known;
+}
+
 function rejectUnknownCommandHelp(): boolean {
   const args = cliUserArgs();
   if (!args.some((arg) => arg === '--help' || arg === '-h')) return false;
   const firstCommand = args.find((arg) => arg !== '--help' && arg !== '-h' && !arg.startsWith('-'));
   if (!firstCommand || firstCommand === 'help') return false;
-  const known = new Set(program.commands.map((command) => command.name()));
-  if (known.has(firstCommand)) return false;
+  if (knownTopLevelNames().has(firstCommand)) return false;
   const suggestion = topLevelCommandSuggestion(firstCommand);
   error(
     `Unknown command '${firstCommand}'.` +

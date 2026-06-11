@@ -108,7 +108,7 @@ export async function runInstallerWithOptions(opts: RunInstallerOptions): Promis
     await maybeInstallProjectHooks({ clack, useDefaults, hooks: opts.hooks, command });
   }
   if (location === 'global') {
-    clack.note('cd your-project\ncartograph quickstart .', 'Quick start');
+    clack.note('cd your-project\ncartograph index .', 'Quick start');
   }
 
   let finalNote = 'Done!';
@@ -455,7 +455,7 @@ async function initializeLocalProject(
   } catch (err) {
     const msg = errMsg(err);
     clack.log.error(`Could not load native modules: ${msg}`);
-    clack.log.info('Skipping project initialization. Run "cartograph quickstart ." later.');
+    clack.log.info('Skipping project initialization. Run "cartograph index ." later.');
     return;
   }
 

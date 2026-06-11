@@ -248,7 +248,7 @@ Same OpenAI-compat shape. Set each `*Llm.endpoint` accordingly.
 ## Step 3 — bootstrap the project
 
 ```sh
-cartograph quickstart [project-path]
+cartograph index [project-path]
 ```
 
 This is the no-download first-run path. It runs three steps in order:
@@ -259,7 +259,7 @@ This is the no-download first-run path. It runs three steps in order:
    embeddings, or model downloads.
 3. `doctor` — verifies the install state and reports optional LLM gaps.
 
-Use `cartograph setup` only when the user wants Cartograph to bootstrap local
+Use `cartograph llm install` only when the user wants Cartograph to bootstrap local
 LLM model files as part of install. That path runs:
 
 1. `admin init` — creates `.cartograph/` if needed.
@@ -272,17 +272,17 @@ LLM model files as part of install. That path runs:
 
 The recommended `.cartograph/config.json` is written by
 `cartograph admin install-models --write-config` (or automatically by
-`cartograph setup` whenever it installs models — i.e. unless
+`cartograph llm install` whenever it installs models — i.e. unless
 `--no-models` is passed). It points all tiers at the `localhost:808x` ports from
 Option A above. If you picked Option B (Ollama), hand-edit each
 `*Llm.endpoint` to `http://localhost:11434` and each `*Llm.model` to
 the Ollama model id.
 
 ```sh
-cartograph quickstart /path/to/project
+cartograph index /path/to/project
 
 # Optional local-model bootstrap:
-cartograph setup --minimal /path/to/project
+cartograph llm install --minimal /path/to/project
 ```
 
 If the user asked for PostgreSQL, start a PostgreSQL 18+ database first and
@@ -304,7 +304,7 @@ cartograph admin init -i /path/to/project \
   --database-pgvector auto
 
 # Optional local-model bootstrap after PostgreSQL init:
-cartograph setup --minimal /path/to/project
+cartograph llm install --minimal /path/to/project
 ```
 
 For an existing SQLite project, use `cartograph admin storage-migrate
@@ -502,10 +502,10 @@ git clone https://github.com/adder-factory/cartograph.git /tmp/cartograph
 brew install llama.cpp  # OR: brew install ollama (simpler, auto-starts)
 
 # 3. Bootstrap with SQLite storage and no model downloads
-cartograph quickstart /path/to/the/users/project
+cartograph index /path/to/the/users/project
 
 # 4. Optional: download/write local model config (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
-cartograph setup --minimal /path/to/the/users/project
+cartograph llm install --minimal /path/to/the/users/project
 
 # 5. Start the backends (one llama-server per port — paste each in its
 #    own terminal):
@@ -541,7 +541,7 @@ cartograph admin storage-migrate /path/to/the/users/project \
   --database-provider sqlite
 ```
 
-If the user picked Ollama instead, after the `quickstart` step:
+If the user picked Ollama instead, after the `cartograph index` step:
 
 ```sh
 ollama pull qwen2.5-coder:3b

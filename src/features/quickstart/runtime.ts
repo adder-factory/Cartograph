@@ -87,7 +87,7 @@ export async function runQuickstart(
       doctor,
     };
   } catch (err) {
-    throw new Error(`quickstart failed: ${errMsg(err)}`);
+    throw new Error(`index failed: ${errMsg(err)}`);
   } finally {
     cg?.close();
   }
@@ -96,7 +96,7 @@ export async function runQuickstart(
 export function renderQuickstartReport(result: QuickstartRunResult): string {
   const { projectPath, index, doctor } = result;
   const lines = [
-    '## cartograph quickstart',
+    '## cartograph index',
     '',
     initializationLine(result),
     indexStatusLine(index),

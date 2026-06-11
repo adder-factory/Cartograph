@@ -106,7 +106,7 @@ describe('MCPServer wrong-directory warning', () => {
       await (server as any).tryInitializeDefault(parent);
     });
     expect(stderr).toContain('No cartograph projects found');
-    expect(stderr).toContain('cartograph quickstart');
+    expect(stderr).toContain('cartograph index');
   });
 
   it('default project found → no warning emitted', async () => {

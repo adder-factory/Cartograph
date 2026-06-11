@@ -303,7 +303,7 @@ describe('lifecycle command action bodies', () => {
     expect(calls.join('\n')).toContain('"autoAllow":true');
   });
 
-  it('routes llm setup, trace-to-culprits, playbook, guide, mcp-budget, quickstart, and viewer actions', async () => {
+  it('routes llm setup, trace-to-culprits, playbook, guide, mcp-budget, index, and viewer actions', async () => {
     await actions.get('llm:setup [path]')!(projectPath);
     await actions.get('llm:smoke [path]')!(projectPath, { timeoutMs: '1234' });
     await actions.get('program:trace-to-culprits')!({
@@ -321,7 +321,7 @@ describe('lifecycle command action bodies', () => {
       top: '3',
     });
 
-    await actions.get('program:quickstart [path]')!(projectPath);
+    await actions.get('program:index [path]')!(projectPath);
     await actions.get('program:viewer [path]')!(projectPath, { port: '0', open: true });
 
     const text = calls.join('\n');
@@ -335,11 +335,11 @@ describe('lifecycle command action bodies', () => {
     expect(text).toContain('"disableWriteTools":true');
     expect(text).toContain('"topContributors":3');
     expect(stdout.join('\n')).toContain('playbook text');
-    expect(stdout.join('\n')).toContain('cartograph quickstart');
+    expect(stdout.join('\n')).toContain('cartograph index');
     expect(stdout.join('\n')).toContain('cartograph status --verbose');
     expect(stdout.join('\n')).toContain('smoke report');
     expect(stdout.join('\n')).toContain('budget:');
-    expect(stdout.join('\n')).toContain('cartograph quickstart');
+    expect(stdout.join('\n')).toContain('cartograph index');
     expect(text).toContain('open:http://localhost:0');
   });
 

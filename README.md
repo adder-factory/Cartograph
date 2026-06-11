@@ -114,7 +114,8 @@ cartograph find "SymbolName" --mode fuzzy
 ```
 
 To index a project *without* touching any agent config, use
-`cartograph quickstart .` (init + index + readiness check only).
+`cartograph index .` (init + index + readiness check only; previously named
+`quickstart`, which still works as an alias).
 
 ### What the installer writes
 
@@ -131,7 +132,7 @@ To index a project *without* touching any agent config, use
   `--command <path>`.
 - With `--location=global` the MCP config is written once for all projects and
   the project-local steps (init, index, hooks) are skipped — run
-  `cartograph quickstart .` per project instead.
+  `cartograph index .` per project instead.
 
 Configuration written for `--location=local` (project-scoped MCP entries and
 instruction files) is added to `.gitignore`, because it can contain absolute

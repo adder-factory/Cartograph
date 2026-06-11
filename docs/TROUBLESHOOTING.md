@@ -23,7 +23,7 @@ Cartograph not initialized in /path/to/project
 Fix:
 
 ```sh
-cartograph quickstart /path/to/project
+cartograph index /path/to/project
 cartograph status --verbose /path/to/project
 ```
 

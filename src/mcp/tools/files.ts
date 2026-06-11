@@ -204,7 +204,7 @@ async function handleFileListingFormat(input: HandleFileListingFormatArgs): Prom
     return ok(
       renderToolResponse({
         body: '',
-        empty: { message: 'No files indexed. Run `cartograph quickstart` first.' },
+        empty: { message: 'No files indexed. Run `cartograph index` first.' },
       }),
     );
   }

@@ -49,7 +49,7 @@ export function greet(name: string): string {
 }
 EOF
 
-    cartograph setup --no-models "$fixture"
+    cartograph llm install --no-models "$fixture"
     test -d "$fixture/.cartograph"
     cartograph admin index --quiet "$fixture"
     cartograph doctor --json "$fixture" > /tmp/cartograph-doctor.json
