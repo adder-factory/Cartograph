@@ -280,13 +280,15 @@ function setEdgeKindsFromHash(raw) {
   const inputs = Array.from(document.querySelectorAll('[data-filter-edge]'));
   if (inputs.length === 0) return;
   const selected = new Set(values);
-  let matchedCurrentControls = values.length === 0;
+  const rendered = new Set(inputs.map((input) => input.dataset.filterEdge));
   inputs.forEach((input) => {
-    const checked = selected.has(input.dataset.filterEdge);
-    input.checked = checked;
-    if (checked) matchedCurrentControls = true;
+    input.checked = selected.has(input.dataset.filterEdge);
   });
-  if (matchedCurrentControls) pendingHashEdgeKinds = null;
+  // Consume the pending set only when EVERY hash kind exists among the
+  // rendered checkboxes — a kind that only exists in the about-to-load
+  // graph must survive until syncEdgeKindFilters reads it, or the deep
+  // link's edge filter is silently lost on a partial match.
+  if (values.every((kind) => rendered.has(kind))) pendingHashEdgeKinds = null;
 }
 
 function setAllEdgeKindFilters(checked) {
@@ -734,17 +736,27 @@ document.getElementById('file-scope-filters')?.addEventListener('change', (e) =>
   writeHashState();
 });
 
+/* Manual edge-kind interaction takes ownership back from any pending
+   deep-link state and any feature-run snapshot. */
+function userOwnsEdgeKindFilters() {
+  pendingHashEdgeKinds = null;
+  if (typeof invalidateFeatureEdgeKindSnapshot === 'function') invalidateFeatureEdgeKindSnapshot();
+}
+
 document.getElementById('edge-kind-filters').addEventListener('change', (e) => {
   if (!e.target.matches('[data-filter-edge]')) return;
+  userOwnsEdgeKindFilters();
   applyFilters();
   writeHashState();
 });
 document.getElementById('btn-edge-all')?.addEventListener('click', () => {
+  userOwnsEdgeKindFilters();
   setAllEdgeKindFilters(true);
   applyFilters();
   writeHashState();
 });
 document.getElementById('btn-edge-none')?.addEventListener('click', () => {
+  userOwnsEdgeKindFilters();
   setAllEdgeKindFilters(false);
   applyFilters();
   writeHashState();

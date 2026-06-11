@@ -71,6 +71,15 @@ async function resetViewerLocalState() {
   renderSavedViews();
   syncGraphSnapshotControls();
   await resetGraphView();
+  // The setters above (and resetGraphView's writeHashState) re-persist
+  // their defaults — strip storage and the URL again so the button
+  // actually delivers "no saved state, no URL state".
+  try {
+    viewerLocalStateKeys().forEach((key) => localStorage.removeItem(key));
+  } catch {}
+  try {
+    history.replaceState(null, '', `${location.pathname}${location.search}`);
+  } catch {}
   renderSavedViews();
   syncGraphSnapshotControls();
   setViewerResetStatus(`Cleared ${keys.length} saved viewer setting${keys.length === 1 ? '' : 's'}.`, 'ok');
@@ -161,12 +170,34 @@ function featureNodeToElement(node) {
   };
 }
 
+/* The user's edge-kind choices captured before a feature force-enables
+   kinds its payload needs; restored when the overlay clears. Null when
+   no feature owns the checkboxes (or the user manually toggled one —
+   manual interaction takes ownership back, see
+   invalidateFeatureEdgeKindSnapshot). */
+let featureEdgeKindSnapshot = null;
+
+function invalidateFeatureEdgeKindSnapshot() {
+  featureEdgeKindSnapshot = null;
+}
+
 function enableFeatureEdgeKinds(edges) {
   const kinds = new Set(edges.map((edge) => edge.kind || 'edge').filter(Boolean));
   if (kinds.size === 0) return;
-  document.querySelectorAll('[data-filter-edge]').forEach((input) => {
-    if (kinds.has(input.dataset.filterEdge)) input.checked = true;
+  const inputs = Array.from(document.querySelectorAll('[data-filter-edge]'));
+  if (featureEdgeKindSnapshot === null) {
+    featureEdgeKindSnapshot = new Map(inputs.map((input) => [input.dataset.filterEdge, input.checked]));
+  }
+  let changed = false;
+  inputs.forEach((input) => {
+    if (kinds.has(input.dataset.filterEdge) && !input.checked) {
+      input.checked = true;
+      changed = true;
+    }
   });
+  // Reflect the force-enable in the URL — otherwise the hash lies
+  // about the visible filters until an unrelated interaction rewrites it.
+  if (changed && typeof writeHashState === 'function') writeHashState();
 }
 
 function revealFeatureElements(nodeIds, edgeIds) {
@@ -258,6 +289,15 @@ function clearFeatureOverlay(opts = {}) {
     button.dataset.active = '0';
     button.setAttribute('aria-pressed', 'false');
   });
+  if (featureEdgeKindSnapshot !== null) {
+    // Give the user back the edge-kind choices the feature overrode.
+    document.querySelectorAll('[data-filter-edge]').forEach((input) => {
+      const previous = featureEdgeKindSnapshot.get(input.dataset.filterEdge);
+      if (previous !== undefined) input.checked = previous;
+    });
+    featureEdgeKindSnapshot = null;
+    if (typeof writeHashState === 'function') writeHashState();
+  }
   if (hidePanel) hideFeaturePanel();
   syncEdgeKindFilters();
   applyFilters();
