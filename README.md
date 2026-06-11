@@ -239,8 +239,13 @@ cartograph viewer .
 </p>
 
 The viewer is local-only and reads the same graph index as the CLI and MCP
-server. Use it to inspect symbol neighborhoods, source, callers, callees,
-health, coverage, and graph layout.
+server. Node shapes encode symbol kinds (circles for callables, diamonds for
+contracts, hexagons for routes, barrels for data stores), borders encode code
+health, and centrality-scaled halos make hub symbols stand out. Rails filter
+by kind, health, edge kind, and per-project file scope; built-in tools cover
+impact analysis, shortest paths, compare-to-HEAD, saved views, PNG/SVG/JSON
+export, an agent-trace replay tab, and a project health tab. See
+[docs/VIEWER.md](docs/VIEWER.md) for the full guide.
 
 ## Languages and storage
 
@@ -291,6 +296,7 @@ local benchmark.
 | Agent-assisted install (pasteable prompt, PowerShell) | [docs/AGENT-INSTALL.md](docs/AGENT-INSTALL.md) |
 | CLI command reference | [docs/CLI-REFERENCE.md](docs/CLI-REFERENCE.md) |
 | MCP setup, profiles, load budget, client snippets | [docs/MCP-USAGE.md](docs/MCP-USAGE.md) |
+| Viewer guide (shapes, filters, tools, shortcuts) | [docs/VIEWER.md](docs/VIEWER.md) |
 | PostgreSQL, pgvector, migration, storage benchmark | [docs/STORAGE-BACKENDS.md](docs/STORAGE-BACKENDS.md) |
 | Configuration and advanced options | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | Language and framework support matrix | [docs/SUPPORT-MATRIX.md](docs/SUPPORT-MATRIX.md) |
