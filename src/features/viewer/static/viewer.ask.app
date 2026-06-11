@@ -202,7 +202,9 @@ document.getElementById('ask-selection-clear').addEventListener('click', () => {
    /api/ask (which delegates to cg.llm.ask), with any active code
    selection folded in as context. */
 async function submitAsk(question) {
-  const target = liveSymbolCache?.label || (LIVE_MODE ? null : 'extractFromSource');
+  const target = (typeof activeEdgeAskTarget === 'function' && activeEdgeAskTarget())
+    || liveSymbolCache?.label
+    || (LIVE_MODE ? null : 'extractFromSource');
   const history = document.getElementById('ask-history');
   const submitBtn = document.getElementById('ask-submit');
   // Render the user message.
@@ -275,6 +277,16 @@ async function submitAsk(question) {
     // for citation grounding. The click delegate above routes
     // them through searchAndFocus.
     loading.innerHTML = renderAnswerWithCitations(data.answer || '(empty answer)');
+    // The server's retrieval citations are better grounded than the
+    // backtick heuristic — list them as clickable sources.
+    const citations = Array.isArray(data.citations) ? data.citations : [];
+    if (citations.length > 0) {
+      const rows = citations.map((c) =>
+        `<a class="ask-link" data-symbol="${escapeHtml(c.name)}">${escapeHtml(c.name)}</a>` +
+        ` <span class="ask-loc">${escapeHtml(c.file)}:${Number(c.line) || '?'}</span>`,
+      ).join('<br>');
+      loading.innerHTML += `<div class="ask-citations">Sources<br>${rows}</div>`;
+    }
   } catch (err) {
     loading.classList.replace('loading', 'err');
     loading.textContent = `Network error: ${String(err)}`;

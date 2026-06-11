@@ -221,7 +221,6 @@ export function sessionsPayload(ctx: RequestContext, limit: number): unknown {
   return {
     sessions: rows.map((r) => ({
       id: r.id,
-      startedTs: r.startedTs,
       lastActivityTs: r.lastActivityTs,
       toolCount: r.toolCount,
     })),
@@ -258,11 +257,9 @@ export function biomarkerFindingsPayload(ctx: RequestContext, biomarker: string,
     findings: rows.map((r) => ({
       id: r.nodeId,
       name: r.name,
-      kind: r.kind,
       file: r.filePath,
       severity: r.severity,
       metric: r.metric,
-      centrality: r.centrality,
     })),
   };
 }
@@ -272,7 +269,6 @@ export function hotspotsPayload(ctx: RequestContext, limit: number): unknown {
   return {
     hotspots: rows.map((r) => ({
       filePath: r.filePath,
-      centrality: r.fileCentrality,
       commits: r.commitCount,
       loc: r.loc,
       lastTouchedTs: r.lastTouchedTs,
