@@ -71,6 +71,10 @@ function lfSetFollow(follow) {
   if (lfHoldBtn) lfHoldBtn.textContent = follow ? 'Hold' : 'Follow';
   if (lfJumpEl) lfJumpEl.hidden = follow;
   if (follow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
+  if (follow && lfGraphCy && lfMode !== 'feed' && lfCurrentNodeId) {
+    const node = lfGraphCy.getElementById(lfCurrentNodeId);
+    if (node.length > 0) lfGraphCy.animate({ center: { eles: node }, duration: LF_FOLLOW_CAM_MS, easing: 'ease-in-out-quad' });
+  }
 }
 
 /* ── append path ── */
@@ -430,6 +434,10 @@ const LF_GRAPH_MAX_TARGETS = 80;
 const LF_GRAPH_LOG_CAP = 400;
 const LF_GRAPH_FLASH_MS = 900;
 const LF_GRAPH_LAYOUT_DEBOUNCE_MS = 600;
+const LF_TRAIL_MAX = 40;
+const LF_TRAIL_MIN_OPACITY = 0.18;
+const LF_TRAIL_FADE_STEP = 0.08;
+const LF_FOLLOW_CAM_MS = 380;
 const LF_MODE_KEY = 'cartograph-viewer-live-mode-v1';
 const LF_MODES = ['feed', 'split', 'graph'];
 
@@ -440,6 +448,12 @@ let lfGraphCy = null;
 let lfGraphLayoutTimer = null;
 let lfGraphLog = [];      // {tool, toolLabel, hue, target} per call, capped
 let lfTargetOrder = [];   // target node ids in insertion order (prune oldest)
+let lfSymbolCache = new Map(); // symbol name → /api/symbol payload | null
+let lfPrevSymbolNodeId = null; // traversal trail: last symbol touched
+let lfTrailEdges = [];         // trail edge ids, oldest first
+let lfTrailSeq = 0;
+let lfCurrentNodeId = null;    // "where the agent is" marker
+let lfGraphHasLaidOut = false;
 
 /** Concrete thing a call touched, if any: symbol > file/dir > query. */
 function lfCallTarget(c) {
@@ -481,8 +495,7 @@ function lfGraphRebuild() {
   if (!lfGraphCy) return;
   // A pending layout timer is fine — it fires against the rebuilt
   // elements, which is exactly what we want.
-  lfGraphCy.elements().remove();
-  lfTargetOrder = [];
+  lfGraphClearElements();
   const session = lfSessionFilterValue();
   for (const entry of lfGraphLog) {
     if (session && entry.sessionId !== session) continue;
@@ -526,13 +539,42 @@ function lfGraphUpsert(entry, fresh) {
   if (!entry.target) return;
   let targetNode = lfGraphCy.getElementById(entry.target.id);
   if (targetNode.length === 0) {
+    // Spawn near the agent's current position so new symbols grow
+    // outward from the walk instead of flying in from origin.
+    const anchor = lfCurrentNodeId ? lfGraphCy.getElementById(lfCurrentNodeId) : null;
+    const anchorPos = anchor && anchor.length > 0 ? anchor.position() : null;
     targetNode = lfGraphCy.add({
       group: 'nodes',
       data: { id: entry.target.id, label: entry.target.label, size: 18, focus: entry.target.focus },
       classes: entry.target.type,
+      position: anchorPos
+        ? { x: anchorPos.x + 70 * (Math.random() - 0.5) + 50, y: anchorPos.y + 70 * (Math.random() - 0.5) }
+        : undefined,
     });
     lfTargetOrder.push(entry.target.id);
     lfGraphPrune();
+  }
+  if (entry.target.type === 'symbol') {
+    lfGraphResolveSymbol(entry.target.label, entry.target.id, targetNode);
+    // Traversal trail: one hop edge per symbol→symbol move, in tool
+    // color, newest bright and older hops fading out.
+    if (lfPrevSymbolNodeId && lfPrevSymbolNodeId !== entry.target.id &&
+        lfGraphCy.getElementById(lfPrevSymbolNodeId).length > 0) {
+      const trailId = `trail:${lfTrailSeq++}`;
+      const trailEdge = lfGraphCy.add({
+        group: 'edges',
+        data: { id: trailId, source: lfPrevSymbolNodeId, target: entry.target.id, color: `hsl(${entry.hue} 70% 60%)` },
+        classes: 'trail',
+      });
+      lfTrailEdges.push(trailId);
+      while (lfTrailEdges.length > LF_TRAIL_MAX) {
+        const dead = lfGraphCy.getElementById(lfTrailEdges.shift());
+        if (dead.length > 0) lfGraphCy.remove(dead);
+      }
+      lfTrailFade();
+      if (fresh) lfGraphFlash(trailEdge);
+    }
+    lfPrevSymbolNodeId = entry.target.id;
   }
   const edgeId = `e:${toolId}->${entry.target.id}`;
   let edge = lfGraphCy.getElementById(edgeId);
@@ -541,10 +583,72 @@ function lfGraphUpsert(entry, fresh) {
   }
   edge.data('n', (edge.data('n') || 0) + 1);
   edge.data('w', Math.min(6, 1 + Math.log2(1 + edge.data('n'))));
+  lfGraphSetCurrent(entry.target.id, fresh);
   if (fresh) {
     lfGraphFlash(targetNode);
     lfGraphFlash(edge);
   }
+}
+
+/** Re-apply the fade gradient over the trail, newest hop brightest. */
+function lfTrailFade() {
+  lfTrailEdges = lfTrailEdges.filter((id) => lfGraphCy.getElementById(id).length > 0);
+  const count = lfTrailEdges.length;
+  lfTrailEdges.forEach((id, i) => {
+    lfGraphCy.getElementById(id).style('opacity', Math.max(LF_TRAIL_MIN_OPACITY, 1 - (count - 1 - i) * LF_TRAIL_FADE_STEP));
+  });
+}
+
+/** Mark the node the agent touched last and glide the camera to it
+    (Follow drives both the feed autoscroll and this chase-cam). */
+function lfGraphSetCurrent(nodeId, fresh) {
+  if (lfCurrentNodeId && lfCurrentNodeId !== nodeId) {
+    lfGraphCy.getElementById(lfCurrentNodeId).removeClass('lf-current');
+  }
+  lfCurrentNodeId = nodeId;
+  const node = lfGraphCy.getElementById(nodeId);
+  if (node.length === 0) return;
+  node.addClass('lf-current');
+  if (fresh && lfFollow && lfMode !== 'feed') {
+    lfGraphCy.stop(false, false);
+    lfGraphCy.animate({ center: { eles: node }, duration: LF_FOLLOW_CAM_MS, easing: 'ease-in-out-quad' });
+  }
+}
+
+/** Upgrade a touched symbol to its indexed identity (kind shape,
+    health border, centrality size — the main graph's own style) once
+    /api/symbol resolves it. Cached per name; unresolved names keep
+    the generic dot. */
+function lfGraphResolveSymbol(name, nodeId, node) {
+  if (lfSymbolCache.has(name)) {
+    lfGraphApplyResolution(nodeId, lfSymbolCache.get(name));
+    return;
+  }
+  if (!LIVE_MODE) return;
+  void (async () => {
+    let payload = null;
+    try {
+      const res = await apiFetch(`/api/symbol/${encodeURIComponent(name)}`);
+      if (res.ok) payload = await res.json();
+    } catch {
+      /* unresolved — keep the generic style */
+    }
+    lfSymbolCache.set(name, payload);
+    if (lfSymbolCache.size > 500) lfSymbolCache = new Map([...lfSymbolCache].slice(-250));
+    lfGraphApplyResolution(nodeId, payload);
+  })();
+}
+
+function lfGraphApplyResolution(nodeId, payload) {
+  if (!lfGraphCy || !payload) return;
+  const node = lfGraphCy.getElementById(nodeId);
+  if (node.length === 0) return;
+  node.data('kind', payload.kind);
+  node.data('centrality', payload.centrality || 0);
+  node.data('health', healthForPayloadNode(payload));
+  if (payload.label) node.data('label', payload.label);
+  node.removeClass('symbol');
+  node.addClass('code');
 }
 
 function lfGraphScheduleLayout() {
@@ -552,7 +656,15 @@ function lfGraphScheduleLayout() {
   lfGraphLayoutTimer = setTimeout(() => {
     lfGraphLayoutTimer = null;
     if (!lfGraphCy || !lfActive || lfMode === 'feed') return;
-    lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 28 }).run();
+    // While following, fitting would yank the chase-cam off the
+    // action — relax positions, then re-center on the current node.
+    const fitNow = !lfGraphHasLaidOut || !lfFollow;
+    lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: fitNow, padding: 28 }).run();
+    lfGraphHasLaidOut = true;
+    if (!fitNow && lfCurrentNodeId) {
+      const node = lfGraphCy.getElementById(lfCurrentNodeId);
+      if (node.length > 0) lfGraphCy.center(node);
+    }
   }, LF_GRAPH_LAYOUT_DEBOUNCE_MS);
 }
 
@@ -581,21 +693,48 @@ function lfEnsureGraph() {
       },
       { selector: 'node.tool', style: { shape: 'round-rectangle', 'background-color': 'data(color)' } },
       { selector: 'node.symbol', style: { shape: 'ellipse', 'background-color': '#183654', 'border-width': 1.5, 'border-color': '#75bdff' } },
+      // Resolved symbols wear the main graph's exact identity — kind
+      // shape + fill, health border, centrality size (viewer.graph-core).
+      { selector: 'node.code', style: viewerBaseNodeStyle() },
       { selector: 'node.file', style: { shape: 'rectangle', 'background-color': '#20252b', 'border-width': 1, 'border-color': '#788592' } },
       { selector: 'node.query', style: { shape: 'diamond', 'background-color': '#20252b', 'border-width': 1, 'border-color': '#9faab6' } },
       { selector: 'node.fresh', style: { 'border-width': 3, 'border-color': '#5dd6aa' } },
+      {
+        selector: 'node.lf-current',
+        style: {
+          'border-width': 4,
+          'border-color': '#75bdff',
+          'underlay-color': '#75bdff',
+          'underlay-opacity': 0.18,
+          'underlay-padding': 8,
+          'z-index': 10,
+        },
+      },
       {
         selector: 'edge',
         style: {
           width: 'data(w)',
           'line-color': '#323a43',
+          'line-opacity': 0.35,
           'curve-style': 'bezier',
           'target-arrow-shape': 'triangle',
           'target-arrow-color': '#323a43',
           'arrow-scale': 0.7,
         },
       },
-      { selector: 'edge.fresh', style: { 'line-color': '#5dd6aa', 'target-arrow-color': '#5dd6aa' } },
+      {
+        selector: 'edge.trail',
+        style: {
+          width: 2.5,
+          'line-color': 'data(color)',
+          'line-opacity': 1,
+          'target-arrow-color': 'data(color)',
+          'target-arrow-shape': 'triangle',
+          'arrow-scale': 0.9,
+          'z-index': 5,
+        },
+      },
+      { selector: 'edge.fresh', style: { 'line-color': '#5dd6aa', 'target-arrow-color': '#5dd6aa', width: 3.5 } },
     ],
   });
   lfGraphCy.on('tap', 'node.symbol', (e) => {
@@ -613,7 +752,16 @@ function lfEnsureGraph() {
 
 function lfGraphReset() {
   lfGraphLog = [];
+  lfGraphClearElements();
+}
+
+/** Drop drawn elements + traversal state, keep the call log. */
+function lfGraphClearElements() {
   lfTargetOrder = [];
+  lfTrailEdges = [];
+  lfPrevSymbolNodeId = null;
+  lfCurrentNodeId = null;
+  lfGraphHasLaidOut = false;
   lfGraphCy?.elements().remove();
 }
 
@@ -646,5 +794,11 @@ document.querySelectorAll('.live-mode-btn').forEach((btn) => {
 globalThis.__cartographLiveFeedSmoke = {
   graphNodeCount: () => (lfGraphCy ? lfGraphCy.nodes().length : 0),
   graphEdgeCount: () => (lfGraphCy ? lfGraphCy.edges().length : 0),
+  graphNodeInfo: (id) => {
+    const node = lfGraphCy?.getElementById(id);
+    if (!node || node.length === 0) return null;
+    return { kind: node.data('kind') ?? null, health: node.data('health') ?? null, classes: node.classes() };
+  },
+  trailEdgeCount: () => (lfGraphCy ? lfGraphCy.edges('.trail').length : 0),
   mode: () => lfMode,
 };
