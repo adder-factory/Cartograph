@@ -213,3 +213,170 @@ describe('sharedDocstringsAcrossConstants', () => {
     expect(shared.size).toBe(0);
   });
 });
+
+describe('field report #2 item 5 — truncation, unit suffixes, shorthand', () => {
+  it('SKIPS when the signature carries the extraction-cap overflow marker', () => {
+    // Doc cites 11 / 0.85 / 0.7 — all literally present in the full
+    // value, but BEYOND the 100-char signature cap. A disjoint check
+    // against the truncated text would be a guess; never guess.
+    const truncated = `BIG_TABLE = { alpha: ${'x'.repeat(80)}...`;
+    const finding = evaluateStaleDoc({
+      id: 'n1',
+      docstring: 'Weights: 11 columns, 0.85 primary, 0.7 fallback.',
+      signature: truncated,
+    });
+    expect(finding).toBeNull();
+  });
+
+  it('does NOT decompose unit-suffixed decimals into bogus claims', () => {
+    // "0.85in" used to backtrack-match as "0" — an invented claim.
+    const finding = evaluateStaleDoc({
+      id: 'n2',
+      docstring: 'Margin defaults to 0.85in on letter paper.',
+      signature: 'PAGE = { margin: 0.85, unit: "in" }',
+    });
+    // The only doc number token is unit-suffixed → no claims → null.
+    expect(finding).toBeNull();
+  });
+
+  it('expands $96K / $2.4M shorthand against spelled-out values', () => {
+    expect(
+      evaluateStaleDoc({
+        id: 'n3',
+        docstring: 'Pipeline value: $96K per quarter.',
+        signature: 'PIPELINE_VALUE = 96000',
+      }),
+    ).toBeNull();
+    expect(
+      evaluateStaleDoc({
+        id: 'n4',
+        docstring: 'Cap at $2.4M total.',
+        signature: 'CAP = 2400000',
+      }),
+    ).toBeNull();
+    // Genuinely drifted shorthand still fires.
+    const drifted = evaluateStaleDoc({
+      id: 'n5',
+      docstring: 'Cap at $2.4M total.',
+      signature: 'CAP = 5000000',
+    });
+    expect(drifted?.biomarker).toBe('stale_doc');
+  });
+
+  it('reads JS numeric separators in initializers as plain numbers', () => {
+    // No unit word after the doc number — keeps this case exercising
+    // the separator normalization, not the spaced-unit skip.
+    expect(
+      evaluateStaleDoc({
+        id: 'n6',
+        docstring: 'Retry budget defaults to 5000.',
+        signature: 'RETRY_BUDGET_MS = 5_000',
+      }),
+    ).toBeNull();
+  });
+
+  it('still fires on the classic drift case', () => {
+    const finding = evaluateStaleDoc({
+      id: 'n7',
+      docstring: 'Gamma is 2 for the squared falloff.',
+      signature: 'GAMMA = 5',
+    });
+    expect(finding?.biomarker).toBe('stale_doc');
+    expect(finding?.detail).toMatchObject({ docNumbers: expect.arrayContaining(['2']) });
+  });
+});
+
+describe('floor-surfaced FP classes — underscore values made these constants visible', () => {
+  // Each fixture reproduces a real cartograph constant that fired the
+  // 0/0/0 floor the day separator normalization landed (the old
+  // tokenizer read `5_000` signatures as NOTHING, so none of these
+  // had ever been checked).
+
+  it('SKIPS regex-literal signatures — pattern digits are not values', () => {
+    // SMALL_MODEL_RE: doc cites example MATCHES; sig digits are a
+    // char class. The disjoint check is meaningless on patterns.
+    expect(
+      evaluateStaleDoc({
+        id: 'r1',
+        docstring: 'Heuristic: trips on `-1b`/`-1B`/`-2b`/`-3b` size tokens.',
+        signature: 'SMALL_MODEL_RE = /-[123]b\\b/i',
+      }),
+    ).toBeNull();
+  });
+
+  it('skips spaced unit words — measurements in other units', () => {
+    // DEFAULT_TIMEOUT_MS: "5 minutes" IS the value, in units the
+    // comparison can't convert. Same class as the attached `0.85in`.
+    expect(
+      evaluateStaleDoc({
+        id: 'u1',
+        docstring: '5 minutes gives comfortable headroom.',
+        signature: 'DEFAULT_TIMEOUT_MS = 300_000',
+      }),
+    ).toBeNull();
+    // FRESHNESS_TTL_MS: the unit governs the whole prose range —
+    // BOTH endpoints of "~10–20 ms" are rationale costs, not values.
+    expect(
+      evaluateStaleDoc({
+        id: 'u2',
+        docstring: 'Caching avoids the ~10–20 ms shell-out per call.',
+        signature: 'FRESHNESS_TTL_MS = 5_000',
+      }),
+    ).toBeNull();
+  });
+
+  it('ignores hyphen-compound references like audit-4', () => {
+    // LOCAL_CHAT_MAX_OUTPUT_LENGTH: "audit-4" is an identifier's
+    // trailing numeral, not a claim that the value is 4.
+    expect(
+      evaluateStaleDoc({
+        id: 'h1',
+        docstring: 'Caps a runaway local model (friction audit-4).',
+        signature: 'LOCAL_CHAT_MAX_OUTPUT_LENGTH = 32_000',
+      }),
+    ).toBeNull();
+  });
+
+  it('matches prose thousands-spacing against separator values', () => {
+    // BIOMARKER_WORKER_NODE_THRESHOLD: "10 000" in prose is the same
+    // number as the `10_000` initializer — overlap, not drift.
+    expect(
+      evaluateStaleDoc({
+        id: 't1',
+        docstring: 'A budget of 10 000 sits in the gap between tiers.',
+        signature: 'BIOMARKER_WORKER_NODE_THRESHOLD = 10_000',
+      }),
+    ).toBeNull();
+  });
+
+  it('does NOT expand bare K/M/B — quantity rationale is not money', () => {
+    // sql.ts DEFAULT_TIMEOUT_MS: "5M rows" is a rationale quantity;
+    // expanding it invented a 5_000_000 claim against a 10_000 value.
+    expect(
+      evaluateStaleDoc({
+        id: 'k1',
+        docstring: 'A recursive CTE materialising 5M rows can pin the CPU.',
+        signature: 'DEFAULT_TIMEOUT_MS = 10_000',
+      }),
+    ).toBeNull();
+  });
+
+  it('keeps the START of a severity-ladder range countable', () => {
+    // RECENT_GROW_THRESHOLD: in "1.5–2.0x info" the range start IS
+    // the constant's value claim; en-dashes split, never glue.
+    expect(
+      evaluateStaleDoc({
+        id: 'l1',
+        docstring: 'Severity ladder by growth ratio: 1.5–2.0x info, 2.0–3.0x warning.',
+        signature: 'RECENT_GROW_THRESHOLD = 1.5',
+      }),
+    ).toBeNull();
+    // A drifted ladder still fires — the skip is surgical.
+    const drifted = evaluateStaleDoc({
+      id: 'l2',
+      docstring: 'Severity ladder by growth ratio: 1.5–2.0x info, 2.0–3.0x warning.',
+      signature: 'RECENT_GROW_THRESHOLD = 4',
+    });
+    expect(drifted?.biomarker).toBe('stale_doc');
+  });
+});

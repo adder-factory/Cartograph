@@ -1,5 +1,27 @@
 import * as fs from 'node:fs';
+import { createRequire } from 'node:module';
 import * as path from 'node:path';
+
+/**
+ * Locate an asset that ships inside the `web-tree-sitter` dependency
+ * via MODULE RESOLUTION rather than path guessing. Install-from-git
+ * global installs hoist dependencies to the package manager's global
+ * root, where none of the static sibling-directory guesses below ever
+ * look — the wasm then "doesn't exist" and the first index aborts
+ * (field report #2, install trap 1). The resolver finds the hoisted
+ * copy wherever it landed. Returns null when the dependency itself
+ * is absent (standalone bundles — the share/ candidates cover those).
+ */
+export function resolveWebTreeSitterAsset(relative: string): string | null {
+  try {
+    const require = createRequire(import.meta.url);
+    const entry = require.resolve('web-tree-sitter');
+    const candidate = path.join(path.dirname(entry), relative);
+    return fs.existsSync(candidate) ? candidate : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Resolve runtime assets that are copied next to source, dist, or a
@@ -21,5 +43,11 @@ export function resolveAssetPath(...relativeParts: string[]): string {
     ...(argv0 ? [path.join(argv0, '..', 'share', 'cartograph', relative)] : []),
   ];
 
-  return candidates.find((candidate) => fs.existsSync(candidate)) ?? candidates[0]!;
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (found) return found;
+  if (relative === 'web-tree-sitter.wasm') {
+    const resolved = resolveWebTreeSitterAsset(relative);
+    if (resolved) return resolved;
+  }
+  return candidates[0]!;
 }

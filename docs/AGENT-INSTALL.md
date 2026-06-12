@@ -39,6 +39,16 @@ curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/insta
 iwr https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 -useb | iex
 ```
 
+> **Installing from git with bun? Three traps (field report #2).** A
+> `bun add -g github:…` install used to abort its first index because
+> `web-tree-sitter.wasm` lived only next to built output; the runtime
+> now falls back to module resolution and finds the hoisted dependency
+> copy, so this works — but two bun behaviors still bite: `bun pm
+> trust` RE-EXTRACTS the package (wiping any hand-patched files), and
+> switching git refs in a global install can throw bun's
+> `DependencyLoop` until you `bun remove -g` the package first. The
+> standalone installer above avoids all three.
+
 The one-command local setup initializes `.cartograph/`, writes supported local
 MCP configuration, indexes the repository, installs the managed git hooks, and
 skips the interactive LLM wizard in `--yes` mode. Core search, graph, impact,

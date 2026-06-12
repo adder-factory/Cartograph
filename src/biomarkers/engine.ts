@@ -1829,6 +1829,13 @@ export function evaluateStaleDoc(node: {
   signature?: string | undefined;
 }): Finding | null {
   if (!node.docstring || !node.signature) return null;
+  // A signature that hit the extraction cap (INIT_SIGNATURE_MAX in
+  // tree-sitter-decls) carries the '...' overflow marker — numbers
+  // cited from LATER in the value are invisible here, so a
+  // disjoint-set verdict would be a guess, and the field report
+  // (#2 item 5) showed exactly that guess firing on real code.
+  if (node.signature.endsWith('...')) return null;
+  if (REGEX_INITIALIZER_RE.test(node.signature)) return null;
   const docNums = extractNumbersFromText(node.docstring);
   const sigNums = extractNumbersFromText(node.signature);
   if (docNums.size === 0 || sigNums.size === 0) return null;
@@ -1843,6 +1850,112 @@ export function evaluateStaleDoc(node: {
     detail: { docNumbers: [...docNums], sigNumbers: [...sigNums] },
   };
 }
+
+// Strip ISO-date sequences (YYYY-MM-DD) before any other extraction.
+// Their digit triples (year / month / day) are never value claims
+// about the constant they decorate. Without this, every session-
+// handoff comment ("Updated 2026-05-10: ...") trips stale_doc.
+const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
+// Strip parentheticals that contain approximation / example signals
+// (`~`, `e.g.`, `for example`, `approximately`, `around`, `like`).
+// Numbers in such contexts are illustrative or rationale, not value
+// claims — flagging them as drift produces FPs on the very common
+// pattern `value (~N units)` or `value (e.g., N units)`. Closes
+// friction #67. Real value claims in parens (`(default: N)`,
+// `(was N before)`) lack the signal token and are preserved.
+const APPROX_PAREN_RE = /\([^()]*(?:~|≈|e\.g\.|for example|\bapproximately\b|\baround\b|\blike\b)[^()]*\)/gi;
+// NOTE: tilde-led numbers OUTSIDE parens (`~5 for tier 2`) are kept
+// deliberately — an approximate value claim still anchors overlap,
+// and extra doc numbers can never cause a firing (the rule needs
+// FULL disjoint). Stripping them broke FUZZY_EDIT_DIST_MAX, whose
+// only value claim is `~5`.
+// JS numeric separators (`5_000` in initializers) and prose
+// thousands-spacing (`10 000 nodes`) both read as the plain number.
+// The space form only collapses digit + exactly-three-digit groups;
+// a spaced enumeration whose second item is 3 digits (`ports 80 443`)
+// would falsely merge, but that shape is vanishingly rare in
+// docstrings and accepted as a known limitation.
+const DIGIT_SEPARATOR_RE = /(?<=\d)(?:_(?=\d)| (?=\d{3}\b))/g;
+// Money shorthand: `$`-REQUIRED. Bare K/M/B suffixes are quantity
+// rationale ("5M rows", "39K files") and model sizes ("-1B params"),
+// not value claims; expanding them invented billion-scale claims on
+// real code. The field-report cases were all money ($96K, $2.4M).
+const SHORTHAND_RE = /(?<![\w#'-])\$(\d+(?:\.\d+)?)\s?([KkMmBb])\b/g;
+const SHORTHAND_MULT: Record<string, number> = { k: 1e3, m: 1e6, b: 1e9 };
+// Tokenizer body: consume the WHOLE word-ish token, then judge it
+// (see usage comment in extractNumbersFromText). The `\w-` lookbehind
+// rejects hyphen-compound references (`audit-4`, `Friction-29`,
+// `gpt-4`) — trailing numerals of an identifier, not value claims.
+// En/em dashes deliberately SPLIT tokens: in a severity ladder like
+// `1.5–2.0x info` the range START is the constant's value claim
+// (RECENT_GROW_THRESHOLD's only anchor) and must stay countable.
+const NUMBER_TOKEN_RE = /(?<![\w#'])(?<!\w-)-?\d+(?:\.\d+)?(?:[\w%-][\w.%-]*)?/;
+// A consumed token containing anything beyond digits/dot is
+// unit-suffixed (`50%`, `0.85in`) — skipped whole.
+const NON_PLAIN_NUMBER_RE = /[^\d.]/;
+// Identifier-style prefixes that commonly precede a non-value number
+// reference (`per RFC 3986`, `bind to port 8080`).
+const NUMBER_PREFIX_SKIP_RE = /\b(?:rfc|port|issue|pr|chapter|section|fig(?:ure)?|sec)\s+$/i;
+// A SPACED time/size unit word after a plain number (`5 minutes`,
+// `10 MB`) is the same measurement class the attached-suffix skip
+// already drops (`0.85in`) — a measurement in OTHER units than the
+// raw initializer, which a unit-blind comparison can't judge. The
+// optional en/em-dash tail lets the unit govern a whole prose range
+// (`~10–20 ms`): both endpoints are measurements, neither a value.
+// Shape first (word after optional range tail), Set lookup second —
+// a 30-way regex alternation buys nothing but complexity.
+const UNIT_WORD_AFTER_RE = /^(?:\s?[–—]\s?\d+(?:\.\d+)?)?\s+([A-Za-z]+)/;
+const UNIT_WORDS = new Set([
+  'ms',
+  'msec',
+  'msecs',
+  'millisecond',
+  'milliseconds',
+  's',
+  'sec',
+  'secs',
+  'second',
+  'seconds',
+  'min',
+  'mins',
+  'minute',
+  'minutes',
+  'h',
+  'hr',
+  'hrs',
+  'hour',
+  'hours',
+  'd',
+  'day',
+  'days',
+  'week',
+  'weeks',
+  'byte',
+  'bytes',
+  'kb',
+  'kib',
+  'mb',
+  'mib',
+  'gb',
+  'gib',
+  'tb',
+  'tib',
+]);
+
+/** True when the text right after a plain number reads as a spaced
+ *  unit word (optionally across an en/em-dash range tail). */
+function isMeasurementTail(tail: string): boolean {
+  const m = UNIT_WORD_AFTER_RE.exec(tail);
+  return m !== null && UNIT_WORDS.has((m[1] ?? '').toLowerCase());
+}
+// 4-digit integers in this range read as years, not value claims.
+const YEAR_MIN = 1900;
+const YEAR_MAX = 2100;
+// A signature whose initializer is a regex literal carries pattern
+// syntax (quantifiers, char classes — `/-[123]b\b/`), never numeric
+// value claims; doc text for such constants cites example MATCHES
+// (`-1b`/`-2b`), so the disjoint check is meaningless there.
+const REGEX_INITIALIZER_RE = /=\s*\//;
 
 /**
  * Pull standalone numeric literals out of free text. We're trying to
@@ -1862,6 +1975,12 @@ export function evaluateStaleDoc(node: {
  *   - parenthetical approximations / examples (`(~85 MB)`,
  *     `(e.g., 12.5 GB)`, `(approximately 4 MB)`) — illustrative
  *     numbers, not value-of-this-constant claims (#67)
+ *   - tilde/≈-led runs outside parens (`~10–20 ms`) — same
+ *     approximation semantics (field report #2 item 5 follow-on)
+ *   - spaced unit words (`5 minutes`, `10 MB`) — measurements in
+ *     other units, same class as the attached-suffix skip
+ *   - hyphen-compound references (`audit-4`, `Friction-29`) —
+ *     trailing numerals of an identifier
  *   - compound-noun-modifier prefixes (`1000-name list`,
  *     `5-element array`) — count adjectives (#67)
  *
@@ -1870,43 +1989,50 @@ export function evaluateStaleDoc(node: {
  */
 function extractNumbersFromText(text: string): Set<string> {
   const out = new Set<string>();
-  // Strip ISO-date sequences (YYYY-MM-DD) before any other extraction.
-  // Their digit triples (year / month / day) are never value claims
-  // about the constant they decorate. Without this, every session-
-  // handoff comment ("Updated 2026-05-10: ...") trips stale_doc.
-  const ISO_DATE_RE = /\b\d{4}-\d{2}-\d{2}\b/g;
-  // Strip parentheticals that contain approximation / example signals
-  // (`~`, `e.g.`, `for example`, `approximately`, `around`, `like`).
-  // Numbers in such contexts are illustrative or rationale, not value
-  // claims — flagging them as drift produces FPs on the very common
-  // pattern `value (~N units)` or `value (e.g., N units)`. Closes
-  // friction #67. Real value claims in parens (`(default: N)`,
-  // `(was N before)`) lack the signal token and are preserved.
-  const APPROX_PAREN_RE = /\([^()]*(?:~|e\.g\.|for example|\bapproximately\b|\baround\b|\blike\b)[^()]*\)/gi;
-  const cleaned = text.replaceAll(ISO_DATE_RE, '').replaceAll(APPROX_PAREN_RE, '');
+  let cleaned = text.replaceAll(ISO_DATE_RE, '').replaceAll(APPROX_PAREN_RE, '');
+  // Normalize digit separators before tokenizing. NOTE: this is what
+  // first made underscore-separated constants VISIBLE to this rule at
+  // all (their signatures previously tokenized to nothing, silently
+  // skipping the check).
+  cleaned = cleaned.replaceAll(DIGIT_SEPARATOR_RE, '');
 
-  // Trailing lookahead `(?![\w%-])` keeps `50%`, `1.5x`, AND
-  // compound-noun-modifier numbers (`1000-name list`, `5-element
-  // array`) out of the result — those name a count, not a value
-  // claim about the constant. Adding `-` to the negative lookahead
-  // closes friction #67's `MAX_SYMBOLS` case.
-  // Leading lookbehind `(?<![\w#'])` filters identifiers + issue refs
-  // + year-style apostrophe prefixes.
-  const re = /(?<![\w#'])-?\d+(?:\.\d+)?(?![\w%-])/g;
-  // Negative-lookbehind for the identifier-style prefixes that
-  // commonly precede a non-value number reference.
-  const PREFIX_SKIP = /\b(?:rfc|port|issue|pr|chapter|section|fig(?:ure)?|sec)\s+$/i;
+  addMoneyShorthandClaims(cleaned, out);
+  addPlainNumberClaims(cleaned, out);
+  return out;
+}
+
+/** Money/quantity shorthand expands to the spelled-out value so a
+ *  doc claim can match the initializer's numerals (field report #2
+ *  item 5). */
+function addMoneyShorthandClaims(cleaned: string, out: Set<string>): void {
+  for (const sm of cleaned.matchAll(SHORTHAND_RE)) {
+    const base = parseStrictDecimalNumber(sm[1] ?? '');
+    const mult = SHORTHAND_MULT[(sm[2] ?? '').toLowerCase()];
+    if (base !== null && mult !== undefined) out.add(String(base * mult));
+  }
+}
+
+/** Tokenizer: consume the WHOLE word-ish token, then judge it. The
+ *  previous trailing-LOOKAHEAD let the regex backtrack INSIDE a
+ *  rejected token — `0.85in` matched as `0`, inventing a value claim
+ *  that was never written (field report #2 item 5). A token with any
+ *  unit/identifier suffix (`50%`, `1.5x`, `1000-name`, `0.85in`) is
+ *  skipped WHOLE: those name counts or measurements, not the value
+ *  of this constant (friction #67 semantics preserved). */
+function addPlainNumberClaims(cleaned: string, out: Set<string>): void {
+  const re = new RegExp(NUMBER_TOKEN_RE.source, 'g');
   let m: RegExpExecArray | null;
   while ((m = re.exec(cleaned)) !== null) {
     const raw = m[0];
+    if (NON_PLAIN_NUMBER_RE.test(raw.startsWith('-') ? raw.slice(1) : raw)) continue; // unit-suffixed token
+    if (isMeasurementTail(cleaned.slice(re.lastIndex))) continue; // spaced unit word — a measurement
     const before = cleaned.slice(0, m.index);
-    if (PREFIX_SKIP.test(before)) continue;
+    if (NUMBER_PREFIX_SKIP_RE.test(before)) continue;
     const f = parseStrictDecimalNumber(raw);
-    if (f !== null && Number.isInteger(f) && f >= 1900 && f <= 2100) continue;
+    if (f !== null && Number.isInteger(f) && f >= YEAR_MIN && f <= YEAR_MAX) continue;
     out.add(raw);
     if (f !== null) out.add(String(f));
   }
-  return out;
 }
 
 /**

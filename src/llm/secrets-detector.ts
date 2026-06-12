@@ -135,8 +135,15 @@ const PATTERN_TABLE: PatternEntry[] = [
   {
     signal: 'literal-token',
     patterns: [
-      // Long base64-ish or hex token (>=32 printable chars) in a string literal
-      /["'][A-Za-z0-9_/+=-]{32,}["']/,
+      // Long base64-ish or hex token (>=32 printable chars) in a
+      // string literal. Two guards against prose-shaped literals
+      // (field report #2 item 4 — "application/x-www-form-urlencoded"
+      // is 34 chars of the token alphabet):
+      //   1. a known MIME-type prefix never counts, and
+      //   2. the literal must contain at least one DIGIT — real keys
+      //      and tokens essentially always do; English words and
+      //      kebab/slash identifiers essentially never do.
+      /["'](?!(?:application|audio|font|image|message|model|multipart|text|video)\/)(?=[A-Za-z_/+=-]*\d)[A-Za-z0-9_/+=-]{32,}["']/,
     ],
     weight: 0.2,
     reason: 'contains a hardcoded long token or credential string',
