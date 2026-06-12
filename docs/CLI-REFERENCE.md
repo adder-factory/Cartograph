@@ -72,6 +72,7 @@ cartograph admin init [path]       # create .cartograph/
 cartograph admin init -i [path]    # initialize and index
 cartograph admin sync [path]       # incremental update
 cartograph admin index [path]      # full reindex
+cartograph admin biomarkers-refresh [path]  # full findings pass, no re-extract
 cartograph admin storage-migrate   # SQLite <-> PostgreSQL
 cartograph admin unlock            # clear stale lock
 cartograph admin prune-store       # clean old orphaned LLM store rows

@@ -21,6 +21,14 @@ export interface AdminIndexGraph {
   close: () => void;
   indexAll: (opts: object) => Promise<AdminIndexResult>;
   sync: (opts: object) => Promise<SyncResult>;
+  stats: {
+    refreshBiomarkers: () => Promise<{
+      filesScanned: number;
+      findingsEmitted: number;
+      errors: number;
+      durationMs: number;
+    } | null>;
+  };
   llm: {
     config: { getEffectiveLlmConfig: () => Promise<unknown> };
     embed: {
@@ -106,6 +114,7 @@ export function registerAdminIndexingCommands(deps: AdminIndexingCommandDeps): v
   registerIndexCommand(deps);
   registerEmbedOnlyCommand(deps);
   registerSyncCommand(deps);
+  registerBiomarkersRefreshCommand(deps);
 }
 
 function registerIndexCommand(deps: AdminIndexingCommandDeps): void {
@@ -528,6 +537,45 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
       } catch (err) {
         if (!options.quiet) {
           error(`Failed to sync: ${errMsg(err)}`);
+          if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
+        }
+        process.exit(1);
+      } finally {
+        cg?.close();
+      }
+    });
+}
+
+function registerBiomarkersRefreshCommand(deps: AdminIndexingCommandDeps): void {
+  const { adminCmd, error, isInitialized, loadCartograph, resolveProjectPath, writeStderr, writeStdout } = deps;
+  adminCmd
+    .command('biomarkers-refresh [path]')
+    .description(
+      'Re-run the full biomarker analysis (per-file + cross-file rules) on the current index, without re-extracting',
+    )
+    .option('-q, --quiet', 'Suppress output (for scripts/gates)')
+    .action(async (pathArg: string | undefined, options: { quiet?: boolean }) => {
+      const projectPath = resolveProjectPath(pathArg);
+      let cg: AdminIndexGraph | undefined;
+      try {
+        if (!isInitialized(projectPath)) {
+          if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
+          process.exit(1);
+        }
+        const { default: Cartograph } = await loadCartograph();
+        cg = await Cartograph.open(projectPath, { autoMigrate: true });
+        const result = await cg.stats.refreshBiomarkers();
+        if (!options.quiet) {
+          writeStdout(
+            result === null
+              ? 'Biomarkers are disabled for this project (enableBiomarkers: false); nothing to refresh.\n'
+              : `Biomarkers refreshed: ${result.findingsEmitted} findings across ${result.filesScanned} files ` +
+                  `(${result.errors} rule errors) in ${result.durationMs}ms\n`,
+          );
+        }
+      } catch (err) {
+        if (!options.quiet) {
+          error(`Failed to refresh biomarkers: ${errMsg(err)}`);
           if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
         }
         process.exit(1);

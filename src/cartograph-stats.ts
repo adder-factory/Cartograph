@@ -11,6 +11,7 @@
  */
 
 import type { Cartograph } from './index.js';
+import { analyseProject, type AnalysisResult } from './biomarkers/index.js';
 import type { GraphStats } from './db/types.js';
 import type { FileRecord } from './types.js';
 import { getStats as qbGetStats } from './db/queries.js';
@@ -124,5 +125,26 @@ export class CartographStats {
   /** Drop the freshness cache. Call after operations that change drift state. */
   invalidateFreshness(): void {
     this.freshnessCache = null;
+  }
+
+  /**
+   * Re-run the FULL biomarker analysis (per-file pass over every indexed
+   * file + the cross-file rules + the generation stamps) WITHOUT
+   * re-extracting the graph. The cheap way to bring
+   * `code_health_findings` to full-pass authority on an index that is
+   * already current (e.g. after `sync`): unchanged files short-circuit
+   * via the per-file content-hash cache, so the dominant cost is the
+   * cross-file pass — versus `indexAll({force: true})`, which re-extracts
+   * the whole repo first. Returns null when biomarkers are disabled.
+   */
+  async refreshBiomarkers(): Promise<AnalysisResult | null> {
+    if (this.cg.config.enableBiomarkers === false) return null;
+    return this.cg.lock.mutex.withLock(async () => {
+      const result = await analyseProject(this.cg.queries, this.cg.projectRoot);
+      // Findings changed out-of-band of index stamps — drop the cached
+      // freshness verdict so readers re-derive pending/clean state.
+      this.invalidateFreshness();
+      return result;
+    });
   }
 }
