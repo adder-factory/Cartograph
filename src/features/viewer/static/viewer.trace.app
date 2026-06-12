@@ -41,6 +41,18 @@ function traceFormatGap(ms) {
 
 const TRACE_LONG_GAP_MS = 10000;
 
+/** Same project root modulo trailing slashes; a null/empty call
+    project means "the session's own project" → same. */
+function viewerSameProjectRoot(callProject, viewerRoot) {
+  if (!callProject) return true;
+  const norm = (p) => String(p || '').replace(/\/+$/, '');
+  return norm(callProject) === norm(viewerRoot);
+}
+
+function viewerProjectBasename(p) {
+  return String(p || '').split('/').filter(Boolean).pop() || String(p || '');
+}
+
 /** One timeline row. All fields are escaped here; clock/gap/dur may
     be '' (demo rows have no timestamps). `searchExtra` carries the
     full tool name so both "find" and "cartograph_find" filter-match. */
@@ -52,7 +64,7 @@ function traceRowHtml(i, row) {
       <span class="t">${escapeHtml(row.clock)}</span>
       <span class="gap${row.longGap ? ' long' : ''}">${escapeHtml(row.gap)}</span>
       <span class="tool" style="--tool-hue:${row.hue}">${escapeHtml(row.tool)}</span>
-      <span class="args" title="${escapeHtml(row.args)}">${escapeHtml(row.args)}</span>
+      <span class="args" title="${escapeHtml(row.args)}">${row.xproj ? `<span class="xproj" title="cross-project call against ${escapeHtml(row.xproj)}">⇄ ${escapeHtml(viewerProjectBasename(row.xproj))}</span>` : ''}${escapeHtml(row.args)}</span>
       <span class="dur${row.durClass || ''}">${escapeHtml(row.dur)}</span>
       <span class="result${row.isErr ? ' err' : ''}" title="${escapeHtml(row.result)}">${escapeHtml(row.result)}</span>
     </div>
@@ -116,21 +128,29 @@ function renderTraceStepDetail(d) {
     ['step', `${d.step}${d.total ? ` of ${d.total}` : ''}`],
     d.durationMs != null ? ['duration', traceFormatMs(d.durationMs)] : null,
     d.sessionId ? ['session', d.sessionId] : null,
+    // Cross-project call — the projectPath tool arg targeted another
+    // cartograph project; absent means the session's own project.
+    d.project ? ['project', d.project] : null,
     d.result ? ['result', d.result] : null,
   ].filter(Boolean);
+  const crossProject = Boolean(d.crossProject);
   traceDetailEl.innerHTML = `
     <div class="trace-detail-head" style="--tool-hue:${traceToolHue(d.tool)}">
       <span class="tool">${escapeHtml(d.tool)}</span>
       ${d.clock ? `<span class="when">${escapeHtml(d.clock)}</span>` : ''}
     </div>
     <div class="trace-detail-kv">
-      ${kv.map(([k, v]) => `<span class="k">${escapeHtml(k)}</span><span class="v${k === 'result' && d.isErr ? ' err' : ''}" title="${escapeHtml(v)}">${escapeHtml(v)}</span>`).join('')}
+      ${kv.map(([k, v]) => `<span class="k">${escapeHtml(k)}</span><span class="v${k === 'result' && d.isErr ? ' err' : ''}${k === 'project' && crossProject ? ' xproj-v' : ''}" title="${escapeHtml(v)}">${escapeHtml(v)}</span>`).join('')}
     </div>
     ${argsPretty ? `<div class="trace-detail-label">Arguments</div><pre>${escapeHtml(argsPretty)}</pre>` : ''}
     ${Array.isArray(d.targets) && d.targets.length > 0
-      ? `<div class="trace-detail-label">On the graph</div><div class="trace-detail-links">${d.targets
-          .map((t) => `<button class="trace-link" data-symbol="${escapeHtml(t)}" title="Focus ${escapeHtml(t)} on the graph">⤴ ${escapeHtml(t)}</button>`)
-          .join('')}</div>`
+      ? crossProject
+        ? `<div class="trace-detail-label">On the graph</div><div class="trace-detail-links">${d.targets
+            .map((t) => `<button class="trace-link" disabled title="Recorded against ${escapeHtml(d.project || 'another project')} — this viewer shows a different project's graph. Open that project's viewer to inspect it.">⇄ ${escapeHtml(t)}</button>`)
+            .join('')}</div><div class="trace-detail-xproj-note">These targets live in ${escapeHtml(viewerProjectBasename(d.project))} — not this project's graph.</div>`
+        : `<div class="trace-detail-label">On the graph</div><div class="trace-detail-links">${d.targets
+            .map((t) => `<button class="trace-link" data-symbol="${escapeHtml(t)}" title="Focus ${escapeHtml(t)} on the graph">⤴ ${escapeHtml(t)}</button>`)
+            .join('')}</div>`
       : ''}
   `;
 }

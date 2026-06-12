@@ -124,13 +124,19 @@ interface McpServerState {
   traceLogger: TraceLogger | null;
   /** Non-null when boot failed to find a default project. */
   noDefaultProjectPreamble: string | null;
+  /** MCP client identity from the initialize handshake, if sent. */
+  clientInfo: { name: string; version: string | null } | null;
 }
 
 /** Stand up the trace logger once we have a working project + DB. */
 function mcpEnsureTraceLogger(st: McpServerState, disableTrace: boolean): void {
   if (disableTrace || st.traceLogger || !st.cg) return;
   try {
-    st.traceLogger = new TraceLogger(st.cg.queries);
+    st.traceLogger = new TraceLogger(st.cg.queries, undefined, {
+      clientName: st.clientInfo?.name,
+      clientVersion: st.clientInfo?.version ?? undefined,
+      projectRoot: st.projectPath ?? undefined,
+    });
   } catch (err) {
     logDebug('MCPServer: TraceLogger setup failed', { err: errMsg(err) });
   }
@@ -397,8 +403,15 @@ async function mcpHandleInitialize(
     | {
         rootUri?: string;
         workspaceFolders?: Array<{ uri: string; name: string }>;
+        clientInfo?: { name?: string; version?: string };
       }
     | undefined;
+
+  // Remember who connected — recorded on the trace session so the
+  // viewer can show "claude-code · …" instead of an opaque id.
+  if (params?.clientInfo?.name) {
+    server.st.clientInfo = { name: params.clientInfo.name, version: params.clientInfo.version ?? null };
+  }
 
   const projectPath = resolveInitProjectPath(server.st.projectPath ?? undefined, params);
   await server.tryInitializeDefault(projectPath);
@@ -511,6 +524,7 @@ export class MCPServer {
       projectPath: options.projectPath ?? null,
       traceLogger: null,
       noDefaultProjectPreamble: null,
+      clientInfo: null,
     };
     this.transport = options.transport ?? new StdioTransport();
     this.disableTrace = options.disableWriteTools === true || resolveMcpServerProfile(options.profile) === 'read-only';

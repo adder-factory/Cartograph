@@ -905,7 +905,13 @@ CREATE TABLE IF NOT EXISTS mcp_sessions (
     tool_count INTEGER NOT NULL DEFAULT 0,
     -- Optional human label set by cartograph_session({action: "create", label})
     -- so resume can look up by name (#13, migration 030).
-    label TEXT
+    label TEXT,
+    -- Session identity (migration 073): the MCP client's self-reported
+    -- name/version from the initialize handshake, and the server's
+    -- resolved default project root at session start.
+    client_name TEXT,
+    client_version TEXT,
+    project_root TEXT
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS idx_mcp_sessions_started_ts
     ON mcp_sessions(started_ts DESC);

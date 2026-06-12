@@ -71,17 +71,32 @@ interface ToolResultEnvelope {
   isError?: boolean;
 }
 
+export interface TraceSessionIdentity {
+  /** MCP client identity from the initialize handshake. */
+  clientName?: string | undefined;
+  clientVersion?: string | undefined;
+  /** The server's resolved default project root. */
+  projectRoot?: string | undefined;
+}
+
 export class TraceLogger {
   private readonly queries: QueryBuilder;
   readonly sessionId: string;
   private step = 0;
   private appendsSincePrune = 0;
 
-  constructor(queries: QueryBuilder, sessionId?: string) {
+  constructor(queries: QueryBuilder, sessionId?: string, identity: TraceSessionIdentity = {}) {
     this.queries = queries;
     this.sessionId = sessionId ?? generateSessionId();
     try {
-      insertSession({ qb: queries, id: this.sessionId, startedTs: Date.now() });
+      insertSession({
+        qb: queries,
+        id: this.sessionId,
+        startedTs: Date.now(),
+        clientName: identity.clientName,
+        clientVersion: identity.clientVersion,
+        projectRoot: identity.projectRoot,
+      });
     } catch (err) {
       logDebug('TraceLogger: insertSession failed (continuing)', { err: errMsg(err) });
     }

@@ -35,6 +35,24 @@ cartograph viewer .
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.
 
+## Sessions
+
+The Agent-trace and Live tabs group recorded MCP tool calls into
+sessions — one session per MCP server connection, created on its first
+tool call. Pickers name each session by the best available handle: a
+user label (set via `cartograph_session({action: "create", label})`),
+else the connecting client's self-reported name from the MCP handshake
+(for example `claude-code`), else the raw session id (always available
+as the option tooltip and in the step detail). Each session also
+records the project root its server was bound to.
+
+Every cartograph project records its own sessions in its own index, so
+the viewer only lists sessions for the project it is showing — two
+projects running cartograph at the same time never mix sessions. A
+single server can still answer one-off calls about another project via
+the `projectPath` tool argument; such calls stay in this project's
+trace and show an explicit `project` row in the step detail.
+
 ## Reading the graph
 
 Node shapes encode the kind of symbol:

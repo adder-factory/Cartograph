@@ -103,6 +103,7 @@ function lfAppendCall(c, animate) {
   if (c.sessionId && !lfSessionsSeen.has(c.sessionId)) {
     lfSessionsSeen.set(c.sessionId, c.ts);
     lfSyncSessionOptions();
+    if (!lfSessionInfo.has(c.sessionId)) void lfRefreshSessionInfo();
   }
   if (c.sessionId !== lfLastSessionId) {
     lfLastSessionId = c.sessionId;
@@ -127,10 +128,19 @@ function lfAppendCall(c, animate) {
   const result = String(c.result ?? '');
   const isErr = result.startsWith('⚠');
   const argsText = formatArgs(c.args);
+  // Cross-project call: badge it and disarm the symbol-focus click —
+  // this viewer shows a different project's graph (helpers live in
+  // viewer.trace.app; runtime-only use).
+  const xproj = typeof c.project === 'string' && !viewerSameProjectRoot(c.project, liveProjectRoot) ? c.project : '';
+  if (xproj) {
+    row.dataset.xproj = xproj;
+    row.classList.remove('has-symbol');
+    row.title = `Cross-project call against ${xproj} — open that project's viewer to inspect it`;
+  }
   row.innerHTML =
     `<span class="lf-time">${new Date(c.ts).toTimeString().slice(0, 8)}</span>` +
     `<span class="lf-tool" style="--tool-hue:${lfToolHue(c.tool)}">${escapeHtml(lfShortTool(c.tool))}</span>` +
-    `<span class="lf-args" title="${escapeHtml(argsText)}">${escapeHtml(argsText)}</span>` +
+    `<span class="lf-args" title="${escapeHtml(argsText)}">${xproj ? `<span class="xproj" title="cross-project call against ${escapeHtml(xproj)}">⇄ ${escapeHtml(viewerProjectBasename(xproj))}</span>` : ''}${escapeHtml(argsText)}</span>` +
     `<span class="lf-dur${durClass}">${lfFormatMs(c.durationMs)}</span>` +
     `<span class="lf-res${isErr ? ' err' : ''}" title="${escapeHtml(result)}">${escapeHtml(result)}</span>`;
   row.dataset.search = `${lfShortTool(c.tool)} ${c.tool} ${argsText} ${result}`.toLowerCase();
@@ -180,8 +190,15 @@ function lfRenderSession() {
     el.textContent = 'No session yet.';
     return;
   }
+  const info = lfSessionInfo.get(lfSessionMeta.id);
+  const who = info?.clientName
+    ? `${info.clientName}${info.clientVersion ? ` ${info.clientVersion}` : ''}`
+    : null;
+  const projectName = info?.projectRoot ? info.projectRoot.split('/').filter(Boolean).pop() : null;
   el.innerHTML =
     `<span class="id">${escapeHtml(lfSessionMeta.id ?? '?')}</span><br>` +
+    `${who ? `${escapeHtml(who)}${info?.label ? ` · ${escapeHtml(info.label)}` : ''}<br>` : info?.label ? `${escapeHtml(info.label)}<br>` : ''}` +
+    `${projectName ? `project ${escapeHtml(projectName)}<br>` : ''}` +
     `${formatNumber(lfSessionMeta.calls)} ${lfSessionMeta.calls === 1 ? 'call' : 'calls'} in this feed<br>` +
     `last activity ${escapeHtml(formatRelative(lfSessionMeta.lastTs))}`;
 }
@@ -280,6 +297,7 @@ function liveFeedActivate() {
     return;
   }
   if (!lfAbort && !lfRetryTimer) void lfRunStream();
+  void lfRefreshSessionInfo();
   if (!lfStatsTimer) {
     lfStatsTimer = setInterval(() => {
       if (lfActive && lfCallCount > 0) lfRenderStats();
@@ -357,6 +375,29 @@ function lfFilterQuery() {
 
 const lfSessionFilterEl = document.getElementById('lf-session-filter');
 const lfSessionsSeen = new Map(); // sessionId → first-seen ts
+const lfSessionInfo = new Map(); // sessionId → {label, clientName, clientVersion, projectRoot, startedTs}
+
+/** Pull session identity (client, label, project) from /api/sessions
+    so the dropdown and the active-session card can show something a
+    human recognises instead of opaque ids. Best-effort. */
+async function lfRefreshSessionInfo() {
+  if (!LIVE_MODE) return;
+  try {
+    const res = await apiFetch('/api/sessions?limit=50');
+    if (!res.ok) return;
+    const body = await res.json();
+    for (const s of body.sessions ?? []) lfSessionInfo.set(s.id, s);
+    lfSyncSessionOptions();
+    lfRenderSession();
+  } catch {
+    /* dropdown falls back to raw ids */
+  }
+}
+
+function lfSessionDisplayName(id) {
+  const info = lfSessionInfo.get(id);
+  return info?.label || info?.clientName || id;
+}
 
 function lfSessionFilterValue() {
   return lfSessionFilterEl?.value || '';
@@ -370,7 +411,13 @@ function lfSyncSessionOptions() {
   const ids = [...lfSessionsSeen.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
   lfSessionFilterEl.innerHTML =
     '<option value="">All sessions</option>' +
-    ids.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+    ids
+      .map((id) => {
+        const name = lfSessionDisplayName(id);
+        const text = name === id ? id : `${name} · ${id}`;
+        return `<option value="${escapeHtml(id)}" title="${escapeHtml(id)}">${escapeHtml(text)}</option>`;
+      })
+      .join('');
   if (selected && ids.includes(selected)) lfSessionFilterEl.value = selected;
 }
 

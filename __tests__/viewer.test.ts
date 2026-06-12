@@ -642,6 +642,53 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.calls).toEqual([]);
   });
 
+  it('returns session identity in /api/sessions and per-call project in the detail', async () => {
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const sid = 'identity-session';
+    try {
+      insertSession({
+        qb,
+        id: sid,
+        startedTs: Date.now(),
+        label: 'review run',
+        clientName: 'claude-code',
+        clientVersion: '2.1.0',
+        projectRoot: testDir,
+      });
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 1,
+        ts: Date.now(),
+        toolName: 'cartograph_status',
+        argsJson: JSON.stringify({ projectPath: '/elsewhere/project' }),
+        resultSummary: 'ok',
+        durationMs: 4,
+      });
+
+      const list = await apiFetch(handle, 'api/sessions?limit=10');
+      const sessions = ((await list.json()) as { sessions: Array<Record<string, unknown>> }).sessions;
+      const mine = sessions.find((s) => s.id === sid);
+      expect(mine?.clientName).toBe('claude-code');
+      expect(mine?.clientVersion).toBe('2.1.0');
+      expect(mine?.projectRoot).toBe(testDir);
+      expect(mine?.label).toBe('review run');
+
+      const detailRes = await apiFetch(handle, `api/sessions/${sid}`);
+      const detail = (await detailRes.json()) as {
+        session: { clientName: string; projectRoot: string } | null;
+        calls: Array<{ project: string | null }>;
+      };
+      expect(detail.session?.clientName).toBe('claude-code');
+      expect(detail.session?.projectRoot).toBe(testDir);
+      // The call targeted another project via the projectPath arg.
+      expect(detail.calls[0]?.project).toBe('/elsewhere/project');
+    } finally {
+      deleteSession(qb, sid);
+      conn.close();
+    }
+  });
+
   it('returns the live call feed at /api/live/calls (and filters by sinceTs)', async () => {
     const empty = await apiFetch(handle, 'api/live/calls');
     expect(empty.status).toBe(200);
@@ -667,7 +714,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
         step: 2,
         ts: t0 + 5,
         toolName: 'cartograph_graph',
-        argsJson: '{}',
+        argsJson: JSON.stringify({ projectPath: '/elsewhere/project' }),
         resultSummary: 'ok',
         durationMs: 7,
       });
@@ -675,9 +722,11 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       const res = await apiFetch(handle, 'api/live/calls');
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
-        calls: Array<{ sessionId: string; step: number; tool: string; args: unknown }>;
+        calls: Array<{ sessionId: string; step: number; tool: string; args: unknown; project: string | null }>;
       };
       expect(body.calls.map((c) => c.step)).toEqual([1, 2]);
+      expect(body.calls[0]!.project).toBeNull();
+      expect(body.calls[1]!.project).toBe('/elsewhere/project');
       expect(body.calls[0]!.sessionId).toBe(sid);
       expect(body.calls[0]!.tool).toBe('cartograph_find');
       expect(body.calls[0]!.args).toEqual({ by: 'symbol', query: 'compute' });
