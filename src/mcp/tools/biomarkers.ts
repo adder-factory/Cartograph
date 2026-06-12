@@ -130,8 +130,11 @@ export function formatIndexedAt(raw: string): string {
 }
 
 /** mode=stats — project-wide biomarker rollup with per-biomarker severity breakdown. */
-function handleStatsMode(cg: import('../../index.js').default): ToolOutcome {
+function handleStatsMode(cg: import('../../index.js').default, format?: 'markdown' | 'json'): ToolOutcome {
   const stats = getFindingsStats(cg.queries);
+  if (format === 'json') {
+    return ok(textResult(JSON.stringify({ mode: 'stats', ...stats }, null, 2)));
+  }
   if (stats.totalFindings === 0) {
     // Affirmative empty result — distinguishes "biomarkers ran and the
     // project is clean" from "biomarkers never ran". Presence of an
@@ -436,6 +439,67 @@ interface RankedModeArgs {
   maxMetric?: number | undefined;
   excludeFile?: string | undefined;
   lowTokens?: boolean | undefined;
+  format?: 'markdown' | 'json' | undefined;
+}
+
+/**
+ * JSON arm of mode=ranked (field report #2 items 10/11). Handles the
+ * zero-row case itself — a machine consumer must get the same shape
+ * for an empty result (reviewer catch: the markdown empty-hint broke
+ * the format contract), with the honest counts still present (every
+ * finding can be orphaned while `shown` is 0); the hint that the
+ * markdown empty state renders rides along as `hint`.
+ */
+function renderRankedJson(
+  cg: import('../../index.js').default,
+  rows: ReturnType<typeof getFindingsRanked>,
+  f: {
+    biomarker: string | undefined;
+    minSeverity: BiomarkerSeverity;
+    minCentrality: number | undefined;
+    minMetric: number | undefined;
+    maxMetric: number | undefined;
+    excludeFile: string | undefined;
+    limit: number;
+  },
+): ToolOutcome {
+  const { biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit } = f;
+  const counts = countFindingsRanked(
+    cg.queries,
+    compact({ biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile }),
+  );
+  const hint =
+    rows.length === 0
+      ? buildEmptyRankedHint(cg, { biomarker, minSeverity, minMetric, maxMetric, excludeFile, minCentrality })
+      : undefined;
+  return ok(
+    textResult(
+      JSON.stringify(
+        {
+          mode: 'ranked',
+          filters: compact({ biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit }),
+          shown: rows.length,
+          total: counts.total,
+          orphaned: counts.orphaned,
+          ...(hint === undefined ? {} : { hint }),
+          findings: rows.map((r) => ({
+            nodeId: r.nodeId,
+            name: r.name,
+            kind: r.kind,
+            filePath: r.filePath,
+            biomarker: r.biomarker,
+            severity: r.severity,
+            metric: r.metric,
+            centrality: r.centrality,
+            surfaceReason: r.surfaceReason,
+            detail: r.detail,
+          })),
+        },
+        null,
+        2,
+      ),
+    ),
+  );
 }
 
 /**
@@ -461,6 +525,9 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
     cg.queries,
     compact({ biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit }),
   );
+  if (args.format === 'json') {
+    return renderRankedJson(cg, rows, { biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit });
+  }
   if (rows.length === 0) {
     return ok(
       renderToolResponse({
@@ -727,6 +794,12 @@ const biomarkersSchema = z.object({
     .enum(['info', 'warning', 'error'])
     .optional()
     .describe("For mode='ranked': only findings of this severity or worse (default 'warning')."),
+  format: z
+    .enum(['markdown', 'json'])
+    .optional()
+    .describe(
+      "Output format for mode='ranked'/'stats' (default 'markdown'). 'json' returns machine-readable rows including each finding's `detail` payload plus the not-shown counts — parse this instead of the markdown table or the DB schema.",
+    ),
   minCentrality: z
     .number()
     .min(0)
@@ -787,7 +860,7 @@ async function handleBiomarkers(ctx: ToolCtx, args: BiomarkersArgs): Promise<Too
     }
     return handleSymbolMode(cg, args.symbol!, ctx.refIds);
   }
-  if (mode === 'stats') return handleStatsMode(cg);
+  if (mode === 'stats') return handleStatsMode(cg, args.format);
   // mode === 'ranked' (also the default). The parsed args already
   // carry exactly the `RankedModeArgs` optional shape.
   return handleRankedMode(cg, args);

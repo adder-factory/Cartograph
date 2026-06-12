@@ -142,6 +142,22 @@ describe('detectSecretsHandling — single signals', () => {
     expect(result.score).toBeGreaterThanOrEqual(0.2);
   });
 
+  it('literal-token does NOT fire on MIME types or digit-free prose literals (field report #2 item 4)', () => {
+    // 34 chars of the token alphabet, zero digits — a content type,
+    // not a credential. Used to push a real Turnstile verifier to
+    // warning.
+    const mime = detectSecretsHandling(
+      input({ body: 'headers.set("content-type", "application/x-www-form-urlencoded");' }),
+    );
+    expect(mime.signals).not.toContain('literal-token');
+    // Digit-free kebab/slash identifier prose — same shape, same verdict.
+    const prose = detectSecretsHandling(input({ body: 'const slug = "this-is-a-long-kebab-identifier-string";' }));
+    expect(prose.signals).not.toContain('literal-token');
+    // A long token WITH digits still fires even when slash-y.
+    const real = detectSecretsHandling(input({ body: 'const k = "c2VjcmV0LXRva2Vu/with9digits8inside7thing";' }));
+    expect(real.signals).toContain('literal-token');
+  });
+
   it('crypto-secret fires for hmac with key argument', () => {
     const result = detectSecretsHandling(input({ body: 'const mac = hmac(data, secretKey);' }));
     expect(result.signals).toContain('crypto-secret');
@@ -244,15 +260,18 @@ describe('detectSecretsHandling — false-positive guards', () => {
     expect(result.score).toBeLessThanOrEqual(0.3);
   });
 
-  it('long strings in test fixtures still caught by literal-token signal', () => {
+  it('digit-free fixture strings are no longer flagged as literal tokens', () => {
     const result = detectSecretsHandling(
       input({
         name: 'getFixture',
         body: 'return "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 34 chars of dummy data',
       }),
     );
-    // literal-token fires even for test-fixture-looking code (integration layer may pre-filter)
-    expect(result.signals).toContain('literal-token');
+    // Since the digit requirement (field report #2 item 4), a
+    // digit-free letter run no longer counts as a token — that shape
+    // is prose/dummy data, the exact FP class the report hit. A
+    // digit-bearing fixture still fires (covered above).
+    expect(result.signals).not.toContain('literal-token');
   });
 });
 

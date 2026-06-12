@@ -156,7 +156,16 @@ above (B17/B19/B20/B21), for 16 agent-prone biomarkers total — via
 - `recently_grew` — large LOC delta since last snapshot.
 - `stale_doc` — fires when a constant's doc cites numbers absent
   from its value. Fix: make the doc accurate; never remove numbers
-  as suppression.
+  as suppression. Conservative by construction: signatures truncated
+  at the extraction cap are skipped (a disjoint verdict against
+  partial text would be a guess), as are regex-literal initializers
+  (pattern digits are not values); unit-suffixed tokens (`0.85in`,
+  `1.5x`) and spaced unit words (`5 minutes`, `10 MB`, `~10–20 ms`
+  ranges) are measurements, not value claims; hyphen-compound
+  references (`audit-4`) are identifiers; `$96K`/`$2.4M` money
+  shorthand is expanded before comparison (`$`-prefixed only — bare
+  `5M rows` is quantity rationale); and both `5_000` numeric
+  separators and `10 000` prose spacing read as the plain number.
 - `secrets_handling` — symbols handling secrets/PII per the
   `src/llm/secrets-detector.ts` patterns. Self-exempt allowlist in
   `src/biomarkers/per-file-shared.ts:SECRETS_RULE_SELF_PATHS`

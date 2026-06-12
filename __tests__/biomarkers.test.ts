@@ -878,6 +878,68 @@ describe('end-to-end through Cartograph', () => {
         expect(banded.every((r) => r.metric >= minMetric && r.metric <= maxMetric)).toBe(true);
       }
 
+      // format: 'json' (field report #2 items 10/11) — machine-readable
+      // rows including the detail payload + the honesty counts, so
+      // agents stop parsing markdown tables or the DB schema. Runs
+      // BEFORE the orphan exercise below (which destroys the fixture
+      // node and with it the joined ranked rows).
+      // NOTE: no handler.closeAll() — it tears down the SHARED cg
+      // (watcher + caches), poisoning the direct-query assertions
+      // below; the test's own cg.close() finally is the cleanup.
+      const handler = new ToolHandler(cg, { profile: 'full' });
+      {
+        const rankedJson = await handler.execute('cartograph_biomarkers', {
+          mode: 'ranked',
+          format: 'json',
+          minSeverity: 'info',
+          limit: 50,
+        });
+        const rankedPayload = JSON.parse(rankedJson.content[0]?.text ?? '') as {
+          mode: string;
+          shown: number;
+          total: number;
+          orphaned: number;
+          findings: Array<{ biomarker: string; detail: unknown }>;
+        };
+        expect(rankedPayload.mode).toBe('ranked');
+        expect(rankedPayload.findings.length).toBe(rankedPayload.shown);
+        expect(rankedPayload.total).toBeGreaterThanOrEqual(rankedPayload.shown);
+        expect(rankedPayload.orphaned).toBe(0);
+        expect(rankedPayload.findings.length).toBeGreaterThan(0);
+        expect(Object.keys(rankedPayload.findings[0]!)).toContain('detail');
+
+        // Zero rows must STAY JSON (reviewer catch): an impossible
+        // filter combination returns the same shape with shown 0 and
+        // a hint, never the markdown empty-state prose.
+        const emptyJson = await handler.execute('cartograph_biomarkers', {
+          mode: 'ranked',
+          format: 'json',
+          biomarker: 'magic_number',
+          minSeverity: 'error',
+          minMetric: 999_999,
+        });
+        const emptyPayload = JSON.parse(emptyJson.content[0]?.text ?? '') as {
+          mode: string;
+          shown: number;
+          hint?: string;
+          findings: unknown[];
+        };
+        expect(emptyPayload.mode).toBe('ranked');
+        expect(emptyPayload.shown).toBe(0);
+        expect(emptyPayload.findings).toEqual([]);
+        expect(typeof emptyPayload.hint).toBe('string');
+
+        const statsJson = await handler.execute('cartograph_biomarkers', { mode: 'stats', format: 'json' });
+        const statsPayload = JSON.parse(statsJson.content[0]?.text ?? '') as {
+          mode: string;
+          totalFindings: number;
+          byBiomarker: Record<string, number>;
+        };
+        expect(statsPayload.mode).toBe('stats');
+        expect(statsPayload.totalFindings).toBeGreaterThan(0);
+        expect(Object.keys(statsPayload.byBiomarker).length).toBeGreaterThan(0);
+      }
+
       // Honesty counter: agrees with ranked when nothing is orphaned,
       // and counts findings whose node id no longer resolves (ranked's
       // INNER JOIN hides them; stats counts them — the field-report

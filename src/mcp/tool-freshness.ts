@@ -332,7 +332,7 @@ const AUTO_SYNC_MAX_FILES = 50;
  *  3s to 10s 2026-05-10: a structural-only sync on a 580-file repo
  *  with 15 changed files runs in ~1s, but the bundled post-hooks
  *  (centrality, biomarkers, hnsw rebuild) can push the wall clock past
- *  3s mid-session. The 10s ceiling matches `cg.sync({summarize: false})`'s
+ *  3s mid-session. The 10s ceiling (10_000) matches `cg.sync({summarize: false})`'s
  *  observed worst case on this codebase while keeping the failure mode
  *  bounded for monorepo callers. */
 const AUTO_SYNC_TIMEOUT_MS = 10_000;
