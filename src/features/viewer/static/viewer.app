@@ -17,13 +17,16 @@ document.querySelectorAll('.tab').forEach(t => {
     else if (LIVE_MODE && liveSymbolCache?.id && !sourcePanelDismissed && !isMobileViewport()) {
       colEl.classList.add('with-codepane');
     }
-    if (view === 'health') {
+    const liveView = document.getElementById('live-view');
+    health.style.display = view === 'health' ? 'block' : 'none';
+    liveView.style.display = view === 'live' ? 'block' : 'none';
+    if (view === 'live') liveFeedActivate();
+    else liveFeedDeactivate();
+    if (view === 'health' || view === 'live') {
       stage.style.display = 'none';
-      health.style.display = 'block';
-      if (LIVE_MODE) loadHealthLive();
+      if (view === 'health' && LIVE_MODE) loadHealthLive();
     } else {
       stage.style.display = 'grid';
-      health.style.display = 'none';
       // The canvas just got resized when grid-template-rows changed;
       // ask cy to re-fit so nothing clips off-screen.
       resizeGraphSoon();

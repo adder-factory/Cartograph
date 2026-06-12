@@ -64,6 +64,7 @@
   <nav class="tabs" aria-label="Primary views">
     <div class="tab active" data-view="graph" data-tooltip="Show the graph viewer"><i data-lucide="network" aria-hidden="true"></i><span>Graph</span></div>
     <div class="tab" data-view="trace" data-tooltip="Replay recorded MCP tool calls"><i data-lucide="route" aria-hidden="true"></i><span>Agent trace</span></div>
+    <div class="tab" data-view="live" data-tooltip="Watch MCP tool calls in real time"><i data-lucide="activity" aria-hidden="true"></i><span>Live</span></div>
     <div class="tab" data-view="health" data-tooltip="Show project health metrics"><i data-lucide="heart-pulse" aria-hidden="true"></i><span>Health</span></div>
   </nav>
 </header>
@@ -383,98 +384,104 @@
 <section id="health-view" class="health-view">
   <div class="health-shell">
     <div class="health-hero">
-      <section class="health-score" aria-label="Project code health">
-        <div>
-          <div class="health-kicker">Project code health</div>
-          <div class="value" id="hc-health">7.4 / 10</div>
-          <div class="sub" id="hc-health-sub">project-wide composite, weighted by current findings</div>
+      <section class="health-score health-card" aria-label="Project code health">
+        <div class="health-kicker">Project code health</div>
+        <div class="health-gauge-wrap">
+          <svg class="health-gauge" viewBox="0 0 220 122" aria-hidden="true">
+            <path class="track" d="M 18 112 A 92 92 0 0 1 202 112" pathLength="100"></path>
+            <path class="fill" id="hc-gauge-fill" d="M 18 112 A 92 92 0 0 1 202 112" pathLength="100"></path>
+          </svg>
+          <div class="health-gauge-readout">
+            <span class="value" id="hc-health">—</span><span class="denom">/10</span>
+          </div>
         </div>
-        <div>
-          <div class="health-score-track" aria-hidden="true"><div class="health-score-fill" id="hc-health-fill"></div></div>
-        </div>
+        <div class="health-grade-pill" id="hc-grade">…</div>
+        <div class="sub" id="hc-health-sub">project-wide composite, weighted by current findings</div>
       </section>
-      <section class="health-metrics" aria-label="Health metrics">
-        <div class="health-metric err">
-          <div class="label">Errors</div>
-          <div class="value" id="hc-errors">43</div>
-          <div class="sub" id="hc-errors-sub">error-tier findings</div>
-        </div>
-        <div class="health-metric warn">
-          <div class="label">Warnings</div>
-          <div class="value" id="hc-warnings">183</div>
-          <div class="sub" id="hc-warnings-sub">warning-tier findings</div>
-        </div>
-        <div class="health-metric">
-          <div class="label">Info</div>
-          <div class="value" id="hc-info">261</div>
-          <div class="sub" id="hc-info-sub">informational findings</div>
-        </div>
-        <div class="health-metric">
-          <div class="label">Total findings</div>
-          <div class="value" id="hc-total">281</div>
-          <div class="sub" id="hc-total-sub">across all biomarkers</div>
-        </div>
-        <div class="health-metric">
-          <div class="label">Nodes flagged</div>
-          <div class="value" id="hc-nodes">214</div>
-          <div class="sub" id="hc-nodes-sub">distinct symbols with at least one finding</div>
-        </div>
-        <div class="health-metric" id="hc-readiness-card">
-          <div class="label">Index status</div>
-          <div class="value" id="hc-readiness">Ready</div>
-          <div class="sub" id="hc-readiness-sub">structural graph is usable</div>
-        </div>
-      </section>
-    </div>
-    <div class="health-main">
-      <section class="health-panel">
-        <h3>Severity Mix</h3>
-        <div class="health-panel-body">
+      <section class="health-findings health-card" aria-label="Findings">
+        <header class="health-card-head"><h3>Findings</h3><span class="health-card-aside" id="hc-findings-aside"></span></header>
+        <div class="health-findings-body">
+          <div class="health-findings-total" id="hc-findings-total">
+            <span class="value" id="hc-total">0</span>
+            <span class="unit" id="hc-total-unit">open findings</span>
+          </div>
           <div class="health-severity-stack" id="hc-severity-stack" aria-hidden="true">
             <span class="err"></span>
             <span class="warn"></span>
             <span class="info"></span>
+            <span class="ok-fill"></span>
           </div>
-          <div class="health-severity-list" id="hc-severity-list"></div>
+          <div class="health-severity-chips" id="hc-severity-chips"></div>
+          <div class="health-flagged-note" id="hc-flagged-note"></div>
         </div>
       </section>
-      <section class="health-panel">
-        <h3>Biomarkers</h3>
-        <div class="health-panel-body">
-          <div class="health-list" id="hc-biomarkers"></div>
+      <section class="health-index health-card" aria-label="Index status">
+        <header class="health-card-head"><h3>Index</h3><span class="health-readiness" id="hc-readiness">—</span></header>
+        <div class="health-index-body">
+          <div class="health-index-grid">
+            <div class="health-fact"><div class="value" id="hc-total-files">—</div><div class="label">Files</div></div>
+            <div class="health-fact"><div class="value" id="hc-total-nodes">—</div><div class="label">Symbols</div></div>
+            <div class="health-fact"><div class="value" id="hc-total-edges">—</div><div class="label">Edges</div></div>
+            <div class="health-fact"><div class="value" id="hc-languages">—</div><div class="label">Languages</div></div>
+          </div>
+          <div class="health-index-next mono" id="hc-readiness-next" hidden></div>
+          <div class="health-index-meta" id="hc-index-meta"></div>
         </div>
       </section>
-      <section class="health-panel">
-        <h3>Risk Hotspots</h3>
-        <div class="health-panel-body">
-          <div class="health-list" id="hc-hotspots-list"></div>
-        </div>
+    </div>
+    <div class="health-main">
+      <section class="health-card">
+        <header class="health-card-head"><h3>Biomarkers</h3><span class="health-card-aside" id="hc-biomarkers-aside"></span></header>
+        <div class="health-list" id="hc-biomarkers"></div>
       </section>
-      <section class="health-panel">
-        <h3>Index Coverage</h3>
-        <div class="health-panel-body">
-          <div class="health-row">
-            <div><div class="name">Indexed symbols</div><div class="meta" id="hc-total-nodes-sub">nodes available to the viewer</div></div>
-            <div class="value" id="hc-total-nodes">0</div>
-          </div>
-          <div class="health-row">
-            <div><div class="name">Readiness</div><div class="meta" id="hc-readiness-meta">doctor and index guidance</div></div>
-            <div class="value" id="hc-readiness-value">Ready</div>
-          </div>
-          <div class="health-row">
-            <div><div class="name">Next step</div><div class="meta" id="hc-readiness-next">Use search, graph, health, compare, or agent trace views.</div></div>
-            <div class="value">Guide</div>
-          </div>
-          <div class="health-row">
-            <div><div class="name">Indexed files</div><div class="meta">files in this project index</div></div>
-            <div class="value" id="hc-total-files">0</div>
-          </div>
-          <div class="health-row">
-            <div><div class="name">Hotspot files</div><div class="meta" id="hc-hotspots-sub">central + actively churning files</div></div>
-            <div class="value" id="hc-hotspots">12</div>
-          </div>
-        </div>
+      <section class="health-card">
+        <header class="health-card-head"><h3>Risk hotspots</h3><span class="health-card-aside" id="hc-hotspots-aside"></span></header>
+        <div class="health-list" id="hc-hotspots-list"></div>
       </section>
+      <section class="health-card">
+        <header class="health-card-head"><h3>Symbol breakdown</h3><span class="health-card-aside" id="hc-kinds-aside"></span></header>
+        <div class="health-list" id="hc-kinds"></div>
+      </section>
+    </div>
+  </div>
+</section>
+
+<!-- Live activity view (toggled) -->
+<section id="live-view" class="live-view">
+  <div class="live-shell">
+    <header class="live-masthead">
+      <span class="live-indicator" id="lf-indicator" data-state="idle"><span class="live-dot" aria-hidden="true"></span><span id="lf-conn">connecting…</span></span>
+      <span class="live-hint">MCP tool calls against this project, as they happen</span>
+      <span class="spacer"></span>
+      <div class="live-stats" aria-label="Live activity stats">
+        <div class="live-stat"><span class="value" id="lf-stat-calls">0</span><span class="label">calls seen</span></div>
+        <div class="live-stat"><span class="value" id="lf-stat-rate">0</span><span class="label">last 60s</span></div>
+        <div class="live-stat"><span class="value" id="lf-stat-avg">—</span><span class="label">avg time</span></div>
+      </div>
+      <button class="btn" id="lf-hold" data-tooltip="Stop following new calls">Hold</button>
+      <button class="btn" id="lf-clear" data-tooltip="Clear the feed">Clear</button>
+    </header>
+    <div class="live-body">
+      <div class="live-feed-wrap">
+        <div class="live-feed mono" id="lf-feed"></div>
+        <div class="live-empty" id="lf-empty">
+          <div class="live-radar" aria-hidden="true"></div>
+          <div class="live-empty-title">Waiting for agent activity</div>
+          <div class="live-empty-sub">Tool calls appear here the moment an MCP client uses cartograph on this project.<br>
+            Hook one up with <code>cartograph llm install</code>, then ask your agent something about this codebase.</div>
+        </div>
+        <button class="live-jump" id="lf-jump" hidden>↓ Following paused — jump to latest</button>
+      </div>
+      <aside class="live-side">
+        <section class="live-side-card">
+          <h3>Active session</h3>
+          <div class="live-session-meta" id="lf-session">No session yet.</div>
+        </section>
+        <section class="live-side-card">
+          <h3>Tool mix</h3>
+          <div class="live-toolmix" id="lf-toolmix"><div class="health-empty">No calls observed yet.</div></div>
+        </section>
+      </aside>
     </div>
   </div>
 </section>
@@ -507,6 +514,7 @@
 <script src="viewer.ask.app"></script>
 <script src="viewer.selection-detail.app"></script>
 <script src="viewer.trace.app"></script>
+<script src="viewer.livefeed.app"></script>
 <script src="viewer.filters.app"></script>
 <script src="viewer.features.app"></script>
 <script src="viewer.ui.app"></script>

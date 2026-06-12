@@ -1,0 +1,131 @@
+/**
+ * Live MCP activity feed — Server-Sent Events.
+ *
+ * The MCP server writes every tool call to `mcp_tool_calls` (best-
+ * effort, see src/trace/logger.ts); the viewer server shares that DB,
+ * so a live feed is a poll loop over the indexed `ts` column. Each
+ * connection gets a backlog snapshot, then new rows as `call` events.
+ *
+ * Cursor semantics: `toolCallsSince` is inclusive (`ts >= cursor`)
+ * because `ts` is millisecond-resolution and two calls can land on
+ * the same instant. The pump re-reads the cursor instant on every
+ * tick and drops rows it already emitted via a (session, step) seen
+ * set — same-ms arrivals are never lost or duplicated.
+ */
+import type * as http from 'node:http';
+import { latestToolCalls, type ToolCallRow, toolCallsSince } from '../../../db/queries-trace.js';
+import { errMsg, logDebug } from '../../../errors.js';
+import {
+  HTTP_OK,
+  LIVE_BACKLOG_LIMIT,
+  LIVE_CALLS_BATCH_LIMIT,
+  LIVE_HEARTBEAT_MS,
+  LIVE_POLL_INTERVAL_MS,
+} from './constants.js';
+import type { RequestContext } from './context.js';
+import { clampInt, safeParseJson } from './http.js';
+
+interface LiveCallPayload {
+  readonly sessionId: string;
+  readonly step: number;
+  readonly ts: number;
+  readonly tool: string;
+  readonly args: unknown;
+  readonly result: string;
+  readonly durationMs: number;
+}
+
+export function serializeLiveCall(row: ToolCallRow): LiveCallPayload {
+  return {
+    sessionId: row.sessionId,
+    step: row.step,
+    ts: row.ts,
+    tool: row.toolName,
+    args: safeParseJson(row.argsJson),
+    result: row.resultSummary,
+    durationMs: row.durationMs,
+  };
+}
+
+/** GET /api/live/calls — JSON polling fallback for the SSE stream. */
+export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null, limitRaw: string | null): unknown {
+  const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
+  const sinceTs = sinceTsRaw === null ? null : Number.parseInt(sinceTsRaw, 10);
+  const rows =
+    sinceTs !== null && Number.isFinite(sinceTs)
+      ? toolCallsSince(ctx.queries, sinceTs, limit)
+      : latestToolCalls(ctx.queries, limit);
+  return { calls: rows.map(serializeLiveCall) };
+}
+
+function callKey(row: ToolCallRow): string {
+  return `${row.sessionId}:${row.step}`;
+}
+
+function writeEvent(res: http.ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
+/**
+ * GET /api/live/stream — hold the response open and push tool calls
+ * as they land in the DB. The route handler contract is fire-and-
+ * forget (`handle` returns void), so never ending the response here
+ * is exactly what keeps the stream alive.
+ */
+export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResponse, ctx: RequestContext): void {
+  res.writeHead(HTTP_OK, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+
+  let backlog: ToolCallRow[];
+  try {
+    backlog = latestToolCalls(ctx.queries, LIVE_BACKLOG_LIMIT.default);
+  } catch (err) {
+    // Headers are already out as text/event-stream — end the stream
+    // instead of letting the error escape to the JSON 500 path.
+    logDebug('viewer: live stream backlog failed', { err: errMsg(err) });
+    res.end();
+    return;
+  }
+  writeEvent(res, 'backlog', { calls: backlog.map(serializeLiveCall) });
+
+  let cursorTs = backlog.length > 0 ? backlog.at(-1)!.ts : 0;
+  let seenAtCursor = new Set(backlog.filter((row) => row.ts === cursorTs).map(callKey));
+
+  const stop = (): void => {
+    clearInterval(pollTimer);
+    clearInterval(heartbeatTimer);
+  };
+
+  const pollTimer = setInterval(() => {
+    let rows: ToolCallRow[];
+    try {
+      rows = toolCallsSince(ctx.queries, cursorTs, LIVE_CALLS_BATCH_LIMIT);
+    } catch (err) {
+      logDebug('viewer: live stream poll failed', { err: errMsg(err) });
+      stop();
+      res.end();
+      return;
+    }
+    const fresh = rows.filter((row) => row.ts > cursorTs || !seenAtCursor.has(callKey(row)));
+    if (fresh.length === 0) return;
+    const lastTs = fresh.at(-1)!.ts;
+    const seen = new Set(cursorTs === lastTs ? seenAtCursor : []);
+    for (const row of fresh) {
+      if (row.ts === lastTs) seen.add(callKey(row));
+    }
+    cursorTs = lastTs;
+    seenAtCursor = seen;
+    for (const row of fresh) writeEvent(res, 'call', serializeLiveCall(row));
+  }, LIVE_POLL_INTERVAL_MS);
+
+  const heartbeatTimer = setInterval(() => {
+    res.write(':hb\n\n');
+  }, LIVE_HEARTBEAT_MS);
+
+  req.on('close', stop);
+  res.on('close', stop);
+}

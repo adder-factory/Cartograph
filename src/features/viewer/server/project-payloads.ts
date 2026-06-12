@@ -17,6 +17,7 @@ import {
   HEALTH_PENALTY_WARNING,
 } from './constants.js';
 import type { RequestContext } from './context.js';
+import { safeParseJson } from './http.js';
 import { serializeGraphNode, serializeNode } from './node-payloads.js';
 
 interface GitChangedFile {
@@ -104,7 +105,7 @@ function readinessPayload(
     grade: 'ok',
     label: 'Ready',
     summary: `${stats.fileCount.toLocaleString()} files and ${stats.nodeCount.toLocaleString()} symbols indexed.`,
-    nextSteps: ['Use search, graph, health, compare, or agent trace views.'],
+    nextSteps: ['Use search, graph, live, health, compare, or agent trace views.'],
   };
 }
 
@@ -208,6 +209,7 @@ export function findingsPayload(ctx: RequestContext): unknown {
   return {
     totalFindings: fStats.totalFindings,
     byBiomarker: fStats.byBiomarker,
+    byBiomarkerSeverity: fStats.byBiomarkerSeverity,
     bySeverity: fStats.bySeverity,
     nodesWithFindings: fStats.nodesWithFindings,
     totalNodes: stats.nodeCount,
@@ -221,8 +223,10 @@ export function sessionsPayload(ctx: RequestContext, limit: number): unknown {
   return {
     sessions: rows.map((r) => ({
       id: r.id,
+      startedTs: r.startedTs,
       lastActivityTs: r.lastActivityTs,
       toolCount: r.toolCount,
+      label: r.label,
     })),
   };
 }
@@ -240,14 +244,6 @@ export function sessionDetailPayload(ctx: RequestContext, sessionId: string): un
       durationMs: c.durationMs,
     })),
   };
-}
-
-function safeParseJson(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return s;
-  }
 }
 
 export function biomarkerFindingsPayload(ctx: RequestContext, biomarker: string, limit: number): unknown {

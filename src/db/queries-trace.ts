@@ -7,7 +7,7 @@
  * than failing the tool call), so the queries here don't throw on
  * benign failures — they let the caller's try/catch decide.
  *
- * MIGRATED TO TYPED QUERIES (2026-05-20). The 11 prepared statements
+ * MIGRATED TO TYPED QUERIES (2026-05-20). The prepared statements
  * in this file are declared at module scope via {@link defineQuery} —
  * Zod schemas drive both compile-time and runtime validation of params
  * + rows. Lazy-cached on `qb.queries.X` to mirror the existing
@@ -27,7 +27,7 @@ export interface SessionRow {
   label: string | null;
 }
 
-interface ToolCallRow {
+export interface ToolCallRow {
   sessionId: string;
   step: number;
   ts: number;
@@ -207,6 +207,27 @@ const callsForSessionQuery = defineQuery({
   row: ToolCallDbRowSchema,
 });
 
+const latestToolCallsQuery = defineQuery({
+  sql:
+    `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
+    `FROM mcp_tool_calls ` +
+    `ORDER BY ts DESC, session_id DESC, step DESC ` +
+    `LIMIT @limit`,
+  params: z.object({ limit: z.number() }),
+  row: ToolCallDbRowSchema,
+});
+
+const toolCallsSinceQuery = defineQuery({
+  sql:
+    `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
+    `FROM mcp_tool_calls ` +
+    `WHERE ts >= @sinceTs ` +
+    `ORDER BY ts ASC, session_id ASC, step ASC ` +
+    `LIMIT @limit`,
+  params: z.object({ sinceTs: z.number(), limit: z.number() }),
+  row: ToolCallDbRowSchema,
+});
+
 const usageCountsQuery = defineQuery({
   sql:
     `SELECT ` +
@@ -251,6 +272,8 @@ declare module './queries.js' {
     gcEmptySessions?: TypedQuery<Record<string, never>, never>;
     recentSessions?: TypedQuery<{ limit: number }, SessionDbRow>;
     callsForSession?: TypedQuery<{ sessionId: string }, ToolCallDbRow>;
+    latestToolCalls?: TypedQuery<{ limit: number }, ToolCallDbRow>;
+    toolCallsSince?: TypedQuery<{ sinceTs: number; limit: number }, ToolCallDbRow>;
     traceUsageCounts?: TypedQuery<Record<string, never>, UsageCountsDbRow>;
     traceUsageToolCalls?: TypedQuery<Record<string, never>, UsageCallDbRow>;
   }
@@ -366,7 +389,30 @@ export function recentSessions(qb: QueryBuilder, limit: number): SessionRow[] {
 export function callsForSession(qb: QueryBuilder, sessionId: string): ToolCallRow[] {
   qb.queries.callsForSession ??= callsForSessionQuery(qb.db);
   const rows = qb.queries.callsForSession.all({ sessionId });
-  return rows.map((r) => ({
+  return rows.map(toolCallRowFromDb);
+}
+
+/** Most-recent N tool calls across all sessions, oldest first. */
+export function latestToolCalls(qb: QueryBuilder, limit: number): ToolCallRow[] {
+  qb.queries.latestToolCalls ??= latestToolCallsQuery(qb.db);
+  const rows = qb.queries.latestToolCalls.all({ limit });
+  return rows.map(toolCallRowFromDb).reverse();
+}
+
+/**
+ * Tool calls at or after `sinceTs`, oldest first. Inclusive on
+ * purpose: `ts` has millisecond resolution, so two calls can share a
+ * timestamp — the live-stream pump re-reads the cursor instant and
+ * dedupes by (session, step) instead of dropping same-ms rows.
+ */
+export function toolCallsSince(qb: QueryBuilder, sinceTs: number, limit: number): ToolCallRow[] {
+  qb.queries.toolCallsSince ??= toolCallsSinceQuery(qb.db);
+  const rows = qb.queries.toolCallsSince.all({ sinceTs, limit });
+  return rows.map(toolCallRowFromDb);
+}
+
+function toolCallRowFromDb(r: ToolCallDbRow): ToolCallRow {
+  return {
     sessionId: r.session_id,
     step: r.step,
     ts: r.ts,
@@ -374,7 +420,7 @@ export function callsForSession(qb: QueryBuilder, sessionId: string): ToolCallRo
     argsJson: r.args_json,
     resultSummary: r.result_summary,
     durationMs: r.duration_ms,
-  }));
+  };
 }
 
 export function getTraceUsage(qb: QueryBuilder): TraceUsageSummary {

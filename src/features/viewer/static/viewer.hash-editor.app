@@ -100,7 +100,7 @@ function applyHashStateControls(s) {
     }
     markBreadcrumbScope();
     applyFilters();
-    if (s.tab && ['graph', 'trace', 'health'].includes(s.tab)) clickTab(s.tab);
+    if (s.tab && ['graph', 'trace', 'live', 'health'].includes(s.tab)) clickTab(s.tab);
   } finally {
     applyingHashState = false;
   }

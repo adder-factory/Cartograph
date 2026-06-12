@@ -20,8 +20,12 @@ cartograph viewer .
 - **Graph** — interactive force-directed view of symbol neighborhoods, with a
   detail pane, source panel, and graph tools.
 - **Agent trace** — replay recorded MCP sessions tool call by tool call.
-- **Health** — project-wide health score, findings grouped by biomarker, risk
-  hotspots, and index coverage.
+- **Live** — watch MCP tool calls stream in as an agent uses cartograph on
+  this project: a following feed with per-call args, duration, and result,
+  plus an active-session card and a live tool-mix breakdown.
+- **Health** — project-wide health score gauge, findings with per-biomarker
+  severity breakdowns, risk hotspots, index coverage, and symbol-kind
+  breakdown.
 
 ## Reading the graph
 
@@ -100,7 +104,7 @@ selection, or an inspected edge.
 | `/` | Focus search |
 | `Cmd/Ctrl+K` | Command palette |
 | `Alt+←` / `Alt+→` | Navigation history |
-| `g g` / `g t` / `g h` | Switch to Graph / Agent trace / Health tab |
+| `g g` / `g t` / `g l` / `g h` | Switch to Graph / Agent trace / Live / Health tab |
 | `0`, `+`, `-` | Fit all, zoom in, zoom out |
 | `Esc` | Dismiss overlays and leave input fields |
 

@@ -45,6 +45,11 @@ export const ASK_SELECTION_CHAR_LIMIT = 8000;
 export const ASK_RETRIEVE_K = 12;
 export const ASK_CITATION_LIMIT = 8;
 
+export const LIVE_BACKLOG_LIMIT: IntBound = { min: 1, max: 200, default: 40 };
+export const LIVE_CALLS_BATCH_LIMIT = 500;
+export const LIVE_POLL_INTERVAL_MS = 500;
+export const LIVE_HEARTBEAT_MS = 15_000;
+
 export const HEALTH_BASELINE = 10;
 export const HEALTH_FLOOR = 1;
 export const HEALTH_PENALTY_ERROR = 2;
