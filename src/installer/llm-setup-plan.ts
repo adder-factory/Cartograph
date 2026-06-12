@@ -216,7 +216,7 @@ function hasStandardLlamaCppStack(backends: readonly DetectedBackend[]): boolean
 export function chooseRecommendedPresetId(
   detectedBackends: readonly DetectedBackend[],
   presets: readonly SetupPreset[],
-  cloudKeys: { openAi: boolean; openRouter: boolean } = { openAi: false, openRouter: false },
+  cloudKeys?: { openAi: boolean; openRouter: boolean },
 ): SetupPresetId {
   if (hasStandardLlamaCppStack(detectedBackends)) return 'install-llama-cpp';
   const firstDetected = presets.find((p) => p.id.startsWith('use-detected-'));
@@ -226,8 +226,8 @@ export function chooseRecommendedPresetId(
   // Direct OpenAI wins over OpenRouter when both keys are present
   // because it also covers the embedding tier (semantic search works
   // out of the box); OpenRouter is chat-only.
-  if (cloudKeys.openAi) return 'cloud-openai';
-  if (cloudKeys.openRouter) return 'cloud-openrouter';
+  if (cloudKeys?.openAi) return 'cloud-openai';
+  if (cloudKeys?.openRouter) return 'cloud-openrouter';
   return 'install-ollama';
 }
 
