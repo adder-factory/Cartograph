@@ -31,8 +31,14 @@ type Page = {
   waitForSelector: (sel: string, opts: { state: 'visible'; timeout: number }) => Promise<unknown>;
   waitForFunction: (fn: () => boolean, arg: undefined, opts: { timeout: number }) => Promise<unknown>;
   waitForTimeout: (ms: number) => Promise<void>;
-  locator: (sel: string) => { fill: (v: string) => Promise<void>; click: () => Promise<void> };
+  locator: (sel: string) => {
+    fill: (v: string) => Promise<void>;
+    click: () => Promise<void>;
+    count: () => Promise<number>;
+    first: () => { click: () => Promise<void> };
+  };
   keyboard: { press: (key: string) => Promise<void> };
+  mouse: { move: (x: number, y: number) => Promise<void> };
 };
 
 async function waitForGraph(page: Page): Promise<void> {
@@ -79,10 +85,42 @@ try {
   await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
   await shoot(page, 'viewer.png');
 
-  // 3. Project health — findings, hotspots, coverage.
+  // 3. Project health — findings, hotspots, coverage. Park the mouse
+  // mid-canvas after every tab click so the tab tooltip isn't baked
+  // into the shot.
   await page.locator('.tab[data-view="health"]').click();
+  await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
   await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
   await shoot(page, 'viewer-health.png');
+
+  // 4. Agent trace — full-page timeline over a recorded session, with
+  // a step selected so the detail card (args + graph-link chips) is
+  // populated. Needs recorded MCP sessions in the index; skipped with
+  // a notice when the project has none.
+  await page.locator('.tab[data-view="trace"]').click();
+  await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
+  await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
+  const traceRows = await page.locator('.trace-row').count();
+  if (traceRows > 0) {
+    await page.locator('.trace-row').first().click();
+    await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
+    await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
+    await shoot(page, 'viewer-trace.png');
+  } else {
+    process.stdout.write('skipped viewer-trace.png — no recorded MCP sessions in this index\n');
+  }
+
+  // 5. Live — the streaming feed renders its backlog snapshot of the
+  // newest session immediately, so a still shows real content.
+  await page.locator('.tab[data-view="live"]').click();
+  await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
+  await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
+  const liveRows = await page.locator('#lf-feed > *').count();
+  if (liveRows > 0) {
+    await shoot(page, 'viewer-live.png');
+  } else {
+    process.stdout.write('skipped viewer-live.png — no tool-call backlog in this index\n');
+  }
 } finally {
   await browser.close();
   await handle.close();

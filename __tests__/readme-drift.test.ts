@@ -104,6 +104,14 @@ describe('README drift guard', () => {
     ]) {
       expect(files.has(expected), `package.json files is missing ${expected}`).toBe(true);
     }
+    // Every image the README displays must ship, or the npm page renders
+    // broken galleries — derived from the README so new shots can't be
+    // forgotten (reviewer catch on the trace/live gallery additions).
+    const readmeImages = [...readme.matchAll(/src="(docs\/assets\/[^"]+)"/g)].map((m) => m[1] ?? '');
+    expect(readmeImages.length).toBeGreaterThan(0);
+    for (const img of readmeImages) {
+      expect(files.has(img), `package.json files is missing README-displayed image ${img}`).toBe(true);
+    }
     expect(files.has('docs'), 'package.json files should not ship private docs wholesale').toBe(false);
     expect(files.has('AGENTS.md'), 'repo-local agent instructions are private project docs').toBe(false);
     expect(files.has('docs/ARCHITECTURE.md'), 'architecture rules are private project docs').toBe(false);
