@@ -442,12 +442,6 @@
       <select class="session-picker" id="lf-session-filter" aria-label="Limit the feed to one session">
         <option value="">All sessions</option>
       </select>
-      <div class="live-mode" role="group" aria-label="Live layout mode">
-        <button class="live-mode-btn active" data-lf-mode="feed">Feed</button>
-        <button class="live-mode-btn" data-lf-mode="split">Both</button>
-        <button class="live-mode-btn" data-lf-mode="graph">Graph</button>
-        <button class="live-mode-btn" data-lf-mode="3d">3D</button>
-      </div>
       <span class="spacer"></span>
       <input class="view-filter" id="lf-filter" type="search" placeholder="Filter calls — tool, args, result…" spellcheck="false" autocomplete="off" aria-label="Filter live calls" />
       <span class="view-filter-count" id="lf-filter-count"></span>
@@ -459,7 +453,7 @@
       <button class="btn" id="lf-hold" data-tooltip="Stop following new calls">Hold</button>
       <button class="btn" id="lf-clear" data-tooltip="Clear the feed">Clear</button>
     </header>
-    <div class="live-body" id="lf-body" data-lf-mode="feed">
+    <div class="live-body" id="lf-body">
       <div class="live-feed-wrap">
         <div class="live-feed mono" id="lf-feed"></div>
         <div class="live-empty" id="lf-empty">
@@ -469,15 +463,6 @@
             Hook one up with <code>cartograph llm install</code>, then ask your agent something about this codebase.</div>
         </div>
         <button class="live-jump" id="lf-jump" hidden>↓ Following paused — jump to latest</button>
-      </div>
-      <div class="live-graph-wrap" id="lf-graph-wrap" hidden>
-        <div class="live-graph" id="lf-graph"></div>
-        <div class="live-graph-hint">Tools (squares) and the symbols, files, and queries they touch — node size grows with use. Click a symbol to open it on the Graph tab.</div>
-      </div>
-      <div class="live-graph-wrap" id="lf-3d-wrap" hidden>
-        <div class="live-3d" id="lf-3d"></div>
-        <div class="live-3d-msg" id="lf-3d-msg" hidden>Loading the 3D renderer…</div>
-        <div class="live-graph-hint">Cinema view — light streams ride the agent's path; drag to orbit, scroll to zoom. The camera follows the action and orbits when idle.</div>
       </div>
       <aside class="live-side">
         <section class="live-side-card">

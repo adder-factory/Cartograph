@@ -60,9 +60,8 @@ const KIND_SHAPE = {
 function shapeForKind(kind) { return KIND_SHAPE[kind] ?? 'ellipse'; }
 
 /* Base node style for INDEXED symbols — kind shape + fill, health
-   border, centrality sizing + hub glow. Shared verbatim by the main
-   graph and the Live tab's activity graph so a symbol looks the same
-   wherever it appears. */
+   border, centrality sizing + hub glow, factored out as one object
+   so future renderers can share it verbatim. */
 function viewerBaseNodeStyle() {
   return {
     'label': 'data(label)',

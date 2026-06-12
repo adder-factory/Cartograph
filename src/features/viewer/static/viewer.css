@@ -2735,25 +2735,6 @@
   .lf-row[hidden],
   .lf-session-row[hidden],
   .trace-row[hidden] { display: none; }
-  .live-mode {
-    display: flex;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    overflow: hidden;
-    flex: 0 0 auto;
-  }
-  .live-mode-btn {
-    padding: 4px 12px;
-    font-size: 11.5px;
-    font-family: inherit;
-    background: transparent;
-    border: 0;
-    color: var(--text-muted);
-    cursor: pointer;
-  }
-  .live-mode-btn + .live-mode-btn { border-left: 1px solid var(--line-soft); }
-  .live-mode-btn:hover { color: var(--text); background: var(--bg-2); }
-  .live-mode-btn.active { background: var(--accent-soft); color: var(--text); }
   .live-stats { display: flex; gap: var(--s-5); margin-right: var(--s-3); }
   .live-stat { text-align: right; }
   .live-stat .value {
@@ -2778,62 +2759,6 @@
     grid-template-columns: minmax(0, 1fr) 280px;
     gap: var(--s-4);
   }
-  .live-body[data-lf-mode="split"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 280px; }
-  .live-body[data-lf-mode="graph"] .live-feed-wrap { display: none; }
-  .live-body[data-lf-mode="3d"] .live-feed-wrap { display: none; }
-  .live-graph-wrap {
-    position: relative;
-    min-width: 0;
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--bg-1);
-    overflow: hidden;
-    display: flex;
-    flex-direction: column;
-  }
-  .live-graph-wrap[hidden] { display: none; }
-  .live-graph {
-    flex: 1;
-    min-height: 0;
-    /* Tron floor: faint cyan line grid over the dark vignette. */
-    background:
-      linear-gradient(rgba(0, 212, 255, .045) 1px, transparent 1px) 0 0 / 100% 34px,
-      linear-gradient(90deg, rgba(0, 212, 255, .045) 1px, transparent 1px) 0 0 / 34px 100%,
-      radial-gradient(ellipse at 50% 35%, #10161d 0%, #090c10 80%);
-  }
-  /* Neon glow: drop-shadow follows the alpha of the drawn pixels, so
-     every node, edge, and packet on the canvas gets a cyan halo. */
-  .live-graph canvas { filter: drop-shadow(0 0 7px rgba(0, 212, 255, .3)); }
-  @media (prefers-reduced-motion: reduce) {
-    .live-graph canvas { filter: none; }
-  }
-  .live-graph-hint {
-    padding: var(--s-2) var(--s-4);
-    border-top: 1px solid var(--line-soft);
-    color: var(--text-faint);
-    font-size: 11px;
-  }
-  .live-3d {
-    flex: 1;
-    min-height: 0;
-    position: relative;
-    overflow: hidden;
-    background: #000003;
-  }
-  .live-3d canvas { display: block; }
-  .live-3d-msg {
-    position: absolute;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: var(--text-dim);
-    font-size: 13px;
-    text-align: center;
-    padding: var(--s-6);
-    pointer-events: none;
-  }
-  .live-3d-msg[hidden] { display: none; }
   .live-feed-wrap {
     position: relative;
     min-width: 0;
@@ -3049,9 +2974,7 @@
   }
   .live-toolmix .health-empty { padding: 0; }
   @media (max-width: 900px) {
-    .live-body,
-    .live-body[data-lf-mode="split"] { grid-template-columns: minmax(0, 1fr); }
-    .live-body[data-lf-mode="split"] { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+    .live-body { grid-template-columns: minmax(0, 1fr); }
     .live-side { display: none; }
     .live-hint { display: none; }
     .view-filter { width: 130px; }
