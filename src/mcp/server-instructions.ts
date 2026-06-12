@@ -85,7 +85,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"What does this file depend on / what depends on it?"** → \`cartograph_files({format: 'deps', file})\` (metadata-only local file dependencies, reverse dependents, and a short defines section; use \`direction\` to show one side).
 - **"Which symbols are in this file?"** → \`cartograph_files({format: 'symbols', file})\` (metadata-only file outline by line; defaults hide import/export/parameter noise; use \`includeParameters\` or \`includeImports\` when needed).
 - **"Which symbols overlap this line range / diff hunk?"** → \`cartograph_at_range\` (one hunk, \`ranges: [...]\` up to 100, or \`diff:\` raw unified diff).
-- **"Is this risky / complex / nested / large?"** → \`cartograph_biomarkers\` (structured findings instead of reading 200 lines of source; \`mode: 'symbol', symbols: [...]\` batches up to 20).
+- **"Is this risky / complex / nested / large?"** → \`cartograph_biomarkers\` (structured findings instead of reading 200 lines of source; \`mode: 'symbol', symbols: [...]\` batches up to 20; \`format: 'json'\` on ranked/stats modes returns machine-readable rows with per-finding detail payloads and exact not-shown counts).
 - **"Is this tested? What's covered?"** → \`cartograph_tests_for\` in core for test discovery; \`cartograph_coverage\` under \`--profile full\` or \`--profile review\` for lcov-backed coverage (\`mode: 'refresh'\` auto-discovers a report).
 - **"What's dead / unreachable?"** → \`cartograph_dead_code\` under \`--profile full\` or \`--profile review\` (\`via\`: auto/rule/llm).
 - **"Which tests cover this symbol?"** → \`cartograph_tests_for\`; **"I edited X — what should I re-run?"** → \`cartograph_affected\` (omit \`files\` to derive from \`git diff HEAD\`; add \`includeCommands: true\` for package-script verification commands).
@@ -104,6 +104,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 - **"None of the tools fit — let me write SQL"** → \`cartograph_sql\` under \`--profile full\` (read-only escape hatch; \`schema: true\` first).
 - **"What other cartograph indices are on this machine?"** → \`cartograph_host({mode: 'discover'})\` under \`--profile full\` (CLI: \`cartograph host --mode discover\`).
 - **"Which cartograph tool fits this question?"** → \`cartograph_playbook\` (returns this text on demand).
+- **The human wants to SEE the graph / watch you work** → suggest \`cartograph viewer\` in a terminal (local-only web UI: Graph, Agent trace replay, real-time Live feed of your tool calls, Health dashboard; \`--session <id-or-label>\` gives one agent its own window).
 - **"Did this agent navigate efficiently?"** → \`cartograph_session({action: "audit"})\` under \`--profile full\` (tool-use findings, repeated calls, missing test-selection/self-check steps); **"How much did this server session use?"** → \`cartograph_session({action: "usage"})\` under \`--profile full\` (aggregate counts/timings only, no raw args or result bodies).
 
 ## Edge orientations (which direction each edge flows)

@@ -29,7 +29,8 @@ cartograph status [path] --json    # automation shape: version, index path,
                                    # last indexed timestamp, counts, rollups
 cartograph host --mode diagnostics # MCP profile/tool and installer target signals
 cartograph host --mode discover    # find .cartograph indexes under a parent path
-cartograph viewer [path]           # local graph viewer
+cartograph viewer [path]           # local graph viewer (graph / agent trace / live / health)
+cartograph viewer --session <id>   # viewer scoped to one MCP session (one window per agent)
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement
 cartograph playbook                # tool-selection playbook
@@ -136,6 +137,7 @@ cartograph review risk --top-n 10
 cartograph review trust
 cartograph review agent-audit
 cartograph biomarkers --min-severity warning
+cartograph biomarkers --format json   # machine-readable: detail payloads + honesty counts
 cartograph hotspots
 cartograph dead-code
 cartograph deps

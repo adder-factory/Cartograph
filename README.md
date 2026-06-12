@@ -29,9 +29,9 @@ local, on your machine.
 [Languages &amp; storage](#languages-and-storage) ·
 [Docs](#documentation)
 
-<img src="docs/assets/viewer-tour.webp" alt="Cartograph viewer tour cycling through a focused symbol with detail pane and source, the project overview graph, and the health dashboard" width="900">
+<img src="docs/assets/viewer-tour.webp" alt="Cartograph viewer tour cycling through a focused symbol with detail pane and source, the project overview graph, the agent-trace timeline, the live tool-call feed, and the health dashboard" width="900">
 
-<sub>Auto-cycling tour: symbol focus → project graph → health. Stills in the gallery below.</sub>
+<sub>Auto-cycling tour: symbol focus → project graph → agent trace → live feed → health. Stills in the gallery below.</sub>
 
 </div>
 
@@ -43,8 +43,12 @@ local, on your machine.
   <img src="docs/assets/viewer.png" alt="Cartograph viewer focused on a symbol with detail pane, source panel, and callers" width="900"><br><br>
   <em>Project overview — hub-centred core graph of this repository</em><br><br>
   <img src="docs/assets/viewer-graph.png" alt="Cartograph viewer project overview graph with a hub starburst neighborhood" width="900"><br><br>
-  <em>Health dashboard — findings, risk hotspots, index coverage</em><br><br>
-  <img src="docs/assets/viewer-health.png" alt="Cartograph viewer health dashboard with code health score, severity mix, risk hotspots, and index coverage" width="900">
+  <em>Agent trace — full-page timeline of a recorded MCP session, with per-step detail and graph-link chips</em><br><br>
+  <img src="docs/assets/viewer-trace.png" alt="Cartograph viewer agent-trace timeline showing recorded MCP tool calls with timing columns and a step-detail card" width="900"><br><br>
+  <em>Live — MCP tool calls streaming in as an agent works, with the active-session card and tool mix</em><br><br>
+  <img src="docs/assets/viewer-live.png" alt="Cartograph viewer live feed streaming MCP tool calls with durations, results, active-session card, and tool-mix breakdown" width="900"><br><br>
+  <em>Health dashboard — project score, findings, risk hotspots, index coverage</em><br><br>
+  <img src="docs/assets/viewer-health.png" alt="Cartograph viewer health dashboard with code health score gauge, findings, risk hotspots, index stats, and symbol breakdown" width="900">
 </p>
 </details>
 
@@ -209,6 +213,7 @@ Every surface, and where to go deeper:
 | 🧭 | **Context plans** — task-scoped route plans that suggest the next query before any source is read | [MCP usage](docs/MCP-USAGE.md) |
 | 🚪 | **Entry points** — routes, CLI commands, MCP tools, and public exports across many frameworks | [Support matrix](docs/SUPPORT-MATRIX.md) |
 | 🗺️ | **Interactive viewer** — local web UI with a node shape language, health borders, hub halos, impact/path/compare tools | [Viewer guide](docs/VIEWER.md) |
+| 📡 | **Agent observability** — watch agents traverse the graph live (per-session feed) and replay full tool-call timelines with graph-link chips | [Viewer guide](docs/VIEWER.md) |
 | 📤 | **Export** — graph snapshots as JSON, DOT, Mermaid, and Cytoscape | [Export formats](docs/GRAPH-EXPORT-FORMATS.md) |
 | 🤖 | **MCP server** — profiles, load budget, low-token mode, client snippets for every major agent | [MCP usage](docs/MCP-USAGE.md) |
 | 🧩 | **LLM tiers (optional)** — summaries, embeddings, semantic search, ask, rerank via local backends (Ollama, llama.cpp, MLX) or cloud (OpenAI, OpenRouter) | [Configuration](docs/CONFIGURATION.md) |
@@ -292,9 +297,17 @@ server. Node shapes encode symbol kinds (circles for callables, diamonds for
 contracts, hexagons for routes, barrels for data stores), borders encode code
 health, and centrality-scaled halos make hub symbols stand out. Rails filter
 by kind, health, edge kind, and per-project file scope; built-in tools cover
-impact analysis, shortest paths, compare-to-HEAD, saved views, PNG/SVG/JSON
-export, an agent-trace replay tab, a live tab streaming MCP tool calls in
-real time, and a project health dashboard. See
+impact analysis, shortest paths, compare-to-HEAD, saved views, and
+PNG/SVG/JSON export.
+
+Beyond the graph: an **Agent trace** tab replays recorded MCP sessions as a
+full-page timeline (per-call timing, arguments, results, and graph-link
+chips that jump from a trace step to the symbol it touched), a **Live** tab
+streams tool calls in real time as an agent works, and a **Health** tab
+shows the project score, findings, and risk hotspots. Sessions are strictly
+per-project (one database = one viewer), each browser tab is titled with
+its project name, and `cartograph viewer --session <id-or-label>` gives an
+individual agent its own isolated window. See
 [docs/VIEWER.md](docs/VIEWER.md) for the full guide.
 
 ## Languages and storage
