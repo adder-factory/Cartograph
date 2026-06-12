@@ -144,6 +144,7 @@ export interface SetupPlan {
   readonly cloudChatAvailable: {
     readonly claudeBin: string | null;
     readonly anthropicApiKey: boolean;
+    readonly openRouterApiKey: boolean;
   };
   /** Per-recommended-model presence under `~/.cartograph/models/`. */
   readonly localGgufPresence: ReadonlyArray<{
@@ -165,6 +166,8 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
   const modelsDir = opts.modelsDir ?? MODELS_DIR_DEFAULT;
   const [claudeBin, detectedBackends] = await Promise.all([findOnPath('claude'), scanForLlmBackends()]);
   const anthropicApiKey = typeof process.env['ANTHROPIC_API_KEY'] === 'string';
+  const openAiApiKey = typeof process.env['OPENAI_API_KEY'] === 'string';
+  const openRouterApiKey = typeof process.env['OPENROUTER_API_KEY'] === 'string';
 
   const localGgufPresence = await Promise.all(
     [RECOMMENDED_EMBED, RECOMMENDED_CHAT_SUMMARIZE, RECOMMENDED_CHAT_ASK, RECOMMENDED_RERANKER].map(async (m) => ({
@@ -178,7 +181,10 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
   );
 
   const presets = buildPresets({ detectedBackends, claudeBin, anthropicApiKey, localGgufPresence });
-  const recommendedPresetId = chooseRecommendedPresetId(detectedBackends, presets);
+  const recommendedPresetId = chooseRecommendedPresetId(detectedBackends, presets, {
+    openAi: openAiApiKey,
+    openRouter: openRouterApiKey,
+  });
 
   return {
     detectedBackends: detectedBackends.map((b) => ({
@@ -187,7 +193,7 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
       endpoint: b.endpoint,
       models: b.models,
     })),
-    cloudChatAvailable: { claudeBin, anthropicApiKey },
+    cloudChatAvailable: { claudeBin, anthropicApiKey, openRouterApiKey },
     localGgufPresence,
     presets,
     recommendedPresetId,
@@ -210,10 +216,18 @@ function hasStandardLlamaCppStack(backends: readonly DetectedBackend[]): boolean
 export function chooseRecommendedPresetId(
   detectedBackends: readonly DetectedBackend[],
   presets: readonly SetupPreset[],
+  cloudKeys: { openAi: boolean; openRouter: boolean } = { openAi: false, openRouter: false },
 ): SetupPresetId {
   if (hasStandardLlamaCppStack(detectedBackends)) return 'install-llama-cpp';
   const firstDetected = presets.find((p) => p.id.startsWith('use-detected-'));
   if (firstDetected) return firstDetected.id;
+  // No local backend running: a cloud key already in the env beats
+  // asking the user to install one — the preset works as applied.
+  // Direct OpenAI wins over OpenRouter when both keys are present
+  // because it also covers the embedding tier (semantic search works
+  // out of the box); OpenRouter is chat-only.
+  if (cloudKeys.openAi) return 'cloud-openai';
+  if (cloudKeys.openRouter) return 'cloud-openrouter';
   return 'install-ollama';
 }
 
@@ -504,10 +518,14 @@ function buildCloudOpenRouterPreset(): SetupPreset {
       `Best for trying cloud models without per-vendor accounts. Pay-per-token.`,
     summary: `Chat tiers → ${CLOUD_OPENROUTER_PUBLIC_ENDPOINT} (${CLOUD_OPENROUTER_MODELS.summarize} / ${CLOUD_OPENROUTER_MODELS.ask})`,
     nextSteps: hasKey
-      ? ['cartograph doctor   # verify (OPENROUTER_API_KEY already set in env)']
+      ? [
+          'cartograph doctor   # verify (OPENROUTER_API_KEY already set in env)',
+          'Optional: append :nitro to a model id for throughput routing, or use a :free model id (rate-limited).',
+        ]
       : [
           `export OPENROUTER_API_KEY=sk-or-...   # get one at ${CLOUD_OPENROUTER_KEYS_URL}`,
           'cartograph doctor   # verify',
+          'Optional: append :nitro to a model id for throughput routing, or use a :free model id (rate-limited).',
         ],
     requiresInstall: !hasKey,
   };
