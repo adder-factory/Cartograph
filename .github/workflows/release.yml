@@ -45,16 +45,23 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # One runner per published target — native compile + native smoke.
+        # One job per published target — native compile + native smoke,
+        # except darwin-x64: GitHub retired hosted Intel macs (macos-13
+        # queues forever), so the ARM mac runner cross-compiles it and
+        # the smoke runs the x64 binary under Rosetta (installed on the
+        # hosted ARM images; our x64 builds are bun-baseline, no AVX).
+        # Windows is pinned to the image windows-latest redirects to by
+        # 2026-06-15 so the migration happens on our terms.
         # No windows-arm64 asset: bun has no compile runtime for it, and
         # install.ps1 points Windows-on-ARM at the x64 build (OS-level
         # emulation).
-        os:
-          - ubuntu-latest # linux-x64
-          - ubuntu-24.04-arm # linux-arm64
-          - macos-latest # darwin-arm64
-          - macos-13 # darwin-x64 (Intel)
-          - windows-latest # windows-x64
+        include:
+          - os: ubuntu-latest # linux-x64
+          - os: ubuntu-24.04-arm # linux-arm64
+          - os: macos-latest # darwin-arm64
+          - os: macos-latest # darwin-x64 cross-compiled, Rosetta smoke
+            target: darwin-x64
+          - os: windows-2025-vs2026 # windows-x64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
@@ -62,12 +69,12 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile --ignore-scripts
-      - run: bun run build:standalone
+      - run: bun run build:standalone ${{ matrix.target }}
       - run: node scripts/smoke-standalone.mjs
       - uses: actions/upload-artifact@v7
         with:
           # Unique per matrix entry so same-OS runners can't collide.
-          name: standalone-${{ matrix.os }}
+          name: standalone-${{ matrix.os }}-${{ matrix.target || 'host' }}
           # Only the finished archives, never the uncleaned stage dir.
           path: |
             release/cartograph-*.tar.gz
