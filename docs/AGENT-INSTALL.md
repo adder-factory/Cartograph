@@ -27,8 +27,9 @@ Do not download LLM models, configure cloud credentials, migrate storage, or
 switch to PostgreSQL unless I ask for those separately.
 ```
 
-Once a prebuilt GitHub release exists, step 1 can instead use the standalone
-installer (`install.sh`, or `install.ps1` for PowerShell):
+Prebuilt releases are published for macOS (arm64, x64), Linux (x64, arm64),
+and Windows (x64); step 1 can instead use the standalone installer
+(`install.sh`, or `install.ps1` for PowerShell):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
