@@ -3,8 +3,9 @@ $ErrorActionPreference = 'Stop'
 $repo = if ($env:CARTOGRAPH_REPO) { $env:CARTOGRAPH_REPO } else { 'adder-factory/cartograph' }
 $installDir = if ($env:CARTOGRAPH_INSTALL_DIR) { $env:CARTOGRAPH_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'cartograph-cli' }
 
-$arch = if ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture -eq 'Arm64') { 'arm64' } else { 'x64' }
-$target = "win32-$arch"
+# Only 64-bit x64 builds are published; Windows-on-ARM runs them via the
+# built-in x64 emulation.
+$target = 'windows-x64'
 
 $version = $env:CARTOGRAPH_VERSION
 if (-not $version) {

@@ -56,18 +56,23 @@ jobs:
       # accelerators the standalone never bundles - usearch alone is a
       # ~2min from-source C++ postinstall on a runner.
       - run: bun install --frozen-lockfile --omit=optional
-      - run: bun scripts/build-standalone.mjs win32-x64
-      - name: Smoke win32-x64
+      - run: bun scripts/build-standalone.mjs windows-x64
+      - name: Smoke windows-x64
         shell: pwsh
         run: |
-          Expand-Archive release/cartograph-win32-x64.zip -DestinationPath C:\smoke
-          $v = & C:\smoke\cartograph-win32-x64\bin\cartograph.cmd --version
+          Expand-Archive release/cartograph-windows-x64.zip -DestinationPath C:\smoke
+          $root = 'C:\smoke\cartograph-windows-x64'
+          $env:CARTOGRAPH_ASSET_ROOT = "$root\share\cartograph"
+          $direct = & "$root\lib\cartograph\cartograph.exe" --version 2>&1
+          Write-Host "direct exe: '$direct' (exit $LASTEXITCODE)"
+          $v = & "$root\bin\cartograph.cmd" --version 2>&1
+          Write-Host "launcher:   '$v' (exit $LASTEXITCODE)"
           $expected = (Get-Content package.json | ConvertFrom-Json).version
           if ("$v".Trim() -ne $expected) { throw "version mismatch: got '$v', expected '$expected'" }
       - uses: actions/upload-artifact@v7
         with:
           name: windows-zip
-          path: release/cartograph-win32-x64.zip
+          path: release/cartograph-windows-x64.zip
           if-no-files-found: error
 
   publish:
