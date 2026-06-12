@@ -606,13 +606,20 @@ const HTTP_LANGUAGES: ReadonlySet<Language> = new Set(['typescript', 'javascript
 // includes its own declaration line — without this guard every fetch-protocol
 // DO trips the rule on its own name. The guard checks the characters
 // immediately before the match for a declaration keyword.
-const HTTP_DECL_PREFIX_RE = /(?:\basync|\bfunction|\bstatic|\bpublic|\bprivate|\bprotected|\bget|\bset)\s+$/;
-/** Longest declaration keyword + one space — how far back the guard looks. */
-const HTTP_DECL_LOOKBEHIND = 12;
+const HTTP_DECL_PREFIX_RE =
+  /(?:\basync|\bfunction\s*\*?|\bstatic|\bpublic|\bprivate|\bprotected|\boverride|\bget|\bset)\s*$/;
+/** Longest declaration keyword (+ generator star + spacing) — how far
+ *  back the guard looks. */
+const HTTP_DECL_LOOKBEHIND = 14;
 
-export function countHttpNoTimeout(rawBody: string, codeBody: string, language: Language): number {
+export function countHttpNoTimeout(_rawBody: string, codeBody: string, language: Language): number {
   if (!HTTP_LANGUAGES.has(language)) return 0;
-  if (TIMEOUT_GATE_RE.test(rawBody)) return 0;
+  // Gate on CODE, not the raw body: a comment merely promising a
+  // future timeout must not mute the finding forever (field report
+  // #2). empty_catch reads comments DELIBERATELY (a comment documents
+  // intent for an empty block); here the only honest gate is an
+  // actual timeout/signal in executable code.
+  if (TIMEOUT_GATE_RE.test(codeBody)) return 0;
   let count = 0;
   HTTP_CALL_RE.lastIndex = 0;
   for (let m = HTTP_CALL_RE.exec(codeBody); m !== null; m = HTTP_CALL_RE.exec(codeBody)) {
