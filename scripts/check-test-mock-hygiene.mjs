@@ -153,9 +153,29 @@ function sourceNamespaceImports(source) {
   return ids;
 }
 
+/** Drop string-literal and comment spans so identifier matching can't
+ *  false-positive on prose. Reuses the same state machine findCallEnd
+ *  walks with. */
+function stripIgnoredSpans(text) {
+  const state = { quote: null, escaped: false, lineComment: false, blockComment: false, skipNext: false };
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    if (state.skipNext) {
+      state.skipNext = false;
+      continue;
+    }
+    const ch = text[i];
+    const next = text[i + 1];
+    if (consumeIgnoredState(state, ch, next) || enterIgnoredState(state, ch, next)) continue;
+    out += ch;
+  }
+  return out;
+}
+
 function liveNamespaceRefsInFactory(mockCall, namespaceIds) {
-  // Skip the spec argument; scan only the factory body.
-  const body = mockCall.slice(mockCall.indexOf(',') + 1);
+  // Skip the spec argument; scan only the factory body, with strings
+  // and comments removed.
+  const body = stripIgnoredSpans(mockCall.slice(mockCall.indexOf(',') + 1));
   return namespaceIds.filter((id) => new RegExp(`\\b${id}\\b`).test(body));
 }
 

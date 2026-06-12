@@ -381,7 +381,7 @@ async function runHookGroups(
 
 /** Sequential ON PURPOSE (the reduce chain is the idiom for that):
  *  these hook bodies are sync work on one thread, so concurrency buys
- *  nothing — measured 2026-06-12: group B fell 6.6s → 3.5s when the
+ *  nothing — measured 2026-06-11: group B fell 6.6s → 3.5s when the
  *  Promise.all interleaving was removed, and per-hook durations became
  *  attributable. Do not "parallelize" this back. */
 function runHooksSequentially(
