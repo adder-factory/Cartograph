@@ -113,6 +113,49 @@ describe('planLlmSetup', () => {
     expect(chooseRecommendedPresetId(detected, presets)).toBe('install-llama-cpp');
   });
 
+  it('routes to a cloud preset when no local backend is running but a key is in env', () => {
+    expect(chooseRecommendedPresetId([], [], { openAi: false, openRouter: true })).toBe('cloud-openrouter');
+    // Direct OpenAI wins when both keys are present — it also covers the
+    // embedding tier, so semantic search works out of the box.
+    expect(chooseRecommendedPresetId([], [], { openAi: true, openRouter: true })).toBe('cloud-openai');
+    expect(chooseRecommendedPresetId([], [], { openAi: false, openRouter: false })).toBe('install-ollama');
+  });
+
+  it('a detected local backend still beats cloud keys', () => {
+    const detected = [{ kind: 'ollama' as const, endpoint: 'http://localhost:11434', models: ['qwen2.5-coder:3b'] }];
+    const presets = [
+      {
+        id: 'use-detected-ollama-http---localhost-11434' as const,
+        label: 'detected',
+        description: 'detected',
+        summary: 'detected',
+        nextSteps: [],
+        requiresInstall: false,
+      },
+    ];
+    expect(chooseRecommendedPresetId(detected, presets, { openAi: true, openRouter: true })).toBe(
+      'use-detected-ollama-http---localhost-11434',
+    );
+  });
+
+  it('planLlmSetup surfaces OPENROUTER_API_KEY and recommends cloud-openrouter when nothing local runs', async () => {
+    const spy = vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const savedOpenRouter = process.env.OPENROUTER_API_KEY;
+    const savedOpenAi = process.env.OPENAI_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'sk-or-test';
+    delete process.env.OPENAI_API_KEY;
+    try {
+      const plan = await planLlmSetup();
+      expect(plan.cloudChatAvailable.openRouterApiKey).toBe(true);
+      expect(plan.recommendedPresetId).toBe('cloud-openrouter');
+    } finally {
+      spy.mockRestore();
+      if (savedOpenRouter === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = savedOpenRouter;
+      if (savedOpenAi !== undefined) process.env.OPENAI_API_KEY = savedOpenAi;
+    }
+  });
+
   it('does not advertise one detected llama-server process as all tiers', async () => {
     const spy = vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([
       {

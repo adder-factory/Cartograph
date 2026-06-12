@@ -55,13 +55,16 @@ export function appendDetectedBackends(
 
 export function appendCloudChatAvailability(
   lines: string[],
-  cloudChatAvailable: { claudeBin: string | null; anthropicApiKey: boolean },
+  cloudChatAvailable: { claudeBin: string | null; anthropicApiKey: boolean; openRouterApiKey?: boolean },
 ): void {
   if (cloudChatAvailable.claudeBin) {
     lines.push(`**Cloud chat available:** \`claude\` CLI at \`${cloudChatAvailable.claudeBin}\``);
   }
   if (cloudChatAvailable.anthropicApiKey) {
     lines.push('**Cloud chat available:** ANTHROPIC_API_KEY set');
+  }
+  if (cloudChatAvailable.openRouterApiKey) {
+    lines.push('**Cloud chat available:** OPENROUTER_API_KEY set');
   }
 }
 
