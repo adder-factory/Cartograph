@@ -66,8 +66,38 @@ function traceDurClass(durationMs) {
   return '';
 }
 
+/** Everything in a call's args that addresses a spot on the graph:
+    direct symbol refs, path endpoints, multi-symbol lists, name-mode
+    search queries, and file/dir scopes (resolved by name on click —
+    file nodes are part of the graph too). Deduped, order-preserving,
+    capped for the chip row. */
+const TRACE_GRAPH_LINK_CAP = 10;
+
+function traceGraphTargets(args) {
+  if (!args || typeof args !== 'object') return [];
+  const out = [];
+  const seen = new Set();
+  const push = (value) => {
+    if (typeof value !== 'string' || !value || seen.has(value)) return;
+    seen.add(value);
+    out.push(value);
+  };
+  push(args.symbol);
+  push(args.start);
+  push(args.to);
+  if (Array.isArray(args.symbols)) for (const s of args.symbols) push(s);
+  // A by-name search query IS a symbol name; content/env/sql queries
+  // are regexes or keys — not graph spots.
+  if (args.by === 'name') push(args.query);
+  push(args.file);
+  push(args.dir);
+  push(args.dirPath);
+  push(args.pathFilter);
+  return out.slice(0, TRACE_GRAPH_LINK_CAP);
+}
+
 /** Step-detail sidebar. `d` = {tool, clock, step, total, durationMs,
-    args (object|string|null), result, isErr, sessionId, symbol}. */
+    args (object|string|null), result, isErr, sessionId, targets}. */
 function renderTraceStepDetail(d) {
   if (!traceDetailEl) return;
   if (!d) {
@@ -97,15 +127,19 @@ function renderTraceStepDetail(d) {
       ${kv.map(([k, v]) => `<span class="k">${escapeHtml(k)}</span><span class="v${k === 'result' && d.isErr ? ' err' : ''}" title="${escapeHtml(v)}">${escapeHtml(v)}</span>`).join('')}
     </div>
     ${argsPretty ? `<div class="trace-detail-label">Arguments</div><pre>${escapeHtml(argsPretty)}</pre>` : ''}
-    ${d.symbol ? `<button class="btn primary" id="trace-focus-graph" data-symbol="${escapeHtml(d.symbol)}">⤴ View on graph</button>` : ''}
+    ${Array.isArray(d.targets) && d.targets.length > 0
+      ? `<div class="trace-detail-label">On the graph</div><div class="trace-detail-links">${d.targets
+          .map((t) => `<button class="trace-link" data-symbol="${escapeHtml(t)}" title="Focus ${escapeHtml(t)} on the graph">⤴ ${escapeHtml(t)}</button>`)
+          .join('')}</div>`
+      : ''}
   `;
 }
 
-/* "View on graph": jump to the Graph tab focused on the step's
-   symbol. Demo steps already applied their subgraph dim in
+/* Graph link chips: jump to the Graph tab focused on the clicked
+   target. Demo steps already applied their subgraph dim in
    activateTraceStep; live steps fetch the neighborhood here. */
 traceDetailEl?.addEventListener('click', (e) => {
-  const btn = e.target instanceof Element ? e.target.closest('#trace-focus-graph') : null;
+  const btn = e.target instanceof Element ? e.target.closest('.trace-link') : null;
   if (!btn) return;
   const symbol = btn.dataset.symbol;
   document.querySelector('.tab[data-view="graph"]')?.click();
@@ -160,12 +194,12 @@ function activateTraceStep(i, fromCy = false) {
     result: t.result,
     isErr: false,
     sessionId: null,
-    symbol: t.focus || null,
+    targets: t.focus ? [t.focus] : [],
   });
 
   // visualise on graph: highlight subgraph, dim everything else. The
-  // graph is on another tab now — the dim persists so "View on graph"
-  // lands on the step's neighborhood.
+  // graph is on another tab now — the dim persists so the graph-link
+  // chip lands on the step's neighborhood.
   if (t.subgraph) {
     const set = new Set(t.subgraph);
     cy.nodes().forEach(n => n.toggleClass('dim', !set.has(n.id())));

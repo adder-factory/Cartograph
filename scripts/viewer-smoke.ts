@@ -420,7 +420,7 @@ async function buildFixtureIndex(projectPath: string): Promise<void> {
 /** Seed recorded MCP sessions so the Agent-trace timeline (and the
  *  Live feed's backlog) render real rows in the fixture run. The
  *  primary session has a fast call, a symbol-bearing call (step
- *  detail → View on graph), a long gap (>10s → .long marker), and an
+ *  detail → "On the graph" chip), a long gap (>10s → .long marker), and an
  *  error-tier result; a second, earlier session exists so the Live
  *  session filter has something to narrow away. */
 function seedTraceFixture(projectPath: string): void {
@@ -2655,21 +2655,23 @@ async function assertTraceView(page: Page): Promise<void> {
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
-  // Step 2 carries args.symbol → the detail card must render the
-  // args JSON and the View-on-graph jump, which lands on the Graph
-  // tab focused on that symbol.
+  // Step 2 carries args {symbol: 'compute', direction: 'callers'} →
+  // the detail card must render the args JSON and a graph-link chip
+  // for the symbol, which lands on the Graph tab focused on it.
   await page.locator('#trace-list .trace-row[data-i="1"]').click();
   await page.waitForFunction(
-    () => Boolean(document.querySelector('#trace-detail pre')) && Boolean(document.querySelector('#trace-focus-graph')),
+    () =>
+      Boolean(document.querySelector('#trace-detail pre')) &&
+      Boolean(document.querySelector('.trace-link[data-symbol="compute"]')),
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
-  await page.locator('#trace-focus-graph').click();
+  await page.locator('.trace-link[data-symbol="compute"]').click();
   await waitForGraph(page);
   const traceHidden = await page.evaluate(
     () => document.querySelector<HTMLElement>('#trace-view')?.style.display !== 'block',
   );
-  if (!traceHidden) throw new Error('View on graph did not switch to the graph tab');
+  if (!traceHidden) throw new Error('the graph-link chip did not switch to the graph tab');
 }
 
 async function assertMobilePanels(page: Page): Promise<void> {

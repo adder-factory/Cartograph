@@ -21,8 +21,9 @@ cartograph viewer .
   detail pane, source panel, and graph tools.
 - **Agent trace** — a full-page timeline over recorded MCP sessions: per-call
   clock, gap-from-previous-call, duration, and result columns, a step-detail
-  card with the full arguments, replay, JSON export, and a per-step
-  "View on graph" jump. The filter box narrows the timeline by tool, args,
+  card with the full arguments and "On the graph" link chips (one per
+  symbol, path endpoint, search name, or file the call touched — click to
+  focus it on the Graph tab), replay, and JSON export. The filter box narrows the timeline by tool, args,
   or result text; replay walks only the matching steps while a filter is
   active.
 - **Live** — watch MCP tool calls stream in as an agent uses cartograph on

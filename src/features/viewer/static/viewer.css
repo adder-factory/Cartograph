@@ -2262,6 +2262,26 @@
     text-transform: uppercase;
     margin-bottom: -6px;
   }
+  .trace-detail-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--s-2);
+  }
+  .trace-link {
+    border: 1px solid rgba(78, 168, 255, .3);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--accent);
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11px;
+    padding: 3px 10px;
+    cursor: pointer;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .trace-link:hover { background: rgba(78, 168, 255, .1); border-color: var(--accent); }
   @media (max-width: 1000px) {
     .trace-body { grid-template-columns: minmax(0, 1fr); }
     .trace-side { display: none; }
