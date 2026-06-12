@@ -7,10 +7,6 @@ document.querySelectorAll('.tab').forEach(t => {
     const view = t.dataset.view;
     const stage = document.querySelector('.stage');
     const health = document.getElementById('health-view');
-    // Trace bar is only relevant on the Agent trace tab — let the
-    // canvas claim the full vertical otherwise. The .with-tracebar
-    // class on the stage drives the grid template.
-    stage.classList.toggle('with-tracebar', view === 'trace');
     // Code panel only makes sense on the Graph tab.
     const colEl = document.getElementById('canvas-col');
     if (view !== 'graph') colEl.classList.remove('with-codepane');
@@ -18,29 +14,30 @@ document.querySelectorAll('.tab').forEach(t => {
       colEl.classList.add('with-codepane');
     }
     const liveView = document.getElementById('live-view');
+    const traceView = document.getElementById('trace-view');
     health.style.display = view === 'health' ? 'block' : 'none';
     liveView.style.display = view === 'live' ? 'block' : 'none';
+    traceView.style.display = view === 'trace' ? 'block' : 'none';
     if (view === 'live') liveFeedActivate();
     else liveFeedDeactivate();
-    if (view === 'health' || view === 'live') {
+    // A replay stepping its timer while another tab is up would keep
+    // mutating rows (and, in file:// mode, re-dimming the graph).
+    if (view !== 'trace') stopTraceReplay();
+    if (view === 'health' || view === 'live' || view === 'trace') {
       stage.style.display = 'none';
       if (view === 'health' && LIVE_MODE) loadHealthLive();
-    } else {
-      stage.style.display = 'grid';
-      // The canvas just got resized when grid-template-rows changed;
-      // ask cy to re-fit so nothing clips off-screen.
-      resizeGraphSoon();
       if (view === 'trace') {
         if (LIVE_MODE) loadSessionsLive();
         else if (activeStep < 0) activateTraceStep(5); // step 6 (impact) is the most visually interesting
-      } else {
-        // graph: clear active step
-        activeStep = -1;
-        document.querySelectorAll('.trace-row').forEach(el => el.classList.remove('active'));
-        cy.nodes().removeClass('dim');
-        cy.edges().removeClass('dim').removeClass('highlight');
-        document.getElementById('canvas-banner').classList.remove('show');
       }
+    } else {
+      stage.style.display = 'grid';
+      // The canvas was hidden while a full-page tab was up; ask cy to
+      // re-fit so nothing clips off-screen. Replay decoration (dim +
+      // banner) deliberately survives the switch — "View on graph"
+      // lands on the selected step's neighborhood; a background tap
+      // or Escape clears it.
+      resizeGraphSoon();
     }
     writeHashState();
   });

@@ -3,9 +3,9 @@ import type { MigrationModule } from './types.js';
 /**
  * MCP trace tables — capture every tool call the MCP server
  * dispatches, plus a session row that groups them. Drives the
- * viewer's "Agent trace" tab (replay how an agent discovered
- * symbols, with each step's args and result visible alongside the
- * graph view) and the "Live" tab's real-time tool-call feed.
+ * viewer's "Agent trace" timeline (replay how an agent discovered
+ * symbols, step by step with args, durations, and results) and the
+ * "Live" tab's real-time tool-call feed.
  *
  * Storage shape:
  *   - mcp_sessions: one row per `cartograph serve --mcp` invocation
@@ -20,7 +20,7 @@ import type { MigrationModule } from './types.js';
  * surviving call are pruned on the same sweep.
  */
 export const MIGRATION: MigrationModule = {
-  description: 'Add mcp_sessions + mcp_tool_calls — tool-call trace log driving the viewer trace bar',
+  description: 'Add mcp_sessions + mcp_tool_calls — tool-call trace log driving the viewer trace timeline',
   up: (db) => {
     db.exec(`
       CREATE TABLE IF NOT EXISTS mcp_sessions (

@@ -2,6 +2,9 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Cartograph from '../src/index.js';
+import { DatabaseConnection, getDatabasePath } from '../src/db/index.js';
+import { QueryBuilder } from '../src/db/queries.js';
+import { appendToolCall, insertSession } from '../src/db/queries-trace.js';
 import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 import { runViewerSmokeFeaturesWorkflow } from './viewer-smoke-features.js';
 import { runViewerSmokeLayoutWorkflow } from './viewer-smoke-layout.js';
@@ -411,6 +414,49 @@ async function buildFixtureIndex(projectPath: string): Promise<void> {
     await cg.indexAll();
   } finally {
     cg.close();
+  }
+}
+
+/** Seed one recorded MCP session so the Agent-trace timeline (and the
+ *  Live feed's backlog) render real rows in the fixture run: a fast
+ *  call, a symbol-bearing call (step detail → View on graph), a long
+ *  gap (>10s → .long marker), and an error-tier result. */
+function seedTraceFixture(projectPath: string): void {
+  const conn = DatabaseConnection.open(getDatabasePath(projectPath));
+  try {
+    const qb = new QueryBuilder(conn.getDb());
+    const base = Date.now() - 60_000;
+    const sessionId = 'smoke-trace-session';
+    insertSession({ qb, id: sessionId, startedTs: base, label: 'smoke' });
+    appendToolCall(qb, {
+      sessionId,
+      step: 1,
+      ts: base,
+      toolName: 'cartograph_find',
+      argsJson: JSON.stringify({ by: 'symbol', query: 'compute' }),
+      resultSummary: '1 result',
+      durationMs: 12,
+    });
+    appendToolCall(qb, {
+      sessionId,
+      step: 2,
+      ts: base + 100,
+      toolName: 'cartograph_graph',
+      argsJson: JSON.stringify({ symbol: 'compute', direction: 'callers' }),
+      resultSummary: '3 callers',
+      durationMs: 230,
+    });
+    appendToolCall(qb, {
+      sessionId,
+      step: 3,
+      ts: base + 15_100,
+      toolName: 'cartograph_status',
+      argsJson: '{}',
+      resultSummary: '⚠ tool error: demo failure',
+      durationMs: 5,
+    });
+  } finally {
+    conn.close();
   }
 }
 
@@ -2508,18 +2554,57 @@ async function assertLiveView(page: Page): Promise<void> {
     rows: document.querySelectorAll('#lf-feed .lf-row').length,
     emptyHidden: document.querySelector<HTMLElement>('#lf-empty')?.hidden ?? false,
     conn: document.querySelector('#lf-conn')?.textContent || '',
+    toolmixRows: document.querySelectorAll('#lf-toolmix .live-toolmix-row').length,
   }));
-  // Fixture DBs usually have no recorded MCP calls — the designed
-  // empty state must show; with history, feed rows must render and
-  // the empty state must yield.
-  if (live.rows === 0 && live.emptyHidden) {
-    throw new Error(`live view rendered neither rows nor its empty state: ${JSON.stringify(live)}`);
-  }
-  if (live.rows > 0 && !live.emptyHidden) {
-    throw new Error(`live view shows the empty state over a populated feed: ${JSON.stringify(live)}`);
+  // The fixture DB carries one seeded session (seedTraceFixture) —
+  // the backlog must render those rows and the empty state must
+  // yield.
+  if (live.rows < 3 || !live.emptyHidden || live.toolmixRows < 1) {
+    throw new Error(`live view did not render the seeded backlog: ${JSON.stringify(live)}`);
   }
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);
+}
+
+async function assertTraceView(page: Page): Promise<void> {
+  await page.locator('[data-view="trace"]').click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#trace-view')?.style.display === 'block' &&
+      document.querySelectorAll('#trace-list .trace-row').length > 0,
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  const timeline = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#trace-list .trace-row').length,
+    pickerVisible: (document.querySelector<HTMLElement>('#session-picker')?.style.display ?? 'none') !== 'none',
+    calls: document.getElementById('tr-stat-calls')?.textContent || '',
+    errors: document.getElementById('tr-stat-errors')?.textContent || '',
+    longGaps: document.querySelectorAll('#trace-list .gap.long').length,
+    errRows: document.querySelectorAll('#trace-list .result.err').length,
+  }));
+  // Seeded session: 3 calls, one >10s gap, one error-tier result.
+  if (timeline.rows < 3 || !timeline.pickerVisible) {
+    throw new Error(`trace timeline did not render the seeded session: ${JSON.stringify(timeline)}`);
+  }
+  if (timeline.calls !== '3' || timeline.errors !== '1' || timeline.longGaps < 1 || timeline.errRows < 1) {
+    throw new Error(`trace masthead stats or row markers wrong: ${JSON.stringify(timeline)}`);
+  }
+  // Step 2 carries args.symbol → the detail card must render the
+  // args JSON and the View-on-graph jump, which lands on the Graph
+  // tab focused on that symbol.
+  await page.locator('#trace-list .trace-row[data-i="1"]').click();
+  await page.waitForFunction(
+    () => Boolean(document.querySelector('#trace-detail pre')) && Boolean(document.querySelector('#trace-focus-graph')),
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  await page.locator('#trace-focus-graph').click();
+  await waitForGraph(page);
+  const traceHidden = await page.evaluate(
+    () => document.querySelector<HTMLElement>('#trace-view')?.style.display !== 'block',
+  );
+  if (!traceHidden) throw new Error('View on graph did not switch to the graph tab');
 }
 
 async function assertMobilePanels(page: Page): Promise<void> {
@@ -2661,6 +2746,7 @@ async function runSmoke(url: string): Promise<void> {
       assertHealthView,
       assertInteractionRaceStability,
       assertLiveView,
+      assertTraceView,
       assertKindFilters,
       assertLocalStateCorruptionRecovery,
       assertNavigationHistoryRefocusesGraph,
@@ -2707,6 +2793,7 @@ const projectPath = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-viewer-smo
 try {
   writeFixture(projectPath);
   await buildFixtureIndex(projectPath);
+  seedTraceFixture(projectPath);
   handle = await startViewerServer(projectPath, { port: 0 });
   await runSmoke(handle.url);
   const realProjectPath = process.cwd();

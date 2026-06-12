@@ -164,14 +164,14 @@ async function bootLive() {
     setGraphState('err', `Failed to load graph: ${String(err)}`);
   }
 
-  // Trace bar: load whatever session the DB has so the user doesn't
-  // need to switch tabs to see anything. loadSessionsLive handles the
-  // empty-DB case with a helpful pointer to `cartograph serve --mcp`.
+  // Agent trace: prefetch whatever session the DB has so the tab is
+  // populated on first open. loadSessionsLive handles the empty-DB
+  // case with a helpful pointer to `cartograph serve --mcp`.
   loadSessionsLive();
 }
 
 /** Fetch /api/sessions and populate the session picker; auto-select
-    the latest session and load its calls into the trace bar.
+    the latest session and load its calls into the trace timeline.
     Empty-state when no MCP server has logged anything yet. */
 let liveTraceCalls = [];      // current session's calls (cached)
 let liveTraceActiveStep = -1; // 0-indexed pointer into liveTraceCalls
@@ -204,12 +204,18 @@ async function loadSessionsLive() {
       picker.style.display = 'none';
       tl.innerHTML = `<div class="empty">No agent trace recorded yet. Start an MCP client (e.g. <code>cartograph serve --mcp</code>) and make a few tool calls to populate this view.</div>`;
       liveTraceCalls = []; liveTraceActiveStep = -1;
+      setText('tr-stat-calls', '—');
+      setText('tr-stat-time', '—');
+      setText('tr-stat-span', '—');
+      setText('tr-stat-errors', '—');
+      renderTraceStepDetail(null);
       return;
     }
     // Render picker options + show it; hide the static label.
     picker.innerHTML = liveSessions.map((s) => {
       const ago = formatRelative(s.lastActivityTs);
-      return `<option value="${escapeHtml(s.id)}">${escapeHtml(s.id)} · ${s.toolCount} calls · ${escapeHtml(ago)}</option>`;
+      const label = s.label ? `${escapeHtml(s.label)} · ` : '';
+      return `<option value="${escapeHtml(s.id)}">${label}${escapeHtml(s.id)} · ${escapeHtml(String(s.toolCount))} calls · ${escapeHtml(ago)}</option>`;
     }).join('');
     picker.style.display = '';
     sessLabel.style.display = 'none';
@@ -226,7 +232,7 @@ async function loadSessionsLive() {
   }
 }
 
-/** Fetch one session's calls and render them in the trace bar.
+/** Fetch one session's calls and render them in the trace timeline.
     The session must already exist in liveSessions so we know the
     persisted tool_count for the divergence check. */
 async function loadSession(sessionId) {
@@ -246,16 +252,19 @@ async function loadSession(sessionId) {
     const meta = liveSessions.find((s) => s.id === sessionId);
     const persistedCt = meta ? meta.toolCount : liveTraceCalls.length;
     const totalMs = liveTraceCalls.reduce((a, c) => a + (c.durationMs || 0), 0);
-    // The picker now carries the session id; the static label only
-    // appears in the empty-state. Header on the picker side just
-    // shows the call count + duration so we don't repeat the id.
-    const sessLabel = document.getElementById('session-label');
+    // The masthead stats carry the session numbers now; the static
+    // label only appears in the empty-state.
     const renderedCt = liveTraceCalls.length;
     const headerCt = renderedCt === persistedCt ? `${renderedCt}` : `${renderedCt} of ${persistedCt}`;
-    sessLabel.textContent = ` · ${headerCt} CALLS · ${(totalMs/1000).toFixed(2)}S TOTAL`;
-    sessLabel.style.display = '';
-    sessLabel.style.color = 'var(--text-muted)';
+    const spanMs = renderedCt > 1 ? liveTraceCalls[renderedCt - 1].ts - liveTraceCalls[0].ts : 0;
+    const errCt = liveTraceCalls.filter((c) => String(c.result ?? '').startsWith('⚠')).length;
+    setText('tr-stat-calls', headerCt);
+    setText('tr-stat-time', traceFormatMs(totalMs));
+    setText('tr-stat-span', renderedCt > 1 ? traceFormatGap(spanMs).slice(1) : '—');
+    setText('tr-stat-errors', String(errCt));
+    document.getElementById('session-label').style.display = 'none';
     renderLiveTraceList();
+    renderTraceStepDetail(null);
   } catch (err) {
     console.warn('viewer: loadSession failed', err);
     tl.innerHTML = `<div class="empty">Failed to load session: ${escapeHtml(String(err))}</div>`;
@@ -270,18 +279,27 @@ function renderLiveTraceList() {
   const tl = document.getElementById('trace-list');
   if (liveTraceCalls.length === 0) {
     tl.innerHTML = '<div class="empty">No calls in this session.</div>';
+    renderTraceStepDetail(null);
     return;
   }
-  const t0 = liveTraceCalls[0]?.ts ?? 0;
-  tl.innerHTML = liveTraceCalls.map((c, i) => `
-    <div class="trace-row${i === liveTraceActiveStep ? ' active' : ''}" data-i="${i}">
-      <span class="delta">+${c.ts - t0}ms</span>
-      <span class="step-num">${c.step}</span>
-      <span class="tool">${escapeHtml(c.tool ?? '')}</span>
-      <span class="args">${escapeHtml(formatArgs(c.args))}</span>
-      <span class="result">${escapeHtml(c.result ?? '')}</span>
-    </div>
-  `).join('');
+  tl.innerHTML = liveTraceCalls.map((c, i) => {
+    const prev = liveTraceCalls[i - 1];
+    const gapMs = prev ? c.ts - prev.ts : 0;
+    return traceRowHtml(i, {
+      step: c.step,
+      clock: new Date(c.ts).toTimeString().slice(0, 8),
+      gap: prev ? traceFormatGap(gapMs) : '',
+      longGap: gapMs >= TRACE_LONG_GAP_MS,
+      hue: traceToolHue(c.tool),
+      tool: traceShortTool(c.tool),
+      args: formatArgs(c.args),
+      dur: traceFormatMs(c.durationMs),
+      durClass: traceDurClass(c.durationMs),
+      result: c.result ?? '',
+      isErr: String(c.result ?? '').startsWith('⚠'),
+      active: i === liveTraceActiveStep,
+    });
+  }).join('');
   tl.querySelectorAll('.trace-row').forEach(el =>
     el.addEventListener('click', () => activateLiveTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
@@ -299,20 +317,31 @@ function formatArgs(args) {
   }
 }
 
-/** Click a live trace row → highlight its target symbol on the graph
-    (parsed from args.symbol if present) AND select it in the right
-    pane. No subgraph reduction in live mode (that needs the real
-    impact-radius result, which we don't store). */
+/** Click a live trace row → highlight it and fill the step-detail
+    sidebar. Graph focus moved to the explicit "View on graph" button
+    in the detail card — auto-fetching a neighborhood on every step
+    was wasteful with the graph on another tab, and replay would have
+    raced one fetch per 850ms tick. */
 async function activateLiveTraceStep(i) {
   liveTraceActiveStep = i;
   const c = liveTraceCalls[i];
   if (!c) return;
   document.querySelectorAll('.trace-row').forEach(el =>
     el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
+  document.querySelector(`.trace-row[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' });
   const symbol = c.args && typeof c.args === 'object' ? c.args.symbol : null;
-  if (typeof symbol === 'string') {
-    await focusGraphOnSymbol(symbol, symbol);
-  }
+  renderTraceStepDetail({
+    tool: c.tool,
+    clock: new Date(c.ts).toTimeString().slice(0, 8),
+    step: c.step,
+    total: liveTraceCalls.length,
+    durationMs: c.durationMs,
+    args: c.args,
+    result: c.result ?? '',
+    isErr: String(c.result ?? '').startsWith('⚠'),
+    sessionId: document.getElementById('session-picker')?.dataset.selectedSession ?? null,
+    symbol: typeof symbol === 'string' && symbol ? symbol : null,
+  });
 }
 
 /** Search → focus a symbol in live mode. Fetches /api/symbol/<query>

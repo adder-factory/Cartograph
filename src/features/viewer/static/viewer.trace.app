@@ -1,22 +1,141 @@
-/* ───────── Trace timeline ───────── */
+/* ───────── Agent trace timeline (Agent trace tab) ─────────
+   Full-page timeline over recorded MCP sessions. Rows render from
+   the live /api/sessions data (viewer.live.app) or the hardcoded
+   demo TRACE (viewer.demo-data.app) in file:// mode. This module
+   owns the shared row/detail templates, the demo path, replay, and
+   export; the live fetch path lives in viewer.live.app. */
 
 const traceList = document.getElementById('trace-list');
-function renderTrace() {
-  traceList.innerHTML = TRACE.map((t, i) => `
-    <div class="trace-row" data-i="${i}">
-      <span class="delta">${escapeHtml(t.delta)}</span>
-      <span class="step-num">${escapeHtml(t.step)}</span>
-      <span class="tool">${escapeHtml(t.tool)}</span>
-      <span class="args">${escapeHtml(t.args)}</span>
-      <span class="result">${escapeHtml(t.result)}</span>
+const traceDetailEl = document.getElementById('trace-detail');
+
+function escapeHtml(s) { return String(s ?? '').replaceAll(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+/** Deterministic hue per tool name — shared with the Live feed so a
+    tool keeps one color across both views (same hash as lfToolHue;
+    duplicated because livefeed loads after this module). */
+function traceToolHue(tool) {
+  let h = 0;
+  const s = String(tool || '');
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 997;
+  return (h * 47 + 13) % 360;
+}
+
+function traceShortTool(tool) { return String(tool || '').replace(/^cartograph_/, ''); }
+
+function traceFormatMs(ms) {
+  const n = Number(ms || 0);
+  if (n >= 10000) return `${(n / 1000).toFixed(0)}s`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}s`;
+  return `${Math.round(n)}ms`;
+}
+
+/** Gap between consecutive calls → "+1.2s" / "+3m 12s"; long pauses
+    (agent thinking / off doing other work) get the .long accent. */
+function traceFormatGap(ms) {
+  const n = Math.max(0, Number(ms || 0));
+  if (n >= 3600000) return `+${Math.floor(n / 3600000)}h ${Math.round((n % 3600000) / 60000)}m`;
+  if (n >= 60000) return `+${Math.floor(n / 60000)}m ${Math.round((n % 60000) / 1000)}s`;
+  if (n >= 1000) return `+${(n / 1000).toFixed(1)}s`;
+  return `+${Math.round(n)}ms`;
+}
+
+const TRACE_LONG_GAP_MS = 10000;
+
+/** One timeline row. All fields are PRE-ESCAPED strings except step
+    and hue; clock/gap/dur may be '' (demo rows have no timestamps). */
+function traceRowHtml(i, row) {
+  return `
+    <div class="trace-row${row.active ? ' active' : ''}" data-i="${i}">
+      <span class="step-num">${escapeHtml(row.step)}</span>
+      <span class="t">${escapeHtml(row.clock)}</span>
+      <span class="gap${row.longGap ? ' long' : ''}">${escapeHtml(row.gap)}</span>
+      <span class="tool" style="--tool-hue:${row.hue}">${escapeHtml(row.tool)}</span>
+      <span class="args" title="${escapeHtml(row.args)}">${escapeHtml(row.args)}</span>
+      <span class="dur${row.durClass || ''}">${escapeHtml(row.dur)}</span>
+      <span class="result${row.isErr ? ' err' : ''}" title="${escapeHtml(row.result)}">${escapeHtml(row.result)}</span>
     </div>
-  `).join('');
+  `;
+}
+
+function traceDurClass(durationMs) {
+  if (durationMs == null) return '';
+  if (durationMs < 100) return ' fast';
+  if (durationMs > 1500) return ' slow';
+  return '';
+}
+
+/** Step-detail sidebar. `d` = {tool, clock, step, total, durationMs,
+    args (object|string|null), result, isErr, sessionId, symbol}. */
+function renderTraceStepDetail(d) {
+  if (!traceDetailEl) return;
+  if (!d) {
+    traceDetailEl.innerHTML = '<div class="health-empty">Select a step to inspect its full arguments and result.</div>';
+    return;
+  }
+  let argsPretty = '';
+  if (d.args != null) {
+    try {
+      argsPretty = typeof d.args === 'string' ? d.args : JSON.stringify(d.args, null, 2);
+    } catch {
+      argsPretty = String(d.args);
+    }
+  }
+  const kv = [
+    ['step', `${d.step}${d.total ? ` of ${d.total}` : ''}`],
+    d.durationMs != null ? ['duration', traceFormatMs(d.durationMs)] : null,
+    d.sessionId ? ['session', d.sessionId] : null,
+    d.result ? ['result', d.result] : null,
+  ].filter(Boolean);
+  traceDetailEl.innerHTML = `
+    <div class="trace-detail-head" style="--tool-hue:${traceToolHue(d.tool)}">
+      <span class="tool">${escapeHtml(d.tool)}</span>
+      ${d.clock ? `<span class="when">${escapeHtml(d.clock)}</span>` : ''}
+    </div>
+    <div class="trace-detail-kv">
+      ${kv.map(([k, v]) => `<span class="k">${escapeHtml(k)}</span><span class="v${k === 'result' && d.isErr ? ' err' : ''}" title="${escapeHtml(v)}">${escapeHtml(v)}</span>`).join('')}
+    </div>
+    ${argsPretty ? `<div class="trace-detail-label">Arguments</div><pre>${escapeHtml(argsPretty)}</pre>` : ''}
+    ${d.symbol ? `<button class="btn primary" id="trace-focus-graph" data-symbol="${escapeHtml(d.symbol)}">⤴ View on graph</button>` : ''}
+  `;
+}
+
+/* "View on graph": jump to the Graph tab focused on the step's
+   symbol. Demo steps already applied their subgraph dim in
+   activateTraceStep; live steps fetch the neighborhood here. */
+traceDetailEl?.addEventListener('click', (e) => {
+  const btn = e.target instanceof Element ? e.target.closest('#trace-focus-graph') : null;
+  if (!btn) return;
+  const symbol = btn.dataset.symbol;
+  document.querySelector('.tab[data-view="graph"]')?.click();
+  if (LIVE_MODE && symbol && typeof focusGraphOnSymbol === 'function') void focusGraphOnSymbol(symbol, symbol);
+  else if (!LIVE_MODE && typeof selectSymbol === 'function' && symbol) selectSymbol(symbol);
+});
+
+/* ───────── file:// demo path ───────── */
+
+function renderTrace() {
+  traceList.innerHTML = TRACE.map((t, i) => traceRowHtml(i, {
+    step: t.step,
+    clock: '',
+    gap: t.delta,
+    longGap: false,
+    hue: traceToolHue(t.tool),
+    tool: traceShortTool(t.tool),
+    args: t.args,
+    dur: '',
+    durClass: '',
+    result: t.result,
+    isErr: false,
+    active: i === activeStep,
+  })).join('');
   traceList.querySelectorAll('.trace-row').forEach(el =>
     el.addEventListener('click', () => activateTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
+  setText('tr-stat-calls', String(TRACE.length));
+  setText('tr-stat-time', '—');
+  setText('tr-stat-span', '—');
+  setText('tr-stat-errors', '0');
 }
-function escapeHtml(s) { return String(s ?? '').replaceAll(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-renderTrace();
 
 let activeStep = -1;
 
@@ -27,7 +146,22 @@ function activateTraceStep(i, fromCy = false) {
   const row = traceList.querySelector(`.trace-row[data-i="${i}"]`);
   if (row && !fromCy) row.scrollIntoView({ block: 'nearest' });
 
-  // visualise on graph: highlight subgraph, dim everything else
+  renderTraceStepDetail({
+    tool: t.tool,
+    clock: '',
+    step: t.step,
+    total: TRACE.length,
+    durationMs: null,
+    args: t.args,
+    result: t.result,
+    isErr: false,
+    sessionId: null,
+    symbol: t.focus || null,
+  });
+
+  // visualise on graph: highlight subgraph, dim everything else. The
+  // graph is on another tab now — the dim persists so "View on graph"
+  // lands on the step's neighborhood.
   if (t.subgraph) {
     const set = new Set(t.subgraph);
     cy.nodes().forEach(n => n.toggleClass('dim', !set.has(n.id())));
@@ -120,3 +254,5 @@ document.getElementById('btn-export').addEventListener('click', () => {
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 1000);
 });
+
+if (!LIVE_MODE) renderTrace();
