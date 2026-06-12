@@ -439,7 +439,17 @@
     <header class="live-masthead">
       <span class="live-indicator" id="lf-indicator" data-state="idle"><span class="live-dot" aria-hidden="true"></span><span id="lf-conn">connecting…</span></span>
       <span class="live-hint">MCP tool calls against this project, as they happen</span>
+      <select class="session-picker" id="lf-session-filter" aria-label="Limit the feed to one session">
+        <option value="">All sessions</option>
+      </select>
+      <div class="live-mode" role="group" aria-label="Live layout mode">
+        <button class="live-mode-btn active" data-lf-mode="feed">Feed</button>
+        <button class="live-mode-btn" data-lf-mode="split">Both</button>
+        <button class="live-mode-btn" data-lf-mode="graph">Graph</button>
+      </div>
       <span class="spacer"></span>
+      <input class="view-filter" id="lf-filter" type="search" placeholder="Filter calls — tool, args, result…" spellcheck="false" autocomplete="off" aria-label="Filter live calls" />
+      <span class="view-filter-count" id="lf-filter-count"></span>
       <div class="live-stats" aria-label="Live activity stats">
         <div class="live-stat"><span class="value" id="lf-stat-calls">0</span><span class="label">calls seen</span></div>
         <div class="live-stat"><span class="value" id="lf-stat-rate">0</span><span class="label">last 60s</span></div>
@@ -448,7 +458,7 @@
       <button class="btn" id="lf-hold" data-tooltip="Stop following new calls">Hold</button>
       <button class="btn" id="lf-clear" data-tooltip="Clear the feed">Clear</button>
     </header>
-    <div class="live-body">
+    <div class="live-body" id="lf-body" data-lf-mode="feed">
       <div class="live-feed-wrap">
         <div class="live-feed mono" id="lf-feed"></div>
         <div class="live-empty" id="lf-empty">
@@ -458,6 +468,10 @@
             Hook one up with <code>cartograph llm install</code>, then ask your agent something about this codebase.</div>
         </div>
         <button class="live-jump" id="lf-jump" hidden>↓ Following paused — jump to latest</button>
+      </div>
+      <div class="live-graph-wrap" id="lf-graph-wrap" hidden>
+        <div class="live-graph" id="lf-graph"></div>
+        <div class="live-graph-hint">Tools (squares) and the symbols, files, and queries they touch — node size grows with use. Click a symbol to open it on the Graph tab.</div>
       </div>
       <aside class="live-side">
         <section class="live-side-card">
@@ -481,6 +495,8 @@
       <select class="session-picker" id="session-picker" style="display:none" aria-label="Recorded session"></select>
       <span class="session" id="session-label">SESSION A1F4-0928 · 8 CALLS · 1.25S TOTAL</span>
       <span class="spacer"></span>
+      <input class="view-filter" id="tr-filter" type="search" placeholder="Filter steps — tool, args, result…" spellcheck="false" autocomplete="off" aria-label="Filter trace steps" />
+      <span class="view-filter-count" id="tr-filter-count"></span>
       <div class="trace-stats" aria-label="Session stats">
         <div class="trace-stat"><span class="value" id="tr-stat-calls">—</span><span class="label">calls</span></div>
         <div class="trace-stat"><span class="value" id="tr-stat-time">—</span><span class="label">tool time</span></div>

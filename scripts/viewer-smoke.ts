@@ -417,15 +417,28 @@ async function buildFixtureIndex(projectPath: string): Promise<void> {
   }
 }
 
-/** Seed one recorded MCP session so the Agent-trace timeline (and the
- *  Live feed's backlog) render real rows in the fixture run: a fast
- *  call, a symbol-bearing call (step detail → View on graph), a long
- *  gap (>10s → .long marker), and an error-tier result. */
+/** Seed recorded MCP sessions so the Agent-trace timeline (and the
+ *  Live feed's backlog) render real rows in the fixture run. The
+ *  primary session has a fast call, a symbol-bearing call (step
+ *  detail → View on graph), a long gap (>10s → .long marker), and an
+ *  error-tier result; a second, earlier session exists so the Live
+ *  session filter has something to narrow away. */
 function seedTraceFixture(projectPath: string): void {
   const conn = DatabaseConnection.open(getDatabasePath(projectPath));
   try {
     const qb = new QueryBuilder(conn.getDb());
     const base = Date.now() - 60_000;
+    const earlierId = 'smoke-trace-session-b';
+    insertSession({ qb, id: earlierId, startedTs: base - 30_000 });
+    appendToolCall(qb, {
+      sessionId: earlierId,
+      step: 1,
+      ts: base - 30_000,
+      toolName: 'cartograph_status',
+      argsJson: '{}',
+      resultSummary: 'second session call',
+      durationMs: 8,
+    });
     const sessionId = 'smoke-trace-session';
     insertSession({ qb, id: sessionId, startedTs: base, label: 'smoke' });
     appendToolCall(qb, {
@@ -2562,6 +2575,62 @@ async function assertLiveView(page: Page): Promise<void> {
   if (live.rows < 3 || !live.emptyHidden || live.toolmixRows < 1) {
     throw new Error(`live view did not render the seeded backlog: ${JSON.stringify(live)}`);
   }
+  // Feed filter: 'demo failure' matches only the seeded error call.
+  await page.locator('#lf-filter').fill('demo failure');
+  await page.waitForFunction(
+    () => {
+      const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
+      return rows.length >= 3 && rows.filter((el) => !el.hidden).length === 1;
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  await page.locator('#lf-filter').fill('');
+  await page.waitForFunction(
+    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].every((el) => !el.hidden),
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  // Session filter: limiting to the primary session hides the
+  // earlier session's row (3 of 4 visible).
+  await page.locator('#lf-session-filter').selectOption('smoke-trace-session');
+  await page.waitForFunction(
+    () => {
+      const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
+      return rows.length >= 4 && rows.filter((el) => !el.hidden).length === 3;
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  await page.locator('#lf-session-filter').selectOption('');
+  await page.waitForFunction(
+    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].every((el) => !el.hidden),
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  // Layout modes: Both → the activity graph builds from the backlog;
+  // Graph → the feed hides; back to Feed for the rest of the suite.
+  await page.locator('.live-mode-btn[data-lf-mode="split"]').click();
+  await page.waitForFunction(
+    () => {
+      const smoke = (globalThis as unknown as { __cartographLiveFeedSmoke?: { graphNodeCount: () => number } })
+        .__cartographLiveFeedSmoke;
+      const wrap = document.querySelector<HTMLElement>('#lf-graph-wrap');
+      return Boolean(wrap && !wrap.hidden && smoke && smoke.graphNodeCount() >= 3);
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  await page.locator('.live-mode-btn[data-lf-mode="graph"]').click();
+  await page.waitForFunction(
+    () => {
+      const feed = document.querySelector('.live-feed-wrap');
+      return feed ? getComputedStyle(feed).display === 'none' : false;
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  await page.locator('.live-mode-btn[data-lf-mode="feed"]').click();
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);
 }
@@ -2590,6 +2659,25 @@ async function assertTraceView(page: Page): Promise<void> {
   if (timeline.calls !== '3' || timeline.errors !== '1' || timeline.longGaps < 1 || timeline.errRows < 1) {
     throw new Error(`trace masthead stats or row markers wrong: ${JSON.stringify(timeline)}`);
   }
+  // Timeline filter: 'find' matches only the seeded step 1 (the
+  // other tools are cartograph_graph / cartograph_status).
+  await page.locator('#tr-filter').fill('find');
+  await page.waitForFunction(
+    () => {
+      const rows = [...document.querySelectorAll<HTMLElement>('#trace-list .trace-row')];
+      return rows.length >= 3 && rows.filter((el) => !el.hidden).length === 1;
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  const filterCount = await page.evaluate(() => document.getElementById('tr-filter-count')?.textContent || '');
+  if (filterCount !== '1/3') throw new Error(`trace filter count wrong: ${JSON.stringify(filterCount)}`);
+  await page.locator('#tr-filter').fill('');
+  await page.waitForFunction(
+    () => [...document.querySelectorAll<HTMLElement>('#trace-list .trace-row')].every((el) => !el.hidden),
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
   // Step 2 carries args.symbol → the detail card must render the
   // args JSON and the View-on-graph jump, which lands on the Graph
   // tab focused on that symbol.

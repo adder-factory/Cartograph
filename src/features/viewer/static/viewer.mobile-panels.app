@@ -152,7 +152,14 @@ document.addEventListener('keydown', (e) => {
   }
   if (e.key === '/' && !inField) {
     e.preventDefault();
-    document.getElementById('search-input')?.focus();
+    // On the Live / Agent-trace tabs, `/` goes to that view's local
+    // filter; everywhere else it is the global symbol search.
+    const activeView = document.querySelector('.tab.active')?.dataset.view;
+    const filterTarget =
+      activeView === 'live' ? document.getElementById('lf-filter')
+      : activeView === 'trace' ? document.getElementById('tr-filter')
+      : null;
+    (filterTarget || document.getElementById('search-input'))?.focus();
     return;
   }
   if (e.key === 'Escape') {

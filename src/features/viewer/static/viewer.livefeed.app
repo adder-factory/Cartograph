@@ -95,11 +95,17 @@ function lfAppendCall(c, animate) {
   lfSeen.add(key);
   lfTrimSeen();
 
+  if (c.sessionId && !lfSessionsSeen.has(c.sessionId)) {
+    lfSessionsSeen.set(c.sessionId, c.ts);
+    lfSyncSessionOptions();
+  }
   if (c.sessionId !== lfLastSessionId) {
     lfLastSessionId = c.sessionId;
     const sep = document.createElement('div');
     sep.className = 'lf-session-row';
+    sep.dataset.session = c.sessionId ?? '';
     sep.innerHTML = `<span class="lf-session-chip">session ${escapeHtml(c.sessionId ?? '?')}</span><span class="line" aria-hidden="true"></span>`;
+    sep.hidden = Boolean(lfFilterQuery()) || Boolean(lfSessionFilterValue());
     lfFeedEl.appendChild(sep);
   }
 
@@ -122,9 +128,13 @@ function lfAppendCall(c, animate) {
     `<span class="lf-args" title="${escapeHtml(argsText)}">${escapeHtml(argsText)}</span>` +
     `<span class="lf-dur${durClass}">${lfFormatMs(c.durationMs)}</span>` +
     `<span class="lf-res${isErr ? ' err' : ''}" title="${escapeHtml(result)}">${escapeHtml(result)}</span>`;
+  row.dataset.search = `${lfShortTool(c.tool)} ${c.tool} ${argsText} ${result}`.toLowerCase();
+  row.dataset.session = c.sessionId ?? '';
+  if (!lfRowPassesFilters(row)) row.hidden = true;
   lfFeedEl.appendChild(row);
   lfRowCount++;
   lfEnforceRowCap();
+  lfGraphRecord(c, animate);
 
   lfCallCount++;
   lfRecentTs.push(c.ts);
@@ -144,6 +154,7 @@ function lfAfterAppend() {
   lfRenderStats();
   lfRenderSession();
   lfRenderToolmix();
+  if (lfFilterQuery() || lfSessionFilterValue()) lfUpdateFilterCount();
   if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
 }
 
@@ -259,6 +270,7 @@ async function lfRunStream() {
 
 function liveFeedActivate() {
   lfActive = true;
+  lfSetMode(lfMode, false);
   if (!LIVE_MODE) {
     lfSetConn('idle', 'file:// mode — start `cartograph viewer` for the live feed');
     if (lfEmptyEl) lfEmptyEl.hidden = false;
@@ -325,5 +337,314 @@ document.getElementById('lf-clear')?.addEventListener('click', () => {
   lfRenderStats();
   lfRenderSession();
   lfRenderToolmix();
+  lfGraphReset();
+  lfSessionsSeen.clear();
+  lfSyncSessionOptions();
+  lfUpdateFilterCount();
   if (lfEmptyEl) lfEmptyEl.hidden = false;
 });
+
+/* ───────── Feed filter ───────── */
+
+const lfFilterInput = document.getElementById('lf-filter');
+const lfFilterCount = document.getElementById('lf-filter-count');
+
+function lfFilterQuery() {
+  return lfFilterInput?.value.trim().toLowerCase() || '';
+}
+
+const lfSessionFilterEl = document.getElementById('lf-session-filter');
+const lfSessionsSeen = new Map(); // sessionId → first-seen ts
+
+function lfSessionFilterValue() {
+  return lfSessionFilterEl?.value || '';
+}
+
+/** Rebuild the session dropdown from the sessions present in the
+    feed, newest first, preserving the current selection. */
+function lfSyncSessionOptions() {
+  if (!lfSessionFilterEl) return;
+  const selected = lfSessionFilterEl.value;
+  const ids = [...lfSessionsSeen.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+  lfSessionFilterEl.innerHTML =
+    '<option value="">All sessions</option>' +
+    ids.map((id) => `<option value="${escapeHtml(id)}">${escapeHtml(id)}</option>`).join('');
+  if (selected && ids.includes(selected)) lfSessionFilterEl.value = selected;
+}
+
+function lfRowPassesFilters(el) {
+  const q = lfFilterQuery();
+  if (q && !(el.dataset.search || '').includes(q)) return false;
+  const session = lfSessionFilterValue();
+  if (session && el.dataset.session !== session) return false;
+  return true;
+}
+
+function lfUpdateFilterCount() {
+  if (!lfFilterCount) return;
+  if (!lfFilterQuery() && !lfSessionFilterValue()) {
+    lfFilterCount.textContent = '';
+    return;
+  }
+  const rows = lfFeedEl.querySelectorAll('.lf-row');
+  let shown = 0;
+  for (const el of rows) if (!el.hidden) shown++;
+  lfFilterCount.textContent = `${shown}/${rows.length}`;
+}
+
+function lfApplyFilter() {
+  const narrowed = Boolean(lfFilterQuery()) || Boolean(lfSessionFilterValue());
+  for (const el of lfFeedEl.querySelectorAll('.lf-row')) {
+    el.hidden = !lfRowPassesFilters(el);
+  }
+  // Session separators are stream landmarks — they only make sense
+  // on the full, unfiltered feed.
+  for (const el of lfFeedEl.querySelectorAll('.lf-session-row')) el.hidden = narrowed;
+  lfUpdateFilterCount();
+  if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
+}
+
+lfSessionFilterEl?.addEventListener('change', () => {
+  lfApplyFilter();
+  lfGraphRebuild();
+});
+
+lfFilterInput?.addEventListener('input', lfApplyFilter);
+lfFilterInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    lfFilterInput.value = '';
+    lfApplyFilter();
+    lfFilterInput.blur();
+  }
+});
+
+/* ───────── Activity graph (Both / Graph layout modes) ─────────
+   A second, independent cytoscape instance: square tool nodes sized
+   by call count, linked to the symbols / files / queries those calls
+   touched. Fed from every appended call (cheap upserts into
+   lfGraphLog); the cy instance itself is created lazily on the first
+   non-feed layout, then replays the log. */
+
+const LF_GRAPH_MAX_TARGETS = 80;
+const LF_GRAPH_LOG_CAP = 400;
+const LF_GRAPH_FLASH_MS = 900;
+const LF_GRAPH_LAYOUT_DEBOUNCE_MS = 600;
+const LF_MODE_KEY = 'cartograph-viewer-live-mode-v1';
+const LF_MODES = ['feed', 'split', 'graph'];
+
+const lfBodyEl = document.getElementById('lf-body');
+const lfGraphWrapEl = document.getElementById('lf-graph-wrap');
+let lfMode = readViewerJsonStorage(LF_MODE_KEY, 'feed', { validate: (v) => LF_MODES.includes(v) });
+let lfGraphCy = null;
+let lfGraphLayoutTimer = null;
+let lfGraphLog = [];      // {tool, toolLabel, hue, target} per call, capped
+let lfTargetOrder = [];   // target node ids in insertion order (prune oldest)
+
+/** Concrete thing a call touched, if any: symbol > file/dir > query. */
+function lfCallTarget(c) {
+  const a = c.args && typeof c.args === 'object' ? c.args : null;
+  if (!a) return null;
+  const sym = a.symbol ?? a.start ?? a.to ?? (Array.isArray(a.symbols) ? a.symbols[0] : null);
+  if (typeof sym === 'string' && sym) return { id: `sym:${sym}`, label: sym, type: 'symbol', focus: sym };
+  const file = a.file ?? a.dir ?? a.dirPath ?? a.pathFilter;
+  if (typeof file === 'string' && file) return { id: `file:${file}`, label: file, type: 'file', focus: null };
+  if (typeof a.query === 'string' && a.query) {
+    const label = a.query.length > 40 ? `${a.query.slice(0, 40)}…` : a.query;
+    return { id: `q:${label}`, label, type: 'query', focus: null };
+  }
+  return null;
+}
+
+function lfGraphRecord(c, fresh) {
+  const entry = {
+    tool: c.tool,
+    toolLabel: lfShortTool(c.tool),
+    hue: lfToolHue(c.tool),
+    target: lfCallTarget(c),
+    sessionId: c.sessionId ?? '',
+  };
+  lfGraphLog.push(entry);
+  if (lfGraphLog.length > LF_GRAPH_LOG_CAP) lfGraphLog.shift();
+  const session = lfSessionFilterValue();
+  if (session && entry.sessionId !== session) return;
+  if (lfGraphCy) {
+    lfGraphUpsert(entry, fresh && lfMode !== 'feed');
+    if (lfMode !== 'feed') lfGraphScheduleLayout();
+  }
+}
+
+/** Rebuild the activity graph from the log under the current session
+    filter — used when the filter changes (text filter is feed-only;
+    the session filter scopes the graph too). */
+function lfGraphRebuild() {
+  if (!lfGraphCy) return;
+  // A pending layout timer is fine — it fires against the rebuilt
+  // elements, which is exactly what we want.
+  lfGraphCy.elements().remove();
+  lfTargetOrder = [];
+  const session = lfSessionFilterValue();
+  for (const entry of lfGraphLog) {
+    if (session && entry.sessionId !== session) continue;
+    lfGraphUpsert(entry, false);
+  }
+  if (lfMode !== 'feed') lfGraphScheduleLayout();
+}
+
+function lfGraphFlash(ele) {
+  ele.addClass('fresh');
+  setTimeout(() => {
+    try {
+      ele.removeClass('fresh');
+    } catch {
+      /* element may have been pruned */
+    }
+  }, LF_GRAPH_FLASH_MS);
+}
+
+function lfGraphPrune() {
+  while (lfTargetOrder.length > LF_GRAPH_MAX_TARGETS) {
+    const id = lfTargetOrder.shift();
+    const node = lfGraphCy.getElementById(id);
+    if (node.length > 0) lfGraphCy.remove(node); // connected edges go with it
+  }
+}
+
+function lfGraphUpsert(entry, fresh) {
+  const toolId = `tool:${entry.tool}`;
+  let toolNode = lfGraphCy.getElementById(toolId);
+  if (toolNode.length === 0) {
+    toolNode = lfGraphCy.add({
+      group: 'nodes',
+      data: { id: toolId, label: entry.toolLabel, color: `hsl(${entry.hue} 55% 38%)`, size: 26, calls: 0, focus: null },
+      classes: 'tool',
+    });
+  }
+  toolNode.data('calls', (toolNode.data('calls') || 0) + 1);
+  toolNode.data('size', Math.min(56, 24 + Math.sqrt(toolNode.data('calls')) * 4));
+  if (fresh) lfGraphFlash(toolNode);
+  if (!entry.target) return;
+  let targetNode = lfGraphCy.getElementById(entry.target.id);
+  if (targetNode.length === 0) {
+    targetNode = lfGraphCy.add({
+      group: 'nodes',
+      data: { id: entry.target.id, label: entry.target.label, size: 18, focus: entry.target.focus },
+      classes: entry.target.type,
+    });
+    lfTargetOrder.push(entry.target.id);
+    lfGraphPrune();
+  }
+  const edgeId = `e:${toolId}->${entry.target.id}`;
+  let edge = lfGraphCy.getElementById(edgeId);
+  if (edge.length === 0) {
+    edge = lfGraphCy.add({ group: 'edges', data: { id: edgeId, source: toolId, target: entry.target.id, w: 1, n: 0 } });
+  }
+  edge.data('n', (edge.data('n') || 0) + 1);
+  edge.data('w', Math.min(6, 1 + Math.log2(1 + edge.data('n'))));
+  if (fresh) {
+    lfGraphFlash(targetNode);
+    lfGraphFlash(edge);
+  }
+}
+
+function lfGraphScheduleLayout() {
+  if (!lfGraphCy || lfGraphLayoutTimer) return;
+  lfGraphLayoutTimer = setTimeout(() => {
+    lfGraphLayoutTimer = null;
+    if (!lfGraphCy || !lfActive || lfMode === 'feed') return;
+    lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 28 }).run();
+  }, LF_GRAPH_LAYOUT_DEBOUNCE_MS);
+}
+
+function lfEnsureGraph() {
+  if (lfGraphCy || typeof cytoscape !== 'function') return;
+  const container = document.getElementById('lf-graph');
+  if (!container) return;
+  lfGraphCy = cytoscape({
+    container,
+    elements: [],
+    style: [
+      {
+        selector: 'node',
+        style: {
+          label: 'data(label)',
+          'font-size': 9,
+          color: '#c7d0da',
+          'text-valign': 'bottom',
+          'text-margin-y': 5,
+          'text-max-width': 130,
+          'text-wrap': 'ellipsis',
+          'background-color': '#2b323a',
+          width: 'data(size)',
+          height: 'data(size)',
+        },
+      },
+      { selector: 'node.tool', style: { shape: 'round-rectangle', 'background-color': 'data(color)' } },
+      { selector: 'node.symbol', style: { shape: 'ellipse', 'background-color': '#183654', 'border-width': 1.5, 'border-color': '#75bdff' } },
+      { selector: 'node.file', style: { shape: 'rectangle', 'background-color': '#20252b', 'border-width': 1, 'border-color': '#788592' } },
+      { selector: 'node.query', style: { shape: 'diamond', 'background-color': '#20252b', 'border-width': 1, 'border-color': '#9faab6' } },
+      { selector: 'node.fresh', style: { 'border-width': 3, 'border-color': '#5dd6aa' } },
+      {
+        selector: 'edge',
+        style: {
+          width: 'data(w)',
+          'line-color': '#323a43',
+          'curve-style': 'bezier',
+          'target-arrow-shape': 'triangle',
+          'target-arrow-color': '#323a43',
+          'arrow-scale': 0.7,
+        },
+      },
+      { selector: 'edge.fresh', style: { 'line-color': '#5dd6aa', 'target-arrow-color': '#5dd6aa' } },
+    ],
+  });
+  lfGraphCy.on('tap', 'node.symbol', (e) => {
+    const focus = e.target.data('focus');
+    if (!focus) return;
+    document.querySelector('.tab[data-view="graph"]')?.click();
+    if (typeof focusGraphOnSymbol === 'function') void focusGraphOnSymbol(focus, focus);
+  });
+  const session = lfSessionFilterValue();
+  for (const entry of lfGraphLog) {
+    if (session && entry.sessionId !== session) continue;
+    lfGraphUpsert(entry, false);
+  }
+}
+
+function lfGraphReset() {
+  lfGraphLog = [];
+  lfTargetOrder = [];
+  lfGraphCy?.elements().remove();
+}
+
+function lfSetMode(mode, persist = true) {
+  lfMode = LF_MODES.includes(mode) ? mode : 'feed';
+  lfBodyEl?.setAttribute('data-lf-mode', lfMode);
+  if (lfGraphWrapEl) lfGraphWrapEl.hidden = lfMode === 'feed';
+  document.querySelectorAll('.live-mode-btn').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.lfMode === lfMode);
+  });
+  if (lfMode !== 'feed') {
+    lfEnsureGraph();
+    requestAnimationFrame(() => {
+      lfGraphCy?.resize();
+      if (lfGraphCy && lfGraphCy.nodes().length > 0) {
+        lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 28 }).run();
+      }
+    });
+  } else if (lfFollow && lfFeedEl) {
+    lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
+  }
+  if (persist) writeViewerJsonStorage(LF_MODE_KEY, lfMode);
+}
+
+document.querySelectorAll('.live-mode-btn').forEach((btn) => {
+  btn.addEventListener('click', () => lfSetMode(btn.dataset.lfMode));
+});
+
+/* Smoke-test hook — mirrors __cartographViewerSmoke for the main app. */
+globalThis.__cartographLiveFeedSmoke = {
+  graphNodeCount: () => (lfGraphCy ? lfGraphCy.nodes().length : 0),
+  graphEdgeCount: () => (lfGraphCy ? lfGraphCy.edges().length : 0),
+  mode: () => lfMode,
+};
