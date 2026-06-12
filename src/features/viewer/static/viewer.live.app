@@ -298,11 +298,13 @@ function renderLiveTraceList() {
       result: c.result ?? '',
       isErr: String(c.result ?? '').startsWith('⚠'),
       active: i === liveTraceActiveStep,
+      searchExtra: c.tool,
     });
   }).join('');
   tl.querySelectorAll('.trace-row').forEach(el =>
     el.addEventListener('click', () => activateLiveTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
+  traceApplyFilter();
 }
 
 function formatArgs(args) {

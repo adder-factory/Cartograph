@@ -22,10 +22,17 @@ cartograph viewer .
 - **Agent trace** — a full-page timeline over recorded MCP sessions: per-call
   clock, gap-from-previous-call, duration, and result columns, a step-detail
   card with the full arguments, replay, JSON export, and a per-step
-  "View on graph" jump.
+  "View on graph" jump. The filter box narrows the timeline by tool, args,
+  or result text; replay walks only the matching steps while a filter is
+  active.
 - **Live** — watch MCP tool calls stream in as an agent uses cartograph on
   this project: a following feed with per-call args, duration, and result,
-  plus an active-session card and a live tool-mix breakdown.
+  plus an active-session card and a live tool-mix breakdown. A filter box
+  narrows the feed by text, a session dropdown limits it to one session
+  (the activity graph follows), and a Feed / Both / Graph
+  toggle adds a live activity graph — tools sized by use, linked to the
+  symbols, files, and queries they touch; click a symbol node to open it
+  on the Graph tab.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.
@@ -104,7 +111,7 @@ selection, or an inspected edge.
 
 | Keys | Action |
 |---|---|
-| `/` | Focus search |
+| `/` | Focus search (the local filter on the Live / Agent trace tabs) |
 | `Cmd/Ctrl+K` | Command palette |
 | `Alt+←` / `Alt+→` | Navigation history |
 | `g g` / `g t` / `g l` / `g h` | Switch to Graph / Agent trace / Live / Health tab |

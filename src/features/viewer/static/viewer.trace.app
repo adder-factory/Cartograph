@@ -41,11 +41,13 @@ function traceFormatGap(ms) {
 
 const TRACE_LONG_GAP_MS = 10000;
 
-/** One timeline row. All fields are PRE-ESCAPED strings except step
-    and hue; clock/gap/dur may be '' (demo rows have no timestamps). */
+/** One timeline row. All fields are escaped here; clock/gap/dur may
+    be '' (demo rows have no timestamps). `searchExtra` carries the
+    full tool name so both "find" and "cartograph_find" filter-match. */
 function traceRowHtml(i, row) {
+  const search = `${row.tool} ${row.searchExtra || ''} ${row.args} ${row.result}`.toLowerCase();
   return `
-    <div class="trace-row${row.active ? ' active' : ''}" data-i="${i}">
+    <div class="trace-row${row.active ? ' active' : ''}" data-i="${i}" data-search="${escapeHtml(search)}">
       <span class="step-num">${escapeHtml(row.step)}</span>
       <span class="t">${escapeHtml(row.clock)}</span>
       <span class="gap${row.longGap ? ' long' : ''}">${escapeHtml(row.gap)}</span>
@@ -127,10 +129,12 @@ function renderTrace() {
     result: t.result,
     isErr: false,
     active: i === activeStep,
+    searchExtra: t.tool,
   })).join('');
   traceList.querySelectorAll('.trace-row').forEach(el =>
     el.addEventListener('click', () => activateTraceStep(Number.parseInt(el.dataset.i, 10)))
   );
+  traceApplyFilter();
   setText('tr-stat-calls', String(TRACE.length));
   setText('tr-stat-time', '—');
   setText('tr-stat-span', '—');
@@ -200,6 +204,52 @@ cy.on('tap', (e) => {
   }
 });
 
+/* ───────── Timeline filter ───────── */
+
+const traceFilterInput = document.getElementById('tr-filter');
+const traceFilterCount = document.getElementById('tr-filter-count');
+
+function traceFilterQuery() {
+  return traceFilterInput?.value.trim().toLowerCase() || '';
+}
+
+function traceApplyFilter() {
+  const q = traceFilterQuery();
+  const rows = [...traceList.querySelectorAll('.trace-row')];
+  let shown = 0;
+  for (const el of rows) {
+    const match = !q || (el.dataset.search || '').includes(q);
+    el.hidden = !match;
+    if (match) shown++;
+  }
+  if (traceFilterCount) traceFilterCount.textContent = q ? `${shown}/${rows.length}` : '';
+}
+
+traceFilterInput?.addEventListener('input', () => {
+  // A running replay walks a captured step order — cancel it before
+  // the filter changes which rows are visible.
+  stopTraceReplay();
+  traceApplyFilter();
+});
+traceFilterInput?.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    e.stopPropagation();
+    traceFilterInput.value = '';
+    traceApplyFilter();
+    traceFilterInput.blur();
+  }
+});
+
+/** Step indices replay should walk: all of them, or — when the
+    timeline filter is active — only the visible matches. */
+function traceReplayOrder(total) {
+  if (!traceFilterQuery()) return Array.from({ length: total }, (_, idx) => idx);
+  return [...traceList.querySelectorAll('.trace-row')]
+    .filter((el) => !el.hidden)
+    .map((el) => Number.parseInt(el.dataset.i, 10))
+    .sort((a, b) => a - b);
+}
+
 /* ───────── Replay button ───────── */
 
 let replayTimer = null;
@@ -217,28 +267,34 @@ document.getElementById('btn-replay').addEventListener('click', () => {
     stopTraceReplay();
     return;
   }
-  // Pick the call list to step through based on mode
+  // Pick the call list to step through based on mode; an active
+  // timeline filter narrows the walk to the visible steps.
   const calls = LIVE_MODE ? liveTraceCalls : TRACE;
   if (!calls || calls.length === 0) return;
+  const order = traceReplayOrder(calls.length);
+  if (order.length === 0) return;
   const stepFn = LIVE_MODE ? activateLiveTraceStep : activateTraceStep;
   // Resume from wherever the user paused (or restart after the end);
   // a step function may be async (live mode fetches) — surface its
   // failure and stop rather than piling steps onto a broken state.
   const startStep = LIVE_MODE ? liveTraceActiveStep : activeStep;
-  let i = startStep >= 0 && startStep < calls.length - 1 ? startStep : 0;
+  let pos = order.indexOf(startStep);
+  // indexOf miss (e.g. the filter changed since the pause) restarts
+  // from the head of the filtered set on purpose.
+  if (pos < 0 || pos >= order.length - 1) pos = 0;
   document.getElementById('btn-replay').textContent = '⏸ Pause';
   const runStep = (idx) => Promise.resolve(stepFn(idx)).catch((err) => {
     console.warn('viewer: trace replay step failed', err);
     stopTraceReplay();
   });
-  void runStep(i);
+  void runStep(order[pos]);
   replayTimer = setInterval(() => {
-    i++;
-    if (i >= calls.length) {
+    pos++;
+    if (pos >= order.length) {
       stopTraceReplay();
       return;
     }
-    void runStep(i);
+    void runStep(order[pos]);
   }, 850);
 });
 
