@@ -320,7 +320,7 @@ function formatArgs(args) {
 }
 
 /** Click a live trace row → highlight it and fill the step-detail
-    sidebar. Graph focus moved to the explicit "View on graph" button
+    sidebar. Graph focus is via the explicit "On the graph" link chips
     in the detail card — auto-fetching a neighborhood on every step
     was wasteful with the graph on another tab, and replay would have
     raced one fetch per 850ms tick. */
@@ -331,7 +331,6 @@ async function activateLiveTraceStep(i) {
   document.querySelectorAll('.trace-row').forEach(el =>
     el.classList.toggle('active', Number.parseInt(el.dataset.i, 10) === i));
   document.querySelector(`.trace-row[data-i="${i}"]`)?.scrollIntoView({ block: 'nearest' });
-  const symbol = c.args && typeof c.args === 'object' ? c.args.symbol : null;
   renderTraceStepDetail({
     tool: c.tool,
     clock: new Date(c.ts).toTimeString().slice(0, 8),
@@ -342,7 +341,7 @@ async function activateLiveTraceStep(i) {
     result: c.result ?? '',
     isErr: String(c.result ?? '').startsWith('⚠'),
     sessionId: document.getElementById('session-picker')?.dataset.selectedSession ?? null,
-    symbol: typeof symbol === 'string' && symbol ? symbol : null,
+    targets: traceGraphTargets(c.args),
   });
 }
 
