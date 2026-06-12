@@ -70,7 +70,7 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
       '--database-url <url>',
       'PostgreSQL connection URL; required for provider=postgres unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set',
     )
-    .option('--database-schema <schema>', 'PostgreSQL schema name (default: public)')
+    .option('--database-schema <schema>', 'PostgreSQL schema name (default: auto-derived per-project schema)')
     .option('--database-pgvector <mode>', 'PostgreSQL pgvector mode: auto (default), off, or require')
     .option('--database-max-connections <n>', 'PostgreSQL pool cap (default: 1)')
     .option('--database-query-timeout-ms <ms>', 'PostgreSQL query timeout in milliseconds (default: 120000)')

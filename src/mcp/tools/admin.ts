@@ -940,7 +940,9 @@ const adminSchema = z.object({
   databaseSchema: z
     .string()
     .optional()
-    .describe('(action=init / storage-migrate) PostgreSQL schema name. Defaults to `public`.'),
+    .describe(
+      '(action=init / storage-migrate) PostgreSQL schema name. Defaults to an auto-derived per-project schema.',
+    ),
   databasePgvector: z
     .enum(['auto', 'off', 'require'])
     .optional()

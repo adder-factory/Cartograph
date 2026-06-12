@@ -8,6 +8,10 @@ export interface DatabaseConfig {
   provider: DatabaseProvider;
   url?: string;
   schema?: string;
+  /** True when `schema` was auto-derived from the project root rather
+   *  than configured — lets error paths hint at the pre-derivation
+   *  implicit-`public` upgrade case. */
+  schemaDerived?: boolean;
   pgvector?: PgvectorMode;
   maxConnections?: number;
   idleTimeoutSeconds?: number;
@@ -173,7 +177,8 @@ export function postgresConnectionSummary(database: DatabaseConfig): string {
   if (database.ssl === true) ssl = 'enabled';
   if (database.ssl === false) ssl = 'disabled';
   const pgvector = database.pgvector ?? 'auto';
-  return `PostgreSQL ${POSTGRES_MIN_SERVER_MAJOR}+ required, pool max ${maxConnections}, connect timeout ${connectionTimeout}s, query timeout ${queryTimeout}ms, SSL ${ssl}, pgvector ${pgvector}`;
+  const schema = database.schema ?? 'auto-derived per project';
+  return `PostgreSQL ${POSTGRES_MIN_SERVER_MAJOR}+ required, schema ${schema}, pool max ${maxConnections}, connect timeout ${connectionTimeout}s, query timeout ${queryTimeout}ms, SSL ${ssl}, pgvector ${pgvector}`;
 }
 
 export function parsePostgresServerVersionNum(value: unknown): number | null {

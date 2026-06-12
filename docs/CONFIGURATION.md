@@ -69,7 +69,7 @@ PostgreSQL 18 or newer:
 |---|---|---|
 | `database.provider` | `sqlite` or `postgres` | `sqlite` |
 | `database.url` | PostgreSQL 18+ connection URL | unset |
-| `database.schema` | PostgreSQL schema | `public` |
+| `database.schema` | PostgreSQL schema | auto-derived per project (`cartograph_<name>_<hash8>`) |
 | `database.pgvector` | `auto`, `off`, or `require` | `auto` |
 | `database.maxConnections` | PostgreSQL pool cap | `1` |
 | `database.connectionTimeoutSeconds` | PostgreSQL connection timeout | `30` |

@@ -41,7 +41,7 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
       '--database-url <url>',
       'PostgreSQL connection URL; required unless CARTOGRAPH_DATABASE_URL / DATABASE_URL is set',
     )
-    .option('--database-schema <schema>', 'PostgreSQL schema name (default: public)')
+    .option('--database-schema <schema>', 'PostgreSQL schema name (default: auto-derived per-project schema)')
     .option('--database-pgvector <mode>', 'PostgreSQL pgvector mode for the target: auto (default), off, or require')
     .option('--database-max-connections <n>', 'PostgreSQL pool cap for the target connection (default: 1)')
     .option('--database-query-timeout-ms <ms>', 'PostgreSQL query timeout in milliseconds (default: 120000)')

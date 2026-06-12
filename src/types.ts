@@ -163,7 +163,7 @@ export interface CartographConfig {
     provider?: 'sqlite' | 'postgres';
     /** PostgreSQL connection URL, e.g. postgres://user:pass@localhost:5432/cartograph. */
     url?: string;
-    /** Optional PostgreSQL schema. Defaults to public. */
+    /** Optional PostgreSQL schema. Omit to get an auto-derived per-project schema (`cartograph_<name>_<hash8>`). */
     schema?: string;
     /**
      * Optional PostgreSQL pgvector acceleration mode. `auto` tries to
