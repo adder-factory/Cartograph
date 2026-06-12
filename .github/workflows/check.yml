@@ -15,8 +15,8 @@
 # parallel-shard risk; revisit adding the full test suite once the bus-error
 # is diagnosed.
 #
-# Install path: `npm ci` (lockfile) for the native prebuilts (tsgo / biome /
-# usearch). The biomarker gate additionally needs the Bun runtime (bun:sqlite
+# Install path: `npm ci --ignore-scripts` (lockfile) for the native prebuilts
+# (tsgo / biome). The biomarker gate additionally needs the Bun runtime (bun:sqlite
 # + bun:ffi + the vendored wasm grammars to index the repo), and PostgreSQL
 # storage tests run against a pgvector-enabled PostgreSQL service.
 name: check
@@ -68,10 +68,12 @@ jobs:
           bun-version: '1.3.14'
 
       - name: Install dependencies
-        # Optional deps (usearch, sqlite-vec) are runtime-guarded vector
-        # accelerators the gates never load — usearch alone is a ~2min
-        # from-source C++ postinstall on a runner.
-        run: npm ci --omit=optional
+        # --ignore-scripts skips usearch's ~2min from-source C++
+        # postinstall (a runtime-guarded vector accelerator the gates
+        # never load) while keeping optional PLATFORM packages — tsgo and
+        # biome ship their binaries as plain optional file deps that an
+        # --omit=optional install would drop.
+        run: npm ci --ignore-scripts
 
       - name: CI script portability
         run: npm run check:ci-portability
