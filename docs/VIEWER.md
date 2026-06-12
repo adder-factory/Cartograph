@@ -37,7 +37,10 @@ cartograph viewer .
   re-running recent hops). The current node breathes, idle nodes ghost
   out, and the camera chases the action while Follow is on. Square tool
   nodes grow with use; click a symbol node to open it on the Graph tab.
-  All motion honors `prefers-reduced-motion`.
+  A fourth **3D** mode renders the same traversal as a bloom-lit WebGL
+  scene with particle streams riding the trail, a camera that flies to
+  the action, and a slow idle orbit (the 3D renderer loads from a CDN on
+  first use). All motion honors `prefers-reduced-motion`.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.

@@ -2780,6 +2780,7 @@
   }
   .live-body[data-lf-mode="split"] { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 280px; }
   .live-body[data-lf-mode="graph"] .live-feed-wrap { display: none; }
+  .live-body[data-lf-mode="3d"] .live-feed-wrap { display: none; }
   .live-graph-wrap {
     position: relative;
     min-width: 0;
@@ -2812,6 +2813,27 @@
     color: var(--text-faint);
     font-size: 11px;
   }
+  .live-3d {
+    flex: 1;
+    min-height: 0;
+    position: relative;
+    overflow: hidden;
+    background: #000003;
+  }
+  .live-3d canvas { display: block; }
+  .live-3d-msg {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-dim);
+    font-size: 13px;
+    text-align: center;
+    padding: var(--s-6);
+    pointer-events: none;
+  }
+  .live-3d-msg[hidden] { display: none; }
   .live-feed-wrap {
     position: relative;
     min-width: 0;
