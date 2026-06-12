@@ -30,8 +30,11 @@ cartograph viewer .
   plus an active-session card and a live tool-mix breakdown. A filter box
   narrows the feed by text, a session dropdown limits it to one session
   (the activity graph follows), and a Feed / Both / Graph
-  toggle adds a live activity graph — tools sized by use, linked to the
-  symbols, files, and queries they touch; click a symbol node to open it
+  toggle adds a live traversal graph: touched symbols resolve against the
+  index and render with the main graph's own kind shapes and health
+  borders, hop edges trace the agent's path from symbol to symbol (newest
+  bright, older fading), and the camera follows the action while Follow
+  is on. Square tool nodes grow with use; click a symbol node to open it
   on the Graph tab.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind

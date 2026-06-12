@@ -59,6 +59,44 @@ const KIND_SHAPE = {
 };
 function shapeForKind(kind) { return KIND_SHAPE[kind] ?? 'ellipse'; }
 
+/* Base node style for INDEXED symbols — kind shape + fill, health
+   border, centrality sizing + hub glow. Shared verbatim by the main
+   graph and the Live tab's activity graph so a symbol looks the same
+   wherever it appears. */
+function viewerBaseNodeStyle() {
+  return {
+    'label': 'data(label)',
+    'background-color': ele => fillForKind(ele.data('kind')),
+    // Files/modules are context, symbols are content — let the
+    // containers recede a touch so colored symbols pop.
+    'background-opacity': ele => (KIND_SHAPE[ele.data('kind')] === 'rectangle' ? 0.72 : 0.94),
+    'color': '#dde3ee',
+    'font-size': 12,
+    'font-weight': 500,
+    'font-family': '-apple-system, system-ui, sans-serif',
+    'text-valign': 'bottom',
+    'text-halign': 'center',
+    'text-margin-y': 4,
+    'text-wrap': 'ellipsis',
+    'text-max-width': 140,
+    // Outline labels instead of background boxes: same contrast on
+    // the dark canvas without the haze of gray rectangles at density.
+    'text-outline-color': '#0b0f17',
+    'text-outline-width': 2,
+    'text-background-opacity': 0,
+    'border-width': ele => borderWidthForHealth(ele.data('health')),
+    'border-color': ele => borderForHealth(ele.data('health')),
+    'width':  ele => sizeForCentrality(ele.data('centrality')),
+    'height': ele => sizeForCentrality(ele.data('centrality')),
+    'shape':  ele => shapeForKind(ele.data('kind')),
+    'underlay-color': ele => fillForKind(ele.data('kind')),
+    'underlay-opacity': ele => hubGlowOpacity(ele.data('centrality')),
+    'underlay-padding': ele => hubGlowPadding(ele.data('centrality')),
+    'transition-property': 'background-color, border-color, border-width, opacity, width, height',
+    'transition-duration': '200ms',
+  };
+}
+
 /* Hub emphasis: a faint kind-colored halo that grows with PageRank
    centrality, so load-bearing symbols read at a glance even when the
    size difference is subtle. Zero below the threshold — leaves stay
@@ -215,37 +253,7 @@ const cy = cytoscape({
   style: [
     {
       selector: 'node',
-      style: {
-        'label': 'data(label)',
-        'background-color': ele => fillForKind(ele.data('kind')),
-        // Files/modules are context, symbols are content — let the
-        // containers recede a touch so colored symbols pop.
-        'background-opacity': ele => (KIND_SHAPE[ele.data('kind')] === 'rectangle' ? 0.72 : 0.94),
-        'color': '#dde3ee',
-        'font-size': 12,
-        'font-weight': 500,
-        'font-family': '-apple-system, system-ui, sans-serif',
-        'text-valign': 'bottom',
-        'text-halign': 'center',
-        'text-margin-y': 4,
-        'text-wrap': 'ellipsis',
-        'text-max-width': 140,
-        // Outline labels instead of background boxes: same contrast on
-        // the dark canvas without the haze of gray rectangles at density.
-        'text-outline-color': '#0b0f17',
-        'text-outline-width': 2,
-        'text-background-opacity': 0,
-        'border-width': ele => borderWidthForHealth(ele.data('health')),
-        'border-color': ele => borderForHealth(ele.data('health')),
-        'width':  ele => sizeForCentrality(ele.data('centrality')),
-        'height': ele => sizeForCentrality(ele.data('centrality')),
-        'shape':  ele => shapeForKind(ele.data('kind')),
-        'underlay-color': ele => fillForKind(ele.data('kind')),
-        'underlay-opacity': ele => hubGlowOpacity(ele.data('centrality')),
-        'underlay-padding': ele => hubGlowPadding(ele.data('centrality')),
-        'transition-property': 'background-color, border-color, border-width, opacity, width, height',
-        'transition-duration': '200ms',
-      }
+      style: viewerBaseNodeStyle(),
     },
     {
       selector: 'node[isGroup]',

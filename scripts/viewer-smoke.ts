@@ -2621,6 +2621,23 @@ async function assertLiveView(page: Page): Promise<void> {
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
+  // The touched symbol resolves against the index and adopts the main
+  // graph's identity: seeded step 2 targets `compute`, a function.
+  await page.waitForFunction(
+    () => {
+      const smoke = (
+        globalThis as unknown as {
+          __cartographLiveFeedSmoke?: {
+            graphNodeInfo: (id: string) => { kind: string | null; classes: string[] } | null;
+          };
+        }
+      ).__cartographLiveFeedSmoke;
+      const info = smoke?.graphNodeInfo('sym:compute');
+      return Boolean(info && info.kind === 'function' && info.classes.includes('code'));
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
   await page.locator('.live-mode-btn[data-lf-mode="graph"]').click();
   await page.waitForFunction(
     () => {
