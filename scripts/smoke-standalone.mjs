@@ -29,6 +29,9 @@ try {
     env: {
       ...process.env,
       CARTOGRAPH_DAEMON_IDLE_TIMEOUT_MS: '500',
+      // The attach line is opt-in since the message gating landed —
+      // without this the smoke can never see it, even on success.
+      CARTOGRAPH_MCP_LOG_ATTACH: '1',
     },
     timeout: 10_000,
   });

@@ -40,6 +40,7 @@
 import './version-check.js';
 import * as fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { isBunStandalonePath } from '../bun-standalone.js';
 import { errMsg } from '../errors.js';
 import { editDistance } from '../text-distance.js';
 import { program, error } from './_cli-core.js';
@@ -108,15 +109,10 @@ registerCartographCommands();
 // Anything else (EACCES, EIO, etc.) is unexpected and would silently
 // suppress CLI parse if swallowed, so we log to stderr before
 // returning false so an operator sees why the CLI didn't dispatch.
-/** Bun standalone executables expose bundled modules under a virtual
- *  root: `/$bunfs/...` on POSIX, a `<drive>:\~BUN\...` virtual drive on
- *  Windows. Missing the Windows form made `isEntryPoint()` fall through
- *  to a realpath compare on a path that doesn't exist on disk — the
- *  windows .exe then exited 0 without ever dispatching the CLI.
- *  Exported for the unit test. */
-export function isBunStandaloneModulePath(modulePath: string): boolean {
-  return modulePath.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(modulePath);
-}
+// Shared check (POSIX + Windows virtual roots) — missing the Windows
+// form here made `isEntryPoint()` fall through to a realpath compare on
+// a path that doesn't exist on disk, and the windows .exe exited 0
+// without ever dispatching the CLI.
 
 function cliUserArgs(): string[] {
   return process.argv.slice(2);
@@ -127,7 +123,7 @@ function isEntryPoint(): boolean {
   // Bun standalone executables expose bundled modules under a virtual
   // `/$bunfs/root/...` path. There is no on-disk module path to compare
   // with argv[1], and this file is only bundled as the executable entry.
-  if (isBunStandaloneModulePath(modulePath)) return true;
+  if (isBunStandalonePath(modulePath)) return true;
   const argv1 = process.argv[1];
   if (!argv1) return false;
   try {
