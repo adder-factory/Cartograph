@@ -108,8 +108,14 @@ registerCartographCommands();
 // Anything else (EACCES, EIO, etc.) is unexpected and would silently
 // suppress CLI parse if swallowed, so we log to stderr before
 // returning false so an operator sees why the CLI didn't dispatch.
-function isBunStandaloneModulePath(modulePath: string): boolean {
-  return modulePath.startsWith('/$bunfs/');
+/** Bun standalone executables expose bundled modules under a virtual
+ *  root: `/$bunfs/...` on POSIX, a `<drive>:\~BUN\...` virtual drive on
+ *  Windows. Missing the Windows form made `isEntryPoint()` fall through
+ *  to a realpath compare on a path that doesn't exist on disk — the
+ *  windows .exe then exited 0 without ever dispatching the CLI.
+ *  Exported for the unit test. */
+export function isBunStandaloneModulePath(modulePath: string): boolean {
+  return modulePath.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(modulePath);
 }
 
 function cliUserArgs(): string[] {
