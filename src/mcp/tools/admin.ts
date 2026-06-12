@@ -922,7 +922,7 @@ const adminSchema = z.object({
     // shape `z.enum` requires. The dispatch table is the sole source.
     .enum(ADMIN_ACTION_NAMES as [string, ...string[]])
     .describe(
-      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move storage between SQLite and PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
+      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed) | `biomarkers-refresh` (full findings pass, no re-extract). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move storage between SQLite and PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
     ),
   path: z.string().optional().describe('(action=init / action=uninit) Absolute path to the project directory.'),
   databaseProvider: z
@@ -1098,7 +1098,7 @@ export const ADMIN_TOOL = defineTool({
   name: 'cartograph_admin',
   description:
     'Index lifecycle + LLM-pipeline ops, dispatched by `action` (all bypass the freshness gate). ' +
-    'Refresh: `sync` / `index`. Setup: `init` / `uninit`. Phases: `summarize` / `embed` / `classify` / `embed-only`. ' +
+    'Refresh: `sync` / `index` / `biomarkers-refresh`. Setup: `init` / `uninit`. Phases: `summarize` / `embed` / `classify` / `embed-only`. ' +
     'Fix-loops: `migrate` / `unlock` / `build-similarity-edges` / `prune-store`. Interop: `scip-export` / `scip-import`. ' +
     'See the `action` field for per-action detail.',
   schema: adminSchema,
