@@ -29,7 +29,7 @@ export function resolveScopedSessionId(ctx: RequestContext): string | null {
  *  as backtracking hotspots; a loop is unambiguous). */
 function stripTrailingSlashes(p: string): string {
   let end = p.length;
-  while (end > 0 && p.charCodeAt(end - 1) === 47 /* '/' */) end--;
+  while (end > 0 && p.codePointAt(end - 1) === 47 /* '/' */) end--;
   return p.slice(0, end);
 }
 
