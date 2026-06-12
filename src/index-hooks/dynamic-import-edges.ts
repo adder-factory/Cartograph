@@ -30,9 +30,8 @@
 
 import * as path from 'node:path';
 import type { IndexHook, IndexHookContext } from './types.js';
-import { readFileSafe } from '../utils.js';
+import { minerFileText } from './file-text-cache.js';
 import type { SyncResult } from '../extraction/index.js';
-import { stripJsComments } from '../resolution/import-resolver.js';
 import {
   type FileTarget,
   lookupSymbolByNameInFile,
@@ -85,9 +84,8 @@ async function buildDynamicImportEdges(ctx: IndexHookContext, files: FileTarget[
   let processed = 0;
   for (const file of files) {
     if (!SUPPORTED_LANGS.has(file.language)) continue;
-    const content = readFileSafe(path.join(ctx.projectRoot, file.path));
-    if (!content) continue;
-    const cleaned = stripJsComments(content);
+    const { cleaned } = minerFileText(ctx.projectRoot, file.path);
+    if (!cleaned) continue;
     if (!cleaned.includes('import(')) continue;
     const scan: ScanCtx = { hookCtx: ctx, file, cleaned, edges };
     collectDestructureEdges(scan);

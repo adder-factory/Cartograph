@@ -12,7 +12,7 @@ local, on your machine.
 [![CI](https://github.com/adder-factory/cartograph/actions/workflows/check.yml/badge.svg)](https://github.com/adder-factory/cartograph/actions/workflows/check.yml)
 [![Version](https://img.shields.io/github/package-json/v/adder-factory/cartograph?label=version&color=8b5cf6)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![TypeScript](https://img.shields.io/github/languages/top/adder-factory/cartograph?color=3178c6)](src)
+[![TypeScript](https://img.shields.io/github/package-json/dependency-version/adder-factory/cartograph/dev/typescript?label=TypeScript&color=3178c6)](tsconfig.json)
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/adder-factory/cartograph/issues)
 
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)

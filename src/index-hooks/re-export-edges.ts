@@ -21,7 +21,7 @@
 
 import * as path from 'node:path';
 import type { IndexHook, IndexHookContext } from './types.js';
-import { readFileSafe } from '../utils.js';
+import { minerFileText } from './file-text-cache.js';
 import type { SyncResult } from '../extraction/index.js';
 import type { Language } from '../types.js';
 import { extractReExports } from '../resolution/import-resolver.js';
@@ -64,7 +64,7 @@ async function buildReExportEdges(ctx: IndexHookContext, files: FileTarget[]): P
 
 function buildReExportEdgesForFile(ctx: IndexHookContext, file: FileTarget): ReExportEdge[] {
   if (!SUPPORTED_LANGS.has(file.language)) return [];
-  const content = readFileSafe(path.join(ctx.projectRoot, file.path));
+  const { content } = minerFileText(ctx.projectRoot, file.path);
   if (!content) return [];
 
   const reExports = extractReExports(content, file.language as Language);

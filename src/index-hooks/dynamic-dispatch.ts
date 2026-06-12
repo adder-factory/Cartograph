@@ -9,12 +9,10 @@
  * noisy all-to-all call graphs.
  */
 
-import * as path from 'node:path';
 import type { Edge } from '../types.js';
 import type { IndexHook, IndexHookContext } from './types.js';
 import type { SyncResult } from '../extraction/index.js';
-import { readFileSafe } from '../utils.js';
-import { stripJsComments } from '../resolution/import-resolver.js';
+import { minerFileText } from './file-text-cache.js';
 import { computeAlgoHash } from '../algo-hash.js';
 import { getMetadata, setMetadata } from '../db/queries-metadata.js';
 import { getSymbolNameIndexByFile } from '../db/queries-search.js';
@@ -71,9 +69,8 @@ async function buildDynamicDispatchEdges(ctx: IndexHookContext, files: FileTarge
   let processed = 0;
   for (const file of files) {
     if (!SUPPORTED_LANGS.has(file.language)) continue;
-    const content = readFileSafe(path.join(ctx.projectRoot, file.path));
-    if (!content) continue;
-    const cleaned = stripJsComments(content);
+    const { cleaned } = minerFileText(ctx.projectRoot, file.path);
+    if (!cleaned) continue;
     if (!hasDispatchSignal(cleaned)) continue;
     collectEdgesFromFile({ ctx, filePath: file.path, cleaned, edges });
     if (++processed % PER_FILE_YIELD_INTERVAL === 0) await yieldToEventLoop();
