@@ -71,10 +71,13 @@ archiveStage();
 
 function bunCompileTarget(t) {
   const [os, arch] = t.split('-');
-  // x64 uses bun's baseline (pre-AVX2) build: bun's default x64 binaries
-  // SIGILL on CPUs/emulators without AVX2 (Rosetta, older Xeons, some
-  // VMs). The release trades a little throughput for running everywhere.
-  const suffix = arch === 'x64' ? '-baseline' : '';
+  // darwin/linux x64 use bun's baseline (pre-AVX2) build: the default
+  // x64 binaries SIGILL on CPUs/emulators without AVX2 (Rosetta, older
+  // Xeons, some VMs). Windows stays on the default build — bun's
+  // compile fetcher failed deterministically on the windows baseline
+  // asset (CI, 2026-06-11), and AVX2 is effectively universal on the
+  // Windows x64 fleet.
+  const suffix = arch === 'x64' && os !== 'win32' ? '-baseline' : '';
   return `bun-${os === 'win32' ? 'windows' : os}-${arch}${suffix}`;
 }
 
