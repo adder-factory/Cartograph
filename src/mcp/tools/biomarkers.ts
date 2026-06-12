@@ -526,7 +526,15 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
     compact({ biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit }),
   );
   if (args.format === 'json') {
-    return renderRankedJson(cg, rows, { biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile, limit });
+    return renderRankedJson(cg, rows, {
+      biomarker,
+      minSeverity,
+      minCentrality,
+      minMetric,
+      maxMetric,
+      excludeFile,
+      limit,
+    });
   }
   if (rows.length === 0) {
     return ok(
