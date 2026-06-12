@@ -106,6 +106,28 @@ export function gitWorktreeRoot(dir: string): string | null {
   }
 }
 
+/**
+ * The repo's `core.hooksPath` from any git config scope (repo, global,
+ * system, includes), or null when unset or not a repo. Returned
+ * verbatim — git treats a relative value as relative to the worktree
+ * root, so callers resolve it themselves.
+ *
+ * Hook managers (husky, lefthook, simple-git-hooks) set this, after
+ * which git ignores `.git/hooks` entirely — anything installed there
+ * silently never fires (issue #4).
+ */
+export function gitCoreHooksPath(dir: string): string | null {
+  try {
+    const out = execFileSync('git', ['config', '--get', 'core.hooksPath'], {
+      ...GIT_EXEC_OPTIONS,
+      cwd: dir,
+    }).trim();
+    return out || null;
+  } catch {
+    return null; // `git config --get` exits 1 when the key is unset
+  }
+}
+
 /** Resolve symlinks where possible so tmp-dir realpath quirks (macOS
  *  `/var` ↔ `/private/var`) don't break worktree-root equality. */
 function safeRealpath(p: string): string {

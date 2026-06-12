@@ -73,6 +73,13 @@ background; skip with `--no-hooks`. `cartograph install-hooks` manages the
 same blocks separately (existing hook content is preserved, and `--remove`
 deletes only Cartograph's managed block).
 
+Repos whose hooks are owned by a `core.hooksPath` manager are handled: with
+husky, the blocks are appended to the tracked `.husky/<hook>` files its runner
+executes; any other custom `core.hooksPath` directory is written directly; and
+blocks stranded in `.git/hooks` by older installs (where git no longer reads
+them) are cleaned up on the next install. `cartograph doctor` reports hook
+liveness — a warning means blocks exist somewhere git will never execute.
+
 ## Admin
 
 ```sh

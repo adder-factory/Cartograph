@@ -12,6 +12,7 @@ export {
   getMcpCommand,
   getMcpServerArgs,
   getMcpServerConfig,
+  isProjectSourceRunEntry,
   mcpCommandOptionsForLocation,
   renderMcpServersPrintConfig,
   type McpCommandOptions,

@@ -473,6 +473,44 @@ describe('Installer targets — Claude specifics', () => {
     expect(fs.existsSync(path.join(tmpHome, '.claude', 'skills', 'cartograph'))).toBe(false);
     expect(fs.readFileSync(path.join(siblingDir, 'SKILL.md'), 'utf-8')).toContain('other-skill');
   });
+
+  it('keeps an existing source-run MCP entry instead of de-sourcing dev wiring', () => {
+    const claude = getTarget('claude')!;
+    const projectKey = path.resolve(process.cwd());
+    const devEntry = {
+      type: 'stdio',
+      command: 'bun',
+      args: [path.join(projectKey, 'src', 'bin', 'cartograph.ts'), 'serve', '--mcp', '--project-path', projectKey],
+    };
+    const cfgPath = path.join(tmpHome, '.claude.json');
+    fs.writeFileSync(
+      cfgPath,
+      JSON.stringify({ projects: { [projectKey]: { mcpServers: { cartograph: devEntry } } } }, null, 2) + '\n',
+    );
+
+    const result = claude.install('local', { autoAllow: false });
+
+    expect(result.files.find((file) => file.path === cfgPath)?.action).toBe('kept');
+    const after = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+    expect(after.projects[projectKey].mcpServers.cartograph).toEqual(devEntry);
+  });
+
+  it('shared .mcp.json writer also keeps source-run entries (copilot path)', () => {
+    const copilot = getTarget('copilot')!;
+    const mcpPath = path.join(process.cwd(), '.mcp.json');
+    const devEntry = {
+      type: 'stdio',
+      command: 'bun',
+      args: [path.join(path.resolve(process.cwd()), 'src', 'bin', 'cartograph.ts'), 'serve', '--mcp'],
+    };
+    fs.writeFileSync(mcpPath, JSON.stringify({ mcpServers: { cartograph: devEntry } }, null, 2) + '\n');
+
+    const result = copilot.install('local', { autoAllow: false });
+
+    expect(result.files.find((file) => file.path === mcpPath)?.action).toBe('kept');
+    const after = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+    expect(after.mcpServers.cartograph).toEqual(devEntry);
+  });
 });
 
 describe('Installer targets — Codex specifics', () => {

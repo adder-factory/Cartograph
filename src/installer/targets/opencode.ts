@@ -29,6 +29,7 @@ import {
   getHomeDir,
   getMcpCommand,
   getMcpServerArgs,
+  isProjectSourceRunEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
@@ -117,6 +118,8 @@ class OpencodeTarget implements AgentTarget {
     let configWrite: WriteResult['files'][number];
     if (jsonDeepEqual(before, after)) {
       configWrite = { path: file, action: 'unchanged' };
+    } else if (isProjectSourceRunEntry(before, process.cwd())) {
+      configWrite = { path: file, action: 'kept' };
     } else {
       const created = !fs.existsSync(file);
       if (!existing['$schema']) existing['$schema'] = OPENCODE_SCHEMA_URL;

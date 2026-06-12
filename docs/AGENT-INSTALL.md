@@ -62,7 +62,11 @@ into the generated config automatically; override with `--command <path>`.
 The managed `post-merge`, `post-checkout`, and `post-rewrite` hook blocks make
 pulls, branch switches, and rebases trigger a quiet background sync. Existing
 hook content is preserved. Skip them at install time with `--no-hooks`, and
-add or remove them later with `cartograph install-hooks [--remove]`.
+add or remove them later with `cartograph install-hooks [--remove]`. Repos
+using a `core.hooksPath` hook manager are supported: husky setups get the
+blocks in the tracked `.husky/<hook>` files, other custom hook directories are
+written directly, and `cartograph doctor` warns when blocks sit somewhere git
+will never execute.
 
 For local installs, generated project config and instruction files are added to
 `.gitignore` because local MCP entries can contain absolute checkout paths and

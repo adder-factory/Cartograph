@@ -300,6 +300,7 @@ async function maybeInstallProjectHooks(args: MaybeInstallProjectHooksArgs): Pro
   }
   const hookSummary = result.changes.map((change) => `${change.hook} ${change.status}`).join(', ');
   clack.log.success(`Git hooks: ${hookSummary}`);
+  if (result.note) clack.log.info(result.note);
 }
 
 /** Step 2: pick the install location, honoring `--location` and `--yes` flags. */
@@ -366,18 +367,21 @@ function installTargetsAt(args: InstallTargetsArgs): void {
     }
     const result = target.install(location, { autoAllow, command });
     for (const file of result.files) {
-      let verb = 'Updated';
-      if (file.action === 'unchanged') {
-        verb = 'Unchanged';
-      } else if (file.action === 'created') {
-        verb = 'Created';
-      }
-      clack.log.success(`${target.displayName}: ${verb} ${tildify(file.path)}`);
+      clack.log.success(`${target.displayName}: ${fileActionVerb(file.action)} ${tildify(file.path)}`);
     }
     for (const note of result.notes ?? []) {
       clack.log.info(`${target.displayName}: ${note}`);
     }
   }
+}
+
+/** Log-line verb for a per-file install action. `kept` marks an
+ *  existing custom MCP entry deliberately left in place. */
+function fileActionVerb(action: string): string {
+  if (action === 'unchanged') return 'Unchanged';
+  if (action === 'created') return 'Created';
+  if (action === 'kept') return 'Kept existing custom MCP entry in';
+  return 'Updated';
 }
 
 /**

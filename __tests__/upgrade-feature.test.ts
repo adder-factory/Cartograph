@@ -3,7 +3,12 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { checkUpgrade, compareVersions, renderUpgradeCheck } from '../src/features/upgrade/index.js';
+import {
+  checkUpgrade,
+  compareVersions,
+  fetchLatestPublishedVersion,
+  renderUpgradeCheck,
+} from '../src/features/upgrade/index.js';
 import { detectInstallMethod, runSourceUpgrade } from '../src/features/upgrade/source-update.js';
 
 describe('upgrade feature', () => {
@@ -258,5 +263,32 @@ describe('source self-update (real git fixtures)', () => {
     expect(result.status).toBe('blocked');
     expect(result.message).toContain('no upstream');
     expect(result.nextSteps.join('\n')).toContain('--set-upstream-to');
+  });
+});
+
+describe('fetchLatestPublishedVersion', () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+  });
+
+  it('prefers GitHub releases and strips the tag v-prefix', async () => {
+    globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
+      expect(String(url)).toContain('api.github.com');
+      return new Response(JSON.stringify({ tag_name: 'v9.9.9' }), { status: 200 });
+    }) as typeof fetch;
+
+    await expect(fetchLatestPublishedVersion()).resolves.toBe('9.9.9');
+  });
+
+  it('falls back to npm when GitHub fails and combines both errors when neither answers', async () => {
+    globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
+      if (String(url).includes('api.github.com')) return new Response('{}', { status: 404 });
+      return new Response(JSON.stringify({ version: '8.8.8' }), { status: 200 });
+    }) as typeof fetch;
+    await expect(fetchLatestPublishedVersion()).resolves.toBe('8.8.8');
+
+    globalThis.fetch = (async () => new Response('{}', { status: 500 })) as typeof fetch;
+    await expect(fetchLatestPublishedVersion()).rejects.toThrow(/GitHub releases API.*; npm registry/);
   });
 });

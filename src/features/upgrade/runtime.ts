@@ -24,7 +24,10 @@ export interface UpgradeCheckResult {
 
 const NPM_REGISTRY_PROTOCOL = 'https:';
 const NPM_REGISTRY_HOST = 'registry.npmjs.org';
-const NPM_VERSION_FETCH_TIMEOUT_MS = 10_000;
+const VERSION_FETCH_TIMEOUT_MS = 10_000;
+
+const GITHUB_API_BASE = 'https://api.github.com';
+const GITHUB_RELEASES_LATEST_PATH = '/repos/adder-factory/cartograph/releases/latest';
 
 const STANDALONE_INSTALLER_URL = 'https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh';
 
@@ -106,7 +109,7 @@ function updateStepsForMethod(method: UpgradeCheckOptions['method']): string[] {
 export async function fetchLatestNpmVersion(packageName = '@adder-factory/cartograph'): Promise<string> {
   const response = await fetch(latestPackageUrl(packageName), {
     headers: { accept: 'application/json' },
-    signal: AbortSignal.timeout(NPM_VERSION_FETCH_TIMEOUT_MS),
+    signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`);
   const parsed = (await response.json()) as { version?: unknown };
@@ -114,6 +117,46 @@ export async function fetchLatestNpmVersion(packageName = '@adder-factory/cartog
     throw new Error('npm registry response did not include a version');
   }
   return parsed.version.trim();
+}
+
+export async function fetchLatestGithubReleaseVersion(): Promise<string> {
+  const response = await fetch(`${GITHUB_API_BASE}${GITHUB_RELEASES_LATEST_PATH}`, {
+    headers: { accept: 'application/vnd.github+json' },
+    signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
+  });
+  if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`);
+  const parsed = (await response.json()) as { tag_name?: unknown };
+  if (typeof parsed.tag_name !== 'string' || parsed.tag_name.trim() === '') {
+    throw new Error('GitHub releases response did not include a tag name');
+  }
+  const tag = parsed.tag_name.trim();
+  // Guard the shape: a non-version tag (e.g. `nightly-2026-06-12`)
+  // would silently compare as 0.0.0 and report the user as current.
+  if (!/^v?\d+\.\d+/.test(tag)) {
+    throw new Error(`GitHub release tag "${tag}" is not a version tag`);
+  }
+  return tag.replace(/^v/, '');
+}
+
+/**
+ * Latest published version, GitHub releases first: GitHub Releases is
+ * Cartograph's canonical release channel (binaries + install.sh), and
+ * the package is not on npm — npm-only lookups always 404'd for
+ * package/standalone installs. npm stays as the fallback so a future
+ * npm publish needs no code change here.
+ */
+export async function fetchLatestPublishedVersion(): Promise<string> {
+  try {
+    return await fetchLatestGithubReleaseVersion();
+  } catch (githubError) {
+    try {
+      return await fetchLatestNpmVersion();
+    } catch (npmError) {
+      const githubMessage = githubError instanceof Error ? githubError.message : String(githubError);
+      const npmMessage = npmError instanceof Error ? npmError.message : String(npmError);
+      throw new Error(`${githubMessage}; ${npmMessage}`);
+    }
+  }
 }
 
 function latestPackageUrl(packageName: string): string {
