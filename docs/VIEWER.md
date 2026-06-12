@@ -32,10 +32,12 @@ cartograph viewer .
   (the activity graph follows), and a Feed / Both / Graph
   toggle adds a live traversal graph: touched symbols resolve against the
   index and render with the main graph's own kind shapes and health
-  borders, hop edges trace the agent's path from symbol to symbol (newest
-  bright, older fading), and the camera follows the action while Follow
-  is on. Square tool nodes grow with use; click a symbol node to open it
-  on the Graph tab.
+  borders, hop edges trace the agent's path from symbol to symbol, and
+  light pulses race along the lines as calls land (with ambient pulses
+  re-running recent hops). The current node breathes, idle nodes ghost
+  out, and the camera chases the action while Follow is on. Square tool
+  nodes grow with use; click a symbol node to open it on the Graph tab.
+  All motion honors `prefers-reduced-motion`.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.

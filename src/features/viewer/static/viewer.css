@@ -2794,7 +2794,17 @@
   .live-graph {
     flex: 1;
     min-height: 0;
-    background: radial-gradient(ellipse at 50% 40%, #171b20 0%, var(--bg-0) 75%);
+    /* Tron floor: faint cyan line grid over the dark vignette. */
+    background:
+      linear-gradient(rgba(0, 212, 255, .045) 1px, transparent 1px) 0 0 / 100% 34px,
+      linear-gradient(90deg, rgba(0, 212, 255, .045) 1px, transparent 1px) 0 0 / 34px 100%,
+      radial-gradient(ellipse at 50% 35%, #10161d 0%, #090c10 80%);
+  }
+  /* Neon glow: drop-shadow follows the alpha of the drawn pixels, so
+     every node, edge, and packet on the canvas gets a cyan halo. */
+  .live-graph canvas { filter: drop-shadow(0 0 7px rgba(0, 212, 255, .3)); }
+  @media (prefers-reduced-motion: reduce) {
+    .live-graph canvas { filter: none; }
   }
   .live-graph-hint {
     padding: var(--s-2) var(--s-4);
