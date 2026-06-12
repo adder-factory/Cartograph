@@ -6,7 +6,7 @@ import { spawnSync } from 'node:child_process';
 const ROOT = path.resolve(import.meta.dirname, '..');
 const RELEASE_DIR = path.join(ROOT, 'release');
 const target = process.argv[2] ?? currentTarget();
-const isWindows = target.startsWith('win32-');
+const isWindows = target.startsWith('windows-');
 const stageName = `cartograph-${target}`;
 const stage = path.join(RELEASE_DIR, stageName);
 const binaryName = isWindows ? 'cartograph.exe' : 'cartograph-bin';
@@ -77,15 +77,17 @@ function bunCompileTarget(t) {
   // compile fetcher failed deterministically on the windows baseline
   // asset (CI, 2026-06-11), and AVX2 is effectively universal on the
   // Windows x64 fleet.
-  const suffix = arch === 'x64' && os !== 'win32' ? '-baseline' : '';
-  return `bun-${os === 'win32' ? 'windows' : os}-${arch}${suffix}`;
+  const suffix = arch === 'x64' && os !== 'windows' ? '-baseline' : '';
+  return `bun-${os}-${arch}${suffix}`;
 }
 
 function currentTarget() {
+  // Node reports Windows as `win32` regardless of bitness; the public
+  // target/artifact name is `windows-x64` (only 64-bit is supported).
   const osMap = new Map([
     ['darwin', 'darwin'],
     ['linux', 'linux'],
-    ['win32', 'win32'],
+    ['win32', 'windows'],
   ]);
   const archMap = new Map([
     ['x64', 'x64'],
