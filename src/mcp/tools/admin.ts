@@ -180,6 +180,28 @@ async function handleSync(ctx: ToolCtx, args: Record<string, unknown>): Promise<
   }
 }
 
+/** Full biomarker findings pass (per-file + cross-file) on the current
+ *  index, without re-extracting — mirrors `cartograph admin
+ *  biomarkers-refresh`. The cheap way to bring `code_health_findings`
+ *  to full-pass authority after a sync. */
+async function handleBiomarkersRefresh(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
+  const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
+  try {
+    const result = await cg.stats.refreshBiomarkers();
+    if (result === null) {
+      return ok(textResult('Biomarkers are disabled for this project (enableBiomarkers: false); nothing to refresh.'));
+    }
+    return ok(
+      textResult(
+        `## Biomarkers refreshed\n\n${result.findingsEmitted} findings across ${result.filesScanned} files ` +
+          `(${result.errors} rule errors) in ${result.durationMs}ms.`,
+      ),
+    );
+  } catch (error_) {
+    return err(`Biomarkers refresh failed: ${errMsg(error_)}`);
+  }
+}
+
 /** Render the sync summary card: header + per-bucket added/modified/removed deltas. */
 function formatSyncResult(result: {
   filesChecked: number;
@@ -860,6 +882,7 @@ const ADMIN_ACTIONS: Record<string, AdminAction> = {
   uninit: handleUninit,
   unlock: handleUnlock,
   sync: handleSync,
+  'biomarkers-refresh': handleBiomarkersRefresh,
   index: handleIndex,
   'embed-only': handleEmbedOnly,
   migrate: handleMigrate,
