@@ -70,7 +70,8 @@ answer without loading whole files into context.
 
 The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,
-semantic search, `ask`, and rerank.
+semantic search, `ask`, and rerank — served by local backends (llama.cpp,
+Ollama, Apple MLX, LM Studio) or cloud providers (OpenAI, OpenRouter).
 
 ## Get started
 
@@ -148,6 +149,23 @@ To index a project *without* touching any agent config, use
 `cartograph index .` (init + index + readiness check only; previously named
 `quickstart`, which still works as an alias).
 
+### 3. Optional: LLM features
+
+The core graph needs no LLM. To add summaries, semantic search, `ask`, and
+rerank, run the setup wizard — it detects running local backends (Ollama,
+llama-server, MLX, LM Studio) and cloud keys in your environment, and
+recommends a preset:
+
+```bash
+cartograph llm setup                                  # interactive wizard
+cartograph admin llm-apply --preset cloud-openrouter  # or apply one directly
+```
+
+With `OPENROUTER_API_KEY` set, one key serves the chat tiers from hundreds of
+hosted models — bulk symbol summaries cost pennies per thousand on the default
+models. Local GGUF setups stay fully offline instead. See
+[Configuration](docs/CONFIGURATION.md) for every preset and tier.
+
 <details>
 <summary><strong>What the installer writes</strong> (MCP config, git hooks, uninstall)</summary>
 
@@ -198,7 +216,7 @@ Every surface, and where to go deeper:
 | 🗺️ | **Interactive viewer** — local web UI with a node shape language, health borders, hub halos, impact/path/compare tools | [Viewer guide](docs/VIEWER.md) |
 | 📤 | **Export** — graph snapshots as JSON, DOT, Mermaid, and Cytoscape | [Export formats](docs/GRAPH-EXPORT-FORMATS.md) |
 | 🤖 | **MCP server** — profiles, load budget, low-token mode, client snippets for every major agent | [MCP usage](docs/MCP-USAGE.md) |
-| 🧩 | **LLM tiers (optional)** — summaries, embeddings, semantic search, ask, rerank via local or cloud OpenAI-compatible backends | [Configuration](docs/CONFIGURATION.md) |
+| 🧩 | **LLM tiers (optional)** — summaries, embeddings, semantic search, ask, rerank via local backends (Ollama, llama.cpp, MLX) or cloud (OpenAI, OpenRouter) | [Configuration](docs/CONFIGURATION.md) |
 | 🗄️ | **Storage** — zero-config SQLite or opt-in PostgreSQL 18+ with pgvector | [Storage backends](docs/STORAGE-BACKENDS.md) |
 
 Cartograph indexes **73 language modes** and recognizes framework-aware signals
