@@ -1,6 +1,11 @@
 import { CARTOGRAPH_PACKAGE_VERSION } from '../../package-version.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
-import { checkUpgrade, fetchLatestNpmVersion, type InstallMethodKind, type UpgradeCheckResult } from './runtime.js';
+import {
+  checkUpgrade,
+  fetchLatestPublishedVersion,
+  type InstallMethodKind,
+  type UpgradeCheckResult,
+} from './runtime.js';
 import { detectInstallMethod, runSourceUpgrade } from './source-update.js';
 
 export interface UpgradeCommandDeps {
@@ -30,7 +35,7 @@ export function registerUpgradeCommand(deps: UpgradeCommandDeps): void {
           ? await runSourceUpgrade({ root: method.root, currentVersion: CARTOGRAPH_PACKAGE_VERSION, apply })
           : await checkUpgrade({
               currentVersion: CARTOGRAPH_PACKAGE_VERSION,
-              fetchLatestVersion: fetchLatestNpmVersion,
+              fetchLatestVersion: fetchLatestPublishedVersion,
               apply,
               method: method.kind,
             });

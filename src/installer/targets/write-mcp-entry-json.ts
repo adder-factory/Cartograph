@@ -16,6 +16,7 @@ import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
 import {
   getMcpServerConfig,
+  isProjectSourceRunEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
@@ -64,6 +65,12 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
   if (jsonDeepEqual(before, after)) {
     // Already exactly what we'd write — preserve byte-identical file.
     return { path: file, action: 'unchanged' };
+  }
+
+  if (isProjectSourceRunEntry(before, process.cwd())) {
+    // Intentional dev wiring (runs cartograph from this project's own
+    // source) — keep it rather than de-sourcing the setup.
+    return { path: file, action: 'kept' };
   }
 
   // 'created' means the file itself did not exist before this write.

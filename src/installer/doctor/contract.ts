@@ -13,6 +13,7 @@ export type CheckId =
   | 'backend-start-commands'
   | 'backend-lifecycle'
   | 'project-checks'
+  | 'git-hooks'
   | 'cartograph-processes';
 
 export interface CheckResult {

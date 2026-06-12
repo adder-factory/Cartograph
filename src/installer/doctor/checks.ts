@@ -1,5 +1,6 @@
 import * as path from 'node:path';
 import { configuredEndpointsFromLlm } from '../../features/backend/index.js';
+import { inspectGitHooksLiveness } from '../../features/git-hooks/index.js';
 import {
   backendLifecycleCheck,
   backendStartCommandsCheck,
@@ -90,8 +91,50 @@ async function runProjectDoctorChecks(opts: RunDoctorOptions): Promise<ProjectDo
   checks.push(configCheck);
   if (configCheck.status !== 'fail') checks.push(await checkDatabaseStorage(projectPath));
 
+  const hooksCheck = checkGitHooksLiveness(projectPath);
+  if (hooksCheck) checks.push(hooksCheck);
+
   const llm = await readLlmFromConfig(projectPath);
   const modelFileCheck = await checkConfiguredModelFiles(llm);
   if (modelFileCheck) checks.push(modelFileCheck);
   return { checks, llm, projectPathForChecks: projectPath };
+}
+
+/**
+ * Hook LIVENESS, not just presence: managed blocks stranded in
+ * `.git/hooks` while `core.hooksPath` redirects execution (husky,
+ * lefthook, …) report "installed" everywhere else but never fire
+ * (issue #4). Null when the project is not a git worktree — nothing
+ * to check.
+ */
+function checkGitHooksLiveness(projectPath: string): CheckResult | null {
+  const liveness = inspectGitHooksLiveness(projectPath);
+  if (!liveness) return null;
+  if (liveness.dead.length > 0) {
+    return {
+      id: 'git-hooks',
+      name: 'Git hooks',
+      status: 'warn',
+      detail: `Managed blocks for ${liveness.dead.join(', ')} sit in .git/hooks, but core.hooksPath routes execution to ${liveness.effectiveDir} — they never fire.`,
+      remediation: 'Re-run `cartograph install-hooks` to write the blocks where git actually executes hooks.',
+    };
+  }
+  if (liveness.live.length === 0) {
+    return {
+      id: 'git-hooks',
+      name: 'Git hooks',
+      status: 'ok',
+      detail:
+        'Managed git hooks not installed (optional — `cartograph install-hooks` adds background sync on pull/checkout/rebase).',
+    };
+  }
+  let sourceSuffix = '';
+  if (liveness.source === 'husky') sourceSuffix = ' via core.hooksPath (husky)';
+  else if (liveness.source === 'core.hooksPath') sourceSuffix = ' via core.hooksPath';
+  return {
+    id: 'git-hooks',
+    name: 'Git hooks',
+    status: 'ok',
+    detail: `${liveness.live.join(', ')} live in ${liveness.effectiveDir}${sourceSuffix}.`,
+  };
 }

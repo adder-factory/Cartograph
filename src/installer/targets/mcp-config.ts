@@ -48,3 +48,34 @@ export function renderMcpServersPrintConfig(
   );
   return `# Add to ${targetPath}\n\n${snippet}\n`;
 }
+
+/**
+ * True when an existing MCP entry runs cartograph FROM THE PROJECT'S
+ * OWN SOURCE TREE — dev wiring like
+ * `bun <project>/src/bin/cartograph.ts serve --mcp`. Overwriting such
+ * an entry with the released binary would silently de-source a
+ * development setup (found dogfooding `install --location=local` on
+ * the cartograph repo itself), so installers keep it and report
+ * `kept` instead.
+ *
+ * Discriminator: any command/args token that is a script file
+ * (.ts/.js/.mjs/.cjs) located INSIDE the project. The standard
+ * entries never have one — their only project-rooted token is the
+ * bare `--project-path` directory argument.
+ *
+ * Known limitation (intentional): an in-project COMPILED binary with
+ * no script extension does not match and will be overwritten with the
+ * standard entry — extensionless tokens are too ambiguous to treat as
+ * dev wiring without false positives.
+ */
+export function isProjectSourceRunEntry(entry: unknown, projectPath: string): boolean {
+  if (entry === null || typeof entry !== 'object') return false;
+  const record = entry as Record<string, unknown>;
+  const tokens: string[] = [];
+  for (const value of [record['command'], record['args']]) {
+    if (typeof value === 'string') tokens.push(value);
+    else if (Array.isArray(value)) tokens.push(...value.filter((token): token is string => typeof token === 'string'));
+  }
+  const root = path.resolve(projectPath) + path.sep;
+  return tokens.some((token) => token.startsWith(root) && /\.(ts|js|mjs|cjs)$/.test(token));
+}

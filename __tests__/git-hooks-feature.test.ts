@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  inspectGitHooksLiveness,
   installGitHooks,
   parseGitHooksOption,
   renderGitHookBlock,
@@ -116,5 +117,83 @@ describe('git hooks feature', () => {
     );
     expect(stderr).toEqual([]);
     expect(stdout.join('\n')).toContain('post-merge: installed');
+  });
+
+  function setHooksPath(value: string): void {
+    execFileSync('git', ['config', 'core.hooksPath', value], { cwd: projectPath, stdio: 'ignore' });
+  }
+
+  it('writes to the tracked .husky/ files when husky owns core.hooksPath', () => {
+    fs.mkdirSync(path.join(projectPath, '.husky', '_'), { recursive: true });
+    setHooksPath('.husky/_');
+
+    const result = installGitHooks({ projectPath, hooks: 'post-merge' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.hooksDirSource).toBe('husky');
+    expect(result.note).toContain('husky');
+
+    const huskyHook = path.join(projectPath, '.husky', 'post-merge');
+    expect(fs.readFileSync(huskyHook, 'utf-8')).toContain('cartograph_command=');
+    expect(fs.existsSync(path.join(projectPath, '.husky', '_', 'post-merge'))).toBe(false);
+    expect(fs.existsSync(hookPath('post-merge'))).toBe(false);
+
+    const removed = installGitHooks({ projectPath, hooks: 'post-merge', remove: true });
+    expect(removed.ok).toBe(true);
+    if (!removed.ok) return;
+    expect(removed.changes[0]?.status).toBe('removed');
+    expect(fs.readFileSync(huskyHook, 'utf-8')).not.toContain('cartograph_command=');
+  });
+
+  it('refuses to write when core.hooksPath escapes the worktree', () => {
+    const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-outside-hooks-'));
+    try {
+      setHooksPath(outsideDir);
+
+      const result = installGitHooks({ projectPath, hooks: 'post-merge' });
+      expect(result.ok).toBe(false);
+      if (result.ok) return;
+      expect(result.error.code).toBe('hooks-path-outside-worktree');
+      expect(result.error.remediation).toContain('cartograph_command=');
+      expect(fs.existsSync(path.join(outsideDir, 'post-merge'))).toBe(false);
+    } finally {
+      fs.rmSync(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it('writes to a custom core.hooksPath directory instead of .git/hooks', () => {
+    setHooksPath('githooks');
+
+    const result = installGitHooks({ projectPath, hooks: 'post-merge' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.hooksDirSource).toBe('core.hooksPath');
+
+    const customHook = path.join(projectPath, 'githooks', 'post-merge');
+    expect(fs.readFileSync(customHook, 'utf-8')).toContain('cartograph_command=');
+    expect(fs.existsSync(hookPath('post-merge'))).toBe(false);
+  });
+
+  it('heals blocks stranded in .git/hooks once core.hooksPath redirects execution', () => {
+    const first = installGitHooks({ projectPath, hooks: 'post-merge' });
+    expect(first.ok).toBe(true);
+    expect(fs.readFileSync(hookPath('post-merge'), 'utf-8')).toContain('cartograph_command=');
+
+    setHooksPath('githooks');
+    const dead = inspectGitHooksLiveness(projectPath);
+    expect(dead?.dead).toEqual(['post-merge']);
+    expect(dead?.live).toEqual([]);
+
+    const second = installGitHooks({ projectPath, hooks: 'post-merge' });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    const statuses = second.changes.map((change) => `${path.basename(path.dirname(change.path))}:${change.status}`);
+    expect(statuses).toContain('githooks:installed');
+    expect(statuses).toContain('hooks:removed');
+    expect(fs.readFileSync(hookPath('post-merge'), 'utf-8')).not.toContain('cartograph_command=');
+
+    const alive = inspectGitHooksLiveness(projectPath);
+    expect(alive?.live).toEqual(['post-merge']);
+    expect(alive?.dead).toEqual([]);
   });
 });

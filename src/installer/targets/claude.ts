@@ -22,6 +22,7 @@ import {
   atomicWriteFileSync,
   getHomeDir,
   getMcpServerConfig,
+  isProjectSourceRunEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
@@ -111,6 +112,9 @@ function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['
   const after = getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts));
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
+  }
+  if (isProjectSourceRunEntry(before, process.cwd())) {
+    return { path: file, action: 'kept' };
   }
 
   const existed = fs.existsSync(file);
