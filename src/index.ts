@@ -16,6 +16,7 @@ import {
   getUnresolvedReferencesCount,
 } from './db/queries-unresolved-refs.js';
 import { loadConfig, saveConfig } from './config.js';
+import { pinDerivedPostgresSchema } from './config/pin-postgres-schema.js';
 import { isInitialized, createDirectory, removeDirectory, validateDirectory } from './directory.js';
 import {
   ExtractionOrchestrator,
@@ -677,6 +678,7 @@ export class Cartograph extends CartographCore {
       Object.assign(config, options.config);
     }
     saveConfig(resolvedRoot, config);
+    pinDerivedPostgresSchema(resolvedRoot, config);
 
     // Initialize database
     const dbPath = getDatabasePath(resolvedRoot);
@@ -715,6 +717,7 @@ export class Cartograph extends CartographCore {
       Object.assign(config, options.config);
     }
     saveConfig(resolvedRoot, config);
+    pinDerivedPostgresSchema(resolvedRoot, config);
 
     // Initialize database
     const dbPath = getDatabasePath(resolvedRoot);
@@ -748,6 +751,7 @@ export class Cartograph extends CartographCore {
 
     // Load configuration
     const config = loadConfig(resolvedRoot);
+    pinDerivedPostgresSchema(resolvedRoot, config);
 
     // Open database
     const dbPath = getDatabasePath(resolvedRoot);
@@ -786,6 +790,7 @@ export class Cartograph extends CartographCore {
 
     // Load configuration
     const config = loadConfig(resolvedRoot);
+    pinDerivedPostgresSchema(resolvedRoot, config);
 
     // Open database
     const dbPath = getDatabasePath(resolvedRoot);

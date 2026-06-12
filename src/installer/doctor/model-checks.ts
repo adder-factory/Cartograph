@@ -12,6 +12,7 @@ import {
   type DatabaseConfig,
   type PostgresServerVersionInfo,
 } from '../../db/database-config.js';
+import { withDerivedPostgresSchema } from '../../db/project-ownership.js';
 import { CURRENT_SCHEMA_VERSION } from '../../db/migrations.js';
 import { createDatabase, readSqliteRuntimeCapabilities } from '../../db/sqlite-adapter.js';
 import { configuredModelFilesFromLlm, LLM_TIER_KEYS, type ConfiguredModelFile } from '../../features/backend/index.js';
@@ -260,7 +261,11 @@ export async function checkDatabaseStorage(projectPath: string): Promise<CheckRe
     };
   }
 
-  if (database.provider === 'postgres') return checkPostgresStorage(database, projectPath);
+  if (database.provider === 'postgres') {
+    // Same derivation as the connection layer — doctor must inspect
+    // the schema the project will actually use, not `public`.
+    return checkPostgresStorage(withDerivedPostgresSchema(database, projectPath), projectPath);
+  }
   return checkSqliteStorage(projectPath);
 }
 
@@ -321,7 +326,7 @@ async function checkPostgresStorage(database: DatabaseConfig, projectPath: strin
       status: 'fail',
       detail: `Invalid PostgreSQL schema name: ${schema}`,
       remediation:
-        'Use a simple PostgreSQL schema identifier such as `cartograph`, or omit `database.schema` for `public`.',
+        'Use a simple PostgreSQL schema identifier such as `cartograph`, or omit `database.schema` to get an auto-derived per-project schema.',
     };
   }
 

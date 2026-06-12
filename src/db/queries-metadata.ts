@@ -33,6 +33,7 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
  * into a per-build-shape key.
  */
 export type MetadataKey =
+  | 'project_root'
   | 'index_timestamp'
   | 'index_head_sha'
   | 'path_alias_config_signature'

@@ -11,6 +11,7 @@ import {
   resolveDatabaseConfig,
   type DatabaseConfig,
 } from '../../db/database-config.js';
+import { withDerivedPostgresSchema } from '../../db/project-ownership.js';
 import { DatabaseConnection, getDatabasePath } from '../../db/index.js';
 
 export interface StorageMigrationOptions {
@@ -121,7 +122,10 @@ export async function migrateSqliteProjectToPostgres(
   options: StorageMigrationOptions,
 ): Promise<StorageMigrationResult> {
   const projectPath = path.resolve(options.projectPath);
-  const database = resolveDatabaseConfig(options.database);
+  // Fill the derived per-project schema BEFORE the fresh-target check
+  // below — otherwise validation would inspect `public` while the
+  // actual connection (which derives at open) writes elsewhere.
+  const database = withDerivedPostgresSchema(resolveDatabaseConfig(options.database), projectPath);
   if (database.provider !== 'postgres') {
     return failure(
       'invalid-target-provider',
@@ -200,7 +204,7 @@ export async function migratePostgresProjectToSqlite(options: {
 }): Promise<StorageMigrationResult> {
   const projectPath = path.resolve(options.projectPath);
   const existingConfig = loadConfig(projectPath);
-  const database = resolveDatabaseConfig(existingConfig.database);
+  const database = withDerivedPostgresSchema(resolveDatabaseConfig(existingConfig.database), projectPath);
   if (database.provider !== 'postgres') {
     return failure(
       'already-sqlite',

@@ -46,11 +46,14 @@ Initialize the project with PostgreSQL storage before the first index:
 cartograph admin init -i /path/to/project \
   --database-provider postgres \
   --database-url postgres://cartograph:cartograph@localhost:5432/cartograph \
-  --database-schema cartograph \
   --database-pgvector auto
 
 cartograph doctor /path/to/project
 ```
+
+No `--database-schema` needed: see
+[Per-project separation](#per-project-separation-on-a-shared-instance).
+Pass it only when you want a specific name.
 
 If you are also bootstrapping local LLM model files, `llm install` accepts the
 same storage flags:
@@ -59,7 +62,6 @@ same storage flags:
 cartograph llm install /path/to/project \
   --database-provider postgres \
   --database-url "$DATABASE_URL" \
-  --database-schema cartograph \
   --database-pgvector auto
 ```
 
@@ -96,6 +98,44 @@ CARTOGRAPH_DATABASE_SSL=true
 ```
 
 `DATABASE_URL` is also accepted when `CARTOGRAPH_DATABASE_URL` is unset.
+
+## Per-Project Separation On A Shared Instance
+
+With SQLite every project is separate for free — the database file
+lives inside the project. One shared PostgreSQL server needs the same
+guarantee, and Cartograph manufactures it (one schema = one project =
+one graph = one viewer):
+
+- **Auto-derived schemas.** When `database.schema` is not configured,
+  every connection derives `cartograph_<name>_<hash8>` from the
+  project's absolute path instead of landing in `public`. Two projects
+  pointed at the same server get disjoint schemas with zero
+  configuration; the schema is created on first connect. The first
+  config-driven open pins the derived name into
+  `.cartograph/config.json` so renaming the project directory later
+  cannot re-derive a different name and "lose" the index. `doctor`,
+  `status`, and `storage-migrate` all report the effective schema.
+
+- **Ownership guard.** The first open of a schema stamps the project
+  root into its metadata; every later open verifies it. If two
+  projects are misconfigured onto one schema (for example both
+  copy-pasted `--database-schema cartograph`), the second project's
+  first open fails with both paths and the fix — instead of silently
+  interleaving two file trees into one graph.
+
+  If you intentionally **moved or renamed** a project, re-bind once:
+
+  ```sh
+  CARTOGRAPH_DATABASE_REBIND_PROJECT_ROOT=1 cartograph status /new/path
+  ```
+
+**Upgrading from a pre-1.0.3 implicit-`public` setup:** earlier builds
+landed in `public` when no schema was configured. After this change an
+unconfigured project derives its own schema and will report the
+(empty) derived schema as behind/fresh — set
+`database.schema: "public"` in `.cartograph/config.json` (or
+`CARTOGRAPH_DATABASE_SCHEMA=public`) to reconnect to existing data;
+the error message says exactly this when it detects the situation.
 
 ## pgvector Modes
 

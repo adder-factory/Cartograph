@@ -149,6 +149,8 @@ export function defineQuery<PSchema extends ZodType, RSchema extends ZodType>(
 
   return (db: SqliteDatabase): TypedQuery<zInfer<PSchema>, zInfer<RSchema>> => {
     const stmt = db.prepare(spec.sql);
+    const normalizeRow = makeRowNormalizer(db, spec.row);
+    let pipeline: RowPipeline<zInfer<RSchema>>;
 
     const parseParams = (raw: unknown): Record<string, unknown> | unknown[] => {
       const parsed = spec.params.safeParse(raw);
@@ -165,6 +167,7 @@ export function defineQuery<PSchema extends ZodType, RSchema extends ZodType>(
       }
       return parsed.data as zInfer<RSchema>;
     };
+    pipeline = makeRowPipeline<zInfer<RSchema>>(mode, normalizeRow, parseRow);
 
     return {
       stmt,
@@ -192,41 +195,110 @@ export function defineQuery<PSchema extends ZodType, RSchema extends ZodType>(
       },
 
       get(params) {
-        const bound = parseParams(params);
-        const row = stmt.get(bound);
-        if (row === undefined || row === null) return undefined;
-        if (mode === 'none') return row as zInfer<RSchema>;
-        return parseRow(row);
+        return pipeline.one(stmt.get(parseParams(params)));
       },
 
       all(params) {
-        const bound = parseParams(params);
-        const rows = stmt.all(bound);
-        if (mode === 'none' || rows.length === 0) {
-          return rows as zInfer<RSchema>[];
-        }
-        if (mode === 'first') {
-          parseRow(rows[0]);
-          return rows as zInfer<RSchema>[];
-        }
-        return rows.map(parseRow);
+        return pipeline.many(stmt.all(parseParams(params)));
       },
 
       *iterate(params) {
-        const bound = parseParams(params);
-        let seen = 0;
-        for (const row of stmt.iterate(bound)) {
-          if (mode === 'none') {
-            yield row as zInfer<RSchema>;
-          } else if (mode === 'first' && seen > 0) {
-            yield row as zInfer<RSchema>;
-          } else {
-            yield parseRow(row);
-          }
-          seen++;
-        }
+        yield* pipeline.each(stmt.iterate(parseParams(params)));
       },
     };
+  };
+}
+
+/**
+ * Shared read-side row handling: normalization runs on EVERY row (it
+ * is a correctness transform — see makeRowNormalizer), while schema
+ * validation samples per `RowValidationMode`.
+ */
+interface RowPipeline<TRow> {
+  one(raw: unknown): TRow | undefined;
+  many(rows: unknown[]): TRow[];
+  each(iter: IterableIterator<unknown>): IterableIterator<TRow>;
+}
+
+function makeRowPipeline<TRow>(
+  mode: RowValidationMode,
+  normalize: <T>(raw: T) => T,
+  parse: (raw: unknown) => TRow,
+): RowPipeline<TRow> {
+  return {
+    one(raw) {
+      const row = normalize(raw);
+      if (row === undefined || row === null) return undefined;
+      return mode === 'none' ? (row as TRow) : parse(row);
+    },
+    many(rows) {
+      for (const row of rows) normalize(row);
+      if (mode === 'none' || rows.length === 0) return rows as TRow[];
+      if (mode === 'first') {
+        parse(rows[0]);
+        return rows as TRow[];
+      }
+      return rows.map(parse);
+    },
+    *each(iter) {
+      let seen = 0;
+      for (const raw of iter) {
+        const row = normalize(raw);
+        if (mode === 'none' || (mode === 'first' && seen > 0)) {
+          yield row as TRow;
+        } else {
+          yield parse(row);
+        }
+        seen++;
+      }
+    },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// PostgreSQL numeric normalization. The PG wire protocol returns
+// `int8` (every COUNT/SUM) and `numeric` as STRINGS, and Bun.SQL
+// exposes no per-column type metadata to convert them at the driver
+// layer — while a blind looks-numeric conversion would corrupt TEXT
+// columns that happen to hold digit strings. The row schema is the
+// missing type oracle: a field that ACCEPTS numbers and REJECTS
+// strings is unambiguous, so only those fields convert. Runs on every
+// row (validation may only sample the first), only on the postgres
+// dialect — the sqlite hot path keeps an identity function.
+// ───────────────────────────────────────────────────────────────────────────
+
+const NUMERIC_STRING_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+
+/** Fields that accept a number but reject a string — probe-based so
+ *  it works on any zod version / wrapper chain (optional, nullable,
+ *  default) without `_def` introspection. */
+function coercibleNumericKeys(row: ZodType): string[] {
+  const shape = (row as { shape?: Record<string, ZodType> }).shape;
+  if (!shape || typeof shape !== 'object') return [];
+  const keys: string[] = [];
+  for (const [key, field] of Object.entries(shape)) {
+    const acceptsNumber = field.safeParse(0).success;
+    const acceptsString = field.safeParse('0').success;
+    if (acceptsNumber && !acceptsString) keys.push(key);
+  }
+  return keys;
+}
+
+function makeRowNormalizer(db: SqliteDatabase, row: ZodType): <T>(raw: T) => T {
+  if (db.dialect === 'sqlite') return (raw) => raw;
+  const numericKeys = coercibleNumericKeys(row);
+  if (numericKeys.length === 0) return (raw) => raw;
+  return (raw) => {
+    if (raw === undefined || raw === null || typeof raw !== 'object') return raw;
+    const record = raw as Record<string, unknown>;
+    for (const key of numericKeys) {
+      const value = record[key];
+      const convertible =
+        (typeof value === 'string' && NUMERIC_STRING_RE.test(value)) ||
+        (typeof value === 'bigint' && value <= BigInt(Number.MAX_SAFE_INTEGER));
+      if (convertible) record[key] = Number(value);
+    }
+    return raw;
   };
 }
 
@@ -295,6 +367,7 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
   const mode: RowValidationMode = spec.options?.validateRows ?? 'first';
 
   return (db: SqliteDatabase): DynamicTypedQuery<zInfer<PSchema>, zInfer<RSchema>> => {
+    const normalizeRow = makeRowNormalizer(db, spec.row);
     // Bounded by the per-site Cartesian product of inputs to `build()`
     // (typically <=64 entries on the largest current consumer —
     // `getFindingsRanked` with 6 optional filters). Not an LRU; growth
@@ -336,7 +409,7 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
       get(params) {
         const validated = parseParams(params);
         const { sql, bindings } = spec.build(validated);
-        const row = prepareCached(sql).get(bindings);
+        const row = normalizeRow(prepareCached(sql).get(bindings));
         if (row === undefined || row === null) return undefined;
         if (mode === 'none') return row as zInfer<RSchema>;
         return parseRow(row, sql);
@@ -346,6 +419,7 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
         const validated = parseParams(params);
         const { sql, bindings } = spec.build(validated);
         const rows = prepareCached(sql).all(bindings);
+        for (const row of rows) normalizeRow(row);
         if (mode === 'none' || rows.length === 0) {
           return rows as zInfer<RSchema>[];
         }
@@ -360,7 +434,8 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
         const validated = parseParams(params);
         const { sql, bindings } = spec.build(validated);
         let seen = 0;
-        for (const row of prepareCached(sql).iterate(bindings)) {
+        for (const raw of prepareCached(sql).iterate(bindings)) {
+          const row = normalizeRow(raw);
           if (mode === 'none') {
             yield row as zInfer<RSchema>;
           } else if (mode === 'first' && seen > 0) {

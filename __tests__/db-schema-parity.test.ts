@@ -79,3 +79,59 @@ describe('migrations <-> schema.sql parity', () => {
     expect(missingFromSchema).toEqual([]);
   });
 });
+
+describe('schema.sql <-> schema-postgres.sql column parity', () => {
+  // The bug class: a migration adds columns to schema.sql (fresh
+  // SQLite installs get them) but schema-postgres.sql is forgotten —
+  // fresh PostgreSQL installs then 500 on the first query that names
+  // the column. Caught live: migration 073's session-identity columns
+  // (client_name/client_version/project_root) were missing from
+  // mcp_sessions on PG and the viewer's /api/sessions crashed.
+  //
+  // Direction: sqlite columns ⊆ postgres columns per shared table.
+  // PG-only extras are legitimate (rowid SERIAL emulation, tsvector
+  // search columns); SQLite-only VIRTUAL tables (FTS5 / R*Tree /
+  // vec0) have no PG counterpart and are exempt.
+  const SCHEMA_PG_SQL = path.join(REPO_ROOT, 'src/db/schema-postgres.sql');
+
+  function tableColumns(sqlText: string): Map<string, Set<string>> {
+    const out = new Map<string, Set<string>>();
+    const re = /CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)\s*\(([\s\S]*?)\)\s*(?:STRICT|WITHOUT|;)/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(sqlText)) !== null) {
+      const cols = new Set<string>();
+      for (const rawLine of m[2]!.split('\n')) {
+        const line = rawLine.trim();
+        if (line === '' || line.startsWith('--')) continue;
+        const first = /^([A-Za-z_]\w*)/.exec(line)?.[1]?.toLowerCase();
+        if (!first) continue;
+        if (['primary', 'foreign', 'unique', 'check', 'constraint'].includes(first)) continue;
+        cols.add(first);
+      }
+      out.set(m[1]!.toLowerCase(), cols);
+    }
+    return out;
+  }
+
+  it('every non-virtual sqlite column exists on the postgres table', () => {
+    const sqliteText = fs.readFileSync(SCHEMA_SQL, 'utf-8');
+    const pgText = fs.readFileSync(SCHEMA_PG_SQL, 'utf-8');
+    const virtualTables = captureGroup1(sqliteText, /CREATE\s+VIRTUAL\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\w+)/gi);
+    const sqliteTables = tableColumns(sqliteText);
+    const pgTables = tableColumns(pgText);
+
+    const problems: string[] = [];
+    for (const [table, cols] of sqliteTables) {
+      if (virtualTables.has(table)) continue;
+      const pgCols = pgTables.get(table);
+      if (!pgCols) {
+        problems.push(`table ${table}: missing from schema-postgres.sql`);
+        continue;
+      }
+      for (const col of cols) {
+        if (!pgCols.has(col)) problems.push(`table ${table}: column ${col} missing from schema-postgres.sql`);
+      }
+    }
+    expect(problems, problems.join('\n')).toEqual([]);
+  });
+});

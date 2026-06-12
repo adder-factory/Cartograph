@@ -69,6 +69,13 @@ export interface DeferredNodeIndexHandle {
  * handle to pass to {@link finalizeDeferredNodeIndexes}.
  */
 export function deferNodeDerivedIndexes(db: SqliteDatabase): DeferredNodeIndexHandle {
+  // SQLite-only: FTS5 / R*Tree maintenance triggers don't exist on
+  // PostgreSQL (search columns are `to_tsvector` generated columns,
+  // maintained by the engine) — and PG's `DROP TRIGGER` grammar
+  // requires `ON <table>`, so the SQLite-form drop is a syntax error
+  // there (caught live on the first direct `admin init -i` against a
+  // PostgreSQL backend).
+  if (db.dialect !== 'sqlite') return { capturedTriggerSql: [] };
   const names = NODE_DERIVED_INDEX_TRIGGERS.map((n) => `'${n}'`).join(',');
   const rows = db.prepare(`SELECT sql FROM sqlite_master WHERE type='trigger' AND name IN (${names})`).all() as Array<{
     sql: string;
@@ -92,6 +99,7 @@ export function deferNodeDerivedIndexes(db: SqliteDatabase): DeferredNodeIndexHa
  * over a stale base until the next full index.
  */
 export function finalizeDeferredNodeIndexes(db: SqliteDatabase, handle: DeferredNodeIndexHandle): void {
+  if (db.dialect !== 'sqlite') return; // nothing was deferred (see deferNodeDerivedIndexes)
   try {
     // Rebuild the three derived indexes from the final `nodes` content,
     // atomically.

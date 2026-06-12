@@ -321,3 +321,59 @@ describe('typed-query wrapper', () => {
     });
   });
 });
+
+describe('postgres numeric normalization (dialect-gated)', () => {
+  // The PG wire protocol returns int8 (every COUNT/SUM) and `numeric`
+  // as STRINGS, and Bun.SQL exposes no column types — so the wrapper
+  // converts using the row schema as the type oracle. Caught live: a
+  // parse-cache stats query failed zod with "expected number,
+  // received string" on the first real init against PostgreSQL.
+  const ROW = z.object({ n: z.number(), id: z.string(), label: z.string().nullable() });
+
+  /** Fake adapter: postgres dialect, statements return PG-shaped rows
+   *  (numbers as strings). Lets the normalization be tested without a
+   *  live server. */
+  function fakePgDb(rows: Array<Record<string, unknown>>): SqliteDatabase {
+    const stmt = {
+      get: () => rows[0],
+      all: () => rows,
+      run: () => ({ changes: 0, lastInsertRowid: 0 }),
+      *iterate() {
+        yield* rows;
+      },
+    };
+    return { dialect: 'postgres', prepare: () => stmt } as unknown as SqliteDatabase;
+  }
+
+  it('converts schema-numeric fields on EVERY row, not just the validated first', () => {
+    // validateRows 'first' only zod-parses row[0]; rows beyond it are
+    // returned raw — the conversion must not depend on validation.
+    const rows = [
+      { n: '42', id: '123', label: null },
+      { n: '7', id: '456', label: 'x' },
+    ];
+    const q = defineQuery({ sql: 'SELECT 1', params: z.object({}), row: ROW })(fakePgDb(rows));
+    const out = q.all({});
+    expect(out[0]!.n).toBe(42);
+    expect(out[1]!.n).toBe(7); // the row zod never saw
+    // The corruption guard: digit-LIKE strings in string-typed fields
+    // stay strings (ids are TEXT and may be all digits).
+    expect(out[0]!.id).toBe('123');
+    expect(out[1]!.id).toBe('456');
+  });
+
+  it('leaves sqlite untouched (identity fast path)', () => {
+    const db = createDatabase(':memory:').db;
+    db.exec('CREATE TABLE t (id TEXT, n INTEGER)');
+    db.exec("INSERT INTO t VALUES ('001', 5)");
+    const q = defineQuery({
+      sql: 'SELECT id, n FROM t',
+      params: z.object({}),
+      row: z.object({ id: z.string(), n: z.number() }),
+    })(db);
+    const row = q.get({})!;
+    expect(row.id).toBe('001');
+    expect(row.n).toBe(5);
+    db.close();
+  });
+});

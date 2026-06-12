@@ -16,6 +16,7 @@ import { bootstrapVecTables } from './vec-helpers.js';
 import { bootstrapPgvector, bootstrapPgvectorTables } from './pgvector-helpers.js';
 import { compact } from '../utils.js';
 import { resolveAssetPath } from '../assets.js';
+import { enforceProjectRootOwnership, projectRootFromDbPath, withDerivedPostgresSchema } from './project-ownership.js';
 import {
   assertPostgresServerVersionSupported,
   readPostgresServerVersionInfo,
@@ -61,6 +62,10 @@ function createConfiguredDatabase(
 ): { db: SqliteDatabase; backend: SqliteBackend; vecLoaded: boolean; database: DatabaseConfig } {
   const database = resolveDatabaseConfig(options.database);
   if (database.provider === 'postgres') {
+    // No configured schema → derive a per-project one rather than
+    // landing every project on `public` (shared-instance separation;
+    // see project-ownership.ts).
+    withDerivedPostgresSchema(database, projectRootFromDbPath(dbPath));
     const db = new PostgresAdapter({ ...database, provider: 'postgres' });
     try {
       assertPostgresServerVersionSupported(readPostgresServerVersionInfo(db));
@@ -71,6 +76,57 @@ function createConfiguredDatabase(
     return { db, backend: 'postgres', vecLoaded: false, database };
   }
   return { ...createDatabase(dbPath), database };
+}
+
+/**
+ * Enforce the open()-time schema-version policy: newer-than-binary
+ * always refuses, behind-on-postgres refuses (fresh-init-only, with
+ * the pre-derivation implicit-`public` upgrade hint when it applies),
+ * behind-on-sqlite migrates only under `autoMigrate`.
+ */
+function migrateOrRefuse(
+  db: SqliteDatabase,
+  policy: { backend: SqliteBackend; autoMigrate: boolean; schemaDerived: boolean },
+): void {
+  const currentVersion = getCurrentVersion(db);
+  if (currentVersion > CURRENT_SCHEMA_VERSION) {
+    throw new Error(
+      `Database schema v${currentVersion} is newer than this binary supports (v${CURRENT_SCHEMA_VERSION}). ` +
+        `The DB was opened by a newer cartograph process. Upgrade this binary, or query the project from a ` +
+        `newer cartograph install.`,
+    );
+  }
+  if (currentVersion >= CURRENT_SCHEMA_VERSION) return;
+  if (policy.backend === 'postgres') {
+    // A derived schema at v0 is the signature of the pre-1.0.3
+    // upgrade path: the project's data lives in the old implicit
+    // `public` schema, and the freshly-derived schema is empty.
+    const upgradeHint =
+      policy.schemaDerived && currentVersion === 0
+        ? ` If this project previously stored its index in PostgreSQL's implicit \`public\` schema ` +
+          `(the pre-derivation default), set \`database.schema: "public"\` in .cartograph/config.json ` +
+          `(or CARTOGRAPH_DATABASE_SCHEMA=public) to reconnect to the existing data.`
+        : '';
+    throw new Error(
+      `PostgreSQL database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
+        `PostgreSQL storage currently supports fresh initialization only; run \`cartograph admin init\` against an ` +
+        `empty PostgreSQL schema or recreate the configured schema.${upgradeHint}`,
+    );
+  }
+  if (!policy.autoMigrate) {
+    throw new Error(
+      `Database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
+        `Refusing to silently migrate — running the migration would lock out any process still ` +
+        `bound to the older schema (typically a long-running MCP server).\n\n` +
+        `To upgrade explicitly, run ONE of:\n` +
+        `  cartograph admin migrate   # apply forward migrations only (cheapest)\n` +
+        `  cartograph admin sync       # migrate + incremental re-extract\n` +
+        `  cartograph admin index --force  # migrate + full re-extract\n\n` +
+        `After migrating, restart any MCP server still bound to the old schema (its tools will ` +
+        `return "stale code, restart" until you do).`,
+    );
+  }
+  runMigrations(db, currentVersion);
 }
 
 /** Apply standard PRAGMAs to a freshly-opened SQLite database. */
@@ -155,53 +211,67 @@ export class DatabaseConnection {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
     const { db, backend, vecLoaded, database } = createConfiguredDatabase(resolvedDbPath, opts);
-    if (db.dialect === 'sqlite') dbApplyPragmas(db);
+    // Same close-before-rethrow as open(): the postgres worker
+    // thread otherwise pins the process open after a refusal.
+    try {
+      if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
-    const schemaPath = resolveAssetPath('db', db.dialect === 'postgres' ? 'schema-postgres.sql' : 'schema.sql');
-    db.exec(fs.readFileSync(schemaPath, 'utf-8'));
+      const schemaPath = resolveAssetPath('db', db.dialect === 'postgres' ? 'schema-postgres.sql' : 'schema.sql');
+      db.exec(fs.readFileSync(schemaPath, 'utf-8'));
 
-    // Fresh-bootstrap integrity gate: if schema.sql was edited in a
-    // way that omits a table or view, fail loud rather than mark the
-    // DB as fully migrated and let the divergence escape into queries
-    // that error at read time (the production-DB state that triggered
-    // migration 057).
-    if (db.dialect === 'sqlite') verifySchemaIntegrity(db);
+      // Fresh-bootstrap integrity gate: if schema.sql was edited in a
+      // way that omits a table or view, fail loud rather than mark the
+      // DB as fully migrated and let the divergence escape into queries
+      // that error at read time (the production-DB state that triggered
+      // migration 057).
+      if (db.dialect === 'sqlite') verifySchemaIntegrity(db);
 
-    // `initialize` is the FRESH-database path: schema.sql builds every
-    // table at CURRENT_SCHEMA_VERSION, so a genuinely fresh DB has an
-    // empty schema_versions (version 0) and we stamp it current. But
-    // schema.sql is all `CREATE TABLE IF NOT EXISTS`, so if it ran over a
-    // NON-EMPTY DB already at an older version, those CREATEs no-oped and
-    // the physical schema is still behind — stamping CURRENT here would
-    // claim migrations ran that didn't, and `open()` would then never
-    // migrate it (the version claims current). Refuse loudly instead.
-    const currentVersion = getCurrentVersion(db);
-    if (currentVersion === 0) {
-      db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)').run(
-        CURRENT_SCHEMA_VERSION,
-        Date.now(),
-        'Initial schema includes all migrations',
-      );
-    } else if (currentVersion < CURRENT_SCHEMA_VERSION) {
-      throw new Error(
-        `Refusing to initialize over an existing schema v${currentVersion} (binary is v${CURRENT_SCHEMA_VERSION}). ` +
-          `\`init\` only stamps a fresh database; this DB is behind and its tables were not migrated by schema.sql ` +
-          `(all CREATE TABLE IF NOT EXISTS). Run \`cartograph admin migrate\` to upgrade it, or initialize against ` +
-          `an empty database / schema.`,
-      );
+      // `initialize` is the FRESH-database path: schema.sql builds every
+      // table at CURRENT_SCHEMA_VERSION, so a genuinely fresh DB has an
+      // empty schema_versions (version 0) and we stamp it current. But
+      // schema.sql is all `CREATE TABLE IF NOT EXISTS`, so if it ran over a
+      // NON-EMPTY DB already at an older version, those CREATEs no-oped and
+      // the physical schema is still behind — stamping CURRENT here would
+      // claim migrations ran that didn't, and `open()` would then never
+      // migrate it (the version claims current). Refuse loudly instead.
+      const currentVersion = getCurrentVersion(db);
+      if (currentVersion === 0) {
+        db.prepare('INSERT OR IGNORE INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)').run(
+          CURRENT_SCHEMA_VERSION,
+          Date.now(),
+          'Initial schema includes all migrations',
+        );
+      } else if (currentVersion < CURRENT_SCHEMA_VERSION) {
+        throw new Error(
+          `Refusing to initialize over an existing schema v${currentVersion} (binary is v${CURRENT_SCHEMA_VERSION}). ` +
+            `\`init\` only stamps a fresh database; this DB is behind and its tables were not migrated by schema.sql ` +
+            `(all CREATE TABLE IF NOT EXISTS). Run \`cartograph admin migrate\` to upgrade it, or initialize against ` +
+            `an empty database / schema.`,
+        );
+      }
+
+      // No-op on first init; kept for symmetry with `open()`.
+      bootstrapVecTables(db, vecLoaded);
+      if (backend === 'postgres') {
+        const pgvectorLoaded = bootstrapPgvector(db, database);
+        bootstrapPgvectorTables(db, pgvectorLoaded);
+        // First open of a fresh schema stamps ownership; initializing
+        // into a schema another project owns fails loudly.
+        enforceProjectRootOwnership(db, resolvedDbPath, database.schema);
+      }
+      if (backend === 'postgres' && !fs.existsSync(resolvedDbPath)) {
+        fs.writeFileSync(resolvedDbPath, 'postgres provider sentinel\n', 'utf-8');
+      }
+
+      return new DatabaseConnection({ db, dbPath: resolvedDbPath, backend, vecLoaded });
+    } catch (err) {
+      try {
+        db.close();
+      } catch {
+        /* already closing on the error path */
+      }
+      throw err;
     }
-
-    // No-op on first init; kept for symmetry with `open()`.
-    bootstrapVecTables(db, vecLoaded);
-    if (backend === 'postgres') {
-      const pgvectorLoaded = bootstrapPgvector(db, database);
-      bootstrapPgvectorTables(db, pgvectorLoaded);
-    }
-    if (backend === 'postgres' && !fs.existsSync(resolvedDbPath)) {
-      fs.writeFileSync(resolvedDbPath, 'postgres provider sentinel\n', 'utf-8');
-    }
-
-    return new DatabaseConnection({ db, dbPath: resolvedDbPath, backend, vecLoaded });
   }
 
   /**
@@ -225,50 +295,53 @@ export class DatabaseConnection {
       throw new Error(`Database not found: ${resolvedDbPath}`);
     }
 
-    const { db, backend, vecLoaded } = createConfiguredDatabase(resolvedDbPath, { database });
+    // Re-capture the resolved config: createConfiguredDatabase fills
+    // in the derived per-project schema for postgres, and the
+    // bootstrap + ownership steps below must see that final value.
+    const {
+      db,
+      backend,
+      vecLoaded,
+      database: resolvedDatabase,
+    } = createConfiguredDatabase(resolvedDbPath, {
+      database,
+    });
     if (db.dialect === 'sqlite') dbApplyPragmas(db);
 
     const conn = new DatabaseConnection({ db, dbPath: resolvedDbPath, backend, vecLoaded });
-    const currentVersion = getCurrentVersion(db);
-    if (currentVersion > CURRENT_SCHEMA_VERSION) {
-      throw new Error(
-        `Database schema v${currentVersion} is newer than this binary supports (v${CURRENT_SCHEMA_VERSION}). ` +
-          `The DB was opened by a newer cartograph process. Upgrade this binary, or query the project from a ` +
-          `newer cartograph install.`,
-      );
-    }
-    if (currentVersion < CURRENT_SCHEMA_VERSION) {
+    // try/catch wraps everything after connection creation: the
+    // postgres adapter runs a worker thread that otherwise keeps the
+    // process alive forever after a guard/version refusal — a
+    // mismatch would HANG the CLI instead of exiting (observed live
+    // on the ownership-mismatch path).
+    try {
+      migrateOrRefuse(db, {
+        backend,
+        autoMigrate: opts.autoMigrate === true,
+        schemaDerived: resolvedDatabase.schemaDerived === true,
+      });
+
+      // Bootstrap vec0 tables when the sqlite-vec extension is loaded.
+      bootstrapVecTables(db, vecLoaded);
       if (backend === 'postgres') {
-        throw new Error(
-          `PostgreSQL database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
-            `PostgreSQL storage currently supports fresh initialization only; run \`cartograph admin init\` against an ` +
-            `empty PostgreSQL schema or recreate the configured schema.`,
-        );
+        const pgvectorLoaded = bootstrapPgvector(db, resolvedDatabase);
+        bootstrapPgvectorTables(db, pgvectorLoaded);
+        // Schema is at CURRENT version here, so project_metadata exists.
+        // Stamp-or-verify which project owns this schema — two projects
+        // misconfigured onto one schema fail loudly instead of silently
+        // interleaving graphs (shared-instance separation).
+        enforceProjectRootOwnership(db, resolvedDbPath, resolvedDatabase.schema);
       }
-      if (!opts.autoMigrate) {
-        throw new Error(
-          `Database schema v${currentVersion} is behind this binary's v${CURRENT_SCHEMA_VERSION}. ` +
-            `Refusing to silently migrate — running the migration would lock out any process still ` +
-            `bound to the older schema (typically a long-running MCP server).\n\n` +
-            `To upgrade explicitly, run ONE of:\n` +
-            `  cartograph admin migrate   # apply forward migrations only (cheapest)\n` +
-            `  cartograph admin sync       # migrate + incremental re-extract\n` +
-            `  cartograph admin index --force  # migrate + full re-extract\n\n` +
-            `After migrating, restart any MCP server still bound to the old schema (its tools will ` +
-            `return "stale code, restart" until you do).`,
-        );
+
+      return conn;
+    } catch (err) {
+      try {
+        conn.close();
+      } catch {
+        /* already closing on the error path */
       }
-      runMigrations(db, currentVersion);
+      throw err;
     }
-
-    // Bootstrap vec0 tables when the sqlite-vec extension is loaded.
-    bootstrapVecTables(db, vecLoaded);
-    if (backend === 'postgres') {
-      const pgvectorLoaded = bootstrapPgvector(db, database);
-      bootstrapPgvectorTables(db, pgvectorLoaded);
-    }
-
-    return conn;
   }
 
   /** Get the underlying database instance. */
