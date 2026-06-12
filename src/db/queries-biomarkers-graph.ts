@@ -247,6 +247,57 @@ export function findFeatureEnvy(args: FindFeatureEnvyArgs): FeatureEnvyRow[] {
 const PACKAGE_MAIN_ENTRY_FILES = ['src/index.ts'];
 
 /**
+ * Framework-convention exports are consumed BY NAME by the framework's
+ * router/bundler, never via an import statement — so no use-edge can ever
+ * exist in the graph, and flagging them as unused is a guaranteed false
+ * positive with a destructive "fix" (deleting `metadata` from a Next.js page
+ * silently strips its SEO; deleting `dynamic` changes rendering semantics).
+ * This is the same modelling Knip ships in its framework plugins.
+ *
+ * Scope is kept deliberately tight: Next.js App Router segment files plus
+ * the root middleware/instrumentation entrypoints. Extend the tables when
+ * another framework's conventions surface the same FP class.
+ */
+const NEXTJS_SEGMENT_FILE_RE =
+  /(^|\/)app\/(.+\/)?(page|layout|template|route|error|global-error|loading|not-found|default|sitemap|robots|manifest|icon|apple-icon|opengraph-image|twitter-image)\.(ts|tsx|js|jsx|mjs)$/;
+const NEXTJS_SEGMENT_EXPORTS: ReadonlySet<string> = new Set([
+  // Route-segment config (nextjs.org/docs/app/api-reference/file-conventions/route-segment-config)
+  'dynamic',
+  'dynamicParams',
+  'revalidate',
+  'fetchCache',
+  'runtime',
+  'preferredRegion',
+  'maxDuration',
+  'experimental_ppr',
+  // Metadata API
+  'metadata',
+  'generateMetadata',
+  'viewport',
+  'generateViewport',
+  // Generation hooks
+  'generateStaticParams',
+  'generateImageMetadata',
+  'generateSitemaps',
+  // Route-handler methods (route.ts)
+  'GET',
+  'POST',
+  'PUT',
+  'PATCH',
+  'DELETE',
+  'HEAD',
+  'OPTIONS',
+]);
+const NEXTJS_ROOT_FILE_RE = /(^|\/)(middleware|instrumentation)\.(ts|js|mjs)$/;
+const NEXTJS_ROOT_EXPORTS: ReadonlySet<string> = new Set(['middleware', 'config', 'register', 'onRequestError']);
+
+/** True when an exported symbol is consumed by framework convention (no graph edge possible). */
+export function isFrameworkConventionExport(filePath: string, name: string): boolean {
+  if (NEXTJS_SEGMENT_FILE_RE.test(filePath) && NEXTJS_SEGMENT_EXPORTS.has(name)) return true;
+  return NEXTJS_ROOT_FILE_RE.test(filePath) && NEXTJS_ROOT_EXPORTS.has(name);
+}
+
+/**
  * SQL for `findUnusedExports`. The EXISTS sub-query excludes
  * `contains` (structural), `exports` (re-export forwarding, not use),
  * `imports` (statement alone isn't use), and `tests` (convention edge,
@@ -323,9 +374,12 @@ const findUnusedExportsQuery = defineQuery({
 
 export function findUnusedExports(qb: QueryBuilder): UnusedExportRow[] {
   qb.queries.findUnusedExports ??= findUnusedExportsQuery(qb.db);
-  return qb.queries.findUnusedExports.all({
+  const rows = qb.queries.findUnusedExports.all({
     mainEntries: JSON.stringify(PACKAGE_MAIN_ENTRY_FILES),
   });
+  // Post-filter (not SQL): the framework-convention predicate needs a real
+  // regex over the path, and defineQuery requires fully static SQL.
+  return rows.filter((row) => !isFrameworkConventionExport(row.filePath, row.name));
 }
 
 // ─── Module augmentation: register typed entries on QueryRegistry ─────────

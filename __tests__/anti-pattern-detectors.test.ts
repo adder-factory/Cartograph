@@ -399,6 +399,22 @@ describe('agent_debug_log detector (G26)', () => {
     expect(countAgentDebugLog('if (TRACE) console.log("x");', 'if (TRACE) console.log("x");', 'typescript')).toBe(0);
   });
 
+  it('SKIPS when the flag keyword sits inside a SCREAMING_SNAKE compound (Workers/Deno env bindings)', () => {
+    const workersSink = 'const silent = env.DEBUG_DIAGNOSTICS === "silent"; if (!silent) console.error(msg);';
+    expect(countAgentDebugLog(workersSink, workersSink, 'typescript')).toBe(0);
+    const appDebug = 'if (settings.APP_DEBUG) console.log("x");';
+    expect(countAgentDebugLog(appDebug, appDebug, 'typescript')).toBe(0);
+    const logVerbose = 'if (env.LOG_VERBOSE) console.info("x");';
+    expect(countAgentDebugLog(logVerbose, logVerbose, 'typescript')).toBe(0);
+  });
+
+  it('still COUNTS when the keyword is merely embedded in a longer word', () => {
+    const embedded = 'if (DEBUGGER) console.log("x");';
+    expect(countAgentDebugLog(embedded, embedded, 'typescript')).toBe(1);
+    const lowercase = 'const debug = true; console.log("x");';
+    expect(countAgentDebugLog(lowercase, lowercase, 'typescript')).toBe(1);
+  });
+
   it('counts multiple ungated console calls', () => {
     expect(
       countAgentDebugLog(
@@ -627,6 +643,20 @@ describe('http_no_timeout detector (G26-P2)', () => {
     expect(countHttpNoTimeout('fetch(url)', 'fetch(url)', 'typescript')).toBe(1);
     expect(countHttpNoTimeout('axios.get(url)', 'axios.get(url)', 'typescript')).toBe(1);
     expect(countHttpNoTimeout('axios.post(url, data)', 'axios.post(url, data)', 'typescript')).toBe(1);
+  });
+
+  it('does NOT count a fetch-named DECLARATION (Durable Object / service-worker handler)', () => {
+    const doHandler = 'async fetch(request: Request): Promise<Response> { return handle(request); }';
+    expect(countHttpNoTimeout(doHandler, doHandler, 'typescript')).toBe(0);
+    const fnDecl = 'function fetch(resource: string) { return resource; }';
+    expect(countHttpNoTimeout(fnDecl, fnDecl, 'typescript')).toBe(0);
+    const staticDecl = 'static async fetch(req: Request) { return route(req); }';
+    expect(countHttpNoTimeout(staticDecl, staticDecl, 'typescript')).toBe(0);
+  });
+
+  it('still counts a real ungated call next to a fetch-named declaration', () => {
+    const mixed = 'async fetch(request: Request) { const r = await fetch(API_URL); return r; }';
+    expect(countHttpNoTimeout(mixed, mixed, 'typescript')).toBe(1);
   });
 
   it('SKIPS when body mentions `signal` (AbortController usage)', () => {
