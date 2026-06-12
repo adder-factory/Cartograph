@@ -134,15 +134,25 @@ async function bootLive() {
       document.title = liveSessionScope
         ? `Project: ${displayName} · ${liveSessionScope.selector}`
         : `Project: ${displayName}`;
-      document.querySelector('.topbar .path').textContent = s.projectRoot;
+      // Project chip: the basename up front, full path on hover.
+      const chip = document.getElementById('project-chip');
+      const chipName = liveProjectRoot.split('/').filter(Boolean).pop() || liveProjectRoot;
+      const chipPath = document.querySelector('.topbar .path');
+      if (chipPath) chipPath.textContent = chipName;
+      chip?.setAttribute('data-tooltip', s.projectRoot);
+      // Stats: compact so they never wrap; exact numbers + index
+      // provenance live in the tooltip.
       const statsEl = document.querySelector('.topbar .stats');
       statsEl.innerHTML =
-        `<b>${s.files}</b> files · <b>${s.nodes.toLocaleString()}</b> nodes · <b>${s.edges.toLocaleString()}</b> edges`;
+        `<span class="stat"><b>${formatCompactCount(s.files)}</b> files</span>` +
+        `<span class="stat"><b>${formatCompactCount(s.nodes)}</b> nodes</span>` +
+        `<span class="stat"><b>${formatCompactCount(s.edges)}</b> edges</span>`;
       const indexedBits = [
+        `${s.files.toLocaleString()} files · ${s.nodes.toLocaleString()} nodes · ${s.edges.toLocaleString()} edges`,
         s.indexedAt ? `Indexed ${formatRelative(s.indexedAt)}` : null,
         s.head ? `HEAD ${String(s.head).slice(0, 7)}` : null,
       ].filter(Boolean);
-      if (indexedBits.length > 0) statsEl.setAttribute('data-tooltip', indexedBits.join(' · '));
+      statsEl.setAttribute('data-tooltip', indexedBits.join(' · '));
       renderFileScopeFilters(s.dirs);
     }
   } catch (err) { console.debug('status endpoint unavailable', err); }
@@ -389,6 +399,16 @@ function applySessionScopeChrome() {
   if (hint) hint.textContent = `scoped to session ${liveSessionScope.selector} — other sessions are not served`;
   const traceTitle = document.querySelector('.trace-title');
   if (traceTitle) traceTitle.textContent = `Agent trace · ${liveSessionScope.selector}`;
+}
+
+/** Counts that never wrap the topbar: 9,999 and below stay exact,
+    larger values compact to 25.9k / 1.2M (exact in the tooltip). */
+function formatCompactCount(n) {
+  const v = Number(n || 0);
+  // 999,950+ rounds to 1000.0k under the k-branch — promote to M.
+  if (v >= 999950) return `${(v / 1e6).toFixed(1)}M`;
+  if (v >= 1e4) return `${(v / 1e3).toFixed(1)}k`;
+  return v.toLocaleString();
 }
 
 /** ts → "Jun 12 02:05" for session pickers. */
