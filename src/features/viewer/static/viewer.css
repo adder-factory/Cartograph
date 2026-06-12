@@ -287,23 +287,18 @@
   }
 
   /* ───────── Layout ────────────────────────────────────────────
-     Three columns + optional bottom tracebar. The tracebar only
-     renders on the Agent-trace tab — the other tabs let the canvas
-     fill the full vertical space (the previous fixed 256px reserve
-     wasted screen real estate on Graph and Health views). */
+     Three columns; the Agent-trace, Live, and Health tabs are
+     separate full-page sections, so the canvas always gets the full
+     vertical space here. */
   .stage {
     display: grid;
     grid-template-columns: 256px 1fr 360px;
     grid-template-rows: 1fr;
     height: calc(100vh - 52px);
   }
-  .stage.with-tracebar {
-    grid-template-rows: 1fr 280px;
-  }
   /* min-height: 0 lets grid items shrink below their content size,
      which is required when a child (#cy) has implicit width/height
-     set inline by Cytoscape — without this the canvas would lock to
-     its previous height when the trace bar tries to claim row 2. */
+     set inline by Cytoscape. */
   .leftrail   { grid-row: 1 / 2; grid-column: 1 / 2; background: var(--bg-1); border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
   /* The middle column is now a vertical split: graph on top, code
      panel on the bottom (when a symbol is selected on the Graph
@@ -313,8 +308,6 @@
   .canvas     { flex: 1 1 0; position: relative; min-height: 0; min-width: 0; overflow: hidden; background:
     radial-gradient(ellipse at 50% 40%, #171b20 0%, var(--bg-0) 75%); }
   .detailpane { grid-row: 1 / 2; grid-column: 3 / 4; background: var(--bg-1); border-left: 1px solid var(--line); overflow-y: auto; min-height: 0; }
-  .tracebar   { grid-row: 2 / 3; grid-column: 1 / 4; background: var(--bg-1); border-top: 1px solid var(--line); display: none; flex-direction: column; min-height: 0; }
-  .stage.with-tracebar .tracebar { display: flex; }
 
   /* ───────── Left rail ───────── */
   .rail-section { padding: var(--s-5) var(--s-5); border-bottom: 1px solid var(--line-soft); }
@@ -2016,37 +2009,83 @@
   .metric .k { color: var(--text-muted); }
   .metric .v { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 500; }
 
-  /* ───────── Trace bar ───────── */
-  .trace-header {
-    height: 38px;
+  /* ───────── Agent trace view ───────── */
+  .trace-view {
+    display: none;
+    position: fixed;
+    top: 52px;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--bg-0);
+    overflow: hidden;
+  }
+  .trace-shell {
+    height: 100%;
+    width: min(1480px, 100%);
+    margin: 0 auto;
+    padding: var(--s-5) var(--s-6) var(--s-6);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-4);
+  }
+  .trace-masthead {
     display: flex;
     align-items: center;
-    padding: 0 16px;
-    border-bottom: 1px solid var(--line-soft);
-    font-size: 11px;
-    color: var(--text-muted);
-    text-transform: uppercase;
-    letter-spacing: .9px;
-    gap: 16px;
+    gap: var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg-1);
+    padding: var(--s-3) var(--s-4);
   }
-  .trace-header .session { color: var(--text); text-transform: none; letter-spacing: 0; font-family: "SF Mono", Menlo, monospace; font-size: 11.5px; }
-  .trace-header .session-picker {
+  .trace-title {
+    font-size: 12px;
+    font-weight: 800;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    white-space: nowrap;
+  }
+  .trace-masthead .session {
+    color: var(--text-dim);
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 11.5px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .session-picker {
     background: var(--bg-2);
     border: 1px solid var(--line);
     color: var(--text);
-    font: inherit;
     font-family: "SF Mono", Menlo, monospace;
     font-size: 11.5px;
     padding: 4px 8px;
     border-radius: 4px;
-    text-transform: none;
-    letter-spacing: 0;
     outline: none;
     cursor: pointer;
     max-width: 380px;
   }
-  .trace-header .session-picker:focus { border-color: var(--accent); }
-  .trace-header .spacer { flex: 1; }
+  .session-picker:focus { border-color: var(--accent); }
+  .trace-masthead .spacer { flex: 1; }
+  .trace-stats { display: flex; gap: var(--s-5); margin-right: var(--s-3); }
+  .trace-stat { text-align: right; }
+  .trace-stat .value {
+    display: block;
+    color: var(--text);
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 16px;
+    font-weight: 700;
+    line-height: 1.15;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .trace-stat .label {
+    color: var(--text-faint);
+    font-size: 10px;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
   .btn {
     padding: 4px 12px;
     border-radius: 4px;
@@ -2058,22 +2097,47 @@
     font-family: inherit;
     text-transform: none;
     letter-spacing: 0;
+    white-space: nowrap;
   }
   .btn:hover { color: var(--text); border-color: var(--text-muted); background: var(--bg-2); }
   .btn.primary { color: var(--accent); border-color: rgba(78,168,255,.3); }
   .btn.primary:hover { background: rgba(78,168,255,.08); }
 
+  .trace-body {
+    flex: 1;
+    min-height: 0;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: var(--s-4);
+  }
+  .trace-timeline-wrap {
+    min-width: 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg-1);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
   .trace-list {
     flex: 1;
     overflow-y: auto;
-    font-family: "SF Mono", Menlo, monospace;
     font-size: 12px;
+    padding: var(--s-2) 0 var(--s-3);
+  }
+  .trace-list .empty {
+    color: var(--text-dim);
+    font-family: -apple-system, sans-serif;
+    font-size: 12.5px;
+    line-height: 1.7;
+    padding: var(--s-6);
   }
   .trace-row {
     display: grid;
-    grid-template-columns: 60px 26px 200px 1fr 110px;
-    align-items: center;
-    padding: 6px 16px;
+    grid-template-columns: 34px 70px 64px minmax(110px, 168px) minmax(0, 1.25fr) 58px minmax(0, .9fr);
+    gap: var(--s-3);
+    align-items: baseline;
+    padding: 5px var(--s-4);
     border-bottom: 1px solid var(--line-soft);
     cursor: pointer;
     transition: background .08s;
@@ -2082,18 +2146,128 @@
   .trace-row:hover { background: var(--bg-2); color: var(--text); }
   .trace-row.active { background: var(--accent-soft); color: var(--text); }
   .trace-row.active .step-num { background: var(--accent); color: var(--bg-0); }
-  .trace-row .delta { color: var(--text-dim); font-size: 11px; }
   .trace-row .step-num {
-    width: 18px; height: 18px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    background: var(--bg-3); color: var(--text-muted); font-size: 10.5px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    align-self: center;
+    background: var(--bg-3);
+    color: var(--text-muted);
+    font-size: 10.5px;
     font-family: -apple-system, sans-serif;
   }
-  .trace-row .tool { color: var(--accent); }
-  .trace-row.active .tool { color: var(--text); font-weight: 600; }
+  .trace-row .t { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+  .trace-row .gap { color: var(--text-dim); font-size: 11px; font-variant-numeric: tabular-nums; }
+  .trace-row .gap.long { color: var(--warn); }
+  .trace-row .tool {
+    font-weight: 700;
+    color: hsl(var(--tool-hue, 210) 75% 72%);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .trace-row.active .tool { color: var(--text); }
   .trace-row .args { color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .trace-row .result { color: var(--text-muted); text-align: right; font-size: 11.5px; }
+  .trace-row .dur { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-dim); }
+  .trace-row .dur.fast { color: var(--ok); }
+  .trace-row .dur.slow { color: var(--warn); }
+  .trace-row .result { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trace-row .result.err { color: var(--err); }
   .trace-row.active .result { color: var(--ok); }
+  .trace-row.active .result.err { color: var(--err); }
+
+  .trace-side {
+    min-width: 0;
+    overflow-y: auto;
+  }
+  .trace-side-card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: var(--bg-1);
+  }
+  .trace-side-card h3 {
+    margin: 0;
+    padding: var(--s-3) var(--s-4);
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--text-muted);
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+  .trace-detail {
+    padding: var(--s-3) var(--s-4) var(--s-4);
+    font-size: 12px;
+    color: var(--text-muted);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s-3);
+  }
+  .trace-detail .health-empty { padding: var(--s-2) 0; }
+  .trace-detail-head {
+    display: flex;
+    align-items: baseline;
+    gap: var(--s-2);
+    flex-wrap: wrap;
+  }
+  .trace-detail-head .tool {
+    font-family: "SF Mono", Menlo, monospace;
+    font-weight: 700;
+    font-size: 13px;
+    color: hsl(var(--tool-hue, 210) 75% 72%);
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .trace-detail-head .when { color: var(--text-faint); font-size: 11.5px; }
+  .trace-detail-kv {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 2px var(--s-3);
+    font-size: 11.5px;
+  }
+  .trace-detail-kv .k { color: var(--text-faint); text-transform: uppercase; letter-spacing: .05em; font-size: 10px; align-self: baseline; }
+  .trace-detail-kv .v {
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .trace-detail-kv .v.err { color: var(--err); }
+  .trace-detail pre {
+    margin: 0;
+    padding: var(--s-3);
+    background: var(--bg-0);
+    border: 1px solid var(--line-soft);
+    border-radius: 6px;
+    font-size: 11.5px;
+    line-height: 1.55;
+    max-height: 280px;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  .trace-detail-label {
+    color: var(--text-faint);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+    margin-bottom: -6px;
+  }
+  @media (max-width: 1000px) {
+    .trace-body { grid-template-columns: minmax(0, 1fr); }
+    .trace-side { display: none; }
+    .trace-stats { display: none; }
+    .trace-masthead .session { display: none; }
+  }
 
   /* ───────── Health pane ───────── */
   .health-view {
@@ -2959,9 +3133,6 @@
     .health-main {
       grid-template-columns: minmax(0, 1fr);
     }
-    .health-metrics {
-      grid-template-columns: repeat(3, minmax(130px, 1fr));
-    }
   }
 
   @media (max-width: 860px) {
@@ -2999,9 +3170,6 @@
       min-height: 0;
       grid-template-columns: minmax(0, 1fr);
       grid-template-rows: minmax(420px, calc(100svh - 116px)) auto auto auto;
-    }
-    .stage.with-tracebar {
-      grid-template-rows: minmax(420px, calc(100svh - 116px)) auto auto 280px;
     }
     .leftrail {
       grid-row: 2 / 3;
@@ -3077,7 +3245,6 @@
       box-shadow: 0 -22px 60px rgba(0, 0, 0, .42);
       padding-bottom: max(var(--s-5), env(safe-area-inset-bottom));
     }
-    .tracebar { grid-row: 4 / 5; grid-column: 1 / 2; min-height: 280px; }
     .codepane {
       flex-direction: column;
       height: min(72svh, 640px);
@@ -3210,8 +3377,8 @@
     .show-code-btn { display: none !important; }
     .splitter-h,
     .splitter-v { display: none; }
-    .trace-row { grid-template-columns: 54px 24px minmax(120px, 1fr); }
-    .trace-row .args, .trace-row .result { display: none; }
+    .trace-row { grid-template-columns: 24px 64px minmax(0, 1fr) 52px; }
+    .trace-row .gap, .trace-row .result { display: none; }
     .health-view {
       top: 0;
       position: static;
@@ -3220,19 +3387,14 @@
     .health-shell {
       padding: var(--s-4) var(--s-3) var(--s-6);
     }
-    .health-score .value {
-      font-size: 42px;
+    .live-view,
+    .trace-view {
+      top: 0;
+      position: static;
+      height: calc(100svh - 116px);
     }
-    .health-metrics {
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-    }
-    .health-metric {
+    .live-shell,
+    .trace-shell {
       padding: var(--s-3);
-    }
-    .health-metric .value {
-      font-size: 22px;
-    }
-    .health-severity-row {
-      grid-template-columns: 72px minmax(0, 1fr) 50px;
     }
   }

@@ -19,7 +19,10 @@ cartograph viewer .
 
 - **Graph** — interactive force-directed view of symbol neighborhoods, with a
   detail pane, source panel, and graph tools.
-- **Agent trace** — replay recorded MCP sessions tool call by tool call.
+- **Agent trace** — a full-page timeline over recorded MCP sessions: per-call
+  clock, gap-from-previous-call, duration, and result columns, a step-detail
+  card with the full arguments, replay, JSON export, and a per-step
+  "View on graph" jump.
 - **Live** — watch MCP tool calls stream in as an agent uses cartograph on
   this project: a following feed with per-call args, duration, and result,
   plus an active-session card and a live tool-mix breakdown.
