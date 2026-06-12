@@ -1,24 +1,29 @@
-# Release pipeline: build the standalone tarballs/zip for every target,
-# smoke what each runner can execute, and attach assets + SHA256SUMS to
-# the GitHub release for the pushed tag.
+# One release pipeline: native per-target builds (each artifact is built
+# AND smoked on its own OS), gated on the same checks CI runs, published
+# with SHA256SUMS. Consolidates the earlier cross-compile release.yml and
+# the dispatch-only standalone-release.yml (2026-06-12).
 #
-# `workflow_dispatch` runs build + smoke only (publish is tag-gated) —
-# use it as a dry run before cutting a tag.
+# Triggers: pushing a v* tag publishes to that tag's release. A manual
+# dispatch is a DRY RUN (gate + build + smoke only) unless `overwrite` is
+# set, which (re)publishes the package.json-versioned release.
 name: release
 
 on:
   push:
     tags: ['v*']
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      overwrite:
+        description: 'Publish without a tag; replace assets if the release exists'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
-env:
-  BUN_VERSION: 1.3.14
-
 jobs:
-  build-unix:
+  # A release must never ship a tree that would not pass CI.
+  gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -26,74 +31,76 @@ jobs:
         with:
           bun-version: 1.3.14
       # Optional deps (usearch, sqlite-vec) are runtime-guarded vector
-      # accelerators the standalone never bundles - usearch alone is a
-      # ~2min from-source C++ postinstall on a runner.
+      # accelerators the gates never load — usearch alone is a ~2min
+      # from-source C++ postinstall on a runner.
       - run: bun install --frozen-lockfile --omit=optional
-      - name: Build cross-compiled tarballs
-        run: |
-          for t in darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
-            bun scripts/build-standalone.mjs "$t"
-          done
-      - name: Smoke linux-x64 (native on this runner)
-        run: |
-          mkdir -p /tmp/smoke
-          tar -xzf release/cartograph-linux-x64.tar.gz -C /tmp/smoke --strip-components=1
-          test "$(/tmp/smoke/bin/cartograph --version)" = "$(jq -r .version package.json)"
-      - uses: actions/upload-artifact@v7
-        with:
-          name: unix-tarballs
-          path: release/cartograph-*.tar.gz
-          if-no-files-found: error
+      - run: bun run typecheck
+      - run: bun run check
+      - run: bun run check:biomarkers
 
-  build-windows:
-    runs-on: windows-latest
+  build:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        # One runner per published target — native compile + native smoke.
+        # No windows-arm64 asset: bun has no compile runtime for it, and
+        # install.ps1 points Windows-on-ARM at the x64 build (OS-level
+        # emulation).
+        os:
+          - ubuntu-latest # linux-x64
+          - ubuntu-24.04-arm # linux-arm64
+          - macos-latest # darwin-arm64
+          - macos-13 # darwin-x64 (Intel)
+          - windows-latest # windows-x64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      # Optional deps (usearch, sqlite-vec) are runtime-guarded vector
-      # accelerators the standalone never bundles - usearch alone is a
-      # ~2min from-source C++ postinstall on a runner.
       - run: bun install --frozen-lockfile --omit=optional
-      - run: bun scripts/build-standalone.mjs windows-x64
-      - name: Smoke windows-x64
-        shell: pwsh
-        run: |
-          Expand-Archive release/cartograph-windows-x64.zip -DestinationPath C:\smoke
-          $root = 'C:\smoke\cartograph-windows-x64'
-          $env:CARTOGRAPH_ASSET_ROOT = "$root\share\cartograph"
-          $direct = & "$root\lib\cartograph\cartograph.exe" --version 2>&1
-          Write-Host "direct exe: '$direct' (exit $LASTEXITCODE)"
-          $v = & "$root\bin\cartograph.cmd" --version 2>&1
-          Write-Host "launcher:   '$v' (exit $LASTEXITCODE)"
-          $expected = (Get-Content package.json | ConvertFrom-Json).version
-          if ("$v".Trim() -ne $expected) { throw "version mismatch: got '$v', expected '$expected'" }
+      - run: bun run build:standalone
+      - run: node scripts/smoke-standalone.mjs
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-zip
-          path: release/cartograph-windows-x64.zip
+          # Unique per matrix entry so same-OS runners can't collide.
+          name: standalone-${{ matrix.os }}
+          # Only the finished archives, never the uncleaned stage dir.
+          path: |
+            release/cartograph-*.tar.gz
+            release/cartograph-*.zip
           if-no-files-found: error
 
   publish:
-    needs: [build-unix, build-windows]
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.overwrite
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v6
       - uses: actions/download-artifact@v8
         with:
-          path: assets
-          merge-multiple: true
-      - name: Generate SHA256SUMS
+          path: release-artifacts
+      - name: Stage release assets
         run: |
-          cd assets
-          sha256sum cartograph-* > SHA256SUMS
-          cat SHA256SUMS
-      - name: Create release if missing, upload assets
+          mkdir -p release
+          find release-artifacts -type f \( -name 'cartograph-*.tar.gz' -o -name 'cartograph-*.zip' \) -exec cp {} release/ \;
+          (cd release && sha256sum cartograph-* > SHA256SUMS)
+          ls -lh release
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="$GITHUB_REF_NAME"
-          gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "$tag" --generate-notes
-          gh release upload "$tag" assets/* --clobber --repo "$GITHUB_REPOSITORY"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="$GITHUB_REF_NAME"
+          else
+            TAG="v$(node -p "require('./package.json').version")"
+          fi
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/cartograph-* release/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            # Tag the exact commit the artifacts were built from, not
+            # whatever the default branch HEAD is at publish time.
+            gh release create "$TAG" release/cartograph-* release/SHA256SUMS \
+              --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$TAG" --generate-notes
+          fi
