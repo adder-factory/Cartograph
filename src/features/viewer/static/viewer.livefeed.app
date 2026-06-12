@@ -304,6 +304,7 @@ function liveFeedDeactivate() {
     clearInterval(lfStatsTimer);
     lfStatsTimer = null;
   }
+  lfStopTicker();
   lfSetConn('idle', 'paused — reopen to resume');
 }
 
@@ -437,7 +438,13 @@ const LF_GRAPH_LAYOUT_DEBOUNCE_MS = 600;
 const LF_TRAIL_MAX = 40;
 const LF_TRAIL_MIN_OPACITY = 0.18;
 const LF_TRAIL_FADE_STEP = 0.08;
-const LF_FOLLOW_CAM_MS = 380;
+const LF_FOLLOW_CAM_MS = 420;
+const LF_PACKET_MS = 460;
+const LF_AMBIENT_PACKET_EVERY_MS = 2600;
+const LF_GHOST_AFTER_MS = 60000;
+const LF_GHOST_PASS_EVERY_MS = 2000;
+const LF_DASH_SPEED = 0.55;
+const LF_REDUCED_MOTION = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const LF_MODE_KEY = 'cartograph-viewer-live-mode-v1';
 const LF_MODES = ['feed', 'split', 'graph'];
 
@@ -454,6 +461,13 @@ let lfTrailEdges = [];         // trail edge ids, oldest first
 let lfTrailSeq = 0;
 let lfCurrentNodeId = null;    // "where the agent is" marker
 let lfGraphHasLaidOut = false;
+let lfLayoutRef = null;        // running (animated) layout, stopped before re-run
+let lfTickerRaf = null;        // rAF loop: marching dashes, breathing, ambience
+let lfPacketSeq = 0;
+let lfDashOffset = 0;
+let lfLastGhostPass = 0;
+let lfLastAmbient = 0;
+const lfLastTouch = new Map(); // node id → last activity ts (ghosting)
 
 /** Concrete thing a call touched, if any: symbol > file/dir > query. */
 function lfCallTarget(c) {
@@ -535,6 +549,7 @@ function lfGraphUpsert(entry, fresh) {
   }
   toolNode.data('calls', (toolNode.data('calls') || 0) + 1);
   toolNode.data('size', Math.min(56, 24 + Math.sqrt(toolNode.data('calls')) * 4));
+  lfTouch(toolNode);
   if (fresh) lfGraphFlash(toolNode);
   if (!entry.target) return;
   let targetNode = lfGraphCy.getElementById(entry.target.id);
@@ -553,7 +568,9 @@ function lfGraphUpsert(entry, fresh) {
     });
     lfTargetOrder.push(entry.target.id);
     lfGraphPrune();
+    lfEnterNode(targetNode);
   }
+  lfTouch(targetNode);
   if (entry.target.type === 'symbol') {
     lfGraphResolveSymbol(entry.target.label, entry.target.id, targetNode);
     // Traversal trail: one hop edge per symbol→symbol move, in tool
@@ -572,7 +589,10 @@ function lfGraphUpsert(entry, fresh) {
         if (dead.length > 0) lfGraphCy.remove(dead);
       }
       lfTrailFade();
-      if (fresh) lfGraphFlash(trailEdge);
+      if (fresh) {
+        lfGraphFlash(trailEdge);
+        lfFirePacket(trailEdge, '#7df9ff', LF_PACKET_MS);
+      }
     }
     lfPrevSymbolNodeId = entry.target.id;
   }
@@ -587,6 +607,137 @@ function lfGraphUpsert(entry, fresh) {
   if (fresh) {
     lfGraphFlash(targetNode);
     lfGraphFlash(edge);
+    lfPing(targetNode);
+    lfFirePacket(edge, `hsl(${entry.hue} 80% 65%)`, LF_PACKET_MS);
+  }
+}
+
+/* ── Tron layer: packets, pings, entrance, ghosting, ticker ── */
+
+function lfTouch(node) {
+  lfLastTouch.set(node.id(), Date.now());
+  node.removeClass('ghost');
+}
+
+/** New nodes materialize instead of popping in. */
+function lfEnterNode(node) {
+  if (LF_REDUCED_MOTION) return;
+  node.style('opacity', 0);
+  node.animate({ style: { opacity: 1 } }, { duration: 260, complete: () => {
+    try { node.removeStyle('opacity'); } catch { /* pruned mid-entrance */ }
+  } });
+}
+
+/** Sonar ripple: prime a tight bright underlay without transition,
+    then flip to the expanded transparent state so it animates out. */
+function lfPing(node) {
+  if (LF_REDUCED_MOTION || node.length === 0) return;
+  node.addClass('ping-prime');
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    node.removeClass('ping-prime');
+    node.addClass('ping');
+    setTimeout(() => {
+      try { node.removeClass('ping'); } catch { /* pruned */ }
+    }, 720);
+  }));
+}
+
+/** A light pulse racing along an edge — source → midpoint → target —
+    then gone. The packet is a tiny glowing node excluded from layout,
+    hit-testing, counts, and ghosting. */
+function lfFirePacket(edge, color, durationMs) {
+  if (LF_REDUCED_MOTION || !lfGraphCy || edge.length === 0) return;
+  const srcPos = { ...edge.source().position() };
+  const midPos = { ...edge.midpoint() };
+  const dstPos = { ...edge.target().position() };
+  const packet = lfGraphCy.add({
+    group: 'nodes',
+    data: { id: `pkt:${lfPacketSeq++}`, color, size: 7 },
+    classes: 'packet',
+    position: srcPos,
+  });
+  packet.ungrabify();
+  packet.unselectify();
+  const dispose = () => {
+    try {
+      lfGraphCy.remove(packet);
+    } catch { /* already gone via clear/rebuild */ }
+  };
+  packet.animate(
+    { position: midPos },
+    {
+      duration: durationMs / 2,
+      easing: 'linear',
+      complete: () =>
+        packet.animate(
+          { position: dstPos },
+          { duration: durationMs / 2, easing: 'linear', complete: dispose },
+        ),
+    },
+  );
+}
+
+/** Idle nodes dim to ghosts so the active frontier glows. */
+function lfGhostPass() {
+  const now = Date.now();
+  lfGraphCy.nodes().not('.packet').forEach((node) => {
+    const touched = lfLastTouch.get(node.id()) || 0;
+    node.toggleClass('ghost', node.id() !== lfCurrentNodeId && now - touched > LF_GHOST_AFTER_MS);
+  });
+}
+
+/** One rAF loop while the graph is visible: marching light along the
+    recent trail, the current node breathing, and an ambient packet
+    re-running a recent hop every couple of seconds. */
+function lfTickerStep(ts) {
+  lfTickerRaf = null;
+  if (!lfGraphCy || !lfActive || lfMode === 'feed' || LF_REDUCED_MOTION) return;
+  lfDashOffset -= LF_DASH_SPEED;
+  if (lfDashOffset < -10000) lfDashOffset = 0;
+  for (const id of lfTrailEdges.slice(-12)) {
+    const edge = lfGraphCy.getElementById(id);
+    if (edge.length > 0) edge.style('line-dash-offset', lfDashOffset);
+  }
+  if (lfCurrentNodeId) {
+    const node = lfGraphCy.getElementById(lfCurrentNodeId);
+    if (node.length > 0 && !node.hasClass('ping') && !node.hasClass('ping-prime')) {
+      node.style('underlay-opacity', 0.14 + 0.1 * (Math.sin(ts / 320) + 1) / 2);
+      node.style('underlay-color', '#7df9ff');
+      node.style('underlay-padding', 8);
+    }
+  }
+  if (ts - lfLastAmbient > LF_AMBIENT_PACKET_EVERY_MS && lfTrailEdges.length > 0) {
+    lfLastAmbient = ts;
+    const recent = lfTrailEdges.slice(-8);
+    const pick = recent[Math.floor(Math.random() * recent.length)];
+    const edge = lfGraphCy.getElementById(pick);
+    if (edge.length > 0) lfFirePacket(edge, 'rgba(125, 249, 255, 0.6)', LF_PACKET_MS * 1.6);
+  }
+  if (ts - lfLastGhostPass > LF_GHOST_PASS_EVERY_MS) {
+    lfLastGhostPass = ts;
+    lfGhostPass();
+  }
+  lfTickerRaf = requestAnimationFrame(lfTickerStep);
+}
+
+function lfStartTicker() {
+  if (lfTickerRaf || LF_REDUCED_MOTION) return;
+  lfTickerRaf = requestAnimationFrame(lfTickerStep);
+}
+
+function lfStopTicker() {
+  if (lfTickerRaf) {
+    cancelAnimationFrame(lfTickerRaf);
+    lfTickerRaf = null;
+  }
+  // Don't freeze a mid-breath glow on the current node.
+  if (lfGraphCy && lfCurrentNodeId) {
+    const node = lfGraphCy.getElementById(lfCurrentNodeId);
+    if (node.length > 0) {
+      node.removeStyle('underlay-opacity');
+      node.removeStyle('underlay-color');
+      node.removeStyle('underlay-padding');
+    }
   }
 }
 
@@ -603,15 +754,27 @@ function lfTrailFade() {
     (Follow drives both the feed autoscroll and this chase-cam). */
 function lfGraphSetCurrent(nodeId, fresh) {
   if (lfCurrentNodeId && lfCurrentNodeId !== nodeId) {
-    lfGraphCy.getElementById(lfCurrentNodeId).removeClass('lf-current');
+    const prev = lfGraphCy.getElementById(lfCurrentNodeId);
+    if (prev.length > 0) {
+      prev.removeClass('lf-current');
+      // The ticker breathes via inline underlay styles — clear them so
+      // the node falls back to its stylesheet (hub glow etc).
+      prev.removeStyle('underlay-opacity');
+      prev.removeStyle('underlay-color');
+      prev.removeStyle('underlay-padding');
+    }
   }
   lfCurrentNodeId = nodeId;
   const node = lfGraphCy.getElementById(nodeId);
   if (node.length === 0) return;
   node.addClass('lf-current');
   if (fresh && lfFollow && lfMode !== 'feed') {
+    const zoom = Math.min(1.35, Math.max(0.9, lfGraphCy.zoom()));
     lfGraphCy.stop(false, false);
-    lfGraphCy.animate({ center: { eles: node }, duration: LF_FOLLOW_CAM_MS, easing: 'ease-in-out-quad' });
+    lfGraphCy.animate(
+      { zoom: { level: zoom, position: { ...node.position() } } },
+      { duration: LF_FOLLOW_CAM_MS, easing: 'ease-in-out-quad' },
+    );
   }
 }
 
@@ -656,15 +819,38 @@ function lfGraphScheduleLayout() {
   lfGraphLayoutTimer = setTimeout(() => {
     lfGraphLayoutTimer = null;
     if (!lfGraphCy || !lfActive || lfMode === 'feed') return;
+    try {
+      lfLayoutRef?.stop();
+    } catch { /* never ran */ }
     // While following, fitting would yank the chase-cam off the
     // action — relax positions, then re-center on the current node.
     const fitNow = !lfGraphHasLaidOut || !lfFollow;
-    lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: fitNow, padding: 28 }).run();
-    lfGraphHasLaidOut = true;
-    if (!fitNow && lfCurrentNodeId) {
-      const node = lfGraphCy.getElementById(lfCurrentNodeId);
-      if (node.length > 0) lfGraphCy.center(node);
+    // Packets are transient sparks — the layout must not drag them.
+    const eles = lfGraphCy.elements().not('.packet');
+    const animate = !LF_REDUCED_MOTION;
+    let layout;
+    try {
+      layout = eles.layout({
+        name: 'fcose',
+        quality: 'default',
+        animate,
+        animationDuration: 650,
+        randomize: false,
+        fit: fitNow,
+        padding: 28,
+      });
+    } catch {
+      layout = eles.layout({ name: 'cose', animate, randomize: false, fit: fitNow, padding: 28 });
     }
+    lfLayoutRef = layout;
+    layout.one('layoutstop', () => {
+      if (!fitNow && lfFollow && lfCurrentNodeId && lfGraphCy) {
+        const node = lfGraphCy.getElementById(lfCurrentNodeId);
+        if (node.length > 0) lfGraphCy.center(node);
+      }
+    });
+    layout.run();
+    lfGraphHasLaidOut = true;
   }, LF_GRAPH_LAYOUT_DEBOUNCE_MS);
 }
 
@@ -689,6 +875,8 @@ function lfEnsureGraph() {
           'background-color': '#2b323a',
           width: 'data(size)',
           height: 'data(size)',
+          'transition-property': 'opacity, width, height, background-color, border-color',
+          'transition-duration': '300ms',
         },
       },
       { selector: 'node.tool', style: { shape: 'round-rectangle', 'background-color': 'data(color)' } },
@@ -728,13 +916,46 @@ function lfEnsureGraph() {
           width: 2.5,
           'line-color': 'data(color)',
           'line-opacity': 1,
+          'line-style': 'dashed',
+          'line-dash-pattern': [9, 6],
           'target-arrow-color': 'data(color)',
           'target-arrow-shape': 'triangle',
           'arrow-scale': 0.9,
           'z-index': 5,
         },
       },
-      { selector: 'edge.fresh', style: { 'line-color': '#5dd6aa', 'target-arrow-color': '#5dd6aa', width: 3.5 } },
+      { selector: 'edge.fresh', style: { 'line-color': '#7df9ff', 'target-arrow-color': '#7df9ff', width: 3.5 } },
+      { selector: 'node.ghost', style: { opacity: 0.3, 'text-opacity': 0.25 } },
+      {
+        selector: 'node.packet',
+        style: {
+          shape: 'ellipse',
+          width: 7,
+          height: 7,
+          label: '',
+          'background-color': 'data(color)',
+          'border-width': 0,
+          'underlay-color': 'data(color)',
+          'underlay-opacity': 0.55,
+          'underlay-padding': 5,
+          events: 'no',
+          'z-index': 30,
+        },
+      },
+      {
+        selector: 'node.ping-prime',
+        style: { 'underlay-color': '#7df9ff', 'underlay-opacity': 0.55, 'underlay-padding': 3, 'transition-duration': '0ms' },
+      },
+      {
+        selector: 'node.ping',
+        style: {
+          'underlay-color': '#7df9ff',
+          'underlay-opacity': 0,
+          'underlay-padding': 36,
+          'transition-property': 'underlay-opacity, underlay-padding',
+          'transition-duration': '700ms',
+        },
+      },
     ],
   });
   lfGraphCy.on('tap', 'node.symbol', (e) => {
@@ -762,6 +983,10 @@ function lfGraphClearElements() {
   lfPrevSymbolNodeId = null;
   lfCurrentNodeId = null;
   lfGraphHasLaidOut = false;
+  lfLastTouch.clear();
+  try {
+    lfLayoutRef?.stop();
+  } catch { /* never ran */ }
   lfGraphCy?.elements().remove();
 }
 
@@ -774,14 +999,17 @@ function lfSetMode(mode, persist = true) {
   });
   if (lfMode !== 'feed') {
     lfEnsureGraph();
+    lfStartTicker();
     requestAnimationFrame(() => {
       lfGraphCy?.resize();
-      if (lfGraphCy && lfGraphCy.nodes().length > 0) {
-        lfGraphCy.layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 28 }).run();
+      if (lfGraphCy && lfGraphCy.nodes().not('.packet').length > 0) {
+        lfGraphCy.elements().not('.packet').layout({ name: 'cose', animate: false, randomize: false, fit: true, padding: 28 }).run();
+        lfGraphHasLaidOut = true;
       }
     });
-  } else if (lfFollow && lfFeedEl) {
-    lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
+  } else {
+    lfStopTicker();
+    if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
   }
   if (persist) writeViewerJsonStorage(LF_MODE_KEY, lfMode);
 }
@@ -792,7 +1020,7 @@ document.querySelectorAll('.live-mode-btn').forEach((btn) => {
 
 /* Smoke-test hook — mirrors __cartographViewerSmoke for the main app. */
 globalThis.__cartographLiveFeedSmoke = {
-  graphNodeCount: () => (lfGraphCy ? lfGraphCy.nodes().length : 0),
+  graphNodeCount: () => (lfGraphCy ? lfGraphCy.nodes().not('.packet').length : 0),
   graphEdgeCount: () => (lfGraphCy ? lfGraphCy.edges().length : 0),
   graphNodeInfo: (id) => {
     const node = lfGraphCy?.getElementById(id);
