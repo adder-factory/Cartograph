@@ -2647,6 +2647,21 @@ async function assertLiveView(page: Page): Promise<void> {
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
+  // 3D cinema mode loads its renderer from a CDN — accept either a
+  // ready scene (canvas present) or the offline-fallback message.
+  await page.locator('.live-mode-btn[data-lf-mode="3d"]').click();
+  await page.waitForFunction(
+    () => {
+      const smoke = (globalThis as unknown as { __cartographLiveFeedSmoke?: { threeDState: () => string } })
+        .__cartographLiveFeedSmoke;
+      const state = smoke?.threeDState();
+      if (state === 'ready') return document.querySelectorAll('#lf-3d canvas').length > 0;
+      if (state === 'failed') return !(document.querySelector<HTMLElement>('#lf-3d-msg')?.hidden ?? true);
+      return false;
+    },
+    undefined,
+    { timeout: 30_000 },
+  );
   await page.locator('.live-mode-btn[data-lf-mode="feed"]').click();
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);

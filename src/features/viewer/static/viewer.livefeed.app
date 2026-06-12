@@ -305,6 +305,7 @@ function liveFeedDeactivate() {
     lfStatsTimer = null;
   }
   lfStopTicker();
+  lf3dPause();
   lfSetConn('idle', 'paused — reopen to resume');
 }
 
@@ -446,7 +447,7 @@ const LF_GHOST_PASS_EVERY_MS = 2000;
 const LF_DASH_SPEED = 0.55;
 const LF_REDUCED_MOTION = globalThis.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false;
 const LF_MODE_KEY = 'cartograph-viewer-live-mode-v1';
-const LF_MODES = ['feed', 'split', 'graph'];
+const LF_MODES = ['feed', 'split', 'graph', '3d'];
 
 const lfBodyEl = document.getElementById('lf-body');
 const lfGraphWrapEl = document.getElementById('lf-graph-wrap');
@@ -497,15 +498,18 @@ function lfGraphRecord(c, fresh) {
   const session = lfSessionFilterValue();
   if (session && entry.sessionId !== session) return;
   if (lfGraphCy) {
-    lfGraphUpsert(entry, fresh && lfMode !== 'feed');
-    if (lfMode !== 'feed') lfGraphScheduleLayout();
+    const cyVisible = lfMode === 'split' || lfMode === 'graph';
+    lfGraphUpsert(entry, fresh && cyVisible);
+    if (cyVisible) lfGraphScheduleLayout();
   }
+  lf3dApply(entry, fresh && lfMode === '3d');
 }
 
 /** Rebuild the activity graph from the log under the current session
     filter — used when the filter changes (text filter is feed-only;
     the session filter scopes the graph too). */
 function lfGraphRebuild() {
+  lf3dRebuild();
   if (!lfGraphCy) return;
   // A pending layout timer is fine — it fires against the rebuilt
   // elements, which is exactly what we want.
@@ -803,7 +807,9 @@ function lfGraphResolveSymbol(name, nodeId, node) {
 }
 
 function lfGraphApplyResolution(nodeId, payload) {
-  if (!lfGraphCy || !payload) return;
+  if (!payload) return;
+  lf3dApplyResolution(nodeId, payload);
+  if (!lfGraphCy) return;
   const node = lfGraphCy.getElementById(nodeId);
   if (node.length === 0) return;
   node.data('kind', payload.kind);
@@ -974,6 +980,7 @@ function lfEnsureGraph() {
 function lfGraphReset() {
   lfGraphLog = [];
   lfGraphClearElements();
+  lf3dClear();
 }
 
 /** Drop drawn elements + traversal state, keep the call log. */
@@ -993,11 +1000,15 @@ function lfGraphClearElements() {
 function lfSetMode(mode, persist = true) {
   lfMode = LF_MODES.includes(mode) ? mode : 'feed';
   lfBodyEl?.setAttribute('data-lf-mode', lfMode);
-  if (lfGraphWrapEl) lfGraphWrapEl.hidden = lfMode === 'feed';
+  const cyVisible = lfMode === 'split' || lfMode === 'graph';
+  if (lfGraphWrapEl) lfGraphWrapEl.hidden = !cyVisible;
+  const wrap3d = document.getElementById('lf-3d-wrap');
+  if (wrap3d) wrap3d.hidden = lfMode !== '3d';
   document.querySelectorAll('.live-mode-btn').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.lfMode === lfMode);
   });
-  if (lfMode !== 'feed') {
+  if (cyVisible) {
+    lf3dPause();
     lfEnsureGraph();
     lfStartTicker();
     requestAnimationFrame(() => {
@@ -1007,8 +1018,12 @@ function lfSetMode(mode, persist = true) {
         lfGraphHasLaidOut = true;
       }
     });
+  } else if (lfMode === '3d') {
+    lfStopTicker();
+    void lf3dActivate();
   } else {
     lfStopTicker();
+    lf3dPause();
     if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
   }
   if (persist) writeViewerJsonStorage(LF_MODE_KEY, lfMode);
@@ -1028,5 +1043,305 @@ globalThis.__cartographLiveFeedSmoke = {
     return { kind: node.data('kind') ?? null, health: node.data('health') ?? null, classes: node.classes() };
   },
   trailEdgeCount: () => (lfGraphCy ? lfGraphCy.edges('.trail').length : 0),
+  threeDState: () => lf3dState,
+  threeDNodeCount: () => lf3dNodes.size,
   mode: () => lfMode,
 };
+
+/* ───────── 3D cinema mode ─────────
+   A lazy-loaded three.js scene (3d-force-graph) of the same activity
+   log: bloom-lit nodes colored by symbol kind, Vizceral-style
+   directional particle streams riding the agent's trail, a camera
+   that flies to the action, and a slow idle orbit. The renderer and
+   its deps load from CDN only when the mode is first opened; if that
+   fails (offline), the pane degrades to a message and every other
+   mode keeps working. */
+
+const LF_3D_SRC = 'https://cdn.jsdelivr.net/npm/3d-force-graph@1/dist/3d-force-graph.min.js';
+const LF_3D_BLOOM_SRC = 'https://esm.sh/three/examples/jsm/postprocessing/UnrealBloomPass.js';
+const LF_3D_MAX_NODES = 140;
+const LF_3D_FLY_MS = 900;
+const LF_3D_FLY_DISTANCE = 230;
+const LF_3D_IDLE_ORBIT_AFTER_MS = 8000;
+const LF_3D_USER_HOLD_MS = 15000;
+
+let lf3d = null;               // ForceGraph3D instance
+let lf3dState = 'unloaded';    // unloaded | loading | ready | failed
+let lf3dNodes = new Map();     // id → live node object
+let lf3dLinks = new Map();     // id → live link object
+let lf3dOrder = [];            // non-tool node ids, oldest first (prune)
+let lf3dPrevSymbol = null;     // trail chaining for the 3D scene
+let lf3dTrailSeq = 0;
+let lf3dCurrentId = null;
+let lf3dLastActivity = 0;
+let lf3dUserHoldUntil = 0;
+let lf3dOrbitTimer = null;
+
+function lfLoadScript(srcUrl) {
+  return new Promise((resolve, reject) => {
+    const el = document.createElement('script');
+    el.src = srcUrl;
+    el.onload = resolve;
+    el.onerror = () => reject(new Error(`script failed to load: ${srcUrl}`));
+    document.head.appendChild(el);
+  });
+}
+
+function lf3dMsg(text) {
+  const el = document.getElementById('lf-3d-msg');
+  if (!el) return;
+  el.hidden = !text;
+  if (text) el.textContent = text;
+}
+
+function lf3dNodeColor(n) {
+  if (n.id === lf3dCurrentId) return '#7df9ff';
+  if (n.type === 'tool') return `hsl(${n.hue} 65% 52%)`;
+  if (n.type === 'symbol' && n.kind) return fillForKind(n.kind);
+  if (n.type === 'symbol') return '#7db7ff';
+  if (n.type === 'file') return '#94a3b8';
+  return '#9faab6';
+}
+
+function lf3dRefreshStyles() {
+  // Re-setting the accessors makes the renderer re-sample node/link
+  // fields we mutated in place (documented dynamic-update pattern).
+  lf3d?.nodeColor(lf3d.nodeColor());
+  lf3d?.nodeVal(lf3d.nodeVal());
+}
+
+function lf3dPushData() {
+  lf3d?.graphData({ nodes: [...lf3dNodes.values()], links: [...lf3dLinks.values()] });
+}
+
+function lf3dPrune() {
+  while (lf3dOrder.length > LF_3D_MAX_NODES) {
+    const id = lf3dOrder.shift();
+    lf3dNodes.delete(id);
+    for (const [linkId, link] of lf3dLinks) {
+      const srcId = typeof link.source === 'object' ? link.source.id : link.source;
+      const dstId = typeof link.target === 'object' ? link.target.id : link.target;
+      if (srcId === id || dstId === id) lf3dLinks.delete(linkId);
+    }
+    if (lf3dPrevSymbol === id) lf3dPrevSymbol = null;
+    if (lf3dCurrentId === id) lf3dCurrentId = null;
+  }
+}
+
+/** Mirror one activity entry into the 3D scene. Safe no-op until the
+    renderer is ready — lf3dRebuild replays the log on first open. */
+function lf3dApply(entry, fresh, flush = true) {
+  if (!lf3d || lf3dState !== 'ready') return;
+  const toolId = `tool:${entry.tool}`;
+  let toolNode = lf3dNodes.get(toolId);
+  if (!toolNode) {
+    toolNode = { id: toolId, label: entry.toolLabel, type: 'tool', hue: entry.hue, calls: 0, val: 4 };
+    lf3dNodes.set(toolId, toolNode);
+  }
+  toolNode.calls += 1;
+  toolNode.val = Math.min(14, 4 + toolNode.calls * 0.5);
+  let targetNode = null;
+  if (entry.target) {
+    targetNode = lf3dNodes.get(entry.target.id);
+    if (!targetNode) {
+      targetNode = {
+        id: entry.target.id,
+        label: entry.target.label,
+        type: entry.target.type,
+        focus: entry.target.focus,
+        kind: entry.target.type === 'symbol' ? lfSymbolCache.get(entry.target.label)?.kind ?? null : null,
+        val: entry.target.type === 'symbol' ? 8 : 5,
+      };
+      lf3dNodes.set(entry.target.id, targetNode);
+      lf3dOrder.push(entry.target.id);
+      lf3dPrune();
+    }
+    const spokeId = `s:${toolId}->${entry.target.id}`;
+    let spoke = lf3dLinks.get(spokeId);
+    if (!spoke) {
+      spoke = { id: spokeId, source: toolId, target: entry.target.id, kind: 'spoke', color: `hsl(${entry.hue} 45% 40%)` };
+      lf3dLinks.set(spokeId, spoke);
+    }
+    if (entry.target.type === 'symbol') {
+      if (lf3dPrevSymbol && lf3dPrevSymbol !== entry.target.id && lf3dNodes.has(lf3dPrevSymbol)) {
+        const trailId = `t:${lf3dTrailSeq++}`;
+        lf3dLinks.set(trailId, {
+          id: trailId,
+          source: lf3dPrevSymbol,
+          target: entry.target.id,
+          kind: 'trail',
+          color: '#7df9ff',
+        });
+      }
+      lf3dPrevSymbol = entry.target.id;
+    }
+    lf3dCurrentId = entry.target.id;
+  }
+  if (flush) {
+    lf3dPushData();
+    lf3dRefreshStyles();
+  }
+  if (fresh) {
+    lf3dLastActivity = Date.now();
+    lf3dStopOrbit();
+    if (targetNode) lf3dFlyTo(targetNode);
+  }
+}
+
+function lf3dApplyResolution(nodeId, payload) {
+  const node = lf3dNodes.get(nodeId);
+  if (!node) return;
+  node.kind = payload.kind;
+  node.val = Math.max(node.val, 8 + Math.min(8, (payload.centrality || 0) * 400));
+  lf3dRefreshStyles();
+}
+
+function lf3dFlyTo(node) {
+  if (!lf3d || LF_REDUCED_MOTION) return;
+  if (Date.now() < lf3dUserHoldUntil) return;
+  // A brand-new node has no simulated position yet — let the force
+  // engine place it first, then chase.
+  setTimeout(() => {
+    if (!lf3d || lfMode !== '3d') return;
+    const live = lf3dNodes.get(node.id);
+    if (!live || live.x == null) return;
+    const len = Math.hypot(live.x, live.y, live.z) || 1;
+    const ratio = 1 + LF_3D_FLY_DISTANCE / len;
+    lf3d.cameraPosition({ x: live.x * ratio, y: live.y * ratio, z: live.z * ratio }, live, LF_3D_FLY_MS);
+  }, 400);
+}
+
+function lf3dStopOrbit() {
+  const controls = lf3d?.controls();
+  if (controls) controls.autoRotate = false;
+}
+
+function lf3dClear() {
+  lf3dNodes = new Map();
+  lf3dLinks = new Map();
+  lf3dOrder = [];
+  lf3dPrevSymbol = null;
+  lf3dCurrentId = null;
+  lf3dPushData();
+}
+
+/** Rebuild the 3D scene from the activity log under the current
+    session filter (mirrors lfGraphRebuild for the 2D instance). */
+function lf3dRebuild() {
+  if (!lf3d || lf3dState !== 'ready') return;
+  lf3dClear();
+  const session = lfSessionFilterValue();
+  for (const entry of lfGraphLog) {
+    if (session && entry.sessionId !== session) continue;
+    lf3dApply(entry, false, false); // batch — one flush below
+  }
+  lf3dPushData();
+  lf3dRefreshStyles();
+}
+
+function lf3dPause() {
+  lf3d?.pauseAnimation();
+  if (lf3dOrbitTimer) {
+    clearInterval(lf3dOrbitTimer);
+    lf3dOrbitTimer = null;
+  }
+}
+
+async function lf3dActivate() {
+  if (lf3dState === 'loading') return;
+  if (lf3dState === 'failed') {
+    // Allow a retry on re-entry (the user may be back online) — but
+    // tear down any half-built instance first so the pane never
+    // hosts two renderers or duplicate observers.
+    try {
+      lf3d?._destructor?.();
+    } catch { /* never fully built */ }
+    lf3d = null;
+    const stalePane = document.getElementById('lf-3d');
+    if (stalePane) stalePane.innerHTML = '';
+    lf3dState = 'unloaded';
+  }
+  if (lf3dState === 'unloaded') {
+    lf3dState = 'loading';
+    lf3dMsg('Loading the 3D renderer…');
+    try {
+      if (typeof ForceGraph3D !== 'function') await lfLoadScript(LF_3D_SRC);
+      lf3dBuild();
+      lf3dState = 'ready';
+      lf3dMsg('');
+      lf3dRebuild();
+    } catch (err) {
+      console.warn('viewer: 3d renderer unavailable', err);
+      lf3dState = 'failed';
+      lf3dMsg('3D renderer unavailable — it loads from a CDN, so check your connection and reopen this mode.');
+      return;
+    }
+  }
+  if (lf3dState !== 'ready') return;
+  lf3d.resumeAnimation();
+  const pane = document.getElementById('lf-3d');
+  if (pane) lf3d.width(pane.clientWidth).height(pane.clientHeight);
+  if (!lf3dOrbitTimer && !LF_REDUCED_MOTION) {
+    lf3dOrbitTimer = setInterval(() => {
+      if (!lf3d || lfMode !== '3d' || !lfActive) return;
+      const controls = lf3d.controls();
+      if (!controls) return;
+      const idle = Date.now() - lf3dLastActivity > LF_3D_IDLE_ORBIT_AFTER_MS && Date.now() > lf3dUserHoldUntil;
+      controls.autoRotate = idle;
+      controls.autoRotateSpeed = 0.55;
+    }, 2000);
+  }
+}
+
+function lf3dBuild() {
+  const pane = document.getElementById('lf-3d');
+  if (!pane) throw new Error('3d pane missing');
+  lf3d = ForceGraph3D()(pane)
+    .backgroundColor('#000003')
+    .showNavInfo(false)
+    .nodeVal('val')
+    .nodeColor((n) => lf3dNodeColor(n))
+    .nodeOpacity(0.95)
+    // nodeLabel is rendered via innerHTML in the library's tooltip —
+    // labels carry MCP arg text, so escape them.
+    .nodeLabel((n) => `${escapeHtml(n.label)}${n.kind ? ` · ${escapeHtml(n.kind)}` : ''}`)
+    .linkColor('color')
+    .linkOpacity(0.35)
+    .linkWidth((l) => (l.kind === 'trail' ? 1.6 : 0.4))
+    .linkDirectionalParticles((l) => (LF_REDUCED_MOTION ? 0 : l.kind === 'trail' ? 4 : 1))
+    .linkDirectionalParticleSpeed((l) => (l.kind === 'trail' ? 0.012 : 0.005))
+    .linkDirectionalParticleWidth((l) => (l.kind === 'trail' ? 2.4 : 1.2))
+    .onNodeClick((n) => {
+      lf3dUserHoldUntil = Date.now() + LF_3D_USER_HOLD_MS;
+      if (n.type === 'symbol' && n.focus) {
+        document.querySelector('.tab[data-view="graph"]')?.click();
+        if (typeof focusGraphOnSymbol === 'function') void focusGraphOnSymbol(n.focus, n.focus);
+      }
+    });
+  if (!pane.dataset.lf3dBound) {
+    pane.dataset.lf3dBound = '1';
+    pane.addEventListener('pointerdown', () => {
+      lf3dUserHoldUntil = Date.now() + LF_3D_USER_HOLD_MS;
+      lf3dStopOrbit();
+    });
+  }
+  if (typeof ResizeObserver === 'function') {
+    new ResizeObserver(() => {
+      if (lf3d && lfMode === '3d') lf3d.width(pane.clientWidth).height(pane.clientHeight);
+    }).observe(pane);
+  }
+  // Real bloom (the official 3d-force-graph pattern). Optional: if the
+  // module import or pass wiring fails, the scene still renders.
+  void (async () => {
+    try {
+      const mod = await import(LF_3D_BLOOM_SRC);
+      const bloom = new mod.UnrealBloomPass();
+      bloom.strength = 0.9;
+      bloom.radius = 0.5;
+      bloom.threshold = 0.22;
+      lf3d.postProcessingComposer().addPass(bloom);
+    } catch (err) {
+      console.debug('viewer: bloom unavailable, rendering without it', err);
+    }
+  })();
+}
