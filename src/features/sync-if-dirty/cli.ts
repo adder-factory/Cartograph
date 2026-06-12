@@ -38,6 +38,23 @@ export function registerSyncIfDirtyCommand(deps: SyncIfDirtyCommandDeps): void {
     );
 }
 
+/** Gate decision: skip only on a clean tree WITH a stamped, in-sync
+ *  index. A clean tree alone is not "nothing to do" — commits, merges,
+ *  checkouts, and rebases all move HEAD without dirtying the tree, and
+ *  the index keeps answering from the old graph until a sync. A
+ *  never-stamped index (null freshness) errs toward syncing. */
+function canSkipSync(dirty: boolean, graph: SyncIfDirtyGraph): boolean {
+  if (dirty) return false;
+  const freshness = graph.stats.getFreshness();
+  return freshness !== null && !hasFreshnessRisk(freshness);
+}
+
+function reportSyncFailure(err: unknown, quiet: boolean | undefined, deps: SyncIfDirtyCommandDeps): void {
+  if (quiet) return;
+  deps.error(`Failed to sync: ${errMsg(err)}`);
+  if (process.env['CG_DEBUG']) deps.writeStderr(`${errMsg(err)}\n`);
+}
+
 export async function runSyncIfDirtyCommand(
   pathArg: string | undefined,
   options: { quiet?: boolean; maxFileSize?: string },
@@ -62,26 +79,15 @@ export async function runSyncIfDirtyCommand(
     const { default: Cartograph } = await deps.loadCartograph();
     cg = await Cartograph.open(projectPath, { autoMigrate: true });
 
-    if (!dirty) {
-      // A clean tree is not "nothing to do": commits, merges, checkouts,
-      // and rebases all move HEAD without dirtying the tree, and the
-      // index keeps answering from the old graph. Compare the indexed
-      // sha against HEAD (plus disk-vs-index content drift) before
-      // skipping. A never-stamped index (null) errs toward syncing.
-      const freshness = cg.stats.getFreshness();
-      if (freshness !== null && !hasFreshnessRisk(freshness)) {
-        if (!options.quiet) deps.info('No source changes and index in sync with HEAD; skipping sync');
-        return;
-      }
+    if (canSkipSync(dirty, cg)) {
+      if (!options.quiet) deps.info('No source changes and index in sync with HEAD; skipping sync');
+      return;
     }
 
     await cg.sync({ summarize: false, ...(maxFileSize !== undefined && { maxFileSize }) });
     if (!options.quiet) deps.info('Synced changed files');
   } catch (err) {
-    if (!options.quiet) {
-      deps.error(`Failed to sync: ${errMsg(err)}`);
-      if (process.env['CG_DEBUG']) deps.writeStderr(`${errMsg(err)}\n`);
-    }
+    reportSyncFailure(err, options.quiet, deps);
     process.exit(1);
   } finally {
     cg?.close();

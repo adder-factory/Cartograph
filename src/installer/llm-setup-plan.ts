@@ -754,37 +754,41 @@ async function buildInstallPresetNote(preset: SetupPreset, nextSteps: readonly s
   };
 }
 
+/** Detected presets: read the structurally-attached `detectedBackend`
+ *  off the preset object (kept in sync with the planner so a future
+ *  summary-wording change can't silently break config generation). */
+function buildConfigForDetectedPreset(id: SetupPresetId, plan: SetupPlan): NonNullable<CartographConfig['llm']> | null {
+  const preset = plan.presets.find((p) => p.id === id);
+  if (!preset?.detectedBackend) return null;
+  const { kind, endpoint, models } = preset.detectedBackend;
+  if (kind === 'ollama') {
+    return buildSingleEndpointConfig(endpoint, {
+      embed: OLLAMA_RECOMMENDED_MODELS.embed,
+      summarize: OLLAMA_RECOMMENDED_MODELS.summarize,
+      ask: OLLAMA_RECOMMENDED_MODELS.ask,
+    });
+  }
+  if (kind === 'llama-server') {
+    return buildDetectedLlamaServerConfig(endpoint, models);
+  }
+  // mlx_lm / LM Studio / etc. — use the first loaded model as the
+  // universal model id. User edits per-tier if needed.
+  const fallbackModel = models[0] ?? '<set model in config.json>';
+  return buildSingleEndpointConfig(endpoint, {
+    embed: fallbackModel,
+    summarize: fallbackModel,
+    ask: fallbackModel,
+  });
+}
+
 /** Build the `llm` config block for a preset, given the current plan. */
 function buildConfigForPreset(
   id: SetupPresetId,
   plan: SetupPlan,
   _modelsDir: string | undefined,
 ): NonNullable<CartographConfig['llm']> | null {
-  // Detected presets: read the structurally-attached `detectedBackend`
-  // off the preset object (kept in sync with the planner so a future
-  // summary-wording change can't silently break config generation).
   if (id.startsWith('use-detected-')) {
-    const preset = plan.presets.find((p) => p.id === id);
-    if (!preset?.detectedBackend) return null;
-    const { kind, endpoint, models } = preset.detectedBackend;
-    if (kind === 'ollama') {
-      return buildSingleEndpointConfig(endpoint, {
-        embed: OLLAMA_RECOMMENDED_MODELS.embed,
-        summarize: OLLAMA_RECOMMENDED_MODELS.summarize,
-        ask: OLLAMA_RECOMMENDED_MODELS.ask,
-      });
-    }
-    if (kind === 'llama-server') {
-      return buildDetectedLlamaServerConfig(endpoint, models);
-    }
-    // mlx_lm / LM Studio / etc. — use the first loaded model as the
-    // universal model id. User edits per-tier if needed.
-    const fallbackModel = models[0] ?? '<set model in config.json>';
-    return buildSingleEndpointConfig(endpoint, {
-      embed: fallbackModel,
-      summarize: fallbackModel,
-      ask: fallbackModel,
-    });
+    return buildConfigForDetectedPreset(id, plan);
   }
   if (id === 'install-ollama') {
     return buildSingleEndpointConfig(OLLAMA_DEFAULT_ENDPOINT, {
