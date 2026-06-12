@@ -88,3 +88,7 @@ nul
 
 # Flaky-test survivor log (scripts/test-parallel.sh RETRY pass)
 .flake-log
+CLAUDE.local.md
+.claude/skills/cartograph/SKILL.md
+.codex/config.toml
+.codex/skills/cartograph/SKILL.md
