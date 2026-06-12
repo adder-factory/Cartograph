@@ -13,7 +13,9 @@ export interface ViewerHandle {
 export interface ViewerOptions {
   /** Port to bind to. Pass 0 to let the OS pick a free port. */
   port?: number;
-  /** Bind host. Default 'localhost' with token-protected APIs. */
+  /** Bind host. Default '127.0.0.1' (a concrete loopback — Bun's
+   *  'localhost' alternates ::1/127.0.0.1 across binds) with
+   *  token-protected APIs. */
   host?: string;
   /**
    * Scope this viewer instance to ONE recorded MCP session, by id or

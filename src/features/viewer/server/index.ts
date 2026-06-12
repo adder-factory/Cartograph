@@ -36,7 +36,12 @@ function listenServer(args: ListenServerArgs): Promise<void> {
   const { server, host, port, onListening } = args;
   return new Promise<void>((resolve, reject) => {
     server.once('error', reject);
-    server.listen(port, host, () => {
+    // exclusive + reusePort:false matter under Bun: its positional
+    // listen() allows TWO servers to bind the same port (SO_REUSEPORT
+    // semantics), which would let two projects' viewers silently
+    // share 8765 and split requests across mismatched API tokens.
+    // One database = one viewer = one port.
+    server.listen({ port, host, exclusive: true, reusePort: false }, () => {
       onListening();
       server.removeListener('error', reject);
       resolve();

@@ -2592,39 +2592,53 @@ async function assertLiveView(page: Page): Promise<void> {
   if (live.rows < 4 || !live.emptyHidden || live.toolmixRows < 1) {
     throw new Error(`live view did not render the seeded backlog: ${JSON.stringify(live)}`);
   }
+  // Exact-session view: the dropdown has NO "All sessions" option;
+  // the newest session (the primary) is auto-selected, so only its 4
+  // rows are visible out of 5 rendered.
+  const exact = await page.evaluate(() => {
+    const dropdown = document.getElementById('lf-session-filter') as HTMLSelectElement;
+    const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
+    return {
+      options: [...dropdown.options].map((o) => o.value),
+      selected: dropdown.value,
+      total: rows.length,
+      visible: rows.filter((el) => !el.hidden).length,
+    };
+  });
+  if (exact.options.includes('') || exact.selected !== 'smoke-trace-session') {
+    throw new Error(`exact-session dropdown wrong: ${JSON.stringify(exact)}`);
+  }
+  if (exact.total < 5 || exact.visible !== 4) {
+    throw new Error(`exact-session default visibility wrong: ${JSON.stringify(exact)}`);
+  }
   // Feed filter: 'demo failure' matches only the seeded error call.
   await page.locator('#lf-filter').fill('demo failure');
   await page.waitForFunction(
     () => {
       const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
-      return rows.length >= 3 && rows.filter((el) => !el.hidden).length === 1;
+      return rows.length >= 5 && rows.filter((el) => !el.hidden).length === 1;
     },
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
   await page.locator('#lf-filter').fill('');
   await page.waitForFunction(
-    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].every((el) => !el.hidden),
+    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].filter((el) => !el.hidden).length === 4,
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
-  // Session filter: limiting to the primary session hides the
-  // earlier session's row (4 of 5 visible).
-  await page.locator('#lf-session-filter').selectOption('smoke-trace-session');
+  // Switching sessions shows exactly the other session's single row.
+  await page.locator('#lf-session-filter').selectOption('smoke-trace-session-b');
   await page.waitForFunction(
     () => {
       const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
-      return rows.length >= 5 && rows.filter((el) => !el.hidden).length === 4;
+      const visible = rows.filter((el) => !el.hidden);
+      return visible.length === 1 && visible[0]!.dataset.session === 'smoke-trace-session-b';
     },
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
-  await page.locator('#lf-session-filter').selectOption('');
-  await page.waitForFunction(
-    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].every((el) => !el.hidden),
-    undefined,
-    { timeout: SEARCH_TIMEOUT_MS },
-  );
+  await page.locator('#lf-session-filter').selectOption('smoke-trace-session');
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);
 }
