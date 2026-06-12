@@ -253,3 +253,17 @@ cartograph admin sync .
 
 PostgreSQL reduces local SQLite writer-lock friction, but long-running admin
 jobs can still compete at the application level.
+
+## Standalone Binary Warns About AVX Under Rosetta Or Emulation
+
+The prebuilt x64 binaries are built against Bun's baseline (pre-AVX2) runtime
+so they run on older x64 CPUs, in VMs, and under Apple's Rosetta. On hosts
+without AVX, Bun still prints a startup notice:
+
+```
+warn: CPU lacks AVX support, strange crashes may occur. ...
+```
+
+For the baseline builds Cartograph ships, the notice is cosmetic — no AVX
+instructions are used and the binary is fully functional. On native x64
+hardware with AVX the notice does not appear.
