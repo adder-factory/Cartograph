@@ -5,6 +5,9 @@
  *     table `[mcp_servers.cartograph]`. TOML — not JSON — handled by
  *     the narrow serializer in `./toml.ts`.
  *   - Instructions to `~/.codex/AGENTS.md`.
+ *   - A `cartograph` skill to `~/.codex/skills/cartograph/SKILL.md`
+ *     (global) or `./.codex/skills/cartograph/SKILL.md` (local) —
+ *     Codex reads the same SKILL.md format Claude Code does.
  *
  * Codex supports project-scoped `.codex/config.toml` in trusted
  * projects. For local installs we write only that project config and
@@ -22,15 +25,18 @@ import {
   getHomeDir,
   getMcpServerConfig,
   removeMarkedSection,
+  removeOwnedFile,
   writeMarkedInstructionsFile,
+  writeOwnedFile,
 } from './shared.js';
 import { writeProjectGitignoreEntries } from './gitignore.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START } from '../instructions-template.js';
+import { SKILL_NAME, SKILL_TEMPLATE } from '../skill-template.js';
 import { buildTomlTable, removeTomlTable, upsertTomlTable } from './toml.js';
 import { mcpCommandOptionsForLocation } from './mcp-config.js';
 
 const TOML_HEADER = 'mcp_servers.cartograph';
-const CODEX_LOCAL_GITIGNORE_ENTRIES = ['.codex/config.toml'];
+const CODEX_LOCAL_GITIGNORE_ENTRIES = ['.codex/config.toml', `.codex/skills/${SKILL_NAME}/SKILL.md`];
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.codex') : path.join(process.cwd(), '.codex');
@@ -40,6 +46,12 @@ function tomlConfigPath(loc: Location): string {
 }
 function instructionsPath(): string {
   return path.join(configDir('global'), 'AGENTS.md');
+}
+function skillsDir(loc: Location): string {
+  return path.join(configDir(loc), 'skills');
+}
+function skillPath(loc: Location): string {
+  return path.join(skillsDir(loc), SKILL_NAME, 'SKILL.md');
 }
 
 class CodexTarget implements AgentTarget {
@@ -72,7 +84,9 @@ class CodexTarget implements AgentTarget {
     files.push(writeMcpEntry(loc, opts));
     if (loc === 'global') {
       files.push(writeInstructionsEntry());
-    } else {
+    }
+    files.push(writeOwnedFile(skillPath(loc), SKILL_TEMPLATE));
+    if (loc === 'local') {
       files.push(writeProjectGitignoreEntries(CODEX_LOCAL_GITIGNORE_ENTRIES));
     }
 
@@ -83,11 +97,13 @@ class CodexTarget implements AgentTarget {
     const files: WriteResult['files'] = [];
 
     files.push(removeTomlConfigEntry(tomlConfigPath(loc)));
-    if (loc !== 'global') return { files };
-
-    const instr = instructionsPath();
-    const instrAction = removeMarkedSection(instr, CARTOGRAPH_SECTION_START, CARTOGRAPH_SECTION_END);
-    files.push({ path: instr, action: instrAction });
+    if (loc === 'global') {
+      const instr = instructionsPath();
+      const instrAction = removeMarkedSection(instr, CARTOGRAPH_SECTION_START, CARTOGRAPH_SECTION_END);
+      files.push({ path: instr, action: instrAction });
+    }
+    const skill = skillPath(loc);
+    files.push(removeOwnedFile(skill, [path.dirname(skill), skillsDir(loc)]));
 
     return { files };
   }
@@ -98,8 +114,8 @@ class CodexTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    if (loc === 'global') return [tomlConfigPath(loc), instructionsPath()];
-    return [tomlConfigPath(loc), path.join(process.cwd(), '.gitignore')];
+    if (loc === 'global') return [tomlConfigPath(loc), instructionsPath(), skillPath(loc)];
+    return [tomlConfigPath(loc), skillPath(loc), path.join(process.cwd(), '.gitignore')];
   }
 }
 

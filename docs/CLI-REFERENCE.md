@@ -47,8 +47,15 @@ added to `.gitignore` because local MCP entries can contain absolute checkout
 paths and personal agent rules. Local MCP server args are pinned with
 `--project-path` where the client config is project-scoped. Claude Code is a
 special case: `~/.claude.json` stores the private project-scoped MCP entry,
-while `.claude/settings.local.json` and `CLAUDE.local.md` stay in the
-repository worktree as gitignored files.
+while `.claude/settings.local.json`, `CLAUDE.local.md`, and
+`.claude/skills/cartograph/SKILL.md` stay in the repository worktree as
+gitignored files.
+
+Agents with an on-demand guidance surface also get a generated artifact built
+from the same instructions template: Claude Code and Codex CLI receive a
+`cartograph` skill (`skills/cartograph/SKILL.md`, global or project scope) and
+opencode receives a `/cartograph` custom command (`commands/cartograph.md`).
+`cartograph uninstall` removes them along with the MCP entries.
 
 Install completions by loading the generated script in your shell startup file,
 for example `cartograph completions zsh` or `cartograph completions powershell`

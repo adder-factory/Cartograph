@@ -53,6 +53,12 @@ negated patterns such as `!customer/` re-include local source that `.gitignore`
 hides. This does not change Git semantics and does not override explicit
 Cartograph `exclude` patterns or `.cartographignore` marker directories.
 
+A `.cartographignore` marker excludes its containing directory (and everything
+below it) from indexing. Placed at the **project root**, it opts the whole
+project out: `cartograph index` discovers zero files, and agents carrying the
+generated Cartograph instructions treat the root marker as "do not offer to
+initialize this project."
+
 `maxFileSize` can also be set from the CLI. `cartograph admin init
 --max-file-size <size>` writes it into the initial config; `admin index`,
 `admin sync`, `admin embed-only`, and `sync-if-dirty` accept the same flag as a

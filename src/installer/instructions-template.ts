@@ -16,12 +16,13 @@ export const CARTOGRAPH_SECTION_START = '<!-- CARTOGRAPH_START -->';
 export const CARTOGRAPH_SECTION_END = '<!-- CARTOGRAPH_END -->';
 
 /**
- * The full marker-delimited block written into each agent's
- * instructions file. Includes the start/end markers so the section
- * can be detected and replaced on re-install.
+ * Marker-free instructions body. Single source for every generated
+ * guidance artifact: the marker-delimited instructions block below,
+ * the Claude Code / Codex CLI `SKILL.md`, and the opencode custom
+ * command (see `skill-template.ts`). Edit cartograph usage advice
+ * HERE so the always-on and on-demand surfaces cannot drift.
  */
-export const INSTRUCTIONS_TEMPLATE = `${CARTOGRAPH_SECTION_START}
-## Cartograph
+export const INSTRUCTIONS_BODY = `## Cartograph
 
 Cartograph builds a semantic knowledge graph of codebases for faster, smarter code exploration.
 
@@ -64,11 +65,21 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 
 ### If \`.cartograph/\` does NOT exist
 
-At the start of a session, ask the user if they'd like to initialize Cartograph:
+If a \`.cartographignore\` file exists at the project root, the user has opted this project out of Cartograph — do not offer to initialize or index it.
+
+Otherwise, at the start of a session, ask the user if they'd like to initialize Cartograph:
 
 "I notice this project doesn't have Cartograph initialized. Would you like me to run \`cartograph index .\` to build a code knowledge graph?"
 
-If they prefer PostgreSQL, use PostgreSQL 18+ and run \`cartograph admin init -i --database-provider postgres --database-url <url> --database-pgvector auto\` instead of the SQLite default.
+If they decline, respect that for the rest of the session — do not re-offer. If they prefer PostgreSQL, use PostgreSQL 18+ and run \`cartograph admin init -i --database-provider postgres --database-url <url> --database-pgvector auto\` instead of the SQLite default.`;
+
+/**
+ * The full marker-delimited block written into each agent's
+ * instructions file. Includes the start/end markers so the section
+ * can be detected and replaced on re-install.
+ */
+export const INSTRUCTIONS_TEMPLATE = `${CARTOGRAPH_SECTION_START}
+${INSTRUCTIONS_BODY}
 ${CARTOGRAPH_SECTION_END}`;
 
 /**

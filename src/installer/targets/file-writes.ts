@@ -90,6 +90,43 @@ export function writeMarkedInstructionsFile(filePath: string): 'created' | 'upda
 }
 
 /**
+ * Write a file we own outright (skill / command artifacts), creating
+ * parent directories as needed. Single read derives both existence
+ * and content — no TOCTOU window — so idempotent re-runs report
+ * `unchanged` instead of rewriting.
+ */
+export function writeOwnedFile(filePath: string, content: string): WriteResult['files'][number] {
+  let existing: string | null = null;
+  try {
+    existing = fs.readFileSync(filePath, 'utf-8');
+  } catch {
+    /* absent or unreadable — treat as create */
+  }
+  if (existing === content) return { path: filePath, action: 'unchanged' };
+  atomicWriteFileSync(filePath, content);
+  return { path: filePath, action: existing === null ? 'created' : 'updated' };
+}
+
+/**
+ * Inverse of `writeOwnedFile`. Deletes the file, then best-effort
+ * removes each `pruneDirs` entry in order — `rmdirSync` only deletes
+ * EMPTY directories, so a `skills/` dir shared with other skills
+ * survives untouched.
+ */
+export function removeOwnedFile(filePath: string, pruneDirs: readonly string[] = []): WriteResult['files'][number] {
+  if (!fs.existsSync(filePath)) return { path: filePath, action: 'not-found' };
+  safeUnlinkSync(filePath);
+  for (const dir of pruneDirs) {
+    try {
+      fs.rmdirSync(dir);
+    } catch {
+      /* not empty or already gone — keep */
+    }
+  }
+  return { path: filePath, action: 'removed' };
+}
+
+/**
  * Atomic JSON write. Trailing newline matches the convention every
  * existing target had — preserves diff-friendly file shape.
  */

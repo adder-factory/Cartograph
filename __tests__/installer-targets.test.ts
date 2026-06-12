@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
+import { INSTRUCTIONS_BODY } from '../src/installer/instructions-template.js';
 import { atomicWriteFileSync, getCartographPermissions, removeMarkedSection } from '../src/installer/targets/shared.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 
@@ -406,11 +407,13 @@ describe('Installer targets — Claude specifics', () => {
       path.join(tmpHome, '.claude.json'),
       path.join(tmpHome, '.claude', 'settings.json'),
       path.join(tmpHome, '.claude', 'CLAUDE.md'),
+      path.join(tmpHome, '.claude', 'skills', 'cartograph', 'SKILL.md'),
     ]);
     expect(claude.describePaths('local')).toEqual([
       path.join(tmpHome, '.claude.json'),
       path.join(cwd, '.claude', 'settings.local.json'),
       path.join(cwd, 'CLAUDE.local.md'),
+      path.join(cwd, '.claude', 'skills', 'cartograph', 'SKILL.md'),
       path.join(cwd, '.gitignore'),
     ]);
   });
@@ -442,6 +445,33 @@ describe('Installer targets — Claude specifics', () => {
     const gitignore = fs.readFileSync(path.join(tmpCwd, '.gitignore'), 'utf-8');
     expect(gitignore).toContain('CLAUDE.local.md');
     expect(gitignore).toContain('.claude/settings.local.json');
+    expect(gitignore).toContain('.claude/skills/cartograph/SKILL.md');
+  });
+
+  it('writes a cartograph skill whose body is the shared instructions verbatim', () => {
+    const claude = getTarget('claude')!;
+
+    claude.install('global', { autoAllow: false });
+
+    const skill = fs.readFileSync(path.join(tmpHome, '.claude', 'skills', 'cartograph', 'SKILL.md'), 'utf-8');
+    // Frontmatter the skill loaders require, then the body in lockstep
+    // with the always-on instructions — a drifting copy fails here.
+    expect(skill.startsWith('---\nname: cartograph\ndescription: ')).toBe(true);
+    expect(skill).toContain(INSTRUCTIONS_BODY);
+    expect(skill).not.toContain('<!-- CARTOGRAPH_START -->');
+  });
+
+  it('uninstall removes only the cartograph skill, preserving sibling skills', () => {
+    const claude = getTarget('claude')!;
+    const siblingDir = path.join(tmpHome, '.claude', 'skills', 'other-skill');
+    fs.mkdirSync(siblingDir, { recursive: true });
+    fs.writeFileSync(path.join(siblingDir, 'SKILL.md'), '---\nname: other-skill\n---\n');
+
+    claude.install('global', { autoAllow: false });
+    claude.uninstall('global');
+
+    expect(fs.existsSync(path.join(tmpHome, '.claude', 'skills', 'cartograph'))).toBe(false);
+    expect(fs.readFileSync(path.join(siblingDir, 'SKILL.md'), 'utf-8')).toContain('other-skill');
   });
 });
 
@@ -475,9 +505,11 @@ describe('Installer targets — Codex specifics', () => {
     expect(codex.describePaths('global')).toEqual([
       path.join(tmpHome, '.codex', 'config.toml'),
       path.join(tmpHome, '.codex', 'AGENTS.md'),
+      path.join(tmpHome, '.codex', 'skills', 'cartograph', 'SKILL.md'),
     ]);
     expect(codex.describePaths('local')).toEqual([
       path.join(cwd, '.codex', 'config.toml'),
+      path.join(cwd, '.codex', 'skills', 'cartograph', 'SKILL.md'),
       path.join(cwd, '.gitignore'),
     ]);
   });
@@ -507,6 +539,19 @@ describe('Installer targets — Codex specifics', () => {
     const localConfig = fs.readFileSync(configPath, 'utf-8');
     expect(localConfig).toContain('[mcp_servers.other]');
     expect(localConfig).toContain('[mcp_servers.cartograph]');
+  });
+
+  it('writes a gitignored project-scope skill in lockstep with the shared instructions', () => {
+    const codex = getTarget('codex')!;
+
+    codex.install('local', { autoAllow: false });
+
+    const skill = fs.readFileSync(path.join(tmpCwd, '.codex', 'skills', 'cartograph', 'SKILL.md'), 'utf-8');
+    expect(skill).toContain(INSTRUCTIONS_BODY);
+    expect(fs.readFileSync(path.join(tmpCwd, '.gitignore'), 'utf-8')).toContain('.codex/skills/cartograph/SKILL.md');
+
+    codex.uninstall('local');
+    expect(fs.existsSync(path.join(tmpCwd, '.codex', 'skills'))).toBe(false);
   });
 });
 
@@ -546,14 +591,39 @@ describe('Installer targets — JSON MCP target specifics', () => {
     expect(pi.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.pi', 'mcp.json')]));
     expect(zed.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'zed', 'settings.json')]);
     expect(zed.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), '.zed', 'settings.json')]));
-    expect(opencode.describePaths('global')).toEqual([path.join(tmpHome, '.config', 'opencode', 'opencode.json')]);
-    expect(opencode.describePaths('local')).toEqual(withLocalGitignore([path.join(process.cwd(), 'opencode.json')]));
+    expect(opencode.describePaths('global')).toEqual([
+      path.join(tmpHome, '.config', 'opencode', 'opencode.json'),
+      path.join(tmpHome, '.config', 'opencode', 'commands', 'cartograph.md'),
+    ]);
+    expect(opencode.describePaths('local')).toEqual(
+      withLocalGitignore([
+        path.join(process.cwd(), 'opencode.json'),
+        path.join(process.cwd(), '.opencode', 'commands', 'cartograph.md'),
+      ]),
+    );
 
     fs.mkdirSync(path.join(process.cwd(), '.github'), { recursive: true });
     fs.writeFileSync(path.join(process.cwd(), '.github', 'mcp.json'), '{}\n');
     expect(copilot.describePaths('local')).toEqual(
       withLocalGitignore([path.join(process.cwd(), '.github', 'mcp.json')]),
     );
+  });
+
+  it('opencode writes the /cartograph command; uninstall prunes the generated tree', () => {
+    const opencode = getTarget('opencode')!;
+
+    opencode.install('local', { autoAllow: false });
+
+    const commandFile = path.join(process.cwd(), '.opencode', 'commands', 'cartograph.md');
+    const command = fs.readFileSync(commandFile, 'utf-8');
+    expect(command.startsWith('---\ndescription: ')).toBe(true);
+    expect(command).toContain(INSTRUCTIONS_BODY);
+    expect(fs.readFileSync(path.join(process.cwd(), '.gitignore'), 'utf-8')).toContain(
+      '.opencode/commands/cartograph.md',
+    );
+
+    opencode.uninstall('local');
+    expect(fs.existsSync(path.join(process.cwd(), '.opencode'))).toBe(false);
   });
 
   it('preserves JSONC comments and trailing commas for CodeBuddy and Pi configs', () => {
