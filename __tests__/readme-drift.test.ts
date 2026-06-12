@@ -42,6 +42,8 @@ describe('README drift guard', () => {
     expect(readme).toContain(`registers **${toolCount} MCP tools**`);
     expect(mcpUsage).toContain(`full ${toolCount}-tool profile`);
     expect(readme).toContain(`supports **${languageCount} language modes**`);
+    // The hero badge carries the same count — keep it from rotting.
+    expect(readme).toContain(`languages-${languageCount}_modes`);
   });
 
   it('documents every top-level CLI command from --help', () => {

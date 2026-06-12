@@ -10,10 +10,16 @@ source. Runs as a CLI, an MCP server, and a TypeScript library — fully
 local, on your machine.
 
 [![CI](https://github.com/adder-factory/cartograph/actions/workflows/check.yml/badge.svg)](https://github.com/adder-factory/cartograph/actions/workflows/check.yml)
+[![Version](https://img.shields.io/github/package-json/v/adder-factory/cartograph?label=version&color=8b5cf6)](package.json)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![TypeScript](https://img.shields.io/github/languages/top/adder-factory/cartograph?color=3178c6)](src)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/adder-factory/cartograph/issues)
+
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
 [![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](docs/MCP-USAGE.md)
 [![Storage](https://img.shields.io/badge/storage-SQLite%20%7C%20PostgreSQL-0f766e.svg)](docs/STORAGE-BACKENDS.md)
+[![Languages](https://img.shields.io/badge/languages-73_modes-0ea5e9.svg)](docs/SUPPORT-MATRIX.md)
+[![Platforms](https://img.shields.io/badge/platform-macOS%20%7C%20Linux%20%7C%20Windows-555.svg)](docs/AGENT-INSTALL.md)
 
 [Why](#why-cartograph) ·
 [Get started](#get-started) ·
@@ -23,9 +29,24 @@ local, on your machine.
 [Languages &amp; storage](#languages-and-storage) ·
 [Docs](#documentation)
 
-<img src="docs/assets/viewer.png" alt="Cartograph graph viewer showing symbol detail, source, graph tools, and code health" width="900">
+<img src="docs/assets/viewer-tour.webp" alt="Cartograph viewer tour cycling through a focused symbol with detail pane and source, the project overview graph, and the health dashboard" width="900">
+
+<sub>Auto-cycling tour: symbol focus → project graph → health. Stills in the gallery below.</sub>
 
 </div>
+
+<details>
+<summary><strong>🖼️ Gallery — open each screen as a still</strong></summary>
+<br>
+<p align="center">
+  <em>Focused symbol — neighborhood graph, health / centrality / coverage, source, callers</em><br><br>
+  <img src="docs/assets/viewer.png" alt="Cartograph viewer focused on a symbol with detail pane, source panel, and callers" width="900"><br><br>
+  <em>Project overview — hub-centred core graph of this repository</em><br><br>
+  <img src="docs/assets/viewer-graph.png" alt="Cartograph viewer project overview graph with a hub starburst neighborhood" width="900"><br><br>
+  <em>Health dashboard — findings, risk hotspots, index coverage</em><br><br>
+  <img src="docs/assets/viewer-health.png" alt="Cartograph viewer health dashboard with code health score, severity mix, risk hotspots, and index coverage" width="900">
+</p>
+</details>
 
 ## Why Cartograph
 
