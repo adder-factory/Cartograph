@@ -33,12 +33,10 @@ let lfStatsTimer = null;
 let lfFollow = true;           // auto-scroll to newest rows
 let lfSeen = new Set();        // "session:step" keys already rendered
 let lfRowCount = 0;            // rendered .lf-row elements (cap)
-let lfCallCount = 0;           // calls seen since open/clear (stat)
-let lfRecentTs = [];           // call timestamps inside the rate window
-let lfDurations = [];          // sliding window for the avg stat
-let lfToolCounts = new Map();  // tool → call count (tool mix card)
+let lfCalls = [];              // {sessionId, ts, durationMs, tool} per call, capped —
+                               // the side cards derive from the SELECTED session's slice
 let lfLastSessionId = null;    // session separator bookkeeping
-let lfSessionMeta = null;      // active session card payload
+let lfSessionPinned = false;   // user explicitly chose a session (stop auto-following)
 
 /* The graph/3D layout modes were removed (user preference: the Live
    tab is the feed). Drop their stale persisted mode key. */
@@ -111,7 +109,7 @@ function lfAppendCall(c, animate) {
     sep.className = 'lf-session-row';
     sep.dataset.session = c.sessionId ?? '';
     sep.innerHTML = `<span class="lf-session-chip">session ${escapeHtml(c.sessionId ?? '?')}</span><span class="line" aria-hidden="true"></span>`;
-    sep.hidden = Boolean(lfFilterQuery()) || Boolean(lfSessionFilterValue());
+    sep.hidden = true;
     lfFeedEl.appendChild(sep);
   }
 
@@ -150,67 +148,73 @@ function lfAppendCall(c, animate) {
   lfRowCount++;
   lfEnforceRowCap();
 
-  lfCallCount++;
-  lfRecentTs.push(c.ts);
-  lfDurations.push(Number(c.durationMs) || 0);
-  if (lfDurations.length > LF_AVG_WINDOW) lfDurations.shift();
-  lfToolCounts.set(c.tool, (lfToolCounts.get(c.tool) || 0) + 1);
-  if (!lfSessionMeta || lfSessionMeta.id !== c.sessionId) {
-    lfSessionMeta = { id: c.sessionId, firstTs: c.ts, calls: 0 };
-  }
-  lfSessionMeta.calls++;
-  lfSessionMeta.lastTs = c.ts;
+  lfCalls.push({ sessionId: c.sessionId ?? '', ts: c.ts, durationMs: Number(c.durationMs) || 0, tool: c.tool });
+  if (lfCalls.length > LF_MAX_ROWS) lfCalls.shift();
   if (lfEmptyEl) lfEmptyEl.hidden = true;
   return true;
+}
+
+/** The selected session's slice of the call log — every side card
+    and stat describes exactly that session. */
+function lfSelectedCalls() {
+  const session = lfSessionFilterValue();
+  return session ? lfCalls.filter((c) => c.sessionId === session) : [];
 }
 
 function lfAfterAppend() {
   lfRenderStats();
   lfRenderSession();
   lfRenderToolmix();
-  if (lfFilterQuery() || lfSessionFilterValue()) lfUpdateFilterCount();
+  if (lfFilterQuery()) lfUpdateFilterCount();
   if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
 }
 
 /* ── side cards + stats ── */
 
 function lfRenderStats() {
+  const calls = lfSelectedCalls();
   const now = Date.now();
-  lfRecentTs = lfRecentTs.filter((t) => now - t < LF_RATE_WINDOW_MS);
-  setText('lf-stat-calls', formatNumber(lfCallCount));
-  setText('lf-stat-rate', formatNumber(lfRecentTs.length));
-  const avg = lfDurations.length > 0 ? lfDurations.reduce((a, b) => a + b, 0) / lfDurations.length : null;
+  const recent = calls.filter((c) => now - c.ts < LF_RATE_WINDOW_MS);
+  const durations = calls.slice(-LF_AVG_WINDOW).map((c) => c.durationMs);
+  setText('lf-stat-calls', formatNumber(calls.length));
+  setText('lf-stat-rate', formatNumber(recent.length));
+  const avg = durations.length > 0 ? durations.reduce((a, b) => a + b, 0) / durations.length : null;
   setText('lf-stat-avg', avg == null ? '—' : lfFormatMs(avg));
 }
 
 function lfRenderSession() {
   const el = document.getElementById('lf-session');
   if (!el) return;
-  if (!lfSessionMeta) {
+  const session = lfSessionFilterValue();
+  const calls = lfSelectedCalls();
+  if (!session) {
     el.textContent = 'No session yet.';
     return;
   }
-  const info = lfSessionInfo.get(lfSessionMeta.id);
+  const info = lfSessionInfo.get(session);
   const who = info?.clientName
     ? `${info.clientName}${info.clientVersion ? ` ${info.clientVersion}` : ''}`
     : null;
   const projectName = info?.projectRoot ? info.projectRoot.split('/').filter(Boolean).pop() : null;
+  const lastTs = calls.length > 0 ? calls[calls.length - 1].ts : null;
   el.innerHTML =
-    `<span class="id">${escapeHtml(lfSessionMeta.id ?? '?')}</span><br>` +
+    `<span class="id">${escapeHtml(session)}</span><br>` +
     `${who ? `${escapeHtml(who)}${info?.label ? ` · ${escapeHtml(info.label)}` : ''}<br>` : info?.label ? `${escapeHtml(info.label)}<br>` : ''}` +
     `${projectName ? `project ${escapeHtml(projectName)}<br>` : ''}` +
-    `${formatNumber(lfSessionMeta.calls)} ${lfSessionMeta.calls === 1 ? 'call' : 'calls'} in this feed<br>` +
-    `last activity ${escapeHtml(formatRelative(lfSessionMeta.lastTs))}`;
+    `${formatNumber(calls.length)} ${calls.length === 1 ? 'call' : 'calls'} in this feed<br>` +
+    `${lastTs != null ? `last activity ${escapeHtml(formatRelative(lastTs))}` : 'no calls in the visible window'}`;
 }
 
 function lfRenderToolmix() {
   const el = document.getElementById('lf-toolmix');
   if (!el) return;
-  if (lfToolCounts.size === 0) {
+  const counts = new Map();
+  for (const c of lfSelectedCalls()) counts.set(c.tool, (counts.get(c.tool) || 0) + 1);
+  if (counts.size === 0) {
     el.innerHTML = '<div class="health-empty">No calls observed yet.</div>';
     return;
   }
-  const rows = [...lfToolCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
+  const rows = [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 8);
   const max = rows[0][1] || 1;
   el.innerHTML = rows.map(([tool, count]) => `
     <div class="live-toolmix-row" style="--tool-hue:${lfToolHue(tool)}">
@@ -300,7 +304,7 @@ function liveFeedActivate() {
   void lfRefreshSessionInfo();
   if (!lfStatsTimer) {
     lfStatsTimer = setInterval(() => {
-      if (lfActive && lfCallCount > 0) lfRenderStats();
+      if (lfActive && lfCalls.length > 0) lfRenderStats();
     }, 5000);
   }
   if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
@@ -349,12 +353,9 @@ document.getElementById('lf-clear')?.addEventListener('click', () => {
   // reconnect's backlog snapshot.
   lfFeedEl.innerHTML = '';
   lfRowCount = 0;
-  lfCallCount = 0;
-  lfRecentTs = [];
-  lfDurations = [];
-  lfToolCounts = new Map();
+  lfCalls = [];
   lfLastSessionId = null;
-  lfSessionMeta = null;
+  lfSessionPinned = false;
   lfRenderStats();
   lfRenderSession();
   lfRenderToolmix();
@@ -403,35 +404,44 @@ function lfSessionFilterValue() {
   return lfSessionFilterEl?.value || '';
 }
 
-/** Rebuild the session dropdown from the sessions present in the
-    feed, newest first, preserving the current selection. */
+/** Rebuild the session dropdown — the feed always shows EXACTLY ONE
+    session (no "All sessions" mixing). Newest first; the newest is
+    auto-selected and the selection FOLLOWS new sessions until the
+    user explicitly picks one. */
 function lfSyncSessionOptions() {
   if (!lfSessionFilterEl) return;
-  const selected = lfSessionFilterEl.value;
+  const previous = lfSessionFilterEl.value;
   const ids = [...lfSessionsSeen.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
-  lfSessionFilterEl.innerHTML =
-    '<option value="">All sessions</option>' +
-    ids
-      .map((id) => {
-        const name = lfSessionDisplayName(id);
-        const text = name === id ? id : `${name} · ${id}`;
-        return `<option value="${escapeHtml(id)}" title="${escapeHtml(id)}">${escapeHtml(text)}</option>`;
-      })
-      .join('');
-  if (selected && ids.includes(selected)) lfSessionFilterEl.value = selected;
+  lfSessionFilterEl.innerHTML = ids
+    .map((id) => {
+      const name = lfSessionDisplayName(id);
+      const text = name === id ? id : `${name} · ${id}`;
+      return `<option value="${escapeHtml(id)}" title="${escapeHtml(id)}">${escapeHtml(text)}</option>`;
+    })
+    .join('');
+  const keepPinned = lfSessionPinned && previous && ids.includes(previous);
+  lfSessionFilterEl.value = keepPinned ? previous : (ids[0] ?? '');
+  if (lfSessionFilterEl.value !== previous) {
+    lfApplyFilter();
+    lfRenderStats();
+    lfRenderSession();
+    lfRenderToolmix();
+  }
 }
 
 function lfRowPassesFilters(el) {
   const q = lfFilterQuery();
   if (q && !(el.dataset.search || '').includes(q)) return false;
-  const session = lfSessionFilterValue();
-  if (session && el.dataset.session !== session) return false;
-  return true;
+  // Exactly one session is ever shown; before any session exists the
+  // dropdown is empty and so is the feed.
+  return el.dataset.session === lfSessionFilterValue();
 }
 
 function lfUpdateFilterCount() {
   if (!lfFilterCount) return;
-  if (!lfFilterQuery() && !lfSessionFilterValue()) {
+  // Session narrowing is the norm now — only a text query warrants
+  // the shown/total readout.
+  if (!lfFilterQuery()) {
     lfFilterCount.textContent = '';
     return;
   }
@@ -442,13 +452,17 @@ function lfUpdateFilterCount() {
 }
 
 function lfApplyFilter() {
-  const narrowed = Boolean(lfFilterQuery()) || Boolean(lfSessionFilterValue());
+  let visible = 0;
   for (const el of lfFeedEl.querySelectorAll('.lf-row')) {
     el.hidden = !lfRowPassesFilters(el);
+    if (!el.hidden) visible++;
   }
-  // Session separators are stream landmarks — they only make sense
-  // on the full, unfiltered feed.
-  for (const el of lfFeedEl.querySelectorAll('.lf-session-row')) el.hidden = narrowed;
+  // The feed shows one session at a time — separator chips marked
+  // boundaries in the old mixed stream and stay hidden.
+  for (const el of lfFeedEl.querySelectorAll('.lf-session-row')) el.hidden = true;
+  // A pinned session whose rows were all evicted by the row cap (or
+  // hidden by a text filter) must not look like a dead pane.
+  if (lfEmptyEl && lfRowCount > 0) lfEmptyEl.hidden = visible > 0;
   lfUpdateFilterCount();
   if (lfFollow && lfFeedEl) lfFeedEl.scrollTop = lfFeedEl.scrollHeight;
 }
@@ -463,4 +477,10 @@ lfFilterInput?.addEventListener('keydown', (e) => {
   }
 });
 
-lfSessionFilterEl?.addEventListener('change', lfApplyFilter);
+lfSessionFilterEl?.addEventListener('change', () => {
+  lfSessionPinned = true;
+  lfApplyFilter();
+  lfRenderStats();
+  lfRenderSession();
+  lfRenderToolmix();
+});

@@ -2,12 +2,13 @@
 
 `cartograph viewer` opens a local-only web UI on top of the same graph index
 used by the CLI and MCP server. Nothing leaves your machine: the server binds
-to localhost and reads the existing `.cartograph` index.
+to the loopback interface (`127.0.0.1`) and reads the existing `.cartograph`
+index.
 
 ```sh
 cartograph index .        # the viewer needs an index
 cartograph viewer .
-# open http://localhost:8765/
+# open http://127.0.0.1:8765/
 ```
 
 | Flag | Effect |
@@ -29,9 +30,11 @@ cartograph viewer .
   active.
 - **Live** — watch MCP tool calls stream in as an agent uses cartograph on
   this project: a following feed with per-call args, duration, and result,
-  plus an active-session card and a live tool-mix breakdown. A filter box
-  narrows the feed by text, a session dropdown limits it to one session,
-  and clicking a symbol-bearing call focuses that symbol on the Graph tab.
+  plus an active-session card and a live tool-mix breakdown. The feed
+  shows exactly one session at a time: the dropdown picks which, defaults
+  to the newest, and follows new sessions until you choose one
+  explicitly. A filter box narrows the visible calls by text, and
+  clicking a symbol-bearing call focuses that symbol on the Graph tab.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.
@@ -47,9 +50,15 @@ else the connecting client's self-reported name from the MCP handshake
 as the option tooltip and in the step detail). Each session also
 records the project root its server was bound to.
 
-Every cartograph project records its own sessions in its own index, so
-the viewer only lists sessions for the project it is showing — two
-projects running cartograph at the same time never mix sessions. A
+One database = one graph viewer: every cartograph project records its
+own sessions in its own index, the viewer serves only sessions
+recorded against its project's root (anything stamped for a different
+root is never listed or streamed; unstamped sessions from older
+binaries still show), and each project launches its own viewer — the
+default port falls back to a free one when 8765 is already taken, and
+the browser tab carries the project name, so running one viewer per
+project in separate tabs is the intended way to monitor several at
+once. A
 single server can still answer one-off calls about another project via
 the `projectPath` tool argument; such calls stay in this project's
 trace and show an explicit `project` row in the step detail.

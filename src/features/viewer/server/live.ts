@@ -24,7 +24,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { clampInt, safeParseJson } from './http.js';
-import { resolveScopedSessionId } from './session-scope.js';
+import { resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
 
 interface LiveCallPayload {
   readonly sessionId: string;
@@ -65,10 +65,11 @@ export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null,
   const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
   const sinceTs = sinceTsRaw === null ? null : Number.parseInt(sinceTsRaw, 10);
   const scoped = resolveScopedSessionId(ctx);
+  const projectRoot = viewerProjectRootParam(ctx);
   const rows =
     sinceTs !== null && Number.isFinite(sinceTs)
-      ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped })
-      : latestToolCalls(ctx.queries, limit, scoped);
+      ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped, projectRoot })
+      : latestToolCalls(ctx.queries, { limit, sessionId: scoped, projectRoot });
   return { calls: rows.map(serializeLiveCall) };
 }
 
@@ -96,7 +97,11 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
 
   let backlog: ToolCallRow[];
   try {
-    backlog = latestToolCalls(ctx.queries, LIVE_BACKLOG_LIMIT.default, resolveScopedSessionId(ctx));
+    backlog = latestToolCalls(ctx.queries, {
+      limit: LIVE_BACKLOG_LIMIT.default,
+      sessionId: resolveScopedSessionId(ctx),
+      projectRoot: viewerProjectRootParam(ctx),
+    });
   } catch (err) {
     // Headers are already out as text/event-stream — end the stream
     // instead of letting the error escape to the JSON 500 path.
@@ -123,6 +128,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
         sinceTs: cursorTs,
         limit: LIVE_CALLS_BATCH_LIMIT,
         sessionId: resolveScopedSessionId(ctx),
+        projectRoot: viewerProjectRootParam(ctx),
       });
     } catch (err) {
       logDebug('viewer: live stream poll failed', { err: errMsg(err) });

@@ -24,3 +24,17 @@ export function resolveScopedSessionId(ctx: RequestContext): string | null {
   const byLabel = findSessionByLabel(ctx.queries, ctx.sessionScope);
   return byLabel?.id ?? ctx.sessionScope;
 }
+
+/** The viewer's project root, normalized for comparison against
+ *  mcp_sessions.project_root (trailing slashes stripped). */
+export function viewerProjectRootParam(ctx: RequestContext): string {
+  return ctx.projectPath.replace(/\/+$/, '');
+}
+
+/** One database = one graph viewer: a session stamped for a DIFFERENT
+ *  project root is never served here. Legacy sessions (NULL root,
+ *  recorded by older binaries) pass — they cannot be attributed. */
+export function sessionBelongsToProject(ctx: RequestContext, projectRoot: string | null | undefined): boolean {
+  if (!projectRoot) return true;
+  return projectRoot.replace(/\/+$/, '') === viewerProjectRootParam(ctx);
+}

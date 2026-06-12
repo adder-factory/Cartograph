@@ -7,7 +7,11 @@ export interface IntBound {
 import { resolveGitBinary } from '../../../git-utils.js';
 
 export const DEFAULT_PORT = 8765;
-export const DEFAULT_HOST = 'localhost';
+/* A concrete loopback address, NOT 'localhost': under Bun, 'localhost'
+   alternates between ::1 and 127.0.0.1 across binds, letting two
+   viewers "share" a port on different address families (and browsers
+   resolve to either). One database = one viewer = one socket. */
+export const DEFAULT_HOST = '127.0.0.1';
 export const HTTP_SCHEME = 'http://';
 export const URL_PARSE_BASE = `${HTTP_SCHEME}localhost`;
 export const GIT_BINARY = resolveGitBinary();

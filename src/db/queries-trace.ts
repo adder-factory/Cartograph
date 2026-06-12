@@ -208,9 +208,10 @@ const recentSessionsQuery = defineQuery({
   sql:
     `SELECT id, started_ts, last_activity_ts, tool_count, label, client_name, client_version, project_root ` +
     `FROM mcp_sessions ` +
+    `WHERE (@projectRoot IS NULL OR project_root IS NULL OR project_root = @projectRoot) ` +
     `ORDER BY started_ts DESC ` +
     `LIMIT @limit`,
-  params: z.object({ limit: z.number() }),
+  params: z.object({ limit: z.number(), projectRoot: z.string().nullable() }),
   row: SessionDbRowSchema,
 });
 
@@ -224,25 +225,40 @@ const callsForSessionQuery = defineQuery({
   row: ToolCallDbRowSchema,
 });
 
+/* The live-feed queries join mcp_sessions so a viewer never streams
+   calls from a session recorded against a DIFFERENT project root
+   (legacy NULL roots pass — they predate the stamp). The INNER JOIN
+   also drops calls whose session row is missing — such orphans cannot
+   arise under the pruneToolCalls/deleteSession flow, and suppressing
+   them is the right call if they ever do. */
 const latestToolCallsQuery = defineQuery({
   sql:
-    `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
-    `FROM mcp_tool_calls ` +
-    `WHERE (@sessionId IS NULL OR session_id = @sessionId) ` +
-    `ORDER BY ts DESC, session_id DESC, step DESC ` +
+    `SELECT c.session_id, c.step, c.ts, c.tool_name, c.args_json, c.result_summary, c.duration_ms ` +
+    `FROM mcp_tool_calls c ` +
+    `JOIN mcp_sessions s ON s.id = c.session_id ` +
+    `WHERE (@sessionId IS NULL OR c.session_id = @sessionId) ` +
+    `  AND (@projectRoot IS NULL OR s.project_root IS NULL OR s.project_root = @projectRoot) ` +
+    `ORDER BY c.ts DESC, c.session_id DESC, c.step DESC ` +
     `LIMIT @limit`,
-  params: z.object({ limit: z.number(), sessionId: z.string().nullable() }),
+  params: z.object({ limit: z.number(), sessionId: z.string().nullable(), projectRoot: z.string().nullable() }),
   row: ToolCallDbRowSchema,
 });
 
 const toolCallsSinceQuery = defineQuery({
   sql:
-    `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
-    `FROM mcp_tool_calls ` +
-    `WHERE ts >= @sinceTs AND (@sessionId IS NULL OR session_id = @sessionId) ` +
-    `ORDER BY ts ASC, session_id ASC, step ASC ` +
+    `SELECT c.session_id, c.step, c.ts, c.tool_name, c.args_json, c.result_summary, c.duration_ms ` +
+    `FROM mcp_tool_calls c ` +
+    `JOIN mcp_sessions s ON s.id = c.session_id ` +
+    `WHERE c.ts >= @sinceTs AND (@sessionId IS NULL OR c.session_id = @sessionId) ` +
+    `  AND (@projectRoot IS NULL OR s.project_root IS NULL OR s.project_root = @projectRoot) ` +
+    `ORDER BY c.ts ASC, c.session_id ASC, c.step ASC ` +
     `LIMIT @limit`,
-  params: z.object({ sinceTs: z.number(), limit: z.number(), sessionId: z.string().nullable() }),
+  params: z.object({
+    sinceTs: z.number(),
+    limit: z.number(),
+    sessionId: z.string().nullable(),
+    projectRoot: z.string().nullable(),
+  }),
   row: ToolCallDbRowSchema,
 });
 
@@ -299,10 +315,16 @@ declare module './queries.js' {
     bumpSessionActivity?: TypedQuery<{ ts: number; id: string }, never>;
     pruneToolCalls?: TypedQuery<{ keep: number }, never>;
     gcEmptySessions?: TypedQuery<Record<string, never>, never>;
-    recentSessions?: TypedQuery<{ limit: number }, SessionDbRow>;
+    recentSessions?: TypedQuery<{ limit: number; projectRoot: string | null }, SessionDbRow>;
     callsForSession?: TypedQuery<{ sessionId: string }, ToolCallDbRow>;
-    latestToolCalls?: TypedQuery<{ limit: number; sessionId: string | null }, ToolCallDbRow>;
-    toolCallsSince?: TypedQuery<{ sinceTs: number; limit: number; sessionId: string | null }, ToolCallDbRow>;
+    latestToolCalls?: TypedQuery<
+      { limit: number; sessionId: string | null; projectRoot: string | null },
+      ToolCallDbRow
+    >;
+    toolCallsSince?: TypedQuery<
+      { sinceTs: number; limit: number; sessionId: string | null; projectRoot: string | null },
+      ToolCallDbRow
+    >;
     traceUsageCounts?: TypedQuery<Record<string, never>, UsageCountsDbRow>;
     traceUsageToolCalls?: TypedQuery<Record<string, never>, UsageCallDbRow>;
   }
@@ -409,10 +431,11 @@ export function pruneToolCalls(qb: QueryBuilder, keep: number): void {
   });
 }
 
-/** Most-recent N sessions, newest first. */
-export function recentSessions(qb: QueryBuilder, limit: number): SessionRow[] {
+/** Most-recent N sessions, newest first — optionally only those
+ *  recorded against one project root (legacy NULL roots pass). */
+export function recentSessions(qb: QueryBuilder, limit: number, projectRoot: string | null = null): SessionRow[] {
   qb.queries.recentSessions ??= recentSessionsQuery(qb.db);
-  const rows = qb.queries.recentSessions.all({ limit });
+  const rows = qb.queries.recentSessions.all({ limit, projectRoot });
   return rows.map(sessionRowFromDb);
 }
 
@@ -423,11 +446,18 @@ export function callsForSession(qb: QueryBuilder, sessionId: string): ToolCallRo
   return rows.map(toolCallRowFromDb);
 }
 
-/** Most-recent N tool calls, oldest first — optionally limited to
- *  one session (the viewer's --session scope). */
-export function latestToolCalls(qb: QueryBuilder, limit: number, sessionId: string | null = null): ToolCallRow[] {
+/** Most-recent N tool calls, oldest first — optionally limited to one
+ *  session (--session scope) and/or one project root. */
+export function latestToolCalls(
+  qb: QueryBuilder,
+  opts: { limit: number; sessionId?: string | null; projectRoot?: string | null },
+): ToolCallRow[] {
   qb.queries.latestToolCalls ??= latestToolCallsQuery(qb.db);
-  const rows = qb.queries.latestToolCalls.all({ limit, sessionId });
+  const rows = qb.queries.latestToolCalls.all({
+    limit: opts.limit,
+    sessionId: opts.sessionId ?? null,
+    projectRoot: opts.projectRoot ?? null,
+  });
   return rows.map(toolCallRowFromDb).reverse();
 }
 
@@ -439,13 +469,14 @@ export function latestToolCalls(qb: QueryBuilder, limit: number, sessionId: stri
  */
 export function toolCallsSince(
   qb: QueryBuilder,
-  opts: { sinceTs: number; limit: number; sessionId?: string | null },
+  opts: { sinceTs: number; limit: number; sessionId?: string | null; projectRoot?: string | null },
 ): ToolCallRow[] {
   qb.queries.toolCallsSince ??= toolCallsSinceQuery(qb.db);
   const rows = qb.queries.toolCallsSince.all({
     sinceTs: opts.sinceTs,
     limit: opts.limit,
     sessionId: opts.sessionId ?? null,
+    projectRoot: opts.projectRoot ?? null,
   });
   return rows.map(toolCallRowFromDb);
 }

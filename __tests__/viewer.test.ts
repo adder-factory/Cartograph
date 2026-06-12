@@ -802,6 +802,68 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     }
   });
 
+  it('never serves sessions recorded against a different project root', async () => {
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const t0 = Date.now();
+    try {
+      insertSession({ qb, id: 'own-project-session', startedTs: t0, projectRoot: testDir });
+      appendToolCall(qb, {
+        sessionId: 'own-project-session',
+        step: 1,
+        ts: t0,
+        toolName: 'cartograph_find',
+        argsJson: '{}',
+        resultSummary: 'ours',
+        durationMs: 2,
+      });
+      insertSession({ qb, id: 'legacy-session', startedTs: t0 + 1 }); // NULL root — older binary
+      appendToolCall(qb, {
+        sessionId: 'legacy-session',
+        step: 1,
+        ts: t0 + 2,
+        toolName: 'cartograph_status',
+        argsJson: '{}',
+        resultSummary: 'legacy',
+        durationMs: 2,
+      });
+      insertSession({ qb, id: 'foreign-session', startedTs: t0 + 3, projectRoot: '/somewhere/else' });
+      appendToolCall(qb, {
+        sessionId: 'foreign-session',
+        step: 1,
+        ts: t0 + 4,
+        toolName: 'cartograph_graph',
+        argsJson: '{}',
+        resultSummary: 'foreign',
+        durationMs: 2,
+      });
+
+      const sessions = (await (await apiFetch(handle, 'api/sessions?limit=50')).json()) as {
+        sessions: Array<{ id: string }>;
+      };
+      const ids = new Set(sessions.sessions.map((s) => s.id));
+      expect(ids.has('own-project-session')).toBe(true);
+      expect(ids.has('legacy-session')).toBe(true); // unattributable → kept
+      expect(ids.has('foreign-session')).toBe(false);
+
+      const foreign = await apiFetch(handle, 'api/sessions/foreign-session');
+      expect(foreign.status).toBe(404);
+
+      const live = (await (await apiFetch(handle, 'api/live/calls?limit=50')).json()) as {
+        calls: Array<{ sessionId: string }>;
+      };
+      const liveSessions = new Set(live.calls.map((c) => c.sessionId));
+      expect(liveSessions.has('own-project-session')).toBe(true);
+      expect(liveSessions.has('legacy-session')).toBe(true);
+      expect(liveSessions.has('foreign-session')).toBe(false);
+    } finally {
+      deleteSession(qb, 'own-project-session');
+      deleteSession(qb, 'legacy-session');
+      deleteSession(qb, 'foreign-session');
+      conn.close();
+    }
+  });
+
   it('--session scopes the viewer to one session, enforced server-side', async () => {
     const conn = DatabaseConnection.open(getDatabasePath(testDir));
     const qb = new QueryBuilder(conn.getDb());

@@ -54,10 +54,22 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
 
       try {
         const { startViewerServer, openInBrowser } = await loadViewerServer();
-        const handle = await startViewerServer(projectPath, {
+        const startOpts = {
           ...(parsedPort.value === undefined ? {} : { port: parsedPort.value }),
           ...(options.session ? { session: options.session } : {}),
-        });
+        };
+        let handle: Awaited<ReturnType<typeof startViewerServer>>;
+        try {
+          handle = await startViewerServer(projectPath, startOpts);
+        } catch (startErr) {
+          const code = (startErr as NodeJS.ErrnoException | null)?.code;
+          // One viewer per project: when the DEFAULT port is taken
+          // (most likely another project's viewer), pick a free one
+          // instead of erroring. An explicit -p stays strict.
+          if (code !== 'EADDRINUSE' || parsedPort.value !== undefined) throw startErr;
+          info('Port 8765 is taken (another viewer?) — picking a free port.');
+          handle = await startViewerServer(projectPath, { ...startOpts, port: 0 });
+        }
         info(`Viewer running at ${handle.url}`);
         info(`  project: ${projectPath}`);
         if (options.session) info(`  session: ${options.session} (scoped — other sessions are not served)`);
