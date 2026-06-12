@@ -176,6 +176,9 @@ export async function runSharedMcpDaemonProxy(options: SharedMcpDaemonOptions): 
   const projectRoot = resolveDaemonProjectRoot(options.projectPath);
   const socket = await ensureDaemonSocket(projectRoot, options);
   if (!socket) return 'fallback';
+  // CONTRACT: scripts/smoke-standalone.mjs and __tests__/mcp-daemon.test.ts
+  // assert this exact line (they set the env gate). Changing the gate or
+  // the message text requires updating both consumers.
   if (process.env['CARTOGRAPH_MCP_LOG_ATTACH'] === '1') {
     process.stderr.write(`[Cartograph MCP] Attached to shared daemon for ${projectRoot}.\n`);
   }
