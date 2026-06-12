@@ -8,10 +8,11 @@
  * — so findings could silently accumulate (the 2026-05-28 drift to 5 err /
  * 37 warn, baseline 65, went undetected for exactly this reason).
  *
- * This script (re)indexes the repo structurally and fails non-zero if ANY
- * biomarker finding exists, including info-level findings. If info counts
- * fluctuate, treat that as detector/indexing drift to fix rather than a gate
- * exception.
+ * This script brings the index current (incremental sync + a full biomarker
+ * refresh; first run or BIOMARKER_GATE_FORCE=1 does a full structural index)
+ * and fails non-zero if ANY biomarker finding exists, including info-level
+ * findings. If info counts fluctuate, treat that as detector/indexing drift
+ * to fix rather than a gate exception.
  *
  * It ALSO fails closed when the cross-file biomarker pass reported any rule
  * error/timeout (the `biomarker_cross_file_errors` metadata key, set by
@@ -123,12 +124,23 @@ function readBiomarkerGateStateWithRetry(databasePath) {
   throw lastError ?? new Error(`Unable to open ${databasePath}`);
 }
 
-// 1. Index the repo structurally. `admin init` first when there's no index
-//    yet (the CI checkout has no committed `.cartograph/`); `--force` so the
-//    findings reflect the CURRENT source, `--quiet` to skip the LLM tail
-//    (biomarkers are AST-based — no LLM needed).
-if (!existsSync(dbPath)) runCli(['admin', 'init'], 'admin init');
-runCli(['admin', 'index', '--force', '--quiet'], 'admin index --force --quiet');
+// 1. Bring the findings to full-pass authority against CURRENT source.
+//    Fresh checkout (CI): init + full index. Existing index (local dev
+//    loop): `admin sync` (re-extracts only changed files) + `admin
+//    biomarkers-refresh` (full per-file + cross-file findings pass on
+//    the current index) — same end state as the old `index --force`
+//    without re-extracting an unchanged repo on every gate run.
+//    BIOMARKER_GATE_FORCE=1 restores the full wipe-and-reindex path.
+//    `--quiet` skips the LLM tail (biomarkers are AST-based).
+if (!existsSync(dbPath)) {
+  runCli(['admin', 'init'], 'admin init');
+  runCli(['admin', 'index', '--quiet'], 'admin index --quiet');
+} else if (process.env.BIOMARKER_GATE_FORCE === '1') {
+  runCli(['admin', 'index', '--force', '--quiet'], 'admin index --force --quiet');
+} else {
+  runCli(['admin', 'sync', '--quiet'], 'admin sync --quiet');
+  runCli(['admin', 'biomarkers-refresh', '--quiet'], 'admin biomarkers-refresh --quiet');
+}
 
 // 2. Count findings by severity straight off the table (no markdown parsing).
 // Cross-file rule-error sentinel (key must match `setMetadata(...,

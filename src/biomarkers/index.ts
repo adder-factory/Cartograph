@@ -138,7 +138,7 @@ interface AnalysisOptions {
   onProgress?: (done: number, total: number) => void;
 }
 
-interface AnalysisResult {
+export interface AnalysisResult {
   filesScanned: number;
   symbolsAnalysed: number;
   findingsEmitted: number;
