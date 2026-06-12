@@ -429,7 +429,13 @@ export function countTsIgnoreSuppression(bodySource: string, language: Language)
 // at the call site (use a proper logger) or accept the finding.
 
 export const AGENT_DEBUG_LOG_RE = /\bconsole\.(?:log|error|warn|info|debug)\s*\(/g;
-const DEBUG_FLAG_GATE_RE = /\b(?:process\.env|DEBUG|VERBOSE|TRACE)\b/;
+// The keyword alternatives match inside SCREAMING_SNAKE compounds too
+// (DEBUG_DIAGNOSTICS, APP_DEBUG, LOG_VERBOSE): `\b` alone can't cross an
+// underscore (it's a word character), which silently missed the most common
+// real-world flag NAMES. This also covers non-Node runtimes (Cloudflare
+// Workers / Deno read `env.DEBUG_*` bindings, not process.env) — the intent
+// marker is the keyword, not the mechanism that delivers it.
+const DEBUG_FLAG_GATE_RE = /\bprocess\.env\b|(?:\b|_)(?:DEBUG|VERBOSE|TRACE)(?:\b|_)/;
 const AGENT_DEBUG_LOG_LANGUAGES: ReadonlySet<Language> = new Set([
   'typescript',
   'javascript',
@@ -594,12 +600,26 @@ const HTTP_LANGUAGES: ReadonlySet<Language> = new Set(['typescript', 'javascript
 /** Count fetch/axios calls in a body that has no timeout/signal
  *  reference. Returns 0 when the body isn't JS/TS OR the body
  *  contains a deadline-keyword. */
+// A method/function DECLARATION named like an HTTP client is not a call:
+// Cloudflare Durable Objects and service-worker handlers are literally named
+// `fetch` (`async fetch(request) { ... }`), and a symbol's captured text
+// includes its own declaration line — without this guard every fetch-protocol
+// DO trips the rule on its own name. The guard checks the characters
+// immediately before the match for a declaration keyword.
+const HTTP_DECL_PREFIX_RE = /(?:\basync|\bfunction|\bstatic|\bpublic|\bprivate|\bprotected|\bget|\bset)\s+$/;
+/** Longest declaration keyword + one space — how far back the guard looks. */
+const HTTP_DECL_LOOKBEHIND = 12;
+
 export function countHttpNoTimeout(rawBody: string, codeBody: string, language: Language): number {
   if (!HTTP_LANGUAGES.has(language)) return 0;
   if (TIMEOUT_GATE_RE.test(rawBody)) return 0;
   let count = 0;
   HTTP_CALL_RE.lastIndex = 0;
-  while (HTTP_CALL_RE.exec(codeBody) !== null) count++;
+  for (let m = HTTP_CALL_RE.exec(codeBody); m !== null; m = HTTP_CALL_RE.exec(codeBody)) {
+    const before = codeBody.slice(Math.max(0, m.index - HTTP_DECL_LOOKBEHIND), m.index);
+    if (HTTP_DECL_PREFIX_RE.test(before)) continue;
+    count++;
+  }
   return count;
 }
 
