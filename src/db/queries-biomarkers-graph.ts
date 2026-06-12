@@ -258,9 +258,35 @@ const PACKAGE_MAIN_ENTRY_FILES = ['src/index.ts'];
  * the root middleware/instrumentation entrypoints. Extend the tables when
  * another framework's conventions surface the same FP class.
  */
-const NEXTJS_SEGMENT_FILE_RE =
-  /(^|\/)app\/(.+\/)?(page|layout|template|route|error|global-error|loading|not-found|default|sitemap|robots|manifest|icon|apple-icon|opengraph-image|twitter-image)\.(ts|tsx|js|jsx|mjs)$/;
-const NEXTJS_ROUTE_FILE_RE = /(^|\/)app\/(.+\/)?route\.(ts|tsx|js|jsx|mjs)$/;
+/* The path shape and the special-file stem are checked separately (a
+   regex carrying the 16-stem alternation tripped complexity limits and
+   was harder to extend anyway). */
+const NEXTJS_SEGMENT_PATH_RE = /(^|\/)app\/(?:.+\/)?([\w-]+)\.(?:ts|tsx|js|jsx|mjs)$/;
+const NEXTJS_SEGMENT_STEMS: ReadonlySet<string> = new Set([
+  'page',
+  'layout',
+  'template',
+  'route',
+  'error',
+  'global-error',
+  'loading',
+  'not-found',
+  'default',
+  'sitemap',
+  'robots',
+  'manifest',
+  'icon',
+  'apple-icon',
+  'opengraph-image',
+  'twitter-image',
+]);
+
+function nextjsSegmentStem(filePath: string): string | null {
+  const m = NEXTJS_SEGMENT_PATH_RE.exec(filePath);
+  if (!m) return null;
+  const stem = m[2] ?? '';
+  return NEXTJS_SEGMENT_STEMS.has(stem) ? stem : null;
+}
 /** Shared route-segment config + generation hooks — valid in every
  *  segment file kind (nextjs.org/docs/app/api-reference/file-conventions/route-segment-config). */
 const NEXTJS_SHARED_EXPORTS: ReadonlySet<string> = new Set([
@@ -302,9 +328,10 @@ const NEXTJS_INSTRUMENTATION_EXPORTS: ReadonlySet<string> = new Set(['register',
 
 /** True when an exported symbol is consumed by framework convention (no graph edge possible). */
 export function isFrameworkConventionExport(filePath: string, name: string): boolean {
-  if (NEXTJS_SEGMENT_FILE_RE.test(filePath)) {
+  const stem = nextjsSegmentStem(filePath);
+  if (stem !== null) {
     if (NEXTJS_SHARED_EXPORTS.has(name)) return true;
-    if (NEXTJS_ROUTE_FILE_RE.test(filePath)) return NEXTJS_ROUTE_HANDLER_EXPORTS.has(name);
+    if (stem === 'route') return NEXTJS_ROUTE_HANDLER_EXPORTS.has(name);
     return NEXTJS_METADATA_EXPORTS.has(name);
   }
   const root = NEXTJS_ROOT_FILE_RE.exec(filePath);
