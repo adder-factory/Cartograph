@@ -2281,7 +2281,24 @@
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .trace-link:hover { background: rgba(78, 168, 255, .1); border-color: var(--accent); }
+  .trace-link:hover:not(:disabled) { background: rgba(78, 168, 255, .1); border-color: var(--accent); }
+  .trace-link:disabled {
+    color: var(--text-dim);
+    border-color: var(--line-soft);
+    cursor: not-allowed;
+  }
+  .trace-detail-xproj-note { color: var(--warn); font-size: 11px; }
+  .xproj {
+    display: inline-block;
+    margin-right: var(--s-2);
+    padding: 0 7px;
+    border-radius: 999px;
+    border: 1px solid rgba(246, 180, 75, .35);
+    color: var(--warn);
+    font-size: 10px;
+    vertical-align: baseline;
+  }
+  .trace-detail-kv .v.xproj-v { color: var(--warn); }
   @media (max-width: 1000px) {
     .trace-body { grid-template-columns: minmax(0, 1fr); }
     .trace-side { display: none; }

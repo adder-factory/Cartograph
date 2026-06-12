@@ -16,6 +16,7 @@
 import { z } from 'zod';
 import type { QueryBuilder } from './queries.js';
 import { qbTransaction } from './queries.js';
+import { mapRowFields } from './row-mapping.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 
 export interface SessionRow {
@@ -25,6 +26,11 @@ export interface SessionRow {
   toolCount: number;
   /** Optional label set via cartograph_session({action: "create", label}). */
   label: string | null;
+  /** MCP client identity from the initialize handshake (073+). */
+  clientName: string | null;
+  clientVersion: string | null;
+  /** The server's resolved default project root at session start (073+). */
+  projectRoot: string | null;
 }
 
 export interface ToolCallRow {
@@ -57,6 +63,9 @@ interface InsertSessionArgs {
   id: string;
   startedTs: number;
   label?: string;
+  clientName?: string | undefined;
+  clientVersion?: string | undefined;
+  projectRoot?: string | undefined;
 }
 
 // ─── Zod schemas ──────────────────────────────────────────────────────────
@@ -67,6 +76,9 @@ const SessionDbRowSchema = z.object({
   last_activity_ts: z.number(),
   tool_count: z.number(),
   label: z.string().nullable(),
+  client_name: z.string().nullable(),
+  client_version: z.string().nullable(),
+  project_root: z.string().nullable(),
 });
 
 type SessionDbRow = z.infer<typeof SessionDbRowSchema>;
@@ -102,14 +114,17 @@ type UsageCallDbRow = z.infer<typeof UsageCallDbRowSchema>;
 
 const insertSessionQuery = defineQuery({
   sql:
-    `INSERT INTO mcp_sessions (id, started_ts, last_activity_ts, tool_count, label) ` +
-    `VALUES (@id, @startedTs, @lastActivityTs, 0, @label) ` +
+    `INSERT INTO mcp_sessions (id, started_ts, last_activity_ts, tool_count, label, client_name, client_version, project_root) ` +
+    `VALUES (@id, @startedTs, @lastActivityTs, 0, @label, @clientName, @clientVersion, @projectRoot) ` +
     `ON CONFLICT(id) DO NOTHING`,
   params: z.object({
     id: z.string(),
     startedTs: z.number(),
     lastActivityTs: z.number(),
     label: z.string().nullable(),
+    clientName: z.string().nullable(),
+    clientVersion: z.string().nullable(),
+    projectRoot: z.string().nullable(),
   }),
   row: z.never(),
 });
@@ -128,7 +143,7 @@ const deleteSessionByIdQuery = defineQuery({
 
 const findSessionByLabelQuery = defineQuery({
   sql:
-    `SELECT id, started_ts, last_activity_ts, tool_count, label ` +
+    `SELECT id, started_ts, last_activity_ts, tool_count, label, client_name, client_version, project_root ` +
     `FROM mcp_sessions ` +
     `WHERE label = @label ` +
     `ORDER BY started_ts DESC ` +
@@ -138,7 +153,9 @@ const findSessionByLabelQuery = defineQuery({
 });
 
 const getSessionByIdQuery = defineQuery({
-  sql: `SELECT id, started_ts, last_activity_ts, tool_count, label ` + `FROM mcp_sessions WHERE id = @id`,
+  sql:
+    `SELECT id, started_ts, last_activity_ts, tool_count, label, client_name, client_version, project_root ` +
+    `FROM mcp_sessions WHERE id = @id`,
   params: z.object({ id: z.string() }),
   row: SessionDbRowSchema,
 });
@@ -189,7 +206,7 @@ const gcEmptySessionsQuery = defineQuery({
 
 const recentSessionsQuery = defineQuery({
   sql:
-    `SELECT id, started_ts, last_activity_ts, tool_count, label ` +
+    `SELECT id, started_ts, last_activity_ts, tool_count, label, client_name, client_version, project_root ` +
     `FROM mcp_sessions ` +
     `ORDER BY started_ts DESC ` +
     `LIMIT @limit`,
@@ -250,7 +267,18 @@ const usageToolCallsQuery = defineQuery({
 
 declare module './queries.js' {
   interface QueryRegistry {
-    insertSession?: TypedQuery<{ id: string; startedTs: number; lastActivityTs: number; label: string | null }, never>;
+    insertSession?: TypedQuery<
+      {
+        id: string;
+        startedTs: number;
+        lastActivityTs: number;
+        label: string | null;
+        clientName: string | null;
+        clientVersion: string | null;
+        projectRoot: string | null;
+      },
+      never
+    >;
     deleteToolCallsBySession?: TypedQuery<{ id: string }, never>;
     deleteSessionById?: TypedQuery<{ id: string }, never>;
     findSessionByLabel?: TypedQuery<{ label: string }, SessionDbRow>;
@@ -283,13 +311,16 @@ declare module './queries.js' {
 
 /** Insert a new session row. Idempotent on PRIMARY KEY conflict. */
 export function insertSession(args: InsertSessionArgs): void {
-  const { qb, id, startedTs, label } = args;
+  const { qb, id, startedTs, label, clientName, clientVersion, projectRoot } = args;
   qb.queries.insertSession ??= insertSessionQuery(qb.db);
   qb.queries.insertSession.run({
     id,
     startedTs,
     lastActivityTs: startedTs,
     label: label ?? null,
+    clientName: clientName ?? null,
+    clientVersion: clientVersion ?? null,
+    projectRoot: projectRoot ?? null,
   });
 }
 
@@ -309,14 +340,19 @@ export function deleteSession(qb: QueryBuilder, id: string): boolean {
 }
 
 /** Map a raw mcp_sessions DB row to the public SessionRow shape. */
+const SESSION_ROW_FIELDS = [
+  ['id', 'id'],
+  ['started_ts', 'startedTs'],
+  ['last_activity_ts', 'lastActivityTs'],
+  ['tool_count', 'toolCount'],
+  ['label', 'label'],
+  ['client_name', 'clientName'],
+  ['client_version', 'clientVersion'],
+  ['project_root', 'projectRoot'],
+] as const;
+
 function sessionRowFromDb(r: SessionDbRow): SessionRow {
-  return {
-    id: r.id,
-    startedTs: r.started_ts,
-    lastActivityTs: r.last_activity_ts,
-    toolCount: r.tool_count,
-    label: r.label,
-  };
+  return mapRowFields<SessionDbRow, SessionRow>(r, SESSION_ROW_FIELDS);
 }
 
 /** Look up a session by user-supplied label (most recent wins). */
@@ -376,13 +412,7 @@ export function pruneToolCalls(qb: QueryBuilder, keep: number): void {
 export function recentSessions(qb: QueryBuilder, limit: number): SessionRow[] {
   qb.queries.recentSessions ??= recentSessionsQuery(qb.db);
   const rows = qb.queries.recentSessions.all({ limit });
-  return rows.map((r) => ({
-    id: r.id,
-    startedTs: r.started_ts,
-    lastActivityTs: r.last_activity_ts,
-    toolCount: r.tool_count,
-    label: r.label,
-  }));
+  return rows.map(sessionRowFromDb);
 }
 
 /** All tool calls for a session, in step order. */

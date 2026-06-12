@@ -211,11 +211,15 @@ async function loadSessionsLive() {
       renderTraceStepDetail(null);
       return;
     }
-    // Render picker options + show it; hide the static label.
+    // Render picker options + show it; hide the static label. Lead
+    // with what a human can recognise — label, then the MCP client
+    // that ran the session, then when — and keep the opaque id as the
+    // option tooltip (it also shows in the step-detail kv).
     picker.innerHTML = liveSessions.map((s) => {
       const ago = formatRelative(s.lastActivityTs);
-      const label = s.label ? `${escapeHtml(s.label)} · ` : '';
-      return `<option value="${escapeHtml(s.id)}">${label}${escapeHtml(s.id)} · ${escapeHtml(String(s.toolCount))} calls · ${escapeHtml(ago)}</option>`;
+      const who = s.label || s.clientName || s.id;
+      const started = formatSessionClock(s.startedTs);
+      return `<option value="${escapeHtml(s.id)}" title="${escapeHtml(s.id)}">${escapeHtml(who)} · ${escapeHtml(started)} · ${escapeHtml(String(s.toolCount))} calls · ${escapeHtml(ago)}</option>`;
     }).join('');
     picker.style.display = '';
     sessLabel.style.display = 'none';
@@ -262,7 +266,18 @@ async function loadSession(sessionId) {
     setText('tr-stat-time', traceFormatMs(totalMs));
     setText('tr-stat-span', renderedCt > 1 ? traceFormatGap(spanMs).slice(1) : '—');
     setText('tr-stat-errors', String(errCt));
-    document.getElementById('session-label').style.display = 'none';
+    // The static label now carries the session's identity line:
+    // which client ran it and against which project root.
+    const sessLabel = document.getElementById('session-label');
+    const sessMeta = liveSessions.find((s) => s.id === sessionId);
+    const identityBits = [
+      sessMeta?.clientName
+        ? `${sessMeta.clientName}${sessMeta.clientVersion ? ` ${sessMeta.clientVersion}` : ''}`
+        : 'unknown client',
+      sessMeta?.projectRoot ? sessMeta.projectRoot.split('/').filter(Boolean).pop() : null,
+    ].filter(Boolean);
+    sessLabel.textContent = identityBits.join(' · ');
+    sessLabel.style.display = '';
     renderLiveTraceList();
     renderTraceStepDetail(null);
   } catch (err) {
@@ -299,6 +314,7 @@ function renderLiveTraceList() {
       isErr: String(c.result ?? '').startsWith('⚠'),
       active: i === liveTraceActiveStep,
       searchExtra: c.tool,
+      xproj: typeof c.project === 'string' && !viewerSameProjectRoot(c.project, liveProjectRoot) ? c.project : '',
     });
   }).join('');
   tl.querySelectorAll('.trace-row').forEach(el =>
@@ -341,8 +357,19 @@ async function activateLiveTraceStep(i) {
     result: c.result ?? '',
     isErr: String(c.result ?? '').startsWith('⚠'),
     sessionId: document.getElementById('session-picker')?.dataset.selectedSession ?? null,
+    project: typeof c.project === 'string' && c.project ? c.project : null,
+    crossProject: typeof c.project === 'string' && !viewerSameProjectRoot(c.project, liveProjectRoot),
     targets: traceGraphTargets(c.args),
   });
+}
+
+/** ts → "Jun 12 02:05" for session pickers. */
+function formatSessionClock(ts) {
+  if (ts == null) return '—';
+  const d = new Date(ts);
+  const month = d.toLocaleString('en-US', { month: 'short' });
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${month} ${d.getDate()} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 /** Search → focus a symbol in live mode. Fetches /api/symbol/<query>

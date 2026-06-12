@@ -22,6 +22,7 @@
 import { z } from 'zod';
 import type { Node } from '../types.js';
 import { type QueryBuilder, type NodeRow, rowToNode } from './queries.js';
+import { mapRowFields } from './row-mapping.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
 import { FRAMEWORK_IMPORT_PREFIXES } from '../llm/role-labeler.js';
 import { prefixLikePattern } from './sql-like.js';
@@ -356,17 +357,19 @@ function queryClassifiableRows(qb: QueryBuilder, roleModel: string): Classifiabl
 }
 
 /** Map a raw DB row to the caller-facing {@link ClassifiableNode} shape. */
+const CLASSIFIABLE_ROW_FIELDS = [
+  ['node_id', 'nodeId'],
+  ['name', 'name'],
+  ['kind', 'kind'],
+  ['file_path', 'filePath'],
+  ['signature', 'signature'],
+  ['docstring', 'docstring'],
+  ['summary', 'summary'],
+  ['is_exported', 'isExported'],
+] as const;
+
 function mapClassifiableRow(r: ClassifiableRow): ClassifiableNode {
-  return {
-    nodeId: r.node_id,
-    name: r.name,
-    kind: r.kind,
-    filePath: r.file_path,
-    signature: r.signature,
-    docstring: r.docstring,
-    summary: r.summary,
-    isExported: r.is_exported,
-  };
+  return mapRowFields<ClassifiableRow, ClassifiableNode>(r, CLASSIFIABLE_ROW_FIELDS);
 }
 
 /**

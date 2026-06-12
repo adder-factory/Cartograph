@@ -440,7 +440,15 @@ function seedTraceFixture(projectPath: string): void {
       durationMs: 8,
     });
     const sessionId = 'smoke-trace-session';
-    insertSession({ qb, id: sessionId, startedTs: base, label: 'smoke' });
+    insertSession({
+      qb,
+      id: sessionId,
+      startedTs: base,
+      label: 'smoke',
+      clientName: 'smoke-client',
+      clientVersion: '1.0.0',
+      projectRoot: projectPath,
+    });
     appendToolCall(qb, {
       sessionId,
       step: 1,
@@ -467,6 +475,15 @@ function seedTraceFixture(projectPath: string): void {
       argsJson: '{}',
       resultSummary: '⚠ tool error: demo failure',
       durationMs: 5,
+    });
+    appendToolCall(qb, {
+      sessionId,
+      step: 4,
+      ts: base + 15_200,
+      toolName: 'cartograph_node',
+      argsJson: JSON.stringify({ symbol: 'compute', projectPath: '/elsewhere/project' }),
+      resultSummary: 'cross-project call',
+      durationMs: 9,
     });
   } finally {
     conn.close();
@@ -2572,7 +2589,7 @@ async function assertLiveView(page: Page): Promise<void> {
   // The fixture DB carries one seeded session (seedTraceFixture) —
   // the backlog must render those rows and the empty state must
   // yield.
-  if (live.rows < 3 || !live.emptyHidden || live.toolmixRows < 1) {
+  if (live.rows < 4 || !live.emptyHidden || live.toolmixRows < 1) {
     throw new Error(`live view did not render the seeded backlog: ${JSON.stringify(live)}`);
   }
   // Feed filter: 'demo failure' matches only the seeded error call.
@@ -2592,12 +2609,12 @@ async function assertLiveView(page: Page): Promise<void> {
     { timeout: SEARCH_TIMEOUT_MS },
   );
   // Session filter: limiting to the primary session hides the
-  // earlier session's row (3 of 4 visible).
+  // earlier session's row (4 of 5 visible).
   await page.locator('#lf-session-filter').selectOption('smoke-trace-session');
   await page.waitForFunction(
     () => {
       const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
-      return rows.length >= 4 && rows.filter((el) => !el.hidden).length === 3;
+      return rows.length >= 5 && rows.filter((el) => !el.hidden).length === 4;
     },
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
@@ -2629,11 +2646,21 @@ async function assertTraceView(page: Page): Promise<void> {
     longGaps: document.querySelectorAll('#trace-list .gap.long').length,
     errRows: document.querySelectorAll('#trace-list .result.err').length,
   }));
-  // Seeded session: 3 calls, one >10s gap, one error-tier result.
-  if (timeline.rows < 3 || !timeline.pickerVisible) {
+  // Seeded session: 4 calls, one >10s gap, one error-tier result,
+  // one cross-project call.
+  if (timeline.rows < 4 || !timeline.pickerVisible) {
     throw new Error(`trace timeline did not render the seeded session: ${JSON.stringify(timeline)}`);
   }
-  if (timeline.calls !== '3' || timeline.errors !== '1' || timeline.longGaps < 1 || timeline.errRows < 1) {
+  // The picker leads with the human handle (label > client), not the
+  // opaque id; the masthead identity line names the client + project.
+  const identity = await page.evaluate(() => ({
+    option: (document.querySelector('#session-picker option:checked') as HTMLOptionElement | null)?.textContent || '',
+    label: document.getElementById('session-label')?.textContent || '',
+  }));
+  if (!identity.option.startsWith('smoke ·') || !identity.label.includes('smoke-client')) {
+    throw new Error(`session identity not rendered: ${JSON.stringify(identity)}`);
+  }
+  if (timeline.calls !== '4' || timeline.errors !== '1' || timeline.longGaps < 1 || timeline.errRows < 1) {
     throw new Error(`trace masthead stats or row markers wrong: ${JSON.stringify(timeline)}`);
   }
   // Timeline filter: 'find' matches only the seeded step 1 (the
@@ -2648,13 +2675,35 @@ async function assertTraceView(page: Page): Promise<void> {
     { timeout: SEARCH_TIMEOUT_MS },
   );
   const filterCount = await page.evaluate(() => document.getElementById('tr-filter-count')?.textContent || '');
-  if (filterCount !== '1/3') throw new Error(`trace filter count wrong: ${JSON.stringify(filterCount)}`);
+  if (filterCount !== '1/4') throw new Error(`trace filter count wrong: ${JSON.stringify(filterCount)}`);
   await page.locator('#tr-filter').fill('');
   await page.waitForFunction(
     () => [...document.querySelectorAll<HTMLElement>('#trace-list .trace-row')].every((el) => !el.hidden),
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
+  // Step 4 targeted ANOTHER project via projectPath — its row wears
+  // the cross-project badge and its graph chips are disabled (this
+  // viewer shows a different project's graph).
+  await page.locator('#trace-list .trace-row[data-i="3"]').click();
+  await page.waitForFunction(
+    () => {
+      const chip = document.querySelector<HTMLButtonElement>('#trace-detail .trace-link');
+      return Boolean(chip && chip.disabled);
+    },
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  const xproj = await page.evaluate(() => ({
+    rowBadges: document.querySelectorAll('#trace-list .trace-row .xproj').length,
+    note: document.querySelector('.trace-detail-xproj-note')?.textContent || '',
+    projectKv: [...document.querySelectorAll('.trace-detail-kv .v')].some((el) =>
+      el.textContent?.includes('/elsewhere/project'),
+    ),
+  }));
+  if (xproj.rowBadges < 1 || !xproj.note.includes('project') || !xproj.projectKv) {
+    throw new Error(`cross-project marking missing: ${JSON.stringify(xproj)}`);
+  }
   // Step 2 carries args {symbol: 'compute', direction: 'callers'} →
   // the detail card must render the args JSON and a graph-link chip
   // for the symbol, which lands on the Graph tab focused on it.

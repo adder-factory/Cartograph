@@ -34,6 +34,24 @@ describe('TraceLogger', () => {
     expect(sessions[0]?.toolCount).toBe(0);
   });
 
+  it('stamps the session with client identity and project root when provided', () => {
+    const t = new TraceLogger(qb, undefined, {
+      clientName: 'claude-code',
+      clientVersion: '2.1.0',
+      projectRoot: '/tmp/example-project',
+    });
+    const session = recentSessions(qb, 10).find((s) => s.id === t.sessionId);
+    expect(session?.clientName).toBe('claude-code');
+    expect(session?.clientVersion).toBe('2.1.0');
+    expect(session?.projectRoot).toBe('/tmp/example-project');
+
+    // Identity is optional — older clients simply leave it null.
+    const bare = new TraceLogger(qb);
+    const bareSession = recentSessions(qb, 10).find((s) => s.id === bare.sessionId);
+    expect(bareSession?.clientName).toBeNull();
+    expect(bareSession?.projectRoot).toBeNull();
+  });
+
   it('appends tool calls in step order with monotonic step numbers', () => {
     const t = new TraceLogger(qb);
     t.log({

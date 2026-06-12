@@ -33,17 +33,29 @@ interface LiveCallPayload {
   readonly args: unknown;
   readonly result: string;
   readonly durationMs: number;
+  /** Cross-project call (the projectPath tool arg); null = the session's own project. */
+  readonly project: string | null;
+}
+
+/** The effective project a recorded call targeted, when it overrode
+    the session's own project via the projectPath tool arg. */
+export function callProjectFromArgs(args: unknown): string | null {
+  if (!args || typeof args !== 'object') return null;
+  const projectPath = (args as { projectPath?: unknown }).projectPath;
+  return typeof projectPath === 'string' && projectPath ? projectPath : null;
 }
 
 export function serializeLiveCall(row: ToolCallRow): LiveCallPayload {
+  const args = safeParseJson(row.argsJson);
   return {
     sessionId: row.sessionId,
     step: row.step,
     ts: row.ts,
     tool: row.toolName,
-    args: safeParseJson(row.argsJson),
+    args,
     result: row.resultSummary,
     durationMs: row.durationMs,
+    project: callProjectFromArgs(args),
   };
 }
 

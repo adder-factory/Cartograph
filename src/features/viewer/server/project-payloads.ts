@@ -5,7 +5,7 @@ import { getHotspots } from '../../../db/queries-history.js';
 import { getMetadata } from '../../../db/queries-metadata.js';
 import { getStats as qbGetStats } from '../../../db/queries.js';
 import { searchNodes } from '../../../db/queries-search.js';
-import { callsForSession, recentSessions } from '../../../db/queries-trace.js';
+import { callsForSession, getSessionById, recentSessions } from '../../../db/queries-trace.js';
 import type { Node } from '../../../types.js';
 import {
   GIT_BINARY,
@@ -18,6 +18,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { safeParseJson } from './http.js';
+import { callProjectFromArgs } from './live.js';
 import { serializeGraphNode, serializeNode } from './node-payloads.js';
 
 interface GitChangedFile {
@@ -227,7 +228,21 @@ export function sessionsPayload(ctx: RequestContext, limit: number): unknown {
       lastActivityTs: r.lastActivityTs,
       toolCount: r.toolCount,
       label: r.label,
+      clientName: r.clientName,
+      clientVersion: r.clientVersion,
+      projectRoot: r.projectRoot,
     })),
+  };
+}
+
+function sessionMetaPayload(session: ReturnType<typeof getSessionById>): Record<string, unknown> | null {
+  if (!session) return null;
+  return {
+    startedTs: session.startedTs,
+    label: session.label,
+    clientName: session.clientName,
+    clientVersion: session.clientVersion,
+    projectRoot: session.projectRoot,
   };
 }
 
@@ -235,14 +250,21 @@ export function sessionDetailPayload(ctx: RequestContext, sessionId: string): un
   const calls = callsForSession(ctx.queries, sessionId);
   return {
     sessionId,
-    calls: calls.map((c) => ({
-      step: c.step,
-      ts: c.ts,
-      tool: c.toolName,
-      args: safeParseJson(c.argsJson),
-      result: c.resultSummary,
-      durationMs: c.durationMs,
-    })),
+    session: sessionMetaPayload(getSessionById(ctx.queries, sessionId)),
+    calls: calls.map((c) => {
+      const args = safeParseJson(c.argsJson);
+      return {
+        step: c.step,
+        ts: c.ts,
+        tool: c.toolName,
+        args,
+        result: c.resultSummary,
+        durationMs: c.durationMs,
+        // Cross-project call (the projectPath tool arg) — null means
+        // the session's own project.
+        project: callProjectFromArgs(args),
+      };
+    }),
   };
 }
 
