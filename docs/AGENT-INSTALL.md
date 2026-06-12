@@ -51,7 +51,10 @@ iwr https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 
 
 The one-command local setup initializes `.cartograph/`, writes supported local
 MCP configuration, indexes the repository, installs the managed git hooks, and
-skips the interactive LLM wizard in `--yes` mode. Core search, graph, impact,
+skips the interactive LLM wizard in `--yes` mode. Where the agent supports
+on-demand guidance artifacts, the installer also generates them from the same
+instructions template: a `cartograph` skill (`skills/cartograph/SKILL.md`) for
+Claude Code and Codex CLI, and a `/cartograph` custom command for opencode. Core search, graph, impact,
 review, status, and affected-test commands work without an LLM backend. If
 `cartograph` is not resolvable on PATH, the installer pins an absolute path
 into the generated config automatically; override with `--command <path>`.
@@ -67,8 +70,8 @@ personal agent rules. Local MCP server args include
 `--project-path <this-project>` where the client config is project-scoped. This
 avoids a global MCP entry defaulting to whichever project was installed last.
 Claude Code is a special case: the private project-scoped MCP entry is stored in
-`~/.claude.json`, while permissions and instructions stay in the worktree as
-gitignored files.
+`~/.claude.json`, while permissions, instructions, and the generated skill stay
+in the worktree as gitignored files.
 
 Supported installer targets include Claude Code, Cursor, Codex CLI, GitHub
 Copilot CLI, CodeBuddy, CodeWhale, Zed, opencode, Hermes, Gemini CLI,

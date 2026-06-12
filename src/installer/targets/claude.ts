@@ -7,6 +7,8 @@
  *     `./.claude/settings.local.json` (local), gated on `autoAllow`.
  *   - Instructions to `~/.claude/CLAUDE.md` (global) or
  *     `./CLAUDE.local.md` (local).
+ *   - A `cartograph` skill to `~/.claude/skills/cartograph/SKILL.md`
+ *     (global) or `./.claude/skills/cartograph/SKILL.md` (local).
  *
  * This follows Claude Code's current user/local/project scope split. The
  * exported writer functions at the bottom intentionally preserve the legacy
@@ -25,15 +27,22 @@ import {
   readJsonFile,
   removeMarkedSection,
   removeNestedJsonEntry,
+  removeOwnedFile,
   replaceOrAppendMarkedSection,
   writePermissionsAllowList,
   writeJsonFile,
+  writeOwnedFile,
 } from './shared.js';
 import { writeProjectGitignoreEntries } from './gitignore.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
+import { SKILL_NAME, SKILL_TEMPLATE } from '../skill-template.js';
 
-const CLAUDE_LOCAL_GITIGNORE_ENTRIES = ['CLAUDE.local.md', '.claude/settings.local.json'] as const;
+const CLAUDE_LOCAL_GITIGNORE_ENTRIES = [
+  'CLAUDE.local.md',
+  '.claude/settings.local.json',
+  `.claude/skills/${SKILL_NAME}/SKILL.md`,
+] as const;
 
 function configDir(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.claude') : path.join(process.cwd(), '.claude');
@@ -48,6 +57,12 @@ function scopedSettingsJsonPath(loc: Location): string {
 function scopedInstructionsPath(loc: Location): string {
   if (loc === 'local') return path.join(process.cwd(), 'CLAUDE.local.md');
   return path.join(configDir(loc), 'CLAUDE.md');
+}
+function scopedSkillsDir(loc: Location): string {
+  return path.join(configDir(loc), 'skills');
+}
+function scopedSkillPath(loc: Location): string {
+  return path.join(scopedSkillsDir(loc), SKILL_NAME, 'SKILL.md');
 }
 function legacyMcpJsonPath(loc: Location): string {
   return loc === 'global' ? path.join(getHomeDir(), '.claude.json') : path.join(process.cwd(), '.claude.json');
@@ -176,8 +191,9 @@ class ClaudeCodeTarget implements AgentTarget {
       files.push(writeScopedPermissionsEntry(loc));
     }
 
-    // 3. CLAUDE.md instructions
-    files.push(writeScopedInstructionsEntry(loc));
+    // 3. CLAUDE.md instructions + the cartograph skill (on-demand
+    //    `/cartograph`, model-invocable via its description)
+    files.push(writeScopedInstructionsEntry(loc), writeOwnedFile(scopedSkillPath(loc), SKILL_TEMPLATE));
 
     if (loc === 'local') {
       files.push(writeProjectGitignoreEntries(CLAUDE_LOCAL_GITIGNORE_ENTRIES));
@@ -221,6 +237,11 @@ class ClaudeCodeTarget implements AgentTarget {
     const action = removeMarkedSection(instr, CARTOGRAPH_SECTION_START, CARTOGRAPH_SECTION_END);
     files.push({ path: instr, action });
 
+    // 4. Skill — prune our skill dir, then `skills/` only when empty
+    // (a sibling skill keeps both alive).
+    const skill = scopedSkillPath(loc);
+    files.push(removeOwnedFile(skill, [path.dirname(skill), scopedSkillsDir(loc)]));
+
     return { files };
   }
 
@@ -244,7 +265,7 @@ class ClaudeCodeTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    const paths = [claudeJsonPath(loc), scopedSettingsJsonPath(loc), scopedInstructionsPath(loc)];
+    const paths = [claudeJsonPath(loc), scopedSettingsJsonPath(loc), scopedInstructionsPath(loc), scopedSkillPath(loc)];
     if (loc === 'local') paths.push(path.join(process.cwd(), '.gitignore'));
     return paths;
   }

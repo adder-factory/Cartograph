@@ -63,6 +63,7 @@ describe('viewer feature CLI', () => {
       'description:Open the local web viewer (graph visualization, impact tools, health) for the indexed graph',
       'option:-p, --port <n>',
       'option:--no-open',
+      'option:--session <idOrLabel>',
       'start:/repo:{"port":0}',
       'info:Viewer running at http://localhost:0',
       'info:  project: /repo',

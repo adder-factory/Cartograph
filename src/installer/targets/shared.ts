@@ -23,7 +23,9 @@ export {
   readJsonFile,
   removeMarkedSection,
   removeNestedJsonEntry,
+  removeOwnedFile,
   replaceOrAppendMarkedSection,
   writeJsonFile,
   writeMarkedInstructionsFile,
+  writeOwnedFile,
 } from './file-writes.js';

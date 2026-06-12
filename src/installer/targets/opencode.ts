@@ -4,8 +4,11 @@
  *   - MCP server entry to `~/.config/opencode/opencode.json` (global,
  *     XDG-style on every OS, matching opencode's docs) or
  *     `./opencode.json` (local).
- *   - No instructions file built in (opencode doesn't have a
- *     conventional agent-rules surface as of 2026-05).
+ *   - A `/cartograph` custom command to
+ *     `~/.config/opencode/commands/cartograph.md` (global) or
+ *     `./.opencode/commands/cartograph.md` (local). opencode has no
+ *     conventional always-on agent-rules surface, so the on-demand
+ *     command is its guidance channel.
  *   - No permissions concept.
  *
  * Config shape uses opencode's wrapper:
@@ -29,10 +32,13 @@ import {
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
+  removeOwnedFile,
   writeJsonFile,
+  writeOwnedFile,
   type McpCommandOptions,
 } from './shared.js';
 import { projectGitignorePath, withLocalGitignoreFileEntries } from './gitignore.js';
+import { OPENCODE_COMMAND_TEMPLATE, SKILL_NAME } from '../skill-template.js';
 
 /** opencode's JSON-schema URL — referenced when stamping new configs
  *  and printing the suggested snippet. Module-scoped so the methods
@@ -53,6 +59,24 @@ function globalConfigDir(): string {
 
 function configPath(loc: Location): string {
   return loc === 'global' ? path.join(globalConfigDir(), 'opencode.json') : path.join(process.cwd(), 'opencode.json');
+}
+
+function commandsDir(loc: Location): string {
+  return loc === 'global'
+    ? path.join(globalConfigDir(), 'commands')
+    : path.join(process.cwd(), '.opencode', 'commands');
+}
+
+function commandPath(loc: Location): string {
+  return path.join(commandsDir(loc), `${SKILL_NAME}.md`);
+}
+
+/** Dirs to best-effort prune (empty-only) after command removal. The
+ *  global `~/.config/opencode/` itself stays — it holds opencode.json. */
+function commandPruneDirs(loc: Location): string[] {
+  const dirs = [commandsDir(loc)];
+  if (loc === 'local') dirs.push(path.join(process.cwd(), '.opencode'));
+  return dirs;
 }
 
 function getOpencodeServerEntry(options: McpCommandOptions = {}): {
@@ -90,38 +114,42 @@ class OpencodeTarget implements AgentTarget {
     const before = existing['mcp']?.cartograph;
     const after = getOpencodeServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
+    let configWrite: WriteResult['files'][number];
     if (jsonDeepEqual(before, after)) {
-      return withLocalGitignoreFileEntries(loc, { files: [{ path: file, action: 'unchanged' }] }, [file]);
+      configWrite = { path: file, action: 'unchanged' };
+    } else {
+      const created = !fs.existsSync(file);
+      if (!existing['$schema']) existing['$schema'] = OPENCODE_SCHEMA_URL;
+      if (!existing['mcp']) existing['mcp'] = {};
+      existing['mcp'].cartograph = after;
+      writeJsonFile(file, existing);
+      configWrite = { path: file, action: created ? 'created' : 'updated' };
     }
 
-    const created = !fs.existsSync(file);
-    if (!existing['$schema']) existing['$schema'] = OPENCODE_SCHEMA_URL;
-    if (!existing['mcp']) existing['mcp'] = {};
-    existing['mcp'].cartograph = after;
-    writeJsonFile(file, existing);
-    return withLocalGitignoreFileEntries(
-      loc,
-      {
-        files: [{ path: file, action: created ? 'created' : 'updated' }],
-      },
-      [file],
-    );
+    const command = commandPath(loc);
+    const commandWrite = writeOwnedFile(command, OPENCODE_COMMAND_TEMPLATE);
+    return withLocalGitignoreFileEntries(loc, { files: [configWrite, commandWrite] }, [file, command]);
   }
 
   uninstall(loc: Location): WriteResult {
+    const files: WriteResult['files'] = [];
     const file = configPath(loc);
     const config = readJsonFile(file);
-    if (!config['mcp']?.cartograph) {
-      return { files: [{ path: file, action: 'not-found' }] };
+    if (config['mcp']?.cartograph) {
+      delete config['mcp'].cartograph;
+      if (Object.keys(config['mcp']).length === 0) {
+        delete config['mcp'];
+      }
+      // If the file is now degenerate (only $schema or empty), leave it
+      // — the user may have other config we shouldn't nuke.
+      writeJsonFile(file, config);
+      files.push({ path: file, action: 'removed' });
+    } else {
+      files.push({ path: file, action: 'not-found' });
     }
-    delete config['mcp'].cartograph;
-    if (Object.keys(config['mcp']).length === 0) {
-      delete config['mcp'];
-    }
-    // If the file is now degenerate (only $schema or empty), leave it
-    // — the user may have other config we shouldn't nuke.
-    writeJsonFile(file, config);
-    return { files: [{ path: file, action: 'removed' }] };
+
+    files.push(removeOwnedFile(commandPath(loc), commandPruneDirs(loc)));
+    return { files };
   }
 
   printConfig(loc: Location, opts: Pick<InstallOptions, 'command'> = {}): string {
@@ -138,7 +166,7 @@ class OpencodeTarget implements AgentTarget {
   }
 
   describePaths(loc: Location): string[] {
-    const paths = [configPath(loc)];
+    const paths = [configPath(loc), commandPath(loc)];
     if (loc === 'local') paths.push(projectGitignorePath());
     return paths;
   }
