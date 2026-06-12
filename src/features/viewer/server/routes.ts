@@ -170,7 +170,12 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
   {
     match: (p) => /^\/api\/sessions\/([\w-]+)$/.exec(p),
     handle: (m, _u, res, ctx) => {
-      sendJson(res, HTTP_OK, sessionDetailPayload(ctx, (m as RegExpExecArray)[1]!));
+      const payload = sessionDetailPayload(ctx, (m as RegExpExecArray)[1]!);
+      if (payload === null) {
+        sendJson(res, HTTP_NOT_FOUND, { error: "session is outside this viewer's --session scope" });
+        return;
+      }
+      sendJson(res, HTTP_OK, payload);
     },
   },
   {

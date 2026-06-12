@@ -7,6 +7,7 @@
    real DB state. */
 
 const LIVE_MODE = globalThis.location.protocol === 'http:' || globalThis.location.protocol === 'https:';
+let liveSessionScope = null;      // /api/status sessionScope — non-null when this viewer serves ONE session
 let liveSymbolCache = null;       // last /api/symbol/:id response (used by renderSubpanel)
 const liveNodeIndex = new Map();  // id → {label, kind, file, line, centrality}
 const MIN_GROUP_CHILDREN = 2;
@@ -122,6 +123,14 @@ async function bootLive() {
     if (r.ok) {
       const s = await r.json();
       liveProjectRoot = s.projectRoot || '';
+      liveSessionScope = s.sessionScope || null;
+      applySessionScopeChrome();
+      // Browser tab = project name (plus the session when scoped), so
+      // several viewers stay distinguishable; the URL stays localhost.
+      const projectName = liveProjectRoot.split('/').filter(Boolean).pop() || 'cartograph';
+      document.title = liveSessionScope
+        ? `${projectName} · ${liveSessionScope.selector} — cartograph`
+        : `${projectName} — cartograph`;
       document.querySelector('.topbar .path').textContent = s.projectRoot;
       const statsEl = document.querySelector('.topbar .stats');
       statsEl.innerHTML =
@@ -199,10 +208,14 @@ async function loadSessionsLive() {
     liveSessions = (await sr.json()).sessions ?? [];
     if (requestSeq !== sessionRequestSeq) return;
     if (liveSessions.length === 0) {
-      sessLabel.textContent = '— no recorded sessions yet —';
+      sessLabel.textContent = liveSessionScope
+        ? `— waiting for session “${liveSessionScope.selector}” —`
+        : '— no recorded sessions yet —';
       sessLabel.style.display = '';
       picker.style.display = 'none';
-      tl.innerHTML = `<div class="empty">No agent trace recorded yet. Start an MCP client (e.g. <code>cartograph serve --mcp</code>) and make a few tool calls to populate this view.</div>`;
+      tl.innerHTML = liveSessionScope
+        ? `<div class="empty">This viewer is scoped to session <code>${escapeHtml(liveSessionScope.selector)}</code>, which has not made a tool call yet. It appears here the moment it does.</div>`
+        : `<div class="empty">No agent trace recorded yet. Start an MCP client (e.g. <code>cartograph serve --mcp</code>) and make a few tool calls to populate this view.</div>`;
       liveTraceCalls = []; liveTraceActiveStep = -1;
       setText('tr-stat-calls', '—');
       setText('tr-stat-time', '—');
@@ -361,6 +374,18 @@ async function activateLiveTraceStep(i) {
     crossProject: typeof c.project === 'string' && !viewerSameProjectRoot(c.project, liveProjectRoot),
     targets: traceGraphTargets(c.args),
   });
+}
+
+/** Scoped viewer chrome: the session dropdown is meaningless when
+    the server only serves one session — hide it and say so. */
+function applySessionScopeChrome() {
+  if (!liveSessionScope) return;
+  const dropdown = document.getElementById('lf-session-filter');
+  if (dropdown) dropdown.style.display = 'none';
+  const hint = document.querySelector('.live-hint');
+  if (hint) hint.textContent = `scoped to session ${liveSessionScope.selector} — other sessions are not served`;
+  const traceTitle = document.querySelector('.trace-title');
+  if (traceTitle) traceTitle.textContent = `Agent trace · ${liveSessionScope.selector}`;
 }
 
 /** ts → "Jun 12 02:05" for session pickers. */

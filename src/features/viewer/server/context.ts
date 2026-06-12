@@ -15,6 +15,12 @@ export interface ViewerOptions {
   port?: number;
   /** Bind host. Default 'localhost' with token-protected APIs. */
   host?: string;
+  /**
+   * Scope this viewer instance to ONE recorded MCP session, by id or
+   * label. Trace, live feed, and session endpoints show nothing else
+   * (enforced server-side). Lets each agent run its own viewer.
+   */
+  session?: string;
 }
 
 export interface StaticAsset {
@@ -33,6 +39,8 @@ export interface ViewerSecurityContext {
 
 export interface RequestContext {
   projectPath: string;
+  /** Raw --session selector (id or label); null = whole project. */
+  sessionScope: string | null;
   conn: DatabaseConnection;
   queries: QueryBuilder;
   traverser: GraphTraverser;

@@ -24,6 +24,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { clampInt, safeParseJson } from './http.js';
+import { resolveScopedSessionId } from './session-scope.js';
 
 interface LiveCallPayload {
   readonly sessionId: string;
@@ -63,10 +64,11 @@ export function serializeLiveCall(row: ToolCallRow): LiveCallPayload {
 export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null, limitRaw: string | null): unknown {
   const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
   const sinceTs = sinceTsRaw === null ? null : Number.parseInt(sinceTsRaw, 10);
+  const scoped = resolveScopedSessionId(ctx);
   const rows =
     sinceTs !== null && Number.isFinite(sinceTs)
-      ? toolCallsSince(ctx.queries, sinceTs, limit)
-      : latestToolCalls(ctx.queries, limit);
+      ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped })
+      : latestToolCalls(ctx.queries, limit, scoped);
   return { calls: rows.map(serializeLiveCall) };
 }
 
@@ -94,7 +96,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
 
   let backlog: ToolCallRow[];
   try {
-    backlog = latestToolCalls(ctx.queries, LIVE_BACKLOG_LIMIT.default);
+    backlog = latestToolCalls(ctx.queries, LIVE_BACKLOG_LIMIT.default, resolveScopedSessionId(ctx));
   } catch (err) {
     // Headers are already out as text/event-stream — end the stream
     // instead of letting the error escape to the JSON 500 path.
@@ -115,7 +117,13 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
   const pollTimer = setInterval(() => {
     let rows: ToolCallRow[];
     try {
-      rows = toolCallsSince(ctx.queries, cursorTs, LIVE_CALLS_BATCH_LIMIT);
+      // Scope is re-resolved per tick: a viewer launched for a labeled
+      // session that hasn't started yet locks on once it appears.
+      rows = toolCallsSince(ctx.queries, {
+        sinceTs: cursorTs,
+        limit: LIVE_CALLS_BATCH_LIMIT,
+        sessionId: resolveScopedSessionId(ctx),
+      });
     } catch (err) {
       logDebug('viewer: live stream poll failed', { err: errMsg(err) });
       stop();

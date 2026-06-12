@@ -82,6 +82,7 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
   const apiToken = createViewerApiToken();
   const ctx: RequestContext = {
     projectPath,
+    sessionScope: opts.session ?? null,
     conn,
     queries,
     traverser,
