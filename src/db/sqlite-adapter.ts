@@ -27,6 +27,7 @@
  * `upsertFile` SCHEMA includes churn-managed columns the SQL omits).
  */
 
+import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
 import { errMsg } from '../errors.js';
 import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
@@ -211,11 +212,22 @@ function applyBunCustomSqliteOnce(): void {
   // eslint-disable-next-line @typescript-eslint/no-require-imports
   const { Database } = requireCjs('bun:sqlite') as { Database: { setCustomSQLite?: (p: string) => void } };
   if (typeof Database.setCustomSQLite !== 'function') return;
-  const candidates = [
-    process.env['CARTOGRAPH_BUN_SQLITE_PATH'],
-    '/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib',
-    '/usr/local/opt/sqlite/lib/libsqlite3.dylib',
-  ].filter((p): p is string => typeof p === 'string' && p.length > 0);
+  // `setCustomSQLite` records the path WITHOUT dlopening it — the open
+  // happens at the first Database constructor, so a recorded-but-missing
+  // path breaks every subsequent DB open ("dlopen ... no such file").
+  // Filter to paths that exist, and try the prefix matching the running
+  // arch first (an x64 build under Rosetta must not record the arm64
+  // Homebrew dylib; dlopen rejects cross-arch images). Found by the
+  // darwin-x64-under-Rosetta release smoke; also fixes plain macOS
+  // installs without a Homebrew sqlite, which previously recorded the
+  // missing path blindly and failed at first open.
+  const brewPrefixes =
+    process.arch === 'x64'
+      ? ['/usr/local/opt/sqlite/lib/libsqlite3.dylib', '/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib']
+      : ['/opt/homebrew/opt/sqlite/lib/libsqlite3.dylib', '/usr/local/opt/sqlite/lib/libsqlite3.dylib'];
+  const candidates = [process.env['CARTOGRAPH_BUN_SQLITE_PATH'], ...brewPrefixes]
+    .filter((p): p is string => typeof p === 'string' && p.length > 0)
+    .filter((p) => fs.existsSync(p));
   for (const candidate of candidates) {
     try {
       Database.setCustomSQLite(candidate);
@@ -248,9 +260,27 @@ export class BunSqliteAdapter implements SqliteDatabase {
     applyBunCustomSqliteOnce();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Database } = requireCjs('bun:sqlite') as {
-      Database: new (path: string, opts?: { strict?: boolean }) => BunSqliteHandle;
+      Database: (new (
+        path: string,
+        opts?: { strict?: boolean },
+      ) => BunSqliteHandle) & { setCustomSQLite?: (p: string) => void };
     };
-    this._db = new Database(dbPath, { strict: true });
+    try {
+      this._db = new Database(dbPath, { strict: true });
+    } catch (err) {
+      // A recorded custom libsqlite3 can still fail to dlopen at the
+      // FIRST open — e.g. an arm64 Homebrew dylib under a Rosetta x64
+      // process ("incompatible architecture"). Fall back to the system
+      // library once: extension loading is lost (vec0 reports
+      // unavailable via tryLoadVecExtension), but the database opens.
+      // The system lib lives in the dyld shared cache, so no existence
+      // check — dlopen resolves it even though the path is not on disk.
+      if (process.platform !== 'darwin' || !/dlopen/i.test(errMsg(err)) || !Database.setCustomSQLite) {
+        throw err;
+      }
+      Database.setCustomSQLite('/usr/lib/libsqlite3.dylib');
+      this._db = new Database(dbPath, { strict: true });
+    }
     this._open = true;
   }
 
