@@ -28,19 +28,8 @@ cartograph viewer .
 - **Live** — watch MCP tool calls stream in as an agent uses cartograph on
   this project: a following feed with per-call args, duration, and result,
   plus an active-session card and a live tool-mix breakdown. A filter box
-  narrows the feed by text, a session dropdown limits it to one session
-  (the activity graph follows), and a Feed / Both / Graph
-  toggle adds a live traversal graph: touched symbols resolve against the
-  index and render with the main graph's own kind shapes and health
-  borders, hop edges trace the agent's path from symbol to symbol, and
-  light pulses race along the lines as calls land (with ambient pulses
-  re-running recent hops). The current node breathes, idle nodes ghost
-  out, and the camera chases the action while Follow is on. Square tool
-  nodes grow with use; click a symbol node to open it on the Graph tab.
-  A fourth **3D** mode renders the same traversal as a bloom-lit WebGL
-  scene with particle streams riding the trail, a camera that flies to
-  the action, and a slow idle orbit (the 3D renderer loads from a CDN on
-  first use). All motion honors `prefers-reduced-motion`.
+  narrows the feed by text, a session dropdown limits it to one session,
+  and clicking a symbol-bearing call focuses that symbol on the Graph tab.
 - **Health** — project-wide health score gauge, findings with per-biomarker
   severity breakdowns, risk hotspots, index coverage, and symbol-kind
   breakdown.

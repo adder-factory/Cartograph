@@ -2608,61 +2608,6 @@ async function assertLiveView(page: Page): Promise<void> {
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
-  // Layout modes: Both → the activity graph builds from the backlog;
-  // Graph → the feed hides; back to Feed for the rest of the suite.
-  await page.locator('.live-mode-btn[data-lf-mode="split"]').click();
-  await page.waitForFunction(
-    () => {
-      const smoke = (globalThis as unknown as { __cartographLiveFeedSmoke?: { graphNodeCount: () => number } })
-        .__cartographLiveFeedSmoke;
-      const wrap = document.querySelector<HTMLElement>('#lf-graph-wrap');
-      return Boolean(wrap && !wrap.hidden && smoke && smoke.graphNodeCount() >= 3);
-    },
-    undefined,
-    { timeout: SEARCH_TIMEOUT_MS },
-  );
-  // The touched symbol resolves against the index and adopts the main
-  // graph's identity: seeded step 2 targets `compute`, a function.
-  await page.waitForFunction(
-    () => {
-      const smoke = (
-        globalThis as unknown as {
-          __cartographLiveFeedSmoke?: {
-            graphNodeInfo: (id: string) => { kind: string | null; classes: string[] } | null;
-          };
-        }
-      ).__cartographLiveFeedSmoke;
-      const info = smoke?.graphNodeInfo('sym:compute');
-      return Boolean(info && info.kind === 'function' && info.classes.includes('code'));
-    },
-    undefined,
-    { timeout: SEARCH_TIMEOUT_MS },
-  );
-  await page.locator('.live-mode-btn[data-lf-mode="graph"]').click();
-  await page.waitForFunction(
-    () => {
-      const feed = document.querySelector('.live-feed-wrap');
-      return feed ? getComputedStyle(feed).display === 'none' : false;
-    },
-    undefined,
-    { timeout: SEARCH_TIMEOUT_MS },
-  );
-  // 3D cinema mode loads its renderer from a CDN — accept either a
-  // ready scene (canvas present) or the offline-fallback message.
-  await page.locator('.live-mode-btn[data-lf-mode="3d"]').click();
-  await page.waitForFunction(
-    () => {
-      const smoke = (globalThis as unknown as { __cartographLiveFeedSmoke?: { threeDState: () => string } })
-        .__cartographLiveFeedSmoke;
-      const state = smoke?.threeDState();
-      if (state === 'ready') return document.querySelectorAll('#lf-3d canvas').length > 0;
-      if (state === 'failed') return !(document.querySelector<HTMLElement>('#lf-3d-msg')?.hidden ?? true);
-      return false;
-    },
-    undefined,
-    { timeout: 30_000 },
-  );
-  await page.locator('.live-mode-btn[data-lf-mode="feed"]').click();
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);
 }
