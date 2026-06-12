@@ -46,7 +46,7 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
         return;
       }
 
-      if (options.session !== undefined && options.session.trim() === '') {
+      if (options.session?.trim() === '') {
         error('--session requires a session id or label (an empty value would silently serve every session)');
         process.exitCode = 1;
         return;
