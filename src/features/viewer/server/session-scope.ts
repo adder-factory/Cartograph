@@ -25,10 +25,18 @@ export function resolveScopedSessionId(ctx: RequestContext): string | null {
   return byLabel?.id ?? ctx.sessionScope;
 }
 
+/** Trailing-slash strip without a regex (S5852: `/+$` patterns flag
+ *  as backtracking hotspots; a loop is unambiguous). */
+function stripTrailingSlashes(p: string): string {
+  let end = p.length;
+  while (end > 0 && p.charCodeAt(end - 1) === 47 /* '/' */) end--;
+  return p.slice(0, end);
+}
+
 /** The viewer's project root, normalized for comparison against
  *  mcp_sessions.project_root (trailing slashes stripped). */
 export function viewerProjectRootParam(ctx: RequestContext): string {
-  return ctx.projectPath.replace(/\/+$/, '');
+  return stripTrailingSlashes(ctx.projectPath);
 }
 
 /** One database = one graph viewer: a session stamped for a DIFFERENT
@@ -36,5 +44,5 @@ export function viewerProjectRootParam(ctx: RequestContext): string {
  *  recorded by older binaries) pass — they cannot be attributed. */
 export function sessionBelongsToProject(ctx: RequestContext, projectRoot: string | null | undefined): boolean {
   if (!projectRoot) return true;
-  return projectRoot.replace(/\/+$/, '') === viewerProjectRootParam(ctx);
+  return stripTrailingSlashes(projectRoot) === viewerProjectRootParam(ctx);
 }
