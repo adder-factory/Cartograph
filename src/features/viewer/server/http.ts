@@ -14,6 +14,15 @@ export function clampInt(v: string | null, bound: IntBound): number {
   return Math.max(bound.min, Math.min(bound.max, n));
 }
 
+/** Parse stored JSON (e.g. trace args), falling back to the raw string. */
+export function safeParseJson(s: string): unknown {
+  try {
+    return JSON.parse(s);
+  } catch {
+    return s;
+  }
+}
+
 export function clampString(v: unknown, max: number, opts: { trim?: boolean } = {}): string {
   if (typeof v !== 'string') return '';
   const trimmed = opts.trim === false ? v : v.trim();

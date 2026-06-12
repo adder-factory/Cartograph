@@ -2468,18 +2468,55 @@ async function assertHealthView(page: Page): Promise<void> {
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
+  // The gauge sweep is set on a rAF after data-loaded flips — wait for
+  // it so the dasharray assertion below cannot race the paint.
+  await page.waitForFunction(
+    () => Boolean(document.querySelector<SVGPathElement>('#hc-gauge-fill')?.style.strokeDasharray),
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
   const health = await page.evaluate(() => ({
     score: document.querySelector('#hc-health')?.textContent || '',
-    severityRows: document.querySelectorAll('#hc-severity-list .health-severity-row').length,
+    grade: document.querySelector('#hc-grade')?.textContent || '',
+    gaugeDash: document.querySelector<SVGPathElement>('#hc-gauge-fill')?.style.strokeDasharray || '',
+    severityChips: document.querySelectorAll('#hc-severity-chips .health-severity-chip').length,
     biomarkers: document.querySelector('#hc-biomarkers')?.textContent?.trim() || '',
     hotspots: document.querySelector('#hc-hotspots-list')?.textContent?.trim() || '',
-    metrics: document.querySelector('#hc-total-nodes')?.textContent || '',
+    kindRows: document.querySelectorAll('#hc-kinds .health-row').length,
+    symbols: document.querySelector('#hc-total-nodes')?.textContent || '',
   }));
-  if (!health.score.includes('/ 10') || health.severityRows < 3 || !health.metrics) {
+  if (!/^\d+(\.\d+)?$/.test(health.score) || health.severityChips !== 3 || !health.symbols || !health.grade) {
     throw new Error(`health dashboard did not render core metrics: ${JSON.stringify(health)}`);
   }
-  if (!health.biomarkers || !health.hotspots) {
+  if (!health.biomarkers || !health.hotspots || health.kindRows === 0) {
     throw new Error(`health dashboard lists were empty: ${JSON.stringify(health)}`);
+  }
+  await page.locator('[data-view="graph"]').click();
+  await waitForGraph(page);
+}
+
+async function assertLiveView(page: Page): Promise<void> {
+  await page.locator('[data-view="live"]').click();
+  await page.waitForFunction(
+    () =>
+      document.querySelector<HTMLElement>('#live-view')?.style.display === 'block' &&
+      document.querySelector<HTMLElement>('#lf-indicator')?.dataset.state === 'live',
+    undefined,
+    { timeout: SEARCH_TIMEOUT_MS },
+  );
+  const live = await page.evaluate(() => ({
+    rows: document.querySelectorAll('#lf-feed .lf-row').length,
+    emptyHidden: document.querySelector<HTMLElement>('#lf-empty')?.hidden ?? false,
+    conn: document.querySelector('#lf-conn')?.textContent || '',
+  }));
+  // Fixture DBs usually have no recorded MCP calls — the designed
+  // empty state must show; with history, feed rows must render and
+  // the empty state must yield.
+  if (live.rows === 0 && live.emptyHidden) {
+    throw new Error(`live view rendered neither rows nor its empty state: ${JSON.stringify(live)}`);
+  }
+  if (live.rows > 0 && !live.emptyHidden) {
+    throw new Error(`live view shows the empty state over a populated feed: ${JSON.stringify(live)}`);
   }
   await page.locator('[data-view="graph"]').click();
   await waitForGraph(page);
@@ -2623,6 +2660,7 @@ async function runSmoke(url: string): Promise<void> {
       assertHealthFilters,
       assertHealthView,
       assertInteractionRaceStability,
+      assertLiveView,
       assertKindFilters,
       assertLocalStateCorruptionRecovery,
       assertNavigationHistoryRefocusesGraph,

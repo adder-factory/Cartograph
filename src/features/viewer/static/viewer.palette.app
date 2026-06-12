@@ -8,6 +8,7 @@
 const ACTIONS = [
   { id: 'tab-graph',  label: 'Switch to Graph tab',  shortcut: 'g g', run: () => clickTab('graph') },
   { id: 'tab-trace',  label: 'Switch to Agent trace tab', shortcut: 'g t', run: () => clickTab('trace') },
+  { id: 'tab-live',   label: 'Switch to Live activity tab', shortcut: 'g l', run: () => clickTab('live') },
   { id: 'tab-health', label: 'Switch to Health tab', shortcut: 'g h', run: () => clickTab('health') },
   { id: 'fit',        label: 'Fit graph to viewport', shortcut: '0',   run: fitGraph },
   { id: 'zoom-in',    label: 'Zoom in',  shortcut: '+', run: () => zoomBy(1.25) },

@@ -11,6 +11,7 @@ export type ViewerSmokeFeaturesWorkflow<TPage> = {
   assertHealthFilters: (page: TPage) => Promise<void>;
   assertInteractionRaceStability: (page: TPage) => Promise<void>;
   assertHealthView: (page: TPage) => Promise<void>;
+  assertLiveView: (page: TPage) => Promise<void>;
   assertKindFilters: (page: TPage) => Promise<void>;
   assertLocalStateCorruptionRecovery: (page: TPage, url: string) => Promise<void>;
   assertNavigationHistoryRefocusesGraph: (page: TPage) => Promise<void>;
@@ -44,6 +45,7 @@ export async function runViewerSmokeFeaturesWorkflow<TPage>(ctx: ViewerSmokeFeat
   await ctx.assertGraphToolStates(page);
   await ctx.assertGraphSnapshotReplay(page);
   await ctx.assertHealthView(page);
+  await ctx.assertLiveView(page);
   await ctx.assertSubpanelSymbolNavigation(page);
   await ctx.assertNavigationHistoryRefocusesGraph(page);
   await ctx.assertTooltips(page);

@@ -29,6 +29,7 @@ import {
   pathPayload,
 } from './graph-payloads.js';
 import { clampInt, clampString, sendJson } from './http.js';
+import { handleLiveStream, liveCallsPayload } from './live.js';
 import { sourcePayload, symbolPayload } from './node-payloads.js';
 import {
   biomarkerFindingsPayload,
@@ -147,6 +148,16 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
       }
       const limit = clampInt(url.searchParams.get('limit'), BIOMARKER_LIMIT);
       sendJson(res, HTTP_OK, biomarkerFindingsPayload(ctx, name, limit));
+    },
+  },
+  {
+    match: matchExact('/api/live/stream'),
+    handle: (_m, _u, res, ctx, req) => handleLiveStream(req, res, ctx),
+  },
+  {
+    match: matchExact('/api/live/calls'),
+    handle: (_m, url, res, ctx) => {
+      sendJson(res, HTTP_OK, liveCallsPayload(ctx, url.searchParams.get('sinceTs'), url.searchParams.get('limit')));
     },
   },
   {

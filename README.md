@@ -293,7 +293,8 @@ contracts, hexagons for routes, barrels for data stores), borders encode code
 health, and centrality-scaled halos make hub symbols stand out. Rails filter
 by kind, health, edge kind, and per-project file scope; built-in tools cover
 impact analysis, shortest paths, compare-to-HEAD, saved views, PNG/SVG/JSON
-export, an agent-trace replay tab, and a project health tab. See
+export, an agent-trace replay tab, a live tab streaming MCP tool calls in
+real time, and a project health dashboard. See
 [docs/VIEWER.md](docs/VIEWER.md) for the full guide.
 
 ## Languages and storage

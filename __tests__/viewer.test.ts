@@ -10,7 +10,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import Cartograph from '../src/index.js';
+import { DatabaseConnection, getDatabasePath } from '../src/db/index.js';
 import { upsertFile } from '../src/db/queries-files.js';
+import { QueryBuilder } from '../src/db/queries.js';
+import { appendToolCall, deleteSession, insertSession } from '../src/db/queries-trace.js';
 import { hashContent } from '../src/extraction/index.js';
 import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 
@@ -91,6 +94,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       'viewer.ask.app',
       'viewer.selection-detail.app',
       'viewer.trace.app',
+      'viewer.livefeed.app',
       'viewer.filters.app',
       'viewer.features.app',
       'viewer.ui.app',
@@ -597,6 +601,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     const body = (await res.json()) as {
       totalFindings: number;
       byBiomarker: Record<string, number>;
+      byBiomarkerSeverity: Record<string, { info: number; warning: number; error: number }>;
       bySeverity: Record<string, number>;
       nodesWithFindings: number;
       totalNodes: number;
@@ -607,6 +612,12 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.totalNodes).toBeGreaterThan(0);
     expect(body.codeHealth).toBeGreaterThanOrEqual(1);
     expect(body.codeHealth).toBeLessThanOrEqual(10);
+    // Per-biomarker severity split feeds the Health tab's mini stacks;
+    // every biomarker bucket must also appear in the split.
+    expect(typeof body.byBiomarkerSeverity).toBe('object');
+    for (const name of Object.keys(body.byBiomarker)) {
+      expect(body.byBiomarkerSeverity[name]).toBeDefined();
+    }
   });
 
   it('returns hotspots at /api/hotspots', async () => {
@@ -629,6 +640,117 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     const body = (await res.json()) as { sessionId: string; calls: unknown[] };
     expect(body.sessionId).toBe('nonexistent-session-id');
     expect(body.calls).toEqual([]);
+  });
+
+  it('returns the live call feed at /api/live/calls (and filters by sinceTs)', async () => {
+    const empty = await apiFetch(handle, 'api/live/calls');
+    expect(empty.status).toBe(200);
+    expect(((await empty.json()) as { calls: unknown[] }).calls).toEqual([]);
+
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const sid = 'live-calls-session';
+    const t0 = Date.now();
+    try {
+      insertSession({ qb, id: sid, startedTs: t0 });
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 1,
+        ts: t0,
+        toolName: 'cartograph_find',
+        argsJson: JSON.stringify({ by: 'symbol', query: 'compute' }),
+        resultSummary: 'ok',
+        durationMs: 12,
+      });
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 2,
+        ts: t0 + 5,
+        toolName: 'cartograph_graph',
+        argsJson: '{}',
+        resultSummary: 'ok',
+        durationMs: 7,
+      });
+
+      const res = await apiFetch(handle, 'api/live/calls');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        calls: Array<{ sessionId: string; step: number; tool: string; args: unknown }>;
+      };
+      expect(body.calls.map((c) => c.step)).toEqual([1, 2]);
+      expect(body.calls[0]!.sessionId).toBe(sid);
+      expect(body.calls[0]!.tool).toBe('cartograph_find');
+      expect(body.calls[0]!.args).toEqual({ by: 'symbol', query: 'compute' });
+
+      const since = await apiFetch(handle, `api/live/calls?sinceTs=${t0 + 1}`);
+      const sinceBody = (await since.json()) as { calls: Array<{ step: number }> };
+      expect(sinceBody.calls.map((c) => c.step)).toEqual([2]);
+    } finally {
+      deleteSession(qb, sid);
+      conn.close();
+    }
+  });
+
+  it('streams new tool calls over /api/live/stream (SSE)', async () => {
+    const ctrl = new AbortController();
+    const res = await apiFetch(handle, 'api/live/stream', { signal: ctrl.signal });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/event-stream/);
+    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    const readEvent = async (wanted: string, timeoutMs = 5000): Promise<unknown> => {
+      const deadline = Date.now() + timeoutMs;
+      for (;;) {
+        const idx = buf.indexOf('\n\n');
+        if (idx >= 0) {
+          const frame = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          const event = /^event: (.+)$/m.exec(frame)?.[1];
+          const data = /^data: (.+)$/m.exec(frame)?.[1];
+          if (event === wanted && data) return JSON.parse(data);
+          continue;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error(`timed out waiting for ${wanted} event`);
+        const chunk = await Promise.race([
+          reader.read(),
+          new Promise<never>((_resolve, reject) =>
+            setTimeout(() => reject(new Error(`timed out waiting for ${wanted} event`)), remaining),
+          ),
+        ]);
+        if (chunk.done) throw new Error('stream ended before the expected event');
+        buf += decoder.decode(chunk.value, { stream: true });
+      }
+    };
+
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const sid = 'live-stream-session';
+    try {
+      const backlog = (await readEvent('backlog')) as { calls: unknown[] };
+      expect(Array.isArray(backlog.calls)).toBe(true);
+
+      insertSession({ qb, id: sid, startedTs: Date.now() });
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 1,
+        ts: Date.now(),
+        toolName: 'cartograph_status',
+        argsJson: '{}',
+        resultSummary: 'streamed',
+        durationMs: 3,
+      });
+      const call = (await readEvent('call')) as { sessionId: string; tool: string; result: string };
+      expect(call.sessionId).toBe(sid);
+      expect(call.tool).toBe('cartograph_status');
+      expect(call.result).toBe('streamed');
+    } finally {
+      await reader.cancel().catch(() => {});
+      ctrl.abort();
+      deleteSession(qb, sid);
+      conn.close();
+    }
   });
 
   it('returns 400 on a malformed percent-encoded symbol id', async () => {
