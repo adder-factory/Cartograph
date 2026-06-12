@@ -6,8 +6,10 @@
 
 Index a repository once, then query it for symbols, callers, impact radius,
 affected tests, and code-health signals instead of repeatedly re-reading
-source. Cartograph runs as a CLI, an MCP server, and a TypeScript library.
+source. Runs as a CLI, an MCP server, and a TypeScript library — fully
+local, on your machine.
 
+[![CI](https://github.com/adder-factory/cartograph/actions/workflows/check.yml/badge.svg)](https://github.com/adder-factory/cartograph/actions/workflows/check.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Runtime: Bun](https://img.shields.io/badge/runtime-Bun%20%E2%89%A5%201.3-black.svg)](https://bun.sh)
 [![MCP](https://img.shields.io/badge/MCP-stdio-4f46e5.svg)](docs/MCP-USAGE.md)
@@ -15,15 +17,15 @@ source. Cartograph runs as a CLI, an MCP server, and a TypeScript library.
 
 [Why](#why-cartograph) ·
 [Get started](#get-started) ·
-[Capabilities](#capabilities) ·
+[Features](#features) ·
 [Usage](#usage) ·
 [Viewer](#local-viewer) ·
 [Languages &amp; storage](#languages-and-storage) ·
 [Docs](#documentation)
 
-</div>
+<img src="docs/assets/viewer.png" alt="Cartograph graph viewer showing symbol detail, source, graph tools, and code health" width="900">
 
----
+</div>
 
 ## Why Cartograph
 
@@ -56,6 +58,7 @@ project — install and setup are one flow.
 
 ### 1. Install the CLI
 
+> [!NOTE]
 > No prebuilt GitHub release is published yet, so install from source. Once a
 > release exists, the `install.sh` / `install.ps1` scripts below will fetch a
 > prebuilt binary and verify it against the release `SHA256SUMS` (set
@@ -96,9 +99,9 @@ code.
 
 ### 2. Set up your project
 
-One command from inside your project does the whole setup — MCP config for
-detected agents, `.cartograph/` init, the structural index, and managed git
-hooks:
+> [!TIP]
+> One command does the whole setup — MCP config for detected agents,
+> `.cartograph/` init, the structural index, and managed git hooks:
 
 ```bash
 cd /path/to/your/project
@@ -124,7 +127,8 @@ To index a project *without* touching any agent config, use
 `cartograph index .` (init + index + readiness check only; previously named
 `quickstart`, which still works as an alias).
 
-### What the installer writes
+<details>
+<summary><strong>What the installer writes</strong> (MCP config, git hooks, uninstall)</summary>
 
 - **MCP server config plus agent instructions** for detected agents, where the
   target supports them. Supported targets: Claude Code, Cursor, Codex CLI,
@@ -154,19 +158,27 @@ cartograph uninstall --location local
 See [Agent-Assisted Install](docs/AGENT-INSTALL.md) for a pasteable prompt that
 lets a coding agent perform the whole setup, plus the PowerShell variant.
 
-## Capabilities
+</details>
 
-| Area | What you get |
-|---|---|
-| **Search** | Symbol-by-name (exact, fuzzy, semantic, intent), regex content search, env-var reads, and SQL table references |
-| **Graph navigation** | Callers, callees, impact radius, multi-hop walks, shortest paths, and embedding-similarity peers |
-| **Impact & tests** | Affected tests for changed files, per-symbol coverage joins, and package-script verification commands |
-| **Code health** | Biomarkers and Code Health findings, churn × centrality hotspots, dead-code candidates, and a dependency audit |
-| **History** | Symbol-level git blame and co-change signals |
-| **Review** | Diff-driven context, semantic neighbors, composed risk triage, and a readiness self-check |
-| **Context** | Task-scoped route plans that suggest the next query before any source is read |
-| **Entry points** | Routes, CLI commands, MCP tools, and public exports across many frameworks |
-| **Export & view** | Graph export (JSON, DOT, Mermaid, Cytoscape) and a local-only graph viewer |
+## Features
+
+Every surface, and where to go deeper:
+
+| | Feature | Go deeper |
+|---|---|---|
+| 🔎 | **Search** — symbol-by-name (exact, fuzzy, semantic, intent), regex content search, env-var reads, and SQL table references | [Search &amp; navigation](docs/CLI-REFERENCE.md#search-and-navigation) |
+| 🕸️ | **Graph navigation** — callers, callees, impact radius, multi-hop walks, shortest paths, and embedding-similarity peers | [Search &amp; navigation](docs/CLI-REFERENCE.md#search-and-navigation) |
+| 🧪 | **Impact &amp; tests** — affected tests for changed files, per-symbol coverage joins, and package-script verification commands | [Change &amp; test selection](docs/CLI-REFERENCE.md#change-and-test-selection) |
+| 🩺 | **Code health** — biomarkers and Code Health findings, churn × centrality hotspots, dead-code candidates, and a dependency audit | [Review &amp; risk](docs/CLI-REFERENCE.md#review-and-risk) |
+| 🕰️ | **History** — symbol-level git blame and co-change signals | [History &amp; refactors](docs/CLI-REFERENCE.md#history-and-refactors) |
+| ✅ | **Review** — diff-driven context, semantic neighbors, composed risk triage, and a readiness self-check | [Review &amp; risk](docs/CLI-REFERENCE.md#review-and-risk) |
+| 🧭 | **Context plans** — task-scoped route plans that suggest the next query before any source is read | [MCP usage](docs/MCP-USAGE.md) |
+| 🚪 | **Entry points** — routes, CLI commands, MCP tools, and public exports across many frameworks | [Support matrix](docs/SUPPORT-MATRIX.md) |
+| 🗺️ | **Interactive viewer** — local web UI with a node shape language, health borders, hub halos, impact/path/compare tools | [Viewer guide](docs/VIEWER.md) |
+| 📤 | **Export** — graph snapshots as JSON, DOT, Mermaid, and Cytoscape | [Export formats](docs/GRAPH-EXPORT-FORMATS.md) |
+| 🤖 | **MCP server** — profiles, load budget, low-token mode, client snippets for every major agent | [MCP usage](docs/MCP-USAGE.md) |
+| 🧩 | **LLM tiers (optional)** — summaries, embeddings, semantic search, ask, rerank via local or cloud OpenAI-compatible backends | [Configuration](docs/CONFIGURATION.md) |
+| 🗄️ | **Storage** — zero-config SQLite or opt-in PostgreSQL 18+ with pgvector | [Storage backends](docs/STORAGE-BACKENDS.md) |
 
 Cartograph indexes **73 language modes** and recognizes framework-aware signals
 (routes, controllers, components, schemas, DI bindings) across the JavaScript /
@@ -240,10 +252,6 @@ subpath.
 cartograph viewer .
 # open http://localhost:8765/
 ```
-
-<p align="center">
-  <img src="docs/assets/viewer.png" alt="Cartograph graph viewer showing symbol detail, source, graph tools, and code health" width="900">
-</p>
 
 The viewer is local-only and reads the same graph index as the CLI and MCP
 server. Node shapes encode symbol kinds (circles for callables, diamonds for
@@ -325,6 +333,8 @@ credits.
 [MIT](https://opensource.org/licenses/MIT)
 
 <div align="center">
+
+If Cartograph saves your agent tokens, a ⭐ helps others find it.
 
 [Report a bug](https://github.com/adder-factory/cartograph/issues) ·
 [Request a feature](https://github.com/adder-factory/cartograph/issues)
