@@ -228,9 +228,10 @@ const latestToolCallsQuery = defineQuery({
   sql:
     `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
     `FROM mcp_tool_calls ` +
+    `WHERE (@sessionId IS NULL OR session_id = @sessionId) ` +
     `ORDER BY ts DESC, session_id DESC, step DESC ` +
     `LIMIT @limit`,
-  params: z.object({ limit: z.number() }),
+  params: z.object({ limit: z.number(), sessionId: z.string().nullable() }),
   row: ToolCallDbRowSchema,
 });
 
@@ -238,10 +239,10 @@ const toolCallsSinceQuery = defineQuery({
   sql:
     `SELECT session_id, step, ts, tool_name, args_json, result_summary, duration_ms ` +
     `FROM mcp_tool_calls ` +
-    `WHERE ts >= @sinceTs ` +
+    `WHERE ts >= @sinceTs AND (@sessionId IS NULL OR session_id = @sessionId) ` +
     `ORDER BY ts ASC, session_id ASC, step ASC ` +
     `LIMIT @limit`,
-  params: z.object({ sinceTs: z.number(), limit: z.number() }),
+  params: z.object({ sinceTs: z.number(), limit: z.number(), sessionId: z.string().nullable() }),
   row: ToolCallDbRowSchema,
 });
 
@@ -300,8 +301,8 @@ declare module './queries.js' {
     gcEmptySessions?: TypedQuery<Record<string, never>, never>;
     recentSessions?: TypedQuery<{ limit: number }, SessionDbRow>;
     callsForSession?: TypedQuery<{ sessionId: string }, ToolCallDbRow>;
-    latestToolCalls?: TypedQuery<{ limit: number }, ToolCallDbRow>;
-    toolCallsSince?: TypedQuery<{ sinceTs: number; limit: number }, ToolCallDbRow>;
+    latestToolCalls?: TypedQuery<{ limit: number; sessionId: string | null }, ToolCallDbRow>;
+    toolCallsSince?: TypedQuery<{ sinceTs: number; limit: number; sessionId: string | null }, ToolCallDbRow>;
     traceUsageCounts?: TypedQuery<Record<string, never>, UsageCountsDbRow>;
     traceUsageToolCalls?: TypedQuery<Record<string, never>, UsageCallDbRow>;
   }
@@ -422,10 +423,11 @@ export function callsForSession(qb: QueryBuilder, sessionId: string): ToolCallRo
   return rows.map(toolCallRowFromDb);
 }
 
-/** Most-recent N tool calls across all sessions, oldest first. */
-export function latestToolCalls(qb: QueryBuilder, limit: number): ToolCallRow[] {
+/** Most-recent N tool calls, oldest first — optionally limited to
+ *  one session (the viewer's --session scope). */
+export function latestToolCalls(qb: QueryBuilder, limit: number, sessionId: string | null = null): ToolCallRow[] {
   qb.queries.latestToolCalls ??= latestToolCallsQuery(qb.db);
-  const rows = qb.queries.latestToolCalls.all({ limit });
+  const rows = qb.queries.latestToolCalls.all({ limit, sessionId });
   return rows.map(toolCallRowFromDb).reverse();
 }
 
@@ -435,9 +437,16 @@ export function latestToolCalls(qb: QueryBuilder, limit: number): ToolCallRow[] 
  * timestamp — the live-stream pump re-reads the cursor instant and
  * dedupes by (session, step) instead of dropping same-ms rows.
  */
-export function toolCallsSince(qb: QueryBuilder, sinceTs: number, limit: number): ToolCallRow[] {
+export function toolCallsSince(
+  qb: QueryBuilder,
+  opts: { sinceTs: number; limit: number; sessionId?: string | null },
+): ToolCallRow[] {
   qb.queries.toolCallsSince ??= toolCallsSinceQuery(qb.db);
-  const rows = qb.queries.toolCallsSince.all({ sinceTs, limit });
+  const rows = qb.queries.toolCallsSince.all({
+    sinceTs: opts.sinceTs,
+    limit: opts.limit,
+    sessionId: opts.sessionId ?? null,
+  });
   return rows.map(toolCallRowFromDb);
 }
 

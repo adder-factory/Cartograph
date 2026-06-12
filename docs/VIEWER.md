@@ -14,6 +14,7 @@ cartograph viewer .
 |---|---|
 | `-p, --port <n>` | HTTP port (default 8765; pass 0 for an OS-picked port) |
 | `--no-open` | Do not auto-open the URL in a browser |
+| `--session <idOrLabel>` | Scope this instance to one recorded MCP session (see Sessions) |
 
 ## Tabs
 
@@ -52,6 +53,15 @@ projects running cartograph at the same time never mix sessions. A
 single server can still answer one-off calls about another project via
 the `projectPath` tool argument; such calls stay in this project's
 trace and show an explicit `project` row in the step detail.
+
+To give each agent its own isolated window, launch one viewer per
+session: `cartograph viewer --session <id-or-label> --port 0`. A scoped
+instance serves nothing but that session — the session list returns
+only it, other sessions' details answer 404, and the live stream is
+filtered server-side. Scoping by label works even before the session
+exists; the viewer waits and locks on at its first tool call. The
+browser tab is titled with the project name (plus the session when
+scoped), so several viewers stay tellable apart.
 
 ## Reading the graph
 

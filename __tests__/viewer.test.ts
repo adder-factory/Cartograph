@@ -802,6 +802,97 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     }
   });
 
+  it('--session scopes the viewer to one session, enforced server-side', async () => {
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const t0 = Date.now();
+    let scopedHandle: ViewerHandle | null = null;
+    try {
+      insertSession({ qb, id: 'scoped-session', startedTs: t0, label: 'agent-a' });
+      appendToolCall(qb, {
+        sessionId: 'scoped-session',
+        step: 1,
+        ts: t0,
+        toolName: 'cartograph_find',
+        argsJson: '{}',
+        resultSummary: 'mine',
+        durationMs: 3,
+      });
+      insertSession({ qb, id: 'other-session', startedTs: t0 + 1 });
+      appendToolCall(qb, {
+        sessionId: 'other-session',
+        step: 1,
+        ts: t0 + 2,
+        toolName: 'cartograph_status',
+        argsJson: '{}',
+        resultSummary: 'not mine',
+        durationMs: 2,
+      });
+
+      // Scope by LABEL — resolution happens per request.
+      scopedHandle = await startViewerServer(testDir, { port: 0, session: 'agent-a' });
+
+      const status = (await (await apiFetch(scopedHandle, 'api/status')).json()) as {
+        sessionScope: { selector: string; sessionId: string | null } | null;
+      };
+      expect(status.sessionScope?.selector).toBe('agent-a');
+      expect(status.sessionScope?.sessionId).toBe('scoped-session');
+
+      const sessions = (await (await apiFetch(scopedHandle, 'api/sessions?limit=50')).json()) as {
+        sessions: Array<{ id: string }>;
+      };
+      expect(sessions.sessions.map((s) => s.id)).toEqual(['scoped-session']);
+
+      const foreign = await apiFetch(scopedHandle, 'api/sessions/other-session');
+      expect(foreign.status).toBe(404);
+      const own = await apiFetch(scopedHandle, 'api/sessions/scoped-session');
+      expect(own.status).toBe(200);
+
+      const live = (await (await apiFetch(scopedHandle, 'api/live/calls?limit=50')).json()) as {
+        calls: Array<{ sessionId: string }>;
+      };
+      expect(live.calls.length).toBe(1);
+      expect(live.calls[0]!.sessionId).toBe('scoped-session');
+
+      // The UNSCOPED server still sees both sessions.
+      const all = (await (await apiFetch(handle, 'api/live/calls?limit=50')).json()) as {
+        calls: Array<{ sessionId: string }>;
+      };
+      expect(new Set(all.calls.map((c) => c.sessionId))).toEqual(new Set(['scoped-session', 'other-session']));
+
+      // Launch-before-start: a viewer scoped to a label that does not
+      // exist yet serves nothing, then locks on per-request once the
+      // labeled session appears.
+      const early = await startViewerServer(testDir, { port: 0, session: 'agent-b' });
+      try {
+        const before = (await (await apiFetch(early, 'api/live/calls?limit=50')).json()) as { calls: unknown[] };
+        expect(before.calls).toEqual([]);
+        insertSession({ qb, id: 'late-session', startedTs: Date.now(), label: 'agent-b' });
+        appendToolCall(qb, {
+          sessionId: 'late-session',
+          step: 1,
+          ts: Date.now(),
+          toolName: 'cartograph_graph',
+          argsJson: '{}',
+          resultSummary: 'late arrival',
+          durationMs: 6,
+        });
+        const after = (await (await apiFetch(early, 'api/live/calls?limit=50')).json()) as {
+          calls: Array<{ sessionId: string }>;
+        };
+        expect(after.calls.map((c) => c.sessionId)).toEqual(['late-session']);
+      } finally {
+        await early.close();
+        deleteSession(qb, 'late-session');
+      }
+    } finally {
+      if (scopedHandle) await scopedHandle.close();
+      deleteSession(qb, 'scoped-session');
+      deleteSession(qb, 'other-session');
+      conn.close();
+    }
+  });
+
   it('returns 400 on a malformed percent-encoded symbol id', async () => {
     const res = await apiFetch(handle, 'api/symbol/%GG');
     expect(res.status).toBe(400);

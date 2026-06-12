@@ -6,6 +6,7 @@ import { getMetadata } from '../../../db/queries-metadata.js';
 import { getStats as qbGetStats } from '../../../db/queries.js';
 import { searchNodes } from '../../../db/queries-search.js';
 import { callsForSession, getSessionById, recentSessions } from '../../../db/queries-trace.js';
+import { resolveScopedSessionId } from './session-scope.js';
 import type { Node } from '../../../types.js';
 import {
   GIT_BINARY,
@@ -34,6 +35,7 @@ export function statusPayload(ctx: RequestContext): unknown {
   const languages = Object.keys(stats.filesByLanguage).sort((a, b) => a.localeCompare(b));
   return {
     projectRoot: ctx.projectPath,
+    sessionScope: ctx.sessionScope ? { selector: ctx.sessionScope, sessionId: scopedSessionOrNull(ctx) } : null,
     files: stats.fileCount,
     nodes: stats.nodeCount,
     edges: stats.edgeCount,
@@ -44,6 +46,13 @@ export function statusPayload(ctx: RequestContext): unknown {
     dirs: scopeDirsPayload(ctx),
     readiness: readinessPayload(ctx.projectPath, stats, indexedAt),
   };
+}
+
+/** The scoped session's id when it EXISTS already, else null (the
+ *  selector may name a labeled session that has not started yet). */
+function scopedSessionOrNull(ctx: RequestContext): string | null {
+  const resolved = resolveScopedSessionId(ctx);
+  return resolved && getSessionById(ctx.queries, resolved) ? resolved : null;
 }
 
 /** Cap on scope-filter rows; the viewer adds its own "everything else" row. */
@@ -220,7 +229,10 @@ export function findingsPayload(ctx: RequestContext): unknown {
 }
 
 export function sessionsPayload(ctx: RequestContext, limit: number): unknown {
-  const rows = recentSessions(ctx.queries, limit);
+  const scoped = resolveScopedSessionId(ctx);
+  const rows = scoped
+    ? [getSessionById(ctx.queries, scoped)].filter((s) => s !== null)
+    : recentSessions(ctx.queries, limit);
   return {
     sessions: rows.map((r) => ({
       id: r.id,
@@ -246,7 +258,11 @@ function sessionMetaPayload(session: ReturnType<typeof getSessionById>): Record<
   };
 }
 
-export function sessionDetailPayload(ctx: RequestContext, sessionId: string): unknown {
+/** Returns null when the requested session is outside this viewer's
+ *  --session scope — the route answers 404 for it. */
+export function sessionDetailPayload(ctx: RequestContext, sessionId: string): Record<string, unknown> | null {
+  const scoped = resolveScopedSessionId(ctx);
+  if (scoped && sessionId !== scoped) return null;
   const calls = callsForSession(ctx.queries, sessionId);
   return {
     sessionId,
