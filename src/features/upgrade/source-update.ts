@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isBunStandalonePath } from '../../bun-standalone.js';
 import { errMsg } from '../../errors.js';
 import { gitWorktreeRoot, hasUncommittedChanges } from '../../git-utils.js';
 import type { UpgradeCheckResult } from './runtime.js';
@@ -27,10 +28,6 @@ export type InstallMethod =
   | { kind: 'unknown' };
 
 const CARTOGRAPH_PACKAGE_NAME = '@adder-factory/cartograph';
-
-/** Matches the entry-point check in bin/cartograph.ts — Bun standalone
- *  executables expose bundled modules under this virtual prefix. */
-const BUN_STANDALONE_PREFIX = '/$bunfs/';
 
 const GIT_OUTPUT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
@@ -64,7 +61,7 @@ export function detectInstallMethod(moduleUrl: string = import.meta.url): Instal
   } catch {
     return { kind: 'unknown' };
   }
-  if (modulePath.startsWith(BUN_STANDALONE_PREFIX)) return { kind: 'standalone' };
+  if (isBunStandalonePath(modulePath)) return { kind: 'standalone' };
   const packageRoot = findOwnPackageRoot(path.dirname(realpathOrSelf(modulePath)));
   if (!packageRoot) return { kind: 'unknown' };
   const worktree = gitWorktreeRoot(packageRoot);

@@ -19,6 +19,7 @@ import * as path from 'node:path';
 import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import { homedir } from 'node:os';
+import { isBunStandalonePath } from '../bun-standalone.js';
 import { ALL_TARGETS, detectAll, getTarget, resolveTargetFlag } from './targets/registry.js';
 import type { AgentTarget, Location } from './targets/types.js';
 import { errMsg } from '../errors.js';
@@ -232,9 +233,9 @@ function isExecutableFile(candidate: string): boolean {
   }
 }
 
-/** Bun standalone executables run with argv[1] under the virtual /$bunfs/ root. */
+/** Bun standalone executables run with argv[1] under the virtual bunfs root. */
 function standaloneBinaryPath(): string | undefined {
-  return process.argv[1]?.startsWith('/$bunfs/') ? process.execPath : undefined;
+  return isBunStandalonePath(process.argv[1]) ? process.execPath : undefined;
 }
 
 /** The `bun link` shim location, when present but not on PATH. */

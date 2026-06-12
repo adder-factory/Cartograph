@@ -3,6 +3,7 @@ import * as net from 'node:net';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isBunStandalonePath } from '../bun-standalone.js';
 import { findNearestCartographRoot } from '../directory.js';
 import { MCPServer } from './index.js';
 import { SocketTransport } from './transport.js';
@@ -256,7 +257,7 @@ function spawnDaemonChild(projectRoot: string, options: SharedMcpDaemonOptions):
 }
 
 function isBunStandaloneModulePath(): boolean {
-  return fileURLToPath(import.meta.url).startsWith('/$bunfs/');
+  return isBunStandalonePath(fileURLToPath(import.meta.url));
 }
 
 function tryAcquireDaemonLock(
