@@ -137,6 +137,28 @@ function isTopLevelSourceMock(spec) {
   return /^(\.\.\/)+src\//.test(spec);
 }
 
+/** Value-namespace imports of shared source modules (`import * as x
+ *  from '../src/...'`). Bun REBINDS these identifiers to the mock when
+ *  the module gets vi.mock'd, so a factory body that references one
+ *  calls the mock from inside itself — runtime self-recursion that
+ *  only surfaces on some file orderings (the 06-09 → 06-11
+ *  module-leak-canary saga). The safe pattern is a value snapshot
+ *  taken BEFORE the vi.mock calls (`const REAL_X = { ...x }`) with the
+ *  factory referencing only the snapshot. */
+function sourceNamespaceImports(source) {
+  const ids = [];
+  const nsImportRe = /^import \* as (\w+) from ['"]((?:\.\.\/)+src\/[^'"]+)['"]/gm;
+  let m;
+  while ((m = nsImportRe.exec(source)) !== null) ids.push(m[1]);
+  return ids;
+}
+
+function liveNamespaceRefsInFactory(mockCall, namespaceIds) {
+  // Skip the spec argument; scan only the factory body.
+  const body = mockCall.slice(mockCall.indexOf(',') + 1);
+  return namespaceIds.filter((id) => new RegExp(`\\b${id}\\b`).test(body));
+}
+
 const failures = [];
 const seenAllowed = new Set();
 let allowlisted = 0;
@@ -145,14 +167,27 @@ let preserved = 0;
 for (const file of listTestFiles(testsRoot)) {
   const rel = toPosixPath(path.relative(repoRoot, file));
   const source = fs.readFileSync(file, 'utf8');
+  const namespaceIds = sourceNamespaceImports(source);
   const mockStartRe = /^vi\.mock\(\s*(['"])([^'"]+)\1\s*,/gm;
   let match;
   while ((match = mockStartRe.exec(source)) !== null) {
     const spec = match[2];
+    const mockCall = source.slice(match.index, findCallEnd(source, match.index));
+
+    // Snapshot rule (every vi.mock factory): no LIVE source-module
+    // namespace references inside a factory body.
+    const liveRefs = liveNamespaceRefsInFactory(mockCall, namespaceIds);
+    if (liveRefs.length > 0) {
+      failures.push(
+        `${rel}:${lineNumberAt(source, match.index)} vi.mock factory references live namespace import(s) ` +
+          `${liveRefs.join(', ')} — bun rebinds these to the mock itself (self-recursion). Take a value ` +
+          `snapshot BEFORE the vi.mock call (const REAL_X = { ...${liveRefs[0]} }) and reference the snapshot.`,
+      );
+    }
+
     if (!isTopLevelSourceMock(spec)) continue;
 
     const key = `${rel}::${spec}`;
-    const mockCall = source.slice(match.index, findCallEnd(source, match.index));
     if (hasActualExportPreservation(mockCall)) {
       preserved++;
       continue;

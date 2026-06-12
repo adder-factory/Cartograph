@@ -63,11 +63,9 @@
  *     SQL cost for a corner-case correctness win.
  */
 
-import * as path from 'node:path';
 import type { IndexHook, IndexHookContext } from './types.js';
-import { readFileSafe } from '../utils.js';
+import { minerFileText } from './file-text-cache.js';
 import type { SyncResult } from '../extraction/index.js';
-import { stripJsComments } from '../resolution/import-resolver.js';
 import { computeAlgoHash } from '../algo-hash.js';
 import { getMetadata, setMetadata } from '../db/queries-metadata.js';
 import { logDebug, errMsg } from '../errors.js';
@@ -175,9 +173,8 @@ async function buildValueRefEdges(ctx: IndexHookContext, files: FileTarget[]): P
   let processed = 0;
   for (const file of files) {
     if (!SUPPORTED_VALUE_REF_LANGS.has(file.language)) continue;
-    const content = readFileSafe(path.join(ctx.projectRoot, file.path));
-    if (!content) continue;
-    const cleaned = stripJsComments(content);
+    const { cleaned } = minerFileText(ctx.projectRoot, file.path);
+    if (!cleaned) continue;
     collectEdgesFromFile({ ctx, filePath: file.path, cleaned, edges });
     // B24 (2026-05-24) — cooperative yield every PER_FILE_YIELD_INTERVAL
     // files so peer Group B hooks dispatched via `Promise.all` actually

@@ -22,6 +22,7 @@
 import type { IndexHook, IndexHookContext, IndexHookOutcome } from './types.js';
 import type { SyncResult } from '../extraction/index.js';
 import { logDebug, logWarn } from '../errors.js';
+import { clearMinerFileTextCache } from './file-text-cache.js';
 
 /**
  * Per-hook wall-clock budget. A hook awaiting a promise that never
@@ -104,27 +105,31 @@ import { HOOK as PROMOTE_NESTED_FN_HOOK } from './promote-nested-fn.js';
  *                          │ CENTRALITY               │
  *                          └──────────────────────────┘
  *
- * Sequencing: groups run serially (A → B → C); hooks within a
- * group run via `Promise.all`. Cross-group ordering is load-
- * bearing — biomarkers' `unused_export` rule reads `references`
- * edges that the Group B emitters insert; `low_coverage` reads
- * the `node_coverage` rows that COVERAGE_REAPPLY restores.
+ * Sequencing: groups run serially (A → B → C). Cross-group ordering
+ * is load-bearing — biomarkers' `unused_export` rule reads
+ * `references` edges that the Group B emitters insert; `low_coverage`
+ * reads the `node_coverage` rows that COVERAGE_REAPPLY restores.
  *
- * Wall-clock impact today: most hooks are sync (SQL `.all()` or
- * `execFileSync('git', ...)`), so the `Promise.all` wrappers only
- * give a real win for hooks whose internals are async I/O bound.
- * Phase 2A of G9 converted the three git miners (churn / cochange
- * / issue-history) to async `execFile`, so Group A genuinely
- * overlaps now. Group B (edge-emitter SQL writes serialized by
- * the bun:sqlite write lock) and Group C (sync reads on a single
- * connection) gain ~nothing from `Promise.all` until they're
- * moved to worker_threads with per-worker DB connections — that
- * carries its own cold-start cost that needs bench-driven sizing,
- * deferred to a follow-up slice.
+ * WITHIN a group, concurrency is per-group (`concurrent` flag):
+ * Group A runs via `Promise.all` — its git miners are async
+ * `execFile` shells that genuinely overlap (G9 Phase 2A). Groups B
+ * and C run SEQUENTIALLY: their hook bodies are sync (bun:sqlite
+ * calls, sync file reads) with cooperative yields, so `Promise.all`
+ * bought no wall-clock — it only interleaved the time slices, which
+ * made every per-hook duration report ≈ the group wall total (each
+ * hook's last slice lands at the end). Sequential execution makes
+ * the per-hook durations truthful at the same wall cost; real
+ * parallelism would need worker_threads with per-worker DB
+ * connections (bench-gated follow-up).
  */
-const HOOK_GROUPS: ReadonlyArray<{ readonly group: 'A' | 'B' | 'C'; readonly hooks: readonly IndexHook[] }> = [
+const HOOK_GROUPS: ReadonlyArray<{
+  readonly group: 'A' | 'B' | 'C';
+  readonly concurrent: boolean;
+  readonly hooks: readonly IndexHook[];
+}> = [
   {
     group: 'A',
+    concurrent: true,
     // role-restore has no graph dependencies (UPDATE over a side
     // table). The three git miners are I/O-bound async shells out
     // to `git log` / `git diff` — they overlap each other.
@@ -132,6 +137,7 @@ const HOOK_GROUPS: ReadonlyArray<{ readonly group: 'A' | 'B' | 'C'; readonly hoo
   },
   {
     group: 'B',
+    concurrent: false,
     // Edge-emitting hooks run BEFORE biomarkers so the biomarker
     // hook sees the freshest graph. `unused_export` consults
     // `references` edges emitted by RE_EXPORT / VALUE_REF /
@@ -214,12 +220,13 @@ const HOOK_GROUPS: ReadonlyArray<{ readonly group: 'A' | 'B' | 'C'; readonly hoo
   },
   {
     group: 'C',
+    concurrent: false,
     // Biomarkers + centrality both depend on a fresh, fully-
-    // emitted edge set. Neither depends on the other, so the
-    // `Promise.all` wrapper here is the right shape for the day
-    // they parallelize for real. Today both are sync SQL on the
-    // shared bun:sqlite connection — see the registry-level
-    // JSDoc above for the Phase 2B/2C deferral rationale.
+    // emitted edge set. Neither depends on the other, so they can
+    // run concurrently the day they parallelize for real. Today
+    // both are sync SQL on the shared bun:sqlite connection — see
+    // the registry-level JSDoc above for the sequential rationale
+    // and the Phase 2B/2C deferral.
     // CENTRALITY is already fingerprint-skip-gated; BIOMARKERS'
     // 6 cross-file rules WILL fan out via a per-rule worker pool
     // (deferred — needs bench-driven justification on larger
@@ -337,21 +344,56 @@ async function runHookPhase(
   getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
 ): Promise<IndexHookOutcome[]> {
   const out: IndexHookOutcome[] = [];
-  for (const { group, hooks } of HOOK_GROUPS) {
+  try {
+    return await runHookGroups(out, phase, getInvoker);
+  } finally {
+    // The miner file-text cache is phase-scoped: release the corpus
+    // text immediately, whether the phase completed or threw.
+    clearMinerFileTextCache();
+  }
+}
+
+async function runHookGroups(
+  out: IndexHookOutcome[],
+  phase: IndexHookOutcome['phase'],
+  getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
+): Promise<IndexHookOutcome[]> {
+  for (const { group, hooks, concurrent } of HOOK_GROUPS) {
     const groupStart = Date.now();
     // B9 (2026-05-24) — group start marker so the per-group progress
     // is visible. Per-hook completions log inside `invokeOneHook`
     // (gated at 1 sec); group end below shows the wall sum so the
     // user can see "Group C took 8 minutes" without summing
-    // individual hooks.
+    // individual hooks. Sequential groups make those per-hook
+    // durations truthful — under Promise.all the interleaved sync
+    // bodies all "finished" at the group's end.
     writePostHookLog(`[postHook] group ${group} ${phase}: starting (${hooks.length} hooks)`);
-    const groupResults = await Promise.all(hooks.map((hook) => invokeOneHook(hook, phase, getInvoker)));
+    const groupResults = concurrent
+      ? await Promise.all(hooks.map((hook) => invokeOneHook(hook, phase, getInvoker)))
+      : await runHooksSequentially(hooks, phase, getInvoker);
     for (const r of groupResults) {
       if (r !== null) out.push(r);
     }
     writePostHookLog(`[postHook] group ${group} ${phase}: done in ${Date.now() - groupStart}ms`);
   }
   return out;
+}
+
+/** Sequential ON PURPOSE (the reduce chain is the idiom for that):
+ *  these hook bodies are sync work on one thread, so concurrency buys
+ *  nothing — measured 2026-06-12: group B fell 6.6s → 3.5s when the
+ *  Promise.all interleaving was removed, and per-hook durations became
+ *  attributable. Do not "parallelize" this back. */
+function runHooksSequentially(
+  hooks: readonly IndexHook[],
+  phase: IndexHookOutcome['phase'],
+  getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
+): Promise<Array<IndexHookOutcome | null>> {
+  return hooks.reduce<Promise<Array<IndexHookOutcome | null>>>(async (chain, hook) => {
+    const results = await chain;
+    results.push(await invokeOneHook(hook, phase, getInvoker));
+    return results;
+  }, Promise.resolve([]));
 }
 
 /**
