@@ -28,7 +28,9 @@ import {
   getFindingsRanked,
   getFindingsStats,
   severityFilterCase,
+  countFindingsRanked,
 } from '../../db/queries-findings.js';
+import { escapeLike } from '../../db/sql-like.js';
 import { getMetadata } from '../../db/queries-metadata.js';
 import { codeHealthScore } from '../../biomarkers/index.js';
 import { BIOMARKER_NAMES } from '../../biomarkers/types.js';
@@ -477,16 +479,35 @@ function handleRankedMode(cg: import('../../index.js').default, args: RankedMode
     );
   }
   const lines = renderRankedFindingsTable(rows, { biomarker, minSeverity, lowTokens: args.lowTokens === true });
-  // SQL LIMIT — `rows.length === limit` is a heuristic for "cap hit".
-  // False positive when total findings exactly equals the cap; cheap.
-  const hasMore = rows.length >= limit;
+  // Honesty footer (field report #2): exact totals under the SAME
+  // filters, including findings whose node id no longer resolves —
+  // ranked INNER JOINs nodes, so stale ids silently vanished while
+  // `stats` counted them, and the mismatch read as a bug. Note: under
+  // a minCentrality filter, error-severity orphans still count in the
+  // total (the error-tier centrality bypass applies in the LEFT JOIN
+  // too) — they surface in the `orphaned` part of the footer.
+  const counts = countFindingsRanked(
+    cg.queries,
+    compact({ biomarker, minSeverity, minCentrality, minMetric, maxMetric, excludeFile }),
+  );
+  const notShown = Math.max(0, counts.total - rows.length);
+  const footerParts: string[] = [];
+  if (notShown > 0) {
+    const beyondLimit = notShown - counts.orphaned;
+    if (beyondLimit > 0) footerParts.push(`${beyondLimit} beyond the limit — pass a higher \`limit\``);
+    if (counts.orphaned > 0) {
+      footerParts.push(
+        `${counts.orphaned} attached to symbol ids that no longer resolve — run \`cartograph_admin({action: 'biomarkers-refresh'})\` to re-attach them`,
+      );
+    }
+  }
   // The chokepoint truncates the table BODY first, then appends the
   // cap footer — so a wide findings table can't push the "pass a
   // higher limit" hint off the budget (the audit-4 biomarkers bug).
   return ok(
     renderToolResponse({
       body: lines.join('\n'),
-      footers: [hasMore ? '> Result capped — pass a higher `limit` to see more.' : undefined],
+      footers: [notShown > 0 ? `> ${notShown} finding(s) not shown: ${footerParts.join('; ')}.` : undefined],
     }),
   );
 }
@@ -536,13 +557,8 @@ function probeLowestCentralityForFilters(
     params['maxMetric'] = args.maxMetric;
   }
   if (args.excludeFile !== undefined && args.excludeFile.length > 0) {
-    const backslash = String.fromCodePoint(92);
-    const escaped = args.excludeFile
-      .replaceAll(backslash, backslash + backslash)
-      .replaceAll('_', backslash + '_')
-      .replaceAll('%', backslash + '%');
     where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
-    params['excludeLike'] = escaped + '%';
+    params['excludeLike'] = `${escapeLike(args.excludeFile)}%`;
   }
   const whereClause = where.join(' AND ');
   const sql = `

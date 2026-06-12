@@ -659,6 +659,24 @@ describe('http_no_timeout detector (G26-P2)', () => {
     expect(countHttpNoTimeout(mixed, mixed, 'typescript')).toBe(1);
   });
 
+  it('does NOT count override / generator declarations either', () => {
+    const overrideDecl = 'override fetch(req: Request) { return route(req); }';
+    expect(countHttpNoTimeout(overrideDecl, overrideDecl, 'typescript')).toBe(0);
+    const generatorDecl = 'function* fetch(resource: string) { yield resource; }';
+    expect(countHttpNoTimeout(generatorDecl, generatorDecl, 'typescript')).toBe(0);
+  });
+
+  it('a comment mentioning timeout does NOT mute the finding (gate reads code only)', () => {
+    const raw = '// TODO: add timeout\nfetch(url);';
+    const code = '\nfetch(url);'; // comment stripped by the code-only pass
+    expect(countHttpNoTimeout(raw, code, 'typescript')).toBe(1);
+  });
+
+  it('a real signal/timeout in code still gates', () => {
+    const body = 'const c = new AbortController(); fetch(url, { signal: c.signal });';
+    expect(countHttpNoTimeout(body, body, 'typescript')).toBe(0);
+  });
+
   it('SKIPS when body mentions `signal` (AbortController usage)', () => {
     const body = 'const c = new AbortController(); fetch(url, { signal: c.signal });';
     expect(countHttpNoTimeout(body, body, 'typescript')).toBe(0);

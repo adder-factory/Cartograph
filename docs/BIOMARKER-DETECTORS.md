@@ -8,6 +8,16 @@ file is the human-readable index.
 A finding fires at metric **≥** the value below; clear by landing
 strictly below.
 
+**Scan scope — read this first:** per-symbol metric detectors run
+ONLY on `function` and `method` nodes (`ANALYSABLE_KINDS` in
+`src/biomarkers/per-file-shared.ts`). Constants are exempt from every
+per-symbol metric scan — only `stale_doc` (doc-vs-value numbers) and
+the file-level `secrets_handling` pass look at them. The practical
+consequence for `magic_number` in data-authoring code: hoisting
+authored numbers into typed `as const` records is the sanctioned fix,
+not a loophole — a table of constants is exactly where such numbers
+belong.
+
 ## Per-symbol structural / complexity (always on)
 
 - `long_parameter_list` — info ≥ 4 params, warning ≥ 5, error ≥ 7.
@@ -137,8 +147,12 @@ above (B17/B19/B20/B21), for 16 agent-prone biomarkers total — via
 
 ## Other per-symbol detectors
 
-- `magic_number` — info-tier; literals not in {0, 1, -1, 2}.
-- `hardcoded_url` — info-tier; literal HTTP(S) URLs.
+- `magic_number` — literals not in {0, 1, -1, 2}; escalates by COUNT
+  per symbol: info ≥ 3, warning ≥ 5, error ≥ 8 (`T_MAGIC`). "Info-tier"
+  describes the floor, not the ceiling — fix against the error bar
+  when driving a repo to zero.
+- `hardcoded_url` — literal HTTP(S) URLs; escalates by count per
+  symbol: info ≥ 1, warning ≥ 2, error ≥ 3.
 - `recently_grew` — large LOC delta since last snapshot.
 - `stale_doc` — fires when a constant's doc cites numbers absent
   from its value. Fix: make the doc accurate; never remove numbers

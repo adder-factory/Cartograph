@@ -486,45 +486,52 @@ const FindingsRankedRowSchema = z.object({
 });
 type FindingsRankedRow = z.infer<typeof FindingsRankedRowSchema>;
 
+/** Filter clauses shared by the ranked SELECT and its honesty COUNT —
+ *  one builder so the two can never drift. */
+function buildRankedFilters(p: Omit<FindingsRankedParams, 'limit'>, bindings: Record<string, unknown>): string[] {
+  const where: string[] = [];
+  if (p.biomarker !== undefined) {
+    where.push('f.biomarker = @biomarker');
+    bindings['biomarker'] = p.biomarker;
+  }
+  if (p.minSeverity !== undefined) {
+    where.push(`${severityFilterCase('f.severity')} >= ${severityFilterCase('@minSev')}`);
+    bindings['minSev'] = p.minSeverity;
+  }
+  if (p.minCentrality !== undefined) {
+    // Errors bypass the centrality floor — an error-tier finding is
+    // worth surfacing regardless of structural reach (friction F-C).
+    where.push("(n.centrality >= @minCentrality OR f.severity = 'error')");
+    bindings['minCentrality'] = p.minCentrality;
+  }
+  if (p.minMetric !== undefined) {
+    where.push('f.metric >= @minMetric');
+    bindings['minMetric'] = p.minMetric;
+  }
+  if (p.maxMetric !== undefined) {
+    where.push('f.metric <= @maxMetric');
+    bindings['maxMetric'] = p.maxMetric;
+  }
+  if (p.excludeFile !== undefined && p.excludeFile.length > 0) {
+    // Literal prefix exclusion via LIKE with explicit ESCAPE — paths
+    // can contain `_` so we escape `_`/`%`/`\`. GLOB has no escape
+    // syntax for its `*`/`?` metachars.
+    where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
+    bindings['excludeLike'] = `${escapeLike(p.excludeFile)}%`;
+  }
+  if (p.pathFilter !== undefined && p.pathFilter.length > 0) {
+    where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
+    bindings['pathLike'] = prefixLikePattern(p.pathFilter);
+  }
+  return where;
+}
+
 const getFindingsRankedQuery = defineDynamicQuery({
   params: FindingsRankedParamsSchema,
   row: FindingsRankedRowSchema,
   build: (p) => {
-    const where: string[] = [];
     const bindings: Record<string, unknown> = { limit: p.limit };
-    if (p.biomarker !== undefined) {
-      where.push('f.biomarker = @biomarker');
-      bindings['biomarker'] = p.biomarker;
-    }
-    if (p.minSeverity !== undefined) {
-      where.push(`${severityFilterCase('f.severity')} >= ${severityFilterCase('@minSev')}`);
-      bindings['minSev'] = p.minSeverity;
-    }
-    if (p.minCentrality !== undefined) {
-      // Errors bypass the centrality floor — an error-tier finding is
-      // worth surfacing regardless of structural reach (friction F-C).
-      where.push("(n.centrality >= @minCentrality OR f.severity = 'error')");
-      bindings['minCentrality'] = p.minCentrality;
-    }
-    if (p.minMetric !== undefined) {
-      where.push('f.metric >= @minMetric');
-      bindings['minMetric'] = p.minMetric;
-    }
-    if (p.maxMetric !== undefined) {
-      where.push('f.metric <= @maxMetric');
-      bindings['maxMetric'] = p.maxMetric;
-    }
-    if (p.excludeFile !== undefined && p.excludeFile.length > 0) {
-      // Literal prefix exclusion via LIKE with explicit ESCAPE — paths
-      // can contain `_` so we escape `_`/`%`/`\`. GLOB has no escape
-      // syntax for its `*`/`?` metachars.
-      where.push(String.raw`n.file_path NOT LIKE @excludeLike ESCAPE '\'`);
-      bindings['excludeLike'] = `${escapeLike(p.excludeFile)}%`;
-    }
-    if (p.pathFilter !== undefined && p.pathFilter.length > 0) {
-      where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
-      bindings['pathLike'] = prefixLikePattern(p.pathFilter);
-    }
+    const where = buildRankedFilters(p, bindings);
     const sql =
       `SELECT n.id AS node_id, n.name, n.kind, n.file_path,
               f.biomarker, f.severity, f.metric, n.centrality, f.detail,
@@ -539,6 +546,57 @@ const getFindingsRankedQuery = defineDynamicQuery({
     return { sql, bindings };
   },
 });
+
+/**
+ * Honesty counter for ranked mode: total findings matching the same
+ * filters WITHOUT the limit, plus how many of those are attached to a
+ * node id that no longer resolves (stale after edits, pending the
+ * next cross-file re-run) — the LEFT JOIN is what lets orphans count.
+ * Node-scoped filters (centrality/path) exclude orphans by
+ * definition: a NULL row can't satisfy them, which is consistent
+ * with what the SELECT shows.
+ */
+const countFindingsRankedQuery = defineDynamicQuery({
+  params: FindingsRankedParamsSchema.omit({ limit: true }),
+  row: z.object({ total: z.number(), orphaned: z.number() }),
+  build: (p) => {
+    const bindings: Record<string, unknown> = {};
+    const where = buildRankedFilters(p, bindings);
+    const sql =
+      `SELECT COUNT(*) AS total,
+              COUNT(*) FILTER (WHERE n.id IS NULL) AS orphaned
+         FROM code_health_findings f
+         LEFT JOIN nodes n ON n.id = f.node_id` + (where.length > 0 ? ' WHERE ' + where.join(' AND ') : '');
+    return { sql, bindings };
+  },
+});
+
+/** Total + orphaned finding counts under the same filters as
+ *  {@link getFindingsRanked} — drives the "N not shown" footer. */
+export function countFindingsRanked(
+  qb: QueryBuilder,
+  options: {
+    biomarker?: string;
+    minSeverity?: FindingSeverity;
+    minCentrality?: number;
+    minMetric?: number;
+    maxMetric?: number;
+    excludeFile?: string;
+    pathFilter?: string;
+  } = {},
+): { total: number; orphaned: number } {
+  qb.queries.countFindingsRanked ??= countFindingsRankedQuery(qb.db);
+  const row = qb.queries.countFindingsRanked.get({
+    biomarker: options.biomarker,
+    minSeverity: options.minSeverity,
+    minCentrality: options.minCentrality,
+    minMetric: options.minMetric,
+    maxMetric: options.maxMetric,
+    excludeFile: options.excludeFile,
+    pathFilter: options.pathFilter,
+  });
+  return row ?? { total: 0, orphaned: 0 };
+}
 
 /** Map raw finding row to public result shape. */
 function mapFindingsRow(r: {
@@ -717,5 +775,6 @@ declare module './queries.js' {
     getFindingsStatsByPassKind?: TypedQuery<Record<string, never>, { pass_kind: string; n: number }>;
     getFindingsStatsNodes?: TypedQuery<Record<string, never>, { n: number }>;
     getFindingsRanked?: DynamicTypedQuery<FindingsRankedParams, FindingsRankedRow>;
+    countFindingsRanked?: DynamicTypedQuery<Omit<FindingsRankedParams, 'limit'>, { total: number; orphaned: number }>;
   }
 }

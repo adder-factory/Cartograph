@@ -260,8 +260,10 @@ const PACKAGE_MAIN_ENTRY_FILES = ['src/index.ts'];
  */
 const NEXTJS_SEGMENT_FILE_RE =
   /(^|\/)app\/(.+\/)?(page|layout|template|route|error|global-error|loading|not-found|default|sitemap|robots|manifest|icon|apple-icon|opengraph-image|twitter-image)\.(ts|tsx|js|jsx|mjs)$/;
-const NEXTJS_SEGMENT_EXPORTS: ReadonlySet<string> = new Set([
-  // Route-segment config (nextjs.org/docs/app/api-reference/file-conventions/route-segment-config)
+const NEXTJS_ROUTE_FILE_RE = /(^|\/)app\/(.+\/)?route\.(ts|tsx|js|jsx|mjs)$/;
+/** Shared route-segment config + generation hooks — valid in every
+ *  segment file kind (nextjs.org/docs/app/api-reference/file-conventions/route-segment-config). */
+const NEXTJS_SHARED_EXPORTS: ReadonlySet<string> = new Set([
   'dynamic',
   'dynamicParams',
   'revalidate',
@@ -270,16 +272,20 @@ const NEXTJS_SEGMENT_EXPORTS: ReadonlySet<string> = new Set([
   'preferredRegion',
   'maxDuration',
   'experimental_ppr',
-  // Metadata API
+  'generateStaticParams',
+  'generateImageMetadata',
+  'generateSitemaps',
+]);
+/** Metadata API — meaningful in non-route segment files. */
+const NEXTJS_METADATA_EXPORTS: ReadonlySet<string> = new Set([
   'metadata',
   'generateMetadata',
   'viewport',
   'generateViewport',
-  // Generation hooks
-  'generateStaticParams',
-  'generateImageMetadata',
-  'generateSitemaps',
-  // Route-handler methods (route.ts)
+]);
+/** HTTP handler methods — ONLY a convention in route files; a `GET`
+ *  exported from page.tsx is an ordinary (flaggable) export. */
+const NEXTJS_ROUTE_HANDLER_EXPORTS: ReadonlySet<string> = new Set([
   'GET',
   'POST',
   'PUT',
@@ -288,13 +294,22 @@ const NEXTJS_SEGMENT_EXPORTS: ReadonlySet<string> = new Set([
   'HEAD',
   'OPTIONS',
 ]);
-const NEXTJS_ROOT_FILE_RE = /(^|\/)(middleware|instrumentation)\.(ts|js|mjs)$/;
-const NEXTJS_ROOT_EXPORTS: ReadonlySet<string> = new Set(['middleware', 'config', 'register', 'onRequestError']);
+/** Root entrypoints anchored to the project root (or src/) — a helper
+ *  named middleware.ts deeper in the tree is not the convention file. */
+const NEXTJS_ROOT_FILE_RE = /^(src\/)?(middleware|instrumentation)\.(ts|js|mjs)$/;
+const NEXTJS_MIDDLEWARE_EXPORTS: ReadonlySet<string> = new Set(['middleware', 'config']);
+const NEXTJS_INSTRUMENTATION_EXPORTS: ReadonlySet<string> = new Set(['register', 'onRequestError']);
 
 /** True when an exported symbol is consumed by framework convention (no graph edge possible). */
 export function isFrameworkConventionExport(filePath: string, name: string): boolean {
-  if (NEXTJS_SEGMENT_FILE_RE.test(filePath) && NEXTJS_SEGMENT_EXPORTS.has(name)) return true;
-  return NEXTJS_ROOT_FILE_RE.test(filePath) && NEXTJS_ROOT_EXPORTS.has(name);
+  if (NEXTJS_SEGMENT_FILE_RE.test(filePath)) {
+    if (NEXTJS_SHARED_EXPORTS.has(name)) return true;
+    if (NEXTJS_ROUTE_FILE_RE.test(filePath)) return NEXTJS_ROUTE_HANDLER_EXPORTS.has(name);
+    return NEXTJS_METADATA_EXPORTS.has(name);
+  }
+  const root = NEXTJS_ROOT_FILE_RE.exec(filePath);
+  if (!root) return false;
+  return root[2] === 'middleware' ? NEXTJS_MIDDLEWARE_EXPORTS.has(name) : NEXTJS_INSTRUMENTATION_EXPORTS.has(name);
 }
 
 /**

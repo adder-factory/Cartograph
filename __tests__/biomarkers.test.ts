@@ -2,7 +2,13 @@
  * Biomarker engine + end-to-end orchestration tests.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { appendFindings, getFindingsForNode, getFindingsRanked, getFindingsStats } from '../src/db/queries-findings.js';
+import {
+  appendFindings,
+  countFindingsRanked,
+  getFindingsForNode,
+  getFindingsRanked,
+  getFindingsStats,
+} from '../src/db/queries-findings.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
@@ -832,6 +838,7 @@ describe('end-to-end through Cartograph', () => {
 
       const ranked = getFindingsRanked(cg.queries, { minSeverity: 'warning', limit: 50 });
       expect(ranked.length).toBeGreaterThan(0);
+
       const onBigUgly = ranked.filter((r) => r.name === 'bigUgly');
       expect(onBigUgly.length).toBeGreaterThan(0);
       // Should hit at least one of: large_method, complex_method, brain_method.
@@ -870,6 +877,33 @@ describe('end-to-end through Cartograph', () => {
         });
         expect(banded.every((r) => r.metric >= minMetric && r.metric <= maxMetric)).toBe(true);
       }
+
+      // Honesty counter: agrees with ranked when nothing is orphaned,
+      // and counts findings whose node id no longer resolves (ranked's
+      // INNER JOIN hides them; stats counts them — the field-report
+      // "105 of 133" mismatch). Orphans arise in the wild when a node
+      // row is removed through a connection without `PRAGMA
+      // foreign_keys` (raw worker connections) — the CASCADE never
+      // fires. Reproduce exactly that, LAST: it destroys the fixture.
+      const before = countFindingsRanked(cg.queries, { minSeverity: 'warning' });
+      expect(before.total).toBeGreaterThanOrEqual(ranked.length);
+      expect(before.orphaned).toBe(0);
+      const victim = ranked[0]!.nodeId;
+      const { Database } = await import('bun:sqlite');
+      const raw = new Database(path.join(dir, '.cartograph', 'cartograph.db'));
+      try {
+        // bun:sqlite defaults foreign_keys OFF — the delete strands
+        // the victim's findings rather than cascading them.
+        raw.run('DELETE FROM nodes WHERE id = ?', [victim]);
+      } finally {
+        raw.close();
+      }
+      const after = countFindingsRanked(cg.queries, { minSeverity: 'warning' });
+      expect(after.total).toBe(before.total);
+      expect(after.orphaned).toBeGreaterThan(0);
+      const rankedOrphaned = getFindingsRanked(cg.queries, { minSeverity: 'warning', limit: 200 });
+      expect(rankedOrphaned.some((r) => r.nodeId === victim)).toBe(false);
+      expect(after.total - rankedOrphaned.length).toBeGreaterThanOrEqual(after.orphaned);
     } finally {
       cg.close();
     }
