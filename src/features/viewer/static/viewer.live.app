@@ -125,12 +125,15 @@ async function bootLive() {
       liveProjectRoot = s.projectRoot || '';
       liveSessionScope = s.sessionScope || null;
       applySessionScopeChrome();
-      // Browser tab = project name (plus the session when scoped), so
-      // several viewers stay distinguishable; the URL stays localhost.
-      const projectName = liveProjectRoot.split('/').filter(Boolean).pop() || 'cartograph';
+      // Browser tab = "Project: <Name>" (plus the session when
+      // scoped), so several viewers stay distinguishable; the URL
+      // stays localhost. No app-name suffix — it doubled up when the
+      // project itself is called cartograph.
+      const base = liveProjectRoot.split('/').filter(Boolean).pop() || 'cartograph';
+      const displayName = base.charAt(0).toUpperCase() + base.slice(1);
       document.title = liveSessionScope
-        ? `${projectName} · ${liveSessionScope.selector} — cartograph`
-        : `${projectName} — cartograph`;
+        ? `Project: ${displayName} · ${liveSessionScope.selector}`
+        : `Project: ${displayName}`;
       document.querySelector('.topbar .path').textContent = s.projectRoot;
       const statsEl = document.querySelector('.topbar .stats');
       statsEl.innerHTML =
