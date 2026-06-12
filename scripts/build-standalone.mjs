@@ -16,17 +16,45 @@ fs.mkdirSync(path.join(stage, 'bin'), { recursive: true });
 fs.mkdirSync(path.join(stage, 'lib', 'cartograph'), { recursive: true });
 fs.mkdirSync(path.join(stage, 'share', 'cartograph'), { recursive: true });
 
-run('bun', [
-  'build',
-  '--compile',
-  '--target=bun',
-  '--outfile',
-  path.join(stage, 'lib', 'cartograph', binaryName),
-  path.join(ROOT, 'src', 'bin', 'cartograph.ts'),
-]);
+// re2-wasm's emscripten glue resolves re2.wasm via a baked
+// `__dirname`, which under `bun build --compile` is the BUILD
+// machine's node_modules path — the binary then fails everywhere that
+// path doesn't exist (caught by the Docker tarball smoke). Patch the
+// glue for the duration of the compile so it prefers the launcher's
+// CARTOGRAPH_ASSET_ROOT (where we ship re2.wasm), and restore the
+// original afterwards.
+const RE2_GLUE = path.join(ROOT, 'node_modules', 're2-wasm', 'build', 'wasm', 're2.js');
+const RE2_DIRNAME_LINE = `scriptDirectory = __dirname + '/';`;
+const RE2_ASSET_ROOT_LINE =
+  `scriptDirectory = (typeof process !== 'undefined' && process.env && process.env.CARTOGRAPH_ASSET_ROOT)` +
+  ` ? process.env.CARTOGRAPH_ASSET_ROOT.replace(/\\/?$/, '/') : __dirname + '/';`;
+
+const re2GlueOriginal = fs.readFileSync(RE2_GLUE, 'utf-8');
+if (!re2GlueOriginal.includes(RE2_DIRNAME_LINE)) {
+  throw new Error(
+    `re2-wasm glue no longer contains the __dirname scriptDirectory line — update the standalone patch in ${import.meta.url}`,
+  );
+}
+fs.writeFileSync(RE2_GLUE, re2GlueOriginal.replace(RE2_DIRNAME_LINE, RE2_ASSET_ROOT_LINE), 'utf-8');
+try {
+  run('bun', [
+    'build',
+    '--compile',
+    // Explicit per-target compile so cross-builds embed the right bun
+    // runtime (plain `--target=bun` always compiled for the HOST, which
+    // would ship a host binary under a foreign target's archive name).
+    `--target=${bunCompileTarget(target)}`,
+    '--outfile',
+    path.join(stage, 'lib', 'cartograph', binaryName),
+    path.join(ROOT, 'src', 'bin', 'cartograph.ts'),
+  ]);
+} finally {
+  fs.writeFileSync(RE2_GLUE, re2GlueOriginal, 'utf-8');
+}
 
 copyFile('src/db/schema.sql', 'share/cartograph/db/schema.sql');
 copyFile('node_modules/web-tree-sitter/web-tree-sitter.wasm', 'share/cartograph/web-tree-sitter.wasm');
+copyFile('node_modules/re2-wasm/build/wasm/re2.wasm', 'share/cartograph/re2.wasm');
 copyDir('src/extraction/wasm', 'share/cartograph/extraction/wasm', (name) => name.endsWith('.wasm'));
 copyDir('src/extraction/tags', 'share/cartograph/extraction/tags', (name) => name.endsWith('.scm'));
 copyDir('src/features/viewer/static', 'share/cartograph/features/viewer/static');
@@ -40,6 +68,15 @@ if (isWindows) writeWindowsLauncher();
 else writePosixLauncher();
 
 archiveStage();
+
+function bunCompileTarget(t) {
+  const [os, arch] = t.split('-');
+  // x64 uses bun's baseline (pre-AVX2) build: bun's default x64 binaries
+  // SIGILL on CPUs/emulators without AVX2 (Rosetta, older Xeons, some
+  // VMs). The release trades a little throughput for running everywhere.
+  const suffix = arch === 'x64' ? '-baseline' : '';
+  return `bun-${os === 'win32' ? 'windows' : os}-${arch}${suffix}`;
+}
 
 function currentTarget() {
   const osMap = new Map([

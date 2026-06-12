@@ -80,13 +80,18 @@ project — install and setup are one flow.
 
 ### 1. Install the CLI
 
-> [!NOTE]
-> No prebuilt GitHub release is published yet, so install from source. Once a
-> release exists, the `install.sh` / `install.ps1` scripts below will fetch a
-> prebuilt binary and verify it against the release `SHA256SUMS` (set
-> `CARTOGRAPH_SKIP_CHECKSUM=1` to bypass verification).
+The one-liner fetches the prebuilt standalone binary for your platform and
+verifies it against the release `SHA256SUMS` before installing (set
+`CARTOGRAPH_SKIP_CHECKSUM=1` to bypass verification):
 
-Requires [Bun](https://bun.sh) `>= 1.3`.
+```bash
+curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
+```
+
+A PowerShell equivalent (`install.ps1`) and an agent-driven install flow are
+documented in [Agent-Assisted Install](docs/AGENT-INSTALL.md).
+
+Prefer running from source? Requires [Bun](https://bun.sh) `>= 1.3`:
 
 ```bash
 git clone https://github.com/adder-factory/cartograph.git
@@ -96,16 +101,6 @@ bun link
 ```
 
 `bun link` puts `cartograph` on your `PATH`. Verify with `cartograph --version`.
-
-Once a release is published, the script install becomes:
-
-```bash
-# Verifies the download against the release SHA256SUMS before installing.
-curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh | sh
-```
-
-A PowerShell equivalent (`install.ps1`) and an agent-driven install flow are
-documented in [Agent-Assisted Install](docs/AGENT-INSTALL.md).
 
 To update a source install later:
 
@@ -217,7 +212,7 @@ Every surface, and where to go deeper:
 | 📤 | **Export** — graph snapshots as JSON, DOT, Mermaid, and Cytoscape | [Export formats](docs/GRAPH-EXPORT-FORMATS.md) |
 | 🤖 | **MCP server** — profiles, load budget, low-token mode, client snippets for every major agent | [MCP usage](docs/MCP-USAGE.md) |
 | 🧩 | **LLM tiers (optional)** — summaries, embeddings, semantic search, ask, rerank via local backends (Ollama, llama.cpp, MLX) or cloud (OpenAI, OpenRouter) | [Configuration](docs/CONFIGURATION.md) |
-| 🗄️ | **Storage** — zero-config SQLite or opt-in PostgreSQL 18+ with pgvector | [Storage backends](docs/STORAGE-BACKENDS.md) |
+| 🗄️ | **Storage** — zero-config SQLite or opt-in PostgreSQL 18+; vector search embedded in both (sqlite-vec + HNSW, or native pgvector) — no separate vector database | [Storage backends](docs/STORAGE-BACKENDS.md) |
 
 Cartograph indexes **73 language modes** and recognizes framework-aware signals
 (routes, controllers, components, schemas, DI bindings) across the JavaScript /
@@ -316,10 +311,13 @@ the authoritative list.
 
 SQLite is the default and works immediately with no configuration. It is the
 fastest local single-writer backend and is capability-checked through Bun's
-embedded SQLite runtime.
+embedded SQLite runtime. Vector search is embedded too: semantic queries run
+on sqlite-vec plus a USearch HNSW index — there is no separate vector
+database to install or operate.
 
 PostgreSQL 18+ is opt-in for shared or external storage, managed backups,
-operational database controls, and native pgvector search:
+operational database controls, and native pgvector for the same vector
+search server-side:
 
 ```bash
 cartograph admin init -i \
@@ -329,7 +327,8 @@ cartograph admin init -i \
   --database-pgvector auto
 ```
 
-Existing graphs migrate between backends with `cartograph admin storage-migrate`.
+Existing graphs migrate between backends **in either direction** — SQLite to
+PostgreSQL and back, no reindex — with `cartograph admin storage-migrate`.
 See [Storage Backends](docs/STORAGE-BACKENDS.md) for the PostgreSQL minimum,
 pgvector modes, production grants, hosted TLS notes, migration details, and a
 local benchmark.
