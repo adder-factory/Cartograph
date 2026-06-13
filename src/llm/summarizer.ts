@@ -42,6 +42,7 @@ import { extractJsonArrayFromText } from './json-utils.js';
 import { logDebug, logWarn } from '../errors.js';
 import { validatePathWithinRootReal, stripReasoningTokens, compact } from '../utils.js';
 import { runSequential } from '../utils/async-iteration.js';
+import { withSqliteBusyRetry } from '../utils-concurrency.js';
 
 /** Symbol kinds worth summarising. Skip parameters/imports/literals. */
 export const SUMMARIZABLE_KINDS: ReadonlySet<string> = new Set([
@@ -213,9 +214,46 @@ const SUMMARY_SYSTEM_PROMPT = [
   '- function / method / route / component: state what it DOES, starting with a present-tense verb.',
   '- class / interface / type alias / struct / enum / other declaration: state what it REPRESENTS — its shape, role, or contents.',
   '',
+  "Anchor on the symbol's name and signature, and preserve any distinguishing qualifiers they carry (e.g. strict, unsigned, async, readonly, recursive) so near-identical symbols get distinct summaries.",
+  '',
   'Never start the line with "This", "The", "Initiates", the symbol\'s kind name, or an -ing word.',
   'Output the summary line only — no markdown, no quotes, no preamble.',
 ].join('\n');
+
+/** Bump when the summary prompt or per-symbol context-prep changes in a
+ *  way that should regenerate existing summaries. Applied to the summary
+ *  model label by {@link summaryModelLabel} — deliberately NOT folded into
+ *  {@link contentHashFor}, which must stay byte-identical to
+ *  `nodes.body_hash` for the staleness join in queries-metadata.ts. A bump
+ *  makes every existing summary a cache-miss so the next pass re-summarises
+ *  with the new prompt. */
+const SUMMARY_PROMPT_VERSION = 2;
+
+/** Symbol-summary cache-key model label: the configured model plus the
+ *  prompt version. File / directory summaries use their own prompts and
+ *  keep the bare model label. */
+function summaryModelLabel(model: string): string {
+  return `${model}@sp${SUMMARY_PROMPT_VERSION}`;
+}
+
+/** Identity/context lines surfaced above the body so the model anchors on
+ *  the symbol's signature + docstring instead of re-deriving them from the
+ *  raw source — small models under-weight the declaration line (the
+ *  strict/unsigned-collapse regression). The NAME is supplied by each
+ *  caller's header line. A present docstring (long ones skip summarisation)
+ *  is an authoritative hint; whitespace-collapsed and length-capped so the
+ *  per-symbol turn stays small and the constant system prompt remains the
+ *  reused KV-cache prefix. */
+function summarySymbolContextLines(sym: Node): string[] {
+  const lines: string[] = [];
+  // Cap + whitespace-collapse both fields so a pathological signature
+  // (deep generics, long parameter lists) or docstring can't blow up the
+  // per-symbol turn and erode the shared system-prompt KV-cache prefix.
+  if (sym.signature) lines.push(`signature: ${sym.signature.replaceAll(/\s+/g, ' ').slice(0, 200)}`);
+  const doc = sym.docstring?.trim();
+  if (doc) lines.push(`doc: ${doc.replaceAll(/\s+/g, ' ').slice(0, 200)}`);
+  return lines;
+}
 
 /**
  * Per-symbol user message — the variable half of the summary prompt.
@@ -227,7 +265,13 @@ const SUMMARY_SYSTEM_PROMPT = [
  * call's JSON parse fails.
  */
 export function buildSummaryUserPrompt(sym: Node, body: string): string {
-  return [`Summarise this ${sym.kind}:`, '```', body, '```'].join('\n');
+  return [
+    `Summarise this ${sym.kind} named "${sym.name}":`,
+    ...summarySymbolContextLines(sym),
+    '```',
+    body,
+    '```',
+  ].join('\n');
 }
 
 /**
@@ -239,7 +283,13 @@ export function buildSummaryUserPrompt(sym: Node, body: string): string {
  */
 function buildBatchPrompt(items: Array<{ sym: Node; body: string }>): string {
   const blocks = items.map((it, i) => {
-    return [`### ${i}. ${it.sym.name} (${it.sym.kind})`, '```', it.body, '```'].join('\n');
+    return [
+      `### ${i}. ${it.sym.name} (${it.sym.kind})`,
+      ...summarySymbolContextLines(it.sym),
+      '```',
+      it.body,
+      '```',
+    ].join('\n');
   });
   return [
     'You are a senior code reviewer documenting an unfamiliar codebase.',
@@ -247,6 +297,7 @@ function buildBatchPrompt(items: Array<{ sym: Node; body: string }>): string {
     `Write a SINGLE LINE summary (max ${MAX_SUMMARY_CHARS} chars) for EACH symbol below.`,
     'For function/method/route/component: start with a present-tense verb (Returns, Computes, Sends, …).',
     'For class/interface/type_alias/struct/enum: start with "Represents", "Models", "Defines", "Holds", or the noun.',
+    "Anchor on each symbol's name + signature and preserve distinguishing qualifiers (strict, unsigned, async, …) so near-identical symbols get distinct summaries.",
     'Never start with "Initiates", "The X", "This X", "Interface", "Class", or a gerund.',
     'No markdown, no quotes.',
     '',
@@ -536,7 +587,11 @@ interface SummarizerInputs {
 }
 
 export async function summarizeAll(inputs: SummarizerInputs): Promise<SummarizerResult> {
-  return new SummarizerRun(inputs).run();
+  // Version the model label so a SUMMARY_PROMPT_VERSION bump is a cache-miss
+  // that re-summarises (the prompt + per-symbol context-prep are NOT part of
+  // contentHashFor — see SUMMARY_PROMPT_VERSION). Applied centrally here so
+  // every caller (background phase + `admin summarize`) shares one label.
+  return new SummarizerRun({ ...inputs, modelLabel: summaryModelLabel(inputs.modelLabel) }).run();
 }
 
 type PendingItem = { sym: Node; body: string; hash: string };
@@ -604,13 +659,27 @@ function summaryTryServeFromCache(ctx: SummarizerCallContext, sym: Node, hash: s
   }
   const byHash = getSummaryByContentHash(queries, hash, modelLabel);
   if (byHash) {
-    const wrote = upsertSymbolSummary({
-      qb: queries,
-      nodeId: sym.id,
-      contentHash: hash,
-      summary: byHash.summary,
-      model: modelLabel,
-    });
+    let wrote: boolean;
+    try {
+      wrote = withSqliteBusyRetry(() =>
+        upsertSymbolSummary({
+          qb: queries,
+          nodeId: sym.id,
+          contentHash: hash,
+          summary: byHash.summary,
+          model: modelLabel,
+        }),
+      );
+    } catch (err) {
+      // D (issues #15/#16): a transient lock on the cache re-pin must not abort
+      // the pass. No LLM work is at stake here, so fall through (return false)
+      // and let the node be re-processed on the next pass.
+      logDebug('Summarizer: cache re-pin failed under DB contention, deferring', {
+        node: sym.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
     if (wrote) {
       counters.cacheHits++;
     } else {
@@ -656,41 +725,60 @@ function summaryReadBodyLines(fileContentCache: Map<string, string[] | null>, pr
  * synthesised — the next sync retries.
  */
 /**
- * Apply the successfully parsed batch summaries to the DB,
- * updating counters and emitting progress for each item.
+ * Persist one generated summary: reject stubs, then upsert under a bounded
+ * busy-retry. A DB-write error that outlasts the retry is isolated — counted
+ * as an error, never propagated — so one locked row can't abort the whole
+ * pass (issues #15/#16). Counts generated/errors; the caller owns
+ * done/progress. Shared by the batch and single-item paths.
  */
-function summaryApplyBatchResults(ctx: SummarizerCallContext, batch: PendingItem[], parsed: Map<number, string>): void {
-  const { counters, queries, modelLabel, total, options } = ctx;
-  for (let i = 0; i < batch.length; i++) {
-    const item = batch[i]!;
-    const summary = parsed.get(i);
-    if (summary && summary.length > 0) {
-      // Stub-pattern filter: LLMs lacking enough context (forward declarations,
-      // .h files) produce "Abstract function: foo" / "Abstract class: Bar"
-      // with no real content. Skip the upsert — absorbed by the skipped
-      // derivation, same as the stale-handle no-op below.
-      if (STUB_SUMMARY_PATTERN.test(summary)) {
-        logWarn('Summarizer: stub summary rejected', { node: item.sym.id, kind: 'stub-rejected' });
-      } else if (
-        // Stale-handle race: the upsert no-ops if the node was deleted
-        // mid-flight; don't increment generated OR errors — the
-        // skipped derivation in the caller absorbs it.
+function summaryPersistItem(ctx: SummarizerCallContext, item: PendingItem, summary: string): void {
+  const { counters, queries, modelLabel } = ctx;
+  // Stub-pattern filter: LLMs lacking enough context (forward declarations,
+  // .h files) produce "Abstract function: foo" with no real content. Skip
+  // the upsert — absorbed by the caller's skipped derivation.
+  if (STUB_SUMMARY_PATTERN.test(summary)) {
+    logWarn('Summarizer: stub summary rejected', { node: item.sym.id, kind: 'stub-rejected' });
+    return;
+  }
+  try {
+    // Stale-handle race: the upsert no-ops if the node was deleted mid-flight.
+    if (
+      withSqliteBusyRetry(() =>
         upsertSymbolSummary({
           qb: queries,
           nodeId: item.sym.id,
           contentHash: item.hash,
           summary: truncateSummary(summary),
           model: modelLabel,
-        })
-      ) {
-        counters.generated++;
-        // Demand-driven priority queue: this node was either explicitly
-        // requested by an intent-search miss or just happened to be next
-        // anyway. Either way, the "needs summarising" signal is now
-        // satisfied — drop the queue entry. No-op when the node wasn't
-        // queued.
-        clearPriorityQueueForNode(queries, item.sym.id);
-      }
+        }),
+      )
+    ) {
+      counters.generated++;
+      clearPriorityQueueForNode(queries, item.sym.id);
+    }
+  } catch (err) {
+    // D (issues #15/#16): a transient lock that outlasts the retry must NOT
+    // abort the pass — count it and move on; the symbol re-summarises next
+    // pass (content-hash cache miss).
+    logWarn('Summarizer: persist failed under DB contention, skipping symbol', {
+      node: item.sym.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    counters.errors++;
+  }
+}
+
+/**
+ * Apply the successfully parsed batch summaries to the DB,
+ * updating counters and emitting progress for each item.
+ */
+function summaryApplyBatchResults(ctx: SummarizerCallContext, batch: PendingItem[], parsed: Map<number, string>): void {
+  const { counters, queries, total, options } = ctx;
+  for (let i = 0; i < batch.length; i++) {
+    const item = batch[i]!;
+    const summary = parsed.get(i);
+    if (summary && summary.length > 0) {
+      summaryPersistItem(ctx, item, summary);
     } else {
       // Empty / whitespace-only response from the LLM for this batch
       // entry. Log it so the operator has a per-node breadcrumb when
@@ -751,7 +839,7 @@ async function summaryTryBatchSummarize(ctx: SummarizerCallContext, batch: Pendi
  * Per-item summary generation via the chat backend.
  */
 async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingItem): Promise<void> {
-  const { counters, queries, client, modelLabel, total, options } = ctx;
+  const { counters, queries, client, total, options } = ctx;
   if (options.signal?.aborted) return;
 
   let summary: string | null = null;
@@ -796,22 +884,11 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
     if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
       logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
     }
-  } else if (STUB_SUMMARY_PATTERN.test(summary)) {
-    // Stub-pattern filter: same skip logic as the batch path.
-    logWarn('Summarizer: stub summary rejected', { node: item.sym.id, kind: 'stub-rejected' });
-  } else if (
-    upsertSymbolSummary({
-      qb: queries,
-      nodeId: item.sym.id,
-      contentHash: item.hash,
-      summary: truncateSummary(summary),
-      model: modelLabel,
-    })
-  ) {
-    counters.generated++;
-    clearPriorityQueueForNode(queries, item.sym.id);
+  } else {
+    summaryPersistItem(ctx, item, summary);
   }
-  // else: stale-handle no-op, derived `skipped` accounts for it.
+  // STUB rejection + stale-handle no-op are handled inside summaryPersistItem;
+  // the derived `skipped` count absorbs the no-ops.
 
   counters.done++;
   options.onProgress?.(counters.done, total);
