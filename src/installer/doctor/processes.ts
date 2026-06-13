@@ -37,7 +37,7 @@ export async function activeCartographProcessesCheck(projectPath: string): Promi
     status: 'ok',
     detail:
       `${rows.length} sibling Cartograph process${rows.length === 1 ? '' : 'es'} visible (${rendered}${suffix}). ` +
-      'If an admin/index command reports `database is locked`, stop or restart those MCP/hook/admin processes, then retry.',
+      'LLM passes (summarize/embed/classify) retry transient locks automatically; if a full `admin index`/`sync` reports `database is locked`, stop or restart those MCP/hook/admin processes, then retry.',
   };
 }
 

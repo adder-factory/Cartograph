@@ -122,6 +122,11 @@ cartograph llm smoke .
 Common backend choices are Ollama, llama-cpp `llama-server`, Apple MLX, LM
 Studio, vLLM, LocalAI, and cloud OpenAI-compatible providers.
 
+Changes to the `llm` section are picked up live: a running `cartograph serve
+--mcp` watches `.cartograph/config.json` and re-resolves on the next LLM tool
+call, so `cartograph admin llm-apply` (or a hand-edit by a separate process)
+takes effect without restarting the server.
+
 For cloud, two presets are first-class: `cloud-openai` (reads `OPENAI_API_KEY`
 from the environment) and `cloud-openrouter` (one key in front of hundreds of
 hosted models; set `OPENROUTER_API_KEY`, get one at <https://openrouter.ai/keys>).

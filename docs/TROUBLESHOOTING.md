@@ -183,6 +183,10 @@ configured backend or point `.cartograph/config.json` at a detected
 OpenAI-compatible backend such as Ollama, llama-cpp, Apple MLX, LM Studio,
 vLLM, LocalAI, or a cloud provider.
 
+A running `cartograph serve --mcp` re-reads `.cartograph/config.json` when it
+changes on disk, so applying a preset or repointing a provider takes effect on
+the next MCP LLM call — no server restart required.
+
 ## Indexing Looks Stale
 
 Run:
@@ -242,9 +246,18 @@ sentinel remain active.
 
 ## Database Lock Or Concurrent Process
 
-Doctor reports sibling MCP/admin/hook processes when it can detect them. If an
-admin/index command reports a database lock, stop or restart the sibling process
-and retry:
+Doctor reports sibling MCP/admin/hook processes when it can detect them.
+
+Long LLM enrichment passes — `admin summarize`, `admin embed`, and `admin
+classify` — are resilient to a concurrent writer (for example a `serve --mcp`
+auto-sync watcher committing mid-pass). Each write takes the SQLite write lock
+up front, retries a transient `database is locked` with backoff, and isolates a
+still-contended item by deferring it to the next pass instead of aborting the
+whole run.
+
+A full `cartograph admin index` (or `admin sync`) writes far more and can still
+lose to a busy sibling. If one reports a database lock, stop or restart the
+sibling process and retry:
 
 ```sh
 cartograph doctor .
