@@ -6,6 +6,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   getCoverageRanked,
   getCoverageStats,
+  getNodeCoverage,
   listCoverageSources,
   clearCoverageSource,
 } from '../src/db/queries-coverage.js';
@@ -14,6 +15,8 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { parseLcov, summariseSpan } from '../src/coverage/lcov.js';
+import { getCoverageReportPaths, removeCoverageReportPath } from '../src/coverage/index.js';
+import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 
 const byName = (a: string, b: string): number => a.localeCompare(b);
 
@@ -510,6 +513,223 @@ export function beta(x: number): number {
       expect(removed).toBeGreaterThan(0);
       const after = listCoverageSources(cg.queries);
       expect(after.map((s) => s.source)).toEqual(['unit']);
+    } finally {
+      cg.close();
+    }
+  });
+});
+
+// ─── #17: same-label reports union instead of clobber ──────────────────────
+describe('same-source-label coverage union (#17)', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = tempDir();
+  });
+  afterEach(() => cleanup(dir));
+
+  // Two functions, each fully covered by ONE of the two reports and
+  // only partially by the other — so loading both under the same label
+  // exercises BOTH conflict arms (keep-existing and replace-with-incoming).
+  const TWO_FN_SRC = [
+    'export function alpha(x: number): number {', // 1
+    '  if (x > 0) {', //                              2
+    '    return x;', //                               3
+    '  }', //                                          4
+    '  return -x;', //                                5
+    '}', //                                            6
+    '', //                                             7
+    'export function beta(y: number): number {', //   8
+    '  if (y > 0) {', //                               9
+    '    return y;', //                               10
+    '  }', //                                         11
+    '  return -y;', //                                12
+    '}', //                                           13
+    '',
+  ].join('\n');
+  // alpha exec lines 1,2,3,5 ; beta exec lines 8,9,10,12.
+  const REPORT_ALPHA_FULL = [
+    'SF:src/two.ts',
+    'DA:1,1',
+    'DA:2,1',
+    'DA:3,1',
+    'DA:5,1', // alpha 4/4
+    'DA:8,1',
+    'DA:9,1',
+    'DA:10,1',
+    'DA:12,0', // beta 3/4
+    'end_of_record',
+  ].join('\n');
+  const REPORT_BETA_FULL = [
+    'SF:src/two.ts',
+    'DA:1,1',
+    'DA:2,1',
+    'DA:3,1',
+    'DA:5,0', // alpha 3/4
+    'DA:8,1',
+    'DA:9,1',
+    'DA:10,1',
+    'DA:12,1', // beta 4/4
+    'end_of_record',
+  ].join('\n');
+
+  function writeTwoFnProject(): void {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'two.ts'), TWO_FN_SRC);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-union', version: '0.0.0' }));
+  }
+  function rankedByName(cg: Cartograph): Map<string, ReturnType<typeof getCoverageRanked>[number]> {
+    return new Map(getCoverageRanked(cg.queries, { kinds: ['function'], limit: 10 }).map((r) => [r.name, r]));
+  }
+
+  it('max-merges multiple reports sharing one source label (keep + replace)', async () => {
+    writeTwoFnProject();
+    const aPath = path.join(dir, 'a.info');
+    const bPath = path.join(dir, 'b.info');
+    fs.writeFileSync(aPath, REPORT_ALPHA_FULL);
+    fs.writeFileSync(bPath, REPORT_BETA_FULL);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      // Both loads use the DEFAULT source label — exactly the monorepo
+      // collision that produced false positives before the fix.
+      await cg.ingestCoverage(aPath); // alpha 100%, beta 75%
+      await cg.ingestCoverage(bPath); // alpha 75%, beta 100%
+
+      const byName = rankedByName(cg);
+      // alpha: existing 100% kept against incoming 75% (keep arm).
+      expect(byName.get('alpha')!.pct).toBe(1);
+      // beta: existing 75% replaced by incoming 100% (replace arm).
+      expect(byName.get('beta')!.pct).toBe(1);
+      // Collapsed under ONE label, not two.
+      expect(getCoverageStats(cg.queries).sources).toEqual(['lcov']);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('a thin 100% report does not shrink a fuller report under the same label (tie-break)', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(
+      path.join(dir, 'src', 'g.ts'),
+      [
+        'export function gamma(x: number): number {',
+        '  const a = x + 1;',
+        '  const b = a + 1;',
+        '  return b;',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-tiebreak', version: '0.0.0' }));
+    // gamma exec lines 1,2,3,4.
+    const full = ['SF:src/g.ts', 'DA:1,1', 'DA:2,1', 'DA:3,1', 'DA:4,1', 'end_of_record'].join('\n');
+    const thin = ['SF:src/g.ts', 'DA:1,1', 'end_of_record'].join('\n'); // 1/1, also 100%
+    const fullPath = path.join(dir, 'full.info');
+    const thinPath = path.join(dir, 'thin.info');
+    fs.writeFileSync(fullPath, full);
+    fs.writeFileSync(thinPath, thin);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      await cg.ingestCoverage(fullPath);
+      const fullTotal = getCoverageRanked(cg.queries, { kinds: ['function'], limit: 10 })[0]!.totalLines;
+      expect(fullTotal).toBeGreaterThan(1);
+
+      // Thin report is also 100% but over fewer lines — must NOT replace
+      // the fuller view just because the fractions tie.
+      await cg.ingestCoverage(thinPath);
+      expect(getCoverageRanked(cg.queries, { kinds: ['function'], limit: 10 })[0]!.totalLines).toBe(fullTotal);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('coverage-reapply re-unions every report under a label after a sync re-extracts a file', async () => {
+    writeTwoFnProject();
+    const aPath = path.join(dir, 'a.info');
+    const bPath = path.join(dir, 'b.info');
+    fs.writeFileSync(aPath, REPORT_ALPHA_FULL);
+    fs.writeFileSync(bPath, REPORT_BETA_FULL);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      await cg.ingestCoverage(aPath);
+      await cg.ingestCoverage(bPath);
+      expect(rankedByName(cg).get('alpha')!.pct).toBe(1);
+
+      // Edit alpha's body without shifting line numbers → fresh node id,
+      // its node_coverage row cascade-deletes on re-extraction.
+      const srcPath = path.join(dir, 'src', 'two.ts');
+      fs.writeFileSync(srcPath, TWO_FN_SRC.replace('return -x;', 'return 0 - x;'));
+      const sync = await cg.sync();
+      expect(sync.filesModified).toBe(1);
+
+      // Both reports were persisted under the label, so reapply re-unions
+      // them — alpha stays 100%. With only the LAST path persisted it
+      // would erode to report B's 75%.
+      const byName = rankedByName(cg);
+      expect(byName.get('alpha')!.pct).toBe(1);
+      expect(byName.get('beta')!.pct).toBe(1);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('dropping a source forgets its report paths so a later sync does not resurrect it', async () => {
+    writeTwoFnProject();
+    const aPath = path.join(dir, 'a.info');
+    fs.writeFileSync(aPath, REPORT_ALPHA_FULL);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      await cg.ingestCoverage(aPath);
+      expect(getCoverageStats(cg.queries).symbolsWithCoverage).toBeGreaterThan(0);
+
+      // Simulate `mode: 'drop'`: clear the rows AND forget the path.
+      clearCoverageSource(cg.queries, 'lcov');
+      removeCoverageReportPath(cg.queries, 'lcov');
+      expect(getCoverageStats(cg.queries).symbolsWithCoverage).toBe(0);
+
+      // A sync that re-extracts a file must NOT bring coverage back.
+      fs.writeFileSync(path.join(dir, 'src', 'two.ts'), TWO_FN_SRC.replace('return -x;', 'return 0 - x;'));
+      const sync = await cg.sync();
+      expect(sync.filesModified).toBe(1);
+      expect(getCoverageStats(cg.queries).symbolsWithCoverage).toBe(0);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('getCoverageReportPaths promotes the legacy single-string shape to a list', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function f(): number { return 1; }\n');
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-legacy', version: '0.0.0' }));
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      // Pre-fix DBs stored `{ [source]: absPath }` (a bare string).
+      setMetadata(
+        cg.queries,
+        'coverage_report_paths',
+        JSON.stringify({ lcov: '/abs/legacy.info', unit: '/abs/unit.info' }),
+      );
+      expect(getCoverageReportPaths(cg.queries)).toEqual({
+        lcov: ['/abs/legacy.info'],
+        unit: ['/abs/unit.info'],
+      });
+      // And a fresh append on top of the legacy value yields a list.
+      const reportPath = path.join(dir, 'fresh.info');
+      fs.writeFileSync(reportPath, ['SF:src/a.ts', 'DA:1,1', 'end_of_record'].join('\n'));
+      await cg.ingestCoverage(reportPath, { source: 'lcov' });
+      const paths = getCoverageReportPaths(cg.queries);
+      expect(paths['lcov']).toContain('/abs/legacy.info');
+      expect(paths['lcov']).toContain(reportPath);
+      expect(getMetadata(cg.queries, 'coverage_report_paths')).toBeTruthy();
     } finally {
       cg.close();
     }

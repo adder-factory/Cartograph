@@ -63,6 +63,35 @@ const NoParams = z.object({});
 
 // ─── Typed query definitions ──────────────────────────────────────────────
 
+// Max-merge predicate for a `(node_id, source)` conflict: is the
+// INCOMING row a better view of this symbol than the EXISTING one?
+// "Better" = strictly higher covered-line fraction, or — on an exact
+// fraction tie — the more complete view (more executable lines seen).
+// Both denominators are guaranteed > 0 (zero-span rows are skipped
+// before upsert; see applyFileCoverage), so cross-multiplying the two
+// fractions is safe and sign-preserving — no division, no
+// divide-by-zero. Bare column names are the existing row; `excluded.*`
+// is the row that would have been inserted.
+//
+// Rationale: multiple lcov reports can legitimately feed one source
+// label — sharded test runs, or several monorepo workspaces each
+// exercising a shared file from a different angle. Last-write-wins let
+// a partial, incidental view (e.g. an importing workspace that only
+// hits one OS branch) clobber a full-coverage view from the owning
+// workspace, producing false positives in `mode: ranked`. Keeping the
+// better-coverage row instead gives lcov union-by-symbol semantics.
+// (#17) The fold is order-independent: it converges to the row with
+// the maximum (fraction, total_lines) regardless of ingest order.
+const COVERAGE_INCOMING_BETTER =
+  'excluded.covered_lines * total_lines > covered_lines * excluded.total_lines ' +
+  'OR (excluded.covered_lines * total_lines = covered_lines * excluded.total_lines ' +
+  'AND excluded.total_lines > total_lines)';
+
+/** SET clause that keeps the winning row's columns coherent (lines,
+ *  branches, and timestamp all come from whichever report wins). */
+const coverageConflictSet = (col: string): string =>
+  `${col} = CASE WHEN ${COVERAGE_INCOMING_BETTER} THEN excluded.${col} ELSE ${col} END`;
+
 const upsertNodeCoverageQuery = defineQuery({
   sql: `INSERT INTO node_coverage
        (node_id, source, covered_lines, total_lines,
@@ -70,11 +99,11 @@ const upsertNodeCoverageQuery = defineQuery({
      VALUES (@nodeId, @source, @coveredLines, @totalLines,
              @coveredBranches, @totalBranches, @ingestedAt)
      ON CONFLICT(node_id, source) DO UPDATE SET
-       covered_lines    = excluded.covered_lines,
-       total_lines      = excluded.total_lines,
-       covered_branches = excluded.covered_branches,
-       total_branches   = excluded.total_branches,
-       ingested_at      = excluded.ingested_at`,
+       ${coverageConflictSet('covered_lines')},
+       ${coverageConflictSet('total_lines')},
+       ${coverageConflictSet('covered_branches')},
+       ${coverageConflictSet('total_branches')},
+       ${coverageConflictSet('ingested_at')}`,
   params: UpsertNodeCoverageParamsSchema,
   row: z.never(),
 });
@@ -270,12 +299,25 @@ interface NodeCoverageRow {
 /**
  * Insert / update a `node_coverage` row.
  *
- * **Stale-row caveat**: re-running ingestion under the same source
- * key only touches symbols present in the new report. If a file is
- * excluded from a later run (renamed, scope narrowed), the previous
- * row stays in the table until the symbol is deleted. To force a
- * full refresh, either DELETE FROM node_coverage WHERE source = ?
- * before ingestion, or pass a fresh source key per run.
+ * **Max-merge on conflict**: when a `(node_id, source)` row already
+ * exists, the upsert keeps whichever row has the better coverage
+ * (higher covered-line fraction; ties broken toward the more complete
+ * view) rather than overwriting last-write-wins. This unions multiple
+ * reports that share a source label — sharded runs, or several
+ * monorepo workspaces exercising one shared file (#17). The branch
+ * counts and timestamp move together with the winning line numbers so
+ * a row never mixes columns from two reports.
+ *
+ * **Forcing a downward refresh**: because the merge only moves
+ * coverage *up*, re-ingesting a report whose coverage genuinely
+ * dropped will NOT lower an existing row. Pass `clearSource` (CLI
+ * `--clear` / MCP `clear: true`), or `clearCoverageSource` first, to
+ * drop the source's rows and re-ingest from scratch.
+ *
+ * **Stale-row caveat**: a plain re-run only touches symbols present in
+ * the new report. If a file is excluded from a later run (renamed,
+ * scope narrowed), its previous row stays until the symbol is deleted
+ * — `clearSource` clears those too.
  */
 export function upsertNodeCoverage(qb: QueryBuilder, row: NodeCoverageRow): void {
   qb.queries.upsertNodeCoverage ??= upsertNodeCoverageQuery(qb.db);

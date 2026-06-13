@@ -23,33 +23,54 @@ import type { SyncResult } from '../extraction/index.js';
 import { ingestCoverage, getCoverageReportPaths } from '../coverage/index.js';
 import { logDebug, errMsg } from '../errors.js';
 
+/** One persisted (source, report) pair to re-apply. */
+interface ReapplyJob {
+  source: string;
+  reportPath: string;
+}
+
 async function reapply(ctx: IndexHookContext): Promise<void> {
   const paths = getCoverageReportPaths(ctx.queries);
-  for (const [source, reportPath] of Object.entries(paths)) {
-    const reportExists = await fsp
-      .access(reportPath)
-      .then(() => true)
-      .catch(() => false);
-    if (!reportExists) {
-      logDebug(
-        `coverage-reapply: report for source '${source}' missing on disk ` +
-          `(${reportPath}); skipping — run cartograph_coverage load/refresh to re-point it`,
-      );
-      continue;
-    }
-    try {
-      // clearSource omitted (false): upsert is idempotent, and rows
-      // for symbols deleted by an edit are already cascade-gone, so a
-      // plain re-apply leaves no stale rows.
-      await ingestCoverage({
-        queries: ctx.queries,
-        projectRoot: ctx.projectRoot,
-        reportPath,
-        options: { source },
-      });
-    } catch (err) {
-      logDebug(`coverage-reapply: re-ingest of source '${source}' failed: ${errMsg(err)}`);
-    }
+  // Flatten to (source, reportPath) jobs in persisted (oldest-first)
+  // order. Each label can have several reports — sharded test runs, or
+  // monorepo workspaces each exercising a shared file. The upsert
+  // max-merges, so re-applying all of them reconstructs the same union
+  // the original loads produced (#17).
+  const jobs: ReapplyJob[] = Object.entries(paths).flatMap(([source, reportPaths]) =>
+    reportPaths.map((reportPath) => ({ source, reportPath })),
+  );
+  // Sequential by design: every ingest mutates the same DB and the
+  // max-merge is order-independent, so there is nothing to parallelize.
+  for (const { source, reportPath } of jobs) {
+    await reapplyReport(ctx, source, reportPath);
+  }
+}
+
+/** Re-ingest a single persisted report; best-effort, never throws. */
+async function reapplyReport(ctx: IndexHookContext, source: string, reportPath: string): Promise<void> {
+  const reportExists = await fsp
+    .access(reportPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!reportExists) {
+    logDebug(
+      `coverage-reapply: report for source '${source}' missing on disk ` +
+        `(${reportPath}); skipping — run cartograph_coverage load/refresh to re-point it`,
+    );
+    return;
+  }
+  try {
+    // clearSource omitted (false): upsert max-merges, and rows for
+    // symbols deleted by an edit are already cascade-gone, so a plain
+    // re-apply leaves no stale rows and unions all reports.
+    await ingestCoverage({
+      queries: ctx.queries,
+      projectRoot: ctx.projectRoot,
+      reportPath,
+      options: { source },
+    });
+  } catch (err) {
+    logDebug(`coverage-reapply: re-ingest of source '${source}' failed: ${errMsg(err)}`);
   }
 }
 
