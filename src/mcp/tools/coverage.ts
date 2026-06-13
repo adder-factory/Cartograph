@@ -15,6 +15,7 @@ import {
   listCoverageSources,
   clearCoverageSource,
 } from '../../db/queries-coverage.js';
+import { removeCoverageReportPath } from '../../coverage/index.js';
 import { handleCoverageLoad } from './_coverage-load.js';
 import { handleCoverageRefresh } from './_coverage-refresh.js';
 import { buildCoverageTips } from './_coverage-tips.js';
@@ -169,6 +170,10 @@ function handleCoverageDrop(cg: Cartograph, source: string | undefined): ToolOut
     return err(`No coverage source named \`${source}\` — nothing to drop.${names}`);
   }
   const removed = clearCoverageSource(cg.queries, source);
+  // Also forget the source's persisted report path(s), or the next
+  // sync's coverage-reapply hook would re-ingest them and resurrect the
+  // rows the user just dropped.
+  removeCoverageReportPath(cg.queries, source);
   return ok(textResult(`Dropped coverage source \`${source}\` — removed ${removed} row${removed === 1 ? '' : 's'}.`));
 }
 
@@ -459,6 +464,8 @@ const coverageSchema = z.object({
     .optional()
     .describe(
       '(mode=load) Label for this report (e.g. "unit", "e2e"); default "lcov". ' +
+        'Multiple reports loaded under the same label are unioned per symbol (max coverage wins), so a monorepo can either ' +
+        'load every workspace report under the default label or namespace each workspace (e.g. "server", "client") for per-workspace `stats`/`drop`. ' +
         '(mode=ranked / stats) Filter the read to one source; default unfiltered, picking the highest-coverage row per symbol. ' +
         '(mode=drop) REQUIRED — the source label whose rows are deleted.',
     ),

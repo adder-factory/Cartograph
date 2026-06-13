@@ -150,7 +150,16 @@ export async function ingestCoverage(args: IngestCoverageArgs): Promise<IngestRe
   // hook can re-derive `node_coverage` after a later sync re-extracts
   // files (re-extraction mints new node ids; the old nodes' coverage
   // rows cascade-delete, so without this the data silently erodes).
-  persistReportPath({ queries, projectRoot: args.projectRoot, source, reportPath });
+  // `replace` mirrors clearSource: a full refresh resets the source's
+  // report list to just this report; a plain load APPENDS so every
+  // report feeding one label is re-unioned after a sync (#17).
+  persistReportPath({
+    queries,
+    projectRoot: args.projectRoot,
+    source,
+    reportPath,
+    replace: options.clearSource === true,
+  });
 
   return { ...totals, durationMs: Date.now() - start };
 }
@@ -161,29 +170,34 @@ interface PersistReportPathArgs {
   projectRoot: string;
   source: string;
   reportPath: string;
+  /** When true (a clearSource refresh), reset the source's report list
+   *  to just this report instead of appending. */
+  replace: boolean;
 }
+
+/** Upper bound on report paths retained per source — generous for any
+ *  real monorepo (a handful of workspaces); drops the oldest beyond it
+ *  so the metadata value can't grow without bound under churn. */
+const MAX_REPORTS_PER_SOURCE = 64;
 
 /**
  * Record the absolute report path under the `coverage_report_paths`
- * metadata key — a `{ [source]: absPath }` JSON map keyed by source
- * label, so multiple coverage sources (unit / e2e) each survive.
+ * metadata key — a `{ [source]: absPath[] }` JSON map keyed by source
+ * label. Storing a LIST (not a single path) lets the coverage-reapply
+ * hook re-union every report that fed a label after a sync, so
+ * same-label multi-report coverage survives re-extraction (#17).
  * Best-effort: a failure here must never fail the ingest itself.
  */
 function persistReportPath(args: PersistReportPathArgs): void {
-  const { queries, projectRoot, source, reportPath } = args;
+  const { queries, projectRoot, source, reportPath, replace } = args;
   try {
     const abs = path.isAbsolute(reportPath) ? reportPath : path.resolve(projectRoot, reportPath);
-    const raw = getMetadata(queries, 'coverage_report_paths');
-    let map: Record<string, string> = {};
-    if (raw) {
-      try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (parsed && typeof parsed === 'object') map = parsed as Record<string, string>;
-      } catch {
-        // Corrupt value — overwrite with a fresh single-entry map.
-      }
-    }
-    map[source] = abs;
+    const map = readReportPathMap(queries);
+    const prior = replace ? [] : (map[source] ?? []);
+    // Dedup by abs path (re-loading the same report is idempotent), put
+    // the freshest last, then cap to the most recent N.
+    const next = [...prior.filter((p) => p !== abs), abs].slice(-MAX_REPORTS_PER_SOURCE);
+    map[source] = next;
     setMetadata(queries, 'coverage_report_paths', JSON.stringify(map));
   } catch (err) {
     logDebug('Coverage: persistReportPath failed', { err: String(err) });
@@ -191,20 +205,52 @@ function persistReportPath(args: PersistReportPathArgs): void {
 }
 
 /**
- * Read back the `{ [source]: absPath }` map persisted by
- * {@link persistReportPath}. Returns an empty map when coverage has
- * never been loaded or the stored value is unreadable.
+ * Forget every persisted report path for a source. Called when a
+ * source is dropped so a later sync's coverage-reapply doesn't
+ * resurrect rows the user explicitly removed. Best-effort.
  */
-export function getCoverageReportPaths(queries: QueryBuilder): Record<string, string> {
+export function removeCoverageReportPath(queries: QueryBuilder, source: string): void {
+  try {
+    const map = readReportPathMap(queries);
+    if (!(source in map)) return;
+    delete map[source];
+    setMetadata(queries, 'coverage_report_paths', JSON.stringify(map));
+  } catch (err) {
+    logDebug('Coverage: removeCoverageReportPath failed', { err: String(err) });
+  }
+}
+
+/**
+ * Read back the `{ [source]: absPath[] }` map persisted by
+ * {@link persistReportPath}. Returns an empty map when coverage has
+ * never been loaded or the stored value is unreadable. Tolerates the
+ * legacy `{ [source]: absPath }` single-string shape by promoting each
+ * value to a one-element array.
+ */
+export function getCoverageReportPaths(queries: QueryBuilder): Record<string, string[]> {
+  return readReportPathMap(queries);
+}
+
+/** Shared reader for the persisted map, normalising the legacy
+ *  single-string-per-source shape into the current list shape. */
+function readReportPathMap(queries: QueryBuilder): Record<string, string[]> {
   const raw = getMetadata(queries, 'coverage_report_paths');
   if (!raw) return {};
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === 'object') return parsed as Record<string, string>;
+    if (!parsed || typeof parsed !== 'object') return {};
+    const out: Record<string, string[]> = {};
+    for (const [source, value] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof value === 'string') {
+        out[source] = [value];
+      } else if (Array.isArray(value)) {
+        out[source] = value.filter((v): v is string => typeof v === 'string');
+      }
+    }
+    return out;
   } catch {
-    // fall through
+    return {};
   }
-  return {};
 }
 
 /**
