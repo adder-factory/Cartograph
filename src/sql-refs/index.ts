@@ -335,12 +335,13 @@ interface CollectSqlLineArgs {
  * {@link collectRefsForSqlLine} so the per-match guard chain doesn't
  * stack the line's cognitive complexity.
  */
-function acceptSqlMatch(
-  m: RegExpExecArray,
-  line: string,
-  pat: PatternDef,
-  seen: Set<string>,
-): { tableName: string; op: SqlOp } | null {
+function acceptSqlMatch(args: {
+  m: RegExpExecArray;
+  line: string;
+  pat: PatternDef;
+  seen: Set<string>;
+}): { tableName: string; op: SqlOp } | null {
+  const { m, line, pat, seen } = args;
   if (!isInsideString(line, m.index)) return null;
   if (pat.validateContinuation && !hasValidSqlTableContinuation(line, m.index + m[0].length)) return null;
   const name = extractTableName(m);
@@ -358,7 +359,7 @@ function collectRefsForSqlLine(args: CollectSqlLineArgs): void {
     pat.re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = pat.re.exec(line)) !== null) {
-      const hit = acceptSqlMatch(m, line, pat, seen);
+      const hit = acceptSqlMatch({ m, line, pat, seen });
       if (!hit) continue;
       refs.push({
         tableName: hit.tableName,
