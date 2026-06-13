@@ -9,7 +9,12 @@ import {
   fetchLatestPublishedVersion,
   renderUpgradeCheck,
 } from '../src/features/upgrade/index.js';
-import { detectInstallMethod, runSourceUpgrade } from '../src/features/upgrade/source-update.js';
+import {
+  canRepinBunGlobal,
+  detectInstallMethod,
+  runBunGlobalRepin,
+  runSourceUpgrade,
+} from '../src/features/upgrade/source-update.js';
 
 describe('upgrade feature', () => {
   it('compares semver-like versions', () => {
@@ -44,7 +49,53 @@ describe('upgrade feature', () => {
       latestVersion: '0.8.0',
       method: 'package',
     });
-    expect(packaged.nextSteps.join('\n')).toContain('package manager');
+    const packagedSteps = packaged.nextSteps.join('\n');
+    // The correct re-pin command, with the resolved version as the tag.
+    expect(packagedSteps).toContain('bun add -g github:adder-factory/cartograph#v0.8.0');
+    expect(packagedSteps).toContain('bun remove -g @adder-factory/cartograph');
+    // Cartograph isn't on npm — never suggest npm, and `bun update -g`
+    // can't move a pinned tag, so neither of the old footguns appears.
+    expect(packagedSteps).not.toContain('npm install');
+    expect(packagedSteps).not.toContain('bun update -g');
+  });
+
+  it('applies a package re-pin in place via the injected executor', async () => {
+    const seen: string[] = [];
+    const result = await checkUpgrade({
+      currentVersion: '0.7.2',
+      latestVersion: '0.8.0',
+      apply: true,
+      method: 'package',
+      applyPackage: (latestVersion) => {
+        seen.push(latestVersion);
+      },
+    });
+    expect(seen).toEqual(['0.8.0']);
+    expect(result.status).toBe('updated');
+    expect(result.applied).toBe(true);
+    expect(result.message).toContain('0.7.2 → 0.8.0');
+    // Restart is surfaced as a prominent warning (issue #13 risk).
+    expect(result.warning).toContain('Restart');
+    expect(result.warning).toContain('#13');
+  });
+
+  it('blocks (with manual steps) when the package re-pin throws', async () => {
+    const result = await checkUpgrade({
+      currentVersion: '0.7.2',
+      latestVersion: '0.8.0',
+      apply: true,
+      method: 'package',
+      applyPackage: () => {
+        throw new Error('network down');
+      },
+    });
+    expect(result.status).toBe('blocked');
+    expect(result.applied).toBe(false);
+    expect(result.message).toContain('network down');
+    const blockedSteps = result.nextSteps.join('\n');
+    expect(blockedSteps).toContain('bun add -g github:adder-factory/cartograph#v0.8.0');
+    // Fallback to the standalone installer when the re-pin keeps failing.
+    expect(blockedSteps).toContain('install.sh');
   });
 
   it('surfaces registry lookup failures as unknown status', async () => {
@@ -75,6 +126,90 @@ describe('install method detection', () => {
 
   it('returns unknown for unparseable module URLs', () => {
     expect(detectInstallMethod('not-a-url')).toEqual({ kind: 'unknown' });
+  });
+});
+
+describe('Bun-global re-pin (#1/#2 upgrade improvements)', () => {
+  let dir: string;
+  let pkgRoot: string;
+  beforeEach(() => {
+    // Mimic a Bun global: <global>/node_modules/@adder-factory/cartograph
+    // with the manifest at <global>/package.json pinning a GitHub tag.
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-upgrade-repin-'));
+    pkgRoot = path.join(dir, 'node_modules', '@adder-factory', 'cartograph');
+    fs.mkdirSync(pkgRoot, { recursive: true });
+    fs.writeFileSync(path.join(pkgRoot, 'package.json'), JSON.stringify({ name: '@adder-factory/cartograph' }));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  function writeManifest(spec: string): void {
+    fs.writeFileSync(
+      path.join(dir, 'package.json'),
+      JSON.stringify({ dependencies: { '@adder-factory/cartograph': spec } }),
+    );
+  }
+
+  it('detects a GitHub-tag Bun global as re-pinnable', () => {
+    writeManifest('github:adder-factory/cartograph#v1.0.5');
+    expect(canRepinBunGlobal(pkgRoot, dir)).toBe(true);
+  });
+
+  it('does NOT treat a non-GitHub spec or a missing manifest as re-pinnable', () => {
+    writeManifest('^1.0.0');
+    expect(canRepinBunGlobal(pkgRoot, dir)).toBe(false);
+    fs.rmSync(path.join(dir, 'package.json'));
+    expect(canRepinBunGlobal(pkgRoot, dir)).toBe(false);
+  });
+
+  it('rejects a project-LOCAL install even with a GitHub spec (reviewer R1 — no global clobber)', () => {
+    // A project that installs cartograph locally AND lists it with a
+    // GitHub spec must NOT qualify: `bun remove -g` would wipe the
+    // user's separate GLOBAL install. The package root is NOT under the
+    // (different) Bun global dir, so re-pin is refused.
+    writeManifest('github:adder-factory/cartograph#v1.0.5'); // <dir>/package.json = the "project"
+    const someOtherBunGlobal = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-other-global-'));
+    try {
+      expect(canRepinBunGlobal(pkgRoot, someOtherBunGlobal)).toBe(false);
+    } finally {
+      fs.rmSync(someOtherBunGlobal, { recursive: true, force: true });
+    }
+  });
+
+  it('removes then adds the new tag (the order that dodges the Bun dependency loop)', () => {
+    writeManifest('github:adder-factory/cartograph#v1.0.5');
+    const calls: string[][] = [];
+    runBunGlobalRepin('1.0.8', (args) => calls.push(args), dir);
+    expect(calls).toEqual([
+      ['remove', '-g', '@adder-factory/cartograph'],
+      ['add', '-g', 'github:adder-factory/cartograph#v1.0.8'],
+    ]);
+  });
+
+  it('rolls back to the previous spec when the add fails, then rethrows', () => {
+    writeManifest('github:adder-factory/cartograph#v1.0.5');
+    const calls: string[][] = [];
+    const runner = (args: string[]): void => {
+      calls.push(args);
+      if (args[0] === 'add' && args[2]?.includes('#v1.0.8')) throw new Error('add failed');
+    };
+    expect(() => runBunGlobalRepin('1.0.8', runner, dir)).toThrow('add failed');
+    // remove → add(new, throws) → add(previous spec, rollback)
+    expect(calls.some((c) => c[0] === 'remove')).toBe(true);
+    expect(calls.some((c) => c[0] === 'add' && c[2] === 'github:adder-factory/cartograph#v1.0.5')).toBe(true);
+  });
+
+  it('skips rollback (no double-add) when no previous spec is found, still rethrows', () => {
+    // No <dir>/package.json → previousSpec is null. The remove + failed
+    // add still run; rollback is a no-op (reviewer R4 edge).
+    const calls: string[][] = [];
+    const runner = (args: string[]): void => {
+      calls.push(args);
+      if (args[0] === 'add') throw new Error('add failed');
+    };
+    expect(() => runBunGlobalRepin('1.0.8', runner, dir)).toThrow('add failed');
+    expect(calls.filter((c) => c[0] === 'add')).toHaveLength(1); // no rollback re-add
   });
 });
 

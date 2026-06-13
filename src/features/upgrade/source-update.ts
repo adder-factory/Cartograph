@@ -14,20 +14,24 @@
  */
 import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isBunStandalonePath } from '../../bun-standalone.js';
 import { errMsg } from '../../errors.js';
 import { gitWorktreeRoot, hasUncommittedChanges } from '../../git-utils.js';
-import type { UpgradeCheckResult } from './runtime.js';
+import {
+  CARTOGRAPH_PACKAGE_NAME as PKG,
+  GITHUB_INSTALL_REF,
+  RESTART_STEP,
+  type UpgradeCheckResult,
+} from './runtime.js';
 
 export type InstallMethod =
   | { kind: 'source'; root: string }
   | { kind: 'standalone' }
   | { kind: 'package'; root: string }
   | { kind: 'unknown' };
-
-const CARTOGRAPH_PACKAGE_NAME = '@adder-factory/cartograph';
 
 const GIT_OUTPUT_MAX_BUFFER_BYTES = 16 * 1024 * 1024;
 
@@ -44,8 +48,6 @@ const GIT_FETCH_TIMEOUT_MS = 120_000;
 
 /** `bun install` may download packages and rebuild native deps. */
 const INSTALL_TIMEOUT_MS = 600_000;
-
-const RESTART_STEP = 'Restart any running MCP server/client sessions so they load the updated code.';
 
 /**
  * Classify how the running Cartograph was installed, from the on-disk
@@ -67,6 +69,98 @@ export function detectInstallMethod(moduleUrl: string = import.meta.url): Instal
   const worktree = gitWorktreeRoot(packageRoot);
   if (worktree && worktree === realpathOrSelf(packageRoot)) return { kind: 'source', root: packageRoot };
   return { kind: 'package', root: packageRoot };
+}
+
+/**
+ * Bun's global install directory: `$BUN_INSTALL/install/global` (default
+ * `~/.bun/install/global`). Its `package.json` is the global manifest and
+ * `node_modules/` holds the installed packages.
+ */
+function bunGlobalInstallDir(): string {
+  const bunInstall = process.env['BUN_INSTALL']?.trim() || path.join(os.homedir(), '.bun');
+  return path.join(bunInstall, 'install', 'global');
+}
+
+/** The cartograph dependency spec recorded in `<globalDir>/package.json`
+ *  (e.g. `github:adder-factory/cartograph#v1.0.5`), or null. */
+function readBunGlobalSpec(globalDir: string): string | null {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(path.join(globalDir, 'package.json'), 'utf-8')) as {
+      dependencies?: Record<string, unknown>;
+    };
+    const spec = parsed.dependencies?.[PKG];
+    return typeof spec === 'string' && spec.trim() !== '' ? spec.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True only when `packageRoot` is the cartograph install UNDER Bun's
+ * global `node_modules` AND that global manifest pins a GitHub ref — the
+ * one shape `--apply` can re-pin in place.
+ *
+ * The bun-global-directory constraint is load-bearing: re-pinning runs
+ * `bun remove -g`, which only ever touches the GLOBAL install. A
+ * project-LOCAL install whose own `package.json` happens to list
+ * cartograph with a GitHub spec must NOT qualify, or `--apply` from that
+ * local binary would silently clobber the user's separate global
+ * cartograph (reviewer R1).
+ */
+export function canRepinBunGlobal(packageRoot: string, globalDir: string = bunGlobalInstallDir()): boolean {
+  const globalNodeModules = realpathOrSelf(path.join(globalDir, 'node_modules'));
+  const root = realpathOrSelf(packageRoot);
+  if (root !== globalNodeModules && !root.startsWith(globalNodeModules + path.sep)) return false;
+  const spec = readBunGlobalSpec(globalDir);
+  return spec !== null && spec.startsWith(GITHUB_INSTALL_REF);
+}
+
+/** Injectable Bun runner (tests pass a recorder). */
+export type BunGlobalRunner = (args: string[]) => void;
+
+function defaultBunGlobalRun(args: string[]): void {
+  // Under Bun, execPath IS the bun binary; PATH fallback for non-Bun harnesses.
+  const bun = process.versions.bun ? process.execPath : 'bun';
+  execFileSync(bun, args, {
+    encoding: 'utf-8',
+    timeout: INSTALL_TIMEOUT_MS,
+    maxBuffer: GIT_OUTPUT_MAX_BUFFER_BYTES,
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+}
+
+/**
+ * Re-pin the Bun global install to `#v<latestVersion>`. Remove first —
+ * `bun add -g` over an existing tag of the same package raises a Bun
+ * `DependencyLoop` — then add the new tag. If the add fails, best-effort
+ * restore the previous spec so the user isn't left with no cartograph,
+ * then rethrow. Throws on failure (the caller maps it to `blocked`).
+ */
+export function runBunGlobalRepin(
+  latestVersion: string,
+  runBun: BunGlobalRunner = defaultBunGlobalRun,
+  globalDir: string = bunGlobalInstallDir(),
+): void {
+  const previousSpec = readBunGlobalSpec(globalDir);
+  runBun(['remove', '-g', PKG]);
+  try {
+    runBun(['add', '-g', `${GITHUB_INSTALL_REF}#v${latestVersion}`]);
+  } catch (addError) {
+    bestEffortReadd(runBun, previousSpec);
+    throw addError;
+  }
+}
+
+/** Best-effort restore of a previous install spec after a failed add, so
+ *  a failed re-pin doesn't leave the user with no cartograph. Swallows
+ *  its own error — the caller rethrows the ORIGINAL add failure. */
+function bestEffortReadd(runBun: BunGlobalRunner, previousSpec: string | null): void {
+  if (!previousSpec) return;
+  try {
+    runBun(['add', '-g', previousSpec]);
+  } catch {
+    /* rollback is best-effort; the original add failure is what matters */
+  }
 }
 
 export interface RunSourceUpgradeOptions {
@@ -410,7 +504,7 @@ function runBunInstall(root: string): void {
 function findOwnPackageRoot(startDir: string): string | null {
   let dir = path.resolve(startDir);
   for (;;) {
-    if (readPackageName(path.join(dir, 'package.json')) === CARTOGRAPH_PACKAGE_NAME) return dir;
+    if (readPackageName(path.join(dir, 'package.json')) === PKG) return dir;
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
