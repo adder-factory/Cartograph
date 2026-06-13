@@ -54,4 +54,20 @@ describe('isFrameworkConventionExport', () => {
     expect(isFrameworkConventionExport('src/instrumentation.ts', 'middleware')).toBe(false);
     expect(isFrameworkConventionExport('src/instrumentation.ts', 'onRequestError')).toBe(true);
   });
+
+  it('exempts TanStack Router `Route` exports under routes/ (issue #12)', () => {
+    // Consumed only by the generated routeTree.gen.ts, which is often
+    // kept out of the index — so the export reads as falsely unused.
+    expect(isFrameworkConventionExport('apps/client/src/routes/index.tsx', 'Route')).toBe(true);
+    expect(isFrameworkConventionExport('src/routes/__root.tsx', 'Route')).toBe(true);
+    expect(isFrameworkConventionExport('src/routes/posts/$postId.tsx', 'Route')).toBe(true);
+    expect(isFrameworkConventionExport('routes/about.ts', 'Route')).toBe(true);
+  });
+
+  it('does NOT exempt non-Route exports or Route outside routes/ (issue #12 scope)', () => {
+    // Only the `Route` convention name under routes/ is exempted.
+    expect(isFrameworkConventionExport('src/routes/index.tsx', 'helper')).toBe(false);
+    expect(isFrameworkConventionExport('src/components/Route.tsx', 'Route')).toBe(false);
+    expect(isFrameworkConventionExport('src/myroutes/index.tsx', 'Route')).toBe(false);
+  });
 });
