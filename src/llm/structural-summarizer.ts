@@ -24,10 +24,11 @@ import * as path from 'node:path';
 import type { Node } from '../types.js';
 import { type QueryBuilder, type NodeRow, rowToNode } from '../db/queries.js';
 import { getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';
+import { withSqliteBusyRetry } from '../utils-concurrency.js';
 import { getOutgoingEdges } from '../db/queries-edges.js';
 import { SUMMARIZABLE_KINDS, contentHashFor, MIN_BODY_LINES } from './summarizer.js';
 import { validatePathWithinRootReal } from '../utils.js';
-import { logDebug } from '../errors.js';
+import { logDebug, logWarn } from '../errors.js';
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -497,20 +498,27 @@ function applyPatternAndWrite(ctx: PhaseCtx, sym: Node, hash: string): void {
     return;
   }
 
-  const wrote = upsertSymbolSummary({
-    qb: queries,
-    nodeId: sym.id,
-    contentHash: hash,
-    summary,
-    model: STRUCTURAL_MODEL,
-  });
+  let wrote = false;
+  try {
+    wrote = withSqliteBusyRetry(() =>
+      upsertSymbolSummary({ qb: queries, nodeId: sym.id, contentHash: hash, summary, model: STRUCTURAL_MODEL }),
+    );
+  } catch (err) {
+    // D (issues #15/#16): a transient lock is non-fatal here — leave `wrote`
+    // false so it's counted as skipped and re-summarised on the next pass. Warn
+    // (not debug) so persistent contention is visible amid no-match skips.
+    logWarn('StructuralSummariser: persist failed under DB contention, deferring', {
+      id: sym.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   if (wrote) {
     tally.generated++;
   } else {
-    // Stale-handle race: node deleted between enumeration and write.
-    // Don't bump `errors` (it's not an error semantically); count as
-    // `skipped` so candidates = generated + skipped + preserved holds.
+    // Stale-handle race OR a transient lock: not an error semantically — count
+    // as `skipped` (candidates = generated + skipped + preserved holds;
+    // re-summarised next pass).
     tally.skipped++;
   }
 
