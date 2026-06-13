@@ -40,6 +40,7 @@ import {
   tsExtractEnum,
   tsExtractProperty,
   tsExtractField,
+  collectFunctionMetadata,
 } from './ts-extract-declarations.js';
 
 // Re-export for backward compatibility
@@ -651,6 +652,7 @@ function tsParseAndWalk(
 function tsMakeExtractorContext(ext: TreeSitterExtractor): ExtractorContext {
   return {
     createNode: (args) => ext.createNode(args),
+    collectFunctionMetadata: (node, opts) => collectFunctionMetadata(ext, node, opts ?? { isExported: true }),
     visitNode: (node) => ext.visitNode(node),
     visitFunctionBody: (body, functionId) => tsVisitFunctionBody(ext, body, functionId),
     addUnresolvedReference: (ref) => ext.unresolvedReferences.push(ref),

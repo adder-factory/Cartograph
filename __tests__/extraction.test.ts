@@ -329,11 +329,30 @@ export function ProfileCard() {
     const result = extractFromSource('ProfileCard.tsx', code);
     const component = result.nodes.find((n) => n.kind === 'component' && n.name === 'ProfileCard');
     expect(component).toBeDefined();
+    // Issue #9 — components must carry the same metadata as the plain
+    // function path, not land with isExported=false / no signature.
+    expect(component?.isExported).toBe(true);
+    expect(component?.signature).toBeDefined();
     expect(result.nodes.find((n) => n.kind === 'function' && n.name === 'ProfileCard')).toBeUndefined();
     const formatRef = result.unresolvedReferences.find(
       (ref) => ref.fromNodeId === component?.id && ref.referenceName === 'formatTitle' && ref.referenceKind === 'calls',
     );
     expect(formatRef).toBeDefined();
+  });
+
+  it('populates isExported/docstring/signature for `export default function` components (issue #9)', () => {
+    const code = `
+/** Page-level header shown on every route. */
+export default function Header(): JSX.Element {
+  return <header>Cartograph</header>;
+}
+`;
+    const result = extractFromSource('Header.tsx', code);
+    const component = result.nodes.find((n) => n.kind === 'component' && n.name === 'Header');
+    expect(component).toBeDefined();
+    expect(component?.isExported).toBe(true);
+    expect(component?.docstring).toContain('Page-level header');
+    expect(component?.signature).toBeDefined();
   });
 
   it('should extract interfaces', () => {
