@@ -259,7 +259,7 @@ const SQL_CLAUSE_KEYWORDS =
 // either directly (`FROM users WHERE …`) or after a single one-word
 // table alias (`FROM users u WHERE …`). `\x60` is the backtick.
 const SQL_TABLE_TAIL = String.raw`\s*(?:$|[,;)('"\x60]|\b${SQL_CLAUSE_KEYWORDS}\b)`;
-const SQL_TABLE_CONTINUATION_RE = new RegExp(`^(?:${SQL_TABLE_TAIL}|\\s+[A-Za-z_]\\w*${SQL_TABLE_TAIL})`, 'i');
+const SQL_TABLE_CONTINUATION_RE = new RegExp(String.raw`^(?:${SQL_TABLE_TAIL}|\s+[A-Za-z_]\w*${SQL_TABLE_TAIL})`, 'i');
 
 /**
  * True when the text after a captured table name (starting at
@@ -327,6 +327,30 @@ interface CollectSqlLineArgs {
   resolveEnclosing: EnclosingNodeResolver;
 }
 
+/**
+ * Validate one regex match: must be inside a string literal, pass the
+ * per-pattern table-continuation check (issue #8), yield a real table
+ * name, and not duplicate a (table, op) pair already seen on this line.
+ * Returns the accepted (table, op) pair or null. Pulled out of
+ * {@link collectRefsForSqlLine} so the per-match guard chain doesn't
+ * stack the line's cognitive complexity.
+ */
+function acceptSqlMatch(
+  m: RegExpExecArray,
+  line: string,
+  pat: PatternDef,
+  seen: Set<string>,
+): { tableName: string; op: SqlOp } | null {
+  if (!isInsideString(line, m.index)) return null;
+  if (pat.validateContinuation && !hasValidSqlTableContinuation(line, m.index + m[0].length)) return null;
+  const name = extractTableName(m);
+  if (!name) return null;
+  const key = `${name.toLowerCase()}|${pat.op}`;
+  if (seen.has(key)) return null;
+  seen.add(key);
+  return { tableName: name, op: pat.op };
+}
+
 function collectRefsForSqlLine(args: CollectSqlLineArgs): void {
   const { refs, line, lineNo, target, resolveEnclosing } = args;
   const seen = new Set<string>();
@@ -334,16 +358,11 @@ function collectRefsForSqlLine(args: CollectSqlLineArgs): void {
     pat.re.lastIndex = 0;
     let m: RegExpExecArray | null;
     while ((m = pat.re.exec(line)) !== null) {
-      if (!isInsideString(line, m.index)) continue;
-      if (pat.validateContinuation && !hasValidSqlTableContinuation(line, m.index + m[0].length)) continue;
-      const name = extractTableName(m);
-      if (!name) continue;
-      const key = `${name.toLowerCase()}|${pat.op}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
+      const hit = acceptSqlMatch(m, line, pat, seen);
+      if (!hit) continue;
       refs.push({
-        tableName: name,
-        op: pat.op,
+        tableName: hit.tableName,
+        op: hit.op,
         sourceNodeId: resolveEnclosing(target.path, lineNo),
         filePath: target.path,
         line: lineNo,
