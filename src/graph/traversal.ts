@@ -507,17 +507,24 @@ export class GraphTraverser {
    * instead — this is how the MCP `edgeKind` filter reaches edge kinds
    * outside the call set (issue #7).
    */
-  private walkCallEdges(
-    nodeId: string,
-    maxDepth: number,
-    edgeKinds: readonly EdgeKind[],
-    direction: 'callers' | 'callees',
-  ): Array<{ node: Node; edge: Edge }> {
+  private walkCallEdges(args: {
+    nodeId: string;
+    maxDepth: number;
+    edgeKinds: readonly EdgeKind[];
+    direction: 'callers' | 'callees';
+  }): Array<{ node: Node; edge: Edge }> {
     const result: Array<{ node: Node; edge: Edge }> = [];
     traverserGetCallWalkRecursive(
       this.queries,
-      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
-      direction,
+      {
+        nodeId: args.nodeId,
+        maxDepth: args.maxDepth,
+        currentDepth: 0,
+        result,
+        visited: new Set(),
+        edgeKinds: args.edgeKinds,
+      },
+      args.direction,
     );
     return result;
   }
@@ -529,7 +536,7 @@ export class GraphTraverser {
     maxDepth: number = 1,
     edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
   ): Array<{ node: Node; edge: Edge }> {
-    return this.walkCallEdges(nodeId, maxDepth, edgeKinds, 'callers');
+    return this.walkCallEdges({ nodeId, maxDepth, edgeKinds, direction: 'callers' });
   }
 
   /** Find all functions/methods called by a function. See
@@ -539,7 +546,7 @@ export class GraphTraverser {
     maxDepth: number = 1,
     edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
   ): Array<{ node: Node; edge: Edge }> {
-    return this.walkCallEdges(nodeId, maxDepth, edgeKinds, 'callees');
+    return this.walkCallEdges({ nodeId, maxDepth, edgeKinds, direction: 'callees' });
   }
 
   /**

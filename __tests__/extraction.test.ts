@@ -355,6 +355,25 @@ export default function Header(): JSX.Element {
     expect(component?.signature).toBeDefined();
   });
 
+  it('captures Rust #[…] attributes as decorators (issue #11)', () => {
+    const code = [
+      '#[test]',
+      'fn test_foo() {}',
+      '',
+      '#[tauri::command]',
+      'fn browser_create() {}',
+      '',
+      '#[allow(dead_code)]',
+      'fn helper() {}',
+    ].join('\n');
+    const result = extractFromSource('src/lib.rs', code, 'rust');
+    const byName = (n: string) => result.nodes.find((x) => x.name === n);
+    expect(byName('test_foo')?.decorators).toContain('test');
+    // Scoped attribute `tauri::command` collapses to its last segment.
+    expect(byName('browser_create')?.decorators).toContain('command');
+    expect(byName('helper')?.decorators).toContain('allow');
+  });
+
   it('should extract interfaces', () => {
     const code = `
 export interface User {
