@@ -317,6 +317,12 @@ export async function printLlmStatus(deps: StatusPrinterDeps, cg: any, projectPa
     const askProviderSuffix = askProvider ? ` (${askProvider})` : '';
     writeStatusLine(deps, `  Ask model: ${askModel}${askProviderSuffix}`);
   }
+  const classifyModel = llmConfig.classifyLlm?.model;
+  if (classifyModel) {
+    const classifyProvider = llmConfig.classifyLlm?.provider;
+    const classifyProviderSuffix = classifyProvider ? ` (${classifyProvider})` : '';
+    writeStatusLine(deps, `  Classify:  ${classifyModel}${classifyProviderSuffix}`);
+  }
   const embedModel = getEmbeddingModel(llmConfig);
   if (embedModel) writeStatusLine(deps, `  Embed:     ${embedModel}`);
   printSummaryCoverage(deps, cg);

@@ -41,6 +41,7 @@ const llmConfigSchema = z
     summarizeLlm: llmChatBlockSchema.optional(),
     askLlm: llmChatBlockSchema.optional(),
     localLlm: llmChatBlockSchema.optional(),
+    classifyLlm: llmChatBlockSchema.optional(),
     embeddingLlm: z
       .object({
         provider: z.literal('openai-compat', {

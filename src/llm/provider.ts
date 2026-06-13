@@ -104,6 +104,7 @@ export async function resolveLlmProviders(config: CartographConfig): Promise<Res
   const summarizeLlmCfg = await resolveChat(llm);
   const askLlmCfg = await resolveAskChat(llm);
   const localLlmCfg = await resolveLocalChat(llm);
+  const classifyLlmCfg = await resolveClassifyChat(llm);
   const embeddingLlmCfg = resolveEmbeddings(llm);
   const rerankerLlmCfg = resolveReranker(llm);
 
@@ -113,12 +114,14 @@ export async function resolveLlmProviders(config: CartographConfig): Promise<Res
     summarizeLlm: summarizeLlmCfg?.cfg ?? null,
     askLlm: askLlmCfg?.cfg ?? null,
     localLlm: localLlmCfg?.cfg ?? null,
+    classifyLlm: classifyLlmCfg?.cfg ?? null,
     embeddingLlm: embeddingLlmCfg?.cfg ?? null,
     rerankerLlm: rerankerLlmCfg?.cfg ?? null,
     resolutionTrace: [
       summarizeLlmCfg?.trace,
       askLlmCfg?.trace,
       localLlmCfg?.trace,
+      classifyLlmCfg?.trace,
       embeddingLlmCfg?.trace,
       rerankerLlmCfg?.trace,
     ]
@@ -395,16 +398,16 @@ async function resolveAskChat(llm: NonNullable<CartographConfig['llm']>): Promis
   }
 }
 
-/**
- * Resolve the local-chat carve-out provider from the optional `localLlm`
- * block. When unset, the local-chat branch routes through the main
- * summarize backend.
- */
-async function resolveLocalChat(
-  llm: NonNullable<CartographConfig['llm']>,
+/** Shared resolver for the optional split chat tiers (`localLlm` /
+ *  `classifyLlm`) — identical provider dispatch, differing only in the
+ *  config slot and the trace prefix. Callers fall back to `summarizeLlm`
+ *  when this returns null. */
+async function resolveSplitChatTier(
+  block: NonNullable<CartographConfig['llm']>['localLlm'],
+  tierName: string,
 ): Promise<Resolved<ChatProviderConfig> | null> {
-  if (!llm.localLlm) return null;
-  const c = llm.localLlm;
+  if (!block) return null;
+  const c = block;
   let r: Resolved<ChatProviderConfig> | null = null;
   switch (c.provider) {
     case 'claude-bridge':
@@ -419,13 +422,24 @@ async function resolveLocalChat(
     default: {
       const p = (c as { provider: string }).provider;
       logWarn(
-        `resolveLlmProviders: unsupported chat provider "${p}" in localLlm — supported: openai-compat (HTTP), claude-bridge, anthropic-api`,
+        `resolveLlmProviders: unsupported chat provider "${p}" in ${tierName} — supported: openai-compat (HTTP), claude-bridge, anthropic-api`,
       );
       return null;
     }
   }
   if (!r) return null;
-  return { cfg: r.cfg, trace: 'localLlm=' + r.trace.replace(/^askChat=|^chat=/, '') };
+  return { cfg: r.cfg, trace: `${tierName}=` + r.trace.replace(/^askChat=|^chat=/, '') };
+}
+
+/** Resolve the optional `localLlm` tier (separate bulk-prose model). */
+function resolveLocalChat(llm: NonNullable<CartographConfig['llm']>): Promise<Resolved<ChatProviderConfig> | null> {
+  return resolveSplitChatTier(llm.localLlm, 'localLlm');
+}
+
+/** Resolve the optional `classifyLlm` tier (separate, typically smaller
+ *  model for role classification). */
+function resolveClassifyChat(llm: NonNullable<CartographConfig['llm']>): Promise<Resolved<ChatProviderConfig> | null> {
+  return resolveSplitChatTier(llm.classifyLlm, 'classifyLlm');
 }
 
 function resolveEmbeddings(llm: NonNullable<CartographConfig['llm']>): Resolved<EmbeddingProviderConfig> | null {
