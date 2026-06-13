@@ -98,6 +98,12 @@ interface CallWalkOpts {
   currentDepth: number;
   result: Array<{ node: Node; edge: Edge }>;
   visited: Set<string>;
+  /** Edge kinds to walk. Defaults to {@link CALL_REF_EDGE_KINDS}; the
+   *  MCP `edgeKind` filter passes a single explicit kind so structural /
+   *  type edges (`contains`, `returns`, `type_of`, `extends`, …) are
+   *  reachable via callers/callees instead of silently filtered against
+   *  a calls-only candidate set (issue #7). */
+  edgeKinds: readonly EdgeKind[];
 }
 
 /** Shared context for type hierarchy / path frontier functions. */
@@ -274,14 +280,13 @@ function traverserGetCallWalkRecursive(
   args: CallWalkOpts,
   direction: 'callers' | 'callees',
 ): void {
-  const { nodeId, maxDepth, currentDepth, result, visited } = args;
+  const { nodeId, maxDepth, currentDepth, result, visited, edgeKinds } = args;
   if (currentDepth >= maxDepth || visited.has(nodeId)) return;
   visited.add(nodeId);
 
+  const kinds = [...edgeKinds];
   const edges =
-    direction === 'callers'
-      ? getIncomingEdges(queries, nodeId, [...CALL_REF_EDGE_KINDS])
-      : getOutgoingEdges(queries, nodeId, [...CALL_REF_EDGE_KINDS]);
+    direction === 'callers' ? getIncomingEdges(queries, nodeId, kinds) : getOutgoingEdges(queries, nodeId, kinds);
   if (edges.length === 0) return;
 
   const peer = direction === 'callers' ? 'source' : 'target';
@@ -292,7 +297,7 @@ function traverserGetCallWalkRecursive(
       result.push({ node: peerNode, edge });
       traverserGetCallWalkRecursive(
         queries,
-        { nodeId: peerNode.id, maxDepth, currentDepth: currentDepth + 1, result, visited },
+        { nodeId: peerNode.id, maxDepth, currentDepth: currentDepth + 1, result, visited, edgeKinds },
         direction,
       );
     }
@@ -495,26 +500,43 @@ export class GraphTraverser {
   }
 
   /**
-   * Find all callers of a function/method
+   * Find all callers of a function/method.
+   *
+   * `edgeKinds` defaults to the calls/references/imports set. Pass an
+   * explicit kind (e.g. `['contains']`, `['extends']`) to walk a
+   * structural / type edge instead — this is how the MCP `edgeKind`
+   * filter reaches edge kinds outside the call set (issue #7).
    */
-  getCallers(nodeId: string, maxDepth: number = 1): Array<{ node: Node; edge: Edge }> {
+  getCallers(
+    nodeId: string,
+    maxDepth: number = 1,
+    edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
+  ): Array<{ node: Node; edge: Edge }> {
     const result: Array<{ node: Node; edge: Edge }> = [];
     traverserGetCallWalkRecursive(
       this.queries,
-      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set() },
+      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
       'callers',
     );
     return result;
   }
 
   /**
-   * Find all functions/methods called by a function
+   * Find all functions/methods called by a function.
+   *
+   * See {@link getCallers} for `edgeKinds` — pass an explicit kind to
+   * walk structural / type edges (`contains`, `returns`, `type_of`, …)
+   * instead of the default call set (issue #7).
    */
-  getCallees(nodeId: string, maxDepth: number = 1): Array<{ node: Node; edge: Edge }> {
+  getCallees(
+    nodeId: string,
+    maxDepth: number = 1,
+    edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
+  ): Array<{ node: Node; edge: Edge }> {
     const result: Array<{ node: Node; edge: Edge }> = [];
     traverserGetCallWalkRecursive(
       this.queries,
-      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set() },
+      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
       'callees',
     );
     return result;
