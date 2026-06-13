@@ -14,8 +14,8 @@ cartograph install --print-config codex
 cartograph install --command /absolute/path/to/cartograph
 cartograph install-hooks [path]    # manage the git hooks separately
 cartograph install-hooks --remove
-cartograph upgrade                 # check for a newer Cartograph (alias: update)
-cartograph upgrade --apply         # fast-forward a source checkout + bun install
+cartograph upgrade                 # check for a newer Cartograph; prints the exact update command (alias: update)
+cartograph upgrade --apply         # apply in place: source-checkout fast-forward, or Bun-global re-pin to the latest tag
 cartograph index [path]            # initialize + structural index + doctor (alias: quickstart)
 cartograph guide                   # compact first-use and daily-workflow guide
 cartograph llm install [path]      # LLM bootstrap: init + install-models + doctor (was: setup)

@@ -22,10 +22,13 @@ interface UpgradeOptions {
 export function registerUpgradeCommand(deps: UpgradeCommandDeps): void {
   const command = deps.program
     .command('upgrade')
-    .description('Check for a newer Cartograph and update a source checkout in place');
+    .description('Check for a newer Cartograph and update a source checkout or Bun global install in place');
   command.alias?.('update');
   command
-    .option('--apply', 'Fast-forward a source checkout and reinstall dependencies (plan-only for other installs)')
+    .option(
+      '--apply',
+      'Apply the update in place: fast-forward a source checkout, or re-pin a Bun global install to the latest GitHub tag (plan-only for other install types)',
+    )
     .option('-j, --json', 'Output JSON')
     .action(async (options: UpgradeOptions) => {
       const apply = options.apply === true;
