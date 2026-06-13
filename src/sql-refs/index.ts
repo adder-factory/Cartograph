@@ -92,6 +92,16 @@ interface PatternDef {
   /** Capture group containing the table name (1, 2, or 3 in IDENT). */
   re: RegExp;
   op: SqlOp;
+  /**
+   * When true, the text following the captured table must look like a
+   * SQL clause continuation (see {@link hasValidSqlTableContinuation}).
+   * Set on the loose `FROM`/`JOIN`/`DELETE FROM` patterns whose table
+   * slot is otherwise satisfied by English prose ("move from first
+   * inquiry to …"). Left off the strongly-anchored write/DDL patterns
+   * (`INSERT INTO … VALUES`, `UPDATE … SET`, `CREATE TABLE … (`), whose
+   * own trailing keywords already pin them to real SQL.
+   */
+  validateContinuation?: boolean;
 }
 
 /**
@@ -108,14 +118,26 @@ const PATTERNS: PatternDef[] = [
   // and let DELETE's own regex below tag it 'write'. Last write wins
   // because Map dedup is keyed by (table, op), so the DELETE one
   // produces a separate write row alongside this read row.
-  { re: new RegExp(String.raw`\bFROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'read' },
-  { re: new RegExp(String.raw`\bJOIN\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'read' },
+  {
+    re: new RegExp(String.raw`\bFROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'),
+    op: 'read',
+    validateContinuation: true,
+  },
+  {
+    re: new RegExp(String.raw`\bJOIN\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'),
+    op: 'read',
+    validateContinuation: true,
+  },
   // INSERT INTO <table>
   { re: new RegExp(String.raw`\bINSERT\s+INTO\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'write' },
   // UPDATE <table> ... SET
   { re: new RegExp(String.raw`\bUPDATE\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}\s+SET\b`, 'gi'), op: 'write' },
   // DELETE FROM <table>
-  { re: new RegExp(String.raw`\bDELETE\s+FROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'), op: 'write' },
+  {
+    re: new RegExp(String.raw`\bDELETE\s+FROM\s+(?:[A-Za-z_]\w*\s*\.\s*)?${IDENT}`, 'gi'),
+    op: 'write',
+    validateContinuation: true,
+  },
   // CREATE TABLE [IF NOT EXISTS] <table>
   {
     re: new RegExp(
@@ -203,7 +225,49 @@ interface FileTarget {
  */
 function lineLooksLikeSql(line: string): boolean {
   if (!/['"`]/.test(line)) return false;
-  return /\b(?:SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER|DROP|TRUNCATE)\b/i.test(line);
+  // DML verbs are strong-enough signals on their own — paired with the
+  // per-pattern table-continuation check (issue #8), prose false
+  // positives are rejected downstream.
+  if (/\b(?:SELECT|INSERT|UPDATE|DELETE)\b/i.test(line)) return true;
+  // DDL verbs CREATE / DROP / ALTER / TRUNCATE double as everyday
+  // English words ("drop-off", "create an account", "alter your plan"),
+  // so require a SQL object keyword after the verb before treating the
+  // line as SQL. Without this, UI copy like "the biggest drop-offs show
+  // where the funnel loses people" satisfied the gate and let the
+  // `FROM <ident>` regex capture the next English word as a table.
+  return /\b(?:CREATE|DROP|ALTER|TRUNCATE)\b[\s\w]*?\b(?:TABLE|INDEX|VIEW|TRIGGER|SCHEMA|DATABASE|SEQUENCE|FUNCTION|PROCEDURE|TYPE|EXTENSION|MATERIALIZED|CONSTRAINT|COLUMN)\b/i.test(
+    line,
+  );
+}
+
+/**
+ * SQL keywords that can legitimately follow a `FROM <table>` /
+ * `JOIN <table>` / `DELETE FROM <table>` reference (optionally after a
+ * one-word table alias). Used to distinguish a real table reference from
+ * English prose that merely contains "from <word>" inside a quoted
+ * JSX/UI string — e.g. `help="how prospects move from first inquiry to
+ * move-in"` captures "first", but "first" is followed by "inquiry to …",
+ * not a SQL clause, so it is rejected (issue #8).
+ */
+const SQL_CLAUSE_KEYWORDS =
+  '(?:WHERE|JOIN|INNER|LEFT|RIGHT|FULL|OUTER|CROSS|NATURAL|LATERAL|ON|USING|GROUP|ORDER|HAVING|LIMIT|OFFSET|FETCH|UNION|EXCEPT|INTERSECT|AS|FOR|WINDOW|RETURNING)';
+
+// A genuine table reference is immediately followed by one of:
+//   - end of line,
+//   - SQL punctuation (`,` `;` `)` `(` or a closing string quote), or
+//   - a SQL clause keyword,
+// either directly (`FROM users WHERE …`) or after a single one-word
+// table alias (`FROM users u WHERE …`). `\x60` is the backtick.
+const SQL_TABLE_TAIL = String.raw`\s*(?:$|[,;)('"\x60]|\b${SQL_CLAUSE_KEYWORDS}\b)`;
+const SQL_TABLE_CONTINUATION_RE = new RegExp(`^(?:${SQL_TABLE_TAIL}|\\s+[A-Za-z_]\\w*${SQL_TABLE_TAIL})`, 'i');
+
+/**
+ * True when the text after a captured table name (starting at
+ * `matchEnd`) is a plausible SQL clause continuation rather than more
+ * English prose. See {@link SQL_CLAUSE_KEYWORDS}.
+ */
+function hasValidSqlTableContinuation(line: string, matchEnd: number): boolean {
+  return SQL_TABLE_CONTINUATION_RE.test(line.slice(matchEnd));
 }
 
 /**
@@ -271,6 +335,7 @@ function collectRefsForSqlLine(args: CollectSqlLineArgs): void {
     let m: RegExpExecArray | null;
     while ((m = pat.re.exec(line)) !== null) {
       if (!isInsideString(line, m.index)) continue;
+      if (pat.validateContinuation && !hasValidSqlTableContinuation(line, m.index + m[0].length)) continue;
       const name = extractTableName(m);
       if (!name) continue;
       const key = `${name.toLowerCase()}|${pat.op}`;
