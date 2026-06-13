@@ -287,8 +287,29 @@ export function isShallowClone(projectRoot: string): boolean {
  * non-git directory or on any git error.
  */
 export function hasUncommittedChanges(rootDir: string): boolean {
+  return getUncommittedSourcePaths(rootDir).length > 0;
+}
+
+/**
+ * The set of project-relative paths with uncommitted or untracked
+ * changes, excluding cartograph's own metadata (`.cartograph/`) and a
+ * cartograph-only `.gitignore` append (F#32). Returns `[]` for a
+ * non-git directory or on any git error.
+ *
+ * Exposed so callers that need to reason about WHICH files are dirty —
+ * e.g. the empty-result freshness hedge, which only cares about files
+ * of an indexable language type (issue #6) — can filter, rather than
+ * collapsing to a single "anything dirty?" boolean.
+ */
+export function getUncommittedSourcePaths(rootDir: string): string[] {
   try {
-    const out = execFileSync('git', ['status', '--porcelain'], {
+    // `-uall` expands untracked directories to individual file paths
+    // (default porcelain collapses a new dir to a single `?? dir/`
+    // entry). The boolean "anything dirty?" result is unchanged, but
+    // callers that filter by file type (the freshness hedge, issue #6)
+    // need the per-file granularity. Gitignored trees (node_modules/…)
+    // are still omitted, so the cost stays bounded.
+    const out = execFileSync('git', ['status', '--porcelain', '-uall'], {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     });
@@ -301,13 +322,14 @@ export function hasUncommittedChanges(rootDir: string): boolean {
       const filePath = line.slice(3).trim();
       if (filePath.length > 0 && !isCartographMetaPath(filePath)) dirtyPaths.push(filePath);
     }
-    if (dirtyPaths.length === 0) return false;
-    if (dirtyPaths.length === 1 && dirtyPaths[0] === '.gitignore' && isCartographOnlyGitignoreDiff(rootDir)) {
-      return false;
+    // Drop a cartograph-only `.gitignore` edit (F#32) — init's own append
+    // must never read as a user change, even alongside other edits.
+    if (dirtyPaths.includes('.gitignore') && isCartographOnlyGitignoreDiff(rootDir)) {
+      return dirtyPaths.filter((p) => p !== '.gitignore');
     }
-    return true;
+    return dirtyPaths;
   } catch {
-    return false;
+    return [];
   }
 }
 

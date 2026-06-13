@@ -300,7 +300,7 @@ function extractFieldFallbackByName(ext: TreeSitterExtractor, node: SyntaxNode, 
 }
 
 /** Common metadata bag for function/method extraction. */
-function collectFunctionMetadata(
+export function collectFunctionMetadata(
   ext: TreeSitterExtractor,
   node: SyntaxNode,
   opts: { isExported?: boolean },

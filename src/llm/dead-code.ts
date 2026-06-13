@@ -389,6 +389,7 @@ function shouldSkipGraphCandidate(args: GraphCandidateSkipArgs): boolean {
   // includeTests because framework-dispatched cases are still live.
   if (isGoConventionLive(node)) return true;
   if (isPublicApiShim(node)) return true;
+  if (isRustEntryPoint(node)) return true;
   if (isDecoratedFrameworkHook(node)) return true;
   if (isFrameworkConventionLive(node)) return true;
   if (isInstallerTargetLifecycleMethod(node)) return true;
@@ -399,6 +400,17 @@ function shouldSkipGraphCandidate(args: GraphCandidateSkipArgs): boolean {
 
 function isDecoratedFrameworkHook(node: Node): boolean {
   return (node.decorators?.length ?? 0) > 0 || (node.decoratorArgs?.length ?? 0) > 0;
+}
+
+/** Cargo-invoked Rust entry points — `fn main` in `build.rs` (build
+ *  script), `main.rs`, or a `bin/*.rs` binary crate. These are called
+ *  reflectively by the toolchain and never have a static in-code caller,
+ *  so the orphan query always flags them (#11). Attribute-driven entry
+ *  points (`#[tauri::command]`, `#[test]`) are covered by
+ *  {@link isDecoratedFrameworkHook} once Rust attributes are extracted. */
+const RUST_ENTRY_FILE_RE = /(?:^|\/)(?:build|main)\.rs$|(?:^|\/)bin\/[^/]+\.rs$/;
+function isRustEntryPoint(node: Node): boolean {
+  return node.language === 'rust' && node.name === 'main' && RUST_ENTRY_FILE_RE.test(node.filePath);
 }
 
 const FRAMEWORK_DISPATCHED_NAMES: ReadonlySet<string> = new Set([

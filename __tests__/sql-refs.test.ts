@@ -195,6 +195,39 @@ describe('extractSqlRefs', () => {
     expect(refs.map((r) => r.tableName)).toEqual(['real_table']);
   });
 
+  it('rejects phantom tables from English prose in quoted JSX attributes (issue #8)', () => {
+    // Real-world TSX from a funnel/analytics UI. Both lines live inside a
+    // double-quoted JSX attribute (so isInsideString passes) and contain
+    // "drop" (so the old lineLooksLikeSql passed), and the `FROM <ident>`
+    // regex captured the next English word ("first" / "booked") as a table.
+    write(
+      'Report.tsx',
+      [
+        `<Stage help="How prospects move from first inquiry to move-in. The biggest drop-offs show where the funnel loses people." />`,
+        `<Stage help="How scheduled visits flow from booked to completed. The drop between Booked and Arrived is no-shows." />`,
+      ].join('\n'),
+    );
+    const refs = extractSqlRefs(testDir, [{ path: 'Report.tsx', language: 'tsx' }], () => null);
+    expect(refs).toEqual([]);
+  });
+
+  it('keeps real FROM/JOIN refs with aliases and trailing clauses (issue #8 guard)', () => {
+    // The continuation check must not reject legitimate SQL: bare tables,
+    // aliased tables, and tables trailed by any SQL clause keyword.
+    write(
+      'q.ts',
+      [
+        `db.prepare('SELECT * FROM orders o JOIN customers c ON o.cid = c.id WHERE o.total > 0');`,
+        `db.prepare('SELECT * FROM invoices');`,
+        `db.prepare('SELECT * FROM line_items GROUP BY sku');`,
+        `db.run('DELETE FROM stale_jobs WHERE done = 1');`,
+      ].join('\n'),
+    );
+    const refs = extractSqlRefs(testDir, [{ path: 'q.ts', language: 'typescript' }], () => null);
+    const names = new Set(refs.map((r) => r.tableName));
+    expect(names).toEqual(new Set(['orders', 'customers', 'invoices', 'line_items', 'stale_jobs']));
+  });
+
   it('rejects template-literal interpolation placeholders as table names', () => {
     // Regression: DB migrations build dynamic SQL with JS template literals, e.g.
     //   db.exec(`INSERT INTO ${tempName} (${colList}) SELECT ${colList} FROM "${table.name}"`);
