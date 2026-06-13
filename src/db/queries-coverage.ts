@@ -80,7 +80,7 @@ const NoParams = z.object({});
 // hits one OS branch) clobber a full-coverage view from the owning
 // workspace, producing false positives in `mode: ranked`. Keeping the
 // better-coverage row instead gives lcov union-by-symbol semantics.
-// (#17) The fold is order-independent: it converges to the row with
+// (#18) The fold is order-independent: it converges to the row with
 // the maximum (fraction, total_lines) regardless of ingest order.
 const COVERAGE_INCOMING_BETTER =
   'excluded.covered_lines * total_lines > covered_lines * excluded.total_lines ' +
@@ -304,7 +304,7 @@ interface NodeCoverageRow {
  * (higher covered-line fraction; ties broken toward the more complete
  * view) rather than overwriting last-write-wins. This unions multiple
  * reports that share a source label — sharded runs, or several
- * monorepo workspaces exercising one shared file (#17). The branch
+ * monorepo workspaces exercising one shared file (#18). The branch
  * counts and timestamp move together with the winning line numbers so
  * a row never mixes columns from two reports.
  *

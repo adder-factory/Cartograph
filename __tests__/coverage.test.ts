@@ -519,8 +519,8 @@ export function beta(x: number): number {
   });
 });
 
-// ─── #17: same-label reports union instead of clobber ──────────────────────
-describe('same-source-label coverage union (#17)', () => {
+// ─── #18: same-label reports union instead of clobber ──────────────────────
+describe('same-source-label coverage union (#18)', () => {
   let dir: string;
   beforeEach(() => {
     dir = tempDir();

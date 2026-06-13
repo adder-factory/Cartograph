@@ -35,7 +35,7 @@ async function reapply(ctx: IndexHookContext): Promise<void> {
   // order. Each label can have several reports — sharded test runs, or
   // monorepo workspaces each exercising a shared file. The upsert
   // max-merges, so re-applying all of them reconstructs the same union
-  // the original loads produced (#17).
+  // the original loads produced (#18).
   const jobs: ReapplyJob[] = Object.entries(paths).flatMap(([source, reportPaths]) =>
     reportPaths.map((reportPath) => ({ source, reportPath })),
   );
