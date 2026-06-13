@@ -424,6 +424,27 @@ const findUnusedExportsQuery = defineQuery({
         WHERE e.target = n.id
           AND e.kind NOT IN ('contains', 'exports', 'imports', 'tests')
       )
+      -- Resolution-incompleteness guard (issue #13): never emit a
+      -- confident "dead" verdict for a symbol that still has a PENDING
+      -- unresolved reference by its name. A resolved usage edge is the
+      -- normal signal, but resolution can be transiently incomplete —
+      -- a partial / interrupted sync, or two cartograph processes with
+      -- different EXTRACTION_LOGIC_VERSIONs thrashing the re-extract heal
+      -- on one index — leaving a real usage stranded in unresolved_refs
+      -- with no edge yet. That used to surface as a false unused_export
+      -- (the same class the version-heal itself was built to fix). The
+      -- reference_kind filter mirrors the edge filter above (structural
+      -- imports/exports/contains/tests don't count as use) and excludes
+      -- field_access so an exported name that merely collides with a
+      -- builtin property access (.map / .length) isn't masked.
+      AND NOT EXISTS (
+        SELECT 1 FROM unresolved_refs ur
+        WHERE ur.reference_name = n.name
+          AND ur.reference_kind IN (
+            'calls', 'references', 'type_of', 'returns',
+            'instantiates', 'extends', 'implements', 'overrides', 'decorates'
+          )
+      )
   `,
   params: z.object({ mainEntries: z.string() }),
   row: UnusedExportRowSchema,
