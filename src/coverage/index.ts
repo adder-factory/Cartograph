@@ -152,7 +152,7 @@ export async function ingestCoverage(args: IngestCoverageArgs): Promise<IngestRe
   // rows cascade-delete, so without this the data silently erodes).
   // `replace` mirrors clearSource: a full refresh resets the source's
   // report list to just this report; a plain load APPENDS so every
-  // report feeding one label is re-unioned after a sync (#17).
+  // report feeding one label is re-unioned after a sync (#18).
   persistReportPath({
     queries,
     projectRoot: args.projectRoot,
@@ -185,7 +185,7 @@ const MAX_REPORTS_PER_SOURCE = 64;
  * metadata key — a `{ [source]: absPath[] }` JSON map keyed by source
  * label. Storing a LIST (not a single path) lets the coverage-reapply
  * hook re-union every report that fed a label after a sync, so
- * same-label multi-report coverage survives re-extraction (#17).
+ * same-label multi-report coverage survives re-extraction (#18).
  * Best-effort: a failure here must never fail the ingest itself.
  */
 function persistReportPath(args: PersistReportPathArgs): void {
