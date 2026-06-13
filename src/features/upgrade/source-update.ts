@@ -112,7 +112,7 @@ export function canRepinBunGlobal(packageRoot: string, globalDir: string = bunGl
   const root = realpathOrSelf(packageRoot);
   if (root !== globalNodeModules && !root.startsWith(globalNodeModules + path.sep)) return false;
   const spec = readBunGlobalSpec(globalDir);
-  return spec !== null && spec.startsWith(GITHUB_INSTALL_REF);
+  return spec?.startsWith(GITHUB_INSTALL_REF) === true;
 }
 
 /** Injectable Bun runner (tests pass a recorder). */
