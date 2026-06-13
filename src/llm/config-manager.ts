@@ -15,12 +15,20 @@ import type { Cartograph } from '../index.js';
 import { resolveLlmProviders, type ResolvedLlm } from './provider.js';
 import { loadConfig } from '../config.js';
 import { logDebug } from '../errors.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 
 export class LlmConfigManager {
   // Resolved LLM providers — populated lazily on first LLM call.
   // Cached per LlmConfigManager instance: never `undefined` after the
   // first resolution attempt, even if it returned `null` (LLM disabled).
   private resolvedLlm: ResolvedLlm | null | undefined = undefined;
+
+  /** mtime (ms) of `.cartograph/config.json` at the last resolution, so
+   *  `resolveLlmConfig` can detect an out-of-band edit (CLI `llm-apply`,
+   *  `llm setup`, or a hand-edit) and re-read without a server restart
+   *  (issue #14). */
+  private configMtimeMs: number | undefined;
 
   constructor(private readonly cg: Cartograph) {}
 
@@ -36,6 +44,29 @@ export class LlmConfigManager {
    * checks in try/catch.
    */
   async resolveLlmConfig(forceReload = false): Promise<ResolvedLlm | null> {
+    // #14: a running MCP server caches config.llm at startup. Detect an
+    // out-of-band edit (CLI `admin llm-apply`, `llm setup`, or a hand-edit)
+    // via the config file's mtime and re-read + re-resolve, so MCP-side LLM
+    // tools pick it up without a restart. Cheap — one stat per resolve, and
+    // bulk passes resolve once per pass.
+    const mtime = this.configFileMtimeMs();
+    if (this.configMtimeMs === undefined) {
+      // First resolution — record the baseline mtime; no reload.
+      this.configMtimeMs = mtime;
+    } else if (mtime !== undefined && mtime !== this.configMtimeMs) {
+      try {
+        this.cg.config.llm = loadConfig(this.cg.projectRoot).llm;
+        // Advance the baseline + drop the cache ONLY after a clean read, so a
+        // transient read failure (e.g. a half-written file) retries on the
+        // next call instead of getting stuck serving stale config.
+        this.configMtimeMs = mtime;
+        this.resolvedLlm = undefined;
+        logDebug('LLM config.json changed on disk — reloaded without restart', { projectRoot: this.cg.projectRoot });
+      } catch (err) {
+        logDebug('LLM config reload failed, keeping cached and retrying next call', { error: String(err) });
+      }
+    }
+
     if (this.resolvedLlm !== undefined && !forceReload) {
       return this.resolvedLlm;
     }
@@ -61,6 +92,21 @@ export class LlmConfigManager {
    */
   invalidate(): void {
     this.resolvedLlm = undefined;
+    // Reset the mtime baseline too: callers pair invalidate() with a fresh
+    // cgRefreshConfigFromDisk (e.g. evictCachedProject after a CLI llm-apply),
+    // so the next resolve should re-record the baseline rather than treat the
+    // already-applied change as a reload trigger (avoids a redundant load).
+    this.configMtimeMs = undefined;
+  }
+
+  /** mtime (ms) of `.cartograph/config.json`, or undefined when it can't be
+   *  stat'd (missing / pre-init) — treated as "no change". */
+  private configFileMtimeMs(): number | undefined {
+    try {
+      return fs.statSync(path.join(this.cg.projectRoot, '.cartograph', 'config.json')).mtimeMs;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
