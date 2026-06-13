@@ -128,6 +128,64 @@ describe('cartograph_coverage family (#7-2)', () => {
     expect(text).toMatch(/Files matched: 1/);
   });
 
+  it("mode='refresh' discovers and unions per-package monorepo reports (#19)", async () => {
+    // A monorepo where each package emits its own coverage. The single
+    // root-only discovery missed packages/*; refresh now globs them and
+    // unions every report under one source.
+    const monoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cov-mono-'));
+    for (const pkg of ['a', 'b']) {
+      fs.mkdirSync(path.join(monoDir, 'packages', pkg, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(monoDir, 'packages', pkg, 'src', `${pkg}.ts`),
+        `export function fn_${pkg}(): number { return 1; }\n`,
+      );
+    }
+    fs.writeFileSync(path.join(monoDir, '.gitignore'), '.cartograph/\n');
+    git(monoDir, 'init', '-q');
+    git(monoDir, 'config', 'user.email', 't@t');
+    git(monoDir, 'config', 'user.name', 't');
+    git(monoDir, 'config', 'commit.gpgsign', 'false');
+    git(monoDir, 'add', '.');
+    git(monoDir, 'commit', '-q', '-m', 'init');
+
+    const monoCg = await Cartograph.init(monoDir, { config: { llm: { endpoint: '' } } });
+    const monoHandler = new ToolHandler(monoCg, { profile: 'full' });
+    try {
+      await monoCg.indexAll({ summarize: false });
+
+      // Each package emits a package-relative report under its own coverage/.
+      for (const pkg of ['a', 'b']) {
+        fs.mkdirSync(path.join(monoDir, 'packages', pkg, 'coverage'), { recursive: true });
+        fs.writeFileSync(
+          path.join(monoDir, 'packages', pkg, 'coverage', 'lcov.info'),
+          [`SF:src/${pkg}.ts`, 'DA:1,1', 'end_of_record'].join('\n'),
+        );
+      }
+
+      const result = await monoHandler.execute('cartograph_coverage', { mode: 'refresh' });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toMatch(/unioned 2 report\(s\)/);
+      expect(text).toMatch(/packages\/a\/coverage\/lcov\.info/);
+      expect(text).toMatch(/packages\/b\/coverage\/lcov\.info/);
+
+      // Both packages' symbols received coverage (proves the
+      // package-relative SF paths resolved across both workspaces) and
+      // every covered line is hit — no false gap from a missed report.
+      const stats = await monoHandler.execute('cartograph_coverage', { mode: 'stats' });
+      const statsText = stats.content[0]?.text ?? '';
+      expect(statsText).toMatch(/Weighted coverage:\*\* 100/);
+      // fn_a and fn_b both have a coverage row (kind-agnostic count ≥ 2).
+      const covered = monoCg.queries.db.prepare(`SELECT COUNT(DISTINCT node_id) AS n FROM node_coverage`).get() as {
+        n: number;
+      };
+      expect(covered.n).toBeGreaterThanOrEqual(2);
+    } finally {
+      monoHandler.closeAll();
+      monoCg.close();
+      fs.rmSync(monoDir, { recursive: true, force: true });
+    }
+  });
+
   it("mode='load' resolves a project-relative reportPath against projectRoot, not cwd", async () => {
     const lcov = 'TN:\nSF:src/a.ts\nDA:1,1\nLF:1\nLH:1\nend_of_record\n';
     fs.mkdirSync(path.join(dir, 'coverage'), { recursive: true });

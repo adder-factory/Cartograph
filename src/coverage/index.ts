@@ -5,10 +5,13 @@
  * symbol's [start_line, end_line] span and upserts into
  * `node_coverage`.
  *
- * Path matching is two-tier: exact match against the indexed path
- * first, then longest-suffix match for monorepo cases where the
- * report's path includes a workspace prefix the project doesn't
- * (e.g. report says `packages/api/src/foo.ts`, indexed path is
+ * Path matching is three-tier (see {@link matchIndexedPath}): when the
+ * report lives under a package (`packages/b/coverage/lcov.info`), its
+ * package prefix is tried first so a package-relative `SF:src/foo.ts`
+ * resolves to `packages/b/src/foo.ts` (#19); then exact match against
+ * the indexed path; then longest-suffix match for the reverse monorepo
+ * case where the report's path includes a workspace prefix the project
+ * doesn't (report says `packages/api/src/foo.ts`, indexed path is
  * `src/foo.ts`).
  */
 
@@ -73,6 +76,53 @@ interface IngestCtx {
   source: string;
   ingestedAt: number;
   totals: IngestTotals;
+  /** Package-root prefix of THIS report, e.g. `packages/b` for a report
+   *  at `packages/b/coverage/lcov.info`; '' for a repo-root report. Lets
+   *  package-relative `SF:` paths resolve to the right workspace. */
+  pathPrefix: string;
+}
+
+/** The indexed file paths, in both lookup shapes — a set for exact hits
+ *  and the list for the longest-suffix scan. Always built together. */
+interface IndexedPaths {
+  set: ReadonlySet<string>;
+  all: readonly string[];
+}
+
+/**
+ * Conventional report locations relative to a *package* root, longest
+ * first so the package prefix is recovered correctly (a
+ * `.../coverage/lcov-report/lcov.info` must not match the shorter
+ * `coverage/lcov.info` / `lcov.info` suffixes first).
+ */
+const CONVENTIONAL_REPORT_SUFFIXES = [
+  'coverage/lcov-report/lcov.info',
+  'coverage/lcov.info',
+  'coverage.lcov',
+  'lcov.info',
+] as const;
+
+/**
+ * Recover a report's package-root prefix from where it lives on disk:
+ * `packages/b/coverage/lcov.info` → `packages/b`; a repo-root report
+ * (or any path outside the project / unknown layout) → `''`.
+ *
+ * Monorepo reporters (vitest/v8) often emit package-relative source
+ * paths (`SF:src/foo.ts`) instead of repo-root-relative
+ * (`SF:packages/b/src/foo.ts`). Knowing the report's package lets
+ * {@link matchIndexedPath} prepend the prefix so those paths land on
+ * the right indexed file instead of matching nothing — or worse, a
+ * same-named file in a different package (#19).
+ */
+export function coveragePathPrefix(projectRoot: string, reportPath: string): string {
+  const abs = path.isAbsolute(reportPath) ? reportPath : path.resolve(projectRoot, reportPath);
+  const rel = normalisePath(path.relative(projectRoot, abs));
+  if (rel === '' || rel.startsWith('../')) return ''; // outside the project — nothing to derive
+  for (const suffix of CONVENTIONAL_REPORT_SUFFIXES) {
+    if (rel === suffix) return ''; // repo-root report — no prefix
+    if (rel.endsWith('/' + suffix)) return rel.slice(0, rel.length - suffix.length - 1);
+  }
+  return '';
 }
 
 function applyFileCoverage(ctx: IngestCtx, fc: import('./lcov.js').FileCoverage, matchedPath: string): void {
@@ -120,14 +170,18 @@ export async function ingestCoverage(args: IngestCoverageArgs): Promise<IngestRe
 
   const body = await readFile(reportPath, 'utf8');
   const fileCoverages = parseLcov(body);
-  const indexedPaths = getAllFilePaths(queries).map(normalisePath);
-  const indexedSet = new Set(indexedPaths);
+  const indexedList = getAllFilePaths(queries).map(normalisePath);
+  const indexed: IndexedPaths = { set: new Set(indexedList), all: indexedList };
+
+  // Where this report lives tells us its workspace, so a per-package
+  // report's package-relative `SF:` paths resolve to the right files.
+  const pathPrefix = coveragePathPrefix(args.projectRoot, reportPath);
 
   const totals: IngestTotals = { filesMatched: 0, filesUnmatched: 0, symbolsUpdated: 0, symbolsEmpty: 0 };
-  const ctx: IngestCtx = { queries, source, ingestedAt: Date.now(), totals };
+  const ctx: IngestCtx = { queries, source, ingestedAt: Date.now(), totals, pathPrefix };
 
   for (const fc of fileCoverages) {
-    const matchedPath = matchIndexedPath(normalisePath(fc.filePath), indexedSet, indexedPaths);
+    const matchedPath = matchIndexedPath(normalisePath(fc.filePath), indexed, ctx.pathPrefix);
     if (!matchedPath) {
       totals.filesUnmatched += 1;
       continue;
@@ -281,20 +335,28 @@ function normalisePath(p: string): string {
 }
 
 /**
- * Resolve a report path to one of the indexed paths. Exact match
- * wins; otherwise the longest indexed path that the report path
- * ends with (preceded by `/`) wins. Returns `null` when nothing
- * matches.
+ * Resolve a report path to one of the indexed paths. Resolution order:
+ *   1. When the report carries a package prefix (it lives under
+ *      `<pkg>/coverage/…`), try `<pkg>/<reportPath>` first. This
+ *      disambiguates a package-relative `SF:src/foo.ts` to THIS
+ *      workspace before it can collide with another package's
+ *      `src/foo.ts` via the suffix fallback below.
+ *   2. Exact match against an indexed path (a repo-root-relative
+ *      reporter, or the prefix not applying).
+ *   3. Longest indexed path the report path ends with (preceded by
+ *      `/`) — the original monorepo case where the report path is a
+ *      superset of the indexed path.
+ * Returns `null` when nothing matches.
  */
-function matchIndexedPath(
-  reportPath: string,
-  indexedSet: ReadonlySet<string>,
-  indexedPaths: readonly string[],
-): string | null {
-  if (indexedSet.has(reportPath)) return reportPath;
+function matchIndexedPath(reportPath: string, indexed: IndexedPaths, pathPrefix: string): string | null {
+  if (pathPrefix) {
+    const prefixed = `${pathPrefix}/${reportPath}`;
+    if (indexed.set.has(prefixed)) return prefixed;
+  }
+  if (indexed.set.has(reportPath)) return reportPath;
 
   let best: string | null = null;
-  for (const ip of indexedPaths) {
+  for (const ip of indexed.all) {
     if (reportPath.endsWith('/' + ip)) {
       if (!best || ip.length > best.length) best = ip;
     }

@@ -414,7 +414,7 @@ const coverageSchema = z.object({
     .enum(['symbol', 'ranked', 'stats', 'load', 'refresh', 'sources', 'drop'])
     .optional()
     .describe(
-      'Data-source axis. `refresh` auto-discovers and ingests an lcov report under conventional projectRoot paths (no `reportPath`). ' +
+      'Data-source axis. `refresh` auto-discovers and ingests lcov under conventional projectRoot paths (no `reportPath`); in a monorepo it also globs per-package `*/coverage/lcov.info` reports and unions them all under one source. ' +
         '`load` ingests an explicit `reportPath`. `symbol` checks one node (auto-selected when a `symbol` arg is passed without `mode`). `ranked` (default) lists worst-coverage-first. `stats` returns the project rollup. ' +
         '`sources` lists ingested source labels with row count + age. `drop` deletes every row for one `source` label.',
     ),
