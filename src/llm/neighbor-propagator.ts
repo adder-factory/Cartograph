@@ -16,6 +16,7 @@
 import type { Buffer } from 'node:buffer';
 import * as fs from 'node:fs';
 import { getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';
+import { withSqliteBusyRetry } from '../utils-concurrency.js';
 import { getEmbeddingForNode, getAllEmbeddings } from '../db/queries-embeddings.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';
 import type { QueryBuilder } from '../db/queries.js';
@@ -437,7 +438,15 @@ function buildAndUpsertSummary(args: {
   const { qb, candidate, summary, fileLineCache, projectRoot } = args;
   const body = projectRoot ? readBodyLines(fileLineCache, projectRoot, candidate) : '';
   const contentHash = contentHashFor(candidate, body);
-  return upsertSymbolSummary({ qb, nodeId: candidate.id, contentHash, summary, model: 'neighbor:v1' });
+  try {
+    return withSqliteBusyRetry(() =>
+      upsertSymbolSummary({ qb, nodeId: candidate.id, contentHash, summary, model: 'neighbor:v1' }),
+    );
+  } catch {
+    // D (issues #15/#16): a transient lock on neighbor propagation is
+    // non-fatal — treat as not-propagated; the next pass retries.
+    return false;
+  }
 }
 
 /** Arguments for {@link tryPropagateSummary}. */

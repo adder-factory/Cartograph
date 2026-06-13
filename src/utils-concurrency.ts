@@ -271,6 +271,49 @@ function isErrnoCode(err: unknown, code: string): boolean {
   return typeof err === 'object' && err !== null && (err as { code?: unknown }).code === code;
 }
 
+/** True when `err` is a transient SQLite lock/busy error worth retrying —
+ *  `SQLITE_BUSY`, `SQLITE_BUSY_SNAPSHOT`, or the generic
+ *  "database is locked" / "database table is locked" message forms. */
+export function isSqliteBusyError(err: unknown): boolean {
+  if (err == null) return false;
+  const code = (err as { code?: unknown }).code;
+  if (typeof code === 'string' && code.startsWith('SQLITE_BUSY')) return true;
+  let msg = '';
+  if (err instanceof Error) msg = err.message;
+  else if (typeof err === 'string') msg = err;
+  return /database (?:table )?is locked|SQLITE_BUSY/i.test(msg);
+}
+
+/** Block the current thread for `ms` (true synchronous sleep, no busy-spin)
+ *  via `Atomics.wait` on a throwaway SharedArrayBuffer. */
+function sleepSyncMs(ms: number): void {
+  if (ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Run a synchronous DB write, retrying a bounded number of times on a
+ *  transient SQLITE_BUSY with exponential backoff. With `BEGIN IMMEDIATE`
+ *  writes (see {@link "../db/sqlite-adapter".SqliteDatabaseAdapter.transaction})
+ *  the connection's `busy_timeout` already waits out most contention inside
+ *  each attempt; this is the thin safety net for the residual / over-timeout
+ *  case so a transient lock retries instead of aborting the caller. The
+ *  backoff is synchronous because SQLite writes run synchronously. */
+export function withSqliteBusyRetry<T>(fn: () => T, opts: { maxRetries?: number; baseDelayMs?: number } = {}): T {
+  const maxRetries = opts.maxRetries ?? 3;
+  const baseDelayMs = opts.baseDelayMs ?? 50;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return fn();
+    } catch (err) {
+      if (!isSqliteBusyError(err) || attempt === maxRetries) throw err;
+      lastErr = err;
+      sleepSyncMs(baseDelayMs * 2 ** attempt);
+    }
+  }
+  throw lastErr;
+}
+
 /**
  * Process items in batches to manage memory.
  *

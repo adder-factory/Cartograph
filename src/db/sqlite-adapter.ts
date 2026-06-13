@@ -346,7 +346,17 @@ export class BunSqliteAdapter implements SqliteDatabase {
   }
 
   transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
-    return this._db.transaction(fn);
+    // Take the write lock up front (BEGIN IMMEDIATE) on the OUTERMOST
+    // transaction so writer-vs-writer contention surfaces as plain
+    // SQLITE_BUSY — which the configured `busy_timeout` waits out — instead
+    // of SQLITE_BUSY_SNAPSHOT from a deferred read-then-write upgrade, which
+    // `busy_timeout` can NOT cover (the watcher-vs-summarize abort, issues
+    // #15/#16). bun:sqlite degrades `.immediate` to a SAVEPOINT when already
+    // inside a transaction, so nested transactions are unaffected.
+    const txn = this._db.transaction(fn) as ((...args: unknown[]) => T) & {
+      immediate?: (...args: unknown[]) => T;
+    };
+    return txn.immediate ?? txn;
   }
 
   close(): void {

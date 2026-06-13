@@ -31,6 +31,7 @@ import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
 import { recommendedTuning } from '../installer/hardware-tuning.js';
 import { runSequential } from '../utils/async-iteration.js';
+import { withSqliteBusyRetry } from '../utils-concurrency.js';
 
 /** Batch size per embed() call. Large enough to amortise per-call HTTP
  *  overhead; the backend's continuous-batching scheduler handles
@@ -275,6 +276,24 @@ interface RunEmbedWorkerArgs {
   onProgress: ((done: number, total: number) => void) | undefined;
 }
 
+/** Persist one embed batch under a bounded busy-retry; a residual lock is
+ *  isolated (the batch is counted as errored, the pass continues) so it never
+ *  aborts the embed run (issue #15). */
+function persistEmbeddingBatchSafely(
+  args: Parameters<typeof persistEmbeddingsForBatch>[0],
+  counters: { generated: number; errors: number },
+): void {
+  try {
+    counters.generated += withSqliteBusyRetry(() => persistEmbeddingsForBatch(args));
+  } catch (err) {
+    logWarn('Embedder: persist failed under DB contention, skipping batch', {
+      batchSize: args.batch.length,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    counters.errors += args.batch.length;
+  }
+}
+
 async function runEmbedWorker(args: RunEmbedWorkerArgs): Promise<void> {
   const { client, queries, embeddingModel, batches, counters, total, nextBatchRef, signal, onProgress } = args;
   /** Vectors from batch N awaiting persist while batch N+1 embed runs. */
@@ -292,12 +311,10 @@ async function runEmbedWorker(args: RunEmbedWorkerArgs): Promise<void> {
     // Stage 2: persist the PREVIOUS batch synchronously while the
     // native side is busy. No-op on the first iteration.
     if (pendingPersist) {
-      counters.generated += persistEmbeddingsForBatch({
-        queries,
-        batch: pendingPersist.batch,
-        vecs: pendingPersist.vecs,
-        embeddingModel,
-      });
+      persistEmbeddingBatchSafely(
+        { queries, batch: pendingPersist.batch, vecs: pendingPersist.vecs, embeddingModel },
+        counters,
+      );
       pendingPersist = null;
     }
     // Stage 3: await this batch's vectors.
@@ -321,12 +338,10 @@ async function runEmbedWorker(args: RunEmbedWorkerArgs): Promise<void> {
 
   // Drain the trailing pending persist (last batch in the queue).
   if (pendingPersist) {
-    counters.generated += persistEmbeddingsForBatch({
-      queries,
-      batch: pendingPersist.batch,
-      vecs: pendingPersist.vecs,
-      embeddingModel,
-    });
+    persistEmbeddingBatchSafely(
+      { queries, batch: pendingPersist.batch, vecs: pendingPersist.vecs, embeddingModel },
+      counters,
+    );
   }
 }
 

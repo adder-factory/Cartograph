@@ -32,6 +32,7 @@ import {
 import { logDebug, logWarn } from '../errors.js';
 import { compact } from '../utils.js';
 import { isContextWindowError, withTransientLlmRetry } from './retry-policy.js';
+import { withSqliteBusyRetry } from '../utils-concurrency.js';
 import { z } from 'zod';
 
 /** Closed label set. The model is asked to pick exactly one.
@@ -608,8 +609,7 @@ function applyStructuralPreFilter(ctx: ClassifierRunCtx, batch: Candidate[]): Ca
   for (const c of batch) {
     const heuristic = classifyByStructure(c);
     if (heuristic) {
-      upsertSymbolRole(ctx.queries, c.nodeId, { role: heuristic, roleModel: STRUCTURAL_ROLE_MODEL });
-      ctx.counters.classified++;
+      classifyPersistRole(ctx, c.nodeId, { role: heuristic, roleModel: STRUCTURAL_ROLE_MODEL });
       ctx.counters.done++;
       ctx.options.onProgress?.(ctx.counters.done, ctx.total);
     } else {
@@ -617,6 +617,22 @@ function applyStructuralPreFilter(ctx: ClassifierRunCtx, batch: Candidate[]): Ca
     }
   }
   return residue;
+}
+
+/** Persist one role under a bounded busy-retry; a residual lock is isolated
+ *  (counted as an error, skipped) so it never aborts the classify pass
+ *  (issues #15/#16). The caller owns the done/progress counters. */
+function classifyPersistRole(ctx: ClassifierRunCtx, nodeId: string, role: { role: string; roleModel: string }): void {
+  try {
+    withSqliteBusyRetry(() => upsertSymbolRole(ctx.queries, nodeId, role));
+    ctx.counters.classified++;
+  } catch (err) {
+    logWarn('Classifier: role persist failed under DB contention, skipping symbol', {
+      nodeId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    ctx.counters.errors++;
+  }
 }
 
 /**
@@ -679,8 +695,7 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
   for (let i = 0; i < batch.length; i++) {
     const c = batch[i]!;
     const label = sanitizeApiEndpointRole(roleByIndex.get(i) ?? 'unknown', c);
-    upsertSymbolRole(ctx.queries, c.nodeId, { role: label, roleModel: ctx.modelLabel });
-    ctx.counters.classified++;
+    classifyPersistRole(ctx, c.nodeId, { role: label, roleModel: ctx.modelLabel });
     ctx.counters.done++;
     ctx.options.onProgress?.(ctx.counters.done, ctx.total);
   }
@@ -707,8 +722,7 @@ async function classifierRetryOversizedBatch({
       name: c.name,
       error: err instanceof Error ? err.message : String(err),
     });
-    upsertSymbolRole(ctx.queries, c.nodeId, { role: 'unknown', roleModel: ctx.modelLabel });
-    ctx.counters.classified++;
+    classifyPersistRole(ctx, c.nodeId, { role: 'unknown', roleModel: ctx.modelLabel });
     ctx.counters.done++;
     ctx.options.onProgress?.(ctx.counters.done, ctx.total);
     return;
