@@ -15,7 +15,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { parseLcov, summariseSpan } from '../src/coverage/lcov.js';
-import { getCoverageReportPaths, removeCoverageReportPath } from '../src/coverage/index.js';
+import { getCoverageReportPaths, removeCoverageReportPath, coveragePathPrefix } from '../src/coverage/index.js';
 import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 
 const byName = (a: string, b: string): number => a.localeCompare(b);
@@ -78,6 +78,33 @@ describe('lcov parser', () => {
     expect(out).toHaveLength(1);
     expect(out[0]!.filePath).toBe('real.ts');
   });
+
+  it('resolves FN/FNDA into functionHits keyed by declaration line (#20)', () => {
+    const body = ['SF:f.ts', 'FN:1,f', 'FNDA:3,f', 'DA:1,0', 'DA:2,3', 'end_of_record'].join('\n');
+    const out = parseLcov(body);
+    // The arrow signature line (1) was scored 0 by lcov, but FNDA shows
+    // the function ran 3×, so functionHits carries the truth.
+    expect(out[0]!.functionHits.get(1)).toBe(3);
+  });
+
+  it('tolerates the LCOV 2.0 `FN:start,end,name` form', () => {
+    const body = ['SF:g.ts', 'FN:4,9,handler', 'FNDA:2,handler', 'end_of_record'].join('\n');
+    const out = parseLcov(body);
+    // start line is 4; the end-line field (9) is dropped, name is `handler`.
+    expect(out[0]!.functionHits.get(4)).toBe(2);
+  });
+
+  it('records a zero-hit function so an uncalled fn stays uncovered (#20)', () => {
+    const body = ['SF:h.ts', 'FN:1,never', 'FNDA:0,never', 'DA:1,0', 'end_of_record'].join('\n');
+    const out = parseLcov(body);
+    expect(out[0]!.functionHits.get(1)).toBe(0);
+  });
+
+  it('resolves FN/FNDA for a record lacking a trailing end_of_record', () => {
+    const body = ['SF:i.ts', 'FN:2,late', 'FNDA:1,late', 'DA:2,0'].join('\n');
+    const out = parseLcov(body);
+    expect(out[0]!.functionHits.get(2)).toBe(1);
+  });
 });
 
 describe('summariseSpan', () => {
@@ -101,6 +128,55 @@ describe('summariseSpan', () => {
     const s = summariseSpan(fc, 1, 10);
     expect(s.totalBranches).toBe(2);
     expect(s.coveredBranches).toBe(1);
+  });
+
+  it('counts a DA:0 declaration line as covered when FNDA shows it ran (#20)', () => {
+    // Multi-line single-statement arrow: lcov scores the signature line
+    // (1) as 0 but emits FNDA:2,f; the body line (2) is correctly hit.
+    // Raw DA would be 1/2=50% (a false low_coverage) — FNDA lifts it to
+    // 2/2=100%.
+    const fc = parseLcov(['SF:f.ts', 'FN:1,f', 'FNDA:2,f', 'DA:1,0', 'DA:2,2', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, 1, 2);
+    expect(s.totalLines).toBe(2);
+    expect(s.coveredLines).toBe(2);
+  });
+
+  it('does NOT lift a declaration line whose function never ran (FNDA:0)', () => {
+    const fc = parseLcov(['SF:f.ts', 'FN:1,f', 'FNDA:0,f', 'DA:1,0', 'DA:2,0', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, 1, 2);
+    expect(s.coveredLines).toBe(0);
+  });
+
+  it('only lifts the declaration line, leaving real body gaps uncovered (#20)', () => {
+    // A called function (FNDA:1) with a genuinely-unhit body line (3).
+    // Only the signature line (1) is lifted; line 3 stays uncovered.
+    const fc = parseLcov(
+      ['SF:f.ts', 'FN:1,f', 'FNDA:1,f', 'DA:1,0', 'DA:2,1', 'DA:3,0', 'end_of_record'].join('\n'),
+    )[0]!;
+    const s = summariseSpan(fc, 1, 3);
+    expect(s.totalLines).toBe(3);
+    expect(s.coveredLines).toBe(2); // lines 1 (lifted) + 2 (hit); line 3 still uncovered
+  });
+});
+
+describe('coveragePathPrefix (#19)', () => {
+  const root = '/repo';
+  it('derives the package prefix from a nested per-package report', () => {
+    expect(coveragePathPrefix(root, '/repo/packages/b/coverage/lcov.info')).toBe('packages/b');
+  });
+  it('handles the lcov-report nesting without mistaking it for the prefix', () => {
+    expect(coveragePathPrefix(root, '/repo/apps/web/coverage/lcov-report/lcov.info')).toBe('apps/web');
+  });
+  it('returns empty for a repo-root report', () => {
+    expect(coveragePathPrefix(root, '/repo/coverage/lcov.info')).toBe('');
+    expect(coveragePathPrefix(root, '/repo/lcov.info')).toBe('');
+  });
+  it('accepts project-relative report paths', () => {
+    expect(coveragePathPrefix(root, 'packages/a/coverage/lcov.info')).toBe('packages/a');
+  });
+  it('returns empty for a report outside the project or an unknown layout', () => {
+    expect(coveragePathPrefix(root, '/tmp/merged.info')).toBe('');
+    expect(coveragePathPrefix(root, '/repo/weird/path.txt')).toBe('');
   });
 });
 
@@ -171,6 +247,71 @@ export function beta(x: number): number {
       expect(stats.symbolsWithCoverage).toBeGreaterThanOrEqual(2);
       expect(stats.weightedPct).toBeGreaterThan(0.5);
       expect(stats.weightedPct).toBeLessThan(1);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('scores a called multi-line arrow at 100%, not low, via FNDA (#20)', async () => {
+    // A multi-line single-statement arrow whose declaration line lcov
+    // scores 0 even though the function is exercised. Before the fix the
+    // symbol read 50% (or 0%) and tripped low_coverage; the FNDA record
+    // proves it ran.
+    const src = ['export const f = (x: number): number => {', '  return x * 2;', '};', ''].join('\n');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'helper.ts'), src);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-arrow', version: '0.0.0' }));
+
+    // Signature line (1) scored 0 by lcov; body line (2) hit; FNDA shows
+    // the function ran twice.
+    const lcov = ['SF:src/helper.ts', 'FN:1,f', 'FNDA:2,f', 'DA:1,0', 'DA:2,2', 'end_of_record'].join('\n');
+    const lcovPath = path.join(dir, 'lcov.info');
+    fs.writeFileSync(lcovPath, lcov);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const result = await cg.ingestCoverage(lcovPath);
+      expect(result.filesMatched).toBe(1);
+
+      const node = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'f' AND start_line IS NOT NULL LIMIT 1`)
+        .get() as { id: string } | undefined;
+      expect(node).toBeDefined();
+      const cov = cg.queries.db
+        .prepare(`SELECT covered_lines AS c, total_lines AS t FROM node_coverage WHERE node_id = ?`)
+        .get(node!.id) as { c: number; t: number } | undefined;
+      expect(cov).toBeDefined();
+      expect(cov!.t).toBeGreaterThanOrEqual(1);
+      // Every line in the arrow's span counts as covered — no false gap.
+      expect(cov!.c).toBe(cov!.t);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('matches a per-package report that emits package-relative SF paths (#19)', async () => {
+    // Monorepo workspace: source at packages/b/src/foo.ts, but the
+    // report (vitest/v8 style) lives under the package and emits
+    // package-relative `SF:src/foo.ts`. The report's location supplies
+    // the `packages/b` prefix so the path resolves to the right file.
+    const pkgDir = path.join(dir, 'packages', 'b');
+    fs.mkdirSync(path.join(pkgDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(pkgDir, 'src', 'foo.ts'), `export function foo(): number { return 1; }\n`);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-monorepo', version: '0.0.0' }));
+
+    fs.mkdirSync(path.join(pkgDir, 'coverage'), { recursive: true });
+    const reportPath = path.join(pkgDir, 'coverage', 'lcov.info');
+    fs.writeFileSync(reportPath, ['SF:src/foo.ts', 'DA:1,1', 'end_of_record'].join('\n'));
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const result = await cg.ingestCoverage(reportPath);
+      // The package-relative `src/foo.ts` resolved to packages/b/src/foo.ts.
+      expect(result.filesMatched).toBe(1);
+      expect(result.filesUnmatched).toBe(0);
+      expect(result.symbolsUpdated).toBeGreaterThanOrEqual(1);
     } finally {
       cg.close();
     }
