@@ -316,6 +316,31 @@ export function boot(): void {
 
       expect(Array.isArray(callees)).toBe(true);
     });
+
+    it('honors an explicit edgeKind so structural/type edges are reachable (issue #7)', () => {
+      const files = getNodesByKind(cg.queries, 'file');
+      const utilsFile = files.find((n) => n.filePath.endsWith('utils.ts'));
+      const classes = getNodesByKind(cg.queries, 'class');
+      const baseClass = classes.find((n) => n.name === 'BaseClass');
+      expect(utilsFile).toBeDefined();
+      expect(baseClass).toBeDefined();
+
+      // callees + edgeKind:'contains' — a file's contained symbols. The
+      // default (calls/references/imports) walk never surfaces these.
+      const contained = cg.internals.traverser.getCallees(utilsFile!.id, 1, ['contains']);
+      expect(contained.every((c) => c.edge.kind === 'contains')).toBe(true);
+      expect(contained.map((c) => c.node.name)).toEqual(
+        expect.arrayContaining(['formatValue', 'processValue', 'doubleValue']),
+      );
+      // The default callees walk must NOT include those contains children.
+      const defaultCallees = cg.internals.traverser.getCallees(utilsFile!.id);
+      expect(defaultCallees.some((c) => c.edge.kind === 'contains')).toBe(false);
+
+      // callers + edgeKind:'extends' — DerivedClass extends BaseClass.
+      const extenders = cg.internals.traverser.getCallers(baseClass!.id, 1, ['extends']);
+      expect(extenders.every((c) => c.edge.kind === 'extends')).toBe(true);
+      expect(extenders.map((c) => c.node.name)).toContain('DerivedClass');
+    });
   });
 
   describe('getImpactRadius()', () => {

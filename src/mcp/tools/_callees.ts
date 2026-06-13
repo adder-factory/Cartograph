@@ -9,7 +9,7 @@
 import type { ToolResult } from '../tool-types.js';
 import { getSymbolRoles } from '../../db/queries-roles.js';
 import type Cartograph from '../../index.js';
-import type { Edge, Node } from '../../types.js';
+import type { Edge, EdgeKind, Node } from '../../types.js';
 import { clamp, numArg } from '../../utils.js';
 import {
   CONFIDENCE_RANK,
@@ -108,13 +108,29 @@ function formatCalleeLines(args: FormatCalleeLinesArgs): { rendered: string; has
   return { rendered, hasMore: args.callees.length > args.perSourceLimit };
 }
 
+/**
+ * Fetch a node's callees, honoring an explicit `edgeKind` at the FETCH
+ * layer rather than post-filtering a calls-only candidate set. Without
+ * this, requesting a structural / type kind (`contains`, `returns`,
+ * `type_of`, `extends`, …) filtered against {calls, references, imports}
+ * and always came back empty (issue #7). An unknown kind yields no
+ * edges — the graph schema constrains the value upstream.
+ */
+function calleesFor(
+  cg: Cartograph,
+  nodeId: string,
+  edgeKindFilter: string | undefined,
+): Array<{ node: Node; edge: Edge }> {
+  return edgeKindFilter
+    ? cg.internals.traverser.getCallees(nodeId, 1, [edgeKindFilter as EdgeKind])
+    : cg.internals.traverser.getCallees(nodeId);
+}
+
 function formatGroupedCallees(opts: FormatGroupedCalleesOpts): { text: string; hasMore: boolean } {
   const { cg, symbol, matches, matchesNote, limit, edgeKindFilter, minConfidence, refIds } = opts;
   const threshold = minConfidence ? CONFIDENCE_RANK[minConfidence] : 0;
   const perSymbol = matches.map((node) => {
-    const raw = edgeKindFilter
-      ? cg.internals.traverser.getCallees(node.id).filter((c) => c.edge.kind === edgeKindFilter)
-      : cg.internals.traverser.getCallees(node.id);
+    const raw = calleesFor(cg, node.id, edgeKindFilter);
     return {
       node,
       callees: raw.filter((c) => CONFIDENCE_RANK[c.edge.confidence ?? 'EXTRACTED'] >= threshold),
@@ -408,10 +424,7 @@ function collectBatchedMultiMatchNodes(
 ): Node[] {
   const nodes: Node[] = [];
   for (const m of matches) {
-    const raw = edgeKindFilter
-      ? cg.internals.traverser.getCallees(m.id).filter((c) => c.edge.kind === edgeKindFilter)
-      : cg.internals.traverser.getCallees(m.id);
-    nodes.push(...raw.map((c) => c.node));
+    nodes.push(...calleesFor(cg, m.id, edgeKindFilter).map((c) => c.node));
   }
   return nodes;
 }
@@ -700,8 +713,7 @@ function collectFlatCallees(args: CollectFlatCalleesArgs): { allCallees: Node[];
   const allCallees: Node[] = [];
   const calleeEdges = new Map<string, Edge>();
   for (const node of matches) {
-    for (const c of cg.internals.traverser.getCallees(node.id)) {
-      if (edgeKindFilter && c.edge.kind !== edgeKindFilter) continue;
+    for (const c of calleesFor(cg, node.id, edgeKindFilter)) {
       if (CONFIDENCE_RANK[c.edge.confidence ?? 'EXTRACTED'] < confidenceThreshold) continue;
       if (seen.has(c.node.id)) continue;
       seen.add(c.node.id);

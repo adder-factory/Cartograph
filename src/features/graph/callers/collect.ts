@@ -2,10 +2,27 @@ import type Cartograph from '../../../index.js';
 import { getIncomingEdges } from '../../../db/queries-edges.js';
 import { CONFIDENCE_RANK, filterByConfidence } from '../../../graph/edge-confidence.js';
 import { TYPE_LIKE_KINDS, TYPE_USAGE_EDGE_KINDS } from '../../../graph/type-usage.js';
-import type { Edge, Node } from '../../../types.js';
+import type { Edge, EdgeKind, Node } from '../../../types.js';
 import { expandTestFileCallers } from './test-file-callers.js';
 
 const TYPE_USAGE_EDGE_KIND_SET: ReadonlySet<string> = new Set<string>(TYPE_USAGE_EDGE_KINDS);
+
+/**
+ * Fetch a node's callers, honoring an explicit `edgeKind` at the FETCH
+ * layer so structural / type edges (`contains`, `returns`, `type_of`,
+ * `extends`, …) are reachable on ANY source kind — not just the
+ * type-like sources the TYPE_USAGE path below already covered (issue
+ * #7). An unknown kind yields no edges (the schema constrains it).
+ */
+function callersFor(
+  cg: Cartograph,
+  nodeId: string,
+  edgeKindFilter: string | undefined,
+): Array<{ node: Node; edge: Edge }> {
+  return edgeKindFilter
+    ? cg.internals.traverser.getCallers(nodeId, 1, [edgeKindFilter as EdgeKind])
+    : cg.internals.traverser.getCallers(nodeId);
+}
 
 export interface CallersAccum {
   nodes: Node[];
@@ -57,9 +74,7 @@ function appendResolvedFileImportCallers(args: {
  */
 export function collectCallersForSource(args: CollectCallersForSourceArgs): Array<{ node: Node; edge: Edge }> {
   const { cg, source, edgeKindFilter, minConfidence } = args;
-  const callRows = edgeKindFilter
-    ? cg.internals.traverser.getCallers(source.id).filter((c) => c.edge.kind === edgeKindFilter)
-    : cg.internals.traverser.getCallers(source.id);
+  const callRows = callersFor(cg, source.id, edgeKindFilter);
 
   const seen = new Set<string>(callRows.map((r) => r.node.id));
   const merged = [...callRows];
@@ -94,8 +109,7 @@ export function collectCallers(args: CollectCallersArgs): CallersAccum {
   const rawRows: Array<{ node: Node; edge: Edge }> = [];
   const threshold = minConfidence ? CONFIDENCE_RANK[minConfidence] : 0;
   for (const node of matchNodes) {
-    for (const c of cg.internals.traverser.getCallers(node.id)) {
-      if (edgeKindFilter && c.edge.kind !== edgeKindFilter) continue;
+    for (const c of callersFor(cg, node.id, edgeKindFilter)) {
       if (CONFIDENCE_RANK[c.edge.confidence ?? 'EXTRACTED'] < threshold) continue;
       if (seen.has(c.node.id)) continue;
       seen.add(c.node.id);
