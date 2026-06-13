@@ -110,11 +110,26 @@ describe('stripPreamble', () => {
  * system-prompt KV-cache prefix across calls (lever A).
  */
 describe('buildSummaryUserPrompt', () => {
-  const node = (kind: string): Node => ({ kind, name: 'x' }) as Node;
+  const node = (kind: string, extra: Partial<Node> = {}): Node => ({ kind, name: 'x', ...extra }) as Node;
 
-  it('tags the symbol kind so the model picks the right framing', () => {
-    expect(buildSummaryUserPrompt(node('function'), 'return 1;')).toContain('Summarise this function:');
-    expect(buildSummaryUserPrompt(node('interface'), 'a: number;')).toContain('Summarise this interface:');
+  it('tags the symbol kind + name so the model picks the framing and anchors on identity', () => {
+    expect(buildSummaryUserPrompt(node('function'), 'return 1;')).toContain('Summarise this function named "x":');
+    expect(buildSummaryUserPrompt(node('interface'), 'a: number;')).toContain('Summarise this interface named "x":');
+  });
+
+  it('surfaces signature + docstring as anchor lines above the body when present', () => {
+    const out = buildSummaryUserPrompt(
+      node('function', { signature: '(s: string) => number | null', docstring: 'Parses a thing.' }),
+      'return parse(s);',
+    );
+    expect(out).toContain('signature: (s: string) => number | null');
+    expect(out).toContain('doc: Parses a thing.');
+  });
+
+  it('omits the signature/doc lines when the symbol carries neither', () => {
+    const out = buildSummaryUserPrompt(node('function'), 'return 1;');
+    expect(out).not.toContain('signature:');
+    expect(out).not.toContain('doc:');
   });
 
   it('fences the body and carries no constant instruction text', () => {
