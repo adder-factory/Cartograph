@@ -1,4 +1,19 @@
+import { errMsg } from '../../errors.js';
+
 export type InstallMethodKind = 'source' | 'standalone' | 'package' | 'unknown';
+
+/** Package + GitHub coordinates for the printed re-pin commands. */
+export const CARTOGRAPH_PACKAGE_NAME = '@adder-factory/cartograph';
+export const GITHUB_INSTALL_REF = 'github:adder-factory/cartograph';
+
+/**
+ * Restart reminder, surfaced after every successful update and in the
+ * plan-only steps. Emphatic on purpose: a running MCP server keeps
+ * serving the OLD code until restarted, and an old server + a new CLI on
+ * one index can thrash the re-extract heal (issue #13).
+ */
+export const RESTART_STEP =
+  '⚠ Restart your MCP server / client session now — the running process keeps serving the OLD code until restarted, and an old server + new CLI on the same index can thrash re-extraction (issue #13).';
 
 export interface UpgradeCheckOptions {
   currentVersion: string;
@@ -8,6 +23,14 @@ export interface UpgradeCheckOptions {
   /** Non-source install kind, used to tailor the printed update steps.
    *  Source checkouts route through `runSourceUpgrade` instead. */
   method?: Exclude<InstallMethodKind, 'source'> | undefined;
+  /**
+   * Executor that performs an in-place update for a re-pinnable package
+   * install (a Bun global pinned to a GitHub tag). Given the resolved
+   * latest version; throws on failure. Injected by the CLI only when the
+   * install is actually re-pinnable, so `--apply` does real work instead
+   * of being plan-only. Omitted ⇒ `--apply` stays plan-only.
+   */
+  applyPackage?: ((latestVersion: string) => void | Promise<void>) | undefined;
 }
 
 export interface UpgradeCheckResult {
@@ -52,7 +75,7 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
       applyRequested,
       applied: false,
       message: 'Latest Cartograph version is unknown.',
-      nextSteps: updateStepsForMethod(options.method),
+      nextSteps: updateStepsForMethod(options.method, null),
       warning,
     };
   }
@@ -71,6 +94,40 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
     };
   }
 
+  // `--apply` with a re-pinnable package install (Bun global on a GitHub
+  // tag): do the update in place instead of only printing steps.
+  if (applyRequested && options.applyPackage) {
+    try {
+      await Promise.resolve(options.applyPackage(latestVersion));
+      return {
+        status: 'updated',
+        method: options.method,
+        currentVersion: options.currentVersion,
+        latestVersion,
+        applyRequested,
+        applied: true,
+        message: `Upgraded ${options.currentVersion} → ${latestVersion}.`,
+        nextSteps: ['Run `cartograph status` to confirm index and feature readiness.'],
+        warning: RESTART_STEP,
+      };
+    } catch (error) {
+      return {
+        status: 'blocked',
+        method: options.method,
+        currentVersion: options.currentVersion,
+        latestVersion,
+        applyRequested,
+        applied: false,
+        message: `In-place upgrade to ${latestVersion} failed: ${errMsg(error)}.`,
+        nextSteps: [
+          `Retry the re-pin — \`bun remove -g ${CARTOGRAPH_PACKAGE_NAME}\` then \`bun add -g ${bunGlobalRef(latestVersion)}\`.`,
+          `If it keeps failing (e.g. offline, or the rollback also failed), install from GitHub Releases instead: \`curl -fsSL ${STANDALONE_INSTALLER_URL} | sh\`.`,
+          RESTART_STEP,
+        ],
+      };
+    }
+  }
+
   return {
     status: 'update_available',
     method: options.method,
@@ -80,29 +137,46 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
     applied: false,
     message: `Cartograph ${latestVersion} is available (current ${options.currentVersion}).`,
     nextSteps: [
-      ...(applyRequested ? ['In-place `--apply` is only available for source checkouts.'] : []),
-      ...updateStepsForMethod(options.method),
+      ...(applyRequested
+        ? [
+            '`--apply` can upgrade a source checkout or a Bun global install in place; for this install, run the steps below.',
+          ]
+        : []),
+      ...updateStepsForMethod(options.method, latestVersion),
     ],
   };
 }
 
-/** Update steps for installs that cannot be fast-forwarded in place. */
-function updateStepsForMethod(method: UpgradeCheckOptions['method']): string[] {
+/** The `bun add -g` ref for a given version, or a releases pointer when
+ *  the version is unknown. */
+function bunGlobalRef(latestVersion: string | null): string {
+  if (latestVersion) return `${GITHUB_INSTALL_REF}#v${latestVersion}`;
+  return `${GITHUB_INSTALL_REF}#<latest tag — see https://github.com/adder-factory/cartograph/releases>`;
+}
+
+/** The two-step Bun-global re-pin (remove first to dodge a Bun
+ *  dependency loop when switching tags), as separate copy-pasteable
+ *  commands. */
+function bunGlobalRepinSteps(latestVersion: string | null): string[] {
+  return [
+    `Re-pin the Bun global install — \`bun remove -g ${CARTOGRAPH_PACKAGE_NAME}\` then \`bun add -g ${bunGlobalRef(latestVersion)}\`. (The remove avoids a Bun dependency loop when switching tags; or just run \`cartograph upgrade --apply\`.)`,
+    RESTART_STEP,
+  ];
+}
+
+/** Update steps for installs that cannot be fast-forwarded in place.
+ *  Cartograph is not on npm — GitHub Releases is the canonical channel —
+ *  so package installs are re-pinned from the GitHub tag, never npm. */
+function updateStepsForMethod(method: UpgradeCheckOptions['method'], latestVersion: string | null): string[] {
   if (method === 'standalone') {
-    return [
-      `Re-run the standalone installer: \`curl -fsSL ${STANDALONE_INSTALLER_URL} | sh\`.`,
-      'Restart any running MCP server/client sessions so they load the updated code.',
-    ];
+    return [`Re-run the standalone installer: \`curl -fsSL ${STANDALONE_INSTALLER_URL} | sh\`.`, RESTART_STEP];
   }
   if (method === 'package') {
-    return [
-      'Update via your package manager, e.g. `bun update -g @adder-factory/cartograph` or `npm install -g @adder-factory/cartograph@latest`.',
-      'Restart any running MCP server/client sessions so they load the updated code.',
-    ];
+    return bunGlobalRepinSteps(latestVersion);
   }
   return [
-    'Update with your install method (`git pull && bun install` in a source checkout, or reinstall the package).',
-    'Restart any running MCP server/client sessions so they load the updated code.',
+    `Update with your install method — Bun global: \`bun remove -g ${CARTOGRAPH_PACKAGE_NAME}\` then \`bun add -g ${bunGlobalRef(latestVersion)}\`; source checkout: \`git pull && bun install\`.`,
+    RESTART_STEP,
   ];
 }
 

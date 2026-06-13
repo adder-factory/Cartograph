@@ -6,7 +6,7 @@ import {
   type InstallMethodKind,
   type UpgradeCheckResult,
 } from './runtime.js';
-import { detectInstallMethod, runSourceUpgrade } from './source-update.js';
+import { canRepinBunGlobal, detectInstallMethod, runBunGlobalRepin, runSourceUpgrade } from './source-update.js';
 
 export interface UpgradeCommandDeps {
   program: CliOptionCommand;
@@ -30,6 +30,12 @@ export function registerUpgradeCommand(deps: UpgradeCommandDeps): void {
     .action(async (options: UpgradeOptions) => {
       const apply = options.apply === true;
       const method = detectInstallMethod();
+      // `--apply` does real work for a re-pinnable Bun global install
+      // (remove + add the new GitHub tag); otherwise it stays plan-only.
+      const applyPackage =
+        apply && method.kind === 'package' && canRepinBunGlobal(method.root)
+          ? (latestVersion: string) => runBunGlobalRepin(latestVersion)
+          : undefined;
       const result =
         method.kind === 'source'
           ? await runSourceUpgrade({ root: method.root, currentVersion: CARTOGRAPH_PACKAGE_VERSION, apply })
@@ -38,6 +44,7 @@ export function registerUpgradeCommand(deps: UpgradeCommandDeps): void {
               fetchLatestVersion: fetchLatestPublishedVersion,
               apply,
               method: method.kind,
+              applyPackage,
             });
       // A blocked apply is a failed operation for automation purposes.
       if (result.status === 'blocked') process.exitCode = 1;
