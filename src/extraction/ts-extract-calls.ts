@@ -61,13 +61,27 @@ export const DECORATOR_NODE_TYPES: ReadonlySet<string> = new Set([
  *   - `attribute_list`   — C# (`class_declaration > attribute_list > attribute`) AND
  *                          PHP (`class_declaration > attribute_list > attribute_group`).
  *   - `attribute_group`  — PHP: nested inside `attribute_list`, groups `#[A, B]`.
+ *   - `attribute_item`   — Rust (`#[test]`, `#[tauri::command]`,
+ *                          `#[allow(dead_code)]`): the `#[…]` wrapper holds an
+ *                          `attribute` child. Rust attributes are PRECEDING
+ *                          SIBLINGS of the item (not children), so
+ *                          `recordPrecedingSiblingDecorators` descends them
+ *                          via this set — without which attribute-driven
+ *                          liveness signals (test fns, framework command
+ *                          entry points, explicit `dead_code` allowances) are
+ *                          invisible and falsely flagged by dead-code (#11).
  *
  * `tsExtractDecoratorsFor` descends one level into any direct-child wrapper, then
  * applies `recordDecoratorIfPresent` to each of THAT wrapper's named-children.
  * Two-deep descent (wrapper → wrapper → decorator) covers PHP's
  * `attribute_list > attribute_group > attribute` shape.
  */
-const DECORATOR_WRAPPER_TYPES: ReadonlySet<string> = new Set(['modifiers', 'attribute_list', 'attribute_group']);
+const DECORATOR_WRAPPER_TYPES: ReadonlySet<string> = new Set([
+  'modifiers',
+  'attribute_list',
+  'attribute_group',
+  'attribute_item',
+]);
 
 /**
  * Identifier-shaped child kinds inside a decorator that name the
@@ -531,6 +545,13 @@ function recordPrecedingSiblingDecorators(args: DecoratorRecordArgs, declNode: S
   for (let j = declIdx - 1; j >= 0; j--) {
     const sibling = siblings[j];
     if (!sibling) continue;
+    // Rust `#[…]` attributes precede the item as `attribute_item`
+    // wrappers (not children) — descend rather than treating them as a
+    // non-decorator separator (#11).
+    if (DECORATOR_WRAPPER_TYPES.has(sibling.type)) {
+      recordDecoratorsInWrapper(args, sibling);
+      continue;
+    }
     if (!DECORATOR_NODE_TYPES.has(sibling.type)) return; // non-decorator separator → stop
     recordDecoratorIfPresent(args, sibling);
   }
