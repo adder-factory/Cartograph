@@ -644,6 +644,7 @@ async function classifierClassifyBatch(ctx: ClassifierRunCtx, batch: Candidate[]
             maxTokens: batchMaxTokens,
             responseSchema: BATCH_ROLE_SCHEMA,
             signal: ctx.options.signal,
+            useClassifyModel: true,
           }),
         ),
       { onRetry: (retryErr) => logDebug('Classifier: retrying transient endpoint error', { error: retryErr.message }) },

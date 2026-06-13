@@ -461,7 +461,7 @@ export async function runClassifyPhase(ctx: PhaseContext, chatConcurrency: numbe
   const cResult = await classifyAllRoles({
     queries: svc.cg.queries,
     client,
-    modelLabel: resolved.summarizeLlm!.model,
+    modelLabel: resolved.classifyLlm?.model ?? resolved.summarizeLlm!.model,
     options: {
       signal: controller.signal,
       concurrency: chatConcurrency,

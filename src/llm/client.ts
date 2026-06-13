@@ -176,6 +176,11 @@ export interface LlmEndpointConfig {
    *  local-tier sibling delegated to for routine subtasks. User-facing
    *  field: `localLlm`. */
   localLlm?: ChatProviderConfig | null;
+  /** Optional separate (typically smaller/faster) provider for role
+   *  classification — the classify phase of `summarize` and
+   *  `cartograph admin classify`. Falls back to `summarizeLlm` when
+   *  unset. User-facing field: `classifyLlm`. */
+  classifyLlm?: ChatProviderConfig | null;
   /** Resolved embedding provider. User-facing field: `embeddingLlm`. */
   embeddingLlm?: EmbeddingProviderConfig | null;
   /** Optional cross-encoder reranker. Off by default (`null`); when
@@ -192,6 +197,7 @@ export function normalizeEndpointConfig(c: LlmEndpointConfig): {
   summarizeLlm: ChatProviderConfig | null;
   askLlm: ChatProviderConfig | null;
   localLlm: ChatProviderConfig | null;
+  classifyLlm: ChatProviderConfig | null;
   embeddingLlm: EmbeddingProviderConfig | null;
   rerankerLlm: import('./reranker-client.js').RerankerProviderConfig | null;
 } {
@@ -199,6 +205,7 @@ export function normalizeEndpointConfig(c: LlmEndpointConfig): {
     summarizeLlm: c.summarizeLlm ?? null,
     askLlm: c.askLlm ?? null,
     localLlm: c.localLlm ?? null,
+    classifyLlm: c.classifyLlm ?? null,
     embeddingLlm: c.embeddingLlm ?? null,
     rerankerLlm: c.rerankerLlm ?? null,
   };
@@ -277,6 +284,7 @@ interface LlmClientBackends {
   summarizeLlm: ChatBackend | null;
   askLlm: ChatBackend | null;
   localLlm: ChatBackend | null;
+  classifyLlm: ChatBackend | null;
 }
 
 /**
@@ -305,6 +313,20 @@ async function llmClientGetAskLlmBackend(
   if (!askLlmCfg) throw new LlmEndpointError('askLlm provider not configured');
   backends.askLlm = await llmClientInstantiateBackend(askLlmCfg);
   return backends.askLlm;
+}
+
+/**
+ * Resolve (and lazily instantiate) the classify LLM backend. Mutates
+ * `backends.classifyLlm` on first call; subsequent calls return the cached instance.
+ */
+async function llmClientGetClassifyLlmBackend(
+  backends: LlmClientBackends,
+  classifyLlmCfg: ChatProviderConfig | null,
+): Promise<ChatBackend> {
+  if (backends.classifyLlm) return backends.classifyLlm;
+  if (!classifyLlmCfg) throw new LlmEndpointError('classifyLlm provider not configured');
+  backends.classifyLlm = await llmClientInstantiateBackend(classifyLlmCfg);
+  return backends.classifyLlm;
 }
 
 /**
@@ -386,14 +408,21 @@ export class LlmClient {
   private readonly summarizeLlmCfg: ChatProviderConfig | null;
   private readonly askLlmCfg: ChatProviderConfig | null;
   private readonly localLlmCfg: ChatProviderConfig | null;
+  private readonly classifyLlmCfg: ChatProviderConfig | null;
   /** Lazily-loaded backend impls — grouped to reduce field count. */
-  private readonly backends: LlmClientBackends = { summarizeLlm: null, askLlm: null, localLlm: null };
+  private readonly backends: LlmClientBackends = {
+    summarizeLlm: null,
+    askLlm: null,
+    localLlm: null,
+    classifyLlm: null,
+  };
 
   constructor(config: LlmEndpointConfig) {
     const norm = normalizeEndpointConfig(config);
     this.summarizeLlmCfg = norm.summarizeLlm;
     this.askLlmCfg = norm.askLlm;
     this.localLlmCfg = norm.localLlm;
+    this.classifyLlmCfg = norm.classifyLlm;
   }
 
   /**
@@ -405,10 +434,19 @@ export class LlmClient {
    */
   async chat(
     messages: ChatMessage[],
-    options: ChatOptions & { useAskModel?: boolean; useLocalChat?: boolean } = {},
+    options: ChatOptions & { useAskModel?: boolean; useLocalChat?: boolean; useClassifyModel?: boolean } = {},
   ): Promise<ChatResult> {
     const useAsk = options.useAskModel ?? false;
     const useLocal = options.useLocalChat ?? false;
+    const useClassify = options.useClassifyModel ?? false;
+    // When the caller asked for the classify path AND a separate
+    // classifyLlm provider was configured, route to that backend — the
+    // cheap-classification carve-out (role labelling), typically a
+    // smaller/faster model. Falls through to summarizeLlm when unset.
+    if (useClassify && this.classifyLlmCfg) {
+      const backend = await llmClientGetClassifyLlmBackend(this.backends, this.classifyLlmCfg);
+      return backend.chat(messages, options, false);
+    }
     // When the caller asked for the local LLM path AND a separate
     // localLlm provider was configured, route to that backend. This
     // is the bulk-prose carve-out (paraphrase verification, draft
@@ -441,6 +479,11 @@ export class LlmClient {
    * Probe the configured summarizeLlm backend and (when separately
    * configured) the askLlm backend. Returns false when either is
    * unreachable or when no chat provider is configured.
+   *
+   * Does NOT probe the optional `localLlm` / `classifyLlm` tiers — those
+   * are exercised lazily and, if mis-configured or down, surface as an
+   * `LlmEndpointError` at call time (local-chat / classify phase) rather
+   * than failing this startup gate.
    */
   async isReachable(): Promise<boolean> {
     if (!this.summarizeLlmCfg) return false;

@@ -369,6 +369,20 @@ export interface CartographConfig {
           claudeBin?: string;
         };
 
+        /** Optional separate (typically smaller/faster) provider for role
+         *  classification — the classify phase of `summarize` and
+         *  `cartograph admin classify`. Falls through to `summarizeLlm`
+         *  when unset. */
+        classifyLlm?: {
+          provider: import('./llm/client.js').ChatProvider;
+          model?: string;
+          apiKey?: string;
+          /** openai-compat only: base URL of the HTTP backend. */
+          endpoint?: string;
+          timeoutMs?: number;
+          claudeBin?: string;
+        };
+
         /**
          * Embedding provider. Only `'openai-compat'` after the
          * in-process `'local'` pathway was deleted 2026-05-24c.

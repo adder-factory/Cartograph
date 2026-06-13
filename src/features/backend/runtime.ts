@@ -20,7 +20,14 @@ import { LLAMA_SERVER_RERANK_FLAG } from '../../installer/llm-setup-catalog.js';
 import { recommendedTuning } from '../../installer/hardware-tuning.js';
 import { normaliseEndpoint, scanForLlmBackends } from '../../installer/scan-backends.js';
 
-export const LLM_TIER_KEYS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
+export const LLM_TIER_KEYS = [
+  'summarizeLlm',
+  'localLlm',
+  'askLlm',
+  'classifyLlm',
+  'embeddingLlm',
+  'rerankerLlm',
+] as const;
 export type LlmTierKey = (typeof LLM_TIER_KEYS)[number];
 
 const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
@@ -548,6 +555,7 @@ function llmTierLabel(tier: LlmTierKey): string {
   if (tier === 'summarizeLlm') return 'summarize';
   if (tier === 'localLlm') return 'local';
   if (tier === 'askLlm') return 'ask';
+  if (tier === 'classifyLlm') return 'classify';
   if (tier === 'embeddingLlm') return 'embed';
   return 'rerank';
 }
