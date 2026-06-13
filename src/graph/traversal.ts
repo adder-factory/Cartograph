@@ -500,46 +500,46 @@ export class GraphTraverser {
   }
 
   /**
-   * Find all callers of a function/method.
-   *
-   * `edgeKinds` defaults to the calls/references/imports set. Pass an
-   * explicit kind (e.g. `['contains']`, `['extends']`) to walk a
-   * structural / type edge instead — this is how the MCP `edgeKind`
-   * filter reaches edge kinds outside the call set (issue #7).
+   * Shared call-walk driver for {@link getCallers} / {@link getCallees}
+   * — they differ only in direction. `edgeKinds` defaults to the
+   * calls/references/imports set; pass an explicit kind (e.g.
+   * `['contains']`, `['extends']`) to walk a structural / type edge
+   * instead — this is how the MCP `edgeKind` filter reaches edge kinds
+   * outside the call set (issue #7).
    */
+  private walkCallEdges(
+    nodeId: string,
+    maxDepth: number,
+    edgeKinds: readonly EdgeKind[],
+    direction: 'callers' | 'callees',
+  ): Array<{ node: Node; edge: Edge }> {
+    const result: Array<{ node: Node; edge: Edge }> = [];
+    traverserGetCallWalkRecursive(
+      this.queries,
+      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
+      direction,
+    );
+    return result;
+  }
+
+  /** Find all callers of a function/method. See {@link walkCallEdges}
+   *  for the `edgeKinds` override. */
   getCallers(
     nodeId: string,
     maxDepth: number = 1,
     edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
   ): Array<{ node: Node; edge: Edge }> {
-    const result: Array<{ node: Node; edge: Edge }> = [];
-    traverserGetCallWalkRecursive(
-      this.queries,
-      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
-      'callers',
-    );
-    return result;
+    return this.walkCallEdges(nodeId, maxDepth, edgeKinds, 'callers');
   }
 
-  /**
-   * Find all functions/methods called by a function.
-   *
-   * See {@link getCallers} for `edgeKinds` — pass an explicit kind to
-   * walk structural / type edges (`contains`, `returns`, `type_of`, …)
-   * instead of the default call set (issue #7).
-   */
+  /** Find all functions/methods called by a function. See
+   *  {@link walkCallEdges} for the `edgeKinds` override. */
   getCallees(
     nodeId: string,
     maxDepth: number = 1,
     edgeKinds: readonly EdgeKind[] = CALL_REF_EDGE_KINDS,
   ): Array<{ node: Node; edge: Edge }> {
-    const result: Array<{ node: Node; edge: Edge }> = [];
-    traverserGetCallWalkRecursive(
-      this.queries,
-      { nodeId, maxDepth, currentDepth: 0, result, visited: new Set(), edgeKinds },
-      'callees',
-    );
-    return result;
+    return this.walkCallEdges(nodeId, maxDepth, edgeKinds, 'callees');
   }
 
   /**

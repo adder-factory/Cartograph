@@ -2,8 +2,8 @@
  * Cross-file biomarker rule: `low_coverage`.
  *
  * Fires when a symbol has BOTH:
- *   - centrality at or above the warning floor (i.e. enough callers
- *     that breaking it propagates), AND
+ *   - centrality in the upper tail of the tested codebase (i.e. enough
+ *     callers that breaking it propagates), AND
  *   - coverage_pct at or below the warning ceiling.
  *
  * The rule is silent when `node_coverage` is empty — projects that
@@ -13,16 +13,38 @@
  * surfacing the genuinely-undertested-and-load-bearing symbols in
  * `cartograph_biomarkers` / `cartograph_digest` / `cartograph_review({mode: 'risk'})`.
  *
- * Thresholds are conservative on purpose: a wall of low_coverage
- * findings on day one would train the agent to ignore the rule.
+ * The centrality bar is RELATIVE (a percentile of the tested
+ * population), not an absolute constant. PageRank centrality is
+ * normalised across the graph (mean ≈ 1/N), so a fixed floor scales
+ * inversely with repo size: the previous `0.001` floor sat *above the
+ * entire under-covered population* on medium/large graphs and the rule
+ * could never fire — "didn't fire" read as "all clear" when it wasn't
+ * (issue #5). A percentile is graph-size-invariant.
+ *
+ * The eligible kinds match `coverage --mode ranked` for the
+ * logic-bearing units: `function`, `method`, AND `component`. The old
+ * `function`/`method`-only filter made the dominant TS/TSX/Vue/Svelte
+ * logic unit (the component) permanently invisible, and disagreed with
+ * the ranked view that reads the same `node_coverage` table.
  */
 
 import type { QueryBuilder } from '../db/queries.js';
 import type { Finding } from './types.js';
 
-/** Minimum PageRank centrality below which we don't bother emitting.
- *  ~1% of symbols typically clear this bar — keeps the rule signal-rich. */
-export const LOW_COVERAGE_MIN_CENTRALITY = 0.001;
+/**
+ * Top-decile centrality percentile (the `0.9` percentile of the
+ * tested-and-eligible population) a symbol must reach before it is
+ * "load-bearing" enough to warn on. Relative, so it is graph-size-
+ * invariant where a fixed absolute floor was not.
+ */
+export const LOW_COVERAGE_WARN_CENTRALITY_PERCENTILE = 0.9;
+
+/**
+ * Centrality percentile for `error` escalation (the `0.98` percentile),
+ * paired with `LOW_COVERAGE_ERROR_PCT`: a symbol this central with
+ * near-zero coverage is a genuine red flag.
+ */
+export const LOW_COVERAGE_ERROR_CENTRALITY_PERCENTILE = 0.98;
 
 /** Coverage ceiling below which we emit (50%). Plenty of well-tested
  *  code sits above this; landing here is a real gap. */
@@ -31,10 +53,14 @@ export const LOW_COVERAGE_MAX_PCT = 0.5;
 /** Coverage ceiling below which severity escalates to `error`. */
 export const LOW_COVERAGE_ERROR_PCT = 0.1;
 
-/** Centrality floor that, paired with `LOW_COVERAGE_ERROR_PCT`,
- *  escalates to `error`. Symbols this central with <10% coverage are
- *  genuine red flags. */
-export const LOW_COVERAGE_ERROR_CENTRALITY = 0.05;
+/**
+ * Symbol kinds the rule considers — the logic-bearing units. Mirrors
+ * the population `coverage --mode ranked` operates on (no
+ * function/method-only restriction), so the two surfaces of the same
+ * `node_coverage` table agree. `component` is the key addition: it is
+ * the dominant logic unit in React/Vue/Svelte/Astro codebases.
+ */
+const ELIGIBLE_KINDS = ['function', 'method', 'component'] as const;
 
 /** Scale factor 100 — maps a fraction into an integer percent so
  *  worst-first ranking matches the agent's intuition (lower = worse). */
@@ -51,39 +77,46 @@ interface LowCoverageRow {
 }
 
 /**
- * Pull all symbols whose centrality clears the floor and whose maximum
- * coverage (across ingested sources) is at or below the ceiling. One
- * row per node; `MAX(...)` picks the most-favourable source so a
- * symbol covered well by e2e but poorly by unit doesn't get flagged.
+ * Pull every eligible-kind symbol that has coverage data, with its
+ * centrality and its maximum coverage (across ingested sources — so a
+ * symbol covered well by e2e but poorly by unit isn't flagged). One row
+ * per node. This is BOTH the candidate set and the population the
+ * relative centrality floor is computed from.
  */
-function selectCandidates(queries: QueryBuilder): LowCoverageRow[] {
+function selectEligibleCovered(queries: QueryBuilder): LowCoverageRow[] {
+  const placeholders = ELIGIBLE_KINDS.map(() => '?').join(', ');
   const sql = `
     SELECT n.id           AS nodeId,
            n.centrality   AS centrality,
            MAX(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) AS coveragePct
     FROM nodes n
     JOIN node_coverage c ON c.node_id = n.id
-    WHERE n.centrality >= ?
-      AND (n.kind = 'function' OR n.kind = 'method')
+    WHERE n.centrality IS NOT NULL
+      AND n.kind IN (${placeholders})
     GROUP BY n.id, n.centrality
-    HAVING coveragePct IS NOT NULL AND coveragePct <= ?
+    HAVING coveragePct IS NOT NULL
   `;
-  const rows = queries.db.prepare(sql).all(LOW_COVERAGE_MIN_CENTRALITY, LOW_COVERAGE_MAX_PCT) as Array<{
-    nodeId: string;
-    centrality: number;
-    coveragePct: number;
-  }>;
-  return rows;
+  return queries.db.prepare(sql).all(...ELIGIBLE_KINDS) as LowCoverageRow[];
 }
 
 /**
- * Severity ladder: error when BOTH centrality is high AND coverage is
- * very low; warning otherwise (the predicate already excludes the
- * "not bad enough" rows via SQL). Info tier is unused — the floor
- * itself does the noise control.
+ * Nearest-rank percentile of an ascending-sorted array. Returns
+ * +Infinity for an empty array so no symbol can clear the bar (there is
+ * no candidate to flag anyway).
  */
-function severityFor(row: LowCoverageRow): 'warning' | 'error' {
-  if (row.coveragePct <= LOW_COVERAGE_ERROR_PCT && row.centrality >= LOW_COVERAGE_ERROR_CENTRALITY) {
+function percentileAsc(sortedAsc: number[], p: number): number {
+  if (sortedAsc.length === 0) return Number.POSITIVE_INFINITY;
+  const idx = Math.min(sortedAsc.length - 1, Math.floor(p * sortedAsc.length));
+  return sortedAsc[idx]!;
+}
+
+/**
+ * Severity ladder: error when centrality is in the top ~2% AND coverage
+ * is very low; warning otherwise. Both centrality thresholds are
+ * relative to the tested population (see {@link percentileAsc}).
+ */
+function severityFor(row: LowCoverageRow, errorCentralityFloor: number): 'warning' | 'error' {
+  if (row.coveragePct <= LOW_COVERAGE_ERROR_PCT && row.centrality >= errorCentralityFloor) {
     return 'error';
   }
   return 'warning';
@@ -100,15 +133,29 @@ function hasCoverageData(queries: QueryBuilder): boolean {
 /** Public entry point used by the cross-file biomarker registry. */
 export function findLowCoverage(queries: QueryBuilder): Finding[] {
   if (!hasCoverageData(queries)) return [];
-  const rows = selectCandidates(queries);
-  return rows.map((r) => ({
-    nodeId: r.nodeId,
-    biomarker: 'low_coverage' as const,
-    severity: severityFor(r),
-    metric: Math.round(r.coveragePct * PCT_SCALE),
-    detail: {
-      coveragePct: Math.round(r.coveragePct * COVERAGE_PCT_ROUND) / COVERAGE_PCT_ROUND,
-      centrality: Math.round(r.centrality * CENTRALITY_ROUND) / CENTRALITY_ROUND,
-    },
-  }));
+  const rows = selectEligibleCovered(queries);
+  if (rows.length === 0) return [];
+
+  // Relative centrality floors, computed once from the tested-eligible
+  // population so the rule fires consistently across repo sizes.
+  const centralitiesAsc = rows.map((r) => r.centrality).sort((a, b) => a - b);
+  const warnCentralityFloor = percentileAsc(centralitiesAsc, LOW_COVERAGE_WARN_CENTRALITY_PERCENTILE);
+  const errorCentralityFloor = percentileAsc(centralitiesAsc, LOW_COVERAGE_ERROR_CENTRALITY_PERCENTILE);
+
+  const findings: Finding[] = [];
+  for (const r of rows) {
+    if (r.coveragePct > LOW_COVERAGE_MAX_PCT) continue;
+    if (r.centrality < warnCentralityFloor) continue;
+    findings.push({
+      nodeId: r.nodeId,
+      biomarker: 'low_coverage' as const,
+      severity: severityFor(r, errorCentralityFloor),
+      metric: Math.round(r.coveragePct * PCT_SCALE),
+      detail: {
+        coveragePct: Math.round(r.coveragePct * COVERAGE_PCT_ROUND) / COVERAGE_PCT_ROUND,
+        centrality: Math.round(r.centrality * CENTRALITY_ROUND) / CENTRALITY_ROUND,
+      },
+    });
+  }
+  return findings;
 }
