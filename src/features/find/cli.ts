@@ -37,7 +37,10 @@ export function registerFindCommand(deps: FindCommandDeps): void {
       '(--by content / --by name --mode intent) Restrict to files under this path prefix',
     )
     .option('--language <lang>', '(--by content) Restrict to one language (typescript / python / …)')
-    .option('--key <key>', '(--by env / --by sql) Specific env-var name or table name; omit for the top-N listing')
+    .option(
+      '--key <key>',
+      '(--by env / --by sql) Specific env-var name or table name; the [query] positional also works (`find RESEND_API_KEY --by env`). Omit both for the top-N listing.',
+    )
     .option('--op <op>', '(--by sql) Filter by op (read | write | ddl)')
     .option(
       '--no-include-tests',

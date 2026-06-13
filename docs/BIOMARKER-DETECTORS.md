@@ -41,10 +41,18 @@ belong.
   Marinescu's textbook). Fires when ATFD > 5 AND FDP ≤ 2 AND LAA < 1/3.
 - `illegal_import` — user-defined architectural layering violations
   (opt-in via `CartographConfig.layers`).
-- `low_coverage` — high-centrality symbols with insufficient test
-  coverage. Reads the most recently ingested lcov source. To clear:
-  regenerate with `bun test --coverage`, re-ingest via `cartograph
-  coverage --mode refresh`, then full reindex.
+- `low_coverage` — under-covered symbols in the upper tail of the
+  codebase's centrality distribution (a RELATIVE percentile floor — top
+  decile warn / top ~2% error — so it fires consistently across repo
+  sizes, where a fixed absolute floor sat above the whole under-covered
+  population on larger graphs). Covers `function`, `method`, AND
+  `component` kinds, matching `coverage --mode ranked`. Reads the most
+  recently ingested lcov source; silent until coverage is loaded.
+  Coverage-dependent, so it is excluded from the structural biomarker
+  floor gate (see `ARCHITECTURE.md`); findings still surface in
+  `cartograph_biomarkers` / `digest` / `review`. To clear: regenerate
+  with `bun test --coverage`, re-ingest via `cartograph coverage --mode
+  refresh`, then full reindex.
 - `duplicate_code` — exact (Type-1) / near (Type-2) / partial (Type-3)
   / semantic (Type-4) clones. See `src/biomarkers/duplicate-code.ts` for
   the per-tier bucketing logic.

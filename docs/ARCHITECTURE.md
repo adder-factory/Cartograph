@@ -78,7 +78,11 @@ These are the current owner modules future sessions should preserve:
   commands just because they were imported.
 - Biomarker floor enforcement lives in `scripts/check-biomarkers.mjs`; keep the
   bar at 0 error / 0 warning / 0 info unless the user explicitly changes the
-  project standard.
+  project standard. The gate counts only STRUCTURAL biomarkers — coverage-
+  dependent rules (`GATE_EXCLUDED_BIOMARKERS`, currently `low_coverage`) are
+  excluded, since their findings appear iff external lcov was loaded into the
+  index and would otherwise flip the gate green/red on coverage presence rather
+  than on real structural drift.
 - Architecture drift enforcement lives in `scripts/check-architecture.mjs` and
   runs through `check:architecture` plus the aggregate `check` script. Keep
   high-signal ownership rules there when they can be checked statically:
