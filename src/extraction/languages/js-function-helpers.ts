@@ -23,7 +23,17 @@ export function tryExtractFunctionDeclarationAsComponent(
   const body = getChildByField(node, 'body');
   if (!body || !bodyContainsJsx(body)) return false;
 
-  const compNode = ctx.createNode({ kind: 'component', name, node });
+  // Mirror the metadata the plain-function path attaches (isExported,
+  // docstring, signature, …). Without this, `export default function
+  // Foo()` components land with is_exported=0 / docstring=NULL /
+  // signature=NULL, corrupting dead-code/unused_export and the node
+  // lookup surfaces (issue #9).
+  const compNode = ctx.createNode({
+    kind: 'component',
+    name,
+    node,
+    extra: ctx.collectFunctionMetadata(node, { isExported: true }),
+  });
   if (!compNode) return false;
 
   ctx.pushScope(compNode.id);

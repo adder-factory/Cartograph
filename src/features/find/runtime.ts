@@ -51,7 +51,7 @@ export function buildFindMcpArgs(queryArg: string | undefined, options: FindOpti
     return { ok: false, error: `--by: must be 'name' | 'content' | 'env' | 'sql'; got '${by}'.` };
   }
   if (by === 'content') return buildFindContentArgs(query, options);
-  if (by === 'env' || by === 'sql') return buildFindEnvOrSqlArgs(by, options);
+  if (by === 'env' || by === 'sql') return buildFindEnvOrSqlArgs(by, query, options);
   return buildFindByNameArgs(query, options);
 }
 
@@ -70,12 +70,18 @@ function buildFindContentArgs(query: string | undefined, options: FindOptions): 
   return { ok: true, args };
 }
 
-function buildFindEnvOrSqlArgs(by: 'env' | 'sql', options: FindOptions): FindArgsResult {
+function buildFindEnvOrSqlArgs(by: 'env' | 'sql', query: string | undefined, options: FindOptions): FindArgsResult {
   const args: Record<string, unknown> = { by };
   const limit = parsePositiveIntValue(options.limit ?? FIND_REF_LIMIT_DEFAULT, '--limit');
   if (!limit.ok) return limit;
   args['limit'] = limit.value;
-  if (options.key) args['key'] = options.key;
+  // `cartograph find RESEND_API_KEY --by env` — promote the positional
+  // [query] to `key` when `--key` is absent. Previously the positional
+  // was silently dropped and the generic top-N list returned (issue #10),
+  // so a missed binding looked like "not in the top N" rather than a
+  // direct lookup miss. `--key` still wins if both are given.
+  const key = options.key ?? query;
+  if (key) args['key'] = key;
   if (options.op) args['op'] = options.op;
   if ('includeTests' in options) args['includeTests'] = options.includeTests;
   if (options.allowStale) args['allowStale'] = true;

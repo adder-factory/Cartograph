@@ -326,8 +326,23 @@ const NEXTJS_ROOT_FILE_RE = /^(src\/)?(middleware|instrumentation)\.(ts|js|mjs)$
 const NEXTJS_MIDDLEWARE_EXPORTS: ReadonlySet<string> = new Set(['middleware', 'config']);
 const NEXTJS_INSTRUMENTATION_EXPORTS: ReadonlySet<string> = new Set(['register', 'onRequestError']);
 
+/**
+ * TanStack Router file-based routing: every route module under a
+ * `routes/` directory exports `const Route = createFileRoute(...)` /
+ * `createRootRoute(...)` / `createLazyFileRoute(...)`. Its sole consumer
+ * is the generated `routeTree.gen.ts`, which is routinely kept out of
+ * the index (gitignored, or dropped by a project exclude / minification
+ * heuristic on its long generated type lines), so the graph holds no
+ * edge to the export and it reads as a dead `unused_export` (issue #12).
+ */
+const TANSTACK_ROUTE_DIR_RE = /(?:^|\/)routes\/.*\.[jt]sx?$/;
+function isTanstackRouteExport(filePath: string, name: string): boolean {
+  return name === 'Route' && TANSTACK_ROUTE_DIR_RE.test(filePath);
+}
+
 /** True when an exported symbol is consumed by framework convention (no graph edge possible). */
 export function isFrameworkConventionExport(filePath: string, name: string): boolean {
+  if (isTanstackRouteExport(filePath, name)) return true;
   const stem = nextjsSegmentStem(filePath);
   if (stem !== null) {
     if (NEXTJS_SHARED_EXPORTS.has(name)) return true;

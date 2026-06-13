@@ -82,11 +82,27 @@ function readBiomarkerGateStateAttempt(databasePath) {
   }
 }
 
+// Biomarkers excluded from the structural floor gate. `low_coverage` is
+// the only coverage-DEPENDENT biomarker: it reads `node_coverage`, which
+// is populated by an external `cartograph coverage --mode load`, not by
+// indexing. Its findings are real test-gap signals (surfaced in
+// `cartograph_biomarkers` / `digest` / `review`), but they are NOT
+// structural code-health drift — and counting them here would make the
+// gate flip based purely on whether lcov happened to be loaded into the
+// index (green on a fresh CI checkout with no coverage, red on a dev box
+// that loaded coverage), which is not the deterministic structural floor
+// this gate exists to hold. See src/biomarkers/low-coverage.ts.
+const GATE_EXCLUDED_BIOMARKERS = ['low_coverage'];
+
 function readBiomarkerGateState(databasePath) {
   const db = new Database(databasePath, { readonly: true, create: false });
   try {
+    const excludedList = GATE_EXCLUDED_BIOMARKERS.map((b) => `'${b}'`).join(', ');
+    const excludeClause = `biomarker NOT IN (${excludedList})`;
     const counts = { error: 0, warning: 0, info: 0 };
-    for (const row of db.query('SELECT severity, COUNT(*) AS n FROM code_health_findings GROUP BY severity').all()) {
+    for (const row of db
+      .query(`SELECT severity, COUNT(*) AS n FROM code_health_findings WHERE ${excludeClause} GROUP BY severity`)
+      .all()) {
       counts[row.severity] = row.n;
     }
     const offenders =
@@ -95,7 +111,7 @@ function readBiomarkerGateState(databasePath) {
             .query(
               `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
                FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
-               WHERE f.severity IN ('error', 'warning', 'info')
+               WHERE f.severity IN ('error', 'warning', 'info') AND f.${excludeClause}
                ORDER BY CASE f.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
                         n.file_path, n.start_line`,
             )

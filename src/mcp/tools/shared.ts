@@ -18,7 +18,8 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import type Cartograph from '../../index.js';
 import { contentDriftCount, getStaleFiles } from '../../freshness.js';
-import { hasUncommittedChanges } from '../../git-utils.js';
+import { getUncommittedSourcePaths } from '../../git-utils.js';
+import { detectLanguage, isLanguageSupported } from '../../extraction/grammars.js';
 import { getFileByPath } from '../../db/queries-files.js';
 import { err, type ToolOutcome } from './_outcome.js';
 import type { FileRecord, Node } from '../../types.js';
@@ -445,6 +446,18 @@ export function formatRefSiteLine<T extends RefSite>(
  * already calls. Keep messages compact: agents read these on every
  * miss, so verbosity compounds.
  */
+/**
+ * True when the working tree has an uncommitted/untracked change to a
+ * file of an INDEXABLE language type. Non-indexed types (markdown,
+ * plain text, images, …) are excluded: they never affect query results
+ * and `sync` cannot clear them, so treating them as a freshness risk
+ * produces a false "run sync and retry" on genuine true negatives
+ * (issue #6). Best-effort — a non-git directory yields no paths.
+ */
+function hasUncommittedIndexableChanges(rootDir: string): boolean {
+  return getUncommittedSourcePaths(rootDir).some((p) => isLanguageSupported(detectLanguage(p)));
+}
+
 export function freshnessHintForEmptyResult(cg: Cartograph): string {
   const f = cg.stats.getFreshness();
   if (!f) return '';
@@ -458,8 +471,11 @@ export function freshnessHintForEmptyResult(cg: Cartograph): string {
   // `isStale` compares only the indexed-vs-current HEAD SHA. A just-created
   // or just-edited file may still be invisible to that flag, so hedge true
   // negatives against git-side working-tree changes and the hash-drift
-  // counter below.
-  if (hasUncommittedChanges(cg.projectRoot)) {
+  // counter below. Only files of an INDEXABLE language type count: an
+  // untracked `.md`/`.txt`/image can never make a query miss, and `sync`
+  // can't clear it (it's already in sync with HEAD), so warning on it
+  // sends the agent into a fruitless sync-and-retry loop (issue #6).
+  if (hasUncommittedIndexableChanges(cg.projectRoot)) {
     return "\n\n> ⚠ Uncommitted changes on disk — a file you just created or edited may not be indexed yet. Run `cartograph_admin({action: 'sync'})` and retry if you expected a match.";
   }
   const drifted = contentDriftCount(f);

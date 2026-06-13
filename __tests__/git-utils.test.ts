@@ -11,7 +11,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
-import { hasUncommittedChanges } from '../src/git-utils.js';
+import { hasUncommittedChanges, getUncommittedSourcePaths } from '../src/git-utils.js';
+import { detectLanguage, isLanguageSupported } from '../src/extraction/grammars.js';
 
 function git(cwd: string, args: string[]): void {
   execFileSync('git', args, { cwd, stdio: 'ignore' });
@@ -125,5 +126,45 @@ describe('hasUncommittedChanges', () => {
     );
     fs.writeFileSync(path.join(dir, 'a.ts'), 'export const a = 999;\n');
     expect(hasUncommittedChanges(dir)).toBe(true);
+  });
+});
+
+describe('getUncommittedSourcePaths', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-git-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('returns the dirty paths, excluding cartograph metadata', () => {
+    initRepo(dir);
+    fs.writeFileSync(path.join(dir, 'b.ts'), 'export const b = 2;\n');
+    fs.writeFileSync(path.join(dir, 'notes.md'), '# notes\n');
+    fs.mkdirSync(path.join(dir, '.cartograph'));
+    fs.writeFileSync(path.join(dir, '.cartograph', 'cartograph.db'), 'index');
+    expect(new Set(getUncommittedSourcePaths(dir))).toEqual(new Set(['b.ts', 'notes.md']));
+  });
+
+  it('lets the freshness hedge ignore a sole untracked non-indexed file (issue #6)', () => {
+    // A stray untracked markdown doc is the only dirty path. The index
+    // is in sync with HEAD and `sync` can never clear it, so an
+    // indexable-only filter (the freshness hedge) must see nothing to
+    // warn about — while a real source edit is still flagged.
+    initRepo(dir);
+    fs.mkdirSync(path.join(dir, 'docs'));
+    fs.writeFileSync(path.join(dir, 'docs', 'AUDIT.md'), '# audit\n');
+
+    const indexableDirty = (root: string) =>
+      getUncommittedSourcePaths(root).some((p) => isLanguageSupported(detectLanguage(p)));
+
+    // The markdown doc is dirty, but not of an indexable type.
+    expect(getUncommittedSourcePaths(dir)).toEqual(['docs/AUDIT.md']);
+    expect(indexableDirty(dir)).toBe(false);
+
+    // Add an untracked .ts file — now there IS an indexable dirty path.
+    fs.writeFileSync(path.join(dir, 'new.ts'), 'export const x = 1;\n');
+    expect(indexableDirty(dir)).toBe(true);
   });
 });

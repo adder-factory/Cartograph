@@ -167,28 +167,82 @@ describe('biomarker: low_coverage', () => {
     }
   });
 
-  it('ignores symbols below the centrality floor', async () => {
+  it('ignores symbols below the RELATIVE centrality floor (issue #5)', async () => {
+    // The bar is a percentile of the tested population, not an absolute
+    // constant. A peripheral under-covered symbol is ignored while a
+    // central under-covered symbol in the same project is flagged.
     const { dir, cg } = await makeProject();
     try {
       const alpha = cg.queries.db
         .prepare(`SELECT id FROM nodes WHERE name = 'alpha' AND kind = 'function' LIMIT 1`)
         .get() as { id: string } | undefined;
+      const beta = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'beta' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string } | undefined;
       expect(alpha).toBeDefined();
-      // 0.0001 is below the 0.001 floor.
-      cg.queries.db.prepare(`UPDATE nodes SET centrality = ? WHERE id = ?`).run(0.0001, alpha!.id);
+      expect(beta).toBeDefined();
 
+      // alpha: top of the distribution + under-covered → flagged.
+      // beta: bottom of the distribution + under-covered → ignored.
+      cg.queries.db.prepare(`UPDATE nodes SET centrality = ? WHERE id = ?`).run(0.5, alpha!.id);
+      cg.queries.db.prepare(`UPDATE nodes SET centrality = ? WHERE id = ?`).run(0.001, beta!.id);
+      for (const id of [alpha!.id, beta!.id]) {
+        upsertNodeCoverage(cg.queries, {
+          nodeId: id,
+          source: 'unit',
+          coveredLines: 1,
+          totalLines: 10,
+          coveredBranches: null,
+          totalBranches: null,
+          ingestedAt: Date.now(),
+        });
+      }
+
+      const flagged = new Set(findLowCoverage(cg.queries).map((f) => f.nodeId));
+      expect(flagged.has(alpha!.id)).toBe(true);
+      expect(flagged.has(beta!.id)).toBe(false);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('flags an under-covered component, not only function/method (issue #5)', async () => {
+    // The old `kind IN ('function','method')` filter made components —
+    // the dominant TS/TSX logic unit — permanently invisible.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-low-cov-comp-'));
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(
+      path.join(dir, 'src', 'Card.tsx'),
+      'export default function Card() {\n  return <section>hi</section>;\n}\n',
+    );
+    fs.writeFileSync(path.join(dir, '.gitignore'), '.cartograph/\n');
+    git(dir, 'init', '-q');
+    git(dir, 'config', 'user.email', 't@t');
+    git(dir, 'config', 'user.name', 't');
+    git(dir, 'config', 'commit.gpgsign', 'false');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'init');
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const card = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'Card' AND kind = 'component' LIMIT 1`)
+        .get() as { id: string } | undefined;
+      expect(card).toBeDefined();
+      cg.queries.db.prepare(`UPDATE nodes SET centrality = ? WHERE id = ?`).run(0.1, card!.id);
       upsertNodeCoverage(cg.queries, {
-        nodeId: alpha!.id,
+        nodeId: card!.id,
         source: 'unit',
         coveredLines: 0,
-        totalLines: 10,
+        totalLines: 3,
         coveredBranches: null,
         totalBranches: null,
         ingestedAt: Date.now(),
       });
 
       const findings = findLowCoverage(cg.queries);
-      expect(findings).toEqual([]);
+      expect(findings.map((f) => f.nodeId)).toContain(card!.id);
     } finally {
       cg.close();
       fs.rmSync(dir, { recursive: true, force: true });

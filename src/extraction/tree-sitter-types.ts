@@ -47,6 +47,12 @@ interface VariableInfo {
 export interface ExtractorContext {
   /** Create a node and add it to the extraction result */
   createNode(args: { kind: NodeKind; name: string; node: SyntaxNode; extra?: Partial<Node> }): Node | null;
+  /** Collect docstring / signature / visibility / isExported / isAsync /
+   *  isStatic metadata for a function-like node via the language
+   *  extractor's own hooks — mirrors the metadata the standard function
+   *  path attaches, so `visitNode` hooks that build their own nodes
+   *  (e.g. JS/TS React `function_declaration` components) don't drop it. */
+  collectFunctionMetadata(node: SyntaxNode, opts?: { isExported?: boolean }): Partial<Node>;
   /** Visit a child node (dispatches through the standard visitNode logic) */
   visitNode(node: SyntaxNode): void;
   /** Visit a function body to extract calls */

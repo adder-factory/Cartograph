@@ -82,6 +82,25 @@ const PATTERNS: PatternDef[] = [
     languages: ['typescript', 'javascript', 'tsx', 'jsx'],
     re: /process\.env\[\s*['"]([A-Z_][A-Z0-9_]*)['"]\s*\]/g,
   },
+  // Cloudflare Workers / Hono bindings: c.env.FOO / ctx.env.FOO /
+  // context.env.FOO (member) and the bracket form c.env["FOO"]. The
+  // `c.env.*` accessor is the standard way Hono handlers read Workers
+  // secrets/bindings, and Workers is a documented Cartograph target —
+  // without this every worker secret was invisible to `find --by env`
+  // (issue #10). The leading `\b` stops `abc.env.X` from matching.
+  {
+    languages: ['typescript', 'javascript', 'tsx', 'jsx'],
+    re: /\b(?:c|ctx|context)\.env\.([A-Z_][A-Z0-9_]*)/g,
+  },
+  {
+    languages: ['typescript', 'javascript', 'tsx', 'jsx'],
+    re: /\b(?:c|ctx|context)\.env\[\s*['"]([A-Z_][A-Z0-9_]*)['"]\s*\]/g,
+  },
+  // Deno.env.get("FOO")
+  {
+    languages: ['typescript', 'javascript', 'tsx', 'jsx'],
+    re: /\bDeno\.env\.get\(\s*['"]([A-Z_][A-Z0-9_]*)['"]/g,
+  },
   // os.getenv("FOO")  /  os.environ.get("FOO")  /  os.environ["FOO"]
   {
     languages: ['python'],
