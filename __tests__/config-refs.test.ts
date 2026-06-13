@@ -115,6 +115,36 @@ describe('extractConfigRefs', () => {
     expect(refs.map((r) => r.configKey)).toEqual(['JAVA_PORT']);
   });
 
+  it('extracts Cloudflare Workers / Hono c.env.X bindings (issue #10)', () => {
+    write(
+      'contact.ts',
+      [
+        `if (!c.env.RESEND_API_KEY) return;`,
+        `const to = c.env.CONTACT_EMAIL?.trim();`,
+        `if (!ctx.env.TURNSTILE_SECRET_KEY) return;`,
+        `const k = context.env.SIGNING_KEY;`,
+        `const b = c.env["BRACKET_KEY"];`,
+      ].join('\n'),
+    );
+    const refs = extractConfigRefs(testDir, [{ path: 'contact.ts', language: 'typescript' }], () => null);
+    expect(new Set(refs.map((r) => r.configKey))).toEqual(
+      new Set(['RESEND_API_KEY', 'CONTACT_EMAIL', 'TURNSTILE_SECRET_KEY', 'SIGNING_KEY', 'BRACKET_KEY']),
+    );
+  });
+
+  it('does not double-count process.env.X as a bare env.X (issue #10 guard)', () => {
+    // The c.env / Deno.env patterns must not also fire on `process.env.X`.
+    write('a.ts', `const x = process.env.NODE_ENV;\n`);
+    const refs = extractConfigRefs(testDir, [{ path: 'a.ts', language: 'typescript' }], () => null);
+    expect(refs.map((r) => r.configKey)).toEqual(['NODE_ENV']);
+  });
+
+  it('extracts Deno.env.get("X") (issue #10)', () => {
+    write('a.ts', `const key = Deno.env.get("DENO_SECRET");\n`);
+    const refs = extractConfigRefs(testDir, [{ path: 'a.ts', language: 'typescript' }], () => null);
+    expect(refs.map((r) => r.configKey)).toEqual(['DENO_SECRET']);
+  });
+
   it('only matches UPPER_CASE keys (skips lower-case identifiers)', () => {
     write('a.ts', `const x = process.env.somethingDynamic;\nconst y = process.env.GOOD_KEY;\n`);
     const refs = extractConfigRefs(testDir, [{ path: 'a.ts', language: 'typescript' }], () => null);

@@ -40,6 +40,20 @@ describe('find feature runtime', () => {
     });
   });
 
+  it('promotes the [query] positional to `key` for env/sql when --key is absent (issue #10)', () => {
+    // `cartograph find RESEND_API_KEY --by env` — positional used to be
+    // dropped, returning the generic top-N list instead of a lookup.
+    expect(buildFindMcpArgs('RESEND_API_KEY', { by: 'env', limit: '3' })).toEqual({
+      ok: true,
+      args: { by: 'env', limit: 3, key: 'RESEND_API_KEY' },
+    });
+    // An explicit --key still wins over the positional.
+    expect(buildFindMcpArgs('IGNORED', { by: 'sql', limit: '5', key: 'users' })).toEqual({
+      ok: true,
+      args: { by: 'sql', limit: 5, key: 'users' },
+    });
+  });
+
   it('builds exact, fuzzy, and semantic name payloads', () => {
     expect(
       buildFindMcpArgs('Widget', {
