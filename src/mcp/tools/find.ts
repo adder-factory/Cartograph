@@ -107,7 +107,7 @@ const findSchema = z.object({
         '(name/semantic) Free-text concept query — mutually exclusive with `symbol`. ' +
         '(name/intent) Behavior phrase, e.g. "verify JWT signature". ' +
         '(content) JavaScript-style regex; `^`/`$` match line boundaries. ' +
-        '(env/sql) Ignored — use `key` to filter to one variable/table.',
+        '(env/sql) Prefer `key`; a `query` passed here is used as `key` when `key` is omitted.',
     ),
   mode: z
     .enum(['exact', 'fuzzy', 'semantic', 'intent'])
@@ -300,7 +300,15 @@ function forwardRefsArgs(args: FindArgs): Record<string, unknown> {
   const out: Record<string, unknown> = { ...args };
   delete out['by'];
   delete out['lowTokens'];
-  delete out['query']; // axis sets handle no query
+  // env/sql are driven by `key`. A positional `query` was previously
+  // dropped silently, so `cartograph_find({by:'env', query:'FOO'})`
+  // returned the generic top-N list instead of looking FOO up (issue
+  // #10). Promote it to `key` when `key` is absent so the lookup the
+  // caller clearly intended happens; an explicit `key` still wins.
+  if (out['key'] === undefined && typeof args.query === 'string' && args.query.trim().length > 0) {
+    out['key'] = args.query;
+  }
+  delete out['query']; // axis sets handle no query (now promoted to key above)
   delete out['mode'];
   delete out['kind'];
   delete out['symbol'];
