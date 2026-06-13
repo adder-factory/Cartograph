@@ -165,6 +165,9 @@ hosted models — bulk symbol summaries cost pennies per thousand on the default
 models. Local GGUF setups stay fully offline instead. See
 [Configuration](docs/CONFIGURATION.md) for every preset and tier.
 
+Applying a preset takes effect immediately: a running MCP server picks up
+`.cartograph/config.json` changes live, no restart needed.
+
 <details>
 <summary><strong>What the installer writes</strong> (MCP config, git hooks, uninstall)</summary>
 

@@ -70,6 +70,10 @@ Shared daemon mode uses a per-project Unix socket on POSIX and a per-project
 named pipe on Windows. Startup retires stale lock/socket state and treats an
 active Windows named pipe as an already-running daemon instead of racing it.
 
+A running server watches `.cartograph/config.json` and re-resolves the `llm`
+tiers on the next LLM tool call, so `cartograph admin llm-apply` or a hand-edit
+by a separate process takes effect without restarting the server.
+
 The server advertises MCP `tools`, `resources`, and `prompts` capabilities.
 Cartograph's public surface is still tool-first; `resources/list`,
 `resources/templates/list`, and `prompts/list` return empty lists so clients
