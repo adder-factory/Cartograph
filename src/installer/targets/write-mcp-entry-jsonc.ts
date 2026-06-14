@@ -437,7 +437,7 @@ function skipLineComment(text: string, start: number): number {
   return i;
 }
 
-function skipBlockComment(text: string, start: number): number {
+export function skipBlockComment(text: string, start: number): number {
   let i = start;
   while (i < text.length) {
     if (text[i] === '*' && text[i + 1] === '/') return i + 2;
