@@ -37,7 +37,16 @@ export async function handlePendingSummaries(ctx: ToolCtx, args: Record<string, 
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
   const limit = clamp(numArg(args['limit'], 20), 1, MAX_PENDING_LIMIT);
   const modelHint = (args['modelHint'] as string | undefined) ?? 'agent-mcp';
-  const batch = pendingSummariesBatch(cg.projectRoot, cg.queries, { limit, modelHint });
+  // Honour the configured body-line floor (falls back to the bridge's
+  // default 3 when unset), keeping the agent-bridge in lock-step.
+  const minBodyLines = cg.config.llm?.minBodyLines;
+  const minBodyLinesByKind = cg.config.llm?.minBodyLinesByKind;
+  const batch = pendingSummariesBatch(cg.projectRoot, cg.queries, {
+    limit,
+    modelHint,
+    ...(minBodyLines === undefined ? {} : { minBodyLines }),
+    ...(minBodyLinesByKind === undefined ? {} : { minBodyLinesByKind }),
+  });
 
   if (batch.items.length === 0) {
     return ok(

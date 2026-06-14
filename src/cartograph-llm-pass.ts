@@ -400,12 +400,16 @@ async function runDeterministicPhase<R extends object>(
   const { phase, runner, logMessage } = args;
   const { svc, controller } = ctx;
   svc.bgCtrl.progress = { phase, done: 0, total: 0 };
+  // The structural pass derives its body-size gate from the same
+  // `config.llm.minBodyLines` floor as the LLM pass (neighbor ignores it).
+  const minBodyLines = svc.cg.config.llm?.minBodyLines;
   const result = await runner({
     projectRoot: svc.cg.projectRoot,
     queries: svc.cg.queries,
     options: {
       signal: controller.signal,
       onProgress: makePhaseProgress(svc, phase),
+      ...(minBodyLines === undefined ? {} : { minBodyLines }),
     },
   });
   // Debug-log every field of the phase result (the two runners return

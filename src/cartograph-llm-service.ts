@@ -386,14 +386,25 @@ export class CartographLlmService {
     const { resolved, client, summaryBatchSize } = await llmPrepareSummarizeClient(this, options.summaryBatchSize);
     // Default the eager-limit from config when the caller didn't set one.
     const eagerLimit = options.eagerLimit ?? this.cg.config.llm?.summarizeEagerLimit;
+    // Body-line floor overrides flow from config so an explicit `admin
+    // summarize`, the background pass, and the status rollup agree on the
+    // summarisable candidate set.
+    const minBodyLines = this.cg.config.llm?.minBodyLines;
+    const minBodyLinesByKind = this.cg.config.llm?.minBodyLinesByKind;
     const summaryResult = await summarizeAllSymbols({
       projectRoot: this.cg.projectRoot,
       queries: this.cg.queries,
       client,
       modelLabel: resolved.summarizeLlm.model,
       // Conditional spread — `exactOptionalPropertyTypes` rejects an
-      // explicit `eagerLimit: undefined`.
-      options: { ...options, summaryBatchSize, ...(eagerLimit === undefined ? {} : { eagerLimit }) },
+      // explicit `<prop>: undefined`.
+      options: {
+        ...options,
+        summaryBatchSize,
+        ...(eagerLimit === undefined ? {} : { eagerLimit }),
+        ...(minBodyLines === undefined ? {} : { minBodyLines }),
+        ...(minBodyLinesByKind === undefined ? {} : { minBodyLinesByKind }),
+      },
     });
     const embedResult =
       resolved.embeddingLlm && !options.signal?.aborted

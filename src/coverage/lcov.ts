@@ -42,6 +42,19 @@ interface SpanSummary {
   coveredBranches: number;
 }
 
+/** A symbol's coverage span. */
+export interface SymbolSpan {
+  startLine: number;
+  endLine: number;
+  /** True for function/method/component symbols, whose first line is a
+   *  declaration/signature line. lcov reporters disagree on whether that
+   *  line "executes" (bun emits no `FN`/`FNDA` at all; v8 names
+   *  const-arrows anonymously), so when nothing marks it covered we fold
+   *  it out of the denominator rather than count it against the symbol —
+   *  the reporter-agnostic generalisation of the `FNDA` lift (#21). */
+  isCallable?: boolean;
+}
+
 /** `SF:` prefix length — strips the record type marker before the file path. */
 const SF_PREFIX_LEN = 3;
 /** `DA:` prefix length — strips the marker before the `line,hits` pair. */
@@ -210,7 +223,11 @@ export function parseLcov(body: string): FileCoverage[] {
  * line outside the span doesn't drag a symbol's denominator down, and
  * a heavily-hit line outside doesn't inflate it.
  */
-export function summariseSpan(fc: FileCoverage, startLine: number, endLine: number): SpanSummary {
+export function summariseSpan(fc: FileCoverage, span: SymbolSpan): SpanSummary {
+  const { startLine, endLine, isCallable = false } = span;
+  // The first line of a multi-line callable is its signature line; the
+  // structural fold below only applies when there's more than one line.
+  const multiLine = endLine > startLine;
   let totalLines = 0;
   let coveredLines = 0;
   let totalBranches = 0;
@@ -218,15 +235,22 @@ export function summariseSpan(fc: FileCoverage, startLine: number, endLine: numb
 
   for (const [line, hits] of fc.lineHits) {
     if (line < startLine || line > endLine) continue;
+    // A line counts as covered when its own `DA` hit count is positive,
+    // OR an `FNDA` function-hit record shows the function declared there
+    // ran — the declaration line executes whenever the function is
+    // entered, so a positive function-hit overrides a bogus `DA:<line>,0`
+    // (#20).
+    const covered = hits > 0 || (fc.functionHits.get(line) ?? 0) > 0;
+    // Reporter-agnostic signature-line fold (#21): the leading line of a
+    // multi-line function/method/component is its declaration line.
+    // Reporters disagree on whether it "executes" — bun emits no
+    // `FN`/`FNDA` at all, v8 names const-arrows anonymously — so when
+    // nothing marks it covered, fold it OUT of the denominator instead of
+    // counting it against the symbol. A positively-covered declaration
+    // line still counts. Real gaps in the body keep their own `DA` counts.
+    if (isCallable && multiLine && line === startLine && !covered) continue;
     totalLines += 1;
-    // A function-declaration line scored `DA:<line>,0` whose `FNDA`
-    // function-hit record shows the function ran is a known lcov
-    // artifact for multi-line single-statement arrows (bun + v8). The
-    // declaration line executes whenever the function is entered, so a
-    // positive function-hit count overrides the bogus zero (#20). This
-    // only corrects the entry line — real gaps in the body keep their
-    // own `DA` hit counts and still drag coverage down.
-    if (hits > 0 || (fc.functionHits.get(line) ?? 0) > 0) coveredLines += 1;
+    if (covered) coveredLines += 1;
   }
 
   for (const [line, br] of fc.branches) {

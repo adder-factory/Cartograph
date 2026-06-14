@@ -85,6 +85,39 @@ export const MIN_BODY_LINES = 4;
  *  candidate-set mismatches before. */
 export const MIN_BODY_LINES_BY_KIND: ReadonlyMap<string, number> = new Map([['route', 1]]);
 
+/** Resolved body-line floor — the default and the per-kind overrides,
+ *  ready to hand to the summary candidate selector. */
+export interface ResolvedBodyLineFloor {
+  defaultMinBodyLines: number;
+  minBodyLinesByKind: ReadonlyMap<string, number>;
+}
+
+/**
+ * Resolve the effective body-line floor from optional config overrides,
+ * falling back to {@link MIN_BODY_LINES} / {@link MIN_BODY_LINES_BY_KIND}.
+ * Per-kind overrides are MERGED over the defaults (override wins per
+ * kind), so an operator can retune one kind without losing `route: 1`.
+ * Shared by the LLM pass, the structural pass, and the status rollup so
+ * all three stay in lock-step on which short symbols are summarisable.
+ */
+export function resolveBodyLineFloor(
+  override?: {
+    minBodyLines?: number;
+    minBodyLinesByKind?: Record<string, number>;
+  },
+  fallbackDefault: number = MIN_BODY_LINES,
+): ResolvedBodyLineFloor {
+  const defaultMinBodyLines =
+    typeof override?.minBodyLines === 'number' && override.minBodyLines >= 0 ? override.minBodyLines : fallbackDefault;
+  const byKind = new Map(MIN_BODY_LINES_BY_KIND);
+  if (override?.minBodyLinesByKind) {
+    for (const [kind, value] of Object.entries(override.minBodyLinesByKind)) {
+      if (typeof value === 'number' && Number.isFinite(value) && value >= 0) byKind.set(kind, value);
+    }
+  }
+  return { defaultMinBodyLines, minBodyLinesByKind: byKind };
+}
+
 /** Default docstring-char threshold below which a node is considered
  *  not-yet-documented and therefore eligible for summarising. Exported
  *  so agent-bridge keeps parity with the local pass. */
@@ -173,6 +206,14 @@ interface SummarizerOptions {
    *  uncapped (full pass). Priority-queue items and cache-hits never
    *  count toward the cap. */
   eagerLimit?: number;
+  /** Override the default minimum body-line floor ({@link MIN_BODY_LINES}).
+   *  Sourced from `config.llm.minBodyLines`. Lower it to summarise more
+   *  short symbols; raise it to skip more. */
+  minBodyLines?: number;
+  /** Per-kind body-line floor overrides, merged over
+   *  {@link MIN_BODY_LINES_BY_KIND}. Sourced from
+   *  `config.llm.minBodyLinesByKind`. */
+  minBodyLinesByKind?: Record<string, number>;
 }
 
 interface SummarizerResult {
@@ -1064,9 +1105,10 @@ class SummarizerRun {
     // cutoff was filtering useful short docstrings on this corpus
     // (2026-05-08 coverage audit).
     const docThreshold = options.existingDocstringCharThreshold ?? DEFAULT_DOC_CHAR_THRESHOLD;
+    const floor = resolveBodyLineFloor(options);
     const rawCandidates = getSummarizableNodes(inputs.queries, SUMMARIZABLE_KINDS, {
-      minBodyLinesByKind: MIN_BODY_LINES_BY_KIND,
-      defaultMinBodyLines: MIN_BODY_LINES,
+      minBodyLinesByKind: floor.minBodyLinesByKind,
+      defaultMinBodyLines: floor.defaultMinBodyLines,
       docCharThreshold: docThreshold,
     });
     // Lever C — order by importance: demand-driven priority-queue items

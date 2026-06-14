@@ -84,6 +84,12 @@ const llmConfigSchema = z
       .optional(),
     summarize: z.boolean().optional(),
     summarizeEagerLimit: z.number().optional(),
+    // Minimum symbol body-line floor for summarisation. Defaults to 4
+    // (route: 1). Lower it for fuller coverage of short symbols; raise it
+    // to skip more. Applied in lock-step across the LLM pass, the
+    // structural pass, and the status rollup.
+    minBodyLines: z.number().int().nonnegative().optional(),
+    minBodyLinesByKind: z.record(z.string(), z.number().int().nonnegative()).optional(),
   })
   .loose();
 

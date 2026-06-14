@@ -27,13 +27,13 @@ import type { QueryBuilder } from '../db/queries.js';
 import { getSummarizableNodes, getSymbolSummary, upsertSymbolSummary } from '../db/queries-summaries.js';
 import { stripReasoningTokens } from '../utils.js';
 import { readBodySafe } from './read-body-safe.js';
-import { SUMMARIZABLE_KINDS, MIN_BODY_LINES_BY_KIND, DEFAULT_DOC_CHAR_THRESHOLD } from './summarizer.js';
+import { SUMMARIZABLE_KINDS, DEFAULT_DOC_CHAR_THRESHOLD, resolveBodyLineFloor } from './summarizer.js';
 
-/** Body-line floor for the agent-bridge candidate set: 3 lines
- *  (the local pass uses a stricter MIN_BODY_LINES_BY_KIND map that
- *  averages to 4). The agent typically produces higher-quality
- *  summaries from less context, so a 3-line body still benefits
- *  from a Claude summary when no local model is available. */
+/** Default body-line floor for the agent-bridge candidate set: 3 lines
+ *  (the local pass uses a stricter floor of 4). The agent typically
+ *  produces higher-quality summaries from less context, so a 3-line body
+ *  still benefits from a Claude summary when no local model is available.
+ *  `config.llm.minBodyLines` overrides this when set. */
 const MIN_BODY_LINES = 3;
 const MAX_BODY_CHARS = 4000;
 
@@ -166,16 +166,27 @@ function tryBuildPendingItem(
 export function pendingSummariesBatch(
   projectRoot: string,
   queries: QueryBuilder,
-  options: { limit?: number; kinds?: ReadonlySet<string> | undefined; modelHint?: string } = {},
+  options: {
+    limit?: number;
+    kinds?: ReadonlySet<string> | undefined;
+    modelHint?: string;
+    /** `config.llm.minBodyLines` — overrides the agent-bridge default
+     *  ({@link MIN_BODY_LINES} = 3) when set. */
+    minBodyLines?: number;
+    minBodyLinesByKind?: Record<string, number>;
+  } = {},
 ): PendingBatch {
   const limit = Math.max(1, Math.min(PENDING_BATCH_MAX_LIMIT, options.limit ?? PENDING_BATCH_DEFAULT_LIMIT));
   const kinds = options.kinds ?? SUMMARIZABLE_KINDS;
   const modelHint = options.modelHint ?? 'agent-mcp';
 
+  // Honour config overrides, but fall back to the agent-bridge's looser
+  // default floor (3) rather than the local pass's 4.
+  const floor = resolveBodyLineFloor(options, MIN_BODY_LINES);
   // Reuse the same docstring threshold the local pass uses for parity.
   const candidates = getSummarizableNodes(queries, kinds, {
-    minBodyLinesByKind: MIN_BODY_LINES_BY_KIND,
-    defaultMinBodyLines: MIN_BODY_LINES,
+    minBodyLinesByKind: floor.minBodyLinesByKind,
+    defaultMinBodyLines: floor.defaultMinBodyLines,
     docCharThreshold: SUMMARY_DOCSTRING_CHAR_THRESHOLD,
   });
   const total = candidates.length;

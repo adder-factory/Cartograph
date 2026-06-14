@@ -125,13 +125,19 @@ export function coveragePathPrefix(projectRoot: string, reportPath: string): str
   return '';
 }
 
+/** Kinds whose first line is a declaration/signature line, eligible for
+ *  the structural signature-line fold in {@link summariseSpan}. Matches
+ *  the `low_coverage` biomarker's eligible kinds (arrow-consts are
+ *  indexed as `function`), so the fold lines up with what gets flagged. */
+const CALLABLE_KINDS: ReadonlySet<string> = new Set(['function', 'method', 'component']);
+
 function applyFileCoverage(ctx: IngestCtx, fc: import('./lcov.js').FileCoverage, matchedPath: string): void {
   const nodes = ctx.queries.getNodesByFile(matchedPath);
   for (const node of nodes) {
     const startLine = node.startLine;
     const endLine = node.endLine;
     if (!startLine || !endLine) continue;
-    const span = summariseSpan(fc, startLine, endLine);
+    const span = summariseSpan(fc, { startLine, endLine, isCallable: CALLABLE_KINDS.has(node.kind) });
     // Invariant: never write a `node_coverage` row whose denominator
     // is zero. Lcov reports executable lines, but many indexed symbols
     // (top-level statements, class-body initialiser blocks, arrow
@@ -142,7 +148,9 @@ function applyFileCoverage(ctx: IngestCtx, fc: import('./lcov.js').FileCoverage,
     // `low_coverage` biomarker — and bloats the table with rows that
     // can't be divided by (NULLIF(total_lines, 0) returns NULL → row
     // dropped from ranked output anyway). Skip-and-count is cleaner
-    // than write-and-ignore.
+    // than write-and-ignore. `symbolsEmpty` now also counts the #21 case
+    // where a multi-line callable's ONLY in-span DA was its folded (and
+    // uncovered) signature line — same skip, avoids a false 0%.
     if (span.totalLines === 0) {
       ctx.totals.symbolsEmpty += 1;
       continue;
