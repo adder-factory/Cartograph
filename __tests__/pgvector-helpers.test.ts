@@ -121,6 +121,27 @@ describe('pgvector helper fallbacks', () => {
     ).toEqual([]);
   });
 
+  it('skips the KNN when a mirror table is absent (no relation-does-not-exist)', () => {
+    // No bootstrapPgvectorTables() → mirror tables are never created and the
+    // existence cache is empty; to_regclass reports them absent. The search
+    // must skip the KNN entirely instead of issuing it and letting Postgres
+    // raise + log `relation does not exist` (caught, but noise in CI logs).
+    const fake = new FakePgvectorDb();
+    expect(bootstrapPgvector(fake.db, POSTGRES_DATABASE)).toBe(true);
+
+    const hits = findSimilarViaPgvector({
+      db: fake.db,
+      queryVec: Float32Array.from([1, 0]),
+      model: 'test-model',
+      k: 2,
+    });
+
+    expect(hits).toEqual([]);
+    // Guard proof: the KNN was never issued, even though the mock would have
+    // returned hits for those tables had the query run.
+    expect(fake.alls.some((sql) => sql.includes('embedding <=>'))).toBe(false);
+  });
+
   it('clears only recognized pgvector mirror tables and tolerates query failures', () => {
     const fake = new FakePgvectorDb();
     clearPgvectorTables(fake.db);
@@ -156,6 +177,7 @@ interface FakePgvectorOptions {
 class FakePgvectorDb {
   readonly execs: string[] = [];
   readonly runs: Array<{ sql: string; params: unknown }> = [];
+  readonly alls: string[] = [];
   readonly db: SqliteDatabase;
 
   constructor(private readonly options: FakePgvectorOptions = {}) {
@@ -191,6 +213,7 @@ class FakePgvectorDb {
   }
 
   private rowsFor(sql: string): unknown[] {
+    this.alls.push(sql);
     if (sql.includes('SELECT DISTINCT LENGTH(embedding) AS len FROM embedding_store')) {
       return [{ len: VECTOR_BYTES }, { len: INVALID_VECTOR_BYTES }, { len: TOO_LARGE_VECTOR_BYTES }];
     }

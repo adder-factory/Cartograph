@@ -44,6 +44,17 @@ const pgvectorAvailableQuery = defineQuery({
   row: OkRowSchema,
 });
 
+// `to_regclass` returns the relation's regclass (cast to its qualified name
+// here) or NULL — crucially, NULL rather than an error for a missing table,
+// unlike `name::regclass`. Used to skip a KNN against a mirror table that the
+// lazy `ensurePgvectorMirrorTable` path hasn't created yet, so Postgres never
+// logs a `relation does not exist` ERROR for a search-before-write.
+const pgvectorTableExistsQuery = defineQuery({
+  sql: 'SELECT to_regclass(@name)::text AS oid',
+  params: z.object({ name: z.string() }),
+  row: z.object({ oid: z.string().nullable() }),
+});
+
 const storeDimsQuery = defineQuery({
   sql: 'SELECT DISTINCT LENGTH(embedding) AS len FROM embedding_store',
   params: NoParams,
@@ -209,6 +220,10 @@ function findSimilarChunkQueryFor(name: string) {
 const pgvectorAvailableByDb = new WeakMap<SqliteDatabase, boolean>();
 const ensuredStoreTablesByDb = new WeakMap<SqliteDatabase, Set<number>>();
 const ensuredChunkTablesByDb = new WeakMap<SqliteDatabase, Set<number>>();
+// Per-(db, table-name) existence cache for the KNN guard. A successful CREATE in
+// `ensurePgvectorMirrorTable` records `true`; a negative `to_regclass` result is
+// cached so repeated searches before the table exists never re-probe.
+const pgvectorTableExistsByDb = new WeakMap<SqliteDatabase, Map<string, boolean>>();
 type PgvectorMirrorTableKind = 'store' | 'chunk';
 
 const storeBackfillByDbAndName = new WeakMap<
@@ -333,6 +348,39 @@ export function isPgvectorAvailable(db: SqliteDatabase): boolean {
   }
 }
 
+function pgvectorTableExistsCache(db: SqliteDatabase): Map<string, boolean> {
+  let cache = pgvectorTableExistsByDb.get(db);
+  if (!cache) {
+    cache = new Map();
+    pgvectorTableExistsByDb.set(db, cache);
+  }
+  return cache;
+}
+
+/**
+ * Whether `name` resolves to an existing relation on this connection. Caches
+ * per (db, name): the KNN search consults this before querying a mirror table,
+ * so a search issued before the lazily-created table exists is skipped rather
+ * than throwing `relation does not exist` (which Postgres logs server-side even
+ * though the caller catches it — pure noise in CI container logs). The cache is
+ * primed to `true` by `ensurePgvectorMirrorTable` on a successful CREATE.
+ */
+function pgvectorTableExists(db: SqliteDatabase, name: string): boolean {
+  const cache = pgvectorTableExistsCache(db);
+  const cached = cache.get(name);
+  if (cached !== undefined) return cached;
+  try {
+    const exists = pgvectorTableExistsQuery(db).get({ name })?.oid != null;
+    cache.set(name, exists); // cache only a definitive probe result
+    return exists;
+  } catch {
+    // A transient probe failure (e.g. a connection blip) must NOT poison the
+    // cache — leave the entry absent so the next call re-probes, rather than
+    // permanently suppressing KNN for this db instance.
+    return false;
+  }
+}
+
 export function bootstrapPgvector(db: SqliteDatabase, database: DatabaseConfig): boolean {
   if (db.dialect !== 'postgres') return false;
   const mode = database.pgvector ?? 'auto';
@@ -419,6 +467,7 @@ function ensurePgvectorMirrorTable(db: SqliteDatabase, dim: number, kind: Pgvect
     db.exec(pgvectorLookupIndexSql(kind, name, dim));
     ensurePgvectorKnnIndex(db, name, indexPrefix);
     ensured.add(dim);
+    pgvectorTableExistsCache(db).set(name, true); // primed so the KNN guard doesn't re-probe
     return true;
   } catch {
     return false;
@@ -548,23 +597,33 @@ export function findSimilarViaPgvector(opts: FindSimilarViaPgvectorOpts): Pgvect
   const params = { embedding, model, fetch };
   const tableName = pgvectorStoreTableNameForDim(dim);
   let rows: PgvectorHit[] = [];
-  try {
-    const query = opts.grain === 'symbol' ? getKnnStoreSymbolQuery(db, tableName) : getKnnStoreAllQuery(db, tableName);
-    rows = query.all(params).map((row) => ({ nodeId: row.node_id, distance: row.distance }));
-  } catch {
-    rows = [];
+  // Skip the KNN when the lazily-created mirror table doesn't exist yet (e.g. a
+  // search before any embedding of this dim was written), so Postgres doesn't
+  // log a `relation does not exist` ERROR. The try/catch stays as a backstop
+  // for a table dropped concurrently after the existence check.
+  if (pgvectorTableExists(db, tableName)) {
+    try {
+      const query =
+        opts.grain === 'symbol' ? getKnnStoreSymbolQuery(db, tableName) : getKnnStoreAllQuery(db, tableName);
+      rows = query.all(params).map((row) => ({ nodeId: row.node_id, distance: row.distance }));
+    } catch {
+      rows = [];
+    }
   }
 
   const includeChunks = opts.includeChunks ?? true;
   if (!includeChunks) return rows.slice(0, k);
 
   let chunkRows: PgvectorHit[] = [];
-  try {
-    chunkRows = getKnnChunkQuery(db, pgvectorChunkTableNameForDim(dim))
-      .all(params)
-      .map((row) => ({ nodeId: row.node_id, distance: row.distance }));
-  } catch {
-    chunkRows = [];
+  const chunkTableName = pgvectorChunkTableNameForDim(dim);
+  if (pgvectorTableExists(db, chunkTableName)) {
+    try {
+      chunkRows = getKnnChunkQuery(db, chunkTableName)
+        .all(params)
+        .map((row) => ({ nodeId: row.node_id, distance: row.distance }));
+    } catch {
+      chunkRows = [];
+    }
   }
   if (chunkRows.length === 0) return rows.slice(0, k);
   return mergeByBestDistance(rows, chunkRows, k);
