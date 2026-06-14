@@ -268,6 +268,56 @@ describe('summariseSpan', () => {
   });
 });
 
+describe('lcov parser + summariseSpan — edge/robustness (mutation-hardening)', () => {
+  it('drops malformed DA records (missing field or non-numeric)', () => {
+    const fc = parseLcov(['SF:x.ts', 'DA:5', 'DA:abc,1', 'DA:6,xyz', 'DA:7,3', 'end_of_record'].join('\n'))[0]!;
+    expect([...fc.lineHits.keys()]).toEqual([7]); // only the valid record survives
+    expect(fc.lineHits.get(7)).toBe(3);
+  });
+
+  it('drops malformed BRDA records and keeps no spurious entries', () => {
+    const fc = parseLcov(
+      ['SF:x.ts', 'BRDA:5', 'BRDA:abc,0,0,1', 'BRDA:6,0,0,xyz', 'BRDA:8,0,0,2', 'end_of_record'].join('\n'),
+    )[0]!;
+    expect(fc.branches.size).toBe(1);
+    expect(fc.branches.get(8)).toEqual({ taken: 1, total: 1 });
+  });
+
+  it('counts every positively-taken branch on a line (taken > 0, not <= 0)', () => {
+    const fc = parseLcov(['SF:x.ts', 'BRDA:5,0,0,2', 'BRDA:5,0,1,3', 'end_of_record'].join('\n'))[0]!;
+    expect(fc.branches.get(5)).toEqual({ taken: 2, total: 2 });
+  });
+
+  it('trims surrounding whitespace before classifying a record', () => {
+    const fc = parseLcov(['SF:x.ts', '   DA:5,1   ', 'end_of_record'].join('\n'))[0]!;
+    expect(fc.lineHits.get(5)).toBe(1);
+  });
+
+  it('ignores FN records with an empty name or non-numeric start line', () => {
+    const fc = parseLcov(
+      ['SF:f.ts', 'FN:1,', 'FNDA:2,', 'FN:abc,x', 'FNDA:2,x', 'FN:3,real', 'FNDA:4,real', 'end_of_record'].join('\n'),
+    )[0]!;
+    expect(fc.functionHits.size).toBe(1); // only the valid FN resolves
+    expect(fc.functionHits.get(3)).toBe(4);
+  });
+
+  it('summariseSpan does not fold the signature line when isCallable defaults to false', () => {
+    const fc = parseLcov(['SF:f.ts', 'DA:1,0', 'DA:2,5', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2 }); // no isCallable → default false
+    expect(s.totalLines).toBe(2); // line 1 still counted (not folded)
+    expect(s.coveredLines).toBe(1);
+  });
+
+  it('summariseSpan branch rollup includes the span endpoints and excludes outside lines', () => {
+    const fc = parseLcov(
+      ['SF:x.ts', 'BRDA:1,0,0,1', 'BRDA:5,0,0,1', 'BRDA:10,0,0,1', 'BRDA:15,0,0,1', 'end_of_record'].join('\n'),
+    )[0]!;
+    const s = summariseSpan(fc, { startLine: 5, endLine: 10 });
+    expect(s.totalBranches).toBe(2); // lines 5 (start) and 10 (end) only
+    expect(s.coveredBranches).toBe(2);
+  });
+});
+
 describe('coveragePathPrefix (#19)', () => {
   const root = '/repo';
   it('derives the package prefix from a nested per-package report', () => {
