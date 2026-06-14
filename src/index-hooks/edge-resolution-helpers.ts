@@ -98,7 +98,7 @@ function normalizeProjectPath(filePath: string): string {
   return filePath.replaceAll('\\', '/');
 }
 
-function readFileSafe(absPath: string): string | null {
+export function readFileSafe(absPath: string): string | null {
   try {
     return fs.readFileSync(absPath, 'utf8');
   } catch {
@@ -106,7 +106,7 @@ function readFileSafe(absPath: string): string | null {
   }
 }
 
-function existsAsFile(absPath: string): boolean {
+export function existsAsFile(absPath: string): boolean {
   try {
     return fs.statSync(absPath).isFile();
   } catch {

@@ -30,8 +30,15 @@ vi.spyOn(edgeQueries, 'insertEdges').mockImplementation(((_queries: unknown, edg
 vi.spyOn(errorModule, 'logDebug').mockImplementation(((message: string) =>
   state.logs.push(message)) as typeof errorModule.logDebug);
 
-const { collectTargets, lookupSymbolByNameInFile, refreshEdgesHook, resolveTargetFile, yieldToEventLoop } =
-  await import('../src/index-hooks/edge-resolution-helpers.js');
+const {
+  collectTargets,
+  existsAsFile,
+  lookupSymbolByNameInFile,
+  readFileSafe,
+  refreshEdgesHook,
+  resolveTargetFile,
+  yieldToEventLoop,
+} = await import('../src/index-hooks/edge-resolution-helpers.js');
 
 function ctx(projectRoot = '/repo'): IndexHookContext {
   return { projectRoot, queries: {}, config: {} } as IndexHookContext;
@@ -92,6 +99,75 @@ describe('edge-resolution helper primitives', () => {
       fs.writeFileSync(path.join(root, 'src', 'aliased.ts'), 'export const aliased = 1;');
 
       expect(resolveTargetFile('src', '@/aliased', root)).toBe('src/aliased.ts');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('resolves a CUSTOM tsconfig path alias that is not in the hard-coded fallback list', () => {
+    // `@feature/` is NOT one of the built-in FALLBACK_ALIASES (@/, ~/, @src/,
+    // src/, @app/, app/), so resolution depends entirely on the hook context
+    // surfacing the project's tsconfig `paths` via getProjectAliases. If the
+    // alias map memoization is broken (never loaded / always undefined), the
+    // import falls through to the fallback list (miss) and direct lookup
+    // (miss) and resolves to null.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-edge-resolution-custom-alias-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src', 'feature'), { recursive: true });
+      fs.writeFileSync(
+        path.join(root, 'tsconfig.json'),
+        JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '@feature/*': ['src/feature/*'] } } }),
+      );
+      fs.writeFileSync(path.join(root, 'src', 'feature', 'widget.ts'), 'export const widget = 1;');
+
+      expect(resolveTargetFile('src', '@feature/widget', root)).toBe('src/feature/widget.ts');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('normalizes backslashes in fromDir to forward slashes before resolving', () => {
+    // A Windows-style fromDir (`src\sub`) must be normalized to `src/sub` so
+    // the relative import resolves from the right directory. Dropping the
+    // separator entirely (`srcsub`) would point at a non-existent directory.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-edge-resolution-backslash-'));
+    try {
+      fs.mkdirSync(path.join(root, 'src', 'sub'), { recursive: true });
+      fs.writeFileSync(path.join(root, 'src', 'sub', 'target.ts'), 'export const t = 1;');
+
+      expect(resolveTargetFile('src\\sub', './target', root)).toBe('src/sub/target.ts');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads file contents as a utf8 string and returns null for unreadable paths', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-edge-resolution-readfile-'));
+    try {
+      const filePath = path.join(root, 'data.txt');
+      fs.writeFileSync(filePath, 'alpha beta');
+
+      const contents = readFileSafe(filePath);
+      expect(typeof contents).toBe('string');
+      expect(contents).toBe('alpha beta');
+
+      expect(readFileSafe(path.join(root, 'does-not-exist.txt'))).toBeNull();
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reports existing files as true and missing paths / directories as false', () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-edge-resolution-exists-'));
+    try {
+      const filePath = path.join(root, 'data.txt');
+      fs.writeFileSync(filePath, 'x');
+
+      expect(existsAsFile(filePath)).toBe(true);
+      // A directory is not a file.
+      expect(existsAsFile(root)).toBe(false);
+      // A non-existent path makes statSync throw — the catch must return false.
+      expect(existsAsFile(path.join(root, 'missing'))).toBe(false);
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
     }
