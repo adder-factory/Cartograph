@@ -6,7 +6,7 @@
  * with positive-match cases, false-positive guards, and the
  * `evaluateRules` round-trip pinning the threshold contract.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll } from 'vitest';
 import {
   countEmptyCatch,
   countSyncIoInAsync,
@@ -23,7 +23,10 @@ import {
   countUnsafeJsonParse,
   countEnvNoValidation,
   countEmptyFunctionBody,
+  computeMetrics,
+  findNodeAt,
   evaluateRules,
+  _internalForTests,
   EMPTY_CATCH_RE,
   SYNC_IO_CALLS,
   FOROF_AWAIT_RE,
@@ -42,7 +45,32 @@ import {
   JSON_PARSE_RE,
   PROCESS_ENV_DOT_RE,
 } from '../src/biomarkers/engine.js';
+import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import type { Language } from '../src/types.js';
+
+const { isMagicNumber } = _internalForTests;
+
+// The structural-detector tests below drive computeMetrics, which parses
+// real source via tree-sitter — grammars must be loaded first.
+beforeAll(async () => {
+  await initGrammars();
+  await loadAllGrammars();
+});
+
+/** Parse `src`, anchor the symbol at (line,col), and compute its metrics.
+ *  Keeps each structural test to one expressive line. */
+function metricsFor(
+  src: string,
+  language: Language,
+  startLine: number,
+  endLine: number,
+  line = 1,
+  column = 0,
+): ReturnType<typeof computeMetrics> {
+  const node = findNodeAt({ source: src, language, line, column });
+  if (!node) throw new Error('findNodeAt returned null');
+  return computeMetrics({ bodyNode: node, language, startLine, endLine });
+}
 
 function metrics(overrides: Record<string, number> = {}): {
   loc: number;
@@ -882,5 +910,575 @@ describe('empty_function_body detector (G26-P2)', () => {
       metrics: metrics({ emptyFunctionBodyCount: 1 }),
     });
     expect(one.find((f) => f.biomarker === 'empty_function_body')!.severity).toBe('info');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────
+// STRUCTURAL complexity detectors — the per-symbol AST-metric tier.
+// These drive computeMetrics (AST walk) + evaluateRules (threshold map)
+// for large_method / complex_method / nested_complexity /
+// complex_conditional / long_parameter_list / magic_number /
+// brain_method, plus the engine helpers (isMagicNumber, isCountedBranch,
+// the Go nil-comparison deduction, countParameters, countConditional-
+// Operands, severityFor). Values below were probed against the live
+// detector, not guessed.
+// ──────────────────────────────────────────────────────────────────────
+
+describe('computeMetrics: cyclomatic / nesting (AST walk)', () => {
+  it('counts cyclomatic EXACTLY: base 1 + 2 if + 1 for + 1 nested-if = 5', () => {
+    const src = `function f(x: number): number {
+  if (x > 0) return 1;
+  if (x < 0) return -1;
+  for (let i = 0; i < 10; i++) {
+    if (i === x) return i;
+  }
+  return 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 8).cyclomatic).toBe(5);
+  });
+
+  it('tracks max nesting EXACTLY: if > while > for > if = 4', () => {
+    const src = `function f(): number {
+  if (true) {
+    while (true) {
+      for (;;) {
+        if (false) {
+          return 1;
+        }
+      }
+    }
+  }
+  return 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 12).maxNesting).toBe(4);
+  });
+
+  it('a branch-free body has cyclomatic 1 (CYCLOMATIC_BASE) and nesting 0', () => {
+    const src = `function flat(a: number, b: number): number {
+  const c = a + b;
+  return c;
+}`;
+    const m = metricsFor(src, 'typescript', 1, 4);
+    expect(m.cyclomatic).toBe(1);
+    expect(m.maxNesting).toBe(0);
+  });
+
+  it('keeps the DEEPEST nesting even when a shallower block follows it (max, not last)', () => {
+    // A naive `maxNesting = newDepth` (always-assign) mutant would report
+    // the trailing shallow `if (d)` depth (1) instead of the peak (3).
+    const src = `function f(a: boolean, b: boolean, c: boolean, d: boolean): number {
+  if (a) {
+    if (b) {
+      if (c) { return 1; }
+    }
+  }
+  if (d) { return 2; }
+  return 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 9).maxNesting).toBe(3);
+  });
+
+  it('reports loc as the inclusive 1-based line span (endLine - startLine + 1)', () => {
+    const src = `function tiny() { return 1; }`;
+    expect(metricsFor(src, 'typescript', 10, 19).loc).toBe(10);
+  });
+
+  it('clamps loc to >= 0 when endLine precedes startLine', () => {
+    const src = `function tiny() { return 1; }`;
+    expect(metricsFor(src, 'typescript', 5, 1).loc).toBe(0);
+  });
+
+  it('returns base metrics (loc only) for an unsupported language with no LangMap', () => {
+    const stub = { type: 'fake', childCount: 0, children: [], text: '' } as never;
+    const m = computeMetrics({ bodyNode: stub, language: 'unknown' as Language, startLine: 1, endLine: 10 });
+    expect(m.loc).toBe(10);
+    expect(m.cyclomatic).toBe(1);
+    expect(m.maxNesting).toBe(0);
+    expect(m.maxConditionalOperands).toBe(0);
+    expect(m.magicNumberCount).toBe(0);
+  });
+});
+
+describe('isCountedBranch + Go nil-comparison deduction', () => {
+  it('Go: a lone `if err != nil` body has cyclomatic 1 (deduction fires)', () => {
+    const src = `package p
+func run() error {
+    a, err := step1()
+    if err != nil {
+        return err
+    }
+    return nil
+}`;
+    expect(metricsFor(src, 'go', 2, 8, 2, 0).cyclomatic).toBe(1);
+  });
+
+  it('Go: an err-nil check + a REAL `if` counts only the real branch (cyclomatic 2)', () => {
+    // Pins the `&&` chain in isCountedBranch: the err-nil if is deducted,
+    // the value-comparison if is not.
+    const src = `package p
+func tier(x int) (string, error) {
+    a, err := step1()
+    if err != nil {
+        return "", err
+    }
+    if x > 100 {
+        return "big", nil
+    }
+    return "small", nil
+}`;
+    expect(metricsFor(src, 'go', 2, 10, 2, 0).cyclomatic).toBe(2);
+  });
+
+  it('Go: an `if` whose condition is a binary comparison (not nil) is a real branch (cyclomatic 2)', () => {
+    // isGoNilComparisonIfStatement sees a binary_expression first child
+    // but no `nil` operand → returns false → the if IS counted.
+    const src = `package p
+func f(x int, y int) int {
+    if x > y {
+        return 1
+    }
+    return 0
+}`;
+    expect(metricsFor(src, 'go', 2, 7, 2, 0).cyclomatic).toBe(2);
+  });
+
+  it('Go: an `if` whose condition is NOT a binary_expression (a call) is a real branch (cyclomatic 2)', () => {
+    // isGoNilComparisonIfStatement bails at the `firstChild?.type !==
+    // "binary_expression"` guard → the if IS counted.
+    const src = `package p
+func f(x int) int {
+    if g(x) {
+        return 1
+    }
+    return 0
+}`;
+    expect(metricsFor(src, 'go', 2, 7, 2, 0).cyclomatic).toBe(2);
+  });
+
+  it('TS: the same `if (x === null)` shape is NOT deducted (Go-only convention)', () => {
+    // The deduction is gated on language === "go"; TS keeps the branch.
+    const src = `function init0(x: number | null): number {
+  if (x === null) {
+    return 0;
+  }
+  return x;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 6).cyclomatic).toBe(2);
+  });
+
+  it('Go: a `for x != nil` loop (for-as-while) IS counted — the deduction is if-only', () => {
+    // The deduction is gated on `nodeType === "if_statement"`. Dropping
+    // that guard would route the for-loop's `x != nil` condition through
+    // the nil check and wrongly deduct it, leaving cyclomatic 1 instead
+    // of 2.
+    const src = `package p
+func walk(x *Node) int {
+    n := 0
+    for x != nil {
+        n++
+        x = x.next
+    }
+    return n
+}`;
+    expect(metricsFor(src, 'go', 2, 9, 2, 0).cyclomatic).toBe(2);
+  });
+});
+
+describe('countConditionalOperands (complex_conditional metric)', () => {
+  // In TS, `if_statement` is in BOTH `nesting` and `conditional`; the AST
+  // walk hits the nesting branch first and `continue`s, so the only TS
+  // conditional that reaches countConditionalOperands is the ternary.
+  it('counts a 3-clause boolean chain `(a && b && c) ? :` as 3 operands', () => {
+    const src = `function f(a: boolean, b: boolean, c: boolean): number {
+  return (a && b && c) ? 1 : 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 3).maxConditionalOperands).toBe(3);
+  });
+
+  it('counts mixed comparisons `(x > 0 && y > 0 && x < 10) ? :` as 3 operands', () => {
+    const src = `function f(x: number, y: number): number {
+  return (x > 0 && y > 0 && x < 10) ? 1 : 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 3).maxConditionalOperands).toBe(3);
+  });
+
+  it('a trivial ternary `a ? :` floors at 1 operand (Math.max(count, 1))', () => {
+    const src = `function f(a: boolean): number {
+  return a ? 1 : 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 3).maxConditionalOperands).toBe(1);
+  });
+
+  it('does NOT descend into a nested lambda — the inner `&&` belongs to the lambda', () => {
+    // FUNCTION_CONTAINER_KINDS guard: the outer ternary test is just the
+    // `.find(...)` call (1 operand), NOT the `x.a && x.b` inside the arrow.
+    const src = `function f(arr: number[]): number {
+  return arr.find((x) => x && x) ? 1 : 0;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 3).maxConditionalOperands).toBe(1);
+  });
+
+  it('keeps the MOST-complex conditional even when a trivial one follows (max, not last)', () => {
+    // A naive `maxConditionalOperands = ops` (always-assign) mutant would
+    // report the trailing trivial ternary (1) instead of the peak (3).
+    const src = `function f(a: boolean, b: boolean, c: boolean): number {
+  const x = (a && b && c) ? 1 : 0;
+  const y = a ? 2 : 3;
+  return x + y;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 5).maxConditionalOperands).toBe(3);
+  });
+});
+
+describe('countParameters (long_parameter_list metric)', () => {
+  it('counts declaration-site formal parameters', () => {
+    const src = `function f(a: number, b: number, c: number, d: number) { return a; }`;
+    expect(metricsFor(src, 'typescript', 1, 1).paramCount).toBe(4);
+  });
+
+  it('a zero-parameter function reports paramCount 0', () => {
+    const src = `function f() { return 1; }`;
+    expect(metricsFor(src, 'typescript', 1, 1).paramCount).toBe(0);
+  });
+
+  it('a single-identifier arrow `x => ...` counts as 1 parameter', () => {
+    // Pins the arrow_function single-identifier shortcut branch.
+    const node = findNodeAt({ source: 'const f = x => x * 2;', language: 'typescript', line: 1, column: 10 });
+    const m = computeMetrics({ bodyNode: node!, language: 'typescript', startLine: 1, endLine: 1 });
+    expect(m.paramCount).toBe(1);
+  });
+
+  it('a parenthesised multi-param arrow `(a, b, c) => ...` counts the WHOLE list, not 1', () => {
+    // The single-identifier shortcut must only fire when the arrow's
+    // first child is a bare `identifier`; a `(a, b, c) =>` arrow has a
+    // `formal_parameters` first child and must fall through to the list
+    // counter. A `first?.type === "identifier"` → always-true mutant
+    // would short-circuit to 1.
+    const node = findNodeAt({
+      source: 'const f = (a: number, b: number, c: number) => a + b + c;',
+      language: 'typescript',
+      line: 1,
+      column: 10,
+    });
+    const m = computeMetrics({ bodyNode: node!, language: 'typescript', startLine: 1, endLine: 1 });
+    expect(m.paramCount).toBe(3);
+  });
+
+  it('counts declaration-site parameters across languages (parameters / parameter_list kinds)', () => {
+    // Pins the non-TS entries in PARAM_LIST_KINDS: Rust/Python use
+    // `parameters`, Go uses `parameter_list`.
+    const rust = `fn f(a: i32, b: i32, c: i32) -> i32 { a + b + c }`;
+    expect(metricsFor(rust, 'rust', 1, 1).paramCount).toBe(3);
+    const py = `def f(a, b, c):\n    return a`;
+    expect(metricsFor(py, 'python', 1, 2).paramCount).toBe(3);
+    const go = `package p\n\nfunc f(a int, b int, c int) int { return a }`;
+    expect(metricsFor(go, 'go', 3, 3, 3, 0).paramCount).toBe(3);
+  });
+
+  it('skips `comment` nodes interleaved in the parameter list', () => {
+    // Pins countNonCommentNamedChildren — the `/* x */` comment is a
+    // named child of the parameter list but must not inflate the count.
+    const src = `function f(
+  a: number,
+  /* x */ b: number
+) { return a + b; }`;
+    expect(metricsFor(src, 'typescript', 1, 4).paramCount).toBe(2);
+  });
+
+  it('does NOT count a CALL argument list inside the body as parameters', () => {
+    // argument_list is deliberately excluded from PARAM_LIST_KINDS: the
+    // 7-arg call must not make a 1-param function look like 7 params.
+    const src = `function f(a: number) { return g(1, 2, 3, 4, 5, 6, 7); }`;
+    expect(metricsFor(src, 'typescript', 1, 1).paramCount).toBe(1);
+  });
+});
+
+describe('isMagicNumber (magic_number classifier)', () => {
+  it('flags real magic literals', () => {
+    expect(isMagicNumber('42')).toBe(true);
+    expect(isMagicNumber('100')).toBe(true);
+    expect(isMagicNumber('3.14')).toBe(true);
+    expect(isMagicNumber('-7')).toBe(true);
+  });
+
+  it('strips underscore separators before classifying', () => {
+    expect(isMagicNumber('1_000_000')).toBe(true);
+  });
+
+  it('keeps the universal trivial allow-list (0, 1, -1, 2) out of the count', () => {
+    expect(isMagicNumber('0')).toBe(false);
+    expect(isMagicNumber('1')).toBe(false);
+    expect(isMagicNumber('-1')).toBe(false);
+    expect(isMagicNumber('2')).toBe(false);
+  });
+
+  it('keeps the float forms of the trivial allow-list out (0.0, 1.0, -1.0)', () => {
+    expect(isMagicNumber('0.0')).toBe(false);
+    expect(isMagicNumber('1.0')).toBe(false);
+    expect(isMagicNumber('-1.0')).toBe(false);
+  });
+
+  it('rejects the kind-overload case (TS `number` type identifier)', () => {
+    expect(isMagicNumber('number')).toBe(false);
+    expect(isMagicNumber('string')).toBe(false);
+  });
+
+  it('flags hex / binary / octal literals unconditionally', () => {
+    expect(isMagicNumber('0xff')).toBe(true);
+    expect(isMagicNumber('0b1010')).toBe(true);
+    expect(isMagicNumber('0o755')).toBe(true);
+  });
+
+  it('flags UPPERCASE-prefixed hex / binary / octal (lowercased before matching)', () => {
+    // `toLowerCase()` normalises the radix prefix; a `toUpperCase()`
+    // mutant would leave `0X` unmatched by the `0[xbo]` class → false.
+    expect(isMagicNumber('0XFF')).toBe(true);
+    expect(isMagicNumber('0B1010')).toBe(true);
+    expect(isMagicNumber('0O755')).toBe(true);
+  });
+
+  it('rejects identifier text with a digit NOT at the start (the `^` anchor guards kind-overload)', () => {
+    // The leading `^` in the digit-prefix regex is load-bearing: an
+    // un-anchored mutant would match the digit anywhere and flag these
+    // identifier-shaped node texts as magic literals.
+    expect(isMagicNumber('utf8')).toBe(false);
+    expect(isMagicNumber('base64')).toBe(false);
+    expect(isMagicNumber('sha256')).toBe(false);
+    expect(isMagicNumber('count2')).toBe(false);
+  });
+
+  it('flags leading-dot floats (`.5`, `-.5`)', () => {
+    expect(isMagicNumber('.5')).toBe(true);
+    expect(isMagicNumber('-.5')).toBe(true);
+  });
+
+  it('Go allow-lists scale-factor constants but NOT in other languages', () => {
+    expect(isMagicNumber('60', 'go')).toBe(false);
+    expect(isMagicNumber('1024', 'go')).toBe(false);
+    expect(isMagicNumber('86400', 'go')).toBe(false);
+    expect(isMagicNumber('60', 'typescript')).toBe(true);
+    expect(isMagicNumber('1024', 'python')).toBe(true);
+  });
+
+  it('Go: numbers outside the allow-list still flag', () => {
+    expect(isMagicNumber('42', 'go')).toBe(true);
+    expect(isMagicNumber('500', 'go')).toBe(true);
+  });
+});
+
+describe('computeMetrics: literal tally (magic_number / hardcoded_url)', () => {
+  it('counts body magic numbers, honouring the trivial allow-list', () => {
+    // 42 and 100 flag; the literal 1 is allow-listed.
+    const src = `function f(): number {
+  const a = 42;
+  const b = 100;
+  const c = 1;
+  return a + b + c;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 6).magicNumberCount).toBe(2);
+  });
+
+  it('Go: applies the per-language scale-factor allow-list in the tally', () => {
+    // 60 and 24 are Go-allow-listed; 42 is not → count 1.
+    const src = `package p
+func human(n int) int {
+    a := n * 60
+    b := n * 24
+    c := n * 42
+    return a + b + c
+}`;
+    expect(metricsFor(src, 'go', 2, 7, 2, 0).magicNumberCount).toBe(1);
+  });
+
+  it('TS: the same numbers all flag (no Go allow-list bleed)', () => {
+    const src = `function human(n: number): number {
+  const a = n * 60;
+  const b = n * 24;
+  const c = n * 42;
+  return a + b + c;
+}`;
+    expect(metricsFor(src, 'typescript', 1, 6).magicNumberCount).toBe(3);
+  });
+
+  it('counts literal URLs but skips format-string templates', () => {
+    const src = `function f(): void {
+  const a = "https://example.com/api";
+  const b = "http://%s";
+}`;
+    expect(metricsFor(src, 'typescript', 1, 4).hardcodedUrlCount).toBe(1);
+  });
+});
+
+describe('evaluateRules: structural metric severity boundaries', () => {
+  function sev(overrides: Record<string, number>, biomarker: string): string {
+    const f = evaluateRules({ nodeId: 'a', language: 'typescript', metrics: metrics(overrides) }).find(
+      (x) => x.biomarker === biomarker,
+    );
+    return f ? f.severity : 'NONE';
+  }
+
+  it('large_method: <100 none, 100-199 warning, >=200 error', () => {
+    expect(sev({ loc: 99 }, 'large_method')).toBe('NONE');
+    expect(sev({ loc: 100 }, 'large_method')).toBe('warning');
+    expect(sev({ loc: 199 }, 'large_method')).toBe('warning');
+    expect(sev({ loc: 200 }, 'large_method')).toBe('error');
+  });
+
+  it('complex_method: <15 none, 15-24 warning, >=25 error', () => {
+    expect(sev({ cyclomatic: 14 }, 'complex_method')).toBe('NONE');
+    expect(sev({ cyclomatic: 15 }, 'complex_method')).toBe('warning');
+    expect(sev({ cyclomatic: 24 }, 'complex_method')).toBe('warning');
+    expect(sev({ cyclomatic: 25 }, 'complex_method')).toBe('error');
+  });
+
+  it('nested_complexity: <5 none, 5-6 warning, >=7 error', () => {
+    expect(sev({ maxNesting: 4 }, 'nested_complexity')).toBe('NONE');
+    expect(sev({ maxNesting: 5 }, 'nested_complexity')).toBe('warning');
+    expect(sev({ maxNesting: 6 }, 'nested_complexity')).toBe('warning');
+    expect(sev({ maxNesting: 7 }, 'nested_complexity')).toBe('error');
+  });
+
+  it('complex_conditional: <6 none, 6-7 warning, >=8 error', () => {
+    expect(sev({ maxConditionalOperands: 5 }, 'complex_conditional')).toBe('NONE');
+    expect(sev({ maxConditionalOperands: 6 }, 'complex_conditional')).toBe('warning');
+    expect(sev({ maxConditionalOperands: 7 }, 'complex_conditional')).toBe('warning');
+    expect(sev({ maxConditionalOperands: 8 }, 'complex_conditional')).toBe('error');
+  });
+
+  it('long_parameter_list: <4 none, 4 info, 5-6 warning, >=7 error (info tier active)', () => {
+    expect(sev({ paramCount: 3 }, 'long_parameter_list')).toBe('NONE');
+    expect(sev({ paramCount: 4 }, 'long_parameter_list')).toBe('info');
+    expect(sev({ paramCount: 5 }, 'long_parameter_list')).toBe('warning');
+    expect(sev({ paramCount: 6 }, 'long_parameter_list')).toBe('warning');
+    expect(sev({ paramCount: 7 }, 'long_parameter_list')).toBe('error');
+  });
+
+  it('magic_number: <3 none, 3-4 info, 5-7 warning, >=8 error (info tier active)', () => {
+    expect(sev({ magicNumberCount: 2 }, 'magic_number')).toBe('NONE');
+    expect(sev({ magicNumberCount: 3 }, 'magic_number')).toBe('info');
+    expect(sev({ magicNumberCount: 4 }, 'magic_number')).toBe('info');
+    expect(sev({ magicNumberCount: 5 }, 'magic_number')).toBe('warning');
+    expect(sev({ magicNumberCount: 7 }, 'magic_number')).toBe('warning');
+    expect(sev({ magicNumberCount: 8 }, 'magic_number')).toBe('error');
+  });
+
+  it('emits the raw metric value on the finding', () => {
+    const f = evaluateRules({ nodeId: 'a', language: 'typescript', metrics: metrics({ loc: 250 }) }).find(
+      (x) => x.biomarker === 'large_method',
+    );
+    expect(f!.metric).toBe(250);
+  });
+
+  it('emits hardcoded_url through evaluateRules when the URL count is non-zero', () => {
+    // Pins the `if (url) out.push(url)` composite branch in evaluateRules.
+    const f = evaluateRules({ nodeId: 'a', language: 'typescript', metrics: metrics({ hardcodedUrlCount: 1 }) }).find(
+      (x) => x.biomarker === 'hardcoded_url',
+    );
+    expect(f).toBeDefined();
+    expect(f!.severity).toBe('info');
+    expect(f!.metric).toBe(1);
+  });
+});
+
+describe('evaluateRules: brain_method composite', () => {
+  function brain(overrides: Record<string, number>): ReturnType<typeof evaluateRules>[number] | undefined {
+    return evaluateRules({ nodeId: 'a', language: 'typescript', metrics: metrics(overrides) }).find(
+      (x) => x.biomarker === 'brain_method',
+    );
+  }
+
+  it('does NOT fire below the LOC gate (49) but fires at the gate (50) with enough density', () => {
+    const dense = { cyclomatic: 25, maxNesting: 7, maxConditionalOperands: 8 };
+    expect(brain({ loc: 49, ...dense })).toBeUndefined();
+    expect(brain({ loc: 50, ...dense })!.severity).toBe('info');
+  });
+
+  it('does NOT fire below the cyclomatic gate (7) but fires at the gate (8)', () => {
+    const big = { loc: 500, maxNesting: 5, maxConditionalOperands: 8 };
+    expect(brain({ cyclomatic: 7, ...big })).toBeUndefined();
+    expect(brain({ cyclomatic: 8, ...big })!.severity).toBe('warning');
+  });
+
+  it('score tiers: info >=5, warning >=10, error >=20', () => {
+    // floor case (nest=1, cond=1): 2.0 × 2.5 × max(1,..) × max(1,..) = 5.0 → info
+    const info = brain({ loc: 200, cyclomatic: 25, maxNesting: 1, maxConditionalOperands: 1 });
+    expect(info!.severity).toBe('info');
+    expect((info!.detail as { score: number }).score).toBe(5);
+    // 2.0 × 2.5 × 1.667 × 2.0 = 16.7 → warning
+    const warn = brain({ loc: 200, cyclomatic: 25, maxNesting: 5, maxConditionalOperands: 8 });
+    expect(warn!.severity).toBe('warning');
+    // 3.0 × 2.5 × 2.333 × 2.0 = 35 → error
+    const err = brain({ loc: 300, cyclomatic: 25, maxNesting: 7, maxConditionalOperands: 8 });
+    expect(err!.severity).toBe('error');
+  });
+
+  it('tier thresholds are inclusive (>=): a score EXACTLY at the boundary takes the higher tier', () => {
+    // Pins the `>=` comparisons in brainMethodSeverity. Each combo is
+    // tuned to land the composite score on an exact integer boundary.
+    // 1.0 × 5.0 × 1 × 1 = 5.0  → info  (loc100, cyc50)
+    expect(brain({ loc: 100, cyclomatic: 50, maxNesting: 1, maxConditionalOperands: 1 })!.severity).toBe('info');
+    // 1.0 × 10.0 × 1 × 1 = 10.0 → warning (loc100, cyc100)
+    expect(brain({ loc: 100, cyclomatic: 100, maxNesting: 1, maxConditionalOperands: 1 })!.severity).toBe('warning');
+    // 1.0 × 20.0 × 1 × 1 = 20.0 → error (loc100, cyc200)
+    expect(brain({ loc: 100, cyclomatic: 200, maxNesting: 1, maxConditionalOperands: 1 })!.severity).toBe('error');
+  });
+
+  it('emits NOTHING for a gated symbol whose composite score is below the info floor', () => {
+    // loc50 + cyc8 pass BOTH gates, but 0.5 × 0.8 × 1 × 1 = 0.4 < 5.
+    // brainMethodSeverity returns null → evaluateBrainMethod returns null.
+    // A `severity` always-truthy or always-info mutant would wrongly emit.
+    expect(brain({ loc: 50, cyclomatic: 8, maxNesting: 1, maxConditionalOperands: 1 })).toBeUndefined();
+  });
+
+  it('rounds the composite score to one decimal place on metric + detail', () => {
+    const warn = brain({ loc: 200, cyclomatic: 25, maxNesting: 5, maxConditionalOperands: 8 });
+    expect(warn!.metric).toBe(16.7);
+    expect((warn!.detail as { score: number; loc: number; cyclomatic: number }).score).toBe(16.7);
+    expect((warn!.detail as { loc: number }).loc).toBe(200);
+    expect((warn!.detail as { cyclomatic: number }).cyclomatic).toBe(25);
+  });
+
+  it('the max(1,...) floors keep low nesting/conditional from depressing the LOC×CYC product', () => {
+    // With nest=1, cond=1 both factors floor to 1.0; score = locFactor ×
+    // cycFactor = 2.0 × 2.5 = 5.0 exactly. A multiplied (not floored)
+    // form would shrink to ~0.4.
+    const f = brain({ loc: 200, cyclomatic: 25, maxNesting: 1, maxConditionalOperands: 1 });
+    expect((f!.detail as { score: number }).score).toBe(5);
+  });
+
+  it('inserts brain_method directly BEFORE long_parameter_list in the finding order', () => {
+    const out = evaluateRules({
+      nodeId: 'a',
+      language: 'typescript',
+      metrics: metrics({
+        loc: 200,
+        cyclomatic: 25,
+        maxNesting: 5,
+        maxConditionalOperands: 8,
+        paramCount: 6,
+        magicNumberCount: 8,
+      }),
+    }).map((f) => f.biomarker);
+    expect(out).toEqual([
+      'large_method',
+      'complex_method',
+      'nested_complexity',
+      'complex_conditional',
+      'brain_method',
+      'long_parameter_list',
+      'magic_number',
+    ]);
+  });
+
+  it('appends brain_method at the end when there is no long_parameter_list anchor', () => {
+    // insertAt === -1 path: only loc/cyc fire, no params → brain pushed last.
+    const out = evaluateRules({
+      nodeId: 'a',
+      language: 'typescript',
+      metrics: metrics({ loc: 200, cyclomatic: 25, maxNesting: 1, maxConditionalOperands: 1 }),
+    }).map((f) => f.biomarker);
+    expect(out).toContain('brain_method');
+    expect(out.indexOf('brain_method')).toBe(out.length - 1);
+    expect(out.includes('long_parameter_list')).toBe(false);
   });
 });
