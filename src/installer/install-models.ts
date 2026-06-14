@@ -289,7 +289,7 @@ function sha256File(filePath: string): Promise<string> {
   });
 }
 
-function parseContentLength(value: string | string[] | undefined): number | null {
+export function parseContentLength(value: string | string[] | undefined): number | null {
   if (Array.isArray(value)) return parseContentLength(value[0]);
   if (value === undefined) return null;
   if (!/^\d+$/.test(value)) return null;

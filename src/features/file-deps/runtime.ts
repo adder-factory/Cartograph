@@ -158,7 +158,7 @@ function countLabel(returned: number, total: number): string {
   return returned === total ? `${total}` : `${returned} of ${total}`;
 }
 
-function truncate(value: string, max: number): string {
+export function truncate(value: string, max: number): string {
   if (value.length <= max) return value;
   return `${value.slice(0, Math.max(0, max - 3))}...`;
 }

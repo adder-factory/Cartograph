@@ -313,6 +313,10 @@ describe('MCP admin formatter contracts', () => {
         getSchemaVersion: () => ({ version: CURRENT_SCHEMA_VERSION, description: 'current schema' }),
       },
       llm: {
+        // No background pass in flight: bgCtrl.promise is null, so the
+        // double-pass guard in handleSummarizePhase falls through to the
+        // real summarizeAll call this test exercises.
+        bgCtrl: { promise: null, getProgress: () => null },
         summarizeAll: async (opts: any) => {
           opts.onProgress?.(1, 3);
           return {
