@@ -322,7 +322,7 @@ interface ResolveByNameAndKindArgs {
  * Higher = closer in the directory tree. Same as
  * `name-matcher.ts:computePathProximity`'s leading segment count.
  */
-function sharedDirSegments(a: string, b: string): number {
+export function sharedDirSegments(a: string, b: string): number {
   const da = a.split('/').slice(0, -1);
   const db = b.split('/').slice(0, -1);
   let shared = 0;
@@ -338,7 +338,7 @@ function sharedDirSegments(a: string, b: string): number {
  * same-file wins outright, then nearest by shared-segment count.
  * Mutates `arr`; returns it for chaining.
  */
-function sortByProximityToRef<T extends Node>(arr: T[], refFilePath: string): T[] {
+export function sortByProximityToRef<T extends Node>(arr: T[], refFilePath: string): T[] {
   arr.sort((a, b) => {
     const aSame = a.filePath === refFilePath ? 1 : 0;
     const bSame = b.filePath === refFilePath ? 1 : 0;
