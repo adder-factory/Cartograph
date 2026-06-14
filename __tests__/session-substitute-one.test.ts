@@ -31,6 +31,18 @@ describe('substituteOne', () => {
     expect(substituteOne('${0}/${1}', [{ a: 1 }, 'x'])).toBe('{"a":1}/x');
   });
 
+  it('handles multi-digit placeholder indices in both modes', () => {
+    // Guards the `\d+` quantifier in BOTH substitution regexes — a single-digit
+    // `\d` would fail to match `${10}`. Whole-value still type-preserves (raw
+    // object), embedded still stringifies.
+    const whole = Array(11).fill('x');
+    whole[10] = { n: 1 };
+    expect(substituteOne('${10}', whole)).toBe(whole[10]);
+    const embedded = Array(11).fill('z');
+    embedded[10] = 'v';
+    expect(substituteOne('a${10}b', embedded)).toBe('avb');
+  });
+
   it('keeps embedded placeholders with out-of-range indices literal', () => {
     expect(substituteOne('pre-${9}-post', [])).toBe('pre-${9}-post');
   });

@@ -21,6 +21,14 @@ describe('unquote', () => {
     expect(unquote('src/app.ts')).toBe('src/app.ts');
   });
 
+  it('only dequotes when BOTH ends are quoted — asymmetric quotes pass through', () => {
+    // Guards the `startsWith('"') && endsWith('"')` test: a leading-only or
+    // trailing-only quote must NOT trigger dequoting (else `||`, or either
+    // side alone, would slice a non-quoted path).
+    expect(unquote('"abc')).toBe('"abc'); // leading quote only
+    expect(unquote('abc"')).toBe('abc"'); // trailing quote only
+  });
+
   it('strips surrounding quotes from a simple quoted path', () => {
     expect(unquote('"path with spaces.ts"')).toBe('path with spaces.ts');
   });

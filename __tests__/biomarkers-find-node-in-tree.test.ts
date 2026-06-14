@@ -49,4 +49,14 @@ describe('findNodeInTree', () => {
     const node = findNodeInTree(tree, 1, 6);
     expect(node?.type).toBe('identifier');
   });
+
+  it('walks up from an anonymous token to the named node starting at the point', () => {
+    // At column 0 the smallest node is the anonymous `const` keyword; the
+    // second-loop fallback must climb to the named `lexical_declaration` that
+    // starts there — distinct from a bare `return target` (which would yield
+    // the keyword).
+    const tree = parseTs('const x = 1;');
+    const node = findNodeInTree(tree, 1, 0);
+    expect(node?.type).toBe('lexical_declaration');
+  });
 });

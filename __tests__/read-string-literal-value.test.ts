@@ -61,10 +61,13 @@ describe('readStringLiteralValue', () => {
     expect(readFirstOfType('const x = `tpl`;', 'template_string')).toBe('tpl');
   });
 
-  it('returns an empty string for "" via the quote-stripping fallback', () => {
-    // An empty string node has no string_fragment child, so the fallback
-    // strips the surrounding quotes down to "".
-    expect(readFirstOfType('const x = "";', 'string')).toBe('');
+  it('quote-strips empty string/template literals via the fallback (all quote kinds)', () => {
+    // An empty literal has no string_fragment child, so it takes the fallback
+    // path and strips the surrounding quotes down to ''. Covering all three
+    // quote kinds exercises each branch of the fallback quote check.
+    expect(readFirstOfType('const x = "";', 'string')).toBe(''); // double
+    expect(readFirstOfType("const x = '';", 'string')).toBe(''); // single
+    expect(readFirstOfType('const x = ``;', 'template_string')).toBe(''); // backtick
   });
 
   it('returns the raw text for a non-string node with no quotes', () => {

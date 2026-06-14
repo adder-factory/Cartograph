@@ -30,6 +30,16 @@ describe('skipBlockComment', () => {
     expect(skipBlockComment('**/', 0)).toBe(3);
   });
 
+  it('does not close on a slash that is not preceded by a star', () => {
+    // A "/" inside the comment body must NOT be mistaken for the closer —
+    // only "*/" ends the comment. Guards the `text[i] === '*'` half of the
+    // condition (without it, the first bare "/" would return early).
+    const text = 'a/b */end';
+    const end = skipBlockComment(text, 0);
+    expect(end).toBe(text.indexOf('end')); // index just past the real "*/"
+    expect(text.slice(end)).toBe('end');
+  });
+
   it('returns text length for an unterminated comment without overrunning', () => {
     const text = '/* never closes';
     expect(skipBlockComment(text, 2)).toBe(text.length);
