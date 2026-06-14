@@ -63,7 +63,7 @@ const DEFAULT_HUNK_COUNT = 1;
  * Strip git's C-style quoting on paths with special characters
  * (e.g. `"path with spaces.ts"` → `path with spaces.ts`).
  */
-function unquote(p: string | null): string | null {
+export function unquote(p: string | null): string | null {
   if (!p) return p;
   if (p.startsWith('"') && p.endsWith('"')) {
     try {

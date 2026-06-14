@@ -498,7 +498,7 @@ function stripSinceCursorFooter(text: string): string {
  * instead of being stringified. Placeholders embedded in a larger
  * string still interpolate as text.
  */
-function substituteOne(v: unknown, positional: unknown[]): unknown {
+export function substituteOne(v: unknown, positional: unknown[]): unknown {
   if (typeof v === 'string') {
     const wholeMatch = /^\$\{(\d+)\}$/.exec(v);
     if (wholeMatch) {
