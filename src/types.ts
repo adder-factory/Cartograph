@@ -469,6 +469,14 @@ export interface CartographConfig {
          *  Raise it for a large repo whose hot set exceeds the default;
          *  set `0` to skip the indexing-time LLM tail entirely. */
         summarizeEagerLimit?: number;
+        /** Minimum symbol body-line floor for summarisation (default 4).
+         *  Lower it for fuller coverage of short symbols; raise it to skip
+         *  more. Applied in lock-step across the LLM pass, the structural
+         *  pass, the status rollup, and the agent-bridge. */
+        minBodyLines?: number;
+        /** Per-kind body-line floor overrides, merged over the default
+         *  (`route: 1`). e.g. `{ "method": 2 }`. */
+        minBodyLinesByKind?: Record<string, number>;
       }
     | undefined;
 

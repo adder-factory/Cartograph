@@ -37,6 +37,12 @@ import { logDebug, logWarn } from '../errors.js';
 interface StructuralSummariserOptions {
   signal?: AbortSignal;
   onProgress?: (done: number, total: number) => void;
+  /** Overrides the default body-line floor ({@link MIN_BODY_LINES})
+   *  this pass derives `STRUCTURAL_MAX_BODY_LINES` from. Sourced from
+   *  `config.llm.minBodyLines` so the structural pass stays in lock-step
+   *  with the LLM pass: structural handles bodies below the floor, the
+   *  LLM pass handles bodies at or above it. */
+  minBodyLines?: number;
 }
 
 export interface StructuralSummariserResult {
@@ -58,15 +64,29 @@ const STRUCTURAL_MODEL = 'structural:v1';
 /** Max chars in produced summaries (matches LLM summarizer cap). */
 const MAX_SUMMARY_CHARS = 200;
 
-/** Max body-line count eligible for structural summarisation. Sourced
- *  from the LLM pass's MIN_BODY_LINES so the two stay in lock-step:
- *  symbols below MIN_BODY_LINES are skipped by the LLM pass (the LLM
- *  adds nothing to a 1-line forwarder), and this pass picks up exactly
- *  that gap. Routes are included regardless of body length —
- *  MIN_BODY_LINES_BY_KIND['route']=1 already lets short routes through
- *  to the LLM, but the structural pass also synthesises route summaries
- *  so intent-search works without a summarize backend. */
-const STRUCTURAL_MAX_BODY_LINES = MIN_BODY_LINES - 1;
+/**
+ * Max body-line count eligible for structural summarisation, derived
+ * from the effective body-line floor (`config.llm.minBodyLines`, default
+ * {@link MIN_BODY_LINES}) so the two passes stay in lock-step: symbols
+ * below the floor are skipped by the LLM pass (it adds nothing to a
+ * 1-line forwarder), and this pass picks up exactly that gap. Routes are
+ * included regardless of body length — `MIN_BODY_LINES_BY_KIND.route=1`
+ * already lets short routes through to the LLM, but the structural pass
+ * also synthesises route summaries so intent-search works without a
+ * summarize backend.
+ *
+ * This is the SINGLE body-size gate: {@link getStructuralCandidates}
+ * applies it, so the per-pattern matchers (which only ever see
+ * already-gated candidates) don't re-check it.
+ *
+ * Edge: `minBodyLines = 0` yields `-1`, so the non-route gate
+ * `(end_line - start_line) <= -1` matches nothing — the structural pass
+ * becomes routes-only. That's intentional and harmless (the LLM pass
+ * then owns every non-route body, since its floor is 0).
+ */
+function structuralMaxBodyLines(minBodyLines: number | undefined): number {
+  return (minBodyLines ?? MIN_BODY_LINES) - 1;
+}
 
 // ---------------------------------------------------------------------------
 // Candidate enumeration
@@ -85,7 +105,7 @@ const STRUCTURAL_MAX_BODY_LINES = MIN_BODY_LINES - 1;
  * The SQL is inlined here (not in queries-summaries.ts) per the task
  * scope constraint: DO NOT touch existing source files.
  */
-function getStructuralCandidates(qb: QueryBuilder): Node[] {
+function getStructuralCandidates(qb: QueryBuilder, maxBodyLines: number): Node[] {
   const kinds = [...SUMMARIZABLE_KINDS, 'route'];
   // Deduplicate: SUMMARIZABLE_KINDS already includes 'route', but the
   // Set guarantees we don't produce a duplicate placeholder.
@@ -95,7 +115,7 @@ function getStructuralCandidates(qb: QueryBuilder): Node[] {
   const placeholders = uniqueKinds.map(() => '?').join(',');
 
   // Route nodes: always included (body-line check waived).
-  // Non-route nodes in SUMMARIZABLE_KINDS: body ≤ STRUCTURAL_MAX_BODY_LINES.
+  // Non-route nodes in SUMMARIZABLE_KINDS: body ≤ maxBodyLines.
   // The CASE expression avoids two separate queries.
   const sql = `
     SELECT * FROM nodes
@@ -106,7 +126,7 @@ function getStructuralCandidates(qb: QueryBuilder): Node[] {
       )
     ORDER BY updated_at DESC, file_path, start_line
   `;
-  const rows = qb.db.prepare(sql).all(...uniqueKinds, STRUCTURAL_MAX_BODY_LINES) as NodeRow[];
+  const rows = qb.db.prepare(sql).all(...uniqueKinds, maxBodyLines) as NodeRow[];
   return rows.map(rowToNode);
 }
 
@@ -236,9 +256,7 @@ function patternRoute(qb: QueryBuilder, sym: Node): string | null {
  */
 function patternOneCallForwarder(qb: QueryBuilder, sym: Node): string | null {
   if (sym.kind === 'route') return null;
-  const bodyLines = sym.endLine - sym.startLine;
-  if (bodyLines > STRUCTURAL_MAX_BODY_LINES) return null;
-
+  // Body size already gated by getStructuralCandidates.
   const callsEdges = getOutgoingEdges(qb, sym.id, ['calls']);
   if (callsEdges.length !== 1) return null;
 
@@ -261,9 +279,7 @@ function patternOneCallForwarder(qb: QueryBuilder, sym: Node): string | null {
  */
 function patternOneInstantiationFactory(qb: QueryBuilder, sym: Node): string | null {
   if (sym.kind === 'route') return null;
-  const bodyLines = sym.endLine - sym.startLine;
-  if (bodyLines > STRUCTURAL_MAX_BODY_LINES) return null;
-
+  // Body size already gated by getStructuralCandidates.
   const instantiatesEdges = getOutgoingEdges(qb, sym.id, ['instantiates']);
   if (instantiatesEdges.length !== 1) return null;
 
@@ -282,9 +298,7 @@ function patternOneInstantiationFactory(qb: QueryBuilder, sym: Node): string | n
  */
 function patternSingleFieldAccessor(qb: QueryBuilder, sym: Node): string | null {
   if (sym.kind === 'route') return null;
-  const bodyLines = sym.endLine - sym.startLine;
-  if (bodyLines > STRUCTURAL_MAX_BODY_LINES) return null;
-
+  // Body size already gated by getStructuralCandidates.
   const fieldEdges = getOutgoingEdges(qb, sym.id, ['field_access']);
   if (fieldEdges.length !== 1) return null;
 
@@ -544,7 +558,7 @@ export async function runStructuralSummariser(args: RunStructuralSummariserArgs)
   const { signal, onProgress } = options;
 
   const t0 = Date.now();
-  const candidates = getStructuralCandidates(queries);
+  const candidates = getStructuralCandidates(queries, structuralMaxBodyLines(options.minBodyLines));
   const total = candidates.length;
 
   const tally: ProcessTally = { generated: 0, skipped: 0, preserved: 0, done: 0 };

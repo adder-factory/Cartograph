@@ -15,8 +15,12 @@
  * updated to call the family tool with the right action arg.
  */
 import { describe, it, expect } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
+import Cartograph from '../src/index.js';
 
 describe('cartograph_admin family (#7-4)', () => {
   it('registry surfaces cartograph_admin; the 5 legacy lifecycle names are gone', () => {
@@ -87,5 +91,40 @@ describe('cartograph_admin family (#7-4)', () => {
     const adminTool = getToolModules().find((m) => m.definition.name === 'cartograph_admin');
     const enumValues = adminTool?.definition.inputSchema.properties?.['action']?.['enum'];
     expect(enumValues).not.toContain('reload-modules');
+  });
+
+  it("action='summarize' skips (no second blocking pass) when a background pass is already running", async () => {
+    // Regression: invoking summarize while the watcher's background pass
+    // (bgCtrl) is in flight used to launch a SECOND concurrent uncapped
+    // pass — double-subscribing the local model and blocking the MCP call
+    // for the whole duration (the agent appeared stuck). The guard now
+    // returns fast with the in-flight progress.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-summ-'));
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function alpha(): number { return 1; }\n');
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'admin-summ', version: '0.0.0' }));
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    const handler = new ToolHandler(cg, { profile: 'full' });
+    let resolveBg: (() => void) | undefined;
+    try {
+      await cg.indexAll({ summarize: false });
+      // Simulate an in-flight background summarization with live progress.
+      cg.llm.bgCtrl.promise = new Promise<void>((res) => {
+        resolveBg = res;
+      });
+      cg.llm.bgCtrl.progress = { phase: 'summarise', done: 3, total: 10 };
+
+      const result = await handler.execute('cartograph_admin', { action: 'summarize', summarizeLimit: -1 });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toMatch(/already running in the background/i);
+      expect(text).toMatch(/summarise 3\/10/);
+      // And it did NOT report a completed pass.
+      expect(text).not.toMatch(/Summarised \d+ new symbol/);
+    } finally {
+      resolveBg?.();
+      handler.closeAll();
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

@@ -656,10 +656,35 @@ function formatEmbedPhaseLine(embed?: EmbedPhaseSummary | null): string | null {
 
 async function handleSummarizePhase(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
+
+  // Guard against a double pass. The file-watcher's post-sync hook starts
+  // a background summarisation (`bgCtrl`) that drains the same backlog
+  // through the same local LLM backend. Launching a second BLOCKING pass
+  // here would double-subscribe the model and hang this call for the
+  // whole (potentially uncapped, hours-long) duration — the agent appears
+  // stuck. Mirror the detached-CLI "already running → don't spawn a
+  // second" guard: report the in-flight pass's progress and return now.
+  const bg = cg.llm.bgCtrl;
+  if (bg.promise) {
+    const p = bg.getProgress();
+    const progressLine = p ? ` — ${p.phase} ${p.done}/${p.total}` : '';
+    return ok(
+      textResult(
+        `## Summarization already running in the background${progressLine}\n\n` +
+          'A background pass (started by the file-watcher after the last sync) is already draining the ' +
+          'summary backlog through the same local LLM backend. Starting a second pass would double-subscribe ' +
+          'the model and block this call, so it was skipped. Re-check `cartograph_status` shortly for progress; ' +
+          'the lower-priority tail also summarises on demand as `find mode:intent` references symbols.',
+      ),
+    );
+  }
+
   const concurrency = parseConcurrency(args['concurrency']);
   // Lever C — `summarizeLimit` caps eager generations this pass.
   // Omitted → service falls back to config.llm.summarizeEagerLimit;
-  // `0` → uncapped full pass (mirrors the CLI `--all`).
+  // `0` → ad-hoc only (zero eager generations); `-1` (or any negative /
+  // non-finite) → uncapped full pass (mirrors the CLI `--all`). Matches
+  // the arg schema and `summarizer.ts` eagerLimit resolution.
   const summarizeLimit = typeof args['summarizeLimit'] === 'number' ? args['summarizeLimit'] : undefined;
   try {
     const progressOpts = ctx.reportProgress

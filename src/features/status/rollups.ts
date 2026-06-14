@@ -16,12 +16,7 @@ import { logWarn } from '../../errors.js';
 import { isShallowClone } from '../../git-utils.js';
 import type Cartograph from '../../index.js';
 import { getDetachedSummarizeState } from '../../llm/detached-summarize.js';
-import {
-  DEFAULT_DOC_CHAR_THRESHOLD,
-  MIN_BODY_LINES,
-  MIN_BODY_LINES_BY_KIND,
-  SUMMARIZABLE_KINDS,
-} from '../../llm/summarizer.js';
+import { DEFAULT_DOC_CHAR_THRESHOLD, resolveBodyLineFloor, SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
 import {
   getCommonUnresolvedReferenceNames,
   getUnresolvedReferenceBuckets,
@@ -290,11 +285,15 @@ function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
   if (!sumCov || sumCov.total === 0) return { present: false };
   const pct = Math.round((sumCov.summarised / sumCov.total) * 100);
   const summaryReuseCached = countSummaryReuseCachedRows(cg);
+  // Resolve the body-line floor from config so the reported pending /
+  // skipped counts match what the LLM + structural passes actually skip.
+  // Optional-chain: the status lenses tolerate a partial `cg`.
+  const floor = resolveBodyLineFloor(cg.config?.llm);
   const pending =
     safeCall(() =>
       countPendingSummarizable(cg.queries, SUMMARIZABLE_KINDS, {
-        minBodyLinesByKind: MIN_BODY_LINES_BY_KIND,
-        defaultMinBodyLines: MIN_BODY_LINES,
+        minBodyLinesByKind: floor.minBodyLinesByKind,
+        defaultMinBodyLines: floor.defaultMinBodyLines,
         docCharThreshold: DEFAULT_DOC_CHAR_THRESHOLD,
       }),
     ) ?? 0;
@@ -329,8 +328,8 @@ function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
   if (opts.summaryBreakdown) {
     const breakdown = safeCall(() =>
       getSummaryBreakdown(cg.queries, SUMMARIZABLE_KINDS, {
-        minBodyLinesByKind: MIN_BODY_LINES_BY_KIND,
-        defaultMinBodyLines: MIN_BODY_LINES,
+        minBodyLinesByKind: floor.minBodyLinesByKind,
+        defaultMinBodyLines: floor.defaultMinBodyLines,
         docCharThreshold: DEFAULT_DOC_CHAR_THRESHOLD,
       }),
     );
@@ -349,7 +348,7 @@ function formatSummaryBreakdown(b: SummaryBreakdown): string {
   if (b.skippedByFloor > 0) {
     lines.push(
       `    _(denominator includes ${b.skippedByFloor} symbol${b.skippedByFloor === 1 ? '' : 's'} ` +
-        `intentionally skipped — body shorter than \`MIN_BODY_LINES_BY_KIND\` floor)_`,
+        `intentionally skipped — body shorter than the min-body-lines floor; tune via \`config.llm.minBodyLines\`)_`,
     );
   }
   return lines.join('\n');

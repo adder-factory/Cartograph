@@ -111,21 +111,21 @@ describe('summariseSpan', () => {
   it('counts only lines inside the span', () => {
     const fc = parseLcov(['SF:x.ts', 'DA:1,1', 'DA:5,0', 'DA:8,2', 'DA:20,0', 'end_of_record'].join('\n'))[0]!;
     // Span 1..10 includes lines 1, 5, 8 — line 20 is outside.
-    const s = summariseSpan(fc, 1, 10);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 10 });
     expect(s.totalLines).toBe(3);
     expect(s.coveredLines).toBe(2); // lines 1 and 8 hit
   });
 
   it('reports 0/0 when the span has no executable lines', () => {
     const fc = parseLcov(['SF:x.ts', 'DA:50,1', 'end_of_record'].join('\n'))[0]!;
-    const s = summariseSpan(fc, 1, 10);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 10 });
     expect(s.totalLines).toBe(0);
     expect(s.coveredLines).toBe(0);
   });
 
   it('rolls up branch data inside the span', () => {
     const fc = parseLcov(['SF:x.ts', 'DA:5,1', 'BRDA:5,0,0,1', 'BRDA:5,0,1,-', 'end_of_record'].join('\n'))[0]!;
-    const s = summariseSpan(fc, 1, 10);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 10 });
     expect(s.totalBranches).toBe(2);
     expect(s.coveredBranches).toBe(1);
   });
@@ -136,14 +136,14 @@ describe('summariseSpan', () => {
     // Raw DA would be 1/2=50% (a false low_coverage) — FNDA lifts it to
     // 2/2=100%.
     const fc = parseLcov(['SF:f.ts', 'FN:1,f', 'FNDA:2,f', 'DA:1,0', 'DA:2,2', 'end_of_record'].join('\n'))[0]!;
-    const s = summariseSpan(fc, 1, 2);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2 });
     expect(s.totalLines).toBe(2);
     expect(s.coveredLines).toBe(2);
   });
 
   it('does NOT lift a declaration line whose function never ran (FNDA:0)', () => {
     const fc = parseLcov(['SF:f.ts', 'FN:1,f', 'FNDA:0,f', 'DA:1,0', 'DA:2,0', 'end_of_record'].join('\n'))[0]!;
-    const s = summariseSpan(fc, 1, 2);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2 });
     expect(s.coveredLines).toBe(0);
   });
 
@@ -153,9 +153,118 @@ describe('summariseSpan', () => {
     const fc = parseLcov(
       ['SF:f.ts', 'FN:1,f', 'FNDA:1,f', 'DA:1,0', 'DA:2,1', 'DA:3,0', 'end_of_record'].join('\n'),
     )[0]!;
-    const s = summariseSpan(fc, 1, 3);
+    const s = summariseSpan(fc, { startLine: 1, endLine: 3 });
     expect(s.totalLines).toBe(3);
     expect(s.coveredLines).toBe(2); // lines 1 (lifted) + 2 (hit); line 3 still uncovered
+  });
+
+  // ---- #21: reporter-agnostic structural signature-line fold ----
+
+  it('folds the DA:0 signature line of a callable when NO FN/FNDA exists — bun (#21)', () => {
+    // bun emits only DA records (no FN/FNDA). A multi-line arrow scores
+    // its signature line (1) at 0; the body (2) is hit. Without the fold
+    // this is 1/2=50% (false low_coverage); folding the signature line
+    // out of the denominator gives 1/1=100%.
+    const fc = parseLcov(['SF:f.ts', 'DA:1,0', 'DA:2,5', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2, isCallable: true });
+    expect(s.totalLines).toBe(1);
+    expect(s.coveredLines).toBe(1);
+  });
+
+  it('folds the signature line when no FNDA is keyed to the declaration line — v8 anon arrow (#21)', () => {
+    // @vitest/coverage-v8 names const-arrows `FN:<line>,(anonymous_N)`
+    // with no usable FNDA at the declaration line, and DA:<sig>,0. Since
+    // nothing lifts line 1, the structural fold drops it: 1/1 body → 100%.
+    // (Were a matching FNDA present, the #20 lift would cover line 1
+    // instead — both paths converge on no false positive.)
+    const fc = parseLcov(['SF:g.ts', 'FN:1,(anonymous_0)', 'DA:1,0', 'DA:2,3', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2, isCallable: true });
+    expect(s.coveredLines).toBe(1);
+    expect(s.totalLines).toBe(1);
+  });
+
+  it('does NOT fold for a non-callable symbol (fold is gated on kind) (#21)', () => {
+    const fc = parseLcov(['SF:f.ts', 'DA:1,0', 'DA:2,5', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2, isCallable: false });
+    expect(s.totalLines).toBe(2); // line 1 still counted
+    expect(s.coveredLines).toBe(1);
+  });
+
+  it('does NOT fold a single-line callable (fold needs >1 line) (#21)', () => {
+    const fc = parseLcov(['SF:f.ts', 'DA:1,0', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 1, isCallable: true });
+    expect(s.totalLines).toBe(1);
+    expect(s.coveredLines).toBe(0);
+  });
+
+  it('still reports 0% for a genuinely-uncalled multi-line callable (#21)', () => {
+    // Signature folded, but the body line is also unhit → 0/1 = 0%, so a
+    // truly under-tested function is still flagged.
+    const fc = parseLcov(['SF:f.ts', 'DA:1,0', 'DA:2,0', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2, isCallable: true });
+    expect(s.totalLines).toBe(1);
+    expect(s.coveredLines).toBe(0);
+  });
+
+  it('counts a positively-covered signature line normally (no spurious fold) (#21)', () => {
+    // When the reporter DOES hit the signature line (real bun behaviour
+    // in many cases), it counts as a covered line like any other.
+    const fc = parseLcov(['SF:f.ts', 'DA:1,7', 'DA:2,5', 'end_of_record'].join('\n'))[0]!;
+    const s = summariseSpan(fc, { startLine: 1, endLine: 2, isCallable: true });
+    expect(s.totalLines).toBe(2);
+    expect(s.coveredLines).toBe(2);
+  });
+
+  // Regression fixtures captured from REAL reporters (bun 1.3.14 +
+  // @vitest/coverage-v8), for `export const f = (x) =>\n  build(...)` —
+  // the arrow occupies the last two lines. Both must read the called
+  // arrow at 100%, never a false low_coverage.
+  it('reads a called arrow at 100% from real bun lcov — no FN/FNDA records (#21)', () => {
+    const fc = parseLcov(
+      [
+        'TN:',
+        'SF:util.ts',
+        'FNF:2',
+        'FNH:2',
+        'DA:1,7',
+        'DA:2,23',
+        'DA:4,22',
+        'DA:5,14',
+        'LF:4',
+        'LH:4',
+        'end_of_record',
+      ].join('\n'),
+    )[0]!;
+    expect(fc.functionHits.size).toBe(0); // bun emits no FN/FNDA
+    const s = summariseSpan(fc, { startLine: 4, endLine: 5, isCallable: true });
+    expect(s.coveredLines).toBe(s.totalLines);
+    expect(s.totalLines).toBeGreaterThanOrEqual(1);
+  });
+
+  it('reads a called arrow at 100% from real vitest-v8 lcov — anonymous FN/FNDA (#21)', () => {
+    const fc = parseLcov(
+      [
+        'TN:',
+        'SF:src/util.ts',
+        'FN:1,build',
+        'FN:4,(anonymous_1)',
+        'FNF:2',
+        'FNH:2',
+        'FNDA:1,build',
+        'FNDA:1,(anonymous_1)',
+        'DA:2,1',
+        'DA:4,1',
+        'DA:5,1',
+        'LF:3',
+        'LH:3',
+        'end_of_record',
+      ].join('\n'),
+    )[0]!;
+    // The anonymously-named arrow's FNDA is keyed to its declaration line.
+    expect(fc.functionHits.get(4)).toBe(1);
+    const s = summariseSpan(fc, { startLine: 4, endLine: 5, isCallable: true });
+    expect(s.coveredLines).toBe(s.totalLines);
+    expect(s.totalLines).toBeGreaterThanOrEqual(1);
   });
 });
 
@@ -284,6 +393,43 @@ export function beta(x: number): number {
       expect(cov).toBeDefined();
       expect(cov!.t).toBeGreaterThanOrEqual(1);
       // Every line in the arrow's span counts as covered — no false gap.
+      expect(cov!.c).toBe(cov!.t);
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('scores a called arrow at 100% from a bun-style lcov with NO FN/FNDA (#21)', async () => {
+    // bun emits only DA records — no FN/FNDA to lift the signature line.
+    // The structural fold (kind-gated in applyFileCoverage) must still
+    // clear the false low_coverage on a multi-line arrow whose signature
+    // line scored 0.
+    const src = ['export const f = (x: number): number => {', '  return x * 2;', '};', ''].join('\n');
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'helper.ts'), src);
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-bun-arrow', version: '0.0.0' }));
+
+    // Signature line (1) scored 0; body (2) hit; NO FN/FNDA (bun shape).
+    const lcov = ['SF:src/helper.ts', 'DA:1,0', 'DA:2,2', 'end_of_record'].join('\n');
+    const lcovPath = path.join(dir, 'lcov.info');
+    fs.writeFileSync(lcovPath, lcov);
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      const result = await cg.ingestCoverage(lcovPath);
+      expect(result.filesMatched).toBe(1);
+
+      const node = cg.queries.db
+        .prepare(`SELECT id, kind FROM nodes WHERE name = 'f' AND start_line IS NOT NULL LIMIT 1`)
+        .get() as { id: string; kind: string } | undefined;
+      expect(node).toBeDefined();
+      expect(node!.kind).toBe('function'); // arrow-const promoted → fold applies
+      const cov = cg.queries.db
+        .prepare(`SELECT covered_lines AS c, total_lines AS t FROM node_coverage WHERE node_id = ?`)
+        .get(node!.id) as { c: number; t: number } | undefined;
+      expect(cov).toBeDefined();
+      // Signature line folded out; the hit body line is the whole span.
       expect(cov!.c).toBe(cov!.t);
     } finally {
       cg.close();
