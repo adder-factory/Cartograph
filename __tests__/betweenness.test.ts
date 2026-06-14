@@ -38,6 +38,21 @@ describe('computeBetweenness — Brandes single-source correctness', () => {
     expect(r.scores.get('b')).toBeCloseTo(0.5, 9);
   });
 
+  it('chain n0→…→n4: exercises Brandes accumulation with a nonzero delta', () => {
+    // A 4+-node path is required to test the `(1 + delta[w]) * sigma[w]`
+    // accumulation with delta[w] != 0. In the 3-node path above, the middle
+    // node's delta derives only from a leaf (delta 0), so `1 + 0` is
+    // indistinguishable from a mutated `1 - 0`. Here n1's update consumes
+    // n2's nonzero delta, pinning the core formula.
+    const g = chainGraph(5);
+    const r = computeBetweenness(g.nodes, g.edges);
+    expect(r.scores.get('n0')).toBe(0);
+    expect(r.scores.get('n4')).toBe(0);
+    expect(r.scores.get('n1')).toBeCloseTo(0.25, 9);
+    expect(r.scores.get('n2')).toBeCloseTo(1 / 3, 9);
+    expect(r.scores.get('n3')).toBeCloseTo(0.25, 9);
+  });
+
   it('barbell graph: bridge node ranks above everything else', () => {
     // Canonical Brandes test case. Two K3 cliques {a,b,c} and {d,e,f}
     // joined by directed pairs of bridge edges through node x. Each
