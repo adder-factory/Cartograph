@@ -213,6 +213,157 @@ const SHAPE_CHAIN_B =
   '  return a + b + c + d + e + f + g + h + i + j + k + m;\n' +
   '}\n';
 
+/** A 12-line function — exactly at the DUP_NEAR_MIN_LOC (12) floor. */
+const CHAIN12_A =
+  'export function chain12(seed: number): number {\n' +
+  '  const a = seed + 1;\n' +
+  '  const b = seed * 2;\n' +
+  '  const c = seed - 3;\n' +
+  '  const d = seed + 4;\n' +
+  '  const e = seed * 5;\n' +
+  '  const f = seed - 6;\n' +
+  '  const g = seed + 7;\n' +
+  '  const h = seed * 8;\n' +
+  '  const i = seed - 9;\n' +
+  '  return a + b + c + d + e + f + g + h + i;\n' +
+  '}\n';
+/** Same 9 statements as CHAIN12_A, reordered — identical token multiset
+ *  (overlap 1.0) so the always-on partial band catches it, and exactly
+ *  12 lines so it sits ON the DUP_NEAR_MIN_LOC floor (proves the floor
+ *  is `< 12`, i.e. a 12-line candidate is admitted). */
+const CHAIN12_B =
+  'export function chain12(seed: number): number {\n' +
+  '  const b = seed * 2;\n' +
+  '  const a = seed + 1;\n' +
+  '  const d = seed + 4;\n' +
+  '  const c = seed - 3;\n' +
+  '  const f = seed - 6;\n' +
+  '  const e = seed * 5;\n' +
+  '  const h = seed * 8;\n' +
+  '  const g = seed + 7;\n' +
+  '  const i = seed - 9;\n' +
+  '  return a + b + c + d + e + f + g + h + i;\n' +
+  '}\n';
+/** CHAIN12 dropped to 11 lines — one statement short of the
+ *  DUP_NEAR_MIN_LOC (12) floor, so the partial tier must skip it. */
+const CHAIN11_A = CHAIN12_A.replace('  const i = seed - 9;\n', '');
+const CHAIN11_B = CHAIN12_B.replace('  const i = seed - 9;\n', '');
+
+/** Two functions of IDENTICAL token count (same statement shape) but
+ *  only ~0.61 multiset overlap — A is an all-`+` chain, B an all-`*`
+ *  chain with a disjoint identifier set. Equal sizes keep them inside
+ *  the comparison window (no early break), so the overlap maths is
+ *  actually exercised; the ~0.61 ratio sits below even the 0.80 opt-in
+ *  band, so they must NOT link. This guards the intersection-size
+ *  `Math.min`, the `/ max(total)` ratio, and the `>= minOverlap` gate —
+ *  a mutant that inflates the overlap (min→max, /→*) or drops the gate
+ *  (`>=`→true) would wrongly link them. */
+const MODERATE_OVERLAP_A =
+  'export function adderRun(seed: number): number {\n' +
+  '  const aa = seed + 1;\n' +
+  '  const bb = aa + 2;\n' +
+  '  const cc = bb + 3;\n' +
+  '  const dd = cc + 4;\n' +
+  '  const ee = dd + 5;\n' +
+  '  const ff = ee + 6;\n' +
+  '  const gg = ff + 7;\n' +
+  '  const hh = gg + 8;\n' +
+  '  const ii = hh + 9;\n' +
+  '  const jj = ii + 10;\n' +
+  '  const kk = jj + 11;\n' +
+  '  return kk;\n' +
+  '}\n';
+const MODERATE_OVERLAP_B =
+  'export function timesRun(base: number): number {\n' +
+  '  const mm = base * 1;\n' +
+  '  const nn = mm * 2;\n' +
+  '  const oo = nn * 3;\n' +
+  '  const pp = oo * 4;\n' +
+  '  const qq = pp * 5;\n' +
+  '  const rr = qq * 6;\n' +
+  '  const ss = rr * 7;\n' +
+  '  const tt = ss * 8;\n' +
+  '  const uu = tt * 9;\n' +
+  '  const vv = uu * 10;\n' +
+  '  const ww = vv * 11;\n' +
+  '  return ww;\n' +
+  '}\n';
+
+/** A function spanning EXACTLY 6 source lines (the DUP_MIN_LOC floor).
+ *  Two copies are a byte-identical exact clone sitting ON the floor — a
+ *  `>= DUP_MIN_LOC` filter admits it, a `> DUP_MIN_LOC` mutant would
+ *  drop it. */
+const SIX_LINE_EXACT =
+  'export function sixExact(x: number): number {\n' +
+  '  const a = x + 1;\n' +
+  '  const b = a + 2;\n' +
+  '  const c = b + 3;\n' +
+  '  return c;\n' +
+  '}\n';
+
+/** An 8-line structurally-identical, renamed pair — a Type-2 *near*
+ *  match, but BELOW the DUP_NEAR_MIN_LOC (12) near floor (and above the
+ *  6-line candidate floor, so it still reaches the near pass). The
+ *  stricter near floor must drop it. */
+const NEAR8_A =
+  'export function eightAlpha(seed: number): number {\n' +
+  '  const aa = seed + 1;\n' +
+  '  const bb = aa + 2;\n' +
+  '  const cc = bb + 3;\n' +
+  '  const dd = cc + 4;\n' +
+  '  const ee = dd + 5;\n' +
+  '  return ee;\n' +
+  '}\n';
+const NEAR8_B =
+  'export function eightBeta(base: number): number {\n' +
+  '  const pp = base + 9;\n' +
+  '  const qq = pp + 8;\n' +
+  '  const rr = qq + 7;\n' +
+  '  const ss = rr + 6;\n' +
+  '  const tt = ss + 5;\n' +
+  '  return tt;\n' +
+  '}\n';
+
+/** A 12-line structurally-identical, renamed pair — a Type-2 *near*
+ *  match sitting EXACTLY on the DUP_NEAR_MIN_LOC (12) floor, so it must
+ *  be flagged (`>= 12` admits; a `> 12` mutant would drop it). */
+const NEAR12_A =
+  'export function twelveAlpha(seed: number): number {\n' +
+  '  const aa = seed + 1;\n' +
+  '  const bb = aa + 2;\n' +
+  '  const cc = bb + 3;\n' +
+  '  const dd = cc + 4;\n' +
+  '  const ee = dd + 5;\n' +
+  '  const ff = ee + 6;\n' +
+  '  const gg = ff + 7;\n' +
+  '  const hh = gg + 8;\n' +
+  '  const ii = hh + 9;\n' +
+  '  return ii;\n' +
+  '}\n';
+const NEAR12_B =
+  'export function twelveBeta(base: number): number {\n' +
+  '  const pp = base + 9;\n' +
+  '  const qq = pp + 8;\n' +
+  '  const rr = qq + 7;\n' +
+  '  const ss = rr + 6;\n' +
+  '  const tt = ss + 5;\n' +
+  '  const uu = tt + 4;\n' +
+  '  const vv = uu + 3;\n' +
+  '  const ww = vv + 2;\n' +
+  '  const xx = ww + 1;\n' +
+  '  return xx;\n' +
+  '}\n';
+
+/** A third semantically-unique function for Tier-4 multi-member-class
+ *  tests (a 3-node `similar_to` chain). */
+const SEMANTIC_C =
+  'export function funcThree(n: number): number {\n' +
+  '  const x = n * 3;\n' +
+  '  const y = x + 7;\n' +
+  '  const z = y - 2;\n' +
+  '  return z;\n' +
+  '}\n';
+
 async function makeProject(files: Record<string, string>): Promise<{ dir: string; cg: Cartograph }> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-dup-bm-'));
   for (const [rel, content] of Object.entries(files)) {
@@ -239,9 +390,25 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
       for (const f of findings) {
         expect(f.biomarker).toBe('duplicate_code');
         expect(f.severity).toBe('warning');
-        const detail = f.detail as { cloneClassSize: number; members: unknown[] };
+        // CLONE_BODY is 7 lines — pin the `endLine - startLine + 1` LOC
+        // arithmetic on both the finding `metric` and `detail.loc`.
+        expect(f.metric).toBe(7);
+        const detail = f.detail as {
+          cloneType: string;
+          loc: number;
+          cloneClassSize: number;
+          members: Array<{ name: string; location: string }>;
+        };
+        expect(detail.cloneType).toBe('exact');
+        expect(detail.loc).toBe(7);
         expect(detail.cloneClassSize).toBe(2);
         expect(detail.members.length).toBe(1); // the one sibling
+        // The sibling payload names the OTHER member by name + location,
+        // never the finding's own node (the `nodeId !== member.nodeId`
+        // filter) — and the location is `${filePath}:${startLine}`.
+        const sibling = detail.members[0]!;
+        expect(sibling.name).toBe('processItem');
+        expect(['src/a.ts:1', 'src/b.ts:1']).toContain(sibling.location);
       }
     } finally {
       cg.close();
@@ -256,6 +423,67 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
     });
     try {
       expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 1: flags a byte-identical pair sitting exactly on the DUP_MIN_LOC floor', async () => {
+    // SIX_LINE_EXACT spans exactly 6 lines = DUP_MIN_LOC. The exact floor
+    // is `>= DUP_MIN_LOC`, so a 6-line clone IS flagged; a `> DUP_MIN_LOC`
+    // mutant would drop it.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SIX_LINE_EXACT,
+      'src/b.ts': SIX_LINE_EXACT,
+    });
+    try {
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect(f.severity).toBe('warning');
+        expect(f.metric).toBe(6);
+        expect((f.detail as { cloneType: string }).cloneType).toBe('exact');
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 2: a renamed pair below the near floor (but above the candidate floor) is dropped', async () => {
+    // NEAR8_A / NEAR8_B are 8 lines — they clear the 6-line candidate
+    // floor (so they reach the near pass) but fall under DUP_NEAR_MIN_LOC
+    // (12). The stricter near floor must drop them: a small renamed
+    // structural match is usually coincidence, not real duplication.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': NEAR8_A,
+      'src/b.ts': NEAR8_B,
+    });
+    try {
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 2: a renamed pair sitting exactly on the DUP_NEAR_MIN_LOC floor is flagged', async () => {
+    // NEAR12_A / NEAR12_B are 12 lines = DUP_NEAR_MIN_LOC. The near floor
+    // is `>= DUP_NEAR_MIN_LOC`, so a 12-line near pair IS flagged; a
+    // `> DUP_NEAR_MIN_LOC` mutant would drop it.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': NEAR12_A,
+      'src/b.ts': NEAR12_B,
+    });
+    try {
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect(f.severity).toBe('info');
+        expect(f.metric).toBe(12);
+        expect((f.detail as { cloneType: string }).cloneType).toBe('near');
+      }
     } finally {
       cg.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -299,6 +527,58 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
     }
   });
 
+  it('a non-matching allowlist glob exempts nothing — the clone is still flagged', async () => {
+    // The allowlist regex is fully anchored; a glob that matches no
+    // candidate path must NOT exempt anyone (a mutant that compiled the
+    // glob to a match-everything regex would wrongly silence the clone).
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CLONE_BODY,
+      'src/b.ts': CLONE_BODY,
+    });
+    try {
+      fs.writeFileSync(getConfigPath(dir), JSON.stringify({ duplicateCodeAllowlist: ['**/zzz.ts'] }));
+      expect(findDuplicateCode(cg.queries, dir).length).toBe(2);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an allowlist of only invalid (empty) globs exempts nothing', async () => {
+    // An empty glob compiles to no usable regex, so the predicate has no
+    // patterns — it must exempt NOTHING (a mutant that returns `true`
+    // from the empty-regex branch would silence every clone).
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CLONE_BODY,
+      'src/b.ts': CLONE_BODY,
+    });
+    try {
+      fs.writeFileSync(getConfigPath(dir), JSON.stringify({ duplicateCodeAllowlist: [''] }));
+      expect(findDuplicateCode(cg.queries, dir).length).toBe(2);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an allowlist exempts a path when ANY glob matches (some, not every)', async () => {
+    // Two globs: one matches nothing, one matches b.ts. A path is exempt
+    // if ANY glob matches; exempting b.ts collapses the class to one
+    // member, so nothing is flagged. (A mutant requiring EVERY glob to
+    // match would exempt no one, leaving the clone flagged.)
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CLONE_BODY,
+      'src/b.ts': CLONE_BODY,
+    });
+    try {
+      fs.writeFileSync(getConfigPath(dir), JSON.stringify({ duplicateCodeAllowlist: ['**/nope.ts', '**/b.ts'] }));
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('Tier 2: flags a near (Type-2) clone — same structure, renamed identifiers/literals', async () => {
     const { dir, cg } = await makeProject({
       'src/a.ts': NEAR_A,
@@ -310,8 +590,11 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
       for (const f of findings) {
         expect(f.biomarker).toBe('duplicate_code');
         expect(f.severity).toBe('info'); // near clones are info, not warning
-        const detail = f.detail as { cloneType: string; cloneClassSize: number };
+        // NEAR_A / NEAR_B are 14 lines each — pin the near-finding LOC.
+        expect(f.metric).toBe(14);
+        const detail = f.detail as { cloneType: string; loc: number; cloneClassSize: number };
         expect(detail.cloneType).toBe('near');
+        expect(detail.loc).toBe(14);
         expect(detail.cloneClassSize).toBe(2);
       }
     } finally {
@@ -391,7 +674,14 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
       for (const f of findings) {
         expect(f.biomarker).toBe('duplicate_code');
         expect(f.severity).toBe('info');
-        expect((f.detail as { cloneType: string }).cloneType).toBe('semantic');
+        // funcOne spans 7 lines, funcTwo 6 — each finding's metric is its
+        // OWN node's `endLine - startLine + 1`, pinning the arithmetic
+        // (a `- 1` or `+ startLine` mutant lands outside {6, 7}). loc and
+        // metric are the same expression, so they must agree.
+        expect([6, 7]).toContain(f.metric);
+        const detail = f.detail as { cloneType: string; loc: number };
+        expect(detail.loc).toBe(f.metric);
+        expect(detail.cloneType).toBe('semantic');
       }
     } finally {
       cg.close();
@@ -474,10 +764,73 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
       for (const f of findings) {
         expect(f.biomarker).toBe('duplicate_code');
         expect(f.severity).toBe('info');
-        const detail = f.detail as { cloneType: string; cloneClassSize: number };
+        // PARTIAL_A is 13 lines, PARTIAL_B is 15 — each finding's metric
+        // is its OWN node's LOC, pinning the partial-finding arithmetic.
+        expect([13, 15]).toContain(f.metric);
+        const detail = f.detail as { cloneType: string; loc: number; cloneClassSize: number };
         expect(detail.cloneType).toBe('partial');
+        expect(detail.loc).toBe(f.metric);
         expect(detail.cloneClassSize).toBe(2);
       }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 3: flags a 12-line reordered partial pair exactly at the near floor', async () => {
+    // CHAIN12_A / CHAIN12_B are 12 lines each — exactly DUP_NEAR_MIN_LOC.
+    // The floor is `< 12`, so a 12-line candidate IS admitted; their
+    // identical token multisets (reordered statements) give ~1.0 overlap,
+    // caught by the always-on high-overlap partial band (no opt-in).
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CHAIN12_A,
+      'src/b.ts': CHAIN12_B,
+    });
+    try {
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect(f.severity).toBe('info');
+        expect(f.metric).toBe(12);
+        expect((f.detail as { cloneType: string }).cloneType).toBe('partial');
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 3: a reordered pair one line below the near floor is not flagged', async () => {
+    // CHAIN11_A / CHAIN11_B are 11 lines — one short of DUP_NEAR_MIN_LOC
+    // (12). Despite a ~1.0 token-multiset overlap, the partial tier's
+    // size floor drops them: no finding.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CHAIN11_A,
+      'src/b.ts': CHAIN11_B,
+    });
+    try {
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 3: equal-size functions with sub-threshold overlap are not linked, even opted in', async () => {
+    // MODERATE_OVERLAP_A / _B have identical token counts (so they stay
+    // inside the comparison window — the size-ratio break never fires)
+    // but only ~0.61 multiset overlap, below the 0.80 opt-in band. The
+    // overlap maths must keep them apart: a mutant that inflates the
+    // overlap (intersection Math.min→max, the `/ max(total)` ratio→`*`)
+    // or drops the gate (`>= minOverlap`→true) would wrongly link them.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': MODERATE_OVERLAP_A,
+      'src/b.ts': MODERATE_OVERLAP_B,
+    });
+    try {
+      fs.writeFileSync(getConfigPath(dir), JSON.stringify({ duplicateCodePartialClones: true }));
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
     } finally {
       cg.close();
       fs.rmSync(dir, { recursive: true, force: true });
@@ -554,6 +907,170 @@ describe('biomarker: duplicate_code (Tier 1 exact + Tier 2 near clones)', () => 
         const detail = f.detail as { cloneType: string; cloneClassSize: number };
         expect(detail.cloneType).toBe('exact');
         expect(detail.cloneClassSize).toBe(2);
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: a similar_to score of exactly the cutoff (0.95) is flagged', async () => {
+    // The semantic gate is `score < DUP_SEMANTIC_MIN_SCORE` (0.95) → skip,
+    // so a score EXACTLY at 0.95 must NOT be skipped — it is a clone.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SEMANTIC_A,
+      'src/b.ts': SEMANTIC_B,
+    });
+    try {
+      const a = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcOne' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      const b = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcTwo' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      insertSimilarToEdges(cg.queries, [{ source: a.id, target: b.id, score: 0.95 }]);
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect((f.detail as { cloneType: string }).cloneType).toBe('semantic');
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: an out-of-range similar_to score (> 1) is rejected', async () => {
+    // A score above 1 is not a valid cosine — it signals a stale index
+    // that persisted a raw dot-product. The `score > 1` guard drops it
+    // so a degenerate edge does not flag every semantic pair as a clone.
+    // (A score of exactly 1.0 stays valid — covered by the high-score
+    // test — so the bound is strict `> 1`, not `>= 1`.)
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SEMANTIC_A,
+      'src/b.ts': SEMANTIC_B,
+    });
+    try {
+      const a = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcOne' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      const b = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcTwo' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      insertSimilarToEdges(cg.queries, [{ source: a.id, target: b.id, score: 1.5 }]);
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: a similar_to score of exactly 1.0 is still flagged (bound is strict > 1)', async () => {
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SEMANTIC_A,
+      'src/b.ts': SEMANTIC_B,
+    });
+    try {
+      const a = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcOne' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      const b = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcTwo' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      insertSimilarToEdges(cg.queries, [{ source: a.id, target: b.id, score: 1.0 }]);
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect((f.detail as { cloneType: string }).cloneType).toBe('semantic');
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: a similar_to edge whose other end is not a clone candidate yields nothing', async () => {
+    // funcOne is an in-scope candidate; tinyHelper is below the size
+    // floor so it never enters the candidate set (byId). A high-cosine
+    // edge between them must be dropped — BOTH ends have to be in scope.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SEMANTIC_A,
+      'src/b.ts': SEMANTIC_B,
+      'src/tiny.ts': TINY_BODY,
+    });
+    try {
+      const a = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcOne' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      const tiny = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'tinyHelper' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      insertSimilarToEdges(cg.queries, [{ source: a.id, target: tiny.id, score: 0.99 }]);
+      expect(findDuplicateCode(cg.queries, dir)).toEqual([]);
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: an edge linking ONE flagged node to an unflagged node adds no semantic finding', async () => {
+    // a.ts + b.ts are an exact clone pair (both syntactically flagged);
+    // c.ts (funcThree) is a unique, unflagged production fn. A semantic
+    // edge from a flagged node to the unflagged one must be skipped —
+    // the `flagged.has(src) || flagged.has(tgt)` guard fires when EITHER
+    // end is already covered, so funcThree gets no semantic finding.
+    const { dir, cg } = await makeProject({
+      'src/a.ts': CLONE_BODY,
+      'src/b.ts': CLONE_BODY,
+      'src/c.ts': SEMANTIC_C,
+    });
+    try {
+      const flagged = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'processItem' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      const unflagged = cg.queries.db
+        .prepare(`SELECT id FROM nodes WHERE name = 'funcThree' AND kind = 'function' LIMIT 1`)
+        .get() as { id: string };
+      insertSimilarToEdges(cg.queries, [{ source: flagged.id, target: unflagged.id, score: 0.99 }]);
+      const findings = findDuplicateCode(cg.queries, dir);
+      // Only the two exact-clone findings; no semantic finding for funcThree.
+      expect(findings.length).toBe(2);
+      for (const f of findings) {
+        expect((f.detail as { cloneType: string }).cloneType).toBe('exact');
+      }
+    } finally {
+      cg.close();
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('Tier 4: a 3-node similar_to chain forms one semantic class of three', async () => {
+    // funcOne~funcTwo and funcTwo~funcThree edges union into a single
+    // connected component — every member gets a finding whose class size
+    // is 3 (exercises the union-find component grouping, not just pairs).
+    const { dir, cg } = await makeProject({
+      'src/a.ts': SEMANTIC_A,
+      'src/b.ts': SEMANTIC_B,
+      'src/c.ts': SEMANTIC_C,
+    });
+    try {
+      const id = (name: string): string =>
+        (
+          cg.queries.db.prepare(`SELECT id FROM nodes WHERE name = ? AND kind = 'function' LIMIT 1`).get(name) as {
+            id: string;
+          }
+        ).id;
+      insertSimilarToEdges(cg.queries, [
+        { source: id('funcOne'), target: id('funcTwo'), score: 0.99 },
+        { source: id('funcTwo'), target: id('funcThree'), score: 0.99 },
+      ]);
+      const findings = findDuplicateCode(cg.queries, dir);
+      expect(findings.length).toBe(3);
+      for (const f of findings) {
+        const detail = f.detail as { cloneType: string; cloneClassSize: number; members: unknown[] };
+        expect(detail.cloneType).toBe('semantic');
+        expect(detail.cloneClassSize).toBe(3);
+        expect(detail.members.length).toBe(2); // the two siblings
       }
     } finally {
       cg.close();
