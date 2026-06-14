@@ -130,15 +130,13 @@ export const goResolver: FrameworkResolver = {
     const safe = getStripped ? getStripped() : stripCommentsForRegex(content, 'go');
     const lineOf = makeLineIndex(safe);
 
-    // Extract Gin routes
-    // r.GET("/path", handler), router.POST("/path", handler), etc.
+    // Extract uppercase-method routes for ANY receiver: Gin r.GET("/path", h),
+    // router.POST(...), and Echo e.DELETE(...) alike. The receiver-agnostic
+    // `\.METHOD(` form subsumes Echo's `e.METHOD(` — every Echo match is also a
+    // match here with an identical route node id, so no separate Echo pattern
+    // is needed (a dedicated `e\.` pattern only produced duplicate-id nodes).
     const ginRoutePattern = /\.\s*(GET|POST|PUT|PATCH|DELETE|OPTIONS|HEAD)\s*\(\s*["']([^"']+)["']/g;
     collectGoRegexRoutes({ nodes, pattern: ginRoutePattern, safe, lineOf, filePath, now });
-
-    // Extract Echo routes
-    // e.GET("/path", handler)
-    const echoRoutePattern = /e\.\s*(GET|POST|PUT|PATCH|DELETE)\s*\(\s*["']([^"']+)["']/g;
-    collectGoRegexRoutes({ nodes, pattern: echoRoutePattern, safe, lineOf, filePath, now });
 
     // Extract Chi routes
     // r.Get("/path", handler), r.Post("/path", handler)
