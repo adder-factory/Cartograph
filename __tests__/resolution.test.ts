@@ -16,8 +16,11 @@ import {
   resolveImportPath,
   resolveViaImport,
   extractImportMappings,
+  extractReExports,
   stripJsComments,
 } from '../src/resolution/import-resolver.js';
+import type { ImportMapping, UnresolvedRef } from '../src/resolution/types.js';
+import type { AliasMap } from '../src/resolution/path-aliases.js';
 import { getUnresolvedReferences } from '../src/db/queries-unresolved-refs.js';
 import { detectFrameworks, getAllFrameworkResolvers } from '../src/resolution/frameworks/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
@@ -1260,6 +1263,864 @@ from typing import (
       expect(names).toContain('Dict');
       // No comment-shaped local name should leak through.
       expect(mappings.some((m) => m.localName?.startsWith('#'))).toBe(false);
+    });
+
+    // ---- Mutation-hardening: decision-logic coverage (2026-06-14) ----
+    // These drive the pure resolution helpers (workspace-package exports,
+    // external classification, Python path normalization, fallback
+    // aliases, ES6/CJS clause parsing, re-export parsing, and the
+    // pickMatchingImport / findDirectExportInFile branches inside
+    // resolveViaImport) through the public entry points. Expected values
+    // were probed against the live functions.
+
+    interface MockCtxOpts {
+      files?: Record<string, string>;
+      nodesInFile?: Record<string, Node[]>;
+      imports?: Record<string, ImportMapping[]>;
+      reExports?: Record<string, ReturnType<typeof extractReExports>>;
+      aliases?: AliasMap | null;
+      root?: string;
+    }
+
+    const mkResCtx = (opts: MockCtxOpts): ResolutionContext => {
+      const files = opts.files ?? {};
+      return {
+        getNodesInFile: (p) => opts.nodesInFile?.[p] ?? [],
+        getNodesByName: () => [],
+        getNodesByQualifiedName: () => [],
+        getNodesByKind: () => [],
+        getNodesByLowerName: () => [],
+        fileExists: (p) => Object.hasOwn(files, p),
+        readFile: (p) => files[p] ?? null,
+        getProjectRoot: () => opts.root ?? '/proj',
+        getAllFiles: () => Object.keys(files),
+        getImportMappings: (p) => opts.imports?.[p] ?? [],
+        getProjectAliases: () => opts.aliases ?? null,
+        getReExports: (p) => opts.reExports?.[p] ?? [],
+      };
+    };
+
+    const mkNode = (p: Partial<Node>): Node =>
+      ({
+        id: p.id ?? 'n',
+        kind: p.kind ?? 'function',
+        name: p.name ?? 'x',
+        qualifiedName: p.qualifiedName ?? `${p.filePath}::${p.name}`,
+        filePath: p.filePath ?? 'f.ts',
+        language: p.language ?? 'typescript',
+        startLine: 1,
+        endLine: 2,
+        startColumn: 0,
+        endColumn: 0,
+        updatedAt: 0,
+        ...p,
+      }) as Node;
+
+    const mkRef = (p: Partial<UnresolvedRef>): UnresolvedRef =>
+      ({
+        fromNodeId: 'caller',
+        referenceName: p.referenceName ?? 'X',
+        referenceKind: 'calls',
+        line: p.line ?? 5,
+        column: 0,
+        filePath: p.filePath ?? 'src/main.ts',
+        language: p.language ?? 'typescript',
+        ...p,
+      }) as UnresolvedRef;
+
+    describe('workspace-package exports resolution', () => {
+      it('resolves a scoped workspace package (@scope/ui) via its `exports` map', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/ui/package.json': JSON.stringify({ name: '@scope/ui', exports: { '.': './src/index.ts' } }),
+            'packages/ui/src/index.ts': '',
+          },
+        });
+        expect(
+          resolveImportPath({ importPath: '@scope/ui', fromFile: 'app/main.ts', language: 'typescript', context: ctx }),
+        ).toBe('packages/ui/src/index.ts');
+      });
+
+      it('resolves a bare workspace package subpath import (myutil/helpers)', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/util/package.json': JSON.stringify({
+              name: 'myutil',
+              exports: { './helpers': './lib/helpers.ts' },
+            }),
+            'packages/util/lib/helpers.ts': '',
+          },
+        });
+        expect(
+          resolveImportPath({ importPath: 'myutil/helpers', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBe('packages/util/lib/helpers.ts');
+      });
+
+      it('a scoped specifier missing its second segment (`@scope`) is not a package name', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/ui/package.json': JSON.stringify({ name: '@scope/ui', exports: { '.': './src/index.ts' } }),
+            'packages/ui/src/index.ts': '',
+          },
+        });
+        // packageNameFromSpecifier returns null for a lone `@scope`, so no
+        // workspace match; classified external -> null.
+        expect(
+          resolveImportPath({ importPath: '@scope', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBeNull();
+      });
+
+      it('a string `exports` field only satisfies the `.` subpath (subpath import is null)', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/s/package.json': JSON.stringify({ name: 's', exports: './main.ts' }),
+            'packages/s/main.ts': '',
+          },
+        });
+        expect(resolveImportPath({ importPath: 's', fromFile: 'a/m.ts', language: 'typescript', context: ctx })).toBe(
+          'packages/s/main.ts',
+        );
+        expect(
+          resolveImportPath({ importPath: 's/sub', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBeNull();
+      });
+
+      it('a package with no `exports` field falls back to ./index', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/noexp/package.json': JSON.stringify({ name: 'noexp' }),
+            'packages/noexp/index.ts': '',
+          },
+        });
+        expect(
+          resolveImportPath({ importPath: 'noexp', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBe('packages/noexp/index.ts');
+      });
+
+      it('conditional exports prefer `types`/`import` over `default`', () => {
+        const ctxImport = mkResCtx({
+          files: {
+            'packages/c/package.json': JSON.stringify({
+              name: 'c',
+              exports: { '.': { import: './esm.ts', default: './cjs.ts' } },
+            }),
+            'packages/c/esm.ts': '',
+            'packages/c/cjs.ts': '',
+          },
+        });
+        expect(
+          resolveImportPath({ importPath: 'c', fromFile: 'a/m.ts', language: 'typescript', context: ctxImport }),
+        ).toBe('packages/c/esm.ts');
+
+        const ctxTypes = mkResCtx({
+          files: {
+            'packages/d/package.json': JSON.stringify({
+              name: 'd',
+              exports: { '.': { types: './t.d.ts', default: './cjs.ts' } },
+            }),
+            'packages/d/t.d.ts': '',
+            'packages/d/cjs.ts': '',
+          },
+        });
+        expect(
+          resolveImportPath({ importPath: 'd', fromFile: 'a/m.ts', language: 'typescript', context: ctxTypes }),
+        ).toBe('packages/d/t.d.ts');
+      });
+
+      it('package.json inside node_modules is ignored for workspace resolution', () => {
+        const ctx = mkResCtx({
+          files: {
+            'node_modules/pkg/package.json': JSON.stringify({ name: 'pkg', exports: { '.': './idx.ts' } }),
+            'node_modules/pkg/idx.ts': '',
+          },
+        });
+        // Not a workspace package; bare specifier -> external -> null.
+        expect(
+          resolveImportPath({ importPath: 'pkg', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBeNull();
+      });
+    });
+
+    describe('external-import classification', () => {
+      it('Node builtins (fs) are external and resolve to null', () => {
+        expect(
+          resolveImportPath({
+            importPath: 'fs',
+            fromFile: 'a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: {} }),
+          }),
+        ).toBeNull();
+      });
+
+      it('a bare npm specifier (react) is external even when a same-named file exists', () => {
+        expect(
+          resolveImportPath({
+            importPath: 'react',
+            fromFile: 'a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { react: '' } }),
+          }),
+        ).toBeNull();
+      });
+
+      it('conventional aliases (@/, ~/, src/) are treated as local', () => {
+        expect(
+          resolveImportPath({
+            importPath: '@/foo',
+            fromFile: 'a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/foo.ts': '' } }),
+          }),
+        ).toBe('src/foo.ts');
+        expect(
+          resolveImportPath({
+            importPath: 'src/bar',
+            fromFile: 'a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/bar.ts': '' } }),
+          }),
+        ).toBe('src/bar.ts');
+      });
+
+      it('a project tsconfig alias prefix escapes the external heuristic', () => {
+        const aliases: AliasMap = {
+          baseUrl: '/proj',
+          patterns: [{ prefix: '@components/', suffix: '', hasWildcard: true, replacements: ['src/components/*'] }],
+        };
+        expect(
+          resolveImportPath({
+            importPath: '@components/Button',
+            fromFile: 'a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/components/Button.tsx': '' }, aliases }),
+          }),
+        ).toBe('src/components/Button.tsx');
+      });
+
+      it('Python stdlib (os) is external; a non-stdlib dotted package resolves', () => {
+        expect(
+          resolveImportPath({
+            importPath: 'os',
+            fromFile: 'a.py',
+            language: 'python',
+            context: mkResCtx({ files: {} }),
+          }),
+        ).toBeNull();
+        expect(
+          resolveImportPath({
+            importPath: 'mypkg.mod',
+            fromFile: 'a.py',
+            language: 'python',
+            context: mkResCtx({ files: { 'mypkg/mod.py': '' } }),
+          }),
+        ).toBe('mypkg/mod.py');
+      });
+
+      it('Go /internal/ packages are local; other non-relative paths are external', () => {
+        expect(
+          resolveImportPath({
+            importPath: 'github.com/x/y/internal/z',
+            fromFile: 'a.go',
+            language: 'go',
+            context: mkResCtx({ files: { 'github.com/x/y/internal/z.go': '' } }),
+          }),
+        ).toBe('github.com/x/y/internal/z.go');
+        expect(
+          resolveImportPath({
+            importPath: 'github.com/x/y',
+            fromFile: 'a.go',
+            language: 'go',
+            context: mkResCtx({ files: { 'github.com/x/y.go': '' } }),
+          }),
+        ).toBeNull();
+      });
+    });
+
+    describe('Python relative-import normalization', () => {
+      it('`from .models import` probes ./models.py', () => {
+        expect(
+          resolveImportPath({
+            importPath: '.models',
+            fromFile: 'pkg/a.py',
+            language: 'python',
+            context: mkResCtx({ files: { 'pkg/models.py': '' } }),
+          }),
+        ).toBe('pkg/models.py');
+      });
+
+      it('`from ..models import` walks one directory up', () => {
+        expect(
+          resolveImportPath({
+            importPath: '..models',
+            fromFile: 'pkg/sub/a.py',
+            language: 'python',
+            context: mkResCtx({ files: { 'pkg/models.py': '' } }),
+          }),
+        ).toBe('pkg/models.py');
+      });
+
+      it('a bare `.` resolves to the package __init__.py', () => {
+        expect(
+          resolveImportPath({
+            importPath: '.',
+            fromFile: 'pkg/a.py',
+            language: 'python',
+            context: mkResCtx({ files: { 'pkg/__init__.py': '' } }),
+          }),
+        ).toBe('pkg/__init__.py');
+      });
+
+      it('a deeper `...a.b` walks up two directories and converts dotted submodule to a path', () => {
+        // dotCount=3 -> `../../` up; rest `a.b` -> `a/b`.
+        expect(
+          resolveImportPath({
+            importPath: '...a.b',
+            fromFile: 'x/y/z/m.py',
+            language: 'python',
+            context: mkResCtx({ files: { 'x/a/b.py': '' } }),
+          }),
+        ).toBe('x/a/b.py');
+      });
+    });
+
+    describe('relative + NodeNext shim resolution', () => {
+      it('a `.js`-suffixed relative import resolves to the `.ts` source (NodeNext shim)', () => {
+        expect(
+          resolveImportPath({
+            importPath: './util.js',
+            fromFile: 'src/a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/util.ts': '' } }),
+          }),
+        ).toBe('src/util.ts');
+      });
+
+      it('a `.js`-suffixed import that has a real `.js` file on disk keeps it', () => {
+        expect(
+          resolveImportPath({
+            importPath: './util.js',
+            fromFile: 'src/a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/util.js': '' } }),
+          }),
+        ).toBe('src/util.js');
+      });
+
+      it('a parent-directory relative import resolves with an extension', () => {
+        expect(
+          resolveImportPath({
+            importPath: '../shared/util',
+            fromFile: 'src/feature/a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/shared/util.ts': '' } }),
+          }),
+        ).toBe('src/shared/util.ts');
+      });
+
+      it('an import that already carries its exact extension resolves via the try-without-extension path', () => {
+        // No ext-list candidate (`./util.ts.ts`) exists; only the bare
+        // `./util.ts` does — exercises the `fileExists(relativePath)` branch.
+        expect(
+          resolveImportPath({
+            importPath: './util.ts',
+            fromFile: 'src/a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/util.ts': '' } }),
+          }),
+        ).toBe('src/util.ts');
+      });
+
+      it('the NodeNext shim picks the real extension even when it is not first in the list (.js -> .tsx)', () => {
+        // `.tsx` follows `.ts` in the TS extension order — proves the shim
+        // loop probes each extension rather than forcing the first.
+        expect(
+          resolveImportPath({
+            importPath: './comp.js',
+            fromFile: 'src/a.ts',
+            language: 'typescript',
+            context: mkResCtx({ files: { 'src/comp.tsx': '' } }),
+          }),
+        ).toBe('src/comp.tsx');
+      });
+    });
+
+    describe('extractReExports', () => {
+      it('parses bare, aliased, default-as, and wildcard re-exports', () => {
+        expect(extractReExports("export { foo } from './a';", 'typescript')).toEqual([
+          { kind: 'named', exportedName: 'foo', originalName: 'foo', source: './a' },
+        ]);
+        expect(extractReExports("export { foo as bar } from './a';", 'typescript')).toEqual([
+          { kind: 'named', exportedName: 'bar', originalName: 'foo', source: './a' },
+        ]);
+        expect(extractReExports("export { default as Foo } from './a';", 'typescript')).toEqual([
+          { kind: 'named', exportedName: 'Foo', originalName: 'default', source: './a' },
+        ]);
+        expect(extractReExports("export * from './a';", 'typescript')).toEqual([{ kind: 'wildcard', source: './a' }]);
+        expect(extractReExports("export * as ns from './a';", 'typescript')).toEqual([
+          { kind: 'wildcard', source: './a' },
+        ]);
+      });
+
+      it('strips per-specifier and leading `type` markers', () => {
+        expect(extractReExports("export type { T } from './a';", 'typescript')).toEqual([
+          { kind: 'named', exportedName: 'T', originalName: 'T', source: './a' },
+        ]);
+        expect(extractReExports("export { type T, value } from './a';", 'typescript')).toEqual([
+          { kind: 'named', exportedName: 'T', originalName: 'T', source: './a' },
+          { kind: 'named', exportedName: 'value', originalName: 'value', source: './a' },
+        ]);
+      });
+
+      it('returns [] for non-JS-family languages', () => {
+        expect(extractReExports("export { foo } from './a';", 'python')).toEqual([]);
+      });
+
+      it('ignores a commented-out re-export', () => {
+        expect(extractReExports("// export { foo } from './a';", 'typescript')).toEqual([]);
+      });
+
+      it('skips brace items that are not bare identifiers', () => {
+        // `foo-bar` / `foo.bar` are not `\w+`; nothing should be emitted.
+        expect(extractReExports("export { foo-bar } from './a';", 'typescript')).toEqual([]);
+        expect(extractReExports("export { foo.bar } from './a';", 'typescript')).toEqual([]);
+      });
+
+      it('rejects an alias item with trailing junk (anchored full-item match)', () => {
+        // `a as b extra` is not a clean `(\w+) as (\w+)` end-to-end match.
+        expect(extractReExports("export { a as b extra } from './a';", 'typescript')).toEqual([]);
+      });
+    });
+
+    describe('ES6 / CJS import clause parsing', () => {
+      it('captures a default + named import together', () => {
+        const m = extractImportMappings('f.ts', "import React, { useState } from 'react';", 'typescript');
+        expect(m).toEqual([
+          {
+            localName: 'React',
+            exportedName: 'default',
+            source: 'react',
+            isDefault: true,
+            isNamespace: false,
+            line: 1,
+          },
+          {
+            localName: 'useState',
+            exportedName: 'useState',
+            source: 'react',
+            isDefault: false,
+            isNamespace: false,
+            line: 1,
+          },
+        ]);
+      });
+
+      it('captures a namespace import alias', () => {
+        const m = extractImportMappings('f.ts', "import * as ns from './a';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'ns', exportedName: '*', source: './a', isDefault: false, isNamespace: true, line: 1 },
+        ]);
+      });
+
+      it('captures an aliased named import (a as b)', () => {
+        const m = extractImportMappings('f.ts', "import { a as b } from './a';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'b', exportedName: 'a', source: './a', isDefault: false, isNamespace: false, line: 1 },
+        ]);
+      });
+
+      it('captures a CJS default require and a destructured require with rename', () => {
+        expect(extractImportMappings('f.ts', "const x = require('./a');", 'typescript')).toEqual([
+          { localName: 'x', exportedName: 'default', source: './a', isDefault: true, isNamespace: false, line: 1 },
+        ]);
+        expect(extractImportMappings('f.ts', "const { a, b: c } = require('./a');", 'typescript')).toEqual([
+          { localName: 'a', exportedName: 'a', source: './a', isDefault: false, isNamespace: false, line: 1 },
+          { localName: 'c', exportedName: 'b', source: './a', isDefault: false, isNamespace: false, line: 1 },
+        ]);
+      });
+
+      it('reports the 1-based line of the import statement', () => {
+        const m = extractImportMappings('f.ts', "\n\nimport { X } from './a';", 'typescript');
+        expect(m[0]?.line).toBe(3);
+      });
+
+      it('does not treat an identifier that merely starts with `import` as an import keyword', () => {
+        const m = extractImportMappings('f.ts', "importFoo();\nimport { Y } from './b';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'Y', exportedName: 'Y', source: './b', isDefault: false, isNamespace: false, line: 2 },
+        ]);
+      });
+
+      it('does not emit a default mapping for `import { A } from` (lone `type` is not a name)', () => {
+        const m = extractImportMappings('f.ts', "import type { A } from './a';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'A', exportedName: 'A', source: './a', isDefault: false, isNamespace: false, line: 1 },
+        ]);
+      });
+
+      it('captures a combined default + namespace import (`import def, * as ns`)', () => {
+        // The `*` is no longer at clause position 0 — exercises indexOf('*')
+        // and the default-before-comma split together.
+        const m = extractImportMappings('f.ts', "import def, * as ns from 'x';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'def', exportedName: 'default', source: 'x', isDefault: true, isNamespace: false, line: 1 },
+          { localName: 'ns', exportedName: '*', source: 'x', isDefault: false, isNamespace: true, line: 1 },
+        ]);
+      });
+
+      it("requires whitespace on BOTH sides of the `from` keyword (`}xfrom 'y'` is not a real from-clause)", () => {
+        // The `from` in `xfrom` has a non-whitespace char (`x`) before it,
+        // so it must not be treated as the keyword — otherwise a spurious
+        // `X from y` mapping leaks in. Guards the isFromKeywordAt boundary.
+        const m = extractImportMappings('f.ts', "import { X }xfrom 'y';\nimport { Z } from 'z';", 'typescript');
+        expect(m).toEqual([
+          { localName: 'Z', exportedName: 'Z', source: 'z', isDefault: false, isNamespace: false, line: 2 },
+        ]);
+      });
+
+      it('parses a multi-line braced named import (brace-depth tracking)', () => {
+        const m = extractImportMappings('f.ts', "import {\n  A,\n  B,\n} from './m';", 'typescript');
+        expect(m.map((x) => x.localName)).toEqual(['A', 'B']);
+        expect(m.every((x) => x.source === './m' && x.line === 1)).toBe(true);
+      });
+
+      it('treats `from` inside the brace as a binding, not the from keyword (only the real keyword ends the clause)', () => {
+        // If the in-brace `from` were treated as the keyword (braceDepth
+        // guard removed), parsing would break and never reach `./m`.
+        const m = extractImportMappings('f.ts', "import { a, from, b } from './m';", 'typescript');
+        expect(m.map((x) => x.localName)).toEqual(['a', 'from', 'b']);
+        expect(m.every((x) => x.source === './m')).toBe(true);
+      });
+
+      it('reads a double-quoted module source', () => {
+        const m = extractImportMappings('f.ts', 'import { Q } from "dq";', 'typescript');
+        expect(m).toEqual([
+          { localName: 'Q', exportedName: 'Q', source: 'dq', isDefault: false, isNamespace: false, line: 1 },
+        ]);
+      });
+    });
+
+    describe('resolveViaImport decision logic', () => {
+      it('direct named import resolves to the exported symbol by name (a different-named export is not picked)', () => {
+        const ctx = mkResCtx({
+          files: { 'src/a.ts': '' },
+          nodesInFile: {
+            // A different-named exported decoy precedes the target — the
+            // lookup must match on NAME, not just on `isExported`.
+            'src/a.ts': [
+              mkNode({ id: 'decoy', name: 'Other', filePath: 'src/a.ts', isExported: true }),
+              mkNode({ id: 'foo-id', name: 'Foo', filePath: 'src/a.ts', isExported: true }),
+            ],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'Foo', source: './a', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        const r = resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx);
+        expect(r?.targetNodeId).toBe('foo-id');
+        expect(r?.confidence).toBe(0.9);
+        expect(r?.resolvedBy).toBe('import');
+      });
+
+      it('an aliased import resolves by local name (Bar -> exported Foo)', () => {
+        const ctx = mkResCtx({
+          files: { 'src/a.ts': '' },
+          nodesInFile: { 'src/a.ts': [mkNode({ id: 'foo-id', name: 'Foo', filePath: 'src/a.ts', isExported: true })] },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Bar', exportedName: 'Foo', source: './a', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'Bar' }), ctx)?.targetNodeId).toBe('foo-id');
+        // The non-local name (Foo) must NOT match pass 1 here.
+        expect(resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx)).toBeNull();
+      });
+
+      it('a namespace member reference (ns.foo) resolves to the named member, not just any export', () => {
+        const ctx = mkResCtx({
+          files: { 'src/a.ts': '' },
+          nodesInFile: {
+            // Decoy export first — the member lookup must match `foo` by name.
+            'src/a.ts': [
+              mkNode({ id: 'decoy', name: 'other', filePath: 'src/a.ts', isExported: true }),
+              mkNode({ id: 'foo-id', name: 'foo', filePath: 'src/a.ts', isExported: true }),
+            ],
+          },
+          imports: {
+            'src/main.ts': [{ localName: 'ns', exportedName: '*', source: './a', isDefault: false, isNamespace: true }],
+          },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'ns.foo' }), ctx)?.targetNodeId).toBe('foo-id');
+      });
+
+      it('a default import resolves to an exported function/class, but a variable export falls back to the import node', () => {
+        const cls = mkResCtx({
+          files: { 'src/a.ts': '', 'src/main.ts': 'x' },
+          nodesInFile: {
+            'src/a.ts': [
+              mkNode({ id: 'def-id', name: 'Whatever', kind: 'class', filePath: 'src/a.ts', isExported: true }),
+            ],
+            'src/main.ts': [mkNode({ id: 'imp', kind: 'import', name: './a', filePath: 'src/main.ts' })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'default', source: './a', isDefault: true, isNamespace: false },
+            ],
+          },
+        });
+        const rCls = resolveViaImport(mkRef({ referenceName: 'Foo' }), cls);
+        expect(rCls?.targetNodeId).toBe('def-id');
+        expect(rCls?.confidence).toBe(0.9);
+
+        // A default export that is a FUNCTION must also resolve (the
+        // function/class disjunction — not class-only).
+        const fnCtx = mkResCtx({
+          files: { 'src/a.ts': '' },
+          nodesInFile: {
+            'src/a.ts': [mkNode({ id: 'fn-id', name: 'go', kind: 'function', filePath: 'src/a.ts', isExported: true })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'default', source: './a', isDefault: true, isNamespace: false },
+            ],
+          },
+        });
+        const rFn = resolveViaImport(mkRef({ referenceName: 'Foo' }), fnCtx);
+        expect(rFn?.targetNodeId).toBe('fn-id');
+        expect(rFn?.confidence).toBe(0.9);
+
+        // Only a `variable` is exported — default lookup (function/class)
+        // misses, so the F#33 fallback resolves to the local import node.
+        const varCtx = mkResCtx({
+          files: { 'src/a.ts': '', 'src/main.ts': 'x' },
+          nodesInFile: {
+            'src/a.ts': [
+              mkNode({ id: 'var-id', name: 'val', kind: 'variable', filePath: 'src/a.ts', isExported: true }),
+            ],
+            'src/main.ts': [mkNode({ id: 'imp', kind: 'import', name: './a', filePath: 'src/main.ts' })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'default', source: './a', isDefault: true, isNamespace: false },
+            ],
+          },
+        });
+        const rVar = resolveViaImport(mkRef({ referenceName: 'Foo' }), varCtx);
+        expect(rVar?.targetNodeId).toBe('imp');
+        expect(rVar?.confidence).toBe(0.4);
+        expect(rVar?.resolvedBy).toBe('external-import');
+      });
+
+      it('a named lookup requires the target to be exported (non-exported falls back to import node)', () => {
+        const ctx = mkResCtx({
+          files: { 'src/a.ts': '', 'src/main.ts': 'x' },
+          nodesInFile: {
+            'src/a.ts': [mkNode({ id: 'foo-id', name: 'Foo', filePath: 'src/a.ts', isExported: false })],
+            'src/main.ts': [mkNode({ id: 'imp', kind: 'import', name: './a', filePath: 'src/main.ts' })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'Foo', source: './a', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        const r = resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx);
+        expect(r?.targetNodeId).toBe('imp');
+        expect(r?.confidence).toBe(0.4);
+      });
+
+      it('aliased same-line fallback (pass 2) disambiguates N same-name imports by line', () => {
+        const ctx = mkResCtx({
+          files: { 'src/a.ts': '', 'src/b.ts': '' },
+          nodesInFile: {
+            'src/a.ts': [mkNode({ id: 'a-mig', name: 'MIGRATION', filePath: 'src/a.ts', isExported: true })],
+            'src/b.ts': [mkNode({ id: 'b-mig', name: 'MIGRATION', filePath: 'src/b.ts', isExported: true })],
+          },
+          imports: {
+            'src/main.ts': [
+              {
+                localName: 'mA',
+                exportedName: 'MIGRATION',
+                source: './a',
+                isDefault: false,
+                isNamespace: false,
+                line: 1,
+              },
+              {
+                localName: 'mB',
+                exportedName: 'MIGRATION',
+                source: './b',
+                isDefault: false,
+                isNamespace: false,
+                line: 2,
+              },
+            ],
+          },
+        });
+        // The ref carries the EXPORTED name and pins to line 2 -> the ./b import.
+        expect(resolveViaImport(mkRef({ referenceName: 'MIGRATION', line: 2 }), ctx)?.targetNodeId).toBe('b-mig');
+        expect(resolveViaImport(mkRef({ referenceName: 'MIGRATION', line: 1 }), ctx)?.targetNodeId).toBe('a-mig');
+      });
+
+      it('an unresolved RELATIVE import returns null (not the external-import fallback)', () => {
+        const ctx = mkResCtx({
+          files: { 'src/main.ts': 'x' },
+          nodesInFile: {
+            'src/main.ts': [mkNode({ id: 'imp', kind: 'import', name: './missing', filePath: 'src/main.ts' })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'Foo', source: './missing', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx)).toBeNull();
+      });
+
+      it('an unresolved stdlib/external import keeps the edge via the import node (F#33)', () => {
+        const ctx = mkResCtx({
+          files: { 'src/main.py': 'x' },
+          nodesInFile: {
+            'src/main.py': [
+              mkNode({ id: 'imp-id', kind: 'import', name: 'typing', filePath: 'src/main.py', language: 'python' }),
+            ],
+          },
+          imports: {
+            'src/main.py': [
+              {
+                localName: 'Protocol',
+                exportedName: 'Protocol',
+                source: 'typing',
+                isDefault: false,
+                isNamespace: false,
+              },
+            ],
+          },
+        });
+        const r = resolveViaImport(
+          mkRef({ referenceName: 'Protocol', language: 'python', filePath: 'src/main.py' }),
+          ctx,
+        );
+        expect(r?.targetNodeId).toBe('imp-id');
+        expect(r?.confidence).toBe(0.4);
+        expect(r?.resolvedBy).toBe('external-import');
+      });
+
+      it('Python `from pkg import mod; mod.func()` resolves to the module member', () => {
+        const ctx = mkResCtx({
+          files: { 'pkg/helpers.py': '' },
+          nodesInFile: {
+            'pkg/helpers.py': [mkNode({ id: 'run-id', name: 'run', filePath: 'pkg/helpers.py', language: 'python' })],
+          },
+          imports: {
+            'src/main.py': [
+              { localName: 'helpers', exportedName: 'helpers', source: 'pkg', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        const r = resolveViaImport(
+          mkRef({ referenceName: 'helpers.run', language: 'python', filePath: 'src/main.py' }),
+          ctx,
+        );
+        expect(r?.targetNodeId).toBe('run-id');
+        expect(r?.confidence).toBe(0.9);
+      });
+
+      it('follows a named re-export chain through a barrel file', () => {
+        const ctx = mkResCtx({
+          files: { 'src/index.ts': '', 'src/a.ts': '' },
+          nodesInFile: {
+            'src/index.ts': [],
+            'src/a.ts': [mkNode({ id: 'foo-real', name: 'Foo', filePath: 'src/a.ts', isExported: true })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'Foo', source: './index', isDefault: false, isNamespace: false },
+            ],
+          },
+          reExports: { 'src/index.ts': [{ kind: 'named', exportedName: 'Foo', originalName: 'Foo', source: './a' }] },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx)?.targetNodeId).toBe('foo-real');
+      });
+
+      it('follows a wildcard re-export chain through a barrel file', () => {
+        const ctx = mkResCtx({
+          files: { 'src/index.ts': '', 'src/a.ts': '' },
+          nodesInFile: {
+            'src/index.ts': [],
+            'src/a.ts': [mkNode({ id: 'foo-real', name: 'Foo', filePath: 'src/a.ts', isExported: true })],
+          },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Foo', exportedName: 'Foo', source: './index', isDefault: false, isNamespace: false },
+            ],
+          },
+          reExports: { 'src/index.ts': [{ kind: 'wildcard', source: './a' }] },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'Foo' }), ctx)?.targetNodeId).toBe('foo-real');
+      });
+
+      it('returns null when no import matches the referenced name', () => {
+        const ctx = mkResCtx({
+          files: { 'src/main.ts': 'x' },
+          imports: {
+            'src/main.ts': [
+              { localName: 'Other', exportedName: 'Other', source: './a', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        expect(resolveViaImport(mkRef({ referenceName: 'Nope' }), ctx)).toBeNull();
+      });
+
+      it.each([
+        ['..'],
+        ['.foo'],
+        ['..foo'],
+      ])('treats an unresolved Python relative source (%s) as intra-project and returns null (no external fallback)', (source) => {
+        const ctx = mkResCtx({
+          files: { 'src/main.py': 'x' },
+          nodesInFile: {
+            'src/main.py': [
+              mkNode({ id: 'imp', kind: 'import', name: source, filePath: 'src/main.py', language: 'python' }),
+            ],
+          },
+          imports: {
+            'src/main.py': [{ localName: 'X', exportedName: 'X', source, isDefault: false, isNamespace: false }],
+          },
+        });
+        // Contrast with the stdlib case above which DOES fall back — a
+        // dot-leading source must stay unresolved for pass-B re-resolution.
+        expect(
+          resolveViaImport(mkRef({ referenceName: 'X', language: 'python', filePath: 'src/main.py' }), ctx),
+        ).toBeNull();
+      });
+
+      it('Python module-member lookup skips import/file nodes and binds to the real definition', () => {
+        const ctx = mkResCtx({
+          files: { 'pkg/helpers.py': '' },
+          nodesInFile: {
+            // An `import` node named `run` precedes the real function `run`;
+            // findPythonModuleMember must skip the import and bind the function.
+            'pkg/helpers.py': [
+              mkNode({ id: 'imp-run', kind: 'import', name: 'run', filePath: 'pkg/helpers.py', language: 'python' }),
+              mkNode({ id: 'fn-run', kind: 'function', name: 'run', filePath: 'pkg/helpers.py', language: 'python' }),
+            ],
+          },
+          imports: {
+            'src/main.py': [
+              { localName: 'helpers', exportedName: 'helpers', source: 'pkg', isDefault: false, isNamespace: false },
+            ],
+          },
+        });
+        const r = resolveViaImport(
+          mkRef({ referenceName: 'helpers.run', language: 'python', filePath: 'src/main.py' }),
+          ctx,
+        );
+        expect(r?.targetNodeId).toBe('fn-run');
+      });
     });
   });
 
