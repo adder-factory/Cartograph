@@ -60,6 +60,7 @@ describe('parseStrictDecimalNumber', () => {
     expect(parseStrictDecimalNumber('+1.5')).toBe(1.5);
     expect(parseStrictDecimalNumber('-0.5')).toBe(-0.5);
     expect(parseStrictDecimalNumber('.5')).toBe(0.5);
+    expect(parseStrictDecimalNumber('.55')).toBe(0.55); // multi-digit after bare dot (\.\d+, not \.\d)
     expect(parseStrictDecimalNumber('5.')).toBe(5);
   });
 
@@ -79,6 +80,8 @@ describe('parseStrictNonNegativeDecimalNumber', () => {
     expect(parseStrictNonNegativeDecimalNumber('42')).toBe(42);
     expect(parseStrictNonNegativeDecimalNumber('+1.5')).toBe(1.5);
     expect(parseStrictNonNegativeDecimalNumber('.5')).toBe(0.5);
+    expect(parseStrictNonNegativeDecimalNumber('.55')).toBe(0.55); // multi-digit after bare dot (\.\d+)
+    expect(parseStrictNonNegativeDecimalNumber('5.')).toBe(5); // trailing dot, zero digits after (\.\d*)
     expect(parseStrictNonNegativeDecimalNumber('0')).toBe(0);
   });
 
