@@ -31,7 +31,7 @@ export const LLM_TIER_KEYS = [
 ] as const;
 export type LlmTierKey = (typeof LLM_TIER_KEYS)[number];
 
-const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
+export const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 const BACKEND_STATE_DIR = 'backends';
 const PID_FILE_SCHEMA_VERSION = 1;
 const STOP_WAIT_MS = 3000;
