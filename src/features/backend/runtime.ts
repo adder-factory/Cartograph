@@ -13,6 +13,7 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { loadConfig } from '../../config.js';
 import { isProcessAlive } from '../../utils-concurrency.js';
@@ -68,6 +69,22 @@ export interface BackendPidFile {
   readonly labels: readonly string[];
   readonly logPath: string;
 }
+
+/** On-disk pid file shape. Validated on read because the file can be
+ *  stale or partially-written across crashes/restarts; the version
+ *  literal makes a schema bump reject old files, and a positive-int pid
+ *  is required before we treat any process as live. */
+const BackendPidFileSchema = z.object({
+  schemaVersion: z.literal(PID_FILE_SCHEMA_VERSION),
+  pid: z.number().int().positive(),
+  startedAt: z.string(),
+  command: z.string(),
+  args: z.array(z.string()),
+  endpoint: z.string(),
+  modelPath: z.string(),
+  labels: z.array(z.string()),
+  logPath: z.string(),
+});
 
 export type BackendRuntimeState = 'running' | 'starting' | 'external' | 'stopped' | 'missing-model';
 
@@ -404,10 +421,8 @@ function backendPaths(projectPath: string, spec: BackendProcessSpec): { pidFileP
 
 async function readPidFile(filePath: string): Promise<BackendPidFile | null> {
   try {
-    const parsed = JSON.parse(await fsp.readFile(filePath, 'utf8')) as BackendPidFile;
-    if (parsed.schemaVersion !== PID_FILE_SCHEMA_VERSION) return null;
-    if (!Number.isInteger(parsed.pid) || parsed.pid <= 0) return null;
-    return parsed;
+    const parsed = BackendPidFileSchema.safeParse(JSON.parse(await fsp.readFile(filePath, 'utf8')));
+    return parsed.success ? parsed.data : null;
   } catch {
     return null;
   }

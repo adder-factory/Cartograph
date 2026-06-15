@@ -213,6 +213,23 @@ describe('OpenAiSdkEmbeddingClient', () => {
     await expect(c.embed(['a', 'b'])).rejects.toThrow(/returned 1 vectors for 2 inputs/);
   });
 
+  it('throws on a non-numeric embedding instead of silently building a garbage vector', async () => {
+    // A compat backend that ignores `encoding_format: 'float'` can return
+    // the embedding as a base64 STRING. Without validation that string's
+    // chars would coerce to NaN inside the Float32Array copy and poison
+    // semantic search; the schema must reject it loudly.
+    server = startMockServer(() =>
+      Response.json({
+        object: 'list',
+        data: [{ object: 'embedding', embedding: 'q83MPgAAAAA=', index: 0 }],
+        model: 'test-model',
+        usage: { prompt_tokens: 0, total_tokens: 0 },
+      }),
+    );
+    const c = new OpenAiSdkEmbeddingClient({ provider: 'openai-compat', model: 'm', endpoint: server.url });
+    await expect(c.embed(['a'])).rejects.toThrow(/non-numeric embedding/);
+  });
+
   it('isReachable() returns true on /v1/models success', async () => {
     server = startMockServer((req) => {
       const url = new URL(req.url);

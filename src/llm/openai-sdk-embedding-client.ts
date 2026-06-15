@@ -26,6 +26,7 @@
  */
 
 import OpenAI from 'openai';
+import { z } from 'zod';
 import type { EmbeddingProviderConfig } from './client.js';
 import { LlmEndpointError } from './client.js';
 import { scanForLlmBackends } from '../installer/scan-backends.js';
@@ -55,6 +56,13 @@ const MAX_INPUT_CHARS = 8000;
  *  llama-server's continuous-batching scheduler runs ~16 sequences
  *  in parallel inside one request, so 64 ≈ 4 internal batches. */
 const HTTP_BATCH_SIZE = 64;
+
+/** A single embedding vector. The SDK types `embedding` as `number[]`,
+ *  but a compat backend that ignores `encoding_format: 'float'` can hand
+ *  back a base64 string or a ragged array — which would silently decode
+ *  into a garbage vector (non-numbers coerced to NaN) and poison
+ *  semantic search. Validate the shape before copying into a Float32Array. */
+const EmbeddingVectorSchema = z.array(z.number());
 
 /**
  * HTTP embedding client with the same public surface as the deprecated
@@ -201,13 +209,14 @@ export class OpenAiSdkEmbeddingClient {
         );
       }
       return res.data.map((entry, i) => {
-        if (!entry?.embedding) {
-          throw new LlmEndpointError(`embedding endpoint returned missing embedding at index ${i}`);
+        const parsed = EmbeddingVectorSchema.safeParse(entry?.embedding);
+        if (!parsed.success) {
+          throw new LlmEndpointError(`embedding endpoint returned a missing or non-numeric embedding at index ${i}`);
         }
-        // The SDK types `embedding` as `number[]`. Convert to
-        // Float32Array to match the in-process `LocalEmbeddingClient`
-        // surface (so downstream code doesn't branch on backend).
-        const arr = entry.embedding;
+        // Convert to Float32Array to match the in-process
+        // `LocalEmbeddingClient` surface (so downstream code doesn't
+        // branch on backend).
+        const arr = parsed.data;
         const f32 = new Float32Array(arr.length);
         for (let j = 0; j < arr.length; j++) f32[j] = arr[j]!;
         return f32;

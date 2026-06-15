@@ -133,6 +133,29 @@ describe('OpenAiSdkChatBackend', () => {
     ]);
   });
 
+  it('degrades non-string content (structured parts) to an empty string', async () => {
+    // Some compat backends return `content` as an array of content parts
+    // rather than a plain string. The old `content ?? ''` only caught
+    // null/undefined and would have leaked the array into the `string`
+    // field; the schema coerces any non-string to '' so the caller sees
+    // an empty (retryable) response instead of a type-confused payload.
+    server = startMockServer(() =>
+      Response.json({
+        id: 'chatcmpl-test',
+        object: 'chat.completion',
+        created: Date.now() / 1000,
+        model: 'test-model',
+        choices: [
+          { index: 0, message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] }, finish_reason: 'stop' },
+        ],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      }),
+    );
+    const client = new OpenAiSdkChatBackend(baseCfg(server.url));
+    const res = await client.chat([{ role: 'user', content: 'hi' }]);
+    expect(res.text).toBe('');
+  });
+
   it('forwards temperature + max_tokens when set', async () => {
     server = startMockServer(() => chatResp('ok'));
     const client = new OpenAiSdkChatBackend(baseCfg(server.url));

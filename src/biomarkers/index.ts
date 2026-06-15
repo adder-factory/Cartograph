@@ -15,6 +15,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { streamingDispatch } from '../concurrency.js';
 import { type QueryBuilder, qbTransaction } from '../db/queries.js';
 import {
@@ -559,6 +560,12 @@ interface AnalysisContext {
   passKind: PassKind;
 }
 
+/** The persisted cache is a flat `filePath → contentHash` map. Validate
+ *  the shape on read so a corrupt or schema-drifted blob is treated as a
+ *  cold cache (full rescan) rather than silently trusted — a stale hash
+ *  here would skip a file that actually changed. */
+const BiomarkerCacheSchema = z.record(z.string(), z.string());
+
 /**
  * Per-file content-hash cache. Skip files whose source hasn't
  * changed since the last successful analysis — their findings in
@@ -571,7 +578,10 @@ interface AnalysisContext {
 function loadBiomarkerCache(queries: QueryBuilder): Record<string, string> {
   try {
     const blob = getMetadata(queries, BIOMARKER_CACHE_KEY);
-    if (blob) return JSON.parse(blob) as Record<string, string>;
+    if (!blob) return {};
+    const parsed = BiomarkerCacheSchema.safeParse(JSON.parse(blob));
+    if (parsed.success) return parsed.data;
+    logDebug('Biomarkers: cache shape invalid (treating as cold)', { err: z.prettifyError(parsed.error) });
   } catch (err) {
     logDebug('Biomarkers: cache read failed (treating as cold)', { err: String(err) });
   }
