@@ -320,6 +320,41 @@ export function buildSummaryUserPrompt(sym: Node, body: string): string {
   ].join('\n');
 }
 
+/** Head/tail line budget + hard char cap for the context-window degraded
+ *  retry (issue #27). A symbol whose full body overflows the chat backend's
+ *  per-slot context still has a useful signature + opening/closing lines; a
+ *  one-line summary rarely needs the whole body, so we keep the first
+ *  {@link RETRY_BODY_HEAD_LINES} and last {@link RETRY_BODY_TAIL_LINES} lines
+ *  (≈ the declaration + return) and cap the whole thing at
+ *  {@link RETRY_BODY_MAX_CHARS} so even pathological single-line bodies shrink. */
+const RETRY_BODY_HEAD_LINES = 8;
+const RETRY_BODY_TAIL_LINES = 4;
+const RETRY_BODY_MAX_CHARS = 800;
+
+/**
+ * Hard-truncate a body for the context-window degraded retry: keep the
+ * head + tail lines (eliding the middle) and char-cap the result. Returns
+ * the input unchanged when there is nothing left to trim (already within
+ * both the line and char budgets) — the caller treats an unchanged body as
+ * "can't shrink further" and records a skip rather than re-issuing an
+ * identical, still-too-large prompt.
+ */
+function truncateBodyForContextRetry(body: string): string {
+  const lines = body.split('\n');
+  let candidate =
+    lines.length <= RETRY_BODY_HEAD_LINES + RETRY_BODY_TAIL_LINES
+      ? body
+      : [
+          ...lines.slice(0, RETRY_BODY_HEAD_LINES),
+          '// ... (body elided for context) ...',
+          ...lines.slice(-RETRY_BODY_TAIL_LINES),
+        ].join('\n');
+  if (candidate.length > RETRY_BODY_MAX_CHARS) {
+    candidate = candidate.slice(0, RETRY_BODY_MAX_CHARS) + '\n// ... (truncated)';
+  }
+  return candidate;
+}
+
 /**
  * Batched summarisation prompt. Same single-line/action-verb constraint
  * as the single prompt, repeated per item, plus a JSON-array output
@@ -884,23 +919,104 @@ async function summaryTryBatchSummarize(ctx: SummarizerCallContext, batch: Pendi
   return true;
 }
 
+/** Reduce a raw chat completion to the single summary line: drop any
+ *  `<think>` reasoning, take the first non-empty line, strip preamble.
+ *  Shared by the primary single-item call and the context-window retry so
+ *  both extract identically. */
+function extractSummaryLine(text: string): string {
+  return stripPreamble(stripReasoningTokens(text).trim().split('\n')[0]?.trim() ?? '');
+}
+
+/** Outcome of the context-window degraded retry ({@link summaryRetryTruncated}):
+ *  - `generated` — a summary was produced from the truncated prompt and persisted.
+ *  - `unsummarizable` — deterministically can't be summarised on this backend
+ *    (truncated prompt STILL overflows, empty/stub response, or nothing left to
+ *    trim); the caller records a skip so it leaves the candidate set.
+ *  - `error` — a non-deterministic failure (transient/other endpoint error, or
+ *    aborted); the caller counts it as an ordinary error so it re-attempts next
+ *    pass rather than being permanently skipped on a transient blip. */
+type TruncatedRetryOutcome = 'generated' | 'unsummarizable' | 'error';
+
 /**
- * Classify a per-item generation failure. A context-window 400 is
- * deterministic — the body won't fit this backend's per-slot context, so
- * re-attempting it every pass just re-fails and burns a call; record a
- * skip instead so it leaves the candidate/pending set and surfaces as
- * "too large" (issue #27; `summarize --all` clears these to retry after
- * the backend is fixed). Anything else is a real failure: count it and
- * track the priority-queue poison-eviction. Extracted from
- * {@link summaryGenerateSingle} to keep that function under the
- * cognitive-complexity threshold.
+ * Context-window degraded retry (issue #27): the FULL body overflowed the
+ * chat backend's per-slot context. Re-issue ONE call with a hard-truncated
+ * body so a one-line summary can still be produced, persisted under the real
+ * content hash (so it caches like any other). See {@link TruncatedRetryOutcome}
+ * for how each result steers the caller.
  */
-function handleSingleGenerateError(ctx: SummarizerCallContext, item: PendingItem, err: unknown): void {
+async function summaryRetryTruncated(ctx: SummarizerCallContext, item: PendingItem): Promise<TruncatedRetryOutcome> {
+  const { counters, client, options } = ctx;
+  const truncatedBody = truncateBodyForContextRetry(item.body);
+  // Nothing left to trim — the signature/system prompt alone overflow this
+  // slot; re-issuing the same prompt would just re-fail. Treat as a skip.
+  if (truncatedBody === item.body) return 'unsummarizable';
+
+  let summary: string | null = null;
+  try {
+    const result = await client.chat(
+      [
+        { role: 'system', content: SUMMARY_SYSTEM_PROMPT },
+        { role: 'user', content: buildSummaryUserPrompt(item.sym, truncatedBody) },
+      ],
+      compact({ temperature: 0, maxTokens: 80, signal: options.signal }),
+    );
+    if (options.signal?.aborted) return 'error';
+    summary = extractSummaryLine(result.text);
+  } catch (retryErr) {
+    if (isContextWindowError(retryErr)) {
+      logDebug('Summarizer: truncated retry still exceeds chat context', { node: item.sym.id });
+      return 'unsummarizable';
+    }
+    logDebug('Summarizer: truncated retry failed (non-context)', {
+      node: item.sym.id,
+      error: retryErr instanceof Error ? retryErr.message : String(retryErr),
+    });
+    return 'error';
+  }
+  if (!summary) {
+    logDebug('Summarizer: truncated retry produced empty summary', { node: item.sym.id });
+    return 'unsummarizable';
+  }
+  // Persist may no-op (stub-rejected / stale node) without bumping `generated`;
+  // detect that via the counter delta and treat it as unsummarizable so the
+  // symbol leaves the candidate set instead of re-looping every pass.
+  const before = counters.generated;
+  summaryPersistItem(ctx, item, summary);
+  return counters.generated > before ? 'generated' : 'unsummarizable';
+}
+
+/**
+ * Classify a per-item generation failure. A context-window 400 means the
+ * body won't fit this backend's per-slot context. Before giving up, attempt
+ * one degraded retry with a hard-truncated prompt ({@link summaryRetryTruncated});
+ * only if that also can't produce a summary do we record a skip — so the
+ * symbol leaves the candidate/pending set, surfaces as "too large", and the
+ * pass converges (issue #27; `summarize --all` clears skips to retry after the
+ * backend is fixed). Anything else is a real failure: count it and track the
+ * priority-queue poison-eviction. Async because the degraded retry issues an
+ * LLM call. Extracted from {@link summaryGenerateSingle} to keep that function
+ * under the cognitive-complexity threshold.
+ */
+async function handleSingleGenerateError(ctx: SummarizerCallContext, item: PendingItem, err: unknown): Promise<void> {
   const { counters, queries } = ctx;
   if (isContextWindowError(err)) {
-    recordSummarySkip(queries, { nodeId: item.sym.id, bodyHash: item.hash, reason: 'context_window' });
-    counters.skippedTooLarge++;
-    logDebug('Summarizer: skipped — prompt exceeds chat context', { node: item.sym.id, error: err.message });
+    const outcome = await summaryRetryTruncated(ctx, item);
+    if (outcome === 'generated') return;
+    if (outcome === 'unsummarizable') {
+      recordSummarySkip(queries, { nodeId: item.sym.id, bodyHash: item.hash, reason: 'context_window' });
+      counters.skippedTooLarge++;
+      logDebug('Summarizer: skipped — prompt exceeds chat context even after truncation', {
+        node: item.sym.id,
+        error: err.message,
+      });
+      return;
+    }
+    // outcome === 'error' — the degraded retry hit a transient/other failure
+    // (its real cause was already logged inside summaryRetryTruncated; don't
+    // re-log the original context-window err and misattribute it). Count it
+    // as an ordinary error so it re-attempts next pass, then poison-track.
+    counters.errors++;
+    recordSummaryGenerationPoison(ctx, item);
     return;
   }
   counters.errors++;
@@ -909,8 +1025,13 @@ function handleSingleGenerateError(ctx: SummarizerCallContext, item: PendingItem
   } else {
     logWarn('Summarizer: unexpected error', { node: item.sym.id, error: String(err) });
   }
-  // Track failure for poison-row eviction.
-  if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
+  recordSummaryGenerationPoison(ctx, item);
+}
+
+/** Track a per-item generation failure for priority-queue poison-eviction
+ *  (shared by the error paths). */
+function recordSummaryGenerationPoison(ctx: SummarizerCallContext, item: PendingItem): void {
+  if (recordPriorityQueueFailure(ctx.queries, item.sym.id).evicted) {
     logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
   }
 }
@@ -936,9 +1057,9 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
       { onRetry: (retryErr) => logDebug('Summarizer: retrying transient endpoint error', { error: retryErr.message }) },
     );
     if (options.signal?.aborted) return;
-    summary = stripPreamble(stripReasoningTokens(result.text).trim().split('\n')[0]?.trim() ?? '');
+    summary = extractSummaryLine(result.text);
   } catch (err) {
-    handleSingleGenerateError(ctx, item, err);
+    await handleSingleGenerateError(ctx, item, err);
     counters.done++;
     options.onProgress?.(counters.done, total);
     return;
