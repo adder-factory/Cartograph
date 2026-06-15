@@ -303,28 +303,16 @@ function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
   } else if (pending > 0) {
     state = 'partial';
   }
-  let action = '';
-  if (state === 'empty') {
-    action = ` — run ${summarizeHint(opts)} (or ${agentSummaryBridgeHint(opts)})`;
-  } else if (state === 'partial') {
-    action = ` — ${pending} pending; run ${summarizeHint(opts)} to complete`;
-  }
+  const action = summariesActionSuffix({ state, pending, coverage: sumCov, opts });
   const weighted = safeCall(() => getWeightedSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS));
   const weightedSuffix =
     weighted && weighted.weightedRatio !== null
       ? ` _(centrality-weighted: ${Math.round(weighted.weightedRatio * 100)}%)_`
       : '';
   const reuseSuffix = summaryReuseCached > 0 ? ` — ${summaryReuseCached} reuse-cached` : '';
-  let line = `**Summaries:** ${sumCov.summarised} / ${sumCov.total} (${pct}%)${weightedSuffix}${reuseSuffix}${action}`;
-  const bgProgress = cg.llm.bgCtrl.progress;
-  if (bgProgress) {
-    line += `\n    ⏳ summarization running in the background — ${bgProgress.phase} ${bgProgress.done}/${bgProgress.total}; re-check coverage shortly`;
-  } else {
-    const detached = safeCall(() => getDetachedSummarizeState(cg.projectRoot));
-    if (detached?.running) {
-      line += `\n    ⏳ detached summarizer running (pid ${detached.pid}) — coverage is still climbing; re-check shortly`;
-    }
-  }
+  let line =
+    `**Summaries:** ${sumCov.summarised} / ${sumCov.total} (${pct}%)${weightedSuffix}${reuseSuffix}${action}` +
+    summariesBackgroundSuffix(cg);
   if (opts.summaryBreakdown) {
     const breakdown = safeCall(() =>
       getSummaryBreakdown(cg.queries, SUMMARIZABLE_KINDS, {
@@ -336,6 +324,40 @@ function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
     if (breakdown) line += '\n' + formatSummaryBreakdown(breakdown);
   }
   return { present: true, state, line };
+}
+
+/** The trailing call-to-action / status note for the summaries line.
+ *  `empty` → how to start; `partial` → pending count + how to finish;
+ *  `full` but sub-100% → a positive "eager pass complete" signal so the
+ *  plateau (short / already-documented symbols handled on demand) does
+ *  not read as stuck (issue #25); 100% → no suffix. */
+export function summariesActionSuffix(args: {
+  state: LensState;
+  pending: number;
+  coverage: { summarised: number; total: number };
+  opts: LensOpts;
+}): string {
+  const { state, pending, coverage, opts } = args;
+  if (state === 'empty') return ` — run ${summarizeHint(opts)} (or ${agentSummaryBridgeHint(opts)})`;
+  if (state === 'partial') return ` — ${pending} pending; run ${summarizeHint(opts)} to complete`;
+  if (coverage.summarised >= coverage.total) return '';
+  const remainder = coverage.total - coverage.summarised;
+  return ` — eager summary pass complete; ${remainder} short / already-documented symbol${remainder === 1 ? '' : 's'} handled on demand`;
+}
+
+/** A second-line note when a background / detached summarizer is still
+ *  filling in coverage, so a stale percentage is not mistaken for the
+ *  final state. Empty when nothing is running. */
+function summariesBackgroundSuffix(cg: Cartograph): string {
+  const bgProgress = cg.llm.bgCtrl.progress;
+  if (bgProgress) {
+    return `\n    ⏳ summarization running in the background — ${bgProgress.phase} ${bgProgress.done}/${bgProgress.total}; re-check coverage shortly`;
+  }
+  const detached = safeCall(() => getDetachedSummarizeState(cg.projectRoot));
+  if (detached?.running) {
+    return `\n    ⏳ detached summarizer running (pid ${detached.pid}) — coverage is still climbing; re-check shortly`;
+  }
+  return '';
 }
 
 function formatSummaryBreakdown(b: SummaryBreakdown): string {

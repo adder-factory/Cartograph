@@ -78,6 +78,18 @@ describe('admin LLM enrichment feature runtime', () => {
       'No candidates — every symbol with a description (summary or docstring) already has a role from the active model.',
     ]);
   });
+
+  it('emits an explicit "nothing to summarise" signal on a zero-candidate run (issue #25)', () => {
+    const text = summarizeDetailMessages(
+      { candidates: 0, generated: 0, errors: 0, cacheHits: 0, deferred: 0, durationMs: 5, embed: null },
+      formatters(),
+    )
+      .map((m) => m.message)
+      .join('\n');
+    expect(text).toContain('Summarised 0 new symbols');
+    expect(text).toContain('Nothing to summarise');
+    expect(text).toContain('eager pass is complete');
+  });
 });
 
 describe('admin LLM enrichment feature CLI', () => {
