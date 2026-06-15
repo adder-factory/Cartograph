@@ -37,9 +37,39 @@ export function bravo(s: string): string {
 }
 `;
 
+/** A single function with a >12-line body so the degraded retry's head/tail
+ *  truncation (eliding the middle) actually shrinks the prompt — small bodies
+ *  short-circuit `truncateBodyForContextRetry` to a no-op and skip directly. */
+const LARGE_FIXTURE = `export function gamma(input: number[]): number {
+  let total = 0;
+  for (let i = 0; i < input.length; i++) {
+    const v = input[i] ?? 0;
+    total += v;
+    total *= 1.0001;
+    total -= 0.5;
+    if (total > 1000) total = 1000;
+    if (total < -1000) total = -1000;
+    const adjusted = total / 2;
+    const squared = adjusted * adjusted;
+    total += squared * 0.0001;
+    const tweak = Math.sin(i) * 3;
+    total += tweak;
+    const damp = Math.cos(i) * 2;
+    total -= damp;
+    total = Math.round(total * 100) / 100;
+  }
+  const finalValue = total + input.length;
+  return finalValue;
+}
+`;
+
 /** A llama.cpp-shaped context-window 400 (matched by isContextWindowError). */
 const CONTEXT_400 =
   'chat endpoint returned 400: request (1200 tokens) exceeds the available context size, try increasing it';
+
+/** Marker the degraded-retry prompt carries (head/tail body elision) — lets a
+ *  chat mock tell the full-body call from the truncated retry. */
+const ELISION_MARKER = 'body elided for context';
 
 describe('Reactive #27 — context-too-large summary skips', () => {
   let tempDir: string;
@@ -132,5 +162,83 @@ describe('Reactive #27 — context-too-large summary skips', () => {
     expect(result.skippedTooLarge).toBe(0);
     expect(result.errors).toBe(2);
     expect(countCurrentSummarySkips(cg.queries)).toBe(0);
+  });
+
+  function gammaSummary(graph: Cartograph): ReturnType<typeof getSymbolSummary> {
+    const row = graph.db.getDb().prepare("SELECT id FROM nodes WHERE name = 'gamma'").get() as
+      | { id: string }
+      | undefined;
+    expect(row).toBeDefined();
+    return getSymbolSummary(graph.queries, row!.id);
+  }
+
+  /** Did a degraded retry actually fire? True iff some chat call carried a
+   *  user message with the head/tail elision marker. Robust to the unrelated
+   *  file/dir summary chat calls the service makes when a symbol succeeds
+   *  (so it beats asserting an exact total call count). */
+  function truncatedRetryIssued(spy: ReturnType<typeof vi.spyOn>): boolean {
+    return spy.mock.calls.some((call) => {
+      const msgs = call[0] as Array<{ role: string; content: string }> | undefined;
+      return msgs?.some((m) => m.role === 'user' && m.content.includes(ELISION_MARKER)) ?? false;
+    });
+  }
+
+  it('recovers a too-large symbol via a truncated retry (no skip, summary persisted)', async () => {
+    fs.writeFileSync(path.join(tempDir, 'sample.ts'), LARGE_FIXTURE);
+    cg = await openIndexed();
+    // Full prompt overflows the slot; the hard-truncated retry (carrying the
+    // elision marker) fits and succeeds — the summary is the degraded path's.
+    const chatSpy = vi.spyOn(LlmClient.prototype, 'chat').mockImplementation(async (msgs) => {
+      const user = msgs.find((m) => m.role === 'user')?.content ?? '';
+      if (user.includes(ELISION_MARKER)) {
+        return { text: 'aggregates the input array into a damped running total', durationMs: 1 };
+      }
+      throw new LlmEndpointError(CONTEXT_400, 400);
+    });
+
+    const result = await cg.llm.summarizeAll({ concurrency: 1 });
+    expect(result.candidates).toBe(1);
+    expect(result.generated).toBe(1);
+    expect(result.skippedTooLarge).toBe(0);
+    expect(result.errors).toBe(0);
+    expect(countCurrentSummarySkips(cg.queries)).toBe(0);
+    expect(truncatedRetryIssued(chatSpy)).toBe(true); // the degraded retry produced it
+    expect(gammaSummary(cg)?.summary).toBe('aggregates the input array into a damped running total');
+  });
+
+  it('records a skip when even the truncated retry exceeds context', async () => {
+    fs.writeFileSync(path.join(tempDir, 'sample.ts'), LARGE_FIXTURE);
+    cg = await openIndexed();
+    // Both the full and the truncated prompt overflow → genuinely unsummarizable.
+    const chatSpy = vi.spyOn(LlmClient.prototype, 'chat').mockRejectedValue(new LlmEndpointError(CONTEXT_400, 400));
+
+    const result = await cg.llm.summarizeAll({ concurrency: 1 });
+    expect(result.candidates).toBe(1);
+    expect(result.skippedTooLarge).toBe(1);
+    expect(result.generated).toBe(0);
+    expect(result.errors).toBe(0);
+    expect(countCurrentSummarySkips(cg.queries)).toBe(1);
+    expect(truncatedRetryIssued(chatSpy)).toBe(true); // the degraded retry WAS attempted before skipping
+    expect(gammaSummary(cg)).toBeNull();
+  });
+
+  it('counts a transient failure on the truncated retry as an error, not a skip', async () => {
+    fs.writeFileSync(path.join(tempDir, 'sample.ts'), LARGE_FIXTURE);
+    cg = await openIndexed();
+    // Full prompt is a context-400, but the degraded retry hits a transient
+    // 503 — must NOT be poison-skipped (it could succeed on a later pass).
+    const chatSpy = vi.spyOn(LlmClient.prototype, 'chat').mockImplementation(async (msgs) => {
+      const user = msgs.find((m) => m.role === 'user')?.content ?? '';
+      if (user.includes(ELISION_MARKER)) {
+        throw new LlmEndpointError('chat endpoint returned 503: service unavailable', 503);
+      }
+      throw new LlmEndpointError(CONTEXT_400, 400);
+    });
+
+    const result = await cg.llm.summarizeAll({ concurrency: 1 });
+    expect(result.errors).toBe(1);
+    expect(result.skippedTooLarge).toBe(0);
+    expect(countCurrentSummarySkips(cg.queries)).toBe(0);
+    expect(truncatedRetryIssued(chatSpy)).toBe(true);
   });
 });
