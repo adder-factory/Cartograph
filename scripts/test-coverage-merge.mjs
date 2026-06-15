@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
@@ -139,25 +138,26 @@ async function retryFailures(failures) {
   return stillFailing;
 }
 
-function parseLcov(text, records) {
+/** Parse ONE shard's lcov into a per-file `Map<line, hits>` map. Kept
+ *  per-shard (not accumulated across shards) because we merge by picking the
+ *  best shard per file, not by summing line hits — see {@link mergeLcov}. */
+function parseShardLcov(text) {
+  const perFile = new Map();
   for (const chunk of text.split('end_of_record')) {
     const sf = chunk.match(/^SF:(.*)$/m)?.[1];
     if (!sf) continue;
-    let file = records.get(sf);
-    if (!file) {
-      file = new Map();
-      records.set(sf, file);
+    let da = perFile.get(sf);
+    if (!da) {
+      da = new Map();
+      perFile.set(sf, da);
     }
     for (const m of chunk.matchAll(/^DA:(\d+),(\d+)/gm)) {
       const line = Number(m[1]);
-      const hits = Number(m[2]);
-      file.set(line, (file.get(line) ?? 0) + hits);
+      da.set(line, (da.get(line) ?? 0) + Number(m[2]));
     }
   }
+  return perFile;
 }
-
-const relevantLineCache = new Map();
-const sourceLineLimitCache = new Map();
 
 function sourcePathForCoverageFile(sf) {
   if (path.isAbsolute(sf)) return sf;
@@ -172,181 +172,45 @@ function isProjectSourceRecord(sf) {
   return projectRelativePath(sf).startsWith('src/');
 }
 
-function lineCoverageSource(sf) {
-  const sourcePath = sourcePathForCoverageFile(sf);
-  if (!existsSync(sourcePath)) return null;
-  if (!/\.[cm]?tsx?$/.test(sourcePath)) return null;
-  return { sourcePath, text: readFileSync(sourcePath, 'utf8') };
+/** Hit-line count for a file's `Map<line, hits>` — how many distinct lines
+ *  were executed at least once. Used to pick a file's best-covering shard. */
+function hitLineCount(da) {
+  let lh = 0;
+  for (const hits of da.values()) if (hits > 0) lh++;
+  return lh;
 }
 
-function sourceLineLimit(sf) {
-  if (sourceLineLimitCache.has(sf)) return sourceLineLimitCache.get(sf);
-  const sourcePath = sourcePathForCoverageFile(sf);
-  if (!existsSync(sourcePath)) {
-    sourceLineLimitCache.set(sf, null);
-    return null;
-  }
-  const lineLimit = readFileSync(sourcePath, 'utf8').split(/\r\n|\r|\n/).length;
-  sourceLineLimitCache.set(sf, lineLimit);
-  return lineLimit;
-}
-
-function scannerContext(text) {
-  const lines = text.split(/\r?\n/);
-  return {
-    code: Array.from({ length: lines.length }, () => ''),
-    escaped: false,
-    line: 0,
-    state: 'code',
-  };
-}
-
-function pushCode(ctx, ch) {
-  ctx.code[ctx.line] += ch;
-}
-
-function scannerNewline(ctx) {
-  ctx.line++;
-  ctx.escaped = false;
-  if (ctx.state === 'line-comment') ctx.state = 'code';
-}
-
-function handleCodeChar(ctx, ch, next) {
-  if (ch === '/' && next === '/') {
-    ctx.state = 'line-comment';
-    return 1;
-  }
-  if (ch === '/' && next === '*') {
-    ctx.state = 'block-comment';
-    return 1;
-  }
-  if (ch === "'" || ch === '"' || ch === '`') {
-    pushCode(ctx, ch);
-    ctx.state = ch === "'" ? 'single' : ch === '"' ? 'double' : 'template';
-    ctx.escaped = false;
-    return 0;
-  }
-  pushCode(ctx, ch);
-  return 0;
-}
-
-function handleQuotedChar(ctx, ch, quote) {
-  if (ctx.escaped) {
-    ctx.escaped = false;
-    return;
-  }
-  if (ch === '\\') {
-    ctx.escaped = true;
-    return;
-  }
-  if (ch === quote) {
-    pushCode(ctx, ch);
-    ctx.state = 'code';
-  }
-}
-
-function handleBlockCommentChar(ctx, ch, next) {
-  if (ch !== '*' || next !== '/') return 0;
-  ctx.state = 'code';
-  return 1;
-}
-
-function scanCoverageChar(ctx, ch, next) {
-  if (ctx.state === 'code') return handleCodeChar(ctx, ch, next);
-  if (ctx.state === 'single') {
-    handleQuotedChar(ctx, ch, "'");
-    return 0;
-  }
-  if (ctx.state === 'double') {
-    handleQuotedChar(ctx, ch, '"');
-    return 0;
-  }
-  if (ctx.state === 'template') {
-    handleQuotedChar(ctx, ch, '`');
-    return 0;
-  }
-  if (ctx.state === 'block-comment') return handleBlockCommentChar(ctx, ch, next);
-  return 0;
-}
-
-function codeByLine(text) {
-  const ctx = scannerContext(text);
-
-  for (let i = 0; i < text.length; i++) {
-    const ch = text[i];
-    const next = text[i + 1];
-
-    if (ch === '\n') {
-      scannerNewline(ctx);
-      continue;
-    }
-
-    i += scanCoverageChar(ctx, ch, next);
-  }
-  return ctx.code;
-}
-
-function bracketDelta(text) {
-  let delta = 0;
-  for (const ch of text) {
-    if (ch === '{' || ch === '(' || ch === '[') delta++;
-    if (ch === '}' || ch === ')' || ch === ']') delta--;
-  }
-  return delta;
-}
-
-function coverageRelevantLines(sf) {
-  if (relevantLineCache.has(sf)) return relevantLineCache.get(sf);
-
-  const source = lineCoverageSource(sf);
-  if (!source) {
-    relevantLineCache.set(sf, null);
-    return null;
-  }
-
-  const codeLines = codeByLine(source.text);
-  const relevant = new Set();
-  let typeDepth = 0;
-
-  for (let index = 0; index < codeLines.length; index++) {
-    const lineNo = index + 1;
-    const trimmed = codeLines[index].trim();
-
-    if (typeDepth > 0) {
-      typeDepth += bracketDelta(trimmed);
-      if (typeDepth <= 0 || /[;}]$/.test(trimmed)) typeDepth = 0;
-      continue;
-    }
-
-    if (!trimmed) continue;
-    if (/^[{}()[\],;:.]+$/.test(trimmed)) continue;
-    if (
-      /^(import\s+type|export\s+type|type\s+\w|interface\s+\w|declare\s+interface\s+\w|export\s+interface\s+\w)\b/.test(
-        trimmed,
-      )
-    ) {
-      typeDepth = /[;}]$/.test(trimmed) ? 0 : Math.max(1, bracketDelta(trimmed));
-      continue;
-    }
-    if (/^export\s*{\s*type\b/.test(trimmed)) continue;
-
-    relevant.add(lineNo);
-  }
-
-  relevantLineCache.set(sf, relevant);
-  return relevant;
-}
-
+/**
+ * Merge per-shard lcov into a single `coverage/lcov.info`.
+ *
+ * IMPORTANT — why we pick the best shard per file instead of summing per line:
+ * each test file runs in its OWN bun process (the whole suite in one process
+ * SIGBUS-crashes on this repo's native deps), and bun's coverage reports a
+ * source file's line numbers INCONSISTENTLY across processes. A file's
+ * dedicated test shard maps its lines correctly (e.g. name-matcher.ts:233 is
+ * real code); a shard that only imports it transitively reports SHIFTED /
+ * phantom line numbers (233's hit lands on a blank line). Summing hits per
+ * (file, line) across 500+ shards therefore scatters real hits onto wrong /
+ * blank lines and collapses coverage (we observed a true 90% read as 25%).
+ *
+ * So for each source file we keep the single shard with the most executed
+ * lines — whose numbering is internally consistent — and emit its raw DA
+ * records. This is slightly CONSERVATIVE (it ignores complementary coverage
+ * when two tests exercise different halves of one file) but accurate and
+ * stable, and Sonar does its own executable-line analysis on top. Paths are
+ * normalised to project-relative so abs/relative SF spellings from different
+ * shards dedupe to one record.
+ */
 async function mergeLcov(files) {
-  const records = new Map();
+  const best = new Map(); // project-relative sf -> { lh, da: Map<line, hits> }
   const reads = await Promise.all(
     files.map(async (file) => {
       const lcovPath = path.join(file.outDir, 'lcov.info');
       try {
-        return { file, text: await readFile(lcovPath, 'utf8'), skipped: false };
+        return { text: await readFile(lcovPath, 'utf8'), skipped: false };
       } catch (err) {
         if (err instanceof Error && 'code' in err && err.code === 'ENOENT') {
-          return { file, text: '', skipped: true };
+          return { text: '', skipped: true };
         }
         throw new Error(
           `Failed reading coverage for ${file.file}: ${err instanceof Error ? err.message : String(err)}`,
@@ -360,42 +224,29 @@ async function mergeLcov(files) {
       skippedNoCoverage++;
       continue;
     }
-    parseLcov(read.text, records);
+    for (const [rawSf, da] of parseShardLcov(read.text)) {
+      if (!isProjectSourceRecord(rawSf)) continue;
+      const sf = projectRelativePath(rawSf);
+      const lh = hitLineCount(da);
+      const current = best.get(sf);
+      if (!current || lh > current.lh) best.set(sf, { lh, da });
+    }
   }
   const lines = ['TN:'];
-  let prunedLines = 0;
-  let prunedOutOfRangeLines = 0;
   let sourceFiles = 0;
-  for (const [sf, lineHits] of [...records.entries()].sort(([a], [b]) => a.localeCompare(b))) {
-    if (!isProjectSourceRecord(sf)) continue;
+  for (const [sf, { da, lh }] of [...best.entries()].sort(([a], [b]) => a.localeCompare(b))) {
     sourceFiles++;
-    const relevant = coverageRelevantLines(sf);
-    const lineLimit = sourceLineLimit(sf);
     lines.push(`SF:${sf}`);
-    let lh = 0;
-    const entries = [...lineHits.entries()]
-      .filter(([line]) => {
-        const inRange = lineLimit == null || line <= lineLimit;
-        if (!inRange) {
-          prunedOutOfRangeLines++;
-          return false;
-        }
-        const keep = relevant == null || relevant.has(line);
-        if (!keep) prunedLines++;
-        return keep;
-      })
-      .sort(([a], [b]) => a - b);
-    for (const [line, hits] of entries) {
-      if (hits > 0) lh++;
+    for (const [line, hits] of [...da.entries()].sort(([a], [b]) => a - b)) {
       lines.push(`DA:${line},${hits}`);
     }
-    lines.push(`LF:${entries.length}`);
+    lines.push(`LF:${da.size}`);
     lines.push(`LH:${lh}`);
     lines.push('end_of_record');
   }
   await mkdir(coverageDir, { recursive: true });
   await writeFile(path.join(coverageDir, 'lcov.info'), `${lines.join(os.EOL)}${os.EOL}`);
-  return { files: sourceFiles, skippedNoCoverage, prunedLines, prunedOutOfRangeLines };
+  return { files: sourceFiles, skippedNoCoverage };
 }
 
 const tests = await listTests();
@@ -409,24 +260,32 @@ await mkdir(tmpRoot, { recursive: true });
 console.log(`=== coverage: ${tests.length} files, ${jobs} workers ===`);
 let failures = await runPool(tests);
 failures = await retryFailures(failures);
-if (failures.length > 0) {
-  console.error(`=== ${failures.length} coverage test file(s) failed ===`);
-  for (const failure of failures.slice(0, 20)) {
-    console.error(`--- ${failure.file} (${failure.code ?? failure.signal}) ---`);
-    const combined = `${failure.stdout}${failure.stderr}`.trim();
-    console.error(combined.split('\n').slice(-120).join('\n'));
-  }
-  process.exit(1);
-}
 
+// Merge whatever coverage we collected FIRST, so a flaky / crashing test can
+// never block the report. A failed shard simply contributes no records (its
+// file falls back to a passing shard, or reads as uncovered) — it cannot zero
+// out `coverage/lcov.info`. Failures are surfaced AFTER the merge, below.
 const merged = await mergeLcov(
   tests.map((file, index) => ({ file, outDir: path.join(tmpRoot, safeName(file, index)) })),
 );
 await rm(tmpRoot, { recursive: true, force: true });
 const skipped = merged.skippedNoCoverage > 0 ? ` (${merged.skippedNoCoverage} test files had no LCOV records)` : '';
-const prunedParts = [];
-if (merged.prunedLines > 0) prunedParts.push(`pruned ${merged.prunedLines} non-executable TS lines`);
-if (merged.prunedOutOfRangeLines > 0)
-  prunedParts.push(`dropped ${merged.prunedOutOfRangeLines} out-of-range LCOV lines`);
-const pruned = prunedParts.length > 0 ? `; ${prunedParts.join('; ')}` : '';
-console.log(`=== coverage merged: ${merged.files} source files -> coverage/lcov.info${skipped}${pruned} ===`);
+console.log(`=== coverage merged: ${merged.files} source files -> coverage/lcov.info${skipped} ===`);
+
+if (failures.length > 0) {
+  console.error(`=== ${failures.length} coverage test file(s) failed (coverage/lcov.info was still written) ===`);
+  for (const failure of failures.slice(0, 20)) {
+    console.error(`--- ${failure.file} (${failure.code ?? failure.signal}) ---`);
+    const combined = `${failure.stdout}${failure.stderr}`.trim();
+    console.error(combined.split('\n').slice(-120).join('\n'));
+  }
+  // Surface failures with a non-zero exit by default so a real regression is
+  // never masked. Set COVERAGE_ALLOW_TEST_FAILURES=1 to still exit 0 once the
+  // coverage report is written — for when a known-flaky spawned test must not
+  // block a coverage / Sonar run.
+  if (process.env.COVERAGE_ALLOW_TEST_FAILURES === '1') {
+    console.error('=== COVERAGE_ALLOW_TEST_FAILURES=1 — exiting 0 despite the failure(s) above ===');
+  } else {
+    process.exit(1);
+  }
+}
