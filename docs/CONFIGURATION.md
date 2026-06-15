@@ -195,6 +195,16 @@ running `llama-server`: `cartograph backend status`/`stop` keep tracking it by
 port. If you move a tier to a different port, the process bound to the old port
 is surfaced as `orphaned` so `cartograph backend stop` can reclaim it.
 
+> **Watch the per-slot context.** llama.cpp splits a server's **total** `-c`
+> across its `--parallel` slots, so each request only gets `-c ÷ --parallel`
+> tokens. Pin a small `-c` with a high `--parallel` (e.g. `-c 8192 --parallel 8`
+> → 1024/slot) and cartograph's summary prompts (up to ~3.3k tokens for file
+> summaries) start failing with HTTP 400 "exceeds context". Either leave `-c`
+> unset (llama.cpp then uses the model's native context) or keep
+> `-c ÷ --parallel ≥ 4096`. `cartograph doctor` probes each reachable chat/ask
+> backend's effective per-slot context and **warns** when it drops below that
+> floor — so you don't have to compute it by hand.
+
 ### A/B-testing a chat model for one invocation
 
 To compare chat models without editing `config.json` or restarting a backend,

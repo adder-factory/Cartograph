@@ -428,7 +428,7 @@ describe('admin command action bodies', () => {
 
     await actions.get('install-models')!({ minimal: true, writeConfig: true, projectPath, dir: '/models' });
     await actions.get('doctor [path]')!(projectPath, { fix: true, skipProjectChecks: true });
-    await actions.get('llm-plan')!();
+    await actions.get('llm-plan [path]')!(projectPath);
     await actions.get('llm-apply')!({ preset: 'install-ollama', projectPath });
     await actions.get('llm-tune [path]')!(projectPath, {});
     await actions.get('llm-tune [path]')!(projectPath, { tier: 'chat', concurrency: '4' });
