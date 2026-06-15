@@ -718,7 +718,7 @@ function formatSummarizePhaseLines(result: {
   candidates: number;
   deferred: number;
   skippedTooLarge?: number;
-  embed: Parameters<typeof formatEmbedPhaseLine>[0];
+  embed?: Parameters<typeof formatEmbedPhaseLine>[0];
 }): string[] {
   const lines: string[] = [
     `## Summarised ${result.generated} new symbol${result.generated === 1 ? '' : 's'} in ${(result.durationMs / 1000).toFixed(1)}s`,
