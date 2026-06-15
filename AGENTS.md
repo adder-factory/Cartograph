@@ -36,6 +36,21 @@ relevant test set; broaden to full tests or health checks when touching
 shared behavior, public CLI/MCP contracts, indexing, extraction, or LLM
 flows.
 
+## Reviewer agent
+
+This repo ships a project-checked-in **reviewer agent** at
+`.claude/agents/reviewer.md` — Claude Code and other hosts that read
+`.claude/agents/` pick it up automatically. It runs an independent,
+read-only semantic review of a diff before you commit or open a PR
+(correctness, edge cases, gate-metric alignment, scope, and security
+smell) and returns a structured `APPROVE` / `REQUEST_CHANGES` / `BLOCK`
+verdict. It is tailored to this project's gates — `npm run typecheck`,
+`npm run check` (architecture + biome), the biomarker floor
+(`check:biomarkers`, confirmed under `BIOMARKER_GATE_FORCE=1`), and the
+Sonar quality gate — and is read-only by design (no shell/write tools) so
+a malicious diff can't trick it into running commands. Run it on any
+code-shipping change; the local gates are a prerequisite, not a substitute.
+
 ## SonarQube verification for agents
 
 Use the local Sonar credentials from `/Users/adderclaudedev/.sonarqube-env`;
