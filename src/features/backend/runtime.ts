@@ -56,6 +56,21 @@ export interface BackendProcessSpec {
   readonly extraArgs: readonly string[];
   readonly command: string;
   readonly args: readonly string[];
+  /** True when a configured tier declared `externallyManaged: true` —
+   *  cartograph never starts/stops/restarts it (issue #30). Absent on
+   *  orphan specs (those ARE cartograph-tracked processes). */
+  readonly externallyManaged?: boolean;
+}
+
+/** A divergence between the args a managed backend was actually started
+ *  with and the args a fresh spawn would use under the CURRENT config —
+ *  i.e. a config change (concurrency / llamaServerArgs / model) that the
+ *  running process predates and has not picked up (issue #30). */
+export interface BackendConfigDrift {
+  /** Args the live process was launched with (from its pid file). */
+  readonly current: readonly string[];
+  /** Args a fresh `backend start` would use with the current config. */
+  readonly requested: readonly string[];
 }
 
 export interface BackendPidFile {
@@ -102,6 +117,10 @@ export interface BackendStatusRow {
   readonly endpointReachable: boolean;
   readonly modelExists: boolean;
   readonly state: BackendRuntimeState;
+  /** Non-null when this is a live cartograph-managed process whose launch
+   *  args diverge from current config (issue #30). Always null for dead /
+   *  external / orphan rows. */
+  readonly configDrift?: BackendConfigDrift | null;
 }
 
 export interface BackendStatusReport {
@@ -130,6 +149,28 @@ export interface BackendStopOptions {
 export interface BackendStopResult extends BackendStatusReport {
   readonly stopped: readonly BackendStatusRow[];
   readonly skipped: readonly { row: BackendStatusRow; reason: string }[];
+}
+
+export interface BackendRestartOptions {
+  readonly projectPath: string;
+  readonly bin?: string;
+  /** Restrict the restart to one tier label (embed / summarize / local /
+   *  ask / rerank); when absent, all configured managed tiers restart. */
+  readonly tier?: string;
+  /** SIGKILL a managed process that outlasts the SIGTERM grace period
+   *  before respawning — otherwise the old process keeps the port and the
+   *  fresh spawn fails with EADDRINUSE. Mirrors `backend stop --force`. */
+  readonly force?: boolean;
+  readonly dryRun?: boolean;
+}
+
+export interface BackendRestartResult extends BackendStatusReport {
+  readonly restarted: readonly BackendStatusRow[];
+  readonly skipped: readonly { row: BackendStatusRow; reason: string }[];
+  /** Tiers cartograph cannot restart because the process is not ours
+   *  (declared `externallyManaged`, or a reachable non-cartograph process):
+   *  the operator must relaunch their own llama-server to apply config. */
+  readonly external: readonly { row: BackendStatusRow; message: string }[];
 }
 
 export interface BackendLogsOptions {
@@ -204,6 +245,10 @@ export function buildBackendProcessSpecs(
     const existing = specs.get(built.key);
     if (existing) {
       existing.labels.push(built.label);
+      // If ANY tier sharing this endpoint declares external, the merged
+      // process is external (cartograph must not own a process a tier
+      // explicitly disclaims).
+      if (built.spec.externallyManaged) existing.externallyManaged = true;
       continue;
     }
     specs.set(built.key, built.spec);
@@ -212,8 +257,9 @@ export function buildBackendProcessSpecs(
   return [...specs.values()].map((spec) => ({ ...spec, labels: [...spec.labels] }));
 }
 
-interface MutableBackendProcessSpec extends Omit<BackendProcessSpec, 'labels'> {
-  readonly labels: string[];
+interface MutableBackendProcessSpec extends Omit<BackendProcessSpec, 'labels' | 'externallyManaged'> {
+  labels: string[];
+  externallyManaged?: boolean;
 }
 
 /**
@@ -275,6 +321,7 @@ function buildTierBackendSpec(
       extraArgs,
       command: ctx.command,
       args,
+      externallyManaged: cfg['externallyManaged'] === true,
     },
   };
 }
@@ -345,7 +392,27 @@ async function buildBackendStatusRow(args: BuildBackendStatusRowArgs): Promise<B
     endpointReachable,
     modelExists,
     state: backendRuntimeState({ pidAlive, endpointReachable, modelExists, pidRecord }),
+    configDrift: detectBackendConfigDrift(pidRecord, pidAlive, spec),
   };
+}
+
+/** Detect a config-vs-running-args divergence for a live managed backend
+ *  (issue #30). Returns null unless the process we launched is still alive
+ *  AND its recorded launch args differ from what a fresh spawn would use
+ *  under the current config. Orphan rows rebuild their spec FROM the pid
+ *  record's own args, so they compare equal — no false drift. */
+function detectBackendConfigDrift(
+  pidRecord: BackendPidFile | null,
+  pidAlive: boolean,
+  spec: BackendProcessSpec,
+): BackendConfigDrift | null {
+  if (!pidRecord || !pidAlive) return null;
+  if (argsEqual(pidRecord.args, spec.args)) return null;
+  return { current: [...pidRecord.args], requested: [...spec.args] };
+}
+
+function argsEqual(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
 /**
@@ -407,8 +474,7 @@ export async function startBackends(options: BackendStartOptions): Promise<Backe
       continue;
     }
     try {
-      const child = await spawnDetachedBackend(row);
-      await writePidFile(row, child.pid);
+      await spawnRow(row);
       started.push(row);
     } catch (err) {
       skipped.push({ row, reason: err instanceof Error ? err.message : String(err) });
@@ -419,11 +485,24 @@ export async function startBackends(options: BackendStartOptions): Promise<Backe
   return { ...after, started, skipped };
 }
 
+/** Spawn a row's backend and record its pid file. Shared by `start` and
+ *  `restart`. */
+async function spawnRow(row: BackendStatusRow): Promise<void> {
+  const child = await spawnDetachedBackend(row);
+  await writePidFile(row, child.pid);
+}
+
 /** Why `start` should NOT spawn a process for this row, or null when it
  *  is a fresh configured tier that should be launched. */
 function backendStartSkipReason(row: BackendStatusRow): string | null {
   if (row.origin === 'orphan') {
     return 'orphaned backend on a port no longer in config; run `cartograph backend stop` to reclaim it';
+  }
+  // Declared external: never spawn — independent of whether the port is
+  // live right now (so a self-managed backend that briefly drops isn't
+  // replaced by a cartograph-owned copy). Issue #30.
+  if (row.spec.externallyManaged) {
+    return `declared externallyManaged in config — cartograph will not start it; (re)launch your own llama-server for ${row.spec.endpoint}`;
   }
   if (!row.modelExists) return `model file missing: ${row.spec.modelPath}`;
   if (row.pidAlive) return `already running as pid ${row.pidRecord?.pid}`;
@@ -436,6 +515,10 @@ export async function stopBackends(options: BackendStopOptions): Promise<Backend
   const stopped: BackendStatusRow[] = [];
   const skipped: Array<{ row: BackendStatusRow; reason: string }> = [];
   for (const row of before.rows) {
+    if (row.spec.externallyManaged) {
+      skipped.push({ row, reason: 'declared externallyManaged in config; cartograph does not stop it' });
+      continue;
+    }
     const pid = row.pidRecord?.pid;
     if (!pid) {
       skipped.push({
@@ -456,17 +539,132 @@ export async function stopBackends(options: BackendStopOptions): Promise<Backend
       });
       continue;
     }
-    process.kill(pid, 'SIGTERM');
-    const exited = await waitForExit(pid, STOP_WAIT_MS);
-    if (!exited && options.force) {
-      process.kill(pid, 'SIGKILL');
-      await waitForExit(pid, STOP_WAIT_MS);
-    }
-    await removePidFile(row.pidFilePath);
+    await signalAndRemoveRow(row, options.force === true);
     stopped.push(row);
   }
   const after = await backendStatus(options.projectPath);
   return { ...after, stopped, skipped };
+}
+
+/** SIGTERM a row's process, wait for exit (SIGKILL on `force` if it
+ *  outlasts the grace period), then remove its pid file. Assumes the
+ *  caller already confirmed the pid is alive and ours. Shared by `stop`
+ *  and `restart`. */
+async function signalAndRemoveRow(row: BackendStatusRow, force: boolean): Promise<void> {
+  const pid = row.pidRecord?.pid;
+  if (!pid) return;
+  process.kill(pid, 'SIGTERM');
+  const exited = await waitForExit(pid, STOP_WAIT_MS);
+  if (!exited && force) {
+    process.kill(pid, 'SIGKILL');
+    await waitForExit(pid, STOP_WAIT_MS);
+  }
+  await removePidFile(row.pidFilePath);
+}
+
+/**
+ * Restart cartograph-managed backends so a config change (concurrency /
+ * llamaServerArgs / model) actually lands — the gap #30 names: `start`
+ * skips a reachable port, so a managed backend never picks up the change
+ * without an explicit stop+start. Optionally scoped to one `tier`.
+ *
+ * Processes that are NOT ours — declared `externallyManaged`, or a
+ * reachable port with no cartograph pid file — cannot be restarted here;
+ * they are returned in `external` with a relaunch hint instead of being
+ * touched.
+ */
+export async function restartBackends(options: BackendRestartOptions): Promise<BackendRestartResult> {
+  const statusOptions = options.bin === undefined ? {} : { bin: options.bin };
+  const before = await backendStatus(options.projectPath, statusOptions);
+  const buckets: RestartBuckets = { restarted: [], skipped: [], external: [] };
+
+  const targets = before.rows.filter((row) => rowMatchesTierFilter(row, options.tier));
+  if (targets.length === 0) return { ...before, ...buckets };
+  await fsp.mkdir(before.stateDir, { recursive: true });
+
+  for (const row of targets) await restartOneRow(row, options, buckets);
+
+  const after = await backendStatus(options.projectPath, statusOptions);
+  return { ...after, ...buckets };
+}
+
+interface RestartBuckets {
+  restarted: BackendStatusRow[];
+  skipped: Array<{ row: BackendStatusRow; reason: string }>;
+  external: Array<{ row: BackendStatusRow; message: string }>;
+}
+
+/** Apply one row's restart disposition, routing it into the right bucket.
+ *  Extracted from {@link restartBackends} to keep that function under the
+ *  cognitive-complexity threshold. */
+async function restartOneRow(
+  row: BackendStatusRow,
+  options: BackendRestartOptions,
+  buckets: RestartBuckets,
+): Promise<void> {
+  const disposition = restartDisposition(row);
+  if (disposition === 'skip-orphan') {
+    buckets.skipped.push({
+      row,
+      reason: 'orphaned backend on a port no longer in config; run `cartograph backend stop` to reclaim it',
+    });
+    return;
+  }
+  if (disposition === 'skip-missing-model') {
+    buckets.skipped.push({ row, reason: `model file missing: ${row.spec.modelPath}` });
+    return;
+  }
+  if (disposition === 'external') {
+    buckets.external.push({ row, message: backendExternalRelaunchMessage(row) });
+    return;
+  }
+  if (options.dryRun) {
+    buckets.restarted.push(row); // plan only — report what WOULD restart
+    return;
+  }
+  if (disposition === 'managed-live') await signalAndRemoveRow(row, options.force === true);
+  try {
+    await spawnRow(row);
+    buckets.restarted.push(row);
+  } catch (err) {
+    buckets.skipped.push({ row, reason: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+type RestartDisposition = 'skip-orphan' | 'skip-missing-model' | 'external' | 'managed-live' | 'managed-stopped';
+
+/** Classify how `restart` should treat a row. `managed-live` = our process
+ *  is running (stop then start); `managed-stopped` = ours but not running
+ *  (just start); `external` = not ours (relaunch hint); the `skip-*` cases
+ *  are orphans / missing models that restart leaves alone. */
+function restartDisposition(row: BackendStatusRow): RestartDisposition {
+  if (row.origin === 'orphan') return 'skip-orphan';
+  if (row.spec.externallyManaged) return 'external';
+  if (!row.modelExists) return 'skip-missing-model';
+  const ours = row.pidRecord !== null && row.pidAlive && pidRecordMatchesSpec(row);
+  if (ours) return 'managed-live';
+  // Reachable but not ours (no/dead pid file) → an external process holds
+  // the port; we can't restart it. A truly stopped tier (not reachable) is
+  // ours to (re)start fresh.
+  if (row.endpointReachable) return 'external';
+  return 'managed-stopped';
+}
+
+/** True when a row should be included given an optional tier-label filter
+ *  (case-insensitive). Orphans (which can carry a stale tier label) only
+ *  match when no filter is given, so a tier-scoped restart never touches
+ *  them. */
+function rowMatchesTierFilter(row: BackendStatusRow, tier: string | undefined): boolean {
+  if (tier === undefined) return true;
+  if (row.origin === 'orphan') return false;
+  const wanted = tier.toLowerCase();
+  return row.spec.labels.some((label) => label.toLowerCase() === wanted);
+}
+
+/** Operator instruction for a tier cartograph can't restart: relaunch your
+ *  own llama-server with the args current config implies. */
+function backendExternalRelaunchMessage(row: BackendStatusRow): string {
+  return `external process — cartograph can't restart it. Relaunch your own llama-server for ${row.spec.endpoint} with: ${renderBackendStartCommand(row.spec)}`;
 }
 
 export async function backendLogs(options: BackendLogsOptions): Promise<BackendLogsReport> {

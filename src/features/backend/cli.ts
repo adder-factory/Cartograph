@@ -1,5 +1,6 @@
 import type {
   BackendLogsReport,
+  BackendRestartResult,
   BackendStartResult,
   BackendStatusReport,
   BackendStatusRow,
@@ -15,6 +16,13 @@ export interface BackendRuntimeModule {
   backendStatus: (projectPath: string, options?: { bin?: string }) => Promise<BackendStatusReport>;
   startBackends: (options: { projectPath: string; bin?: string; dryRun?: boolean }) => Promise<BackendStartResult>;
   stopBackends: (options: { projectPath: string; force?: boolean }) => Promise<BackendStopResult>;
+  restartBackends: (options: {
+    projectPath: string;
+    bin?: string;
+    tier?: string;
+    force?: boolean;
+    dryRun?: boolean;
+  }) => Promise<BackendRestartResult>;
   backendLogs: (options: { projectPath: string; tier?: string; lines?: number }) => Promise<BackendLogsReport>;
   renderBackendStartCommand: typeof renderBackendStartCommand;
 }
@@ -27,23 +35,52 @@ export interface BackendCommandDeps {
   loadBackendRuntime: () => Promise<BackendRuntimeModule>;
 }
 
+/** Shared collaborators threaded to each subcommand registrar. */
+interface BackendCommandContext {
+  resolveProjectPath: (pathArg?: string) => string;
+  loadBackendRuntime: () => Promise<BackendRuntimeModule>;
+  writeStdout: (message?: string) => void;
+  error: (message: string) => void;
+}
+
 export function registerBackendCommand(deps: BackendCommandDeps): void {
-  const { program, resolveProjectPath, loadBackendRuntime, writeStdout } = deps;
-  const backendCmd = program
+  const backendCmd = deps.program
     .command('backend')
     .description('Manage configured local llama-server backends for this project');
+  const ctx: BackendCommandContext = {
+    resolveProjectPath: deps.resolveProjectPath,
+    loadBackendRuntime: deps.loadBackendRuntime,
+    writeStdout: deps.writeStdout,
+    error: deps.error,
+  };
+  registerStatusCommand(backendCmd, ctx);
+  registerStartCommand(backendCmd, ctx);
+  registerRestartCommand(backendCmd, ctx);
+  registerStopCommand(backendCmd, ctx);
+  registerLogsCommand(backendCmd, ctx);
+}
 
+/** Exit non-zero when there is nothing usable to (re)start — no managed
+ *  tiers at all, or a configured model file is missing. Shared by `start`
+ *  and `restart`. */
+function exitIfNoUsableBackends(result: BackendStatusReport): void {
+  if (result.rows.length === 0 || result.rows.some((row) => row.state === 'missing-model')) process.exit(1);
+}
+
+function registerStatusCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
   backendCmd
     .command('status [path]')
     .description('Show configured local llama-server backend status')
     .option('--json', 'Print structured JSON instead of Markdown')
     .action(async (pathArg: string | undefined, options: { json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
+      const projectPath = ctx.resolveProjectPath(pathArg);
+      const runtime = await ctx.loadBackendRuntime();
       const result = await runtime.backendStatus(projectPath);
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStatusReport(result, runtime));
+      ctx.writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStatusReport(result, runtime));
     });
+}
 
+function registerStartCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
   backendCmd
     .command('start [path]')
     .description('Start configured local llama-server backend processes in the background')
@@ -51,33 +88,72 @@ export function registerBackendCommand(deps: BackendCommandDeps): void {
     .option('--dry-run', 'Print what would be started without spawning processes')
     .option('--json', 'Print structured JSON instead of Markdown')
     .action(async (pathArg: string | undefined, options: { bin?: string; dryRun?: boolean; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
+      const projectPath = ctx.resolveProjectPath(pathArg);
+      const runtime = await ctx.loadBackendRuntime();
       const result = await runtime.startBackends({
         projectPath,
         ...(options.bin ? { bin: options.bin } : {}),
         dryRun: options.dryRun === true,
       });
-      writeStdout(
+      ctx.writeStdout(
         options.json
           ? JSON.stringify(result, null, 2)
           : formatBackendStartReport(result, runtime, options.dryRun === true),
       );
-      if (result.rows.length === 0 || result.rows.some((row) => row.state === 'missing-model')) process.exit(1);
+      exitIfNoUsableBackends(result);
     });
+}
 
+function registerRestartCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
+  backendCmd
+    .command('restart [path]')
+    .description(
+      'Restart managed local llama-server backends so config changes (concurrency / llamaServerArgs) take effect',
+    )
+    .option('--bin <path>', 'llama-server binary path (default: llama-server)')
+    .option('--tier <name>', 'Only restart one tier label (embed, summarize, local, ask, rerank)')
+    .option('--force', 'SIGKILL a managed process that does not exit after SIGTERM before respawning')
+    .option('--dry-run', 'Print what would be restarted without stopping or spawning processes')
+    .option('--json', 'Print structured JSON instead of Markdown')
+    .action(
+      async (
+        pathArg: string | undefined,
+        options: { bin?: string; tier?: string; force?: boolean; dryRun?: boolean; json?: boolean },
+      ) => {
+        const projectPath = ctx.resolveProjectPath(pathArg);
+        const runtime = await ctx.loadBackendRuntime();
+        const result = await runtime.restartBackends({
+          projectPath,
+          ...(options.bin ? { bin: options.bin } : {}),
+          ...(options.tier ? { tier: options.tier } : {}),
+          force: options.force === true,
+          dryRun: options.dryRun === true,
+        });
+        ctx.writeStdout(
+          options.json
+            ? JSON.stringify(result, null, 2)
+            : formatBackendRestartReport(result, runtime, options.dryRun === true),
+        );
+        exitIfNoUsableBackends(result);
+      },
+    );
+}
+
+function registerStopCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
   backendCmd
     .command('stop [path]')
     .description('Stop local llama-server backend processes started by `cartograph backend start`')
     .option('--force', 'Send SIGKILL if a process does not exit after SIGTERM')
     .option('--json', 'Print structured JSON instead of Markdown')
     .action(async (pathArg: string | undefined, options: { force?: boolean; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const runtime = await loadBackendRuntime();
+      const projectPath = ctx.resolveProjectPath(pathArg);
+      const runtime = await ctx.loadBackendRuntime();
       const result = await runtime.stopBackends({ projectPath, force: options.force === true });
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStopReport(result, runtime));
+      ctx.writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendStopReport(result, runtime));
     });
+}
 
+function registerLogsCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
   backendCmd
     .command('logs [path]')
     .description('Tail logs for configured local llama-server backend processes')
@@ -85,16 +161,16 @@ export function registerBackendCommand(deps: BackendCommandDeps): void {
     .option('--lines <n>', 'Number of log lines per backend to show (default 80)')
     .option('--json', 'Print structured JSON instead of Markdown')
     .action(async (pathArg: string | undefined, options: { tier?: string; lines?: string; json?: boolean }) => {
-      const projectPath = resolveProjectPath(pathArg);
-      const lines = parseOptionalPositiveInt(options.lines, '--lines', deps.error);
+      const projectPath = ctx.resolveProjectPath(pathArg);
+      const lines = parseOptionalPositiveInt(options.lines, '--lines', ctx.error);
       if (lines === null) return;
-      const runtime = await loadBackendRuntime();
+      const runtime = await ctx.loadBackendRuntime();
       const result = await runtime.backendLogs({
         projectPath,
         ...(options.tier ? { tier: options.tier } : {}),
         ...(lines === undefined ? {} : { lines }),
       });
-      writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendLogsReport(result));
+      ctx.writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendLogsReport(result));
       if (options.tier && result.logs.length === 0) process.exit(1);
     });
 }
@@ -114,6 +190,32 @@ function formatBackendStartReport(result: BackendStartResult, runtime: BackendRu
   if (dryRun) lines.push('_Dry run: no processes were started._', '');
   if (result.started.length > 0) {
     lines.push(`Started ${result.started.length} backend process${result.started.length === 1 ? '' : 'es'}.`, '');
+  }
+  if (result.skipped.length > 0) {
+    lines.push('Skipped:');
+    for (const skipped of result.skipped) lines.push(`- ${skipped.row.spec.labels.join('/')} — ${skipped.reason}`);
+    lines.push('');
+  }
+  if (result.rows.length === 0) lines.push(`_No managed backend processes._ ${result.unmanagedReason ?? ''}`.trim());
+  else appendBackendRows(lines, result.rows, runtime);
+  return lines.join('\n');
+}
+
+function formatBackendRestartReport(
+  result: BackendRestartResult,
+  runtime: BackendRuntimeModule,
+  dryRun: boolean,
+): string {
+  const lines = ['## cartograph backend restart', ''];
+  if (dryRun) lines.push('_Dry run: no processes were stopped or started._', '');
+  if (result.restarted.length > 0) {
+    const verb = dryRun ? 'Would restart' : 'Restarted';
+    lines.push(`${verb} ${result.restarted.length} backend process${result.restarted.length === 1 ? '' : 'es'}.`, '');
+  }
+  if (result.external.length > 0) {
+    lines.push('External (cartograph cannot restart these — relaunch your own process):');
+    for (const ext of result.external) lines.push(`- ${ext.row.spec.labels.join('/')} — ${ext.message}`);
+    lines.push('');
   }
   if (result.skipped.length > 0) {
     lines.push('Skipped:');
@@ -165,6 +267,17 @@ function formatBackendRow(row: BackendStatusRow, runtime: BackendRuntimeModule):
   }
   if (row.state === 'starting') {
     lines.push(`  readiness: process is alive but endpoint is not reachable yet; inspect logs if it stays here.`);
+  }
+  if (row.spec.externallyManaged) {
+    lines.push(`  externally managed: cartograph reports this tier but never starts/stops/restarts it.`);
+  }
+  if (row.configDrift) {
+    lines.push(
+      `  ⚠ config drift: the running process was started with different llama-server args than current config would use.`,
+      `    running: ${row.configDrift.current.join(' ')}`,
+      `    config:  ${row.configDrift.requested.join(' ')}`,
+      `    apply:   cartograph backend restart ${resultProjectPathFromRow(row)}`,
+    );
   }
   return lines;
 }

@@ -8,6 +8,7 @@ import {
   renderBackendStartCommand,
   startBackends,
   stopBackends,
+  restartBackends,
   backendStatus,
 } from '../src/features/backend/runtime.js';
 import * as scanBackends from '../src/installer/scan-backends.js';
@@ -220,5 +221,187 @@ describe('backend orphan reclamation (issue #24)', () => {
     expect(result.stopped).toHaveLength(1);
     expect(isProcessAlive(pid)).toBe(false);
     expect(fs.existsSync(path.join(project, '.cartograph', 'backends', 'llama-deadbeef0001.json'))).toBe(false);
+  });
+});
+
+describe('backend restart + drift + externallyManaged (issue #30)', () => {
+  const tmpDirs: string[] = [];
+  const children: number[] = [];
+
+  afterEach(() => {
+    for (const pid of children.splice(0)) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // already gone
+      }
+    }
+    for (const dir of tmpDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function makeProject(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-backend30-'));
+    tmpDirs.push(dir);
+    fs.mkdirSync(path.join(dir, '.cartograph', 'backends'), { recursive: true });
+    return dir;
+  }
+
+  function spawnSleeper(): number {
+    const child = spawn('sleep', ['60'], { stdio: 'ignore' });
+    const pid = child.pid!;
+    children.push(pid);
+    child.unref();
+    return pid;
+  }
+
+  function writeConfig(project: string, llm: Record<string, unknown>): void {
+    fs.writeFileSync(path.join(project, '.cartograph', 'config.json'), JSON.stringify({ llm }));
+  }
+
+  function writePidFile(project: string, id: string, record: Record<string, unknown>): void {
+    fs.writeFileSync(path.join(project, '.cartograph', 'backends', `${id}.json`), JSON.stringify(record, null, 2), {
+      mode: 0o600,
+    });
+  }
+
+  function pidFileCount(project: string): number {
+    return fs.readdirSync(path.join(project, '.cartograph', 'backends')).filter((f) => f.endsWith('.json')).length;
+  }
+
+  it('flags config drift when a live managed backend was started with different args', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const model = path.join(project, 'chat.gguf');
+    fs.writeFileSync(model, 'x');
+    const llm = {
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8181', model, concurrency: 4 },
+    };
+    writeConfig(project, llm);
+    const spec = buildBackendProcessSpecs(llm)[0]!;
+    // started with --parallel 8 (an older concurrency); current config wants 4
+    const oldArgs = spec.args.map((a) => (a === '4' ? '8' : a));
+    writePidFile(project, spec.id, {
+      schemaVersion: 1,
+      pid: spawnSleeper(),
+      startedAt: new Date().toISOString(),
+      command: 'llama-server',
+      args: oldArgs,
+      endpoint: spec.endpoint,
+      modelPath: model,
+      labels: ['summarize'],
+      logPath: path.join(project, '.cartograph', 'backends', `${spec.id}.log`),
+    });
+
+    const status = await backendStatus(project);
+    const row = status.rows.find((r) => r.spec.id === spec.id)!;
+    expect(row.configDrift).toBeTruthy();
+    expect(row.configDrift!.current).toContain('8');
+    expect(row.configDrift!.requested).toContain('4');
+  });
+
+  it('reports no drift when the live backend args match current config', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const model = path.join(project, 'chat.gguf');
+    fs.writeFileSync(model, 'x');
+    const llm = {
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8181', model, concurrency: 4 },
+    };
+    writeConfig(project, llm);
+    const spec = buildBackendProcessSpecs(llm)[0]!;
+    writePidFile(project, spec.id, {
+      schemaVersion: 1,
+      pid: spawnSleeper(),
+      startedAt: new Date().toISOString(),
+      command: 'llama-server',
+      args: [...spec.args],
+      endpoint: spec.endpoint,
+      modelPath: model,
+      labels: ['summarize'],
+      logPath: path.join(project, '.cartograph', 'backends', `${spec.id}.log`),
+    });
+
+    const status = await backendStatus(project);
+    const row = status.rows.find((r) => r.spec.id === spec.id)!;
+    expect(row.configDrift ?? null).toBeNull();
+  });
+
+  it('start skips and stop never signals a tier declared externallyManaged', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const model = path.join(project, 'chat.gguf');
+    fs.writeFileSync(model, 'x');
+    writeConfig(project, {
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8181', model, externallyManaged: true },
+    });
+
+    const startResult = await startBackends({ projectPath: project });
+    expect(startResult.started).toHaveLength(0);
+    expect(startResult.skipped.map((s) => s.reason).join('\n')).toContain('externallyManaged');
+    expect(pidFileCount(project)).toBe(0);
+
+    const stopResult = await stopBackends({ projectPath: project });
+    expect(stopResult.stopped).toHaveLength(0);
+    expect(stopResult.skipped.map((s) => s.reason).join('\n')).toContain('does not stop it');
+  });
+
+  it('restart returns an externally-managed tier in `external` with a relaunch hint (no spawn)', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const model = path.join(project, 'chat.gguf');
+    fs.writeFileSync(model, 'x');
+    writeConfig(project, {
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8181', model, externallyManaged: true },
+    });
+
+    const result = await restartBackends({ projectPath: project });
+    expect(result.restarted).toHaveLength(0);
+    expect(result.external).toHaveLength(1);
+    expect(result.external[0]!.message).toContain('http://localhost:8181');
+    expect(pidFileCount(project)).toBe(0);
+  });
+
+  it('restart --dry-run plans configured tiers without spawning, honouring --tier', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const chat = path.join(project, 'chat.gguf');
+    const ask = path.join(project, 'ask.gguf');
+    fs.writeFileSync(chat, 'x');
+    fs.writeFileSync(ask, 'x');
+    writeConfig(project, {
+      summarizeLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8181', model: chat },
+      askLlm: { provider: 'openai-compat', endpoint: 'http://localhost:8182', model: ask },
+    });
+
+    const all = await restartBackends({ projectPath: project, dryRun: true });
+    expect(all.restarted).toHaveLength(2);
+
+    const one = await restartBackends({ projectPath: project, dryRun: true, tier: 'summarize' });
+    expect(one.restarted).toHaveLength(1);
+    expect(one.restarted[0]!.spec.labels).toContain('summarize');
+
+    expect(pidFileCount(project)).toBe(0); // dry-run spawned nothing
+  });
+
+  it('restart skips an orphan (stop-only) instead of relaunching it', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject(); // no config → the pid file is an orphan
+    writePidFile(project, 'llama-orphanrst01', {
+      schemaVersion: 1,
+      pid: spawnSleeper(),
+      startedAt: new Date().toISOString(),
+      command: 'llama-server',
+      args: ['-m', '/models/old.gguf', '--host', 'localhost', '--port', '8199'],
+      endpoint: 'http://localhost:8199',
+      modelPath: '/models/old.gguf',
+      labels: ['summarize'],
+      logPath: path.join(project, '.cartograph', 'backends', 'llama-orphanrst01.log'),
+    });
+
+    const result = await restartBackends({ projectPath: project });
+    expect(result.restarted).toHaveLength(0);
+    expect(result.external).toHaveLength(0);
+    expect(result.skipped.map((s) => s.reason).join('\n')).toContain('orphaned backend');
   });
 });

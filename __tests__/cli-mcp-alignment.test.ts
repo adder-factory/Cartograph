@@ -111,13 +111,14 @@ const KNOWN_ASYMMETRIC = new Set<string>([
   // a human/operator smoke harness for the running backend processes.
   'llm:smoke',
 
-  // `cartograph backend status|start|stop|logs` manages local llama-server
-  // child processes and pid/log files. That is intentionally CLI-only:
-  // an MCP session should not start or stop the process stack it may
-  // depend on for the very tool call.
+  // `cartograph backend status|start|restart|stop|logs` manages local
+  // llama-server child processes and pid/log files. That is intentionally
+  // CLI-only: an MCP session should not start, restart, or stop the process
+  // stack it may depend on for the very tool call.
   'backend',
   'backend:status',
   'backend:start',
+  'backend:restart',
   'backend:stop',
   'backend:logs',
 
