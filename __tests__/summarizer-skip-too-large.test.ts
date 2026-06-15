@@ -38,7 +38,8 @@ export function bravo(s: string): string {
 `;
 
 /** A llama.cpp-shaped context-window 400 (matched by isContextWindowError). */
-const CONTEXT_400 = 'chat endpoint returned 400: request (1200 tokens) exceeds the available context size, try increasing it';
+const CONTEXT_400 =
+  'chat endpoint returned 400: request (1200 tokens) exceeds the available context size, try increasing it';
 
 describe('Reactive #27 — context-too-large summary skips', () => {
   let tempDir: string;
