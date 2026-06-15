@@ -32,6 +32,7 @@
  */
 
 import OpenAI from 'openai';
+import { z } from 'zod';
 import type {
   ChatBackend,
   ChatMessage,
@@ -191,8 +192,16 @@ function buildChatCompletionParams(
   };
 }
 
+/** Assistant `content` is `string | null` per the SDK type, but a compat
+ *  backend can return structured content parts (an array/object). Coerce
+ *  any non-string to `null` so a malformed body degrades to an empty
+ *  response (upstream retry/fallback) instead of a type-confused payload. */
+const ChatContentSchema = z.string().nullish();
+
 function buildChatResult(res: OpenAI.Chat.ChatCompletion, durationMs: number): ChatResult {
-  const text = res.choices[0]?.message?.content ?? '';
+  const rawContent = res.choices[0]?.message?.content;
+  const parsedContent = ChatContentSchema.safeParse(rawContent);
+  const text = (parsedContent.success ? parsedContent.data : null) ?? '';
   const out: ChatResult = { text, durationMs };
   if (typeof res.usage?.prompt_tokens === 'number') out.promptTokens = res.usage.prompt_tokens;
   if (typeof res.usage?.completion_tokens === 'number') out.completionTokens = res.usage.completion_tokens;

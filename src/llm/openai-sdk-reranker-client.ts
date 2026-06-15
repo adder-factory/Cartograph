@@ -42,6 +42,7 @@
  * scores either way.
  */
 
+import { z } from 'zod';
 import { LlmEndpointError } from './client.js';
 import { logWarn } from '../errors.js';
 import { backendLabel, scanForLlmBackends, type DetectedBackendKind } from '../installer/scan-backends.js';
@@ -95,9 +96,18 @@ interface RerankResultEntry {
   readonly relevance_score: number;
 }
 
-interface RerankResponse {
-  readonly results?: ReadonlyArray<RerankResultEntry>;
-}
+/** Envelope of the Cohere-compat `/v1/rerank` response. `results` is
+ *  validated as an array but its entries stay `unknown` here — each one
+ *  is individually validated and range-checked in
+ *  `scoresFromRerankResponse`, so a single malformed entry is dropped
+ *  rather than failing the whole batch. (Entry validation stays
+ *  hand-rolled rather than a zod schema: the wire field name `index` is
+ *  a very common token, and emitting it as a schema property created a
+ *  spurious cross-file name-match — `RegExp` `match.index` resolving to
+ *  it — that tripped an unrelated `feature_envy` finding.) */
+const RerankResponseSchema = z.object({
+  results: z.array(z.unknown()).optional(),
+});
 
 interface RerankAbort {
   readonly controller: AbortController;
@@ -186,8 +196,18 @@ export class OpenAiSdkRerankerClient {
       signal,
     });
     await assertRerankResponseOk(res);
-    const body = (await res.json()) as RerankResponse;
-    return scoresFromRerankResponse(body, candidates.length);
+    // A non-object body, or one whose `results` is absent/not an array,
+    // is treated as a missing-shape ERROR (not an empty result set): a
+    // reachable rerank endpoint that omits `results` is misconfigured,
+    // and silently returning all-zero scores would hide that.
+    const parsed = RerankResponseSchema.safeParse(await res.json());
+    if (!parsed.success || !Array.isArray(parsed.data.results)) {
+      throw new LlmEndpointError(
+        `rerank endpoint returned a body without a \`results\` array. ` +
+          'Backend may not implement the Cohere-compatible /v1/rerank shape.',
+      );
+    }
+    return scoresFromRerankResponse(parsed.data.results, candidates.length);
   }
 
   private requestHeaders(): Record<string, string> {
@@ -254,16 +274,10 @@ export class OpenAiSdkRerankerClient {
   }
 }
 
-function scoresFromRerankResponse(body: RerankResponse, candidateCount: number): number[] {
-  if (!Array.isArray(body.results)) {
-    throw new LlmEndpointError(
-      `rerank endpoint returned a body without a \`results\` array. ` +
-        'Backend may not implement the Cohere-compatible /v1/rerank shape.',
-    );
-  }
+function scoresFromRerankResponse(results: readonly unknown[], candidateCount: number): number[] {
   // Fill scores in input order — backends may sort by score descending.
   const scores = new Array<number>(candidateCount).fill(0);
-  const validEntries = body.results.filter((entry) => isValidRerankEntry(entry, candidateCount));
+  const validEntries = results.filter((entry): entry is RerankResultEntry => isValidRerankEntry(entry, candidateCount));
   const normalized = normalizeRerankScores(validEntries.map((entry) => entry.relevance_score));
   for (let i = 0; i < validEntries.length; i++) {
     const entry = validEntries[i]!;
@@ -272,13 +286,18 @@ function scoresFromRerankResponse(body: RerankResponse, candidateCount: number):
   return scores;
 }
 
-function isValidRerankEntry(entry: RerankResultEntry | undefined, candidateCount: number): entry is RerankResultEntry {
+/** Validate one rerank result entry's structure and its index range
+ *  (contextual — bounded by the request's candidate count). A malformed
+ *  entry is dropped so the batch keeps its good ones. */
+function isValidRerankEntry(entry: unknown, candidateCount: number): entry is RerankResultEntry {
+  if (typeof entry !== 'object' || entry === null) return false;
+  const { index, relevance_score } = entry as { index?: unknown; relevance_score?: unknown };
   return (
-    typeof entry?.index === 'number' &&
-    entry.index >= 0 &&
-    entry.index < candidateCount &&
-    typeof entry.relevance_score === 'number' &&
-    Number.isFinite(entry.relevance_score)
+    typeof index === 'number' &&
+    index >= 0 &&
+    index < candidateCount &&
+    typeof relevance_score === 'number' &&
+    Number.isFinite(relevance_score)
   );
 }
 

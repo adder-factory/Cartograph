@@ -4,19 +4,10 @@ import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import type { SqliteDatabase, SqliteStatement } from './sqlite-adapter.js';
-import { parsePostgresWorkerJson } from './postgres-codec.js';
+import { parsePostgresWorkerJson, parseWorkerResponse, type WorkerResponse } from './postgres-codec.js';
 import { POSTGRES_DEFAULT_QUERY_TIMEOUT_MS, postgresSqlOptions, type DatabaseConfig } from './database-config.js';
 
 type PostgresAdapterOptions = DatabaseConfig & { provider: 'postgres' };
-
-interface WorkerResponse {
-  ok: boolean;
-  rows?: unknown[];
-  changes?: number;
-  lastInsertRowid?: number | bigint;
-  value?: unknown;
-  error?: string;
-}
 
 interface WorkerRequest {
   op: 'query' | 'batch' | 'exec' | 'pragma' | 'close';
@@ -163,7 +154,7 @@ export class PostgresAdapter implements SqliteDatabase {
     }
     const raw = fs.readFileSync(this.state.responsePath, 'utf-8');
     Atomics.store(this.state.control, 0, 0);
-    const response = decodeValue(parsePostgresWorkerJson(raw, 'response')) as WorkerResponse;
+    const response = parseWorkerResponse(decodeValue(parsePostgresWorkerJson(raw, 'response')), 'response');
     if (!response.ok) throw new Error(response.error ?? 'PostgreSQL query failed');
     return response;
   }

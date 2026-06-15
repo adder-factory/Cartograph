@@ -191,6 +191,15 @@ describe('OpenAiSdkRerankerClient', () => {
     await expect(client.rerank('q', ['a'])).rejects.toThrow(/Cohere-compatible/);
   });
 
+  it('rejects a null / non-object body with the helpful error (not a raw TypeError)', async () => {
+    // A backend returning bare `null` (or any non-object) used to throw a
+    // `Cannot read properties of null` TypeError on `body.results`. The
+    // envelope guard now surfaces the actionable Cohere-shape message.
+    server = startMockServer(() => Response.json(null));
+    const client = new OpenAiSdkRerankerClient(baseCfg(server.url));
+    await expect(client.rerank('q', ['a'])).rejects.toThrow(/Cohere-compatible/);
+  });
+
   it('wraps transport errors into LlmEndpointError', async () => {
     const client = new OpenAiSdkRerankerClient(baseCfg('http://localhost:1'));
     await expect(client.rerank('q', ['a'])).rejects.toThrow(/rerank endpoint request failed/);
