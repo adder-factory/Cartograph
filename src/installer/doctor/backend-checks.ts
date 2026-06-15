@@ -8,7 +8,12 @@ import {
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from '../default-endpoints.js';
 import { describeHardware, recommendedTuning } from '../hardware-tuning.js';
 import { LLAMA_SERVER_RERANK_FLAG } from '../llm-setup-catalog.js';
-import { backendStatus, LOCAL_BACKEND_HOSTS, renderBackendStartCommands } from '../../features/backend/index.js';
+import {
+  backendStatus,
+  type BackendStatusReport,
+  LOCAL_BACKEND_HOSTS,
+  renderBackendStartCommands,
+} from '../../features/backend/index.js';
 import type { CheckResult } from './contract.js';
 
 interface EmbeddingReachabilityCheckArgs {
@@ -289,63 +294,74 @@ export async function backendLifecycleCheck(
   if (renderBackendStartCommands(llm).length === 0) return null;
   const status = await backendStatus(projectPath);
   if (status.rows.length === 0) return null;
+  return backendLifecycleWarning(projectPath, status) ?? backendLifecycleOkSummary(projectPath, status);
+}
 
-  // Orphan rows describe processes on endpoints no longer in config, so
-  // the missing-model / stale / starting checks below — which speak to
-  // CURRENTLY-configured tiers — must ignore them (an orphan's old GGUF
-  // path being gone is not a "configured model missing" problem). They
-  // get their own check instead.
+const BACKEND_LIFECYCLE_ID = 'backend-lifecycle';
+const BACKEND_LIFECYCLE_NAME = 'Backend lifecycle';
+
+/** First failing backend-lifecycle condition (orphan → missing model →
+ *  stale pid → still starting → config drift), or null when all healthy.
+ *  Orphan rows describe processes on endpoints no longer in config, so the
+ *  configured-tier checks below ignore them (an orphan's old GGUF path being
+ *  gone is not a "configured model missing" problem); orphans get their own
+ *  branch. Extracted from {@link backendLifecycleCheck} to keep that function
+ *  under the cognitive-complexity threshold. */
+function backendLifecycleWarning(projectPath: string, status: BackendStatusReport): CheckResult | null {
   const configRows = status.rows.filter((row) => row.origin === 'config');
   const orphans = status.rows.filter((row) => row.origin === 'orphan' && row.pidAlive);
   if (orphans.length > 0) {
-    return {
-      id: 'backend-lifecycle',
-      name: 'Backend lifecycle',
-      status: 'warn',
-      detail: `${orphans.length} orphaned backend process${orphans.length === 1 ? '' : 'es'} bound to a port no longer in config.`,
-      remediation: `Run \`cartograph backend stop ${projectPath}\` to stop them and free their (GPU) memory.`,
-    };
+    return backendLifecycleWarn(
+      `${orphans.length} orphaned backend process${orphans.length === 1 ? '' : 'es'} bound to a port no longer in config.`,
+      `Run \`cartograph backend stop ${projectPath}\` to stop them and free their (GPU) memory.`,
+    );
   }
-
   const missing = configRows.filter((row) => !row.modelExists);
   if (missing.length > 0) {
-    return {
-      id: 'backend-lifecycle',
-      name: 'Backend lifecycle',
-      status: 'warn',
-      detail: `${missing.length} managed backend model file${missing.length === 1 ? '' : 's'} missing.`,
-      remediation: `Install the missing GGUFs or run \`cartograph admin install-models --write-config --project-path ${projectPath}\`.`,
-    };
+    return backendLifecycleWarn(
+      `${missing.length} managed backend model file${missing.length === 1 ? '' : 's'} missing.`,
+      `Install the missing GGUFs or run \`cartograph admin install-models --write-config --project-path ${projectPath}\`.`,
+    );
   }
-
   const stale = configRows.filter((row) => row.pidRecord !== null && !row.pidAlive);
   if (stale.length > 0) {
-    return {
-      id: 'backend-lifecycle',
-      name: 'Backend lifecycle',
-      status: 'warn',
-      detail: `${stale.length} stale backend pid file${stale.length === 1 ? '' : 's'} found.`,
-      remediation: `Run \`cartograph backend stop ${projectPath}\` to remove stale pid files, then \`cartograph backend start ${projectPath}\` if you need local LLMs.`,
-    };
+    return backendLifecycleWarn(
+      `${stale.length} stale backend pid file${stale.length === 1 ? '' : 's'} found.`,
+      `Run \`cartograph backend stop ${projectPath}\` to remove stale pid files, then \`cartograph backend start ${projectPath}\` if you need local LLMs.`,
+    );
   }
-
   const starting = configRows.filter((row) => row.state === 'starting');
   if (starting.length > 0) {
-    return {
-      id: 'backend-lifecycle',
-      name: 'Backend lifecycle',
-      status: 'warn',
-      detail: `${starting.length} managed backend process${starting.length === 1 ? '' : 'es'} alive but not reachable yet.`,
-      remediation: `Wait for model load, run \`cartograph llm smoke ${projectPath}\`, or inspect \`cartograph backend logs ${projectPath}\`.`,
-    };
+    return backendLifecycleWarn(
+      `${starting.length} managed backend process${starting.length === 1 ? '' : 'es'} alive but not reachable yet.`,
+      `Wait for model load, run \`cartograph llm smoke ${projectPath}\`, or inspect \`cartograph backend logs ${projectPath}\`.`,
+    );
   }
+  // Config-drift: a running managed backend predates a config change
+  // (concurrency / llamaServerArgs / model) and hasn't picked it up — and
+  // `backend start` would silently skip the reachable port (issue #30).
+  const drifted = configRows.filter((row) => row.configDrift);
+  if (drifted.length > 0) {
+    return backendLifecycleWarn(
+      `${drifted.length} running managed backend${drifted.length === 1 ? '' : 's'} started with different llama-server args than the current config would use (a concurrency / llamaServerArgs / model change has not been applied).`,
+      `Run \`cartograph backend restart ${projectPath}\` to apply the change to managed tiers; relaunch your own llama-server for any externally-managed tiers.`,
+    );
+  }
+  return null;
+}
 
+function backendLifecycleWarn(detail: string, remediation: string): CheckResult {
+  return { id: BACKEND_LIFECYCLE_ID, name: BACKEND_LIFECYCLE_NAME, status: 'warn', detail, remediation };
+}
+
+function backendLifecycleOkSummary(projectPath: string, status: BackendStatusReport): CheckResult {
+  const configRows = status.rows.filter((row) => row.origin === 'config');
   const counts = new Map<string, number>();
   for (const row of configRows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
   const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ');
   return {
-    id: 'backend-lifecycle',
-    name: 'Backend lifecycle',
+    id: BACKEND_LIFECYCLE_ID,
+    name: BACKEND_LIFECYCLE_NAME,
     status: 'ok',
     detail:
       `Managed backend states: ${summary}. ` +

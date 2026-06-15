@@ -41,6 +41,16 @@ const llmChatBlockSchema = z
      *  explicit `--parallel` (or `-np`) here overrides cartograph's
      *  computed value. */
     llamaServerArgs: z.array(z.string()).optional(),
+    /** Declare this tier's backend as externally managed (you run the
+     *  `llama-server` yourself). Cartograph then never starts, stops, or
+     *  restarts it: `backend start` always skips it (instead of the
+     *  "is the port live right now" heuristic), `stop` never signals it,
+     *  `restart` prints a relaunch hint, and `status` labels it external.
+     *  You own applying config changes by relaunching with the new
+     *  `--parallel`/flags. NOTE: if several tiers share one endpoint (one
+     *  llama-server process), declaring this on ANY of them marks the whole
+     *  shared process external — cartograph won't manage it for the others. */
+    externallyManaged: z.boolean().optional(),
   })
   .loose();
 
@@ -76,6 +86,9 @@ const llmConfigSchema = z
          *  for this tier (e.g. `["--cache-ram", "2048"]`). An explicit
          *  `--parallel`/`-np` here overrides the computed value. */
         llamaServerArgs: z.array(z.string()).optional(),
+        /** Declare this tier's backend as externally managed — cartograph
+         *  never starts/stops/restarts it. See `llmChatBlockSchema`. */
+        externallyManaged: z.boolean().optional(),
       })
       .loose()
       .optional(),
@@ -99,6 +112,9 @@ const llmConfigSchema = z
          *  for this tier. An explicit `--parallel`/`-np` here overrides
          *  the computed value. */
         llamaServerArgs: z.array(z.string()).optional(),
+        /** Declare this tier's backend as externally managed — cartograph
+         *  never starts/stops/restarts it. See `llmChatBlockSchema`. */
+        externallyManaged: z.boolean().optional(),
       })
       .loose()
       .nullable()
