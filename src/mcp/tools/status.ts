@@ -776,7 +776,8 @@ export const STATUS_TOOL = defineTool({
     STATUS_MAX_INLINE_TOP_N +
     '). `summaryBreakdown: true` splits Summaries into structural/neighbor-prop/llm + body-floor skips. ' +
     '`verbose: true` enables all three rollups at sensible defaults. ' +
-    'Drift banner shows commit-drift and uncommitted-edit signals together; re-extraction-flagged files get a separate 🔵 line.',
+    'Drift banner shows commit-drift and uncommitted-edit signals together; re-extraction-flagged files get a separate 🔵 line. ' +
+    'Leads with the running Cartograph version and flags version skew when an in-place upgrade left this server older than the on-disk CLI.',
   schema: statusSchema,
   handle: handleStatus,
   bypassFreshnessGate: true,
