@@ -194,3 +194,19 @@ process), changing a tier's model or `llamaServerArgs` no longer orphans the
 running `llama-server`: `cartograph backend status`/`stop` keep tracking it by
 port. If you move a tier to a different port, the process bound to the old port
 is surfaced as `orphaned` so `cartograph backend stop` can reclaim it.
+
+### A/B-testing a chat model for one invocation
+
+To compare chat models without editing `config.json` or restarting a backend,
+`cartograph admin summarize` and `cartograph ask` (code mode) accept per-call
+`--model <path>` and `--endpoint <url>` overrides. They apply only to that one
+invocation — e.g. point `ask` at a second `llama-server` serving the candidate:
+
+```sh
+cartograph ask "how does retrieval work?" --endpoint http://localhost:9091 --model /models/candidate-B.gguf
+```
+
+`summarize` caches its summaries under the override model id, so each candidate's
+summaries are kept distinct. An `--endpoint` implies an `openai-compat` HTTP
+backend (point it at a cloud OpenAI-compatible API and supply its key via that
+tier's config if needed).

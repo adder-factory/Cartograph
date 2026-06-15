@@ -72,6 +72,19 @@ export type ChatProvider = 'claude-bridge' | 'anthropic-api' | 'openai-compat';
  *  truth — callers import the type instead of re-spelling the literal. */
 export type EmbeddingProvider = 'openai-compat';
 
+/**
+ * A one-shot override for the chat backend a single `summarize` / `ask`
+ * invocation uses — point it at a different model and/or endpoint without
+ * mutating `config.json` or restarting the backend (issue #26). An
+ * `endpoint` implies an `openai-compat` HTTP backend. Unspecified fields
+ * fall through to the resolved tier config. Canonical home for the type
+ * shared by the core service and the `summarize`/`ask` CLIs.
+ */
+export interface ChatTierOverride {
+  readonly model?: string;
+  readonly endpoint?: string;
+}
+
 export interface ChatProviderConfig {
   provider: ChatProvider;
   model: string;

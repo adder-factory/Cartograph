@@ -1,4 +1,5 @@
 import { parseStrictDecimalInteger } from '../../strict-numeric.js';
+import type { ChatTierOverride } from '../../llm/client.js';
 
 export {
   parseStrictDecimalInteger,
@@ -19,6 +20,17 @@ export function parseOptionalPositiveInt(
     return null;
   }
   return n;
+}
+
+/** Build the per-invocation chat override from `--model` / `--endpoint`,
+ *  or `undefined` when neither was given. Shared by the `summarize` and
+ *  `ask` CLIs (issue #26 — A/B-test models without editing config). */
+export function chatOverrideFromOptions(options: { model?: string; endpoint?: string }): ChatTierOverride | undefined {
+  if (options.model === undefined && options.endpoint === undefined) return undefined;
+  return {
+    ...(options.model === undefined ? {} : { model: options.model }),
+    ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
+  };
 }
 
 export type PositiveIntParseResult = { ok: true; value: number } | { ok: false; error: string };

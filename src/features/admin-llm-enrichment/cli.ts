@@ -12,6 +12,7 @@ import {
   type LlmSummarizeResult,
   type SummarizeOptions,
 } from './runtime.js';
+import { chatOverrideFromOptions } from '../shared/cli-args.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliOptionCommand;
@@ -26,6 +27,7 @@ interface EnrichmentGraph {
       concurrency: number;
       eagerLimit?: number;
       onProgress?: (done: number, total: number) => void;
+      chatOverride?: { model?: string; endpoint?: string };
     }) => Promise<LlmSummarizeResult>;
     embed: {
       embedAll: (opts?: { concurrency?: number }) => Promise<LlmEmbedResult>;
@@ -132,6 +134,14 @@ function registerSummarizeCommand(deps: AdminLlmEnrichmentCommandDeps): void {
       '--all',
       'Summarize every eligible symbol — uncapped full pass (overrides config.llm.summarizeEagerLimit and --limit)',
     )
+    .option(
+      '--model <path>',
+      'Override the summarizeLlm model for THIS pass only (A/B test without editing config or restarting the backend). Summaries cache under this model id.',
+    )
+    .option(
+      '--endpoint <url>',
+      'Override the summarizeLlm endpoint for THIS pass only (implies an openai-compat HTTP backend at the given base URL).',
+    )
     .action((pathArg: string | undefined, options: SummarizeOptions) =>
       runSummarizeCommand({ pathArg, options, deps }),
     );
@@ -148,6 +158,8 @@ async function runSummarizeCommand(args: {
   const concurrency = parseConcurrencyOption(options.concurrency, deps);
   const eagerLimit = parseEagerLimit(options, deps);
   const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
+  const chatOverride = chatOverrideFromOptions(options);
+  const chatOverrideOpt = chatOverride === undefined ? {} : { chatOverride };
   let cg: EnrichmentGraph | undefined;
 
   try {
@@ -172,7 +184,7 @@ async function runSummarizeCommand(args: {
     }
 
     if (options.quiet) {
-      await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt });
+      await cg.llm.summarizeAll({ concurrency, ...eagerLimitOpt, ...chatOverrideOpt });
       return;
     }
 
@@ -187,6 +199,7 @@ async function runSummarizeCommand(args: {
       result = await cg.llm.summarizeAll({
         concurrency,
         ...eagerLimitOpt,
+        ...chatOverrideOpt,
         onProgress: (done: number, total: number) => {
           progress.onProgress({ phase: 'parsing', current: done, total });
         },

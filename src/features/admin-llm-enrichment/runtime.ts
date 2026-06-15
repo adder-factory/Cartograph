@@ -3,6 +3,10 @@ export interface SummarizeOptions {
   concurrency?: string;
   limit?: string;
   all?: boolean;
+  /** Per-invocation summarizeLlm model override (A/B testing). */
+  model?: string;
+  /** Per-invocation summarizeLlm endpoint override (implies openai-compat). */
+  endpoint?: string;
 }
 
 export interface LlmEmbedResult {

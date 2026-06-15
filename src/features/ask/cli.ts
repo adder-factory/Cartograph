@@ -15,6 +15,7 @@ import {
   validateLocalChatPrompt,
   validateAskQuestion,
 } from './runtime.js';
+import { chatOverrideFromOptions } from '../shared/cli-args.js';
 import type { CliArgumentOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliArgumentOptionCommand;
@@ -65,6 +66,14 @@ export function registerAskCommand(deps: AskCommandDeps): void {
     )
     .option('-s, --system <message>', "(mode=local_chat) Optional system message shaping the local model's behavior")
     .option('--max-tokens <n>', '(mode=local_chat) Positive-integer cap on output tokens')
+    .option(
+      '--model <path>',
+      '(mode=code) Override the ask model for THIS call only — A/B-test models without editing config or restarting the backend.',
+    )
+    .option(
+      '--endpoint <url>',
+      '(mode=code) Override the ask endpoint for THIS call only (implies an openai-compat HTTP backend).',
+    )
     .option('-q, --quiet', 'Code mode: print only the answer. Local-chat mode: suppress the model/timing trailer')
     .action(async (question: string | undefined, pathArg: string | undefined, options: AskOptions) => {
       await handleAskCommand({ deps, question, pathArg, options });
@@ -122,13 +131,19 @@ export async function handleAskCommand({ deps, question, pathArg, options }: Han
         return;
       }
 
-      const result = (await cg.llm.ask(question ?? '', { retrieveK: retrieveK.value })) as AskResult;
+      const chatOverride = chatOverrideFromOptions(options);
+      const result = (await cg.llm.ask(question ?? '', {
+        retrieveK: retrieveK.value,
+        ...(chatOverride ? { chatOverride } : {}),
+      })) as AskResult;
       writeLine(deps, result.answer);
       if (!options.quiet) {
         const lines = await buildAskAnnotationLines({
           cg,
           result,
-          askModel: askSetup.askModel,
+          // Reflect the per-call override in the trailer so A/B results
+          // are labelled with the model that actually answered.
+          askModel: chatOverride?.model ?? askSetup.askModel,
           ...(deps.dim ? { dim: deps.dim } : {}),
         });
         for (const line of lines) writeLine(deps, line);
@@ -155,6 +170,9 @@ async function handleLocalChatAskCommand({
   pathArg,
   options,
 }: HandleLocalChatAskCommandArgs): Promise<void> {
+  if (options.model !== undefined || options.endpoint !== undefined) {
+    deps.error('Note: --model / --endpoint apply to code mode only and are ignored in --mode local_chat.');
+  }
   const prompt = resolveLocalChatPrompt(promptArg, options);
   const validPrompt = validateLocalChatPrompt(prompt ?? '');
   if (!validPrompt.ok) {

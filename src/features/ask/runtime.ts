@@ -9,6 +9,10 @@ export interface AskOptions {
   system?: string;
   maxTokens?: string;
   quiet?: boolean;
+  /** Per-invocation ask-model override (A/B testing). */
+  model?: string;
+  /** Per-invocation ask-endpoint override (implies openai-compat). */
+  endpoint?: string;
 }
 
 export type AskValidationResult = { ok: true } | { ok: false; error: string };

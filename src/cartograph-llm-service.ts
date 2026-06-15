@@ -31,7 +31,7 @@ import type { Cartograph } from './index.js';
 import type { SearchOptions, SearchResult } from './search/types.js';
 import { getEmbeddingForNode } from './db/queries-embeddings.js';
 import { searchNodes } from './db/queries-search.js';
-import { LlmClient } from './llm/client.js';
+import { LlmClient, type ChatProviderConfig, type ChatTierOverride } from './llm/client.js';
 import { createEmbeddingClient, type EmbeddingProvider } from './llm/embedding-client.js';
 import { summarizeAll as summarizeAllSymbols } from './llm/summarizer.js';
 import { classifyAllRoles, type ClassifierResult } from './llm/classifier.js';
@@ -73,6 +73,42 @@ interface AskOptions {
   signal?: AbortSignal;
   /** Route to the higher-stakes ask model when configured. */
   useAskModel?: boolean;
+  /** Per-invocation chat-backend override (model / endpoint) for this
+   *  one call only — A/B-test models without editing config or bouncing
+   *  the backend (issue #26). */
+  chatOverride?: ChatTierOverride;
+}
+
+/** True when the override carries at least one field to apply. */
+export function chatOverrideActive(override: ChatTierOverride | undefined): override is ChatTierOverride {
+  return override !== undefined && (override.model !== undefined || override.endpoint !== undefined);
+}
+
+/** Apply a {@link ChatTierOverride} onto a resolved chat tier. Carries
+ *  the backend-relevant fields (apiKey, timeoutMs, …) over from the base
+ *  EXCEPT when an `endpoint` override flips the provider from a
+ *  non-HTTP base (claude-bridge / anthropic-api) to `openai-compat` — in
+ *  that case the base's provider-specific `claudeBin` / `apiKey` don't
+ *  apply to the new HTTP backend and are dropped (a stale Anthropic key
+ *  would otherwise 401 a cloud openai-compat target). */
+export function applyChatTierOverride(base: ChatProviderConfig, override: ChatTierOverride): ChatProviderConfig {
+  const flipsToHttp = override.endpoint !== undefined && base.provider !== 'openai-compat';
+  // Rebuild without claudeBin / apiKey when flipping providers; a plain
+  // copy otherwise. `omit` keeps it free of `delete` and unused binds.
+  const merged: ChatProviderConfig = flipsToHttp ? omitProviderSpecificAuth(base) : { ...base };
+  if (override.endpoint !== undefined) {
+    merged.provider = 'openai-compat';
+    merged.endpoint = override.endpoint;
+  }
+  if (override.model !== undefined) merged.model = override.model;
+  return merged;
+}
+
+/** Copy a chat config without the provider-specific auth fields that
+ *  only apply to non-openai-compat providers (`claudeBin`, `apiKey`). */
+function omitProviderSpecificAuth(cfg: ChatProviderConfig): ChatProviderConfig {
+  const { claudeBin: _claudeBin, apiKey: _apiKey, ...rest } = cfg;
+  return rest;
 }
 
 /**
@@ -381,9 +417,16 @@ export class CartographLlmService {
        *  and the background pass reach the same end state. Pass `Infinity`
        *  (e.g. `admin summarize --all`) for a full uncapped pass. */
       eagerLimit?: number;
+      /** Per-invocation chat-backend override (model / endpoint). When
+       *  set, summaries cache under the override model id (issue #26). */
+      chatOverride?: ChatTierOverride;
     } = {},
   ): Promise<SummarizeAllResult> {
-    const { resolved, client, summaryBatchSize } = await llmPrepareSummarizeClient(this, options.summaryBatchSize);
+    const { resolved, client, summaryBatchSize } = await llmPrepareSummarizeClient(
+      this,
+      options.summaryBatchSize,
+      options.chatOverride,
+    );
     // Default the eager-limit from config when the caller didn't set one.
     const eagerLimit = options.eagerLimit ?? this.cg.config.llm?.summarizeEagerLimit;
     // Body-line floor overrides flow from config so an explicit `admin
@@ -530,12 +573,22 @@ export class CartographLlmService {
    * to check before calling for a graceful UX.
    */
   async ask(question: string, options: AskOptions = {}): Promise<AskResult> {
-    const resolved = await this.config.resolveLlmConfig();
-    if (!resolved?.summarizeLlm) {
+    const baseResolved = await this.config.resolveLlmConfig();
+    if (!baseResolved?.summarizeLlm) {
       throw new Error(
         'No ask provider configured for cartograph_ask. Run `cartograph llm setup` or set config.llm.summarizeLlm.',
       );
     }
+    // A per-invocation override targets the ask backend specifically:
+    // set `askLlm` to the overridden tier (based on the existing ask
+    // backend, or summarizeLlm when no separate ask tier) so `ask`'s
+    // chat + reachability route to it without touching summarize.
+    const resolved = chatOverrideActive(options.chatOverride)
+      ? {
+          ...baseResolved,
+          askLlm: applyChatTierOverride(baseResolved.askLlm ?? baseResolved.summarizeLlm, options.chatOverride),
+        }
+      : baseResolved;
     const client = new LlmClient(resolved);
     if (!(await client.isAskReachable())) {
       throw new Error(`Ask backend not reachable (${resolved.resolutionTrace}).`);
@@ -907,15 +960,20 @@ function usesPostgresBackend(svc: CartographLlmService): boolean {
 async function llmPrepareSummarizeClient(
   svc: CartographLlmService,
   callerBatchSize: number | undefined,
+  chatOverride?: ChatTierOverride,
 ): Promise<{
   resolved: ResolvedLlm & { summarizeLlm: NonNullable<ResolvedLlm['summarizeLlm']> };
   client: LlmClient;
   summaryBatchSize: number;
 }> {
-  const resolved = await svc.config.resolveLlmConfig();
-  if (!resolved?.summarizeLlm) {
+  const baseResolved = await svc.config.resolveLlmConfig();
+  if (!baseResolved?.summarizeLlm) {
     throw new Error('No summarize provider configured. Run `cartograph llm setup` or set config.llm.summarizeLlm.');
   }
+  const summarizeLlm = chatOverrideActive(chatOverride)
+    ? applyChatTierOverride(baseResolved.summarizeLlm, chatOverride)
+    : baseResolved.summarizeLlm;
+  const resolved: ResolvedLlm & { summarizeLlm: ChatProviderConfig } = { ...baseResolved, summarizeLlm };
   const client = new LlmClient(resolved);
   if (!(await client.isReachable())) {
     throw new Error(`Summarize backend not reachable (${resolved.resolutionTrace}).`);
