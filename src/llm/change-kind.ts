@@ -126,7 +126,7 @@ export async function classifyChangeKind(args: ClassifyChangeKindArgs): Promise<
 
   if (!(await client.isReachable())) {
     throw new LlmEndpointError(
-      'classifyChangeKind requires a reachable chat backend (configure llm.summarizeLlm / askLlm / localLlm)',
+      'classifyChangeKind requires a reachable summarizeLlm chat backend (configure llm.summarizeLlm)',
     );
   }
 

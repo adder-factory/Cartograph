@@ -369,22 +369,13 @@ async function llmClientInstantiateBackend(cfg: ChatProviderConfig): Promise<Cha
 }
 
 /**
- * Probe the LLM backends (summarizeLlm and optional separate askLlm).
- * Returns false if either backend reports unreachable, or on any error.
+ * Probe a single chat backend (resolved lazily via `resolve`), folding
+ * any instantiation / network error into `false`. Each tier is probed
+ * on its own so an unrelated tier being down can't fail another (#26).
  */
-async function llmClientProbeBackends(
-  backends: LlmClientBackends,
-  summarizeLlmCfg: ChatProviderConfig,
-  askLlmCfg: ChatProviderConfig | null,
-): Promise<boolean> {
+async function llmClientProbeBackend(resolve: () => Promise<ChatBackend>): Promise<boolean> {
   try {
-    const summarizeOk = await (await llmClientGetSummarizeLlmBackend(backends, summarizeLlmCfg)).isReachable();
-    if (!summarizeOk) return false;
-    if (askLlmCfg) {
-      const askOk = await (await llmClientGetAskLlmBackend(backends, askLlmCfg)).isReachable();
-      if (!askOk) return false;
-    }
-    return true;
+    return await (await resolve()).isReachable();
   } catch {
     return false;
   }
@@ -476,18 +467,35 @@ export class LlmClient {
   }
 
   /**
-   * Probe the configured summarizeLlm backend and (when separately
-   * configured) the askLlm backend. Returns false when either is
-   * unreachable or when no chat provider is configured.
+   * Probe ONLY the `summarizeLlm` backend — the primary chat tier used
+   * by summarisation, classification, local-chat, dead-code/change
+   * judges, and query expansion. Returns false when it is unreachable
+   * or no summarize provider is configured.
    *
-   * Does NOT probe the optional `localLlm` / `classifyLlm` tiers — those
-   * are exercised lazily and, if mis-configured or down, surface as an
-   * `LlmEndpointError` at call time (local-chat / classify phase) rather
-   * than failing this startup gate.
+   * Deliberately does NOT probe `askLlm` / `localLlm` / `classifyLlm`:
+   * tiers pointed at separate backends must fail independently, so an
+   * unrelated down backend (e.g. a stopped `ask` server) can't abort a
+   * summarize run (issue #26). Those tiers are exercised lazily and, if
+   * down, surface as an `LlmEndpointError` at call time. Use
+   * {@link isAskReachable} for the `ask` path.
    */
   async isReachable(): Promise<boolean> {
-    if (!this.summarizeLlmCfg) return false;
-    return llmClientProbeBackends(this.backends, this.summarizeLlmCfg, this.askLlmCfg);
+    const cfg = this.summarizeLlmCfg;
+    if (!cfg) return false;
+    return llmClientProbeBackend(() => llmClientGetSummarizeLlmBackend(this.backends, cfg));
+  }
+
+  /**
+   * Reachability of the backend the `ask` path actually uses: the
+   * separate `askLlm` when configured, otherwise the `summarizeLlm`
+   * fallback (mirroring `chat({ useAskModel: true })`). Kept separate
+   * from {@link isReachable} so `ask` doesn't hard-require the summarize
+   * backend and vice-versa (issue #26).
+   */
+  async isAskReachable(): Promise<boolean> {
+    const cfg = this.askLlmCfg;
+    if (cfg) return llmClientProbeBackend(() => llmClientGetAskLlmBackend(this.backends, cfg));
+    return this.isReachable();
   }
 
   /**
