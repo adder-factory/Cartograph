@@ -1353,6 +1353,9 @@ const summarizableNodesQuery = defineQuery({
               @defaultMinBodyLines
             )
         AND (docstring IS NULL OR length(docstring) < @docCharThreshold)
+        AND NOT EXISTS (
+              SELECT 1 FROM summary_skips sk WHERE sk.node_id = nodes.id AND sk.body_hash = nodes.body_hash
+            )
       ORDER BY updated_at DESC, file_path, start_line`,
   params: SummarizableParamsSchema,
   row: NodeRowSchemaForSummarizable,
@@ -1366,7 +1369,10 @@ const countPendingSummarizableQuery = defineQuery({
               @defaultMinBodyLines
             )
         AND (docstring IS NULL OR length(docstring) < @docCharThreshold)
-        AND id NOT IN (SELECT node_id FROM summary_refs)`,
+        AND id NOT IN (SELECT node_id FROM summary_refs)
+        AND NOT EXISTS (
+              SELECT 1 FROM summary_skips sk WHERE sk.node_id = nodes.id AND sk.body_hash = nodes.body_hash
+            )`,
   params: SummarizableParamsSchema,
   row: z.object({ c: z.number() }),
 });

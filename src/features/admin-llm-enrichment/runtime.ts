@@ -23,6 +23,9 @@ export interface LlmSummarizeResult {
   generated: number;
   errors: number;
   cacheHits: number;
+  /** Symbols skipped — prompt exceeds the chat backend's per-slot context
+   *  (issue #27). Optional so older callers/tests that omit it still type. */
+  skippedTooLarge?: number;
   deferred: number;
   durationMs: number;
   embed?: LlmEmbedResult | null;
@@ -70,7 +73,8 @@ export function summarizeDetailMessages(
   result: LlmSummarizeResult,
   deps: { formatNumber: (n: number) => string; formatDuration: (ms: number) => string },
 ): RenderMessage[] {
-  const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
+  const tooLarge = result.skippedTooLarge ?? 0;
+  const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred - tooLarge;
   const messages: RenderMessage[] = [
     {
       level: 'success',
@@ -96,6 +100,15 @@ export function summarizeDetailMessages(
   if (result.errors > 0) details.push(`Errors: ${deps.formatNumber(result.errors)}`);
   if (skipped > 0) details.push(`Skipped: ${deps.formatNumber(skipped)}`);
   if (details.length > 0) messages.push({ level: 'info', message: details.join(' — ') });
+  if (tooLarge > 0) {
+    messages.push({
+      level: 'warn',
+      message:
+        `${deps.formatNumber(tooLarge)} symbol(s) skipped — prompt exceeds the chat backend's per-slot context. ` +
+        'Raise `-c` or lower `--parallel` (run `cartograph doctor` for the exact per-slot budget), then ' +
+        '`cartograph admin summarize --all` to retry them.',
+    });
+  }
   if (result.deferred > 0) {
     messages.push({
       level: 'info',

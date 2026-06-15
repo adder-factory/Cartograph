@@ -21,7 +21,7 @@ const HTTP_TOO_EARLY = 425;
 const HTTP_RATE_LIMITED = 429;
 const HTTP_SERVER_ERROR_FLOOR = 500;
 
-export function isContextWindowError(err: unknown): boolean {
+export function isContextWindowError(err: unknown): err is LlmEndpointError {
   return err instanceof LlmEndpointError && CONTEXT_WINDOW_ERROR_RE.test(err.message);
 }
 
