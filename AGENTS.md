@@ -1,125 +1,17 @@
 # AGENTS.md — install + bootstrap cartograph from an AI assistant
 
-## Session handoff trigger
+This file is the public install + bootstrap guide for Cartograph, written for
+AI assistants (Claude Code, Cursor, Windsurf, Codex, etc.) helping a user
+install it. The instructions are sequential so they can be followed
+mechanically: run a command, verify the output, move to the next step. If a
+step fails, the remediation is named in the failure-mode section at the end.
 
-If the user says exactly `go`, read `NEXT_SESSION_GO.md` and begin the
-first unchecked task listed there.
-
-## Architecture rules for development
-
-Read `docs/ARCHITECTURE.md` before architecture-sensitive changes. It is the
-canonical persistent guide for Cartograph's feature-slice architecture and the
-current post-migration ownership conventions.
-
-Use feature slices, not layer-first buckets, for new code and for any
-area you touch during maintenance. The platform's natural unit is the
-slice boundary: MCP tool/action, CLI command/subcommand, installer flow,
-index hook, language extractor, or LLM action.
-
-Each slice should keep its contract, runtime, formatting/adapters, and
-focused tests close together when practical. Use explicit types or Zod
-schemas at trust boundaries, and validate data as it crosses those
-boundaries.
-
-Expected failures are return values with stable codes/messages/remediation
-where possible. Reserve thrown exceptions for truly unexpected states,
-programmer errors, and low-level I/O failures that cannot be handled
-locally.
-
-Prefer the simplest feature-local shape that keeps the contract explicit.
-Do not add indirection unless the reason is stated in code or the
-surrounding module pattern makes it obvious. Consistency matters more
-than cleverness: repeated slices should look predictable.
-
-Before declaring work done, verify it with type-checking and the smallest
-relevant test set; broaden to full tests or health checks when touching
-shared behavior, public CLI/MCP contracts, indexing, extraction, or LLM
-flows.
-
-## Code search order
-
-When searching or navigating this codebase, use the highest-signal tool first
-and fall back only when it can't answer:
-
-1. **Cartograph (codegraph) first** — its indexed graph for symbols, callers/
-   callees/impact, references, and structure (`cartograph_find`,
-   `cartograph_graph`, `cartograph_files`, `cartograph_node`, … via MCP, or
-   `cartograph <cmd>` from the CLI). Reach for this before any text search.
-2. **`rg` (ripgrep) next** — for fast literal/regex content search when you need
-   raw text or Cartograph returns nothing.
-3. **`grep` last** — only when `rg` is unavailable.
-
-## Reviewer agent
-
-This repo ships a project-checked-in **reviewer agent** at
-`.claude/agents/reviewer.md` — Claude Code and other hosts that read
-`.claude/agents/` pick it up automatically. It runs an independent,
-read-only semantic review of a diff before you commit or open a PR
-(correctness, edge cases, gate-metric alignment, scope, and security
-smell) and returns a structured `APPROVE` / `REQUEST_CHANGES` / `BLOCK`
-verdict. It is tailored to this project's gates — `npm run typecheck`,
-`npm run check` (architecture + biome), the biomarker floor
-(`check:biomarkers`, confirmed under `BIOMARKER_GATE_FORCE=1`), and the
-Sonar quality gate — and is read-only by design (no shell/write tools) so
-a malicious diff can't trick it into running commands. Run it on any
-code-shipping change; the local gates are a prerequisite, not a substitute.
-
-## SonarQube verification for agents
-
-Use the local Sonar credentials from `~/.sonarqube-env`;
-do not print token values. Source it inside the command that needs it:
-
-```sh
-set -a
-. ~/.sonarqube-env
-set +a
-```
-
-Scanner success is not quality-gate success. After `sonar-scanner` exits
-successfully, read the CE task id for that exact scan and check the gate by
-`analysisId`:
-
-```sh
-task_id=$(sed -n 's/^ceTaskId=//p' .scannerwork/report-task.txt)
-task_json=$(curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
-  "$SONAR_HOST_URL/api/ce/task?id=$task_id")
-analysis_id=$(printf '%s' "$task_json" | jq -r '.task.analysisId')
-curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
-  "$SONAR_HOST_URL/api/qualitygates/project_status?analysisId=$analysis_id"
-```
-
-Report the quality-gate `projectStatus.status` separately from scanner
-execution. If the gate fails, pull unresolved issues and `TO_REVIEW` hotspots
-from Sonar before guessing:
-
-```sh
-curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
-  "$SONAR_HOST_URL/api/issues/search?components=cartograph&issueStatuses=OPEN&ps=100&additionalFields=_all"
-curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
-  "$SONAR_HOST_URL/api/hotspots/search?project=cartograph&status=TO_REVIEW&ps=100"
-```
-
-Prefer Sonar's API v2 when the local server metadata says a v2 replacement
-exists. Check metadata instead of guessing endpoint names:
-
-```sh
-curl -sf -H "Authorization: Bearer $SONAR_TOKEN" \
-  "$SONAR_HOST_URL/api/webservices/list" |
-  jq -r '.webServices[] as $ws | $ws.actions[]? as $a |
-    ($a.changelog // [])[]? |
-    select(.description | test("api/v2"; "i")) |
-    "\($ws.path)/\($a.key) -> \(.description)"'
-```
-
-On the local SonarQube `26.5.0.122743` server, API v2 is available for some
-areas such as users and authorizations, but CE task polling and quality-gate
-status still use `/api/ce/task` and `/api/qualitygates/project_status`.
-
-This file is for AI assistants (Claude Code, Cursor, Windsurf, etc.)
-helping a user install cartograph. The instructions are written
-sequentially so they can be followed mechanically: run a command,
-verify the output, move to the next step. If a step fails, the
-remediation is named in the failure-mode section at the end.
+> **Working ON this repository (not just installing Cartograph)?** The
+> development conventions — architecture rules, the reviewer-agent step, the
+> gate / SonarQube workflow, the code-search order, and the `go` handoff
+> trigger — live in `AGENTS.local.md`, a local git-ignored file. Read it before
+> making changes. A fresh clone has this pointer but not the file; keep your
+> copy in a private backup.
 
 ## Fast path (recommended) — use the MCP wizard
 
