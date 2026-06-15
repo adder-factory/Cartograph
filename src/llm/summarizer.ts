@@ -885,6 +885,37 @@ async function summaryTryBatchSummarize(ctx: SummarizerCallContext, batch: Pendi
 }
 
 /**
+ * Classify a per-item generation failure. A context-window 400 is
+ * deterministic — the body won't fit this backend's per-slot context, so
+ * re-attempting it every pass just re-fails and burns a call; record a
+ * skip instead so it leaves the candidate/pending set and surfaces as
+ * "too large" (issue #27; `summarize --all` clears these to retry after
+ * the backend is fixed). Anything else is a real failure: count it and
+ * track the priority-queue poison-eviction. Extracted from
+ * {@link summaryGenerateSingle} to keep that function under the
+ * cognitive-complexity threshold.
+ */
+function handleSingleGenerateError(ctx: SummarizerCallContext, item: PendingItem, err: unknown): void {
+  const { counters, queries } = ctx;
+  if (isContextWindowError(err)) {
+    recordSummarySkip(queries, { nodeId: item.sym.id, bodyHash: item.hash, reason: 'context_window' });
+    counters.skippedTooLarge++;
+    logDebug('Summarizer: skipped — prompt exceeds chat context', { node: item.sym.id, error: err.message });
+    return;
+  }
+  counters.errors++;
+  if (err instanceof LlmEndpointError) {
+    logDebug('Summarizer: endpoint error', { node: item.sym.id, error: err.message });
+  } else {
+    logWarn('Summarizer: unexpected error', { node: item.sym.id, error: String(err) });
+  }
+  // Track failure for poison-row eviction.
+  if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
+    logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
+  }
+}
+
+/**
  * Per-item summary generation via the chat backend.
  */
 async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingItem): Promise<void> {
@@ -907,27 +938,7 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
     if (options.signal?.aborted) return;
     summary = stripPreamble(stripReasoningTokens(result.text).trim().split('\n')[0]?.trim() ?? '');
   } catch (err) {
-    if (isContextWindowError(err)) {
-      // Deterministic: the prompt exceeds the backend's per-slot context.
-      // Re-attempting the same body next pass just re-fails and burns a
-      // call, so record a skip — it leaves the candidate/pending set and
-      // surfaces as "too large" instead of a stuck error/pending (#27).
-      // `summarize --all` clears these to retry after the backend is fixed.
-      recordSummarySkip(queries, { nodeId: item.sym.id, bodyHash: item.hash, reason: 'context_window' });
-      counters.skippedTooLarge++;
-      logDebug('Summarizer: skipped — prompt exceeds chat context', { node: item.sym.id, error: err.message });
-    } else {
-      counters.errors++;
-      if (err instanceof LlmEndpointError) {
-        logDebug('Summarizer: endpoint error', { node: item.sym.id, error: err.message });
-      } else {
-        logWarn('Summarizer: unexpected error', { node: item.sym.id, error: String(err) });
-      }
-      // Track failure for poison-row eviction.
-      if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
-        logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
-      }
-    }
+    handleSingleGenerateError(ctx, item, err);
     counters.done++;
     options.onProgress?.(counters.done, total);
     return;
