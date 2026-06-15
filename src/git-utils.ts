@@ -317,9 +317,10 @@ export function getUncommittedSourcePaths(rootDir: string): string[] {
     for (const line of out.split('\n')) {
       if (line.trim().length === 0) continue;
       // Porcelain v1 line: "XY <path>" (or "XY <old> -> <new>" for a
-      // rename). Imperfect path extraction errs toward "dirty" — the
-      // safe direction for a freshness hedge.
-      const filePath = line.slice(3).trim();
+      // rename). Take the NEW path after ` -> ` for renames (matching
+      // `classifyPorcelainLine`) so a staged rename surfaces its real
+      // destination, not the raw "old -> new" token.
+      const filePath = line.includes(' -> ') ? line.split(' -> ')[1]!.trim() : line.slice(3).trim();
       if (filePath.length > 0 && !isCartographMetaPath(filePath)) dirtyPaths.push(filePath);
     }
     // Drop a cartograph-only `.gitignore` edit (F#32) — init's own append

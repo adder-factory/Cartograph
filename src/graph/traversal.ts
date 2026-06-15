@@ -579,11 +579,15 @@ export class GraphTraverser {
 
     const nodes = new Map<string, Node>();
     const edges: Edge[] = [];
-    const visited = new Set<string>();
     nodes.set(focalNode.id, focalNode);
-    const opts: TraversalGraphOpts = { queries: this.queries, nodes, edges, visited };
-    traverserGetTypeRelativesRecursive(opts, nodeId, 'ancestors');
-    traverserGetTypeRelativesRecursive(opts, nodeId, 'descendants');
+    // Walk ancestors and descendants with SEPARATE `visited` sets: a single
+    // shared set let the ancestors pass mark the focal node visited, so the
+    // descendants pass bailed at its first guard and never emitted any
+    // descendants. `nodes`/`edges` stay shared (and dedupe by id) so the two
+    // directions still accumulate into one subgraph without duplication.
+    const base = { queries: this.queries, nodes, edges };
+    traverserGetTypeRelativesRecursive({ ...base, visited: new Set<string>() }, nodeId, 'ancestors');
+    traverserGetTypeRelativesRecursive({ ...base, visited: new Set<string>() }, nodeId, 'descendants');
     return { nodes, edges, roots: [nodeId] };
   }
 

@@ -296,19 +296,16 @@ describe('GraphTraverser.getTypeHierarchy', () => {
     expect(names(h.nodes)).toEqual(expect.arrayContaining(['Animal', 'Mammal']));
   });
 
-  it('BUG: getTypeHierarchy misses descendants because the ancestors pass marks the start node visited', () => {
-    // Animal HAS an incoming `extends` edge from Mammal (a descendant), so the
-    // hierarchy SHOULD contain Mammal (and transitively Dog). But
-    // getTypeHierarchy shares one `visited` set across the ancestors then
-    // descendants passes; the ancestors pass marks `Animal` visited, so the
-    // descendants pass returns immediately at its first `visited.has(nodeId)`
-    // guard. Result: descendants are never explored for the focal node.
-    //
-    // This test pins the CURRENT (buggy) behaviour so the defect is captured;
-    // the correct expectation would be arrayContaining(['Animal','Mammal']).
+  it('getTypeHierarchy includes descendants as well as ancestors', () => {
+    // Animal has an incoming `extends` edge from Mammal (a descendant), and
+    // Dog `implements` Mammal, so the hierarchy contains Animal + Mammal + Dog.
+    // Regression guard: a single shared `visited` set used to let the ancestors
+    // pass mark Animal visited, so the descendants pass bailed at its first
+    // `visited.has(nodeId)` guard and returned only ['Animal']. The two passes
+    // now use separate `visited` sets.
     const animalId = nodeId('Animal', 'interface');
     const h = traverser.getTypeHierarchy(animalId);
-    expect(names(h.nodes)).toEqual(['Animal']);
+    expect(names(h.nodes)).toEqual(expect.arrayContaining(['Animal', 'Mammal', 'Dog']));
   });
 
   it('returns an empty subgraph for a missing node', () => {

@@ -669,19 +669,16 @@ describe('uncommitted source paths — rename extraction', () => {
   let dir: string;
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
-  it('keeps a staged rename as a single raw "old -> new" string (documented imperfect extraction)', () => {
+  it('surfaces a staged rename as its new path (splits on ` -> `)', () => {
     dir = mkTmp();
     initRepo(dir);
     // Stage a rename so porcelain emits `R  a.ts -> renamed.ts`.
     git(dir, 'mv', 'a.ts', 'renamed.ts');
     const paths = getUncommittedSourcePaths(dir);
-    // NOTE: `getUncommittedSourcePaths` uses `line.slice(3).trim()` and does
-    // NOT split on ` -> ` (its docstring calls the extraction "imperfect" and
-    // says it errs toward "dirty"). So a rename surfaces as one raw token
-    // `"a.ts -> renamed.ts"` rather than the new path. This diverges from
-    // `classifyPorcelainLine` (used by getChangeBreakdownSince) which DOES
-    // split on ` -> `. Asserting the real, current behaviour.
-    expect(paths).toEqual(['a.ts -> renamed.ts']);
+    // Regression guard: extraction now splits on ` -> ` (matching
+    // `classifyPorcelainLine`), so a rename surfaces its destination path
+    // rather than the raw `"a.ts -> renamed.ts"` token.
+    expect(paths).toEqual(['renamed.ts']);
     expect(hasUncommittedChanges(dir)).toBe(true);
   });
 

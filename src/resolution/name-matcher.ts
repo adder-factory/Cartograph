@@ -623,8 +623,13 @@ function isReceiverFactoryNode(args: {
   return node.name === parsed.factoryMethod && node.qualifiedName.includes(parsed.objectOrClass);
 }
 
+/** Resolve a factory's return type to the receiver class it produces. The
+ *  self-reference keywords map back to the calling class: lowercase `self`
+ *  (Python/Rust value) / `static` (PHP late-static-binding), and capitalized
+ *  `Self` (Rust/Swift — `fn make() -> Self`). Any concrete type is returned
+ *  as-is for the chain to look up. */
 function returnedReceiverName(returnType: string, objectOrClass: string): string {
-  return returnType === 'self' || returnType === 'static' ? objectOrClass : returnType;
+  return returnType === 'self' || returnType === 'Self' || returnType === 'static' ? objectOrClass : returnType;
 }
 
 function inferCallableReturnType(node: Node | undefined): string | null {

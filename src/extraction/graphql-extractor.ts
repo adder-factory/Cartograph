@@ -104,6 +104,12 @@ function collectNamedTypes(node: SyntaxNode, source: string): string[] {
   return out;
 }
 
+/** Max `type`/`non_null_type`/`list_type` wrappers `unwrapTypeName` descends
+ *  before giving up. 16 is a generous bound — real schemas rarely nest more
+ *  than a couple of list levels, and even `[[T!]!]!` stays well under it —
+ *  that still guards against a pathological / cyclic tree. */
+const MAX_TYPE_WRAPPER_DEPTH = 16;
+
 /**
  * Unwrap `non_null_type` / `list_type` to find the base `named_type`'s name.
  * Returns null if the chain doesn't end at a named_type (shouldn't happen
@@ -111,7 +117,7 @@ function collectNamedTypes(node: SyntaxNode, source: string): string[] {
  */
 function unwrapTypeName(typeNode: SyntaxNode, source: string): string | null {
   let cur: SyntaxNode | null = typeNode;
-  for (let i = 0; i < 8 && cur; i++) {
+  for (let i = 0; i < MAX_TYPE_WRAPPER_DEPTH && cur; i++) {
     if (cur.type === 'named_type') {
       const nameLeaf = findChildByType(cur, 'name');
       return nameLeaf ? getNodeText(nameLeaf, source).trim() || null : null;
