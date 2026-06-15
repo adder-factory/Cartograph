@@ -101,9 +101,11 @@
  *   - `<![CDATA[ ... ]]>` sections that contain literal `</select>` or
  *     `<include refid="x"/>` text inside CDATA are NOT specially
  *     handled. Real MyBatis files avoid this pattern.
- *   - Self-closing statement tags (`<select id="x" />`) have no body;
- *     the body scan is a no-op. Real MyBatis files don't ship empty
- *     statements.
+ *
+ * Self-closing statement tags (`<select id="x" />`) are detected and
+ * skip the body scan, so an empty statement can't bleed the following
+ * statement's includes / `#{params}` into itself (see
+ * `emitStatementReferences`).
  *
  * XML comment handling: `<!-- ... -->` blocks ARE stripped (replaced
  * with equivalent-length whitespace so line numbers stay accurate)
@@ -347,7 +349,12 @@ function emitStatementReferences(args: StatementReferenceArgs): void {
   // emit one UnresolvedReference per match. The standard resolver's
   // qualifiedName-match path resolves them against `<sql>` method
   // nodes mined elsewhere in the project.
-  const closingStart = findClosingTag(source, tag, openingEnd);
+  //
+  // A self-closing statement (`<select id="x" />`) has NO body: searching for
+  // `</tag>` would otherwise match the NEXT statement's close and bleed its
+  // includes / `#{params}` into this one. Treat the body as empty.
+  const selfClosing = /\/\s*>$/.test(openingText.trimEnd());
+  const closingStart = selfClosing ? openingEnd : findClosingTag(source, tag, openingEnd);
   const body = source.substring(openingEnd, closingStart);
   INCLUDE_REFID_RE.lastIndex = 0;
   let inc: RegExpExecArray | null;

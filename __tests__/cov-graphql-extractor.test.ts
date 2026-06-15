@@ -116,15 +116,15 @@ describe('GraphQL extractor — object types & fields', () => {
     expect(names).toEqual(['Thing', 'Thing', 'Thing', 'Thing']);
   });
 
-  it('KNOWN GAP: doubly-nested non-null lists `[[T!]!]!` drop the type_of ref (unwrap depth cap)', () => {
-    // `[[Thing!]!]!` nests as type>non_null>list>type>non_null>list>type>non_null>named_type,
-    // putting `named_type` at depth 8. `unwrapTypeName` loops `i < 8` (depths 0..7),
-    // so it exits one node short and returns null — no `type_of` ref is emitted.
-    // The `field` node is still created; only the type linkage is lost.
+  it('resolves the base type of doubly-nested non-null lists `[[T!]!]!`', () => {
+    // `[[Thing!]!]!` nests 9 wrappers deep
+    // (type>non_null>list>type>non_null>list>type>non_null>named_type).
+    // `unwrapTypeName` descends up to MAX_TYPE_WRAPPER_DEPTH (16), so it reaches
+    // the base `Thing` and emits a `type_of` ref. Regression guard: the old
+    // `i < 8` cap exited one node short and dropped the ref.
     const r = extract(`type Wrap {\n  e: [[Thing!]!]!\n}`);
     expect(findNode(r, 'field', 'e')).toBeDefined();
-    // Documents the current (buggy) behaviour: zero type_of refs for this field.
-    expect(typeOfRefNames(r)).toEqual([]);
+    expect(typeOfRefNames(r)).toContain('Thing');
   });
 });
 

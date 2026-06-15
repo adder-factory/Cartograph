@@ -694,12 +694,12 @@ describe('matchMethodCall chained returned-receiver resolution', () => {
     ).toMatchObject({ targetNodeId: 'method:foo-build', resolvedBy: 'instance-method' });
   });
 
-  it('does NOT pass a capitalized `Self` return type through (flagged Rust gap)', () => {
-    // BUG/GAP FLAG: returnedReceiverName treats only the lowercase tokens
-    // `self` / `static` as receiver passthroughs, but idiomatic Rust factory
-    // signatures return CAPITALIZED `Self`. Here `builder() -> Self` makes the
-    // chain look for a class literally named `Self`, finds none, and the
-    // chained `.build` call goes unresolved. Documents current behavior.
+  it('chains a capitalized `Self` factory return type back to the receiver class', () => {
+    // Regression guard: `make() -> Self` (idiomatic Rust/Swift) resolves `Self`
+    // to the calling class `Foo`, so `Foo::make().finish` chains to the
+    // `Foo::finish` method. Previously only lowercase `self`/`static` were
+    // receiver passthroughs, so the chain looked for a class literally named
+    // `Self`, found none, and returned null.
     const foo = node({
       id: 'class:foo-cap',
       name: 'Foo',
@@ -727,12 +727,11 @@ describe('matchMethodCall chained returned-receiver resolution', () => {
       language: 'rust',
       filePath: 'src/foo2.rs',
     });
-    expect(
-      matchReference(
-        ref({ referenceName: 'Foo::make().finish', language: 'rust', filePath: 'src/m2.rs' }),
-        context([foo, builder, build]),
-      ),
-    ).toBeNull();
+    const result = matchReference(
+      ref({ referenceName: 'Foo::make().finish', language: 'rust', filePath: 'src/m2.rs' }),
+      context([foo, builder, build]),
+    );
+    expect(result?.targetNodeId).toBe('method:foo-cap-build');
   });
 
   it('does not chain-resolve when the factory return type is a primitive', () => {

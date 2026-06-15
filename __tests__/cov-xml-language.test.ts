@@ -477,29 +477,12 @@ describe('XML (MyBatis) extractor — robustness / malformed input', () => {
     expect(result.unresolvedReferences).toEqual([]);
   });
 
-  it('BUG: a self-closing statement bleeds its "body" into the next same-tag sibling', () => {
-    // KNOWN BUG (documented here, NOT a test of intended behavior).
-    //
-    // The module's JSDoc (xml.ts, "Known limitations") claims:
-    //   "Self-closing statement tags (`<select id="x" />`) have no body;
-    //    the body scan is a no-op."
-    //
-    // That holds ONLY when the self-closing tag is the last statement (see
-    // the test above). When another statement of the SAME tag follows,
-    // `findClosingTag` matches the NEXT statement's `</select>`, so the
-    // self-closing tag's "body" spans across its sibling and it captures
-    // that sibling's `#{x}` placeholder — emitting a spurious
-    // `SelfMapper::empty::x` reference. The body scan is therefore NOT a
-    // no-op in this case. (`STATEMENT_RE` is not self-close-aware: the
-    // `/` in `/>` is just part of the `[^>]*` run before `>`, and
-    // `openingEnd` lands after the `/>` with no flag that the tag had no
-    // body.)
-    //
-    // Real MyBatis files don't ship empty statements, so this is benign in
-    // practice, but the asserted-here behavior is incorrect. Asserting the
-    // ACTUAL (buggy) output keeps the test green and pins the bug; flip the
-    // expectations if/when the extractor is fixed to skip self-closing
-    // bodies.
+  it('a self-closing statement followed by a same-tag sibling has an empty body (no bleed)', () => {
+    // Regression guard: `<select id="empty" />` is self-closing, so its body
+    // scan is skipped. Previously `findClosingTag` matched the NEXT statement's
+    // `</select>`, so `empty`'s "body" spanned across `real` and captured its
+    // `#{x}` — emitting a spurious `SelfMapper::empty::x`. Now `empty` emits no
+    // body refs; only `real`'s `#{x}` produces `SelfMapper::real::x`.
     const source = `<mapper namespace="com.example.SelfMapper">
   <select id="empty" resultType="User" />
   <select id="real">SELECT * WHERE x = #{x}</select>
@@ -508,8 +491,7 @@ describe('XML (MyBatis) extractor — robustness / malformed input', () => {
     const result = extract('mapper/Self.xml', source);
     expect(nodeLabels(result)).toEqual(expect.arrayContaining(['method:empty', 'method:real']));
     expect(refNames(result)).toContain('SelfMapper::real::x');
-    // Spurious ref from the self-closing `empty` statement (the bug):
-    expect(refNames(result)).toContain('SelfMapper::empty::x');
+    expect(refNames(result)).not.toContain('SelfMapper::empty::x');
   });
 
   it('shares the id-ordinal allocator across statement and mapping passes', () => {
