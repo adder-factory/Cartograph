@@ -10,6 +10,8 @@ import { shortSha } from '../../git-utils.js';
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { detectModuleFormat, formatModuleFormatLine } from '../../module-format.js';
+import { CARTOGRAPH_PACKAGE_VERSION, readOnDiskPackageVersion } from '../../package-version.js';
+import { detectVersionSkew } from '../../features/upgrade/runtime.js';
 import type Cartograph from '../../index.js';
 import { contentDriftCount, hasFreshnessRisk } from '../../freshness.js';
 import { DEGENERATE_EDGE_UREF_FLOOR } from '../../resolution/types.js';
@@ -102,6 +104,7 @@ async function handleStatus(ctx: ToolCtx, args: StatusArgs): Promise<ToolOutcome
 
   const lines: string[] = [];
   appendHeaderAndCounts({ lines, projectRoot, sourceLabel, stats });
+  appendVersionSkew(lines);
   appendDefaultProjectSection(lines, ctx, projectRoot);
   appendBackendStatus(lines, cg, await isHnswAvailable());
   appendModuleFormat(lines, projectRoot);
@@ -184,7 +187,10 @@ function appendDefaultProjectSection(lines: string[], ctx: ToolCtx, queriedRoot:
  * project doesn't match what the user wants, the agent can't tell
  * from any other tool's output whether to start passing
  * `projectPath`. Surfacing the project root here makes the mismatch
- * visible on the very first call.
+ * visible on the very first call. Also leads with the running Cartograph
+ * version (the `**Version:**` line) so "which version am I on?" is
+ * answerable from the first status call — and so {@link appendVersionSkew}
+ * has a printed baseline to contrast an in-place upgrade against.
  */
 interface AppendHeaderAndCountsArgs {
   lines: string[];
@@ -198,11 +204,35 @@ function appendHeaderAndCounts(args: AppendHeaderAndCountsArgs): void {
   lines.push(
     '## Cartograph Status',
     '',
+    `**Version:** ${CARTOGRAPH_PACKAGE_VERSION}`,
     `**Project root:** \`${projectRoot}\` ${sourceLabel}`,
     `**Files indexed:** ${stats.fileCount}` + (stats.testFileCount > 0 ? ` (${stats.testFileCount} test)` : ''),
     `**Total nodes:** ${stats.nodeCount}`,
     `**Total edges:** ${stats.edgeCount}`,
     `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
+  );
+}
+
+/**
+ * Warn when an in-place upgrade replaced the CLI on disk but this MCP
+ * server is still running the old code (issue #23). The `Version:` line
+ * above reports the running version; this fires only when the on-disk
+ * package.json is strictly newer — i.e. the operator ran `cartograph
+ * upgrade` (or re-pinned the Bun global) and now needs to restart so the
+ * server stops serving stale code. Silent in the common in-sync case.
+ *
+ * `readOnDiskPackageVersion()` re-reads disk on every call, unlike the
+ * frozen-at-startup {@link CARTOGRAPH_PACKAGE_VERSION}; the delta between
+ * them IS the skew signal. For a standalone binary the asset is embedded
+ * and never changes under a live process, so this stays silent there.
+ */
+function appendVersionSkew(lines: string[]): void {
+  const skew = detectVersionSkew(CARTOGRAPH_PACKAGE_VERSION, readOnDiskPackageVersion());
+  if (!skew) return;
+  lines.push(
+    `**⚠ Version skew:** this MCP server is running ${skew.running}, but the Cartograph CLI on disk is now ` +
+      `${skew.onDisk} — an in-place upgrade replaced the files. Restart the MCP server / client session to load ` +
+      `${skew.onDisk}; an old server + new CLI on the same index can thrash re-extraction (issue #13).`,
   );
 }
 
