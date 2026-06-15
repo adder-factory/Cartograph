@@ -306,23 +306,29 @@ interface RenderLlmTuneReportArgs {
 /** Read mode — describe hardware + recommendation + current overrides. */
 async function renderLlmTuneReport(args: RenderLlmTuneReportArgs): Promise<ToolOutcome> {
   const currentOverrides = await readCurrentOverrides(args.projectPath);
+  // chat/ask carry a per-slot context budget → cartograph auto-sizes
+  // `-c = parallel × ctxPerSlot`; embed/reranker take no chat `-c`.
+  const launchCell = (tier: { llamaServerParallel: number; ctxPerSlot: number }): string =>
+    tier.ctxPerSlot > 0
+      ? `--parallel ${tier.llamaServerParallel} -c ${tier.llamaServerParallel * tier.ctxPerSlot}`
+      : `--parallel ${tier.llamaServerParallel}`;
   const lines: string[] = [
     '## LLM tuning',
     '',
     `**Detected hardware:** ${args.hw}`,
     '',
-    '**Per-tier recommendation:** (auto-applied unless overridden)',
+    '**Per-tier recommendation:** (auto-applied on `cartograph backend start` unless overridden)',
     '',
-    '| Tier | Recommended `llama-server --parallel N` | Recommended cartograph concurrency | Your override |',
+    '| Tier | Auto `llama-server` flags | Recommended cartograph concurrency | Your override |',
     '|---|---|---|---|',
-    `| embed (jina, :8080)                | ${args.tuning.embed.llamaServerParallel} | ${args.tuning.embed.cartographConcurrency} | ${currentOverrides['embed'] ?? '(none)'} |`,
-    `| chat (Qwen 3B, :8081)              | ${args.tuning.chat.llamaServerParallel} | ${args.tuning.chat.cartographConcurrency} | ${currentOverrides['chat'] ?? '(none)'} |`,
-    `| ask (Qwen 7B, :8082)               | ${args.tuning.ask.llamaServerParallel} | ${args.tuning.ask.cartographConcurrency} | ${currentOverrides['ask'] ?? '(none)'} |`,
-    `| reranker (bge, :8083 --reranking)  | ${args.tuning.reranker.llamaServerParallel} | ${args.tuning.reranker.cartographConcurrency} | ${currentOverrides['reranker'] ?? '(none)'} |`,
+    `| embed (jina, :8080)                | ${launchCell(args.tuning.embed)} | ${args.tuning.embed.cartographConcurrency} | ${currentOverrides['embed'] ?? '(none)'} |`,
+    `| chat (Qwen 3B, :8081)              | ${launchCell(args.tuning.chat)} | ${args.tuning.chat.cartographConcurrency} | ${currentOverrides['chat'] ?? '(none)'} |`,
+    `| ask (Qwen 7B, :8082)               | ${launchCell(args.tuning.ask)} | ${args.tuning.ask.cartographConcurrency} | ${currentOverrides['ask'] ?? '(none)'} |`,
+    `| reranker (bge, :8083 --reranking)  | ${launchCell(args.tuning.reranker)} | ${args.tuning.reranker.cartographConcurrency} | ${currentOverrides['reranker'] ?? '(none)'} |`,
     '',
     '**To apply a manual override:** call `cartograph_admin({action: "llm-tune", projectPath: "<abs>", tier: "<embed|chat|ask|reranker>", concurrency: N})`. ',
-    'A `cartograph backend start`-managed llama-server picks up the override as its `--parallel N` automatically; if you launch llama-server yourself, restart it with `--parallel N`. ',
-    'For memory-/context-tuning beyond parallelism (e.g. `--cache-ram`, `-c`, `-ngl`), set `llamaServerArgs` on the tier in `.cartograph/config.json`.',
+    'A `cartograph backend start`-managed llama-server picks up the override as its `--parallel N` automatically (and re-scales the auto `-c`); if you launch llama-server yourself, restart it with the flags above. ',
+    "`cartograph backend start` auto-sets `-c` (= `--parallel N` × per-slot budget) for chat/ask so every slot fits cartograph's summary prompts; for other memory/context flags (`--cache-ram`, a custom `-c`, `-ngl`) set `llamaServerArgs` on the tier in `.cartograph/config.json` (a pinned `-c`/`--ctx-size` overrides the auto one).",
   ];
   return ok(textResult(lines.join('\n')));
 }

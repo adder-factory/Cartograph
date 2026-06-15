@@ -240,6 +240,14 @@ llama-server -m ~/.cartograph/models/qwen2.5-coder-7b-instruct-q4_k_m.gguf --por
 llama-server -m ~/.cartograph/models/bge-reranker-v2-m3-Q4_K_M.gguf --port 8083 --rerank
 ```
 
+> **Easier:** `cartograph backend start` launches exactly these processes for you
+> with per-machine tuning baked in — including `--parallel N` and an auto-sized
+> `-c` for the chat tiers (llama.cpp splits context across slots, so a chat
+> backend launched without `-c` can leave each slot too small for summary
+> prompts). Launch by hand only if you're not using the managed path; if so,
+> add `-c` on the chat ports (e.g. `-c 16384` for 4 slots). See
+> `docs/CONFIGURATION.md` → "Tuning a managed local llama-server".
+
 ### Option B — Ollama (simpler; auto-loads models on demand)
 
 ```sh
@@ -522,10 +530,12 @@ cartograph index /path/to/the/users/project
 # 4. Optional: download/write local model config (--minimal = ~2.1 GB; drop the flag for full ~7 GB)
 cartograph llm install --minimal /path/to/the/users/project
 
-# 5. Start the backends (one llama-server per port — paste each in its
-#    own terminal):
-llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings &
-llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 &
+# 5. Start the backends — `cartograph backend start` launches one llama-server
+#    per port with per-machine `--parallel`/`-c` tuning baked in:
+cartograph backend start /path/to/the/users/project
+#    (or by hand, one per terminal — add `-c` on the chat port, e.g. `-c 16384`:)
+#    llama-server -m ~/.cartograph/models/jina-embeddings-v2-base-code.Q4_K_M.gguf --port 8080 --embeddings &
+#    llama-server -m ~/.cartograph/models/qwen2.5-coder-3b-instruct-q4_k_m.gguf --port 8081 -c 16384 &
 
 # 6. Verify
 cartograph doctor /path/to/the/users/project

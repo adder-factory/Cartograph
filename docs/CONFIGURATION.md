@@ -170,10 +170,19 @@ because the default `--parallel` plus prompt cache overshoot the GPU budget:
   `cartograph_admin({action: "llm-tune", tier, concurrency})`) now also drives
   the backend's `--parallel N`, so lowering it reduces KV-slot and decode-buffer
   memory.
+- **Auto-sized context (`-c`)** — for chat-family tiers (`summarizeLlm`,
+  `localLlm`, `classifyLlm`, `askLlm`) cartograph automatically passes
+  `-c = (--parallel N) × 4096`, sized per machine with no config needed. llama.cpp
+  splits the total context across its parallel slots, so a tier launched without
+  `-c` would leave each slot too small for cartograph's own summary prompts and
+  large symbols would fail with an HTTP 400 "exceeds context". `embeddingLlm` /
+  `rerankerLlm` take no chat `-c` (sized by `--batch-size` / encoder-only).
 - **`llamaServerArgs`** — an array of extra flags appended verbatim to the start
-  command for that tier. Use it to cap prompt cache, context, or GPU offload
-  (`--cache-ram`, `-c`, `-ngl`, ...). An explicit `--parallel`/`-np` here
-  overrides the computed value entirely, leaving you in full control.
+  command for that tier. Use it to cap prompt cache or GPU offload (`--cache-ram`,
+  `-ngl`, ...), or to **override** the auto values: an explicit `--parallel`/`-np`
+  replaces the computed slot count (and suppresses the auto `-c`, since you then
+  own the slot math), and an explicit `-c`/`--ctx-size` replaces the auto-sized
+  context.
 
 ```json
 {

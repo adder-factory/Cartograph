@@ -133,14 +133,19 @@ export function detectedBackendsCheck(detected: readonly DetectedBackend[]): Che
 export function recommendedTuningCheck(): CheckResult {
   const hw = describeHardware();
   const t = recommendedTuning();
+  // Chat-family tiers get an auto-sized `-c = parallel × ctxPerSlot` so
+  // every scheduler slot fits cartograph's own summary prompts (issue #27).
+  const chatCtx = t.chat.llamaServerParallel * t.chat.ctxPerSlot;
+  const askCtx = t.ask.llamaServerParallel * t.ask.ctxPerSlot;
   const lines = [
     `Detected: ${hw}.`,
-    `Recommended \`llama-server --parallel N\` per tier:`,
+    `Recommended \`llama-server\` flags per tier (cartograph applies these automatically on \`backend start\`):`,
     `  embed :8080     → --parallel ${t.embed.llamaServerParallel}  (cartograph drives ${t.embed.cartographConcurrency} concurrent batches)`,
-    `  chat  :8081     → --parallel ${t.chat.llamaServerParallel}  (cartograph drives ${t.chat.cartographConcurrency})`,
-    `  ask   :8082     → --parallel ${t.ask.llamaServerParallel}  (cartograph drives ${t.ask.cartographConcurrency})`,
+    `  chat  :8081     → --parallel ${t.chat.llamaServerParallel} -c ${chatCtx}  (${t.chat.ctxPerSlot}/slot; cartograph drives ${t.chat.cartographConcurrency})`,
+    `  ask   :8082     → --parallel ${t.ask.llamaServerParallel} -c ${askCtx}  (${t.ask.ctxPerSlot}/slot; cartograph drives ${t.ask.cartographConcurrency})`,
     `  rerank :8083 (with ${LLAMA_SERVER_RERANK_FLAG}) → --parallel ${t.reranker.llamaServerParallel}  (cartograph drives ${t.reranker.cartographConcurrency})`,
-    'Increase `--parallel N` on your llama-server startup to saturate every slot; cartograph auto-matches outbound concurrency.',
+    "`cartograph backend start` sets these per machine; chat/ask also get an auto-sized `-c` so each slot fits cartograph's summary prompts " +
+      '(llama.cpp splits `-c` across `--parallel` slots). If you launch llama-server yourself, mirror the `-c` above; override either via `llamaServerArgs`.',
   ].join('\n');
   return { id: 'recommended-tuning', name: 'Recommended tuning', status: 'ok', detail: lines };
 }

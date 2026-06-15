@@ -77,10 +77,10 @@ vi.spyOn(llmSetupPlan, 'applyLlmSetupChoice').mockImplementation((async () => ({
 
 vi.spyOn(hardwareTuning, 'describeHardware').mockImplementation((() => '8-core test host') as never);
 vi.spyOn(hardwareTuning, 'recommendedTuning').mockImplementation((() => ({
-  embed: { llamaServerParallel: 2, cartographConcurrency: 2 },
-  chat: { llamaServerParallel: 1, cartographConcurrency: 1 },
-  ask: { llamaServerParallel: 1, cartographConcurrency: 1 },
-  reranker: { llamaServerParallel: 1, cartographConcurrency: 1 },
+  embed: { llamaServerParallel: 2, cartographConcurrency: 2, ctxPerSlot: 0 },
+  chat: { llamaServerParallel: 1, cartographConcurrency: 1, ctxPerSlot: 4096 },
+  ask: { llamaServerParallel: 1, cartographConcurrency: 1, ctxPerSlot: 4096 },
+  reranker: { llamaServerParallel: 1, cartographConcurrency: 1, ctxPerSlot: 0 },
 })) as never);
 
 function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
