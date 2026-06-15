@@ -74,6 +74,19 @@ export function summarizeDetailMessages(
     },
   ];
 
+  // Explicit "did nothing on purpose" signal so a non-interactive /
+  // piped run can't be mistaken for a silent no-op (issue #25): when
+  // there were zero eligible candidates the eager pass is already
+  // complete, and the remaining sub-100% tail summarises on demand.
+  if (result.candidates === 0) {
+    messages.push({
+      level: 'info',
+      message:
+        'Nothing to summarise — every eligible symbol already has an up-to-date summary. ' +
+        'The eager pass is complete; short / already-documented symbols are handled on demand when referenced.',
+    });
+  }
+
   const details: string[] = [];
   if (result.cacheHits > 0) details.push(`Cache hits: ${deps.formatNumber(result.cacheHits)}`);
   if (result.errors > 0) details.push(`Errors: ${deps.formatNumber(result.errors)}`);
