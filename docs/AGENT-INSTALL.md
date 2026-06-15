@@ -39,15 +39,33 @@ curl -fsSL https://raw.githubusercontent.com/adder-factory/cartograph/main/insta
 iwr https://raw.githubusercontent.com/adder-factory/cartograph/main/install.ps1 -useb | iex
 ```
 
-> **Installing from git with bun? Three traps (field report #2).** A
-> `bun add -g github:…` install used to abort its first index because
-> `web-tree-sitter.wasm` lived only next to built output; the runtime
-> now falls back to module resolution and finds the hoisted dependency
-> copy, so this works — but two bun behaviors still bite: `bun pm
-> trust` RE-EXTRACTS the package (wiping any hand-patched files), and
-> switching git refs in a global install can throw bun's
-> `DependencyLoop` until you `bun remove -g` the package first. The
-> standalone installer above avoids all three.
+> **Installing a Bun global from git? Use the `git+https` clone spec, not
+> the `github:` shorthand.** bun resolves `github:adder-factory/cartograph#<tag>`
+> through GitHub's tarball API (`api.github.com/.../tarball` → codeload),
+> which has been returning `504` consistently for this repo (issue #23).
+> The `git+https` form does a real `git clone` (reusing your existing
+> `gh`/git credential helper) and sidesteps the tarball API entirely:
+>
+> ```sh
+> bun add -g "git+https://github.com/adder-factory/cartograph.git#v1.1.5"
+> ```
+>
+> `cartograph upgrade --apply` re-pins a Bun global to this exact form (and
+> migrates an older `github:` pin onto it). The standalone `install.sh`
+> above — a checksum-verified GitHub **Release binary**, not a tarball —
+> also avoids codeload, and is the recommended non-source path.
+>
+> **Three further bun traps (field report #2):** an early `bun add -g`
+> install used to abort its first index because `web-tree-sitter.wasm`
+> lived only next to built output; the runtime now falls back to module
+> resolution and finds the hoisted dependency copy, so this works — but
+> `bun pm trust` RE-EXTRACTS the package (wiping any hand-patched files),
+> switching git refs in a global install can throw bun's `DependencyLoop`
+> until you `bun remove -g` the package first, and repeated `bun add -g`
+> with different ref specs can leave a duplicate `@adder-factory/cartograph`
+> key in the global manifest/lockfile (delete the lockfile + re-add, or
+> just let `cartograph upgrade --apply` own the re-pin). `install.sh`
+> avoids all of these.
 
 The one-command local setup initializes `.cartograph/`, writes supported local
 MCP configuration, indexes the repository, installs the managed git hooks, and

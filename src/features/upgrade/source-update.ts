@@ -22,6 +22,7 @@ import { errMsg } from '../../errors.js';
 import { gitWorktreeRoot, hasUncommittedChanges } from '../../git-utils.js';
 import {
   CARTOGRAPH_PACKAGE_NAME as PKG,
+  GIT_CLONE_INSTALL_REF,
   GITHUB_INSTALL_REF,
   RESTART_STEP,
   type UpgradeCheckResult,
@@ -81,8 +82,29 @@ function bunGlobalInstallDir(): string {
   return path.join(bunInstall, 'install', 'global');
 }
 
+/**
+ * True when `spec` is a cartograph install pinned to this repo, in
+ * either supported form: the current `git+https://….git[#<ref>]` clone
+ * spec, or the legacy `github:adder-factory/cartograph[#<ref>]` shorthand
+ * (each with or without a `#<tag>`). Both are re-pinnable in place; a
+ * re-pin migrates a legacy spec to the `git+https` form (issue #23 — the
+ * shorthand 504s on bun's tarball path).
+ *
+ * The match is boundary-anchored (exact, or ref + `#`) so a different
+ * repo that merely shares this one's prefix — e.g.
+ * `github:adder-factory/cartograph-other` — is NOT mistaken for ours.
+ */
+export function isRepinnableCartographSpec(spec: string): boolean {
+  return matchesInstallRef(spec, GIT_CLONE_INSTALL_REF) || matchesInstallRef(spec, GITHUB_INSTALL_REF);
+}
+
+function matchesInstallRef(spec: string, ref: string): boolean {
+  return spec === ref || spec.startsWith(`${ref}#`);
+}
+
 /** The cartograph dependency spec recorded in `<globalDir>/package.json`
- *  (e.g. `github:adder-factory/cartograph#v1.0.5`), or null. */
+ *  (e.g. `git+https://github.com/adder-factory/cartograph.git#v1.1.5`, or
+ *  the legacy `github:adder-factory/cartograph#v1.0.5`), or null. */
 function readBunGlobalSpec(globalDir: string): string | null {
   try {
     const parsed = JSON.parse(fs.readFileSync(path.join(globalDir, 'package.json'), 'utf-8')) as {
@@ -112,7 +134,7 @@ export function canRepinBunGlobal(packageRoot: string, globalDir: string = bunGl
   const root = realpathOrSelf(packageRoot);
   if (root !== globalNodeModules && !root.startsWith(globalNodeModules + path.sep)) return false;
   const spec = readBunGlobalSpec(globalDir);
-  return spec?.startsWith(GITHUB_INSTALL_REF) === true;
+  return spec != null && isRepinnableCartographSpec(spec);
 }
 
 /** Injectable Bun runner (tests pass a recorder). */
@@ -130,11 +152,16 @@ function defaultBunGlobalRun(args: string[]): void {
 }
 
 /**
- * Re-pin the Bun global install to `#v<latestVersion>`. Remove first —
- * `bun add -g` over an existing tag of the same package raises a Bun
- * `DependencyLoop` — then add the new tag. If the add fails, best-effort
- * restore the previous spec so the user isn't left with no cartograph,
- * then rethrow. Throws on failure (the caller maps it to `blocked`).
+ * Re-pin the Bun global install to `#v<latestVersion>` via the
+ * `git+https` clone spec ({@link GIT_CLONE_INSTALL_REF}) — which also
+ * migrates a legacy `github:` install onto the clone form that dodges
+ * bun's tarball-API 504s (issue #23). Remove first — `bun add -g` over
+ * an existing tag of the same package raises a Bun `DependencyLoop`, and
+ * the remove also clears any duplicate manifest key bun accumulated from
+ * earlier ref-spec churn — then add the new tag. If the add fails,
+ * best-effort restore the previous spec so the user isn't left with no
+ * cartograph, then rethrow. Throws on failure (the caller maps it to
+ * `blocked`).
  */
 export function runBunGlobalRepin(
   latestVersion: string,
@@ -144,7 +171,7 @@ export function runBunGlobalRepin(
   const previousSpec = readBunGlobalSpec(globalDir);
   runBun(['remove', '-g', PKG]);
   try {
-    runBun(['add', '-g', `${GITHUB_INSTALL_REF}#v${latestVersion}`]);
+    runBun(['add', '-g', `${GIT_CLONE_INSTALL_REF}#v${latestVersion}`]);
   } catch (addError) {
     bestEffortReadd(runBun, previousSpec);
     throw addError;

@@ -117,6 +117,10 @@ describe('cartograph_status — project-root surfacing', () => {
     expect(text).toMatch(new RegExp(`Project root.*\`${path.resolve(dir)}\``));
     expect(text).toMatch(/default/);
     expect(text).toMatch(/server CWD at startup/);
+    // The running version leads the header (issue #23) and, with no
+    // in-place upgrade under the test, the skew warning stays silent.
+    expect(text).toMatch(/\*\*Version:\*\* \d+\.\d+\.\d+/);
+    expect(text).not.toMatch(/Version skew/);
   });
 
   it('shows the project root labelled as "from `projectPath`" when projectPath is supplied', async () => {

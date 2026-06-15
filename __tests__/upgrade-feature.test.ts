@@ -6,12 +6,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   checkUpgrade,
   compareVersions,
+  detectVersionSkew,
   fetchLatestPublishedVersion,
   renderUpgradeCheck,
 } from '../src/features/upgrade/index.js';
 import {
   canRepinBunGlobal,
   detectInstallMethod,
+  isRepinnableCartographSpec,
   runBunGlobalRepin,
   runSourceUpgrade,
 } from '../src/features/upgrade/source-update.js';
@@ -51,7 +53,10 @@ describe('upgrade feature', () => {
     });
     const packagedSteps = packaged.nextSteps.join('\n');
     // The correct re-pin command, with the resolved version as the tag.
-    expect(packagedSteps).toContain('bun add -g github:adder-factory/cartograph#v0.8.0');
+    // git+https (real clone), NOT the github: shorthand whose tarball-API
+    // path 504s (issue #23).
+    expect(packagedSteps).toContain('bun add -g git+https://github.com/adder-factory/cartograph.git#v0.8.0');
+    expect(packagedSteps).not.toContain('github:adder-factory/cartograph');
     expect(packagedSteps).toContain('bun remove -g @adder-factory/cartograph');
     // Cartograph isn't on npm — never suggest npm, and `bun update -g`
     // can't move a pinned tag, so neither of the old footguns appears.
@@ -93,7 +98,7 @@ describe('upgrade feature', () => {
     expect(result.applied).toBe(false);
     expect(result.message).toContain('network down');
     const blockedSteps = result.nextSteps.join('\n');
-    expect(blockedSteps).toContain('bun add -g github:adder-factory/cartograph#v0.8.0');
+    expect(blockedSteps).toContain('bun add -g git+https://github.com/adder-factory/cartograph.git#v0.8.0');
     // Fallback to the standalone installer when the re-pin keeps failing.
     expect(blockedSteps).toContain('install.sh');
   });
@@ -108,6 +113,35 @@ describe('upgrade feature', () => {
 
     expect(result.status).toBe('unknown');
     expect(result.warning).toContain('offline');
+  });
+});
+
+describe('detectVersionSkew', () => {
+  it('flags a strictly newer on-disk version (in-place upgrade, server not restarted)', () => {
+    expect(detectVersionSkew('1.1.5', '1.1.6')).toEqual({ running: '1.1.5', onDisk: '1.1.6' });
+  });
+
+  it('stays silent when on-disk equals or trails the running version, or is unreadable', () => {
+    expect(detectVersionSkew('1.1.5', '1.1.5')).toBeNull();
+    expect(detectVersionSkew('1.1.6', '1.1.5')).toBeNull();
+    expect(detectVersionSkew('1.1.5', null)).toBeNull();
+  });
+});
+
+describe('isRepinnableCartographSpec', () => {
+  it('accepts both the git+https clone form and the legacy github: shorthand, tagged or not', () => {
+    expect(isRepinnableCartographSpec('git+https://github.com/adder-factory/cartograph.git#v1.1.5')).toBe(true);
+    expect(isRepinnableCartographSpec('git+https://github.com/adder-factory/cartograph.git')).toBe(true);
+    expect(isRepinnableCartographSpec('github:adder-factory/cartograph#v1.0.5')).toBe(true);
+    expect(isRepinnableCartographSpec('github:adder-factory/cartograph')).toBe(true);
+  });
+
+  it('rejects semver ranges, unrelated repos, and prefix look-alikes (boundary-anchored)', () => {
+    expect(isRepinnableCartographSpec('^1.0.0')).toBe(false);
+    expect(isRepinnableCartographSpec('github:someone/else#v1')).toBe(false);
+    expect(isRepinnableCartographSpec('git+https://github.com/someone/else.git#v1')).toBe(false);
+    // A different repo that merely shares this one's name prefix must NOT qualify.
+    expect(isRepinnableCartographSpec('github:adder-factory/cartograph-other#v1')).toBe(false);
   });
 });
 
@@ -151,8 +185,13 @@ describe('Bun-global re-pin (#1/#2 upgrade improvements)', () => {
     );
   }
 
-  it('detects a GitHub-tag Bun global as re-pinnable', () => {
+  it('detects a legacy github:-tag Bun global as re-pinnable (back-compat)', () => {
     writeManifest('github:adder-factory/cartograph#v1.0.5');
+    expect(canRepinBunGlobal(pkgRoot, dir)).toBe(true);
+  });
+
+  it('detects a git+https-tag Bun global as re-pinnable (current install form)', () => {
+    writeManifest('git+https://github.com/adder-factory/cartograph.git#v1.1.5');
     expect(canRepinBunGlobal(pkgRoot, dir)).toBe(true);
   });
 
@@ -177,13 +216,13 @@ describe('Bun-global re-pin (#1/#2 upgrade improvements)', () => {
     }
   });
 
-  it('removes then adds the new tag (the order that dodges the Bun dependency loop)', () => {
+  it('removes then re-adds via git+https, migrating a legacy github: pin off the 504-prone tarball path', () => {
     writeManifest('github:adder-factory/cartograph#v1.0.5');
     const calls: string[][] = [];
     runBunGlobalRepin('1.0.8', (args) => calls.push(args), dir);
     expect(calls).toEqual([
       ['remove', '-g', '@adder-factory/cartograph'],
-      ['add', '-g', 'github:adder-factory/cartograph#v1.0.8'],
+      ['add', '-g', 'git+https://github.com/adder-factory/cartograph.git#v1.0.8'],
     ]);
   });
 

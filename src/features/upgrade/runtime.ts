@@ -4,6 +4,26 @@ export type InstallMethodKind = 'source' | 'standalone' | 'package' | 'unknown';
 
 /** Package + GitHub coordinates for the printed re-pin commands. */
 export const CARTOGRAPH_PACKAGE_NAME = '@adder-factory/cartograph';
+
+/**
+ * The Bun-global install spec.
+ *
+ * `git+https://….git` (a real `git clone`) rather than the `github:org/repo`
+ * shorthand on purpose: bun resolves the shorthand through GitHub's tarball
+ * API (`api.github.com/repos/.../tarball/<ref>` → codeload), which has been
+ * returning `504` consistently for this repo (issue #23). The `git+https`
+ * form clones via git instead, reusing the user's existing git credential
+ * helper, and sidesteps the tarball API entirely. This is the string every
+ * re-pin/plan step emits.
+ */
+export const GIT_CLONE_INSTALL_REF = 'git+https://github.com/adder-factory/cartograph.git';
+
+/**
+ * Legacy `github:` shorthand. Retained ONLY so {@link
+ * canRepinBunGlobal} still recognises installs pinned with the old form
+ * as re-pinnable — a re-pin then migrates them to {@link
+ * GIT_CLONE_INSTALL_REF}. Never emit this in a new install command.
+ */
 export const GITHUB_INSTALL_REF = 'github:adder-factory/cartograph';
 
 /**
@@ -148,10 +168,11 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
 }
 
 /** The `bun add -g` ref for a given version, or a releases pointer when
- *  the version is unknown. */
+ *  the version is unknown. Always the `git+https` clone form — see
+ *  {@link GIT_CLONE_INSTALL_REF} for why not `github:`. */
 function bunGlobalRef(latestVersion: string | null): string {
-  if (latestVersion) return `${GITHUB_INSTALL_REF}#v${latestVersion}`;
-  return `${GITHUB_INSTALL_REF}#<latest tag — see https://github.com/adder-factory/cartograph/releases>`;
+  if (latestVersion) return `${GIT_CLONE_INSTALL_REF}#v${latestVersion}`;
+  return `${GIT_CLONE_INSTALL_REF}#<latest tag — see https://github.com/adder-factory/cartograph/releases>`;
 }
 
 /** The two-step Bun-global re-pin (remove first to dodge a Bun
@@ -237,6 +258,30 @@ function latestPackageUrl(packageName: string): string {
   const packagePath = encodeURIComponent(packageName).replace('%2F', '/');
   const url = new URL(`${packagePath}/latest`, `${NPM_REGISTRY_PROTOCOL}//${NPM_REGISTRY_HOST}`);
   return url.toString();
+}
+
+export interface VersionSkew {
+  /** Version this process loaded at startup (in-memory constant). */
+  running: string;
+  /** Version currently on disk — strictly newer than `running`. */
+  onDisk: string;
+}
+
+/**
+ * Detect an in-place upgrade the running process has not picked up: the
+ * on-disk package version is strictly NEWER than the version this process
+ * loaded at startup. Returns null when there is no skew (equal, older, or
+ * the disk version is unreadable) — the overwhelmingly common case.
+ *
+ * Surfaced by `cartograph_status` so an operator who ran `cartograph
+ * upgrade` sees a "restart me" hint instead of silently being served the
+ * old code (issue #23). A bare `<` (not `≤`) is deliberate: a same or
+ * lower on-disk version is normal and must not warn.
+ */
+export function detectVersionSkew(running: string, onDisk: string | null): VersionSkew | null {
+  if (!onDisk) return null;
+  if (compareVersions(onDisk, running) <= 0) return null;
+  return { running, onDisk };
 }
 
 export function compareVersions(a: string, b: string): number {
