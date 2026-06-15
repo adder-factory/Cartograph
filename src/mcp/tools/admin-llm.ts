@@ -12,12 +12,14 @@ import type { ToolCtx } from './types.js';
  * so an AI agent walking a user through cartograph install doesn't
  * need to drive the interactive @clack wizard.
  */
-export async function handleLlmPlan(_ctx: ToolCtx, _args: Record<string, unknown>): Promise<ToolOutcome> {
+export async function handleLlmPlan(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const { planLlmSetup } = await import('../../installer/llm-setup-plan.js');
   try {
-    const plan = await planLlmSetup();
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : ctx.defaultCg?.projectRoot;
+    const plan = await planLlmSetup(projectPath ? { projectPath } : {});
     const lines: string[] = ['## LLM setup plan', ''];
     appendDetectedBackends(lines, plan);
+    appendConfiguredLocalBackends(lines, plan);
     appendCloudChatAvailability(lines, plan.cloudChatAvailable);
     lines.push('', `**Recommended preset:** \`${plan.recommendedPresetId}\``, '', '**Available presets:**');
     for (const p of plan.presets) {
@@ -49,6 +51,34 @@ export function appendDetectedBackends(
   for (const b of plan.detectedBackends) {
     const modelHint = b.models.length > 0 ? `${b.models.length} models loaded` : 'no models loaded';
     lines.push(`- ${b.label} at \`${b.endpoint}\` (${modelHint})`);
+  }
+  lines.push('');
+}
+
+/**
+ * Surface configured-but-not-running local llama-server tiers so the
+ * agent can tell the user to *start* their backend rather than install
+ * a new one — the "installed but not running" case the bare "No
+ * backends detected" message hid (issue #25).
+ */
+export function appendConfiguredLocalBackends(
+  lines: string[],
+  plan: Awaited<ReturnType<typeof import('../../installer/llm-setup-plan.js')['planLlmSetup']>>,
+): void {
+  const lb = plan.localBackends;
+  if (!lb || lb.notRunning.length === 0) return;
+  const tiers = lb.notRunning
+    .map((b) => `${b.labels.join('/')} ${b.endpoint}${b.modelExists ? '' : ' ⚠ model file missing'}`)
+    .join(', ');
+  lines.push('', `**${lb.notRunning.length} configured local tier(s) not running:** ${tiers}`);
+  if (lb.startCommand && lb.llamaServerOnPath) {
+    lines.push(
+      `\`llama-server\` is installed — these are configured but not started. Run \`${lb.startCommand}\` to bring them up (no new preset needed).`,
+    );
+  } else if (lb.startCommand) {
+    lines.push(
+      '`llama-server` is not on PATH — install llama.cpp (`brew install llama.cpp`), then `cartograph backend start <project>`.',
+    );
   }
   lines.push('');
 }

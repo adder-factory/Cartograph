@@ -33,6 +33,7 @@ import { LLM_CONCURRENCY_BOUNDS, parseConcurrency } from '../../llm/concurrency.
 import { databaseConfigFromOptionInput, resolveDatabaseConfig } from '../../db/database-config.js';
 import {
   appendCloudChatAvailability,
+  appendConfiguredLocalBackends,
   appendDetectedBackends,
   buildOverrideAppliedReport,
   formatAppliedPresetLine,
@@ -1144,6 +1145,7 @@ export const __adminToolInternals = {
   formatEmbedPhaseLine,
   appendDetectedBackends,
   appendCloudChatAvailability,
+  appendConfiguredLocalBackends,
   formatAppliedPresetLine,
   buildOverrideAppliedReport,
 };

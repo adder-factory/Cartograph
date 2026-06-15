@@ -157,14 +157,33 @@ export interface SetupPlan {
   readonly presets: ReadonlyArray<SetupPreset>;
   /** Which preset id the planner would auto-pick (no user input). */
   readonly recommendedPresetId: SetupPresetId;
+  /** Project-configured local llama-server tiers and whether they are
+   *  currently running — lets `llm-plan` distinguish "no backend
+   *  installed" from "configured but not started" (issue #25). All
+   *  zero/empty when no `projectPath` was given or the project uses a
+   *  non-managed provider (Ollama / cloud / external). */
+  readonly localBackends: {
+    readonly configured: number;
+    readonly notRunning: ReadonlyArray<{
+      readonly labels: readonly string[];
+      readonly endpoint: string;
+      readonly modelExists: boolean;
+    }>;
+    readonly llamaServerOnPath: boolean;
+    readonly startCommand: string | null;
+  };
 }
 
 /** Top-level: scan, probe, build the plan. Pure-data return — no
  *  side effects on the project's config.json (use
  *  {@link applyLlmSetupChoice} for that). */
-export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<SetupPlan> {
+export async function planLlmSetup(opts: { modelsDir?: string; projectPath?: string } = {}): Promise<SetupPlan> {
   const modelsDir = opts.modelsDir ?? MODELS_DIR_DEFAULT;
-  const [claudeBin, detectedBackends] = await Promise.all([findOnPath('claude'), scanForLlmBackends()]);
+  const [claudeBin, detectedBackends, localBackends] = await Promise.all([
+    findOnPath('claude'),
+    scanForLlmBackends(),
+    detectConfiguredLocalBackends(opts.projectPath),
+  ]);
   const anthropicApiKey = typeof process.env['ANTHROPIC_API_KEY'] === 'string';
   const openAiApiKey = typeof process.env['OPENAI_API_KEY'] === 'string';
   const openRouterApiKey = typeof process.env['OPENROUTER_API_KEY'] === 'string';
@@ -197,7 +216,39 @@ export async function planLlmSetup(opts: { modelsDir?: string } = {}): Promise<S
     localGgufPresence,
     presets,
     recommendedPresetId,
+    localBackends,
   };
+}
+
+/**
+ * Inspect the project's configured local llama-server tiers (via the
+ * backend feature's own status probe) so `llm-plan` can say "configured
+ * but not running — run `cartograph backend start`" instead of "no
+ * backend, install one" (issue #25). Returns an all-empty summary when
+ * no projectPath is given, the project uses a non-managed provider, or
+ * anything throws — the hint is purely additive.
+ */
+async function detectConfiguredLocalBackends(projectPath: string | undefined): Promise<SetupPlan['localBackends']> {
+  const empty = { configured: 0, notRunning: [], llamaServerOnPath: false, startCommand: null } as const;
+  if (!projectPath) return empty;
+  try {
+    const { backendStatus } = await import('../features/backend/index.js');
+    const status = await backendStatus(projectPath);
+    const configRows = status.rows.filter((row) => row.origin === 'config');
+    if (configRows.length === 0) return empty;
+    const notRunning = configRows
+      .filter((row) => !row.endpointReachable)
+      .map((row) => ({ labels: [...row.spec.labels], endpoint: row.spec.endpoint, modelExists: row.modelExists }));
+    const llamaServerOnPath = (await findOnPath('llama-server')) !== null;
+    return {
+      configured: configRows.length,
+      notRunning,
+      llamaServerOnPath,
+      startCommand: notRunning.length > 0 ? `cartograph backend start ${projectPath}` : null,
+    };
+  } catch {
+    return empty;
+  }
 }
 
 function hasDetectedEndpoint(backends: readonly DetectedBackend[], endpoint: string): boolean {

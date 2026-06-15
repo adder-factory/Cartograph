@@ -4,11 +4,19 @@ import type { CliRequiredOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliRequiredOptionCommand;
 
+interface ConfiguredLocalBackends {
+  configured: number;
+  notRunning: ReadonlyArray<{ labels: readonly string[]; endpoint: string; modelExists: boolean }>;
+  llamaServerOnPath: boolean;
+  startCommand: string | null;
+}
+
 interface LlmSetupPlanModule {
-  planLlmSetup: () => Promise<{
+  planLlmSetup: (opts?: { projectPath?: string }) => Promise<{
     recommendedPresetId: string;
     detectedBackends: ReadonlyArray<{ label: string; endpoint: string; models: readonly string[] }>;
     presets: ReadonlyArray<{ id: string; summary: string }>;
+    localBackends: ConfiguredLocalBackends;
   }>;
   applyLlmSetupChoice: (opts: { projectRoot: string; preset: string }) => Promise<{
     applied: boolean;
@@ -55,14 +63,15 @@ export function registerAdminLlmSetupCommands(deps: AdminLlmSetupCommandDeps): v
 }
 
 function registerLlmPlanCommand(deps: AdminLlmSetupCommandDeps): void {
-  const { adminCmd, error, loadLlmSetupPlan, writeStdout } = deps;
+  const { adminCmd, error, loadLlmSetupPlan, resolveProjectPath, writeStdout } = deps;
   adminCmd
-    .command('llm-plan')
+    .command('llm-plan [path]')
     .description("Print agent-friendly LLM setup presets (mirrors cartograph_admin MCP tool with action='llm-plan')")
-    .action(async () => {
+    .action(async (pathArg: string | undefined) => {
       try {
+        const projectPath = resolveProjectPath(pathArg);
         const { planLlmSetup } = await loadLlmSetupPlan();
-        const plan = await planLlmSetup();
+        const plan = await planLlmSetup({ projectPath });
         writeStdout(`Recommended preset: ${plan.recommendedPresetId}\n`);
         writeStdout('\n');
         writeStdout('Detected backends:\n');
@@ -75,6 +84,7 @@ function registerLlmPlanCommand(deps: AdminLlmSetupCommandDeps): void {
             );
           }
         }
+        writeConfiguredLocalBackends(plan.localBackends, writeStdout);
         writeStdout('\n');
         writeStdout('Available presets:\n');
         for (const preset of plan.presets) {
@@ -85,6 +95,21 @@ function registerLlmPlanCommand(deps: AdminLlmSetupCommandDeps): void {
         process.exit(1);
       }
     });
+}
+
+/** Render configured-but-not-running local tiers so the CLI tells the
+ *  user to *start* their backend, not install a new one (issue #25). */
+function writeConfiguredLocalBackends(lb: ConfiguredLocalBackends | undefined, writeStdout: (m: string) => void): void {
+  if (!lb || lb.notRunning.length === 0) return;
+  const tiers = lb.notRunning
+    .map((b) => `${b.labels.join('/')} ${b.endpoint}${b.modelExists ? '' : ' (model file missing)'}`)
+    .join(', ');
+  writeStdout(`\n${lb.notRunning.length} configured local tier(s) not running: ${tiers}\n`);
+  if (lb.startCommand && lb.llamaServerOnPath) {
+    writeStdout(`  llama-server is installed — run \`${lb.startCommand}\` to start them (no new preset needed).\n`);
+  } else if (lb.startCommand) {
+    writeStdout('  llama-server is not on PATH — install llama.cpp, then `cartograph backend start <project>`.\n');
+  }
 }
 
 function registerLlmApplyCommand(deps: AdminLlmSetupCommandDeps): void {
