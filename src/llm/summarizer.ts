@@ -36,8 +36,9 @@ import {
   clearPriorityQueueForNode,
   recordPriorityQueueFailure,
 } from '../db/queries-summary-priority.js';
+import { clearSummarySkips, recordSummarySkip } from '../db/queries-summary-skips.js';
 import { type LlmClient, LlmEndpointError, BATCH_PARSE_FAILURE_LOG_CHARS } from './client.js';
-import { withTransientLlmRetry } from './retry-policy.js';
+import { isContextWindowError, withTransientLlmRetry } from './retry-policy.js';
 import { extractJsonArrayFromText } from './json-utils.js';
 import { logDebug, logWarn } from '../errors.js';
 import { validatePathWithinRootReal, stripReasoningTokens, compact } from '../utils.js';
@@ -225,6 +226,10 @@ interface SummarizerResult {
   cacheHits: number;
   /** Failures (timeout, network, server error). */
   errors: number;
+  /** Symbols skipped because their prompt exceeds the chat backend's
+   *  per-slot context (HTTP 400). Recorded so they stop re-attempting and
+   *  leave the "pending" count; cleared by `summarize --all`. See #27. */
+  skippedTooLarge: number;
   /** Lever C — candidates left un-summarised because the eager-limit
    *  was reached. They drain on demand via the priority queue. 0 when
    *  the pass ran uncapped or finished within budget. */
@@ -647,6 +652,9 @@ interface SummarizerCounters {
   generated: number;
   cacheHits: number;
   errors: number;
+  /** Symbols whose prompt exceeded the chat backend's per-slot context
+   *  (recorded in summary_skips; surfaced separately from `errors`). */
+  skippedTooLarge: number;
   next: number;
   /** Lever C — non-priority cache-MISS items claimed for generation.
    *  Checked-and-incremented synchronously (no `await` between), so
@@ -877,6 +885,37 @@ async function summaryTryBatchSummarize(ctx: SummarizerCallContext, batch: Pendi
 }
 
 /**
+ * Classify a per-item generation failure. A context-window 400 is
+ * deterministic — the body won't fit this backend's per-slot context, so
+ * re-attempting it every pass just re-fails and burns a call; record a
+ * skip instead so it leaves the candidate/pending set and surfaces as
+ * "too large" (issue #27; `summarize --all` clears these to retry after
+ * the backend is fixed). Anything else is a real failure: count it and
+ * track the priority-queue poison-eviction. Extracted from
+ * {@link summaryGenerateSingle} to keep that function under the
+ * cognitive-complexity threshold.
+ */
+function handleSingleGenerateError(ctx: SummarizerCallContext, item: PendingItem, err: unknown): void {
+  const { counters, queries } = ctx;
+  if (isContextWindowError(err)) {
+    recordSummarySkip(queries, { nodeId: item.sym.id, bodyHash: item.hash, reason: 'context_window' });
+    counters.skippedTooLarge++;
+    logDebug('Summarizer: skipped — prompt exceeds chat context', { node: item.sym.id, error: err.message });
+    return;
+  }
+  counters.errors++;
+  if (err instanceof LlmEndpointError) {
+    logDebug('Summarizer: endpoint error', { node: item.sym.id, error: err.message });
+  } else {
+    logWarn('Summarizer: unexpected error', { node: item.sym.id, error: String(err) });
+  }
+  // Track failure for poison-row eviction.
+  if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
+    logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
+  }
+}
+
+/**
  * Per-item summary generation via the chat backend.
  */
 async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingItem): Promise<void> {
@@ -899,16 +938,7 @@ async function summaryGenerateSingle(ctx: SummarizerCallContext, item: PendingIt
     if (options.signal?.aborted) return;
     summary = stripPreamble(stripReasoningTokens(result.text).trim().split('\n')[0]?.trim() ?? '');
   } catch (err) {
-    counters.errors++;
-    if (err instanceof LlmEndpointError) {
-      logDebug('Summarizer: endpoint error', { node: item.sym.id, error: err.message });
-    } else {
-      logWarn('Summarizer: unexpected error', { node: item.sym.id, error: String(err) });
-    }
-    // Track failure for poison-row eviction.
-    if (recordPriorityQueueFailure(queries, item.sym.id).evicted) {
-      logDebug('Summarizer: priority queue poison-evicted', { node: item.sym.id });
-    }
+    handleSingleGenerateError(ctx, item, err);
     counters.done++;
     options.onProgress?.(counters.done, total);
     return;
@@ -1106,6 +1136,14 @@ class SummarizerRun {
     // (2026-05-08 coverage audit).
     const docThreshold = options.existingDocstringCharThreshold ?? DEFAULT_DOC_CHAR_THRESHOLD;
     const floor = resolveBodyLineFloor(options);
+    const budget = resolveEagerBudget(options.eagerLimit);
+    // An uncapped pass (`summarize --all`) is the explicit "retry
+    // everything" request: drop persisted too-large skips so those
+    // symbols re-qualify as candidates (e.g. after the operator raised
+    // the backend's `-c` per the doctor warning, or the body changed).
+    // Capped/background passes keep the skips so they don't re-loop on
+    // bodies the current backend can't fit. See issue #27.
+    if (budget === Number.POSITIVE_INFINITY) clearSummarySkips(inputs.queries);
     const rawCandidates = getSummarizableNodes(inputs.queries, SUMMARIZABLE_KINDS, {
       minBodyLinesByKind: floor.minBodyLinesByKind,
       defaultMinBodyLines: floor.defaultMinBodyLines,
@@ -1126,9 +1164,8 @@ class SummarizerRun {
     // its smallest member position, and priority items occupy positions
     // 0..N_priority-1, so no non-priority cluster can sort ahead of them.
     const candidates = batchSize > 1 ? clusterCandidatesByCalls(inputs.queries, ordered) : ordered;
-    const budget = resolveEagerBudget(options.eagerLimit);
     this.workerState = {
-      counters: { done: 0, generated: 0, cacheHits: 0, errors: 0, next: 0, missesClaimed: 0 },
+      counters: { done: 0, generated: 0, cacheHits: 0, errors: 0, skippedTooLarge: 0, next: 0, missesClaimed: 0 },
       candidates,
       options,
       fileContentCache: new Map(),
@@ -1153,6 +1190,7 @@ class SummarizerRun {
       generated: counters.generated,
       cacheHits: counters.cacheHits,
       errors: counters.errors,
+      skippedTooLarge: counters.skippedTooLarge,
       deferred,
       durationMs: Date.now() - this.t0,
     };

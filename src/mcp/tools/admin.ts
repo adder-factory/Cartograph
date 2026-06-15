@@ -701,29 +701,54 @@ async function handleSummarizePhase(ctx: ToolCtx, args: Record<string, unknown>)
       ...(summarizeLimit === undefined ? {} : { eagerLimit: summarizeLimit }),
       ...progressOpts,
     });
-    const lines: string[] = [
-      `## Summarised ${result.generated} new symbol${result.generated === 1 ? '' : 's'} in ${(result.durationMs / 1000).toFixed(1)}s`,
-    ];
-    const details: string[] = [];
-    if (result.cacheHits > 0) details.push(`Cache hits: ${result.cacheHits}`);
-    if (result.errors > 0) details.push(`Errors: ${result.errors}`);
-    const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
-    if (skipped > 0) details.push(`Skipped: ${skipped}`);
-    if (details.length > 0) lines.push(`- ${details.join(' — ')}`);
-    // Lever C — surface the deferred tail so the caller knows the pass
-    // was capped (not failed); it drains on demand via intent-search.
-    if (result.deferred > 0) {
-      lines.push(
-        `- Deferred ${result.deferred} lower-priority symbols — they summarise on demand when ` +
-          `\`find mode:intent\` references them. Pass \`summarizeLimit: -1\` for a full pass.`,
-      );
-    }
-    const embedLine = formatEmbedPhaseLine(result.embed);
-    if (embedLine) lines.push(embedLine);
-    return ok(textResult(lines.join('\n')));
+    return ok(textResult(formatSummarizePhaseLines(result).join('\n')));
   } catch (error_) {
     return err(`Summarize failed: ${errMsg(error_)}`);
   }
+}
+
+/** Render the `summarize` action's result lines. Extracted from
+ *  {@link handleSummarizePhase} so that handler stays under the
+ *  complex_method biomarker threshold (the branch count lives here). */
+function formatSummarizePhaseLines(result: {
+  generated: number;
+  durationMs: number;
+  cacheHits: number;
+  errors: number;
+  candidates: number;
+  deferred: number;
+  skippedTooLarge?: number;
+  embed?: Parameters<typeof formatEmbedPhaseLine>[0];
+}): string[] {
+  const lines: string[] = [
+    `## Summarised ${result.generated} new symbol${result.generated === 1 ? '' : 's'} in ${(result.durationMs / 1000).toFixed(1)}s`,
+  ];
+  const details: string[] = [];
+  if (result.cacheHits > 0) details.push(`Cache hits: ${result.cacheHits}`);
+  if (result.errors > 0) details.push(`Errors: ${result.errors}`);
+  const tooLarge = result.skippedTooLarge ?? 0;
+  const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred - tooLarge;
+  if (skipped > 0) details.push(`Skipped: ${skipped}`);
+  if (details.length > 0) lines.push(`- ${details.join(' — ')}`);
+  // #27 — symbols whose prompt exceeds the backend's per-slot context are
+  // recorded (not re-attempted); point the operator at the fix + retry.
+  if (tooLarge > 0) {
+    lines.push(
+      `- ${tooLarge} skipped — prompt exceeds the chat backend's per-slot context. ` +
+        'Raise `-c` or lower `--parallel` (see `cartograph doctor`), then `summarizeLimit: -1` to retry.',
+    );
+  }
+  // Lever C — surface the deferred tail so the caller knows the pass
+  // was capped (not failed); it drains on demand via intent-search.
+  if (result.deferred > 0) {
+    lines.push(
+      `- Deferred ${result.deferred} lower-priority symbols — they summarise on demand when ` +
+        `\`find mode:intent\` references them. Pass \`summarizeLimit: -1\` for a full pass.`,
+    );
+  }
+  const embedLine = formatEmbedPhaseLine(result.embed);
+  if (embedLine) lines.push(embedLine);
+  return lines;
 }
 
 async function handleEmbedPhase(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {

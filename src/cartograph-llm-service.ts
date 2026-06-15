@@ -349,6 +349,10 @@ interface SummarizeAllResult {
   generated: number;
   cacheHits: number;
   errors: number;
+  /** Symbols skipped because their prompt exceeds the chat backend's
+   *  per-slot context (HTTP 400); recorded so they stop re-attempting.
+   *  Cleared by `summarize --all`. See issue #27. */
+  skippedTooLarge: number;
   /** Lever C — candidates left for the demand-driven priority queue
    *  because the eager-limit was reached. 0 when the pass ran uncapped
    *  or finished within budget. */

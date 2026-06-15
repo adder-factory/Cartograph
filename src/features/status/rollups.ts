@@ -12,6 +12,7 @@ import {
   getWeightedSummaryCoverage,
   type SummaryBreakdown,
 } from '../../db/queries-summaries.js';
+import { countCurrentSummarySkips } from '../../db/queries-summary-skips.js';
 import { logWarn } from '../../errors.js';
 import { isShallowClone } from '../../git-utils.js';
 import type Cartograph from '../../index.js';
@@ -310,8 +311,16 @@ function readSummariesLens(cg: Cartograph, opts: LensOpts): LensReading {
       ? ` _(centrality-weighted: ${Math.round(weighted.weightedRatio * 100)}%)_`
       : '';
   const reuseSuffix = summaryReuseCached > 0 ? ` — ${summaryReuseCached} reuse-cached` : '';
+  // #27 — symbols recorded as too large for the chat backend's per-slot
+  // context. Surfaced as a distinct bucket so they read as "needs a backend
+  // fix" rather than swelling the retryable `pending` count.
+  const tooLarge = safeCall(() => countCurrentSummarySkips(cg.queries)) ?? 0;
+  const tooLargeSuffix =
+    tooLarge > 0
+      ? ` — ${tooLarge} skipped (prompt exceeds chat context; raise \`-c\`/lower \`--parallel\`, see \`doctor\`)`
+      : '';
   let line =
-    `**Summaries:** ${sumCov.summarised} / ${sumCov.total} (${pct}%)${weightedSuffix}${reuseSuffix}${action}` +
+    `**Summaries:** ${sumCov.summarised} / ${sumCov.total} (${pct}%)${weightedSuffix}${reuseSuffix}${tooLargeSuffix}${action}` +
     summariesBackgroundSuffix(cg);
   if (opts.summaryBreakdown) {
     const breakdown = safeCall(() =>

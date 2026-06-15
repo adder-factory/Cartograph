@@ -993,6 +993,20 @@ CREATE TABLE IF NOT EXISTS summary_priority_queue (
 CREATE INDEX IF NOT EXISTS idx_summary_priority_enqueued
     ON summary_priority_queue(enqueued_at DESC);
 
+-- Symbols whose summary prompt exceeded the chat backend's per-slot
+-- context (HTTP 400). Recorded so the summariser stops re-attempting the
+-- same body every pass and status reports them as "skipped — too large"
+-- instead of a stuck "pending". Stamped with the failing body_hash so a
+-- body change re-qualifies the symbol; `summarize --all` clears the table
+-- to retry everything. Cascade-deleted with parent node. See issue #27.
+CREATE TABLE IF NOT EXISTS summary_skips (
+    node_id TEXT PRIMARY KEY,
+    body_hash TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    recorded_at INTEGER NOT NULL,
+    FOREIGN KEY (node_id) REFERENCES nodes(id) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
 -- Stage 7 #2 — classified intent for each commit SHA. Looked up by
 -- SHA when the cochange / history paths want to filter / break down
 -- co-changes by intent (feat / fix / refactor / perf / test / docs /
