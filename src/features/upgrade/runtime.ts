@@ -1,4 +1,8 @@
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { errMsg } from '../../errors.js';
+
+const execFileAsync = promisify(execFile);
 
 export type InstallMethodKind = 'source' | 'standalone' | 'package' | 'unknown';
 
@@ -71,6 +75,15 @@ const VERSION_FETCH_TIMEOUT_MS = 10_000;
 
 const GITHUB_API_BASE = 'https://api.github.com';
 const GITHUB_RELEASES_LATEST_PATH = '/repos/adder-factory/cartograph/releases/latest';
+
+/** Git transport endpoint for tag listing. The same host `git+https`
+ *  installs clone from — and, critically, a DIFFERENT service from
+ *  `api.github.com`, which has been intermittently 504-ing for this repo
+ *  (issue #23 follow-up). `git ls-remote` here stays up when the REST API
+ *  does not. */
+const GIT_REMOTE_URL = 'https://github.com/adder-factory/cartograph.git';
+const GIT_LS_REMOTE_TIMEOUT_MS = 15_000;
+const GIT_LS_REMOTE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
 const STANDALONE_INSTALLER_URL = 'https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh';
 
@@ -227,31 +240,89 @@ export async function fetchLatestGithubReleaseVersion(): Promise<string> {
   const tag = parsed.tag_name.trim();
   // Guard the shape: a non-version tag (e.g. `nightly-2026-06-12`)
   // would silently compare as 0.0.0 and report the user as current.
-  if (!/^v?\d+\.\d+/.test(tag)) {
+  // Require all three semver components, matching the invariant the git
+  // path enforces (pickLatestSemverTag), so the two channels agree on
+  // what counts as a release tag.
+  if (!/^v?\d+\.\d+\.\d+/.test(tag)) {
     throw new Error(`GitHub release tag "${tag}" is not a version tag`);
   }
   return tag.replace(/^v/, '');
 }
 
+/** Injectable `git ls-remote` runner — returns its raw stdout. Tests pass
+ *  canned output so the lookup is exercised without git or the network. */
+export type GitLsRemoteRunner = (remoteUrl: string) => Promise<string>;
+
+async function defaultGitLsRemote(remoteUrl: string): Promise<string> {
+  // `--refs` drops the peeled `^{}` rows; `--end-of-options` keeps the
+  // constant URL from ever being parsed as a flag (option-injection
+  // hygiene, matching the rest of the upgrade git plumbing).
+  const { stdout } = await execFileAsync('git', ['ls-remote', '--tags', '--refs', '--end-of-options', remoteUrl], {
+    timeout: GIT_LS_REMOTE_TIMEOUT_MS,
+    maxBuffer: GIT_LS_REMOTE_MAX_BUFFER_BYTES,
+  });
+  return stdout;
+}
+
+/** Highest stable `vMAJOR.MINOR.PATCH` tag in `git ls-remote --tags`
+ *  output, `v`-prefix stripped — or null when none parse. Pre-release
+ *  tags (`v1.2.0-rc1`) and non-semver tags (`nightly-…`) are ignored, so
+ *  this mirrors what the GitHub `releases/latest` endpoint would return. */
+function pickLatestSemverTag(lsRemoteOutput: string): string | null {
+  let best: string | null = null;
+  for (const line of lsRemoteOutput.split('\n')) {
+    const captured = /refs\/tags\/(v?\d+\.\d+\.\d+)\s*$/.exec(line.trim())?.[1];
+    if (!captured) continue;
+    const version = captured.replace(/^v/, '');
+    if (best === null || compareVersions(version, best) > 0) best = version;
+  }
+  return best;
+}
+
 /**
- * Latest published version, GitHub releases first: GitHub Releases is
- * Cartograph's canonical release channel (binaries + install.sh), and
- * the package is not on npm — npm-only lookups always 404'd for
- * package/standalone installs. npm stays as the fallback so a future
- * npm publish needs no code change here.
+ * Latest released version via the git transport — `git ls-remote --tags`
+ * against the repo, picking the highest stable semver tag. This is the
+ * PRIMARY lookup (see {@link fetchLatestPublishedVersion}) because it does
+ * not touch `api.github.com`, which has been 504-ing for this repo while
+ * the git endpoint stays up. Throws when git is missing, the remote is
+ * unreachable, or no semver tag is found — the caller then falls back to
+ * the REST API.
  */
-export async function fetchLatestPublishedVersion(): Promise<string> {
-  try {
-    return await fetchLatestGithubReleaseVersion();
-  } catch (githubError) {
+export async function fetchLatestGitTagVersion(
+  runLsRemote: GitLsRemoteRunner = defaultGitLsRemote,
+  remoteUrl: string = GIT_REMOTE_URL,
+): Promise<string> {
+  const version = pickLatestSemverTag(await runLsRemote(remoteUrl));
+  if (!version) throw new Error('git ls-remote returned no semver tags');
+  return version;
+}
+
+/**
+ * Latest published version. Tries the git transport first
+ * ({@link fetchLatestGitTagVersion}) because `api.github.com` has been
+ * intermittently 504-ing for this repo and `git ls-remote` is a separate
+ * service that stays up; then the GitHub releases REST API (canonical
+ * channel: binaries + install.sh); then npm as a no-op-today fallback so
+ * a future npm publish needs no change here. The error aggregates all
+ * three failures so a fully-offline check reports every channel it tried.
+ */
+export async function fetchLatestPublishedVersion(
+  fetchGitTag: () => Promise<string> = () => fetchLatestGitTagVersion(),
+): Promise<string> {
+  const channels: ReadonlyArray<readonly [string, () => Promise<string>]> = [
+    ['git ls-remote', fetchGitTag],
+    ['GitHub releases API', fetchLatestGithubReleaseVersion],
+    ['npm registry', () => fetchLatestNpmVersion()],
+  ];
+  const errors: string[] = [];
+  for (const [label, fetcher] of channels) {
     try {
-      return await fetchLatestNpmVersion();
-    } catch (npmError) {
-      const githubMessage = githubError instanceof Error ? githubError.message : String(githubError);
-      const npmMessage = npmError instanceof Error ? npmError.message : String(npmError);
-      throw new Error(`${githubMessage}; ${npmMessage}`);
+      return await fetcher();
+    } catch (error) {
+      errors.push(`${label}: ${errMsg(error)}`);
     }
   }
+  throw new Error(`Could not resolve the latest published version — ${errors.join('; ')}`);
 }
 
 function latestPackageUrl(packageName: string): string {

@@ -7,6 +7,7 @@ import {
   checkUpgrade,
   compareVersions,
   detectVersionSkew,
+  fetchLatestGitTagVersion,
   fetchLatestPublishedVersion,
   renderUpgradeCheck,
 } from '../src/features/upgrade/index.js';
@@ -440,29 +441,71 @@ describe('source self-update (real git fixtures)', () => {
   });
 });
 
+describe('fetchLatestGitTagVersion (git transport — sidesteps the flaky REST API)', () => {
+  // A realistic `git ls-remote --tags --refs` dump: <sha>\trefs/tags/<name>.
+  const SAMPLE_LS_REMOTE = [
+    'a1b2c3d\trefs/tags/v1.0.0',
+    'd4e5f6a\trefs/tags/v1.1.5',
+    '99aa88b\trefs/tags/v1.1.6',
+    'beef001\trefs/tags/v1.2.0-rc1', // pre-release — excluded, mirrors releases/latest
+    'cafe112\trefs/tags/nightly-2026-06-15', // non-semver — excluded
+  ].join('\n');
+
+  it('picks the highest stable semver tag and strips the v prefix', async () => {
+    await expect(fetchLatestGitTagVersion(async () => SAMPLE_LS_REMOTE)).resolves.toBe('1.1.6');
+  });
+
+  it('returns the max regardless of line order, not the last line seen', async () => {
+    const reordered = SAMPLE_LS_REMOTE.split('\n').reverse().join('\n');
+    await expect(fetchLatestGitTagVersion(async () => reordered)).resolves.toBe('1.1.6');
+  });
+
+  it('throws when no stable semver tag is present, so the caller falls through', async () => {
+    await expect(
+      fetchLatestGitTagVersion(async () => 'x\trefs/tags/v2.0.0-rc1\nz\trefs/tags/nightly\n'),
+    ).rejects.toThrow(/no semver tags/);
+  });
+});
+
 describe('fetchLatestPublishedVersion', () => {
   const realFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = realFetch;
   });
+  const gitUnavailable = async (): Promise<string> => {
+    throw new Error('git unavailable');
+  };
 
-  it('prefers GitHub releases and strips the tag v-prefix', async () => {
+  it('prefers git ls-remote and never touches the REST API when git answers', async () => {
+    let fetchCalled = false;
+    globalThis.fetch = (async () => {
+      fetchCalled = true;
+      return new Response('{}', { status: 500 });
+    }) as typeof fetch;
+
+    await expect(fetchLatestPublishedVersion(async () => '9.9.9')).resolves.toBe('9.9.9');
+    expect(fetchCalled).toBe(false);
+  });
+
+  it('falls back to the GitHub releases API when git ls-remote fails', async () => {
     globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
       expect(String(url)).toContain('api.github.com');
       return new Response(JSON.stringify({ tag_name: 'v9.9.9' }), { status: 200 });
     }) as typeof fetch;
 
-    await expect(fetchLatestPublishedVersion()).resolves.toBe('9.9.9');
+    await expect(fetchLatestPublishedVersion(gitUnavailable)).resolves.toBe('9.9.9');
   });
 
-  it('falls back to npm when GitHub fails and combines both errors when neither answers', async () => {
+  it('falls back to npm, then aggregates every channel error when nothing answers', async () => {
     globalThis.fetch = (async (url: Parameters<typeof fetch>[0]) => {
       if (String(url).includes('api.github.com')) return new Response('{}', { status: 404 });
       return new Response(JSON.stringify({ version: '8.8.8' }), { status: 200 });
     }) as typeof fetch;
-    await expect(fetchLatestPublishedVersion()).resolves.toBe('8.8.8');
+    await expect(fetchLatestPublishedVersion(gitUnavailable)).resolves.toBe('8.8.8');
 
     globalThis.fetch = (async () => new Response('{}', { status: 500 })) as typeof fetch;
-    await expect(fetchLatestPublishedVersion()).rejects.toThrow(/GitHub releases API.*; npm registry/);
+    await expect(fetchLatestPublishedVersion(gitUnavailable)).rejects.toThrow(
+      /git ls-remote.*GitHub releases API.*npm registry/,
+    );
   });
 });
