@@ -102,6 +102,14 @@ describe('buildBackendProcessSpecs — per-tier llama-server tuning (issue #24)'
     expect(args[args.indexOf('-c') + 1]).toBe('1024');
   });
 
+  it('lets a user `--ctx-size` (long form) in llamaServerArgs override the auto-sized one', () => {
+    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2, llamaServerArgs: ['--ctx-size', '1024'] }));
+    const args = specs[0]!.args;
+    // long-flag form suppresses the auto `-c` too
+    expect(args).not.toContain('-c');
+    expect(args.slice(-2)).toEqual(['--ctx-size', '1024']);
+  });
+
   it('treats the `--ctx_size` underscore alias as a user-pinned context (no duplicate `-c`)', () => {
     const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2, llamaServerArgs: ['--ctx_size', '2048'] }));
     const args = specs[0]!.args;
