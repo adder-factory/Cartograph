@@ -155,7 +155,7 @@ export function backendStartCommandsCheck(llm: Record<string, unknown> | null): 
     detail: [
       'Managed start command: `cartograph backend start <project>`.',
       'Log command: `cartograph backend logs <project> --tier <embed|summarize|local|ask|rerank>`.',
-      'Configured local llama-server commands (one process per unique endpoint/model):',
+      'Configured local llama-server commands (one process per unique local endpoint):',
       ...commands.map((cmd) => `  ${cmd}`),
     ].join('\n'),
   };
@@ -169,7 +169,24 @@ export async function backendLifecycleCheck(
   const status = await backendStatus(projectPath);
   if (status.rows.length === 0) return null;
 
-  const missing = status.rows.filter((row) => !row.modelExists);
+  // Orphan rows describe processes on endpoints no longer in config, so
+  // the missing-model / stale / starting checks below — which speak to
+  // CURRENTLY-configured tiers — must ignore them (an orphan's old GGUF
+  // path being gone is not a "configured model missing" problem). They
+  // get their own check instead.
+  const configRows = status.rows.filter((row) => row.origin === 'config');
+  const orphans = status.rows.filter((row) => row.origin === 'orphan' && row.pidAlive);
+  if (orphans.length > 0) {
+    return {
+      id: 'backend-lifecycle',
+      name: 'Backend lifecycle',
+      status: 'warn',
+      detail: `${orphans.length} orphaned backend process${orphans.length === 1 ? '' : 'es'} bound to a port no longer in config.`,
+      remediation: `Run \`cartograph backend stop ${projectPath}\` to stop them and free their (GPU) memory.`,
+    };
+  }
+
+  const missing = configRows.filter((row) => !row.modelExists);
   if (missing.length > 0) {
     return {
       id: 'backend-lifecycle',
@@ -180,7 +197,7 @@ export async function backendLifecycleCheck(
     };
   }
 
-  const stale = status.rows.filter((row) => row.pidRecord !== null && !row.pidAlive);
+  const stale = configRows.filter((row) => row.pidRecord !== null && !row.pidAlive);
   if (stale.length > 0) {
     return {
       id: 'backend-lifecycle',
@@ -191,7 +208,7 @@ export async function backendLifecycleCheck(
     };
   }
 
-  const starting = status.rows.filter((row) => row.state === 'starting');
+  const starting = configRows.filter((row) => row.state === 'starting');
   if (starting.length > 0) {
     return {
       id: 'backend-lifecycle',
@@ -203,7 +220,7 @@ export async function backendLifecycleCheck(
   }
 
   const counts = new Map<string, number>();
-  for (const row of status.rows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
+  for (const row of configRows) counts.set(row.state, (counts.get(row.state) ?? 0) + 1);
   const summary = [...counts].map(([state, count]) => `${count} ${state}`).join(', ');
   return {
     id: 'backend-lifecycle',

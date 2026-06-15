@@ -262,7 +262,8 @@ export function buildOverrideAppliedReport(args: OverrideAppliedReportArgs): str
     `**Backup:** \`${args.backupPath}\``,
     '',
     `Takes effect on the next embed / summarize / rerank pass. ` +
-      `To match this on the backend side, restart the corresponding llama-server with \`--parallel ${args.concurrency}\`.`,
+      `\`cartograph backend start\` now passes \`--parallel ${args.concurrency}\` for this tier automatically; ` +
+      `if you launch llama-server yourself, restart it with \`--parallel ${args.concurrency}\`.`,
   ].join('\n');
 }
 
@@ -290,7 +291,8 @@ async function renderLlmTuneReport(args: RenderLlmTuneReportArgs): Promise<ToolO
     `| reranker (bge, :8083 --reranking)  | ${args.tuning.reranker.llamaServerParallel} | ${args.tuning.reranker.cartographConcurrency} | ${currentOverrides['reranker'] ?? '(none)'} |`,
     '',
     '**To apply a manual override:** call `cartograph_admin({action: "llm-tune", projectPath: "<abs>", tier: "<embed|chat|ask|reranker>", concurrency: N})`. ',
-    'To match on the backend side, restart the corresponding llama-server with `--parallel N`.',
+    'A `cartograph backend start`-managed llama-server picks up the override as its `--parallel N` automatically; if you launch llama-server yourself, restart it with `--parallel N`. ',
+    'For memory-/context-tuning beyond parallelism (e.g. `--cache-ram`, `-c`, `-ngl`), set `llamaServerArgs` on the tier in `.cartograph/config.json`.',
   ];
   return ok(textResult(lines.join('\n')));
 }
