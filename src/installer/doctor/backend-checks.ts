@@ -247,7 +247,7 @@ export async function chatContextBudgetCheck(llm: Record<string, unknown> | null
   const byEndpoint = new Map<string, string[]>();
   for (const [tierKey, label] of CHAT_FAMILY_TIER_LABELS) {
     const block = llm[tierKey] as Record<string, unknown> | undefined;
-    if (!block || block['provider'] !== 'openai-compat') continue;
+    if (block?.['provider'] !== 'openai-compat') continue;
     const endpoint = block['endpoint'];
     if (typeof endpoint !== 'string' || !isLocalEndpoint(endpoint)) continue;
     const base = normaliseEndpoint(endpoint);
