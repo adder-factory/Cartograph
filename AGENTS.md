@@ -36,6 +36,19 @@ relevant test set; broaden to full tests or health checks when touching
 shared behavior, public CLI/MCP contracts, indexing, extraction, or LLM
 flows.
 
+## Code search order
+
+When searching or navigating this codebase, use the highest-signal tool first
+and fall back only when it can't answer:
+
+1. **Cartograph (codegraph) first** — its indexed graph for symbols, callers/
+   callees/impact, references, and structure (`cartograph_find`,
+   `cartograph_graph`, `cartograph_files`, `cartograph_node`, … via MCP, or
+   `cartograph <cmd>` from the CLI). Reach for this before any text search.
+2. **`rg` (ripgrep) next** — for fast literal/regex content search when you need
+   raw text or Cartograph returns nothing.
+3. **`grep` last** — only when `rg` is unavailable.
+
 ## Reviewer agent
 
 This repo ships a project-checked-in **reviewer agent** at
