@@ -158,3 +158,39 @@ cloud embedding provider if you want semantic search:
 
 Any other OpenAI-compatible cloud (together.ai, fireworks.ai, groq, ...) works
 through the generic `cloud-openai-compat` template with an explicit `apiKey`.
+
+### Tuning a managed local llama-server
+
+`cartograph backend start` generates one `llama-server` process per unique local
+endpoint. Two per-tier knobs control the generated command line — useful when a
+large chat model loads but every decode hits a Metal/VRAM out-of-memory error
+because the default `--parallel` plus prompt cache overshoot the GPU budget:
+
+- **`concurrency`** — the cartograph-side concurrency override (also set via
+  `cartograph_admin({action: "llm-tune", tier, concurrency})`) now also drives
+  the backend's `--parallel N`, so lowering it reduces KV-slot and decode-buffer
+  memory.
+- **`llamaServerArgs`** — an array of extra flags appended verbatim to the start
+  command for that tier. Use it to cap prompt cache, context, or GPU offload
+  (`--cache-ram`, `-c`, `-ngl`, ...). An explicit `--parallel`/`-np` here
+  overrides the computed value entirely, leaving you in full control.
+
+```json
+{
+  "llm": {
+    "summarizeLlm": {
+      "provider": "openai-compat",
+      "endpoint": "http://localhost:8081",
+      "model": "/abs/path/to/chat-30b.Q4_K_M.gguf",
+      "concurrency": 1,
+      "llamaServerArgs": ["--cache-ram", "1024", "-c", "8192"]
+    }
+  }
+}
+```
+
+Because a managed backend is now identified by its **endpoint** (a port hosts one
+process), changing a tier's model or `llamaServerArgs` no longer orphans the
+running `llama-server`: `cartograph backend status`/`stop` keep tracking it by
+port. If you move a tier to a different port, the process bound to the old port
+is surfaced as `orphaned` so `cartograph backend stop` can reclaim it.

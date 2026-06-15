@@ -90,6 +90,11 @@ export type BackendRuntimeState = 'running' | 'starting' | 'external' | 'stopped
 
 export interface BackendStatusRow {
   readonly spec: BackendProcessSpec;
+  /** `config` — derived from a currently-configured tier. `orphan` —
+   *  a pid file left in the state dir whose endpoint is no longer in
+   *  config (e.g. after a tier's endpoint changed); surfaced so `stop`
+   *  can reclaim the still-running process instead of stranding it. */
+  readonly origin: 'config' | 'orphan';
   readonly pidFilePath: string;
   readonly logPath: string;
   readonly pidRecord: BackendPidFile | null;
@@ -192,49 +197,16 @@ export function buildBackendProcessSpecs(
   const command = options.bin ?? 'llama-server';
 
   for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const cfg = block as Record<string, unknown>;
-    if (cfg['provider'] !== 'openai-compat') continue;
-    const model = cfg['model'];
-    const endpoint = cfg['endpoint'];
-    if (typeof model !== 'string' || typeof endpoint !== 'string') continue;
-    if (!path.isAbsolute(model)) continue;
-
-    const parsed = parseLocalEndpoint(endpoint);
-    if (!parsed) continue;
-    const extraArgs = llamaServerExtraArgsForTier(tier);
-    const key = `${normaliseEndpoint(endpoint)}\0${model}\0${extraArgs.join('\0')}`;
-    const existing = specs.get(key);
+    const built = buildTierBackendSpec(tier, llm[tier], { command, tuning });
+    if (!built) continue;
+    // A managed backend's identity (its dedup `key`) is its endpoint
+    // PLUS the stable per-tier-kind mode flags — see `buildTierBackendSpec`.
+    const existing = specs.get(built.key);
     if (existing) {
-      existing.labels.push(llmTierLabel(tier));
+      existing.labels.push(built.label);
       continue;
     }
-    const labels = [llmTierLabel(tier)];
-    const parallel = llamaServerParallelForTier(tuning, tier);
-    const args = [
-      '-m',
-      model,
-      '--host',
-      parsed.host,
-      '--port',
-      parsed.port,
-      ...extraArgs,
-      '--parallel',
-      String(parallel),
-    ];
-    specs.set(key, {
-      id: backendSpecId(endpoint, model, extraArgs),
-      labels,
-      endpoint: normaliseEndpoint(endpoint),
-      modelPath: model,
-      host: parsed.host,
-      port: parsed.port,
-      parallel,
-      extraArgs,
-      command,
-      args,
-    });
+    specs.set(built.key, built.spec);
   }
 
   return [...specs.values()].map((spec) => ({ ...spec, labels: [...spec.labels] }));
@@ -242,6 +214,69 @@ export function buildBackendProcessSpecs(
 
 interface MutableBackendProcessSpec extends Omit<BackendProcessSpec, 'labels'> {
   readonly labels: string[];
+}
+
+/**
+ * Validate one LLM tier block and, if it describes a managed local
+ * llama-server, build its process spec + dedup key.
+ *
+ * The dedup key / `backendSpecId` are the endpoint PLUS the stable
+ * per-tier-kind mode flags (`--embeddings` / `--reranking`) — but NOT
+ * the model, `llamaServerArgs`, or concurrency, all of which a user can
+ * change. Excluding those mutable bits is what lets a later model/flag
+ * change still resolve the same pid file (see `pidRecordMatchesSpec`)
+ * instead of orphaning the live process; keeping the mode flags in
+ * keeps an embed/rerank tier that shares a port with chat a distinct
+ * process (different llama-server mode) rather than silently merging
+ * into chat and dropping `--embeddings`.
+ */
+function buildTierBackendSpec(
+  tier: LlmTierKey,
+  block: unknown,
+  ctx: { command: string; tuning: ReturnType<typeof recommendedTuning> },
+): { key: string; label: string; spec: MutableBackendProcessSpec } | null {
+  if (typeof block !== 'object' || block === null) return null;
+  const cfg = block as Record<string, unknown>;
+  if (cfg['provider'] !== 'openai-compat') return null;
+  const model = cfg['model'];
+  const endpoint = cfg['endpoint'];
+  if (typeof model !== 'string' || typeof endpoint !== 'string') return null;
+  if (!path.isAbsolute(model)) return null;
+  const parsed = parseLocalEndpoint(endpoint);
+  if (!parsed) return null;
+
+  const extraArgs = llamaServerExtraArgsForTier(tier);
+  const passthrough = llamaServerPassthroughArgs(cfg);
+  const parallel = resolveTierParallel(ctx.tuning, tier, cfg);
+  const args = [
+    '-m',
+    model,
+    '--host',
+    parsed.host,
+    '--port',
+    parsed.port,
+    ...extraArgs,
+    // A user-pinned `--parallel`/`-np` in `llamaServerArgs` wins — skip
+    // the computed one so the passthrough stays authoritative.
+    ...(passthroughHasParallelFlag(passthrough) ? [] : ['--parallel', String(parallel)]),
+    ...passthrough,
+  ];
+  return {
+    key: `${normaliseEndpoint(endpoint)}\0${extraArgs.join('\0')}`,
+    label: llmTierLabel(tier),
+    spec: {
+      id: backendSpecId(endpoint, extraArgs),
+      labels: [llmTierLabel(tier)],
+      endpoint: normaliseEndpoint(endpoint),
+      modelPath: model,
+      host: parsed.host,
+      port: parsed.port,
+      parallel,
+      extraArgs,
+      command: ctx.command,
+      args,
+    },
+  };
 }
 
 export function renderBackendStartCommand(spec: BackendProcessSpec): string {
@@ -257,8 +292,10 @@ export function renderBackendStartCommands(llm: Record<string, unknown> | null):
 
 export async function backendStatus(projectPath: string, options: { bin?: string } = {}): Promise<BackendStatusReport> {
   const stateDir = backendStateDir(projectPath);
-  const specs = buildBackendProcessSpecs(readProjectLlm(projectPath), options);
-  if (specs.length === 0) {
+  const configSpecs = buildBackendProcessSpecs(readProjectLlm(projectPath), options);
+  const knownIds = new Set(configSpecs.map((spec) => spec.id));
+  const orphanSpecs = await discoverOrphanSpecs(stateDir, knownIds);
+  if (configSpecs.length === 0 && orphanSpecs.length === 0) {
     return {
       projectPath,
       stateDir,
@@ -268,28 +305,91 @@ export async function backendStatus(projectPath: string, options: { bin?: string
     };
   }
 
-  const detected = await scanForLlmBackends(specs.map((spec) => spec.endpoint)).catch(() => []);
+  const allSpecs = [...configSpecs, ...orphanSpecs];
+  const detected = await scanForLlmBackends(allSpecs.map((spec) => spec.endpoint)).catch(() => []);
   const reachableEndpoints = new Set(detected.map((backend) => backend.endpoint));
   const rows = await Promise.all(
-    specs.map(async (spec): Promise<BackendStatusRow> => {
-      const paths = backendPaths(projectPath, spec);
-      const pidRecord = await readPidFile(paths.pidFilePath);
-      const pidAlive = pidRecord ? isProcessAlive(pidRecord.pid) : false;
-      const endpointReachable = reachableEndpoints.has(spec.endpoint);
-      const modelExists = await pathExists(spec.modelPath);
-      return {
+    allSpecs.map((spec, index) =>
+      buildBackendStatusRow({
+        projectPath,
         spec,
-        pidFilePath: paths.pidFilePath,
-        logPath: paths.logPath,
-        pidRecord,
-        pidAlive,
-        endpointReachable,
-        modelExists,
-        state: backendRuntimeState({ pidAlive, endpointReachable, modelExists, pidRecord }),
-      };
-    }),
+        origin: index < configSpecs.length ? 'config' : 'orphan',
+        reachableEndpoints,
+      }),
+    ),
   );
   return { projectPath, stateDir, rows };
+}
+
+interface BuildBackendStatusRowArgs {
+  readonly projectPath: string;
+  readonly spec: BackendProcessSpec;
+  readonly origin: 'config' | 'orphan';
+  readonly reachableEndpoints: ReadonlySet<string>;
+}
+
+async function buildBackendStatusRow(args: BuildBackendStatusRowArgs): Promise<BackendStatusRow> {
+  const { projectPath, spec, origin, reachableEndpoints } = args;
+  const paths = backendPaths(projectPath, spec);
+  const pidRecord = await readPidFile(paths.pidFilePath);
+  const pidAlive = pidRecord ? isProcessAlive(pidRecord.pid) : false;
+  const endpointReachable = reachableEndpoints.has(spec.endpoint);
+  const modelExists = await pathExists(spec.modelPath);
+  return {
+    spec,
+    origin,
+    pidFilePath: paths.pidFilePath,
+    logPath: paths.logPath,
+    pidRecord,
+    pidAlive,
+    endpointReachable,
+    modelExists,
+    state: backendRuntimeState({ pidAlive, endpointReachable, modelExists, pidRecord }),
+  };
+}
+
+/**
+ * Scan the backend state dir for pid files that no longer map to a
+ * configured tier (id ∉ `knownIds`) — e.g. left behind when a tier's
+ * endpoint changed in `config.json`, which the reporter previously
+ * stranded as an unmanageable process bound to the old port. Each
+ * orphan is rebuilt into a minimal spec from its own pid record so
+ * `status` can show it and `stop` can reclaim it.
+ */
+async function discoverOrphanSpecs(stateDir: string, knownIds: ReadonlySet<string>): Promise<BackendProcessSpec[]> {
+  let entries: string[];
+  try {
+    entries = await fsp.readdir(stateDir);
+  } catch {
+    return [];
+  }
+  const candidates = entries.filter(
+    (entry) => entry.endsWith('.json') && !knownIds.has(entry.slice(0, -'.json'.length)),
+  );
+  const specs = await Promise.all(candidates.map((entry) => orphanSpecFromPidFile(stateDir, entry)));
+  return specs.filter((spec): spec is BackendProcessSpec => spec !== null);
+}
+
+/** Rebuild a minimal {@link BackendProcessSpec} from a stray pid file
+ *  so an orphaned backend can be shown and stopped. Returns null when
+ *  the file is unreadable / fails schema validation (it is then left
+ *  in place rather than acted on). */
+async function orphanSpecFromPidFile(stateDir: string, entry: string): Promise<BackendProcessSpec | null> {
+  const record = await readPidFile(path.join(stateDir, entry));
+  if (!record) return null;
+  const parsed = parseLocalEndpoint(record.endpoint);
+  return {
+    id: entry.slice(0, -'.json'.length),
+    labels: record.labels.length > 0 ? [...record.labels] : ['orphaned'],
+    endpoint: record.endpoint,
+    modelPath: record.modelPath,
+    host: parsed?.host ?? '',
+    port: parsed?.port ?? '',
+    parallel: 0,
+    extraArgs: [],
+    command: record.command,
+    args: [...record.args],
+  };
 }
 
 export async function startBackends(options: BackendStartOptions): Promise<BackendStartResult> {
@@ -301,16 +401,9 @@ export async function startBackends(options: BackendStartOptions): Promise<Backe
 
   await fsp.mkdir(before.stateDir, { recursive: true });
   for (const row of before.rows) {
-    if (!row.modelExists) {
-      skipped.push({ row, reason: `model file missing: ${row.spec.modelPath}` });
-      continue;
-    }
-    if (row.pidAlive) {
-      skipped.push({ row, reason: `already running as pid ${row.pidRecord?.pid}` });
-      continue;
-    }
-    if (row.endpointReachable) {
-      skipped.push({ row, reason: `endpoint already reachable at ${row.spec.endpoint}; assuming external process` });
+    const skipReason = backendStartSkipReason(row);
+    if (skipReason !== null) {
+      skipped.push({ row, reason: skipReason });
       continue;
     }
     try {
@@ -324,6 +417,18 @@ export async function startBackends(options: BackendStartOptions): Promise<Backe
 
   const after = await backendStatus(options.projectPath, backendStatusOptions);
   return { ...after, started, skipped };
+}
+
+/** Why `start` should NOT spawn a process for this row, or null when it
+ *  is a fresh configured tier that should be launched. */
+function backendStartSkipReason(row: BackendStatusRow): string | null {
+  if (row.origin === 'orphan') {
+    return 'orphaned backend on a port no longer in config; run `cartograph backend stop` to reclaim it';
+  }
+  if (!row.modelExists) return `model file missing: ${row.spec.modelPath}`;
+  if (row.pidAlive) return `already running as pid ${row.pidRecord?.pid}`;
+  if (row.endpointReachable) return `endpoint already reachable at ${row.spec.endpoint}; assuming external process`;
+  return null;
 }
 
 export async function stopBackends(options: BackendStopOptions): Promise<BackendStopResult> {
@@ -513,23 +618,17 @@ function waitForSpawn(child: ChildProcess, command: string): Promise<void> {
   });
 }
 
+/** A pid file is "ours to signal" when cartograph wrote it for the
+ *  SAME endpoint (host:port). We deliberately no longer compare the
+ *  model or the full arg list: a backend's identity is its port, so
+ *  changing a tier's model or `llamaServerArgs` in config must not
+ *  strand the running process as unmanageable (issue #24). The pid
+ *  file is our own tracked record (schema-validated, mode 0600) and we
+ *  only act on it after confirming the pid is still alive. */
 function pidRecordMatchesSpec(row: BackendStatusRow): boolean {
   const record = row.pidRecord;
   if (!record) return false;
-  return (
-    record.command === row.spec.command &&
-    arraysEqual(record.args, row.spec.args) &&
-    record.endpoint === row.spec.endpoint &&
-    record.modelPath === row.spec.modelPath
-  );
-}
-
-function arraysEqual(left: readonly string[], right: readonly string[]): boolean {
-  if (left.length !== right.length) return false;
-  for (let i = 0; i < left.length; i++) {
-    if (left[i] !== right[i]) return false;
-  }
-  return true;
+  return record.endpoint === row.spec.endpoint;
 }
 
 async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
@@ -566,6 +665,39 @@ function llamaServerParallelForTier(tuning: ReturnType<typeof recommendedTuning>
   return tuning.chat.llamaServerParallel;
 }
 
+/** Resolve the `--parallel N` value for a tier. A manual `concurrency`
+ *  override in config wins — so `cartograph_admin({action: 'llm-tune',
+ *  concurrency})` actually reduces the backend's KV-slot count and
+ *  decode-buffer memory (issue #24) — otherwise the hardware-aware
+ *  recommendation from `recommendedTuning()` applies. */
+function resolveTierParallel(
+  tuning: ReturnType<typeof recommendedTuning>,
+  tier: LlmTierKey,
+  cfg: Record<string, unknown>,
+): number {
+  const override = cfg['concurrency'];
+  if (typeof override === 'number' && Number.isInteger(override) && override > 0) return override;
+  return llamaServerParallelForTier(tuning, tier);
+}
+
+/** User-pinned extra `llama-server` flags for this tier
+ *  (`llamaServerArgs` in config), appended verbatim to the generated
+ *  start command. Non-array configs and non-string entries are dropped
+ *  so a malformed value can never break command construction. */
+function llamaServerPassthroughArgs(cfg: Record<string, unknown>): string[] {
+  const raw = cfg['llamaServerArgs'];
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((value): value is string => typeof value === 'string');
+}
+
+/** True when the passthrough args already pin `--parallel` (or its
+ *  `-np` short form, in either `flag value` or `flag=value` shape). */
+function passthroughHasParallelFlag(passthrough: readonly string[]): boolean {
+  return passthrough.some(
+    (arg) => arg === '--parallel' || arg === '-np' || arg.startsWith('--parallel=') || arg.startsWith('-np='),
+  );
+}
+
 function llmTierLabel(tier: LlmTierKey): string {
   if (tier === 'summarizeLlm') return 'summarize';
   if (tier === 'localLlm') return 'local';
@@ -575,10 +707,19 @@ function llmTierLabel(tier: LlmTierKey): string {
   return 'rerank';
 }
 
-function backendSpecId(endpoint: string, modelPath: string, extraArgs: readonly string[]): string {
+/** Stable per-backend id derived from the endpoint + the per-tier-kind
+ *  mode flags (`extraArgs`). The MODEL, `llamaServerArgs`, and
+ *  concurrency are deliberately OUT of the hash — they are all
+ *  user-mutable, and keeping them out is what makes the pid/log file
+ *  path survive a model/flag change so `status`/`stop` keep managing
+ *  the same running process instead of orphaning it (issue #24).
+ *  `extraArgs` depends only on the tier KIND (never on user config),
+ *  so it stays stable across such changes while still separating an
+ *  embed/rerank backend from a chat backend on the same port. */
+function backendSpecId(endpoint: string, extraArgs: readonly string[]): string {
   const hash = crypto
     .createHash('sha256')
-    .update(`${normaliseEndpoint(endpoint)}\0${modelPath}\0${extraArgs.join('\0')}`)
+    .update(`${normaliseEndpoint(endpoint)}\0${extraArgs.join('\0')}`)
     .digest('hex')
     .slice(0, 12);
   return `llama-${hash}`;

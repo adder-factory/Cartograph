@@ -155,6 +155,11 @@ function formatBackendRow(row: BackendStatusRow, runtime: BackendRuntimeModule):
     `  log: ${row.logPath}`,
     `  command: ${runtime.renderBackendStartCommand(row.spec)}`,
   ];
+  if (row.origin === 'orphan') {
+    lines.push(
+      `  ⚠ orphaned: this endpoint is no longer in config (model/port changed?); run \`cartograph backend stop ${resultProjectPathFromRow(row)}\` to stop it and free its memory.`,
+    );
+  }
   if (row.pidRecord && !row.pidAlive) {
     lines.push(`  stale pid cleanup: cartograph backend stop ${resultProjectPathFromRow(row)}`);
   }

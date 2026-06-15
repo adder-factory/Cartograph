@@ -29,8 +29,18 @@ const llmChatBlockSchema = z
     summaryBatchSize: z.number().optional(),
     /** Manual override for cartograph-side concurrent in-flight
      *  requests this tier drives. When unset, cartograph uses the
-     *  hardware-aware recommendation from `recommendedTuning()`. */
+     *  hardware-aware recommendation from `recommendedTuning()`. For a
+     *  `cartograph backend start`-managed local llama-server this value
+     *  also drives the backend's `--parallel N`. */
     concurrency: z.number().int().positive().optional(),
+    /** openai-compat + local llama-server only: extra flags appended
+     *  verbatim to the `cartograph backend start` command for this
+     *  tier (e.g. `["--cache-ram", "1024", "-c", "8192", "-ngl",
+     *  "999"]`). Lets you cap KV-cache / context / offload per tier for
+     *  constrained hardware without cartograph owning every flag. An
+     *  explicit `--parallel` (or `-np`) here overrides cartograph's
+     *  computed value. */
+    llamaServerArgs: z.array(z.string()).optional(),
   })
   .loose();
 
@@ -58,8 +68,14 @@ const llmConfigSchema = z
         dtype: z.enum(['q4f16', 'fp16', 'fp32', 'q4', 'q8']).optional(),
         /** Manual override for cartograph-side concurrent in-flight
          *  embed batches. When unset, cartograph uses the
-         *  hardware-aware recommendation from `recommendedTuning()`. */
+         *  hardware-aware recommendation from `recommendedTuning()`. For
+         *  a `cartograph backend start`-managed local llama-server this
+         *  value also drives the backend's `--parallel N`. */
         concurrency: z.number().int().positive().optional(),
+        /** Extra flags appended verbatim to `cartograph backend start`
+         *  for this tier (e.g. `["--cache-ram", "2048"]`). An explicit
+         *  `--parallel`/`-np` here overrides the computed value. */
+        llamaServerArgs: z.array(z.string()).optional(),
       })
       .loose()
       .optional(),
@@ -76,8 +92,13 @@ const llmConfigSchema = z
         timeoutMs: z.number().optional(),
         dtype: z.string().optional(),
         /** Manual override for cartograph-side concurrent in-flight
-         *  rerank requests. */
+         *  rerank requests. For a `cartograph backend start`-managed
+         *  local llama-server this value also drives `--parallel N`. */
         concurrency: z.number().int().positive().optional(),
+        /** Extra flags appended verbatim to `cartograph backend start`
+         *  for this tier. An explicit `--parallel`/`-np` here overrides
+         *  the computed value. */
+        llamaServerArgs: z.array(z.string()).optional(),
       })
       .loose()
       .nullable()
