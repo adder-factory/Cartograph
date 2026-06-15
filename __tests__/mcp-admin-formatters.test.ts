@@ -54,6 +54,7 @@ vi.spyOn(doctor, 'formatDoctorReport').mockImplementation((() => '# Doctor\n\nAl
 vi.spyOn(llmSetupPlan, 'planLlmSetup').mockImplementation((async () => ({
   detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
   cloudChatAvailable: { claudeBin: '/bin/claude', anthropicApiKey: true },
+  localBackends: { configured: 0, notRunning: [], llamaServerOnPath: false, startCommand: null },
   recommendedPresetId: 'install-ollama',
   presets: [
     {
@@ -220,6 +221,40 @@ describe('MCP admin formatter contracts', () => {
     expect(detectedLines.join('\n')).toContain('Ollama');
     expect(detectedLines.join('\n')).toContain('claude');
     expect(detectedLines.join('\n')).toContain('ANTHROPIC_API_KEY');
+
+    // issue #25: configured-but-not-running local tiers → "start it" hint.
+    const notRunningInstalled: string[] = [];
+    admin.appendConfiguredLocalBackends(notRunningInstalled, {
+      localBackends: {
+        configured: 2,
+        notRunning: [{ labels: ['ask'], endpoint: 'http://localhost:8082', modelExists: true }],
+        llamaServerOnPath: true,
+        startCommand: 'cartograph backend start /repo',
+      },
+    } as any);
+    expect(notRunningInstalled.join('\n')).toContain('configured local tier(s) not running');
+    expect(notRunningInstalled.join('\n')).toContain('ask http://localhost:8082');
+    expect(notRunningInstalled.join('\n')).toContain('`llama-server` is installed');
+    expect(notRunningInstalled.join('\n')).toContain('cartograph backend start /repo');
+
+    const notRunningNoBinary: string[] = [];
+    admin.appendConfiguredLocalBackends(notRunningNoBinary, {
+      localBackends: {
+        configured: 1,
+        notRunning: [{ labels: ['embed'], endpoint: 'http://localhost:8080', modelExists: false }],
+        llamaServerOnPath: false,
+        startCommand: 'cartograph backend start /repo',
+      },
+    } as any);
+    expect(notRunningNoBinary.join('\n')).toContain('not on PATH');
+    expect(notRunningNoBinary.join('\n')).toContain('model file missing');
+
+    // No configured-but-not-running tiers → no lines added.
+    const noneNotRunning: string[] = [];
+    admin.appendConfiguredLocalBackends(noneNotRunning, {
+      localBackends: { configured: 3, notRunning: [], llamaServerOnPath: true, startCommand: null },
+    } as any);
+    expect(noneNotRunning).toEqual([]);
 
     await expect(buildNoLlmFooter(async () => [])).resolves.toContain('No LLM configured');
     await expect(

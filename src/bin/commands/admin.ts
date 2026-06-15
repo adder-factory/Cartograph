@@ -137,10 +137,16 @@ export interface AdminCommandDeps {
     formatDoctorJson: (result: unknown) => string;
   }>;
   loadLlmSetupPlan: () => Promise<{
-    planLlmSetup: () => Promise<{
+    planLlmSetup: (opts?: { projectPath?: string }) => Promise<{
       recommendedPresetId: string;
       detectedBackends: ReadonlyArray<{ label: string; endpoint: string; models: readonly string[] }>;
       presets: ReadonlyArray<{ id: string; summary: string }>;
+      localBackends: {
+        configured: number;
+        notRunning: ReadonlyArray<{ labels: readonly string[]; endpoint: string; modelExists: boolean }>;
+        llamaServerOnPath: boolean;
+        startCommand: string | null;
+      };
     }>;
     applyLlmSetupChoice: (opts: { projectRoot: string; preset: any }) => Promise<{
       applied: boolean;

@@ -47,6 +47,7 @@ describe('admin LLM setup feature CLI', () => {
           recommendedPresetId: 'install-ollama',
           detectedBackends: [{ label: 'Ollama', endpoint: TEST_ENDPOINT, models: ['qwen'] }],
           presets: [{ id: 'install-ollama', summary: 'Ollama local' }],
+          localBackends: { configured: 0, notRunning: [], llamaServerOnPath: false, startCommand: null },
         }),
         applyLlmSetupChoice: async (opts) => {
           calls.push(`apply:${JSON.stringify(opts)}`);
@@ -81,12 +82,12 @@ describe('admin LLM setup feature CLI', () => {
       }),
     });
 
-    await actions.get('llm-plan')!();
+    await actions.get('llm-plan [path]')!('/repo');
     await actions.get('llm-apply')!({ preset: 'install-ollama', projectPath: '/repo' });
     await actions.get('llm-tune [path]')!('/repo', {});
     await actions.get('llm-tune [path]')!('/repo', { tier: 'chat', concurrency: '4' });
 
-    expect(Array.from(actions.keys()).sort()).toEqual(['llm-apply', 'llm-plan', 'llm-tune [path]']);
+    expect(Array.from(actions.keys()).sort()).toEqual(['llm-apply', 'llm-plan [path]', 'llm-tune [path]']);
     expect(stdout.join('')).toContain('Recommended preset: install-ollama');
     expect(stdout.join('')).toContain(`- Ollama at ${TEST_ENDPOINT} (1 model)`);
     expect(stdout.join('')).toContain('- install-ollama — Ollama local');
