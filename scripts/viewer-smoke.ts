@@ -27,7 +27,23 @@ const GRAPH_FIT_TOLERANCE_PX = 2;
 const EDGE_GEOMETRY_SAMPLE_LIMIT = 8;
 const LAYOUT_STABILITY_NODE_LIMIT = 20;
 const LAYOUT_STABILITY_SETTLE_MS = 900;
-const LAYOUT_STABILITY_TOLERANCE_PX = 0.5;
+// Max per-node drift (after centering, so translation is already removed)
+// allowed between two independent reloads. This guards against the regression
+// it was written for — the graph grossly rearranging or collapsing on reload
+// (nodes moving tens-to-hundreds of px) — NOT sub-pixel reproducibility.
+//
+// The layout is seeded-deterministic and runs synchronously, but the
+// post-layout collision-relaxation pass sizes each node from its rendered
+// metrics (`outerWidth()` / label width — see layoutCollisionRadius in
+// viewer.graph-layout.app). Whether a node is already measured when the
+// synchronous layout runs is render-timing-sensitive, so its collision radius
+// — and thus the packing equilibrium — can differ by a couple of px between
+// two reloads even though each run is internally converged (MIN_MOVE 0.05px).
+// The previous 0.5px bound was tighter than that irreducible metric-driven
+// variance and flaked intermittently (observed worst case ~4.4px); 8px stays
+// well below any real rearrangement while absorbing the settling noise.
+// Units are Cytoscape model coordinates (node.position()), not rendered px.
+const LAYOUT_STABILITY_TOLERANCE_PX = 8;
 const LINEAR_LAYOUT_MIN_NODE_COUNT = 8;
 const LINEAR_LAYOUT_MIN_SPAN_PX = 80;
 const LINEAR_LAYOUT_MIN_SPREAD_PX = 8;
