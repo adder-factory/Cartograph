@@ -707,9 +707,19 @@ async function handleSummarizePhase(ctx: ToolCtx, args: Record<string, unknown>)
     const details: string[] = [];
     if (result.cacheHits > 0) details.push(`Cache hits: ${result.cacheHits}`);
     if (result.errors > 0) details.push(`Errors: ${result.errors}`);
-    const skipped = result.candidates - result.generated - result.errors - result.cacheHits - result.deferred;
+    const tooLarge = result.skippedTooLarge ?? 0;
+    const skipped =
+      result.candidates - result.generated - result.errors - result.cacheHits - result.deferred - tooLarge;
     if (skipped > 0) details.push(`Skipped: ${skipped}`);
     if (details.length > 0) lines.push(`- ${details.join(' — ')}`);
+    // #27 — symbols whose prompt exceeds the backend's per-slot context are
+    // recorded (not re-attempted); point the operator at the fix + retry.
+    if (tooLarge > 0) {
+      lines.push(
+        `- ${tooLarge} skipped — prompt exceeds the chat backend's per-slot context. ` +
+          'Raise `-c` or lower `--parallel` (see `cartograph doctor`), then `summarizeLimit: -1` to retry.',
+      );
+    }
     // Lever C — surface the deferred tail so the caller knows the pass
     // was capped (not failed); it drains on demand via intent-search.
     if (result.deferred > 0) {
