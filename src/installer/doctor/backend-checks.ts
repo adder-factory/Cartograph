@@ -8,7 +8,7 @@ import {
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from '../default-endpoints.js';
 import { describeHardware, recommendedTuning } from '../hardware-tuning.js';
 import { LLAMA_SERVER_RERANK_FLAG } from '../llm-setup-catalog.js';
-import { backendStatus, renderBackendStartCommands } from '../../features/backend/index.js';
+import { backendStatus, LOCAL_BACKEND_HOSTS, renderBackendStartCommands } from '../../features/backend/index.js';
 import type { CheckResult } from './contract.js';
 
 interface EmbeddingReachabilityCheckArgs {
@@ -133,21 +133,137 @@ export function detectedBackendsCheck(detected: readonly DetectedBackend[]): Che
 export function recommendedTuningCheck(): CheckResult {
   const hw = describeHardware();
   const t = recommendedTuning();
-  // Chat-family tiers get an auto-sized `-c = parallel × ctxPerSlot` so
-  // every scheduler slot fits cartograph's own summary prompts (issue #27).
-  const chatCtx = t.chat.llamaServerParallel * t.chat.ctxPerSlot;
-  const askCtx = t.ask.llamaServerParallel * t.ask.ctxPerSlot;
   const lines = [
     `Detected: ${hw}.`,
-    `Recommended \`llama-server\` flags per tier (cartograph applies these automatically on \`backend start\`):`,
+    `Recommended \`llama-server --parallel N\` per tier:`,
     `  embed :8080     → --parallel ${t.embed.llamaServerParallel}  (cartograph drives ${t.embed.cartographConcurrency} concurrent batches)`,
-    `  chat  :8081     → --parallel ${t.chat.llamaServerParallel} -c ${chatCtx}  (${t.chat.ctxPerSlot}/slot; cartograph drives ${t.chat.cartographConcurrency})`,
-    `  ask   :8082     → --parallel ${t.ask.llamaServerParallel} -c ${askCtx}  (${t.ask.ctxPerSlot}/slot; cartograph drives ${t.ask.cartographConcurrency})`,
+    `  chat  :8081     → --parallel ${t.chat.llamaServerParallel}  (cartograph drives ${t.chat.cartographConcurrency})`,
+    `  ask   :8082     → --parallel ${t.ask.llamaServerParallel}  (cartograph drives ${t.ask.cartographConcurrency})`,
     `  rerank :8083 (with ${LLAMA_SERVER_RERANK_FLAG}) → --parallel ${t.reranker.llamaServerParallel}  (cartograph drives ${t.reranker.cartographConcurrency})`,
-    "`cartograph backend start` sets these per machine; chat/ask also get an auto-sized `-c` so each slot fits cartograph's summary prompts " +
-      '(llama.cpp splits `-c` across `--parallel` slots). If you launch llama-server yourself, mirror the `-c` above; override either via `llamaServerArgs`.',
+    'Increase `--parallel N` on your llama-server startup to saturate every slot; cartograph auto-matches outbound concurrency.',
   ].join('\n');
   return { id: 'recommended-tuning', name: 'Recommended tuning', status: 'ok', detail: lines };
+}
+
+// ─── Chat-family per-slot context budget (issue #27) ────────────────────────
+
+/** Minimum per-slot context (tokens) cartograph's chat-family prompts need.
+ *  Summary prompts run up to ~3.3k tokens (file summaries); 4096 covers them
+ *  with headroom. llama.cpp divides a server's total `-c` across its
+ *  `--parallel` slots (per-slot = `-c` ÷ parallel), so a small `-c` paired
+ *  with high `--parallel` — or a model whose native context ÷ parallel is
+ *  small — leaves each slot under this floor and large symbols fail with an
+ *  HTTP 400 "exceeds the available context size". */
+const MIN_CHAT_CTX_PER_SLOT = 4096;
+
+/** Per-endpoint `/props` probe budget. Matches the scan-backends probe — a
+ *  loopback GET that normally answers in <50 ms. */
+const PROPS_PROBE_TIMEOUT_MS = 1000;
+
+/** Config tiers whose backend serves cartograph's summary / ask prompts,
+ *  paired with the label shown to the user. embed/reranker are excluded —
+ *  they take no chat `-c` (sized by `--batch-size` / encoder-only). */
+const CHAT_FAMILY_TIER_LABELS: ReadonlyArray<readonly [string, string]> = [
+  ['summarizeLlm', 'summarize'],
+  ['localLlm', 'local'],
+  ['classifyLlm', 'classify'],
+  ['askLlm', 'ask'],
+];
+
+/** True when the endpoint points at a local host — the only place a per-slot
+ *  `-c`/`--parallel` budget is something the operator controls. Cloud
+ *  OpenAI-compat endpoints have no `/props` and no slot model. Reuses
+ *  {@link LOCAL_BACKEND_HOSTS} (the same set `backend start` treats as local,
+ *  incl. the `0.0.0.0` bind address) so the two never drift. */
+function isLocalEndpoint(endpoint: string): boolean {
+  try {
+    return LOCAL_BACKEND_HOSTS.has(new URL(endpoint).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Probe a llama.cpp server's effective PER-SLOT context via `/props`
+ *  (`n_ctx` there is already per-sequence). Returns null when unreachable or
+ *  the field is absent (non-llama.cpp servers). */
+async function fetchPerSlotCtx(endpoint: string): Promise<number | null> {
+  try {
+    const res = await fetch(`${normaliseEndpoint(endpoint)}/props`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(PROPS_PROBE_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const body = (await res.json()) as { n_ctx?: unknown; default_generation_settings?: { n_ctx?: unknown } };
+    const raw = body.default_generation_settings?.n_ctx ?? body.n_ctx;
+    return typeof raw === 'number' && Number.isFinite(raw) && raw > 0 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/** One probed chat-family endpoint and its effective per-slot context. */
+export interface ChatCtxProbe {
+  readonly endpoint: string;
+  readonly tiers: readonly string[];
+  readonly nCtx: number | null;
+}
+
+/** Pure verdict from the probed per-slot contexts. Null when nothing
+ *  assessable was reachable (no signal → no check row). Extracted from
+ *  {@link chatContextBudgetCheck} so the threshold logic is unit-testable
+ *  without a live backend. */
+export function assessChatContextBudget(probes: readonly ChatCtxProbe[]): CheckResult | null {
+  const reachable = probes.filter((p) => p.nCtx !== null);
+  if (reachable.length === 0) return null;
+  const undersized = reachable.filter((p) => (p.nCtx as number) < MIN_CHAT_CTX_PER_SLOT);
+  if (undersized.length === 0) {
+    return {
+      id: 'chat-context-budget',
+      name: 'Chat context budget',
+      status: 'ok',
+      detail: `All reachable chat tiers have >= ${MIN_CHAT_CTX_PER_SLOT} tokens/slot.`,
+    };
+  }
+  const summary = undersized.map((p) => `${p.tiers.join('/')} @ ${p.endpoint}: ${p.nCtx} tokens/slot`).join('; ');
+  return {
+    id: 'chat-context-budget',
+    name: 'Chat context budget',
+    status: 'warn',
+    detail:
+      `${summary} — below the ${MIN_CHAT_CTX_PER_SLOT}-token/slot floor cartograph's summary prompts need. ` +
+      'llama.cpp splits a server\'s total `-c` across its `--parallel` slots, so large symbols fail with an HTTP 400 "exceeds context".',
+    remediation:
+      `Raise the backend's \`-c\` or lower \`--parallel\` so \`-c\` ÷ \`--parallel\` >= ${MIN_CHAT_CTX_PER_SLOT} per slot ` +
+      '(via `llamaServerArgs`/`concurrency` in .cartograph/config.json, or the flags on your own launch command).',
+  };
+}
+
+/** Warn when a reachable local chat/ask backend's per-slot context is
+ *  below the floor cartograph's prompts need (issue #27). Probes `/props` on
+ *  each unique local chat-family endpoint; null when none are
+ *  configured/reachable so cloud-only or LLM-less setups stay quiet. */
+export async function chatContextBudgetCheck(llm: Record<string, unknown> | null): Promise<CheckResult | null> {
+  if (!llm) return null;
+  const byEndpoint = new Map<string, string[]>();
+  for (const [tierKey, label] of CHAT_FAMILY_TIER_LABELS) {
+    const block = llm[tierKey] as Record<string, unknown> | undefined;
+    if (!block || block['provider'] !== 'openai-compat') continue;
+    const endpoint = block['endpoint'];
+    if (typeof endpoint !== 'string' || !isLocalEndpoint(endpoint)) continue;
+    const base = normaliseEndpoint(endpoint);
+    const labels = byEndpoint.get(base) ?? [];
+    labels.push(label);
+    byEndpoint.set(base, labels);
+  }
+  if (byEndpoint.size === 0) return null;
+  const probes = await Promise.all(
+    [...byEndpoint.entries()].map(async ([endpoint, tiers]) => ({
+      endpoint,
+      tiers,
+      nCtx: await fetchPerSlotCtx(endpoint),
+    })),
+  );
+  return assessChatContextBudget(probes);
 }
 
 export function backendStartCommandsCheck(llm: Record<string, unknown> | null): CheckResult | null {

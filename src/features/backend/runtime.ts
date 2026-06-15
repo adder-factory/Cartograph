@@ -31,7 +31,7 @@ export const LLM_TIER_KEYS = [
 ] as const;
 export type LlmTierKey = (typeof LLM_TIER_KEYS)[number];
 
-const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
+export const LOCAL_BACKEND_HOSTS: ReadonlySet<string> = new Set(['localhost', '127.0.0.1', '0.0.0.0', '::1', '[::1]']);
 const BACKEND_STATE_DIR = 'backends';
 const PID_FILE_SCHEMA_VERSION = 1;
 const STOP_WAIT_MS = 3000;
@@ -248,21 +248,6 @@ function buildTierBackendSpec(
   const extraArgs = llamaServerExtraArgsForTier(tier);
   const passthrough = llamaServerPassthroughArgs(cfg);
   const parallel = resolveTierParallel(ctx.tuning, tier, cfg);
-  const userPinnedParallel = passthroughHasParallelFlag(passthrough);
-  // Auto-size the context budget: llama.cpp divides total `-c` across
-  // `--parallel` slots, so a chat-family tier launched without `-c` gets
-  // (default ctx ÷ parallel) per slot — too small for cartograph's own
-  // summary prompts on any machine (issue #27). Emit `-c = parallel ×
-  // ctxPerSlot` so every slot fits. Only when WE own `--parallel` and the
-  // user hasn't pinned a context flag: a user `--parallel`/`-np` means
-  // they own the slot math (don't guess a mismatched `-c`); a user
-  // `-c`/`--ctx-size` stays authoritative. embed/reranker have ctxPerSlot
-  // 0 (no chat `-c`). A config-level `concurrency` override (not a
-  // passthrough arg) flows through `parallel` via resolveTierParallel
-  // above, so the auto `-c` scales with it correctly.
-  const ctxPerSlot = tierCtxPerSlot(ctx.tuning, tier);
-  const autoCtx =
-    !userPinnedParallel && !passthroughHasCtxFlag(passthrough) && ctxPerSlot > 0 ? parallel * ctxPerSlot : 0;
   const args = [
     '-m',
     model,
@@ -273,8 +258,7 @@ function buildTierBackendSpec(
     ...extraArgs,
     // A user-pinned `--parallel`/`-np` in `llamaServerArgs` wins — skip
     // the computed one so the passthrough stays authoritative.
-    ...(userPinnedParallel ? [] : ['--parallel', String(parallel)]),
-    ...(autoCtx > 0 ? ['-c', String(autoCtx)] : []),
+    ...(passthroughHasParallelFlag(passthrough) ? [] : ['--parallel', String(parallel)]),
     ...passthrough,
   ];
   return {
@@ -681,17 +665,6 @@ function llamaServerParallelForTier(tuning: ReturnType<typeof recommendedTuning>
   return tuning.chat.llamaServerParallel;
 }
 
-/** Per-slot context budget for a tier, from {@link recommendedTuning}.
- *  summarize/local/classify → `chat`; ask → `ask`; embed/reranker →
- *  their own (0 = no chat `-c`). Mirrors {@link llamaServerParallelForTier}
- *  so the launcher can size `-c = parallel × ctxPerSlot`. */
-function tierCtxPerSlot(tuning: ReturnType<typeof recommendedTuning>, tier: LlmTierKey): number {
-  if (tier === 'embeddingLlm') return tuning.embed.ctxPerSlot;
-  if (tier === 'askLlm') return tuning.ask.ctxPerSlot;
-  if (tier === 'rerankerLlm') return tuning.reranker.ctxPerSlot;
-  return tuning.chat.ctxPerSlot;
-}
-
 /** Resolve the `--parallel N` value for a tier. A manual `concurrency`
  *  override in config wins — so `cartograph_admin({action: 'llm-tune',
  *  concurrency})` actually reduces the backend's KV-slot count and
@@ -722,23 +695,6 @@ function llamaServerPassthroughArgs(cfg: Record<string, unknown>): string[] {
 function passthroughHasParallelFlag(passthrough: readonly string[]): boolean {
   return passthrough.some(
     (arg) => arg === '--parallel' || arg === '-np' || arg.startsWith('--parallel=') || arg.startsWith('-np='),
-  );
-}
-
-/** True when the passthrough args already pin the context size — in
- *  which case the launcher leaves the user's value authoritative and
- *  skips its auto-sized `-c`. Covers `-c` / `--ctx-size` plus the
- *  underscore alias `--ctx_size` llama.cpp also accepts, each in either
- *  `flag value` or `flag=value` shape. */
-function passthroughHasCtxFlag(passthrough: readonly string[]): boolean {
-  return passthrough.some(
-    (arg) =>
-      arg === '-c' ||
-      arg === '--ctx-size' ||
-      arg === '--ctx_size' ||
-      arg.startsWith('-c=') ||
-      arg.startsWith('--ctx-size=') ||
-      arg.startsWith('--ctx_size='),
   );
 }
 

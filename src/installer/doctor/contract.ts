@@ -10,6 +10,7 @@ export type CheckId =
   | 'detected-llm-backends'
   | 'embedding-endpoint'
   | 'recommended-tuning'
+  | 'chat-context-budget'
   | 'backend-start-commands'
   | 'backend-lifecycle'
   | 'project-checks'

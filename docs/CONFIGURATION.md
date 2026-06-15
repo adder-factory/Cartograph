@@ -170,19 +170,10 @@ because the default `--parallel` plus prompt cache overshoot the GPU budget:
   `cartograph_admin({action: "llm-tune", tier, concurrency})`) now also drives
   the backend's `--parallel N`, so lowering it reduces KV-slot and decode-buffer
   memory.
-- **Auto-sized context (`-c`)** — for chat-family tiers (`summarizeLlm`,
-  `localLlm`, `classifyLlm`, `askLlm`) cartograph automatically passes
-  `-c = (--parallel N) × 4096`, sized per machine with no config needed. llama.cpp
-  splits the total context across its parallel slots, so a tier launched without
-  `-c` would leave each slot too small for cartograph's own summary prompts and
-  large symbols would fail with an HTTP 400 "exceeds context". `embeddingLlm` /
-  `rerankerLlm` take no chat `-c` (sized by `--batch-size` / encoder-only).
 - **`llamaServerArgs`** — an array of extra flags appended verbatim to the start
-  command for that tier. Use it to cap prompt cache or GPU offload (`--cache-ram`,
-  `-ngl`, ...), or to **override** the auto values: an explicit `--parallel`/`-np`
-  replaces the computed slot count (and suppresses the auto `-c`, since you then
-  own the slot math), and an explicit `-c`/`--ctx-size` replaces the auto-sized
-  context.
+  command for that tier. Use it to cap prompt cache, context, or GPU offload
+  (`--cache-ram`, `-c`, `-ngl`, ...). An explicit `--parallel`/`-np` here
+  overrides the computed value entirely, leaving you in full control.
 
 ```json
 {
@@ -203,6 +194,16 @@ process), changing a tier's model or `llamaServerArgs` no longer orphans the
 running `llama-server`: `cartograph backend status`/`stop` keep tracking it by
 port. If you move a tier to a different port, the process bound to the old port
 is surfaced as `orphaned` so `cartograph backend stop` can reclaim it.
+
+> **Watch the per-slot context.** llama.cpp splits a server's **total** `-c`
+> across its `--parallel` slots, so each request only gets `-c ÷ --parallel`
+> tokens. Pin a small `-c` with a high `--parallel` (e.g. `-c 8192 --parallel 8`
+> → 1024/slot) and cartograph's summary prompts (up to ~3.3k tokens for file
+> summaries) start failing with HTTP 400 "exceeds context". Either leave `-c`
+> unset (llama.cpp then uses the model's native context) or keep
+> `-c ÷ --parallel ≥ 4096`. `cartograph doctor` probes each reachable chat/ask
+> backend's effective per-slot context and **warns** when it drops below that
+> floor — so you don't have to compute it by hand.
 
 ### A/B-testing a chat model for one invocation
 

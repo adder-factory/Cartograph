@@ -4,6 +4,7 @@ import { inspectGitHooksLiveness } from '../../features/git-hooks/index.js';
 import {
   backendLifecycleCheck,
   backendStartCommandsCheck,
+  chatContextBudgetCheck,
   checkEmbeddingReachability,
   detectBackends,
   detectedBackendsCheck,
@@ -47,6 +48,8 @@ export async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorRes
   if (reachability) checks.push(reachability);
 
   checks.push(recommendedTuningCheck());
+  const ctxBudget = await chatContextBudgetCheck(llm);
+  if (ctxBudget) checks.push(ctxBudget);
   const backendCommands = backendStartCommandsCheck(llm);
   if (backendCommands) checks.push(backendCommands);
 

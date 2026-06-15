@@ -68,13 +68,6 @@ interface TierTuning {
    *  `llamaServerParallel` keeps every slot full without piling up
    *  extra requests at the client. */
   readonly cartographConcurrency: number;
-  /** llama-server context budget PER scheduler slot. llama.cpp splits
-   *  the total `-c` across `--parallel` slots, so cartograph launches
-   *  the backend with `-c = llamaServerParallel × ctxPerSlot` to
-   *  guarantee each slot fits the prompts cartograph itself generates.
-   *  `0` means "not applicable" — embed/reranker tiers are sized by
-   *  `--batch-size` / are encoder-only and take no chat `-c`. */
-  readonly ctxPerSlot: number;
 }
 
 /** Per-tier tuning bundle returned by {@link recommendedTuning}. */
@@ -95,19 +88,6 @@ export interface RecommendedTuning {
    *  (~418 MB); behaves like a medium-sized encoder. */
   readonly reranker: TierTuning;
 }
-
-/** Minimum llama-server context PER PARALLEL SLOT for chat-family tiers
- *  (summarize / local / classify → `chat`; `ask`). llama.cpp divides the
- *  total `-c` across `--parallel` slots, so cartograph sizes
- *  `-c = parallel × this` to guarantee every slot fits the prompts
- *  cartograph itself sends: symbol summaries (MAX_BODY_CHARS=4000 chars
- *  ≈ 1.5k tok), file summaries (~3.3k tok), dir summaries (~2.3k tok).
- *  4096 covers all observed prompts with headroom. Without this, a fresh
- *  `cartograph backend start` omits `-c` and llama.cpp's default context
- *  ÷ parallel leaves each slot too small — large summaries fail with an
- *  HTTP 400 "exceeds context" on any machine (worse the more slots the
- *  hardware tuning picks). See issue #27. */
-export const MIN_CHAT_CTX_PER_SLOT = 4096;
 
 /** Fallback CPU count when `os.cpus()` is unavailable (older Bun /
  *  embedded contexts). */
@@ -220,14 +200,11 @@ export function recommendedTuning(hw: DetectedHardware = detectHardware()): Reco
  *  (extra requests queue at the client), and slot-leaving when
  *  M < N. The default mirrors them. */
 function mkTuning(slots: { embed: number; chat: number; ask: number; reranker: number }): RecommendedTuning {
-  // chat-family tiers (chat → summarize/local/classify; ask) carry a
-  // per-slot context budget so the launcher can size `-c` automatically;
-  // embed/reranker take no chat `-c` (ctxPerSlot 0).
   return {
-    embed: { llamaServerParallel: slots.embed, cartographConcurrency: slots.embed, ctxPerSlot: 0 },
-    chat: { llamaServerParallel: slots.chat, cartographConcurrency: slots.chat, ctxPerSlot: MIN_CHAT_CTX_PER_SLOT },
-    ask: { llamaServerParallel: slots.ask, cartographConcurrency: slots.ask, ctxPerSlot: MIN_CHAT_CTX_PER_SLOT },
-    reranker: { llamaServerParallel: slots.reranker, cartographConcurrency: slots.reranker, ctxPerSlot: 0 },
+    embed: { llamaServerParallel: slots.embed, cartographConcurrency: slots.embed },
+    chat: { llamaServerParallel: slots.chat, cartographConcurrency: slots.chat },
+    ask: { llamaServerParallel: slots.ask, cartographConcurrency: slots.ask },
+    reranker: { llamaServerParallel: slots.reranker, cartographConcurrency: slots.reranker },
   };
 }
 

@@ -85,57 +85,6 @@ describe('buildBackendProcessSpecs — per-tier llama-server tuning (issue #24)'
     expect(specs[0]!.args).toContain('--parallel');
   });
 
-  it('auto-sizes `-c` to parallel × per-slot for a chat tier (issue #27)', () => {
-    // ctx is split across --parallel slots; cartograph sizes -c so every
-    // slot fits its own summary prompts. parallel 2 × 4096/slot = 8192.
-    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2 }));
-    const args = specs[0]!.args;
-    expect(args.filter((a) => a === '-c')).toHaveLength(1);
-    expect(args[args.indexOf('-c') + 1]).toBe('8192');
-  });
-
-  it('lets a user `-c`/`--ctx-size` in llamaServerArgs override the auto-sized one', () => {
-    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2, llamaServerArgs: ['-c', '1024'] }));
-    const args = specs[0]!.args;
-    // exactly one -c — the user's — no duplicate auto-sized flag
-    expect(args.filter((a) => a === '-c')).toHaveLength(1);
-    expect(args[args.indexOf('-c') + 1]).toBe('1024');
-  });
-
-  it('lets a user `--ctx-size` (long form) in llamaServerArgs override the auto-sized one', () => {
-    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2, llamaServerArgs: ['--ctx-size', '1024'] }));
-    const args = specs[0]!.args;
-    // long-flag form suppresses the auto `-c` too
-    expect(args).not.toContain('-c');
-    expect(args.slice(-2)).toEqual(['--ctx-size', '1024']);
-  });
-
-  it('treats the `--ctx_size` underscore alias as a user-pinned context (no duplicate `-c`)', () => {
-    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 2, llamaServerArgs: ['--ctx_size', '2048'] }));
-    const args = specs[0]!.args;
-    // user pinned context via the underscore alias → suppress the auto `-c`
-    expect(args).not.toContain('-c');
-    expect(args.slice(-2)).toEqual(['--ctx_size', '2048']);
-  });
-
-  it('skips the auto `-c` when the user pins --parallel (they own the slot math)', () => {
-    const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 4, llamaServerArgs: ['--parallel', '1'] }));
-    expect(specs[0]!.args).not.toContain('-c');
-  });
-
-  it('does not add a chat `-c` to the embed tier (sized by --batch-size, not chat ctx)', () => {
-    const specs = buildBackendProcessSpecs({
-      embeddingLlm: {
-        provider: 'openai-compat',
-        endpoint: 'http://localhost:8080',
-        model: '/models/jina.gguf',
-        concurrency: 4,
-      },
-    });
-    expect(specs[0]!.args).not.toContain('-c');
-    expect(specs[0]!.args).toContain('--embeddings');
-  });
-
   it('keys identity by endpoint — same port, different model keeps the same id (no orphan)', () => {
     const a = buildBackendProcessSpecs(chatLlm({ model: '/models/old.gguf' } as never));
     const b = buildBackendProcessSpecs({
