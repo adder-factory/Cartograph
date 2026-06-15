@@ -537,7 +537,7 @@ export class CartographLlmService {
       );
     }
     const client = new LlmClient(resolved);
-    if (!(await client.isReachable())) {
+    if (!(await client.isAskReachable())) {
       throw new Error(`Ask backend not reachable (${resolved.resolutionTrace}).`);
     }
 
