@@ -340,7 +340,7 @@ export function parseUncommittedSourcePaths(porcelain: string): string[] {
     // (`R`/`C`). Without this guard a file legitimately named like `a -> b.ts`
     // (status ` M`) would be mis-split to its trailing segment. Non-rename
     // lines are `XY <path>`, so the path begins at column 3.
-    const isRenameOrCopy = line[0] === 'R' || line[0] === 'C';
+    const isRenameOrCopy = line.startsWith('R') || line.startsWith('C');
     const filePath = isRenameOrCopy ? line.split(' -> ')[1]!.trim() : line.slice(3).trim();
     if (filePath.length > 0 && !isCartographMetaPath(filePath)) dirtyPaths.push(filePath);
   }
