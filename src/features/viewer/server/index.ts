@@ -17,7 +17,12 @@ import { DEFAULT_HOST, DEFAULT_PORT, HTTP_INTERNAL_ERROR, HTTP_SCHEME } from './
 import type { RequestContext, ViewerHandle, ViewerOptions } from './context.js';
 import { sendJson } from './http.js';
 import { handleRequest } from './routes.js';
-import { createViewerApiToken, createViewerSecurityContext, formatHostForViewerUrl } from './security.js';
+import {
+  createViewerApiToken,
+  createViewerSecurityContext,
+  formatHostForViewerUrl,
+  viewerConfigEditAllowed,
+} from './security.js';
 
 export type { ViewerHandle } from './context.js';
 
@@ -94,6 +99,7 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
     indexHtml: loadIndexHtml(),
     staticAssets: loadStaticAssets(),
     security: createViewerSecurityContext(opts.host ?? DEFAULT_HOST, opts.port ?? DEFAULT_PORT, apiToken),
+    allowConfigEdit: viewerConfigEditAllowed(opts.host ?? DEFAULT_HOST, opts.allowConfigEdit === true),
   };
 
   const server = http.createServer((req, res) => {

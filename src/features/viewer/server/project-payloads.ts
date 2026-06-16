@@ -20,6 +20,7 @@ import {
 import type { RequestContext } from './context.js';
 import { safeParseJson } from './http.js';
 import { callProjectFromArgs } from './live.js';
+import { isReindexInProgress } from './reindex-job.js';
 import { serializeGraphNode, serializeNode } from './node-payloads.js';
 
 interface GitChangedFile {
@@ -45,6 +46,8 @@ export function statusPayload(ctx: RequestContext): unknown {
     nodesByKind: stats.nodesByKind,
     dirs: scopeDirsPayload(ctx),
     readiness: readinessPayload(ctx.projectPath, stats, indexedAt),
+    allowConfigEdit: ctx.allowConfigEdit,
+    reindexing: isReindexInProgress(),
   };
 }
 

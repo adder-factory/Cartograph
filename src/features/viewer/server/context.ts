@@ -23,6 +23,13 @@ export interface ViewerOptions {
    * (enforced server-side). Lets each agent run its own viewer.
    */
   session?: string;
+  /**
+   * Enable the config editor (write + re-index endpoints) even on a
+   * non-loopback bind. Loopback binds enable it by default; this is the
+   * explicit opt-in for binds reachable from other hosts. See
+   * `viewerConfigEditAllowed`.
+   */
+  allowConfigEdit?: boolean;
 }
 
 export interface StaticAsset {
@@ -49,6 +56,9 @@ export interface RequestContext {
   indexHtml: string;
   staticAssets: Record<string, StaticAsset>;
   security: ViewerSecurityContext;
+  /** Whether the config editor's write/re-index endpoints are enabled
+   *  for this server (loopback bind by default, else --allow-config-edit). */
+  allowConfigEdit: boolean;
   cg?: Cartograph;
 }
 

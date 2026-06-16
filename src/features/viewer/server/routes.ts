@@ -2,6 +2,7 @@ import type * as http from 'node:http';
 import { BIOMARKER_NAMES } from '../../../biomarkers/types.js';
 import { sendIndexHtml, sendStaticAsset } from './assets.js';
 import { handleAskRequest } from './ask.js';
+import { handleConfigGet, handleConfigPost, handleReindex } from './config-routes.js';
 import {
   BIOMARKER_LIMIT,
   COMPARE_LIMIT,
@@ -71,6 +72,7 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
     handle: (m, _u, res, ctx, req) => sendStaticAsset({ req, res, ctx, filename: (m as RegExpExecArray)[1]! }),
   },
   { match: matchExact('/api/status'), handle: (_m, _u, res, ctx) => sendJson(res, HTTP_OK, statusPayload(ctx)) },
+  { match: matchExact('/api/config'), handle: (_m, _u, res, ctx, req) => handleConfigGet(req, res, ctx) },
   {
     match: matchExact('/api/graph'),
     handle: (_m, url, res, ctx) => {
@@ -202,6 +204,14 @@ export async function handleRequest(
   }
   if (req.method === 'POST' && url.pathname === '/api/ask') {
     await handleAskRequest(req, res, ctx);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/config') {
+    await handleConfigPost(req, res, ctx);
+    return;
+  }
+  if (req.method === 'POST' && url.pathname === '/api/reindex') {
+    await handleReindex(req, res, ctx);
     return;
   }
   if (req.method !== 'GET') {

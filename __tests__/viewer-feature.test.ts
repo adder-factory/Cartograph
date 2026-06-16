@@ -64,6 +64,7 @@ describe('viewer feature CLI', () => {
       'option:-p, --port <n>',
       'option:--no-open',
       'option:--session <idOrLabel>',
+      'option:--allow-config-edit',
       'start:/repo:{"port":0}',
       'info:Viewer running at http://localhost:0',
       'info:  project: /repo',

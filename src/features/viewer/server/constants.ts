@@ -23,6 +23,7 @@ export const HTTP_UNAUTHORIZED = 401;
 export const HTTP_FORBIDDEN = 403;
 export const HTTP_NOT_FOUND = 404;
 export const HTTP_METHOD_NOT_ALLOWED = 405;
+export const HTTP_CONFLICT = 409;
 export const HTTP_PAYLOAD_TOO_LARGE = 413;
 export const HTTP_INTERNAL_ERROR = 500;
 export const HTTP_SERVICE_UNAVAILABLE = 503;
@@ -41,6 +42,14 @@ export const GRAPH_BFS_LIMIT = 60;
 export const DEFAULT_GRAPH_ROOT_CANDIDATES = 28;
 export const STATIC_ASSET_CACHE_CONTROL = 'no-cache';
 export const VIEWER_EXCLUDED_EDGE_KINDS = new Set(['similar_to', 'def_use']);
+
+/** Config-editor limits. The body carries the full curated config
+ *  (include/exclude glob lists can be long), so the cap is generous;
+ *  the re-index trigger body is just `{ mode }`. */
+export const CONFIG_BODY_BYTE_LIMIT = 256 * 1024;
+export const CONFIG_REINDEX_BODY_BYTE_LIMIT = 1024;
+export const CONFIG_GLOB_LIST_LIMIT = 1000;
+export const CONFIG_GLOB_CHAR_LIMIT = 500;
 
 export const ASK_BODY_BYTE_LIMIT = 64 * 1024;
 export const ASK_QUESTION_CHAR_LIMIT = 8000;

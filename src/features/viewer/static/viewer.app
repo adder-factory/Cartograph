@@ -15,17 +15,20 @@ document.querySelectorAll('.tab').forEach(t => {
     }
     const liveView = document.getElementById('live-view');
     const traceView = document.getElementById('trace-view');
+    const configView = document.getElementById('config-view');
     health.style.display = view === 'health' ? 'block' : 'none';
     liveView.style.display = view === 'live' ? 'block' : 'none';
     traceView.style.display = view === 'trace' ? 'block' : 'none';
+    configView.style.display = view === 'config' ? 'block' : 'none';
     if (view === 'live') liveFeedActivate();
     else liveFeedDeactivate();
     // A replay stepping its timer while another tab is up would keep
     // mutating rows (and, in file:// mode, re-dimming the graph).
     if (view !== 'trace') stopTraceReplay();
-    if (view === 'health' || view === 'live' || view === 'trace') {
+    if (view === 'health' || view === 'live' || view === 'trace' || view === 'config') {
       stage.style.display = 'none';
       if (view === 'health' && LIVE_MODE) loadHealthLive();
+      if (view === 'config') loadConfigLive();
       if (view === 'trace') {
         if (LIVE_MODE) loadSessionsLive();
         else if (activeStep < 0) activateTraceStep(5); // step 6 (impact) is the most visually interesting
