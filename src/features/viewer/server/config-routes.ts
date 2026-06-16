@@ -243,19 +243,24 @@ function parseReindexMode(body: string): ReindexMode | null {
  *  never a JSON status code. Always releases the single-flight guard. */
 async function streamReindexJob(job: ReindexJob): Promise<void> {
   const { res, ctx } = job;
-  res.writeHead(HTTP_OK, {
-    'content-type': 'text/event-stream',
-    'cache-control': 'no-cache',
-    connection: 'keep-alive',
-    'x-accel-buffering': 'no',
-  });
   const controller = new AbortController();
   const onClose = (): void => controller.abort();
-  // Cancel on CLIENT disconnect via the RESPONSE 'close'. The request
-  // 'close' fires once the POST body has been read (well before the SSE
-  // stream ends), so listening there would abort the index immediately.
-  res.on('close', onClose);
+  // Everything runs INSIDE the try — including writeHead and the listener
+  // wiring — so a synchronous throw there (headers already sent, socket
+  // already closed) still hits `finally` and releases the single-flight
+  // guard. Otherwise one failed writeHead would leak the guard and wedge
+  // every later re-index at 409 until restart.
   try {
+    res.writeHead(HTTP_OK, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache',
+      connection: 'keep-alive',
+      'x-accel-buffering': 'no',
+    });
+    // Cancel on CLIENT disconnect via the RESPONSE 'close'. The request
+    // 'close' fires once the POST body has been read (well before the SSE
+    // stream ends), so listening there would abort the index immediately.
+    res.on('close', onClose);
     await runReindex(job, controller.signal);
   } catch (err) {
     writeSseEvent(res, 'error', { message: errMsg(err) });

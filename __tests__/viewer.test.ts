@@ -1084,7 +1084,19 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     // to completion is bounded.
     const text = await res.text();
     expect(text).toMatch(/event: (done|busy)/);
-  }, 35_000);
+
+    // The single-flight guard must be released after the job finishes —
+    // a second re-index must NOT get a stale 409. (Regression guard for
+    // the leaked-lock path when stream setup throws.)
+    const again = await fetch(new URL('api/reindex', handle.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-cartograph-viewer-token': handle.apiToken },
+      body: JSON.stringify({ mode: 'sync' }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    expect(again.status).toBe(200);
+    await again.text();
+  }, 45_000);
 });
 
 function apiFetch(handle: ViewerHandle, pathOrUrl: string, init: RequestInit = {}): Promise<Response> {
