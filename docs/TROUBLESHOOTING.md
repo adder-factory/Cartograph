@@ -15,7 +15,9 @@ missing local model files. Doctor cannot start an LLM backend process for you.
 ## `bun install` Fails Extracting A Tarball
 
 Cartograph installs from source, so a source install or `cartograph upgrade
---apply` runs `bun install`. That step can occasionally fail with:
+--apply` runs `bun install`.
+
+Symptom:
 
 ```text
 error: Fail extracting tarball for "@biomejs/cli-linux-x64-musl"
@@ -26,7 +28,9 @@ optional platform package even though the lockfile is valid (the failure is
 near-instant and a clean retry succeeds). It is not a problem with Cartograph
 or your environment.
 
-Fix — clear Bun's cache so a half-written entry is not reused, then re-run:
+Fix:
+
+Clearing Bun's cache first forces a clean re-fetch:
 
 ```sh
 bun pm cache rm
