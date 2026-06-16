@@ -637,6 +637,24 @@ function reorderProdFirst(rawResults: SearchResult[], limit: number): SearchResu
   return [...prodHits, ...fixtureHits].slice(0, limit);
 }
 
+/**
+ * Stable-demote `import`-kind hits to the end of an exact-name result
+ * set so a container's own members fill the default `limit` before its
+ * importers do. An exact name search for a class should surface the
+ * class + its methods — not the N files that import it under the same
+ * name, which match identically and otherwise crowd real members past
+ * the cap. Imports are demoted, not dropped: they still appear after the
+ * members, or sooner at a higher `limit`.
+ *
+ * @internal — exported for unit testing the import-demotion ordering.
+ */
+export function deprioritizeImports(results: SearchResult[]): SearchResult[] {
+  const imports = results.filter((r) => r.node.kind === 'import');
+  if (imports.length === 0 || imports.length === results.length) return results;
+  const defs = results.filter((r) => r.node.kind !== 'import');
+  return [...defs, ...imports];
+}
+
 function canonicalToolNameLiteral(query: string): string | null {
   const trimmed = query.trim();
   return /^cartograph_[a-z0-9_]+$/.test(trimmed) ? trimmed : null;
@@ -1100,7 +1118,8 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
           compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
         );
   const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
-  const fullResults = reorderProdFirst(rankedResults, limit);
+  const memberFirstResults = deprioritizeImports(rankedResults);
+  const fullResults = reorderProdFirst(memberFirstResults, limit);
   return { rawResults, fullResults };
 }
 

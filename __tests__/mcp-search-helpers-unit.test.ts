@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   buildConceptHintIfNeeded,
+  deprioritizeImports,
   describeRemainingFilters,
   detectMultiNameQuery,
   detectMultiNameQueryWithOperatorStrip,
@@ -66,6 +67,35 @@ function searchResult(name: string, text: string): SearchResult {
     score: 1,
   };
 }
+
+describe('deprioritizeImports — exact-name result ordering', () => {
+  const res = (name: string, kind: SearchResult['node']['kind']): SearchResult => {
+    const base = searchResult(name, name);
+    return { ...base, node: { ...base.node, kind } };
+  };
+
+  it('stable-demotes import hits to the end, preserving member order', () => {
+    const out = deprioritizeImports([
+      res('A', 'class'),
+      res('imp1', 'import'),
+      res('m1', 'method'),
+      res('imp2', 'import'),
+      res('m2', 'method'),
+    ]);
+    // members keep their relative order; both imports move to the end, in order
+    expect(out.map((r) => r.node.name)).toEqual(['A', 'm1', 'm2', 'imp1', 'imp2']);
+  });
+
+  it('returns the input unchanged (same reference) when there are no imports', () => {
+    const input = [res('A', 'class'), res('m1', 'method')];
+    expect(deprioritizeImports(input)).toBe(input);
+  });
+
+  it('returns the input unchanged when every hit is an import (kind=import filter contract)', () => {
+    const input = [res('imp1', 'import'), res('imp2', 'import')];
+    expect(deprioritizeImports(input)).toBe(input);
+  });
+});
 
 describe('_search query helper units', () => {
   it('describes remaining non-kind filters in query order', () => {
