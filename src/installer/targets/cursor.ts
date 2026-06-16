@@ -18,7 +18,9 @@ import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
   atomicWriteFileSync,
+  deleteNestedJsonEntry,
   getHomeDir,
+  getNestedJsonEntry,
   readJsonFile,
   removeMarkedSection,
   replaceOrAppendMarkedSection,
@@ -72,7 +74,7 @@ class CursorTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const mcpPath = mcpJsonPath(loc);
     const config = readJsonFile(mcpPath);
-    const alreadyConfigured = !!config['mcpServers']?.cartograph;
+    const alreadyConfigured = getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined;
     // "Installed" heuristic: does ~/.cursor exist (global) or has the
     // user opted into a project-local cursor config dir?
     const installed =
@@ -102,11 +104,7 @@ class CursorTarget implements AgentTarget {
 
     const mcpPath = mcpJsonPath(loc);
     const config = readJsonFile(mcpPath);
-    if (config['mcpServers']?.cartograph) {
-      delete config['mcpServers'].cartograph;
-      if (Object.keys(config['mcpServers']).length === 0) {
-        delete config['mcpServers'];
-      }
+    if (deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) {
       writeJsonFile(mcpPath, config);
       files.push({ path: mcpPath, action: 'removed' });
     } else {

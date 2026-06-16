@@ -17,10 +17,12 @@ import {
   getHomeDir,
   getMcpCommand,
   getMcpServerArgs,
+  getNestedJsonEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
   removeNestedJsonEntry,
+  setNestedJsonEntry,
   writeJsonFile,
   type McpCommandOptions,
 } from './shared.js';
@@ -60,7 +62,11 @@ class ZedTarget implements AgentTarget {
     const file = settingsJsonPath(loc);
     const config = readJsonFile(file);
     const installed = fs.existsSync(configDir(loc)) || fs.existsSync(file);
-    return { installed, alreadyConfigured: !!config['context_servers']?.cartograph, configPath: file };
+    return {
+      installed,
+      alreadyConfigured: getNestedJsonEntry(config, 'context_servers', 'cartograph') !== undefined,
+      configPath: file,
+    };
   }
 
   install(loc: Location, opts: InstallOptions): WriteResult {
@@ -98,14 +104,13 @@ class ZedTarget implements AgentTarget {
 function writeContextServerEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
   const existing = readJsonFile(file);
-  const before = existing['context_servers']?.cartograph;
+  const before = getNestedJsonEntry(existing, 'context_servers', 'cartograph');
   const after = getZedContextServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
   if (jsonDeepEqual(before, after)) return { path: file, action: 'unchanged' };
 
   const action = before || fs.existsSync(file) ? 'updated' : 'created';
-  if (!existing['context_servers']) existing['context_servers'] = {};
-  existing['context_servers'].cartograph = after;
+  setNestedJsonEntry(existing, 'context_servers', 'cartograph', after);
   writeJsonFile(file, existing);
   return { path: file, action };
 }

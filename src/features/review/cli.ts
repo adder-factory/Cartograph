@@ -3,6 +3,7 @@
  * feature-local CLI registration.
  */
 import { readFile } from 'node:fs/promises';
+import type { Command } from 'commander';
 import { errMsg } from '../../errors.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
@@ -21,13 +22,16 @@ type RunViaMCPFn = (tool: string, args: Record<string, unknown>, projectPath?: s
 
 export interface ReviewCommandDeps {
   program: CommandLike;
-  reviewCmd: CommandLike;
+  // The real commander Command — it is both the builder used below and
+  // the value handed to installFamilyActionAlias / attachUnknownActionHandler,
+  // whose internals read Command-only members (.commands, .on, ...).
+  reviewCmd: Command;
   error: (message: string) => void;
   assignIntArg: AssignNumericArgFn;
   assignFloatArg: AssignNumericArgFn;
   runViaMCP: RunViaMCPFn;
-  installFamilyActionAlias: (group: any, family: string, disc: string) => void;
-  attachUnknownActionHandler: (group: any, family: string) => void;
+  installFamilyActionAlias: (group: Command, family: string, disc: string) => void;
+  attachUnknownActionHandler: (group: Command, family: string) => void;
 }
 
 interface ReviewContextOptions {

@@ -27,13 +27,16 @@ import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
   getHomeDir,
+  deleteNestedJsonEntry,
   getMcpCommand,
   getMcpServerArgs,
+  getNestedJsonEntry,
   isProjectSourceRunEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
   removeOwnedFile,
+  setNestedJsonEntry,
   writeJsonFile,
   writeOwnedFile,
   type McpCommandOptions,
@@ -104,7 +107,7 @@ class OpencodeTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = configPath(loc);
     const config = readJsonFile(file);
-    const alreadyConfigured = !!config['mcp']?.cartograph;
+    const alreadyConfigured = getNestedJsonEntry(config, 'mcp', 'cartograph') !== undefined;
     const installed = loc === 'global' ? fs.existsSync(globalConfigDir()) : fs.existsSync(file);
     return { installed, alreadyConfigured, configPath: file };
   }
@@ -112,7 +115,7 @@ class OpencodeTarget implements AgentTarget {
   install(loc: Location, opts: InstallOptions): WriteResult {
     const file = configPath(loc);
     const existing = readJsonFile(file);
-    const before = existing['mcp']?.cartograph;
+    const before = getNestedJsonEntry(existing, 'mcp', 'cartograph');
     const after = getOpencodeServerEntry(mcpCommandOptionsForLocation(loc, opts));
 
     let configWrite: WriteResult['files'][number];
@@ -123,8 +126,7 @@ class OpencodeTarget implements AgentTarget {
     } else {
       const created = !fs.existsSync(file);
       if (!existing['$schema']) existing['$schema'] = OPENCODE_SCHEMA_URL;
-      if (!existing['mcp']) existing['mcp'] = {};
-      existing['mcp'].cartograph = after;
+      setNestedJsonEntry(existing, 'mcp', 'cartograph', after);
       writeJsonFile(file, existing);
       configWrite = { path: file, action: created ? 'created' : 'updated' };
     }
@@ -138,11 +140,7 @@ class OpencodeTarget implements AgentTarget {
     const files: WriteResult['files'] = [];
     const file = configPath(loc);
     const config = readJsonFile(file);
-    if (config['mcp']?.cartograph) {
-      delete config['mcp'].cartograph;
-      if (Object.keys(config['mcp']).length === 0) {
-        delete config['mcp'];
-      }
+    if (deleteNestedJsonEntry(config, 'mcp', 'cartograph')) {
       // If the file is now degenerate (only $schema or empty), leave it
       // — the user may have other config we shouldn't nuke.
       writeJsonFile(file, config);

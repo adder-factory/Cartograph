@@ -1,6 +1,6 @@
 import * as fs from 'node:fs';
 import type { WriteResult } from './types.js';
-import { jsonDeepEqual, readJsonFile, writeJsonFile } from './file-writes.js';
+import { ensureNestedStringArray, jsonDeepEqual, readJsonFile, writeJsonFile } from './file-writes.js';
 
 /**
  * Permissions list for Claude `settings.json`. Other targets that
@@ -23,17 +23,15 @@ export function writePermissionsAllowList(filePath: string): WriteResult['files'
   const settings = readJsonFile(filePath);
   const created = !fs.existsSync(filePath);
 
-  if (!settings['permissions']) settings['permissions'] = {};
-  if (!Array.isArray(settings['permissions'].allow)) settings['permissions'].allow = [];
-
-  const before = [...settings['permissions'].allow];
+  const allow = ensureNestedStringArray(settings, 'permissions', 'allow');
+  const before = [...allow];
   for (const permission of getCartographPermissions()) {
-    if (!settings['permissions'].allow.includes(permission)) {
-      settings['permissions'].allow.push(permission);
+    if (!allow.includes(permission)) {
+      allow.push(permission);
     }
   }
 
-  if (jsonDeepEqual(before, settings['permissions'].allow) && !created) {
+  if (jsonDeepEqual(before, allow) && !created) {
     return { path: filePath, action: 'unchanged' };
   }
 

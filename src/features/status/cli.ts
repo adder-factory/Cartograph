@@ -9,12 +9,13 @@ import {
   STATUS_MAX_INLINE_TOP_N,
 } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type Cartograph from '../../index.js';
 
 type CommandLike = CliOptionCommand;
 
 interface StatusCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 

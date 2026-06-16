@@ -19,13 +19,19 @@ export {
 } from './mcp-config.js';
 export { getCartographPermissions, writePermissionsAllowList } from './permissions.js';
 export {
+  asJsonObject,
   atomicWriteFileSync,
+  deleteNestedJsonEntry,
+  ensureNestedStringArray,
+  getNestedJsonEntry,
+  getNestedStringArray,
   jsonDeepEqual,
   readJsonFile,
   removeMarkedSection,
   removeNestedJsonEntry,
   removeOwnedFile,
   replaceOrAppendMarkedSection,
+  setNestedJsonEntry,
   writeJsonFile,
   writeMarkedInstructionsFile,
   writeOwnedFile,

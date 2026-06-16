@@ -20,7 +20,15 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { atomicWriteFileSync, getHomeDir, readJsonFile, renderMcpServersPrintConfig, writeJsonFile } from './shared.js';
+import {
+  atomicWriteFileSync,
+  deleteNestedJsonEntry,
+  getHomeDir,
+  getNestedJsonEntry,
+  readJsonFile,
+  renderMcpServersPrintConfig,
+  writeJsonFile,
+} from './shared.js';
 import { INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 import { writeMcpEntryJson } from './write-mcp-entry-json.js';
 import { projectGitignorePath, writeProjectGitignoreFileEntries } from './gitignore.js';
@@ -47,7 +55,7 @@ class KiroTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = mcpJsonPath(loc);
     const config = readJsonFile(file);
-    const alreadyConfigured = !!config['mcpServers']?.cartograph;
+    const alreadyConfigured = getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined;
     const installed =
       loc === 'global'
         ? fs.existsSync(configDir('global')) || fs.existsSync(file)
@@ -73,11 +81,7 @@ class KiroTarget implements AgentTarget {
 
     const file = mcpJsonPath(loc);
     const config = readJsonFile(file);
-    if (config['mcpServers']?.cartograph) {
-      delete config['mcpServers'].cartograph;
-      if (Object.keys(config['mcpServers']).length === 0) {
-        delete config['mcpServers'];
-      }
+    if (deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) {
       writeJsonFile(file, config);
       files.push({ path: file, action: 'removed' });
     } else {

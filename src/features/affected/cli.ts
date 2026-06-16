@@ -16,6 +16,7 @@ import {
 import type { CliOptionCommand } from '../shared/cli-command.js';
 import type Cartograph from '../../index.js';
 import type { QueryBuilder } from '../../db/queries.js';
+import type { GraphQueryManager } from '../../graph/index.js';
 
 type CommandLike = CliOptionCommand;
 
@@ -41,7 +42,7 @@ export interface AffectedCommandDeps {
   isInitialized: (projectPath: string) => boolean;
   buildIndexedPathSets: (queries: QueryBuilder) => IndexedPathSets;
   findAffectedTests: (
-    graphManager: any,
+    graphManager: GraphQueryManager,
     input: AffectedCoreInput,
   ) => { affectedTests: Set<string>; totalDependents: number; barrelsReached: string[] };
   loadGitUtils: () => Promise<{ listChangedFilesSince: (projectPath: string, ref: string) => string[] | null }>;

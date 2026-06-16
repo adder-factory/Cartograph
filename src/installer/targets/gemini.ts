@@ -17,8 +17,10 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
+  deleteNestedJsonEntry,
   getHomeDir,
   getMcpServerConfig,
+  getNestedJsonEntry,
   mcpCommandOptionsForLocation,
   readJsonFile,
   removeMarkedSection,
@@ -54,7 +56,7 @@ class GeminiTarget implements AgentTarget {
   detect(loc: Location): DetectionResult {
     const file = settingsJsonPath(loc);
     const config = readJsonFile(file);
-    const alreadyConfigured = !!config['mcpServers']?.cartograph;
+    const alreadyConfigured = getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined;
     const installed =
       loc === 'global'
         ? fs.existsSync(configDir('global')) || fs.existsSync(file)
@@ -76,11 +78,7 @@ class GeminiTarget implements AgentTarget {
 
     const file = settingsJsonPath(loc);
     const config = readJsonFile(file);
-    if (config['mcpServers']?.cartograph) {
-      delete config['mcpServers'].cartograph;
-      if (Object.keys(config['mcpServers']).length === 0) {
-        delete config['mcpServers'];
-      }
+    if (deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) {
       // Leave the file in place even if now `{}` — other top-level
       // Gemini settings the user might add later can share the file.
       writeJsonFile(file, config);

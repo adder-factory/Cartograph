@@ -14,6 +14,7 @@ import {
 } from './runtime.js';
 import { chatOverrideFromOptions } from '../shared/cli-args.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { IndexProgress } from '../../index.js';
 
 type CommandLike = CliOptionCommand;
 
@@ -56,7 +57,7 @@ interface RunOpenedEnrichmentGraphArgs {
 
 export interface AdminLlmEnrichmentCommandDeps {
   adminCmd: CommandLike;
-  createShimmerProgress: () => { onProgress: any; stop: () => Promise<void> };
+  createShimmerProgress: () => { onProgress: (progress: IndexProgress) => void; stop: () => Promise<void> };
   error: (message: string) => void;
   formatDuration: (ms: number) => string;
   formatNumber: (n: number) => string;

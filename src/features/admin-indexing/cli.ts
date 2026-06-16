@@ -10,6 +10,7 @@ import {
   type SyncResult,
 } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { IndexProgress } from '../../index.js';
 
 type CommandLike = CliOptionCommand;
 
@@ -50,8 +51,13 @@ export interface AdminIndexingCommandDeps {
   info: (message: string) => void;
   formatNumber: (n: number) => string;
   formatDuration: (ms: number) => string;
-  createVerboseProgress: () => any;
-  createShimmerProgress: () => { onProgress: any; stop: () => Promise<void> };
+  createVerboseProgress: () => (progress: IndexProgress) => void;
+  createShimmerProgress: () => { onProgress: (progress: IndexProgress) => void; stop: () => Promise<void> };
+  // DI seam: the real awaitSummarisationWithProgress wants the full
+  // Cartograph instance, but this command only ever opens the structural
+  // `AdminIndexGraph` subset; param-contravariance makes neither concrete
+  // type assignable here.
+  // biome-ignore lint/suspicious/noExplicitAny: DI seam — real Cartograph param is not assignable to/from the AdminIndexGraph subset under contravariance
   awaitSummarisationWithProgress: (cg: any, clack: ClackPrompts) => Promise<void>;
   printIndexResult: (clack: ClackPrompts, result: AdminIndexResult, projectPath: string) => void;
   isInitialized: (projectPath: string) => boolean;

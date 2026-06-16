@@ -15,7 +15,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import { writeMcpEntry, writePermissionsEntry, writeInstructionsEntry } from './targets/claude.js';
-import { readJsonFile } from './targets/shared.js';
+import { getNestedJsonEntry, getNestedStringArray, readJsonFile } from './targets/shared.js';
 
 export type InstallLocation = 'global' | 'local';
 
@@ -45,7 +45,7 @@ export function hasMcpConfig(location: InstallLocation): boolean {
   const file =
     location === 'global' ? path.join(os.homedir(), '.claude.json') : path.join(process.cwd(), '.claude.json');
   const config = readJsonFile(file);
-  return !!config['mcpServers']?.cartograph;
+  return getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined;
 }
 
 export function hasPermissions(location: InstallLocation): boolean {
@@ -54,9 +54,9 @@ export function hasPermissions(location: InstallLocation): boolean {
       ? path.join(os.homedir(), '.claude', 'settings.json')
       : path.join(process.cwd(), '.claude', 'settings.json');
   const settings = readJsonFile(file);
-  const allow = settings['permissions']?.allow;
-  if (!Array.isArray(allow)) return false;
-  return allow.some((p: string) => p.startsWith('mcp__cartograph__'));
+  const allow = getNestedStringArray(settings, 'permissions', 'allow');
+  if (allow === null) return false;
+  return allow.some((p) => p.startsWith('mcp__cartograph__'));
 }
 
 export function hasClaudeMdSection(location: InstallLocation): boolean {

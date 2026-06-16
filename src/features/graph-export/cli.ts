@@ -9,12 +9,13 @@ import {
   type GraphExportRawOptions,
 } from './contract.js';
 import { runGraphExport, type GraphExportRuntimeDeps, type GraphExportRunResult } from './runtime.js';
+import type Cartograph from '../../index.js';
 
 type CommandLike = CliOptionCommand;
 
 interface GraphExportCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 

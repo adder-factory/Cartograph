@@ -78,29 +78,34 @@ function projectKey(): string {
   return path.resolve(process.cwd());
 }
 
-function objectRecord(value: unknown): Record<string, any> | null {
+function objectRecord(value: unknown): Record<string, unknown> | null {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
-  return value as Record<string, any>;
+  return value as Record<string, unknown>;
 }
 
-function ensureObject(parent: Record<string, any>, key: string): Record<string, any> {
+function ensureObject(parent: Record<string, unknown>, key: string): Record<string, unknown> {
   const current = objectRecord(parent[key]);
   if (current) return current;
-  const next: Record<string, any> = {};
+  const next: Record<string, unknown> = {};
   parent[key] = next;
   return next;
 }
 
-function localProjectConfig(config: Record<string, any>): Record<string, any> | null {
+function localProjectConfig(config: Record<string, unknown>): Record<string, unknown> | null {
   const projects = objectRecord(config['projects']);
   if (!projects) return null;
   return objectRecord(projects[projectKey()]);
 }
 
-function hasScopedMcpEntry(loc: Location, config: Record<string, any>): boolean {
-  if (loc === 'global') return !!config['mcpServers']?.cartograph;
-  const projectConfig = localProjectConfig(config);
-  return !!projectConfig?.['mcpServers']?.cartograph;
+/** True when `record[key]` is a non-null object whose `cartograph` member exists. */
+function hasCartographMember(record: Record<string, unknown> | null, key: string): boolean {
+  const child = record ? objectRecord(record[key]) : null;
+  return !!child && child['cartograph'] !== undefined;
+}
+
+function hasScopedMcpEntry(loc: Location, config: Record<string, unknown>): boolean {
+  if (loc === 'global') return hasCartographMember(config, 'mcpServers');
+  return hasCartographMember(localProjectConfig(config), 'mcpServers');
 }
 
 function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
@@ -108,7 +113,7 @@ function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['
 
   const file = claudeJsonPath(loc);
   const existing = readJsonFile(file);
-  const before = localProjectConfig(existing)?.['mcpServers']?.cartograph;
+  const before = objectRecord(localProjectConfig(existing)?.['mcpServers'])?.['cartograph'];
   const after = getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts));
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
@@ -215,18 +220,19 @@ class ClaudeCodeTarget implements AgentTarget {
     // 2. Permissions
     const settingsPath = scopedSettingsJsonPath(loc);
     const settings = readJsonFile(settingsPath);
-    if (Array.isArray(settings['permissions']?.allow)) {
-      const before = settings['permissions'].allow.length;
-      settings['permissions'].allow = settings['permissions'].allow.filter(
-        (p: string) => !p.startsWith('mcp__cartograph__'),
-      );
-      if (settings['permissions'].allow.length === before) {
+    const permissions = objectRecord(settings['permissions']);
+    const allow = permissions?.['allow'];
+    if (permissions && Array.isArray(allow)) {
+      const before = allow.length;
+      const filtered = allow.filter((p: unknown) => typeof p === 'string' && !p.startsWith('mcp__cartograph__'));
+      if (filtered.length === before) {
         files.push({ path: settingsPath, action: 'not-found' });
       } else {
-        if (settings['permissions'].allow.length === 0) {
-          delete settings['permissions'].allow;
+        permissions['allow'] = filtered;
+        if (filtered.length === 0) {
+          delete permissions['allow'];
         }
-        if (Object.keys(settings['permissions']).length === 0) {
+        if (Object.keys(permissions).length === 0) {
           delete settings['permissions'];
         }
         writeJsonFile(settingsPath, settings);

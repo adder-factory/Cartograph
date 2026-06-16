@@ -20,10 +20,15 @@ function safeBackupFile(filePath: string): void {
  * `{}` — so an idempotent re-run never silently deletes a user's
  * existing config that happened to break JSON parse temporarily.
  */
-export function readJsonFile(filePath: string): Record<string, any> {
+export function readJsonFile(filePath: string): Record<string, unknown> {
   if (!fs.existsSync(filePath)) return {};
   try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const parsed: unknown = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    // A JSON file's top level can be any value; the installer only ever
+    // operates on object-shaped configs. Anything else (array, scalar,
+    // null) degrades to `{}` so callers never index a non-object.
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed as Record<string, unknown>;
   } catch (err) {
     logWarn(`Could not parse ${path.basename(filePath)}: ${errMsg(err)}`);
     logWarn(`A backup will be created before overwriting.`);
@@ -130,8 +135,104 @@ export function removeOwnedFile(filePath: string, pruneDirs: readonly string[] =
  * Atomic JSON write. Trailing newline matches the convention every
  * existing target had — preserves diff-friendly file shape.
  */
-export function writeJsonFile(filePath: string, data: Record<string, any>): void {
+export function writeJsonFile(filePath: string, data: Record<string, unknown>): void {
   atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
+}
+
+/**
+ * Coerce a value parsed from JSON to a string-keyed record, or `null`
+ * when it is not a plain object (array / scalar / null). The agent
+ * config readers all parse to `unknown`-valued records; this narrows a
+ * nested member before the caller indexes it.
+ */
+export function asJsonObject(value: unknown): Record<string, unknown> | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/**
+ * Read `config[wrapperKey][entryKey]` when both levels are objects.
+ * Returns `undefined` when either level is missing or not an object —
+ * so a caller's truthiness check stays the same as the old `any`-typed
+ * `config[wrapperKey]?.[entryKey]` chain, now without `any`.
+ */
+export function getNestedJsonEntry(config: Record<string, unknown>, wrapperKey: string, entryKey: string): unknown {
+  return asJsonObject(config[wrapperKey])?.[entryKey];
+}
+
+/**
+ * Set `config[wrapperKey][entryKey] = value`, creating the wrapper
+ * object when absent (or replacing a non-object wrapper). Mutates and
+ * returns `config` so callers can chain a `writeJsonFile`.
+ */
+export function setNestedJsonEntry(
+  config: Record<string, unknown>,
+  wrapperKey: string,
+  entryKey: string,
+  value: unknown,
+): Record<string, unknown> {
+  let wrapper = asJsonObject(config[wrapperKey]);
+  if (!wrapper) {
+    wrapper = {};
+    config[wrapperKey] = wrapper;
+  }
+  wrapper[entryKey] = value;
+  return config;
+}
+
+/**
+ * Delete `config[wrapperKey][entryKey]` in memory, pruning the wrapper
+ * object when it becomes empty. Returns `true` when an entry was
+ * actually removed. The on-disk variant is {@link removeNestedJsonEntry}.
+ */
+export function deleteNestedJsonEntry(config: Record<string, unknown>, wrapperKey: string, entryKey: string): boolean {
+  const wrapper = asJsonObject(config[wrapperKey]);
+  if (!wrapper || wrapper[entryKey] === undefined) return false;
+  delete wrapper[entryKey];
+  if (Object.keys(wrapper).length === 0) delete config[wrapperKey];
+  return true;
+}
+
+/**
+ * Read `config[wrapperKey][listKey]` as a `string[]`, or `null` when
+ * either level is missing / not the expected shape. Non-string members
+ * are dropped so the caller traffics in a clean `string[]`.
+ */
+export function getNestedStringArray(
+  config: Record<string, unknown>,
+  wrapperKey: string,
+  listKey: string,
+): string[] | null {
+  const list = asJsonObject(config[wrapperKey])?.[listKey];
+  if (!Array.isArray(list)) return null;
+  return list.filter((v): v is string => typeof v === 'string');
+}
+
+/**
+ * Ensure `config[wrapperKey][listKey]` is a string array, creating the
+ * wrapper object and/or the array when absent, and returns that array
+ * (mutating `config`). A non-array existing value is replaced with `[]`.
+ */
+export function ensureNestedStringArray(
+  config: Record<string, unknown>,
+  wrapperKey: string,
+  listKey: string,
+): string[] {
+  let wrapper = asJsonObject(config[wrapperKey]);
+  if (!wrapper) {
+    wrapper = {};
+    config[wrapperKey] = wrapper;
+  }
+  const existing = wrapper[listKey];
+  if (Array.isArray(existing)) {
+    // Coerce to string[] in place — drop any non-string member.
+    const cleaned = existing.filter((v): v is string => typeof v === 'string');
+    wrapper[listKey] = cleaned;
+    return cleaned;
+  }
+  const fresh: string[] = [];
+  wrapper[listKey] = fresh;
+  return fresh;
 }
 
 export function removeNestedJsonEntry(
@@ -140,14 +241,8 @@ export function removeNestedJsonEntry(
   entryKey: string,
 ): WriteResult['files'][number] {
   const config = readJsonFile(filePath);
-  const parent = config[parentKey];
-  if (parent === null || typeof parent !== 'object' || Array.isArray(parent) || !parent[entryKey]) {
+  if (!deleteNestedJsonEntry(config, parentKey, entryKey)) {
     return { path: filePath, action: 'not-found' };
-  }
-
-  delete parent[entryKey];
-  if (Object.keys(parent).length === 0) {
-    delete config[parentKey];
   }
   writeJsonFile(filePath, config);
   return { path: filePath, action: 'removed' };
