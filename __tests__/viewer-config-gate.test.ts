@@ -5,7 +5,11 @@
  * so the non-loopback decision is pinned here.
  */
 import { describe, it, expect } from 'vitest';
-import { isLockContentionResult, redactUrlCredentials } from '../src/features/viewer/server/config-routes.js';
+import {
+  isLockContentionResult,
+  redactDatabase,
+  redactUrlCredentials,
+} from '../src/features/viewer/server/config-routes.js';
 import { viewerConfigEditAllowed } from '../src/features/viewer/server/security.js';
 
 describe('viewerConfigEditAllowed', () => {
@@ -45,6 +49,33 @@ describe('redactUrlCredentials', () => {
     expect(redactUrlCredentials('postgres://db.example.com:5432/cartograph')).toBe(
       'postgres://db.example.com:5432/cartograph',
     );
+  });
+});
+
+describe('redactDatabase', () => {
+  it('allowlists known fields and drops loose secret-bearing keys', () => {
+    // The database config schema is `.loose()`, so extra keys reach here at
+    // runtime even though the type doesn't model them — simulate that.
+    const out = redactDatabase({
+      provider: 'postgres',
+      url: 'postgres://u:s3cret@h:5432/db',
+      schema: 'app',
+      pgvector: 'auto',
+      password: 's3cret',
+      apiKey: 'k-123',
+    } as unknown as Parameters<typeof redactDatabase>[0]) as Record<string, unknown>;
+    expect(out).toEqual({
+      provider: 'postgres',
+      url: 'postgres://u:***@h:5432/db',
+      schema: 'app',
+      pgvector: 'auto',
+    });
+    expect(out['password']).toBeUndefined();
+    expect(out['apiKey']).toBeUndefined();
+  });
+
+  it('returns null when there is no database block', () => {
+    expect(redactDatabase(undefined)).toBeNull();
   });
 });
 

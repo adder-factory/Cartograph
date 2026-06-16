@@ -322,8 +322,8 @@ function cfgSetProgress(current, total, label, file) {
   setText('cfg-progress-file', file || '');
 }
 
-/** Refresh the top-bar files/nodes/edges counts after a reindex. (The
-    project identity in the bar doesn't change, so only the counts.) */
+/** Refresh the top-bar files/nodes/edges counts AND the file-scope rail
+    after a reindex (the project identity in the bar doesn't change). */
 async function cfgRefreshTopbarStats() {
   try {
     const r = await apiFetch('/api/status');
@@ -336,6 +336,9 @@ async function cfgRefreshTopbarStats() {
         `<span class="stat"><b>${formatCompactCount(s.nodes)}</b> nodes</span>` +
         `<span class="stat"><b>${formatCompactCount(s.edges)}</b> edges</span>`;
     }
+    // The file-scope rail is only rendered at boot — re-render it from the
+    // fresh dirs so newly-included directories appear and removed ones drop.
+    if (typeof renderFileScopeFilters === 'function') renderFileScopeFilters(s.dirs);
   } catch (err) {
     console.debug('viewer: cfgRefreshTopbarStats failed', err);
   }

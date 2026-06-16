@@ -16,6 +16,7 @@ import { QueryBuilder } from '../src/db/queries.js';
 import { appendToolCall, deleteSession, insertSession } from '../src/db/queries-trace.js';
 import { hashContent } from '../src/extraction/index.js';
 import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
+import { endReindexJob, tryBeginReindexJob } from '../src/features/viewer/server/reindex-job.js';
 
 describe('viewer HTTP server', () => {
   let testDir: string;
@@ -1051,6 +1052,18 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(res.status).toBe(200);
     const after = await getConfig();
     expect(after.database).toBeNull(); // the database block in the body was ignored
+  });
+
+  it('refuses to save config while a re-index is running (409)', async () => {
+    // The reindex single-flight guard is module-global and shared with the
+    // running server, so we can drive it deterministically.
+    expect(tryBeginReindexJob()).toBe(true);
+    try {
+      const res = await postConfig({ exclude: ['**/while-reindexing/**'] });
+      expect(res.status).toBe(409);
+    } finally {
+      endReindexJob();
+    }
   });
 
   it('rejects an invalid re-index mode with 400', async () => {

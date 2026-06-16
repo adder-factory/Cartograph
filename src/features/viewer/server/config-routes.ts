@@ -88,10 +88,19 @@ export function redactUrlCredentials(url: string): string {
   return url.replace(/(\/\/[^:/@]*:)[^@/]+(@)/, '$1***$2').replace(/([?&](?:password|pass|pwd)=)[^&]+/gi, '$1***');
 }
 
-function redactDatabase(db: CartographConfig['database']): unknown {
+/** Build the read-only database summary from an ALLOWLIST of known
+ *  non-sensitive fields. The database config schema is `.loose()`, so
+ *  spreading the whole object could echo secret-bearing extra keys
+ *  (`password`, `apiKey`, key material, …) to the browser. Exported for
+ *  testing. */
+export function redactDatabase(db: CartographConfig['database']): unknown {
   if (!db) return null;
-  if (typeof db.url !== 'string' || db.url === '') return { ...db };
-  return { ...db, url: redactUrlCredentials(db.url) };
+  const safe: Record<string, unknown> = {};
+  if (db.provider !== undefined) safe['provider'] = db.provider;
+  if (typeof db.url === 'string' && db.url !== '') safe['url'] = redactUrlCredentials(db.url);
+  if (db.schema !== undefined) safe['schema'] = db.schema;
+  if (db.pgvector !== undefined) safe['pgvector'] = db.pgvector;
+  return safe;
 }
 
 // GET /api/config — always available (read-only display works even when
@@ -122,6 +131,13 @@ export async function handleConfigPost(
 ): Promise<void> {
   if (!ctx.allowConfigEdit) {
     sendJson(res, HTTP_FORBIDDEN, { error: CONFIG_EDIT_DISABLED_MSG });
+    return;
+  }
+  // Refuse to save while a re-index is running: indexAll/sync re-read
+  // config at job start, so a write that lands mid-run would not be
+  // applied by that job, leaving config.json and the graph out of sync.
+  if (isReindexInProgress()) {
+    sendJson(res, HTTP_CONFLICT, { error: 'a re-index is running — wait for it to finish before saving config' });
     return;
   }
   const body = await readBodyOr400(req, res, CONFIG_BODY_BYTE_LIMIT);
