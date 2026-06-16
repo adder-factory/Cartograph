@@ -12,6 +12,31 @@ Use `cartograph doctor --fix .` when you want Cartograph to apply safe install
 fixes such as creating `.cartograph/`, writing recommended config, or filling in
 missing local model files. Doctor cannot start an LLM backend process for you.
 
+## `bun install` Fails Extracting A Tarball
+
+Cartograph installs from source, so a source install or `cartograph upgrade
+--apply` runs `bun install`.
+
+Symptom:
+
+```text
+error: Fail extracting tarball for "@biomejs/cli-linux-x64-musl"
+```
+
+This is a transient flake in Bun's installer — it sometimes fails extracting an
+optional platform package even though the lockfile is valid (the failure is
+near-instant and a clean retry succeeds). It is not a problem with Cartograph
+or your environment.
+
+Fix:
+
+Clearing Bun's cache first forces a clean re-fetch:
+
+```sh
+bun pm cache rm
+bun install
+```
+
 ## Cartograph Is Not Initialized
 
 Symptom:
