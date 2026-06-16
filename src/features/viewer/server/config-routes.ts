@@ -159,6 +159,14 @@ export async function handleConfigPost(
   // the client body — that is the whitelist guarantee.
   const merged: CartographConfig = { ...current, ...validated.value };
 
+  // The feature toggles default ON when unset (the hook treats only an
+  // explicit `false` as off), and the form re-submits that as an explicit
+  // `true`. Don't persist that: a no-op save would otherwise write
+  // `enableX: true` where the config had nothing — churning config.json
+  // and reading as a spurious "reindex" change. Keep the field unset.
+  if (merged.enableBiomarkers === true && current.enableBiomarkers === undefined) delete merged.enableBiomarkers;
+  if (merged.enableCoChange === true && current.enableCoChange === undefined) delete merged.enableCoChange;
+
   // Validation failure is the client's fault → 400. Use a relative label
   // (not the absolute config path) so the echoed message never leaks the
   // user's filesystem layout to the browser.
@@ -243,13 +251,16 @@ function parseReindexMode(body: string): ReindexMode | null {
  *  never a JSON status code. Always releases the single-flight guard. */
 async function streamReindexJob(job: ReindexJob): Promise<void> {
   const { res, ctx } = job;
-  const controller = new AbortController();
-  const onClose = (): void => controller.abort();
-  // Everything runs INSIDE the try — including writeHead and the listener
-  // wiring — so a synchronous throw there (headers already sent, socket
-  // already closed) still hits `finally` and releases the single-flight
-  // guard. Otherwise one failed writeHead would leak the guard and wedge
-  // every later re-index at 409 until restart.
+  // Run everything INSIDE the try — including writeHead — so a synchronous
+  // throw there (headers already sent, socket already closed) still hits
+  // `finally` and releases the single-flight guard. Otherwise one failed
+  // writeHead would leak the guard and wedge every later re-index at 409.
+  //
+  // The job is deliberately NOT aborted when the client disconnects: a full
+  // `clearStructural` index clears the structural tables before rebuilding,
+  // so aborting mid-run could leave a partial / empty index. Letting it run
+  // to completion is the safe choice — the single-flight guard prevents
+  // pile-up, and the user just reloads to see the result.
   try {
     res.writeHead(HTTP_OK, {
       'content-type': 'text/event-stream',
@@ -257,29 +268,24 @@ async function streamReindexJob(job: ReindexJob): Promise<void> {
       connection: 'keep-alive',
       'x-accel-buffering': 'no',
     });
-    // Cancel on CLIENT disconnect via the RESPONSE 'close'. The request
-    // 'close' fires once the POST body has been read (well before the SSE
-    // stream ends), so listening there would abort the index immediately.
-    res.on('close', onClose);
-    await runReindex(job, controller.signal);
+    await runReindex(job);
   } catch (err) {
     writeSseEvent(res, 'error', { message: errMsg(err) });
   } finally {
     endReindexJob();
     // The viewer's read cache (ctx.queries node/name LRU) is now stale —
     // the reindex wrote through cg's own connection. Drop it so the
-    // frontend's follow-up /api/status read reflects the new graph.
+    // frontend's follow-up reads reflect the new graph.
     ctx.queries.nodeCache.clear();
-    res.off('close', onClose);
     if (!res.writableEnded) res.end();
   }
 }
 
-async function runReindex(job: ReindexJob, signal: AbortSignal): Promise<void> {
+async function runReindex(job: ReindexJob): Promise<void> {
   const { cg, mode, res } = job;
   const onProgress = (progress: IndexProgress): void => writeSseEvent(res, 'progress', progress);
   if (mode === 'index') {
-    const result = await cg.indexAll({ onProgress, signal, clearStructural: true, summarize: false });
+    const result = await cg.indexAll({ onProgress, clearStructural: true, summarize: false });
     if (!result.success) {
       writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
       return;
@@ -295,7 +301,7 @@ async function runReindex(job: ReindexJob, signal: AbortSignal): Promise<void> {
     });
     return;
   }
-  const result = await cg.sync({ onProgress, signal });
+  const result = await cg.sync({ onProgress });
   if (result.lockContention) {
     writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
     return;
