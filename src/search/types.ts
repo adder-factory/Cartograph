@@ -19,6 +19,11 @@ export interface SearchOptions {
   /** Top-level pathFilter prefixes to include after the retrieval cascade. */
   pathPrefixes?: string[];
 
+  /** When true, the FTS fetch demotes import-kind rows to the end of the
+   *  candidate window so a container's members are fetched ahead of the files
+   *  that import it under the same name — used by the exact-name find path. */
+  demoteImportRows?: boolean;
+
   /** File path patterns to exclude */
   excludePatterns?: string[];
 

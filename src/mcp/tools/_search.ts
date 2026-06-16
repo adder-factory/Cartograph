@@ -1115,7 +1115,12 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
     : searchNodes(
         cg.queries,
         query,
-        compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
+        compact({
+          limit: fetchLimit,
+          kinds,
+          pathPrefixes: pathFilter === undefined ? undefined : [pathFilter],
+          demoteImportRows: true,
+        }),
       );
   const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
   // Import-demotion is a symbol-NAME-search affordance: keep a container's own

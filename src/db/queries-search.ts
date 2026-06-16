@@ -449,6 +449,7 @@ interface ResolvedQuery {
 interface RetrievalCtx {
   qb: QueryBuilder;
   rq: ResolvedQuery;
+  demoteImportRows?: boolean;
 }
 
 /** Fuzzy-search query context — the query-builder handle paired with
@@ -525,13 +526,14 @@ function resolveSearchQuery(qb: QueryBuilder, query: string, options: SearchOpti
  * full-table scan.
  */
 function runRetrievalCascade(ctx: RetrievalCtx, limit: number, offset: number): SearchResult[] {
-  const { qb, rq } = ctx;
+  const { qb, rq, demoteImportRows } = ctx;
   let results = selectInitialResults(qb, {
     text: rq.text,
     kinds: rq.kinds,
     languages: rq.languages,
     limit,
     offset,
+    ...(demoteImportRows === undefined ? {} : { demoteImportRows }),
     callersOf: rq.callersOf,
     calleesOf: rq.calleesOf,
     dependsOn: rq.dependsOn,
@@ -592,7 +594,11 @@ export function searchNodes(qb: QueryBuilder, query: string, options: SearchOpti
   const cascadeLimit = needsCentralityHeadroom
     ? Math.min(SEARCH_CASCADE_LIMIT_CAP, Math.max(limit * SEARCH_CASCADE_LIMIT_MULTIPLIER, SEARCH_CASCADE_LIMIT_FLOOR))
     : limit;
-  let results = runRetrievalCascade({ qb, rq }, cascadeLimit, offset);
+  let results = runRetrievalCascade(
+    compact({ qb, rq, demoteImportRows: options.demoteImportRows }),
+    cascadeLimit,
+    offset,
+  );
   if (results.length > 0 && query) {
     addExactNameSupplements({ qb, results, query, kinds: rq.kinds, languages: rq.languages });
   }
@@ -696,6 +702,7 @@ function selectInitialResults(
     languages: Language[] | undefined;
     limit: number;
     offset: number;
+    demoteImportRows?: boolean;
     callersOf: string[];
     calleesOf: string[];
     dependsOn: string[];
@@ -712,6 +719,7 @@ function selectInitialResults(
     languages,
     limit,
     offset,
+    demoteImportRows,
     callersOf,
     calleesOf,
     dependsOn,
@@ -723,7 +731,7 @@ function selectInitialResults(
   } = params;
 
   if (text) {
-    return searchNodesFTS(qb, text, compact({ kinds, languages, limit, offset }));
+    return searchNodesFTS(qb, text, compact({ kinds, languages, limit, offset, demoteImportRows }));
   }
 
   if (callersOf.length > 0 || calleesOf.length > 0 || dependsOn.length > 0) {
@@ -1430,7 +1438,7 @@ function appendKindLanguageFiltersNamed(
 }
 
 function searchNodesFTS(qb: QueryBuilder, query: string, options: SearchOptions): SearchResult[] {
-  const { kinds, languages, limit = SEARCH_DEFAULT_LIMIT, offset = 0 } = options;
+  const { kinds, languages, limit = SEARCH_DEFAULT_LIMIT, offset = 0, demoteImportRows } = options;
   const ftsQuery = buildFtsPrefixQuery(query);
   if (!ftsQuery) return [];
 
@@ -1449,6 +1457,7 @@ function searchNodesFTS(qb: QueryBuilder, query: string, options: SearchOptions)
         languages,
         ftsLimit,
         offset,
+        demoteImportRows: demoteImportRows ?? false,
       });
       return rows.map((row) => ({
         node: rowToNode(row),
@@ -1467,6 +1476,7 @@ function searchNodesFTS(qb: QueryBuilder, query: string, options: SearchOptions)
       languages,
       ftsLimit,
       offset,
+      demoteImportRows: demoteImportRows ?? false,
     });
     return rows.map((row) => ({
       node: rowToNode(row),
@@ -1733,6 +1743,7 @@ const SearchNodesFTSParamsSchema = z.object({
   languages: z.array(z.string()).optional(),
   ftsLimit: z.number(),
   offset: z.number(),
+  demoteImportRows: z.boolean().optional(),
 });
 type SearchNodesFTSParams = z.infer<typeof SearchNodesFTSParamsSchema>;
 
@@ -1756,7 +1767,7 @@ const searchNodesFTSQuery = defineDynamicQuery({
       languages: p.languages,
       tablePrefix: 'nodes.',
     });
-    state.sql += ' ORDER BY score LIMIT @ftsLimit OFFSET @offset';
+    state.sql += ` ORDER BY ${p.demoteImportRows ? "(nodes.kind = 'import'), " : ''}score LIMIT @ftsLimit OFFSET @offset`;
     return state;
   },
 });
@@ -1781,7 +1792,7 @@ const searchNodesPostgresFTSQuery = defineDynamicQuery({
       languages: p.languages,
       tablePrefix: 'nodes.',
     });
-    state.sql += ' ORDER BY score DESC LIMIT @ftsLimit OFFSET @offset';
+    state.sql += ` ORDER BY ${p.demoteImportRows ? "(nodes.kind = 'import'), " : ''}score DESC LIMIT @ftsLimit OFFSET @offset`;
     return state;
   },
 });
