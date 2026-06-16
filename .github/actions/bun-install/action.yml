@@ -1,0 +1,38 @@
+# Composite: `bun install` with a bounded retry that clears bun's cache
+# between attempts.
+#
+# Why: bun's installer occasionally fails extracting an optional PLATFORM
+# tarball (seen: `@biomejs/cli-linux-x64-musl`) on an otherwise-valid frozen
+# lockfile — a transient download/extraction flake (it fails within ~500ms,
+# far faster than a real fetch; a clean re-fetch succeeds). release.yml runs
+# this install in `gate` and in every `build` matrix leg, so a single flake
+# blocks the whole release (gate fail → dead; build fail → publish skipped).
+# The retry absorbs the flake without a manual re-run; the cache clear keeps
+# a half-written cache entry from being reused on the retry.
+#
+# `--ignore-scripts` skips usearch's ~2min from-source C++ postinstall (a
+# runtime-guarded vector accelerator neither the gates nor the standalone
+# load) while keeping optional PLATFORM packages — tsgo and biome ship their
+# binaries as plain optional file deps that an `--omit=optional` install
+# would drop.
+#
+# Assumes bun is already on PATH (set up via oven-sh/setup-bun beforehand).
+name: bun-install
+description: bun install --frozen-lockfile --ignore-scripts, with a bounded retry past transient tarball-extraction flakes
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: |
+        for attempt in 1 2 3; do
+          if bun install --frozen-lockfile --ignore-scripts; then
+            exit 0
+          fi
+          if [ "$attempt" -lt 3 ]; then
+            echo "::warning::bun install failed (attempt ${attempt}/3) — clearing cache and retrying"
+            bun pm cache rm || true
+            sleep 5
+          fi
+        done
+        echo "::error::bun install failed after 3 attempts"
+        exit 1

@@ -30,12 +30,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      # --ignore-scripts skips usearch's ~2min from-source C++
-      # postinstall (a runtime-guarded vector accelerator neither the
-      # gates nor the standalone load) while keeping optional PLATFORM
-      # packages — tsgo and biome ship their binaries as plain optional
-      # file deps that an --omit=optional install would drop.
-      - run: bun install --frozen-lockfile --ignore-scripts
+      # Retry-wrapped install (see .github/actions/bun-install): absorbs
+      # bun's transient optional-platform-tarball extraction flakes that
+      # would otherwise fail the whole release.
+      - uses: ./.github/actions/bun-install
       - run: bun run typecheck
       - run: bun run check
       - run: bun run check:biomarkers
@@ -68,7 +66,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - run: bun install --frozen-lockfile --ignore-scripts
+      - uses: ./.github/actions/bun-install
       - run: bun run build:standalone ${{ matrix.target }}
       - run: node scripts/smoke-standalone.mjs
       - uses: actions/upload-artifact@v7
