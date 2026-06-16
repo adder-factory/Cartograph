@@ -223,13 +223,15 @@ function cfgShowApply(applyClass) {
   apply.hidden = true;
   apply.innerHTML = '';
   if (applyClass === 'reindex') {
-    cfgSetBanner('ok', '✓ Saved. The scope changed — re-index for it to take effect.');
+    // A full re-index (clearStructural) is the only reliably-correct apply
+    // for a config change: an incremental sync does not clear structural /
+    // derived tables, so disabling a hook or tightening `exclude` would
+    // leave stale findings/nodes behind. So offer only the full re-index.
+    cfgSetBanner('ok', '✓ Saved. Re-index for the change to take effect.');
     apply.hidden = false;
     apply.innerHTML =
-      '<button type="button" class="config-btn primary" id="cfg-reindex-full">Re-index now</button>' +
-      '<button type="button" class="config-btn" id="cfg-reindex-sync">Sync changed only</button>';
+      '<button type="button" class="config-btn primary" id="cfg-reindex-full">Re-index now</button>';
     cfgEl('cfg-reindex-full').addEventListener('click', () => cfgRunReindex('index'));
-    cfgEl('cfg-reindex-sync').addEventListener('click', () => cfgRunReindex('sync'));
   } else if (applyClass === 'restart') {
     cfgSetBanner('warn', '✓ Saved. Database settings changed — restart the viewer to apply them.');
   } else if (applyClass === 'hot') {

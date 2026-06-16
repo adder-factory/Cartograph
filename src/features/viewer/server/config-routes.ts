@@ -77,6 +77,23 @@ function curatedFrom(config: CartographConfig): CuratedConfig {
   };
 }
 
+/**
+ * Mask credentials before the read-only database panel echoes the config
+ * to the browser. A PostgreSQL `url` typically embeds `user:password@`,
+ * and a `?password=` query param is also possible — anyone who can open
+ * the viewer would otherwise see the DB password. Provider / schema /
+ * pgvector stay visible for diagnostics. Exported for testing.
+ */
+export function redactUrlCredentials(url: string): string {
+  return url.replace(/(\/\/[^:/@]*:)[^@/]+(@)/, '$1***$2').replace(/([?&](?:password|pass|pwd)=)[^&]+/gi, '$1***');
+}
+
+function redactDatabase(db: CartographConfig['database']): unknown {
+  if (!db) return null;
+  if (typeof db.url !== 'string' || db.url === '') return { ...db };
+  return { ...db, url: redactUrlCredentials(db.url) };
+}
+
 // GET /api/config — always available (read-only display works even when
 // editing is disallowed; the client hides the controls on allowConfigEdit:false).
 export function handleConfigGet(_req: http.IncomingMessage, res: http.ServerResponse, ctx: RequestContext): void {
@@ -91,7 +108,7 @@ export function handleConfigGet(_req: http.IncomingMessage, res: http.ServerResp
     allowConfigEdit: ctx.allowConfigEdit,
     reindexing: isReindexInProgress(),
     config: curatedFrom(config),
-    database: config.database ?? null,
+    database: redactDatabase(config.database),
     supportedLanguages: VALID_LANGUAGES,
     maxFileSizeCap: MAX_INDEX_FILE_SIZE,
     maxFileSizeCapLabel: MAX_INDEX_FILE_SIZE_LABEL,
@@ -199,7 +216,7 @@ export async function handleReindex(
     return;
   }
 
-  await streamReindexJob({ req, res, cg, mode });
+  await streamReindexJob({ req, res, ctx, cg, mode });
 }
 
 type ReindexMode = 'index' | 'sync';
@@ -207,6 +224,7 @@ type ReindexMode = 'index' | 'sync';
 interface ReindexJob {
   req: http.IncomingMessage;
   res: http.ServerResponse;
+  ctx: RequestContext;
   cg: Awaited<ReturnType<typeof ensureCartograph>>;
   mode: ReindexMode;
 }
@@ -224,7 +242,7 @@ function parseReindexMode(body: string): ReindexMode | null {
  *  headers are out, every outcome (including failure) is an SSE frame —
  *  never a JSON status code. Always releases the single-flight guard. */
 async function streamReindexJob(job: ReindexJob): Promise<void> {
-  const { req, res } = job;
+  const { res, ctx } = job;
   res.writeHead(HTTP_OK, {
     'content-type': 'text/event-stream',
     'cache-control': 'no-cache',
@@ -233,15 +251,22 @@ async function streamReindexJob(job: ReindexJob): Promise<void> {
   });
   const controller = new AbortController();
   const onClose = (): void => controller.abort();
-  req.on('close', onClose);
+  // Cancel on CLIENT disconnect via the RESPONSE 'close'. The request
+  // 'close' fires once the POST body has been read (well before the SSE
+  // stream ends), so listening there would abort the index immediately.
+  res.on('close', onClose);
   try {
     await runReindex(job, controller.signal);
   } catch (err) {
     writeSseEvent(res, 'error', { message: errMsg(err) });
   } finally {
     endReindexJob();
-    req.off('close', onClose);
-    res.end();
+    // The viewer's read cache (ctx.queries node/name LRU) is now stale —
+    // the reindex wrote through cg's own connection. Drop it so the
+    // frontend's follow-up /api/status read reflects the new graph.
+    ctx.queries.nodeCache.clear();
+    res.off('close', onClose);
+    if (!res.writableEnded) res.end();
   }
 }
 
@@ -305,49 +330,59 @@ function validateCuratedInput(input: Record<string, unknown>): FieldResult<Parti
   const overrides: Partial<CartographConfig> = {};
   const steps: ReadonlyArray<() => string | null> = [
     () =>
-      pickField(
+      pickField({
         input,
-        'include',
-        (v) => parseGlobList(v, 'include'),
-        (val) => {
+        key: 'include',
+        parse: (v) => parseGlobList(v, 'include'),
+        set: (val) => {
           overrides.include = val;
         },
-      ),
+      }),
     () =>
-      pickField(
+      pickField({
         input,
-        'exclude',
-        (v) => parseGlobList(v, 'exclude'),
-        (val) => {
+        key: 'exclude',
+        parse: (v) => parseGlobList(v, 'exclude'),
+        set: (val) => {
           overrides.exclude = val;
         },
-      ),
-    () =>
-      pickField(input, 'languages', parseLanguages, (val) => {
-        overrides.languages = val;
       }),
     () =>
-      pickField(input, 'maxFileSize', parseMaxFileSize, (val) => {
-        overrides.maxFileSize = val;
-      }),
-    () =>
-      pickField(
+      pickField({
         input,
-        'enableBiomarkers',
-        (v) => parseBool(v, 'enableBiomarkers'),
-        (val) => {
+        key: 'languages',
+        parse: parseLanguages,
+        set: (val) => {
+          overrides.languages = val;
+        },
+      }),
+    () =>
+      pickField({
+        input,
+        key: 'maxFileSize',
+        parse: parseMaxFileSize,
+        set: (val) => {
+          overrides.maxFileSize = val;
+        },
+      }),
+    () =>
+      pickField({
+        input,
+        key: 'enableBiomarkers',
+        parse: (v) => parseBool(v, 'enableBiomarkers'),
+        set: (val) => {
           overrides.enableBiomarkers = val;
         },
-      ),
+      }),
     () =>
-      pickField(
+      pickField({
         input,
-        'enableCoChange',
-        (v) => parseBool(v, 'enableCoChange'),
-        (val) => {
+        key: 'enableCoChange',
+        parse: (v) => parseBool(v, 'enableCoChange'),
+        set: (val) => {
           overrides.enableCoChange = val;
         },
-      ),
+      }),
   ];
   for (const step of steps) {
     const error = step();
@@ -356,14 +391,17 @@ function validateCuratedInput(input: Record<string, unknown>): FieldResult<Parti
   return { ok: true, value: overrides };
 }
 
+interface PickFieldSpec<T> {
+  input: Record<string, unknown>;
+  key: string;
+  parse: (value: unknown) => FieldResult<T>;
+  set: (value: T) => void;
+}
+
 /** Parse one optional curated field. Returns an error string (→ 400) or
  *  null; on success calls `set` with the concretely-typed value. */
-function pickField<T>(
-  input: Record<string, unknown>,
-  key: string,
-  parse: (value: unknown) => FieldResult<T>,
-  set: (value: T) => void,
-): string | null {
+function pickField<T>(spec: PickFieldSpec<T>): string | null {
+  const { input, key, parse, set } = spec;
   if (!(key in input)) return null;
   const r = parse(input[key]);
   if (!r.ok) return r.error;

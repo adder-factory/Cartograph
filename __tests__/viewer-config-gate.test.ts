@@ -5,6 +5,7 @@
  * so the non-loopback decision is pinned here.
  */
 import { describe, it, expect } from 'vitest';
+import { redactUrlCredentials } from '../src/features/viewer/server/config-routes.js';
 import { viewerConfigEditAllowed } from '../src/features/viewer/server/security.js';
 
 describe('viewerConfigEditAllowed', () => {
@@ -24,5 +25,25 @@ describe('viewerConfigEditAllowed', () => {
   it('honors the --allow-config-edit opt-in on any bind', () => {
     expect(viewerConfigEditAllowed('0.0.0.0', true)).toBe(true);
     expect(viewerConfigEditAllowed('example.com', true)).toBe(true);
+  });
+});
+
+describe('redactUrlCredentials', () => {
+  it('masks the password in a postgres connection URL (the GET /api/config leak)', () => {
+    expect(redactUrlCredentials('postgres://user:s3cret@db.example.com:5432/cartograph')).toBe(
+      'postgres://user:***@db.example.com:5432/cartograph',
+    );
+  });
+
+  it('masks a password query parameter', () => {
+    expect(redactUrlCredentials('postgres://db.example.com/cartograph?sslmode=require&password=s3cret')).toBe(
+      'postgres://db.example.com/cartograph?sslmode=require&password=***',
+    );
+  });
+
+  it('leaves a credential-free URL unchanged', () => {
+    expect(redactUrlCredentials('postgres://db.example.com:5432/cartograph')).toBe(
+      'postgres://db.example.com:5432/cartograph',
+    );
   });
 });

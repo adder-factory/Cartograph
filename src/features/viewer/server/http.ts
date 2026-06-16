@@ -9,8 +9,11 @@ export function sendJson(res: http.ServerResponse, code: number, body: unknown):
 
 /** Write one Server-Sent Events frame to an already-open `text/event-stream`
  *  response (headers must already be written). Shared by the live feed and
- *  the config-editor re-index progress stream. */
+ *  the config-editor re-index progress stream. No-ops once the response has
+ *  ended or the socket is gone, so a write after a client disconnect can't
+ *  throw `ERR_STREAM_WRITE_AFTER_END`. */
 export function writeSseEvent(res: http.ServerResponse, event: string, data: unknown): void {
+  if (res.writableEnded || res.destroyed) return;
   res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
