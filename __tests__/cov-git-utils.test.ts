@@ -704,6 +704,15 @@ describe('parseUncommittedSourcePaths — porcelain handling', () => {
     expect(parseUncommittedSourcePaths('R  a.ts -> b.ts\nR  c.ts -> d.ts')).toEqual(['b.ts', 'd.ts']);
   });
 
+  it('does not treat ` -> ` in a non-rename path as a rename (status-gated)', () => {
+    // A modified file whose NAME contains ` -> ` (status ` M`, not `R`) must
+    // keep its FULL path, not be mis-split to the trailing segment. (PR #35
+    // review — without the status gate this returned 'b.ts'.)
+    expect(parseUncommittedSourcePaths(' M src/a -> b.ts')).toEqual(['src/a -> b.ts']);
+    // A genuine rename (status `R`) still takes the new path.
+    expect(parseUncommittedSourcePaths('R  old.ts -> new.ts')).toEqual(['new.ts']);
+  });
+
   it('trims trailing whitespace / CR off the path (rename and plain)', () => {
     // A trailing space or `\r` (CRLF) must NOT leak into the path. Without the
     // `.trim()` these would be "src/a.ts  " / "renamed.ts  " / "src/a.ts\r".
