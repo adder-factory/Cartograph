@@ -280,13 +280,31 @@ async function streamReindexJob(job: ReindexJob): Promise<void> {
   }
 }
 
+/** Distinguish indexAll's two `success:false` cases: lock contention
+ *  (the lock couldn't be acquired, so nothing ran — retry later) vs a
+ *  genuine failure. The contention path carries the sentinel lock-acquire
+ *  error message (see `cgRunIndexUnderLock` in src/index.ts). Exported for
+ *  testing. */
+export function isLockContentionResult(errors: ReadonlyArray<{ message: string }>): boolean {
+  return errors.some((e) => /acquire file lock/i.test(e.message));
+}
+
 async function runReindex(job: ReindexJob): Promise<void> {
   const { cg, mode, res } = job;
   const onProgress = (progress: IndexProgress): void => writeSseEvent(res, 'progress', progress);
   if (mode === 'index') {
     const result = await cg.indexAll({ onProgress, clearStructural: true, summarize: false });
     if (!result.success) {
-      writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
+      // indexAll returns success:false BOTH for lock contention (the lock
+      // couldn't be acquired, nothing ran) and for a genuine failure
+      // (0 files indexed with errors). Only the former is "busy / retry";
+      // the latter is a real error the user should see.
+      if (isLockContentionResult(result.errors)) {
+        writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
+      } else {
+        const detail = result.errors.find((e) => e.severity === 'error')?.message ?? 'no files could be indexed';
+        writeSseEvent(res, 'error', { message: `re-index failed: ${detail}` });
+      }
       return;
     }
     writeSseEvent(res, 'done', {

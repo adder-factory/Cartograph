@@ -5,7 +5,7 @@
  * so the non-loopback decision is pinned here.
  */
 import { describe, it, expect } from 'vitest';
-import { redactUrlCredentials } from '../src/features/viewer/server/config-routes.js';
+import { isLockContentionResult, redactUrlCredentials } from '../src/features/viewer/server/config-routes.js';
 import { viewerConfigEditAllowed } from '../src/features/viewer/server/security.js';
 
 describe('viewerConfigEditAllowed', () => {
@@ -45,5 +45,15 @@ describe('redactUrlCredentials', () => {
     expect(redactUrlCredentials('postgres://db.example.com:5432/cartograph')).toBe(
       'postgres://db.example.com:5432/cartograph',
     );
+  });
+});
+
+describe('isLockContentionResult', () => {
+  it('is true only for the lock-acquire sentinel — a genuine index failure reads as an error, not "busy"', () => {
+    expect(isLockContentionResult([{ message: 'Could not acquire file lock - another process may be indexing' }])).toBe(
+      true,
+    );
+    expect(isLockContentionResult([{ message: 'parse error in src/foo.ts: unexpected token' }])).toBe(false);
+    expect(isLockContentionResult([])).toBe(false);
   });
 });
