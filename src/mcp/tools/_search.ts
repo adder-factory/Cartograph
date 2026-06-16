@@ -1102,23 +1102,30 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
   // rows ordered like `../...js`. When the query is centrality-only
   // (no text / no graph qualifiers), push the predicate into SQL.
   const parsed = parseQuery(query);
-  const rawResults =
-    shouldUseCentralityFastPath(parsed) && pathFilter === undefined
-      ? runCentralityOnlySearch({
-          cg,
-          cf: parsed.centralityFilter!,
-          kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
-          languages: parsed.languages.length > 0 ? parsed.languages : undefined,
-          limit: fetchLimit,
-          sortByCentrality: parsed.sortBy === 'centrality',
-        })
-      : searchNodes(
-          cg.queries,
-          query,
-          compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
-        );
+  const usedCentralityPath = shouldUseCentralityFastPath(parsed) && pathFilter === undefined;
+  const rawResults = usedCentralityPath
+    ? runCentralityOnlySearch({
+        cg,
+        cf: parsed.centralityFilter!,
+        kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
+        languages: parsed.languages.length > 0 ? parsed.languages : undefined,
+        limit: fetchLimit,
+        sortByCentrality: parsed.sortBy === 'centrality',
+      })
+    : searchNodes(
+        cg.queries,
+        query,
+        compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
+      );
   const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
-  const memberFirstResults = deprioritizeImports(rankedResults);
+  // Import-demotion is a symbol-NAME-search affordance: keep a container's own
+  // members ahead of the files that import it under the same name. Skip it for
+  // a centrality-ranked query (`centrality:>0` / `sort:centrality`), which must
+  // keep its `ORDER BY centrality DESC`. NOTE: within the name path it only
+  // re-ranks the over-fetched candidate window — a symbol imported far more than
+  // `limit × SEARCH_OVERFETCH_MULTIPLIER` times can still cap out its members
+  // (raise `--limit`); a fetch-level fix is a follow-up.
+  const memberFirstResults = usedCentralityPath ? rankedResults : deprioritizeImports(rankedResults);
   const fullResults = reorderProdFirst(memberFirstResults, limit);
   return { rawResults, fullResults };
 }
