@@ -126,7 +126,7 @@ class OpencodeTarget implements AgentTarget {
     } else {
       const created = !fs.existsSync(file);
       if (!existing['$schema']) existing['$schema'] = OPENCODE_SCHEMA_URL;
-      setNestedJsonEntry(existing, 'mcp', 'cartograph', after);
+      setNestedJsonEntry({ config: existing, wrapperKey: 'mcp', entryKey: 'cartograph', value: after });
       writeJsonFile(file, existing);
       configWrite = { path: file, action: created ? 'created' : 'updated' };
     }

@@ -203,7 +203,7 @@ function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
   if (before || fs.existsSync(file)) {
     action = 'updated';
   }
-  setNestedJsonEntry(existing, 'mcpServers', 'cartograph', after);
+  setNestedJsonEntry({ config: existing, wrapperKey: 'mcpServers', entryKey: 'cartograph', value: after });
   writeJsonFile(file, existing);
   return { path: file, action };
 }

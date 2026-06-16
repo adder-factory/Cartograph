@@ -165,12 +165,13 @@ export function getNestedJsonEntry(config: Record<string, unknown>, wrapperKey: 
  * object when absent (or replacing a non-object wrapper). Mutates and
  * returns `config` so callers can chain a `writeJsonFile`.
  */
-export function setNestedJsonEntry(
-  config: Record<string, unknown>,
-  wrapperKey: string,
-  entryKey: string,
-  value: unknown,
-): Record<string, unknown> {
+export function setNestedJsonEntry(args: {
+  config: Record<string, unknown>;
+  wrapperKey: string;
+  entryKey: string;
+  value: unknown;
+}): Record<string, unknown> {
+  const { config, wrapperKey, entryKey, value } = args;
   let wrapper = asJsonObject(config[wrapperKey]);
   if (!wrapper) {
     wrapper = {};

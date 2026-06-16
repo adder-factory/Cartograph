@@ -107,10 +107,17 @@ interface ComputeUnusedSetsArgs {
  * Read a package.json from disk as an object-shaped record. A parse of
  * a JSON file yields `unknown`; the audit only ever reads object fields
  * (`dependencies`, `scripts`, ...) so a non-object top level (array /
- * scalar / null) collapses to `{}`.
+ * scalar / null) collapses to `{}`. Malformed JSON returns `null` — a
+ * distinct "skip this manifest entirely" signal (it must not be counted
+ * as a present-but-empty workspace manifest).
  */
-function parsePackageJson(raw: string): Record<string, unknown> {
-  const parsed: unknown = JSON.parse(raw);
+function parsePackageJson(raw: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
   if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
   return parsed as Record<string, unknown>;
 }
@@ -137,9 +144,9 @@ function readPackageJson(args: ReadPackageJsonArgs): {
   if (existsSync(packageJsonPath)) {
     try {
       const packageJson = parsePackageJson(readFileSync(packageJsonPath, 'utf-8'));
-      return { packageJson, packageJsonPath };
+      if (packageJson !== null) return { packageJson, packageJsonPath };
     } catch {
-      return { packageJson: {}, packageJsonPath: '' };
+      // unreadable — fall through to the empty fallback
     }
   }
   return { packageJson: {}, packageJsonPath: '' };
@@ -239,9 +246,10 @@ function readWorkspaceManifests(
       const fullPath = join(projectRoot, match);
       try {
         const json = parsePackageJson(readFileSync(fullPath, 'utf-8'));
-        manifests.push({ packageJsonPath: fullPath, packageJson: json, isRoot: false });
+        // null = malformed JSON → skip; a throw = unreadable → skip (catch).
+        if (json !== null) manifests.push({ packageJsonPath: fullPath, packageJson: json, isRoot: false });
       } catch {
-        // Malformed / unreadable workspace package.json — skip silently.
+        // Unreadable workspace package.json — skip silently.
         // The audit still completes against the surviving manifests.
       }
     }

@@ -110,7 +110,7 @@ function writeContextServerEntry(loc: Location, opts: InstallOptions): WriteResu
   if (jsonDeepEqual(before, after)) return { path: file, action: 'unchanged' };
 
   const action = before || fs.existsSync(file) ? 'updated' : 'created';
-  setNestedJsonEntry(existing, 'context_servers', 'cartograph', after);
+  setNestedJsonEntry({ config: existing, wrapperKey: 'context_servers', entryKey: 'cartograph', value: after });
   writeJsonFile(file, existing);
   return { path: file, action };
 }

@@ -89,7 +89,7 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
     action = 'updated';
   }
 
-  setNestedJsonEntry(existing, 'mcpServers', 'cartograph', after);
+  setNestedJsonEntry({ config: existing, wrapperKey: 'mcpServers', entryKey: 'cartograph', value: after });
   writeJsonFile(file, existing);
   return { path: file, action };
 }
