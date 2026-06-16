@@ -1,0 +1,422 @@
+/**
+ * Config-editor endpoints for the viewer.
+ *
+ *  - GET  /api/config   — the curated, editable config subset + a
+ *                         read-only database summary + capabilities.
+ *  - POST /api/config   — validate + whitelist + persist the curated
+ *                         subset (never the database / llm / rootDir).
+ *  - POST /api/reindex  — run an in-process full index or incremental
+ *                         sync, streaming progress as Server-Sent Events.
+ *
+ * The write endpoints are gated by `ctx.allowConfigEdit` (loopback bind
+ * by default, else `--allow-config-edit`) and enforced server-side, so a
+ * tampered client cannot reach them by un-hiding the UI.
+ */
+import type * as http from 'node:http';
+import { loadConfig, saveConfig } from '../../../config.js';
+import { VALID_LANGUAGES } from '../../../config/languages.js';
+import { classifyConfigChange } from '../../../config/change-class.js';
+import { assertValidCartographConfig } from '../../../config/schema.js';
+import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from '../../../default-config.js';
+import { errMsg, logDebug } from '../../../errors.js';
+import type { IndexProgress } from '../../../extraction/index.js';
+import type { CartographConfig, Language } from '../../../types.js';
+import {
+  CONFIG_BODY_BYTE_LIMIT,
+  CONFIG_GLOB_CHAR_LIMIT,
+  CONFIG_GLOB_LIST_LIMIT,
+  CONFIG_REINDEX_BODY_BYTE_LIMIT,
+  HTTP_BAD_REQUEST,
+  HTTP_CONFLICT,
+  HTTP_FORBIDDEN,
+  HTTP_INTERNAL_ERROR,
+  HTTP_OK,
+  HTTP_PAYLOAD_TOO_LARGE,
+} from './constants.js';
+import type { RequestContext } from './context.js';
+import { ensureCartograph } from './context.js';
+import { readBody, sendJson, writeSseEvent } from './http.js';
+import { endReindexJob, isReindexInProgress, tryBeginReindexJob } from './reindex-job.js';
+
+const CONFIG_EDIT_DISABLED_MSG =
+  'config editing is disabled — the viewer is not bound to localhost (launch with --allow-config-edit to override)';
+
+const BUSY_MESSAGE =
+  'another indexer is already running (e.g. the MCP server) — the existing index was left intact. Try again shortly.';
+
+/** A relative label for validation error messages so a 400 echoed to the
+ *  browser never leaks the project's absolute filesystem path. */
+const CONFIG_DISPLAY_PATH = '.cartograph/config.json';
+
+const VALID_LANGUAGE_SET: ReadonlySet<string> = new Set(VALID_LANGUAGES);
+
+/** The fields the editor is allowed to display and write. Everything
+ *  else in the config (database, llm, rootDir, version, …) is never
+ *  surfaced as editable nor overwritten from a client body. */
+interface CuratedConfig {
+  include: string[];
+  exclude: string[];
+  languages: Language[];
+  maxFileSize: number;
+  enableBiomarkers: boolean;
+  enableCoChange: boolean;
+}
+
+type FieldResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+function curatedFrom(config: CartographConfig): CuratedConfig {
+  return {
+    include: config.include,
+    exclude: config.exclude,
+    languages: config.languages,
+    maxFileSize: config.maxFileSize,
+    // Both default ON: the indexer treats only an explicit `false` as
+    // disabled, so an unset field reads as enabled in the UI.
+    enableBiomarkers: config.enableBiomarkers !== false,
+    enableCoChange: config.enableCoChange !== false,
+  };
+}
+
+// GET /api/config — always available (read-only display works even when
+// editing is disallowed; the client hides the controls on allowConfigEdit:false).
+export function handleConfigGet(_req: http.IncomingMessage, res: http.ServerResponse, ctx: RequestContext): void {
+  let config: CartographConfig;
+  try {
+    config = loadConfig(ctx.projectPath);
+  } catch (err) {
+    sendJson(res, HTTP_INTERNAL_ERROR, { error: `failed to load config: ${errMsg(err)}` });
+    return;
+  }
+  sendJson(res, HTTP_OK, {
+    allowConfigEdit: ctx.allowConfigEdit,
+    reindexing: isReindexInProgress(),
+    config: curatedFrom(config),
+    database: config.database ?? null,
+    supportedLanguages: VALID_LANGUAGES,
+    maxFileSizeCap: MAX_INDEX_FILE_SIZE,
+    maxFileSizeCapLabel: MAX_INDEX_FILE_SIZE_LABEL,
+  });
+}
+
+// POST /api/config — validate, whitelist, persist.
+export async function handleConfigPost(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: RequestContext,
+): Promise<void> {
+  if (!ctx.allowConfigEdit) {
+    sendJson(res, HTTP_FORBIDDEN, { error: CONFIG_EDIT_DISABLED_MSG });
+    return;
+  }
+  const body = await readBodyOr400(req, res, CONFIG_BODY_BYTE_LIMIT);
+  if (body === null) return;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    sendJson(res, HTTP_BAD_REQUEST, { error: 'invalid JSON body' });
+    return;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    sendJson(res, HTTP_BAD_REQUEST, { error: 'body must be a JSON object' });
+    return;
+  }
+
+  const validated = validateCuratedInput(parsed as Record<string, unknown>);
+  if (!validated.ok) {
+    sendJson(res, HTTP_BAD_REQUEST, { error: validated.error });
+    return;
+  }
+
+  let current: CartographConfig;
+  try {
+    current = loadConfig(ctx.projectPath);
+  } catch (err) {
+    sendJson(res, HTTP_INTERNAL_ERROR, { error: `failed to load current config: ${errMsg(err)}` });
+    return;
+  }
+
+  // Overlay ONLY the curated fields onto the freshly-loaded config. The
+  // database / llm / rootDir / version blocks come from `current`, never
+  // the client body — that is the whitelist guarantee.
+  const merged: CartographConfig = { ...current, ...validated.value };
+
+  // Validation failure is the client's fault → 400. Use a relative label
+  // (not the absolute config path) so the echoed message never leaks the
+  // user's filesystem layout to the browser.
+  try {
+    assertValidCartographConfig(CONFIG_DISPLAY_PATH, merged);
+  } catch (err) {
+    sendJson(res, HTTP_BAD_REQUEST, { error: errMsg(err) });
+    return;
+  }
+  // Persistence failure (ENOSPC / EACCES / …) is a server fault → 500,
+  // with a generic message rather than a raw I/O error string.
+  try {
+    saveConfig(ctx.projectPath, merged);
+  } catch (err) {
+    logDebug('viewer: saveConfig failed', { err: errMsg(err) });
+    sendJson(res, HTTP_INTERNAL_ERROR, { error: 'failed to write config' });
+    return;
+  }
+  sendJson(res, HTTP_OK, { ok: true, applyClass: classifyConfigChange(current, merged) });
+}
+
+// POST /api/reindex — stream an in-process index/sync as SSE.
+export async function handleReindex(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  ctx: RequestContext,
+): Promise<void> {
+  if (!ctx.allowConfigEdit) {
+    sendJson(res, HTTP_FORBIDDEN, { error: CONFIG_EDIT_DISABLED_MSG });
+    return;
+  }
+  const body = await readBodyOr400(req, res, CONFIG_REINDEX_BODY_BYTE_LIMIT);
+  if (body === null) return;
+
+  const mode = parseReindexMode(body);
+  if (mode === null) {
+    sendJson(res, HTTP_BAD_REQUEST, { error: "mode must be 'index' or 'sync'" });
+    return;
+  }
+
+  // Single-flight: a fast in-process 409 instead of contending on the
+  // index file-lock. Acquire BEFORE switching to the SSE response so the
+  // 409 can still be a normal JSON error.
+  if (!tryBeginReindexJob()) {
+    sendJson(res, HTTP_CONFLICT, { error: 'a re-index is already running' });
+    return;
+  }
+
+  let cg: Awaited<ReturnType<typeof ensureCartograph>>;
+  try {
+    cg = await ensureCartograph(ctx);
+  } catch (err) {
+    endReindexJob();
+    sendJson(res, HTTP_INTERNAL_ERROR, { error: `failed to open project: ${errMsg(err)}` });
+    return;
+  }
+
+  await streamReindexJob({ req, res, cg, mode });
+}
+
+type ReindexMode = 'index' | 'sync';
+
+interface ReindexJob {
+  req: http.IncomingMessage;
+  res: http.ServerResponse;
+  cg: Awaited<ReturnType<typeof ensureCartograph>>;
+  mode: ReindexMode;
+}
+
+function parseReindexMode(body: string): ReindexMode | null {
+  try {
+    const parsed = JSON.parse(body) as { mode?: unknown };
+    return parsed.mode === 'index' || parsed.mode === 'sync' ? parsed.mode : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Switch the response to an event stream and run the job. Once the SSE
+ *  headers are out, every outcome (including failure) is an SSE frame —
+ *  never a JSON status code. Always releases the single-flight guard. */
+async function streamReindexJob(job: ReindexJob): Promise<void> {
+  const { req, res } = job;
+  res.writeHead(HTTP_OK, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+    'x-accel-buffering': 'no',
+  });
+  const controller = new AbortController();
+  const onClose = (): void => controller.abort();
+  req.on('close', onClose);
+  try {
+    await runReindex(job, controller.signal);
+  } catch (err) {
+    writeSseEvent(res, 'error', { message: errMsg(err) });
+  } finally {
+    endReindexJob();
+    req.off('close', onClose);
+    res.end();
+  }
+}
+
+async function runReindex(job: ReindexJob, signal: AbortSignal): Promise<void> {
+  const { cg, mode, res } = job;
+  const onProgress = (progress: IndexProgress): void => writeSseEvent(res, 'progress', progress);
+  if (mode === 'index') {
+    const result = await cg.indexAll({ onProgress, signal, clearStructural: true, summarize: false });
+    if (!result.success) {
+      writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
+      return;
+    }
+    writeSseEvent(res, 'done', {
+      mode,
+      filesIndexed: result.filesIndexed,
+      filesSkipped: result.filesSkipped,
+      filesErrored: result.filesErrored,
+      nodesCreated: result.nodesCreated,
+      edgesCreated: result.edgesCreated,
+      durationMs: result.durationMs,
+    });
+    return;
+  }
+  const result = await cg.sync({ onProgress, signal });
+  if (result.lockContention) {
+    writeSseEvent(res, 'busy', { message: BUSY_MESSAGE });
+    return;
+  }
+  writeSseEvent(res, 'done', {
+    mode,
+    filesChecked: result.filesChecked,
+    filesAdded: result.filesAdded,
+    filesModified: result.filesModified,
+    filesRemoved: result.filesRemoved,
+    nodesUpdated: result.nodesUpdated,
+    durationMs: result.durationMs,
+  });
+}
+
+async function readBodyOr400(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  byteLimit: number,
+): Promise<string | null> {
+  try {
+    return await readBody(req, byteLimit);
+  } catch (err) {
+    const msg = errMsg(err);
+    sendJson(res, msg === 'body too large' ? HTTP_PAYLOAD_TOO_LARGE : HTTP_BAD_REQUEST, { error: msg });
+    return null;
+  }
+}
+
+/**
+ * Validate + collect the whitelisted curated fields present in the body.
+ * One table-driven pass: each present field is parsed and, on success,
+ * written to `overrides` via its (concretely-typed) setter; the first
+ * failure short-circuits with that field's error.
+ */
+function validateCuratedInput(input: Record<string, unknown>): FieldResult<Partial<CartographConfig>> {
+  const overrides: Partial<CartographConfig> = {};
+  const steps: ReadonlyArray<() => string | null> = [
+    () =>
+      pickField(
+        input,
+        'include',
+        (v) => parseGlobList(v, 'include'),
+        (val) => {
+          overrides.include = val;
+        },
+      ),
+    () =>
+      pickField(
+        input,
+        'exclude',
+        (v) => parseGlobList(v, 'exclude'),
+        (val) => {
+          overrides.exclude = val;
+        },
+      ),
+    () =>
+      pickField(input, 'languages', parseLanguages, (val) => {
+        overrides.languages = val;
+      }),
+    () =>
+      pickField(input, 'maxFileSize', parseMaxFileSize, (val) => {
+        overrides.maxFileSize = val;
+      }),
+    () =>
+      pickField(
+        input,
+        'enableBiomarkers',
+        (v) => parseBool(v, 'enableBiomarkers'),
+        (val) => {
+          overrides.enableBiomarkers = val;
+        },
+      ),
+    () =>
+      pickField(
+        input,
+        'enableCoChange',
+        (v) => parseBool(v, 'enableCoChange'),
+        (val) => {
+          overrides.enableCoChange = val;
+        },
+      ),
+  ];
+  for (const step of steps) {
+    const error = step();
+    if (error !== null) return { ok: false, error };
+  }
+  return { ok: true, value: overrides };
+}
+
+/** Parse one optional curated field. Returns an error string (→ 400) or
+ *  null; on success calls `set` with the concretely-typed value. */
+function pickField<T>(
+  input: Record<string, unknown>,
+  key: string,
+  parse: (value: unknown) => FieldResult<T>,
+  set: (value: T) => void,
+): string | null {
+  if (!(key in input)) return null;
+  const r = parse(input[key]);
+  if (!r.ok) return r.error;
+  set(r.value);
+  return null;
+}
+
+function parseGlobList(value: unknown, field: string): FieldResult<string[]> {
+  if (!Array.isArray(value)) return { ok: false, error: `${field} must be an array of strings` };
+  if (value.length > CONFIG_GLOB_LIST_LIMIT) {
+    return { ok: false, error: `${field} has too many entries (max ${CONFIG_GLOB_LIST_LIMIT})` };
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return { ok: false, error: `${field} must contain only strings` };
+    const trimmed = item.trim();
+    if (!trimmed) continue; // drop blank textarea lines
+    if (trimmed.length > CONFIG_GLOB_CHAR_LIMIT) {
+      return { ok: false, error: `${field} entry exceeds ${CONFIG_GLOB_CHAR_LIMIT} characters` };
+    }
+    out.push(trimmed);
+  }
+  return { ok: true, value: out };
+}
+
+function parseLanguages(value: unknown): FieldResult<Language[]> {
+  if (!Array.isArray(value)) return { ok: false, error: 'languages must be an array of strings' };
+  const seen = new Set<string>();
+  const out: Language[] = [];
+  for (const item of value) {
+    if (typeof item !== 'string') return { ok: false, error: 'languages must contain only strings' };
+    if (!VALID_LANGUAGE_SET.has(item)) return { ok: false, error: `unknown language: ${item}` };
+    if (seen.has(item)) continue;
+    seen.add(item);
+    out.push(item as Language);
+  }
+  return { ok: true, value: out };
+}
+
+function parseMaxFileSize(value: unknown): FieldResult<number> {
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    return { ok: false, error: 'maxFileSize must be an integer number of bytes' };
+  }
+  if (value < 1 || value > MAX_INDEX_FILE_SIZE) {
+    return {
+      ok: false,
+      error: `maxFileSize must be between 1 and ${MAX_INDEX_FILE_SIZE} bytes (${MAX_INDEX_FILE_SIZE_LABEL})`,
+    };
+  }
+  return { ok: true, value };
+}
+
+function parseBool(value: unknown, field: string): FieldResult<boolean> {
+  if (typeof value !== 'boolean') return { ok: false, error: `${field} must be a boolean` };
+  return { ok: true, value };
+}

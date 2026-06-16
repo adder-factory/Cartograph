@@ -23,7 +23,7 @@ import {
   LIVE_POLL_INTERVAL_MS,
 } from './constants.js';
 import type { RequestContext } from './context.js';
-import { clampInt, safeParseJson } from './http.js';
+import { clampInt, safeParseJson, writeSseEvent } from './http.js';
 import { resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
 
 interface LiveCallPayload {
@@ -77,10 +77,6 @@ function callKey(row: ToolCallRow): string {
   return `${row.sessionId}:${row.step}`;
 }
 
-function writeEvent(res: http.ServerResponse, event: string, data: unknown): void {
-  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
-}
-
 /**
  * GET /api/live/stream — hold the response open and push tool calls
  * as they land in the DB. The route handler contract is fire-and-
@@ -109,7 +105,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     res.end();
     return;
   }
-  writeEvent(res, 'backlog', { calls: backlog.map(serializeLiveCall) });
+  writeSseEvent(res, 'backlog', { calls: backlog.map(serializeLiveCall) });
 
   let cursorTs = backlog.length > 0 ? backlog.at(-1)!.ts : 0;
   let seenAtCursor = new Set(backlog.filter((row) => row.ts === cursorTs).map(callKey));
@@ -145,7 +141,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     }
     cursorTs = lastTs;
     seenAtCursor = seen;
-    for (const row of fresh) writeEvent(res, 'call', serializeLiveCall(row));
+    for (const row of fresh) writeSseEvent(res, 'call', serializeLiveCall(row));
   }, LIVE_POLL_INTERVAL_MS);
 
   const heartbeatTimer = setInterval(() => {

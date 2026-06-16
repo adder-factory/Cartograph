@@ -129,3 +129,17 @@ function formatHostnameForOrigin(hostname: string): string {
 function isLoopbackOrLocalHost(hostname: string): boolean {
   return hostname === 'localhost' || hostname === '::1' || /^127(?:\.\d{1,3}){3}$/.test(hostname);
 }
+
+/**
+ * Whether the viewer's config editor (the write + re-index endpoints)
+ * is enabled for a server bound to `host`. This is privileged: those
+ * endpoints rewrite `.cartograph/config.json` and can trigger an
+ * in-process re-index. A loopback bind enables it by default; any
+ * non-loopback bind requires the explicit `--allow-config-edit` opt-in
+ * (`allowFlag`). The route handlers enforce this server-side so a
+ * tampered client cannot reach the endpoints by un-hiding the UI.
+ */
+export function viewerConfigEditAllowed(host: string, allowFlag: boolean): boolean {
+  if (allowFlag) return true;
+  return isLoopbackOrLocalHost(normalizeHostname(host));
+}

@@ -87,6 +87,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       'viewer.graph-diagnostics.app',
       'viewer.live.app',
       'viewer.health.app',
+      'viewer.config.app',
       'viewer.source.app',
       'viewer.palette.app',
       'viewer.hash-editor.app',
@@ -991,6 +992,99 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(oversized.status).toBe(413);
     await expect(oversized.json()).resolves.toMatchObject({ error: 'body too large' });
   });
+
+  // ── Config editor (loopback bind → allowConfigEdit is true here; the
+  //    non-loopback 403 path is unit-tested via viewerConfigEditAllowed). ──
+
+  interface ConfigPayload {
+    allowConfigEdit: boolean;
+    reindexing: boolean;
+    config: {
+      include: string[];
+      exclude: string[];
+      languages: string[];
+      maxFileSize: number;
+      enableBiomarkers: boolean;
+      enableCoChange: boolean;
+    };
+    database: unknown;
+    supportedLanguages: string[];
+    maxFileSizeCap: number;
+    maxFileSizeCapLabel: string;
+  }
+  const getConfig = async (): Promise<ConfigPayload> =>
+    (await apiFetch(handle, 'api/config')).json() as Promise<ConfigPayload>;
+  const postConfig = (body: unknown): Promise<Response> =>
+    apiFetch(handle, 'api/config', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+
+  it('exposes the curated config + capabilities at GET /api/config', async () => {
+    const body = await getConfig();
+    expect(body.allowConfigEdit).toBe(true); // loopback bind enables it by default
+    expect(body.config.include).toContain('src/**/*.ts');
+    expect(Array.isArray(body.config.exclude)).toBe(true);
+    expect(body.config.maxFileSize).toBeGreaterThan(0);
+    expect(body.supportedLanguages).toContain('typescript');
+    expect(body.maxFileSizeCap).toBeGreaterThan(0);
+    expect(body.database).toBeNull(); // sqlite default → no database block surfaced
+  });
+
+  it('persists a curated edit and reports the apply class', async () => {
+    const before = await getConfig();
+    const res = await postConfig({ ...before.config, exclude: [...before.config.exclude, '**/generated/**'] });
+    expect(res.status).toBe(200);
+    await expect(res.json()).resolves.toMatchObject({ ok: true, applyClass: 'reindex' });
+    const after = await getConfig();
+    expect(after.config.exclude).toContain('**/generated/**');
+  });
+
+  it('rejects an out-of-range maxFileSize with 400 and writes nothing', async () => {
+    const before = await getConfig();
+    const res = await postConfig({ maxFileSize: 999 * 1024 * 1024 }); // above the 10 MB cap
+    expect(res.status).toBe(400);
+    const after = await getConfig();
+    expect(after.config.maxFileSize).toBe(before.config.maxFileSize);
+  });
+
+  it('never persists non-whitelisted fields (database) from the request body', async () => {
+    const res = await postConfig({ database: { provider: 'postgres', url: 'postgres://evil' }, exclude: ['**/x/**'] });
+    expect(res.status).toBe(200);
+    const after = await getConfig();
+    expect(after.database).toBeNull(); // the database block in the body was ignored
+  });
+
+  it('rejects an unknown language with 400', async () => {
+    const res = await postConfig({ languages: ['typescript', 'klingon'] });
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toMatchObject({ error: expect.stringMatching(/unknown language/) });
+  });
+
+  it('rejects an invalid re-index mode with 400', async () => {
+    const res = await apiFetch(handle, 'api/reindex', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: 'wipe' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('streams an in-process re-index as Server-Sent Events', async () => {
+    const res = await fetch(new URL('api/reindex', handle.url), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-cartograph-viewer-token': handle.apiToken },
+      body: JSON.stringify({ mode: 'sync' }),
+      signal: AbortSignal.timeout(30_000),
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toMatch(/text\/event-stream/);
+    // The server ends the response after the terminal frame, so reading
+    // to completion is bounded.
+    const text = await res.text();
+    expect(text).toMatch(/event: (done|busy)/);
+  }, 35_000);
 });
 
 function apiFetch(handle: ViewerHandle, pathOrUrl: string, init: RequestInit = {}): Promise<Response> {

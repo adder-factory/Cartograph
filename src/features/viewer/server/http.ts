@@ -7,6 +7,13 @@ export function sendJson(res: http.ServerResponse, code: number, body: unknown):
   res.end(JSON.stringify(body));
 }
 
+/** Write one Server-Sent Events frame to an already-open `text/event-stream`
+ *  response (headers must already be written). Shared by the live feed and
+ *  the config-editor re-index progress stream. */
+export function writeSseEvent(res: http.ServerResponse, event: string, data: unknown): void {
+  res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+}
+
 export function clampInt(v: string | null, bound: IntBound): number {
   if (!v) return bound.default;
   const n = parseStrictDecimalInteger(v);

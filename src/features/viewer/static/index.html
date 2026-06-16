@@ -71,6 +71,7 @@
     <div class="tab" data-view="trace" data-tooltip="Replay recorded MCP tool calls"><i data-lucide="route" aria-hidden="true"></i><span>Agent trace</span></div>
     <div class="tab" data-view="live" data-tooltip="Watch MCP tool calls in real time"><i data-lucide="activity" aria-hidden="true"></i><span>Live</span></div>
     <div class="tab" data-view="health" data-tooltip="Show project health metrics"><i data-lucide="heart-pulse" aria-hidden="true"></i><span>Health</span></div>
+    <div class="tab" data-view="config" data-tooltip="Edit config and re-index"><i data-lucide="settings" aria-hidden="true"></i><span>Config</span></div>
   </nav>
 </header>
 
@@ -516,6 +517,90 @@
   </div>
 </section>
 
+<!-- Config view (toggled) -->
+<section id="config-view" class="config-view">
+  <div class="config-shell">
+    <header class="config-head">
+      <div>
+        <div class="health-kicker">Project configuration</div>
+        <h2 class="config-title">Index configuration</h2>
+        <p class="config-sub">Edit <code class="mono">.cartograph/config.json</code> and re-index without leaving the viewer.</p>
+      </div>
+      <span class="config-readonly-badge" id="cfg-readonly-badge" hidden>Read-only</span>
+    </header>
+
+    <div class="config-banner" id="cfg-banner" hidden></div>
+
+    <form id="cfg-form" class="config-grid" autocomplete="off">
+      <section class="health-card config-card config-card-wide">
+        <header class="health-card-head"><h3>Scope</h3><span class="health-card-aside">what gets indexed</span></header>
+        <div class="config-card-body">
+          <label class="config-field">
+            <span class="config-label">Include globs <em>one per line</em></span>
+            <textarea id="cfg-include" class="config-textarea mono" rows="6" spellcheck="false"></textarea>
+          </label>
+          <label class="config-field">
+            <span class="config-label">Exclude globs <em>one per line</em></span>
+            <textarea id="cfg-exclude" class="config-textarea mono" rows="8" spellcheck="false"></textarea>
+          </label>
+        </div>
+      </section>
+
+      <section class="health-card config-card">
+        <header class="health-card-head"><h3>Languages</h3><span class="health-card-aside" id="cfg-langs-aside"></span></header>
+        <div class="config-card-body">
+          <p class="config-hint">Leave all unselected to auto-detect every supported language.</p>
+          <div class="config-langs" id="cfg-languages"></div>
+        </div>
+      </section>
+
+      <section class="health-card config-card">
+        <header class="health-card-head"><h3>Limits &amp; features</h3></header>
+        <div class="config-card-body">
+          <label class="config-field config-field-inline">
+            <span class="config-label">Max file size <em id="cfg-maxsize-hint"></em></span>
+            <span class="config-num-wrap">
+              <input id="cfg-maxfilesize" class="config-input mono" type="number" min="1" step="0.5" inputmode="decimal" />
+              <span class="config-unit">MB</span>
+            </span>
+          </label>
+          <label class="config-toggle">
+            <input id="cfg-enableBiomarkers" type="checkbox" />
+            <span><b>Biomarkers</b><em>static code-health analysis</em></span>
+          </label>
+          <label class="config-toggle">
+            <input id="cfg-enableCoChange" type="checkbox" />
+            <span><b>Co-change edges</b><em>git-history coupling between files</em></span>
+          </label>
+        </div>
+      </section>
+
+      <section class="health-card config-card">
+        <header class="health-card-head"><h3>Database</h3><span class="health-card-aside">read-only</span></header>
+        <div class="config-card-body">
+          <div class="config-db" id="cfg-database"></div>
+          <p class="config-hint">Changing the database needs a viewer restart — edit it with <code class="mono">cartograph admin</code>.</p>
+        </div>
+      </section>
+    </form>
+
+    <div class="config-actions" id="cfg-actions">
+      <button type="button" class="config-btn primary" id="cfg-save">Save config</button>
+      <button type="button" class="config-btn" id="cfg-reset" data-tooltip="Discard unsaved edits">Revert</button>
+      <div class="config-apply" id="cfg-apply" hidden></div>
+    </div>
+
+    <div class="config-progress" id="cfg-progress" hidden>
+      <div class="config-progress-head">
+        <span id="cfg-progress-phase">Indexing…</span>
+        <span id="cfg-progress-count" class="mono"></span>
+      </div>
+      <div class="config-progress-bar"><span id="cfg-progress-fill"></span></div>
+      <div class="config-progress-file mono" id="cfg-progress-file"></div>
+    </div>
+  </div>
+</section>
+
 <!-- Command palette (Cmd/Ctrl+K) — quick navigation overlay -->
 <div class="palette-backdrop" id="palette-backdrop" hidden>
   <dialog class="palette" aria-label="Command palette">
@@ -537,6 +622,7 @@
 <script src="viewer.graph-diagnostics.app"></script>
 <script src="viewer.live.app"></script>
 <script src="viewer.health.app"></script>
+<script src="viewer.config.app"></script>
 <script src="viewer.source.app"></script>
 <script src="viewer.palette.app"></script>
 <script src="viewer.hash-editor.app"></script>
