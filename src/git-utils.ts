@@ -313,16 +313,7 @@ export function getUncommittedSourcePaths(rootDir: string): string[] {
       ...GIT_EXEC_OPTIONS,
       cwd: rootDir,
     });
-    const dirtyPaths: string[] = [];
-    for (const line of out.split('\n')) {
-      if (line.trim().length === 0) continue;
-      // Porcelain v1 line: "XY <path>" (or "XY <old> -> <new>" for a
-      // rename). Take the NEW path after ` -> ` for renames (matching
-      // `classifyPorcelainLine`) so a staged rename surfaces its real
-      // destination, not the raw "old -> new" token.
-      const filePath = line.includes(' -> ') ? line.split(' -> ')[1]!.trim() : line.slice(3).trim();
-      if (filePath.length > 0 && !isCartographMetaPath(filePath)) dirtyPaths.push(filePath);
-    }
+    const dirtyPaths = parseUncommittedSourcePaths(out);
     // Drop a cartograph-only `.gitignore` edit (F#32) — init's own append
     // must never read as a user change, even alongside other edits.
     if (dirtyPaths.includes('.gitignore') && isCartographOnlyGitignoreDiff(rootDir)) {
@@ -332,6 +323,28 @@ export function getUncommittedSourcePaths(rootDir: string): string[] {
   } catch {
     return [];
   }
+}
+
+/**
+ * Parse `git status --porcelain` output into source paths, separated from the
+ * git I/O so the porcelain handling is unit-testable. For each non-blank line,
+ * take the NEW path after ` -> ` (renames, matching `classifyPorcelainLine`),
+ * trim trailing whitespace / CR, and drop empty paths and cartograph
+ * meta-paths.
+ */
+export function parseUncommittedSourcePaths(porcelain: string): string[] {
+  const dirtyPaths: string[] = [];
+  for (const line of porcelain.split('\n')) {
+    if (line.trim().length === 0) continue;
+    // ` -> ` is a rename/copy separator only when the X status code says so
+    // (`R`/`C`). Without this guard a file legitimately named like `a -> b.ts`
+    // (status ` M`) would be mis-split to its trailing segment. Non-rename
+    // lines are `XY <path>`, so the path begins at column 3.
+    const isRenameOrCopy = line.startsWith('R') || line.startsWith('C');
+    const filePath = isRenameOrCopy ? line.split(' -> ')[1]!.trim() : line.slice(3).trim();
+    if (filePath.length > 0 && !isCartographMetaPath(filePath)) dirtyPaths.push(filePath);
+  }
+  return dirtyPaths;
 }
 
 /**

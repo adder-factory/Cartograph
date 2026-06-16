@@ -41,6 +41,7 @@ import {
   isShaReachable,
   isShallowClone,
   listChangedFilesSince,
+  parseUncommittedSourcePaths,
   resolveGitBinary,
   shortSha,
 } from '../src/git-utils.js';
@@ -686,5 +687,49 @@ describe('uncommitted source paths — rename extraction', () => {
     dir = mkTmp();
     expect(getUncommittedSourcePaths(dir)).toEqual([]);
     expect(hasUncommittedChanges(dir)).toBe(false);
+  });
+});
+
+// Pure porcelain parser — exercises the defensive trim / empty-path guard with
+// degenerate input (trailing whitespace, CRLF, empty paths) that real `git
+// status` never emits, so the guards can't be silently weakened.
+describe('parseUncommittedSourcePaths — porcelain handling', () => {
+  it('takes the new path after ` -> ` for a rename', () => {
+    expect(parseUncommittedSourcePaths('R  old.ts -> renamed.ts')).toEqual(['renamed.ts']);
+  });
+
+  it('parses every line of a multi-rename blob (the loop, not just line 0)', () => {
+    // Guards the per-line loop: a regression that only read the first line
+    // would drop d.ts. Each rename independently yields its new path.
+    expect(parseUncommittedSourcePaths('R  a.ts -> b.ts\nR  c.ts -> d.ts')).toEqual(['b.ts', 'd.ts']);
+  });
+
+  it('does not treat ` -> ` in a non-rename path as a rename (status-gated)', () => {
+    // A modified file whose NAME contains ` -> ` (status ` M`, not `R`) must
+    // keep its FULL path, not be mis-split to the trailing segment. (PR #35
+    // review — without the status gate this returned 'b.ts'.)
+    expect(parseUncommittedSourcePaths(' M src/a -> b.ts')).toEqual(['src/a -> b.ts']);
+    // A genuine rename (status `R`) still takes the new path.
+    expect(parseUncommittedSourcePaths('R  old.ts -> new.ts')).toEqual(['new.ts']);
+  });
+
+  it('trims trailing whitespace / CR off the path (rename and plain)', () => {
+    // A trailing space or `\r` (CRLF) must NOT leak into the path. Without the
+    // `.trim()` these would be "src/a.ts  " / "renamed.ts  " / "src/a.ts\r".
+    expect(parseUncommittedSourcePaths(' M src/a.ts  ')).toEqual(['src/a.ts']);
+    expect(parseUncommittedSourcePaths(' M src/a.ts\r')).toEqual(['src/a.ts']);
+    expect(parseUncommittedSourcePaths('R  old.ts -> renamed.ts  ')).toEqual(['renamed.ts']);
+  });
+
+  it('drops an empty path (the `length > 0` guard is load-bearing)', () => {
+    // A status prefix with no path → empty after slice/trim → must be filtered.
+    // Distinguishes `length > 0` from a always-true `>= 0` / `true`.
+    expect(parseUncommittedSourcePaths('?? ')).toEqual([]);
+    expect(parseUncommittedSourcePaths('?? \n M src/real.ts')).toEqual(['src/real.ts']);
+  });
+
+  it('skips blank lines and cartograph meta-paths', () => {
+    expect(parseUncommittedSourcePaths('\n\n M src/x.ts\n')).toEqual(['src/x.ts']);
+    expect(parseUncommittedSourcePaths(' M .cartograph/cartograph.db')).toEqual([]);
   });
 });
