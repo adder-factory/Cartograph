@@ -188,7 +188,7 @@ export function setNestedJsonEntry(args: {
  */
 export function deleteNestedJsonEntry(config: Record<string, unknown>, wrapperKey: string, entryKey: string): boolean {
   const wrapper = asJsonObject(config[wrapperKey]);
-  if (!wrapper || wrapper[entryKey] === undefined) return false;
+  if (wrapper?.[entryKey] === undefined) return false;
   delete wrapper[entryKey];
   if (Object.keys(wrapper).length === 0) delete config[wrapperKey];
   return true;

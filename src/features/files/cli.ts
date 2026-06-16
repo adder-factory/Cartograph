@@ -1,5 +1,5 @@
 import { errMsg } from '../../errors.js';
-import type { Node, NodeKind } from '../../types.js';
+import type { NodeKind } from '../../types.js';
 import {
   MAX_FILE_DEPS_LIMIT,
   collectFileDeps,
@@ -270,7 +270,7 @@ async function runFilesSymbolsCommand(deps: FilesCommandDeps, options: FilesComm
         return;
       }
       const result = collectFileSymbols({
-        nodes: cg.queries.getNodesByFile(resolved.filePath) as Node[],
+        nodes: cg.queries.getNodesByFile(resolved.filePath),
         kinds: parsed.options.kinds,
         includeParameters: options.includeParameters === true,
         includeImports: options.includeImports === true,

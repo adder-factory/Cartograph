@@ -171,7 +171,7 @@ export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonAr
       hnswAvailable: args.hnswAvailable,
       nodesByKind: args.stats.nodesByKind,
       languages: Object.entries(args.stats.filesByLanguage)
-        .filter(([, count]) => (count as number) > 0)
+        .filter(([, count]) => count > 0)
         .map(([lang]) => lang),
       pendingChanges: {
         added: args.changes.added.length,

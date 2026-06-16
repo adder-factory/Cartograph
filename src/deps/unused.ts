@@ -442,6 +442,7 @@ function collectUsedFromScriptsAndAllowlist(args: CollectUsedFromScriptsAndAllow
 
 function collectUsedFromScripts(args: Omit<CollectUsedFromScriptsAndAllowlistArgs, 'projectRoot'>): void {
   const { manifests, declaredDeps, usedSet, binToPackage } = args;
+  const collected = { declaredDeps, usedSet, binToPackage };
   // Walk scripts across EVERY workspace manifest (root + each
   // workspace child). Without this a workspace's `typecheck: tsc
   // --noEmit` would never surface `tsc → typescript` as a used
@@ -451,17 +452,22 @@ function collectUsedFromScripts(args: Omit<CollectUsedFromScriptsAndAllowlistArg
   for (const m of manifests) {
     const scripts = objectField(m.packageJson, 'scripts');
     for (const [, scriptBody] of Object.entries(scripts)) {
-      if (typeof scriptBody !== 'string') continue;
-      const tokens = tokenizeScript(scriptBody);
-      for (const token of tokens) {
-        if (binToPackage.has(token)) {
-          usedSet.add(binToPackage.get(token)!);
-        }
-        if (declaredDeps.has(token)) {
-          usedSet.add(token);
-        }
-      }
+      if (typeof scriptBody === 'string') collectScriptBinUsage(scriptBody, collected);
     }
+  }
+}
+
+/** Per-script-body half of {@link collectUsedFromScripts}, extracted to keep
+ *  the manifest×script×token nesting under the cognitive-complexity floor. */
+function collectScriptBinUsage(
+  scriptBody: string,
+  collected: Pick<CollectUsedFromScriptsAndAllowlistArgs, 'declaredDeps' | 'usedSet' | 'binToPackage'>,
+): void {
+  const { declaredDeps, usedSet, binToPackage } = collected;
+  for (const token of tokenizeScript(scriptBody)) {
+    const pkg = binToPackage.get(token);
+    if (pkg !== undefined) usedSet.add(pkg);
+    if (declaredDeps.has(token)) usedSet.add(token);
   }
 }
 
