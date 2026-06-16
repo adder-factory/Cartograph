@@ -637,6 +637,24 @@ function reorderProdFirst(rawResults: SearchResult[], limit: number): SearchResu
   return [...prodHits, ...fixtureHits].slice(0, limit);
 }
 
+/**
+ * Stable-demote `import`-kind hits to the end of an exact-name result
+ * set so a container's own members fill the default `limit` before its
+ * importers do. An exact name search for a class should surface the
+ * class + its methods — not the N files that import it under the same
+ * name, which match identically and otherwise crowd real members past
+ * the cap. Imports are demoted, not dropped: they still appear after the
+ * members, or sooner at a higher `limit`.
+ *
+ * @internal — exported for unit testing the import-demotion ordering.
+ */
+export function deprioritizeImports(results: SearchResult[]): SearchResult[] {
+  const imports = results.filter((r) => r.node.kind === 'import');
+  if (imports.length === 0 || imports.length === results.length) return results;
+  const defs = results.filter((r) => r.node.kind !== 'import');
+  return [...defs, ...imports];
+}
+
 function canonicalToolNameLiteral(query: string): string | null {
   const trimmed = query.trim();
   return /^cartograph_[a-z0-9_]+$/.test(trimmed) ? trimmed : null;
@@ -1084,23 +1102,36 @@ function fetchExactSearchResults(args: FetchExactSearchResultsArgs): ExactSearch
   // rows ordered like `../...js`. When the query is centrality-only
   // (no text / no graph qualifiers), push the predicate into SQL.
   const parsed = parseQuery(query);
-  const rawResults =
-    shouldUseCentralityFastPath(parsed) && pathFilter === undefined
-      ? runCentralityOnlySearch({
-          cg,
-          cf: parsed.centralityFilter!,
-          kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
-          languages: parsed.languages.length > 0 ? parsed.languages : undefined,
+  const usedCentralityPath = shouldUseCentralityFastPath(parsed) && pathFilter === undefined;
+  const rawResults = usedCentralityPath
+    ? runCentralityOnlySearch({
+        cg,
+        cf: parsed.centralityFilter!,
+        kinds: parsed.kinds.length > 0 ? parsed.kinds : kinds,
+        languages: parsed.languages.length > 0 ? parsed.languages : undefined,
+        limit: fetchLimit,
+        sortByCentrality: parsed.sortBy === 'centrality',
+      })
+    : searchNodes(
+        cg.queries,
+        query,
+        compact({
           limit: fetchLimit,
-          sortByCentrality: parsed.sortBy === 'centrality',
-        })
-      : searchNodes(
-          cg.queries,
-          query,
-          compact({ limit: fetchLimit, kinds, pathPrefixes: pathFilter === undefined ? undefined : [pathFilter] }),
-        );
+          kinds,
+          pathPrefixes: pathFilter === undefined ? undefined : [pathFilter],
+          demoteImportRows: true,
+        }),
+      );
   const rankedResults = prioritizeCanonicalToolNameResults(query, rawResults);
-  const fullResults = reorderProdFirst(rankedResults, limit);
+  // Import-demotion is a symbol-NAME-search affordance: keep a container's own
+  // members ahead of the files that import it under the same name. Skip it for
+  // a centrality-ranked query (`centrality:>0` / `sort:centrality`), which must
+  // keep its `ORDER BY centrality DESC`. NOTE: within the name path it only
+  // re-ranks the over-fetched candidate window — a symbol imported far more than
+  // `limit × SEARCH_OVERFETCH_MULTIPLIER` times can still cap out its members
+  // (raise `--limit`); a fetch-level fix is a follow-up.
+  const memberFirstResults = usedCentralityPath ? rankedResults : deprioritizeImports(rankedResults);
+  const fullResults = reorderProdFirst(memberFirstResults, limit);
   return { rawResults, fullResults };
 }
 
