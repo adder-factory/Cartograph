@@ -21,17 +21,22 @@ export function getCartographPermissions(): string[] {
 
 export function writePermissionsAllowList(filePath: string): WriteResult['files'][number] {
   const settings = readJsonFile(filePath);
+  // Snapshot BEFORE ensureNestedStringArray mutates `settings` (it filters
+  // out any non-string members). Comparing the whole original vs. final
+  // settings — not just the allow array post-filter — means a file whose
+  // ONLY change is that cleanup still gets written back instead of being
+  // reported 'unchanged' and leaving the junk on disk.
+  const originalSettings = structuredClone(settings);
   const created = !fs.existsSync(filePath);
 
   const allow = ensureNestedStringArray(settings, 'permissions', 'allow');
-  const before = [...allow];
   for (const permission of getCartographPermissions()) {
     if (!allow.includes(permission)) {
       allow.push(permission);
     }
   }
 
-  if (jsonDeepEqual(before, allow) && !created) {
+  if (jsonDeepEqual(originalSettings, settings) && !created) {
     return { path: filePath, action: 'unchanged' };
   }
 
