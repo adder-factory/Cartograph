@@ -54,7 +54,7 @@ function targetEntry(loc: Location, args: WriteMcpEntryJsoncArgs): Record<string
 export function detectMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs, installed: boolean): DetectionResult {
   const file = args.resolvePath(loc);
   const config = parseJsoncFile(file);
-  return { installed, alreadyConfigured: !!config?.['mcpServers']?.cartograph, configPath: file };
+  return { installed, alreadyConfigured: readCartographEntry(config) !== undefined, configPath: file };
 }
 
 export function writeMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs): WriteResult['files'][number] {
@@ -75,7 +75,7 @@ export function writeMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs):
 
   const parsed = parseJsoncText(text);
   if (!parsed) return { path: file, action: 'kept' };
-  if (jsonDeepEqual(parsed['mcpServers']?.cartograph, after)) {
+  if (jsonDeepEqual(readCartographEntry(parsed), after)) {
     return { path: file, action: 'unchanged' };
   }
 
@@ -92,7 +92,7 @@ export function removeMcpEntryJsonc(loc: Location, args: WriteMcpEntryJsoncArgs)
   const text = fs.readFileSync(file, 'utf-8');
   const parsed = parseJsoncText(text);
   if (!parsed) return { path: file, action: 'kept' };
-  if (!parsed['mcpServers']?.cartograph) return { path: file, action: 'not-found' };
+  if (readCartographEntry(parsed) === undefined) return { path: file, action: 'not-found' };
 
   const next = removeMcpServerEntry(text);
   if (!next) return { path: file, action: 'kept' };
@@ -104,21 +104,29 @@ function writeJsoncFile(filePath: string, content: string): void {
   atomicWriteFileSync(filePath, content.endsWith('\n') ? content : `${content}\n`);
 }
 
-function parseJsoncFile(filePath: string): Record<string, any> | null {
+function parseJsoncFile(filePath: string): Record<string, unknown> | null {
   if (!fs.existsSync(filePath)) return {};
   return parseJsoncText(fs.readFileSync(filePath, 'utf-8'));
 }
 
-function parseJsoncText(text: string): Record<string, any> | null {
+function parseJsoncText(text: string): Record<string, unknown> | null {
   const trimmed = text.trim();
   if (!trimmed) return {};
   try {
-    const parsed = JSON.parse(removeTrailingCommas(stripJsoncComments(text)));
+    const parsed: unknown = JSON.parse(removeTrailingCommas(stripJsoncComments(text)));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed as Record<string, any>;
+    return parsed as Record<string, unknown>;
   } catch {
     return null;
   }
+}
+
+/** `record['mcpServers'].cartograph` when both are present, else undefined. */
+function readCartographEntry(record: Record<string, unknown> | null | undefined): unknown {
+  if (!record) return undefined;
+  const servers = record['mcpServers'];
+  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) return undefined;
+  return (servers as Record<string, unknown>)['cartograph'];
 }
 
 function stripJsoncComments(text: string): string {

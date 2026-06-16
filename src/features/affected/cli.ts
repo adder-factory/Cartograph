@@ -14,12 +14,15 @@ import {
   validateAffectedIndexedPaths,
 } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type Cartograph from '../../index.js';
+import type { QueryBuilder } from '../../db/queries.js';
+import type { GraphQueryManager } from '../../graph/index.js';
 
 type CommandLike = CliOptionCommand;
 
 interface AffectedCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 
@@ -37,9 +40,9 @@ export interface AffectedCommandDeps {
   loadCartograph: () => Promise<AffectedCartographModule>;
   runViaMCP?: unknown;
   isInitialized: (projectPath: string) => boolean;
-  buildIndexedPathSets: (queries: any) => IndexedPathSets;
+  buildIndexedPathSets: (queries: QueryBuilder) => IndexedPathSets;
   findAffectedTests: (
-    graphManager: any,
+    graphManager: GraphQueryManager,
     input: AffectedCoreInput,
   ) => { affectedTests: Set<string>; totalDependents: number; barrelsReached: string[] };
   loadGitUtils: () => Promise<{ listChangedFilesSince: (projectPath: string, ref: string) => string[] | null }>;
@@ -140,7 +143,7 @@ interface CollectChangedFilesForCliArgs {
 
 interface BuildAffectedCoreInputArgs {
   deps: Pick<AffectedCommandDeps, 'buildIndexedPathSets' | 'error' | 'info'>;
-  cg: any;
+  cg: Cartograph;
   changed: ChangedFilesResult;
   options: AffectedOptions;
 }

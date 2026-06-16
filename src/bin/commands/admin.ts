@@ -23,7 +23,7 @@ import { registerAdminSimilarityEdgesCommand } from '../../features/admin-simila
 import { registerAdminStorageMigrateCommand } from '../../features/admin-storage-migrate/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
-import type { CliRequiredOptionCommand } from '../../features/shared/cli-command.js';
+import type { Command } from 'commander';
 import {
   adminCmd as cliAdminCmd,
   loadCartograph as cliLoadCartograph,
@@ -44,8 +44,6 @@ import {
   printIndexResult as cliPrintIndexResult,
 } from '../_cli-core.js';
 
-type CommandLike = CliRequiredOptionCommand;
-
 interface AssignNumericArgInput {
   args: Record<string, unknown>;
   key: string;
@@ -55,7 +53,16 @@ interface AssignNumericArgInput {
 }
 
 export interface AdminCommandDeps {
-  adminCmd: CommandLike;
+  // The real commander Command — it is both the admin-family builder
+  // passed to every sub-registrar and the value handed to
+  // attachUnknownActionHandler, which reads Command-only members.
+  adminCmd: Command;
+  // DI seam: this single loadCartograph is forwarded to every admin
+  // sub-registrar, each of which narrows the opened graph to its own
+  // structural subset (AdminIndexGraph, ProjectLifecycleGraph, ...).
+  // The real Cartograph is not assignable to those divergent subsets,
+  // so only `any` flows through to all of them.
+  // biome-ignore lint/suspicious/noExplicitAny: DI seam — real Cartograph is not assignable to the per-sub-registrar narrowed graph subsets
   loadCartograph: () => Promise<{ default: any }>;
   resolveProjectPath: (pathArg?: string) => string;
   chalk: typeof cliChalk;
@@ -69,7 +76,7 @@ export interface AdminCommandDeps {
   formatBytes: (bytes: number) => string;
   createVerboseProgress: typeof cliCreateVerboseProgress;
   createShimmerProgress: typeof defaultCreateShimmerProgress;
-  attachUnknownActionHandler: (group: any, family: string) => void;
+  attachUnknownActionHandler: (group: Command, family: string) => void;
   assignIntArg: (args: AssignNumericArgInput) => boolean;
   assignFloatArg: (args: AssignNumericArgInput) => boolean;
   awaitSummarisationWithProgress: typeof cliAwaitSummarisationWithProgress;
@@ -81,15 +88,15 @@ export interface AdminCommandDeps {
   writeScipImport: typeof defaultWriteScipImport;
   writeStdout: (message: string) => void;
   writeStderr: (message: string) => void;
-  loadClack: () => Promise<any>;
-  loadReadline: () => Promise<{ createInterface: (...args: any[]) => any }>;
+  loadClack: () => Promise<typeof import('@clack/prompts')>;
+  loadReadline: () => Promise<{ createInterface: typeof import('node:readline').createInterface }>;
   loadParseCache: () => Promise<{ clearParseCache: (queries: unknown, language?: string) => number }>;
   loadDetachedSummarize: () => Promise<{
     spawnDetachedSummarize: (projectPath: string) => { spawned: boolean; pid?: number; reason?: string };
   }>;
   loadSimilarEdges: () => Promise<{
     buildSimilarToEdges: (
-      cg: any,
+      cg: unknown,
       options: { k: number; minScore: number },
     ) => Promise<{
       written: number;
@@ -105,7 +112,7 @@ export interface AdminCommandDeps {
       options: { maxAgeMs: number },
     ) => { summariesPruned: number; embeddingsPruned: number };
   }>;
-  loadDbIndex: () => Promise<{ dbReclaimAfterBulkDelete: (db: any) => void }>;
+  loadDbIndex: () => Promise<{ dbReclaimAfterBulkDelete: (db: unknown) => void }>;
   loadInstallModels: () => Promise<{
     installRecommendedModels: (opts: {
       dir?: string;
@@ -148,7 +155,7 @@ export interface AdminCommandDeps {
         startCommand: string | null;
       };
     }>;
-    applyLlmSetupChoice: (opts: { projectRoot: string; preset: any }) => Promise<{
+    applyLlmSetupChoice: (opts: { projectRoot: string; preset: string }) => Promise<{
       applied: boolean;
       preset: string;
       configPath: string;
@@ -156,7 +163,7 @@ export interface AdminCommandDeps {
       notes: readonly string[];
       nextSteps: readonly string[];
     }>;
-    writeLlmTierConcurrencyOverride: (opts: { projectRoot: string; tier: any; concurrency: number }) => Promise<{
+    writeLlmTierConcurrencyOverride: (opts: { projectRoot: string; tier: string; concurrency: number }) => Promise<{
       configPath: string;
       backupPath?: string | null;
       configKey: string;
@@ -177,6 +184,7 @@ export interface AdminCommandDeps {
 
 const defaultAdminCommandDeps: AdminCommandDeps = {
   adminCmd: cliAdminCmd,
+  // biome-ignore lint/suspicious/noExplicitAny: matches the AdminCommandDeps.loadCartograph DI-seam type bridged onto every sub-registrar's narrowed graph subset
   loadCartograph: cliLoadCartograph as () => Promise<{ default: any }>,
   resolveProjectPath: cliResolveProjectPath,
   chalk: cliChalk,

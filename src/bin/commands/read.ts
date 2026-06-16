@@ -21,6 +21,7 @@ import {
 import { isValidFindAxis, parseFieldsOption, registerFindCommand } from '../../features/find/index.js';
 import { registerGraphExportCommand as registerGraphExportFeatureCommand } from '../../features/graph-export/index.js';
 import type { CliArgumentOptionCommand } from '../../features/shared/cli-command.js';
+import type Cartograph from '../../index.js';
 import { registerStatusCommand as registerStatusFeatureCommand } from '../../features/status/index.js';
 import { isInitialized } from '../../directory.js';
 import { detectPackageManager, packageScriptCommand, readPackageScripts } from '../../package-scripts.js';
@@ -45,7 +46,7 @@ type CommandLike = CliArgumentOptionCommand;
 
 interface ReadCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 

@@ -38,9 +38,13 @@ import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 const requireCjs = createRequire(import.meta.url);
 
 export interface SqliteStatement {
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
   run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
   runBatch?(paramSets: any[][]): { changes: number; lastInsertRowid: number | bigint };
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
   get(...params: any[]): any;
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
   all(...params: any[]): any[];
   /**
    * Streaming row iterator. Lets memory-bounded callers early-exit a
@@ -48,6 +52,7 @@ export interface SqliteStatement {
    * query whose row count could exceed the agent's tolerance for large
    * payloads (cartograph_sql escape hatch, large grep result merges).
    */
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
   iterate(...params: any[]): IterableIterator<any>;
 }
 
@@ -55,7 +60,9 @@ export interface SqliteDatabase {
   readonly dialect: 'sqlite' | 'postgres';
   prepare(sql: string): SqliteStatement;
   exec(sql: string): void;
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite pragma() return signature
   pragma(str: string): any;
+  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic transaction() wrapper signature
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
   close(): void;
   readonly open: boolean;

@@ -66,7 +66,7 @@ export interface UnusedDepsResult {
  */
 interface WorkspaceManifest {
   packageJsonPath: string;
-  packageJson: Record<string, any>;
+  packageJson: Record<string, unknown>;
   isRoot: boolean;
 }
 
@@ -103,8 +103,39 @@ interface ComputeUnusedSetsArgs {
   usedSet: Set<string>;
 }
 
+/**
+ * Read a package.json from disk as an object-shaped record. A parse of
+ * a JSON file yields `unknown`; the audit only ever reads object fields
+ * (`dependencies`, `scripts`, ...) so a non-object top level (array /
+ * scalar / null) collapses to `{}`. Malformed JSON returns `null` — a
+ * distinct "skip this manifest entirely" signal (it must not be counted
+ * as a present-but-empty workspace manifest).
+ */
+function parsePackageJson(raw: string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  return parsed as Record<string, unknown>;
+}
+
+/**
+ * Pull an object-valued field (`dependencies`, `devDependencies`,
+ * `scripts`, ...) off a manifest as a string-keyed record. A field that
+ * is absent or not an object collapses to `{}`, so callers can iterate
+ * its keys unconditionally.
+ */
+function objectField(packageJson: Record<string, unknown>, key: string): Record<string, unknown> {
+  const value = packageJson[key];
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
+  return value as Record<string, unknown>;
+}
+
 function readPackageJson(args: ReadPackageJsonArgs): {
-  packageJson: Record<string, any>;
+  packageJson: Record<string, unknown>;
   packageJsonPath: string;
 } {
   const { projectRoot } = args;
@@ -112,10 +143,10 @@ function readPackageJson(args: ReadPackageJsonArgs): {
 
   if (existsSync(packageJsonPath)) {
     try {
-      const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf-8'));
-      return { packageJson, packageJsonPath };
+      const packageJson = parsePackageJson(readFileSync(packageJsonPath, 'utf-8'));
+      if (packageJson !== null) return { packageJson, packageJsonPath };
     } catch {
-      return { packageJson: {}, packageJsonPath: '' };
+      // unreadable — fall through to the empty fallback
     }
   }
   return { packageJson: {}, packageJsonPath: '' };
@@ -131,9 +162,9 @@ function extractDeclaredDeps(args: ExtractDeclaredDepsArgs): {
   const dev = new Set<string>();
   const optional = new Set<string>();
   for (const m of manifests) {
-    for (const k of Object.keys(m.packageJson['dependencies'] ?? {})) runtime.add(k);
-    for (const k of Object.keys(m.packageJson['devDependencies'] ?? {})) dev.add(k);
-    for (const k of Object.keys(m.packageJson['optionalDependencies'] ?? {})) optional.add(k);
+    for (const k of Object.keys(objectField(m.packageJson, 'dependencies'))) runtime.add(k);
+    for (const k of Object.keys(objectField(m.packageJson, 'devDependencies'))) dev.add(k);
+    for (const k of Object.keys(objectField(m.packageJson, 'optionalDependencies'))) optional.add(k);
   }
   return {
     declaredRuntime: Array.from(runtime).sort((a, b) => Number(a > b) - Number(a < b)),
@@ -166,7 +197,7 @@ function extractDeclaredDeps(args: ExtractDeclaredDepsArgs): {
  * overcollects rather than failing on that rare construct — the
  * trade-off favours simplicity over exclusion fidelity.
  */
-function parseWorkspacePatterns(packageJson: Record<string, any>): string[] {
+function parseWorkspacePatterns(packageJson: Record<string, unknown>): string[] {
   const ws = packageJson['workspaces'];
   if (Array.isArray(ws)) return ws.filter((s): s is string => typeof s === 'string');
   if (ws !== null && typeof ws === 'object') {
@@ -192,7 +223,7 @@ function parseWorkspacePatterns(packageJson: Record<string, any>): string[] {
  */
 function readWorkspaceManifests(
   projectRoot: string,
-  rootPackageJson: Record<string, any>,
+  rootPackageJson: Record<string, unknown>,
   rootPackageJsonPath: string,
 ): WorkspaceManifest[] {
   const manifests: WorkspaceManifest[] = [
@@ -214,10 +245,11 @@ function readWorkspaceManifests(
     for (const match of glob.scanSync({ cwd: projectRoot })) {
       const fullPath = join(projectRoot, match);
       try {
-        const json = JSON.parse(readFileSync(fullPath, 'utf-8')) as Record<string, any>;
-        manifests.push({ packageJsonPath: fullPath, packageJson: json, isRoot: false });
+        const json = parsePackageJson(readFileSync(fullPath, 'utf-8'));
+        // null = malformed JSON → skip; a throw = unreadable → skip (catch).
+        if (json !== null) manifests.push({ packageJsonPath: fullPath, packageJson: json, isRoot: false });
       } catch {
-        // Malformed / unreadable workspace package.json — skip silently.
+        // Unreadable workspace package.json — skip silently.
         // The audit still completes against the surviving manifests.
       }
     }
@@ -410,6 +442,7 @@ function collectUsedFromScriptsAndAllowlist(args: CollectUsedFromScriptsAndAllow
 
 function collectUsedFromScripts(args: Omit<CollectUsedFromScriptsAndAllowlistArgs, 'projectRoot'>): void {
   const { manifests, declaredDeps, usedSet, binToPackage } = args;
+  const collected = { declaredDeps, usedSet, binToPackage };
   // Walk scripts across EVERY workspace manifest (root + each
   // workspace child). Without this a workspace's `typecheck: tsc
   // --noEmit` would never surface `tsc → typescript` as a used
@@ -417,18 +450,24 @@ function collectUsedFromScripts(args: Omit<CollectUsedFromScriptsAndAllowlistArg
   // unused. Same shape for every workspace-local bin invocation
   // (vite / vitest / tauri / drizzle-kit etc.).
   for (const m of manifests) {
-    const scripts = m.packageJson['scripts'] ?? {};
+    const scripts = objectField(m.packageJson, 'scripts');
     for (const [, scriptBody] of Object.entries(scripts)) {
-      const tokens = tokenizeScript(scriptBody as string);
-      for (const token of tokens) {
-        if (binToPackage.has(token)) {
-          usedSet.add(binToPackage.get(token)!);
-        }
-        if (declaredDeps.has(token)) {
-          usedSet.add(token);
-        }
-      }
+      if (typeof scriptBody === 'string') collectScriptBinUsage(scriptBody, collected);
     }
+  }
+}
+
+/** Per-script-body half of {@link collectUsedFromScripts}, extracted to keep
+ *  the manifest×script×token nesting under the cognitive-complexity floor. */
+function collectScriptBinUsage(
+  scriptBody: string,
+  collected: Pick<CollectUsedFromScriptsAndAllowlistArgs, 'declaredDeps' | 'usedSet' | 'binToPackage'>,
+): void {
+  const { declaredDeps, usedSet, binToPackage } = collected;
+  for (const token of tokenizeScript(scriptBody)) {
+    const pkg = binToPackage.get(token);
+    if (pkg !== undefined) usedSet.add(pkg);
+    if (declaredDeps.has(token)) usedSet.add(token);
   }
 }
 
@@ -594,13 +633,13 @@ const RUNTIME_SHIMMED_SPECIFIERS: Array<{
     spec: 'vitest',
     isShimmed: (projectRoot, manifests) => {
       for (const m of manifests) {
-        const declaredDev = m.packageJson['devDependencies'] ?? {};
+        const declaredDev = objectField(m.packageJson, 'devDependencies');
         if (Object.hasOwn(declaredDev, 'vitest')) return false;
       }
       // Signal A: `bun test` in ANY manifest's test script. Workspaces
       // commonly only put `bun test` in the leaf packages, not the root.
       for (const m of manifests) {
-        const scripts = m.packageJson['scripts'] ?? {};
+        const scripts = objectField(m.packageJson, 'scripts');
         const testScript = typeof scripts['test'] === 'string' ? scripts['test'] : '';
         if (/\bbun\s+test\b/.test(testScript)) return true;
       }

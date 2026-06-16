@@ -33,7 +33,16 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
-import { getHomeDir, jsonDeepEqual, readJsonFile, writeJsonFile, type McpCommandOptions } from './shared.js';
+import {
+  deleteNestedJsonEntry,
+  getHomeDir,
+  getNestedJsonEntry,
+  jsonDeepEqual,
+  readJsonFile,
+  setNestedJsonEntry,
+  writeJsonFile,
+  type McpCommandOptions,
+} from './shared.js';
 
 function unifiedConfigDir(): string {
   return path.join(getHomeDir(), '.gemini', 'config');
@@ -119,7 +128,7 @@ class AntigravityTarget implements AgentTarget {
     }
     const file = preferredMcpConfigPath();
     const config = readJsonFile(file);
-    const alreadyConfigured = !!config['mcpServers']?.cartograph;
+    const alreadyConfigured = getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined;
     // "Installed" heuristic: either dir or one of the config files
     // exists. Antigravity creates ~/.gemini/ on first launch before MCP.
     const installed = fs.existsSync(unifiedConfigDir()) || fs.existsSync(legacyConfigDir()) || fs.existsSync(file);
@@ -184,7 +193,7 @@ function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
   const existing = readJsonFile(file);
-  const before = existing['mcpServers']?.cartograph;
+  const before = getNestedJsonEntry(existing, 'mcpServers', 'cartograph');
   const after = buildAntigravityEntry(opts);
 
   if (jsonDeepEqual(before, after)) {
@@ -194,8 +203,7 @@ function writeMcpEntry(opts: InstallOptions): WriteResult['files'][number] {
   if (before || fs.existsSync(file)) {
     action = 'updated';
   }
-  if (!existing['mcpServers']) existing['mcpServers'] = {};
-  existing['mcpServers'].cartograph = after;
+  setNestedJsonEntry({ config: existing, wrapperKey: 'mcpServers', entryKey: 'cartograph', value: after });
   writeJsonFile(file, existing);
   return { path: file, action };
 }
@@ -205,11 +213,7 @@ function cleanupLegacyEntry(): WriteResult['files'][number] | null {
   const legacy = legacyMcpConfigPath();
   if (!fs.existsSync(legacy)) return null;
   const config = readJsonFile(legacy);
-  if (!config['mcpServers']?.cartograph) return null;
-  delete config['mcpServers'].cartograph;
-  if (Object.keys(config['mcpServers']).length === 0) {
-    delete config['mcpServers'];
-  }
+  if (!deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) return null;
   writeJsonFile(legacy, config);
   return { path: legacy, action: 'removed' };
 }
@@ -217,11 +221,7 @@ function cleanupLegacyEntry(): WriteResult['files'][number] | null {
 function removeCartographFromFile(file: string): WriteResult['files'][number] {
   if (!fs.existsSync(file)) return { path: file, action: 'not-found' };
   const config = readJsonFile(file);
-  if (!config['mcpServers']?.cartograph) return { path: file, action: 'not-found' };
-  delete config['mcpServers'].cartograph;
-  if (Object.keys(config['mcpServers']).length === 0) {
-    delete config['mcpServers'];
-  }
+  if (!deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) return { path: file, action: 'not-found' };
   // Leave a now-empty `{}` — Antigravity manages this file and a
   // stray empty file is less surprising than a deletion.
   writeJsonFile(file, config);

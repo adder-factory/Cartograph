@@ -17,9 +17,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
+  asJsonObject,
   getHomeDir,
   getMcpCommand,
   getMcpServerArgs,
+  getNestedStringArray,
   mcpCommandOptionsForLocation,
   readJsonFile,
   writeJsonFile,
@@ -122,22 +124,23 @@ function removeMcpEntry(loc: Location): WriteResult['files'][number] {
 function removePermissionsEntry(loc: Location): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
   const settings = readJsonFile(file);
-  if (!Array.isArray(settings['permissions']?.allow)) {
+  const permissions = asJsonObject(settings['permissions']);
+  const allow = getNestedStringArray(settings, 'permissions', 'allow');
+  if (!permissions || allow === null) {
     return { path: file, action: 'not-found' };
   }
 
-  const before = settings['permissions'].allow.length;
-  settings['permissions'].allow = settings['permissions'].allow.filter(
-    (permission: string) => !permission.startsWith('mcp__cartograph__'),
-  );
-  if (settings['permissions'].allow.length === before) {
+  const filtered = allow.filter((permission) => !permission.startsWith('mcp__cartograph__'));
+  if (filtered.length === allow.length) {
     return { path: file, action: 'not-found' };
   }
 
-  if (settings['permissions'].allow.length === 0) {
-    delete settings['permissions'].allow;
+  if (filtered.length === 0) {
+    delete permissions['allow'];
+  } else {
+    permissions['allow'] = filtered;
   }
-  if (Object.keys(settings['permissions']).length === 0) {
+  if (Object.keys(permissions).length === 0) {
     delete settings['permissions'];
   }
   writeJsonFile(file, settings);

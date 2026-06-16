@@ -3,13 +3,14 @@ import { databaseConfigFromOptionInput } from '../../db/database-config.js';
 import { parseMaxFileSizeValue } from '../admin-indexing/runtime.js';
 import { resolveInitProjectPath, shouldConfirmUninit } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { IndexProgress, IndexResult } from '../../index.js';
 
 type CommandLike = CliOptionCommand;
 
 type ClackPrompts = typeof import('@clack/prompts');
 
 interface ProjectLifecycleGraph {
-  indexAll: (opts: Record<string, unknown>) => Promise<any>;
+  indexAll: (opts: Record<string, unknown>) => Promise<IndexResult>;
   uninitialize: () => Promise<void>;
   close: () => void;
 }
@@ -18,8 +19,8 @@ export interface AdminProjectLifecycleCommandDeps {
   adminCmd: CommandLike;
   colors: { dim: string; reset: string };
   chalk: { yellow: (message: string) => string };
-  createShimmerProgress: () => { onProgress: any; stop: () => Promise<void> };
-  createVerboseProgress: () => any;
+  createShimmerProgress: () => { onProgress: (progress: IndexProgress) => void; stop: () => Promise<void> };
+  createVerboseProgress: () => (progress: IndexProgress) => void;
   isInitialized: (projectPath: string) => boolean;
   loadCartograph: () => Promise<{
     default: {
@@ -31,8 +32,8 @@ export interface AdminProjectLifecycleCommandDeps {
     };
   }>;
   loadClack: () => Promise<ClackPrompts>;
-  loadReadline: () => Promise<{ createInterface: (...args: any[]) => any }>;
-  printIndexResult: (clack: ClackPrompts, result: any, projectPath: string) => void;
+  loadReadline: () => Promise<{ createInterface: typeof import('node:readline').createInterface }>;
+  printIndexResult: (clack: ClackPrompts, result: IndexResult, projectPath: string) => void;
   resolveProjectPath: (pathArg?: string) => string;
   writeStdout: (message: string) => void;
   success: (message: string) => void;
@@ -112,7 +113,7 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         clack.log.success(`Initialized in ${projectPath}`);
 
         if (options.index) {
-          let result: any;
+          let result: IndexResult;
 
           if (options.verbose) {
             result = await cg.indexAll({

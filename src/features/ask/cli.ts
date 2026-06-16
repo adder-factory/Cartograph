@@ -17,12 +17,13 @@ import {
 } from './runtime.js';
 import { chatOverrideFromOptions } from '../shared/cli-args.js';
 import type { CliArgumentOptionCommand } from '../shared/cli-command.js';
+import type Cartograph from '../../index.js';
 
 type CommandLike = CliArgumentOptionCommand;
 
 interface AskCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 
@@ -219,7 +220,7 @@ async function handleLocalChatAskCommand({
 
 type AskSetupResult = { ok: true; askModel: string } | { ok: false; error: string };
 
-async function resolveAskSetup(cg: any): Promise<AskSetupResult> {
+async function resolveAskSetup(cg: Cartograph): Promise<AskSetupResult> {
   const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   const { getChatModel, getAskModel } = await import('../../llm/provider.js');
   const chatModel = getChatModel(llmConfig);
@@ -230,7 +231,7 @@ async function resolveAskSetup(cg: any): Promise<AskSetupResult> {
 }
 
 interface BuildAskAnnotationLinesArgs {
-  cg: any;
+  cg: Cartograph;
   result: AskResult;
   askModel: string;
   dim?: (line: string) => string;

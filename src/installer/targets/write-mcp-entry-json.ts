@@ -15,11 +15,14 @@
 import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
 import {
+  deleteNestedJsonEntry,
   getMcpServerConfig,
+  getNestedJsonEntry,
   isProjectSourceRunEntry,
   jsonDeepEqual,
   mcpCommandOptionsForLocation,
   readJsonFile,
+  setNestedJsonEntry,
   writeJsonFile,
   type McpCommandOptions,
 } from './shared.js';
@@ -41,7 +44,11 @@ function targetEntry(loc: Location, args: WriteMcpEntryJsonArgs): Record<string,
 export function detectMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs, installed: boolean): DetectionResult {
   const file = args.resolvePath(loc);
   const config = readJsonFile(file);
-  return { installed, alreadyConfigured: !!config['mcpServers']?.cartograph, configPath: file };
+  return {
+    installed,
+    alreadyConfigured: getNestedJsonEntry(config, 'mcpServers', 'cartograph') !== undefined,
+    configPath: file,
+  };
 }
 
 /**
@@ -59,7 +66,7 @@ export function detectMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs, i
 export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): WriteResult['files'][number] {
   const file = args.resolvePath(loc);
   const existing = readJsonFile(file);
-  const before = existing['mcpServers']?.cartograph;
+  const before = getNestedJsonEntry(existing, 'mcpServers', 'cartograph');
   const after = targetEntry(loc, args);
 
   if (jsonDeepEqual(before, after)) {
@@ -82,8 +89,7 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
     action = 'updated';
   }
 
-  if (!existing['mcpServers']) existing['mcpServers'] = {};
-  existing['mcpServers'].cartograph = after;
+  setNestedJsonEntry({ config: existing, wrapperKey: 'mcpServers', entryKey: 'cartograph', value: after });
   writeJsonFile(file, existing);
   return { path: file, action };
 }
@@ -91,12 +97,8 @@ export function writeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): W
 export function removeMcpEntryJson(loc: Location, args: WriteMcpEntryJsonArgs): WriteResult['files'][number] {
   const file = args.resolvePath(loc);
   const config = readJsonFile(file);
-  if (!config['mcpServers']?.cartograph) {
+  if (!deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')) {
     return { path: file, action: 'not-found' };
-  }
-  delete config['mcpServers'].cartograph;
-  if (Object.keys(config['mcpServers']).length === 0) {
-    delete config['mcpServers'];
   }
   writeJsonFile(file, config);
   return { path: file, action: 'removed' };
