@@ -16,6 +16,8 @@ import { clamp, numArg } from '../../utils.js';
 import { textResult, truncateOutput } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import type { ToolCtx } from './types.js';
+import type Cartograph from '../../index.js';
+import type { SqliteDatabase } from '../../db/sqlite-adapter.js';
 import { enqueueForPrioritySummary } from '../../db/queries-summary-priority.js';
 import { getSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
@@ -131,7 +133,7 @@ function validateSearchIntentArgs(
 /**
  * Check if index has summaries, docstrings, and/or test names indexed.
  */
-function checkIndexCoverage(db: any): IndexCoverageMetrics | ToolOutcome {
+function checkIndexCoverage(db: SqliteDatabase): IndexCoverageMetrics | ToolOutcome {
   try {
     const summaryRows = (
       db.prepare(`SELECT COUNT(*) AS c FROM symbol_summaries WHERE summary IS NOT NULL AND summary != ''`).get() as {
@@ -304,7 +306,7 @@ interface SearchResults {
 }
 
 interface ExecuteIntentSearchesArgs {
-  db: any;
+  db: SqliteDatabase;
   query: string;
   coverage: IndexCoverageMetrics;
   queryDefs: QueryDefs;
@@ -393,7 +395,7 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
 }
 
 interface SymbolIntentQueryArgs {
-  db: any;
+  db: SqliteDatabase;
   sql: string;
   expr: string;
   params: ReadonlyArray<unknown>;
@@ -408,7 +410,7 @@ function runSymbolIntentQuery(args: SymbolIntentQueryArgs): SymbolIntentRow[] {
 }
 
 function runTestNameIntentQuery(args: {
-  db: any;
+  db: SqliteDatabase;
   queryDefs: QueryDefs;
   orExpr: string;
   limit: number;
@@ -422,7 +424,7 @@ function runTestNameIntentQuery(args: {
 }
 
 function collectAndConfirmedIds(args: {
-  db: any;
+  db: SqliteDatabase;
   queryDefs: QueryDefs;
   andExpr: string | null;
   symFilterParams: ReadonlyArray<unknown>;
@@ -520,7 +522,7 @@ function extractQueryTokens(query: string): string[] {
  * Look up unsummarised, undocstrung nodes matching any of the given tokens
  * by exact name (case-insensitive). Returns a deduplicated set of node IDs.
  */
-function findCandidateNodeIds(db: any, tokens: string[]): Set<string> {
+function findCandidateNodeIds(db: SqliteDatabase, tokens: string[]): Set<string> {
   const candidateNodeIds = new Set<string>();
   for (const token of tokens) {
     try {
@@ -550,7 +552,7 @@ function findCandidateNodeIds(db: any, tokens: string[]): Set<string> {
  * Returns an early-return message string when nodes were enqueued, or
  * null when nothing was enqueued (caller should compute a coverage hint).
  */
-function tryEnqueueForSummary(cg: any, candidateNodeIds: Set<string>, query: string): string | null {
+function tryEnqueueForSummary(cg: Cartograph, candidateNodeIds: Set<string>, query: string): string | null {
   const hasNoCandidates = candidateNodeIds.size === 0;
   if (hasNoCandidates) return null;
   try {
@@ -575,7 +577,7 @@ function tryEnqueueForSummary(cg: any, candidateNodeIds: Set<string>, query: str
  * Compute a coverage hint line for appending to the zero-hit message.
  * Returns an empty string when the coverage query itself fails.
  */
-function computeCoverageHint(cg: any): string {
+function computeCoverageHint(cg: Cartograph): string {
   try {
     const cov = getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
     const hasSummarizableNodes = cov.total > 0;
@@ -601,7 +603,7 @@ function computeCoverageHint(cg: any): string {
  * Handle zero-hit case: enqueue unsummarised symbols for priority summary
  * and compute coverage hint.
  */
-function handleNoHitResults(query: string, cg: any): string {
+function handleNoHitResults(query: string, cg: Cartograph): string {
   const tokens = extractQueryTokens(query);
   const candidateNodeIds = findCandidateNodeIds(cg.db.getDb(), tokens);
   const earlyReturn = tryEnqueueForSummary(cg, candidateNodeIds, query);
@@ -686,7 +688,7 @@ function resolveSearchArgs(args: Record<string, unknown>): ParsedSearchArgs | To
 
 /** @internal Run phases 3-7: build queries, execute searches, merge, handle zero-hit, render. */
 function runIntentSearchPipeline(
-  cg: any,
+  cg: Cartograph,
   parsed: ParsedSearchArgs,
   coverageMetrics: IndexCoverageMetrics,
 ): ToolOutcome {

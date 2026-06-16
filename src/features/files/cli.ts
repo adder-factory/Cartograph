@@ -19,6 +19,8 @@ import { LIST_ALL_DEFAULT_LIMIT, runModuleSummary } from '../module/index.js';
 import { MAX_SOURCE_READ_LINE_LIMIT } from '../source-read/index.js';
 import { parseIntegerValue } from '../shared/cli-args.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type Cartograph from '../../index.js';
+import type { QueryBuilder } from '../../db/queries.js';
 import {
   type DirRollup,
   type FileListing,
@@ -38,7 +40,7 @@ type CommandLike = CliOptionCommand;
 
 interface FilesCartographModule {
   default: {
-    open: (projectPath: string) => Promise<any>;
+    open: (projectPath: string) => Promise<Cartograph>;
   };
 }
 
@@ -49,8 +51,8 @@ export interface FilesCommandDeps {
   resolveProjectPath: (pathArg?: string) => string;
   loadCartograph: () => Promise<FilesCartographModule>;
   isInitialized: (projectPath: string) => boolean;
-  getAllFilesWithSymbolCount: (queries: any) => FileListing;
-  getFileSummaries: (queries: any, paths: string[]) => Map<string, string>;
+  getAllFilesWithSymbolCount: (queries: QueryBuilder) => FileListing;
+  getFileSummaries: (queries: QueryBuilder, paths: string[]) => Map<string, string>;
   filterFilesByDir: <T extends { path: string }>(files: ReadonlyArray<T>, dir: string) => T[];
   buildDirRollup: (files: ReadonlyArray<FileListingRow>, maxDepth?: number, dir?: string) => DirRollup;
   runViaMCP: (toolName: string, args: Record<string, unknown>, pathArg: string | undefined) => Promise<void>;
@@ -63,7 +65,7 @@ interface WriteRenderedFilesArgs {
   files: FileListing;
   outputOptions: { format: 'tree' | 'flat' | 'grouped' | 'summary'; maxDepth: number | undefined };
   effectiveOptions: FilesCommandOptions;
-  queries: any;
+  queries: QueryBuilder;
 }
 
 interface ParsedFilesDepsOptions {
@@ -452,7 +454,10 @@ function parseModuleLimit(raw: string | undefined): { ok: true; limit?: number }
   return { ok: true, limit };
 }
 
-async function openIndexedFiles(deps: FilesCommandDeps, projectPath: string): Promise<{ cg: any; files: FileListing }> {
+async function openIndexedFiles(
+  deps: FilesCommandDeps,
+  projectPath: string,
+): Promise<{ cg: Cartograph; files: FileListing }> {
   const { default: Cartograph } = await deps.loadCartograph();
   const cg = await Cartograph.open(projectPath);
   return { cg, files: deps.getAllFilesWithSymbolCount(cg.queries) };

@@ -6,6 +6,7 @@ import { resolveSymbolToNode, symbolNotFound } from './symbol-resolver.js';
 import { getNodesByCommits } from '../../db/queries-history.js';
 import { getLineRangeHistory, getFileFollowEarliestTs, fileWasEverRenamed, type CommitMeta } from '../../git-utils.js';
 import type { ToolCtx } from './types.js';
+import type Cartograph from '../../index.js';
 import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok } from './_outcome.js';
 import { renderMarkdownBulletList, type MarkdownBulletListSpec } from './_result-spec.js';
@@ -114,7 +115,7 @@ type BlameToolArgs = z.infer<typeof blameSchema>;
  * Returns empty array if the file is untracked or has no history.
  */
 function fetchBlameHistory(
-  cg: any,
+  cg: Cartograph,
   node: { filePath: string; startLine: number; endLine: number },
   fetchCap: number,
 ): CommitMeta[] {
@@ -130,8 +131,7 @@ function fetchBlameHistory(
 /** Arguments for {@link enrichBlameRowsWithPeers}. */
 interface EnrichBlameRowsWithPeersArgs {
   history: CommitMeta[];
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  cg: any;
+  cg: Cartograph;
   nodeId: string;
   perCommitPeers: number;
 }

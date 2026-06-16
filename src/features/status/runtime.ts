@@ -1,4 +1,10 @@
-import { classifyChangedFiles, realModifiedCount as computeRealModified } from '../../changed-files-classify.js';
+import {
+  type ChangedFiles,
+  classifyChangedFiles,
+  realModifiedCount as computeRealModified,
+} from '../../changed-files-classify.js';
+import type Cartograph from '../../index.js';
+import type { GraphStats } from '../../db/types.js';
 import { getSummaryCoverage, getWeightedSummaryCoverage } from '../../db/queries-summaries.js';
 import { getCartographDir } from '../../directory.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
@@ -46,21 +52,21 @@ export interface StatusPrinter {
   printUninitializedStatus: (projectPath: string, options: StatusOptions) => void;
   printStatusJson: (args: PrintStatusJsonArgs) => void;
   printStatusHeader: (projectPath: string) => void;
-  printStatusIndexStats: (stats: any, cg: any, hnswAvailable: boolean) => void;
+  printStatusIndexStats: (stats: GraphStats, cg: Cartograph, hnswAvailable: boolean) => void;
   printCountBreakdown: (title: string, entries: Record<string, number>) => void;
-  printParseCacheStatus: (cg: any) => Promise<void>;
-  printPendingChanges: (changes: any, realModifiedCount: number, healOnly: string[]) => void;
-  printLlmStatus: (cg: any, projectPath: string) => Promise<void>;
-  printSummaryCoverage: (cg: any) => void;
-  printStatusRollups: (cg: any, rollups: StatusRollupConfig) => void;
+  printParseCacheStatus: (cg: Cartograph) => Promise<void>;
+  printPendingChanges: (changes: ChangedFiles, realModifiedCount: number, healOnly: string[]) => void;
+  printLlmStatus: (cg: Cartograph, projectPath: string) => Promise<void>;
+  printSummaryCoverage: (cg: Cartograph) => void;
+  printStatusRollups: (cg: Cartograph, rollups: StatusRollupConfig) => void;
   printStatusRollupLine: (line: string) => void;
 }
 
 export interface PrintStatusJsonArgs {
-  cg: any;
+  cg: Cartograph;
   projectPath: string;
-  stats: any;
-  changes: any;
+  stats: GraphStats;
+  changes: ChangedFiles;
   healOnly: string[];
   realModifiedCount: number;
   hnswAvailable: boolean;
@@ -69,14 +75,14 @@ export interface PrintStatusJsonArgs {
 
 export interface PrintStatusIndexStatsArgs {
   deps: StatusPrinterDeps;
-  stats: any;
-  cg: any;
+  stats: GraphStats;
+  cg: Cartograph;
   hnswAvailable: boolean;
 }
 
 export interface PrintPendingChangesArgs {
   deps: StatusPrinterDeps;
-  changes: any;
+  changes: ChangedFiles;
   realModifiedCount: number;
   healOnly: string[];
 }
@@ -92,8 +98,8 @@ export async function buildStatusRollupConfig(options: StatusOptions): Promise<S
 }
 
 export async function loadStatusChangeInfo(
-  cg: any,
-): Promise<{ changes: any; healOnly: string[]; realModifiedCount: number }> {
+  cg: Cartograph,
+): Promise<{ changes: ChangedFiles; healOnly: string[]; realModifiedCount: number }> {
   const changes = classifyChangedFiles(cg);
   if (!changes) throw new Error('Failed to read changed files from the index');
   return { changes, healOnly: changes.healOnly, realModifiedCount: computeRealModified(changes) };
@@ -178,7 +184,7 @@ export function printStatusJson(deps: StatusPrinterDeps, args: PrintStatusJsonAr
   );
 }
 
-function getLastIndexedAt(cg: any): number | null {
+function getLastIndexedAt(cg: Cartograph): number | null {
   try {
     const row = cg.db.getDb().prepare('SELECT MAX(indexed_at) AS lastIndexedAt FROM files').get() as
       | { lastIndexedAt?: unknown }
@@ -254,7 +260,7 @@ export function printCountBreakdown(deps: StatusPrinterDeps, title: string, entr
   writeStatusLine(deps);
 }
 
-export async function printParseCacheStatus(deps: StatusPrinterDeps, cg: any): Promise<void> {
+export async function printParseCacheStatus(deps: StatusPrinterDeps, cg: Cartograph): Promise<void> {
   try {
     const { getParseCacheStats } = await import('../../db/queries-parse-cache.js');
     const pc = getParseCacheStats(cg.queries);
@@ -296,7 +302,7 @@ export function printPendingChanges({ deps, changes, realModifiedCount, healOnly
   writeStatusLine(deps);
 }
 
-export async function printLlmStatus(deps: StatusPrinterDeps, cg: any, projectPath: string): Promise<void> {
+export async function printLlmStatus(deps: StatusPrinterDeps, cg: Cartograph, projectPath: string): Promise<void> {
   writeStatusLine(deps, deps.style.bold('LLM Enrichment:'));
   const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   if (!llmConfig) {
@@ -334,7 +340,7 @@ export async function printLlmStatus(deps: StatusPrinterDeps, cg: any, projectPa
   writeStatusLine(deps);
 }
 
-export function printSummaryCoverage(deps: StatusPrinterDeps, cg: any): void {
+export function printSummaryCoverage(deps: StatusPrinterDeps, cg: Cartograph): void {
   const cov = getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
   if (cov.total === 0) return;
   const pct = Math.round((cov.summarised / cov.total) * 100);
@@ -347,7 +353,7 @@ export function printSummaryCoverage(deps: StatusPrinterDeps, cg: any): void {
   );
 }
 
-export function printStatusRollups(deps: StatusPrinterDeps, cg: any, rollups: StatusRollupConfig): void {
+export function printStatusRollups(deps: StatusPrinterDeps, cg: Cartograph, rollups: StatusRollupConfig): void {
   const rollupLines: string[] = [];
   rollups.appendFeatureReadiness(rollupLines, cg, {
     summaryBreakdown: rollups.summaryBreakdown,
