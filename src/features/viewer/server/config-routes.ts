@@ -88,11 +88,11 @@ export function redactUrlCredentials(url: string): string {
   return url.replace(/(\/\/[^:/@]*:)[^@/]+(@)/, '$1***$2').replace(/([?&](?:password|pass|pwd)=)[^&]+/gi, '$1***');
 }
 
-/** Build the read-only database summary from an ALLOWLIST of known
- *  non-sensitive fields. The database config schema is `.loose()`, so
- *  spreading the whole object could echo secret-bearing extra keys
- *  (`password`, `apiKey`, key material, …) to the browser. Exported for
- *  testing. */
+/** Build the read-only database summary from an ALLOWLIST of known fields
+ *  (provider, redacted url, schema, pgvector). The database config schema
+ *  is `.loose()`, so unknown extra keys could carry sensitive values;
+ *  returning only the allowlisted fields keeps them off the wire.
+ *  Exported for testing. */
 export function redactDatabase(db: CartographConfig['database']): unknown {
   if (!db) return null;
   const safe: Record<string, unknown> = {};
