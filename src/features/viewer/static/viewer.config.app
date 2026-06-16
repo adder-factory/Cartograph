@@ -12,10 +12,6 @@ if (typeof escapeHtml !== 'function') {
 }
 
 const CFG_BYTES_PER_MB = 1024 * 1024;
-const CFG_DEMO_LANGS = [
-  'typescript', 'javascript', 'tsx', 'jsx', 'python', 'go',
-  'rust', 'java', 'c', 'cpp', 'csharp', 'ruby', 'php', 'swift', 'kotlin', 'sql',
-];
 
 let cfgState = null;
 let cfgReindexing = false;
@@ -40,33 +36,6 @@ function cfgSetBanner(kind, html) {
   banner.hidden = false;
   banner.className = `config-banner ${kind}`;
   banner.innerHTML = html;
-}
-
-/* ── language chips ── */
-
-function cfgRenderLanguages(supported, selected) {
-  const wrap = cfgEl('cfg-languages');
-  if (!wrap) return;
-  const sel = new Set(selected || []);
-  wrap.innerHTML = (supported || [])
-    .map((lang) => {
-      const on = sel.has(lang);
-      return (
-        `<button type="button" class="config-lang-chip${on ? ' on' : ''}" ` +
-        `data-lang="${escapeHtml(lang)}" aria-pressed="${on ? 'true' : 'false'}">${escapeHtml(lang)}</button>`
-      );
-    })
-    .join('');
-  cfgUpdateLangAside();
-}
-
-function cfgSelectedLanguages() {
-  return [...document.querySelectorAll('#cfg-languages .config-lang-chip.on')].map((chip) => chip.dataset.lang);
-}
-
-function cfgUpdateLangAside() {
-  const n = cfgSelectedLanguages().length;
-  setText('cfg-langs-aside', n === 0 ? 'auto-detect' : `${n} selected`);
 }
 
 /* ── read-only database panel ── */
@@ -96,7 +65,6 @@ function cfgPopulateForm(state) {
   const c = state.config || {};
   cfgEl('cfg-include').value = (c.include || []).join('\n');
   cfgEl('cfg-exclude').value = (c.exclude || []).join('\n');
-  cfgRenderLanguages(state.supportedLanguages || [], c.languages || []);
 
   const mb = Number(c.maxFileSize || 0) / CFG_BYTES_PER_MB;
   cfgShownMaxSize = mb ? String(Number(mb.toFixed(3))) : '';
@@ -121,7 +89,6 @@ function cfgFormToBody() {
   const body = {
     include: lines('cfg-include'),
     exclude: lines('cfg-exclude'),
-    languages: cfgSelectedLanguages(),
     enableBiomarkers: cfgEl('cfg-enableBiomarkers').checked,
     enableCoChange: cfgEl('cfg-enableCoChange').checked,
   };
@@ -143,7 +110,7 @@ function cfgFormToBody() {
 function cfgApplyEditable(allow) {
   cfgEl('config-view')?.classList.toggle('readonly', !allow);
   cfgEl('cfg-readonly-badge').hidden = allow;
-  for (const node of document.querySelectorAll('#cfg-form textarea, #cfg-form input, #cfg-languages .config-lang-chip')) {
+  for (const node of document.querySelectorAll('#cfg-form textarea, #cfg-form input')) {
     node.disabled = !allow;
   }
   cfgEl('cfg-actions').hidden = !allow;
@@ -314,8 +281,16 @@ function cfgHandleFrame(raw, mode) {
     cfgSetProgress(1, 1, 'Done', '');
     cfgSetBanner('ok', cfgDoneSummary(data, mode));
     cfgEl('cfg-apply').hidden = true;
-    if (LIVE_MODE && typeof loadHealthLive === 'function') loadHealthLive();
     cfgLoad();
+    if (LIVE_MODE) {
+      // The reindex changed the underlying graph, so the Health view, the
+      // rendered graph, and the top-bar counts are all stale. Refresh them
+      // in place — reloadGraphForDensity re-fetches /api/graph while
+      // preserving the current focus and filters.
+      if (typeof loadHealthLive === 'function') loadHealthLive();
+      if (typeof reloadGraphForDensity === 'function') void reloadGraphForDensity();
+      void cfgRefreshTopbarStats();
+    }
   } else if (event === 'busy') {
     cfgEl('cfg-progress').hidden = true;
     cfgSetBanner('warn', escapeHtml(data.message || 'Another indexer is running.'));
@@ -347,6 +322,25 @@ function cfgSetProgress(current, total, label, file) {
   setText('cfg-progress-file', file || '');
 }
 
+/** Refresh the top-bar files/nodes/edges counts after a reindex. (The
+    project identity in the bar doesn't change, so only the counts.) */
+async function cfgRefreshTopbarStats() {
+  try {
+    const r = await apiFetch('/api/status');
+    if (!r.ok) return;
+    const s = await r.json();
+    const statsEl = document.querySelector('.topbar .stats');
+    if (statsEl && typeof formatCompactCount === 'function') {
+      statsEl.innerHTML =
+        `<span class="stat"><b>${formatCompactCount(s.files)}</b> files</span>` +
+        `<span class="stat"><b>${formatCompactCount(s.nodes)}</b> nodes</span>` +
+        `<span class="stat"><b>${formatCompactCount(s.edges)}</b> edges</span>`;
+    }
+  } catch (err) {
+    console.debug('viewer: cfgRefreshTopbarStats failed', err);
+  }
+}
+
 function cfgDoneSummary(d, mode) {
   if (mode === 'sync') {
     const changed = Number(d.filesAdded || 0) + Number(d.filesModified || 0);
@@ -367,13 +361,11 @@ function cfgRenderDemo() {
     config: {
       include: ['src/**/*.ts', 'src/**/*.tsx'],
       exclude: ['**/node_modules/**', '**/dist/**', '**/*.min.js'],
-      languages: ['typescript', 'tsx'],
       maxFileSize: 5 * CFG_BYTES_PER_MB,
       enableBiomarkers: true,
       enableCoChange: true,
     },
     database: { provider: 'sqlite' },
-    supportedLanguages: CFG_DEMO_LANGS,
     maxFileSizeCap: 10 * CFG_BYTES_PER_MB,
     maxFileSizeCapLabel: '10mb',
   };
@@ -392,11 +384,4 @@ cfgEl('cfg-reset')?.addEventListener('click', () => {
   cfgPopulateForm(cfgState);
   cfgEl('cfg-apply').hidden = true;
   cfgSetBanner('', '');
-});
-cfgEl('cfg-languages')?.addEventListener('click', (e) => {
-  const chip = e.target.closest('.config-lang-chip');
-  if (!chip || chip.disabled) return;
-  const on = chip.classList.toggle('on');
-  chip.setAttribute('aria-pressed', on ? 'true' : 'false');
-  cfgUpdateLangAside();
 });

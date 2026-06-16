@@ -21,7 +21,10 @@ describe('classifyConfigChange', () => {
   it('treats scope-affecting edits as "reindex"', () => {
     expect(classifyConfigChange(base, withField({ exclude: ['**/dist/**'] }))).toBe('reindex');
     expect(classifyConfigChange(base, withField({ include: ['lib/**/*.ts'] }))).toBe('reindex');
-    expect(classifyConfigChange(base, withField({ languages: ['python'] }))).toBe('reindex');
+  });
+
+  it('does NOT treat a languages-only change as a reindex (it never filtered the scan)', () => {
+    expect(classifyConfigChange(base, withField({ languages: ['python'] }))).toBe('none');
   });
 
   it('treats maxFileSize as "reindex" (it only applies on the next index, not instantly)', () => {

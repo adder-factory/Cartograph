@@ -1002,13 +1002,11 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     config: {
       include: string[];
       exclude: string[];
-      languages: string[];
       maxFileSize: number;
       enableBiomarkers: boolean;
       enableCoChange: boolean;
     };
     database: unknown;
-    supportedLanguages: string[];
     maxFileSizeCap: number;
     maxFileSizeCapLabel: string;
   }
@@ -1027,7 +1025,6 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.config.include).toContain('src/**/*.ts');
     expect(Array.isArray(body.config.exclude)).toBe(true);
     expect(body.config.maxFileSize).toBeGreaterThan(0);
-    expect(body.supportedLanguages).toContain('typescript');
     expect(body.maxFileSizeCap).toBeGreaterThan(0);
     expect(body.database).toBeNull(); // sqlite default → no database block surfaced
   });
@@ -1054,12 +1051,6 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(res.status).toBe(200);
     const after = await getConfig();
     expect(after.database).toBeNull(); // the database block in the body was ignored
-  });
-
-  it('rejects an unknown language with 400', async () => {
-    const res = await postConfig({ languages: ['typescript', 'klingon'] });
-    expect(res.status).toBe(400);
-    await expect(res.json()).resolves.toMatchObject({ error: expect.stringMatching(/unknown language/) });
   });
 
   it('rejects an invalid re-index mode with 400', async () => {

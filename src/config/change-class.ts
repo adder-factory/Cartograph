@@ -34,11 +34,12 @@ export type ConfigApplyClass = 'restart' | 'reindex' | 'hot' | 'none';
  *  callers that do edit `database` still get the correct classification. */
 const RESTART_FIELDS: ReadonlyArray<keyof CartographConfig> = ['database'];
 
-/** Changes what gets indexed / which derived passes run — needs a re-index. */
+/** Changes what gets indexed / which derived passes run — needs a re-index.
+ *  (`languages` is intentionally absent: it does not filter the indexing
+ *  scan — files are matched by glob and language is auto-detected.) */
 const REINDEX_FIELDS: ReadonlyArray<keyof CartographConfig> = [
   'include',
   'exclude',
-  'languages',
   'frameworks',
   'maxFileSize',
   'enableBiomarkers',

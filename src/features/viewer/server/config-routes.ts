@@ -14,13 +14,12 @@
  */
 import type * as http from 'node:http';
 import { loadConfig, saveConfig } from '../../../config.js';
-import { VALID_LANGUAGES } from '../../../config/languages.js';
 import { classifyConfigChange } from '../../../config/change-class.js';
 import { assertValidCartographConfig } from '../../../config/schema.js';
 import { MAX_INDEX_FILE_SIZE, MAX_INDEX_FILE_SIZE_LABEL } from '../../../default-config.js';
 import { errMsg, logDebug } from '../../../errors.js';
 import type { IndexProgress } from '../../../extraction/index.js';
-import type { CartographConfig, Language } from '../../../types.js';
+import type { CartographConfig } from '../../../types.js';
 import {
   CONFIG_BODY_BYTE_LIMIT,
   CONFIG_GLOB_CHAR_LIMIT,
@@ -48,15 +47,17 @@ const BUSY_MESSAGE =
  *  browser never leaks the project's absolute filesystem path. */
 const CONFIG_DISPLAY_PATH = '.cartograph/config.json';
 
-const VALID_LANGUAGE_SET: ReadonlySet<string> = new Set(VALID_LANGUAGES);
-
 /** The fields the editor is allowed to display and write. Everything
  *  else in the config (database, llm, rootDir, version, …) is never
- *  surfaced as editable nor overwritten from a client body. */
+ *  surfaced as editable nor overwritten from a client body.
+ *
+ *  `languages` is intentionally NOT here: the scan filters files via
+ *  `shouldIncludeFile` (include/exclude globs) and auto-detects language
+ *  by extension, so a language list does not control what gets indexed —
+ *  exposing it as an indexing filter would mislead. */
 interface CuratedConfig {
   include: string[];
   exclude: string[];
-  languages: Language[];
   maxFileSize: number;
   enableBiomarkers: boolean;
   enableCoChange: boolean;
@@ -68,7 +69,6 @@ function curatedFrom(config: CartographConfig): CuratedConfig {
   return {
     include: config.include,
     exclude: config.exclude,
-    languages: config.languages,
     maxFileSize: config.maxFileSize,
     // Both default ON: the indexer treats only an explicit `false` as
     // disabled, so an unset field reads as enabled in the UI.
@@ -109,7 +109,6 @@ export function handleConfigGet(_req: http.IncomingMessage, res: http.ServerResp
     reindexing: isReindexInProgress(),
     config: curatedFrom(config),
     database: redactDatabase(config.database),
-    supportedLanguages: VALID_LANGUAGES,
     maxFileSizeCap: MAX_INDEX_FILE_SIZE,
     maxFileSizeCapLabel: MAX_INDEX_FILE_SIZE_LABEL,
   });
@@ -361,15 +360,6 @@ function validateCuratedInput(input: Record<string, unknown>): FieldResult<Parti
     () =>
       pickField({
         input,
-        key: 'languages',
-        parse: parseLanguages,
-        set: (val) => {
-          overrides.languages = val;
-        },
-      }),
-    () =>
-      pickField({
-        input,
         key: 'maxFileSize',
         parse: parseMaxFileSize,
         set: (val) => {
@@ -434,20 +424,6 @@ function parseGlobList(value: unknown, field: string): FieldResult<string[]> {
       return { ok: false, error: `${field} entry exceeds ${CONFIG_GLOB_CHAR_LIMIT} characters` };
     }
     out.push(trimmed);
-  }
-  return { ok: true, value: out };
-}
-
-function parseLanguages(value: unknown): FieldResult<Language[]> {
-  if (!Array.isArray(value)) return { ok: false, error: 'languages must be an array of strings' };
-  const seen = new Set<string>();
-  const out: Language[] = [];
-  for (const item of value) {
-    if (typeof item !== 'string') return { ok: false, error: 'languages must contain only strings' };
-    if (!VALID_LANGUAGE_SET.has(item)) return { ok: false, error: `unknown language: ${item}` };
-    if (seen.has(item)) continue;
-    seen.add(item);
-    out.push(item as Language);
   }
   return { ok: true, value: out };
 }
