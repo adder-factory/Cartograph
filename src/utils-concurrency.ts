@@ -413,8 +413,11 @@ export async function runUnderIndexLock<T>(
   return lock.mutex.withLock(async () => {
     try {
       lock.file.acquire();
-    } catch {
-      return onContention();
+    } catch (err) {
+      // Only genuine lock contention falls back to onContention(); a real
+      // failure (permissions, disk full) must surface, not be masked as "busy".
+      if (err instanceof LockHeldError) return onContention();
+      throw err;
     }
     try {
       return await fn();
