@@ -584,6 +584,14 @@ export class MCPServer {
       this.toolHandler.setDefaultCartograph(this.st.cg);
       return;
     }
+    // A standalone server can get a second `initialize` with a new rootUri, i.e.
+    // a switch to a different project than the one currently open. Capture the
+    // prior instance + path BEFORE overwriting projectPath, so we can retire the
+    // old project after the new one opens, and restore projectPath if the open
+    // fails. `previousCg` is null on first init; this path is unreachable for a
+    // daemon (its clients share one fixed root, so the reuse guard above returned).
+    const previousCg = this.st.cg;
+    const previousProjectPath = this.st.projectPath;
     this.st.noDefaultProjectPreamble = null;
     this.st.projectPath = resolvedRoot;
 
@@ -595,10 +603,35 @@ export class MCPServer {
       // direction (DB ahead of binary) at every tool dispatch.
       this.st.cg = await Cartograph.open(resolvedRoot, { autoMigrate: true });
       this.toolHandler.setDefaultCartograph(this.st.cg);
+      // The new project is open and is now the tool handler's default. Retire the
+      // prior project (its watcher + write-lock) so it isn't orphaned as a leaked
+      // second writer — done here, before the startup sync, so a sync failure
+      // can't leave it leaked. Also drop the trace logger: it holds the prior
+      // project's now-closed `queries`, and `mcpEnsureTraceLogger` only rebuilds
+      // when it is null, so without this every later trace write targets the
+      // closed DB. TraceLogger.log swallows that failure, so the symptom is silent
+      // — traces just stop recording for the rest of the session. Nulling it makes
+      // the next tool call rebuild one bound to the new project.
+      if (previousCg && previousCg !== this.st.cg) {
+        try {
+          previousCg.close();
+        } catch {
+          /* ignore — best-effort retirement of the prior project */
+        }
+        this.st.traceLogger = null;
+      }
       await this.runStartupSync();
       mcpStartWatching(this.st);
     } catch (err) {
       process.stderr.write(`[Cartograph MCP] Failed to open project at ${resolvedRoot}: ${errMsg(err)}\n`);
+      // Open failed. If a prior project was active it was never reassigned (st.cg
+      // still points at it) and stays the default — restore projectPath to match,
+      // otherwise st.projectPath would name a project the live `cg` isn't serving.
+      // On a first init there is no prior project; keep projectPath = resolvedRoot
+      // so retryInitIfNeeded retries this same root on the next tool call.
+      if (previousCg && this.st.cg === previousCg) {
+        this.st.projectPath = previousProjectPath;
+      }
     }
   }
 

@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MCPServer } from '../src/mcp/index.js';
 import { policyFingerprint } from '../src/mcp/daemon.js';
+import { TraceLogger } from '../src/trace/logger.js';
 import Cartograph from '../src/index.js';
 
 const dirs: string[] = [];
@@ -58,6 +59,36 @@ describe('MCPServer.tryInitializeDefault (P1 #3 — no re-open leak)', () => {
       // Same instance — not re-opened (which would leak the prior connection +
       // watcher and create a second writer).
       expect(server.st.cg).toBe(first);
+    } finally {
+      server.toolHandler.closeAll();
+      server.st.cg?.close();
+    }
+  });
+
+  it('closes the prior Cartograph when re-initialized for a DIFFERENT project root', async () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'cg-switch-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'cg-switch-b-'));
+    dirs.push(dirA, dirB);
+    for (const d of [dirA, dirB]) (await Cartograph.init(d, { index: false })).close();
+
+    const server = new MCPServer({ disableStartupSync: true });
+    try {
+      await server.tryInitializeDefault(dirA);
+      const first = server.st.cg;
+      if (!first) throw new Error('expected an open Cartograph for project A');
+      // A trace logger bound to A (normally created lazily on the first tool
+      // call) must be dropped on switch — otherwise it would log to A's closed DB.
+      server.st.traceLogger = new TraceLogger(first.queries);
+
+      await server.tryInitializeDefault(dirB); // standalone server switches project
+      // New instance for B, and the prior (A) instance was closed — not orphaned
+      // with its watcher + write-lock still held (that would leak a writer).
+      expect(server.st.cg).not.toBe(first);
+      expect(server.st.cg).not.toBeNull();
+      expect(() => first.db.getDb().prepare('SELECT 1 AS ok').get()).toThrow();
+      // The stale trace logger (bound to A's now-closed queries) was cleared so
+      // the next tool call rebuilds one against B.
+      expect(server.st.traceLogger).toBeNull();
     } finally {
       server.toolHandler.closeAll();
       server.st.cg?.close();
