@@ -63,4 +63,28 @@ describe('MCPServer.tryInitializeDefault (P1 #3 — no re-open leak)', () => {
       server.st.cg?.close();
     }
   });
+
+  it('closes the prior Cartograph when re-initialized for a DIFFERENT project root', async () => {
+    const dirA = mkdtempSync(join(tmpdir(), 'cg-switch-a-'));
+    const dirB = mkdtempSync(join(tmpdir(), 'cg-switch-b-'));
+    dirs.push(dirA, dirB);
+    for (const d of [dirA, dirB]) (await Cartograph.init(d, { index: false })).close();
+
+    const server = new MCPServer({ disableStartupSync: true });
+    try {
+      await server.tryInitializeDefault(dirA);
+      const first = server.st.cg;
+      expect(first).not.toBeNull();
+
+      await server.tryInitializeDefault(dirB); // standalone server switches project
+      // New instance for B, and the prior (A) instance was closed — not orphaned
+      // with its watcher + write-lock still held (that would leak a writer).
+      expect(server.st.cg).not.toBe(first);
+      expect(server.st.cg).not.toBeNull();
+      expect(() => first?.db.getDb().prepare('SELECT 1 AS ok').get()).toThrow();
+    } finally {
+      server.toolHandler.closeAll();
+      server.st.cg?.close();
+    }
+  });
 });

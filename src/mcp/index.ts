@@ -587,6 +587,16 @@ export class MCPServer {
     this.st.noDefaultProjectPreamble = null;
     this.st.projectPath = resolvedRoot;
 
+    // A standalone server can get a second `initialize` with a new rootUri, i.e.
+    // a switch to a different project than the one currently open. Capture the
+    // prior instance and retire it only AFTER the new project is open and swapped
+    // into the tool handler (below): the old project stays serviceable during the
+    // async open, the tool handler never points at a closed DB, and a failed open
+    // leaves the working project intact instead of orphaning it. null on first
+    // init; unreachable for a daemon (its clients share one fixed root, so the
+    // reuse guard above already returned).
+    const previousCg = this.st.cg;
+
     try {
       // The MCP server IS the long-lived process whose schema-vs-binary
       // alignment matters; opening with autoMigrate=true is correct
@@ -597,6 +607,16 @@ export class MCPServer {
       this.toolHandler.setDefaultCartograph(this.st.cg);
       await this.runStartupSync();
       mcpStartWatching(this.st);
+      // New project is live and is now the tool handler's default; close the
+      // prior project's instance (its watcher + write-lock) so it isn't orphaned
+      // as a leaked second writer. Nothing references it anymore.
+      if (previousCg && previousCg !== this.st.cg) {
+        try {
+          previousCg.close();
+        } catch {
+          /* ignore — best-effort retirement of the prior project */
+        }
+      }
     } catch (err) {
       process.stderr.write(`[Cartograph MCP] Failed to open project at ${resolvedRoot}: ${errMsg(err)}\n`);
     }
