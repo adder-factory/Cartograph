@@ -84,6 +84,10 @@ Common causes:
 - The host is using HTTP/SSE MCP settings. Cartograph's server is stdio MCP.
 - A long-running MCP session still has an old database handle after storage was
   migrated. Restart the host session.
+- `serve --mcp` defaults to a shared per-project daemon (the stdio process proxies
+  to it). Cartograph auto-retires unreachable daemon lock/socket state at startup,
+  but if a handshake keeps failing, bypass it with `--no-daemon` to run a
+  standalone in-process server. See [MCP usage](MCP-USAGE.md) for the daemon model.
 
 ## Gitignored Source Is Missing
 
@@ -273,6 +277,14 @@ sentinel remain active.
 
 Doctor reports sibling MCP/admin/hook processes when it can detect them.
 
+Since v1.1.17 `cartograph serve --mcp` defaults to a shared per-project daemon —
+**one writer per project** — so multiple agents pointed at the same project share
+a single index writer instead of re-indexing concurrently and clobbering each
+other. Writer-lock contention is therefore mostly a concern when you opt out of
+that model with `--no-daemon` (a standalone in-process server, one per process),
+or when you run a long CLI `admin` job alongside a live server. See
+[MCP usage](MCP-USAGE.md) for the daemon model.
+
 Long LLM enrichment passes — `admin summarize`, `admin embed`, and `admin
 classify` — are resilient to a concurrent writer (for example a `serve --mcp`
 auto-sync watcher committing mid-pass). Each write takes the SQLite write lock
@@ -281,8 +293,8 @@ still-contended item by deferring it to the next pass instead of aborting the
 whole run.
 
 A full `cartograph admin index` (or `admin sync`) writes far more and can still
-lose to a busy sibling. If one reports a database lock, stop or restart the
-sibling process and retry:
+lose to a busy sibling. If one reports a database lock, let the daemon settle (or
+stop/restart the contending standalone server or admin job) and retry:
 
 ```sh
 cartograph doctor .

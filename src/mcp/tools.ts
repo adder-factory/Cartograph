@@ -6,7 +6,7 @@
 
 import { resolve as resolvePath } from 'node:path';
 import type Cartograph from '../index.js';
-import { cgRefreshConfigFromDisk } from '../index.js';
+import { cgRefreshConfigFromDisk, findNearestCartographRoot } from '../index.js';
 import type { ToolDefinition, ToolResult } from './tool-types.js';
 import type { ToolCtx, ToolModule } from './tools/types.js';
 import { getToolModule, tools as registryTools } from './tools/registry.js';
@@ -414,6 +414,28 @@ export class ToolHandler {
         );
       }
       return this.cg;
+    }
+    // A projectPath that resolves to the default project's own root must reuse
+    // the default CG, not open a SECOND instance through the cache: two in-process
+    // Cartographs on one `.cartograph/` each carry their own watcher + FileLock,
+    // and the per-CG mutexes can't serialize them (they only collide on the
+    // cross-process FileLock). Resolve the same way the cache does
+    // (findNearestCartographRoot) so every alias/subdir of the default root dedups
+    // here; anything else falls through to the cache's own LRU + watcher.
+    if (this.cg) {
+      try {
+        const defaultRoot = resolvePath(this.cg.projectRoot);
+        // Fast path: projectPath IS the default root (what agents usually pass) —
+        // a cheap string compare, no filesystem walk.
+        if (resolvePath(projectPath) === defaultRoot) return this.cg;
+        // Subdir/alias of the default project: resolve the way the cache does
+        // (nearest .cartograph wins, so a nested project resolves to itself and
+        // correctly does NOT dedup here). Only this branch touches the filesystem.
+        const root = findNearestCartographRoot(projectPath);
+        if (root && resolvePath(root) === defaultRoot) return this.cg;
+      } catch {
+        /* fall through to the cache, which surfaces resolution errors itself */
+      }
     }
     return this.st.cache.getOrOpen(projectPath);
   }
