@@ -541,46 +541,57 @@ export class ToolHandler {
       return preflight;
     }
     const { cg, gate } = preflight as { cg: Cartograph | null; gate: FreshnessGateOutcome };
-    const effectiveArgs = toolHandlerResolveLowTokensArgs(this.options, mod, args);
 
-    // Every tool is `defineTool`-backed: `normalizeToolArgs` does
-    // structural validation and reports unknown (typo'd) args that Zod
-    // would otherwise strip silently.
-    const validation = normalizeToolArgs(mod!, effectiveArgs);
-    if (!validation.ok) {
-      return errorResult(`Invalid arguments for \`${toolName}\`: ${validation.error}`);
-    }
-
-    let result: ToolResult;
+    // Pin the in-use cached project for the duration of this call so a concurrent
+    // burst of newly-opened projects can't LRU-evict and close the handle while
+    // the handler (and the post-handler staleness banner) is still using it —
+    // tool calls dispatch concurrently (readline doesn't await its handlers). The
+    // default CG is never cached/evicted, so it doesn't need a borrow.
+    const borrowedRoot = cg && cg !== this.cg ? this.st.cache.borrow(cg) : null;
     try {
-      result = await mod!.handle(this.makeCtx(opts), effectiveArgs);
-    } catch (err) {
-      return errorResult(`Tool execution failed: ${errMsg(err)}`);
-    }
+      const effectiveArgs = toolHandlerResolveLowTokensArgs(this.options, mod, args);
 
-    // F#60 — per-file staleness banner. Computed AFTER the handler
-    // returns because it intersects "files pending in the watcher"
-    // with "files referenced in this response" — the response shape
-    // isn't known until the handler runs. Prepended before the
-    // freshness banner so an agent reading top-to-bottom sees
-    // file-specific warnings first, then the index-level state.
-    const stalenessBanner = computeStalenessBanner(cg, result);
-    if (stalenessBanner) result = prependBanner(result, stalenessBanner);
-    if (gate.banner) result = prependBanner(result, gate.banner);
-    if (validation.warnings?.length) {
-      const warnBanner = validation.warnings.map((w) => `⚠ ${w}`).join('\n');
-      // Unknown-arg warnings surface regardless of whether the handler
-      // returned an error — an agent that passed a bad arg must always
-      // learn it was ignored, even when the handler itself failed.
-      // prependBanner skips isError results, so we inline a direct prepend
-      // that handles both success and error ToolResults.
-      result = prependTextToResult(result, warnBanner);
-      result = { ...result, metadata: { ...result.metadata, warnings: validation.warnings } };
+      // Every tool is `defineTool`-backed: `normalizeToolArgs` does
+      // structural validation and reports unknown (typo'd) args that Zod
+      // would otherwise strip silently.
+      const validation = normalizeToolArgs(mod!, effectiveArgs);
+      if (!validation.ok) {
+        return errorResult(`Invalid arguments for \`${toolName}\`: ${validation.error}`);
+      }
+
+      let result: ToolResult;
+      try {
+        result = await mod!.handle(this.makeCtx(opts), effectiveArgs);
+      } catch (err) {
+        return errorResult(`Tool execution failed: ${errMsg(err)}`);
+      }
+
+      // F#60 — per-file staleness banner. Computed AFTER the handler
+      // returns because it intersects "files pending in the watcher"
+      // with "files referenced in this response" — the response shape
+      // isn't known until the handler runs. Prepended before the
+      // freshness banner so an agent reading top-to-bottom sees
+      // file-specific warnings first, then the index-level state.
+      const stalenessBanner = computeStalenessBanner(cg, result);
+      if (stalenessBanner) result = prependBanner(result, stalenessBanner);
+      if (gate.banner) result = prependBanner(result, gate.banner);
+      if (validation.warnings?.length) {
+        const warnBanner = validation.warnings.map((w) => `⚠ ${w}`).join('\n');
+        // Unknown-arg warnings surface regardless of whether the handler
+        // returned an error — an agent that passed a bad arg must always
+        // learn it was ignored, even when the handler itself failed.
+        // prependBanner skips isError results, so we inline a direct prepend
+        // that handles both success and error ToolResults.
+        result = prependTextToResult(result, warnBanner);
+        result = { ...result, metadata: { ...result.metadata, warnings: validation.warnings } };
+      }
+      if (gate.freshnessMeta && !result.isError) {
+        result = { ...result, metadata: { ...result.metadata, freshness: gate.freshnessMeta } };
+      }
+      return result;
+    } finally {
+      this.st.cache.release(borrowedRoot);
     }
-    if (gate.freshnessMeta && !result.isError) {
-      result = { ...result, metadata: { ...result.metadata, freshness: gate.freshnessMeta } };
-    }
-    return result;
   }
 
   /**

@@ -18,6 +18,7 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { ProjectCache } from '../src/mcp/tools/_project-cache.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -153,5 +154,44 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     expect(roots.some((r) => r.endsWith('/p1'))).toBe(false);
     expect(roots.some((r) => r.endsWith('/p16'))).toBe(true);
     handler.closeAll();
+  });
+
+  it('a borrowed LRU project is skipped by cap eviction (no use-after-close), and evictable after release', () => {
+    const cache = new ProjectCache();
+    const cgs: Cartograph[] = [];
+    for (let i = 0; i < 16; i++) cgs.push(cache.getOrOpen(path.join(parentDir, `p${i}`)));
+    // Pin the LRU (p0) — simulate an in-flight tool call still holding it.
+    const borrowed = cache.borrow(cgs[0]);
+    // Opening a 17th would normally evict+close the LRU (p0); the borrow forces
+    // eviction to skip p0 and drop the next-oldest (p1) instead.
+    cache.getOrOpen(path.join(parentDir, 'p16'));
+    let roots = [...cache.snapshot().cachedRoots];
+    expect(roots.some((r) => r.endsWith('/p0'))).toBe(true); // borrowed survived
+    expect(roots.some((r) => r.endsWith('/p1'))).toBe(false); // next-oldest evicted instead
+    // After release, p0 is evictable again.
+    cache.release(borrowed);
+    cache.getOrOpen(path.join(parentDir, 'p17'));
+    roots = [...cache.snapshot().cachedRoots];
+    expect(roots.some((r) => r.endsWith('/p0'))).toBe(false); // now evicted
+    cache.closeAll();
+  });
+
+  it('when every cached project is borrowed, the cache exceeds the cap rather than close a live handle', () => {
+    const cache = new ProjectCache();
+    const held: Array<string | null> = [];
+    for (let i = 0; i < 16; i++) held.push(cache.borrow(cache.getOrOpen(path.join(parentDir, `p${i}`))));
+    expect(cache.snapshot().cachedRoots.length).toBe(16);
+    // All 16 are in use; opening a 17th can't evict any → cache grows to 17
+    // rather than close a borrowed (in-flight) handle. Every original survives.
+    cache.getOrOpen(path.join(parentDir, 'p16'));
+    expect(cache.snapshot().cachedRoots.length).toBe(17);
+    for (let i = 0; i < 16; i++) {
+      expect(cache.snapshot().cachedRoots.some((r) => r.endsWith(`/p${i}`))).toBe(true);
+    }
+    // Once the borrows are released, the next open trims back to the cap.
+    for (const r of held) cache.release(r);
+    cache.getOrOpen(path.join(parentDir, 'p17'));
+    expect(cache.snapshot().cachedRoots.length).toBeLessThanOrEqual(16);
+    cache.closeAll();
   });
 });
