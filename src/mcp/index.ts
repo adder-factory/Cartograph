@@ -580,6 +580,7 @@ export class MCPServer {
     // prior Cartograph + its watcher and spawn a second writer — exactly the
     // multi-writer churn the daemon is meant to prevent. Reuse the open project.
     if (this.st.cg && this.st.projectPath === resolvedRoot) {
+      this.st.noDefaultProjectPreamble = null;
       this.toolHandler.setDefaultCartograph(this.st.cg);
       return;
     }

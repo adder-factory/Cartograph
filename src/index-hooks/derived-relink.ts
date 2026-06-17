@@ -19,6 +19,11 @@
  * `body_hash` absent from the stores) are not matched here — they fall to the
  * normal summarise / embed passes.
  *
+ * The `similar_to` repair is OUTGOING-only: it rebuilds edges FROM the
+ * re-extracted nodes, not incoming edges from unchanged source nodes that had a
+ * re-extracted node in their top-k. Those return on the next full
+ * `build-similarity-edges` (or when those sources are themselves re-synced).
+ *
  * PostgreSQL/pgvector projects: the incremental `similar_to` repair is a no-op
  * there (it uses the sqlite-vec index), so pgvector users rely on the next full
  * `build-similarity-edges` to restore similarity edges. The ref relinks (which

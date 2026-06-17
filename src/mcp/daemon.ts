@@ -142,7 +142,7 @@ function attachDaemonClient(runtime: DaemonRuntime, socket: net.Socket): void {
  * `disableStartupSync` is excluded: it affects sync timing, not the tool surface.
  */
 export function policyFingerprint(options: SharedMcpDaemonOptions): string {
-  const disabled = [...(options.disabledTools ?? [])].sort().join(',');
+  const disabled = [...(options.disabledTools ?? [])].sort((a, b) => a.localeCompare(b)).join(',');
   return [
     options.profile ?? 'core',
     options.disableWriteTools ? 'w0' : 'w1',
