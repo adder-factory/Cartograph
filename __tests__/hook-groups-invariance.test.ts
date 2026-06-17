@@ -71,6 +71,7 @@ describe('G9 hook-group invariance', () => {
     'tests-edges',
     'test-names',
     'coverage-reapply',
+    'derived-relink',
     'promote-nested-fn',
   ]);
   const EXPECTED_GROUP_C = new Set(['biomarkers', 'centrality', 'betweenness']);
