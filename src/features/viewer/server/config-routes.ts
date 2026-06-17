@@ -85,7 +85,7 @@ function curatedFrom(config: CartographConfig): CuratedConfig {
  * pgvector stay visible for diagnostics. Exported for testing.
  */
 export function redactUrlCredentials(url: string): string {
-  return url.replace(/(\/\/[^:/@]*:)[^@/]+(@)/, '$1***$2').replace(/([?&](?:password|pass|pwd)=)[^&]+/gi, '$1***');
+  return url.replace(/(\/\/[^:/@]*:)[^@/]+(@)/, '$1***$2').replaceAll(/([?&](?:password|pass|pwd)=)[^&]+/gi, '$1***');
 }
 
 /** Build the read-only database summary from an ALLOWLIST of known fields
