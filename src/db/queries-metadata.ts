@@ -65,6 +65,7 @@ export type MetadataKey =
   | 'coverage_report_paths'
   | 'biomarker_cross_file_pass_at'
   | 'biomarker_cross_file_errors'
+  | 'similar_to_built'
   | `biomarker_file_state_${string}_${string}`;
 
 // ─── Typed query definitions ─────────────────────────────────────────────

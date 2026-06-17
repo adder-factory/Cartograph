@@ -15,9 +15,11 @@
 import path from 'node:path';
 
 import type { Cartograph } from '../index.js';
+import { runUnderIndexLock } from '../utils-concurrency.js';
 import { findSimilarViaPgvector, isPgvectorAvailable } from '../db/pgvector-helpers.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';
-import { deleteAllSimilarToEdges, insertSimilarToEdges } from '../db/queries-similarity.js';
+import { deleteAllSimilarToEdges, deleteSimilarToEdgesFrom, insertSimilarToEdges } from '../db/queries-similarity.js';
+import { setMetadata } from '../db/queries-metadata.js';
 import { HnswIndex, type HnswEmbeddingRow } from './hnsw-index.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
 export { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
@@ -252,35 +254,135 @@ export async function buildSimilarToEdges(
   const k = opts?.k ?? DEFAULT_SIMILAR_K;
   const minScore = opts?.minScore ?? DEFAULT_SIMILAR_MIN_SCORE;
 
-  const dbConn = cg.db;
-  const db = dbConn.getDb();
-  const queries = cg.queries;
+  // Take the index lock for the whole build: it reads a full embedding
+  // snapshot then replaces every similar_to edge, so a concurrent re-extract
+  // deleting nodes mid-build would otherwise drop edges to vanished targets.
+  // On contention (another process is re-indexing) report a retry rather than
+  // racing — the snapshot is preserved for next time.
+  return runUnderIndexLock(
+    cg.lock,
+    async () => {
+      const dbConn = cg.db;
+      const db = dbConn.getDb();
+      const queries = cg.queries;
 
-  const vecLoaded = dbConn.hasVecExtension();
-  const pgvectorAvailable = isPgvectorAvailable(db);
-  const rows = fetchEmbeddingRows(db);
-  if (rows.length === 0) return { written: 0, processed: 0 };
-  const hnswByDim = await buildHnswByDim(rows, cg);
-  if (!pgvectorAvailable && !vecLoaded && hnswByDim.size === 0) {
-    return { written: 0, processed: 0, reason: 'pgvector unavailable, HNSW unavailable, and sqlite-vec not loaded' };
-  }
+      const vecLoaded = dbConn.hasVecExtension();
+      const pgvectorAvailable = isPgvectorAvailable(db);
+      const rows = fetchEmbeddingRows(db);
+      if (rows.length === 0) return { written: 0, processed: 0 };
+      const hnswByDim = await buildHnswByDim(rows, cg);
+      if (!pgvectorAvailable && !vecLoaded && hnswByDim.size === 0) {
+        return {
+          written: 0,
+          processed: 0,
+          reason: 'pgvector unavailable, HNSW unavailable, and sqlite-vec not loaded',
+        };
+      }
 
-  // Precompute one L2-normalised vector per node so edge scores are an
-  // exact cosine similarity, independent of the KNN backend's distance
-  // metric (HNSW 'ip' space yields `1 - rawDot`, not cosine, when the
-  // model's embeddings aren't unit-length — which is the case here).
-  const unitByNode = new Map<string, Float32Array>();
-  for (const row of rows) {
-    if (!unitByNode.has(row.node_id)) {
-      unitByNode.set(row.node_id, unitVector(viewVec(row.embedding)));
-    }
-  }
+      // Precompute one L2-normalised vector per node so edge scores are an
+      // exact cosine similarity, independent of the KNN backend's distance
+      // metric (HNSW 'ip' space yields `1 - rawDot`, not cosine, when the
+      // model's embeddings aren't unit-length — which is the case here).
+      const unitByNode = new Map<string, Float32Array>();
+      for (const row of rows) {
+        if (!unitByNode.has(row.node_id)) {
+          unitByNode.set(row.node_id, unitVector(viewVec(row.embedding)));
+        }
+      }
+
+      const edges: SimilarEdge[] = [];
+      for (const row of rows) {
+        edges.push(
+          ...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode, vecLoaded, pgvectorAvailable }),
+        );
+      }
+
+      writeSimilarEdgesAtomically(db, queries, edges);
+      // Durable opt-in marker: the self-heal hook repairs similar_to only when
+      // the feature is in use. A broad edit can transiently delete EVERY edge
+      // before the hook runs, so "any edge exists" is not a reliable signal —
+      // this flag survives that and keeps repair firing.
+      setMetadata(queries, 'similar_to_built', '1');
+      return { written: edges.length, processed: rows.length };
+    },
+    () => ({
+      written: 0,
+      processed: 0,
+      reason: 'index busy — another process is re-indexing; retry build-similarity-edges shortly',
+    }),
+  );
+}
+
+/** Scoped {@link fetchEmbeddingRows} — only the symbol rows for `nodeIds`. */
+function fetchEmbeddingRowsForNodes(
+  db: ReturnType<Cartograph['db']['getDb']>,
+  nodeIds: readonly string[],
+): EmbeddingRow[] {
+  return db
+    .prepare(
+      `SELECT s.rowid AS rowid, r.node_id AS node_id, s.embedding AS embedding, s.model AS embedding_model
+         FROM embedding_store s
+         JOIN embedding_refs r
+           ON r.body_hash = s.body_hash AND r.model = s.model AND r.grain = s.grain
+        WHERE s.embedding IS NOT NULL
+          AND s.grain = 'symbol'
+          AND r.node_id IN (SELECT value FROM json_each(@nodeIds))`,
+    )
+    .all({ nodeIds: JSON.stringify(nodeIds) }) as EmbeddingRow[];
+}
+
+export interface RepairSimilarToForNodesArgs {
+  db: ReturnType<Cartograph['db']['getDb']>;
+  queries: Cartograph['queries'];
+  vecLoaded: boolean;
+  nodeIds: readonly string[];
+  k?: number;
+  minScore?: number;
+}
+
+/**
+ * Bounded incremental repair of `similar_to` edges for a re-extracted node set.
+ *
+ * A whole-file re-extract cascade-deletes the file's symbols' similar_to edges.
+ * `buildSimilarToEdges` is a full O(N) rebuild — too heavy for a per-sync hook —
+ * so this recomputes only the OUTGOING edges of the given nodes against the
+ * persisted vec0 index (which already holds every other node's vector). Edges
+ * pointing INTO these nodes from unchanged nodes are not reconstructed here;
+ * they return on the next full `build-similarity-edges`, or when those source
+ * nodes are themselves re-synced. Scores use vec0's cosine (`1 - distance`),
+ * matching the writer's documented 0..1 scale.
+ *
+ * Requires sqlite-vec; a no-op (returns 0) when `vecLoaded` is false, the node
+ * set is empty, or none of the nodes have a (re-linked) embedding yet.
+ */
+export function repairSimilarToForNodes(args: RepairSimilarToForNodesArgs): number {
+  const { db, queries, vecLoaded, nodeIds } = args;
+  if (!vecLoaded || nodeIds.length === 0) return 0;
+  const k = args.k ?? DEFAULT_SIMILAR_K;
+  const minScore = args.minScore ?? DEFAULT_SIMILAR_MIN_SCORE;
+
+  const rows = fetchEmbeddingRowsForNodes(db, nodeIds);
+  if (rows.length === 0) return 0;
 
   const edges: SimilarEdge[] = [];
   for (const row of rows) {
-    edges.push(...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode, vecLoaded, pgvectorAvailable }));
+    const dim = row.embedding.length / FLOAT32_BYTES;
+    const queryVec = new Float32Array(row.embedding.buffer, row.embedding.byteOffset, dim);
+    const hits = findSimilarViaVec({ db, vecLoaded: true, queryVec, model: row.embedding_model, k: k + 1 });
+    for (const hit of hits) {
+      if (hit.nodeId === row.node_id) continue;
+      const similarity = 1 - hit.distance; // vec0 cosine distance → cosine similarity
+      if (similarity < minScore) continue;
+      edges.push({ source: row.node_id, target: hit.nodeId, score: similarity });
+    }
   }
 
-  writeSimilarEdgesAtomically(db, queries, edges);
-  return { written: edges.length, processed: rows.length };
+  // Idempotent + atomic: clear the repaired nodes' outgoing edges, then
+  // re-insert in one transaction (matching writeSimilarEdgesAtomically) so a
+  // crash can't leave a node with its edges deleted but not replaced.
+  db.transaction(() => {
+    deleteSimilarToEdgesFrom(queries, nodeIds);
+    insertSimilarToEdges(queries, edges);
+  })();
+  return edges.length;
 }

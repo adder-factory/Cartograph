@@ -247,10 +247,11 @@ describe('lifecycle command action bodies', () => {
     if (projectPath && fs.existsSync(projectPath)) fs.rmSync(projectPath, { recursive: true, force: true });
   });
 
-  it('starts MCP serve and prints non-MCP serve guidance', async () => {
+  it('runs a standalone MCP serve under --no-daemon and prints non-MCP serve guidance', async () => {
     await actions.get('program:serve')!({
       projectPath,
       mcp: true,
+      daemon: false, // --no-daemon: standalone server, skip the shared daemon
       profile: 'review',
       writeTools: false,
       allowStaleDefault: true,
@@ -259,6 +260,7 @@ describe('lifecycle command action bodies', () => {
       startupSync: false,
     });
     expect(calls).toContain('server.start');
+    expect(calls.join('\n')).not.toContain('daemon.proxy:');
     expect(calls.join('\n')).toContain('"disableWriteTools":true');
     expect(calls.join('\n')).toContain('"profile":"review"');
     expect(calls.join('\n')).toContain('"lowTokensDefault":true');
@@ -266,6 +268,14 @@ describe('lifecycle command action bodies', () => {
     await actions.get('program:serve')!({});
     expect(stderr.join('\n')).toContain('Cartograph MCP Server');
     expect(stderr.join('\n')).toContain('Use --mcp flag');
+  });
+
+  it('defaults MCP serve to the shared per-project daemon when --no-daemon is absent', async () => {
+    // No `daemon` key → commander leaves it undefined → daemon mode is the
+    // default. The proxy mock returns non-'proxied', so it falls through to a
+    // standalone start — but the daemon path must have been attempted.
+    await actions.get('program:serve')!({ projectPath, mcp: true });
+    expect(calls.join('\n')).toContain('daemon.proxy:');
   });
 
   it('routes MCP daemon child and proxy serve paths', async () => {
@@ -285,7 +295,8 @@ describe('lifecycle command action bodies', () => {
       throw new Error(`exit:${code}`);
     }) as typeof process.exit;
     try {
-      await expect(actions.get('program:serve')!({ projectPath, mcp: true })).rejects.toThrow('exit:1');
+      // daemon: false isolates standalone startup failure (skip the daemon path).
+      await expect(actions.get('program:serve')!({ projectPath, mcp: true, daemon: false })).rejects.toThrow('exit:1');
     } finally {
       process.exit = originalExit;
     }

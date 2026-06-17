@@ -58,7 +58,7 @@ cartograph serve --mcp --profile read-only
 cartograph serve --mcp --profile review
 cartograph serve --mcp --no-write-tools
 cartograph serve --mcp --low-tokens-default
-cartograph serve --mcp --daemon --project-path /absolute/path/to/project
+cartograph serve --mcp --no-daemon          # standalone; opt out of the shared daemon
 ```
 
 Profiles filter the advertised tool list. `core` is the 14-tool common
@@ -66,9 +66,15 @@ coding-agent surface. `full` exposes every registered tool. `review` focuses
 diff/risk/test workflows. `read-only` advertises read-capable tools and blocks
 mutating branches of mixed tools.
 
-Shared daemon mode uses a per-project Unix socket on POSIX and a per-project
-named pipe on Windows. Startup retires stale lock/socket state and treats an
-active Windows named pipe as an already-running daemon instead of racing it.
+Shared daemon mode is the **default** for `cartograph serve --mcp`: every agent
+on a project connects (as a thin stdio proxy) to one shared per-project daemon,
+so multiple agents share a single writer instead of each re-indexing the project
+concurrently and clobbering each other. Pass `--no-daemon` for a standalone
+server in the current process (test isolation, one-shot / CI runs). It uses a
+per-project Unix socket on POSIX and a per-project named pipe on Windows. Startup
+retires stale lock/socket state and treats an active Windows named pipe as an
+already-running daemon instead of racing it. If the proxy cannot reach or start
+the daemon it falls back to a standalone server automatically.
 
 A running server watches `.cartograph/config.json` and re-resolves the `llm`
 tiers on the next LLM tool call, so `cartograph admin llm-apply` or a hand-edit

@@ -13,9 +13,11 @@
  *   - readFileInChunks — streaming file reader (avoids loading entire file into memory)
  *   - debounce / throttle — call-rate limiters
  *
- * `utils.ts` re-exports every name here so callers don't need to update
- * import paths. Future moves can flip imports over to this file
- * directly when convenient.
+ * `utils.ts` re-exports the primitives that originally lived there
+ * (FileLock, Mutex, MemoryMonitor, processInBatches, readFileInChunks,
+ * debounce, throttle) so their old import paths keep working. Names added
+ * here since the split — `runUnderIndexLock`, the SQLite-busy helpers — are
+ * imported from this module directly rather than back through `utils.ts`.
  */
 
 import * as fs from 'node:fs';
@@ -394,6 +396,35 @@ export class Mutex {
   isLocked(): boolean {
     return this.locked;
   }
+}
+
+/**
+ * Run `fn` under an in-process mutex + a cross-process file lock — the same
+ * write-lock pairing index/sync use. On file-lock contention (another process
+ * is indexing) returns `onContention()` instead of blocking, so the caller can
+ * surface a "retry" result. Must NOT be called while already holding `file`
+ * (the FileLock is not re-entrant) — for top-level operations only.
+ */
+export async function runUnderIndexLock<T>(
+  lock: { mutex: Mutex; file: FileLock },
+  fn: () => Promise<T>,
+  onContention: () => T,
+): Promise<T> {
+  return lock.mutex.withLock(async () => {
+    try {
+      lock.file.acquire();
+    } catch (err) {
+      // Only genuine lock contention falls back to onContention(); a real
+      // failure (permissions, disk full) must surface, not be masked as "busy".
+      if (err instanceof LockHeldError) return onContention();
+      throw err;
+    }
+    try {
+      return await fn();
+    } finally {
+      lock.file.release();
+    }
+  });
 }
 
 /**

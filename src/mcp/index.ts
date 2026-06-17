@@ -575,6 +575,15 @@ export class MCPServer {
       this.st.projectPath = projectPath;
       return;
     }
+    // The daemon fans many clients (each sends its own `initialize`) through one
+    // MCPServer. Re-opening a project that is already open would orphan the
+    // prior Cartograph + its watcher and spawn a second writer — exactly the
+    // multi-writer churn the daemon is meant to prevent. Reuse the open project.
+    if (this.st.cg && this.st.projectPath === resolvedRoot) {
+      this.st.noDefaultProjectPreamble = null;
+      this.toolHandler.setDefaultCartograph(this.st.cg);
+      return;
+    }
     this.st.noDefaultProjectPreamble = null;
     this.st.projectPath = resolvedRoot;
 

@@ -47,4 +47,17 @@ describe('similarity edges', () => {
     expect(result1.written).toBe(0);
     expect(result2.written).toBe(0);
   });
+
+  it('reports contention instead of racing when the index lock is held by another writer', async () => {
+    // Simulate a concurrent re-extract holding the cross-process file lock.
+    cg.lock.file.acquire();
+    try {
+      const result = await buildSimilarToEdges(cg, { k: 5, minScore: 0.6 });
+      expect(result.written).toBe(0);
+      expect(result.processed).toBe(0);
+      expect(result.reason).toMatch(/index busy/i);
+    } finally {
+      cg.lock.file.release();
+    }
+  });
 });

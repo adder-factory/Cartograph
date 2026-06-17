@@ -3,8 +3,9 @@
  *
  * Extracted from `QueryBuilder` so the SQL repository doesn't carry
  * the per-domain summary helpers as direct members. The functions
- * read / write the `symbol_summaries` table (and cascade-touch
- * `symbol_embeddings` + the vec0 mirror in `pruneOrphanSummaries`)
+ * read / write `summary_refs` + `summary_store` (exposed to legacy
+ * readers via the `symbol_summaries` view) and prune orphan
+ * `embedding_refs` + the vec0 mirror in `pruneOrphanSummaries`,
  * via the `@internal`-tagged `db` and `vecLoaded` fields on the
  * parent `QueryBuilder`.
  */
@@ -530,30 +531,29 @@ export function getSymbolSummary(
 }
 
 /**
- * Find a cached summary by content_hash + model, regardless of which
- * node_id originally produced it. Used when a symbol moves files,
- * shifts lines, or otherwise gets a fresh node_id but the body
- * itself is unchanged — the summary text is still valid and we'd
- * rather copy it onto the new node_id than burn another LLM call.
+ * Find a cached summary by content_hash + model in the content-addressed
+ * `summary_store`, regardless of whether any live node still references it.
+ * Used when a symbol moves files, shifts lines, or — critically — when a
+ * concurrent re-extract cascade-deleted every `summary_refs` row for this
+ * body: the cached summary text is still valid and present in the store, so
+ * we re-pin it onto the current node_id instead of burning another LLM call.
  *
- * On hash collision (two distinct symbols with identical
- * body+signature) we prefer the most recently generated summary
- * via ORDER BY generated_at DESC. The collision is semantically
- * harmless — identical bodies yield identical summaries — but a
- * stable choice keeps test output deterministic across SQLite
- * page-layout shifts.
- *
- * Returns the originating nodeId so callers can correlate / diagnose.
+ * Queries `summary_store` DIRECTLY rather than the `symbol_summaries` view
+ * (which INNER JOINs `summary_refs`); the view hides a cached summary the
+ * moment its last ref is evicted, which forced needless regeneration after a
+ * churn. The store's PK is (body_hash, model), so at most one row matches —
+ * and identical body+signature yields an identical summary, so serving it for
+ * a fresh node_id is semantically exact.
  */
 export function getSummaryByContentHash(
   qb: QueryBuilder,
   contentHash: string,
   model: string,
-): { summary: string; nodeId: string } | null {
+): { summary: string } | null {
   qb.queries.getSummaryByContentHash ??= getSummaryByContentHashQuery(qb.db);
   const row = qb.queries.getSummaryByContentHash.get({ contentHash, model });
   if (!row) return null;
-  return { summary: row.summary, nodeId: row.node_id };
+  return { summary: row.summary };
 }
 
 export interface SymbolDescription {
@@ -1058,7 +1058,6 @@ const getSymbolSummaryQuery = defineQuery({
 });
 
 const GetSummaryByContentHashRowSchema = z.object({
-  node_id: z.string(),
   summary: z.string(),
 });
 type GetSummaryByContentHashRow = z.infer<typeof GetSummaryByContentHashRowSchema>;
@@ -1070,9 +1069,13 @@ const GetSummaryByContentHashParamsSchema = z.object({
 type GetSummaryByContentHashParams = z.infer<typeof GetSummaryByContentHashParamsSchema>;
 
 const getSummaryByContentHashQuery = defineQuery({
-  sql: `SELECT node_id, summary FROM symbol_summaries
-       WHERE content_hash = @contentHash AND model = @model
-       ORDER BY generated_at DESC LIMIT 1`,
+  // Hit summary_store DIRECTLY (not the symbol_summaries view, which inner-joins
+  // summary_refs): a cached summary must remain reachable even after every ref
+  // to it was cascade-deleted by a concurrent re-extract. PK (body_hash, model)
+  // ⇒ at most one row, so no ORDER BY / dedup is needed.
+  sql: `SELECT summary FROM summary_store
+       WHERE body_hash = @contentHash AND model = @model
+       LIMIT 1`,
   params: GetSummaryByContentHashParamsSchema,
   row: GetSummaryByContentHashRowSchema,
 });
