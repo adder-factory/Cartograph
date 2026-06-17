@@ -608,8 +608,10 @@ export class MCPServer {
       // second writer — done here, before the startup sync, so a sync failure
       // can't leave it leaked. Also drop the trace logger: it holds the prior
       // project's now-closed `queries`, and `mcpEnsureTraceLogger` only rebuilds
-      // when it is null, so without this the next tool call would log to a closed
-      // DB and throw. The next call rebuilds one bound to the new project.
+      // when it is null, so without this every later trace write targets the
+      // closed DB. TraceLogger.log swallows that failure, so the symptom is silent
+      // — traces just stop recording for the rest of the session. Nulling it makes
+      // the next tool call rebuild one bound to the new project.
       if (previousCg && previousCg !== this.st.cg) {
         try {
           previousCg.close();
