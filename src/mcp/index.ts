@@ -584,18 +584,16 @@ export class MCPServer {
       this.toolHandler.setDefaultCartograph(this.st.cg);
       return;
     }
-    this.st.noDefaultProjectPreamble = null;
-    this.st.projectPath = resolvedRoot;
-
     // A standalone server can get a second `initialize` with a new rootUri, i.e.
     // a switch to a different project than the one currently open. Capture the
-    // prior instance and retire it only AFTER the new project is open and swapped
-    // into the tool handler (below): the old project stays serviceable during the
-    // async open, the tool handler never points at a closed DB, and a failed open
-    // leaves the working project intact instead of orphaning it. null on first
-    // init; unreachable for a daemon (its clients share one fixed root, so the
-    // reuse guard above already returned).
+    // prior instance + path BEFORE overwriting projectPath, so we can retire the
+    // old project after the new one opens, and restore projectPath if the open
+    // fails. `previousCg` is null on first init; this path is unreachable for a
+    // daemon (its clients share one fixed root, so the reuse guard above returned).
     const previousCg = this.st.cg;
+    const previousProjectPath = this.st.projectPath;
+    this.st.noDefaultProjectPreamble = null;
+    this.st.projectPath = resolvedRoot;
 
     try {
       // The MCP server IS the long-lived process whose schema-vs-binary
@@ -605,20 +603,33 @@ export class MCPServer {
       // direction (DB ahead of binary) at every tool dispatch.
       this.st.cg = await Cartograph.open(resolvedRoot, { autoMigrate: true });
       this.toolHandler.setDefaultCartograph(this.st.cg);
-      await this.runStartupSync();
-      mcpStartWatching(this.st);
-      // New project is live and is now the tool handler's default; close the
-      // prior project's instance (its watcher + write-lock) so it isn't orphaned
-      // as a leaked second writer. Nothing references it anymore.
+      // The new project is open and is now the tool handler's default. Retire the
+      // prior project (its watcher + write-lock) so it isn't orphaned as a leaked
+      // second writer — done here, before the startup sync, so a sync failure
+      // can't leave it leaked. Also drop the trace logger: it holds the prior
+      // project's now-closed `queries`, and `mcpEnsureTraceLogger` only rebuilds
+      // when it is null, so without this the next tool call would log to a closed
+      // DB and throw. The next call rebuilds one bound to the new project.
       if (previousCg && previousCg !== this.st.cg) {
         try {
           previousCg.close();
         } catch {
           /* ignore — best-effort retirement of the prior project */
         }
+        this.st.traceLogger = null;
       }
+      await this.runStartupSync();
+      mcpStartWatching(this.st);
     } catch (err) {
       process.stderr.write(`[Cartograph MCP] Failed to open project at ${resolvedRoot}: ${errMsg(err)}\n`);
+      // Open failed. If a prior project was active it was never reassigned (st.cg
+      // still points at it) and stays the default — restore projectPath to match,
+      // otherwise st.projectPath would name a project the live `cg` isn't serving.
+      // On a first init there is no prior project; keep projectPath = resolvedRoot
+      // so retryInitIfNeeded retries this same root on the next tool call.
+      if (previousCg && this.st.cg === previousCg) {
+        this.st.projectPath = previousProjectPath;
+      }
     }
   }
 
