@@ -15,6 +15,7 @@
 import path from 'node:path';
 
 import type { Cartograph } from '../index.js';
+import { runUnderIndexLock } from '../utils-concurrency.js';
 import { findSimilarViaPgvector, isPgvectorAvailable } from '../db/pgvector-helpers.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';
 import { deleteAllSimilarToEdges, deleteSimilarToEdgesFrom, insertSimilarToEdges } from '../db/queries-similarity.js';
@@ -252,37 +253,58 @@ export async function buildSimilarToEdges(
   const k = opts?.k ?? DEFAULT_SIMILAR_K;
   const minScore = opts?.minScore ?? DEFAULT_SIMILAR_MIN_SCORE;
 
-  const dbConn = cg.db;
-  const db = dbConn.getDb();
-  const queries = cg.queries;
+  // Take the index lock for the whole build: it reads a full embedding
+  // snapshot then replaces every similar_to edge, so a concurrent re-extract
+  // deleting nodes mid-build would otherwise drop edges to vanished targets.
+  // On contention (another process is re-indexing) report a retry rather than
+  // racing — the snapshot is preserved for next time.
+  return runUnderIndexLock(
+    cg.lock,
+    async () => {
+      const dbConn = cg.db;
+      const db = dbConn.getDb();
+      const queries = cg.queries;
 
-  const vecLoaded = dbConn.hasVecExtension();
-  const pgvectorAvailable = isPgvectorAvailable(db);
-  const rows = fetchEmbeddingRows(db);
-  if (rows.length === 0) return { written: 0, processed: 0 };
-  const hnswByDim = await buildHnswByDim(rows, cg);
-  if (!pgvectorAvailable && !vecLoaded && hnswByDim.size === 0) {
-    return { written: 0, processed: 0, reason: 'pgvector unavailable, HNSW unavailable, and sqlite-vec not loaded' };
-  }
+      const vecLoaded = dbConn.hasVecExtension();
+      const pgvectorAvailable = isPgvectorAvailable(db);
+      const rows = fetchEmbeddingRows(db);
+      if (rows.length === 0) return { written: 0, processed: 0 };
+      const hnswByDim = await buildHnswByDim(rows, cg);
+      if (!pgvectorAvailable && !vecLoaded && hnswByDim.size === 0) {
+        return {
+          written: 0,
+          processed: 0,
+          reason: 'pgvector unavailable, HNSW unavailable, and sqlite-vec not loaded',
+        };
+      }
 
-  // Precompute one L2-normalised vector per node so edge scores are an
-  // exact cosine similarity, independent of the KNN backend's distance
-  // metric (HNSW 'ip' space yields `1 - rawDot`, not cosine, when the
-  // model's embeddings aren't unit-length — which is the case here).
-  const unitByNode = new Map<string, Float32Array>();
-  for (const row of rows) {
-    if (!unitByNode.has(row.node_id)) {
-      unitByNode.set(row.node_id, unitVector(viewVec(row.embedding)));
-    }
-  }
+      // Precompute one L2-normalised vector per node so edge scores are an
+      // exact cosine similarity, independent of the KNN backend's distance
+      // metric (HNSW 'ip' space yields `1 - rawDot`, not cosine, when the
+      // model's embeddings aren't unit-length — which is the case here).
+      const unitByNode = new Map<string, Float32Array>();
+      for (const row of rows) {
+        if (!unitByNode.has(row.node_id)) {
+          unitByNode.set(row.node_id, unitVector(viewVec(row.embedding)));
+        }
+      }
 
-  const edges: SimilarEdge[] = [];
-  for (const row of rows) {
-    edges.push(...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode, vecLoaded, pgvectorAvailable }));
-  }
+      const edges: SimilarEdge[] = [];
+      for (const row of rows) {
+        edges.push(
+          ...computeEdgesForRow({ db, row, k, minScore, hnswByDim, unitByNode, vecLoaded, pgvectorAvailable }),
+        );
+      }
 
-  writeSimilarEdgesAtomically(db, queries, edges);
-  return { written: edges.length, processed: rows.length };
+      writeSimilarEdgesAtomically(db, queries, edges);
+      return { written: edges.length, processed: rows.length };
+    },
+    () => ({
+      written: 0,
+      processed: 0,
+      reason: 'index busy — another process is re-indexing; retry build-similarity-edges shortly',
+    }),
+  );
 }
 
 /** Scoped {@link fetchEmbeddingRows} — only the symbol rows for `nodeIds`. */
