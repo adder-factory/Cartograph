@@ -137,7 +137,11 @@ function registerServeCommand(deps: McpServerCommandDeps): void {
     .description('Start Cartograph as an MCP server for AI assistants')
     .option('-p, --project-path <path>', 'Project path (optional for MCP mode, uses rootUri from client)')
     .option('--mcp', 'Run as MCP server (stdio transport)')
-    .option('--daemon', 'Use a shared per-project MCP daemon with this process acting as the stdio proxy')
+    .option('--daemon', 'Use the shared per-project MCP daemon (default; this process acts as the stdio proxy)')
+    .option(
+      '--no-daemon',
+      'Run a standalone MCP server in this process instead of the shared per-project daemon (one writer per project)',
+    )
     .option('--daemon-child', 'Internal: run the shared MCP daemon process')
     .option('--profile <name>', MCP_SERVER_PROFILE_DESCRIPTION)
     .option(
@@ -208,7 +212,11 @@ async function startMcpServeMode(
     await runSharedMcpDaemonProcess(serverOptions);
     return;
   }
-  if (options.daemon) {
+  // Daemon mode is the default (one shared writer per project, so multiple
+  // agents don't re-index concurrently and clobber each other). `--no-daemon`
+  // sets `daemon: false` for a standalone server (test isolation, one-shot/CI).
+  // If the proxy can't reach/start the daemon it falls through to standalone.
+  if (options.daemon !== false) {
     const { runSharedMcpDaemonProxy } = await loadMcpDaemon();
     const outcome = await runSharedMcpDaemonProxy(serverOptions);
     if (outcome === 'proxied') return;
