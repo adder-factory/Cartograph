@@ -12,7 +12,7 @@
  * call site for each pass — the runner inside `runHooks*` walks
  * every registered hook automatically.
  *
- * The live execution plan is HOOK_GROUPS below (28 hooks across
+ * The live execution plan is HOOK_GROUPS below (29 hooks across
  * groups A/B/C — biomarkers, centrality, churn, issue-history,
  * config-refs, sql-refs, cochange, tests-edges, and the rest). A PR
  * adding a derived-signal pass registers its hook into the matching
@@ -62,6 +62,7 @@ import { HOOK as TESTS_EDGES_HOOK } from './tests-edges.js';
 import { HOOK as TEST_NAMES_HOOK } from './test-names.js';
 import { HOOK as ROLE_RESTORE_HOOK } from './role-restore.js';
 import { HOOK as COVERAGE_REAPPLY_HOOK } from './coverage-reapply.js';
+import { HOOK as DERIVED_RELINK_HOOK } from './derived-relink.js';
 import { HOOK as PROMOTE_NESTED_FN_HOOK } from './promote-nested-fn.js';
 
 /**
@@ -209,6 +210,11 @@ const HOOK_GROUPS: ReadonlyArray<{
       TESTS_EDGES_HOOK,
       TEST_NAMES_HOOK,
       COVERAGE_REAPPLY_HOOK,
+      // derived-relink re-pins summary_refs / embedding_refs from the
+      // content-addressed stores after a re-extract cascade-deletes them, and
+      // incrementally repairs the affected nodes' similar_to edges. Group B so
+      // the restored data is in place before Group C readers.
+      DERIVED_RELINK_HOOK,
       // F#12 slice 3 — promote-nested-fn must run BEFORE biomarkers
       // (Group C) so newly promoted Node rows count toward god_class /
       // unused_export / etc. on this pass. It only fires when at least

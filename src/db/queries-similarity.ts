@@ -66,6 +66,19 @@ export function deleteAllSimilarToEdges(qb: QueryBuilder): void {
 }
 
 /**
+ * Delete the OUTGOING similar_to edges of the given source nodes. Used by the
+ * bounded incremental repair (`repairSimilarToForNodes`) so re-running it for a
+ * re-extracted node is idempotent — clear that node's edges, then re-insert its
+ * fresh KNN. Targets `idx_edges_source_kind_similar_to`, so it is cheap.
+ */
+export function deleteSimilarToEdgesFrom(qb: QueryBuilder, nodeIds: readonly string[]): void {
+  if (nodeIds.length === 0) return;
+  qb.db
+    .prepare("DELETE FROM edges WHERE kind = 'similar_to' AND source IN (SELECT value FROM json_each(@nodeIds))")
+    .run({ nodeIds: JSON.stringify(nodeIds) });
+}
+
+/**
  * Insert similar_to edges in a batch. Each row includes source, target,
  * and similarity score (0..1). Edges are written with confidence='INFERRED'
  * and metadata storing the score.
