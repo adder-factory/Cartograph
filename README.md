@@ -238,7 +238,14 @@ Run the server directly, or let `cartograph install` wire it into your client:
 ```bash
 cartograph serve --mcp                       # default 'core' profile
 cartograph serve --mcp --profile full        # full tool surface
+cartograph serve --mcp --no-daemon           # standalone (CI / test isolation)
 ```
+
+By default `serve --mcp` runs as a shared **per-project daemon** — one writer per
+project — so multiple agents working on the same project share a single index
+writer instead of re-indexing concurrently and clobbering each other; the stdio
+process proxies to it. Pass `--no-daemon` for a standalone in-process server. See
+[MCP usage](docs/MCP-USAGE.md) for the daemon model.
 
 Cartograph registers **34 MCP tools** (all prefixed `cartograph_`). The default
 `core` profile advertises the 14 most common coding-agent tools to keep the
