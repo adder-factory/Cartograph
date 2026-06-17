@@ -19,6 +19,7 @@ import { runUnderIndexLock } from '../utils-concurrency.js';
 import { findSimilarViaPgvector, isPgvectorAvailable } from '../db/pgvector-helpers.js';
 import { findSimilarViaVec } from '../db/vec-helpers.js';
 import { deleteAllSimilarToEdges, deleteSimilarToEdgesFrom, insertSimilarToEdges } from '../db/queries-similarity.js';
+import { setMetadata } from '../db/queries-metadata.js';
 import { HnswIndex, type HnswEmbeddingRow } from './hnsw-index.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
 export { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from './similarity-defaults.js';
@@ -297,6 +298,11 @@ export async function buildSimilarToEdges(
       }
 
       writeSimilarEdgesAtomically(db, queries, edges);
+      // Durable opt-in marker: the self-heal hook repairs similar_to only when
+      // the feature is in use. A broad edit can transiently delete EVERY edge
+      // before the hook runs, so "any edge exists" is not a reliable signal —
+      // this flag survives that and keeps repair firing.
+      setMetadata(queries, 'similar_to_built', '1');
       return { written: edges.length, processed: rows.length };
     },
     () => ({

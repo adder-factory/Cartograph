@@ -45,13 +45,12 @@ export function relinkDerivedRefsFromStore(qb: QueryBuilder, nodeIds?: readonly 
     .run(params);
 
   // Embeddings: a ref per (node, store-row); the vec0 vector survives, so the
-  // restored ref makes the node searchable again immediately. summary_hash_at_embed
-  // is set to '' deliberately: the embed_store vector is body-keyed (not
-  // summary-keyed), so reusing it is always correct, but '' will not match the
-  // node's current summary hash, so the next `embed` pass re-checks these nodes.
-  // That re-check is a content-addressed store hit (no model call), so the only
-  // cost is a cheap re-verification — preferred over joining summary_refs here to
-  // back-fill a hash that the body-keyed reuse does not actually depend on.
+  // restored ref makes the node searchable again immediately. Back-fill
+  // summary_hash_at_embed from the summary just relinked above — the node's
+  // current summary content_hash IS its summary_refs.body_hash — so the next
+  // `embed` staleness check (getEmbeddableNodes compares ss.content_hash vs
+  // summary_hash_at_embed) does not flag these nodes and re-run the embedder.
+  // '' when the node has no summary (matches getEmbeddableNodes' COALESCE).
   const embWhere =
     `FROM nodes n
        JOIN embedding_store es ON es.body_hash = n.body_hash
@@ -63,7 +62,8 @@ export function relinkDerivedRefsFromStore(qb: QueryBuilder, nodeIds?: readonly 
   const embeddings = countOf(embWhere, 'COUNT(*)');
   qb.db
     .prepare(`INSERT OR IGNORE INTO embedding_refs (node_id, body_hash, model, grain, summary_hash_at_embed)
-       SELECT n.id, n.body_hash, es.model, es.grain, '' ${embWhere}`)
+       SELECT n.id, n.body_hash, es.model, es.grain,
+              COALESCE((SELECT sr.body_hash FROM summary_refs sr WHERE sr.node_id = n.id), '') ${embWhere}`)
     .run(params);
 
   return { summaries, embeddings };

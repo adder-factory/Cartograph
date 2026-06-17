@@ -14,6 +14,7 @@ import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
 import { relinkDerivedRefsFromStore } from '../src/db/relink-refs.js';
 import { repairSimilarToForNodes } from '../src/embeddings/similar-edges.js';
 import { HOOK as DERIVED_RELINK_HOOK } from '../src/index-hooks/derived-relink.js';
+import { getMetadata, setMetadata } from '../src/db/queries-metadata.js';
 import type { IndexHookContext } from '../src/index-hooks/types.js';
 import type { SyncResult } from '../src/extraction/index.js';
 import type { CartographConfig } from '../src/types.js';
@@ -251,6 +252,76 @@ describe('derived-relink HOOK.afterSync (wiring)', () => {
       const before = (db.prepare('SELECT COUNT(*) AS n FROM summary_refs').get() as { n: number }).n;
       await DERIVED_RELINK_HOOK.afterSync!(ctx, { ...result, changedFilePaths: [] });
       expect((db.prepare('SELECT COUNT(*) AS n FROM summary_refs').get() as { n: number }).n).toBe(before);
+    } finally {
+      dbConn.close();
+    }
+  });
+});
+
+describe('derived-relink — PR review regressions', () => {
+  it('P2#5: back-fills summary_hash_at_embed from the relinked summary (no spurious re-embed)', () => {
+    const { dbConn, qb, db } = open();
+    try {
+      qb.insertNode(makeNode('fn:1', 'bh1'));
+      // Both a cached summary and a cached embedding for the same body.
+      db.prepare(
+        `INSERT INTO summary_store (body_hash, model, summary, generated_at) VALUES ('bh1','m','sum',5)`,
+      ).run();
+      db.prepare(
+        `INSERT INTO embedding_store (body_hash, model, grain, embedding, generated_at) VALUES ('bh1','m','symbol',?,1)`,
+      ).run(f32([1, 0, 0, 0]));
+
+      relinkDerivedRefsFromStore(qb); // summaries relinked first, then embeddings
+
+      // The embedding ref's summary_hash_at_embed must equal the node's current
+      // summary content_hash (== the summary's body_hash) so getEmbeddableNodes
+      // does NOT flag it stale. Previously this was '' → spurious re-embed.
+      const ref = db.prepare(`SELECT summary_hash_at_embed AS h FROM embedding_refs WHERE node_id='fn:1'`).get() as {
+        h: string;
+      };
+      expect(ref.h).toBe('bh1');
+    } finally {
+      dbConn.close();
+    }
+  });
+
+  it('P2#4: repairs similar_to after a full edge wipe when the build flag is set', async () => {
+    const { dbConn, qb, db } = open();
+    try {
+      if (!dbConn.hasVecExtension()) return;
+      qb.insertNode(makeNode('fn:1', 'bh1'));
+      qb.insertNode(makeNode('fn:2', 'bh2'));
+      upsertSymbolEmbedding({ qb, nodeId: 'fn:1', embedding: f32([1, 0, 0, 0]), model: 'm', summaryHashAtEmbed: '' });
+      upsertSymbolEmbedding({
+        qb,
+        nodeId: 'fn:2',
+        embedding: f32([0.99, 0.01, 0, 0]),
+        model: 'm',
+        summaryHashAtEmbed: '',
+      });
+      // Simulate "build-similarity-edges was run" (durable opt-in flag) but with
+      // ZERO surviving edges — a broad edit cascaded them all away.
+      setMetadata(qb, 'similar_to_built', '1');
+      expect((db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind='similar_to'").get() as { n: number }).n).toBe(0);
+
+      const ctx: IndexHookContext = { projectRoot: '/unused', config: {} as CartographConfig, queries: qb, db: dbConn };
+      const result: SyncResult = {
+        filesChecked: 1,
+        filesAdded: 0,
+        filesModified: 1,
+        filesRemoved: 0,
+        nodesUpdated: 0,
+        durationMs: 0,
+        changedFilePaths: ['src/a.ts'],
+      };
+      await DERIVED_RELINK_HOOK.afterSync!(ctx, result);
+
+      // The flag (not a surviving edge) drove the repair.
+      expect(getMetadata(qb, 'similar_to_built')).toBe('1');
+      expect(
+        (db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind='similar_to' AND source='fn:1'").get() as { n: number })
+          .n,
+      ).toBeGreaterThanOrEqual(1);
     } finally {
       dbConn.close();
     }

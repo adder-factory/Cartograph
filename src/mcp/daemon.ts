@@ -41,11 +41,14 @@ interface DaemonHello {
   pid: number;
   socketPath: string;
   protocol: 1;
+  /** Tool-policy fingerprint — a client whose policy differs must not attach. */
+  policy: string;
 }
 
 interface DaemonRuntime {
   projectRoot: string;
   socketPath: string;
+  policy: string;
   mcp: MCPServer;
   server: net.Server | null;
   clients: number;
@@ -60,6 +63,13 @@ interface DaemonSocketTarget {
 
 export function runSharedMcpDaemonProcess(options: SharedMcpDaemonOptions): Promise<void> {
   const projectRoot = resolveDaemonProjectRoot(options.projectPath);
+  if (projectRoot === null) {
+    // The child is always spawned with an explicit --project-path, so this is
+    // unreachable in practice; guard the type and fail loudly rather than key a
+    // daemon on a project that can only come from a client's rootUri.
+    process.stderr.write('[Cartograph daemon] No up-front project root; daemon child cannot start.\n');
+    process.exit(1);
+  }
   const lock = prepareDaemonLock(projectRoot);
   if (!lock.acquired) {
     process.stderr.write(`[Cartograph daemon] Existing daemon is active at ${lock.info.socketPath}; exiting child.\n`);
@@ -97,6 +107,7 @@ function createDaemonRuntime(projectRoot: string, socketPath: string, options: S
   return {
     projectRoot,
     socketPath,
+    policy: policyFingerprint(options),
     mcp: new MCPServer({ ...options, projectPath: projectRoot }),
     server: null,
     clients: 0,
@@ -110,7 +121,7 @@ function createDaemonServer(runtime: DaemonRuntime): net.Server {
 }
 
 function attachDaemonClient(runtime: DaemonRuntime, socket: net.Socket): void {
-  writeDaemonHello(socket, runtime.socketPath);
+  writeDaemonHello(socket, runtime.socketPath, runtime.policy);
   let transport: SocketTransport;
   const onClose = (): void => {
     runtime.clients = Math.max(0, runtime.clients - 1);
@@ -123,12 +134,31 @@ function attachDaemonClient(runtime: DaemonRuntime, socket: net.Socket): void {
   runtime.mcp.attachTransport(transport);
 }
 
-function writeDaemonHello(socket: net.Socket, socketPath: string): void {
+/**
+ * Stable fingerprint of the tool-surface-affecting options. Clients that differ
+ * here (profile, write-tool gating, disabled tools, default-arg flags) must NOT
+ * share a daemon — its single ToolHandler reflects whichever client started it,
+ * so a sandboxed client could otherwise inherit a write-capable surface.
+ * `disableStartupSync` is excluded: it affects sync timing, not the tool surface.
+ */
+export function policyFingerprint(options: SharedMcpDaemonOptions): string {
+  const disabled = [...(options.disabledTools ?? [])].sort().join(',');
+  return [
+    options.profile ?? 'core',
+    options.disableWriteTools ? 'w0' : 'w1',
+    options.allowStaleDefault ? 's1' : 's0',
+    options.lowTokensDefault ? 'l1' : 'l0',
+    disabled,
+  ].join('|');
+}
+
+function writeDaemonHello(socket: net.Socket, socketPath: string, policy: string): void {
   const hello: DaemonHello = {
     cartograph: CARTOGRAPH_PACKAGE_VERSION,
     pid: process.pid,
     socketPath,
     protocol: 1,
+    policy,
   };
   socket.write(`${JSON.stringify(hello)}\n`);
 }
@@ -174,6 +204,9 @@ function stopDaemon(runtime: DaemonRuntime, reason: string): void {
 
 export async function runSharedMcpDaemonProxy(options: SharedMcpDaemonOptions): Promise<'proxied' | 'fallback'> {
   const projectRoot = resolveDaemonProjectRoot(options.projectPath);
+  // Project only resolvable from the client's rootUri → use a standalone server
+  // (the daemon must key its socket on a project root known up-front).
+  if (projectRoot === null) return 'fallback';
   const socket = await ensureDaemonSocket(projectRoot, options);
   if (!socket) return 'fallback';
   // CONTRACT: scripts/smoke-standalone.mjs and __tests__/mcp-daemon.test.ts
@@ -186,19 +219,33 @@ export async function runSharedMcpDaemonProxy(options: SharedMcpDaemonOptions): 
   process.exit(0);
 }
 
-function resolveDaemonProjectRoot(projectPath: string | undefined): string {
-  const start = path.resolve(projectPath ?? process.cwd());
-  return findNearestCartographRoot(start) ?? start;
+/**
+ * The project root the daemon should key on, or `null` when it can only be
+ * known from the client's `initialize` rootUri/workspaceFolders (which a
+ * per-project daemon cannot key on — the caller must use a standalone server).
+ *
+ * An explicit `--project-path` always wins. Without it, the project is only
+ * definite if the cwd is inside a `.cartograph` project; otherwise return null
+ * so a no-`--project-path` config launched from a home/global dir doesn't
+ * silently attach to cwd and ignore the workspace the client sent.
+ */
+function resolveDaemonProjectRoot(projectPath: string | undefined): string | null {
+  if (projectPath !== undefined) {
+    const start = path.resolve(projectPath);
+    return findNearestCartographRoot(start) ?? start;
+  }
+  return findNearestCartographRoot(process.cwd());
 }
 
 async function ensureDaemonSocket(projectRoot: string, options: SharedMcpDaemonOptions): Promise<net.Socket | null> {
-  const existing = await connectExistingDaemon(projectRoot);
+  const localPolicy = policyFingerprint(options);
+  const existing = await connectExistingDaemon(projectRoot, localPolicy);
   if (existing) return existing;
 
   spawnDaemonChild(projectRoot, options);
   const deadline = Date.now() + DAEMON_START_TIMEOUT_MS;
   while (Date.now() < deadline) {
-    const socket = await connectExistingDaemon(projectRoot);
+    const socket = await connectExistingDaemon(projectRoot, localPolicy);
     if (socket) return socket;
     await sleep(DAEMON_CONNECT_POLL_MS);
   }
@@ -206,12 +253,12 @@ async function ensureDaemonSocket(projectRoot: string, options: SharedMcpDaemonO
   return null;
 }
 
-function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> {
+function connectExistingDaemon(projectRoot: string, localPolicy: string): Promise<net.Socket | null> {
   const target = resolveDaemonSocketTarget(projectRoot);
   if (!target) return Promise.resolve(null);
   const socket = net.createConnection(target.socketPath);
   return readHelloLine(socket)
-    .then((hello) => acceptDaemonSocket(socket, hello))
+    .then((hello) => acceptDaemonSocket(socket, hello, localPolicy))
     .catch((err) => {
       socket.destroy();
       retireUnreachableDaemonLock(projectRoot, target.lock, err);
@@ -219,8 +266,19 @@ function connectExistingDaemon(projectRoot: string): Promise<net.Socket | null> 
     });
 }
 
-function acceptDaemonSocket(socket: net.Socket, hello: DaemonHello): net.Socket | null {
-  if (isAcceptableDaemonHello(hello.cartograph, hello.protocol, CARTOGRAPH_PACKAGE_VERSION)) return socket;
+function acceptDaemonSocket(socket: net.Socket, hello: DaemonHello, localPolicy: string): net.Socket | null {
+  if (isAcceptableDaemonHello(hello.cartograph, hello.protocol, CARTOGRAPH_PACKAGE_VERSION)) {
+    if (hello.policy === localPolicy) return socket;
+    // Same version, different tool policy (profile / --no-write-tools /
+    // --disable-tool / default-arg flags): the running daemon's single
+    // ToolHandler would serve the wrong surface — use a standalone server.
+    process.stderr.write(
+      `[Cartograph MCP] Shared daemon tool-policy mismatch ` +
+        `(daemon "${hello.policy}", local "${localPolicy}"); using direct mode.\n`,
+    );
+    socket.destroy();
+    return null;
+  }
   process.stderr.write(
     `[Cartograph MCP] Shared daemon version/protocol mismatch ` +
       `(daemon ${hello.cartograph}, local ${CARTOGRAPH_PACKAGE_VERSION}); using direct mode.\n`,
@@ -477,7 +535,8 @@ function readHelloLine(socket: net.Socket): Promise<DaemonHello> {
           parsed?.protocol !== 1 ||
           typeof parsed.cartograph !== 'string' ||
           typeof parsed.pid !== 'number' ||
-          typeof parsed.socketPath !== 'string'
+          typeof parsed.socketPath !== 'string' ||
+          typeof parsed.policy !== 'string'
         ) {
           reject(new Error('invalid daemon hello'));
           return;

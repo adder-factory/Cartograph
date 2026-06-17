@@ -30,6 +30,7 @@ import type { SyncResult } from '../extraction/index.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { relinkDerivedRefsFromStore } from '../db/relink-refs.js';
 import { repairSimilarToForNodes } from '../embeddings/similar-edges.js';
+import { getMetadata } from '../db/queries-metadata.js';
 
 /** Current node ids living in the given (re-extracted) files. */
 function nodeIdsForFiles(qb: QueryBuilder, filePaths: readonly string[]): string[] {
@@ -40,8 +41,14 @@ function nodeIdsForFiles(qb: QueryBuilder, filePaths: readonly string[]): string
   return rows.map((r) => r.id);
 }
 
-/** True when the project uses similar_to (some edge survives on an unchanged node). */
+/**
+ * True when the project uses similar_to. The durable `similar_to_built` flag
+ * (set by build-similarity-edges) is the primary signal — it survives a broad
+ * edit that transiently deletes every edge before this hook runs. Fall back to
+ * "any edge exists" for graphs built before the flag was introduced.
+ */
 function similarToInUse(qb: QueryBuilder): boolean {
+  if (getMetadata(qb, 'similar_to_built') === '1') return true;
   const row = qb.db.prepare("SELECT EXISTS(SELECT 1 FROM edges WHERE kind = 'similar_to') AS ok").get() as
     | { ok: number }
     | undefined;
