@@ -366,7 +366,10 @@ export function debounce(fn: () => void, ms: number): () => void {
 
       const hit = getSummaryByContentHash(queries, seed.content_hash, seed.model);
       expect(hit).not.toBeNull();
-      expect(hit!.nodeId).toBe(seed.node_id);
+      // Content-addressed reuse returns the cached summary text only — it no
+      // longer reports an originating node_id (the lookup hits summary_store
+      // directly, so it works even when every ref has been evicted).
+      expect(hit!.summary.length).toBeGreaterThan(0);
 
       expect(getSummaryByContentHash(queries, seed.content_hash, 'different-model')).toBeNull();
       expect(getSummaryByContentHash(queries, '00'.repeat(16), seed.model)).toBeNull();
