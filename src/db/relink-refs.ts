@@ -45,8 +45,13 @@ export function relinkDerivedRefsFromStore(qb: QueryBuilder, nodeIds?: readonly 
     .run(params);
 
   // Embeddings: a ref per (node, store-row); the vec0 vector survives, so the
-  // restored ref makes the node searchable again. summary_hash_at_embed='' is
-  // deliberate — see the hook header.
+  // restored ref makes the node searchable again immediately. summary_hash_at_embed
+  // is set to '' deliberately: the embed_store vector is body-keyed (not
+  // summary-keyed), so reusing it is always correct, but '' will not match the
+  // node's current summary hash, so the next `embed` pass re-checks these nodes.
+  // That re-check is a content-addressed store hit (no model call), so the only
+  // cost is a cheap re-verification — preferred over joining summary_refs here to
+  // back-fill a hash that the body-keyed reuse does not actually depend on.
   const embWhere =
     `FROM nodes n
        JOIN embedding_store es ON es.body_hash = n.body_hash

@@ -13,6 +13,10 @@ import { getSymbolSummary } from '../src/db/queries-summaries.js';
 import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
 import { relinkDerivedRefsFromStore } from '../src/db/relink-refs.js';
 import { repairSimilarToForNodes } from '../src/embeddings/similar-edges.js';
+import { HOOK as DERIVED_RELINK_HOOK } from '../src/index-hooks/derived-relink.js';
+import type { IndexHookContext } from '../src/index-hooks/types.js';
+import type { SyncResult } from '../src/extraction/index.js';
+import type { CartographConfig } from '../src/types.js';
 import type { Node } from '../src/types.js';
 
 const dirs: string[] = [];
@@ -186,6 +190,67 @@ describe('repairSimilarToForNodes', () => {
         (db.prepare(`SELECT COUNT(*) AS n FROM edges WHERE kind='similar_to' AND source='fn:1'`).get() as { n: number })
           .n,
       ).toBeGreaterThanOrEqual(1);
+    } finally {
+      dbConn.close();
+    }
+  });
+});
+
+describe('derived-relink HOOK.afterSync (wiring)', () => {
+  it('re-links refs and repairs similar_to for the changed files, and no-ops a clean sync', async () => {
+    const { dbConn, qb, db } = open();
+    try {
+      if (!dbConn.hasVecExtension()) return;
+      // Two embedded symbols in the same file; a cached summary for fn:1.
+      qb.insertNode(makeNode('fn:1', 'bh1'));
+      qb.insertNode(makeNode('fn:2', 'bh2'));
+      upsertSymbolEmbedding({ qb, nodeId: 'fn:1', embedding: f32([1, 0, 0, 0]), model: 'm', summaryHashAtEmbed: '' });
+      upsertSymbolEmbedding({
+        qb,
+        nodeId: 'fn:2',
+        embedding: f32([0.99, 0.01, 0, 0]),
+        model: 'm',
+        summaryHashAtEmbed: '',
+      });
+      db.prepare(
+        `INSERT INTO summary_store (body_hash, model, summary, generated_at) VALUES ('bh1','m','does a thing',5)`,
+      ).run();
+      // Seed similar_to both ways so the feature is "in use" and survives the fn:1 wipe.
+      repairSimilarToForNodes({ db, queries: qb, vecLoaded: true, nodeIds: ['fn:1', 'fn:2'], minScore: 0.5 });
+
+      // Simulate a whole-file re-extract that cascade-evicted fn:1's derived data.
+      db.prepare("DELETE FROM embedding_refs WHERE node_id='fn:1'").run();
+      db.prepare("DELETE FROM summary_refs WHERE node_id='fn:1'").run();
+      db.prepare("DELETE FROM edges WHERE kind='similar_to' AND source='fn:1'").run();
+      expect(getSymbolSummary(qb, 'fn:1')).toBeNull();
+
+      // Drive the hook end-to-end (config/projectRoot are unused by afterSync).
+      const ctx: IndexHookContext = { projectRoot: '/unused', config: {} as CartographConfig, queries: qb, db: dbConn };
+      const result: SyncResult = {
+        filesChecked: 1,
+        filesAdded: 0,
+        filesModified: 1,
+        filesRemoved: 0,
+        nodesUpdated: 0,
+        durationMs: 0,
+        changedFilePaths: ['src/a.ts'],
+      };
+      await DERIVED_RELINK_HOOK.afterSync!(ctx, result);
+
+      // Summary + embedding refs re-linked from the stores; similar_to repaired.
+      expect(getSymbolSummary(qb, 'fn:1')?.summary).toBe('does a thing');
+      expect(
+        (db.prepare("SELECT COUNT(*) AS n FROM embedding_refs WHERE node_id='fn:1'").get() as { n: number }).n,
+      ).toBe(1);
+      expect(
+        (db.prepare("SELECT COUNT(*) AS n FROM edges WHERE kind='similar_to' AND source='fn:1'").get() as { n: number })
+          .n,
+      ).toBeGreaterThanOrEqual(1);
+
+      // A clean sync (no changedFilePaths) is a no-op.
+      const before = (db.prepare('SELECT COUNT(*) AS n FROM summary_refs').get() as { n: number }).n;
+      await DERIVED_RELINK_HOOK.afterSync!(ctx, { ...result, changedFilePaths: [] });
+      expect((db.prepare('SELECT COUNT(*) AS n FROM summary_refs').get() as { n: number }).n).toBe(before);
     } finally {
       dbConn.close();
     }
