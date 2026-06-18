@@ -55,6 +55,21 @@ export function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+/**
+ * Run `fn`, returning its result, or `undefined` if it throws. The
+ * best-effort "swallow the error" helper used by the status / readiness
+ * lenses, where a missing optional signal must degrade to an empty state
+ * rather than fail the whole call. Centralised so the viewer's system
+ * payload and the MCP status tool share one definition.
+ */
+export function safeCall<T>(fn: () => T): T | undefined {
+  try {
+    return fn();
+  } catch {
+    return undefined;
+  }
+}
+
 export class CartographError extends Error {
   /** Error code for categorization (e.g., 'FILE_ERROR', 'PARSE_ERROR') */
   readonly code: string;

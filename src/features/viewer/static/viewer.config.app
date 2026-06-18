@@ -16,6 +16,7 @@ const CFG_BYTES_PER_MB = 1024 * 1024;
 let cfgState = null;
 let cfgReindexing = false;
 let cfgShownMaxSize = '';
+let cfgBaselineBody = '';
 
 function cfgEl(id) {
   return document.getElementById(id);
@@ -77,6 +78,7 @@ function cfgPopulateForm(state) {
   cfgEl('cfg-enableBiomarkers').checked = c.enableBiomarkers !== false;
   cfgEl('cfg-enableCoChange').checked = c.enableCoChange !== false;
   cfgRenderDatabase(state.database);
+  cfgCaptureBaseline();
 }
 
 function cfgFormToBody() {
@@ -105,6 +107,27 @@ function cfgFormToBody() {
     if (Number.isFinite(mb)) body.maxFileSize = Math.round(mb * CFG_BYTES_PER_MB);
   }
   return body;
+}
+
+/* ── dirty tracking: Save/Revert only light up when the form actually
+   differs from what was loaded, and an "Unsaved changes" tag appears.
+   Pristine Save renders inert (see .cg-btn.primary:disabled). */
+function cfgCaptureBaseline() {
+  cfgBaselineBody = JSON.stringify(cfgFormToBody());
+  cfgRefreshDirty();
+}
+
+function cfgRefreshDirty() {
+  const allow = !!cfgState?.allowConfigEdit;
+  // Stringify once and reuse (single cfgFormToBody() call per event).
+  const currentBody = JSON.stringify(cfgFormToBody());
+  const dirty = cfgBaselineBody !== '' && currentBody !== cfgBaselineBody;
+  const save = cfgEl('cfg-save');
+  const reset = cfgEl('cfg-reset');
+  const tag = cfgEl('cfg-dirty');
+  if (save) save.disabled = !allow || !dirty;
+  if (reset) reset.disabled = !allow || !dirty;
+  if (tag) tag.hidden = !dirty;
 }
 
 function cfgApplyEditable(allow) {
@@ -180,7 +203,7 @@ async function cfgSave() {
   } catch (err) {
     cfgSetBanner('err', `Save failed: ${escapeHtml(err?.message || String(err))}`);
   } finally {
-    btn.disabled = false;
+    cfgRefreshDirty();
   }
 }
 
@@ -197,7 +220,7 @@ function cfgShowApply(applyClass) {
     cfgSetBanner('ok', '✓ Saved. Re-index for the change to take effect.');
     apply.hidden = false;
     apply.innerHTML =
-      '<button type="button" class="config-btn primary" id="cfg-reindex-full">Re-index now</button>';
+      '<button type="button" class="cg-btn primary" id="cfg-reindex-full">Re-index now</button>';
     cfgEl('cfg-reindex-full').addEventListener('click', () => cfgRunReindex('index'));
   } else if (applyClass === 'restart') {
     cfgSetBanner('warn', '✓ Saved. Database settings changed — restart the viewer to apply them.');
@@ -388,3 +411,8 @@ cfgEl('cfg-reset')?.addEventListener('click', () => {
   cfgEl('cfg-apply').hidden = true;
   cfgSetBanner('', '');
 });
+
+for (const cfgNode of document.querySelectorAll('#cfg-form input, #cfg-form textarea')) {
+  cfgNode.addEventListener('input', cfgRefreshDirty);
+  cfgNode.addEventListener('change', cfgRefreshDirty);
+}

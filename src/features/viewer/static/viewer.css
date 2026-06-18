@@ -28,6 +28,24 @@
     --control-h-sm: 28px;
     --canvas-control-w: 42px;
     --canvas-control-gap: 8px;
+
+    /* ── refresh tokens (2026-06 viewer redesign) ──
+       Shared by the settings + status + health surfaces and rolled out
+       across the rest of the viewer. Layered on top of the originals so
+       existing rules keep resolving. */
+    --radius-sm:   5px;
+    --radius-lg:   12px;
+    --surface:     #161a1f;   /* card face, a step above --bg-1 */
+    --surface-2:   #1c2128;   /* nested inputs / wells */
+    --line-strong: #3c454f;
+    --ring:        0 0 0 3px rgba(117, 189, 255, .30);  /* focus ring */
+    --ease:        cubic-bezier(.2, .6, .2, 1);
+    --dur:         .16s;
+    --ok-soft:     rgba(93, 214, 170, .13);
+    --warn-soft:   rgba(246, 180, 75, .13);
+    --err-soft:    rgba(248, 113, 113, .13);
+    --info-soft:   rgba(125, 183, 255, .13);
+    --accent-ink:  #06121f;   /* text on a filled accent button */
   }
 
   * { box-sizing: border-box; }
@@ -1905,7 +1923,7 @@
     transition: color .12s, border-color .12s;
   }
   .subtab:hover { color: var(--text); }
-  .subtab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
   .subtab .ct { color: var(--text-dim); margin-left: var(--s-1); font-variant-numeric: tabular-nums; font-size: 12px; }
 
   .subpanel { padding: var(--s-3) var(--s-5) var(--s-5); }
@@ -2213,8 +2231,8 @@
   }
   .trace-side-card {
     border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--bg-1);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
   }
   .trace-side-card h3 {
     margin: 0;
@@ -2971,8 +2989,8 @@
   }
   .live-side-card {
     border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--bg-1);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
   }
   .live-side-card h3 {
     margin: 0;
@@ -3486,242 +3504,363 @@
     }
   }
 
-  /* ───────── Config editor view ───────── */
+  /* ═══════════ Shared UI primitives (2026-06 viewer refresh) ═══════════
+     Buttons, switches, and the settings surfaces. Reused by the status +
+     health pages as the refresh rolls out across the viewer. */
+
+  /* —— Button —— */
+  .cg-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--s-2);
+    height: var(--control-h);
+    padding: 0 var(--s-4);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-sm);
+    background: var(--bg-2);
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+    font-weight: 550;
+    line-height: 1;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease),
+                box-shadow var(--dur) var(--ease), opacity var(--dur) var(--ease),
+                filter var(--dur) var(--ease), transform var(--dur) var(--ease);
+  }
+  .cg-btn svg.lucide { width: 15px; height: 15px; }
+  .cg-btn:hover:not(:disabled) { border-color: var(--line-strong); background: var(--bg-3); }
+  .cg-btn:focus-visible { outline: none; box-shadow: var(--ring); }
+  .cg-btn:active:not(:disabled) { transform: translateY(.5px); }
+  .cg-btn:disabled { opacity: .45; cursor: default; }
+  .cg-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 650;
+  }
+  .cg-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
+  /* Pristine / nothing-to-save: clearly inert, not just dimmed. */
+  .cg-btn.primary:disabled { background: var(--bg-2); border-color: var(--line); color: var(--text-faint); opacity: 1; }
+  .cg-btn.ghost { background: transparent; }
+  .cg-btn.ghost:hover:not(:disabled) { background: var(--bg-2); border-color: var(--line-strong); }
+
+  /* —— Toggle switch —— */
+  .switch { position: relative; display: inline-flex; flex: none; cursor: pointer; }
+  .switch input { position: absolute; inset: 0; margin: 0; opacity: 0; cursor: pointer; }
+  .switch-track {
+    width: 40px; height: 23px; border-radius: 999px;
+    background: var(--bg-3); border: 1px solid var(--line);
+    display: inline-flex; align-items: center; padding: 2px;
+    transition: background var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  }
+  .switch-thumb {
+    width: 17px; height: 17px; border-radius: 50%;
+    background: var(--text-dim); box-shadow: var(--shadow-sm);
+    transition: transform var(--dur) var(--ease), background var(--dur) var(--ease);
+  }
+  .switch input:checked + .switch-track { background: var(--accent); border-color: var(--accent); }
+  .switch input:checked + .switch-track .switch-thumb { transform: translateX(17px); background: var(--accent-ink); }
+  .switch input:focus-visible + .switch-track { box-shadow: var(--ring); }
+  .switch input:disabled + .switch-track { opacity: .5; cursor: default; }
+
+  /* ═══════════ Settings / config view ═══════════ */
   .config-view {
     display: none;
     position: fixed;
-    top: 52px;
-    left: 0;
-    right: 0;
-    bottom: 0;
+    top: 52px; left: 0; right: 0; bottom: 0;
     background:
-      radial-gradient(1200px 420px at 50% -180px, rgba(117, 189, 255, .05), transparent 70%),
+      radial-gradient(1100px 460px at 50% -200px, rgba(117, 189, 255, .06), transparent 70%),
       var(--bg-0);
     overflow-y: auto;
   }
   .config-shell {
-    width: min(1100px, 100%);
+    width: min(760px, 100%);
     margin: 0 auto;
-    padding: var(--s-6);
-  }
-  .config-head {
+    padding: var(--s-8) var(--s-6) var(--s-10);
     display: flex;
-    align-items: flex-start;
-    justify-content: space-between;
-    gap: var(--s-4);
-    margin-bottom: var(--s-4);
+    flex-direction: column;
+    min-height: 100%;
   }
-  .config-title {
-    margin: 2px 0 4px;
-    font-size: 20px;
-    font-weight: 650;
-    letter-spacing: -.01em;
+
+  .config-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4); margin-bottom: var(--s-6); }
+  .config-kicker {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    color: var(--accent); font-size: 12px; font-weight: 600;
+    letter-spacing: .03em; text-transform: uppercase;
   }
-  .config-sub {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 13px;
-  }
-  .config-sub code, .config-hint code, .config-banner code { color: var(--text-muted); }
+  .config-kicker svg.lucide { width: 14px; height: 14px; }
+  .config-title { margin: var(--s-2) 0 var(--s-1); font-size: 23px; font-weight: 680; letter-spacing: -.015em; }
+  .config-sub { margin: 0; color: var(--text-dim); font-size: 13.5px; }
+  .config-sub code, .config-banner code, .setting-help code { color: var(--text-muted); }
   .config-readonly-badge {
-    flex: none;
-    padding: 4px 10px;
-    border-radius: 999px;
-    border: 1px solid var(--warn);
-    color: var(--warn);
-    background: rgba(246, 180, 75, .1);
-    font-size: 11px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: .04em;
+    flex: none; display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px; border-radius: 999px;
+    border: 1px solid var(--warn); color: var(--warn); background: var(--warn-soft);
+    font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
   }
+  .config-readonly-badge svg.lucide { width: 13px; height: 13px; }
 
   .config-banner {
     margin-bottom: var(--s-4);
     padding: var(--s-3) var(--s-4);
-    border: 1px solid var(--line);
-    border-left-width: 3px;
-    border-radius: var(--radius);
-    background: var(--bg-1);
-    color: var(--text-muted);
-    font-size: 13px;
+    border: 1px solid var(--line); border-left-width: 3px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-1); color: var(--text-muted); font-size: 13px;
   }
-  .config-banner.ok   { border-left-color: var(--ok);   color: var(--text); }
-  .config-banner.warn { border-left-color: var(--warn); color: var(--text); }
-  .config-banner.err  { border-left-color: var(--err);  color: var(--text); }
-  .config-banner.info { border-left-color: var(--accent); }
+  .config-banner.ok   { border-left-color: var(--ok);     background: var(--ok-soft);   color: var(--text); }
+  .config-banner.warn { border-left-color: var(--warn);   background: var(--warn-soft); color: var(--text); }
+  .config-banner.err  { border-left-color: var(--err);    background: var(--err-soft);  color: var(--text); }
+  .config-banner.info { border-left-color: var(--accent); background: var(--info-soft); }
 
-  .config-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: var(--s-4);
+  /* —— section card —— */
+  .settings-form { display: flex; flex-direction: column; gap: var(--s-4); }
+  .settings-section {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
   }
-  .config-view[data-loaded="1"] .config-card { animation: health-rise .4s ease-out both; }
-  .config-view[data-loaded="1"] .config-card:nth-child(2) { animation-delay: .05s; }
-  .config-view[data-loaded="1"] .config-card:nth-child(3) { animation-delay: .1s; }
-  .config-view[data-loaded="1"] .config-card:nth-child(4) { animation-delay: .14s; }
+  .config-view[data-loaded="1"] .settings-section { animation: health-rise .4s ease-out both; }
+  .config-view[data-loaded="1"] .settings-section:nth-child(2) { animation-delay: .05s; }
+  .config-view[data-loaded="1"] .settings-section:nth-child(3) { animation-delay: .1s; }
   @media (prefers-reduced-motion: reduce) {
-    .config-view[data-loaded="1"] .config-card { animation: none; }
+    .config-view[data-loaded="1"] .settings-section { animation: none; }
   }
-  .config-card-wide { grid-column: 1 / -1; }
-  .config-card-body {
+  .settings-section-head {
+    display: flex; align-items: center; gap: var(--s-3);
     padding: var(--s-4);
-    display: flex;
-    flex-direction: column;
-    gap: var(--s-4);
-  }
-
-  .config-field {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .config-field-inline {
-    flex-direction: row;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--s-3);
-  }
-  .config-label {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--text-muted);
-  }
-  .config-label em {
-    margin-left: 6px;
-    font-style: normal;
-    font-weight: 400;
-    color: var(--text-faint);
-  }
-  .config-hint {
-    margin: 0;
-    color: var(--text-dim);
-    font-size: 12px;
-  }
-  .config-textarea {
-    width: 100%;
-    resize: vertical;
-    padding: var(--s-2) var(--s-3);
-    background: var(--bg-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    font-size: 12px;
-    line-height: 1.55;
-  }
-  .config-textarea:focus, .config-input:focus {
-    outline: none;
-    border-color: var(--accent);
-    box-shadow: 0 0 0 2px var(--accent-soft);
-  }
-  .config-num-wrap {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .config-input {
-    width: 96px;
-    padding: 6px var(--s-2);
-    background: var(--bg-2);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    text-align: right;
-  }
-  .config-unit { color: var(--text-dim); font-size: 12px; }
-
-  .config-toggle {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
-    cursor: pointer;
-  }
-  .config-toggle input { width: 16px; height: 16px; accent-color: var(--accent); flex: none; }
-  .config-toggle span { display: flex; flex-direction: column; }
-  .config-toggle em { font-style: normal; color: var(--text-faint); font-size: 12px; }
-
-  .config-db { display: flex; flex-direction: column; gap: 4px; }
-  .config-db-row {
-    display: flex;
-    justify-content: space-between;
-    gap: var(--s-3);
-    padding: 4px 0;
     border-bottom: 1px solid var(--line-soft);
-    font-size: 12px;
   }
+  .settings-section-icon {
+    flex: none; display: inline-flex; align-items: center; justify-content: center;
+    width: 32px; height: 32px; border-radius: 9px;
+    background: var(--info-soft); color: var(--accent);
+  }
+  .settings-section-icon svg.lucide { width: 17px; height: 17px; }
+  .settings-section-head h3 { margin: 0; font-size: 14.5px; font-weight: 620; }
+  .settings-section-head > div p { margin: 2px 0 0; font-size: 12px; color: var(--text-dim); }
+  .settings-section-lock {
+    margin-left: auto; display: inline-flex; align-items: center; gap: 5px;
+    color: var(--text-faint); font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em;
+  }
+  .settings-section-lock svg.lucide { width: 12px; height: 12px; }
+  .settings-section.is-locked .settings-section-body { background: rgba(0, 0, 0, .12); }
+  .settings-section-body { padding: var(--s-4); display: flex; flex-direction: column; }
+
+  /* —— stacked field (textarea) —— */
+  .setting-field { display: flex; flex-direction: column; gap: var(--s-2); }
+  .setting-field + .setting-field { margin-top: var(--s-4); padding-top: var(--s-4); border-top: 1px solid var(--line-soft); }
+  .setting-field-label { font-size: 12.5px; font-weight: 600; color: var(--text-muted); }
+  .setting-field-note { margin-left: 6px; font-weight: 400; color: var(--text-faint); font-size: 11.5px; }
+  .setting-textarea {
+    width: 100%; resize: vertical; min-height: 84px;
+    padding: var(--s-3); background: var(--surface-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    font-size: 12.5px; line-height: 1.6;
+    transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+  }
+  .setting-textarea:focus { outline: none; border-color: var(--accent); box-shadow: var(--ring); }
+  .setting-help { margin: 0; color: var(--text-dim); font-size: 12px; line-height: 1.5; }
+
+  /* —— row (label left / control right) —— */
+  .setting-row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); padding: var(--s-3) 0; }
+  .setting-row + .setting-row { border-top: 1px solid var(--line-soft); }
+  .setting-row:first-child { padding-top: 0; }
+  .setting-row:last-child { padding-bottom: 0; }
+  .setting-row-text { min-width: 0; }
+  .setting-row-title { font-size: 13.5px; font-weight: 560; color: var(--text); }
+  .setting-row-help { margin-top: 2px; font-size: 12px; color: var(--text-dim); }
+  .setting-row-help em { font-style: normal; color: var(--text-faint); }
+  .setting-row-control { flex: none; }
+
+  .setting-input-affix {
+    display: inline-flex; align-items: center;
+    border: 1px solid var(--line); border-radius: var(--radius-sm);
+    background: var(--surface-2); overflow: hidden;
+    transition: border-color var(--dur) var(--ease), box-shadow var(--dur) var(--ease);
+  }
+  .setting-input-affix:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+  .setting-input {
+    width: 84px; height: 32px; padding: 0 var(--s-2);
+    background: transparent; color: var(--text); border: 0; outline: none;
+    text-align: right; font-size: 13px;
+  }
+  .setting-input-affix .affix {
+    padding: 0 var(--s-3); height: 32px; display: inline-flex; align-items: center;
+    background: var(--bg-2); color: var(--text-dim); font-size: 12px;
+    border-left: 1px solid var(--line);
+  }
+
+  /* —— read-only database —— */
+  .config-db { display: flex; flex-direction: column; margin-bottom: var(--s-3); }
+  .config-db-row {
+    display: flex; justify-content: space-between; gap: var(--s-3);
+    padding: var(--s-2) 0; border-bottom: 1px solid var(--line-soft); font-size: 12.5px;
+  }
+  .config-db-row:last-child { border-bottom: 0; }
   .config-db-row .k { color: var(--text-dim); }
   .config-db-row .v { color: var(--text); }
 
-  .config-actions {
-    display: flex;
-    align-items: center;
-    gap: var(--s-3);
+  /* —— sticky action bar —— */
+  .config-actionbar {
+    position: sticky; bottom: var(--s-4);
+    display: flex; align-items: center; justify-content: space-between; gap: var(--s-4);
     margin-top: var(--s-5);
+    padding: var(--s-3) var(--s-4);
+    background: rgba(16, 18, 20, .86);
+    -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+    border: 1px solid var(--line-strong); border-radius: var(--radius-lg);
+    box-shadow: var(--shadow);
     flex-wrap: wrap;
   }
+  .config-actionbar-status { display: flex; align-items: center; gap: var(--s-3); min-width: 0; flex: 1 1 auto; }
+  .config-actionbar-buttons { display: flex; align-items: center; gap: var(--s-2); flex: none; }
+  .config-dirty { display: inline-flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--warn); font-weight: 550; }
+  .config-dirty-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 0 3px var(--warn-soft); }
   .config-apply { display: flex; gap: var(--s-2); }
-  .config-btn {
-    height: var(--control-h);
-    padding: 0 var(--s-4);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    background: var(--bg-2);
-    color: var(--text);
-    font-size: 13px;
-    font-weight: 500;
-    cursor: pointer;
-    transition: background .12s, border-color .12s;
-  }
-  .config-btn:hover:not(:disabled) { border-color: var(--accent); background: var(--bg-3); }
-  .config-btn.primary {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #06121f;
-    font-weight: 600;
-  }
-  .config-btn.primary:hover:not(:disabled) { filter: brightness(1.08); }
-  .config-btn:disabled { opacity: .5; cursor: default; }
+  /* [hidden] guards: the class display rules above outrank the UA
+     [hidden] rule, so these toggled elements must opt back into hiding. */
+  .config-readonly-badge[hidden],
+  .config-actionbar[hidden],
+  .config-dirty[hidden],
+  .config-apply[hidden] { display: none; }
 
+  /* —— progress —— */
   .config-progress {
-    margin-top: var(--s-5);
+    margin-top: var(--s-4);
     padding: var(--s-4);
-    background: var(--bg-1);
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
   }
-  .config-progress-head {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    margin-bottom: var(--s-2);
-    font-size: 13px;
-    color: var(--text-muted);
-  }
-  .config-progress-bar {
-    height: 8px;
-    border-radius: 999px;
-    background: var(--bg-3);
-    overflow: hidden;
-  }
+  .config-progress-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: var(--s-2); font-size: 13px; color: var(--text-muted); }
+  .config-progress-bar { height: 8px; border-radius: 999px; background: var(--bg-3); overflow: hidden; }
   .config-progress-bar > span {
-    display: block;
-    height: 100%;
-    width: 6%;
-    border-radius: 999px;
+    display: block; height: 100%; width: 6%; border-radius: 999px;
     background: linear-gradient(90deg, var(--accent), var(--ok));
     transition: width .25s ease-out;
   }
-  .config-progress-file {
-    margin-top: 6px;
-    color: var(--text-faint);
-    font-size: 11px;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
+  .config-progress-file { margin-top: 6px; color: var(--text-faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   @media (max-width: 860px) {
     .config-view { top: 0; position: static; min-height: calc(100svh - 52px); }
-    .config-shell { padding: var(--s-4) var(--s-3) var(--s-6); }
-    .config-grid { grid-template-columns: 1fr; }
+    .config-shell { padding: var(--s-5) var(--s-3) var(--s-8); }
+    .config-title { font-size: 20px; }
+    .config-actionbar { flex-direction: column; align-items: stretch; }
+    .config-actionbar-buttons { justify-content: flex-end; }
   }
+
+  /* ═══════════ System view (Overview / Health / Settings) ═══════════ */
+  .system-view {
+    display: none;
+    position: fixed;
+    top: 52px; left: 0; right: 0; bottom: 0;
+    flex-direction: column;
+    background: var(--bg-0);
+    z-index: 4;
+  }
+  .system-subnav {
+    display: flex; align-items: center; gap: var(--s-1);
+    padding: var(--s-2) var(--s-4);
+    background: var(--bg-1);
+    border-bottom: 1px solid var(--line);
+    flex: none;
+  }
+  .system-subtab {
+    display: inline-flex; align-items: center; gap: var(--s-2);
+    height: 30px; padding: 0 var(--s-3);
+    border: 1px solid transparent; border-radius: 8px;
+    background: transparent; color: var(--text-dim);
+    font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
+    transition: background var(--dur) var(--ease), color var(--dur) var(--ease), border-color var(--dur) var(--ease);
+  }
+  .system-subtab svg.lucide { width: 15px; height: 15px; }
+  .system-subtab:hover { color: var(--text); background: var(--bg-2); }
+  .system-subtab.active { color: var(--accent); background: var(--info-soft); border-color: rgba(117, 189, 255, .22); }
+  .system-subtab:focus-visible { outline: none; box-shadow: var(--ring); }
+  .system-body { flex: 1 1 auto; overflow-y: auto; position: relative; }
+
+  /* Health + Settings render as panels inside the system body — neutralize
+     their standalone full-page positioning. */
+  #system-view .health-view,
+  #system-view .config-view {
+    position: static; inset: auto; display: block;
+    height: auto; min-height: 0; overflow: visible; background: transparent;
+  }
+  #system-view .system-panel[hidden] { display: none; }
+
+  /* ── Overview (status) page ── */
+  .overview-shell { width: min(900px, 100%); margin: 0 auto; padding: var(--s-6) var(--s-6) var(--s-10); }
+  .overview-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4); margin-bottom: var(--s-5); }
+  .overview-sync {
+    flex: none; display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 11px; border-radius: 999px;
+    font-size: 11.5px; font-weight: 600; text-transform: uppercase; letter-spacing: .03em;
+    border: 1px solid var(--line);
+  }
+  .overview-sync.ok   { color: var(--ok);   border-color: var(--ok);   background: var(--ok-soft); }
+  .overview-sync.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+
+  .overview-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: var(--s-3); margin-bottom: var(--s-4); }
+  .overview-tile { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); padding: var(--s-4); }
+  .overview-tile .v { font-size: 22px; font-weight: 680; letter-spacing: -.01em; font-variant-numeric: tabular-nums; }
+  .overview-tile .k { margin-top: 2px; font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .05em; }
+  .overview-tile .sub { margin-top: 3px; font-size: 11px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .overview-section { margin-bottom: var(--s-4); }
+  .overview-empty { color: var(--text-dim); font-size: 13px; padding: var(--s-2) 0; }
+  #ov-readiness, #ov-llm { padding-top: var(--s-1); padding-bottom: var(--s-1); }
+
+  /* readiness meter rows */
+  .ov-meter { display: grid; grid-template-columns: 150px 1fr auto; align-items: center; gap: var(--s-3) var(--s-4); padding: var(--s-3) 0; }
+  .ov-meter + .ov-meter { border-top: 1px solid var(--line-soft); }
+  .ov-meter-label { display: flex; align-items: center; gap: var(--s-2); font-size: 13px; font-weight: 550; }
+  .ov-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+  .ov-dot.full { background: var(--ok); }
+  .ov-dot.partial { background: var(--warn); }
+  .ov-dot.empty { background: var(--text-faint); }
+  .ov-dot.info { background: var(--info); }
+  .ov-meter-track { height: 6px; border-radius: 999px; background: var(--bg-3); overflow: hidden; min-width: 60px; }
+  .ov-meter-fill { display: block; height: 100%; border-radius: 999px; background: linear-gradient(90deg, var(--accent), var(--ok)); transition: width .3s var(--ease); }
+  .ov-meter-val { font-size: 12.5px; color: var(--text-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .ov-meter-sub { grid-column: 1 / -1; margin-top: -4px; font-size: 11.5px; color: var(--text-faint); }
+
+  /* LLM tier rows */
+  .ov-llm-row { display: flex; align-items: center; gap: var(--s-3); padding: var(--s-3) 0; }
+  .ov-llm-row + .ov-llm-row { border-top: 1px solid var(--line-soft); }
+  .ov-llm-state { flex: none; display: inline-flex; align-items: center; gap: 6px; width: 86px; font-size: 12px; font-weight: 600; }
+  .ov-llm-state .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint); }
+  .ov-llm-state.up   { color: var(--ok); }  .ov-llm-state.up .dot   { background: var(--ok);  box-shadow: 0 0 0 3px var(--ok-soft); }
+  .ov-llm-state.down { color: var(--err); } .ov-llm-state.down .dot { background: var(--err); box-shadow: 0 0 0 3px var(--err-soft); }
+  .ov-llm-tier { flex: none; width: 92px; font-size: 13px; font-weight: 600; text-transform: capitalize; }
+  .ov-llm-model { flex: 1 1 auto; min-width: 0; font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .ov-llm-endpoint { flex: none; font-size: 11.5px; color: var(--text-faint); }
+
+  @media (max-width: 860px) {
+    .system-view { top: 0; }
+    .overview-shell { padding: var(--s-4) var(--s-3) var(--s-8); }
+    .ov-meter { grid-template-columns: 1fr auto; }
+    .ov-meter-track { grid-column: 1 / -1; order: 3; min-width: 0; }
+    .ov-llm-endpoint { display: none; }
+  }
+
+  /* ═══════════ Refresh polish: consistent focus rings + states ═══════════
+     Keyboard focus was invisible on several controls; unify it with the
+     --ring token and align active states to the System sub-nav's accent
+     treatment for a cohesive feel across the viewer. */
+  .tab:focus-visible,
+  .mode-toggle:focus-visible,
+  .btn:focus-visible,
+  .navbtn:focus-visible,
+  .palette-item:focus-visible,
+  .kind-chip:focus-visible,
+  .session-picker:focus-visible,
+  .view-filter:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn:focus-visible { border-color: var(--accent); }
+  /* Active top-bar tab reads with the accent like the System sub-nav. */
+  .tab.active { color: var(--accent); }
+  /* Clearer keyboard-selected row in the command palette. */
+  .palette-item.active { box-shadow: inset 2px 0 0 var(--accent); }
+  .palette input:focus-visible { box-shadow: inset 0 -1px 0 var(--accent); }

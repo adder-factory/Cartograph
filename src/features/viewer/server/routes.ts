@@ -43,6 +43,7 @@ import {
   statusPayload,
 } from './project-payloads.js';
 import { checkViewerRequest } from './security.js';
+import { emptySystemPayload, systemPayload } from './system-payload.js';
 
 interface GetRoute {
   match: (path: string) => RegExpExecArray | true | null;
@@ -52,7 +53,7 @@ interface GetRoute {
     res: http.ServerResponse,
     ctx: RequestContext,
     req: http.IncomingMessage,
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 interface RespondWithIdLookupArgs {
@@ -72,6 +73,20 @@ const GET_ROUTES: ReadonlyArray<GetRoute> = [
     handle: (m, _u, res, ctx, req) => sendStaticAsset({ req, res, ctx, filename: (m as RegExpExecArray)[1]! }),
   },
   { match: matchExact('/api/status'), handle: (_m, _u, res, ctx) => sendJson(res, HTTP_OK, statusPayload(ctx)) },
+  {
+    match: matchExact('/api/system'),
+    handle: async (_m, _u, res, ctx) => {
+      // Read-only overview; never 500-crash — each readiness sub-object
+      // already degrades to null internally, and a hard failure (e.g.
+      // ensureCartograph throwing) falls back to an empty-but-shaped
+      // payload so the client always parses.
+      try {
+        sendJson(res, HTTP_OK, await systemPayload(ctx));
+      } catch {
+        sendJson(res, HTTP_OK, emptySystemPayload());
+      }
+    },
+  },
   { match: matchExact('/api/config'), handle: (_m, _u, res, ctx, req) => handleConfigGet(req, res, ctx) },
   {
     match: matchExact('/api/graph'),
@@ -218,13 +233,25 @@ export async function handleRequest(
     sendJson(res, HTTP_METHOD_NOT_ALLOWED, { error: 'method not allowed' });
     return;
   }
-  for (const route of GET_ROUTES) {
-    const m = route.match(url.pathname);
-    if (m === null) continue;
-    route.handle(m, url, res, ctx, req);
+  // Match first, then dispatch once (some handlers are async, e.g.
+  // /api/system): resolve the matching route + its match result
+  // synchronously, then await the single handler outside the loop.
+  const matched = matchGetRoute(url.pathname);
+  if (matched === null) {
+    sendJson(res, HTTP_NOT_FOUND, { error: `not found: ${url.pathname}` });
     return;
   }
-  sendJson(res, HTTP_NOT_FOUND, { error: `not found: ${url.pathname}` });
+  await matched.route.handle(matched.m, url, res, ctx, req);
+}
+
+/** First GET route whose matcher accepts `pathname`, paired with its
+ *  match result, or null when nothing matches. */
+function matchGetRoute(pathname: string): { route: GetRoute; m: RegExpExecArray | true } | null {
+  for (const route of GET_ROUTES) {
+    const m = route.match(pathname);
+    if (m !== null) return { route, m };
+  }
+  return null;
 }
 
 function respondWithIdLookup(args: RespondWithIdLookupArgs): void {

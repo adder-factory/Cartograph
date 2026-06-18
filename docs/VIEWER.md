@@ -35,9 +35,17 @@ cartograph viewer .
   to the newest, and follows new sessions until you choose one
   explicitly. A filter box narrows the visible calls by text, and
   clicking a symbol-bearing call focuses that symbol on the Graph tab.
-- **Health** — project-wide health score gauge, findings with per-biomarker
-  severity breakdowns, risk hotspots, index coverage, and symbol-kind
-  breakdown.
+- **System** — a tab with its own sub-nav (Overview / Health / Settings):
+  - **Overview** — a project status page: file / symbol / edge / language
+    counts, database size, indexer version, and in-sync state; a
+    feature-readiness breakdown (summaries, embeddings, coverage, roles,
+    directory summaries, unresolved refs); and LLM backend reachability.
+    Backed by `GET /api/system`.
+  - **Health** — project-wide health score gauge, findings with per-biomarker
+    severity breakdowns, risk hotspots, index coverage, and symbol-kind
+    breakdown.
+  - **Settings** — edit `.cartograph/config.json` and re-index from the
+    browser (enabled by default on a loopback bind; see `--allow-config-edit`).
 
 ## Sessions
 
@@ -149,7 +157,7 @@ selection, or an inspected edge.
 | `/` | Focus search (the local filter on the Live / Agent trace tabs) |
 | `Cmd/Ctrl+K` | Command palette |
 | `Alt+←` / `Alt+→` | Navigation history |
-| `g g` / `g t` / `g l` / `g h` | Switch to Graph / Agent trace / Live / Health tab |
+| `g g` / `g t` / `g l` / `g s` | Switch to Graph / Agent trace / Live / System tab |
 | `0`, `+`, `-` | Fit all, zoom in, zoom out |
 | `Esc` | Dismiss overlays and leave input fields |
 

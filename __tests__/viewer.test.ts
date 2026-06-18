@@ -89,6 +89,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       'viewer.live.app',
       'viewer.health.app',
       'viewer.config.app',
+      'viewer.status.app',
       'viewer.source.app',
       'viewer.palette.app',
       'viewer.hash-editor.app',
@@ -295,7 +296,10 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body).toContain('id="search-suggest"');
     expect(body).toContain('id="graph-state"');
     expect(body).toContain('id="graph-trail"');
-    expect(body).toContain('class="health-view"');
+    expect(body).toContain('id="health-view"');
+    expect(body).toContain('id="system-view"');
+    expect(body).toContain('data-view="system"');
+    expect(body).toContain('id="overview-view"');
     expect(body).toContain('id="hc-biomarkers"');
     expect(body).toContain('id="hc-hotspots-list"');
     expect(body).toContain('function renderHealthDashboard');

@@ -48,7 +48,9 @@ local, on your machine.
   <em>Live — MCP tool calls streaming in as an agent works, with the active-session card and tool mix</em><br><br>
   <img src="docs/assets/viewer-live.png" alt="Cartograph viewer live feed streaming MCP tool calls with durations, results, active-session card, and tool-mix breakdown" width="900"><br><br>
   <em>Health dashboard — project score, findings, risk hotspots, index coverage</em><br><br>
-  <img src="docs/assets/viewer-health.png" alt="Cartograph viewer health dashboard with code health score gauge, findings, risk hotspots, index stats, and symbol breakdown" width="900">
+  <img src="docs/assets/viewer-health.png" alt="Cartograph viewer health dashboard with code health score gauge, findings, risk hotspots, index stats, and symbol breakdown" width="900"><br><br>
+  <em>System overview — project status, feature-readiness meters, and LLM backend reachability</em><br><br>
+  <img src="docs/assets/viewer-system.png" alt="Cartograph viewer system overview with project stat tiles, feature-readiness meters, and LLM backend reachability" width="900">
 </p>
 </details>
 
@@ -313,8 +315,11 @@ PNG/SVG/JSON export.
 Beyond the graph: an **Agent trace** tab replays recorded MCP sessions as a
 full-page timeline (per-call timing, arguments, results, and graph-link
 chips that jump from a trace step to the symbol it touched), a **Live** tab
-streams tool calls in real time as an agent works, and a **Health** tab
-shows the project score, findings, and risk hotspots. Sessions are strictly
+streams tool calls in real time as an agent works, and a **System** tab
+groups an **Overview** status page (project counts, database size, version,
+in-sync state, feature-readiness, and LLM backend reachability), the
+**Health** dashboard (project score, findings, and risk hotspots), and a
+**Settings** editor for `.cartograph/config.json`. Sessions are strictly
 per-project (one database = one viewer), each browser tab is titled with
 its project name, and `cartograph viewer --session <id-or-label>` gives an
 individual agent its own isolated window. See

@@ -70,8 +70,7 @@
     <div class="tab active" data-view="graph" data-tooltip="Show the graph viewer"><i data-lucide="network" aria-hidden="true"></i><span>Graph</span></div>
     <div class="tab" data-view="trace" data-tooltip="Replay recorded MCP tool calls"><i data-lucide="route" aria-hidden="true"></i><span>Agent trace</span></div>
     <div class="tab" data-view="live" data-tooltip="Watch MCP tool calls in real time"><i data-lucide="activity" aria-hidden="true"></i><span>Live</span></div>
-    <div class="tab" data-view="health" data-tooltip="Show project health metrics"><i data-lucide="heart-pulse" aria-hidden="true"></i><span>Health</span></div>
-    <div class="tab" data-view="config" data-tooltip="Edit config and re-index"><i data-lucide="settings" aria-hidden="true"></i><span>Config</span></div>
+    <div class="tab" data-view="system" data-tooltip="Project status, health metrics, and settings"><i data-lucide="gauge" aria-hidden="true"></i><span>System</span></div>
   </nav>
 </header>
 
@@ -373,8 +372,44 @@
 
 </main>
 
-<!-- Health view (toggled) -->
-<section id="health-view" class="health-view">
+<!-- System view: Overview / Health / Settings (toggled) -->
+<section id="system-view" class="system-view">
+  <nav class="system-subnav" id="system-subnav" aria-label="System sections">
+    <button type="button" class="system-subtab active" data-subview="overview"><i data-lucide="gauge" aria-hidden="true"></i><span>Overview</span></button>
+    <button type="button" class="system-subtab" data-subview="health"><i data-lucide="heart-pulse" aria-hidden="true"></i><span>Health</span></button>
+    <button type="button" class="system-subtab" data-subview="settings"><i data-lucide="sliders-horizontal" aria-hidden="true"></i><span>Settings</span></button>
+  </nav>
+  <div class="system-body">
+    <div id="overview-view" class="system-panel" data-subview="overview">
+      <div class="overview-shell">
+        <header class="overview-head">
+          <div>
+            <div class="config-kicker"><i data-lucide="gauge" aria-hidden="true"></i> System status</div>
+            <h2 class="config-title">Project overview</h2>
+            <p class="config-sub" id="ov-sub">Index health, readiness, and LLM backends.</p>
+          </div>
+          <span class="overview-sync" id="ov-sync" hidden></span>
+        </header>
+        <div class="overview-tiles" id="ov-tiles"></div>
+        <section class="settings-section overview-section">
+          <header class="settings-section-head">
+            <span class="settings-section-icon"><i data-lucide="activity" aria-hidden="true"></i></span>
+            <div><h3>Feature readiness</h3><p>What has been computed for this index</p></div>
+            <span class="settings-section-lock" id="ov-readiness-aside" hidden></span>
+          </header>
+          <div class="settings-section-body" id="ov-readiness"><div class="overview-empty">Loading…</div></div>
+        </section>
+        <section class="settings-section overview-section">
+          <header class="settings-section-head">
+            <span class="settings-section-icon"><i data-lucide="cpu" aria-hidden="true"></i></span>
+            <div><h3>LLM backends</h3><p>Model routing and reachability</p></div>
+            <span class="settings-section-lock" id="ov-llm-aside" hidden></span>
+          </header>
+          <div class="settings-section-body" id="ov-llm"><div class="overview-empty">Loading…</div></div>
+        </section>
+      </div>
+    </div>
+<section id="health-view" class="system-panel health-view" data-subview="health" hidden>
   <div class="health-shell">
     <div class="health-hero">
       <section class="health-score health-card" aria-label="Project code health">
@@ -436,6 +471,119 @@
         <div class="health-list" id="hc-kinds"></div>
       </section>
     </div>
+  </div>
+</section>
+<section id="config-view" class="system-panel config-view" data-subview="settings" hidden>
+  <div class="config-shell">
+    <header class="config-head">
+      <div class="config-head-text">
+        <div class="config-kicker"><i data-lucide="sliders-horizontal" aria-hidden="true"></i> Project settings</div>
+        <h2 class="config-title">Index configuration</h2>
+        <p class="config-sub">Edit <code class="mono">.cartograph/config.json</code> and re-index without leaving the viewer.</p>
+      </div>
+      <span class="config-readonly-badge" id="cfg-readonly-badge" hidden><i data-lucide="lock" aria-hidden="true"></i> Read-only</span>
+    </header>
+
+    <div class="config-banner" id="cfg-banner" hidden></div>
+
+    <form id="cfg-form" class="settings-form" autocomplete="off">
+      <section class="settings-section">
+        <header class="settings-section-head">
+          <span class="settings-section-icon"><i data-lucide="folder-tree" aria-hidden="true"></i></span>
+          <div><h3>Scope</h3><p>Which files get indexed</p></div>
+        </header>
+        <div class="settings-section-body">
+          <div class="setting-field">
+            <label class="setting-field-label" for="cfg-include">Include globs <span class="setting-field-note">one per line</span></label>
+            <textarea id="cfg-include" class="setting-textarea mono" rows="5" spellcheck="false" placeholder="src/**/*.ts"></textarea>
+            <p class="setting-help">Built-in language globs are always indexed — deleting them here has no effect; add project-specific globs only.</p>
+          </div>
+          <div class="setting-field">
+            <label class="setting-field-label" for="cfg-exclude">Exclude globs <span class="setting-field-note">one per line</span></label>
+            <textarea id="cfg-exclude" class="setting-textarea mono" rows="6" spellcheck="false" placeholder="**/dist/**"></textarea>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <header class="settings-section-head">
+          <span class="settings-section-icon"><i data-lucide="sliders-horizontal" aria-hidden="true"></i></span>
+          <div><h3>Limits &amp; features</h3><p>Indexing budget and optional passes</p></div>
+        </header>
+        <div class="settings-section-body">
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Max file size</div>
+              <div class="setting-row-help">Files larger than this are skipped <em id="cfg-maxsize-hint"></em></div>
+            </div>
+            <div class="setting-row-control">
+              <span class="setting-input-affix">
+                <input id="cfg-maxfilesize" class="setting-input mono" type="number" min="1" step="0.5" inputmode="decimal" aria-label="Max file size in megabytes" />
+                <span class="affix">MB</span>
+              </span>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Biomarkers</div>
+              <div class="setting-row-help">Static code-health analysis — findings and risk hotspots</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch">
+                <input id="cfg-enableBiomarkers" type="checkbox" aria-label="Enable biomarkers" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+          <div class="setting-row">
+            <div class="setting-row-text">
+              <div class="setting-row-title">Co-change edges</div>
+              <div class="setting-row-help">Git-history coupling between files</div>
+            </div>
+            <div class="setting-row-control">
+              <label class="switch">
+                <input id="cfg-enableCoChange" type="checkbox" aria-label="Enable co-change edges" />
+                <span class="switch-track"><span class="switch-thumb"></span></span>
+              </label>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section is-locked">
+        <header class="settings-section-head">
+          <span class="settings-section-icon"><i data-lucide="database" aria-hidden="true"></i></span>
+          <div><h3>Database</h3><p>Where the graph is stored</p></div>
+          <span class="settings-section-lock"><i data-lucide="lock" aria-hidden="true"></i> read-only</span>
+        </header>
+        <div class="settings-section-body">
+          <div class="config-db" id="cfg-database"></div>
+          <p class="setting-help">Changing the database needs a viewer restart — edit it with <code class="mono">cartograph admin</code>.</p>
+        </div>
+      </section>
+    </form>
+
+    <div class="config-actionbar" id="cfg-actions">
+      <div class="config-actionbar-status">
+        <span class="config-dirty" id="cfg-dirty" hidden><span class="config-dirty-dot"></span> Unsaved changes</span>
+        <div class="config-apply" id="cfg-apply" hidden></div>
+      </div>
+      <div class="config-actionbar-buttons">
+        <button type="button" class="cg-btn ghost" id="cfg-reset" data-tooltip="Discard unsaved edits">Revert</button>
+        <button type="button" class="cg-btn primary" id="cfg-save"><i data-lucide="save" aria-hidden="true"></i> Save changes</button>
+      </div>
+    </div>
+
+    <div class="config-progress" id="cfg-progress" hidden>
+      <div class="config-progress-head">
+        <span id="cfg-progress-phase">Indexing…</span>
+        <span id="cfg-progress-count" class="mono"></span>
+      </div>
+      <div class="config-progress-bar"><span id="cfg-progress-fill"></span></div>
+      <div class="config-progress-file mono" id="cfg-progress-file"></div>
+    </div>
+  </div>
+</section>
   </div>
 </section>
 
@@ -517,83 +665,6 @@
   </div>
 </section>
 
-<!-- Config view (toggled) -->
-<section id="config-view" class="config-view">
-  <div class="config-shell">
-    <header class="config-head">
-      <div>
-        <div class="health-kicker">Project configuration</div>
-        <h2 class="config-title">Index configuration</h2>
-        <p class="config-sub">Edit <code class="mono">.cartograph/config.json</code> and re-index without leaving the viewer.</p>
-      </div>
-      <span class="config-readonly-badge" id="cfg-readonly-badge" hidden>Read-only</span>
-    </header>
-
-    <div class="config-banner" id="cfg-banner" hidden></div>
-
-    <form id="cfg-form" class="config-grid" autocomplete="off">
-      <section class="health-card config-card config-card-wide">
-        <header class="health-card-head"><h3>Scope</h3><span class="health-card-aside">what gets indexed</span></header>
-        <div class="config-card-body">
-          <label class="config-field">
-            <span class="config-label">Include globs <em>one per line</em></span>
-            <textarea id="cfg-include" class="config-textarea mono" rows="6" spellcheck="false"></textarea>
-            <p class="config-hint">Built-in language globs are always indexed — deleting them here has no effect; add project-specific globs only.</p>
-          </label>
-          <label class="config-field">
-            <span class="config-label">Exclude globs <em>one per line</em></span>
-            <textarea id="cfg-exclude" class="config-textarea mono" rows="8" spellcheck="false"></textarea>
-          </label>
-        </div>
-      </section>
-
-      <section class="health-card config-card">
-        <header class="health-card-head"><h3>Limits &amp; features</h3></header>
-        <div class="config-card-body">
-          <label class="config-field config-field-inline">
-            <span class="config-label">Max file size <em id="cfg-maxsize-hint"></em></span>
-            <span class="config-num-wrap">
-              <input id="cfg-maxfilesize" class="config-input mono" type="number" min="1" step="0.5" inputmode="decimal" />
-              <span class="config-unit">MB</span>
-            </span>
-          </label>
-          <label class="config-toggle">
-            <input id="cfg-enableBiomarkers" type="checkbox" />
-            <span><b>Biomarkers</b><em>static code-health analysis</em></span>
-          </label>
-          <label class="config-toggle">
-            <input id="cfg-enableCoChange" type="checkbox" />
-            <span><b>Co-change edges</b><em>git-history coupling between files</em></span>
-          </label>
-        </div>
-      </section>
-
-      <section class="health-card config-card">
-        <header class="health-card-head"><h3>Database</h3><span class="health-card-aside">read-only</span></header>
-        <div class="config-card-body">
-          <div class="config-db" id="cfg-database"></div>
-          <p class="config-hint">Changing the database needs a viewer restart — edit it with <code class="mono">cartograph admin</code>.</p>
-        </div>
-      </section>
-    </form>
-
-    <div class="config-actions" id="cfg-actions">
-      <button type="button" class="config-btn primary" id="cfg-save">Save config</button>
-      <button type="button" class="config-btn" id="cfg-reset" data-tooltip="Discard unsaved edits">Revert</button>
-      <div class="config-apply" id="cfg-apply" hidden></div>
-    </div>
-
-    <div class="config-progress" id="cfg-progress" hidden>
-      <div class="config-progress-head">
-        <span id="cfg-progress-phase">Indexing…</span>
-        <span id="cfg-progress-count" class="mono"></span>
-      </div>
-      <div class="config-progress-bar"><span id="cfg-progress-fill"></span></div>
-      <div class="config-progress-file mono" id="cfg-progress-file"></div>
-    </div>
-  </div>
-</section>
-
 <!-- Command palette (Cmd/Ctrl+K) — quick navigation overlay -->
 <div class="palette-backdrop" id="palette-backdrop" hidden>
   <dialog class="palette" aria-label="Command palette">
@@ -616,6 +687,7 @@
 <script src="viewer.live.app"></script>
 <script src="viewer.health.app"></script>
 <script src="viewer.config.app"></script>
+<script src="viewer.status.app"></script>
 <script src="viewer.source.app"></script>
 <script src="viewer.palette.app"></script>
 <script src="viewer.hash-editor.app"></script>

@@ -118,11 +118,11 @@ MOBILE_MQ.addEventListener?.('change', () => {
 
 /* Keyboard shortcuts. `/` focuses search, `Esc` clears selection,
    `+/-/0` mirror graph zoom, Alt+arrows mirror history, and the
-   `g g` / `g t` / `g l` / `g h` chords (advertised in the command palette)
-   switch tabs. */
+   `g g` / `g t` / `g l` / `g s` chords (advertised in the command palette)
+   switch tabs (`g s` → System; `g h` opens System · Health). */
 let pendingChordKey = null;
 let pendingChordTimer = null;
-const CHORD_TABS = { g: 'graph', t: 'trace', l: 'live', h: 'health' };
+const CHORD_TABS = { g: 'graph', t: 'trace', l: 'live', s: 'system', h: 'health' };
 
 function clearPendingChord() {
   pendingChordKey = null;

@@ -29,7 +29,15 @@ function hashList(raw) {
 }
 
 function activeTabView() {
-  return document.querySelector('.tab.active')?.dataset.view || 'graph';
+  const view = document.querySelector('.tab.active')?.dataset.view || 'graph';
+  // System hosts Overview/Health/Settings sub-views; serialize the active
+  // sub-view so a copied link reopens the same panel (settings ↔ config
+  // keeps pre-merge links working).
+  if (view === 'system' && typeof viewerSystemSubview === 'function') {
+    const sub = viewerSystemSubview();
+    return sub === 'settings' ? 'config' : sub;
+  }
+  return view;
 }
 
 function checkedHashValues(selector, datasetKey) {
@@ -100,7 +108,12 @@ function applyHashStateControls(s) {
     }
     markBreadcrumbScope();
     applyFilters();
-    if (s.tab && ['graph', 'trace', 'live', 'health'].includes(s.tab)) clickTab(s.tab);
+    if (s.tab) {
+      // 'health'/'config' are pre-System-merge tab names; clickTab routes
+      // them (and the sub-view names) to the System tab + right panel.
+      const tab = s.tab === 'config' ? 'settings' : s.tab;
+      if (['graph', 'trace', 'live', 'system', 'overview', 'health', 'settings'].includes(tab)) clickTab(tab);
+    }
   } finally {
     applyingHashState = false;
   }
