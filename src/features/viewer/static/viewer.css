@@ -1923,7 +1923,7 @@
     transition: color .12s, border-color .12s;
   }
   .subtab:hover { color: var(--text); }
-  .subtab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .subtab.active { color: var(--accent); border-bottom-color: var(--accent); }
   .subtab .ct { color: var(--text-dim); margin-left: var(--s-1); font-variant-numeric: tabular-nums; font-size: 12px; }
 
   .subpanel { padding: var(--s-3) var(--s-5) var(--s-5); }
@@ -2231,8 +2231,8 @@
   }
   .trace-side-card {
     border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--bg-1);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
   }
   .trace-side-card h3 {
     margin: 0;
@@ -2989,8 +2989,8 @@
   }
   .live-side-card {
     border: 1px solid var(--line);
-    border-radius: 10px;
-    background: var(--bg-1);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
   }
   .live-side-card h3 {
     margin: 0;
