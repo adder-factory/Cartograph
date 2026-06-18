@@ -6,7 +6,6 @@ document.querySelectorAll('.tab').forEach(t => {
     t.classList.add('active');
     const view = t.dataset.view;
     const stage = document.querySelector('.stage');
-    const health = document.getElementById('health-view');
     // Code panel only makes sense on the Graph tab.
     const colEl = document.getElementById('canvas-col');
     if (view !== 'graph') colEl.classList.remove('with-codepane');
@@ -15,20 +14,20 @@ document.querySelectorAll('.tab').forEach(t => {
     }
     const liveView = document.getElementById('live-view');
     const traceView = document.getElementById('trace-view');
-    const configView = document.getElementById('config-view');
-    health.style.display = view === 'health' ? 'block' : 'none';
+    const systemView = document.getElementById('system-view');
+    // Health + Settings are sub-views of System now; the System sub-nav
+    // (viewer.status.app) owns showing + lazy-loading each panel.
     liveView.style.display = view === 'live' ? 'block' : 'none';
     traceView.style.display = view === 'trace' ? 'block' : 'none';
-    configView.style.display = view === 'config' ? 'block' : 'none';
+    systemView.style.display = view === 'system' ? 'flex' : 'none';
     if (view === 'live') liveFeedActivate();
     else liveFeedDeactivate();
     // A replay stepping its timer while another tab is up would keep
     // mutating rows (and, in file:// mode, re-dimming the graph).
     if (view !== 'trace') stopTraceReplay();
-    if (view === 'health' || view === 'live' || view === 'trace' || view === 'config') {
+    if (view === 'system' || view === 'live' || view === 'trace') {
       stage.style.display = 'none';
-      if (view === 'health' && LIVE_MODE) loadHealthLive();
-      if (view === 'config') loadConfigLive();
+      if (view === 'system') showSystemView();
       if (view === 'trace') {
         if (LIVE_MODE) loadSessionsLive();
         else if (activeStep < 0) activateTraceStep(5); // step 6 (impact) is the most visually interesting

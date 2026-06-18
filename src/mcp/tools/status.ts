@@ -7,6 +7,7 @@ import { getStatsNodesByKindLanguage } from '../../db/queries.js';
 import { getParseCacheStats } from '../../db/queries-parse-cache.js';
 import { classifyChangedFiles, realModifiedCount, type ChangedFiles } from '../../changed-files-classify.js';
 import { shortSha } from '../../git-utils.js';
+import { safeCall } from '../../errors.js';
 import { z } from 'zod';
 import { projectPathField } from './_common-fields.js';
 import { detectModuleFormat, formatModuleFormatLine } from '../../module-format.js';
@@ -462,14 +463,6 @@ function appendFreshness(
       '_For the per-file content-hash list (path-by-path drift, not ' +
         'commit-count), run `cartograph_changed_since`._',
     );
-  }
-}
-
-function safeCall<T>(fn: () => T): T | undefined {
-  try {
-    return fn();
-  } catch {
-    return undefined;
   }
 }
 

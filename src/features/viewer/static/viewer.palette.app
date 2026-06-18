@@ -9,7 +9,10 @@ const ACTIONS = [
   { id: 'tab-graph',  label: 'Switch to Graph tab',  shortcut: 'g g', run: () => clickTab('graph') },
   { id: 'tab-trace',  label: 'Switch to Agent trace tab', shortcut: 'g t', run: () => clickTab('trace') },
   { id: 'tab-live',   label: 'Switch to Live activity tab', shortcut: 'g l', run: () => clickTab('live') },
-  { id: 'tab-health', label: 'Switch to Health tab', shortcut: 'g h', run: () => clickTab('health') },
+  { id: 'tab-system', label: 'Switch to System tab', shortcut: 'g s', run: () => clickTab('system') },
+  { id: 'tab-overview', label: 'System · Overview', run: () => clickTab('overview') },
+  { id: 'tab-health', label: 'System · Health', run: () => clickTab('health') },
+  { id: 'tab-settings', label: 'System · Settings', run: () => clickTab('config') },
   { id: 'fit',        label: 'Fit graph to viewport', shortcut: '0',   run: fitGraph },
   { id: 'zoom-in',    label: 'Zoom in',  shortcut: '+', run: () => zoomBy(1.25) },
   { id: 'zoom-out',   label: 'Zoom out', shortcut: '-', run: () => zoomBy(0.8) },
@@ -38,6 +41,24 @@ function pushRecent(symbol) {
 }
 
 function clickTab(view) {
+  // Health + Settings are sub-views of the System tab now; route the
+  // legacy/sub-view names there so palette actions, chords, and old links
+  // resolve. Real top-level tabs (graph/trace/live/system) fall through.
+  const subviews = { overview: 'overview', health: 'health', config: 'settings', settings: 'settings' };
+  if (Object.prototype.hasOwnProperty.call(subviews, view)) {
+    const sub = subviews[view];
+    const systemTab = document.querySelector('.tab[data-view="system"]');
+    if (systemTab?.classList.contains('active')) {
+      // Already on System — just switch the sub-view (single load).
+      if (typeof setSystemSubview === 'function') setSystemSubview(sub);
+    } else {
+      // Arm the target so the tab's showSystemView() opens it directly,
+      // then activate System — no redundant Overview fetch.
+      if (typeof armSystemSubview === 'function') armSystemSubview(sub);
+      systemTab?.click();
+    }
+    return;
+  }
   document.querySelector(`.tab[data-view="${view}"]`)?.click();
 }
 

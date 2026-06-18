@@ -2552,10 +2552,12 @@ async function assertFindingsInteraction(page: Page): Promise<void> {
 }
 
 async function assertHealthView(page: Page): Promise<void> {
-  await page.locator('[data-view="health"]').click();
+  await page.locator('.tab[data-view="system"]').click();
+  await page.locator('#system-subnav .system-subtab[data-subview="health"]').click();
   await page.waitForFunction(
     () =>
-      document.querySelector<HTMLElement>('#health-view')?.style.display === 'block' &&
+      document.querySelector<HTMLElement>('#system-view')?.style.display !== 'none' &&
+      document.querySelector<HTMLElement>('#health-view')?.hidden === false &&
       document.querySelector<HTMLElement>('#health-view')?.dataset.loaded === '1',
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },

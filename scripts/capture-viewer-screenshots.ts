@@ -88,7 +88,8 @@ try {
   // 3. Project health — findings, hotspots, coverage. Park the mouse
   // mid-canvas after every tab click so the tab tooltip isn't baked
   // into the shot.
-  await page.locator('.tab[data-view="health"]').click();
+  await page.locator('.tab[data-view="system"]').click();
+  await page.locator('#system-subnav .system-subtab[data-subview="health"]').click();
   await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
   await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
   await shoot(page, 'viewer-health.png');
