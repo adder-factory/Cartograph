@@ -736,15 +736,27 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
         resultSummary: 'ok',
         durationMs: 3,
       });
+      // Relative/alias projectPath ("."): unresolvable at render time, so
+      // kept (falls back to the session scope) rather than hidden.
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 4,
+        ts: t0 + 13,
+        toolName: 'cartograph_status',
+        argsJson: JSON.stringify({ projectPath: '.' }),
+        resultSummary: 'ok',
+        durationMs: 1,
+      });
 
       const res = await apiFetch(handle, 'api/live/calls');
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
         calls: Array<{ sessionId: string; step: number; tool: string; args: unknown; project: string | null }>;
       };
-      // Step 2 (cross-project) is excluded; steps 1 (own) and 3 (explicit
-      // same-project) are kept, both with a null project chip.
-      expect(body.calls.map((c) => c.step)).toEqual([1, 3]);
+      // Step 2 (absolute cross-project) is excluded; steps 1 (own), 3
+      // (explicit same-project) and 4 (relative alias) are kept, all with a
+      // null project chip.
+      expect(body.calls.map((c) => c.step)).toEqual([1, 3, 4]);
       expect(body.calls.every((c) => c.project === null)).toBe(true);
       expect(body.calls[0]!.sessionId).toBe(sid);
       expect(body.calls[0]!.tool).toBe('cartograph_find');
@@ -753,7 +765,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       // sinceTs after step 1: the cross-project step 2 stays excluded; step 3 shows.
       const since = await apiFetch(handle, `api/live/calls?sinceTs=${t0 + 1}`);
       const sinceBody = (await since.json()) as { calls: Array<{ step: number }> };
-      expect(sinceBody.calls.map((c) => c.step)).toEqual([3]);
+      expect(sinceBody.calls.map((c) => c.step)).toEqual([3, 4]);
     } finally {
       deleteSession(qb, sid);
       conn.close();
