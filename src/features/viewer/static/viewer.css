@@ -3874,4 +3874,4 @@
     border: 1px solid var(--line); background: var(--bg-1);
     color: var(--text-dim); font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
   }
-  .overview-version[hidden] { display: none; }
+  .overview-version[hidden], .overview-sync[hidden] { display: none; }

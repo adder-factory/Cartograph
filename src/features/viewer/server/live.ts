@@ -78,17 +78,28 @@ function visibleLiveCalls(ctx: RequestContext, rows: ToolCallRow[]): LiveCallPay
   return out;
 }
 
+/** Over-fetch factor for the live feed. Cross-project rows are dropped
+ *  AFTER the query (the SQL can't safely parse args_json), so pulling
+ *  only `limit` rows would let a foreign-heavy window under-fill the
+ *  batch. Fetch this many times the requested count, then trim. */
+const LIVE_PROJECT_OVERFETCH = 4;
+
 /** GET /api/live/calls — JSON polling fallback for the SSE stream. */
 export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null, limitRaw: string | null): unknown {
   const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
   const sinceTs = sinceTsRaw === null ? null : Number.parseInt(sinceTsRaw, 10);
   const scoped = resolveScopedSessionId(ctx);
   const projectRoot = viewerProjectRootParam(ctx);
-  const rows =
-    sinceTs !== null && Number.isFinite(sinceTs)
-      ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped, projectRoot })
-      : latestToolCalls(ctx.queries, { limit, sessionId: scoped, projectRoot });
-  return { calls: visibleLiveCalls(ctx, rows) };
+  const since = sinceTs !== null && Number.isFinite(sinceTs);
+  const fetchLimit = limit * LIVE_PROJECT_OVERFETCH;
+  const rows = since
+    ? toolCallsSince(ctx.queries, { sinceTs, limit: fetchLimit, sessionId: scoped, projectRoot })
+    : latestToolCalls(ctx.queries, { limit: fetchLimit, sessionId: scoped, projectRoot });
+  // latestToolCalls is oldest-first (most recent last) → keep the most
+  // recent `limit`; toolCallsSince is oldest-first from the cursor → keep
+  // the first `limit`.
+  const visible = visibleLiveCalls(ctx, rows);
+  return { calls: since ? visible.slice(0, limit) : visible.slice(-limit) };
 }
 
 function callKey(row: ToolCallRow): string {

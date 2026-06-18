@@ -760,6 +760,36 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     }
   });
 
+  it('serves the live feed even with a malformed args_json row', async () => {
+    const conn = DatabaseConnection.open(getDatabasePath(testDir));
+    const qb = new QueryBuilder(conn.getDb());
+    const sid = 'malformed-args-session';
+    try {
+      insertSession({ qb, id: sid, startedTs: Date.now(), projectRoot: testDir });
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 1,
+        ts: Date.now(),
+        toolName: 'cartograph_find',
+        argsJson: '{not valid json', // older binaries left rows like this
+        resultSummary: 'ok',
+        durationMs: 2,
+      });
+      // The project filter parses args in JS (safeParseJson), not SQL
+      // (json_extract throws on malformed JSON and would 500 the feed).
+      const res = await apiFetch(handle, 'api/live/calls');
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { calls: Array<{ sessionId: string; project: string | null }> };
+      const mine = body.calls.find((c) => c.sessionId === sid);
+      // Unattributable args → kept (not treated as cross-project), no chip.
+      expect(mine).toBeDefined();
+      expect(mine?.project).toBeNull();
+    } finally {
+      deleteSession(qb, sid);
+      conn.close();
+    }
+  });
+
   it('streams new tool calls over /api/live/stream (SSE)', async () => {
     const ctrl = new AbortController();
     const res = await apiFetch(handle, 'api/live/stream', { signal: ctrl.signal });
