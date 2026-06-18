@@ -4,6 +4,7 @@
  * session exists — the instance shows nothing until that session
  * makes its first tool call, then locks onto it.
  */
+import * as path from 'node:path';
 import { findSessionByLabel, getSessionById } from '../../../db/queries-trace.js';
 import type { RequestContext } from './context.js';
 
@@ -45,4 +46,33 @@ export function viewerProjectRootParam(ctx: RequestContext): string {
 export function sessionBelongsToProject(ctx: RequestContext, projectRoot: string | null | undefined): boolean {
   if (!projectRoot) return true;
   return stripTrailingSlashes(projectRoot) === viewerProjectRootParam(ctx);
+}
+
+/** Normalize a path for cross-project comparison: unify separators and
+ *  strip trailing slashes, and fold case on Windows (case-insensitive
+ *  filesystem) — never on POSIX, where lowercasing would over-match. */
+function normalizePathForCompare(p: string): string {
+  const slashed = stripTrailingSlashes(p.replaceAll('\\', '/'));
+  return process.platform === 'win32' ? slashed.toLowerCase() : slashed;
+}
+
+/**
+ * A recorded call targets THIS viewer's project when it carries no
+ * `projectPath` override (it ran against the session's own project,
+ * already scoped by the SQL filter) or that override resolves to this
+ * very project. A call that overrode to a DIFFERENT project is a
+ * cross-project call — it operated elsewhere and must not surface here,
+ * even though the issuing session is rooted in this project.
+ *
+ * Only an ABSOLUTE override is confidently cross-project: a relative or
+ * alias path (".", a subdirectory) can't be resolved to a root at render
+ * time, so it falls back to the session scope (the live query already
+ * bound the session to this project) and is kept rather than risk hiding
+ * own-project work. A symlinked absolute path that resolves here but
+ * spells differently can still be hidden — benign: this comparison only
+ * ever hides an own-project call, it never leaks a foreign one.
+ */
+export function callTargetsViewerProject(ctx: RequestContext, callProjectPath: string | null): boolean {
+  if (!callProjectPath || !path.isAbsolute(callProjectPath)) return true;
+  return normalizePathForCompare(callProjectPath) === normalizePathForCompare(ctx.projectPath);
 }

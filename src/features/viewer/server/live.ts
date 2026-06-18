@@ -24,7 +24,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { clampInt, safeParseJson, writeSseEvent } from './http.js';
-import { resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
+import { callTargetsViewerProject, resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
 
 interface LiveCallPayload {
   readonly sessionId: string;
@@ -60,17 +60,46 @@ export function serializeLiveCall(row: ToolCallRow): LiveCallPayload {
   };
 }
 
+/**
+ * Serialize a batch for display, scoped to the viewer's project: drop
+ * cross-project calls (a `projectPath` override that targets a DIFFERENT
+ * project — they operated elsewhere and must not leak into this feed),
+ * and clear the now-redundant project chip on explicit same-project calls.
+ * The SQL already scopes by session root; this scopes by the call's
+ * effective target, which the session root can't capture.
+ */
+function visibleLiveCalls(ctx: RequestContext, rows: ToolCallRow[]): LiveCallPayload[] {
+  const out: LiveCallPayload[] = [];
+  for (const row of rows) {
+    const call = serializeLiveCall(row);
+    if (!callTargetsViewerProject(ctx, call.project)) continue;
+    out.push(call.project ? { ...call, project: null } : call);
+  }
+  return out;
+}
+
+/** Over-fetch factor for the live feed. Cross-project rows are dropped
+ *  AFTER the query (the SQL can't safely parse args_json), so pulling
+ *  only `limit` rows would let a foreign-heavy window under-fill the
+ *  batch. Fetch this many times the requested count, then trim. */
+const LIVE_PROJECT_OVERFETCH = 4;
+
 /** GET /api/live/calls — JSON polling fallback for the SSE stream. */
 export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null, limitRaw: string | null): unknown {
   const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
   const sinceTs = sinceTsRaw === null ? null : Number.parseInt(sinceTsRaw, 10);
   const scoped = resolveScopedSessionId(ctx);
   const projectRoot = viewerProjectRootParam(ctx);
-  const rows =
-    sinceTs !== null && Number.isFinite(sinceTs)
-      ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped, projectRoot })
-      : latestToolCalls(ctx.queries, { limit, sessionId: scoped, projectRoot });
-  return { calls: rows.map(serializeLiveCall) };
+  const since = sinceTs !== null && Number.isFinite(sinceTs);
+  const fetchLimit = limit * LIVE_PROJECT_OVERFETCH;
+  const rows = since
+    ? toolCallsSince(ctx.queries, { sinceTs, limit: fetchLimit, sessionId: scoped, projectRoot })
+    : latestToolCalls(ctx.queries, { limit: fetchLimit, sessionId: scoped, projectRoot });
+  // latestToolCalls is oldest-first (most recent last) → keep the most
+  // recent `limit`; toolCallsSince is oldest-first from the cursor → keep
+  // the first `limit`.
+  const visible = visibleLiveCalls(ctx, rows);
+  return { calls: since ? visible.slice(0, limit) : visible.slice(-limit) };
 }
 
 function callKey(row: ToolCallRow): string {
@@ -105,7 +134,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     res.end();
     return;
   }
-  writeSseEvent(res, 'backlog', { calls: backlog.map(serializeLiveCall) });
+  writeSseEvent(res, 'backlog', { calls: visibleLiveCalls(ctx, backlog) });
 
   let cursorTs = backlog.length > 0 ? backlog.at(-1)!.ts : 0;
   let seenAtCursor = new Set(backlog.filter((row) => row.ts === cursorTs).map(callKey));
@@ -141,7 +170,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     }
     cursorTs = lastTs;
     seenAtCursor = seen;
-    for (const row of fresh) writeSseEvent(res, 'call', serializeLiveCall(row));
+    for (const call of visibleLiveCalls(ctx, fresh)) writeSseEvent(res, 'call', call);
   }, LIVE_POLL_INTERVAL_MS);
 
   const heartbeatTimer = setInterval(() => {

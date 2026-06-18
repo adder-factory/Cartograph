@@ -227,10 +227,14 @@ const callsForSessionQuery = defineQuery({
 
 /* The live-feed queries join mcp_sessions so a viewer never streams
    calls from a session recorded against a DIFFERENT project root
-   (legacy NULL roots pass — they predate the stamp). The INNER JOIN
-   also drops calls whose session row is missing — such orphans cannot
-   arise under the pruneToolCalls/deleteSession flow, and suppressing
-   them is the right call if they ever do. */
+   (legacy NULL roots pass — they predate the stamp). Cross-project calls
+   (a `projectPath` arg overriding to another root) are filtered out in
+   JS (`visibleLiveCalls`), not here: `json_extract` on `args_json`
+   throws on the malformed-JSON rows older binaries left behind, which
+   would crash the whole feed — and `json_valid` isn't Postgres-portable.
+   The INNER JOIN also drops calls whose session row is missing — such
+   orphans cannot arise under the pruneToolCalls/deleteSession flow, and
+   suppressing them is the right call if they ever do. */
 const latestToolCallsQuery = defineQuery({
   sql:
     `SELECT c.session_id, c.step, c.ts, c.tool_name, c.args_json, c.result_summary, c.duration_ms ` +
