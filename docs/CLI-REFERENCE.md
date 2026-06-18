@@ -29,7 +29,7 @@ cartograph status [path] --json    # automation shape: version, index path,
                                    # last indexed timestamp, counts, rollups
 cartograph host --mode diagnostics # MCP profile/tool and installer target signals
 cartograph host --mode discover    # find .cartograph indexes under a parent path
-cartograph viewer [path]           # local graph viewer (graph / agent trace / live / health)
+cartograph viewer [path]           # local graph viewer (graph / agent trace / live / system)
 cartograph viewer --session <id>   # viewer scoped to one MCP session (one window per agent)
 cartograph serve --mcp             # MCP server over stdio
 cartograph mcp-budget              # MCP startup payload measurement

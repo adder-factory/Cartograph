@@ -25,7 +25,7 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
   const { program, resolveProjectPath, isInitialized, error, info, loadViewerServer } = deps;
   program
     .command('viewer [path]')
-    .description('Open the local web viewer (graph visualization, impact tools, health) for the indexed graph')
+    .description('Open the local web viewer (graph visualization, impact tools, system overview) for the indexed graph')
     .option('-p, --port <n>', `HTTP port (default 8765; pass 0 for an OS-picked port)`)
     .option('--no-open', 'Do not auto-open the URL in a browser')
     .option(

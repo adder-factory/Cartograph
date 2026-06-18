@@ -94,6 +94,14 @@ try {
   await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
   await shoot(page, 'viewer-health.png');
 
+  // 3b. System overview — the status page: project counts, feature-
+  // readiness meters, and LLM backend reachability, sourced from
+  // /api/system.
+  await page.locator('#system-subnav .system-subtab[data-subview="overview"]').click();
+  await page.mouse.move(VIEWPORT.width / 2, VIEWPORT.height / 2);
+  await page.waitForTimeout(VIEW_SWITCH_SETTLE_MS);
+  await shoot(page, 'viewer-system.png');
+
   // 4. Agent trace — full-page timeline over a recorded session, with
   // a step selected so the detail card (args + graph-link chips) is
   // populated. Needs recorded MCP sessions in the index; skipped with
