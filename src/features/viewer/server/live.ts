@@ -24,7 +24,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { clampInt, safeParseJson, writeSseEvent } from './http.js';
-import { resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
+import { callTargetsViewerProject, resolveScopedSessionId, viewerProjectRootParam } from './session-scope.js';
 
 interface LiveCallPayload {
   readonly sessionId: string;
@@ -60,6 +60,24 @@ export function serializeLiveCall(row: ToolCallRow): LiveCallPayload {
   };
 }
 
+/**
+ * Serialize a batch for display, scoped to the viewer's project: drop
+ * cross-project calls (a `projectPath` override that targets a DIFFERENT
+ * project — they operated elsewhere and must not leak into this feed),
+ * and clear the now-redundant project chip on explicit same-project calls.
+ * The SQL already scopes by session root; this scopes by the call's
+ * effective target, which the session root can't capture.
+ */
+function visibleLiveCalls(ctx: RequestContext, rows: ToolCallRow[]): LiveCallPayload[] {
+  const out: LiveCallPayload[] = [];
+  for (const row of rows) {
+    const call = serializeLiveCall(row);
+    if (!callTargetsViewerProject(ctx, call.project)) continue;
+    out.push(call.project ? { ...call, project: null } : call);
+  }
+  return out;
+}
+
 /** GET /api/live/calls — JSON polling fallback for the SSE stream. */
 export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null, limitRaw: string | null): unknown {
   const limit = clampInt(limitRaw, LIVE_BACKLOG_LIMIT);
@@ -70,7 +88,7 @@ export function liveCallsPayload(ctx: RequestContext, sinceTsRaw: string | null,
     sinceTs !== null && Number.isFinite(sinceTs)
       ? toolCallsSince(ctx.queries, { sinceTs, limit, sessionId: scoped, projectRoot })
       : latestToolCalls(ctx.queries, { limit, sessionId: scoped, projectRoot });
-  return { calls: rows.map(serializeLiveCall) };
+  return { calls: visibleLiveCalls(ctx, rows) };
 }
 
 function callKey(row: ToolCallRow): string {
@@ -105,7 +123,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     res.end();
     return;
   }
-  writeSseEvent(res, 'backlog', { calls: backlog.map(serializeLiveCall) });
+  writeSseEvent(res, 'backlog', { calls: visibleLiveCalls(ctx, backlog) });
 
   let cursorTs = backlog.length > 0 ? backlog.at(-1)!.ts : 0;
   let seenAtCursor = new Set(backlog.filter((row) => row.ts === cursorTs).map(callKey));
@@ -141,7 +159,7 @@ export function handleLiveStream(req: http.IncomingMessage, res: http.ServerResp
     }
     cursorTs = lastTs;
     seenAtCursor = seen;
-    for (const row of fresh) writeSseEvent(res, 'call', serializeLiveCall(row));
+    for (const call of visibleLiveCalls(ctx, fresh)) writeSseEvent(res, 'call', call);
   }, LIVE_POLL_INTERVAL_MS);
 
   const heartbeatTimer = setInterval(() => {

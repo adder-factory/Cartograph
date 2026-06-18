@@ -715,6 +715,8 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
         resultSummary: 'ok',
         durationMs: 12,
       });
+      // Cross-project call: a projectPath override to ANOTHER project. It
+      // operated elsewhere, so it must not leak into this project's feed.
       appendToolCall(qb, {
         sessionId: sid,
         step: 2,
@@ -724,22 +726,34 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
         resultSummary: 'ok',
         durationMs: 7,
       });
+      // Explicit SAME-project override: kept, but the redundant chip cleared.
+      appendToolCall(qb, {
+        sessionId: sid,
+        step: 3,
+        ts: t0 + 9,
+        toolName: 'cartograph_node',
+        argsJson: JSON.stringify({ projectPath: testDir, id: 'x' }),
+        resultSummary: 'ok',
+        durationMs: 3,
+      });
 
       const res = await apiFetch(handle, 'api/live/calls');
       expect(res.status).toBe(200);
       const body = (await res.json()) as {
         calls: Array<{ sessionId: string; step: number; tool: string; args: unknown; project: string | null }>;
       };
-      expect(body.calls.map((c) => c.step)).toEqual([1, 2]);
-      expect(body.calls[0]!.project).toBeNull();
-      expect(body.calls[1]!.project).toBe('/elsewhere/project');
+      // Step 2 (cross-project) is excluded; steps 1 (own) and 3 (explicit
+      // same-project) are kept, both with a null project chip.
+      expect(body.calls.map((c) => c.step)).toEqual([1, 3]);
+      expect(body.calls.every((c) => c.project === null)).toBe(true);
       expect(body.calls[0]!.sessionId).toBe(sid);
       expect(body.calls[0]!.tool).toBe('cartograph_find');
       expect(body.calls[0]!.args).toEqual({ by: 'symbol', query: 'compute' });
 
+      // sinceTs after step 1: the cross-project step 2 stays excluded; step 3 shows.
       const since = await apiFetch(handle, `api/live/calls?sinceTs=${t0 + 1}`);
       const sinceBody = (await since.json()) as { calls: Array<{ step: number }> };
-      expect(sinceBody.calls.map((c) => c.step)).toEqual([2]);
+      expect(sinceBody.calls.map((c) => c.step)).toEqual([3]);
     } finally {
       deleteSession(qb, sid);
       conn.close();

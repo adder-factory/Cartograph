@@ -46,3 +46,17 @@ export function sessionBelongsToProject(ctx: RequestContext, projectRoot: string
   if (!projectRoot) return true;
   return stripTrailingSlashes(projectRoot) === viewerProjectRootParam(ctx);
 }
+
+/**
+ * A recorded call targets THIS viewer's project when it carries no
+ * `projectPath` override (it ran against the session's own project,
+ * already scoped by the SQL filter) or that override resolves to this
+ * very project. A call that overrode to a DIFFERENT project is a
+ * cross-project call — it operated on another project and must not
+ * surface in this project's live feed, even though the session that
+ * issued it is rooted here.
+ */
+export function callTargetsViewerProject(ctx: RequestContext, callProjectPath: string | null): boolean {
+  if (!callProjectPath) return true;
+  return stripTrailingSlashes(callProjectPath) === viewerProjectRootParam(ctx);
+}
