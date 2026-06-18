@@ -3845,3 +3845,22 @@
     .ov-meter-track { grid-column: 1 / -1; order: 3; min-width: 0; }
     .ov-llm-endpoint { display: none; }
   }
+
+  /* ═══════════ Refresh polish: consistent focus rings + states ═══════════
+     Keyboard focus was invisible on several controls; unify it with the
+     --ring token and align active states to the System sub-nav's accent
+     treatment for a cohesive feel across the viewer. */
+  .tab:focus-visible,
+  .mode-toggle:focus-visible,
+  .btn:focus-visible,
+  .navbtn:focus-visible,
+  .palette-item:focus-visible,
+  .kind-chip:focus-visible,
+  .session-picker:focus-visible,
+  .view-filter:focus-visible { outline: none; box-shadow: var(--ring); }
+  .btn:focus-visible { border-color: var(--accent); }
+  /* Active top-bar tab reads with the accent like the System sub-nav. */
+  .tab.active { color: var(--accent); }
+  /* Clearer keyboard-selected row in the command palette. */
+  .palette-item.active { box-shadow: inset 2px 0 0 var(--accent); }
+  .palette input:focus-visible { box-shadow: inset 0 -1px 0 var(--accent); }
