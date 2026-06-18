@@ -136,14 +136,19 @@ function readModuleFormat(): string | null {
 }
 
 /** Whether cartograph's on-disk `package.json` declares `type: module`;
- *  null/false when the asset is unreadable or not an ES module. */
+ *  null/false when the asset is unreadable or not an ES module. The value
+ *  is static for the process lifetime, so cache it — `/api/system` must
+ *  not stat + parse package.json on every request. */
+let cachedIsEsm: boolean | undefined;
 function packageIsEsm(): boolean {
+  if (cachedIsEsm !== undefined) return cachedIsEsm;
   try {
     const raw = fs.readFileSync(resolveAssetPath('package.json'), 'utf-8');
-    return (JSON.parse(raw) as { type?: unknown }).type === 'module';
+    cachedIsEsm = (JSON.parse(raw) as { type?: unknown }).type === 'module';
   } catch {
-    return false;
+    cachedIsEsm = false;
   }
+  return cachedIsEsm;
 }
 
 function readDbSize(cg: Cartograph): number | null {
@@ -328,10 +333,19 @@ function buildTier(args: BuildTierArgs): SystemLlmTier {
 }
 
 /** Probe each distinct openai-compat endpoint at `<base>/v1/models`
- *  with a short timeout, mirroring `status-llm.ts`. */
+ *  with a short timeout, mirroring `status-llm.ts`. The result is cached
+ *  for a short TTL so opening the Overview repeatedly does not block on
+ *  (or spam) the backends — each probe can cost up to the full timeout. */
+let cachedReachMap: Map<string, boolean> | undefined;
+let lastProbeTimeMs = 0;
+const REACHABILITY_CACHE_TTL_MS = 15_000;
 async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string, boolean>> {
   const endpoints = collectOpenAiCompatEndpoints(llmCfg);
   if (endpoints.length === 0) return new Map();
+  const now = Date.now();
+  if (cachedReachMap && now - lastProbeTimeMs < REACHABILITY_CACHE_TTL_MS) {
+    return cachedReachMap;
+  }
   const probes = await Promise.all(
     endpoints.map(async (url) => {
       const controller = new AbortController();
@@ -347,7 +361,9 @@ async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string,
       }
     }),
   );
-  return new Map(probes);
+  cachedReachMap = new Map(probes);
+  lastProbeTimeMs = now;
+  return cachedReachMap;
 }
 
 function collectOpenAiCompatEndpoints(llmCfg: LlmEndpointConfig): string[] {

@@ -43,8 +43,8 @@ for (const btn of document.querySelectorAll('#system-subnav .system-subtab')) {
 /* ── Overview (status) ── */
 
 function ovBytes(n) {
-  const bytes = Number(n || 0);
-  if (bytes <= 0) return '—';
+  const bytes = Number(n);
+  if (Number.isNaN(bytes) || bytes <= 0) return '—';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0;
   let v = bytes;
@@ -199,7 +199,12 @@ function ovReadinessRow(def, d) {
 function renderOvLlm(system) {
   const el = document.getElementById('ov-llm');
   if (!el) return;
-  const llm = system && system.llm;
+  if (!system) {
+    el.innerHTML = '<div class="overview-empty">LLM status unavailable.</div>';
+    setOvAside('ov-llm-aside', '', null);
+    return;
+  }
+  const llm = system.llm;
   if (!llm || !llm.configured) {
     el.innerHTML =
       '<div class="overview-empty">No LLM configured. Run <code class="mono">cartograph llm setup</code> to enable summaries, ask, and semantic search.</div>';
