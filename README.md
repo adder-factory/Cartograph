@@ -29,7 +29,7 @@ local, on your machine.
 [Languages &amp; storage](#languages-and-storage) ·
 [Docs](#documentation)
 
-<img src="docs/assets/viewer-tour.webp" alt="Cartograph viewer tour cycling through a focused symbol with detail pane and source, the project overview graph, the agent-trace timeline, the live tool-call feed, and the health dashboard" width="900">
+<img src="docs/assets/viewer-tour.webp" alt="Cartograph viewer tour cycling through a focused symbol graph with detail pane, the System overview with readiness meters and LLM backend status, the health dashboard, the agent-trace timeline, and the live tool-call feed" width="900">
 
 <sub>Auto-cycling tour: symbol focus → project graph → agent trace → live feed → health. Stills in the gallery below.</sub>
 
