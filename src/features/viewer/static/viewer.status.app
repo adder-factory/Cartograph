@@ -217,8 +217,16 @@ function renderOvLlm(system) {
     setOvAside('ov-llm-aside', '', null);
     return;
   }
-  const anyDown = tiers.some((t) => t.reachable === false);
-  setOvAside('ov-llm-aside', anyDown ? 'some backends offline' : 'all reachable', anyDown ? 'err' : 'ok');
+  // Only claim "all reachable" when at least one tier was actually probed;
+  // cloud/non-HTTP tiers report reachable:null and must not read as green.
+  const probed = tiers.filter((t) => t.reachable === true || t.reachable === false);
+  if (probed.length === 0) {
+    setOvAside('ov-llm-aside', 'not probed', null);
+  } else if (probed.some((t) => t.reachable === false)) {
+    setOvAside('ov-llm-aside', 'some backends offline', 'err');
+  } else {
+    setOvAside('ov-llm-aside', 'all reachable', 'ok');
+  }
   el.innerHTML = tiers.map(ovLlmRow).join('');
 }
 

@@ -7,21 +7,46 @@
  * repo's own index always has summarizable symbols, so the readiness
  * rollup is non-empty.
  */
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import Cartograph from '../src/index.js';
 import { startViewerServer, type ViewerHandle } from '../src/features/viewer/server/index.js';
 import type { SystemPayload } from '../src/features/viewer/server/system-payload.js';
 
 describe('viewer GET /api/system', () => {
   let handle: ViewerHandle;
+  let testDir: string;
 
   beforeAll(async () => {
-    // process.cwd() is the repo root, which is itself a Cartograph
-    // project (.cartograph/ exists) — boot against its real index.
-    handle = await startViewerServer(process.cwd(), { port: 0 });
+    // Hermetic temp project — the repo's own .cartograph/ is gitignored
+    // and absent in clean checkouts/CI, so don't boot against process.cwd().
+    // The fixture has real functions so the summaries-readiness denominator
+    // is non-empty.
+    testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-viewer-system-'));
+    fs.mkdirSync(path.join(testDir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(testDir, 'src', 'lib.ts'),
+      `
+export function add(a: number, b: number): number { return a + b; }
+export function mul(a: number, b: number): number { return a * b; }
+export function compute(x: number, y: number): number {
+  const a = add(x, y);
+  const b = mul(a, 2);
+  return add(b, x);
+}
+`,
+    );
+    const cg = Cartograph.initSync(testDir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+    await cg.indexAll();
+    cg.close();
+    handle = await startViewerServer(testDir, { port: 0 });
   });
 
   afterAll(async () => {
     await handle.close();
+    fs.rmSync(testDir, { recursive: true, force: true });
   });
 
   it('returns a fully-shaped system overview payload with real data', async () => {
@@ -58,9 +83,9 @@ describe('viewer GET /api/system', () => {
       skippedByFloor: expect.any(Number),
     });
 
-    // LLM section: configured or not, tiers is always an array.
-    expect(body.llm).not.toBeNull();
-    expect(Array.isArray(body.llm?.tiers)).toBe(true);
+    // LLM section: null when the fixture has no LLM configured, else tiers
+    // is an array; each tier's reachable is a tri-state.
+    expect(body.llm === null || Array.isArray(body.llm.tiers)).toBe(true);
     for (const tier of body.llm?.tiers ?? []) {
       expect(typeof tier.tier).toBe('string');
       // reachable is a tri-state: true/false (probed) or null (unprobeable).

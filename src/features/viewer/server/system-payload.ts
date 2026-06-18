@@ -293,11 +293,20 @@ async function buildLlm(cg: Cartograph): Promise<{ configured: boolean; tiers: S
   if (!llmCfg) return { configured: false, tiers: [] };
 
   const reachMap = await probeReachability(llmCfg);
+  // `ask` falls back to the summarize backend when `askLlm` is omitted
+  // (getAskModel mirrors that), so build the row from the effective block —
+  // otherwise the row shows a model with a null provider/endpoint/reach.
   const tiers: SystemLlmTier[] = [
     buildTier({ tier: 'chat', block: llmCfg.summarizeLlm, model: getChatModel(llmCfg), reachMap }),
-    buildTier({ tier: 'ask', block: llmCfg.askLlm, model: getAskModel(llmCfg), reachMap }),
+    buildTier({ tier: 'ask', block: llmCfg.askLlm ?? llmCfg.summarizeLlm, model: getAskModel(llmCfg), reachMap }),
     buildTier({ tier: 'embed', block: llmCfg.embeddingLlm, model: getEmbeddingModel(llmCfg), reachMap }),
   ];
+  // A configured reranker is already probed by collectOpenAiCompatEndpoints,
+  // so it must appear as a tier — otherwise a down reranker is invisible and
+  // the summary still reads "all reachable".
+  if (llmCfg.rerankerLlm) {
+    tiers.push(buildTier({ tier: 'reranker', block: llmCfg.rerankerLlm, model: llmCfg.rerankerLlm.model, reachMap }));
+  }
   return { configured: true, tiers };
 }
 
