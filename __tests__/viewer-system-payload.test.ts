@@ -38,7 +38,16 @@ export function compute(x: number, y: number): number {
 }
 `,
     );
-    const cg = Cartograph.initSync(testDir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+    // A minimal openai-compat LLM config (with an unreachable fixture
+    // endpoint) so `body.llm` is non-null and the tier-shape assertions
+    // below actually execute instead of skipping on a null payload.
+    const cg = Cartograph.initSync(testDir, {
+      config: {
+        include: ['src/**/*.ts'],
+        exclude: [],
+        llm: { summarizeLlm: { provider: 'openai-compat', model: 'test-model', endpoint: 'http://127.0.0.1:9' } },
+      },
+    });
     await cg.indexAll();
     cg.close();
     handle = await startViewerServer(testDir, { port: 0 });
@@ -83,14 +92,23 @@ export function compute(x: number, y: number): number {
       skippedByFloor: expect.any(Number),
     });
 
-    // LLM section: null when the fixture has no LLM configured, else tiers
-    // is an array; each tier's reachable is a tri-state.
-    expect(body.llm === null || Array.isArray(body.llm.tiers)).toBe(true);
+    // LLM section: the fixture configures summarizeLlm, so the section is
+    // present with a non-empty tier list — and the per-tier shape is
+    // genuinely exercised (not vacuously skipped on a null payload).
+    expect(body.llm).not.toBeNull();
+    expect(Array.isArray(body.llm?.tiers)).toBe(true);
+    expect(body.llm?.tiers.length).toBeGreaterThan(0);
     for (const tier of body.llm?.tiers ?? []) {
-      expect(typeof tier.tier).toBe('string');
+      expect(['chat', 'ask', 'embed', 'reranker']).toContain(tier.tier);
+      expect(tier.model === null || typeof tier.model === 'string').toBe(true);
       // reachable is a tri-state: true/false (probed) or null (unprobeable).
       expect([true, false, null]).toContain(tier.reachable);
     }
+    // The configured chat tier resolves the fixture's model, and the
+    // unreachable fixture endpoint probes as offline (false, not null).
+    const chat = body.llm?.tiers.find((t) => t.tier === 'chat');
+    expect(chat?.model).toBe('test-model');
+    expect(chat?.reachable).toBe(false);
   }, 30_000);
 });
 

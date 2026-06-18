@@ -119,7 +119,9 @@ function cfgCaptureBaseline() {
 
 function cfgRefreshDirty() {
   const allow = !!cfgState?.allowConfigEdit;
-  const dirty = cfgBaselineBody !== '' && JSON.stringify(cfgFormToBody()) !== cfgBaselineBody;
+  // Stringify once and reuse (single cfgFormToBody() call per event).
+  const currentBody = JSON.stringify(cfgFormToBody());
+  const dirty = cfgBaselineBody !== '' && currentBody !== cfgBaselineBody;
   const save = cfgEl('cfg-save');
   const reset = cfgEl('cfg-reset');
   const tag = cfgEl('cfg-dirty');

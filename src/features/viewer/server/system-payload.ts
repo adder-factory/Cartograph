@@ -345,15 +345,18 @@ function buildTier(args: BuildTierArgs): SystemLlmTier {
  *  with a short timeout, mirroring `status-llm.ts`. The result is cached
  *  for a short TTL so opening the Overview repeatedly does not block on
  *  (or spam) the backends — each probe can cost up to the full timeout. */
-let cachedReachMap: Map<string, boolean> | undefined;
-let lastProbeTimeMs = 0;
+let cachedReach: { key: string; map: Map<string, boolean>; atMs: number } | undefined;
 const REACHABILITY_CACHE_TTL_MS = 15_000;
 async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string, boolean>> {
   const endpoints = collectOpenAiCompatEndpoints(llmCfg);
   if (endpoints.length === 0) return new Map();
+  // Key the cache by the exact endpoint set so a config change (or a
+  // different project served by the same process) re-probes immediately
+  // instead of returning a stale map; the TTL only bounds same-set reuse.
+  const key = [...endpoints].sort().join('\n');
   const now = Date.now();
-  if (cachedReachMap && now - lastProbeTimeMs < REACHABILITY_CACHE_TTL_MS) {
-    return cachedReachMap;
+  if (cachedReach && cachedReach.key === key && now - cachedReach.atMs < REACHABILITY_CACHE_TTL_MS) {
+    return cachedReach.map;
   }
   const probes = await Promise.all(
     endpoints.map(async (url) => {
@@ -370,9 +373,8 @@ async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string,
       }
     }),
   );
-  cachedReachMap = new Map(probes);
-  lastProbeTimeMs = now;
-  return cachedReachMap;
+  cachedReach = { key, map: new Map(probes), atMs: now };
+  return cachedReach.map;
 }
 
 function collectOpenAiCompatEndpoints(llmCfg: LlmEndpointConfig): string[] {
