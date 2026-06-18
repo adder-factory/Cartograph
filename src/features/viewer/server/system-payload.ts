@@ -353,9 +353,9 @@ async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string,
   // Key the cache by the exact endpoint set so a config change (or a
   // different project served by the same process) re-probes immediately
   // instead of returning a stale map; the TTL only bounds same-set reuse.
-  const key = [...endpoints].sort().join('\n');
+  const key = [...endpoints].sort((a, b) => a.localeCompare(b)).join('\n');
   const now = Date.now();
-  if (cachedReach && cachedReach.key === key && now - cachedReach.atMs < REACHABILITY_CACHE_TTL_MS) {
+  if (cachedReach?.key === key && now - cachedReach.atMs < REACHABILITY_CACHE_TTL_MS) {
     return cachedReach.map;
   }
   const probes = await Promise.all(
