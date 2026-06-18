@@ -3864,3 +3864,14 @@
   /* Clearer keyboard-selected row in the command palette. */
   .palette-item.active { box-shadow: inset 2px 0 0 var(--accent); }
   .palette input:focus-visible { box-shadow: inset 0 -1px 0 var(--accent); }
+
+  /* Overview header: version as a subtle pill beside the sync badge (was a
+     lone "dormant" stat tile that orphaned onto its own grid row). */
+  .overview-head-meta { flex: none; display: flex; align-items: center; gap: var(--s-2); }
+  .overview-version {
+    display: inline-flex; align-items: center;
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--bg-1);
+    color: var(--text-dim); font-size: 11.5px; font-weight: 600; letter-spacing: .02em;
+  }
+  .overview-version[hidden] { display: none; }

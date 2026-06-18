@@ -97,14 +97,23 @@ function renderOverview(status, system) {
     tiles.push(ovTile(ovNum(status.edges), 'Edges'));
     tiles.push(ovTile(String((status.languages || []).length), 'Languages'));
   }
-  if (system) {
-    if (system.dbSizeBytes != null) tiles.push(ovTile(ovBytes(system.dbSizeBytes), 'Database', system.backend || ''));
-    if (system.version) tiles.push(ovTile(`v${system.version}`, 'Version'));
-  }
+  if (system && system.dbSizeBytes != null) tiles.push(ovTile(ovBytes(system.dbSizeBytes), 'Database', system.backend || ''));
   setOvHtml('ov-tiles', tiles.join('') || '<div class="overview-empty">No index stats.</div>');
+  renderOvVersion(system);
   renderOvSync(status, system);
   renderOvReadiness(system);
   renderOvLlm(system);
+}
+
+function renderOvVersion(system) {
+  const el = document.getElementById('ov-version');
+  if (!el) return;
+  if (system && system.version) {
+    el.hidden = false;
+    el.textContent = `v${system.version}`;
+  } else {
+    el.hidden = true;
+  }
 }
 
 function renderOvSync(status, system) {
