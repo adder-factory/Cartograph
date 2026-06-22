@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { Cartograph, FileLock } from '../src/index.js';
 import { getAllFiles } from '../src/db/queries-files.js';
 import { MAX_INDEX_FILE_SIZE } from '../src/default-config.js';
+import { ToolHandler } from '../src/mcp/tools.js';
 
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-lifecycle-'));
@@ -78,6 +79,25 @@ describe('Cartograph lifecycle API', () => {
       await cg.uninitialize();
       expect(fs.existsSync(path.join(dir, '.cartograph'))).toBe(false);
       expect(Cartograph.isInitialized(dir)).toBe(false);
+    } finally {
+      cleanup(dir);
+    }
+  });
+
+  it('treats repeated close through handlers and direct callers as idempotent', async () => {
+    const dir = tempDir();
+    try {
+      writeProject(dir);
+      const cg = Cartograph.initSync(dir, { config: { enableWatcher: false, include: ['src/**/*.ts'] } });
+      const handler = new ToolHandler(cg);
+
+      handler.closeAll();
+      handler.closeAll();
+      cg.close();
+      cg.destroy();
+
+      await cg.uninitialize();
+      expect(fs.existsSync(path.join(dir, '.cartograph'))).toBe(false);
     } finally {
       cleanup(dir);
     }

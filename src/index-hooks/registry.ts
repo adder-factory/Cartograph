@@ -285,7 +285,7 @@ function toError(err: unknown): Error {
  * Invoke a single hook with timing + per-hook timeout + error
  * capture. Returns the outcome record or null when the hook has no
  * handler for this phase. Factored out of {@link runHookPhase} so
- * the grouped-parallel runner can dispatch via `Promise.all`.
+ * concurrent and sequential hook groups share one invocation path.
  */
 async function invokeOneHook(
   hook: IndexHook,
@@ -330,16 +330,16 @@ function writePostHookLog(message: string): void {
 }
 
 /**
- * Shared runner: walk each hook group serially, fanning each
- * group's member hooks out via `Promise.all`. Per-hook timeout +
+ * Shared runner: walk hook groups serially. Each group then runs
+ * according to its `concurrent` flag: Group A can fan out async git
+ * miners via `Promise.all`, while the sync DB-heavy groups run
+ * sequentially for truthful per-hook timings. Per-hook timeout +
  * try/catch wrap each invocation so one bad hook never fails the
  * whole pass, matching the original serial contract.
  *
  * Group ordering is load-bearing (see HOOK_GROUPS diagram). Within
- * a group, declared order is preserved in the returned outcomes —
- * `Promise.all` resolves in input order even when its tasks finish
- * out of order — so test snapshots and diagnostic logs stay
- * stable.
+ * Within a group, declared order is preserved in the returned
+ * outcomes, so test snapshots and diagnostic logs stay stable.
  *
  * `runAfterIndexAll` and `runAfterSync` are the only callers.
  * Keeping them as named entry points preserves every external call

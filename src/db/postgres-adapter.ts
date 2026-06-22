@@ -4,19 +4,15 @@ import * as path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import type { SqliteDatabase, SqliteStatement } from './sqlite-adapter.js';
-import { parsePostgresWorkerJson, parseWorkerResponse, type WorkerResponse } from './postgres-codec.js';
+import {
+  parsePostgresWorkerJson,
+  parseWorkerResponse,
+  type WorkerRequest,
+  type WorkerResponse,
+} from './postgres-codec.js';
 import { POSTGRES_DEFAULT_QUERY_TIMEOUT_MS, postgresSqlOptions, type DatabaseConfig } from './database-config.js';
 
 type PostgresAdapterOptions = DatabaseConfig & { provider: 'postgres' };
-
-interface WorkerRequest {
-  op: 'query' | 'batch' | 'exec' | 'pragma' | 'close';
-  sql?: string;
-  mode?: 'run' | 'get' | 'all';
-  params?: unknown[];
-  paramSets?: unknown[][];
-  pragma?: string;
-}
 
 interface PostgresAdapterState {
   worker: Worker;
@@ -86,12 +82,12 @@ export class PostgresAdapter implements SqliteDatabase {
     this.call({ op: 'exec', sql });
   }
 
-  pragma(str: string): unknown {
-    return this.call({ op: 'pragma', pragma: str }).value;
+  pragma<T = unknown>(str: string): T {
+    return this.call({ op: 'pragma', pragma: str }).value as T;
   }
 
-  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
-    return (...args: unknown[]) => {
+  transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T {
+    return (...args: Args) => {
       const savepoint = `cartograph_sp_${this.state.txDepth}`;
       if (this.state.txDepth === 0) this.exec('BEGIN');
       else this.exec(`SAVEPOINT ${savepoint}`);
@@ -198,18 +194,18 @@ class PostgresStatement implements SqliteStatement {
     };
   }
 
-  get(...params: unknown[]): unknown {
+  get<TRow = unknown>(...params: unknown[]): TRow | null | undefined {
     const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'get', params });
-    return response.rows?.[0] ?? null;
+    return (response.rows?.[0] ?? null) as TRow | null;
   }
 
-  all(...params: unknown[]): unknown[] {
+  all<TRow = unknown>(...params: unknown[]): TRow[] {
     const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'all', params });
-    return response.rows ?? [];
+    return (response.rows ?? []) as TRow[];
   }
 
-  iterate(...params: unknown[]): IterableIterator<unknown> {
-    return this.all(...params)[Symbol.iterator]();
+  iterate<TRow = unknown>(...params: unknown[]): IterableIterator<TRow> {
+    return this.all<TRow>(...params)[Symbol.iterator]();
   }
 }
 

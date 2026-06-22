@@ -56,6 +56,49 @@ describe('admin unlock feature CLI', () => {
       'success:Removed lock file. You can now run indexing again.',
     ]);
   });
+
+  it('sets exitCode instead of hard-exiting when lock removal throws', async () => {
+    let action: ((pathArg: string | undefined) => Promise<void>) | undefined;
+    const calls: string[] = [];
+    const originalExit = process.exit;
+    const originalExitCode = process.exitCode;
+    let exitCalled = false;
+    let observedExitCode: string | number | undefined;
+
+    registerAdminUnlockCommand({
+      adminCmd: fakeCommand((fn) => {
+        action = fn;
+      }),
+      resolveProjectPath: (pathArg) => pathArg ?? '/repo',
+      isInitialized: () => true,
+      getCartographDir: (projectPath) => `${projectPath}/.cartograph`,
+      removeLockFileIfPresent: () => {
+        throw new Error('permission denied');
+      },
+      success: (message) => calls.push(`success:${message}`),
+      info: (message) => calls.push(`info:${message}`),
+      error: (message) => calls.push(`error:${message}`),
+    });
+
+    expect(action).toBeDefined();
+    process.exitCode = 0;
+    process.exit = (code?: string | number | null | undefined): never => {
+      exitCalled = true;
+      throw new Error(`process.exit(${String(code)})`);
+    };
+
+    try {
+      await action!('/repo');
+      observedExitCode = process.exitCode;
+    } finally {
+      process.exit = originalExit;
+      process.exitCode = originalExitCode;
+    }
+
+    expect(exitCalled).toBe(false);
+    expect(observedExitCode).toBe(1);
+    expect(calls).toEqual(['error:Failed to remove lock: permission denied']);
+  });
 });
 
 function fakeCommand(setAction: (fn: (pathArg: string | undefined) => Promise<void>) => void) {

@@ -138,7 +138,8 @@ export async function runFilesCommand(
   try {
     if (!deps.isInitialized(projectPath)) {
       deps.error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const { cg, files: indexedFiles } = await openIndexedFiles(deps, projectPath);
@@ -171,7 +172,7 @@ export async function runFilesCommand(
     }
   } catch (err) {
     deps.error(`Failed to list files: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 

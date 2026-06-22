@@ -1,5 +1,10 @@
 import { workerData } from 'node:worker_threads';
-import { parsePostgresWorkerJson } from './postgres-codec.js';
+import {
+  parsePostgresWorkerInit,
+  parsePostgresWorkerJson,
+  parseWorkerRequest,
+  type WorkerRequest,
+} from './postgres-codec.js';
 import {
   SQL_IDENTIFIER_PATTERN,
   offsetInsideLiteral,
@@ -8,30 +13,14 @@ import {
   stringLiteralSpans,
 } from './postgres-worker-sql.js';
 
-interface WorkerInit {
-  control: SharedArrayBuffer;
-  requestPath: string;
-  responsePath: string;
-  sqlOptions: Bun.SQL.Options;
-  url: string;
-  schema: string;
-}
-
-interface WorkerRequest {
-  op: 'query' | 'batch' | 'exec' | 'pragma' | 'close';
-  sql?: string;
-  mode?: 'run' | 'get' | 'all';
-  params?: unknown[];
-  paramSets?: unknown[][];
-  pragma?: string;
-}
-
 const WORKER_READY = 10;
 const WORKER_REQUEST = 1;
 const WORKER_RESPONSE = 2;
 const SAFE_IDENTIFIER_PATTERN = String.raw`(?:[A-Za-z]|_)\w*`;
 const SAFE_IDENTIFIER_RE = /^(?:[A-Za-z]|_)\w*$/;
 const SQL_PARAMETER_PATTERN = String.raw`[@:$]?(?:[A-Za-z]|_)\w*|\?`;
+
+type QueryRequest = Extract<WorkerRequest, { op: 'query' }>;
 
 const NODE_BATCH_INSERT_SQL = `
   INSERT INTO nodes (
@@ -114,7 +103,7 @@ const EDGE_BATCH_INSERT_SQL = `
   ON CONFLICT DO NOTHING
 `;
 
-const init = workerData as WorkerInit;
+const init = parsePostgresWorkerInit(workerData, 'init');
 const control = new Int32Array(init.control);
 const sql = new Bun.SQL(init.sqlOptions);
 const schemaName = assertSafeIdentifier(init.schema || 'public');
@@ -190,9 +179,10 @@ for (;;) {
   while (Atomics.load(control, 0) !== WORKER_REQUEST) {
     Atomics.wait(control, 0, Atomics.load(control, 0));
   }
-  const request = decodeValue(
-    parsePostgresWorkerJson(await Bun.file(init.requestPath).text(), 'request'),
-  ) as WorkerRequest;
+  const request = parseWorkerRequest(
+    decodeValue(parsePostgresWorkerJson(await Bun.file(init.requestPath).text(), 'request')),
+    'request',
+  );
   const response = await handleRequest(request);
   await Bun.write(init.responsePath, JSON.stringify(encodeValue(response)));
   Atomics.store(control, 0, WORKER_RESPONSE);
@@ -235,14 +225,14 @@ async function handleExecRequest(inputSql: string): Promise<Record<string, unkno
   return { ok: true };
 }
 
-async function handlePragmaQuery(request: WorkerRequest): Promise<Record<string, unknown>> {
+async function handlePragmaQuery(request: QueryRequest): Promise<Record<string, unknown>> {
   const dataRows = await pragmaRows(request.sql ?? '');
   if (request.mode === 'run') return { ok: true, rows: dataRows, changes: 0, lastInsertRowid: 0 };
   if (request.mode === 'get') return { ok: true, rows: dataRows.slice(0, 1) };
   return { ok: true, rows: dataRows };
 }
 
-async function handleTranslatedQuery(request: WorkerRequest): Promise<Record<string, unknown>> {
+async function handleTranslatedQuery(request: QueryRequest): Promise<Record<string, unknown>> {
   const translated = translateQuery(request.sql ?? '', request.params ?? []);
   const rows = await sql.unsafe(translated.sql, translated.params);
   const dataRows = Array.from(rows as unknown[]).map(normalizeRow);

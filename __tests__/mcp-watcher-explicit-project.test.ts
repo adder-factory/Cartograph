@@ -18,7 +18,30 @@ import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
-import { ProjectCache } from '../src/mcp/tools/_project-cache.js';
+import { ProjectCache, waitForProjectCacheWatcherStops } from '../src/mcp/tools/_project-cache.js';
+
+const openHandlers: ToolHandler[] = [];
+const openCaches: ProjectCache[] = [];
+
+function trackHandler(handler: ToolHandler): ToolHandler {
+  openHandlers.push(handler);
+  return handler;
+}
+
+function trackCache(cache: ProjectCache): ProjectCache {
+  openCaches.push(cache);
+  return cache;
+}
+
+async function closeTrackedResources(): Promise<void> {
+  while (openHandlers.length > 0) {
+    openHandlers.pop()?.closeAll();
+  }
+  while (openCaches.length > 0) {
+    openCaches.pop()?.closeAll();
+  }
+  await waitForProjectCacheWatcherStops();
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -43,14 +66,15 @@ describe('explicit-project watcher (auto-incremental fix)', () => {
     cg.close();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await closeTrackedResources();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('starts a file watcher when a project is loaded via projectPath', async () => {
     // ToolHandler with NO default cg — every query must go through
     // the explicit-project getCartograph(projectPath) path.
-    const handler = new ToolHandler(null);
+    const handler = trackHandler(new ToolHandler(null));
     // First query opens the project + caches it + (NEW) starts the watcher.
     const result = await handler.execute('cartograph_status', { projectPath: dir });
     expect(result.isError).toBeFalsy();
@@ -63,16 +87,18 @@ describe('explicit-project watcher (auto-incremental fix)', () => {
     expect(watchedRoots.length).toBe(1);
 
     handler.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
   it('does not double-start the watcher when the same project is re-queried', async () => {
-    const handler = new ToolHandler(null);
+    const handler = trackHandler(new ToolHandler(null));
     await handler.execute('cartograph_status', { projectPath: dir });
     await handler.execute('cartograph_status', { projectPath: dir });
     await handler.execute('cartograph_status', { projectPath: dir });
     const { watchedRoots } = handler.getProjectCacheSnapshot();
     expect(watchedRoots.length).toBe(1); // dedup by resolved root
     handler.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
   // Note: the soft-cap (MAX_WATCHED_PROJECTS = 16) and watcher
@@ -103,12 +129,13 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     }
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    await closeTrackedResources();
     if (fs.existsSync(parentDir)) fs.rmSync(parentDir, { recursive: true, force: true });
   });
 
   it("doesn't crash + caps the cache at MAX_CACHED_PROJECTS when N > cap", async () => {
-    const handler = new ToolHandler(null);
+    const handler = trackHandler(new ToolHandler(null));
     // Query every project sequentially. Without LRU eviction, all 18
     // CG instances would stay open (18 SQLite handles, 18 watchers).
     for (let i = 0; i < PROJECT_COUNT; i++) {
@@ -121,10 +148,11 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     expect(cachedRoots.length).toBeLessThanOrEqual(16);
     expect(watchedRoots.length).toBeLessThanOrEqual(16);
     handler.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
   it('least-recently-used project is evicted first', async () => {
-    const handler = new ToolHandler(null);
+    const handler = trackHandler(new ToolHandler(null));
     // Open p0 first, then 17 others. p0 should evict.
     await handler.execute('cartograph_status', { projectPath: path.join(parentDir, 'p0') });
     for (let i = 1; i < PROJECT_COUNT; i++) {
@@ -136,10 +164,11 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     expect(roots.some((r) => r.endsWith('/p0'))).toBe(false);
     expect(roots.some((r) => r.endsWith(`/p${PROJECT_COUNT - 1}`))).toBe(true);
     handler.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
   it('most-recently-used project survives eviction', async () => {
-    const handler = new ToolHandler(null);
+    const handler = trackHandler(new ToolHandler(null));
     for (let i = 0; i < 16; i++) {
       await handler.execute('cartograph_status', { projectPath: path.join(parentDir, `p${i}`) });
     }
@@ -154,10 +183,11 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     expect(roots.some((r) => r.endsWith('/p1'))).toBe(false);
     expect(roots.some((r) => r.endsWith('/p16'))).toBe(true);
     handler.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
-  it('a borrowed LRU project is skipped by cap eviction (no use-after-close), and evictable after release', () => {
-    const cache = new ProjectCache();
+  it('a borrowed LRU project is skipped by cap eviction (no use-after-close), and evictable after release', async () => {
+    const cache = trackCache(new ProjectCache());
     const cgs: Cartograph[] = [];
     for (let i = 0; i < 16; i++) cgs.push(cache.getOrOpen(path.join(parentDir, `p${i}`)));
     // Pin the LRU (p0) — simulate an in-flight tool call still holding it.
@@ -174,10 +204,11 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     roots = [...cache.snapshot().cachedRoots];
     expect(roots.some((r) => r.endsWith('/p0'))).toBe(false); // now evicted
     cache.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 
-  it('when every cached project is borrowed, the cache exceeds the cap rather than close a live handle', () => {
-    const cache = new ProjectCache();
+  it('when every cached project is borrowed, the cache exceeds the cap rather than close a live handle', async () => {
+    const cache = trackCache(new ProjectCache());
     const held: Array<string | null> = [];
     for (let i = 0; i < 16; i++) held.push(cache.borrow(cache.getOrOpen(path.join(parentDir, `p${i}`))));
     expect(cache.snapshot().cachedRoots.length).toBe(16);
@@ -193,5 +224,6 @@ describe('LRU eviction (10K-project parent-dir scenario)', () => {
     cache.getOrOpen(path.join(parentDir, 'p17'));
     expect(cache.snapshot().cachedRoots.length).toBeLessThanOrEqual(16);
     cache.closeAll();
+    await waitForProjectCacheWatcherStops();
   });
 });

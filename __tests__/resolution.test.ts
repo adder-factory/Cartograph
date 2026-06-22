@@ -1427,6 +1427,91 @@ from typing import (
         ).toBe('packages/d/t.d.ts');
       });
 
+      it('resolves root conditional exports without an explicit dot subpath', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/rootcond/package.json': JSON.stringify({
+              name: 'rootcond',
+              exports: { import: './esm.ts', default: './cjs.ts' },
+            }),
+            'packages/rootcond/esm.ts': '',
+            'packages/rootcond/cjs.ts': '',
+            'packages/rootcond/index.ts': '',
+          },
+        });
+
+        expect(
+          resolveImportPath({ importPath: 'rootcond', fromFile: 'a/m.ts', language: 'typescript', context: ctx }),
+        ).toBe('packages/rootcond/esm.ts');
+      });
+
+      it('resolves array export targets instead of falling back to package index', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/arr/package.json': JSON.stringify({
+              name: 'arr',
+              exports: { '.': ['./src/entry.ts'] },
+            }),
+            'packages/arr/src/entry.ts': '',
+            'packages/arr/index.ts': '',
+          },
+        });
+
+        expect(resolveImportPath({ importPath: 'arr', fromFile: 'a/m.ts', language: 'typescript', context: ctx })).toBe(
+          'packages/arr/src/entry.ts',
+        );
+      });
+
+      it('resolves wildcard subpath exports before falling back to a same-named package file', () => {
+        const ctx = mkResCtx({
+          files: {
+            'packages/pat/package.json': JSON.stringify({
+              name: 'pat',
+              exports: { './features/*': './src/features/*.ts' },
+            }),
+            'packages/pat/src/features/button.ts': '',
+            'packages/pat/features/button.ts': '',
+          },
+        });
+
+        expect(
+          resolveImportPath({
+            importPath: 'pat/features/button',
+            fromFile: 'a/m.ts',
+            language: 'typescript',
+            context: ctx,
+          }),
+        ).toBe('packages/pat/src/features/button.ts');
+      });
+
+      it('picks the most-specific wildcard pattern even when a broader one is listed first', () => {
+        const ctx = mkResCtx({
+          files: {
+            // Node resolves the most-specific matching pattern, not the first
+            // in object order. The broad `./features/*` is listed before the
+            // narrower `./features/private/*`.
+            'packages/spec/package.json': JSON.stringify({
+              name: 'spec',
+              exports: {
+                './features/*': './public/*.ts',
+                './features/private/*': './internal/*.ts',
+              },
+            }),
+            'packages/spec/internal/widget.ts': '',
+            'packages/spec/public/private/widget.ts': '',
+          },
+        });
+
+        expect(
+          resolveImportPath({
+            importPath: 'spec/features/private/widget',
+            fromFile: 'a/m.ts',
+            language: 'typescript',
+            context: ctx,
+          }),
+        ).toBe('packages/spec/internal/widget.ts');
+      });
+
       it('package.json inside node_modules is ignored for workspace resolution', () => {
         const ctx = mkResCtx({
           files: {

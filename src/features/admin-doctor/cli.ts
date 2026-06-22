@@ -40,10 +40,13 @@ export function registerAdminDoctorCommand(deps: AdminDoctorCommandDeps): void {
           skipProjectChecks: resolveSkipProjectChecks(options),
         });
         writeStdout(`${options.json ? formatDoctorJson(result) : formatDoctorReport(result)}\n`);
-        if (finalDoctorStatus(result) === 'fail') process.exit(1);
+        if (finalDoctorStatus(result) === 'fail') {
+          process.exitCode = 1;
+          return;
+        }
       } catch (err) {
         error(`doctor failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

@@ -10,7 +10,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import { getHomeDir, getMcpServerConfig, mcpCommandOptionsForLocation, type McpCommandOptions } from './shared.js';
 import {
   detectMcpEntryJson,
@@ -78,7 +85,7 @@ class CopilotTarget implements AgentTarget {
     return withLocalGitignoreFileEntries(
       loc,
       {
-        files: [writeMcpEntryJson(loc, copilotMcpConfig(opts.command))],
+        files: [writeMcpEntryJson(loc, copilotMcpConfig(installCommandOption(opts)))],
         notes: ['Run /mcp reload in Copilot CLI, or start a new session.'],
       },
       [mcpJsonPath(loc)],

@@ -495,6 +495,35 @@ describe('JSON.parse Error Boundaries in DB', () => {
     db.close();
   });
 
+  it('should drop edge metadata when valid JSON has the wrong shape', () => {
+    const dbPath = path.join(tempDir, 'test.db');
+    const db = DatabaseConnection.initialize(dbPath);
+    const queries = new QueryBuilder(db.getDb());
+
+    seedFile(db, 'a.ts');
+    seedFile(db, 'b.ts');
+
+    const insertNode = db.getDb().prepare(`
+      INSERT INTO nodes (id, kind, name, qualified_name, file_path, language, start_line, end_line, start_column, end_column, is_exported, is_async, is_static, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `);
+    insertNode.run('node-a', 'function', 'funcA', 'funcA', 'a.ts', 'typescript', 1, 5, 0, 0, 0, 0, 0, Date.now());
+    insertNode.run('node-b', 'function', 'funcB', 'funcB', 'b.ts', 'typescript', 1, 5, 0, 0, 0, 0, 0, Date.now());
+
+    db.getDb()
+      .prepare(`
+      INSERT INTO edges (source, target, kind, metadata)
+      VALUES (?, ?, ?, ?)
+    `)
+      .run('node-a', 'node-b', 'calls', '["not","an","object"]');
+
+    const edges = getOutgoingEdges(queries, 'node-a');
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.metadata).toBeUndefined();
+
+    db.close();
+  });
+
   it('should not crash when file record has malformed JSON in errors column', () => {
     const dbPath = path.join(tempDir, 'test.db');
     const db = DatabaseConnection.initialize(dbPath);

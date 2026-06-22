@@ -183,18 +183,6 @@ export function readFileSafe(absPath: string): string | null {
 }
 
 /**
- * Safely parse JSON with a fallback value.
- * Prevents crashes from corrupted database metadata.
- */
-export function safeJsonParse<T>(value: string, fallback: T): T {
-  try {
-    return JSON.parse(value);
-  } catch {
-    return fallback;
-  }
-}
-
-/**
  * Split `items` round-robin across `n` slices. Worker-pool fan-out
  * pattern — both the biomarker per-file pool and the value-ref-edges
  * pool need identical "deal items to N workers card-game style"

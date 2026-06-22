@@ -7,25 +7,17 @@
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
 import { makeLineIndex } from '../../utils.js';
+import { hasPackageDependency } from './package-dependencies.js';
 import { isSameDirectoryPath, pathMatchesDirectoryPattern } from './resolve-by-name.js';
+
+const REACT_DEPENDENCIES = ['react', 'next', 'react-native'] as const;
 
 export const reactResolver: FrameworkResolver = {
   name: 'react',
 
   detect(context: ResolutionContext): boolean {
     // Check for React in package.json
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.react || deps.next || deps['react-native']) {
-          return true;
-        }
-      } catch {
-        // Invalid JSON
-      }
-    }
+    if (hasPackageDependency(context.readFile('package.json'), REACT_DEPENDENCIES)) return true;
 
     // Check for .jsx/.tsx files
     const allFiles = context.getAllFiles();

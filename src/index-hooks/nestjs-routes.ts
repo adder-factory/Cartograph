@@ -47,6 +47,7 @@
  */
 
 import type { IndexHook, IndexHookContext } from './types.js';
+import { z } from 'zod';
 import { computeAlgoHash } from '../algo-hash.js';
 import { getMetadata, setMetadata } from '../db/queries-metadata.js';
 import { logDebug, errMsg } from '../errors.js';
@@ -109,6 +110,8 @@ const ROUTE_CLASS_DECORATORS: readonly string[] = ['Controller', 'Resolver'];
 
 /** TS/JS languages on which NestJS code lives. Skip everything else. */
 const NESTJS_LANGUAGES: ReadonlySet<string> = new Set(['typescript', 'tsx', 'javascript', 'jsx']);
+
+const decoratorsJsonSchema = z.array(z.string());
 
 function refresh(ctx: IndexHookContext): void {
   try {
@@ -322,16 +325,17 @@ function joinHttpPath(prefix: string, subpath: string): string {
 }
 
 /** Parse the JSON-encoded `Node.decorators` column. Returns [] for
- *  NULL / invalid JSON / non-array shapes — defensive. */
+ *  NULL / invalid JSON / non-array shapes / invalid entries — defensive. */
 function parseDecoratorsJson(raw: string | null): string[] {
   if (!raw) return [];
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.filter((v): v is string => typeof v === 'string');
+    parsed = JSON.parse(raw);
   } catch {
     return [];
   }
+  const result = decoratorsJsonSchema.safeParse(parsed);
+  return result.success ? result.data : [];
 }
 
 export const HOOK: IndexHook = {

@@ -1,5 +1,4 @@
 import { describe, expect, it, beforeEach, afterEach } from 'vitest';
-import { Database } from 'bun:sqlite';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -10,7 +9,7 @@ import {
   enforceProjectRootOwnership,
   withDerivedPostgresSchema,
 } from '../src/db/project-ownership.js';
-import type { SqliteDatabase } from '../src/db/sqlite-adapter.js';
+import { createDatabase, type SqliteDatabase } from '../src/db/sqlite-adapter.js';
 import type { DatabaseConfig } from '../src/db/database-config.js';
 
 // PostgreSQL truncates identifiers at 63 bytes; a derived name that
@@ -68,7 +67,7 @@ describe('withDerivedPostgresSchema', () => {
 });
 
 describe('enforceProjectRootOwnership — one schema = one project, enforced', () => {
-  let db: Database;
+  let db: SqliteDatabase;
   let rootA: string;
   let rootB: string;
   let savedRebind: string | undefined;
@@ -79,7 +78,7 @@ describe('enforceProjectRootOwnership — one schema = one project, enforced', (
       ?.value;
 
   beforeEach(() => {
-    db = new Database(':memory:');
+    db = createDatabase(':memory:').db;
     db.exec(`CREATE TABLE project_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at REAL NOT NULL)`);
     rootA = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-own-a-'));
     rootB = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-own-b-'));
@@ -96,18 +95,18 @@ describe('enforceProjectRootOwnership — one schema = one project, enforced', (
   });
 
   it('stamps on first open, passes on every matching open', () => {
-    enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootA), 'cartograph_a_12345678');
+    enforceProjectRootOwnership(db, dbPathFor(rootA), 'cartograph_a_12345678');
     expect(stamped()).toBe(canonicalProjectRoot(rootA));
     // Second open from the same root: no throw, stamp unchanged.
-    enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootA), 'cartograph_a_12345678');
+    enforceProjectRootOwnership(db, dbPathFor(rootA), 'cartograph_a_12345678');
     expect(stamped()).toBe(canonicalProjectRoot(rootA));
   });
 
   it('fails loudly when a second project opens the same schema', () => {
-    enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootA), 'shared_schema');
+    enforceProjectRootOwnership(db, dbPathFor(rootA), 'shared_schema');
     let message = '';
     try {
-      enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootB), 'shared_schema');
+      enforceProjectRootOwnership(db, dbPathFor(rootB), 'shared_schema');
     } catch (err) {
       message = (err as Error).message;
     }
@@ -123,9 +122,9 @@ describe('enforceProjectRootOwnership — one schema = one project, enforced', (
   });
 
   it('re-binds on mismatch when the override env is set (moved project)', () => {
-    enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootA), 's');
+    enforceProjectRootOwnership(db, dbPathFor(rootA), 's');
     process.env[REBIND_ENV] = '1';
-    enforceProjectRootOwnership(db as unknown as SqliteDatabase, dbPathFor(rootB), 's');
+    enforceProjectRootOwnership(db, dbPathFor(rootB), 's');
     expect(stamped()).toBe(canonicalProjectRoot(rootB));
   });
 });

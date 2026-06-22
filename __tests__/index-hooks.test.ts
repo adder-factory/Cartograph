@@ -1,12 +1,11 @@
 /**
- * Index-hook framework: register a fake hook at runtime, run an
- * indexAll/sync against a synthetic project, assert the hook ran
- * with the expected context shape and that errors are caught.
+ * Index-hook framework: run indexAll/sync hook phases against a
+ * disposable project context, then assert the runner preserves the
+ * expected hook/context/outcome shape.
  *
- * The registry's static-import list (`REGISTERED_HOOKS`) is empty
- * on main today; tests poke at the runner directly through
- * `runAfterIndexAll`/`runAfterSync` rather than mutating that
- * list.
+ * The registry owns its static hook list; these tests exercise the
+ * public runner surface (`runAfterIndexAll` / `runAfterSync`) rather
+ * than mutating module state.
  */
 import { describe, it, expect } from 'vitest';
 import {
@@ -17,20 +16,7 @@ import {
   type IndexHookContext,
 } from '../src/index-hooks/registry.js';
 import type { SyncResult } from '../src/extraction/index.js';
-
-function makeFakeContext(): IndexHookContext {
-  // Hooks should not mutate the context; for the runner-shape
-  // tests we hand them stubs typed `as any` — the runner doesn't
-  // touch any of these fields itself.
-  return {
-    projectRoot: '/tmp/fake-project',
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    config: {} as any,
-    queries: {} as any,
-    db: {} as any,
-    /* eslint-enable */
-  };
-}
+import { withFakeIndexHookContext } from './helpers/fake-index-hook-context.js';
 
 const fakeSyncResult: SyncResult = {
   filesChecked: 0,
@@ -52,11 +38,10 @@ describe('index-hooks registry — runner', () => {
     }
   });
 
-  it('runAfterIndexAll returns one outcome per registered hook, swallowing per-hook errors', async () => {
-    // Registered hooks will throw on the fake `{} as any` ctx; the
-    // runner contract is to catch + report each error so one bad
-    // hook never fails the whole pass.
-    const outcomes = await runAfterIndexAll(makeFakeContext());
+  it('runAfterIndexAll returns one outcome per registered hook', async () => {
+    // Use a disposable real context so registered hooks exercise the
+    // production boundary shape without mutating this repository's index.
+    const outcomes = await withFakeIndexHookContext((ctx) => runAfterIndexAll(ctx));
     const expectedCount = getRegisteredHooks().filter((h) => h.afterIndexAll).length;
     expect(outcomes.length).toBe(expectedCount);
     for (const o of outcomes) {
@@ -66,8 +51,8 @@ describe('index-hooks registry — runner', () => {
     }
   });
 
-  it('runAfterSync returns one outcome per registered hook, swallowing per-hook errors', async () => {
-    const outcomes = await runAfterSync(makeFakeContext(), fakeSyncResult);
+  it('runAfterSync returns one outcome per registered hook', async () => {
+    const outcomes = await withFakeIndexHookContext((ctx) => runAfterSync(ctx, fakeSyncResult));
     const expectedCount = getRegisteredHooks().filter((h) => h.afterSync).length;
     expect(outcomes.length).toBe(expectedCount);
     for (const o of outcomes) {
@@ -99,9 +84,10 @@ describe('index-hooks runner — fake-hook injection', () => {
         captured = ctx;
       },
     };
-    const ctx = makeFakeContext();
-    await hook.afterIndexAll!(ctx);
-    expect(captured).toBe(ctx);
+    await withFakeIndexHookContext(async (ctx) => {
+      await hook.afterIndexAll!(ctx);
+      expect(captured).toBe(ctx);
+    });
   });
 
   it('a hook with afterSync receives both ctx and result', async () => {
@@ -114,9 +100,10 @@ describe('index-hooks runner — fake-hook injection', () => {
         capturedResult = result;
       },
     };
-    const ctx = makeFakeContext();
-    await hook.afterSync!(ctx, fakeSyncResult);
-    expect(capturedCtx).toBe(ctx);
+    await withFakeIndexHookContext(async (ctx) => {
+      await hook.afterSync!(ctx, fakeSyncResult);
+      expect(capturedCtx).toBe(ctx);
+    });
     expect(capturedResult).toBe(fakeSyncResult);
   });
 

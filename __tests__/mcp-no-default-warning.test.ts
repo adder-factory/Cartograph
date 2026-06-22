@@ -39,13 +39,19 @@ async function setupChildProject(parent: string, name: string): Promise<void> {
 
 /** Capture stderr writes during a fn call, restore on exit. */
 async function captureStderr(fn: () => Promise<unknown>): Promise<string> {
-  const original = process.stderr.write.bind(process.stderr);
+  const original = process.stderr.write;
   let buf = '';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (process.stderr.write as any) = (chunk: string | Uint8Array): boolean => {
+  const captureWrite: typeof process.stderr.write = (
+    chunk: string | Uint8Array,
+    encodingOrCallback?: BufferEncoding | ((err?: Error | null) => void),
+    callback?: (err?: Error | null) => void,
+  ): boolean => {
     buf += typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf-8');
+    if (typeof encodingOrCallback === 'function') encodingOrCallback();
+    if (callback) callback();
     return true;
   };
+  process.stderr.write = captureWrite;
   try {
     await fn();
   } finally {
@@ -68,12 +74,11 @@ describe('MCPServer wrong-directory warning', () => {
   it('one child candidate → "did you mean X?" suggestion', async () => {
     await setupChildProject(parent, 'my-project');
     const { MCPServer } = await import('../src/mcp/index.js');
-    // Use the private tryInitializeDefault — invoking via test
-    // because spinning up the full stdio transport is heavy.
+    // Invoke tryInitializeDefault directly because spinning up the full
+    // stdio transport is heavy.
     const server = new MCPServer();
     const stderr = await captureStderr(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (server as any).tryInitializeDefault(parent);
+      await server.tryInitializeDefault(parent);
     });
     expect(stderr).toContain('No `.cartograph/` at or above');
     expect(stderr).toContain('Did you mean');
@@ -88,8 +93,7 @@ describe('MCPServer wrong-directory warning', () => {
     const { MCPServer } = await import('../src/mcp/index.js');
     const server = new MCPServer();
     const stderr = await captureStderr(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (server as any).tryInitializeDefault(parent);
+      await server.tryInitializeDefault(parent);
     });
     expect(stderr).toContain('Found 3 candidate cartograph projects');
     expect(stderr).toContain('alpha');
@@ -102,8 +106,7 @@ describe('MCPServer wrong-directory warning', () => {
     const { MCPServer } = await import('../src/mcp/index.js');
     const server = new MCPServer();
     const stderr = await captureStderr(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (server as any).tryInitializeDefault(parent);
+      await server.tryInitializeDefault(parent);
     });
     expect(stderr).toContain('No cartograph projects found');
     expect(stderr).toContain('cartograph index');
@@ -114,13 +117,14 @@ describe('MCPServer wrong-directory warning', () => {
     const child = path.join(parent, 'real');
     const { MCPServer } = await import('../src/mcp/index.js');
     const server = new MCPServer();
-    const stderr = await captureStderr(async () => {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (server as any).tryInitializeDefault(child);
-    });
-    expect(stderr).not.toContain('No `.cartograph/` at or above');
-    expect(stderr).not.toContain('Did you mean');
-    // server.stop() not called — but cg watcher started; let test
-    // teardown clean up via the rmSync in afterEach.
+    try {
+      const stderr = await captureStderr(async () => {
+        await server.tryInitializeDefault(child);
+      });
+      expect(stderr).not.toContain('No `.cartograph/` at or above');
+      expect(stderr).not.toContain('Did you mean');
+    } finally {
+      server.stop(false);
+    }
   });
 });

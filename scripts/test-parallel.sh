@@ -66,11 +66,46 @@ sum_count() {
   grep -oE "^ +[0-9]+ $2" "$1" | grep -oE "[0-9]+" | awk '{ n += $1 } END { print n + 0 }'
 }
 
+failed_files_from_log() {
+  # Echo only files that contain a bun:test `(fail)` record. Many of
+  # our tests print normal diagnostic output, which gives them file
+  # headers even when every test in that file passed. Retrying every
+  # header hides the real failing file and pollutes .flake-log.
+  awk '
+    /^[[:space:]]*[0-9]+ test(s)? failed:$/ {
+      in_summary = 1
+      next
+    }
+    in_summary == 1 {
+      next
+    }
+    /^__tests__\/[^:]+\.test\.ts:$/ {
+      file = substr($0, 1, length($0) - 1)
+      next
+    }
+    /^\(fail\)/ && file != "" {
+      seen[file] = 1
+    }
+    END {
+      for (f in seen) print f
+    }
+  ' "$1" | sort
+}
+
 retry_won_shard() {
   # $1 = shard index. `retried` contains shards whose failed files all
   # passed in fresh per-file processes.
   [[ " ${retried[*]:-} " == *" $1 "* ]]
 }
+
+if [ "${TEST_PARALLEL_EXTRACT_FAILED_FILES:-0}" = "1" ]; then
+  if [ "$#" -ne 1 ]; then
+    echo "usage: TEST_PARALLEL_EXTRACT_FAILED_FILES=1 scripts/test-parallel.sh <log>" >&2
+    exit 2
+  fi
+  failed_files_from_log "$1"
+  exit 0
+fi
 
 echo "=== running $N shards in parallel (pattern: $PATTERN) ==="
 START=$(date +%s)
@@ -105,8 +140,16 @@ if [ "$RETRY" -gt 0 ]; then
     f=$(shard_fails "$log")
     status="${shard_status[$i]:-0}"
     if [ "${f:-0}" -gt 0 ] || [ "$status" -ne 0 ]; then
-      if [ "$status" -ne 0 ] && ! grep -qE "^Ran " "$log"; then
-        echo "=== shard $i exited $status before printing a summary; retrying the whole shard (up to $RETRY attempts) ==="
+      # A non-zero shard exit with zero failed tests is a process-level
+      # failure (native crash / signal / post-summary teardown), not a
+      # per-file assertion failure. Retry the whole shard so the flake log
+      # does not misclassify every file header in the shard as a flaky file.
+      if [ "$status" -ne 0 ] && { [ "${f:-0}" -eq 0 ] || ! grep -qE "^Ran " "$log"; }; then
+        if grep -qE "^Ran " "$log"; then
+          echo "=== shard $i exited $status after printing a summary with no failed tests; retrying the whole shard (up to $RETRY attempts) ==="
+        else
+          echo "=== shard $i exited $status before printing a summary; retrying the whole shard (up to $RETRY attempts) ==="
+        fi
         mv "$log" "$log.first"
         shard_passed=false
         attempt=0
@@ -127,12 +170,15 @@ if [ "$RETRY" -gt 0 ]; then
         continue
       fi
 
-      # Extract failed file paths. bun:test prints `<path>:` headers
-      # only for files with output (typically failed). Heuristic:
-      # every `__tests__/X.test.ts:` header in the log is a file
-      # with output — retry all of them.
+      # Extract failed file paths. Fall back to all emitted test-file
+      # headers only if bun:test did not print `(fail)` records; that
+      # keeps odd formatter failures debuggable without misclassifying
+      # every noisy but passing file as flaky.
       failed_files=()
-      mapfile -t failed_files < <(grep -oE "^__tests__/[^:]+\.test\.ts:" "$log" | tr -d ':' | sort -u)
+      mapfile -t failed_files < <(failed_files_from_log "$log")
+      if [ "${#failed_files[@]}" -eq 0 ]; then
+        mapfile -t failed_files < <(grep -oE "^__tests__/[^:]+\.test\.ts:" "$log" | tr -d ':' | sort -u)
+      fi
       if [ "${#failed_files[@]}" -eq 0 ]; then
         echo "=== shard $i exited $status with ${f:-0} fails but no file headers to retry; treating as failed ==="
         continue

@@ -20,10 +20,10 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { Database } from 'bun:sqlite';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { createDatabase } from '../src/db/sqlite-adapter.js';
 import { isSqliteBusyError, withSqliteBusyRetry } from '../src/utils-concurrency.js';
 
 describe('isSqliteBusyError', () => {
@@ -115,21 +115,21 @@ describe('deferred read-then-write vs BEGIN IMMEDIATE (the #15/#16 mechanism)', 
 
   it('a DEFERRED read-then-write fails when a second connection commits in between', () => {
     const file = tmpDb();
-    const a = new Database(file);
+    const { db: a } = createDatabase(file);
     a.exec('PRAGMA journal_mode=WAL');
     a.exec('PRAGMA busy_timeout=200');
     a.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v)');
     a.exec('INSERT INTO t VALUES (1, 0)');
-    const b = new Database(file);
+    const { db: b } = createDatabase(file);
     b.exec('PRAGMA busy_timeout=200');
 
     a.exec('BEGIN'); // DEFERRED — no write lock yet
-    a.query('SELECT v FROM t WHERE id = 1').get(); // pins a read snapshot
-    b.query('INSERT INTO t VALUES (2, 1)').run(); // concurrent commit advances the WAL
+    a.prepare('SELECT v FROM t WHERE id = 1').get(); // pins a read snapshot
+    b.prepare('INSERT INTO t VALUES (2, 1)').run(); // concurrent commit advances the WAL
 
     let caught: unknown;
     try {
-      a.query('UPDATE t SET v = 9 WHERE id = 1').run(); // read→write upgrade on a stale snapshot
+      a.prepare('UPDATE t SET v = 9 WHERE id = 1').run(); // read→write upgrade on a stale snapshot
     } catch (err) {
       caught = err;
     }
@@ -147,32 +147,32 @@ describe('deferred read-then-write vs BEGIN IMMEDIATE (the #15/#16 mechanism)', 
 
   it('BEGIN IMMEDIATE takes the write lock up front, so no snapshot can be invalidated', () => {
     const file = tmpDb();
-    const a = new Database(file);
+    const { db: a } = createDatabase(file);
     a.exec('PRAGMA journal_mode=WAL');
     a.exec('PRAGMA busy_timeout=200');
     a.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v)');
     a.exec('INSERT INTO t VALUES (1, 0)');
-    const b = new Database(file);
+    const { db: b } = createDatabase(file);
     b.exec('PRAGMA busy_timeout=50'); // short so the contention probe returns fast
 
     // What the adapter now does for every write transaction:
     // `db.transaction(fn).immediate` — BEGIN IMMEDIATE acquires the write
     // lock at the start, so the read-then-write below can't be invalidated.
     const txn = a.transaction(() => {
-      a.query('SELECT v FROM t WHERE id = 1').get(); // read INSIDE the immediate txn
+      a.prepare('SELECT v FROM t WHERE id = 1').get(); // read INSIDE the immediate txn
       // A already holds the write lock, so B cannot commit here:
       let bBlocked = false;
       try {
-        b.query('INSERT INTO t VALUES (2, 1)').run();
+        b.prepare('INSERT INTO t VALUES (2, 1)').run();
       } catch (err) {
         bBlocked = isSqliteBusyError(err);
       }
       expect(bBlocked).toBe(true); // confirms A took the write lock up front
-      a.query('UPDATE t SET v = 9 WHERE id = 1').run(); // succeeds — no BUSY_SNAPSHOT
+      a.prepare('UPDATE t SET v = 9 WHERE id = 1').run(); // succeeds — no BUSY_SNAPSHOT
     });
 
-    expect(() => (txn as unknown as { immediate: () => void }).immediate()).not.toThrow();
-    expect(a.query('SELECT v FROM t WHERE id = 1').get()).toEqual({ v: 9 });
+    expect(() => txn()).not.toThrow();
+    expect(a.prepare('SELECT v FROM t WHERE id = 1').get()).toEqual({ v: 9 });
     a.close();
     b.close();
   });

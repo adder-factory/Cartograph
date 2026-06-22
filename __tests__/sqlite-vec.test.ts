@@ -73,6 +73,15 @@ function cleanup(dir: string, conn: DatabaseConnection): void {
   fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function detectSqliteVecAvailable(): boolean {
+  const { dir, conn } = setup();
+  try {
+    return conn.hasVecExtension();
+  } finally {
+    cleanup(dir, conn);
+  }
+}
+
 function seedNodesAndSummaries(db: ReturnType<DatabaseConnection['getDb']>, ids: string[]): void {
   // Since migration 033, symbol_embeddings.node_id → nodes.id directly.
   // Plant minimal rows in the nodes table — no summary needed for
@@ -114,7 +123,9 @@ describe('sqlite-vec extension', () => {
   });
 });
 
-describe('vec-helpers — bootstrap + mirror + KNN', () => {
+const describeVec = detectSqliteVecAvailable() ? describe : describe.skip;
+
+describeVec('vec-helpers — bootstrap + mirror + KNN', () => {
   let dir: string;
   let conn: DatabaseConnection;
   let queries: QueryBuilder;
@@ -126,17 +137,6 @@ describe('vec-helpers — bootstrap + mirror + KNN', () => {
     conn = s.conn;
     queries = s.queries;
     db = s.db;
-    // Skip if vec didn't load — we still want the suite green elsewhere.
-    // sqlite-vec is an optional dep — skip the suite (don't fail) on
-    // contributor / CI machines where its platform binary isn't
-    // installed. The fallback in-memory path is exercised by the
-    // existing similarity tests elsewhere.
-    if (!conn.hasVecExtension()) {
-      cleanup(dir, conn);
-      // eslint-disable-next-line no-console
-      console.warn('[sqlite-vec.test] extension not loaded — skipping vec-specific tests');
-      return;
-    }
     // Seed nodes (FK chain: embeddings -> nodes directly since migration 033).
     seedNodesAndSummaries(db, ['n1', 'n2', 'n3', 'n4', 'n5']);
   });
@@ -403,7 +403,7 @@ describe('vec-helpers — bootstrap + mirror + KNN', () => {
   });
 });
 
-describe('vec path equivalence — same top-K nodes as the in-memory scan', () => {
+describeVec('vec path equivalence — same top-K nodes as the in-memory scan', () => {
   // This bypasses the LLM-config resolver and asserts the contract
   // directly: given identical embeddings in symbol_embeddings,
   // findSimilarViaVec and topKByCosine return the same nodeId set
@@ -419,16 +419,6 @@ describe('vec path equivalence — same top-K nodes as the in-memory scan', () =
     conn = s.conn;
     queries = s.queries;
     db = s.db;
-    // sqlite-vec is an optional dep — skip the suite (don't fail) on
-    // contributor / CI machines where its platform binary isn't
-    // installed. The fallback in-memory path is exercised by the
-    // existing similarity tests elsewhere.
-    if (!conn.hasVecExtension()) {
-      cleanup(dir, conn);
-      // eslint-disable-next-line no-console
-      console.warn('[sqlite-vec.test] extension not loaded — skipping vec-specific tests');
-      return;
-    }
     // Seed nodes (FK chain: embeddings -> nodes directly since migration 033).
     seedNodesAndSummaries(db, ['n1', 'n2', 'n3', 'n4', 'n5', 'n6']);
   });

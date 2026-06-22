@@ -1,17 +1,17 @@
 /**
  * G9 invariance tests for the grouped hook runner.
  *
- * After Phase 1 + Phase 2A the registry runs hooks in three groups
- * (A → B → C) with Promise.all within each group. The runtime
- * outcomes must stay equivalent to the prior serial loop for two
- * reasons:
+ * After Phase 1 + Phase 2A the registry runs hooks in three serial
+ * groups (A → B → C), with per-group concurrency controlled by the
+ * registry. The runtime outcomes must stay equivalent to the prior
+ * serial loop for two reasons:
  *
  *   1. Cross-group ordering is load-bearing — `unused_export` reads
  *      `references` edges emitted by Group B's edge-emitters;
  *      `low_coverage` reads node_coverage rows restored by COVERAGE_REAPPLY.
  *      Group C must observe Group B's writes. The serial walk used to
  *      enforce this implicitly; the grouped runner enforces it by
- *      awaiting each group's Promise.all before starting the next.
+ *      awaiting one group before starting the next.
  *
  *   2. The hook outcome array shape stays one entry per registered
  *      hook with a string `name`, a phase tag, and a numeric duration —
@@ -21,19 +21,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { getRegisteredHooks, runAfterIndexAll, runAfterSync } from '../src/index-hooks/registry.js';
-import type { IndexHookContext } from '../src/index-hooks/registry.js';
 import type { SyncResult } from '../src/extraction/index.js';
-
-function makeFakeContext(): IndexHookContext {
-  return {
-    projectRoot: '/tmp/fake-project',
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    config: {} as any,
-    queries: {} as any,
-    db: {} as any,
-    /* eslint-enable */
-  };
-}
+import { withFakeIndexHookContext } from './helpers/fake-index-hook-context.js';
 
 const fakeSyncResult: SyncResult = {
   filesChecked: 0,
@@ -105,10 +94,10 @@ describe('G9 hook-group invariance', () => {
   });
 
   it('runAfterIndexAll outcome ordering preserves the flat registered order', async () => {
-    // The grouped runner uses Promise.all WITHIN a group; the outcomes
-    // are concatenated in input order regardless of which task resolved
-    // first. So the outcome name order must match getRegisteredHooks().
-    const outcomes = await runAfterIndexAll(makeFakeContext());
+    // The grouped runner preserves declared hook order whether a group
+    // runs concurrently or sequentially, so outcome names must match
+    // getRegisteredHooks().
+    const outcomes = await withFakeIndexHookContext((ctx) => runAfterIndexAll(ctx));
     const registered = getRegisteredHooks().filter((h) => h.afterIndexAll);
     expect(outcomes.length).toBe(registered.length);
     for (let i = 0; i < outcomes.length; i++) {
@@ -119,7 +108,7 @@ describe('G9 hook-group invariance', () => {
   });
 
   it('runAfterSync outcome ordering preserves the flat registered order', async () => {
-    const outcomes = await runAfterSync(makeFakeContext(), fakeSyncResult);
+    const outcomes = await withFakeIndexHookContext((ctx) => runAfterSync(ctx, fakeSyncResult));
     const registered = getRegisteredHooks().filter((h) => h.afterSync);
     expect(outcomes.length).toBe(registered.length);
     for (let i = 0; i < outcomes.length; i++) {

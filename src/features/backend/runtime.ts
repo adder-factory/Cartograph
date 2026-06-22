@@ -20,6 +20,7 @@ import { isProcessAlive } from '../../utils-concurrency.js';
 import { LLAMA_SERVER_RERANK_FLAG } from '../../installer/llm-setup-catalog.js';
 import { recommendedTuning } from '../../installer/hardware-tuning.js';
 import { normaliseEndpoint, scanForLlmBackends } from '../../installer/scan-backends.js';
+import { asJsonObject } from '../../json-object.js';
 
 export const LLM_TIER_KEYS = [
   'summarizeLlm',
@@ -73,33 +74,23 @@ export interface BackendConfigDrift {
   readonly requested: readonly string[];
 }
 
-export interface BackendPidFile {
-  readonly schemaVersion: number;
-  readonly pid: number;
-  readonly startedAt: string;
-  readonly command: string;
-  readonly args: readonly string[];
-  readonly endpoint: string;
-  readonly modelPath: string;
-  readonly labels: readonly string[];
-  readonly logPath: string;
-}
-
 /** On-disk pid file shape. Validated on read because the file can be
  *  stale or partially-written across crashes/restarts; the version
  *  literal makes a schema bump reject old files, and a positive-int pid
  *  is required before we treat any process as live. */
+const backendPidFileStringSchema = z.string().trim().min(1);
 const BackendPidFileSchema = z.object({
   schemaVersion: z.literal(PID_FILE_SCHEMA_VERSION),
   pid: z.number().int().positive(),
-  startedAt: z.string(),
-  command: z.string(),
+  startedAt: backendPidFileStringSchema,
+  command: backendPidFileStringSchema,
   args: z.array(z.string()),
-  endpoint: z.string(),
-  modelPath: z.string(),
-  labels: z.array(z.string()),
-  logPath: z.string(),
+  endpoint: backendPidFileStringSchema,
+  modelPath: backendPidFileStringSchema,
+  labels: z.array(backendPidFileStringSchema).min(1),
+  logPath: backendPidFileStringSchema,
 });
+export type BackendPidFile = z.infer<typeof BackendPidFileSchema>;
 
 export type BackendRuntimeState = 'running' | 'starting' | 'external' | 'stopped' | 'missing-model';
 
@@ -190,15 +181,23 @@ export interface BackendLogsReport extends BackendStatusReport {
   readonly logs: readonly BackendLogRow[];
 }
 
+function ownField(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function ownObjectField(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  return asJsonObject(ownField(record, key));
+}
+
 export function configuredModelFilesFromLlm(llm: Record<string, unknown> | null): ConfiguredModelFile[] {
-  if (!llm) return [];
+  const root = asJsonObject(llm);
+  if (!root) return [];
   const out: ConfiguredModelFile[] = [];
   for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const cfg = block as Record<string, unknown>;
-    if (cfg['provider'] !== 'openai-compat') continue;
-    const model = cfg['model'];
+    const cfg = ownObjectField(root, tier);
+    if (!cfg) continue;
+    if (ownField(cfg, 'provider') !== 'openai-compat') continue;
+    const model = ownField(cfg, 'model');
     if (typeof model !== 'string' || model.length === 0) continue;
     if (!path.isAbsolute(model)) continue;
     out.push({ tier, modelPath: model });
@@ -207,12 +206,13 @@ export function configuredModelFilesFromLlm(llm: Record<string, unknown> | null)
 }
 
 export function configuredEndpointsFromLlm(llm: Record<string, unknown> | null): string[] {
-  if (!llm) return [];
+  const root = asJsonObject(llm);
+  if (!root) return [];
   const endpoints: string[] = [];
   for (const tier of LLM_TIER_KEYS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const endpoint = (block as Record<string, unknown>)['endpoint'];
+    const cfg = ownObjectField(root, tier);
+    if (!cfg) continue;
+    const endpoint = ownField(cfg, 'endpoint');
     if (typeof endpoint === 'string' && endpoint.length > 0) endpoints.push(endpoint);
   }
   return [...new Set(endpoints)];
@@ -220,9 +220,9 @@ export function configuredEndpointsFromLlm(llm: Record<string, unknown> | null):
 
 export function readProjectLlm(projectPath: string): Record<string, unknown> | null {
   try {
-    const cfg = loadConfig(projectPath) as unknown as Record<string, unknown>;
-    const llm = cfg['llm'];
-    return typeof llm === 'object' && llm !== null ? (llm as Record<string, unknown>) : null;
+    const cfg = asJsonObject(loadConfig(projectPath));
+    if (!cfg) return null;
+    return ownObjectField(cfg, 'llm');
   } catch {
     return null;
   }
@@ -232,13 +232,14 @@ export function buildBackendProcessSpecs(
   llm: Record<string, unknown> | null,
   options: { bin?: string } = {},
 ): BackendProcessSpec[] {
-  if (!llm) return [];
+  const root = asJsonObject(llm);
+  if (!root) return [];
   const tuning = recommendedTuning();
   const specs = new Map<string, MutableBackendProcessSpec>();
   const command = options.bin ?? 'llama-server';
 
   for (const tier of LLM_TIER_KEYS) {
-    const built = buildTierBackendSpec(tier, llm[tier], { command, tuning });
+    const built = buildTierBackendSpec(tier, ownField(root, tier), { command, tuning });
     if (!built) continue;
     // A managed backend's identity (its dedup `key`) is its endpoint
     // PLUS the stable per-tier-kind mode flags — see `buildTierBackendSpec`.
@@ -281,11 +282,11 @@ function buildTierBackendSpec(
   block: unknown,
   ctx: { command: string; tuning: ReturnType<typeof recommendedTuning> },
 ): { key: string; label: string; spec: MutableBackendProcessSpec } | null {
-  if (typeof block !== 'object' || block === null) return null;
-  const cfg = block as Record<string, unknown>;
-  if (cfg['provider'] !== 'openai-compat') return null;
-  const model = cfg['model'];
-  const endpoint = cfg['endpoint'];
+  const cfg = asJsonObject(block);
+  if (!cfg) return null;
+  if (ownField(cfg, 'provider') !== 'openai-compat') return null;
+  const model = ownField(cfg, 'model');
+  const endpoint = ownField(cfg, 'endpoint');
   if (typeof model !== 'string' || typeof endpoint !== 'string') return null;
   if (!path.isAbsolute(model)) return null;
   const parsed = parseLocalEndpoint(endpoint);
@@ -321,7 +322,7 @@ function buildTierBackendSpec(
       extraArgs,
       command: ctx.command,
       args,
-      externallyManaged: cfg['externallyManaged'] === true,
+      externallyManaged: ownField(cfg, 'externallyManaged') === true,
     },
   };
 }
@@ -741,10 +742,10 @@ async function writePidFile(row: BackendStatusRow, pid: number): Promise<void> {
         pid,
         startedAt: new Date().toISOString(),
         command: row.spec.command,
-        args: row.spec.args,
+        args: [...row.spec.args],
         endpoint: row.spec.endpoint,
         modelPath: row.spec.modelPath,
-        labels: row.spec.labels,
+        labels: [...row.spec.labels],
         logPath: row.logPath,
       } satisfies BackendPidFile,
       null,
@@ -873,7 +874,7 @@ function resolveTierParallel(
   tier: LlmTierKey,
   cfg: Record<string, unknown>,
 ): number {
-  const override = cfg['concurrency'];
+  const override = ownField(cfg, 'concurrency');
   if (typeof override === 'number' && Number.isInteger(override) && override > 0) return override;
   return llamaServerParallelForTier(tuning, tier);
 }
@@ -883,7 +884,7 @@ function resolveTierParallel(
  *  start command. Non-array configs and non-string entries are dropped
  *  so a malformed value can never break command construction. */
 function llamaServerPassthroughArgs(cfg: Record<string, unknown>): string[] {
-  const raw = cfg['llamaServerArgs'];
+  const raw = ownField(cfg, 'llamaServerArgs');
   if (!Array.isArray(raw)) return [];
   return raw.filter((value): value is string => typeof value === 'string');
 }

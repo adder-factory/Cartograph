@@ -32,7 +32,7 @@ export function registerPlaybookCommand(deps: PlaybookCommandDeps): void {
       try {
         const result = await handler.execute('cartograph_playbook', {});
         writeStdout(result.content[0]?.text ?? '');
-        if (result.isError) process.exit(1);
+        if (result.isError) process.exitCode = 1;
       } finally {
         handler.closeAll();
       }

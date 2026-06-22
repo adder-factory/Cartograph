@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { z } from 'zod';
 import {
   databaseConfigFromOptionInput,
   postgresConnectionSummary,
@@ -21,6 +23,12 @@ import {
   createDatabase,
   readSqliteRuntimeCapabilities,
 } from '../src/db/sqlite-adapter.js';
+
+const sqliteRuntimeProbeSchema = z.object({
+  vecLoaded: z.boolean(),
+  sqliteVersion: z.string(),
+});
+type SqliteRuntimeProbe = z.infer<typeof sqliteRuntimeProbeSchema>;
 
 let currentDir: string | undefined;
 
@@ -243,9 +251,72 @@ describe('database runtime capability gates', () => {
       opened.db.close();
     }
   });
+
+  it('prepares Bun SQLite before direct read-only opens so sqlite-vec remains available', () => {
+    const baseline = runBunRuntimeProbe(`
+      import { mkdtempSync, rmSync } from 'node:fs';
+      import { tmpdir } from 'node:os';
+      import { join } from 'node:path';
+
+      const { createDatabase } = await import('./src/db/sqlite-adapter.ts');
+      const dir = mkdtempSync(join(tmpdir(), 'cartograph-sqlite-runtime-baseline-'));
+      const opened = createDatabase(join(dir, 'baseline.db'));
+      try {
+        const row = opened.db.prepare('SELECT sqlite_version() AS v').get();
+        console.log(JSON.stringify({ vecLoaded: opened.vecLoaded, sqliteVersion: row?.v ?? '' }));
+      } finally {
+        opened.db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    `);
+    if (!baseline.vecLoaded) return;
+
+    const guardedDirectOpen = runBunRuntimeProbe(`
+      import { mkdtempSync, rmSync } from 'node:fs';
+      import { tmpdir } from 'node:os';
+      import { join } from 'node:path';
+
+      const { createDatabase, prepareBunSqliteRuntime } = await import('./src/db/sqlite-adapter.ts');
+      const dir = mkdtempSync(join(tmpdir(), 'cartograph-sqlite-runtime-guarded-'));
+      prepareBunSqliteRuntime();
+      const { Database } = await import('bun:sqlite');
+      const direct = new Database(join(dir, 'direct.db'));
+      direct.exec('CREATE TABLE t (id INTEGER)');
+      direct.close();
+      const opened = createDatabase(join(dir, 'after-direct.db'));
+      try {
+        const row = opened.db.prepare('SELECT sqlite_version() AS v').get();
+        console.log(JSON.stringify({ vecLoaded: opened.vecLoaded, sqliteVersion: row?.v ?? '' }));
+      } finally {
+        opened.db.close();
+        rmSync(dir, { recursive: true, force: true });
+      }
+    `);
+
+    expect(guardedDirectOpen).toEqual(baseline);
+  });
 });
 
 function restoreEnv(name: string, value: string | undefined): void {
   if (value === undefined) delete process.env[name];
   else process.env[name] = value;
+}
+
+function runBunRuntimeProbe(source: string): SqliteRuntimeProbe {
+  const repoRoot = path.resolve(import.meta.dirname, '..');
+  const raw = execFileSync('bun', ['-e', source], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  return parseSqliteRuntimeProbe(raw);
+}
+
+function parseSqliteRuntimeProbe(raw: string): SqliteRuntimeProbe {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return sqliteRuntimeProbeSchema.parse(parsed);
+  } catch {
+    throw new Error(`Unexpected SQLite runtime probe payload: ${raw}`);
+  }
 }

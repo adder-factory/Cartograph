@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { registerAdminCommands, type AdminCommandDeps } from '../src/bin/commands/admin.js';
 
-const actions = new Map<string, (...args: any[]) => unknown>();
+const actions = new Map<string, (...args: unknown[]) => unknown>();
 const calls: string[] = [];
 let projectPath: string;
 
@@ -27,7 +27,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => unknown): this {
+  action(fn: (...args: unknown[]) => unknown): this {
     actions.set(this.name, fn);
     return this;
   }

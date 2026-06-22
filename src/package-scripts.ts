@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { readPackageJsonScripts } from './package-manifest.js';
 
 export type PackageManager = 'bun' | 'pnpm' | 'yarn' | 'npm';
 
@@ -18,15 +19,7 @@ export function packageJsonExists(projectRoot: string): boolean {
 
 export function readPackageScripts(projectRoot: string): Record<string, string> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8')) as unknown;
-    const obj = parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {};
-    const rawScripts = obj['scripts'];
-    if (!rawScripts || typeof rawScripts !== 'object' || Array.isArray(rawScripts)) return {};
-    return Object.fromEntries(
-      Object.entries(rawScripts as Record<string, unknown>).filter((entry): entry is [string, string] => {
-        return typeof entry[1] === 'string';
-      }),
-    );
+    return readPackageJsonScripts(fs.readFileSync(path.join(projectRoot, 'package.json'), 'utf8'));
   } catch {
     return {};
   }

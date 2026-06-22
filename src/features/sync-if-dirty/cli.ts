@@ -64,7 +64,8 @@ export async function runSyncIfDirtyCommand(
   const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
   if (!parsedMaxFileSize.ok) {
     deps.error(parsedMaxFileSize.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   const maxFileSize = parsedMaxFileSize.value;
   let cg: SyncIfDirtyGraph | undefined;
@@ -72,7 +73,8 @@ export async function runSyncIfDirtyCommand(
   try {
     if (!deps.isInitialized(projectPath)) {
       if (!options.quiet) deps.error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const dirty = deps.hasUncommittedChanges(projectPath);
@@ -88,7 +90,7 @@ export async function runSyncIfDirtyCommand(
     if (!options.quiet) deps.info('Synced changed files');
   } catch (err) {
     reportSyncFailure(err, options.quiet, deps);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     cg?.close();
   }

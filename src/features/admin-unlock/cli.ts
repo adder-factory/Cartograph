@@ -42,7 +42,7 @@ export function registerAdminUnlockCommand(deps: AdminUnlockCommandDeps): void {
         success('Removed lock file. You can now run indexing again.');
       } catch (err) {
         error(`Failed to remove lock: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

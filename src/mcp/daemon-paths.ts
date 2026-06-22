@@ -1,16 +1,22 @@
 import * as crypto from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { getCartographDir } from '../directory.js';
+import { asJsonObject } from '../json-object.js';
 
 const POSIX_SOCKET_PATH_LIMIT = 100;
 
-export interface DaemonLockInfo {
-  pid: number;
-  version: string;
-  socketPath: string;
-  startedAt: number;
-}
+const daemonLockInfoSchema = z.object({
+  pid: z.number().int().positive(),
+  version: z.string().min(1),
+  socketPath: z.string(),
+  startedAt: z.number().nonnegative(),
+});
+
+const legacyDaemonPidSchema = z.number().int().positive();
+
+export type DaemonLockInfo = z.infer<typeof daemonLockInfoSchema>;
 
 export function getDaemonPidPath(projectRoot: string): string {
   return path.join(getCartographDir(projectRoot), 'daemon.pid');
@@ -33,23 +39,17 @@ export function decodeLockInfo(raw: string): DaemonLockInfo | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
   try {
-    const parsed = JSON.parse(trimmed) as Partial<DaemonLockInfo> | number;
-    if (typeof parsed === 'number' && Number.isFinite(parsed) && parsed > 0) {
-      return { pid: parsed, version: 'unknown', socketPath: '', startedAt: 0 };
-    }
-    if (
-      typeof parsed === 'object' &&
-      parsed !== null &&
-      typeof parsed.pid === 'number' &&
-      typeof parsed.version === 'string' &&
-      typeof parsed.socketPath === 'string' &&
-      typeof parsed.startedAt === 'number'
-    ) {
-      return parsed as DaemonLockInfo;
-    }
+    const parsed: unknown = JSON.parse(trimmed);
+    const legacy = legacyDaemonPidSchema.safeParse(parsed);
+    if (legacy.success) return { pid: legacy.data, version: 'unknown', socketPath: '', startedAt: 0 };
+    const lockInput = asJsonObject(parsed);
+    if (!lockInput) return null;
+    const lock = daemonLockInfoSchema.safeParse(lockInput);
+    if (lock.success) return lock.data;
   } catch {
     const pid = Number(trimmed);
-    if (Number.isFinite(pid) && pid > 0) return { pid, version: 'unknown', socketPath: '', startedAt: 0 };
+    const legacy = legacyDaemonPidSchema.safeParse(pid);
+    if (legacy.success) return { pid: legacy.data, version: 'unknown', socketPath: '', startedAt: 0 };
   }
   return null;
 }

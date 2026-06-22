@@ -3,7 +3,7 @@ import * as errorModule from '../src/errors.js';
 import * as workerSlice from '../src/utils/worker-slice.js';
 
 const state = {
-  replies: [] as Array<{ ok: true; results: unknown[] } | { ok: false; error: string }>,
+  replies: [] as unknown[],
   workerCalls: [] as Array<{ workerData: unknown; timeoutMs: number; sliceLabel: string }>,
   logs: [] as string[],
 };
@@ -15,7 +15,7 @@ vi.spyOn(workerSlice, 'runWorkerSlice').mockImplementation((async (args: {
 }) => {
   state.workerCalls.push(args);
   const reply = state.replies.shift();
-  if (!reply) return { ok: true, results: [] };
+  if (!reply) return { ok: true, results: [], durationMs: 0 };
   return reply;
 }) as never);
 
@@ -26,6 +26,22 @@ const { PER_FILE_WORKER_THRESHOLD, runPerFileBiomarkersInWorkers, shouldUsePerFi
 );
 
 const ORIGINAL_WORKERS = process.env['CARTOGRAPH_BIOMARKER_PERFILE_WORKERS'];
+const STATS_DELTA = {
+  symbolsAnalysed: 0,
+  findingsEmitted: 0,
+  unsupportedLanguages: 0,
+  errors: 0,
+  skippedRangeMismatch: 0,
+};
+
+function perFileResult(relPath: string, outcome: 'computed' | 'unsupported-language') {
+  return {
+    relPath,
+    currentHash: null,
+    outcome,
+    statsDelta: STATS_DELTA,
+  };
+}
 
 function setWorkers(value: string | undefined): void {
   if (value === undefined) delete process.env['CARTOGRAPH_BIOMARKER_PERFILE_WORKERS'];
@@ -78,10 +94,12 @@ describe('biomarker per-file worker pool', () => {
 
   it('partitions files round-robin, aggregates successful replies, and logs failed workers', async () => {
     setWorkers('3');
+    const computed = perFileResult('src/a.ts', 'computed');
+    const unsupported = perFileResult('src/c.ts', 'unsupported-language');
     state.replies = [
-      { ok: true, results: [{ relPath: 'src/a.ts', outcome: 'computed' }] },
+      { ok: true, results: [computed], durationMs: 1 },
       { ok: false, error: 'worker timeout' },
-      { ok: true, results: [{ relPath: 'src/c.ts', outcome: 'unsupported-language' }] },
+      { ok: true, results: [unsupported], durationMs: 1 },
     ];
 
     const results = await runPerFileBiomarkersInWorkers({
@@ -97,10 +115,7 @@ describe('biomarker per-file worker pool', () => {
       ],
     });
 
-    expect(results).toEqual([
-      { relPath: 'src/a.ts', outcome: 'computed' },
-      { relPath: 'src/c.ts', outcome: 'unsupported-language' },
-    ]);
+    expect(results).toEqual([computed, unsupported]);
     expect(state.workerCalls).toHaveLength(3);
     expect(state.workerCalls.map((call) => call.timeoutMs)).toEqual([77, 77, 77]);
     expect(state.workerCalls.map((call) => call.sliceLabel)).toEqual(['#0/3', '#1/3', '#2/3']);
@@ -110,5 +125,21 @@ describe('biomarker per-file worker pool', () => {
       ),
     ).toEqual([['src/a.ts', 'src/d.ts'], ['src/b.ts'], ['src/c.ts']]);
     expect(state.logs).toEqual(['biomarkers per-file worker failed: worker timeout']);
+  });
+
+  it('logs malformed worker replies and skips their results', async () => {
+    setWorkers('1');
+    state.replies = [{ ok: true, results: [{ relPath: 'src/a.ts', outcome: 'computed' }], durationMs: 1 }];
+
+    const results = await runPerFileBiomarkersInWorkers({
+      dbPath: '/db',
+      projectRoot: '/repo',
+      nowMs: 123,
+      files: [{ relPath: 'src/a.ts', currentHash: null }],
+    });
+
+    expect(results).toEqual([]);
+    expect(state.logs).toHaveLength(1);
+    expect(state.logs[0]).toContain('invalid biomarker per-file worker reply');
   });
 });

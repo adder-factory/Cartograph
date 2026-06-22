@@ -19,7 +19,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import {
   atomicWriteFileSync,
   deleteNestedJsonEntry,
@@ -105,7 +112,7 @@ class KiroTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath, command: opts.command });
+  return writeMcpEntryJson(loc, { resolvePath: mcpJsonPath, command: installCommandOption(opts) });
 }
 
 /**

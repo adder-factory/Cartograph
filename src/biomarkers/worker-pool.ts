@@ -23,7 +23,19 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { logDebug, errMsg } from '../errors.js';
 import type { CrossFileBiomarkerName, Finding } from './types.js';
-import type { BiomarkerWorkerReply } from './biomarker-worker.js';
+import { parseBiomarkerWorkerReply, type BiomarkerWorkerInit } from './biomarker-worker-contract.js';
+
+export interface BiomarkerWorkerLike {
+  once(eventName: 'message', listener: (raw: unknown) => void): this;
+  once(eventName: 'error', listener: (err: Error) => void): this;
+  once(eventName: 'exit', listener: (code: number) => void): this;
+  terminate(): Promise<number>;
+}
+
+export type BiomarkerWorkerClass = new (
+  filename: string,
+  options: { workerData: BiomarkerWorkerInit },
+) => BiomarkerWorkerLike;
 
 export interface BiomarkerRuleResult {
   readonly ruleKind: CrossFileBiomarkerName;
@@ -37,6 +49,7 @@ export interface RunRulesInWorkersArgs {
   readonly dbPath: string;
   readonly projectRoot: string;
   readonly ruleKinds: ReadonlyArray<CrossFileBiomarkerName>;
+  readonly WorkerClass?: BiomarkerWorkerClass;
   /**
    * Per-worker wall-clock budget (ms). A worker that blocks past this
    * is terminated and surfaced as an error result. Defaults to the
@@ -68,12 +81,14 @@ function workerEntryUrl(): URL {
  */
 export async function runRulesInWorkers(args: RunRulesInWorkersArgs): Promise<BiomarkerRuleResult[]> {
   const timeoutMs = args.perRuleTimeoutMs ?? DEFAULT_PER_RULE_TIMEOUT_MS;
+  const WorkerClass = args.WorkerClass ?? Worker;
   const tasks = args.ruleKinds.map((ruleKind) =>
     runOneRuleInWorker({
       dbPath: args.dbPath,
       projectRoot: args.projectRoot,
       ruleKind,
       timeoutMs,
+      WorkerClass,
     }),
   );
   return Promise.all(tasks);
@@ -84,18 +99,19 @@ interface RunOneRuleArgs {
   readonly projectRoot: string;
   readonly ruleKind: CrossFileBiomarkerName;
   readonly timeoutMs: number;
+  readonly WorkerClass: BiomarkerWorkerClass;
 }
 
 function runOneRuleInWorker(args: RunOneRuleArgs): Promise<BiomarkerRuleResult> {
   return new Promise((resolve) => {
     const start = Date.now();
     const entry = workerEntryUrl();
-    const worker = new Worker(fileURLToPath(entry), {
+    const worker = new args.WorkerClass(fileURLToPath(entry), {
       workerData: {
         dbPath: args.dbPath,
         projectRoot: args.projectRoot,
         ruleKind: args.ruleKind,
-      },
+      } satisfies BiomarkerWorkerInit,
     });
     let settled = false;
     const settle = (result: BiomarkerRuleResult): void => {
@@ -113,12 +129,24 @@ function runOneRuleInWorker(args: RunOneRuleArgs): Promise<BiomarkerRuleResult> 
         error: `worker timeout after ${args.timeoutMs}ms`,
       });
     }, args.timeoutMs);
-    worker.once('message', (raw: BiomarkerWorkerReply) => {
+    worker.once('message', (raw: unknown) => {
       clearTimeout(timer);
-      if (raw.ok) {
-        settle({ ruleKind: raw.ruleKind, findings: raw.findings, durationMs: raw.durationMs });
+      let msg: ReturnType<typeof parseBiomarkerWorkerReply>;
+      try {
+        msg = parseBiomarkerWorkerReply(raw);
+      } catch (err) {
+        settle({
+          ruleKind: args.ruleKind,
+          findings: [],
+          durationMs: Date.now() - start,
+          error: errMsg(err),
+        });
+        return;
+      }
+      if (msg.ok) {
+        settle({ ruleKind: msg.ruleKind, findings: msg.findings, durationMs: msg.durationMs });
       } else {
-        settle({ ruleKind: raw.ruleKind, findings: [], durationMs: Date.now() - start, error: raw.error });
+        settle({ ruleKind: msg.ruleKind, findings: [], durationMs: Date.now() - start, error: msg.error });
       }
     });
     worker.once('error', (err) => {

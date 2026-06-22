@@ -77,6 +77,12 @@ describe('detectModuleFormat — JSONC handling', () => {
     expect(detectModuleFormat(dir)).toBeNull();
   });
 
+  it('ignores valid JSON roots that are not manifest objects', () => {
+    fs.writeFileSync(path.join(dir, 'package.json'), '["module"]');
+    fs.writeFileSync(path.join(dir, 'tsconfig.json'), '"NodeNext"');
+    expect(detectModuleFormat(dir)).toBeNull();
+  });
+
   it('returns CJS when only package.json exists with type=commonjs', () => {
     fs.writeFileSync(path.join(dir, 'package.json'), '{"type":"commonjs"}');
     expect(detectModuleFormat(dir)?.format).toBe('CJS');

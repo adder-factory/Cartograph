@@ -20,6 +20,7 @@ import { fileURLToPath } from 'node:url';
 import type { NodeKind, EdgeKind } from '../types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import { getAllNodes } from '../db/queries.js';
+import { readPackageJsonIdentity } from '../package-manifest.js';
 import {
   buildSymbolString,
   escapeDescriptorName,
@@ -568,22 +569,23 @@ interface ScipMeta {
  * cartograph's own version from its bundled `package.json`.
  */
 export function deriveScipMeta(projectRoot: string): ScipMeta {
-  const projectPkg = readPackageJson(path.join(projectRoot, 'package.json'));
-  const toolPkg = readPackageJson(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'));
+  const projectPkg = readPackageIdentity(path.join(projectRoot, 'package.json'));
+  const toolPkg = readPackageIdentity(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json'),
+  );
   return {
-    projectName:
-      (typeof projectPkg.name === 'string' && projectPkg.name) || path.basename(path.resolve(projectRoot)) || 'project',
-    projectVersion: (typeof projectPkg.version === 'string' && projectPkg.version) || '0.0.0',
-    toolVersion: (typeof toolPkg.version === 'string' && toolPkg.version) || '0.0.0',
+    projectName: projectPkg.name || path.basename(path.resolve(projectRoot)) || 'project',
+    projectVersion: projectPkg.version || '0.0.0',
+    toolVersion: toolPkg.version || '0.0.0',
   };
 }
 
-/** Parse a `package.json`, returning `{}` when absent or malformed. */
-function readPackageJson(file: string): { name?: unknown; version?: unknown } {
+/** Parse a `package.json`, returning null fields when absent or malformed. */
+function readPackageIdentity(file: string): { name: string | null; version: string | null } {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8')) as { name?: unknown; version?: unknown };
+    return readPackageJsonIdentity(fs.readFileSync(file, 'utf8'));
   } catch {
-    return {};
+    return { name: null, version: null };
   }
 }
 

@@ -25,10 +25,13 @@ export function registerQuickstartCommand(deps: QuickstartCommandDeps): void {
       try {
         const result = await runQuickstart({ projectPath }, deps);
         deps.writeStdout(renderQuickstartReport(result));
-        if (!result.index.success) process.exit(1);
+        if (!result.index.success) {
+          process.exitCode = 1;
+          return;
+        }
       } catch (err) {
         deps.error(errMsg(err));
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

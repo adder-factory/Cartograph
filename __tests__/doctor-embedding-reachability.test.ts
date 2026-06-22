@@ -143,6 +143,23 @@ describe('runDoctor — embedding endpoint reachability', () => {
     expect(embCheck).toBeUndefined();
   });
 
+  it('ignores inherited embedding tier blocks while running reachability diagnostics', async () => {
+    await writeLlmConfig({});
+
+    Object.defineProperty(Object.prototype, 'embeddingLlm', {
+      configurable: true,
+      value: { provider: 'openai-compat', endpoint: 'http://localhost:1', model: 'polluted' },
+    });
+    try {
+      const result = await runDoctor({ projectPath });
+
+      const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
+      expect(embCheck).toBeUndefined();
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'embeddingLlm');
+    }
+  });
+
   it('always emits the `Detected LLM backends` informational line', async () => {
     const result = await runDoctor({ projectPath, skipProjectChecks: true });
     const line = result.checks.find((c) => c.name === 'Detected LLM backends');

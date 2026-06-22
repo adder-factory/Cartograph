@@ -38,7 +38,8 @@ export function registerTraceToCulpritsCommand(deps: TraceToCulpritsCommandDeps)
       const trace = options.trace ?? (await (deps.readStdin ?? readProcessStdin)());
       if (!trace.trim()) {
         writeStderr('No trace provided. Pipe a stack trace to stdin or pass --trace "<text>".');
-        process.exit(2);
+        process.exitCode = 2;
+        return;
       }
       const args: Record<string, unknown> = { trace };
       if (!assignIntArg({ args, key: 'limit', raw: options.limit, optionName: '--limit', opts: { min: 1 } })) return;

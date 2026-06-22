@@ -37,7 +37,8 @@ export interface WriteMcpEntryJsonArgs {
 }
 
 function targetEntry(loc: Location, args: WriteMcpEntryJsonArgs): Record<string, unknown> {
-  const options = mcpCommandOptionsForLocation(loc, { command: args.command });
+  const command = Object.hasOwn(args, 'command') ? args.command : undefined;
+  const options = mcpCommandOptionsForLocation(loc, { command });
   return args.entry?.(options) ?? getMcpServerConfig(options);
 }
 

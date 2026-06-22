@@ -225,6 +225,29 @@ describe('parse_cache helpers', () => {
     ).toBeNull();
   });
 
+  it('treats a current-version payload missing required result fields as a miss', () => {
+    const sample = { nodes: [], edges: [], unresolvedReferences: [], errors: [], durationMs: 0 };
+    putCachedParse({
+      qb: cg.queries,
+      contentHash: 'hmissing-duration',
+      language: 'typescript',
+      filePath: 'src/missing-duration.ts',
+      result: sample,
+    });
+    cg.queries.db
+      .prepare("UPDATE parse_cache SET payload = json_remove(payload, '$.result.durationMs') WHERE content_hash = ?")
+      .run('hmissing-duration');
+
+    expect(
+      getCachedParse({
+        qb: cg.queries,
+        contentHash: 'hmissing-duration',
+        language: 'typescript',
+        filePath: 'src/missing-duration.ts',
+      }),
+    ).toBeNull();
+  });
+
   it('evictParseCacheIfOversized is a no-op under the cap', () => {
     const sample = { nodes: [], edges: [], unresolvedReferences: [], errors: [], durationMs: 0 };
     putCachedParse({ qb: cg.queries, contentHash: 'h', language: 'typescript', filePath: 'src/a.ts', result: sample });

@@ -210,8 +210,7 @@ export class TokenStore {
     await cg.llm.bgCtrl.awaitCompletion();
 
     // Wipe roles so classify has work to do, leaving summaries intact.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.exec('UPDATE nodes SET role = NULL, role_model = NULL');
 
     handler = new ToolHandler(cg);

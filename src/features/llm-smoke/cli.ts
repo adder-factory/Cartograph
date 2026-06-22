@@ -32,6 +32,6 @@ export function registerLlmSmokeCommand(deps: LlmSmokeCommandDeps): void {
       const { runLlmSmoke, formatLlmSmokeReport, formatLlmSmokeJson } = await loadLlmSmoke();
       const result = await runLlmSmoke({ projectPath, ...(timeoutMs === undefined ? {} : { timeoutMs }) });
       writeStdout(options.json ? formatLlmSmokeJson(result) : formatLlmSmokeReport(result));
-      if (result.overallStatus === 'fail') process.exit(1);
+      if (result.overallStatus === 'fail') process.exitCode = 1;
     });
 }

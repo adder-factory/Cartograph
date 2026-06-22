@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import { resolveAssetPath } from './assets.js';
+import { readPackageJsonVersion } from './package-manifest.js';
 
 /**
  * Read the version from the on-disk `package.json` asset RIGHT NOW
@@ -14,8 +15,7 @@ import { resolveAssetPath } from './assets.js';
 export function readOnDiskPackageVersion(): string | null {
   try {
     const raw = fs.readFileSync(resolveAssetPath('package.json'), 'utf-8');
-    const parsed = JSON.parse(raw) as { version?: unknown };
-    return typeof parsed.version === 'string' && parsed.version.trim() !== '' ? parsed.version.trim() : null;
+    return readPackageJsonVersion(raw);
   } catch {
     return null;
   }

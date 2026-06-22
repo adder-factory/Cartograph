@@ -1,6 +1,11 @@
 import { Worker } from 'node:worker_threads';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import {
+  parseShimmerWorkerReply,
+  type ShimmerWorkerData,
+  type ShimmerWorkerMessage,
+} from './shimmer-worker-contract.js';
 
 const PHASE_NAMES: Record<string, string> = {
   scanning: 'Scanning files',
@@ -37,14 +42,17 @@ function stopShimmerWorker(worker: Worker): Promise<void> {
       worker.terminate().then(() => resolve());
     }, 2000);
 
-    worker.on('message', (msg: { type: string }) => {
-      if (msg.type === 'stopped') {
+    worker.on('message', (raw: unknown) => {
+      try {
+        parseShimmerWorkerReply(raw);
         clearTimeout(timeout);
         worker.terminate().then(() => resolve());
+      } catch {
+        return;
       }
     });
 
-    worker.postMessage({ type: 'stop' });
+    worker.postMessage({ type: 'stop' } satisfies ShimmerWorkerMessage);
   });
 }
 
@@ -141,16 +149,15 @@ export function createShimmerProgress(): ShimmerProgress {
     return createTextProgressFallback();
   }
 
-  const worker = new Worker(workerPath, {
-    workerData: { startTime: Date.now() },
-  });
+  const workerData = { startTime: Date.now() } satisfies ShimmerWorkerData;
+  const worker = new Worker(workerPath, { workerData });
 
   return {
     onProgress(progress: IndexProgress) {
       const phaseName = PHASE_NAMES[progress.phase] || progress.phase;
 
       if (progress.phase !== lastPhase && lastPhase) {
-        worker.postMessage({ type: 'finish-phase' });
+        worker.postMessage({ type: 'finish-phase' } satisfies ShimmerWorkerMessage);
       }
       lastPhase = progress.phase;
 
@@ -162,7 +169,13 @@ export function createShimmerProgress(): ShimmerProgress {
         count = progress.current;
       }
 
-      worker.postMessage({ type: 'update', phase: progress.phase, phaseName, percent, count });
+      worker.postMessage({
+        type: 'update',
+        phase: progress.phase,
+        phaseName,
+        percent,
+        count,
+      } satisfies ShimmerWorkerMessage);
     },
 
     stop() {

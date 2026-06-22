@@ -30,8 +30,11 @@ import { SUMMARIZABLE_KINDS } from '../llm/summarizer.js';
 import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-generator.js';
 import { getToolModules } from '../mcp/tools/registry.js';
 import { getToolContract } from '../mcp/tools/_tool-contract.js';
-import { resolveAssetPath } from '../assets.js';
 import { chalk, error, formatDuration, formatNumber } from './cli-output.js';
+import { CARTOGRAPH_PACKAGE_VERSION } from '../package-version.js';
+import type { ClackUi } from '../features/shared/clack-ui.js';
+import type { QueryBuilder } from '../db/queries.js';
+import type { LlmEndpointConfig } from '../llm/client.js';
 
 export {
   chalk,
@@ -123,13 +126,10 @@ export const sessionCmd = program
     'Agent session state + macros. Subcommands: create / resume / audit / list / delete / macro_save / macro_run / macro_list / macro_delete; kebab aliases also work.',
   );
 
-// Version from package.json
-const packageJson = JSON.parse(fs.readFileSync(resolveAssetPath('package.json'), 'utf-8'));
-
 program
   .name('cartograph')
   .description('Code intelligence and knowledge graph for any codebase')
-  .version(packageJson.version);
+  .version(CARTOGRAPH_PACKAGE_VERSION);
 
 // =============================================================================
 // Helper Functions
@@ -250,7 +250,20 @@ export function installFamilyActionAlias(group: import('commander').Command, fam
  * Polls the bg pass and emits a one-line phase update only when the
  * formatted message changes — silent otherwise.
  */
-function makeSummaryTicker(cg: import('../index.js').default, clack: typeof import('@clack/prompts')): () => void {
+interface BackgroundSummaryGraph {
+  queries: QueryBuilder | null;
+  close: () => void;
+  llm: {
+    config: { getEffectiveLlmConfig: () => Promise<LlmEndpointConfig | null | undefined> };
+    bgCtrl: {
+      promise: Promise<unknown> | null;
+      getProgress: () => { phase: string; done: number; total: number } | null;
+      awaitCompletion: () => Promise<void>;
+    };
+  };
+}
+
+function makeSummaryTicker(cg: BackgroundSummaryGraph, clack: ClackUi): () => void {
   const phaseLabels: Record<string, string> = {
     summarise: 'symbol summaries',
     embed: 'embeddings',
@@ -270,10 +283,7 @@ function makeSummaryTicker(cg: import('../index.js').default, clack: typeof impo
   };
 }
 
-export async function awaitSummarisationWithProgress(
-  cg: import('../index.js').default,
-  clack: typeof import('@clack/prompts'),
-): Promise<void> {
+export async function awaitSummarisationWithProgress(cg: BackgroundSummaryGraph, clack: ClackUi): Promise<void> {
   if (cg.llm.bgCtrl.promise === null) return;
 
   const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
@@ -295,8 +305,8 @@ export async function awaitSummarisationWithProgress(
 
   try {
     await cg.llm.bgCtrl.awaitCompletion();
-    const cov = getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS);
-    if (cov.total > 0) {
+    const cov = cg.queries ? getSummaryCoverage(cg.queries, SUMMARIZABLE_KINDS) : null;
+    if (cov && cov.total > 0) {
       const pct = Math.round((cov.summarised / cov.total) * FRACTION_TO_PERCENT);
       clack.log.info(`Summary coverage: ${formatNumber(cov.summarised)}/${formatNumber(cov.total)} (${pct}%)`);
     }
@@ -335,7 +345,7 @@ export type IndexResult = {
  * true when a lock-acquisition (or other non-file-level) failure
  * fired, so the caller skips the size-skips + breakdown sections.
  */
-function printIndexHeadlineOrLockShortCircuit(clack: typeof import('@clack/prompts'), result: IndexResult): boolean {
+function printIndexHeadlineOrLockShortCircuit(clack: ClackUi, result: IndexResult): boolean {
   const hasErrors = result.filesErrored > 0;
   // Lock-acquisition failure (or any non-file-level failure) — surface
   // before the file-count branches so the CLI doesn't fall through to
@@ -364,11 +374,7 @@ function printIndexHeadlineOrLockShortCircuit(clack: typeof import('@clack/promp
   return false;
 }
 
-export function printIndexResult(
-  clack: typeof import('@clack/prompts'),
-  result: IndexResult,
-  projectPath?: string,
-): void {
+export function printIndexResult(clack: ClackUi, result: IndexResult, projectPath?: string): void {
   if (printIndexHeadlineOrLockShortCircuit(clack, result)) return;
 
   // Surface size-cap skips so they don't disappear silently. The
@@ -422,11 +428,7 @@ function tallyErrorsByCode(errors: IndexResult['errors']): Map<string, number> {
  *  log. Pulled out of {@link printIndexResult} so the branch isn't
  *  carrying a 4-deep `for/if/set` walker plus two trailing `if`s
  *  alongside the else-if cascade. */
-function printIndexErrorBreakdown(
-  clack: typeof import('@clack/prompts'),
-  result: IndexResult,
-  projectPath?: string,
-): void {
+function printIndexErrorBreakdown(clack: ClackUi, result: IndexResult, projectPath?: string): void {
   const errorsByCode = tallyErrorsByCode(result.errors);
   const breakdown = Array.from(errorsByCode)
     .map(([code, count]) => `${formatNumber(count)} ${ERROR_CODE_LABELS[code] || code}`)

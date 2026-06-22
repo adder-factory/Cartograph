@@ -12,6 +12,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 
 type Format = 'ESM' | 'CJS' | 'mixed' | 'unknown';
 
@@ -24,6 +25,22 @@ interface ModuleFormatInfo {
   /** Verbatim `package.json#type` ("module" | "commonjs"). */
   pkgType?: string;
 }
+
+const packageManifestSchema = z.looseObject({
+  type: z.string().optional(),
+});
+
+const tsCompilerOptionsSchema = z.looseObject({
+  target: z.string().optional(),
+  module: z.string().optional(),
+});
+
+const tsConfigSchema = z.looseObject({
+  compilerOptions: tsCompilerOptionsSchema.optional(),
+});
+
+type PackageManifest = z.infer<typeof packageManifestSchema>;
+type TsConfig = z.infer<typeof tsConfigSchema>;
 
 function safeRead(file: string): string | null {
   try {
@@ -119,20 +136,22 @@ function stripJsonc(json: string): string {
   return out;
 }
 
-function safeParse(json: string | null): Record<string, unknown> | null {
+function safeParse<T>(json: string | null, schema: z.ZodType<T>): T | null {
   if (json == null) return null;
-  const direct = tryParseJson(json);
+  const direct = tryParseJson(json, schema);
   if (direct !== null) return direct;
   // tsconfig.json may have JSONC comments — strip and retry.
-  return tryParseJson(stripJsonc(json));
+  return tryParseJson(stripJsonc(json), schema);
 }
 
 /** Parse JSON returning `null` instead of throwing on syntax error.
  *  Pulled out so {@link safeParse}'s retry chain is two sequential
  *  calls instead of try-inside-catch nesting. */
-function tryParseJson(json: string): Record<string, unknown> | null {
+function tryParseJson<T>(json: string, schema: z.ZodType<T>): T | null {
   try {
-    return JSON.parse(json);
+    const parsed: unknown = JSON.parse(json);
+    const result = schema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
@@ -152,13 +171,6 @@ function tsModuleFormat(mod: string | undefined): Format | undefined {
   return undefined;
 }
 
-/** Read a string field from a JSON object safely. */
-function readStringField(obj: unknown, key: string): string | undefined {
-  if (!obj || typeof obj !== 'object') return undefined;
-  const v = (obj as Record<string, unknown>)[key];
-  return typeof v === 'string' ? v : undefined;
-}
-
 /** Convert `package.json#type` to our Format tag. */
 function pkgTypeToFormat(pkgType: string | undefined): Format | undefined {
   if (pkgType === 'module') return 'ESM';
@@ -176,14 +188,13 @@ function pickFormat(pkgFmt: Format | undefined, tscFmt: Format | undefined): For
 }
 
 export function detectModuleFormat(rootDir: string): ModuleFormatInfo | null {
-  const pkg = safeParse(safeRead(path.join(rootDir, 'package.json')));
-  const tscRaw = safeParse(safeRead(path.join(rootDir, 'tsconfig.json')));
-  if (!pkg && !tscRaw) return null;
+  const pkg: PackageManifest | null = safeParse(safeRead(path.join(rootDir, 'package.json')), packageManifestSchema);
+  const tsc: TsConfig | null = safeParse(safeRead(path.join(rootDir, 'tsconfig.json')), tsConfigSchema);
+  if (!pkg && !tsc) return null;
 
-  const pkgType = readStringField(pkg, 'type');
-  const tsc = (tscRaw?.['compilerOptions'] as Record<string, unknown> | undefined) ?? null;
-  const tsTarget = readStringField(tsc, 'target');
-  const tsModule = readStringField(tsc, 'module');
+  const pkgType = pkg?.type;
+  const tsTarget = tsc?.compilerOptions?.target;
+  const tsModule = tsc?.compilerOptions?.module;
 
   const format = pickFormat(pkgTypeToFormat(pkgType), tsModuleFormat(tsModule));
 

@@ -9,6 +9,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { fileExists } from '../../utils.js';
 
 export interface TestRunner {
@@ -24,19 +25,36 @@ interface DetectArgs {
   projectRoot: string;
 }
 
-function readJsonIfExists<T = unknown>(file: string): T | null {
+const packageStringMapSchema = z.preprocess(
+  (value: unknown): Record<string, string> => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return {};
+
+    const stringEntries: [string, string][] = [];
+    for (const [key, entryValue] of Object.entries(value)) {
+      if (typeof entryValue === 'string') stringEntries.push([key, entryValue]);
+    }
+    return Object.fromEntries(stringEntries);
+  },
+  z.record(z.string(), z.string()),
+);
+
+const packageJsonSchema = z.looseObject({
+  scripts: packageStringMapSchema,
+  devDependencies: packageStringMapSchema,
+  dependencies: packageStringMapSchema,
+});
+
+type PackageJsonShape = z.infer<typeof packageJsonSchema>;
+
+function readJsonIfExists<T>(file: string, schema: z.ZodType<T>): T | null {
   try {
     const body = fs.readFileSync(file, 'utf8');
-    return JSON.parse(body) as T;
+    const parsed: unknown = JSON.parse(body);
+    const result = schema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch {
     return null;
   }
-}
-
-interface PackageJsonShape {
-  scripts?: Record<string, string>;
-  devDependencies?: Record<string, string>;
-  dependencies?: Record<string, string>;
 }
 
 /**
@@ -52,7 +70,7 @@ export function detectTestRunner(projectRoot: string): TestRunner | null {
 
 function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
   const pkgJsonPath = path.join(projectRoot, 'package.json');
-  const pkg = readJsonIfExists<PackageJsonShape>(pkgJsonPath);
+  const pkg = readJsonIfExists(pkgJsonPath, packageJsonSchema);
   if (pkg) {
     const runner = detectNodeTestRunner(pkg);
     if (runner) return runner;
@@ -62,10 +80,7 @@ function detectFromArgs({ projectRoot }: DetectArgs): TestRunner | null {
 }
 
 function packageDependencyNames(pkg: PackageJsonShape): ReadonlySet<string> {
-  return new Set([
-    ...(pkg.devDependencies ? Object.keys(pkg.devDependencies) : []),
-    ...(pkg.dependencies ? Object.keys(pkg.dependencies) : []),
-  ]);
+  return new Set([...Object.keys(pkg.devDependencies), ...Object.keys(pkg.dependencies)]);
 }
 
 function detectNodeTestRunner(pkg: PackageJsonShape): TestRunner | null {

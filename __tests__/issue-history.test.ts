@@ -435,8 +435,7 @@ describe.skipIf(!HAS_GIT)('Cartograph issue history', () => {
     expect([...new Set(getIssuesForNode(cg.queries, node.id).map((i) => i.issueNumber))]).toEqual([1]);
 
     // Simulate force-push / gc by storing an unreachable SHA.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    setMetadata((cg as any).queries, LAST_MINED_ISSUES_HEAD_KEY, '0'.repeat(40));
+    setMetadata(cg.queries, LAST_MINED_ISSUES_HEAD_KEY, '0'.repeat(40));
 
     commitAt(
       '2025-03-01T00:00:00Z',

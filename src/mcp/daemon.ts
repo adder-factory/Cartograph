@@ -9,7 +9,13 @@ import { MCPServer } from './index.js';
 import { SocketTransport } from './transport.js';
 import type { McpServerProfile } from './profiles.js';
 import { CARTOGRAPH_PACKAGE_VERSION } from './version.js';
-import { isAcceptableDaemonHello, isDaemonConnectFailure, isDaemonLockPastStartupGrace } from './daemon-logic.js';
+import {
+  type DaemonHello,
+  isAcceptableDaemonHello,
+  isDaemonConnectFailure,
+  isDaemonLockPastStartupGrace,
+  parseDaemonHello,
+} from './daemon-logic.js';
 import {
   type DaemonLockInfo,
   decodeLockInfo,
@@ -34,15 +40,6 @@ export interface SharedMcpDaemonOptions {
   allowStaleDefault?: boolean | undefined;
   lowTokensDefault?: boolean | undefined;
   disableStartupSync?: boolean | undefined;
-}
-
-interface DaemonHello {
-  cartograph: string;
-  pid: number;
-  socketPath: string;
-  protocol: 1;
-  /** Tool-policy fingerprint — a client whose policy differs must not attach. */
-  policy: string;
 }
 
 interface DaemonRuntime {
@@ -530,18 +527,13 @@ function readHelloLine(socket: net.Socket): Promise<DaemonHello> {
       if (tail.length > 0) socket.unshift(tail);
       cleanup();
       try {
-        const parsed = JSON.parse(line) as DaemonHello;
-        if (
-          parsed?.protocol !== 1 ||
-          typeof parsed.cartograph !== 'string' ||
-          typeof parsed.pid !== 'number' ||
-          typeof parsed.socketPath !== 'string' ||
-          typeof parsed.policy !== 'string'
-        ) {
+        const parsed: unknown = JSON.parse(line);
+        const hello = parseDaemonHello(parsed);
+        if (hello === null) {
           reject(new Error('invalid daemon hello'));
           return;
         }
-        resolve(parsed);
+        resolve(hello);
       } catch (err) {
         reject(err);
       }

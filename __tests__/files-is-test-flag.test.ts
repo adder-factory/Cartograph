@@ -48,20 +48,20 @@ describe('Tooling-gaps #7: files.is_test flag', () => {
   });
 
   it('the is_test column exists on the files table', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const cols = q.db.prepare(`PRAGMA table_info(files)`).all() as Array<{ name: string }>;
     const names = cols.map((c) => c.name);
     expect(names).toContain('is_test');
   });
 
   it('flags **/*.test.ts as test', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const row = q.db.prepare(`SELECT is_test FROM files WHERE path LIKE '%foo.test.ts'`).get() as { is_test: number };
     expect(row?.is_test).toBe(1);
   });
 
   it('flags files under __tests__/ as test', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const row = q.db.prepare(`SELECT is_test FROM files WHERE path LIKE '%__tests__/bar.test.ts'`).get() as {
       is_test: number;
     };
@@ -69,7 +69,7 @@ describe('Tooling-gaps #7: files.is_test flag', () => {
   });
 
   it('does NOT flag plain src/foo.ts as test', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const row = q.db
       .prepare(`SELECT is_test FROM files WHERE path LIKE '%src/foo.ts' AND path NOT LIKE '%test%'`)
       .get() as { is_test: number };

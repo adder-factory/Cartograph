@@ -430,6 +430,11 @@ describe('Framework resolver detection and convention-based resolution', () => {
         frameworkContext({ files: { 'package.json': JSON.stringify({ dependencies: { react: '^19.0.0' } }) } }),
       ),
     ).toBe(true);
+    expect(
+      reactResolver.detect(
+        frameworkContext({ files: { 'package.json': JSON.stringify({ dependencies: { react: 1 } }) } }),
+      ),
+    ).toBe(false);
     expect(reactResolver.detect(frameworkContext({ files: { 'package.json': '{not-json' } }))).toBe(false);
     expect(reactResolver.detect(frameworkContext({ files: { 'src/App.tsx': '' } }))).toBe(true);
   });

@@ -7,12 +7,13 @@
  * cheap and deterministic.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import Cartograph from '../src/index.js';
 import { upsertSymbolEmbedding } from '../src/db/queries-embeddings.js';
+import { createDatabase } from '../src/db/sqlite-adapter.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
 import { getToolModules } from '../src/mcp/tools/registry.js';
 import { isTrivialConstant } from '../src/mcp/tools/review-neighbors.js';
@@ -34,6 +35,20 @@ function unitVec(seed: number): Float32Array {
 function tempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cg-rn-'));
 }
+
+function detectSqliteVecAvailable(): boolean {
+  const dir = tempDir();
+  const dbPath = path.join(dir, 'probe.db');
+  const { db, vecLoaded } = createDatabase(dbPath);
+  try {
+    return vecLoaded;
+  } finally {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const vectorIt = it.skipIf(!detectSqliteVecAvailable());
 
 interface Fixture {
   cg: InstanceType<typeof Cartograph>;
@@ -152,7 +167,7 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
   });
   afterEach(() => f.cleanup());
 
-  it('resolves a file → returns lookalikes for its symbols', async () => {
+  vectorIt('resolves a file → returns lookalikes for its symbols', async () => {
     const tool = getReviewNeighborsTool();
     const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', files: ['a.ts'], k: 3 });
     const text = result.content[0]?.text ?? '';
@@ -163,7 +178,7 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
     expect(text).toMatch(/alpha|beta/i);
   });
 
-  it('resolves a symbol name → finds its semantic peer in another file', async () => {
+  vectorIt('resolves a symbol name → finds its semantic peer in another file', async () => {
     const tool = getReviewNeighborsTool();
     const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 5 });
     const text = result.content[0]?.text ?? '';
@@ -181,13 +196,28 @@ describe('cartograph_review_neighbors — resolution + ranking', () => {
     }
   });
 
-  it('infers neighbors mode when symbols are provided without an explicit mode', async () => {
+  vectorIt('infers neighbors mode when symbols are provided without an explicit mode', async () => {
     const tool = getReviewNeighborsTool();
     const result = await tool.handle(makeCtx(f.cg), { symbols: ['alpha'], k: 1 });
     const text = result.content[0]?.text ?? '';
     expect(text).toContain('Review neighbors');
     expect(text).not.toContain('Review context');
     if (f.cg.db.hasVecExtension()) expect(text).toMatch(/beta/i);
+  });
+
+  it('falls back to in-memory cosine when sqlite-vec is unavailable but embeddings exist', async () => {
+    const tool = getReviewNeighborsTool();
+    const vecSpy = vi.spyOn(f.cg.db, 'hasVecExtension').mockReturnValue(false);
+    try {
+      const result = await tool.handle(makeCtx(f.cg), { mode: 'neighbors', symbols: ['alpha'], k: 5 });
+      const text = result.content[0]?.text ?? '';
+      expect(text).toContain('Review neighbors');
+      expect(text).toMatch(/alpha/i);
+      expect(text).toMatch(/beta/i);
+      expect(text).not.toMatch(/no semantic neighbors above threshold/i);
+    } finally {
+      vecSpy.mockRestore();
+    }
   });
 
   it('excludes the changed-symbol set itself from the lookalike output', async () => {

@@ -3,6 +3,8 @@ import { parseViewerPort } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliOptionCommand;
+type ViewerShutdownSignal = 'SIGINT';
+type ViewerShutdownListener = () => Promise<void>;
 
 export interface ViewerServerModule {
   startViewerServer: (
@@ -19,6 +21,13 @@ export interface ViewerCommandDeps {
   error: (message: string) => void;
   info: (message: string) => void;
   loadViewerServer: () => Promise<ViewerServerModule>;
+  registerShutdownSignal?: (signal: ViewerShutdownSignal, listener: ViewerShutdownListener) => void;
+}
+
+function registerProcessShutdownSignal(signal: ViewerShutdownSignal, listener: ViewerShutdownListener): void {
+  process.once(signal, () => {
+    void listener();
+  });
 }
 
 export function registerViewerCommand(deps: ViewerCommandDeps): void {
@@ -44,7 +53,8 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
         const projectPath = resolveProjectPath(pathArg);
         if (!isInitialized(projectPath)) {
           error(`No Cartograph index at ${projectPath}. Run \`cartograph index ${projectPath}\` first.`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         const parsedPort = parseViewerPort(options.port);
@@ -85,13 +95,22 @@ export function registerViewerCommand(deps: ViewerCommandDeps): void {
           info(`  press Ctrl+C to stop`);
           // commander auto-inverts `--no-open` -> options.open === false
           if (options.open !== false) openInBrowser(handle.url);
-          // Park forever: keep the process alive until the user kills it.
-          process.on('SIGINT', () => {
-            handle.close().finally(() => process.exit(0));
+          // The HTTP server handle keeps the process alive. On Ctrl+C,
+          // close it and let the event loop drain naturally.
+          const registerShutdownSignal = deps.registerShutdownSignal ?? registerProcessShutdownSignal;
+          registerShutdownSignal('SIGINT', async () => {
+            try {
+              await handle.close();
+              process.exitCode = 0;
+            } catch (closeErr) {
+              error(`Failed to stop viewer: ${errMsg(closeErr)}`);
+              process.exitCode = 1;
+            }
           });
         } catch (err) {
           error(`Failed to start viewer: ${errMsg(err)}`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
       },
     );

@@ -13,7 +13,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import {
   getHomeDir,
   getMcpCommand,
@@ -103,7 +110,7 @@ class BobTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, bobMcpConfig(opts.command));
+  return writeMcpEntryJson(loc, bobMcpConfig(installCommandOption(opts)));
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {

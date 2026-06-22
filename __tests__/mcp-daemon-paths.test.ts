@@ -11,6 +11,21 @@ import {
   type DaemonLockInfo,
 } from '../src/mcp/daemon-paths.js';
 
+function withObjectPrototypeProperty<T>(key: string, value: unknown, run: () => T): T {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    value,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, key, previous);
+    else Reflect.deleteProperty(Object.prototype, key);
+  }
+}
+
 describe('MCP daemon path helpers', () => {
   it('builds pid and socket paths from the project metadata directory', () => {
     const projectRoot = path.join(os.tmpdir(), 'cg-daemon-short-root');
@@ -42,6 +57,31 @@ describe('MCP daemon path helpers', () => {
     expect(decodeLockInfo('789')).toEqual({ pid: 789, version: 'unknown', socketPath: '', startedAt: 0 });
     expect(decodeLockInfo('')).toBeNull();
     expect(decodeLockInfo('{ nope')).toBeNull();
+  });
+
+  it('rejects malformed daemon lock values instead of trusting the JSON shape', () => {
+    const validBase: DaemonLockInfo = {
+      pid: 123,
+      version: '0.0.0-test',
+      socketPath: '/tmp/cartograph-test.sock',
+      startedAt: 456,
+    };
+
+    expect(decodeLockInfo(JSON.stringify({ ...validBase, pid: 12.5 }))).toBeNull();
+    expect(decodeLockInfo(JSON.stringify({ ...validBase, startedAt: -1 }))).toBeNull();
+    expect(decodeLockInfo('12.5')).toBeNull();
+  });
+
+  it('ignores inherited daemon lock fields while decoding structured locks', () => {
+    withObjectPrototypeProperty('pid', 123, () => {
+      withObjectPrototypeProperty('version', '0.0.0-polluted', () => {
+        withObjectPrototypeProperty('socketPath', '/tmp/polluted.sock', () => {
+          withObjectPrototypeProperty('startedAt', 456, () => {
+            expect(decodeLockInfo('{}')).toBeNull();
+          });
+        });
+      });
+    });
   });
 
   it('chmod helper reports whether POSIX socket permissions were restricted', () => {

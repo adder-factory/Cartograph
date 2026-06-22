@@ -20,7 +20,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
-import { getFreshnessInfo, classifyFreshness } from '../src/freshness.js';
+import { getFreshnessInfo, classifyFreshness, type FreshnessInfo } from '../src/freshness.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
@@ -31,6 +31,11 @@ function setupRepo(dir: string): void {
   git(dir, 'config', 'user.email', 't@t');
   git(dir, 'config', 'user.name', 't');
   git(dir, 'config', 'commit.gpgsign', 'false');
+}
+
+function requireFreshnessInfo(info: FreshnessInfo | null): FreshnessInfo {
+  if (info === null) throw new Error('expected freshness info');
+  return info;
 }
 
 describe('Tooling-gaps #1: freshness severity bucket', () => {
@@ -55,15 +60,14 @@ describe('Tooling-gaps #1: freshness severity bucket', () => {
   });
 
   it('exposes a `severity` enum on FreshnessInfo', () => {
-    const f = getFreshnessInfo((cg as any).queries, testDir);
-    expect(f).not.toBeNull();
+    const f = requireFreshnessInfo(getFreshnessInfo(cg.queries, testDir));
     // Must be one of the documented buckets.
-    expect((f as any).severity).toMatch(/^(fresh|recent|stale|very_stale)$/);
+    expect(f.severity).toMatch(/^(fresh|recent|stale|very_stale)$/);
   });
 
   it('classifies a just-indexed, in-sync repo as `fresh`', () => {
-    const f = getFreshnessInfo((cg as any).queries, testDir);
-    expect((f as any).severity).toBe('fresh');
+    const f = requireFreshnessInfo(getFreshnessInfo(cg.queries, testDir));
+    expect(f.severity).toBe('fresh');
   });
 
   it('an in-sync repo indexed >7 days ago is NOT very_stale (regression)', () => {
@@ -88,7 +92,7 @@ describe('Tooling-gaps #1: freshness severity bucket', () => {
     }
     git(testDir, 'add', '.');
     git(testDir, 'commit', '-q', '-m', 'big drift');
-    const f = getFreshnessInfo((cg as any).queries, testDir);
-    expect((f as any).severity).toBe('very_stale');
+    const f = requireFreshnessInfo(getFreshnessInfo(cg.queries, testDir));
+    expect(f.severity).toBe('very_stale');
   });
 });

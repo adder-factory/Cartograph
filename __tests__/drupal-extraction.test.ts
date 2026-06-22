@@ -23,6 +23,22 @@ import { getNodesByKind } from '../src/db/queries.js';
 import { getOutgoingEdges } from '../src/db/queries-edges.js';
 import { isLanguageSupported, getLanguageDisplayName, detectLanguage } from '../src/extraction/grammars.js';
 import { drupalResolver } from '../src/resolution/frameworks/drupal.js';
+import type { ResolutionContext } from '../src/resolution/types.js';
+
+function detectionContext(readFile: ResolutionContext['readFile']): ResolutionContext {
+  return {
+    getNodesInFile: () => [],
+    getNodesByName: () => [],
+    getNodesByQualifiedName: () => [],
+    getNodesByKind: () => [],
+    fileExists: () => false,
+    readFile,
+    getProjectRoot: () => '',
+    getAllFiles: () => [],
+    getNodesByLowerName: () => [],
+    getImportMappings: () => [],
+  };
+}
 
 describe('YAML language registration (F#62)', () => {
   it('registers yaml as a supported language with the right display name', () => {
@@ -56,14 +72,12 @@ describe('Drupal framework resolver (F#62)', () => {
       path.join(tempDir, 'composer.json'),
       JSON.stringify({ require: { 'drupal/core-recommended': '~10.5' } }),
     );
-    // detect() only consults `readFile` — the rest of the
-    // ResolutionContext can be a minimal stub here.
-    const detected = drupalResolver.detect({
-      readFile: (relPath: string) => {
+    const detected = drupalResolver.detect(
+      detectionContext((relPath: string) => {
         const abs = path.join(tempDir, relPath);
         return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
-      },
-    } as any);
+      }),
+    );
     expect(detected).toBe(true);
   });
 
@@ -72,13 +86,34 @@ describe('Drupal framework resolver (F#62)', () => {
       path.join(tempDir, 'composer.json'),
       JSON.stringify({ require: { 'laravel/framework': '^10.0' } }),
     );
-    const detected = drupalResolver.detect({
-      readFile: (relPath: string) => {
+    const detected = drupalResolver.detect(
+      detectionContext((relPath: string) => {
         const abs = path.join(tempDir, relPath);
         return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
-      },
-    } as any);
+      }),
+    );
     expect(detected).toBe(false);
+  });
+
+  it('ignores inherited composer require fields during Drupal detection', () => {
+    fs.writeFileSync(path.join(tempDir, 'composer.json'), '{}');
+    Object.defineProperty(Object.prototype, 'require', {
+      configurable: true,
+      writable: true,
+      value: { 'drupal/core-recommended': '~10.5' },
+    });
+
+    try {
+      const detected = drupalResolver.detect(
+        detectionContext((relPath: string) => {
+          const abs = path.join(tempDir, relPath);
+          return fs.existsSync(abs) ? fs.readFileSync(abs, 'utf-8') : null;
+        }),
+      );
+      expect(detected).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'require');
+    }
   });
 
   it('end-to-end: routing.yml route → PHP controller method edge', async () => {

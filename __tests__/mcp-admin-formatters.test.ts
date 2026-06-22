@@ -12,8 +12,13 @@ import * as installModels from '../src/installer/install-models.js';
 import * as llmSetupPlan from '../src/installer/llm-setup-plan.js';
 import * as recommendedConfig from '../src/installer/recommended-config.js';
 import * as scip from '../src/scip/index.js';
+import type { IndexProgress } from '../src/extraction/index.js';
+import { CallIdCache } from '../src/mcp/tools/_call-id-cache.js';
+import { RefIdCache } from '../src/mcp/tools/_id-cache.js';
 import { ADMIN_TOOL, __adminToolInternals as admin } from '../src/mcp/tools/admin.js';
 import { buildNoLlmFooter } from '../src/mcp/tools/admin.js';
+import type { ToolCtx } from '../src/mcp/tools/types.js';
+import type { SetupPlan } from '../src/installer/llm-setup-plan.js';
 
 vi.spyOn(similarEdges, 'buildSimilarToEdges').mockImplementation((async () => ({
   written: 7,
@@ -87,25 +92,49 @@ function textOf(result: Awaited<ReturnType<typeof ADMIN_TOOL.handle>>): string {
   return result.content[0]?.text ?? '';
 }
 
-function fakeCtx(cg: unknown, progress: string[] = [], opts: { defaultCg?: unknown } = {}) {
+function asCartographDouble(value: unknown): ReturnType<ToolCtx['getCartograph']> {
+  return value as ReturnType<ToolCtx['getCartograph']>;
+}
+
+type FakeAdminCtx = ToolCtx & { readonly evicted: string[] };
+
+function fakeCtx(cg: unknown, progress?: string[], opts: { defaultCg?: unknown } = {}): FakeAdminCtx {
   const evicted: string[] = [];
-  const getCartograph = (projectPath?: string): unknown => {
+  const getCartograph: ToolCtx['getCartograph'] = (projectPath?: string) => {
     if (projectPath && typeof cg === 'object' && cg !== null && !('projectRoot' in cg)) {
-      return { ...cg, projectRoot: projectPath };
+      return asCartographDouble({ ...cg, projectRoot: projectPath });
     }
-    return cg;
+    return asCartographDouble(cg);
   };
   return {
     getCartograph,
-    reportProgress: (current: number, total?: number, message?: string) =>
-      progress.push(`${current}/${total}:${message}`),
+    ...(progress === undefined
+      ? {}
+      : {
+          reportProgress: (current: number, total?: number, message?: string) =>
+            progress.push(`${current}/${total}:${message}`),
+        }),
     closeProjectsMatching: () => {},
     evictCachedProject: (projectPath: string) => evicted.push(projectPath),
     evicted,
     options: {},
-    defaultCg: opts.defaultCg ?? null,
+    defaultCg: opts.defaultCg === undefined ? null : asCartographDouble(opts.defaultCg),
     projectCache: new Map(),
-  } as any;
+    refIds: new RefIdCache(),
+    callIds: new CallIdCache(),
+  };
+}
+
+function setupPlan(overrides: Partial<SetupPlan>): SetupPlan {
+  return {
+    detectedBackends: [],
+    cloudChatAvailable: { claudeBin: null, anthropicApiKey: false, openRouterApiKey: false },
+    localGgufPresence: [],
+    presets: [],
+    recommendedPresetId: 'skip',
+    localBackends: { configured: 0, notRunning: [], llamaServerOnPath: false, startCommand: null },
+    ...overrides,
+  };
 }
 
 afterAll(() => {
@@ -183,11 +212,9 @@ describe('MCP admin formatter contracts', () => {
   });
 
   it('forwards index progress only when the context supplies a reporter', () => {
-    expect(admin.buildIndexProgressOpts({} as any)).toEqual({});
+    expect(admin.buildIndexProgressOpts(fakeCtx({}))).toEqual({});
     const calls: string[] = [];
-    const opts = admin.buildIndexProgressOpts({
-      reportProgress: (current: number, total: number, message: string) => calls.push(`${current}/${total}:${message}`),
-    } as any);
+    const opts = admin.buildIndexProgressOpts(fakeCtx({}, calls));
     opts.onProgress?.({ phase: 'scan', current: 3, total: 9, currentFile: 'src/a.ts' });
     expect(calls).toEqual(['3/9:scan: src/a.ts']);
   });
@@ -210,13 +237,16 @@ describe('MCP admin formatter contracts', () => {
     ).toContain('Embed phase failed');
 
     const emptyPlanLines: string[] = [];
-    admin.appendDetectedBackends(emptyPlanLines, { detectedBackends: [] } as any);
+    admin.appendDetectedBackends(emptyPlanLines, setupPlan({ detectedBackends: [] }));
     expect(emptyPlanLines.join('\n')).toContain('No backends detected');
 
     const detectedLines: string[] = [];
-    admin.appendDetectedBackends(detectedLines, {
-      detectedBackends: [{ label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
-    } as any);
+    admin.appendDetectedBackends(
+      detectedLines,
+      setupPlan({
+        detectedBackends: [{ kind: 'ollama', label: 'Ollama', endpoint: 'http://localhost:11434', models: ['qwen'] }],
+      }),
+    );
     admin.appendCloudChatAvailability(detectedLines, { claudeBin: '/bin/claude', anthropicApiKey: true });
     expect(detectedLines.join('\n')).toContain('Ollama');
     expect(detectedLines.join('\n')).toContain('claude');
@@ -224,36 +254,45 @@ describe('MCP admin formatter contracts', () => {
 
     // issue #25: configured-but-not-running local tiers → "start it" hint.
     const notRunningInstalled: string[] = [];
-    admin.appendConfiguredLocalBackends(notRunningInstalled, {
-      localBackends: {
-        configured: 2,
-        notRunning: [{ labels: ['ask'], endpoint: 'http://localhost:8082', modelExists: true }],
-        llamaServerOnPath: true,
-        startCommand: 'cartograph backend start /repo',
-      },
-    } as any);
+    admin.appendConfiguredLocalBackends(
+      notRunningInstalled,
+      setupPlan({
+        localBackends: {
+          configured: 2,
+          notRunning: [{ labels: ['ask'], endpoint: 'http://localhost:8082', modelExists: true }],
+          llamaServerOnPath: true,
+          startCommand: 'cartograph backend start /repo',
+        },
+      }),
+    );
     expect(notRunningInstalled.join('\n')).toContain('configured local tier(s) not running');
     expect(notRunningInstalled.join('\n')).toContain('ask http://localhost:8082');
     expect(notRunningInstalled.join('\n')).toContain('`llama-server` is installed');
     expect(notRunningInstalled.join('\n')).toContain('cartograph backend start /repo');
 
     const notRunningNoBinary: string[] = [];
-    admin.appendConfiguredLocalBackends(notRunningNoBinary, {
-      localBackends: {
-        configured: 1,
-        notRunning: [{ labels: ['embed'], endpoint: 'http://localhost:8080', modelExists: false }],
-        llamaServerOnPath: false,
-        startCommand: 'cartograph backend start /repo',
-      },
-    } as any);
+    admin.appendConfiguredLocalBackends(
+      notRunningNoBinary,
+      setupPlan({
+        localBackends: {
+          configured: 1,
+          notRunning: [{ labels: ['embed'], endpoint: 'http://localhost:8080', modelExists: false }],
+          llamaServerOnPath: false,
+          startCommand: 'cartograph backend start /repo',
+        },
+      }),
+    );
     expect(notRunningNoBinary.join('\n')).toContain('not on PATH');
     expect(notRunningNoBinary.join('\n')).toContain('model file missing');
 
     // No configured-but-not-running tiers → no lines added.
     const noneNotRunning: string[] = [];
-    admin.appendConfiguredLocalBackends(noneNotRunning, {
-      localBackends: { configured: 3, notRunning: [], llamaServerOnPath: true, startCommand: null },
-    } as any);
+    admin.appendConfiguredLocalBackends(
+      noneNotRunning,
+      setupPlan({
+        localBackends: { configured: 3, notRunning: [], llamaServerOnPath: true, startCommand: null },
+      }),
+    );
     expect(noneNotRunning).toEqual([]);
 
     await expect(buildNoLlmFooter(async () => [])).resolves.toContain('No LLM configured');
@@ -300,9 +339,15 @@ describe('MCP admin formatter contracts', () => {
       errors: [],
     };
     const calls: string[] = [];
+    type IndexOptionsDouble = {
+      summarize?: boolean;
+      clearStructural?: boolean;
+      embedOnly?: boolean;
+      onProgress?: (progress: IndexProgress) => void;
+    };
     const cg = {
       config: { llm: { summarizeLlm: {}, summarizeEagerLimit: 0 } },
-      sync: async (opts: any) => {
+      sync: async (opts: IndexOptionsDouble) => {
         calls.push(`sync:${opts.summarize}`);
         opts.onProgress?.({ phase: 'sync', current: 1, total: 1, currentFile: 'src/a.ts' });
         return {
@@ -314,7 +359,7 @@ describe('MCP admin formatter contracts', () => {
           durationMs: 1000,
         };
       },
-      indexAll: async (opts: any) => {
+      indexAll: async (opts: IndexOptionsDouble) => {
         calls.push(`index:${Boolean(opts.clearStructural)}:${Boolean(opts.embedOnly)}:${opts.summarize}`);
         opts.onProgress?.({ phase: 'index', current: 2, total: 4 });
         return indexResult;
@@ -326,14 +371,14 @@ describe('MCP admin formatter contracts', () => {
       },
     };
 
-    const sync = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'sync' } as any);
+    const sync = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'sync' });
     expect(textOf(sync)).toContain('Scanned 3 files');
 
-    const index = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'index', force: true } as any);
+    const index = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'index', force: true });
     expect(textOf(index)).toContain('Re-indexed 2 files');
     expect(textOf(index)).toContain('ad-hoc only');
 
-    const embedOnly = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'embed-only' } as any);
+    const embedOnly = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'embed-only' });
     expect(textOf(embedOnly)).toContain('Embedded 5/6 symbols');
 
     expect(calls).toEqual(['sync:false', 'index:true:false:false', 'index:false:true:false']);
@@ -343,6 +388,9 @@ describe('MCP admin formatter contracts', () => {
 
   it('dispatches migrate and LLM phase actions with progress and detail lines', async () => {
     const progress: string[] = [];
+    type LlmPhaseOptionsDouble = {
+      onProgress?: (current: number, total: number) => void;
+    };
     const cg = {
       db: {
         getSchemaVersion: () => ({ version: CURRENT_SCHEMA_VERSION, description: 'current schema' }),
@@ -352,7 +400,7 @@ describe('MCP admin formatter contracts', () => {
         // double-pass guard in handleSummarizePhase falls through to the
         // real summarizeAll call this test exercises.
         bgCtrl: { promise: null, getProgress: () => null },
-        summarizeAll: async (opts: any) => {
+        summarizeAll: async (opts: LlmPhaseOptionsDouble) => {
           opts.onProgress?.(1, 3);
           return {
             generated: 2,
@@ -365,19 +413,19 @@ describe('MCP admin formatter contracts', () => {
           };
         },
         embed: {
-          embedAll: async (opts: any) => {
+          embedAll: async (opts: LlmPhaseOptionsDouble) => {
             opts.onProgress?.(2, 4);
             return { generated: 1, candidates: 4, errors: 1, skipped: 1, durationMs: 900 };
           },
         },
-        classifyAll: async (opts: any) => {
+        classifyAll: async (opts: LlmPhaseOptionsDouble) => {
           opts.onProgress?.(3, 3);
           return { classified: 1, candidates: 4, errors: 1, durationMs: 700 };
         },
       },
     };
 
-    const migrate = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'migrate' } as any);
+    const migrate = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'migrate' });
     expect(textOf(migrate)).toContain(`Schema at v${CURRENT_SCHEMA_VERSION}`);
     expect(textOf(migrate)).toContain('Already current');
 
@@ -385,17 +433,17 @@ describe('MCP admin formatter contracts', () => {
       action: 'summarize',
       concurrency: 2,
       summarizeLimit: 10,
-    } as any);
+    });
     expect(textOf(summarize)).toContain('Summarised 2 new symbols');
     expect(textOf(summarize)).toContain('Cache hits: 1');
     expect(textOf(summarize)).toContain('Deferred 1 lower-priority symbols');
     expect(textOf(summarize)).toContain('Embedded');
 
-    const embed = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'embed', concurrency: 2 } as any);
+    const embed = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'embed', concurrency: 2 });
     expect(textOf(embed)).toContain('Embedded 1 new vector');
     expect(textOf(embed)).toContain('Skipped: 1');
 
-    const classify = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'classify', concurrency: 2 } as any);
+    const classify = await ADMIN_TOOL.handle(fakeCtx(cg, progress), { action: 'classify', concurrency: 2 });
     expect(textOf(classify)).toContain('Classified 1 symbol');
     expect(textOf(classify)).toContain('Errors: 1');
 
@@ -418,16 +466,16 @@ describe('MCP admin formatter contracts', () => {
       action: 'build-similarity-edges',
       k: 3,
       minScore: 0.8,
-    } as any);
+    });
     expect(textOf(similarity)).toContain('Built similarity edges');
     expect(textOf(similarity)).toContain('Written: 7');
 
-    const prune = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'prune-store', maxAgeDays: 7 } as any);
+    const prune = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'prune-store', maxAgeDays: 7 });
     expect(textOf(prune)).toContain('Pruned cold orphan store rows');
     expect(textOf(prune)).toContain('summary_store rows pruned: 2');
     expect(textOf(prune)).toContain('reclaimed');
 
-    const scipExport = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'scip-export' } as any);
+    const scipExport = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'scip-export' });
     expect(textOf(scipExport)).toContain('Exported SCIP index');
     expect(textOf(scipExport)).toContain('Disambiguated: 1');
 
@@ -438,7 +486,7 @@ describe('MCP admin formatter contracts', () => {
       const scipImport = await ADMIN_TOOL.handle(fakeCtx({ ...cg, projectRoot: dir }), {
         action: 'scip-import',
         in: inPath,
-      } as any);
+      });
       expect(textOf(scipImport)).toContain('Imported SCIP index');
       expect(textOf(scipImport)).toContain('Skipped: 1');
       expect(textOf(scipImport)).toContain('Dropped: 2');
@@ -446,7 +494,7 @@ describe('MCP admin formatter contracts', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
 
-    const install = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'install-models', minimal: true } as any);
+    const install = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'install-models', minimal: true });
     expect(textOf(install)).toContain('Installed 1 model');
     expect(textOf(install)).toContain('embed.gguf');
     expect(textOf(install)).toContain('Already present');
@@ -457,7 +505,7 @@ describe('MCP admin formatter contracts', () => {
       writeConfig: true,
       projectPath: '/repo',
       dir: '/models',
-    } as any);
+    });
     expect(textOf(installConfig)).toContain('Updated `/repo/.cartograph/config.json`');
     expect(textOf(installConfig)).toContain('Added/updated');
     expect(recommendedConfig.writeRecommendedLlmConfig).toHaveBeenCalledWith(
@@ -469,14 +517,14 @@ describe('MCP admin formatter contracts', () => {
       projectPath: '/repo',
       fix: true,
       skipProjectChecks: true,
-    } as any);
+    });
     expect(textOf(doctor)).toContain('Doctor');
     expect(textOf(doctor)).toContain('All checks passed');
   });
 
   it('dispatches LLM plan/apply/tune actions and tuning write mode', async () => {
     const cg = { queries: {} };
-    const plan = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-plan' } as any);
+    const plan = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-plan' });
     expect(textOf(plan)).toContain('LLM setup plan');
     expect(textOf(plan)).toContain('Ollama');
     expect(textOf(plan)).toContain('ANTHROPIC_API_KEY');
@@ -487,7 +535,7 @@ describe('MCP admin formatter contracts', () => {
       action: 'llm-apply',
       projectPath: '/repo',
       preset: 'install-ollama',
-    } as any);
+    });
     expect(textOf(applied)).toContain('Applied preset `install-ollama`');
     expect(textOf(applied)).toContain('configured Ollama');
     expect(applyCtx.evicted).toEqual(['/repo']);
@@ -505,21 +553,21 @@ describe('MCP admin formatter contracts', () => {
       }),
     );
     try {
-      const report = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-tune', projectPath: dir } as any);
+      const report = await ADMIN_TOOL.handle(fakeCtx(cg), { action: 'llm-tune', projectPath: dir });
       expect(textOf(report)).toContain('LLM tuning');
       expect(textOf(report)).toContain('8-core test host');
       expect(textOf(report)).toContain('| embed');
 
       const defaultReport = await ADMIN_TOOL.handle(fakeCtx(cg, [], { defaultCg: { projectRoot: dir } }), {
         action: 'llm-tune',
-      } as any);
+      });
       expect(textOf(defaultReport)).toContain('LLM tuning');
 
       const missingConcurrency = await ADMIN_TOOL.handle(fakeCtx(cg), {
         action: 'llm-tune',
         projectPath: dir,
         tier: 'chat',
-      } as any);
+      });
       expect(missingConcurrency.isError).toBe(true);
       expect(textOf(missingConcurrency)).toContain('write mode requires `concurrency');
 
@@ -528,12 +576,55 @@ describe('MCP admin formatter contracts', () => {
         projectPath: dir,
         tier: 'chat',
         concurrency: 4,
-      } as any);
+      });
       expect(textOf(write)).toContain('Applied tuning override');
       expect(textOf(write)).toContain('summarizeLlm');
       expect(write.isError).not.toBe(true);
       const updated = JSON.parse(fs.readFileSync(path.join(cartoDir, 'config.json'), 'utf-8'));
       expect(updated.llm.summarizeLlm.concurrency).toBe(4);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports malformed llm-tune config roots before looking for tier blocks', async () => {
+    const cg = { queries: {} };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-tune-bad-config-'));
+    const cartoDir = path.join(dir, '.cartograph');
+    fs.mkdirSync(cartoDir);
+    fs.writeFileSync(path.join(cartoDir, 'config.json'), JSON.stringify([{ stale: true }]));
+    try {
+      const result = await ADMIN_TOOL.handle(fakeCtx(cg), {
+        action: 'llm-tune',
+        projectPath: dir,
+        tier: 'chat',
+        concurrency: 4,
+      });
+
+      expect(result.isError).toBe(true);
+      expect(textOf(result)).toContain('could not parse');
+      expect(textOf(result)).toContain('config root must be an object');
+      expect(textOf(result)).not.toContain('no `llm.summarizeLlm` block');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('surfaces malformed llm-tune config roots in read mode instead of hiding overrides', async () => {
+    const cg = { queries: {} };
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-admin-tune-read-bad-config-'));
+    const cartoDir = path.join(dir, '.cartograph');
+    fs.mkdirSync(cartoDir);
+    fs.writeFileSync(path.join(cartoDir, 'config.json'), JSON.stringify([{ stale: true }]));
+    try {
+      const result = await ADMIN_TOOL.handle(fakeCtx(cg), {
+        action: 'llm-tune',
+        projectPath: dir,
+      });
+
+      expect(result.isError).not.toBe(true);
+      expect(textOf(result)).toContain('Current overrides unavailable');
+      expect(textOf(result)).toContain('config root must be an object');
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

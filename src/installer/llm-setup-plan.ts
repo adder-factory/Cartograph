@@ -24,6 +24,7 @@
 
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
+import { z } from 'zod';
 import { findOnPath } from '../llm/claude-bridge.js';
 import { DEFAULT_CLAUDE_ASK_MODEL } from '../llm/provider.js';
 import {
@@ -37,6 +38,7 @@ import {
 import { buildRecommendedLlmConfig } from './recommended-config.js';
 import { buildSingleEndpointConfig } from './build-endpoint-config.js';
 import { errMsg } from '../errors.js';
+import { asJsonObject } from '../json-object.js';
 import {
   backendInstallHint,
   backendLabel,
@@ -117,6 +119,11 @@ const CLOUD_OPENAI_MODELS = {
   summarize: 'gpt-4o-mini',
   ask: 'gpt-4o',
 } as const;
+
+const configRootSchema = z.looseObject({});
+
+type ConfigRoot = z.infer<typeof configRootSchema>;
+type ConfigRootParseResult = { ok: true; value: ConfigRoot } | { ok: false; error: string };
 
 /** Recommended OpenRouter models per tier — same cost/quality framing
  *  as {@link CLOUD_OPENAI_MODELS}: summarize is the cheap bulk tier,
@@ -736,6 +743,10 @@ export async function applyLlmSetupChoice(opts: ApplyOptions): Promise<ApplyResu
 
 export type LlmTuneTier = 'embed' | 'chat' | 'ask' | 'reranker';
 type LlmTuneConfigKey = 'embeddingLlm' | 'summarizeLlm' | 'askLlm' | 'rerankerLlm';
+export type LlmTierConcurrencyOverrides = Record<LlmTuneTier, number | null>;
+export type ReadLlmTierConcurrencyOverridesResult =
+  | { readonly ok: true; readonly overrides: LlmTierConcurrencyOverrides }
+  | { readonly ok: false; readonly error: string };
 
 const LLM_TUNE_CONFIG_KEYS: Record<LlmTuneTier, LlmTuneConfigKey> = {
   embed: 'embeddingLlm',
@@ -773,21 +784,20 @@ export async function writeLlmTierConcurrencyOverride(
   if (!exists) {
     throw new Error(`no config.json at ${configPath}`);
   }
-  let parsed: Record<string, unknown>;
+  let parsed: ConfigRoot;
   try {
     const raw = await fsp.readFile(configPath, 'utf-8');
-    const value = JSON.parse(raw) as unknown;
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-      throw new Error('config root must be an object');
-    }
-    parsed = value as Record<string, unknown>;
+    const result = parseConfigRoot(raw);
+    if (!result.ok) throw new Error(result.error);
+    parsed = result.value;
   } catch (error_) {
     throw new Error(`could not parse ${configPath}: ${errMsg(error_)}`);
   }
-  const llm = (parsed['llm'] as Record<string, unknown> | undefined) ?? {};
-  const tierBlock = (llm[configKey] as Record<string, unknown> | null | undefined) ?? null;
+  const llm = objectOrEmpty(ownField(parsed, 'llm'));
+  const tierBlock = objectOrNull(ownField(llm, configKey));
   if (!tierBlock) throw new Error(`no llm.${configKey} block in ${configPath}`);
-  const previous = typeof tierBlock['concurrency'] === 'number' ? tierBlock['concurrency'] : null;
+  const concurrency = ownField(tierBlock, 'concurrency');
+  const previous = typeof concurrency === 'number' ? concurrency : null;
   tierBlock['concurrency'] = opts.concurrency;
   llm[configKey] = tierBlock;
   parsed['llm'] = llm;
@@ -796,6 +806,46 @@ export async function writeLlmTierConcurrencyOverride(
   await fsp.writeFile(`${configPath}.tmp`, JSON.stringify(parsed, null, 2), 'utf-8');
   await fsp.rename(`${configPath}.tmp`, configPath);
   return { configPath, backupPath, configKey, previous, concurrency: opts.concurrency };
+}
+
+export async function readLlmTierConcurrencyOverrides(
+  projectRoot: string,
+): Promise<ReadLlmTierConcurrencyOverridesResult> {
+  const configPath = `${projectRoot}/.cartograph/config.json`;
+  const exists = await fsp
+    .access(configPath)
+    .then(() => true)
+    .catch(() => false);
+  if (!exists) return { ok: true, overrides: emptyLlmTierConcurrencyOverrides() };
+  const raw = await fsp.readFile(configPath, 'utf-8');
+  const parsed = parseConfigRoot(raw);
+  if (!parsed.ok) return { ok: false, error: `could not parse ${configPath}: ${parsed.error}` };
+  const llm = objectOrEmpty(ownField(parsed.value, 'llm'));
+  return {
+    ok: true,
+    overrides: {
+      embed: readLlmTierConcurrency(llm, 'embed'),
+      chat: readLlmTierConcurrency(llm, 'chat'),
+      ask: readLlmTierConcurrency(llm, 'ask'),
+      reranker: readLlmTierConcurrency(llm, 'reranker'),
+    },
+  };
+}
+
+function emptyLlmTierConcurrencyOverrides(): LlmTierConcurrencyOverrides {
+  return {
+    embed: null,
+    chat: null,
+    ask: null,
+    reranker: null,
+  };
+}
+
+function readLlmTierConcurrency(llm: ConfigRoot, tier: LlmTuneTier): number | null {
+  const block = objectOrNull(ownField(llm, LLM_TUNE_CONFIG_KEYS[tier]));
+  if (!block) return null;
+  const concurrency = ownField(block, 'concurrency');
+  return typeof concurrency === 'number' ? concurrency : null;
 }
 
 interface InstallPresetNote {
@@ -918,15 +968,9 @@ function writeRawLlmConfig(
   let backupPath: string | null = null;
   if (fs.existsSync(configPath)) {
     const raw = fs.readFileSync(configPath, 'utf-8');
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed === 'object' && parsed !== null) {
-        merged = { ...(parsed as Record<string, unknown>) };
-      }
-    } catch {
-      // Corrupt prior config — keep the backup but treat as no prior.
-      merged = {};
-    }
+    const parsed = parseConfigRoot(raw);
+    // Corrupt prior config — keep the backup but treat as no prior.
+    merged = parsed.ok ? { ...parsed.value } : {};
     backupPath = `${configPath}.bak.${Date.now()}`;
     fs.copyFileSync(configPath, backupPath);
   }
@@ -937,6 +981,35 @@ function writeRawLlmConfig(
   fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), 'utf-8');
   fs.renameSync(tmp, configPath);
   return { configPath, backupPath };
+}
+
+function parseConfigRoot(raw: string): ConfigRootParseResult {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch (error_) {
+    return { ok: false, error: errMsg(error_) };
+  }
+  const root = asJsonObject(value);
+  if (!root) return { ok: false, error: 'config root must be an object' };
+  const parsed = configRootSchema.safeParse(root);
+  if (!parsed.success) return { ok: false, error: 'config root must be an object' };
+  return { ok: true, value: parsed.data };
+}
+
+function objectOrEmpty(value: unknown): ConfigRoot {
+  return objectOrNull(value) ?? {};
+}
+
+function objectOrNull(value: unknown): ConfigRoot | null {
+  const object = asJsonObject(value);
+  if (!object) return null;
+  const parsed = configRootSchema.safeParse(object);
+  return parsed.success ? parsed.data : null;
+}
+
+function ownField(record: ConfigRoot, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
 /** Identifiers the CLI / MCP surface accept as `--preset` values.

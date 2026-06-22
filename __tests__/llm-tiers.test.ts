@@ -229,8 +229,7 @@ export function debounce(fn: () => void, ms: number): () => void {
       await cg.indexAll({ summarize: false });
 
       // Manually attach a docstring to one node, leave summaries empty.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const db = (cg.queries as any).db;
+      const db = cg.queries.db;
       const target = db
         .prepare(`SELECT id FROM nodes WHERE kind IN ('function', 'method') ORDER BY id LIMIT 1`)
         .get() as { id: string } | undefined;
@@ -275,8 +274,7 @@ export function debounce(fn: () => void, ms: number): () => void {
       expect([...rolesBefore.values()].reduce((a, b) => a + b, 0)).toBeGreaterThan(0);
 
       // Wipe role assignments. Summaries themselves stay intact.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const db = (cg.queries as any).db;
+      const db = cg.queries.db;
       db.exec(`UPDATE nodes SET role = NULL, role_model = NULL`);
 
       const rolesAfterWipe = getRoleCounts(cg.queries);
@@ -313,10 +311,8 @@ export function debounce(fn: () => void, ms: number): () => void {
       const summariesAfterFirst = getSummaryCoverage(cg.queries).summarised;
       expect(summariesAfterFirst).toBeGreaterThan(0);
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const queries = (cg as any).queries as import('../src/db/queries.js').QueryBuilder;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const db = (queries as any).db;
+      const queries = cg.queries;
+      const db = queries.db;
       const rowCountBefore = (db.prepare('SELECT COUNT(*) AS c FROM symbol_summaries').get() as { c: number }).c;
       expect(rowCountBefore).toBe(summariesAfterFirst);
 
@@ -353,12 +349,8 @@ export function debounce(fn: () => void, ms: number): () => void {
       await cg.indexAll();
       await cg.llm.bgCtrl.awaitCompletion();
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const queries = (cg as any).queries as import('../src/db/queries.js').QueryBuilder;
-      const allSummaries = queries[
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        'db'
-      ]
+      const queries = cg.queries;
+      const allSummaries = queries.db
         .prepare('SELECT node_id, content_hash, model FROM symbol_summaries LIMIT 1')
         .all() as Array<{ node_id: string; content_hash: string; model: string }>;
       expect(allSummaries.length).toBeGreaterThan(0);
@@ -409,10 +401,8 @@ export function debounce(fn: () => void, ms: number): () => void {
     });
     try {
       await cg.indexAll({ summarize: false });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const queries = (cg as any).queries;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const projectRoot = (cg as any).projectRoot;
+      const queries = cg.queries;
+      const projectRoot = cg.projectRoot;
       const { summarizeAll } = await import('../src/llm/summarizer.js');
       const client = createFakeLlmClient(defaultChatHandler);
 
@@ -447,10 +437,8 @@ export function debounce(fn: () => void, ms: number): () => void {
     });
     try {
       await cg.indexAll({ summarize: false });
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const queries = (cg as any).queries;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const projectRoot = (cg as any).projectRoot;
+      const queries = cg.queries;
+      const projectRoot = cg.projectRoot;
       const { summarizeAll } = await import('../src/llm/summarizer.js');
       const client = createFakeLlmClient(defaultChatHandler);
 

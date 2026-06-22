@@ -47,9 +47,11 @@ import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, UnresolvedRef, ResolvedRef } from '../types.js';
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
 import { detectTsOrJs } from './detect-language.js';
+import { hasPackageDependency } from './package-dependencies.js';
 
 /** HTTP methods Bun.serve's per-method route shape supports. */
 const BUN_SERVE_METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'] as const;
+const BUN_SERVE_DEPENDENCIES = ['@types/bun', 'bun'] as const;
 
 export const bunServeResolver: FrameworkResolver = {
   name: 'bun-serve',
@@ -60,16 +62,7 @@ export const bunServeResolver: FrameworkResolver = {
   detect(context: ResolutionContext): boolean {
     // Signal A: `@types/bun` or `bun` in package.json (Bun-runtime
     // projects always declare one or the other for typings).
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps['@types/bun'] || deps['bun']) return true;
-      } catch {
-        // Invalid JSON — fall through to other signals.
-      }
-    }
+    if (hasPackageDependency(context.readFile('package.json'), BUN_SERVE_DEPENDENCIES)) return true;
     // Signal B: bunfig.toml at the project root — bun-native project.
     if (context.readFile('bunfig.toml') !== null) return true;
     // Signal C: source-level `Bun.serve(` token anywhere in the indexed

@@ -9,11 +9,10 @@ function extractionResult(filePath = 'src/a.ts'): ExtractionResult {
     language: 'typescript',
     nodes: [],
     edges: [],
+    unresolvedReferences: [],
     errors: [],
-    imports: [],
-    envRefs: [],
-    sqlRefs: [],
-  } as unknown as ExtractionResult;
+    durationMs: 1,
+  };
 }
 
 type WorkerMessage = {
@@ -156,6 +155,25 @@ describe('ParseWorkerPool', () => {
     FakeWorker.instances[0]!.emit('error', new Error('parser crashed'));
     await expect(errored).rejects.toThrow(/Worker error: parser crashed/);
     expect(warnings.some((warning) => String(warning.msg).includes('Parse worker error'))).toBe(true);
+  });
+
+  it('rejects pending parses when a worker posts a malformed parse result', async () => {
+    FakeWorker.autoParse = false;
+    const { pool, warnings } = makePool();
+
+    const malformed = pool.requestParse('src/malformed.ts', 'malformed');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const worker = FakeWorker.instances[0]!;
+    const parseMessage = worker.messages.find((msg) => msg.type === 'parse')!;
+
+    worker.emit('message', {
+      type: 'parse-result',
+      id: parseMessage.id,
+      result: { nodes: [], edges: [], errors: [] },
+    });
+
+    await expect(malformed).rejects.toThrow(/invalid parse worker reply: result:/);
+    expect(warnings.some((warning) => String(warning.msg).includes('malformed message'))).toBe(true);
   });
 
   it('rejects and terminates a worker that reports grammar-load failure', async () => {

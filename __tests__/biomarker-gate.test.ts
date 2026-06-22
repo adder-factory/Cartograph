@@ -2,8 +2,8 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Database } from 'bun:sqlite';
 import { describe, expect, it } from 'vitest';
+import { createDatabase } from '../src/db/sqlite-adapter.js';
 
 const repoRoot = path.resolve(import.meta.dir, '..');
 const gateScript = path.join(repoRoot, 'scripts', 'check-biomarkers.mjs');
@@ -22,7 +22,7 @@ function createFixtureRoot(): string {
 }
 
 function createGateDatabase(root: string, severity: 'error' | 'warning' | 'info' | null): void {
-  const db = new Database(path.join(root, '.cartograph', 'cartograph.db'), { create: true });
+  const { db } = createDatabase(path.join(root, '.cartograph', 'cartograph.db'));
   try {
     db.exec(`
       CREATE TABLE nodes (
@@ -55,6 +55,19 @@ function createGateDatabase(root: string, severity: 'error' | 'warning' | 'info'
   }
 }
 
+function createWalGateDatabaseWithoutSidecars(root: string): void {
+  createGateDatabase(root, null);
+  const dbPath = path.join(root, '.cartograph', 'cartograph.db');
+  const { db } = createDatabase(dbPath);
+  try {
+    db.exec('PRAGMA journal_mode=WAL');
+  } finally {
+    db.close();
+  }
+  fs.rmSync(`${dbPath}-wal`, { force: true });
+  fs.rmSync(`${dbPath}-shm`, { force: true });
+}
+
 function runGate(root: string): { code: number; output: string } {
   const result = spawnSync('bun', [gateScript], {
     cwd: root,
@@ -69,6 +82,21 @@ describe('biomarker gate smoke', () => {
     const root = createFixtureRoot();
     try {
       createGateDatabase(root, null);
+
+      const result = runGate(root);
+
+      expect(result.code).toBe(0);
+      expect(result.output).toContain('biomarker floor: 0 error / 0 warning / 0 info');
+      expect(result.output).toContain('biomarker-gate OK — 0 error / 0 warning / 0 info.');
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('reads a WAL-mode database when checkpoint sidecars are absent', () => {
+    const root = createFixtureRoot();
+    try {
+      createWalGateDatabaseWithoutSidecars(root);
 
       const result = runGate(root);
 

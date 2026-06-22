@@ -5,7 +5,7 @@ import * as path from 'node:path';
 import { registerReadCommands } from '../src/bin/commands/read.js';
 import type { FileRecord, Node } from '../src/types.js';
 
-const actions = new Map<string, (...args: any[]) => unknown>();
+const actions = new Map<string, (...args: unknown[]) => unknown>();
 const calls: Array<{ tool: string; args: unknown; projectPath?: string }> = [];
 const stdout: string[] = [];
 let projectPath: string;
@@ -76,7 +76,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => unknown): this {
+  action(fn: (...args: unknown[]) => unknown): this {
     actions.set(this.name, fn);
     return this;
   }

@@ -6,16 +6,58 @@
 
 import * as readline from 'node:readline';
 import type { Socket } from 'node:net';
+import { z } from 'zod';
 import { errMsg } from '../errors.js';
 
-/**
- * JSON-RPC 2.0 Request
- */
-export interface JsonRpcRequest {
-  jsonrpc: '2.0';
-  id: string | number;
-  method: string;
-  params?: unknown;
+const jsonRpcIdSchema = z.union([z.string(), z.number()]);
+
+const jsonRpcBaseSchema = z.looseObject({
+  jsonrpc: z.literal('2.0'),
+  method: z.string(),
+  params: z.unknown().optional(),
+});
+
+const jsonRpcRequestSchema = jsonRpcBaseSchema.extend({ id: jsonRpcIdSchema }).transform((value) => {
+  const request: {
+    jsonrpc: '2.0';
+    id: string | number;
+    method: string;
+    params?: unknown;
+  } = {
+    jsonrpc: '2.0',
+    id: value.id,
+    method: value.method,
+  };
+  if (value.params !== undefined) request.params = value.params;
+  return request;
+});
+
+const jsonRpcNotificationSchema = jsonRpcBaseSchema
+  .refine((value) => !hasOwn(value, 'id'), {
+    path: ['id'],
+    message: 'Notifications must not include an id',
+  })
+  .transform((value) => {
+    const notification: {
+      jsonrpc: '2.0';
+      method: string;
+      params?: unknown;
+    } = {
+      jsonrpc: '2.0',
+      method: value.method,
+    };
+    if (value.params !== undefined) notification.params = value.params;
+    return notification;
+  });
+
+const jsonRpcInboundMessageSchema = z.union([jsonRpcRequestSchema, jsonRpcNotificationSchema]);
+
+export type JsonRpcRequest = z.infer<typeof jsonRpcRequestSchema>;
+export type JsonRpcNotification = z.infer<typeof jsonRpcNotificationSchema>;
+
+export function parseJsonRpcInboundMessage(value: unknown): JsonRpcRequest | JsonRpcNotification | null {
+  const parsed = jsonRpcInboundMessageSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 /**
@@ -35,15 +77,6 @@ interface JsonRpcError {
   code: number;
   message: string;
   data?: unknown;
-}
-
-/**
- * JSON-RPC 2.0 Notification (no id, no response expected)
- */
-export interface JsonRpcNotification {
-  jsonrpc: '2.0';
-  method: string;
-  params?: unknown;
 }
 
 // Standard JSON-RPC error codes
@@ -216,7 +249,8 @@ export class StdioTransport extends JsonRpcResponder {
       this.sendError(null, { code: ErrorCodes.ParseError, message: 'Parse error: invalid JSON' });
       return;
     }
-    if (!this.isValidMessage(parsed)) {
+    const message = parseJsonRpcInboundMessage(parsed);
+    if (!message) {
       this.sendError(null, {
         code: ErrorCodes.InvalidRequest,
         message: 'Invalid Request: not a valid JSON-RPC 2.0 message',
@@ -225,9 +259,9 @@ export class StdioTransport extends JsonRpcResponder {
     }
     if (!this.messageHandler) return;
     try {
-      await this.messageHandler(parsed as JsonRpcRequest | JsonRpcNotification);
+      await this.messageHandler(message);
     } catch (err) {
-      this.reportHandlerError(parsed as JsonRpcRequest, err);
+      this.reportHandlerError(message, err);
     }
   }
 
@@ -239,20 +273,9 @@ export class StdioTransport extends JsonRpcResponder {
   }
 
   /** JSON-RPC error reply for a thrown messageHandler — only sent when the incoming message had an `id`. */
-  private reportHandlerError(message: JsonRpcRequest, err: unknown): void {
+  private reportHandlerError(message: JsonRpcRequest | JsonRpcNotification, err: unknown): void {
     if (!('id' in message)) return;
     this.sendError(message.id, { code: ErrorCodes.InternalError, message: `Internal error: ${errMsg(err)}` });
-  }
-
-  /**
-   * Check if message is a valid JSON-RPC 2.0 message
-   */
-  private isValidMessage(msg: unknown): boolean {
-    if (typeof msg !== 'object' || msg === null) return false;
-    const obj = msg as Record<string, unknown>;
-    if (obj['jsonrpc'] !== '2.0') return false;
-    if (typeof obj['method'] !== 'string') return false;
-    return true;
   }
 }
 
@@ -260,4 +283,8 @@ export class SocketTransport extends StdioTransport {
   constructor(socket: Socket, onClose?: () => void) {
     super({ input: socket, output: socket, exitOnClose: false, closeOnStop: true, ...(onClose ? { onClose } : {}) });
   }
+}
+
+function hasOwn(value: object, key: PropertyKey): boolean {
+  return Object.hasOwn(value, key);
 }

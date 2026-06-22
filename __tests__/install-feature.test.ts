@@ -3,9 +3,13 @@ import {
   installerRunOptions,
   printConfigLocation,
   registerInstallCommand,
+  type InstallCommandDeps,
+  type InstallOptions,
   validateInstallCommand,
   validateInstallLocation,
 } from '../src/features/install/index.js';
+
+type InstallAction = (opts: InstallOptions) => Promise<void>;
 
 describe('install feature runtime', () => {
   it('validates locations and builds sparse installer options', () => {
@@ -34,7 +38,7 @@ describe('install feature runtime', () => {
 
 describe('install feature CLI', () => {
   it('prints target config and runs installer through injected dependencies', async () => {
-    const actions = new Map<string, (opts: Record<string, unknown>) => Promise<void>>();
+    const actions = new Map<string, InstallAction>();
     const calls: string[] = [];
     registerInstallCommand({
       program: new FakeCommand(actions),
@@ -69,11 +73,69 @@ describe('install feature CLI', () => {
       'install:{"target":"auto","location":"global","command":"/bin/cartograph","autoAllow":true,"yes":true}',
     ]);
   });
+
+  it('reports invalid command input without hard-exiting or loading installers', async () => {
+    await withProcessExitGuard(async () => {
+      const { action, calls } = registerInstallAction();
+
+      await action({ command: '   ' });
+
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual(['error:--command must not be blank.']);
+    });
+  });
+
+  it('reports unknown print-config targets without hard-exiting', async () => {
+    await withProcessExitGuard(async () => {
+      const { action, calls } = registerInstallAction();
+
+      await action({ printConfig: 'missing', command: '/bin/cartograph' });
+
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual(['loadTargets', 'error:Unknown target "missing". Known: claude, cursor.']);
+    });
+  });
+
+  it('reports invalid install locations without hard-exiting or running the installer', async () => {
+    await withProcessExitGuard(async () => {
+      const { action, calls } = registerInstallAction();
+
+      await action({ location: 'project' });
+
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual(['error:--location must be "global" or "local" (got "project").']);
+    });
+  });
+
+  it('reports installer failures without hard-exiting', async () => {
+    await withProcessExitGuard(async () => {
+      const { action, calls } = registerInstallAction({
+        loadInstaller: async () => {
+          calls.push('loadInstaller');
+          return {
+            runInstallerWithOptions: async (opts) => {
+              calls.push(`run:${JSON.stringify(opts)}`);
+              throw new Error('installer exploded');
+            },
+          };
+        },
+      });
+
+      await action({ target: 'auto', location: 'local', yes: true });
+
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual([
+        'loadInstaller',
+        'run:{"target":"auto","location":"local","autoAllow":true,"yes":true}',
+        'error:installer exploded',
+      ]);
+    });
+  });
 });
 
 class FakeCommand {
   constructor(
-    private readonly actions: Map<string, (opts: Record<string, unknown>) => Promise<void>>,
+    private readonly actions: Map<string, InstallAction>,
     private readonly name = 'program',
   ) {}
 
@@ -89,8 +151,57 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (opts: Record<string, unknown>) => Promise<void>): this {
+  action(fn: InstallAction): this {
     this.actions.set(this.name, fn);
     return this;
+  }
+}
+
+function registerInstallAction(overrides: Partial<InstallCommandDeps> = {}): {
+  action: InstallAction;
+  calls: string[];
+} {
+  const actions = new Map<string, InstallAction>();
+  const calls: string[] = [];
+  registerInstallCommand({
+    program: new FakeCommand(actions),
+    error: (message) => calls.push(`error:${message}`),
+    writeStdout: (message) => calls.push(`stdout:${message}`),
+    loadInstallerTargets: async () => {
+      calls.push('loadTargets');
+      return {
+        getTarget: () => null,
+        listTargetIds: () => ['claude', 'cursor'],
+      };
+    },
+    loadInstaller: async () => {
+      calls.push('loadInstaller');
+      return {
+        runInstallerWithOptions: async (opts) => calls.push(`install:${JSON.stringify(opts)}`),
+      };
+    },
+    ...overrides,
+  });
+  const action = actions.get('install');
+  if (!action) throw new Error('install action was not registered');
+  return { action, calls };
+}
+
+async function withProcessExitGuard(run: () => Promise<void>): Promise<void> {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  let exitCalled = false;
+  process.exitCode = 0;
+  process.exit = (code?: string | number | null | undefined): never => {
+    exitCalled = true;
+    throw new Error(`process.exit(${String(code)})`);
+  };
+
+  try {
+    await run();
+    expect(exitCalled).toBe(false);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode ?? 0;
   }
 }

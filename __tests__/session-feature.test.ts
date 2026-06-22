@@ -51,6 +51,10 @@ describe('session feature runtime', () => {
       ok: true,
       args: { action: 'macro_run', name: 'triage', args: ['indexAll'] },
     });
+    expect(buildMacroRunArgs({ name: 'triage', args: '[1,true,null]' })).toEqual({
+      ok: true,
+      args: { action: 'macro_run', name: 'triage', args: [1, true, null] },
+    });
     expect(buildMacroSaveArgs({ name: 'triage', steps: 'nope' })).toEqual({
       ok: false,
       error: 'macro_save: --steps must be valid JSON',
@@ -58,6 +62,30 @@ describe('session feature runtime', () => {
     expect(buildMacroRunArgs({ name: 'triage', args: 'nope' })).toEqual({
       ok: false,
       error: 'macro_run: --args must be valid JSON',
+    });
+    expect(buildMacroSaveArgs({ name: 'triage', steps: '{"tool":"cartograph_status","args":{}}' })).toEqual({
+      ok: false,
+      error: 'macro_save: --steps must be an array of step objects',
+    });
+    expect(buildMacroSaveArgs({ name: 'triage', steps: '["cartograph_status"]' })).toEqual({
+      ok: false,
+      error: 'macro_save: --steps must be an array of step objects',
+    });
+    expect(buildMacroSaveArgs({ name: 'triage', steps: '[]' })).toEqual({
+      ok: false,
+      error: 'macro_save: --steps must contain at least one {tool, args} step',
+    });
+    expect(buildMacroSaveArgs({ name: 'triage', steps: '[{"args":{}}]' })).toEqual({
+      ok: false,
+      error: 'macro_save: --steps must be an array of {tool, args} step objects',
+    });
+    expect(buildMacroSaveArgs({ name: 'triage', steps: '[{"tool":"cartograph_status","args":[]}]' })).toEqual({
+      ok: false,
+      error: 'macro_save: --steps must be an array of {tool, args} step objects',
+    });
+    expect(buildMacroRunArgs({ name: 'triage', args: '{"0":"indexAll"}' })).toEqual({
+      ok: false,
+      error: 'macro_run: --args must be an array',
     });
   });
 

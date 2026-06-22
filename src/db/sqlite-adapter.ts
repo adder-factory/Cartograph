@@ -38,32 +38,25 @@ import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
 const requireCjs = createRequire(import.meta.url);
 
 export interface SqliteStatement {
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
-  run(...params: any[]): { changes: number; lastInsertRowid: number | bigint };
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
-  runBatch?(paramSets: any[][]): { changes: number; lastInsertRowid: number | bigint };
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
-  get(...params: any[]): any;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
-  all(...params: any[]): any[];
+  run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint };
+  runBatch?(paramSets: unknown[][]): { changes: number; lastInsertRowid: number | bigint };
+  get<TRow = unknown>(...params: unknown[]): TRow | null | undefined;
+  all<TRow = unknown>(...params: unknown[]): TRow[];
   /**
    * Streaming row iterator. Lets memory-bounded callers early-exit a
    * query without materialising the full result set. Use this for any
    * query whose row count could exceed the agent's tolerance for large
    * payloads (cartograph_sql escape hatch, large grep result merges).
    */
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic prepared-statement signatures
-  iterate(...params: any[]): IterableIterator<any>;
+  iterate<TRow = unknown>(...params: unknown[]): IterableIterator<TRow>;
 }
 
 export interface SqliteDatabase {
   readonly dialect: 'sqlite' | 'postgres';
   prepare(sql: string): SqliteStatement;
   exec(sql: string): void;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite pragma() return signature
-  pragma(str: string): any;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors better-sqlite3/bun:sqlite variadic transaction() wrapper signature
-  transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
+  pragma<T = unknown>(str: string): T;
+  transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T;
   close(): void;
   readonly open: boolean;
   /**
@@ -250,10 +243,24 @@ function applyBunCustomSqliteOnce(): void {
   bunCustomSqliteApplied = true;
 }
 
+/**
+ * Prepare Bun's process-global SQLite runtime before any direct
+ * `bun:sqlite` Database constructor runs.
+ *
+ * Most code should use {@link createDatabase}. This hook exists for
+ * read-only escape hatches that intentionally open `bun:sqlite` directly
+ * without the full Cartograph adapter; calling it first prevents that direct
+ * open from locking the process to Bun's default SQLite build, which would
+ * make later sqlite-vec loads unavailable on macOS.
+ */
+export function prepareBunSqliteRuntime(): void {
+  applyBunCustomSqliteOnce();
+}
+
 interface BunSqliteHandle {
   prepare(sql: string): unknown;
   exec(sql: string): void;
-  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T;
+  transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T;
   loadExtension(file: string, entrypoint?: string): void;
   close(): void;
 }
@@ -264,7 +271,7 @@ export class BunSqliteAdapter implements SqliteDatabase {
   readonly dialect = 'sqlite' as const;
 
   constructor(dbPath: string) {
-    applyBunCustomSqliteOnce();
+    prepareBunSqliteRuntime();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Database } = requireCjs('bun:sqlite') as {
       Database: (new (
@@ -321,16 +328,18 @@ export class BunSqliteAdapter implements SqliteDatabase {
           lastInsertRowid: result.lastInsertRowid,
         };
       },
-      get(...params: unknown[]) {
-        return stmt.get(...filterParams(params));
+      get<TRow = unknown>(...params: unknown[]) {
+        return stmt.get(...filterParams(params)) as TRow | null | undefined;
       },
-      all(...params: unknown[]) {
-        return stmt.all(...filterParams(params));
+      all<TRow = unknown>(...params: unknown[]) {
+        return stmt.all(...filterParams(params)) as TRow[];
       },
-      iterate(...params: unknown[]) {
-        if (typeof stmt.iterate === 'function') return stmt.iterate(...filterParams(params));
+      iterate<TRow = unknown>(...params: unknown[]) {
+        if (typeof stmt.iterate === 'function') {
+          return stmt.iterate(...filterParams(params)) as IterableIterator<TRow>;
+        }
         const rows = stmt.all(...filterParams(params));
-        return rows[Symbol.iterator]();
+        return rows[Symbol.iterator]() as IterableIterator<TRow>;
       },
     };
   }
@@ -339,20 +348,20 @@ export class BunSqliteAdapter implements SqliteDatabase {
     this._db.exec(sql);
   }
 
-  pragma(str: string): unknown {
+  pragma<T = unknown>(str: string): T {
     const trimmed = str.trim();
     if (trimmed.includes('=')) {
       this._db.exec(`PRAGMA ${trimmed}`);
-      return undefined;
+      return undefined as T;
     }
-    return (this._db.prepare(`PRAGMA ${trimmed}`) as { get: () => unknown }).get();
+    return (this._db.prepare(`PRAGMA ${trimmed}`) as { get: () => T }).get();
   }
 
   loadExtension(file: string, entrypoint?: string): void {
     this._db.loadExtension(file, entrypoint);
   }
 
-  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
+  transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T {
     // Take the write lock up front (BEGIN IMMEDIATE) on the OUTERMOST
     // transaction so writer-vs-writer contention surfaces as plain
     // SQLITE_BUSY — which the configured `busy_timeout` waits out — instead
@@ -360,8 +369,8 @@ export class BunSqliteAdapter implements SqliteDatabase {
     // `busy_timeout` can NOT cover (the watcher-vs-summarize abort, issues
     // #15/#16). bun:sqlite degrades `.immediate` to a SAVEPOINT when already
     // inside a transaction, so nested transactions are unaffected.
-    const txn = this._db.transaction(fn) as ((...args: unknown[]) => T) & {
-      immediate?: (...args: unknown[]) => T;
+    const txn = this._db.transaction(fn) as ((...args: Args) => T) & {
+      immediate?: (...args: Args) => T;
     };
     return txn.immediate ?? txn;
   }

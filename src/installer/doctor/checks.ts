@@ -1,6 +1,7 @@
 import * as path from 'node:path';
 import { configuredEndpointsFromLlm } from '../../features/backend/index.js';
 import { inspectGitHooksLiveness } from '../../features/git-hooks/index.js';
+import { asJsonObject } from '../../json-object.js';
 import {
   backendLifecycleCheck,
   backendStartCommandsCheck,
@@ -29,6 +30,11 @@ interface ProjectDoctorChecks {
   projectPathForChecks: string | null;
 }
 
+function ownObjectField(record: Record<string, unknown> | null, key: string): Record<string, unknown> | null {
+  if (!record || !Object.hasOwn(record, key)) return null;
+  return asJsonObject(record[key]);
+}
+
 /** Pure-check pass: the body of `runDoctor` minus the `fix` branch. */
 export async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   const checks: CheckResult[] = [];
@@ -42,7 +48,7 @@ export async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorRes
 
   const detected = await detectBackends(configuredEndpointsFromLlm(llm));
   checks.push(detectedBackendsCheck(detected));
-  const embeddingLlm = llm?.['embeddingLlm'] as Record<string, unknown> | null | undefined;
+  const embeddingLlm = ownObjectField(llm, 'embeddingLlm');
   const projectPathForChecks = projectChecks.projectPathForChecks;
   const reachability = checkEmbeddingReachability({ embeddingLlm, detected, projectPath: projectPathForChecks, llm });
   if (reachability) checks.push(reachability);

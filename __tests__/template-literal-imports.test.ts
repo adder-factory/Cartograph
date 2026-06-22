@@ -54,7 +54,7 @@ describe('template-literal / string-literal imports', () => {
   });
 
   it('real import graph does not contain fixture imports (sanity)', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind='import' AND (name LIKE '%./real%' OR name LIKE '%./ns%')`)
       .all() as Array<{ name: string }>;
@@ -194,34 +194,34 @@ describe('string-imports algo-version self-heal', () => {
   });
 
   it('algo version is stamped in project_metadata after indexAll', () => {
-    const stored = getMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
+    const stored = getMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
     expect(stored).toBe(STRING_IMPORTS_ALGO_VERSION);
   });
 
   it('forces a full re-mine on sync when stored algo version is stale', async () => {
     // Confirm baseline: indexAll mined a.ts's template-literal import.
-    const before = getStringImports((cg as any).queries, { moduleNameLike: './%' });
+    const before = getStringImports(cg.queries, { moduleNameLike: './%' });
     const beforeSpecs = before.map((r) => r.moduleName);
     expect(beforeSpecs).toContain('./from-a');
 
     // Now inject a bogus algo version — simulates a pre-fix install state.
-    setMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, '0');
+    setMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, '0');
 
     // The ONLY changed file in this sync is b.ts (it has no string imports).
     // Under incremental logic, sync would only mine b.ts and leave a.ts stale.
     // With the self-heal, the algo-version mismatch forces a full re-mine,
     // so a.ts's rows are still present after the sync.
     fs.writeFileSync(path.join(testDir, 'src', 'b.ts'), 'export const y = 42;\n');
-    const result = await (cg as any).sync();
+    const result = await cg.sync();
     expect(result.filesModified).toBeGreaterThanOrEqual(1);
 
     // Self-heal must have re-mined all files, so './from-a' must still appear.
-    const after = getStringImports((cg as any).queries, { moduleNameLike: './%' });
+    const after = getStringImports(cg.queries, { moduleNameLike: './%' });
     const afterSpecs = after.map((r) => r.moduleName);
     expect(afterSpecs).toContain('./from-a');
 
     // The algo version must now be stamped at the current value.
-    const stamp = getMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
+    const stamp = getMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
     expect(stamp).toBe(STRING_IMPORTS_ALGO_VERSION);
   });
 
@@ -229,23 +229,23 @@ describe('string-imports algo-version self-heal', () => {
     // Regression guard: the algo-version check must fire even when the sync
     // has ZERO changed files (no-op sync). Previously the check sat inside the
     // changed-files branch of afterSync, so a no-op sync silently skipped it.
-    const before = getStringImports((cg as any).queries, { moduleNameLike: './%' });
+    const before = getStringImports(cg.queries, { moduleNameLike: './%' });
     expect(before.map((r) => r.moduleName)).toContain('./from-a');
 
     // Stamp a bogus version — simulates a pre-fix deployment state.
-    setMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, 'stale-version');
+    setMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY, 'stale-version');
 
     // Run a sync with NO filesystem changes — changedFilePaths will be empty.
-    const result = await (cg as any).sync();
+    const result = await cg.sync();
     expect(result.filesModified ?? 0).toBe(0);
 
     // The hoisted mismatch check must have triggered the full re-mine even
     // though no files changed, so a.ts's rows are still present.
-    const after = getStringImports((cg as any).queries, { moduleNameLike: './%' });
+    const after = getStringImports(cg.queries, { moduleNameLike: './%' });
     expect(after.map((r) => r.moduleName)).toContain('./from-a');
 
     // Version must be re-stamped to the current value.
-    const stamp = getMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
+    const stamp = getMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
     expect(stamp).toBe(STRING_IMPORTS_ALGO_VERSION);
   });
 
@@ -254,13 +254,13 @@ describe('string-imports algo-version self-heal', () => {
     // should only process changed files, NOT trigger a full clearStringImports.
     // Verify by confirming a.ts rows survive a b.ts-only sync.
     fs.writeFileSync(path.join(testDir, 'src', 'b.ts'), 'export const y = 99;\n');
-    await (cg as any).sync();
+    await cg.sync();
 
-    const rows = getStringImports((cg as any).queries, { moduleNameLike: './%' });
+    const rows = getStringImports(cg.queries, { moduleNameLike: './%' });
     const specs = rows.map((r) => r.moduleName);
     expect(specs).toContain('./from-a');
 
-    const stamp = getMetadata((cg as any).queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
+    const stamp = getMetadata(cg.queries, LAST_MINED_STRING_IMPORTS_ALGO_VERSION_KEY);
     expect(stamp).toBe(STRING_IMPORTS_ALGO_VERSION);
   });
 });

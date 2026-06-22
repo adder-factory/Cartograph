@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { migrationSuccessMessage, registerAdminMigrateCommand } from '../src/features/admin-migrate/index.js';
 
 describe('admin migrate feature runtime', () => {
@@ -32,6 +32,86 @@ describe('admin migrate feature CLI', () => {
       'info:Restart any MCP server still bound to the old schema (its tools will return "stale code, restart" until you do).',
       'close',
     ]);
+  });
+
+  it('sets exitCode and returns when the project is not initialized', async () => {
+    let action: ((pathArg: string | undefined) => Promise<void>) | undefined;
+    const calls: string[] = [];
+    const originalExitCode = process.exitCode;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+      throw new Error(`process.exit(${String(code)})`);
+    });
+
+    try {
+      registerAdminMigrateCommand({
+        adminCmd: fakeCommand((fn) => {
+          action = fn;
+        }),
+        resolveProjectPath: (pathArg) => pathArg ?? '/repo',
+        isInitialized: () => false,
+        loadCartograph: async () => {
+          calls.push('loadCartograph');
+          throw new Error('loadCartograph should not run when uninitialized');
+        },
+        success: (message) => calls.push(`success:${message}`),
+        info: (message) => calls.push(`info:${message}`),
+        error: (message) => calls.push(`error:${message}`),
+      });
+
+      if (!action) throw new Error('migrate action was not registered');
+      await action('/repo');
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual(['error:Cartograph not initialized in /repo']);
+    } finally {
+      exitSpy.mockRestore();
+      process.exitCode = originalExitCode ?? 0;
+    }
+  });
+
+  it('sets exitCode instead of hard-exiting when migration fails', async () => {
+    let action: ((pathArg: string | undefined) => Promise<void>) | undefined;
+    const calls: string[] = [];
+    const originalExitCode = process.exitCode;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+      throw new Error(`process.exit(${String(code)})`);
+    });
+
+    try {
+      registerAdminMigrateCommand({
+        adminCmd: fakeCommand((fn) => {
+          action = fn;
+        }),
+        resolveProjectPath: (pathArg) => pathArg ?? '/repo',
+        isInitialized: () => true,
+        loadCartograph: async () => ({
+          default: {
+            open: async (projectPath, opts = {}) => {
+              calls.push(`open:${projectPath}:${JSON.stringify(opts)}`);
+              throw new Error('still behind');
+            },
+          },
+        }),
+        success: (message) => calls.push(`success:${message}`),
+        info: (message) => calls.push(`info:${message}`),
+        error: (message) => calls.push(`error:${message}`),
+      });
+
+      if (!action) throw new Error('migrate action was not registered');
+      await action('/repo');
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual([
+        'open:/repo:{}',
+        'open:/repo:{"autoMigrate":true}',
+        'error:Failed to migrate: still behind',
+      ]);
+    } finally {
+      exitSpy.mockRestore();
+      process.exitCode = originalExitCode ?? 0;
+    }
   });
 });
 

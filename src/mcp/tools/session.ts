@@ -31,8 +31,10 @@
  */
 
 import { z } from 'zod';
+import { macroStepContractsSchema } from '../../features/session/runtime.js';
 import { projectPathField } from './_common-fields.js';
 import { errMsg } from '../../errors.js';
+import { asJsonObject } from '../../json-object.js';
 import { generateSessionId } from '../../trace/logger.js';
 import {
   insertSession,
@@ -199,8 +201,7 @@ function lookupAuditSession(
 
 function parseArgsJson(argsJson: string): Record<string, unknown> {
   try {
-    const parsed = JSON.parse(argsJson) as unknown;
-    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    return asJsonObject(JSON.parse(argsJson)) ?? {};
   } catch {
     return {};
   }
@@ -423,20 +424,27 @@ function validateSteps(raw: unknown): MacroStep[] | string {
   // stringified JSON that deserialised to `[]`) surfaces as an error
   // rather than a cheerful "Macro saved" (friction audit-4 #4).
   if (raw.length === 0) return 'steps must contain at least one {tool, args} step.';
-  const out: MacroStep[] = [];
-  for (let i = 0; i < raw.length; i++) {
-    const s = raw[i];
-    if (!s || typeof s !== 'object') return `steps[${i}] must be an object.`;
-    const obj = s as Record<string, unknown>;
-    const tool = obj['tool'];
-    if (typeof tool !== 'string' || !tool) return `steps[${i}].tool must be a non-empty string.`;
-    const argsField = obj['args'] ?? {};
-    if (typeof argsField !== 'object' || Array.isArray(argsField)) {
-      return `steps[${i}].args must be an object (got ${JSON.stringify(argsField)}).`;
-    }
-    out.push({ tool, args: argsField as Record<string, unknown> });
+  const result = macroStepContractsSchema.safeParse(raw);
+  return result.success ? result.data : describeMacroStepValidationError(raw, result.error);
+}
+
+function describeMacroStepValidationError(raw: readonly unknown[], error: z.ZodError): string {
+  const issue = error.issues[0];
+  const index = issue?.path[0];
+  const field = issue?.path[1];
+  if (typeof index !== 'number') return `'steps' must be an array of {tool, args} objects.`;
+  if (field === undefined) return `steps[${index}] must be an object.`;
+  if (field === 'tool') return `steps[${index}].tool must be a non-empty string.`;
+  if (field === 'args') {
+    const step = raw[index];
+    const argsField = isRecord(step) && Object.hasOwn(step, 'args') ? step['args'] : undefined;
+    return `steps[${index}].args must be an object (got ${JSON.stringify(argsField)}).`;
   }
-  return out;
+  return `steps[${index}] must be a {tool, args} object.`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
 function handleMacroSave(ctx: ToolCtx, args: Record<string, unknown>): ToolOutcome {

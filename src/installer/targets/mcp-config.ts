@@ -1,17 +1,24 @@
 import * as path from 'node:path';
+import { asJsonObject } from './file-writes.js';
 
 export interface McpCommandOptions {
   command?: string | undefined;
   projectPath?: string | undefined;
 }
 
+function ownStringOption(options: McpCommandOptions, key: keyof McpCommandOptions): string | undefined {
+  const value = Object.hasOwn(options, key) ? options[key] : undefined;
+  return typeof value === 'string' ? value : undefined;
+}
+
 export function getMcpCommand(options: McpCommandOptions = {}): string {
-  return options.command ?? 'cartograph';
+  return ownStringOption(options, 'command') ?? 'cartograph';
 }
 
 export function getMcpServerArgs(options: McpCommandOptions = {}): string[] {
   const args = ['serve', '--mcp'];
-  if (options.projectPath) args.push('--project-path', path.resolve(options.projectPath));
+  const projectPath = ownStringOption(options, 'projectPath');
+  if (projectPath) args.push('--project-path', path.resolve(projectPath));
   return args;
 }
 
@@ -20,7 +27,7 @@ export function mcpCommandOptionsForLocation(
   options: McpCommandOptions = {},
 ): McpCommandOptions {
   if (loc !== 'local') return options;
-  return { ...options, projectPath: options.projectPath ?? process.cwd() };
+  return { ...options, projectPath: ownStringOption(options, 'projectPath') ?? process.cwd() };
 }
 
 /**
@@ -69,10 +76,12 @@ export function renderMcpServersPrintConfig(
  * dev wiring without false positives.
  */
 export function isProjectSourceRunEntry(entry: unknown, projectPath: string): boolean {
-  if (entry === null || typeof entry !== 'object') return false;
-  const record = entry as Record<string, unknown>;
+  const record = asJsonObject(entry);
+  if (!record) return false;
   const tokens: string[] = [];
-  for (const value of [record['command'], record['args']]) {
+  const command = Object.hasOwn(record, 'command') ? record['command'] : undefined;
+  const args = Object.hasOwn(record, 'args') ? record['args'] : undefined;
+  for (const value of [command, args]) {
     if (typeof value === 'string') tokens.push(value);
     else if (Array.isArray(value)) tokens.push(...value.filter((token): token is string => typeof token === 'string'));
   }

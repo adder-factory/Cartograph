@@ -11,6 +11,7 @@ import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
 import { detectTsOrJs } from './detect-language.js';
+import { hasPackageDependencyMatching } from './package-dependencies.js';
 
 const HONO_LANGUAGES = ['typescript', 'javascript', 'tsx', 'jsx'] as const;
 const HONO_METHODS: ReadonlySet<string> = new Set(['get', 'post', 'put', 'patch', 'delete', 'options', 'all']);
@@ -61,19 +62,7 @@ export const honoResolver: FrameworkResolver = {
   anchors: ['Hono', '.get(', '.post(', '.put(', '.patch(', '.delete(', '.route(', '.on('],
 
   detect(context: ResolutionContext): boolean {
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson) as {
-          dependencies?: Record<string, string>;
-          devDependencies?: Record<string, string>;
-        };
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps['hono'] || Object.keys(deps).some((name) => name.startsWith('@hono/'))) return true;
-      } catch {
-        // Invalid package.json is not a framework signal.
-      }
-    }
+    if (hasPackageDependencyMatching(context.readFile('package.json'), isHonoDependencyName)) return true;
 
     for (const file of context.getAllFiles()) {
       if (!isJsLikePath(file)) continue;
@@ -113,6 +102,10 @@ export const honoResolver: FrameworkResolver = {
     return toRouteNodes(filePath, [...routes, ...buildMountedRoutes(routes, mounts)]);
   },
 };
+
+function isHonoDependencyName(name: string): boolean {
+  return name === 'hono' || name.startsWith('@hono/');
+}
 
 function hasHonoImport(content: string): boolean {
   return (

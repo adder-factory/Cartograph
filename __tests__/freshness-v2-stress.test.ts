@@ -165,10 +165,8 @@ describeStress('Freshness v2 — migration 020 idempotency', () => {
       // Re-run the migration directly via the migration module (simulates
       // a re-applied migration on an already-migrated DB).
       const { MIGRATION } = await import('../src/db/migrations/020-artifact-source-hash.js');
-      const rawDb = (cg as unknown as { queries: { db: { exec: (s: string) => void; prepare: (s: string) => any } } })
-        .queries.db;
       // Should not throw — guard checks column existence.
-      expect(() => MIGRATION.up(rawDb as any)).not.toThrow();
+      expect(() => MIGRATION.up(cg.queries.db)).not.toThrow();
       cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
@@ -194,14 +192,13 @@ describeStress('Freshness v2 — getStaleArtifactsCount performance', () => {
 
       // Hand-insert 1000 fake findings + 1000 fake embeddings to simulate
       // a heavily-summarised project without running the LLM passes.
-      const queries = (cg as unknown as { queries: any }).queries;
       const nodes = getNodesByKind(cg.queries, 'function').slice(0, 1000);
       // Pad with synthetic findings
       const findings: Array<{ nodeId: string; biomarker: string; severity: 'info'; metric: number }> = [];
       for (let i = 0; i < nodes.length; i++) {
         findings.push({ nodeId: nodes[i]!.id, biomarker: `__perf_${i}__`, severity: 'info', metric: i });
       }
-      appendFindings(queries, findings);
+      appendFindings(cg.queries, findings);
 
       const start = Date.now();
       const counts = getStaleArtifactsCount(cg.queries);
@@ -233,47 +230,48 @@ describeStress('Freshness v2 — watcher end-to-end with real git', () => {
         projectRoot: dir,
         config: cg.getConfig(),
         syncFn: async () => {
+          const result = await cg.sync({ summarize: false });
           syncFired = true;
           syncCount++;
-          const result = await cg.sync({ summarize: false });
           return { filesChanged: result.filesAdded + result.filesModified, durationMs: result.durationMs };
         },
         options: { debounceMs: 200 },
       });
 
-      const started = watcher.start();
-      if (!started) {
-        console.log('watcher start failed — skipping (platform support)');
-        cg.close();
-        return;
-      }
-
       try {
-        await watcher.untilReady(5000);
-      } catch {
-        console.log('watcher start failed — skipping (platform support)');
-        watcher.stop();
+        const started = watcher.start();
+        if (!started) {
+          console.log('watcher start failed — skipping (platform support)');
+          return;
+        }
+
+        try {
+          await watcher.untilReady(5000);
+        } catch {
+          console.log('watcher start failed — skipping (platform support)');
+          return;
+        }
+
+        // Make a real commit. .git/HEAD changes; isGitHeadChange should fire.
+        fs.writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1;\n');
+        git(dir, 'add', '.');
+        git(dir, 'commit', '-q', '-m', 'watcher test');
+        watcher._injectFileEventForTest(path.join(dir, '.git', 'HEAD'));
+
+        // Wait for debounce + sync to complete. syncFired flips only
+        // after cg.sync() resolves so teardown cannot close the DB
+        // underneath an in-flight watcher sync.
+        const deadline = Date.now() + 5000;
+        while (!syncFired && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+
+        console.log(`syncFired=${syncFired}, syncCount=${syncCount}`);
+        expect(syncFired).toBe(true);
+      } finally {
+        await watcher.stopAndWait();
         cg.close();
-        return;
       }
-
-      // Make a real commit. .git/HEAD changes; isGitHeadChange should fire.
-      fs.writeFileSync(path.join(dir, 'src', 'b.ts'), 'export const b = 1;\n');
-      git(dir, 'add', '.');
-      git(dir, 'commit', '-q', '-m', 'watcher test');
-      watcher._injectFileEventForTest(path.join(dir, '.git', 'HEAD'));
-
-      // Wait for debounce + sync to complete
-      const deadline = Date.now() + 5000;
-      while (!syncFired && Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 50));
-      }
-
-      console.log(`syncFired=${syncFired}, syncCount=${syncCount}`);
-      expect(syncFired).toBe(true);
-
-      watcher.stop();
-      cg.close();
     } finally {
       if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
     }

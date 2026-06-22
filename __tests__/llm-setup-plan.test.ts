@@ -22,6 +22,7 @@ import {
   applyLlmSetupChoice,
   AVAILABLE_PRESETS,
   chooseRecommendedPresetId,
+  readLlmTierConcurrencyOverrides,
 } from '../src/installer/llm-setup-plan.js';
 
 describe('planLlmSetup', () => {
@@ -333,5 +334,87 @@ describe('applyLlmSetupChoice', () => {
     expect(result.applied).toBe(true);
     expect(result.backupPath).not.toBeNull();
     expect(fs.existsSync(result.backupPath!)).toBe(true);
+  });
+
+  it('does not preserve array entries from a malformed existing config root', async () => {
+    const configPath = path.join(projectRoot, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify([{ stale: true }]), 'utf-8');
+
+    const result = await applyLlmSetupChoice({ projectRoot, preset: 'install-ollama' });
+
+    expect(result.applied).toBe(true);
+    expect(result.backupPath).not.toBeNull();
+    const written: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(Array.isArray(written)).toBe(false);
+    expect(written).not.toHaveProperty('0');
+    expect(written).toHaveProperty('llm');
+  });
+
+  it('reports malformed config roots when reading tuning overrides', async () => {
+    const configPath = path.join(projectRoot, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify([{ stale: true }]), 'utf-8');
+
+    const result = await readLlmTierConcurrencyOverrides(projectRoot);
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain('config root must be an object');
+  });
+
+  it('reads tuning overrides through the same tier mapping used by writes', async () => {
+    const configPath = path.join(projectRoot, '.cartograph', 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({
+        llm: {
+          embeddingLlm: { concurrency: 3 },
+          summarizeLlm: { concurrency: 4 },
+          askLlm: { concurrency: 5 },
+          rerankerLlm: { concurrency: 6 },
+        },
+      }),
+      'utf-8',
+    );
+
+    const result = await readLlmTierConcurrencyOverrides(projectRoot);
+
+    expect(result).toEqual({
+      ok: true,
+      overrides: {
+        embed: 3,
+        chat: 4,
+        ask: 5,
+        reranker: 6,
+      },
+    });
+  });
+
+  it('ignores inherited tuning override blocks while reading config', async () => {
+    const configPath = path.join(projectRoot, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, '{}', 'utf-8');
+
+    Object.defineProperty(Object.prototype, 'llm', {
+      configurable: true,
+      value: {
+        embeddingLlm: { concurrency: 3 },
+        summarizeLlm: { concurrency: 4 },
+        askLlm: { concurrency: 5 },
+        rerankerLlm: { concurrency: 6 },
+      },
+    });
+    try {
+      const result = await readLlmTierConcurrencyOverrides(projectRoot);
+
+      expect(result).toEqual({
+        ok: true,
+        overrides: {
+          embed: null,
+          chat: null,
+          ask: null,
+          reranker: null,
+        },
+      });
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['llm'];
+    }
   });
 });

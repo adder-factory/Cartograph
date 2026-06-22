@@ -31,11 +31,13 @@ import { describe, it, expect } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import { EventEmitter } from 'node:events';
 import Cartograph from '../src/index.js';
 import { CROSS_FILE_RULES, reconcileCrossFileRuleResult } from '../src/biomarkers/index.js';
-import { runRulesInWorkers } from '../src/biomarkers/worker-pool.js';
+import { runRulesInWorkers, type BiomarkerWorkerClass } from '../src/biomarkers/worker-pool.js';
 import { getDatabasePath } from '../src/db/index.js';
 import type { Finding } from '../src/biomarkers/types.js';
+import type { BiomarkerWorkerInit } from '../src/biomarkers/biomarker-worker-contract.js';
 
 /** A class with `n` trivial 1-line methods. n>=60 -> god_class `error`
  *  (T_GOD_ERR). 1-line bodies stay under DUP_MIN_LOC so the methods
@@ -74,6 +76,21 @@ function key(f: Finding): string {
 function hasSeverity(findings: Finding[], severity: string): boolean {
   return findings.some((f) => f.severity === severity);
 }
+
+class MalformedReplyWorker extends EventEmitter {
+  constructor(_filename: string, options: { workerData: BiomarkerWorkerInit }) {
+    super();
+    queueMicrotask(() => {
+      this.emit('message', { ok: true, ruleKind: options.workerData.ruleKind, durationMs: 1 });
+    });
+  }
+
+  terminate(): Promise<number> {
+    return Promise.resolve(0);
+  }
+}
+
+const MALFORMED_REPLY_WORKER: BiomarkerWorkerClass = MalformedReplyWorker;
 
 describe('cross-file biomarker worker pool parity + fail-safe', () => {
   it('worker pool produces the identical finding set as the serial host path, incl. warning + error severities', async () => {
@@ -179,6 +196,22 @@ describe('cross-file biomarker worker pool parity + fail-safe', () => {
       cg.close();
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('a malformed worker reply surfaces as an error result for that rule', async () => {
+    const results = await runRulesInWorkers({
+      dbPath: '/tmp/cartograph.db',
+      projectRoot: '/repo',
+      ruleKinds: ['duplicate_code'],
+      WorkerClass: MALFORMED_REPLY_WORKER,
+    });
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({
+      ruleKind: 'duplicate_code',
+      findings: [],
+    });
+    expect(results[0]?.error).toMatch(/invalid biomarker worker reply: findings:/);
   });
 
   it('persists biomarker_cross_file_errors = 0 after a clean full pass (the CI fail-closed sentinel)', async () => {

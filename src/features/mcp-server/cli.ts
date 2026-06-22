@@ -86,7 +86,7 @@ export function resolveServeProfile(
   const profile = raw ?? DEFAULT_MCP_SERVER_PROFILE;
   if (isMcpServerProfile(profile)) return profile;
   error(`Invalid --profile "${profile}". Expected one of: ${MCP_SERVER_PROFILE_NAMES.join(', ')}`);
-  process.exit(1);
+  process.exitCode = 1;
   return null;
 }
 
@@ -181,7 +181,7 @@ async function runServeCommand(deps: McpServerCommandDeps, options: ServeCommand
     await startMcpServeMode(deps, options, buildServeServerOptions(options, projectPath, profile));
   } catch (error_) {
     error(`Failed to start server: ${errMsg(error_)}`);
-    process.exit(1);
+    process.exitCode = 1;
   }
 }
 

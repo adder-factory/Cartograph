@@ -1,6 +1,10 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { writeSync } from 'node:fs';
-import type { ShimmerWorkerMessage } from './types.js';
+import {
+  parseShimmerWorkerData,
+  parseShimmerWorkerMessage,
+  type ShimmerWorkerMessage,
+} from './shimmer-worker-contract.js';
 
 // Write directly to fd 1 (stdout) instead of writeStdout().
 // In Node.js worker threads, process.stdout is proxied through the main
@@ -36,7 +40,7 @@ const BAR_SHIMMER_WIDTH = 3;
 const BAR_SHIMMER_PAD_END = 6;
 const BAR_SHIMMER_PAD_START = 3;
 
-const startTime: number = workerData.startTime;
+const { startTime } = parseShimmerWorkerData(workerData);
 
 function animFrame(): number {
   return Math.floor((Date.now() - startTime) / ANIM_INTERVAL);
@@ -120,7 +124,13 @@ function finishPhase(): void {
 // Render loop — independent of main thread
 const tickInterval = setInterval(render, 50);
 
-parentPort!.on('message', (msg: ShimmerWorkerMessage) => {
+parentPort!.on('message', (raw: unknown) => {
+  let msg: ShimmerWorkerMessage;
+  try {
+    msg = parseShimmerWorkerMessage(raw);
+  } catch {
+    return;
+  }
   if (msg.type === 'update') {
     currentMessage = msg.phaseName;
     currentPercent = msg.percent;

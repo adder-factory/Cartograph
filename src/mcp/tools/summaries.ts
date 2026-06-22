@@ -26,6 +26,7 @@
  */
 
 import { z } from 'zod';
+import { summarySaveItemSchema } from '../../features/summaries/runtime.js';
 import { projectPathField } from './_common-fields.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
@@ -68,13 +69,7 @@ const summariesSchema = z.object({
     ),
   // save-mode args
   items: z
-    .array(
-      z.object({
-        nodeId: z.string(),
-        contentHash: z.string(),
-        summary: z.string().describe('One line, max 200 chars. Action verb. No "This function..." preamble.'),
-      }),
-    )
+    .array(summarySaveItemSchema)
     .optional()
     .describe(
       '(action=save) Summaries to persist; each item echoes back the contentHash from action=pending unchanged.',

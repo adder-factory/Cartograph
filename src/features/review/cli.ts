@@ -214,7 +214,8 @@ function registerReviewNeighborsCommand(deps: ReviewCommandDeps): void {
       const symbols = parseCommaList(options.symbols);
       if (files.length === 0 && symbols.length === 0) {
         error('Pass at least one --files or --symbols (comma-separated).');
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       const args: Record<string, unknown> = { mode: 'neighbors' };
       if (files.length > 0) args['files'] = files;

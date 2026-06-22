@@ -44,5 +44,5 @@ async function runDoctorCommand(
   const { runDoctor, formatDoctorReport, formatDoctorJson } = await deps.loadDoctor();
   const result = await runDoctor(doctorRunOptions(pathArg, options));
   deps.writeStdout(options.json ? formatDoctorJson(result) : formatDoctorReport(result));
-  if (finalDoctorStatus(result) === 'fail') process.exit(1);
+  if (finalDoctorStatus(result) === 'fail') process.exitCode = 1;
 }

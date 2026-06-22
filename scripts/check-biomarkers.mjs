@@ -140,6 +140,16 @@ function readBiomarkerGateStateWithRetry(databasePath) {
   throw lastError ?? new Error(`Unable to open ${databasePath}`);
 }
 
+function makeWalDatabaseReadable(databasePath) {
+  const db = new Database(databasePath);
+  try {
+    db.exec('PRAGMA busy_timeout=1000');
+    db.exec('PRAGMA wal_checkpoint(PASSIVE)');
+  } finally {
+    db.close();
+  }
+}
+
 // 1. Bring the findings to full-pass authority against CURRENT source.
 //    Fresh checkout (CI): init + full index. Existing index (local dev
 //    loop): `admin sync` (re-extracts only changed files) + `admin
@@ -167,6 +177,7 @@ if (!existsSync(dbPath)) {
 // unknown (note, don't fail) to stay non-brittle — but see the JSDoc caveat:
 // `enableBiomarkers: false` is the one config where absent legitimately means
 // "nothing to gate."
+makeWalDatabaseReadable(dbPath);
 const { counts, offenders, cfRaw } = readBiomarkerGateStateWithRetry(dbPath);
 const crossFileErrors = cfRaw === null ? null : Number(cfRaw);
 

@@ -15,8 +15,10 @@
  * tokens.
  */
 
+import { z } from 'zod';
 import type { LlmClient, ResponseJsonSchema } from './client.js';
 import { LlmEndpointError } from './client.js';
+import { parseJsonObjectWithOwnField } from './json-reply.js';
 
 export type ChangeKind =
   | 'addition'
@@ -62,6 +64,17 @@ const CHANGE_KIND_SCHEMA: ResponseJsonSchema = {
   properties: { kind: { enum: [...CHAT_LABELS] } },
   required: ['kind'],
 };
+
+const changeKindReplySchema = z.looseObject({
+  kind: z.enum(CHAT_LABELS),
+});
+
+function parseChatChangeKind(rawText: string): ChangeKind | undefined {
+  const parsed = parseJsonObjectWithOwnField(rawText, 'kind');
+  if (parsed === null) return undefined;
+  const result = changeKindReplySchema.safeParse(parsed);
+  return result.success ? result.data.kind : undefined;
+}
 
 const CHAT_SYSTEM_PROMPT =
   'Classify a code change into ONE of these labels: ' +
@@ -140,13 +153,7 @@ export async function classifyChangeKind(args: ClassifyChangeKindArgs): Promise<
       ],
       { temperature: 0, maxTokens: 24, responseSchema: CHANGE_KIND_SCHEMA, ...(signal ? { signal } : {}) },
     );
-    let rawKind: unknown;
-    try {
-      rawKind = (JSON.parse(result.text) as { kind?: unknown }).kind;
-    } catch {
-      rawKind = undefined;
-    }
-    const label = CHAT_LABELS.find((l) => l === rawKind);
+    const label = parseChatChangeKind(result.text);
     if (!label) {
       return {
         kind: 'modification',

@@ -241,8 +241,8 @@ describe('cartograph_node — multi-symbol + inline expansions', () => {
   });
 
   it('rejects non-string entries in symbols (boundary validator)', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const result = await handler.execute('cartograph_node', { symbols: ['alpha', 42 as any] });
+    const symbols: unknown[] = ['alpha', 42];
+    const result = await handler.execute('cartograph_node', { symbols });
     expect(result.isError).toBe(true);
     // Boundary validator catches the type mismatch before the handler
     // sees the input — the message names the offending index.

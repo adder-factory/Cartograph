@@ -183,6 +183,17 @@ describe('cartograph_session family (#13)', () => {
       expect(text).toMatch(/unknown tool/);
     });
 
+    it('macro_save rejects null step args instead of saving a corrupt recipe', async () => {
+      const text = textOf(
+        await handler.runHandler('cartograph_session', {
+          action: 'macro_save',
+          name: 'bad-args',
+          steps: [{ tool: 'cartograph_status', args: null }],
+        }),
+      );
+      expect(text).toMatch(/steps\[0\]\.args must be an object/);
+    });
+
     it('macro_save + macro_list shows the recipe', async () => {
       await handler.runHandler('cartograph_session', {
         action: 'macro_save',

@@ -20,11 +20,16 @@
  */
 
 import { fileURLToPath } from 'node:url';
-import { logDebug } from '../errors.js';
+import { errMsg, logDebug } from '../errors.js';
 import { partitionRoundRobin } from '../utils.js';
 import { runWorkerSlice } from '../utils/worker-slice.js';
 import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
-import type { PerFileResult, PerFileWorkerReply } from './per-file-worker.js';
+import {
+  parsePerFileWorkerReply,
+  type PerFileResult,
+  type PerFileWorkerInit,
+  type PerFileWorkerReply,
+} from './per-file-worker-contract.js';
 
 /** Below this file count, the in-main streamingDispatch path beats the
  *  worker-spawn overhead (per-worker bun:sqlite open + grammar preload
@@ -89,18 +94,24 @@ interface RunOneWorkerArgs {
  *  Mirrors G9's `runOneRuleInWorker` shape — settled flag + per-worker
  *  timeout + exit-without-message handling. */
 function runOneWorker(args: RunOneWorkerArgs): Promise<PerFileWorkerReply> {
-  return runWorkerSlice<PerFileWorkerReply>({
+  return runWorkerSlice<unknown>({
     workerPath: args.workerPath,
     workerData: {
       dbPath: args.dbPath,
       projectRoot: args.projectRoot,
-      batch: args.batch,
+      batch: [...args.batch],
       nowMs: args.nowMs,
-    },
+    } satisfies PerFileWorkerInit,
     timeoutMs: args.timeoutMs,
     sliceLabel: args.sliceLabel,
     logPrefix: 'biomarkers per-file',
     makeErrorReply: (error) => ({ ok: false, error }),
+  }).then((raw) => {
+    try {
+      return parsePerFileWorkerReply(raw);
+    } catch (err) {
+      return { ok: false, error: errMsg(err) };
+    }
   });
 }
 

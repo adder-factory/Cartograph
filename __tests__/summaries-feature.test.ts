@@ -29,6 +29,30 @@ describe('summaries feature runtime', () => {
     });
   });
 
+  it('normalizes and rejects blank required save item fields at the boundary', () => {
+    expect(
+      buildSaveSummariesArgs(JSON.stringify([{ nodeId: ' n1 ', contentHash: ' h1 ', summary: ' Does work. ' }]), {}),
+    ).toEqual({
+      ok: true,
+      args: {
+        action: 'save',
+        items: [{ nodeId: 'n1', contentHash: 'h1', summary: 'Does work.' }],
+        model: 'agent-cli',
+      },
+    });
+
+    for (const item of [
+      { nodeId: ' ', contentHash: 'h1', summary: 'Does work.' },
+      { nodeId: 'n1', contentHash: ' ', summary: 'Does work.' },
+      { nodeId: 'n1', contentHash: 'h1', summary: ' ' },
+    ]) {
+      expect(buildSaveSummariesArgs(JSON.stringify([item]), {})).toEqual({
+        ok: false,
+        error: 'Expected each summary item to include non-empty string nodeId, contentHash, and summary.',
+      });
+    }
+  });
+
   it('returns expected failures as values for invalid save JSON shape', () => {
     expect(buildSaveSummariesArgs('not json', {})).toEqual({
       ok: false,
@@ -37,6 +61,14 @@ describe('summaries feature runtime', () => {
     expect(buildSaveSummariesArgs('{"items":{}}', {})).toEqual({
       ok: false,
       error: 'Expected a JSON array of {nodeId, contentHash, summary} or {"items":[...]}.',
+    });
+    expect(buildSaveSummariesArgs('["not an item"]', {})).toEqual({
+      ok: false,
+      error: 'Expected each summary item to include non-empty string nodeId, contentHash, and summary.',
+    });
+    expect(buildSaveSummariesArgs('[{"nodeId":"n1","contentHash":"h1","summary":42}]', {})).toEqual({
+      ok: false,
+      error: 'Expected each summary item to include non-empty string nodeId, contentHash, and summary.',
     });
   });
 

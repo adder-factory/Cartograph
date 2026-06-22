@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { registerReviewCommands } from '../src/bin/commands/review.js';
 
-const actions = new Map<string, (...args: any[]) => unknown>();
+const actions = new Map<string, (...args: unknown[]) => unknown>();
 const calls: Array<{ tool: string; args: Record<string, unknown>; projectPath?: string }> = [];
 const errors: string[] = [];
 
@@ -20,7 +20,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => unknown): this {
+  action(fn: (...args: unknown[]) => unknown): this {
     actions.set(this.name, fn);
     return this;
   }
@@ -152,16 +152,19 @@ describe('review command action bodies', () => {
   });
 
   it('validates neighbors inputs and agent-audit severity before MCP dispatch', async () => {
-    const originalExit = process.exit;
-    process.exit = ((code?: number) => {
-      process.exitCode = typeof code === 'number' ? code : 0;
-      throw new Error(`exit:${process.exitCode}`);
-    }) as typeof process.exit;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+      throw new Error(`unexpected process.exit(${String(code)})`);
+    });
+
     try {
-      await expect(actions.get('neighbors')!({})).rejects.toThrow('exit:1');
+      await expect(actions.get('neighbors')!({})).resolves.toBeUndefined();
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      process.exitCode = 0;
     } finally {
-      process.exit = originalExit;
+      exitSpy.mockRestore();
     }
+
     await actions.get('agent-audit')!({ minSeverity: 'critical' });
 
     expect(errors.join('\n')).toContain('Pass at least one --files or --symbols');

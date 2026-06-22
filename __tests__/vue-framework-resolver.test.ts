@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { vueResolver } from '../src/resolution/frameworks/vue.js';
+import type { ResolutionContext, UnresolvedRef } from '../src/resolution/types.js';
 import type { Node } from '../src/types.js';
 
 function node(id: string, name: string, kind: Node['kind'], filePath: string): Node {
@@ -18,7 +19,7 @@ function node(id: string, name: string, kind: Node['kind'], filePath: string): N
   };
 }
 
-function context(files: string[], nodes: Node[] = [], packageJson: string | null = null) {
+function context(files: string[], nodes: Node[] = [], packageJson: string | null = null): ResolutionContext {
   return {
     readFile: (filePath: string) => (filePath === 'package.json' ? packageJson : null),
     getAllFiles: () => files,
@@ -30,10 +31,14 @@ function context(files: string[], nodes: Node[] = [], packageJson: string | null
     getNodesByLowerName: () => [],
     getImportMappings: () => [],
     getProjectRoot: () => '/repo',
-  } as any;
+  };
 }
 
-function ref(referenceName: string, referenceKind: 'calls' | 'imports' = 'calls', filePath = 'pages/index.vue') {
+function ref(
+  referenceName: string,
+  referenceKind: 'calls' | 'imports' = 'calls',
+  filePath = 'pages/index.vue',
+): UnresolvedRef {
   return {
     fromNodeId: 'component:pages/index.vue:Page:1',
     referenceName,
@@ -42,7 +47,7 @@ function ref(referenceName: string, referenceKind: 'calls' | 'imports' = 'calls'
     column: 1,
     filePath,
     language: filePath.endsWith('.vue') ? 'vue' : 'typescript',
-  } as any;
+  };
 }
 
 describe('Vue framework resolver', () => {

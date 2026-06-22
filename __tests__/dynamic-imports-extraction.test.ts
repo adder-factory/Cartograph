@@ -81,7 +81,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
   });
 
   it("indexes dynamic `import('./plugin')` as an import node", () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name, qualified_name FROM nodes WHERE kind = 'import' AND name LIKE '%plugin%'`)
       .all() as Array<{ name: string; qualified_name: string }>;
@@ -89,7 +89,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
   });
 
   it("indexes `require('./cjs-dep')` as an import node", () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name, qualified_name FROM nodes WHERE kind = 'import' AND name LIKE '%cjs-dep%'`)
       .all() as Array<{ name: string; qualified_name: string }>;
@@ -101,7 +101,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
     // The `as any` wraps the string in an `as_expression` AST node — the
     // pre-fix extractor only inspected direct children of `arguments` and
     // missed the nested string.
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind = 'import' AND name = 'node-llama-cpp'`)
       .all() as Array<{ name: string }>;
@@ -109,7 +109,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
   });
 
   it("indexes parenthesised dynamic import `import(('pkg'))`", () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind = 'import' AND name = 'some-bare-pkg'`)
       .all() as Array<{ name: string }>;
@@ -117,7 +117,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
   });
 
   it("indexes `import('pkg' satisfies string)` dynamic import", () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind = 'import' AND name = 'satisfies-pkg'`)
       .all() as Array<{ name: string }>;
@@ -125,7 +125,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
   });
 
   it("indexes `require('pkg' as any)` (TS-cast CommonJS require)", () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind = 'import' AND name = 'require-cast-pkg'`)
       .all() as Array<{ name: string }>;
@@ -139,7 +139,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
     // `requireCjs('sqlite-vec')`. Without alias recognition, the
     // extractor's calleeName === 'require' check misses this and the
     // import node never emits.
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const rows = q.db
       .prepare(`SELECT name FROM nodes WHERE kind = 'import' AND name = 'create-require-pkg'`)
       .all() as Array<{ name: string }>;
@@ -152,7 +152,7 @@ describe('Tooling-gaps #5: dynamic import extraction', () => {
     // `import(` or `require(`. An agent's filter for dynamic-only is a
     // signature LIKE pattern. Edge-level metadata could be a refinement
     // later, but the node-signature shape is enough for v1 filtering.
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const dynamic = q.db
       .prepare(
         `SELECT signature FROM nodes WHERE kind = 'import'

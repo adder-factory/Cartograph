@@ -1,4 +1,5 @@
 import type * as http from 'node:http';
+import { z } from 'zod';
 import { errMsg } from '../../../errors.js';
 import {
   ASK_BODY_BYTE_LIMIT,
@@ -15,7 +16,13 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { ensureCartograph } from './context.js';
-import { clampString, readBody, sendJson } from './http.js';
+import { clampString, parseJsonObject, readBody, sendJson } from './http.js';
+
+const askRequestBodySchema = z.object({
+  question: z.unknown().optional(),
+  symbol: z.unknown().optional(),
+  selection: z.unknown().optional(),
+});
 
 function buildAskPrompt(question: string, symbol: string, selection: string): string {
   const symbolPrefixed = `About \`${symbol}\` (in this codebase): ${question}`;
@@ -50,17 +57,25 @@ export async function handleAskRequest(
     sendJson(res, msg === 'body too large' ? HTTP_PAYLOAD_TOO_LARGE : HTTP_BAD_REQUEST, { error: msg });
     return;
   }
-  let parsed: { question?: unknown; symbol?: unknown; selection?: unknown };
-  try {
-    parsed = JSON.parse(body);
-  } catch {
+  const rawJson = parseJsonObject(body);
+  if (!rawJson.ok) {
+    if (rawJson.reason === 'not-object') {
+      sendJson(res, HTTP_BAD_REQUEST, { error: 'body must be a JSON object' });
+      return;
+    }
     sendJson(res, HTTP_BAD_REQUEST, { error: 'invalid JSON body' });
     return;
   }
+  const parsedBody = askRequestBodySchema.safeParse(rawJson.value);
+  if (!parsedBody.success) {
+    sendJson(res, HTTP_BAD_REQUEST, { error: 'body must be a JSON object' });
+    return;
+  }
+  const parsed = rawJson.value;
 
-  const question = clampString(parsed.question, ASK_QUESTION_CHAR_LIMIT);
-  const symbol = clampString(parsed.symbol, ASK_SYMBOL_CHAR_LIMIT);
-  const selection = clampString(parsed.selection, ASK_SELECTION_CHAR_LIMIT, { trim: false });
+  const question = clampString(parsed['question'], ASK_QUESTION_CHAR_LIMIT);
+  const symbol = clampString(parsed['symbol'], ASK_SYMBOL_CHAR_LIMIT);
+  const selection = clampString(parsed['selection'], ASK_SELECTION_CHAR_LIMIT, { trim: false });
   if (!question) {
     sendJson(res, HTTP_BAD_REQUEST, { error: 'question is required' });
     return;

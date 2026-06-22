@@ -95,6 +95,11 @@ export interface InstallOptions {
   command?: string | undefined;
 }
 
+export function installCommandOption(options: Pick<InstallOptions, 'command'>): string | undefined {
+  const value = Object.hasOwn(options, 'command') ? options.command : undefined;
+  return typeof value === 'string' ? value : undefined;
+}
+
 export interface AgentTarget {
   /** Stable id; matches the `TargetId` union. */
   readonly id: TargetId;

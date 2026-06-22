@@ -20,9 +20,14 @@
 
 import * as path from 'node:path';
 import * as fs from 'node:fs';
+import { z } from 'zod';
 import { errMsg } from '../errors.js';
 import type { CartographConfig } from '../types.js';
 import { MODELS_DIR_DEFAULT } from '../llm/recommended-models.js';
+
+const configRootSchema = z.looseObject({});
+
+type ConfigRoot = z.infer<typeof configRootSchema>;
 
 /** Abort with an error message if the project is not initialized. */
 function assertInitialized(projectPath: string): void {
@@ -33,19 +38,28 @@ function assertInitialized(projectPath: string): void {
 }
 
 /** Atomic write of `config.json` with the merged llm block. */
-function writeLlmConfig(projectPath: string, llm: NonNullable<CartographConfig['llm']>): void {
+export function writeLlmConfig(projectPath: string, llm: NonNullable<CartographConfig['llm']>): void {
   const configPath = path.join(projectPath, '.cartograph', 'config.json');
   const raw = fs.existsSync(configPath) ? fs.readFileSync(configPath, 'utf-8') : '{}';
-  let config: Record<string, unknown>;
-  try {
-    config = JSON.parse(raw) as Record<string, unknown>;
-  } catch (err) {
-    throw new Error(`config.json is malformed: ${errMsg(err)}`);
-  }
+  const config = parseConfigRoot(raw);
   config['llm'] = llm;
   const tmp = configPath + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(config, null, 2), 'utf-8');
   fs.renameSync(tmp, configPath);
+}
+
+function parseConfigRoot(raw: string): ConfigRoot {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`config.json is malformed: ${errMsg(err)}`);
+  }
+  const result = configRootSchema.safeParse(parsed);
+  if (!result.success) {
+    throw new Error('config.json root must be an object');
+  }
+  return result.data;
 }
 
 /** Summarise the chosen config — one line per non-null slot. */

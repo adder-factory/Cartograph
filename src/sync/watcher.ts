@@ -211,6 +211,10 @@ interface WatcherState {
   /** Resolved parcel subscription once the async `subscribe()` returns.
    *  `null` while the subscribe call is in flight or after `stop()`. */
   subscription: AsyncSubscription | null;
+  /** In-flight native subscribe/open lifecycle. Awaited by stopAndWait(). */
+  subscribePromise: Promise<void> | null;
+  /** In-flight native unsubscribe lifecycle. Awaited by stopAndWait(). */
+  unsubscribePromise: Promise<void> | null;
   /** True once `start()` was called and the subscribe call has been
    *  kicked off, even before it resolves. Lets `isActive()` answer
    *  truthy during the (typically <10ms) window between `start()`
@@ -262,6 +266,8 @@ function watcherMakeState(args: WatcherMakeStateArgs): WatcherState {
   const { syncFn, debounceMs, onSyncComplete, onSyncError, clock } = args;
   return {
     subscription: null,
+    subscribePromise: null,
+    unsubscribePromise: null,
     subscribing: false,
     debounceTimer: null,
     safetyNetTimer: null,
@@ -656,7 +662,7 @@ export class FileWatcher {
     // resolver layer already handles negations downstream.
     const ignoreGlobs = this.opts.config.exclude.filter((p) => !p.startsWith('!'));
 
-    loadParcelSubscribe()
+    const subscribePromise = loadParcelSubscribe()
       .then((parcelSubscribe) =>
         parcelSubscribe(
           watchRoot,
@@ -680,12 +686,12 @@ export class FileWatcher {
       .then((sub) => {
         if (stRef.stopped) {
           // stop() raced ahead of subscribe resolving — tear down the
-          // freshly-opened subscription immediately. Fire-and-forget;
-          // unsubscribe is safe to do asynchronously.
-          void sub.unsubscribe().catch((cleanupErr) => {
+          // freshly-opened subscription immediately. Return the promise
+          // so stopAndWait() can wait for native teardown before callers
+          // remove watched directories in tests / uninitialize flows.
+          return sub.unsubscribe().catch((cleanupErr) => {
             logDebug('parcel-watcher cleanup-after-stop unsubscribe failed', { error: String(cleanupErr) });
           });
-          return;
         }
         stRef.subscription = sub;
         stRef.subscribing = false;
@@ -694,16 +700,25 @@ export class FileWatcher {
           debounceMs: this.opts.debounceMs,
           safetyNetIntervalMs: this.opts.safetyNetIntervalMs,
         });
+        return undefined;
       })
       .catch((subErr: unknown) => {
         // The async subscribe call rejected (bad permissions, ENOENT
         // on the root path, FD exhaustion, missing prebuilt native
         // binary for this platform). Surface and disable.
+        if (stRef.stopped) {
+          logDebug('parcel-watcher subscribe failed after stop', { error: String(subErr) });
+          return;
+        }
         logWarn('Could not start file watcher', { error: String(subErr) });
         stRef.subscribing = false;
         stRef.stopped = true;
         this.opts.onSyncError?.(toError(subErr));
+      })
+      .finally(() => {
+        if (stRef.subscribePromise === subscribePromise) stRef.subscribePromise = null;
       });
+    stRef.subscribePromise = subscribePromise;
   }
 
   /**
@@ -716,29 +731,45 @@ export class FileWatcher {
    * `stopped` and unsubscribes immediately to avoid leaks.
    */
   stop(): void {
-    this.st.stopped = true;
-    this.st.subscribing = false;
+    const stRef = this.st;
+    stRef.stopped = true;
+    stRef.subscribing = false;
 
-    if (this.st.debounceTimer) {
-      this.st.debounceTimer.cancel();
-      this.st.debounceTimer = null;
+    if (stRef.debounceTimer) {
+      stRef.debounceTimer.cancel();
+      stRef.debounceTimer = null;
     }
 
-    if (this.st.safetyNetTimer) {
-      this.st.safetyNetTimer.cancel();
-      this.st.safetyNetTimer = null;
+    if (stRef.safetyNetTimer) {
+      stRef.safetyNetTimer.cancel();
+      stRef.safetyNetTimer = null;
     }
 
-    if (this.st.subscription) {
-      const sub = this.st.subscription;
-      this.st.subscription = null;
-      void sub.unsubscribe().catch((err) => {
-        logDebug('parcel-watcher unsubscribe failed', { error: String(err) });
-      });
+    if (stRef.subscription) {
+      const sub = stRef.subscription;
+      stRef.subscription = null;
+      const unsubscribePromise = sub
+        .unsubscribe()
+        .catch((err) => {
+          logDebug('parcel-watcher unsubscribe failed', { error: String(err) });
+        })
+        .finally(() => {
+          if (stRef.unsubscribePromise === unsubscribePromise) stRef.unsubscribePromise = null;
+        });
+      stRef.unsubscribePromise = unsubscribePromise;
     }
 
-    this.st.hasChanges = false;
+    stRef.hasChanges = false;
     logDebug('File watcher stopped');
+  }
+
+  /** Stop watching and wait for native subscribe/unsubscribe cleanup to settle. */
+  async stopAndWait(): Promise<void> {
+    const stRef = this.st;
+    this.stop();
+    await Promise.allSettled(
+      [stRef.subscribePromise, stRef.unsubscribePromise].filter((p): p is Promise<void> => p !== null),
+    );
   }
 
   /**

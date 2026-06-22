@@ -18,6 +18,7 @@ import Cartograph from '../src/index.js';
 import { searchNodes } from '../src/db/queries-search.js';
 import { extractFromSource } from '../src/extraction/tree-sitter.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
+import type { ExtractionResult, UnresolvedReference } from '../src/extraction/types.js';
 
 beforeAll(async () => {
   await initGrammars();
@@ -34,15 +35,17 @@ interface RefShape {
   from?: string;
 }
 
-function summarise(r: { unresolvedReferences?: any[]; nodes: any[] }, names: string[]): RefShape[] {
-  const refs = r.unresolvedReferences ?? [];
-  return refs
-    .filter((x: any) => names.includes(x.referenceName))
-    .map((x: any) => ({
-      kind: x.referenceKind,
-      name: x.referenceName,
-      from: r.nodes.find((n: any) => n.id === x.fromNodeId)?.name,
-    }));
+function unresolvedReferencesForNames(result: ExtractionResult, names: readonly string[]): UnresolvedReference[] {
+  const nameSet = new Set(names);
+  return result.unresolvedReferences.filter((ref) => nameSet.has(ref.referenceName));
+}
+
+function summarise(result: ExtractionResult, names: readonly string[]): RefShape[] {
+  return unresolvedReferencesForNames(result, names).map((ref) => ({
+    kind: ref.referenceKind,
+    name: ref.referenceName,
+    from: result.nodes.find((node) => node.id === ref.fromNodeId)?.name,
+  }));
 }
 
 describe('type_of edges — TypeScript', () => {
@@ -143,10 +146,10 @@ type DB struct {
 }
     `,
     );
-    const refs = (r.unresolvedReferences ?? []).filter((x: any) => ['Head', 'Queryable'].includes(x.referenceName));
+    const refs = unresolvedReferencesForNames(r, ['Head', 'Queryable']);
     // Embedded fields produce `extends` (or `references`) — they should
     // NOT also produce a `type_of` edge to the same target.
-    const typeOfRefs = refs.filter((x: any) => x.referenceKind === 'type_of');
+    const typeOfRefs = refs.filter((ref) => ref.referenceKind === 'type_of');
     expect(typeOfRefs).toEqual([]);
   });
 });
@@ -180,8 +183,8 @@ def process(a: Foo, b: Bar) -> Foo:
 def f(a: dict, b: list, c: Optional) -> None: pass
     `,
     );
-    const refs = (r.unresolvedReferences ?? []).filter(
-      (x: any) => x.referenceKind === 'type_of' || x.referenceKind === 'returns',
+    const refs = r.unresolvedReferences.filter(
+      (ref) => ref.referenceKind === 'type_of' || ref.referenceKind === 'returns',
     );
     // dict / list / Optional / None are all builtins — no edges.
     expect(refs).toEqual([]);

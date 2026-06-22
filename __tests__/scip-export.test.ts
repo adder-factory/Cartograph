@@ -9,10 +9,13 @@
  * dependency just to test one.
  */
 
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { ProtoWriter } from '../src/scip/proto-writer.js';
 import { buildSymbolString, escapeDescriptorName, DescriptorSuffix } from '../src/scip/scip-symbol.js';
-import { exportScipIndex, type ScipExportInput } from '../src/scip/export.js';
+import { deriveScipMeta, exportScipIndex, type ScipExportInput } from '../src/scip/export.js';
 
 // ── minimal protobuf decoder (test-only) ──────────────────────────
 
@@ -162,6 +165,34 @@ describe('SCIP symbol strings', () => {
       { name: 'X', suffix: DescriptorSuffix.Type },
     ]);
     expect(sym).toBe('cartograph cartograph my  project 1.0.0 X#');
+  });
+});
+
+describe('deriveScipMeta', () => {
+  it('ignores inherited package name and version fields', () => {
+    const projectRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-scip-meta-'));
+    fs.writeFileSync(path.join(projectRoot, 'package.json'), '{}');
+    Object.defineProperty(Object.prototype, 'name', {
+      configurable: true,
+      writable: true,
+      value: 'inherited-project',
+    });
+    Object.defineProperty(Object.prototype, 'version', {
+      configurable: true,
+      writable: true,
+      value: '9.9.9',
+    });
+
+    try {
+      expect(deriveScipMeta(projectRoot)).toMatchObject({
+        projectName: path.basename(projectRoot),
+        projectVersion: '0.0.0',
+      });
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'name');
+      Reflect.deleteProperty(Object.prototype, 'version');
+      fs.rmSync(projectRoot, { recursive: true, force: true });
+    }
   });
 });
 

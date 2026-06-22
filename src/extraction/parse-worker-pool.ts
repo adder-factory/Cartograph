@@ -27,6 +27,12 @@ import type { ExtractionResult } from './types.js';
 import type { Worker as NodeWorker } from 'node:worker_threads';
 import { mergeProfileEntries, type ProfileEntry } from './profile.js';
 import { errMsg } from '../errors.js';
+import {
+  parseParseWorkerCommand,
+  parseParseWorkerReply,
+  parseWorkerRawId,
+  type ParseWorkerReply,
+} from './parse-worker-contract.js';
 
 /** Race ceiling on a `worker.terminate()` Promise so we don't hang on a stuck WASM. */
 const TERMINATE_RACE_TIMEOUT_MS = 1000;
@@ -126,6 +132,7 @@ function poolRejectAllPending(state: PoolState, reason: string): void {
 }
 
 function waitForWorkerGrammarLoad(worker: NodeWorker, languages: string[], timeoutMs: number): Promise<void> {
+  const command = parseParseWorkerCommand({ type: 'load-grammars', languages });
   return new Promise<void>((resolve, reject) => {
     let settled = false;
     const timer = setTimeout(() => {
@@ -146,16 +153,23 @@ function waitForWorkerGrammarLoad(worker: NodeWorker, languages: string[], timeo
       if (err) reject(err);
       else resolve();
     };
-    const onMessage = (msg: { type?: string; error?: string }): void => {
+    const onMessage = (raw: unknown): void => {
+      let msg: ParseWorkerReply;
+      try {
+        msg = parseParseWorkerReply(raw);
+      } catch (err) {
+        finish(new Error(errMsg(err)));
+        return;
+      }
       if (msg.type === 'grammars-loaded') {
         finish();
         return;
       }
       if (msg.type === 'grammars-load-failed') {
-        finish(new Error(msg.error || 'Worker failed to load grammars'));
+        finish(new Error(msg.error));
         return;
       }
-      finish(new Error(`Unexpected message while loading grammars: ${msg.type ?? '<missing>'}`));
+      finish(new Error(`Unexpected message while loading grammars: ${msg.type}`));
     };
     const onError = (err: Error): void => {
       finish(new Error(`Worker error while loading grammars: ${err.message}`));
@@ -167,7 +181,7 @@ function waitForWorkerGrammarLoad(worker: NodeWorker, languages: string[], timeo
     worker.on('message', onMessage);
     worker.once('error', onError);
     worker.once('exit', onExit);
-    worker.postMessage({ type: 'load-grammars', languages });
+    worker.postMessage(command);
   });
 }
 
@@ -263,7 +277,7 @@ export class ParseWorkerPool {
         timer,
         slotIndex: entry.slotIndex,
       });
-      entry.worker.postMessage({ type: 'parse', id, filePath, content });
+      entry.worker.postMessage(parseParseWorkerCommand({ type: 'parse', id, filePath, content }));
     });
   }
 
@@ -308,19 +322,37 @@ export class ParseWorkerPool {
 
   private attachWorkerHandlers(entry: WorkerEntry): void {
     const { worker: w, slotIndex } = entry;
-    w.on('message', (msg: { type: string; id?: number; result?: ExtractionResult; profileDelta?: ProfileEntry[] }) => {
+    w.on('message', (raw: unknown) => {
+      let msg: ParseWorkerReply;
+      try {
+        msg = parseParseWorkerReply(raw);
+      } catch (err) {
+        const id = parseWorkerRawId(raw);
+        this.opts.logWarn('Parse worker sent malformed message', { slot: slotIndex, error: errMsg(err) });
+        if (id !== null) {
+          const pending = this.state.pendingParses.get(id);
+          if (pending) {
+            clearTimeout(pending.timer);
+            this.state.pendingParses.delete(id);
+            pending.reject(new Error(errMsg(err)));
+            entry.busy = false;
+            poolNotifyIdle(this.state);
+          }
+        }
+        return;
+      }
       if (msg.type === 'parse-result' && msg.id !== undefined) {
         const pending = this.state.pendingParses.get(msg.id);
         if (pending) {
           clearTimeout(pending.timer);
           this.state.pendingParses.delete(msg.id);
-          pending.resolve(msg.result!);
+          pending.resolve(msg.result);
         }
         // Fold worker-side profile deltas into the main-thread
         // profile module. Empty / undefined when the profiler is off
         // — the merge is a no-op then.
         if (msg.profileDelta && msg.profileDelta.length > 0) {
-          mergeProfileEntries(msg.profileDelta);
+          mergeProfileEntries(msg.profileDelta satisfies ProfileEntry[]);
         }
         entry.busy = false;
         poolNotifyIdle(this.state);

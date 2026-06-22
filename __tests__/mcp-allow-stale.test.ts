@@ -20,10 +20,17 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
-import { ToolHandler } from '../src/mcp/tools.js';
+import { ToolHandler, type ToolResult } from '../src/mcp/tools.js';
+import type { FreshnessMetadata } from '../src/mcp/tool-types.js';
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+}
+
+function requireFreshness(result: ToolResult): FreshnessMetadata {
+  const freshness = result.metadata?.freshness;
+  if (!freshness) throw new Error('expected freshness metadata');
+  return freshness;
 }
 
 describe('Tooling-gaps #2: --allow-stale opt-in', () => {
@@ -82,24 +89,24 @@ describe('Tooling-gaps #2: --allow-stale opt-in', () => {
     // isStale is true, but `blocked` must NOT be set (the call was
     // dispatched, not refused). The pre-flight error path also attaches
     // freshness metadata, so isStale alone is not enough.
-    expect((result as any).metadata?.freshness).toBeDefined();
-    expect((result as any).metadata?.freshness?.isStale).toBe(true);
-    expect((result as any).metadata?.freshness?.severity).toBe('very_stale');
-    expect((result as any).metadata?.freshness?.recommendedAction).toBe('sync_required');
-    expect((result as any).metadata?.freshness?.contentDriftedFiles).toBe(null);
-    expect((result as any).metadata?.freshness?.blocked).not.toBe(true);
-    expect((result as any).isError).not.toBe(true);
+    const freshness = requireFreshness(result);
+    expect(freshness.isStale).toBe(true);
+    expect(freshness.severity).toBe('very_stale');
+    expect(freshness.recommendedAction).toBe('sync_required');
+    expect(freshness.contentDriftedFiles).toBe(null);
+    expect(freshness.blocked).not.toBe(true);
+    expect(result.isError).not.toBe(true);
   });
 
   it('fresh-required tools block any stale result unless allowStale is explicit', async () => {
     const blocked = await handler.execute('cartograph_dead_code', { via: 'rule' });
     const blockedText = blocked.content[0]?.text ?? '';
     expect(blockedText).toMatch(/requires a fresh index/i);
-    expect((blocked as any).metadata?.freshness?.blocked).toBe(true);
+    expect(requireFreshness(blocked).blocked).toBe(true);
 
     const bypassed = await handler.execute('cartograph_dead_code', { via: 'rule', allowStale: true });
     const bypassedText = bypassed.content[0]?.text ?? '';
     expect(bypassedText).not.toMatch(/requires a fresh index/i);
-    expect((bypassed as any).metadata?.freshness?.blocked).not.toBe(true);
+    expect(requireFreshness(bypassed).blocked).not.toBe(true);
   });
 });

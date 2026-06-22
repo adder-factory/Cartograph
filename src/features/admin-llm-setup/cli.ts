@@ -92,7 +92,8 @@ function registerLlmPlanCommand(deps: AdminLlmSetupCommandDeps): void {
         }
       } catch (err) {
         error(`llm-plan failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     });
 }
@@ -144,7 +145,8 @@ function registerLlmApplyCommand(deps: AdminLlmSetupCommandDeps): void {
         }
       } catch (err) {
         error(`llm-apply failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     });
 }
@@ -176,7 +178,8 @@ function registerLlmTuneCommand(deps: AdminLlmSetupCommandDeps): void {
         const parsed = parseLlmTuneOverride(options);
         if (!parsed.ok) {
           error(parsed.error);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         const { writeLlmTierConcurrencyOverride } = await loadLlmSetupPlan();
@@ -190,7 +193,8 @@ function registerLlmTuneCommand(deps: AdminLlmSetupCommandDeps): void {
         info(`llm.${result.configKey}.concurrency: ${result.previous ?? '(unset)'} → ${result.concurrency}`);
       } catch (err) {
         error(`llm-tune failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     });
 }

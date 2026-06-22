@@ -4,6 +4,7 @@
  * variant + the global undefined-stripping behaviour.
  */
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
 import { bindingsFromObject, insertSqlParts, mapRow, updateSqlSets, type Schema } from '../src/db/row-mapper.js';
 
 interface FakeRow {
@@ -71,7 +72,7 @@ describe('mapRow()', () => {
     expect(mapRow({ json_blob: '{"x":42}' }, schema)).toEqual({ blob: { x: 42 } });
     // null → fallback (undefined when not specified) → key dropped.
     expect(mapRow({ json_blob: null }, schema)).toEqual({});
-    // Malformed JSON → safeJsonParse returns the fallback.
+    // Malformed JSON returns the fallback.
     expect(mapRow({ json_blob: '{not-json' }, schema)).toEqual({});
   });
 
@@ -82,6 +83,17 @@ describe('mapRow()', () => {
     };
     expect(mapRow({ json_blob: null }, schema)).toEqual({ tags: [] });
     expect(mapRow({ json_blob: '["a","b"]' }, schema)).toEqual({ tags: ['a', 'b'] });
+  });
+
+  it('validates parsed JSON fields with the supplied schema before returning them', () => {
+    type T = { tags: string[] };
+    const schema: Schema<T, { json_blob: string | null }> = {
+      tags: { col: 'json_blob', json: true, schema: z.array(z.string()), fallback: [] },
+    };
+
+    expect(mapRow({ json_blob: '["a","b"]' }, schema)).toEqual({ tags: ['a', 'b'] });
+    expect(mapRow({ json_blob: '[1,2]' }, schema)).toEqual({ tags: [] });
+    expect(mapRow({ json_blob: '{"0":"a"}' }, schema)).toEqual({ tags: [] });
   });
 
   it('applies an arbitrary cast() function', () => {

@@ -50,6 +50,21 @@ describe('classifyChangeKind — grammar-constrained chat output', () => {
     expect(res.score).toBe(0);
   });
 
+  it('requires the chat reply kind to be an own JSON property', async () => {
+    const client = clientReplying('{}');
+    Object.defineProperty(Object.prototype, 'kind', {
+      configurable: true,
+      value: 'behavioral_change',
+    });
+    try {
+      const res = await classifyChangeKind({ client, ...baseArgs });
+      expect(res.kind).toBe('modification');
+      expect(res.score).toBe(0);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'kind');
+    }
+  });
+
   it('rule-dispatches an added symbol without calling the model', async () => {
     const client = clientReplying('{"kind":"refactor"}');
     const res = await classifyChangeKind({
@@ -88,5 +103,19 @@ describe('classifyCommitMessageWithFallback — grammar-constrained chat fallbac
     const client = clientReplying('could be a fix');
     const res = await classifyCommitMessageWithFallback('wip', client);
     expect(res.intent).toBe('unknown');
+  });
+
+  it('requires the chat reply intent to be an own JSON property', async () => {
+    const client = clientReplying('{}');
+    Object.defineProperty(Object.prototype, 'intent', {
+      configurable: true,
+      value: 'perf',
+    });
+    try {
+      const res = await classifyCommitMessageWithFallback('wip', client);
+      expect(res.intent).toBe('unknown');
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'intent');
+    }
   });
 });

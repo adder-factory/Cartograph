@@ -23,6 +23,21 @@ function cleanupTempDir(dir: string): void {
   if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
 }
 
+function withObjectPrototypeProperty<T>(key: string, value: unknown, run: () => T): T {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    value,
+    configurable: true,
+    writable: true,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, key, previous);
+    else Reflect.deleteProperty(Object.prototype, key);
+  }
+}
+
 function expectOwnerOnlyFile(filePath: string): void {
   if (process.platform === 'win32') return;
   expect(fs.statSync(filePath).mode & 0o777).toBe(0o600);
@@ -94,6 +109,21 @@ describe('mergeRecommendedLlmConfig (FRICTION-11)', () => {
     const { nextConfig } = mergeRecommendedLlmConfig(current, recommended);
     const llm = nextConfig['llm'] as Record<string, unknown>;
     expect(llm['summarizeLlm']).toBeDefined();
+  });
+
+  it('does not preserve array entries from a malformed prior llm block', () => {
+    const current = {
+      version: 1,
+      llm: [{ stale: true }],
+    };
+    const recommended = buildRecommendedLlmConfig({ dir: '/tmp/models-test' });
+
+    const { nextConfig } = mergeRecommendedLlmConfig(current, recommended);
+
+    const llm = nextConfig['llm'];
+    expect(Array.isArray(llm)).toBe(false);
+    expect(llm).not.toHaveProperty('0');
+    expect(llm).toHaveProperty('summarizeLlm');
   });
 
   it('defaults every tier to openai-compat (one llama-server per port) 2026-05-24c step 4c', () => {
@@ -245,6 +275,19 @@ describe('writeRecommendedLlmConfig (FRICTION-11)', () => {
     expect(written.llm.askLlm).toBeUndefined();
     expect(written.llm.rerankerLlm).toBeUndefined();
   });
+
+  it('does not preserve array entries from a malformed existing config root', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify([{ stale: true }]), 'utf-8');
+
+    const result = writeRecommendedLlmConfig({ projectRoot: tempDir, dir: path.join(tempDir, 'models') });
+
+    expect(result.backupPath).not.toBeNull();
+    const written: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(Array.isArray(written)).toBe(false);
+    expect(written).not.toHaveProperty('0');
+    expect(written).toHaveProperty('llm');
+  });
 });
 
 describe('loadConfig legacy-llm write-back guard (FRICTION-11)', () => {
@@ -299,5 +342,77 @@ describe('loadConfig legacy-llm write-back guard (FRICTION-11)', () => {
     // load); the guard caps it at one attempt per path per process.
     const failures = stderrBuffer.split('\n').filter((l) => l.includes('failed to write back'));
     expect(failures.length).toBeLessThanOrEqual(1);
+  });
+
+  it('ignores inherited top-level llm config when loading config files', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify(DEFAULT_CONFIG, null, 2), 'utf-8');
+
+    withObjectPrototypeProperty('llm', { chat: { provider: 'claude-bridge', model: 'polluted' } }, () => {
+      const loaded = loadConfig(tempDir);
+
+      expect(loaded.llm).toBeUndefined();
+    });
+
+    const written: unknown = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+    expect(written).not.toHaveProperty('llm');
+  });
+
+  it('ignores inherited legacy llm tier names inside an own llm block', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(configPath, JSON.stringify({ ...DEFAULT_CONFIG, llm: { enabled: true } }, null, 2), 'utf-8');
+
+    withObjectPrototypeProperty('chat', { provider: 'claude-bridge', model: 'polluted' }, () => {
+      const loaded = loadConfig(tempDir);
+
+      expect(loaded.llm?.enabled).toBe(true);
+      expect(loaded.llm?.summarizeLlm).toBeUndefined();
+    });
+
+    const written = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { llm?: Record<string, unknown> };
+    expect(written.llm).toEqual({ enabled: true });
+  });
+
+  it('migrates own legacy llm tiers even when the new tier name is inherited', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ ...DEFAULT_CONFIG, llm: { chat: { provider: 'claude-bridge', model: 'own-chat' } } }, null, 2),
+      'utf-8',
+    );
+
+    withObjectPrototypeProperty('summarizeLlm', { provider: 'claude-bridge', model: 'polluted' }, () => {
+      const loaded = loadConfig(tempDir);
+
+      expect(loaded.llm?.summarizeLlm).toEqual({ provider: 'claude-bridge', model: 'own-chat' });
+    });
+
+    const written = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as { llm?: Record<string, unknown> };
+    expect(written.llm?.['summarizeLlm']).toEqual({ provider: 'claude-bridge', model: 'own-chat' });
+    expect(written.llm).not.toHaveProperty('chat');
+  });
+
+  it('does not preserve inherited endpoints when migrating legacy provider values', () => {
+    const configPath = path.join(tempDir, '.cartograph', 'config.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify(
+        { ...DEFAULT_CONFIG, llm: { summarizeLlm: { provider: 'nllc', model: 'legacy-model' } } },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+
+    withObjectPrototypeProperty('endpoint', 'http://polluted.example.test', () => {
+      const loaded = loadConfig(tempDir);
+
+      expect(loaded.llm?.summarizeLlm?.endpoint).toBe('http://localhost:8081');
+    });
+
+    const written = JSON.parse(fs.readFileSync(configPath, 'utf-8')) as {
+      llm?: { summarizeLlm?: { endpoint?: string } };
+    };
+    expect(written.llm?.summarizeLlm?.endpoint).toBe('http://localhost:8081');
   });
 });

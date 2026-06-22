@@ -35,6 +35,24 @@ import { errMsg } from '../../errors.js';
 const MAX_CACHED_PROJECTS = 16;
 /** Soft-cap on simultaneously-watched explicit-project cartographs. */
 const MAX_WATCHED_PROJECTS = 16;
+const pendingProjectWatcherStops = new Set<Promise<void>>();
+
+function trackWatcherStop(cg: Cartograph | undefined): void {
+  if (!cg) return;
+  const pendingStop = cg.watcher.stopAndWait().catch(() => {
+    /* idempotent */
+  });
+  pendingProjectWatcherStops.add(pendingStop);
+  void pendingStop.finally(() => {
+    pendingProjectWatcherStops.delete(pendingStop);
+  });
+}
+
+export async function waitForProjectCacheWatcherStops(): Promise<void> {
+  while (pendingProjectWatcherStops.size > 0) {
+    await Promise.allSettled(pendingProjectWatcherStops);
+  }
+}
 
 /**
  * Fingerprint a project's on-disk SQLite file at open time so a
@@ -200,11 +218,7 @@ export class ProjectCache {
     for (const cg of this.st.cgsByPath.values()) {
       if (closed.has(cg)) continue;
       closed.add(cg);
-      try {
-        cg.watcher.stop?.();
-      } catch {
-        /* idempotent */
-      }
+      trackWatcherStop(cg);
       try {
         cg.close();
       } catch {
@@ -313,11 +327,7 @@ export class ProjectCache {
       if (value === cg) this.st.cgsByPath.delete(key);
     }
     if (this.st.watchedRoots.has(root)) {
-      try {
-        cg?.watcher.stop?.();
-      } catch {
-        /* idempotent */
-      }
+      trackWatcherStop(cg);
       this.st.watchedRoots.delete(root);
     }
     try {
@@ -395,6 +405,7 @@ export class ProjectCache {
       return true;
     }
     if (resolvePath(cgRoot) !== resolvedRoot) return false;
+    trackWatcherStop(cached);
     try {
       cached.close();
     } catch {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { svelteResolver } from '../src/resolution/frameworks/svelte.js';
+import type { ResolutionContext, UnresolvedRef } from '../src/resolution/types.js';
 import type { Node } from '../src/types.js';
 
 function node(id: string, name: string, kind: Node['kind'], filePath: string): Node {
@@ -18,7 +19,7 @@ function node(id: string, name: string, kind: Node['kind'], filePath: string): N
   };
 }
 
-function context(files: string[], nodes: Node[] = [], packageJson: string | null = null) {
+function context(files: string[], nodes: Node[] = [], packageJson: string | null = null): ResolutionContext {
   return {
     readFile: (path: string) => (path === 'package.json' ? packageJson : null),
     getAllFiles: () => files,
@@ -27,15 +28,17 @@ function context(files: string[], nodes: Node[] = [], packageJson: string | null
     getNodesByName: (name: string) => nodes.filter((n) => n.name === name),
     getNodesByQualifiedName: () => [],
     getNodesByKind: () => [],
+    getNodesByLowerName: () => [],
+    getImportMappings: () => [],
     getProjectRoot: () => '/repo',
-  } as any;
+  };
 }
 
 function ref(
   referenceName: string,
   referenceKind: 'calls' | 'imports' = 'calls',
   filePath = 'src/routes/+page.svelte',
-) {
+): UnresolvedRef {
   return {
     fromNodeId: 'component:src/routes/+page.svelte:Page:1',
     referenceName,
@@ -44,7 +47,7 @@ function ref(
     column: 1,
     filePath,
     language: 'svelte',
-  } as any;
+  };
 }
 
 describe('Svelte framework resolver', () => {

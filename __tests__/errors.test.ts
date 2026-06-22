@@ -8,6 +8,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { z } from 'zod';
 import {
   CartographError,
   ConfigError,
@@ -15,9 +16,11 @@ import {
   defaultLogger,
   errMsg,
   FileError,
+  formatZodIssues,
   getLogger,
   logDebug,
   logWarn,
+  parseZodBoundary,
   ParseError,
   SearchError,
   setLogger,
@@ -66,6 +69,37 @@ describe('errMsg', () => {
     expect(errMsg(e)).toBe('custom subclass message');
     // Double-check it does NOT return the stringified form
     expect(errMsg(e)).not.toContain('CustomError:');
+  });
+});
+
+describe('Zod boundary error formatting', () => {
+  it('formats nested issue paths with object keys and array indexes', () => {
+    const schema = z.object({
+      items: z.array(z.object({ name: z.string() })),
+    });
+    const parsed = schema.safeParse({ items: [{}] });
+    if (parsed.success) expect.fail('expected invalid payload');
+
+    expect(formatZodIssues(parsed.error)).toMatch(/^items\.0\.name: /);
+  });
+
+  it('formats root-level Zod issues with the root sentinel', () => {
+    const parsed = z.string().safeParse(42);
+    if (parsed.success) expect.fail('expected invalid payload');
+
+    expect(formatZodIssues(parsed.error)).toMatch(/^<root>: /);
+  });
+
+  it('returns parsed values from parseZodBoundary on success', () => {
+    const schema = z.object({ id: z.string() });
+
+    expect(parseZodBoundary(schema, { id: 'node-1' }, 'worker init')).toEqual({ id: 'node-1' });
+  });
+
+  it('throws a labelled single-line validation error from parseZodBoundary on failure', () => {
+    const schema = z.object({ id: z.string() });
+
+    expect(() => parseZodBoundary(schema, { id: 7 }, 'worker init')).toThrow(/^worker init: id: /);
   });
 });
 

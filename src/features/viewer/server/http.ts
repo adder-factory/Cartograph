@@ -33,6 +33,28 @@ export function safeParseJson(s: string): unknown {
   }
 }
 
+export type JsonObjectParseResult =
+  | { ok: true; value: Record<string, unknown> }
+  | { ok: false; reason: 'invalid-json' | 'not-object' };
+
+export function parseJsonObject(body: string): JsonObjectParseResult {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return { ok: false, reason: 'invalid-json' };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ok: false, reason: 'not-object' };
+  }
+
+  const ownOnly: Record<string, unknown> = Object.create(null);
+  for (const [key, value] of Object.entries(parsed)) {
+    ownOnly[key] = value;
+  }
+  return { ok: true, value: ownOnly };
+}
+
 export function clampString(v: unknown, max: number, opts: { trim?: boolean } = {}): string {
   if (typeof v !== 'string') return '';
   const trimmed = opts.trim === false ? v : v.trim();

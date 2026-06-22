@@ -48,6 +48,7 @@ function writeCleanArchitectureFixture(root: string): void {
     "import { findCartographIgnoredDirs } from './file-discovery-policy.js';\n",
   );
   writeFile(root, 'src/extraction/file-discovery-policy.ts', 'export const policy = true;\n');
+  writeFile(root, 'src/config.ts', 'export const config = true;\n');
   writeFile(root, 'src/resolution/name-matcher.ts', 'export const matcher = true;\n');
   writeFile(root, 'src/resolution/name-matcher-receivers.ts', 'export const receivers = true;\n');
   writeFile(root, 'src/mcp/tools.ts', 'export const tools = true;\n');
@@ -55,6 +56,8 @@ function writeCleanArchitectureFixture(root: string): void {
   writeFile(root, 'src/context/index.ts', 'export const context = true;\n');
   writeFile(root, 'src/bin/_cli-core.ts', 'export const cli = true;\n');
   writeFile(root, 'src/db/queries.ts', 'export const queries = true;\n');
+  writeFile(root, 'src/extraction/languages/registry.ts', 'export const languageRegistry = true;\n');
+  writeFile(root, 'src/installer/targets/shared.ts', 'export const targetShared = true;\n');
   writeFile(
     root,
     'src/resolution/frameworks/foo.ts',
@@ -113,4 +116,31 @@ describe('architecture gate', () => {
       fs.rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // Derived from the filesystem so every real feature CLI adapter is covered
+  // and the gate's exit-free invariant stays in sync as adapters are added.
+  const featureCliAdapters = fs
+    .readdirSync(path.join(repoRoot, 'src/features'), { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => `src/features/${entry.name}/cli.ts`)
+    .filter((relPath) => fs.existsSync(path.join(repoRoot, relPath)))
+    .sort();
+
+  for (const cliPath of featureCliAdapters) {
+    it(`fails when feature CLI adapter ${cliPath} reintroduces process.exit()`, () => {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-arch-gate-'));
+      try {
+        writeCleanArchitectureFixture(dir);
+        writeFile(dir, cliPath, 'export function run() { process.exit(1); }\n');
+
+        const result = runGate(dir);
+
+        expect(result.code).not.toBe(0);
+        expect(result.output).toContain(cliPath);
+        expect(result.output).toContain('must not call process.exit()');
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
 });

@@ -15,7 +15,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import {
   asJsonObject,
   getHomeDir,
@@ -110,7 +117,7 @@ class QoderTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, qoderMcpConfig(opts.command));
+  return writeMcpEntryJson(loc, qoderMcpConfig(installCommandOption(opts)));
 }
 
 function writePermissionsEntry(loc: Location): WriteResult['files'][number] {
@@ -124,7 +131,7 @@ function removeMcpEntry(loc: Location): WriteResult['files'][number] {
 function removePermissionsEntry(loc: Location): WriteResult['files'][number] {
   const file = settingsJsonPath(loc);
   const settings = readJsonFile(file);
-  const permissions = asJsonObject(settings['permissions']);
+  const permissions = asJsonObject(Object.hasOwn(settings, 'permissions') ? settings['permissions'] : undefined);
   const allow = getNestedStringArray(settings, 'permissions', 'allow');
   if (!permissions || allow === null) {
     return { path: file, action: 'not-found' };
@@ -142,6 +149,8 @@ function removePermissionsEntry(loc: Location): WriteResult['files'][number] {
   }
   if (Object.keys(permissions).length === 0) {
     delete settings['permissions'];
+  } else {
+    settings['permissions'] = permissions;
   }
   writeJsonFile(file, settings);
   return { path: file, action: 'removed' };

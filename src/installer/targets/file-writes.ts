@@ -1,8 +1,11 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { errMsg, logWarn } from '../../errors.js';
+import { asJsonObject } from '../../json-object.js';
 import { CARTOGRAPH_SECTION_END, CARTOGRAPH_SECTION_START, INSTRUCTIONS_TEMPLATE } from '../instructions-template.js';
 import type { WriteResult } from './types.js';
+
+export { asJsonObject, type JsonObject } from '../../json-object.js';
 
 /** Best-effort copy to `<path>.backup`. Swallows errors — backup is advisory. */
 function safeBackupFile(filePath: string): void {
@@ -27,8 +30,7 @@ export function readJsonFile(filePath: string): Record<string, unknown> {
     // A JSON file's top level can be any value; the installer only ever
     // operates on object-shaped configs. Anything else (array, scalar,
     // null) degrades to `{}` so callers never index a non-object.
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return parsed as Record<string, unknown>;
+    return asJsonObject(parsed) ?? {};
   } catch (err) {
     logWarn(`Could not parse ${path.basename(filePath)}: ${errMsg(err)}`);
     logWarn(`A backup will be created before overwriting.`);
@@ -139,15 +141,8 @@ export function writeJsonFile(filePath: string, data: Record<string, unknown>): 
   atomicWriteFileSync(filePath, JSON.stringify(data, null, 2) + '\n');
 }
 
-/**
- * Coerce a value parsed from JSON to a string-keyed record, or `null`
- * when it is not a plain object (array / scalar / null). The agent
- * config readers all parse to `unknown`-valued records; this narrows a
- * nested member before the caller indexes it.
- */
-export function asJsonObject(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
+function getOwnJsonField(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
 }
 
 /**
@@ -157,7 +152,9 @@ export function asJsonObject(value: unknown): Record<string, unknown> | null {
  * `config[wrapperKey]?.[entryKey]` chain, now without `any`.
  */
 export function getNestedJsonEntry(config: Record<string, unknown>, wrapperKey: string, entryKey: string): unknown {
-  return asJsonObject(config[wrapperKey])?.[entryKey];
+  const wrapper = asJsonObject(getOwnJsonField(config, wrapperKey));
+  if (!wrapper || !Object.hasOwn(wrapper, entryKey)) return undefined;
+  return wrapper[entryKey];
 }
 
 /**
@@ -172,11 +169,9 @@ export function setNestedJsonEntry(args: {
   value: unknown;
 }): Record<string, unknown> {
   const { config, wrapperKey, entryKey, value } = args;
-  let wrapper = asJsonObject(config[wrapperKey]);
-  if (!wrapper) {
-    wrapper = {};
-    config[wrapperKey] = wrapper;
-  }
+  let wrapper = asJsonObject(getOwnJsonField(config, wrapperKey));
+  wrapper ??= {};
+  config[wrapperKey] = wrapper;
   wrapper[entryKey] = value;
   return config;
 }
@@ -187,10 +182,11 @@ export function setNestedJsonEntry(args: {
  * actually removed. The on-disk variant is {@link removeNestedJsonEntry}.
  */
 export function deleteNestedJsonEntry(config: Record<string, unknown>, wrapperKey: string, entryKey: string): boolean {
-  const wrapper = asJsonObject(config[wrapperKey]);
-  if (wrapper?.[entryKey] === undefined) return false;
+  const wrapper = asJsonObject(getOwnJsonField(config, wrapperKey));
+  if (!wrapper || !Object.hasOwn(wrapper, entryKey) || wrapper[entryKey] === undefined) return false;
   delete wrapper[entryKey];
   if (Object.keys(wrapper).length === 0) delete config[wrapperKey];
+  else config[wrapperKey] = wrapper;
   return true;
 }
 
@@ -204,7 +200,9 @@ export function getNestedStringArray(
   wrapperKey: string,
   listKey: string,
 ): string[] | null {
-  const list = asJsonObject(config[wrapperKey])?.[listKey];
+  const wrapper = asJsonObject(getOwnJsonField(config, wrapperKey));
+  if (!wrapper || !Object.hasOwn(wrapper, listKey)) return null;
+  const list = wrapper[listKey];
   if (!Array.isArray(list)) return null;
   return list.filter((v): v is string => typeof v === 'string');
 }
@@ -219,11 +217,9 @@ export function ensureNestedStringArray(
   wrapperKey: string,
   listKey: string,
 ): string[] {
-  let wrapper = asJsonObject(config[wrapperKey]);
-  if (!wrapper) {
-    wrapper = {};
-    config[wrapperKey] = wrapper;
-  }
+  let wrapper = asJsonObject(getOwnJsonField(config, wrapperKey));
+  wrapper ??= {};
+  config[wrapperKey] = wrapper;
   const existing = wrapper[listKey];
   if (Array.isArray(existing)) {
     // Coerce to string[] in place — drop any non-string member.
@@ -280,7 +276,10 @@ export function jsonDeepEqual(a: unknown, b: unknown): boolean {
   if (typeof a !== 'object') return false;
   if (Array.isArray(a) !== Array.isArray(b)) return false;
   if (Array.isArray(a) && Array.isArray(b)) return arrayDeepEqual(a, b);
-  return objectDeepEqual(a as Record<string, unknown>, b as Record<string, unknown>);
+  const objectA = asJsonObject(a);
+  const objectB = asJsonObject(b);
+  if (!objectA || !objectB) return false;
+  return objectDeepEqual(objectA, objectB);
 }
 
 interface ReplaceOrAppendMarkedSectionArgs {

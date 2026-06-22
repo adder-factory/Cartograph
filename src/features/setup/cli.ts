@@ -93,7 +93,9 @@ function configureSetupCommand(
       if (database) setupOptions.database = database;
       const result = await runSetup(setupOptions, { ...deps, writeProgress });
       writeStdout('\n' + result.doctorReport);
-      if (result.doctor.overallStatus === 'fail') process.exit(1);
+      if (result.doctor.overallStatus === 'fail') {
+        process.exitCode = 1;
+      }
     });
 }
 

@@ -1,8 +1,6 @@
-export interface ValueRefEdgeRecord {
-  source: string;
-  target: string;
-  kind: 'references';
-}
+import type { ValueRefEdgeRecord } from './value-ref-edges-contract.js';
+
+export type { ValueRefEdgeRecord } from './value-ref-edges-contract.js';
 
 export const SUPPORTED_VALUE_REF_LANGS: ReadonlySet<string> = new Set(['typescript', 'javascript', 'tsx', 'jsx']);
 

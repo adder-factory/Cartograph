@@ -3,16 +3,42 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawn } from 'node:child_process';
+import { registerBackendCommand, type BackendRuntimeModule } from '../src/features/backend/index.js';
 import {
+  type BackendStartResult,
+  type BackendLogsReport,
   buildBackendProcessSpecs,
+  configuredEndpointsFromLlm,
+  configuredModelFilesFromLlm,
   renderBackendStartCommand,
   startBackends,
   stopBackends,
   restartBackends,
   backendStatus,
 } from '../src/features/backend/runtime.js';
+import type { CliOptionCommand } from '../src/features/shared/cli-command.js';
 import * as scanBackends from '../src/installer/scan-backends.js';
 import { isProcessAlive } from '../src/utils-concurrency.js';
+
+function withObjectPrototypeProperties<T>(entries: Record<string, unknown>, run: () => T): T {
+  const previous = new Map<string, PropertyDescriptor | undefined>();
+  for (const key of Object.keys(entries)) {
+    previous.set(key, Object.getOwnPropertyDescriptor(Object.prototype, key));
+    Object.defineProperty(Object.prototype, key, {
+      configurable: true,
+      writable: true,
+      value: entries[key],
+    });
+  }
+  try {
+    return run();
+  } finally {
+    for (const [key, descriptor] of previous) {
+      if (descriptor) Object.defineProperty(Object.prototype, key, descriptor);
+      else Reflect.deleteProperty(Object.prototype, key);
+    }
+  }
+}
 
 describe('backend feature runtime', () => {
   it('shell-quotes backend command arguments with spaces and quotes', () => {
@@ -33,6 +59,180 @@ describe('backend feature runtime', () => {
   });
 });
 
+interface BackendStartCliOptions {
+  readonly bin?: string;
+  readonly dryRun?: boolean;
+  readonly json?: boolean;
+}
+
+interface BackendLogsCliOptions {
+  readonly tier?: string;
+  readonly lines?: string;
+  readonly json?: boolean;
+}
+
+type BackendStartCliAction = (pathArg: string | undefined, options: BackendStartCliOptions) => Promise<void>;
+type BackendLogsCliAction = (pathArg: string | undefined, options: BackendLogsCliOptions) => Promise<void>;
+
+function isBackendStartCliAction(value: unknown): value is BackendStartCliAction {
+  return typeof value === 'function';
+}
+
+function isBackendLogsCliAction(value: unknown): value is BackendLogsCliAction {
+  return typeof value === 'function';
+}
+
+function createBackendCommandHarness(): { program: CliOptionCommand; actions: Map<string, unknown> } {
+  const actions = new Map<string, unknown>();
+
+  function makeCommand(name: string): CliOptionCommand {
+    let command: CliOptionCommand;
+    command = {
+      command(childName: string) {
+        return makeCommand(childName);
+      },
+      description() {
+        return command;
+      },
+      option() {
+        return command;
+      },
+      action<Args extends unknown[]>(fn: (...args: Args) => unknown) {
+        actions.set(name, fn);
+        return command;
+      },
+    };
+    return command;
+  }
+
+  return { program: makeCommand('root'), actions };
+}
+
+function unusedBackendRuntimeCall(name: string): never {
+  throw new Error(`unexpected backend runtime call: ${name}`);
+}
+
+describe('backend feature CLI', () => {
+  it('sets exitCode instead of hard-exiting when start has no usable backends', async () => {
+    const { program, actions } = createBackendCommandHarness();
+    const stdout: string[] = [];
+    const errors: string[] = [];
+    let startOptions: unknown;
+    const startResult: BackendStartResult = {
+      projectPath: '/repo',
+      stateDir: '/repo/.cartograph/backends',
+      rows: [],
+      unmanagedReason: 'no configured managed tiers',
+      started: [],
+      skipped: [],
+    };
+
+    registerBackendCommand({
+      program,
+      resolveProjectPath: (pathArg) => pathArg ?? '/resolved',
+      error: (message) => errors.push(message),
+      writeStdout: (message = '') => stdout.push(message),
+      loadBackendRuntime: async (): Promise<BackendRuntimeModule> => ({
+        backendStatus: async () => unusedBackendRuntimeCall('backendStatus'),
+        startBackends: async (options) => {
+          startOptions = options;
+          return startResult;
+        },
+        stopBackends: async () => unusedBackendRuntimeCall('stopBackends'),
+        restartBackends: async () => unusedBackendRuntimeCall('restartBackends'),
+        backendLogs: async () => unusedBackendRuntimeCall('backendLogs'),
+        renderBackendStartCommand,
+      }),
+    });
+
+    const action = actions.get('start [path]');
+    if (!isBackendStartCliAction(action)) throw new Error('backend start action was not registered');
+
+    const originalExit = process.exit;
+    const originalExitCode = process.exitCode;
+    let exitCalled = false;
+    let observedExitCode: string | number | undefined;
+    process.exitCode = 0;
+    process.exit = (code?: string | number | null | undefined): never => {
+      exitCalled = true;
+      throw new Error(`process.exit(${String(code)})`);
+    };
+
+    try {
+      await action('/repo', { dryRun: true, json: true });
+      observedExitCode = process.exitCode;
+    } finally {
+      process.exit = originalExit;
+      process.exitCode = originalExitCode;
+    }
+
+    expect(exitCalled).toBe(false);
+    expect(observedExitCode).toBe(1);
+    expect(startOptions).toEqual({ projectPath: '/repo', dryRun: true });
+    expect(stdout.join('\n')).toContain('"rows": []');
+    expect(errors).toEqual([]);
+  });
+
+  it('sets exitCode instead of hard-exiting when a requested log tier has no rows', async () => {
+    const { program, actions } = createBackendCommandHarness();
+    const stdout: string[] = [];
+    const errors: string[] = [];
+    let logsOptions: unknown;
+    const logsResult: BackendLogsReport = {
+      projectPath: '/repo',
+      stateDir: '/repo/.cartograph/backends',
+      rows: [],
+      unmanagedReason: 'no configured managed tiers',
+      logs: [],
+    };
+
+    registerBackendCommand({
+      program,
+      resolveProjectPath: (pathArg) => pathArg ?? '/resolved',
+      error: (message) => errors.push(message),
+      writeStdout: (message = '') => stdout.push(message),
+      loadBackendRuntime: async (): Promise<BackendRuntimeModule> => ({
+        backendStatus: async () => unusedBackendRuntimeCall('backendStatus'),
+        startBackends: async () => unusedBackendRuntimeCall('startBackends'),
+        stopBackends: async () => unusedBackendRuntimeCall('stopBackends'),
+        restartBackends: async () => unusedBackendRuntimeCall('restartBackends'),
+        backendLogs: async (options) => {
+          logsOptions = options;
+          return logsResult;
+        },
+        renderBackendStartCommand,
+      }),
+    });
+
+    const action = actions.get('logs [path]');
+    if (!isBackendLogsCliAction(action)) throw new Error('backend logs action was not registered');
+
+    const originalExit = process.exit;
+    const originalExitCode = process.exitCode;
+    let exitCalled = false;
+    let observedExitCode: string | number | undefined;
+    process.exitCode = 0;
+    process.exit = (code?: string | number | null | undefined): never => {
+      exitCalled = true;
+      throw new Error(`process.exit(${String(code)})`);
+    };
+
+    try {
+      await action('/repo', { tier: 'ask', lines: '5' });
+      observedExitCode = process.exitCode;
+    } finally {
+      process.exit = originalExit;
+      process.exitCode = originalExitCode;
+    }
+
+    expect(exitCalled).toBe(false);
+    expect(observedExitCode).toBe(1);
+    expect(logsOptions).toEqual({ projectPath: '/repo', tier: 'ask', lines: 5 });
+    expect(stdout.join('\n')).toContain('_No managed backend processes._ no configured managed tiers');
+    expect(errors).toEqual([]);
+  });
+});
+
 describe('buildBackendProcessSpecs — per-tier llama-server tuning (issue #24)', () => {
   function chatLlm(extra: Record<string, unknown>): Record<string, unknown> {
     return {
@@ -44,6 +244,28 @@ describe('buildBackendProcessSpecs — per-tier llama-server tuning (issue #24)'
       },
     };
   }
+
+  it('ignores inherited LLM tier blocks and tier fields', () => {
+    const inheritedTier = {
+      provider: 'openai-compat',
+      endpoint: 'http://localhost:8181',
+      model: '/models/polluted.gguf',
+    };
+
+    withObjectPrototypeProperties({ summarizeLlm: inheritedTier }, () => {
+      expect(buildBackendProcessSpecs({})).toEqual([]);
+      expect(configuredModelFilesFromLlm({})).toEqual([]);
+      expect(configuredEndpointsFromLlm({})).toEqual([]);
+    });
+
+    withObjectPrototypeProperties(inheritedTier, () => {
+      const llm = { summarizeLlm: {} };
+
+      expect(buildBackendProcessSpecs(llm)).toEqual([]);
+      expect(configuredModelFilesFromLlm(llm)).toEqual([]);
+      expect(configuredEndpointsFromLlm(llm)).toEqual([]);
+    });
+  });
 
   it('drives --parallel from a concurrency override (lets llm-tune cut KV memory)', () => {
     const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 1 }));
@@ -221,6 +443,28 @@ describe('backend orphan reclamation (issue #24)', () => {
     expect(result.stopped).toHaveLength(1);
     expect(isProcessAlive(pid)).toBe(false);
     expect(fs.existsSync(path.join(project, '.cartograph', 'backends', 'llama-deadbeef0001.json'))).toBe(false);
+  });
+
+  it('ignores malformed and incomplete orphan pid files', async () => {
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);
+    const project = makeProject();
+    const stateDir = path.join(project, '.cartograph', 'backends');
+    fs.writeFileSync(path.join(stateDir, 'bad-json.json'), '{not json');
+    writePidFile(project, 'empty-fields', {
+      schemaVersion: 1,
+      pid: 2147483646,
+      startedAt: '',
+      command: '',
+      args: [],
+      endpoint: '',
+      modelPath: '',
+      labels: [],
+      logPath: '',
+    });
+
+    const status = await backendStatus(project);
+
+    expect(status.rows).toHaveLength(0);
   });
 });
 

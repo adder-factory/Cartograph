@@ -253,7 +253,7 @@ const CartographConfigSchema = z
   })
   .loose();
 
-export function assertValidCartographConfig(configPath: string, config: CartographConfig): void {
+export function assertValidCartographConfig(configPath: string, config: unknown): asserts config is CartographConfig {
   const result = CartographConfigSchema.safeParse(config);
   if (!result.success) {
     throw new Error(`Invalid configuration in ${configPath}:\n${z.prettifyError(result.error)}`);

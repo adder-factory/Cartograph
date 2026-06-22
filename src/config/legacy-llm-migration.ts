@@ -1,5 +1,6 @@
 import * as fs from 'node:fs';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from '../installer/default-endpoints.js';
+import { asJsonObject } from '../json-object.js';
 
 /**
  * Map of legacy llm field name → new purpose-suffixed name. Applied
@@ -60,17 +61,26 @@ const LEGACY_PROVIDER_DEFAULT_ENDPOINTS: Record<string, string> = {
  *  to hand-edit if they prefer a different layout. */
 const LEGACY_PROVIDER_TIERS = ['summarizeLlm', 'localLlm', 'askLlm', 'embeddingLlm', 'rerankerLlm'] as const;
 
+function ownField(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
 function migrateLegacyProviderValue(
   tier: string,
   block: Record<string, unknown>,
 ): { migrated: boolean; out: Record<string, unknown> } {
-  const provider = block['provider'];
+  const provider = ownField(block, 'provider');
   // Chat tiers — `'nllc'` was the in-process libcgshim path.
   const isChat = tier === 'summarizeLlm' || tier === 'localLlm' || tier === 'askLlm';
   const isEmbedOrRerank = tier === 'embeddingLlm' || tier === 'rerankerLlm';
   const stale = (isChat && provider === 'nllc') || (isEmbedOrRerank && provider === 'local');
   if (!stale) return { migrated: false, out: block };
   const defaultEndpoint = LEGACY_PROVIDER_DEFAULT_ENDPOINTS[tier] ?? LLAMA_SERVER_DEFAULT_ENDPOINT;
+  const configuredEndpoint = ownField(block, 'endpoint');
   return {
     migrated: true,
     out: {
@@ -78,53 +88,62 @@ function migrateLegacyProviderValue(
       provider: 'openai-compat',
       // Preserve an explicit user endpoint if somehow present (defensive —
       // legacy configs don't have one, but don't clobber).
-      endpoint: block['endpoint'] ?? defaultEndpoint,
+      endpoint: typeof configuredEndpoint === 'string' ? configuredEndpoint : defaultEndpoint,
     },
   };
 }
 
-export function migrateLegacyLlmFieldNames(parsed: unknown, configPath: string): unknown {
-  if (typeof parsed !== 'object' || parsed === null) return parsed;
-  const root = parsed as Record<string, unknown>;
-  const llmRaw = root['llm'];
-  if (typeof llmRaw !== 'object' || llmRaw === null) return parsed;
-  const llm = { ...(llmRaw as Record<string, unknown>) };
+function migrateLegacyTierNames(llm: Record<string, unknown>): boolean {
   let changed = false;
   for (const [oldKey, newKey] of LEGACY_LLM_FIELD_MAP) {
     // Only migrate when the OLD key is present AND the NEW key is
     // absent. Skip when the new shape already wins so we don't
     // clobber an explicit user override.
-    if (oldKey in llm && !(newKey in llm)) {
+    const hasOldKey = Object.hasOwn(llm, oldKey);
+    const hasNewKey = Object.hasOwn(llm, newKey);
+    if (hasOldKey && !hasNewKey) {
       llm[newKey] = llm[oldKey];
       delete llm[oldKey];
       changed = true;
-    } else if (oldKey in llm) {
+    } else if (hasOldKey) {
       // Both present — drop the old one. The new one wins; the user
       // would otherwise see legacy fields lingering forever.
       delete llm[oldKey];
       changed = true;
     }
   }
+  return changed;
+}
+
+function warnLegacyProviderMigration(tier: string, out: Record<string, unknown>): void {
+  const endpoint = ownField(out, 'endpoint');
+  process.stderr.write(
+    `[Cartograph] Auto-migrated legacy ${tier}.provider value to "openai-compat" + endpoint=${
+      typeof endpoint === 'string' ? endpoint : '(unset)'
+    } (in-process pathway removed 2026-05-24c step 4c). Run \`cartograph doctor\` to confirm the endpoint is reachable + start a llama-server there if not.\n`,
+  );
+}
+
+function migrateLegacyProviderValues(llm: Record<string, unknown>): boolean {
+  let changed = false;
   // Per-tier provider value migration: `'nllc'` (chat) and `'local'`
   // (embedding / reranker) are the removed in-process pathway. Translate
   // to `'openai-compat'` with a tier-specific default endpoint so the
   // resolver doesn't drop the tier on load.
   for (const tier of LEGACY_PROVIDER_TIERS) {
-    const block = llm[tier];
-    if (typeof block !== 'object' || block === null) continue;
-    const { migrated, out } = migrateLegacyProviderValue(tier, block as Record<string, unknown>);
+    const block = asJsonObject(ownField(llm, tier));
+    if (!block) continue;
+    const { migrated, out } = migrateLegacyProviderValue(tier, block);
     if (migrated) {
       llm[tier] = out;
       changed = true;
-      process.stderr.write(
-        `[Cartograph] Auto-migrated legacy ${tier}.provider value to "openai-compat" + endpoint=${
-          (out['endpoint'] as string) ?? '(unset)'
-        } (in-process pathway removed 2026-05-24c step 4c). Run \`cartograph doctor\` to confirm the endpoint is reachable + start a llama-server there if not.\n`,
-      );
+      warnLegacyProviderMigration(tier, out);
     }
   }
-  if (!changed) return parsed;
-  const migrated = { ...root, llm };
+  return changed;
+}
+
+function writeBackMigratedConfig(configPath: string, migrated: Record<string, unknown>): Record<string, unknown> {
   // Write-back is attempted at most once per config path per process.
   // After a SUCCESSFUL write the file no longer has legacy keys, so
   // `changed` is false on later calls anyway — the guard's real job is
@@ -147,8 +166,21 @@ export function migrateLegacyLlmFieldNames(parsed: unknown, configPath: string):
     // If we can't write back (e.g. read-only mount), still return
     // the migrated in-memory version so the rest of the load works.
     process.stderr.write(
-      `[Cartograph] Migrated legacy llm field names in memory; failed to write back to ${configPath}: ${(err as Error).message}\n`,
+      `[Cartograph] Migrated legacy llm field names in memory; failed to write back to ${configPath}: ${errorMessage(err)}\n`,
     );
     return migrated;
   }
+}
+
+export function migrateLegacyLlmFieldNames(parsed: unknown, configPath: string): unknown {
+  const root = asJsonObject(parsed);
+  if (!root) return parsed;
+  const llm = asJsonObject(ownField(root, 'llm'));
+  if (!llm) return parsed;
+
+  const tierNamesChanged = migrateLegacyTierNames(llm);
+  const providerValuesChanged = migrateLegacyProviderValues(llm);
+  if (!tierNamesChanged && !providerValuesChanged) return parsed;
+
+  return writeBackMigratedConfig(configPath, { ...root, llm });
 }

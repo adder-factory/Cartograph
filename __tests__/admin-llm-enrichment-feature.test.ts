@@ -120,6 +120,97 @@ describe('admin LLM enrichment feature CLI', () => {
     expect(text).toContain('success:Classified 6 symbols in 12ms');
     expect(text.match(/close/g)?.length).toBe(3);
   });
+
+  it('reports invalid summarize concurrency without calling process.exit or opening the graph', async () => {
+    const { actions, calls } = fakeDeps();
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('summarize [path]')!('/repo', { quiet: false, concurrency: 'nope' });
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain('error:--concurrency must be a positive integer');
+    expect(calls).not.toContain('open:/repo');
+  });
+
+  it('reports invalid summarize eager limit without calling process.exit or opening the graph', async () => {
+    const { actions, calls } = fakeDeps();
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('summarize [path]')!('/repo', { quiet: false, limit: '-1' });
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain(
+      'error:--limit must be a non-negative integer (0 = ad-hoc only; use --all for an uncapped pass)',
+    );
+    expect(calls).not.toContain('open:/repo');
+  });
+
+  it('reports summarize on an uninitialized project without calling process.exit or opening the graph', async () => {
+    const { actions, calls } = fakeDeps({ initialized: false });
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('summarize [path]')!('/repo', { quiet: false });
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain('error:Cartograph not initialized in /repo');
+    expect(calls).not.toContain('open:/repo');
+  });
+
+  it('reports missing summarize LLM config without calling process.exit and closes the graph', async () => {
+    const { actions, calls } = fakeDeps({ llmConfig: null });
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('summarize [path]')!('/repo', { quiet: false });
+    });
+
+    const text = calls.join('\n');
+    expect(exitCode).toBe(1);
+    expect(text).toContain('open:/repo');
+    expect(text).toContain('error:No LLM available.');
+    expect(text.match(/close/g)?.length).toBe(1);
+  });
+
+  it('reports summarize failures without calling process.exit and closes the graph', async () => {
+    const { actions, calls } = fakeDeps({ summarizeError: new Error('summarize boom') });
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('summarize [path]')!('/repo', { quiet: false });
+    });
+
+    const text = calls.join('\n');
+    expect(exitCode).toBe(1);
+    expect(text).toContain('progress.stop');
+    expect(text).toContain('error:Failed to summarise: summarize boom');
+    expect(text.match(/close/g)?.length).toBe(1);
+  });
+
+  it('reports embed on an uninitialized project without calling process.exit or opening the graph', async () => {
+    const { actions, calls } = fakeDeps({ initialized: false });
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('embed [path]')!('/repo', { quiet: false });
+    });
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain('error:Cartograph not initialized in /repo');
+    expect(calls).not.toContain('open:/repo');
+  });
+
+  it('reports embed failures without calling process.exit and closes the graph', async () => {
+    const { actions, calls } = fakeDeps({ embedError: new Error('embed boom') });
+
+    const exitCode = await withProcessExitGuard(async () => {
+      await actions.get('embed [path]')!('/repo', { quiet: false });
+    });
+
+    const text = calls.join('\n');
+    expect(exitCode).toBe(1);
+    expect(text).toContain('error:Failed to embed: embed boom');
+    expect(text.match(/close/g)?.length).toBe(1);
+  });
 });
 
 function parseConcurrency(raw: string | undefined): number {
@@ -142,8 +233,31 @@ function embedResult(): LlmEmbedResult {
   };
 }
 
-function fakeDeps() {
-  const actions = new Map<string, (...args: any[]) => Promise<void>>();
+interface FakeDepsOptions {
+  initialized?: boolean;
+  llmConfig?: unknown;
+  summarizeError?: Error;
+  embedError?: Error;
+  classifyError?: Error;
+}
+
+async function withProcessExitGuard(run: () => Promise<void>): Promise<string | number | undefined> {
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+    throw new Error(`process.exit(${String(code)})`);
+  });
+  try {
+    await run();
+    return process.exitCode;
+  } finally {
+    exitSpy.mockRestore();
+    process.exitCode = originalExitCode ?? 0;
+  }
+}
+
+function fakeDeps(options: FakeDepsOptions = {}) {
+  const actions = new Map<string, (...args: unknown[]) => Promise<void>>();
   const calls: string[] = [];
   const deps: AdminLlmEnrichmentCommandDeps = {
     adminCmd: new FakeCommand(actions),
@@ -153,16 +267,16 @@ function fakeDeps() {
     }),
     error: (message) => calls.push(`error:${message}`),
     ...formatters(),
-    isInitialized: () => true,
+    isInitialized: () => options.initialized ?? true,
     loadCartograph: async () => ({
       default: {
         open: async (projectPath) => {
           calls.push(`open:${projectPath}`);
-          return fakeGraph(calls);
+          return fakeGraph(calls, options);
         },
       },
     }),
-    loadClack: vi.fn(async () => fakeClack(calls) as any),
+    loadClack: vi.fn(async () => fakeClack(calls)),
     parseConcurrency,
     resolveProjectPath: (pathArg) => pathArg ?? '/repo',
   };
@@ -171,16 +285,19 @@ function fakeDeps() {
   return { actions, calls };
 }
 
-function fakeGraph(calls: string[]) {
+function fakeGraph(calls: string[], options: FakeDepsOptions = {}) {
+  const llmConfig = options.llmConfig === undefined ? { summarizeLlm: { model: 'qwen' } } : options.llmConfig;
+
   return {
     close: () => calls.push('close'),
     llm: {
-      config: { getEffectiveLlmConfig: async () => ({ summarizeLlm: { model: 'qwen' } }) },
+      config: { getEffectiveLlmConfig: async () => llmConfig },
       summarizeAll: async (opts: {
         concurrency: number;
         eagerLimit?: number;
         onProgress?: (done: number, total: number) => void;
       }) => {
+        if (options.summarizeError) throw options.summarizeError;
         calls.push(
           `summarizeAll:${JSON.stringify({
             concurrency: opts.concurrency,
@@ -201,11 +318,13 @@ function fakeGraph(calls: string[]) {
       },
       embed: {
         embedAll: async (opts = {}) => {
+          if (options.embedError) throw options.embedError;
           calls.push(`embedAll:${JSON.stringify(opts)}`);
           return embedResult();
         },
       },
       classifyAll: async (opts: { concurrency: number }) => {
+        if (options.classifyError) throw options.classifyError;
         calls.push(`classifyAll:${JSON.stringify(opts)}`);
         return {
           classified: TEST_CLASSIFIED,
@@ -226,13 +345,15 @@ function fakeClack(calls: string[]) {
       info: (message: string) => calls.push(`info:${message}`),
       success: (message: string) => calls.push(`success:${message}`),
       warn: (message: string) => calls.push(`warn:${message}`),
+      error: (message: string) => calls.push(`error:${message}`),
     },
+    note: (message: string, title?: string) => calls.push(`note:${title}:${message}`),
   };
 }
 
 class FakeCommand {
   constructor(
-    private readonly actions: Map<string, (...args: any[]) => Promise<void>>,
+    private readonly actions: Map<string, (...args: unknown[]) => Promise<void>>,
     private readonly name = 'admin',
   ) {}
 
@@ -248,7 +369,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => Promise<void>): this {
+  action(fn: (...args: unknown[]) => Promise<void>): this {
     this.actions.set(this.name, fn);
     return this;
   }

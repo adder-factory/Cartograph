@@ -106,7 +106,7 @@ export function registerAdminInstallModelsCommand(deps: AdminInstallModelsComman
         }
       } catch (err) {
         error(`install-models failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

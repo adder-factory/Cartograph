@@ -9,6 +9,21 @@ import {
   buildTsPathAliasResolver,
 } from '../src/import-classifier.js';
 
+function withObjectPrototypeProperty<T>(key: string, value: unknown, run: () => T): T {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    configurable: true,
+    enumerable: false,
+    value,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, key, previous);
+    else Reflect.deleteProperty(Object.prototype, key);
+  }
+}
+
 describe('classifyImport', () => {
   let dir: string;
 
@@ -375,6 +390,57 @@ describe('classifyImport', () => {
     it('returns null when tsconfig has no paths', () => {
       fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: { strict: true } }));
       expect(readTsPathAliases(dir, dir)).toBeNull();
+    });
+
+    it('ignores inherited compilerOptions while parsing tsconfig aliases', () => {
+      fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({}));
+
+      withObjectPrototypeProperty('compilerOptions', { baseUrl: '.', paths: { '@/*': ['src/*'] } }, () => {
+        expect(readTsPathAliases(dir, dir)).toBeNull();
+      });
+    });
+
+    it('ignores inherited compilerOptions fields while parsing tsconfig aliases', () => {
+      fs.writeFileSync(path.join(dir, 'tsconfig.json'), JSON.stringify({ compilerOptions: {} }));
+
+      withObjectPrototypeProperty('baseUrl', '.', () => {
+        withObjectPrototypeProperty('paths', { '@/*': ['src/*'] }, () => {
+          expect(readTsPathAliases(dir, dir)).toBeNull();
+        });
+      });
+    });
+
+    it('uses own compilerOptions fields over polluted prototype fields', () => {
+      fs.writeFileSync(
+        path.join(dir, 'tsconfig.json'),
+        JSON.stringify({ compilerOptions: { baseUrl: '.', paths: { '#/*': ['lib/*'] } } }),
+      );
+
+      let aliases: ReturnType<typeof readTsPathAliases> = null;
+      withObjectPrototypeProperty('paths', { '@/*': ['src/*'] }, () => {
+        aliases = readTsPathAliases(dir, dir);
+      });
+
+      expect(aliases).not.toBeNull();
+      expect(aliases!.paths).toEqual({ '#/*': ['lib/*'] });
+    });
+
+    it('filters malformed path entries while keeping valid aliases', () => {
+      fs.writeFileSync(
+        path.join(dir, 'tsconfig.json'),
+        JSON.stringify({
+          compilerOptions: {
+            baseUrl: '.',
+            paths: {
+              '@/*': 'src/*',
+              '#/*': ['lib/*'],
+            },
+          },
+        }),
+      );
+      const aliases = readTsPathAliases(dir, dir);
+      expect(aliases).not.toBeNull();
+      expect(aliases!.paths).toEqual({ '#/*': ['lib/*'] });
     });
   });
 

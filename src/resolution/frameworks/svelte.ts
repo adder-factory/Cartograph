@@ -7,7 +7,10 @@
 
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext } from '../types.js';
+import { hasPackageDependency } from './package-dependencies.js';
 import { isSameDirectoryPath } from './resolve-by-name.js';
+
+const SVELTE_DEPENDENCIES = ['svelte', '@sveltejs/kit'] as const;
 
 /**
  * Svelte 5 runes — compiler-provided, not user code
@@ -48,18 +51,7 @@ export const svelteResolver: FrameworkResolver = {
 
   detect(context: ResolutionContext): boolean {
     // Check for svelte or @sveltejs/kit in package.json
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.svelte || deps['@sveltejs/kit']) {
-          return true;
-        }
-      } catch {
-        // Invalid JSON
-      }
-    }
+    if (hasPackageDependency(context.readFile('package.json'), SVELTE_DEPENDENCIES)) return true;
 
     // Check for .svelte files in project
     const allFiles = context.getAllFiles();

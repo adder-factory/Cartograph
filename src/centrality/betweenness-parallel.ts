@@ -35,6 +35,7 @@ import {
   type BetweennessResult,
 } from './betweenness.js';
 import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+import { parseBetweennessWorkerReply } from './betweenness-worker-contract.js';
 
 /** Edge-count floor above which the parallel path makes sense. Below it,
  *  per-worker spawn cost (~50-200 ms) dominates the per-source compute. */
@@ -103,17 +104,6 @@ function partitionSources(sources: Int32Array, workerCount: number): number[][] 
   return slices;
 }
 
-interface WorkerReplyOk {
-  ok: true;
-  cbBuf: ArrayBuffer;
-  durationMs: number;
-}
-interface WorkerReplyErr {
-  ok: false;
-  error: string;
-}
-type WorkerReply = WorkerReplyOk | WorkerReplyErr;
-
 /** Spawn a single worker for one source-slice. Resolves with the
  *  per-worker `Float64Array(N)` cb accumulator. Bounded by a timeout
  *  so a stuck worker can't hang the whole compute. */
@@ -151,7 +141,14 @@ function runOneWorker(args: {
         ),
       );
     }, args.timeoutMs);
-    worker.on('message', (msg: WorkerReply) => {
+    worker.on('message', (raw: unknown) => {
+      let msg: ReturnType<typeof parseBetweennessWorkerReply>;
+      try {
+        msg = parseBetweennessWorkerReply(raw);
+      } catch (err) {
+        settle(() => reject(err instanceof Error ? err : new Error(String(err))));
+        return;
+      }
       if (!msg.ok) {
         settle(() => reject(new Error(msg.error)));
         return;

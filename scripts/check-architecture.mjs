@@ -199,6 +199,26 @@ function checkAdapterBoundaries(rootDir, failures) {
   }
 }
 
+// Every feature CLI adapter must signal expected failures through
+// `process.exitCode`, never `process.exit()`, so the event loop drains and
+// pending output/teardown (e.g. `finally { cg?.close() }`) actually runs.
+// The set is derived from the filesystem rather than an allowlist so a NEW
+// `src/features/<name>/cli.ts` (or `cli/` slice) is covered automatically.
+function featureCliAdapterFiles(rootDir) {
+  return listFiles(rootDir, 'src/features').filter(
+    (file) => /^src\/features\/[^/]+\/cli\.ts$/.test(file) || /^src\/features\/[^/]+\/cli\/.+\.ts$/.test(file),
+  );
+}
+
+function checkExitFreeCliAdapters(rootDir, failures) {
+  for (const relPath of featureCliAdapterFiles(rootDir)) {
+    const source = readText(rootDir, relPath);
+    if (/\bprocess\s*\.\s*exit\s*\(/.test(source)) {
+      failures.push(`${relPath} must not call process.exit(); set process.exitCode for expected CLI failures.`);
+    }
+  }
+}
+
 function resolverObjects(source) {
   const objects = [];
   const pattern = /export\s+const\s+([A-Za-z0-9_]+)\s*:\s*FrameworkResolver\s*=\s*\{/g;
@@ -258,6 +278,7 @@ export function runArchitectureCheck(rootDir = repoRoot) {
   checkForbiddenBroadBuckets(rootDir, failures);
   checkCentralFileBudgets(rootDir, failures);
   checkAdapterBoundaries(rootDir, failures);
+  checkExitFreeCliAdapters(rootDir, failures);
   checkFrameworkResolvers(rootDir, failures);
   checkExtractionPolicyOwnership(rootDir, failures);
   return { ok: failures.length === 0, failures };

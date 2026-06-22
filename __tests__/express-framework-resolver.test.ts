@@ -80,6 +80,10 @@ describe('expressResolver.detect', () => {
     expect(expressResolver.detect(context({ 'package.json': '{"dependencies":{"lodash":"1"}}' }))).toBe(false);
   });
 
+  it('ignores dependency entries whose versions are not strings', () => {
+    expect(expressResolver.detect(context({ 'package.json': '{"dependencies":{"express":1}}' }))).toBe(false);
+  });
+
   it('swallows invalid package.json JSON (no throw, falls through to false)', () => {
     // The try/catch around JSON.parse must not let a parse error escape;
     // with no other signal the result is false.

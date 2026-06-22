@@ -17,9 +17,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { z } from 'zod';
 import { isBunStandalonePath } from '../../bun-standalone.js';
 import { errMsg } from '../../errors.js';
 import { gitWorktreeRoot, hasUncommittedChanges } from '../../git-utils.js';
+import { asJsonObject } from '../../json-object.js';
 import {
   CARTOGRAPH_PACKAGE_NAME as PKG,
   GIT_CLONE_INSTALL_REF,
@@ -49,6 +51,18 @@ const GIT_FETCH_TIMEOUT_MS = 120_000;
 
 /** `bun install` may download packages and rebuild native deps. */
 const INSTALL_TIMEOUT_MS = 600_000;
+
+const BunGlobalManifestSchema = z.looseObject({
+  dependencies: z.record(z.string(), z.unknown()).optional(),
+});
+
+const VersionManifestSchema = z.looseObject({
+  version: z.string().trim().min(1).optional(),
+});
+
+const NameManifestSchema = z.looseObject({
+  name: z.string().trim().min(1).optional(),
+});
 
 /**
  * Classify how the running Cartograph was installed, from the on-disk
@@ -107,10 +121,19 @@ function matchesInstallRef(spec: string, ref: string): boolean {
  *  the legacy `github:adder-factory/cartograph#v1.0.5`), or null. */
 function readBunGlobalSpec(globalDir: string): string | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(path.join(globalDir, 'package.json'), 'utf-8')) as {
-      dependencies?: Record<string, unknown>;
-    };
-    const spec = parsed.dependencies?.[PKG];
+    const manifest = parseManifestJson(
+      fs.readFileSync(path.join(globalDir, 'package.json'), 'utf-8'),
+      BunGlobalManifestSchema,
+    );
+    if (
+      !manifest ||
+      !Object.hasOwn(manifest, 'dependencies') ||
+      !manifest.dependencies ||
+      !Object.hasOwn(manifest.dependencies, PKG)
+    ) {
+      return null;
+    }
+    const spec = manifest.dependencies[PKG];
     return typeof spec === 'string' && spec.trim() !== '' ? spec.trim() : null;
   } catch {
     return null;
@@ -507,12 +530,8 @@ function localPackageVersion(root: string): string | null {
 }
 
 function parsePackageVersion(raw: string): string | null {
-  try {
-    const parsed = JSON.parse(raw) as { version?: unknown };
-    return typeof parsed.version === 'string' && parsed.version.trim() !== '' ? parsed.version.trim() : null;
-  } catch {
-    return null;
-  }
+  const manifest = parseManifestJson(raw, VersionManifestSchema);
+  return manifest && Object.hasOwn(manifest, 'version') ? (manifest.version ?? null) : null;
 }
 
 function runBunInstall(root: string): void {
@@ -540,8 +559,19 @@ function findOwnPackageRoot(startDir: string): string | null {
 
 function readPackageName(packageJsonPath: string): string | null {
   try {
-    const parsed = JSON.parse(fs.readFileSync(packageJsonPath, 'utf-8')) as { name?: unknown };
-    return typeof parsed.name === 'string' ? parsed.name : null;
+    const manifest = parseManifestJson(fs.readFileSync(packageJsonPath, 'utf-8'), NameManifestSchema);
+    return manifest && Object.hasOwn(manifest, 'name') ? (manifest.name ?? null) : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseManifestJson<T>(raw: string, schema: z.ZodType<T>): T | null {
+  try {
+    const root = asJsonObject(JSON.parse(raw));
+    if (!root) return null;
+    const manifest = schema.safeParse(root);
+    return manifest.success ? manifest.data : null;
   } catch {
     return null;
   }

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { detectLanguage, isPlayRoutesFile } from '../src/extraction/grammars.js';
 import { playResolver } from '../src/resolution/frameworks/play.js';
+import type { ResolutionContext } from '../src/resolution/types.js';
 import type { Node } from '../src/types.js';
 
 function node(id: string, name: string, kind: Node['kind'], filePath: string): Node {
@@ -19,7 +20,7 @@ function node(id: string, name: string, kind: Node['kind'], filePath: string): N
   };
 }
 
-function context(files: string[], nodes: Node[] = [], reads: Record<string, string | null> = {}) {
+function context(files: string[], nodes: Node[] = [], reads: Record<string, string | null> = {}): ResolutionContext {
   return {
     readFile: (filePath: string) => reads[filePath] ?? null,
     getAllFiles: () => files,
@@ -31,7 +32,7 @@ function context(files: string[], nodes: Node[] = [], reads: Record<string, stri
     getNodesByLowerName: () => [],
     getImportMappings: () => [],
     getProjectRoot: () => '/repo',
-  } as any;
+  };
 }
 
 describe('Play framework resolver', () => {

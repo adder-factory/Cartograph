@@ -7,6 +7,7 @@
  * then exit) so the orchestrator's listeners fire the same events.
  *
  *  - `'success'`     — post `{ok: true, edges: []}` then exit(0).
+ *  - `'invalid-reply'` — post a malformed success reply, then exit(0).
  *  - `'silent-exit'` — exit(0) WITHOUT posting any message. This is
  *                      the B28 v1 hang trigger: pre-B28-v2 the pool
  *                      had no exit handler, so the iteration's
@@ -35,7 +36,7 @@ import { parentPort, workerData } from 'node:worker_threads';
  *  the `dbPath` channel: the test passes the behavior string as
  *  `dbPath` and the fixture interprets it here. The fixture never
  *  opens a DB so the field is otherwise unused. */
-type Behavior = 'success' | 'silent-exit' | 'hang' | 'throw';
+type Behavior = 'success' | 'invalid-reply' | 'silent-exit' | 'hang' | 'throw';
 
 interface TestWorkerInit {
   readonly dbPath: Behavior;
@@ -47,6 +48,11 @@ const behavior = init.dbPath;
 switch (behavior) {
   case 'success': {
     parentPort?.postMessage({ ok: true, edges: [], durationMs: 0 });
+    process.exit(0);
+    break;
+  }
+  case 'invalid-reply': {
+    parentPort?.postMessage({ ok: true, durationMs: 0 });
     process.exit(0);
     break;
   }
