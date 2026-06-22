@@ -537,19 +537,26 @@ const findUnusedExportsQuery = defineQuery({
       -- Value/type same-name namespace guard (issue #51). TypeScript has
       -- separate value and type namespaces, so a file can export a value
       -- and a type that share a name (e.g. branded-ID parsers:
-      -- \`export const UserId = …; export type UserId = …\`). A consumer's
-      -- \`import { UserId, type UserId }\` use of the TYPE often resolves to
-      -- the same-name VALUE companion, leaving the \`type_alias\` with no
-      -- incoming edge — a false "dead" verdict even though the type is
-      -- imported and used. So: never confidently flag a TS/TSX
-      -- \`type_alias\` when the same file exports a same-name value node
-      -- (anything but a type) that itself has real (non-structural) usage.
-      -- A genuinely-dead type with no live value twin (e.g. \`DeadType\`)
-      -- still surfaces. (Scoped to \`type_alias\`; the analogous
-      -- \`export const Foo\` + \`export interface Foo\` merge is out of
-      -- scope for issue #51.)
+      -- \`export const UserId = …; export type UserId = …\`). A consumer in
+      -- ANOTHER file doing \`import { UserId, type UserId }\` has its use of
+      -- the TYPE resolve to the same-name VALUE companion, leaving the
+      -- type-level export (\`type_alias\` or \`interface\`) with no incoming
+      -- edge — a false "dead" verdict even though the type is imported and
+      -- used. So: never confidently flag a TS/TSX type-level export when the
+      -- same file exports a same-name value node (anything but a type) that
+      -- has real usage FROM ANOTHER FILE.
+      --
+      -- The cross-file requirement (\`src.file_path <> v.file_path\`) is what
+      -- keeps this from over-suppressing: a same-file value-only use (e.g.
+      -- \`export const Foo = …; export type Foo = …; function local(){ Foo() }\`)
+      -- is no evidence the TYPE is consumed anywhere, so a genuinely-dead
+      -- type with only a local value twin still surfaces — as does a type
+      -- with no value twin at all (\`DeadType\`). \`src.file_path\` is valid for
+      -- both symbol-node and file-node edge sources (dynamic-import hooks emit
+      -- \`references\` edges sourced from a \`file:<path>\` node whose file_path is
+      -- the importing file), so cross-file dynamic imports pass the filter too.
       AND NOT (
-        n.kind = 'type_alias'
+        n.kind IN ('type_alias', 'interface')
         AND n.language IN ('typescript', 'tsx')
         AND EXISTS (
           SELECT 1 FROM nodes v
@@ -560,8 +567,10 @@ const findUnusedExportsQuery = defineQuery({
             AND v.kind NOT IN ('type_alias', 'interface')
             AND EXISTS (
               SELECT 1 FROM edges e
+              JOIN nodes src ON src.id = e.source
               WHERE e.target = v.id
                 AND e.kind NOT IN ('contains', 'exports', 'imports', 'tests')
+                AND src.file_path <> v.file_path
             )
         )
       )

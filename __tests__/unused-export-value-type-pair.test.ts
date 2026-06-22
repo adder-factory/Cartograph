@@ -82,9 +82,9 @@ describe('unused_export value/type same-name guard (#51)', () => {
   });
 
   it('still flags a dead type alias whose same-name value twin is itself unused', async () => {
-    // The guard requires the value twin to have REAL usage. If the twin is
-    // also dead, the alias is not spared (no false negative for a truly
-    // dead value/type pair).
+    // The guard requires the value twin to have real CROSS-FILE usage. If the
+    // twin is also dead, the alias is not spared (no false negative for a
+    // truly dead value/type pair).
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-vt-pair2-'));
     try {
       fs.mkdirSync(path.join(dir, 'src'));
@@ -96,6 +96,59 @@ describe('unused_export value/type same-name guard (#51)', () => {
       await cg.indexAll();
       // Neither the value nor the type is used anywhere → both stay flaggable.
       expect(findUnusedExports(cg.queries).map((r) => r.name)).toContain('Orphan');
+      cg.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('still flags a dead type whose value twin has only SAME-FILE usage (no over-suppression)', async () => {
+    // Codex review of #51: a same-file value-only use is no evidence the TYPE
+    // is consumed anywhere, so the guard must NOT spare it. Only cross-file
+    // usage of the value twin (the import-mis-resolution scenario) counts.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-vt-localonly-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      fs.writeFileSync(
+        path.join(dir, 'src', 'ids.ts'),
+        [
+          'export const Foo = () => 1;',
+          'export type Foo = string;',
+          'function local() { return Foo(); }', // same-file value use only
+          'export function useLocal() { return local(); }',
+        ].join('\n'),
+      );
+      const cg = Cartograph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+      await cg.indexAll();
+      // The Foo TYPE is genuinely dead (no cross-file consumer) → still flagged.
+      const flagged = findUnusedExports(cg.queries).filter((r) => r.name === 'Foo' && r.kind === 'type_alias');
+      expect(flagged.length).toBe(1);
+      cg.close();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('spares an interface with a cross-file-used same-name value twin (Gemini review)', async () => {
+    // The same value/type namespace collision affects `interface`, not just
+    // `type_alias` (e.g. a const object + same-name interface).
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-vt-iface-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'src'));
+      fs.writeFileSync(
+        path.join(dir, 'src', 'box.ts'),
+        ['export const Box = { make: () => ({ v: 1 }) };', 'export interface Box { v: number; }'].join('\n'),
+      );
+      fs.writeFileSync(
+        path.join(dir, 'src', 'consumer.ts'),
+        [
+          'import { Box, type Box as BoxType } from "./box.js";',
+          'export function makeBox(): BoxType { return Box.make(); }',
+        ].join('\n'),
+      );
+      const cg = Cartograph.initSync(dir, { config: { include: ['src/**/*.ts'], exclude: [] } });
+      await cg.indexAll();
+      expect(findUnusedExports(cg.queries).map((r) => r.name)).not.toContain('Box');
       cg.close();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });

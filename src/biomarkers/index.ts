@@ -93,10 +93,12 @@ const MIN_LOC = ANALYSABLE_MIN_LOC;
  * the previous pass.
  *
  * The suffix is derived from two source hashes:
- *   - `biomarkerSourceHash`: sha256 of the three files that own the
- *     biomarker rule + cache contract (this file, `engine.ts`,
- *     `types.ts`). Any substantive edit invalidates the per-file
- *     cache on the next sync.
+ *   - `biomarkerSourceHash`: sha256 of the files that own the biomarker
+ *     rule + cache contract (this file, `engine.ts`, `types.ts`,
+ *     `lang-map.ts`, and the cross-file SQL rules in
+ *     `../db/queries-biomarkers-graph.ts`). Any substantive edit
+ *     invalidates the cache on the next sync — which, going cold, forces
+ *     the full pass that recomputes the cross-file rules too.
  *   - `EXTRACTION_LOGIC_VERSION`: source-derived hash of the
  *     extractor's emit-set contract. Coupled here so that an
  *     extractor change which produces new edges / nodes for unchanged
@@ -116,7 +118,7 @@ const MIN_LOC = ANALYSABLE_MIN_LOC;
  *
  * Comment-strip + whitespace-normalise in the hasher means JSDoc /
  * reformat-only edits don't invalidate. Refactor PRs that touch any
- * of the three spec files substantively (rename a public symbol,
+ * of these spec files substantively (rename a public symbol,
  * change a stored metric shape, add/remove a rule) DO invalidate —
  * one full pass on the next sync. The trade-off vs. the old manual
  * scheme: lose the option to mark a refactor as "no-op for caching."
@@ -128,6 +130,12 @@ const biomarkerSourceHash = computeAlgoHash('src/biomarkers/index.ts', [
   './engine',
   './types',
   './lang-map',
+  // The cross-file SQL rules (unused_export / god_class / feature_envy) live
+  // outside src/biomarkers/. Their results are persisted and only recompute on
+  // a full pass, which is forced when THIS key goes cold — so a change to a
+  // rule's SQL must invalidate here, else an already-indexed project keeps the
+  // stale findings through warm-cache syncs (issue #51 review — Codex).
+  '../db/queries-biomarkers-graph',
 ]);
 export const BIOMARKER_CACHE_KEY: `biomarker_file_state_${string}_${string}` = `biomarker_file_state_${biomarkerSourceHash}_${EXTRACTION_LOGIC_VERSION}`;
 
