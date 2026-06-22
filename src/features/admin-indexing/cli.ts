@@ -231,7 +231,6 @@ export async function runQuietIndex(args: RunQuietIndexArgs): Promise<void> {
       deps.writeStderr(`${location}${err.message}\n`);
     }
     process.exitCode = 1;
-    return;
   }
 }
 

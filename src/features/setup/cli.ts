@@ -95,7 +95,6 @@ function configureSetupCommand(
       writeStdout('\n' + result.doctorReport);
       if (result.doctor.overallStatus === 'fail') {
         process.exitCode = 1;
-        return;
       }
     });
 }
