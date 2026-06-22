@@ -14,7 +14,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import {
   getHomeDir,
   getMcpCommand,
@@ -100,7 +107,7 @@ class ReasonixTarget implements AgentTarget {
 }
 
 function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, reasonixMcpConfig(opts.command));
+  return writeMcpEntryJson(loc, reasonixMcpConfig(installCommandOption(opts)));
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {

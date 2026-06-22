@@ -19,6 +19,7 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
 import type { CartographConfig } from '../types.js';
 import { copyPrivateFileSync, ensurePrivateDirectory, writePrivateFileAtomic } from '../config.js';
 import {
@@ -51,6 +52,10 @@ export interface RecommendedConfigOptions {
    *  a config that points at an undownloaded file. */
   includeAsk?: boolean;
 }
+
+const configRootSchema = z.looseObject({});
+
+type ConfigRoot = z.infer<typeof configRootSchema>;
 
 /** Default llama-server ports for each tier. llama-server is
  *  one-model-per-process, so a multi-tier install runs N llama-server
@@ -155,14 +160,13 @@ export function mergeRecommendedLlmConfig(
   current: Record<string, unknown> | undefined,
   recommended: NonNullable<CartographConfig['llm']>,
 ): MergeRecommendedLlmResult {
-  const base: Record<string, unknown> = current ? { ...current } : {};
+  const base: ConfigRoot = current ? { ...current } : {};
   const priorLlmRaw = base['llm'];
-  const priorLlm: Record<string, unknown> =
-    typeof priorLlmRaw === 'object' && priorLlmRaw !== null ? { ...(priorLlmRaw as Record<string, unknown>) } : {};
+  const priorLlm: ConfigRoot = objectOrEmpty(priorLlmRaw);
 
   // Walk each recommended slot and overwrite it.
   for (const slot of RECOMMENDED_LLM_SLOTS) {
-    const next = (recommended as Record<string, unknown>)[slot];
+    const next = recommended[slot];
     if (next === undefined) {
       delete priorLlm[slot];
     } else {
@@ -175,7 +179,7 @@ export function mergeRecommendedLlmConfig(
   return {
     nextConfig: base,
     diff: {
-      addedOrUpdated: RECOMMENDED_LLM_SLOTS.filter((s) => (recommended as Record<string, unknown>)[s] !== undefined),
+      addedOrUpdated: RECOMMENDED_LLM_SLOTS.filter((s) => recommended[s] !== undefined),
     },
   };
 }
@@ -208,16 +212,9 @@ export function writeRecommendedLlmConfig(options: WriteRecommendedLlmOptions): 
   let backupPath: string | null = null;
   if (fs.existsSync(configPath)) {
     const raw = fs.readFileSync(configPath, 'utf-8');
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed === 'object' && parsed !== null) {
-        current = parsed as Record<string, unknown>;
-      }
-    } catch {
-      // Corrupt prior config — treat as no prior config but still
-      // back up the file (the operator may want it).
-      current = undefined;
-    }
+    // Corrupt or non-object prior config — treat as no prior config but
+    // still back up the file (the operator may want it).
+    current = parseConfigRoot(raw);
     backupPath = `${configPath}.bak.${Date.now()}`;
     copyPrivateFileSync(configPath, backupPath);
   }
@@ -232,4 +229,19 @@ export function writeRecommendedLlmConfig(options: WriteRecommendedLlmOptions): 
   writePrivateFileAtomic(configPath, JSON.stringify(nextConfig, null, 2));
 
   return { configPath, backupPath, diff };
+}
+
+function parseConfigRoot(raw: string): ConfigRoot | undefined {
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    const result = configRootSchema.safeParse(parsed);
+    return result.success ? result.data : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function objectOrEmpty(value: unknown): ConfigRoot {
+  const parsed = configRootSchema.safeParse(value);
+  return parsed.success ? { ...parsed.data } : {};
 }

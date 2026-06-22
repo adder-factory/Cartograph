@@ -14,7 +14,14 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
 import {
   getHomeDir,
   getMcpCommand,
@@ -158,7 +165,7 @@ function stripMatchingQuotes(value: string): string {
 }
 
 function writeMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  return writeMcpEntryJson(loc, rovoMcpConfig(opts.command));
+  return writeMcpEntryJson(loc, rovoMcpConfig(installCommandOption(opts)));
 }
 
 function removeMcpEntry(loc: Location): WriteResult['files'][number] {

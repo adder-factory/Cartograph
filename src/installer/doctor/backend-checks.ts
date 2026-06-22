@@ -14,6 +14,7 @@ import {
   LOCAL_BACKEND_HOSTS,
   renderBackendStartCommands,
 } from '../../features/backend/index.js';
+import { asJsonObject } from '../../json-object.js';
 import type { CheckResult } from './contract.js';
 
 interface EmbeddingReachabilityCheckArgs {
@@ -31,17 +32,27 @@ export async function detectBackends(configuredEndpoints: readonly string[] = []
   }
 }
 
+function ownField(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function ownObjectField(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  return asJsonObject(ownField(record, key));
+}
+
 export function checkEmbeddingReachability({
   embeddingLlm,
   detected,
   projectPath,
   llm,
 }: EmbeddingReachabilityCheckArgs): CheckResult | null {
-  if (!embeddingLlm || typeof embeddingLlm !== 'object') return null;
-  if (embeddingLlm['provider'] !== 'openai-compat') return null;
+  const embedding = asJsonObject(embeddingLlm);
+  if (!embedding) return null;
+  if (ownField(embedding, 'provider') !== 'openai-compat') return null;
 
-  const endpoint = typeof embeddingLlm['endpoint'] === 'string' ? embeddingLlm['endpoint'] : null;
-  if (!endpoint) return checkEndpointlessOpenAiEmbedding(embeddingLlm);
+  const configuredEndpoint = ownField(embedding, 'endpoint');
+  const endpoint = typeof configuredEndpoint === 'string' ? configuredEndpoint : null;
+  if (!endpoint) return checkEndpointlessOpenAiEmbedding(embedding);
 
   const base = normaliseEndpoint(endpoint);
   const match = detected.find((d) => d.endpoint === base);
@@ -86,7 +97,8 @@ function localBackendStartHint(projectPath: string): string {
 }
 
 function checkEndpointlessOpenAiEmbedding(embeddingLlm: Record<string, unknown>): CheckResult {
-  const configuredApiKey = typeof embeddingLlm['apiKey'] === 'string' && embeddingLlm['apiKey'].length > 0;
+  const apiKey = ownField(embeddingLlm, 'apiKey');
+  const configuredApiKey = typeof apiKey === 'string' && apiKey.length > 0;
   const envApiKey = typeof process.env['OPENAI_API_KEY'] === 'string' && process.env['OPENAI_API_KEY'].length > 0;
   if (configuredApiKey || envApiKey) {
     return {
@@ -248,12 +260,13 @@ export function assessChatContextBudget(probes: readonly ChatCtxProbe[]): CheckR
  *  each unique local chat-family endpoint; null when none are
  *  configured/reachable so cloud-only or LLM-less setups stay quiet. */
 export async function chatContextBudgetCheck(llm: Record<string, unknown> | null): Promise<CheckResult | null> {
-  if (!llm) return null;
+  const root = asJsonObject(llm);
+  if (!root) return null;
   const byEndpoint = new Map<string, string[]>();
   for (const [tierKey, label] of CHAT_FAMILY_TIER_LABELS) {
-    const block = llm[tierKey] as Record<string, unknown> | undefined;
-    if (block?.['provider'] !== 'openai-compat') continue;
-    const endpoint = block['endpoint'];
+    const block = ownObjectField(root, tierKey);
+    if (!block || ownField(block, 'provider') !== 'openai-compat') continue;
+    const endpoint = ownField(block, 'endpoint');
     if (typeof endpoint !== 'string' || !isLocalEndpoint(endpoint)) continue;
     const base = normaliseEndpoint(endpoint);
     const labels = byEndpoint.get(base) ?? [];

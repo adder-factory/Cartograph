@@ -20,7 +20,13 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { ALL_TARGETS, getTarget, resolveTargetFlag } from '../src/installer/targets/registry.js';
 import { INSTRUCTIONS_BODY } from '../src/installer/instructions-template.js';
-import { atomicWriteFileSync, getCartographPermissions, removeMarkedSection } from '../src/installer/targets/shared.js';
+import {
+  atomicWriteFileSync,
+  deleteNestedJsonEntry,
+  getCartographPermissions,
+  getNestedJsonEntry,
+  removeMarkedSection,
+} from '../src/installer/targets/shared.js';
 import { upsertTomlTable, removeTomlTable, buildTomlTable } from '../src/installer/targets/toml.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
@@ -63,6 +69,21 @@ function withLocalGitignore(paths: string[]): string[] {
 function isInsideProject(file: string): boolean {
   const relative = path.relative(process.cwd(), file);
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function withObjectPrototypeProperty<T>(key: string, value: unknown, run: () => T): T {
+  const previous = Object.getOwnPropertyDescriptor(Object.prototype, key);
+  Object.defineProperty(Object.prototype, key, {
+    configurable: true,
+    writable: true,
+    value,
+  });
+  try {
+    return run();
+  } finally {
+    if (previous) Object.defineProperty(Object.prototype, key, previous);
+    else Reflect.deleteProperty(Object.prototype, key);
+  }
 }
 
 describe('Installer targets — contract', () => {
@@ -433,6 +454,24 @@ describe('Installer targets — Claude specifics', () => {
     expect(fs.existsSync(path.join(tmpCwd, '.claude.json'))).toBe(false);
   });
 
+  it('ignores inherited Claude local project MCP entries', () => {
+    const claude = getTarget('claude')!;
+    const project = path.resolve(process.cwd());
+    const configPath = path.join(tmpHome, '.claude.json');
+
+    fs.writeFileSync(configPath, JSON.stringify({ projects: {} }) + '\n');
+    withObjectPrototypeProperty(project, { mcpServers: { cartograph: { command: 'polluted-project' } } }, () => {
+      expect(claude.detect('local').alreadyConfigured).toBe(false);
+      expect(claude.uninstall('local').files[0]!.action).toBe('not-found');
+    });
+
+    fs.writeFileSync(configPath, JSON.stringify({ projects: { [project]: {} } }) + '\n');
+    withObjectPrototypeProperty('mcpServers', { cartograph: { command: 'polluted-wrapper' } }, () => {
+      expect(claude.detect('local').alreadyConfigured).toBe(false);
+      expect(claude.uninstall('local').files[0]!.action).toBe('not-found');
+    });
+  });
+
   it('writes Claude local permissions, instructions, and ignore entries as private project files', () => {
     const claude = getTarget('claude')!;
 
@@ -510,6 +549,23 @@ describe('Installer targets — Claude specifics', () => {
     expect(result.files.find((file) => file.path === mcpPath)?.action).toBe('kept');
     const after = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
     expect(after.mcpServers.cartograph).toEqual(devEntry);
+  });
+
+  it('shared .mcp.json writer ignores inherited source-run command fields', () => {
+    const copilot = getTarget('copilot')!;
+    const mcpPath = path.join(process.cwd(), '.mcp.json');
+    fs.writeFileSync(mcpPath, JSON.stringify({ mcpServers: { cartograph: {} } }, null, 2) + '\n');
+
+    const inheritedCommand = path.join(path.resolve(process.cwd()), 'src', 'bin', 'cartograph.ts');
+    withObjectPrototypeProperty('command', inheritedCommand, () => {
+      const result = copilot.install('local', { autoAllow: false });
+
+      expect(result.files.find((file) => file.path === mcpPath)?.action).toBe('updated');
+    });
+
+    const after = JSON.parse(fs.readFileSync(mcpPath, 'utf-8'));
+    expect(after.mcpServers.cartograph.command).toBe('cartograph');
+    expect(after.mcpServers.cartograph.args).toEqual(localMcpArgs());
   });
 });
 
@@ -662,6 +718,26 @@ describe('Installer targets — JSON MCP target specifics', () => {
 
     opencode.uninstall('local');
     expect(fs.existsSync(path.join(process.cwd(), '.opencode'))).toBe(false);
+  });
+
+  it('ignores inherited MCP server wrappers in plain JSON config helpers', () => {
+    withObjectPrototypeProperty('mcpServers', { cartograph: { command: 'polluted' } }, () => {
+      const config: Record<string, unknown> = {};
+
+      expect(getNestedJsonEntry(config, 'mcpServers', 'cartograph')).toBeUndefined();
+      expect(deleteNestedJsonEntry(config, 'mcpServers', 'cartograph')).toBe(false);
+      expect(Object.keys(config)).toEqual([]);
+    });
+  });
+
+  it('ignores inherited MCP server wrappers when detecting JSONC configs', () => {
+    const codebuddy = getTarget('codebuddy')!;
+    fs.writeFileSync(path.join(process.cwd(), '.mcp.json'), '{}\n');
+
+    withObjectPrototypeProperty('mcpServers', { cartograph: { command: 'polluted' } }, () => {
+      expect(codebuddy.detect('local').alreadyConfigured).toBe(false);
+      expect(codebuddy.uninstall('local').files[0]!.action).toBe('not-found');
+    });
   });
 
   it('preserves JSONC comments and trailing commas for CodeBuddy and Pi configs', () => {

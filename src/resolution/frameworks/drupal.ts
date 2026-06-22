@@ -72,6 +72,7 @@ import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef }
 import { generateNodeId } from '../../extraction/tree-sitter-helpers.js';
 import { getParser } from '../../extraction/grammars.js';
 import { logWarn } from '../../errors.js';
+import { hasComposerDependencyMatching } from './composer-manifest.js';
 
 /** Drupal hook-file extensions. Files matching these are the
  *  `.module` / `.install` / `.theme` / `.inc` shape that carry hook
@@ -723,21 +724,7 @@ export const drupalResolver: FrameworkResolver = {
   languages: ['php', 'yaml'],
 
   detect(context: ResolutionContext): boolean {
-    const composer = context.readFile('composer.json');
-    if (!composer) return false;
-    try {
-      const json = JSON.parse(composer) as {
-        require?: Record<string, string>;
-        'require-dev'?: Record<string, string>;
-      };
-      const dependencyNames = [
-        ...(json.require ? Object.keys(json.require) : []),
-        ...(json['require-dev'] ? Object.keys(json['require-dev']) : []),
-      ];
-      return dependencyNames.some((k) => k.startsWith('drupal/'));
-    } catch {
-      return false;
-    }
+    return hasComposerDependencyMatching(context.readFile('composer.json'), (name) => name.startsWith('drupal/'));
   },
 
   resolve(ref: UnresolvedRef, context: ResolutionContext): ResolvedRef | null {

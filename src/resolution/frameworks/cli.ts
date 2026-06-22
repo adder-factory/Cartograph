@@ -17,6 +17,7 @@ import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext } from '../types.js';
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
 import { detectTsOrJs } from './detect-language.js';
+import { hasPackageDependencyMatching } from './package-dependencies.js';
 
 const DEPENDENCY_NAMES = new Set(['commander', 'yargs', 'caporal', '@caporal/core', 'cac']);
 
@@ -32,18 +33,7 @@ export const cliCommanderResolver: FrameworkResolver = {
   name: 'cli-commander',
 
   detect(context: ResolutionContext): boolean {
-    const packageJson = context.readFile('package.json');
-    if (!packageJson) return false;
-    try {
-      const pkg = JSON.parse(packageJson);
-      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-      for (const dep of Object.keys(deps)) {
-        if (DEPENDENCY_NAMES.has(dep)) return true;
-      }
-    } catch {
-      // Invalid JSON
-    }
-    return false;
+    return hasPackageDependencyMatching(context.readFile('package.json'), (name) => DEPENDENCY_NAMES.has(name));
   },
 
   // Resolver is extract-only; ref resolution stays with the language

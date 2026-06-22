@@ -18,7 +18,15 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, TargetId, WriteResult } from './types.js';
+import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type TargetId,
+  type WriteResult,
+} from './types.js';
 import {
   getHomeDir,
   getMcpCommand,
@@ -94,7 +102,7 @@ export function defineJsonMcpTarget(spec: JsonMcpTargetSpec): AgentTarget {
     install(loc: Location, opts: InstallOptions): WriteResult {
       return withLocalGitignoreFileEntries(
         loc,
-        { files: [writeMcpEntryJson(loc, mcpConfig(opts.command))], notes: [...spec.notes] },
+        { files: [writeMcpEntryJson(loc, mcpConfig(installCommandOption(opts)))], notes: [...spec.notes] },
         [mcpJsonPath(loc)],
       );
     },

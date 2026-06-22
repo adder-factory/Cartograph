@@ -9,24 +9,16 @@ import type { FrameworkResolver, UnresolvedRef, ResolvedRef, ResolutionContext }
 import { stripCommentsForRegex, makeLineIndex } from '../../utils.js';
 import { pathMatchesDirectoryPattern } from './resolve-by-name.js';
 import { detectTsOrJs } from './detect-language.js';
+import { hasPackageDependency } from './package-dependencies.js';
+
+const EXPRESS_DEPENDENCIES = ['express', 'fastify', 'koa', 'hapi'] as const;
 
 export const expressResolver: FrameworkResolver = {
   name: 'express',
 
   detect(context: ResolutionContext): boolean {
     // Check for Express in package.json
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson);
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps.express || deps.fastify || deps.koa || deps.hapi) {
-          return true;
-        }
-      } catch {
-        // Invalid JSON
-      }
-    }
+    if (hasPackageDependency(context.readFile('package.json'), EXPRESS_DEPENDENCIES)) return true;
 
     // Check for common Express patterns
     const allFiles = context.getAllFiles();

@@ -26,9 +26,39 @@
 import * as fs from 'node:fs';
 import { createRequire } from 'node:module';
 import * as path from 'node:path';
+import { z } from 'zod';
 import { logDebug } from '../errors.js';
+import { asJsonObject } from '../json-object.js';
 
 const MAX_EXTENDS_DEPTH = 8;
+const rawPathTargetsSchema = z.array(z.unknown());
+const tsconfigPathsSchema = z.unknown().transform(normalizeTsconfigPaths);
+const rawTsconfigSchema = z.looseObject({
+  extends: z.string().optional(),
+  compilerOptions: z
+    .looseObject({
+      baseUrl: z.string().optional(),
+      paths: tsconfigPathsSchema.optional(),
+    })
+    .optional(),
+});
+
+type RawTsconfig = z.infer<typeof rawTsconfigSchema>;
+type TsconfigPaths = Exclude<z.infer<typeof tsconfigPathsSchema>, undefined>;
+
+function normalizeTsconfigPaths(value: unknown): Record<string, string[]> | undefined {
+  const input = asJsonObject(value);
+  if (!input) return undefined;
+  const normalized: Record<string, string[]> = Object.create(null);
+  for (const key of Object.keys(input)) {
+    const result = rawPathTargetsSchema.safeParse(input[key]);
+    if (!result.success) continue;
+    const targets = result.data.filter((target): target is string => typeof target === 'string');
+    if (targets.length === 0) continue;
+    normalized[key] = targets;
+  }
+  return Object.keys(normalized).length > 0 ? normalized : undefined;
+}
 
 /** A single alias pattern from `compilerOptions.paths`. */
 interface AliasPattern {
@@ -141,19 +171,11 @@ function consumeJsonStringChar(
   return { out: nextOut, inString: ch !== '"', nextIndex: i + 1 };
 }
 
-interface RawTsconfig {
-  extends?: string;
-  compilerOptions?: {
-    baseUrl?: string;
-    paths?: Record<string, string[]>;
-  };
-}
-
 interface ResolvedTsconfigAliases {
   usedFile: string;
   chain: string[];
   baseUrl: string;
-  paths?: Record<string, unknown>;
+  paths?: TsconfigPaths;
 }
 
 interface TsconfigResolveContext {
@@ -165,8 +187,9 @@ interface TsconfigResolveContext {
 function readTsconfigLike(filePath: string): RawTsconfig | null {
   try {
     const raw = fs.readFileSync(filePath, 'utf-8');
-    const parsed = JSON.parse(stripJsonc(raw)) as RawTsconfig;
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    const parsed: unknown = JSON.parse(stripJsonc(raw));
+    const result = rawTsconfigSchema.safeParse(parsed);
+    return result.success ? result.data : null;
   } catch (err) {
     logDebug('path-aliases: failed to parse', { filePath, err: String(err) });
     return null;
@@ -198,7 +221,7 @@ export function loadProjectAliases(projectRoot: string): AliasMap | null {
   const found = findFirstTsconfigLike(projectRoot);
   if (!found) return null;
 
-  if (!found.paths || typeof found.paths !== 'object') {
+  if (!found.paths) {
     // baseUrl alone isn't an "alias" per se; with no paths we'd just
     // be redirecting the whole tree. Skip — the existing resolver
     // already handles relative imports.
@@ -235,7 +258,7 @@ export function loadProjectAliases(projectRoot: string): AliasMap | null {
 export function projectAliasConfigFingerprint(projectRoot: string): string {
   const found = findFirstTsconfigLike(projectRoot);
   if (!found) return 'alias:none';
-  const paths = found.paths && typeof found.paths === 'object' ? normalizePathsForFingerprint(found.paths) : null;
+  const paths = found.paths ? normalizePathsForFingerprint(found.paths) : null;
   if (!paths || Object.keys(paths).length === 0) return 'alias:none';
   return JSON.stringify({
     baseUrl: normalizeBaseUrlForFingerprint(projectRoot, found.baseUrl),
@@ -276,7 +299,7 @@ function resolveTsconfigAliases(
   const co = raw.compilerOptions ?? {};
   const inheritedBaseUrl = inherited?.baseUrl ?? configDir;
   const baseUrl = typeof co.baseUrl === 'string' ? path.resolve(configDir, co.baseUrl) : inheritedBaseUrl;
-  const paths = co.paths && typeof co.paths === 'object' ? co.paths : inherited?.paths;
+  const paths = co.paths ?? inherited?.paths;
 
   const resolved: Omit<ResolvedTsconfigAliases, 'usedFile'> = {
     chain: [...(inherited?.chain ?? []), normalizeConfigPath(ctx.projectRoot, normalizedPath)],
@@ -325,15 +348,12 @@ function normalizeConfigPath(projectRoot: string, filePath: string): string {
   return relative === '' ? path.basename(filePath) : relative;
 }
 
-function normalizePathsForFingerprint(paths: Record<string, unknown>): Record<string, string[]> {
-  const out: Record<string, string[]> = {};
+function normalizePathsForFingerprint(paths: TsconfigPaths): Record<string, string[]> {
+  const out: Record<string, string[]> = Object.create(null);
   for (const key of Object.keys(paths).sort((a, b) => a.localeCompare(b))) {
     const targets = paths[key];
-    if (!Array.isArray(targets)) continue;
-    const filtered = targets
-      .filter((target): target is string => typeof target === 'string')
-      .map(normalizeAliasTargetForFingerprint);
-    if (filtered.length > 0) out[key] = filtered;
+    if (!targets) continue;
+    out[key] = targets.map(normalizeAliasTargetForFingerprint);
   }
   return out;
 }
@@ -348,14 +368,11 @@ function normalizeAliasTargetForFingerprint(target: string): string {
 }
 
 /** Convert the `compilerOptions.paths` map into a list of {@link AliasPattern}. */
-function buildAliasPatterns(paths: Record<string, unknown>): AliasPattern[] {
+function buildAliasPatterns(paths: TsconfigPaths): AliasPattern[] {
   const patterns: AliasPattern[] = [];
   for (const [pattern, targets] of Object.entries(paths)) {
-    if (!Array.isArray(targets) || targets.length === 0) continue;
-    const filtered = targets.filter((t): t is string => typeof t === 'string');
-    if (filtered.length === 0) continue;
     const { prefix, suffix, hasWildcard } = splitWildcard(pattern);
-    patterns.push({ prefix, suffix, hasWildcard, replacements: filtered });
+    patterns.push({ prefix, suffix, hasWildcard, replacements: targets });
   }
   return patterns;
 }

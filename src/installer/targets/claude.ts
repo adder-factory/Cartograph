@@ -17,8 +17,16 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { AgentTarget, DetectionResult, InstallOptions, Location, WriteResult } from './types.js';
 import {
+  installCommandOption,
+  type AgentTarget,
+  type DetectionResult,
+  type InstallOptions,
+  type Location,
+  type WriteResult,
+} from './types.js';
+import {
+  asJsonObject,
   atomicWriteFileSync,
   getHomeDir,
   getMcpServerConfig,
@@ -79,28 +87,35 @@ function projectKey(): string {
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | null {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
+  return asJsonObject(value);
+}
+
+function objectField(parent: Record<string, unknown> | null | undefined, key: string): Record<string, unknown> | null {
+  if (!parent || !Object.hasOwn(parent, key)) return null;
+  return objectRecord(parent[key]);
 }
 
 function ensureObject(parent: Record<string, unknown>, key: string): Record<string, unknown> {
-  const current = objectRecord(parent[key]);
-  if (current) return current;
+  const current = objectField(parent, key);
+  if (current) {
+    parent[key] = current;
+    return current;
+  }
   const next: Record<string, unknown> = {};
   parent[key] = next;
   return next;
 }
 
 function localProjectConfig(config: Record<string, unknown>): Record<string, unknown> | null {
-  const projects = objectRecord(config['projects']);
+  const projects = objectField(config, 'projects');
   if (!projects) return null;
-  return objectRecord(projects[projectKey()]);
+  return objectField(projects, projectKey());
 }
 
 /** True when `record[key]` is a non-null object whose `cartograph` member exists. */
 function hasCartographMember(record: Record<string, unknown> | null, key: string): boolean {
-  const child = record ? objectRecord(record[key]) : null;
-  return !!child && child['cartograph'] !== undefined;
+  const child = objectField(record, key);
+  return !!child && Object.hasOwn(child, 'cartograph') && child['cartograph'] !== undefined;
 }
 
 function hasScopedMcpEntry(loc: Location, config: Record<string, unknown>): boolean {
@@ -109,11 +124,16 @@ function hasScopedMcpEntry(loc: Location, config: Record<string, unknown>): bool
 }
 
 function writeScopedMcpEntry(loc: Location, opts: InstallOptions): WriteResult['files'][number] {
-  if (loc === 'global') return writeMcpEntryJson(loc, { resolvePath: claudeJsonPath, command: opts.command });
+  if (loc === 'global')
+    return writeMcpEntryJson(loc, { resolvePath: claudeJsonPath, command: installCommandOption(opts) });
 
   const file = claudeJsonPath(loc);
   const existing = readJsonFile(file);
-  const before = objectRecord(localProjectConfig(existing)?.['mcpServers'])?.['cartograph'];
+  const existingMcpServers = objectField(localProjectConfig(existing), 'mcpServers');
+  const before =
+    existingMcpServers && Object.hasOwn(existingMcpServers, 'cartograph')
+      ? existingMcpServers['cartograph']
+      : undefined;
   const after = getMcpServerConfig(mcpCommandOptionsForLocation(loc, opts));
   if (jsonDeepEqual(before, after)) {
     return { path: file, action: 'unchanged' };
@@ -134,22 +154,35 @@ function removeScopedMcpEntry(loc: Location): WriteResult['files'][number] {
 
   const file = claudeJsonPath(loc);
   const config = readJsonFile(file);
-  const projects = objectRecord(config['projects']);
-  const projectConfig = projects ? objectRecord(projects[projectKey()]) : null;
-  const mcpServers = projectConfig ? objectRecord(projectConfig['mcpServers']) : null;
-  if (!mcpServers?.['cartograph']) {
+  const project = projectKey();
+  const projects = objectField(config, 'projects');
+  const projectConfig = objectField(projects, project);
+  const mcpServers = objectField(projectConfig, 'mcpServers');
+  if (
+    !projects ||
+    !projectConfig ||
+    !mcpServers ||
+    !Object.hasOwn(mcpServers, 'cartograph') ||
+    mcpServers['cartograph'] === undefined
+  ) {
     return { path: file, action: 'not-found' };
   }
 
   delete mcpServers['cartograph'];
   if (Object.keys(mcpServers).length === 0) {
-    delete projectConfig!['mcpServers'];
+    delete projectConfig['mcpServers'];
+  } else {
+    projectConfig['mcpServers'] = mcpServers;
   }
-  if (projectConfig && Object.keys(projectConfig).length === 0) {
-    delete projects![projectKey()];
+  if (Object.keys(projectConfig).length === 0) {
+    delete projects[project];
+  } else {
+    projects[project] = projectConfig;
   }
-  if (projects && Object.keys(projects).length === 0) {
+  if (Object.keys(projects).length === 0) {
     delete config['projects'];
+  } else {
+    config['projects'] = projects;
   }
   writeJsonFile(file, config);
   return { path: file, action: 'removed' };
@@ -220,8 +253,8 @@ class ClaudeCodeTarget implements AgentTarget {
     // 2. Permissions
     const settingsPath = scopedSettingsJsonPath(loc);
     const settings = readJsonFile(settingsPath);
-    const permissions = objectRecord(settings['permissions']);
-    const allow = permissions?.['allow'];
+    const permissions = objectField(settings, 'permissions');
+    const allow = permissions && Object.hasOwn(permissions, 'allow') ? permissions['allow'] : undefined;
     if (permissions && Array.isArray(allow)) {
       const before = allow.length;
       const filtered = allow.filter((p: unknown) => typeof p === 'string' && !p.startsWith('mcp__cartograph__'));
@@ -234,6 +267,8 @@ class ClaudeCodeTarget implements AgentTarget {
         }
         if (Object.keys(permissions).length === 0) {
           delete settings['permissions'];
+        } else {
+          settings['permissions'] = permissions;
         }
         writeJsonFile(settingsPath, settings);
         files.push({ path: settingsPath, action: 'removed' });

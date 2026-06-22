@@ -11,6 +11,7 @@
 import * as fs from 'node:fs';
 import type { DetectionResult, Location, WriteResult } from './types.js';
 import {
+  asJsonObject,
   atomicWriteFileSync,
   getMcpServerConfig,
   jsonDeepEqual,
@@ -47,7 +48,8 @@ interface ReadObjectPropertyArgs {
 }
 
 function targetEntry(loc: Location, args: WriteMcpEntryJsoncArgs): Record<string, unknown> {
-  const options = mcpCommandOptionsForLocation(loc, { command: args.command });
+  const command = Object.hasOwn(args, 'command') ? args.command : undefined;
+  const options = mcpCommandOptionsForLocation(loc, { command });
   return args.entry?.(options) ?? getMcpServerConfig(options);
 }
 
@@ -114,8 +116,7 @@ function parseJsoncText(text: string): Record<string, unknown> | null {
   if (!trimmed) return {};
   try {
     const parsed: unknown = JSON.parse(removeTrailingCommas(stripJsoncComments(text)));
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed as Record<string, unknown>;
+    return asJsonObject(parsed);
   } catch {
     return null;
   }
@@ -124,9 +125,9 @@ function parseJsoncText(text: string): Record<string, unknown> | null {
 /** `record['mcpServers'].cartograph` when both are present, else undefined. */
 function readCartographEntry(record: Record<string, unknown> | null | undefined): unknown {
   if (!record) return undefined;
-  const servers = record['mcpServers'];
-  if (servers === null || typeof servers !== 'object' || Array.isArray(servers)) return undefined;
-  return (servers as Record<string, unknown>)['cartograph'];
+  const servers = asJsonObject(Object.hasOwn(record, 'mcpServers') ? record['mcpServers'] : undefined);
+  if (!servers || !Object.hasOwn(servers, 'cartograph')) return undefined;
+  return servers['cartograph'];
 }
 
 function stripJsoncComments(text: string): string {
@@ -350,7 +351,9 @@ function readObjectKey(text: string, keyStart: number): { key: string; keyEnd: n
   if (text[keyStart] !== '"') return null;
   const keyEnd = stringEnd(text, keyStart);
   try {
-    return { key: JSON.parse(text.slice(keyStart, keyEnd)) as string, keyEnd };
+    const parsed: unknown = JSON.parse(text.slice(keyStart, keyEnd));
+    if (typeof parsed !== 'string') return null;
+    return { key: parsed, keyEnd };
   } catch {
     return null;
   }

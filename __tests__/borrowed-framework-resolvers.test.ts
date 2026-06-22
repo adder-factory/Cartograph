@@ -161,6 +161,21 @@ class OrderController {
     expect(phpResult.references[0]?.referenceName).toBe('show');
   });
 
+  it('does not detect Symfony from inherited composer require fields', () => {
+    const ctx = context({ 'composer.json': '{}' });
+    Object.defineProperty(Object.prototype, 'require', {
+      configurable: true,
+      writable: true,
+      value: { 'symfony/framework-bundle': '^7.0' },
+    });
+
+    try {
+      expect(symfonyResolver.detect(ctx)).toBe(false);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'require');
+    }
+  });
+
   it('detects NeuG and extracts graph resource landmarks', () => {
     const ctx = context({
       'pyproject.toml': '[project]\ndependencies = ["neug"]\n',

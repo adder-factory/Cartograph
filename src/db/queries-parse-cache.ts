@@ -47,11 +47,6 @@ import { defineQuery, type TypedQuery } from './typed-query.js';
  */
 const PAYLOAD_VERSION = computeAlgoHash('src/db/queries-parse-cache.ts', ['../types']);
 
-interface CachedPayload {
-  _v: string;
-  result: ExtractionResult;
-}
-
 /**
  * Structural-sanity schema for a cached `ExtractionResult`. Every
  * object is `.loose()` and only the long-stable load-bearing fields
@@ -61,8 +56,10 @@ interface CachedPayload {
  * cache hits into misses. It is strictly stronger than the prior bare
  * `Array.isArray(nodes) && Array.isArray(edges)` check: it confirms
  * every nodes / edges / refs element is an object carrying its core
- * id-kind-name keys, catching a corrupted element the array check
- * waved straight through into the extractor.
+ * id-kind-name keys, and that required result-level fields such as
+ * `errors` and `durationMs` are present. That catches corrupted
+ * payloads the old array-only check waved straight through into the
+ * extractor.
  *
  * Schema-VERSION drift is already handled upstream by `PAYLOAD_VERSION`
  * (a hash of types.ts); this guards the residual case — on-disk
@@ -96,8 +93,21 @@ const ExtractionResultSchema = z
     nodes: z.array(cachedNodeSchema),
     edges: z.array(cachedEdgeSchema),
     unresolvedReferences: z.array(cachedRefSchema),
+    errors: z.array(z.unknown()),
+    durationMs: z.number(),
   })
   .loose();
+const CachedExtractionResultSchema = z.custom<ExtractionResult>(
+  (value) => ExtractionResultSchema.safeParse(value).success,
+  {
+    message: 'Expected structurally valid cached ExtractionResult',
+  },
+);
+const CachedPayloadSchema = z.strictObject({
+  _v: z.string(),
+  result: CachedExtractionResultSchema,
+});
+type CachedPayload = z.infer<typeof CachedPayloadSchema>;
 
 /** Default LRU floor. Under this we don't evict; the cap is scaled ABOVE
  *  the live (current-version) entry count so a >20k-file repo doesn't
@@ -270,21 +280,15 @@ export function getCachedParse(args: GetCachedParseArgs): ExtractionResult | nul
   const row = qb.queries.getCachedParse.get({ contentHash, language, filePath });
   if (!row?.payload) return null;
   try {
-    const parsed = JSON.parse(row.payload) as CachedPayload | ExtractionResult;
+    const decoded: unknown = JSON.parse(row.payload);
+    const parsed = CachedPayloadSchema.safeParse(decoded);
     // Schema drift guard: a payload missing the version envelope is
     // a pre-versioned entry from before this guard shipped; treat it
     // as a miss so it gets re-parsed and re-cached in the new shape.
     // A version mismatch (older _v from a previous schema) is also a
     // miss — replaying it could surface fields that no longer exist.
-    if (!('_v' in parsed) || parsed._v !== PAYLOAD_VERSION) return null;
-    const result = parsed.result;
-    // Structural-sanity validation — a payload whose nodes / edges /
-    // refs aren't arrays of well-shaped objects (rare on-disk
-    // corruption of a current-version row) is treated as a miss and
-    // re-parsed cleanly. Validation-only: the original `result` is
-    // returned untouched.
-    if (!ExtractionResultSchema.safeParse(result).success) return null;
-    return result;
+    if (!parsed.success || parsed.data._v !== PAYLOAD_VERSION) return null;
+    return parsed.data.result;
   } catch (err) {
     logDebug('parse_cache: payload JSON parse failed (treating as miss)', {
       contentHash,

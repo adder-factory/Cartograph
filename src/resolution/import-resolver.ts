@@ -5,6 +5,7 @@
  */
 
 import * as path from 'node:path';
+import { z } from 'zod';
 import type { Language, Node } from '../types.js';
 import type { UnresolvedRef, ResolvedRef, ResolutionContext, ImportMapping, ReExport } from './types.js';
 import { applyAliases } from './path-aliases.js';
@@ -114,6 +115,13 @@ type WorkspacePackageExport = {
   readonly exports: unknown;
 };
 
+const workspacePackageJsonSchema = z.looseObject({
+  name: z.string().min(1),
+  exports: z.unknown().optional(),
+});
+
+type WorkspacePackageJson = z.infer<typeof workspacePackageJsonSchema>;
+
 const workspacePackageCache = new WeakMap<ResolutionContext, Map<string, WorkspacePackageExport>>();
 
 /**
@@ -183,12 +191,17 @@ function getWorkspacePackages(context: ResolutionContext): Map<string, Workspace
 function parseWorkspacePackageJson(content: string | null): { name: string; exports: unknown } | null {
   if (content === null) return null;
   try {
-    const parsed = JSON.parse(content) as { name?: unknown; exports?: unknown };
-    if (typeof parsed.name !== 'string' || parsed.name.length === 0) return null;
-    return { name: parsed.name, exports: parsed.exports ?? null };
+    const parsed: unknown = JSON.parse(content);
+    const result = workspacePackageJsonSchema.safeParse(parsed);
+    if (!result.success) return null;
+    return workspacePackageJsonFromSchema(result.data);
   } catch {
     return null;
   }
+}
+
+function workspacePackageJsonFromSchema(pkg: WorkspacePackageJson): { name: string; exports: unknown } {
+  return { name: pkg.name, exports: pkg.exports ?? null };
 }
 
 function packageNameFromSpecifier(importPath: string): string | null {
@@ -203,21 +216,57 @@ function packageNameFromSpecifier(importPath: string): string | null {
 
 function resolvePackageExportTarget(exportsField: unknown, subpath: string): string | null {
   if (typeof exportsField === 'string') return subpath === '.' ? exportsField : null;
-  if (exportsField === null || typeof exportsField !== 'object' || Array.isArray(exportsField)) return null;
-  const exportsRecord = exportsField as Record<string, unknown>;
-  const entry = exportsRecord[subpath];
-  return packageExportEntryToString(entry);
+  if (exportsField === null || typeof exportsField !== 'object') return null;
+  if (subpath === '.') {
+    const rootTarget = packageExportEntryToString(exportsField);
+    if (rootTarget !== null) return rootTarget;
+  }
+  if (Array.isArray(exportsField)) return null;
+  const entry = objectProperty(exportsField, subpath);
+  const exactTarget = packageExportEntryToString(entry);
+  return exactTarget ?? resolvePackageExportPatternTarget(exportsField, subpath);
 }
 
 function packageExportEntryToString(entry: unknown): string | null {
   if (typeof entry === 'string') return entry;
-  if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) return null;
-  const record = entry as Record<string, unknown>;
+  if (Array.isArray(entry)) {
+    for (const item of entry) {
+      const hit = packageExportEntryToString(item);
+      if (hit !== null) return hit;
+    }
+    return null;
+  }
+  if (entry === null || typeof entry !== 'object') return null;
   for (const key of ['types', 'import', 'default']) {
-    const hit = packageExportEntryToString(record[key]);
+    const hit = packageExportEntryToString(objectProperty(entry, key));
     if (hit !== null) return hit;
   }
   return null;
+}
+
+function objectProperty(value: object, key: string): unknown {
+  return Object.hasOwn(value, key) ? Reflect.get(value, key) : undefined;
+}
+
+function resolvePackageExportPatternTarget(exportsField: object, subpath: string): string | null {
+  for (const key of Object.keys(exportsField)) {
+    const wildcard = packageExportPatternWildcard(key, subpath);
+    if (wildcard === null) continue;
+    const target = packageExportEntryToString(objectProperty(exportsField, key));
+    if (target !== null) return target.replaceAll('*', wildcard);
+  }
+  return null;
+}
+
+function packageExportPatternWildcard(pattern: string, subpath: string): string | null {
+  const wildcardIndex = pattern.indexOf('*');
+  if (wildcardIndex < 0) return null;
+  const prefix = pattern.slice(0, wildcardIndex);
+  const suffix = pattern.slice(wildcardIndex + 1);
+  if (!subpath.startsWith(prefix) || !subpath.endsWith(suffix)) return null;
+  const wildcardEnd = subpath.length - suffix.length;
+  if (wildcardEnd < prefix.length) return null;
+  return subpath.slice(prefix.length, wildcardEnd);
 }
 
 function stripLeadingDotSlash(value: string): string {

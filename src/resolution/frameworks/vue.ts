@@ -8,6 +8,7 @@
 
 import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { hasPackageDependency } from './package-dependencies.js';
 
 const VUE_COMPILER_MACROS = new Set([
   'defineProps',
@@ -69,25 +70,14 @@ const MODULE_EXTENSIONS = [
 ];
 
 const SERVER_ROUTE_EXTENSIONS = new Set(['.ts', '.js', '.mjs', '.cjs']);
+const VUE_DEPENDENCIES = ['vue', 'nuxt', '@nuxt/kit'] as const;
 
 export const vueResolver: FrameworkResolver = {
   name: 'vue',
   languages: ['vue', 'typescript', 'javascript', 'tsx', 'jsx'],
 
   detect(context: ResolutionContext): boolean {
-    const packageJson = context.readFile('package.json');
-    if (packageJson) {
-      try {
-        const pkg = JSON.parse(packageJson) as {
-          dependencies?: Record<string, string>;
-          devDependencies?: Record<string, string>;
-        };
-        const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-        if (deps['vue'] || deps['nuxt'] || deps['@nuxt/kit']) return true;
-      } catch {
-        /* malformed package.json — fall back to file signal */
-      }
-    }
+    if (hasPackageDependency(context.readFile('package.json'), VUE_DEPENDENCIES)) return true;
     return context.getAllFiles().some((file) => file.endsWith('.vue') || file.endsWith('nuxt.config.ts'));
   },
 

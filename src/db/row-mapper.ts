@@ -18,7 +18,7 @@
  * declarative:
  *   - `bool01`     — SQLite's `INTEGER` 0/1 → JS `boolean`
  *   - `nullable`   — SQL `NULL` → JS `undefined` (so `compact` later strips the key)
- *   - `json`       — SQLite `TEXT` (JSON) → JS object/array, with `safeJsonParse` fallback
+ *   - `json`       — SQLite `TEXT` (JSON) → JS object/array, optionally schema-validated
  *   - `cast`       — arbitrary transform `(raw) => T[K]` for the rare unique case
  *   - bare `keyof Row` — direct passthrough
  *
@@ -26,12 +26,21 @@
  * mini-DSL deliberately stops at the four common patterns this codebase had.
  */
 
-import { safeJsonParse } from '../utils.js';
+import type { z } from 'zod';
 
 /**
  * One field's mapping spec. Either a bare column name (1:1) or an
  * object describing a transform.
  */
+type JsonFieldSpec<TVal, Row> = {
+  readonly col: keyof Row & string;
+  readonly json: true;
+  /** Returned when the column is null OR JSON.parse fails. */
+  readonly fallback?: TVal;
+  /** Validates the parsed JSON value before it crosses into typed row objects. */
+  readonly schema?: z.ZodType<Exclude<TVal, undefined>>;
+};
+
 type FieldSpec<TVal, Row> =
   | (keyof Row & string)
   | {
@@ -42,12 +51,7 @@ type FieldSpec<TVal, Row> =
       readonly col: keyof Row & string;
       readonly nullable: true;
     }
-  | {
-      readonly col: keyof Row & string;
-      readonly json: true;
-      /** Returned when the column is null OR JSON.parse fails. */
-      readonly fallback?: TVal;
-    }
+  | JsonFieldSpec<TVal, Row>
   | {
       readonly col: keyof Row & string;
       /**
@@ -76,7 +80,24 @@ export type Schema<T, Row> = {
  * `updateSqlSets` from each re-implementing the union-narrow.
  */
 function colOf<Row>(spec: FieldSpec<unknown, Row>): string {
-  return typeof spec === 'string' ? spec : (spec as { col: string }).col;
+  return typeof spec === 'string' ? spec : spec.col;
+}
+
+function readJsonField<Row>(spec: JsonFieldSpec<unknown, Row>, row: Row): unknown {
+  const raw = row[spec.col];
+  if (raw == null) return spec.fallback;
+  if (typeof raw !== 'string') return spec.fallback;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return spec.fallback;
+  }
+
+  if (!spec.schema) return parsed;
+  const result = spec.schema.safeParse(parsed);
+  return result.success ? result.data : spec.fallback;
 }
 
 /**
@@ -84,21 +105,18 @@ function colOf<Row>(spec: FieldSpec<unknown, Row>): string {
  * (or `undefined` to signal "strip this key from the output").
  */
 function readField<Row>(spec: FieldSpec<unknown, Row>, row: Row): unknown {
-  if (typeof spec === 'string') return row[spec as keyof Row];
-  const obj = spec as Record<string, unknown> & { col: keyof Row & string };
-  const raw = row[obj.col as keyof Row];
+  if (typeof spec === 'string') return row[spec];
+  const raw = row[spec.col];
   // bun:sqlite can return either `number` or `bigint` depending on
   // whether the connection is in `safeIntegers` mode (per-statement
   // toggle; off by default in cartograph). `raw === 1` alone would
   // silently false-read every boolean column if a future call site
   // enables safeIntegers — guard with both shapes.
-  if ('bool01' in obj) return raw === 1 || raw === 1n;
-  if ('nullable' in obj) return raw ?? undefined;
-  if ('json' in obj) {
-    return raw == null ? obj['fallback'] : safeJsonParse(raw as string, obj['fallback']);
-  }
+  if ('bool01' in spec) return raw === 1 || raw === 1n;
+  if ('nullable' in spec) return raw ?? undefined;
+  if ('json' in spec) return readJsonField(spec, row);
   // 'cast' in obj
-  return (obj['cast'] as (raw: unknown) => unknown)(raw);
+  return spec.cast(raw);
 }
 
 /**
@@ -108,9 +126,8 @@ function readField<Row>(spec: FieldSpec<unknown, Row>, row: Row): unknown {
  */
 function writeField<Row>(spec: FieldSpec<unknown, Row>, value: unknown): unknown {
   if (typeof spec === 'string') return value === undefined ? null : value;
-  const arm = spec as Record<string, unknown>;
-  if ('bool01' in arm) return value ? 1 : 0;
-  if ('json' in arm) return value === undefined ? null : JSON.stringify(value);
+  if ('bool01' in spec) return value ? 1 : 0;
+  if ('json' in spec) return value === undefined ? null : JSON.stringify(value);
   // 'nullable' or 'cast' — read-side cast narrows the type, not the
   // shape, so writes pass through with undefined → null for safety.
   return value === undefined ? null : value;

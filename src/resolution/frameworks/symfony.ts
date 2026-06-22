@@ -11,6 +11,7 @@ import type { Language, Node } from '../../types.js';
 import type { UnresolvedReference } from '../../extraction/types.js';
 import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
+import { hasComposerDependency } from './composer-manifest.js';
 import { makeFrameworkNodeAtOffset } from './node-builders.js';
 import { makeFrameworkReference } from './reference.js';
 
@@ -34,18 +35,8 @@ export const symfonyResolver: FrameworkResolver = {
 
   detect(context: ResolutionContext): boolean {
     if (context.fileExists('symfony.lock') || context.fileExists('bin/console')) return true;
-    const composer = context.readFile('composer.json');
-    if (composer) {
-      try {
-        const pkg = JSON.parse(composer) as {
-          require?: Record<string, string>;
-          'require-dev'?: Record<string, string>;
-        };
-        const deps = { ...pkg.require, ...pkg['require-dev'] };
-        if (deps['symfony/framework-bundle'] || deps['symfony/routing']) return true;
-      } catch {
-        return false;
-      }
+    if (hasComposerDependency(context.readFile('composer.json'), ['symfony/framework-bundle', 'symfony/routing'])) {
+      return true;
     }
     return context.fileExists('config/routes.yaml') || context.fileExists('config/routes.yml');
   },

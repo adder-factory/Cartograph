@@ -268,6 +268,8 @@ function makeRowPipeline<TRow>(
 // ───────────────────────────────────────────────────────────────────────────
 
 const NUMERIC_STRING_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
+const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 /** Fields that accept a number but reject a string — probe-based so
  *  it works on any zod version / wrapper chain (optional, nullable,
@@ -292,14 +294,22 @@ function makeRowNormalizer(db: SqliteDatabase, row: ZodType): <T>(raw: T) => T {
     if (raw === undefined || raw === null || typeof raw !== 'object') return raw;
     const record = raw as Record<string, unknown>;
     for (const key of numericKeys) {
-      const value = record[key];
-      const convertible =
-        (typeof value === 'string' && NUMERIC_STRING_RE.test(value)) ||
-        (typeof value === 'bigint' && value <= BigInt(Number.MAX_SAFE_INTEGER));
-      if (convertible) record[key] = Number(value);
+      const coerced = postgresNumericToSafeNumber(record[key]);
+      if (coerced !== undefined) record[key] = coerced;
     }
     return raw;
   };
+}
+
+function postgresNumericToSafeNumber(value: unknown): number | undefined {
+  if (typeof value === 'bigint') {
+    return value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT ? Number(value) : undefined;
+  }
+  if (typeof value !== 'string' || !NUMERIC_STRING_RE.test(value)) return undefined;
+  const coerced = Number(value);
+  if (!Number.isFinite(coerced)) return undefined;
+  if (Number.isInteger(coerced) && !Number.isSafeInteger(coerced)) return undefined;
+  return coerced;
 }
 
 /** Convenience type aliases — `TypedQueryParams<typeof q>` resolves the param shape. */

@@ -10,12 +10,53 @@ import { clearVecTables } from './vec-helpers.js';
 import { clearPgvectorTables } from './pgvector-helpers.js';
 import { bindingsFromObject, insertSqlParts, mapRow, updateSqlSets, type Schema } from './row-mapper.js';
 import { defineQuery, type TypedQuery } from './typed-query.js';
-import type { UnresolvedReference } from '../extraction/types.js';
-import type { Node, Edge, FileRecord, NodeKind, EdgeKind, Language } from '../types.js';
+import type { ExtractionError, UnresolvedReference } from '../extraction/types.js';
+import type { Node, Edge, FileRecord, NodeKind, EdgeKind, Language, DecoratorArgsEntry } from '../types.js';
 import type { GraphStats } from './types.js';
 import { buildNameSubwords } from '../utils.js';
 import { logWarn } from '../errors.js';
 import { clearStructural } from './queries-clear.js';
+
+const stringArrayJsonSchema = z.array(z.string());
+const numberArrayJsonSchema = z.array(z.number());
+const recordStringJsonSchema = z.record(z.string(), z.string());
+const edgeMetadataJsonSchema = z.record(z.string(), z.unknown());
+const decoratorArgsEntryInputJsonSchema = z.object({
+  name: z.string(),
+  argStrings: stringArrayJsonSchema,
+  argIdents: stringArrayJsonSchema,
+  namedArgs: recordStringJsonSchema.optional(),
+});
+const decoratorArgsEntryJsonSchema = decoratorArgsEntryInputJsonSchema.transform((entry): DecoratorArgsEntry => {
+  const out: DecoratorArgsEntry = {
+    name: entry.name,
+    argStrings: entry.argStrings,
+    argIdents: entry.argIdents,
+  };
+  if (entry.namedArgs !== undefined) out.namedArgs = entry.namedArgs;
+  return out;
+});
+const decoratorArgsJsonSchema = z.array(decoratorArgsEntryJsonSchema);
+const extractionErrorInputJsonSchema = z.object({
+  message: z.string(),
+  filePath: z.string().optional(),
+  line: z.number().optional(),
+  column: z.number().optional(),
+  severity: z.enum(['error', 'warning']),
+  code: z.string().optional(),
+});
+const extractionErrorJsonSchema = extractionErrorInputJsonSchema.transform((entry): ExtractionError => {
+  const out: ExtractionError = {
+    message: entry.message,
+    severity: entry.severity,
+  };
+  if (entry.filePath !== undefined) out.filePath = entry.filePath;
+  if (entry.line !== undefined) out.line = entry.line;
+  if (entry.column !== undefined) out.column = entry.column;
+  if (entry.code !== undefined) out.code = entry.code;
+  return out;
+});
+const extractionErrorsJsonSchema = z.array(extractionErrorJsonSchema);
 
 /**
  * Database row types (snake_case from SQLite)
@@ -123,8 +164,8 @@ const NODE_SCHEMA: Schema<Node, NodeRow> = {
   isExported: { col: 'is_exported', bool01: true },
   isAsync: { col: 'is_async', bool01: true },
   isStatic: { col: 'is_static', bool01: true },
-  decorators: { col: 'decorators', json: true },
-  decoratorArgs: { col: 'decorator_args', json: true },
+  decorators: { col: 'decorators', json: true, schema: stringArrayJsonSchema },
+  decoratorArgs: { col: 'decorator_args', json: true, schema: decoratorArgsJsonSchema },
   updatedAt: 'updated_at',
   centrality: { col: 'centrality', nullable: true },
   betweenness: { col: 'betweenness', nullable: true },
@@ -140,13 +181,13 @@ export const UNRESOLVED_REF_SCHEMA: Schema<UnresolvedReference, UnresolvedRefRow
   referenceKind: { col: 'reference_kind', cast: (v) => v as EdgeKind },
   line: 'line',
   column: 'col',
-  candidates: { col: 'candidates', json: true },
+  candidates: { col: 'candidates', json: true, schema: stringArrayJsonSchema },
   filePath: 'file_path',
   language: { col: 'language', cast: (v) => v as Language },
   // Default 1 so legacy rows behave like single-site refs even before
   // the migration's default kicks in.
   siteCount: { col: 'site_count', cast: (v) => (v as number | null) ?? 1 },
-  extraLines: { col: 'extra_lines', json: true },
+  extraLines: { col: 'extra_lines', json: true, schema: numberArrayJsonSchema },
 };
 
 /** @internal Exported for cluster files (`queries-edges.ts`); see `NodeRow`. */
@@ -154,7 +195,7 @@ export const EDGE_SCHEMA: Schema<Edge, EdgeRow> = {
   source: 'source',
   target: 'target',
   kind: { col: 'kind', cast: (v) => v as EdgeKind },
-  metadata: { col: 'metadata', json: true },
+  metadata: { col: 'metadata', json: true, schema: edgeMetadataJsonSchema },
   line: { col: 'line', nullable: true },
   column: { col: 'col', nullable: true },
   // The `confidence` column is NOT NULL with DB-side default 'EXTRACTED'
@@ -190,7 +231,7 @@ export const FILE_RECORD_SCHEMA: Schema<FileRecord, FileRow> = {
   modifiedAt: 'modified_at',
   indexedAt: 'indexed_at',
   nodeCount: 'node_count',
-  errors: { col: 'errors', json: true },
+  errors: { col: 'errors', json: true, schema: extractionErrorsJsonSchema },
   // commitCount / loc default to 0 (not undefined) so the surrounding
   // Compact<>-typed assignment expects a number; cast handles the
   // null → 0 collapse.

@@ -12,10 +12,12 @@ import type { UnresolvedReference } from '../../extraction/types.js';
 import { stripCommentsForRegex } from '../../utils.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
 import { makeFrameworkNodeAtOffset } from './node-builders.js';
+import { hasPackageDependency } from './package-dependencies.js';
 import { readQuoted } from './quoted.js';
 import { makeFrameworkReference } from './reference.js';
 
 const ANGULAR_LANGUAGES = ['typescript'] as const;
+const ANGULAR_DEPENDENCIES = ['@angular/core', '@angular/router', '@angular/cli'] as const;
 const ROUTE_PATH_RE = /\bpath\s*:\s*(['"])(.*?)\1/g;
 const COMPONENT_RE = /\bcomponent\s*:\s*([A-Z][A-Za-z0-9_$]*)\b/;
 
@@ -26,18 +28,7 @@ export const angularResolver: FrameworkResolver = {
 
   detect(context: ResolutionContext): boolean {
     if (context.fileExists('angular.json')) return true;
-    const packageJson = context.readFile('package.json');
-    if (!packageJson) return false;
-    try {
-      const pkg = JSON.parse(packageJson) as {
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-      };
-      const deps = { ...pkg.dependencies, ...pkg.devDependencies };
-      return Boolean(deps['@angular/core'] || deps['@angular/router'] || deps['@angular/cli']);
-    } catch {
-      return false;
-    }
+    return hasPackageDependency(context.readFile('package.json'), ANGULAR_DEPENDENCIES);
   },
 
   resolve(_ref: UnresolvedRef, _context: ResolutionContext): ResolvedRef | null {

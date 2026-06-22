@@ -22,6 +22,8 @@ import { z } from 'zod';
 import { createDatabase, type SqliteDatabase } from '../src/db/sqlite-adapter.js';
 import {
   defineQuery,
+  defineDynamicQuery,
+  getDefinedQueryRegistry,
   TypedQueryParamsError,
   TypedQueryRowError,
   type TypedQuery,
@@ -115,6 +117,51 @@ function _typeAssertions(q: ReturnType<typeof findNodeById>) {
   const rows: Row[] = q.all({ id: 'x' });
   return { params, row, rows };
 }
+
+describe('defineQuery registry gate', () => {
+  const registrySql = 'SELECT 42 AS answer';
+  let previousRegistryEnv: string | undefined;
+
+  beforeEach(() => {
+    previousRegistryEnv = process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'];
+  });
+
+  afterEach(() => {
+    if (previousRegistryEnv === undefined) delete process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'];
+    else process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'] = previousRegistryEnv;
+  });
+
+  it('does not register queries when the registry gate is disabled', () => {
+    delete process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'];
+    const before = getDefinedQueryRegistry().length;
+
+    defineQuery({
+      sql: registrySql,
+      params: z.object({}),
+      row: z.object({ answer: z.number() }),
+    });
+
+    expect(getDefinedQueryRegistry()).toHaveLength(before);
+  });
+
+  it('registers SQL and a useful caller source when the gate is enabled', () => {
+    process.env['CARTOGRAPH_REGISTER_DEFINED_QUERIES'] = '1';
+    const before = getDefinedQueryRegistry().length;
+
+    defineQuery({
+      sql: registrySql,
+      params: z.object({}),
+      row: z.object({ answer: z.number() }),
+    });
+
+    const after = getDefinedQueryRegistry();
+    const last = after.at(-1)!;
+    expect(after).toHaveLength(before + 1);
+    expect(last.sql).toBe(registrySql);
+    expect(last.source).toMatch(/\.ts:\d+$/);
+    expect(last.source).not.toBe('<unknown>');
+  });
+});
 
 // ---- tests ----------------------------------------------------------------
 
@@ -322,6 +369,86 @@ describe('typed-query wrapper', () => {
   });
 });
 
+describe('dynamic typed-query wrapper', () => {
+  let db: SqliteDatabase;
+
+  beforeEach(() => {
+    db = makeDb();
+    seed(db, [
+      { id: 'n_1', kind: 'function', name: 'parseFoo', is_exported: 1 },
+      { id: 'n_2', kind: 'function', name: 'bar', is_exported: 0 },
+      { id: 'n_3', kind: 'class', name: 'Baz', is_exported: 1 },
+    ]);
+  });
+
+  afterEach(() => {
+    db.close();
+  });
+
+  const dynamicByKind = defineDynamicQuery({
+    params: z.object({
+      kind: z.enum(NODE_KINDS),
+      descending: z.boolean().default(false),
+    }),
+    row: NodeRowSchema,
+    build: ({ kind, descending }) => ({
+      sql: `SELECT id, kind, name, is_exported FROM nodes WHERE kind = @kind ORDER BY id ${
+        descending ? 'DESC' : 'ASC'
+      }`,
+      bindings: { kind },
+    }),
+  });
+
+  it('validates params, builds SQL, and returns rows', () => {
+    const rows = dynamicByKind(db).all({ kind: 'function', descending: true });
+
+    expect(rows.map((r) => r.id)).toEqual(['n_2', 'n_1']);
+  });
+
+  it('supports get(), iterate(), and run()', () => {
+    const dynamicInsert = defineDynamicQuery({
+      params: InsertNodeParams,
+      row: z.never(),
+      build: (params) => ({
+        sql: 'INSERT INTO nodes (id, kind, name, is_exported) VALUES (@id, @kind, @name, @is_exported)',
+        bindings: params,
+      }),
+    })(db);
+    expect(dynamicInsert.run({ id: 'n_4', kind: 'method', name: 'm', is_exported: 0 }).changes).toBe(1);
+
+    const q = dynamicByKind(db);
+    expect(q.get({ kind: 'method' })?.id).toBe('n_4');
+    expect([...q.iterate({ kind: 'function' })].map((r) => r.id)).toEqual(['n_1', 'n_2']);
+  });
+
+  it('throws the dynamic SQL params error on invalid params', () => {
+    const q = dynamicByKind(db);
+
+    // @ts-expect-error — kind must be one of NODE_KINDS
+    expect(() => q.all({ kind: 'route' })).toThrow(TypedQueryParamsError);
+  });
+
+  it("'all' mode catches row drift beyond the first dynamic row", () => {
+    db.prepare('INSERT INTO nodes (id, kind, name, is_exported) VALUES (?, ?, ?, ?)').run(
+      'n_zlater',
+      'function',
+      'broken',
+      2,
+    );
+    const q = defineDynamicQuery({
+      params: z.object({}),
+      row: NodeRowSchema,
+      options: { validateRows: 'all' },
+      build: () => ({
+        sql: 'SELECT id, kind, name, is_exported FROM nodes WHERE kind = @kind ORDER BY id',
+        bindings: { kind: 'function' },
+      }),
+    })(db);
+
+    expect(() => q.all({})).toThrow(TypedQueryRowError);
+  });
+});
+
 describe('postgres numeric normalization (dialect-gated)', () => {
   // The PG wire protocol returns int8 (every COUNT/SUM) and `numeric`
   // as STRINGS, and Bun.SQL exposes no column types — so the wrapper
@@ -362,6 +489,22 @@ describe('postgres numeric normalization (dialect-gated)', () => {
     expect(out[1]!.id).toBe('456');
   });
 
+  it('rejects integer strings that cannot be represented safely as numbers', () => {
+    const q = defineQuery({ sql: 'SELECT 1', params: z.object({}), row: ROW })(
+      fakePgDb([{ n: '9007199254740993', id: '123', label: null }]),
+    );
+
+    expect(() => q.get({})).toThrow(TypedQueryRowError);
+  });
+
+  it('rejects bigint values outside the JavaScript safe-integer range', () => {
+    const q = defineQuery({ sql: 'SELECT 1', params: z.object({}), row: ROW })(
+      fakePgDb([{ n: BigInt(Number.MIN_SAFE_INTEGER) - 2n, id: '123', label: null }]),
+    );
+
+    expect(() => q.get({})).toThrow(TypedQueryRowError);
+  });
+
   it('leaves sqlite untouched (identity fast path)', () => {
     const db = createDatabase(':memory:').db;
     db.exec('CREATE TABLE t (id TEXT, n INTEGER)');
@@ -375,5 +518,62 @@ describe('postgres numeric normalization (dialect-gated)', () => {
     expect(row.id).toBe('001');
     expect(row.n).toBe(5);
     db.close();
+  });
+
+  it('handles decimals, scientific notation, nullable wrappers, and safe bigint values', () => {
+    const q = defineQuery({
+      sql: 'SELECT 1',
+      params: z.object({}),
+      row: z.object({
+        decimal: z.number().nullable(),
+        sci: z.number(),
+        count: z.number(),
+        id: z.string(),
+      }),
+    })(
+      fakePgDb([
+        {
+          decimal: '3.5',
+          sci: '1e2',
+          count: BigInt(Number.MAX_SAFE_INTEGER),
+          id: '001',
+        },
+      ]),
+    );
+
+    expect(q.get({})).toEqual({
+      decimal: 3.5,
+      sci: 100,
+      count: Number.MAX_SAFE_INTEGER,
+      id: '001',
+    });
+  });
+
+  it('leaves non-object row schemas on the identity path', () => {
+    const q = defineQuery({
+      sql: 'SELECT 1',
+      params: z.object({}),
+      row: z.number(),
+    })(fakePgDb([7]));
+
+    expect(q.get({})).toBe(7);
+  });
+
+  it('rejects numeric strings that coerce to non-finite numbers', () => {
+    const q = defineQuery({ sql: 'SELECT 1', params: z.object({}), row: ROW })(
+      fakePgDb([{ n: '1e309', id: '123', label: null }]),
+    );
+
+    expect(() => q.get({})).toThrow(TypedQueryRowError);
+  });
+
+  it('normalizes Postgres numeric fields for dynamic queries too', () => {
+    const q = defineDynamicQuery({
+      params: z.object({}),
+      row: z.object({ n: z.number(), id: z.string() }),
+      build: () => ({ sql: 'SELECT n, id FROM stats', bindings: {} }),
+    })(fakePgDb([{ n: '12', id: '001' }]));
+
+    expect(q.get({})).toEqual({ n: 12, id: '001' });
   });
 });

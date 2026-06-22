@@ -16,6 +16,7 @@ import { withDerivedPostgresSchema } from '../../db/project-ownership.js';
 import { CURRENT_SCHEMA_VERSION } from '../../db/migrations.js';
 import { createDatabase, readSqliteRuntimeCapabilities } from '../../db/sqlite-adapter.js';
 import { configuredModelFilesFromLlm, LLM_TIER_KEYS, type ConfiguredModelFile } from '../../features/backend/index.js';
+import { asJsonObject } from '../../json-object.js';
 import { MODELS_DIR_DEFAULT } from '../../llm/recommended-models.js';
 import { formatBytes } from '../../utils.js';
 import type { CheckResult } from './contract.js';
@@ -48,6 +49,14 @@ function parseSchemaVersion(raw: number | string | undefined): number | null {
   if (typeof raw === 'number') return Number.isSafeInteger(raw) ? raw : null;
   if (typeof raw === 'string') return parseUnsignedDecimalInteger(raw);
   return null;
+}
+
+function ownField(record: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(record, key) ? record[key] : undefined;
+}
+
+function ownObjectField(record: Record<string, unknown>, key: string): Record<string, unknown> | null {
+  return asJsonObject(ownField(record, key));
 }
 
 function compareSemver(a: string, b: string): number {
@@ -150,10 +159,10 @@ export async function checkModels(llm: Record<string, unknown> | null): Promise<
 }
 
 function hasConfiguredLlmTier(llm: Record<string, unknown> | null): boolean {
-  if (!llm) return false;
+  const root = asJsonObject(llm);
+  if (!root) return false;
   return LLM_TIER_KEYS.some((tier) => {
-    const block = llm[tier];
-    return typeof block === 'object' && block !== null;
+    return ownObjectField(root, tier) !== null;
   });
 }
 
@@ -217,7 +226,7 @@ export async function checkProjectConfig(projectPath: string): Promise<CheckResu
     };
   }
 
-  const llm = runtimeConfig['llm'] as Record<string, unknown> | undefined;
+  const llm = ownObjectField(runtimeConfig, 'llm');
   if (!llm || Object.keys(llm).length === 0) {
     return {
       id: 'project-config',
@@ -618,10 +627,9 @@ export async function readLlmFromConfig(projectPath: string): Promise<Record<str
     .catch(() => false);
   if (!configExists) return null;
   try {
-    const parsed = loadConfig(projectPath) as unknown as Record<string, unknown>;
-    const llm = parsed['llm'] as Record<string, unknown> | undefined;
-    if (!llm || typeof llm !== 'object') return null;
-    return llm;
+    const parsed = asJsonObject(loadConfig(projectPath));
+    if (!parsed) return null;
+    return ownObjectField(parsed, 'llm');
   } catch {
     return null;
   }

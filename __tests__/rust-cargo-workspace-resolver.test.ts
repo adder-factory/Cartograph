@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { getCargoWorkspaceCrateMap } from '../src/resolution/frameworks/cargo-workspace.js';
 import { rustResolver } from '../src/resolution/frameworks/rust.js';
+import type { ResolutionContext } from '../src/resolution/types.js';
 import type { Node } from '../src/types.js';
 
 function node(id: string, name: string, kind: Node['kind'], filePath: string): Node {
@@ -19,7 +20,7 @@ function node(id: string, name: string, kind: Node['kind'], filePath: string): N
   };
 }
 
-function context(files: string[], reads: Record<string, string>, nodes: Node[]) {
+function context(files: string[], reads: Record<string, string>, nodes: Node[]): ResolutionContext {
   return {
     readFile: (filePath: string) => reads[filePath] ?? null,
     getAllFiles: () => files,
@@ -31,7 +32,7 @@ function context(files: string[], reads: Record<string, string>, nodes: Node[]) 
     getNodesByLowerName: () => [],
     getImportMappings: () => [],
     getProjectRoot: () => '/repo',
-  } as any;
+  };
 }
 
 describe('Rust Cargo workspace resolver', () => {
