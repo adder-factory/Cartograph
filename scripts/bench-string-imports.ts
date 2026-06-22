@@ -82,7 +82,7 @@ async function indexClean(opts: { enableStringImports: boolean }): Promise<{
     config: {
       llm: { endpoint: '' },
       enableStringImports: opts.enableStringImports,
-    } as any,
+    },
   });
 
   const t0 = performance.now();

@@ -343,4 +343,44 @@ describe('unused deps analyzer - tooling deps', () => {
       cleanup(tmpDir);
     }
   });
+
+  it('ignores malformed object-form bin entries instead of marking the package used', async () => {
+    const tmpDir = tempDir();
+    try {
+      const nmDir = path.join(tmpDir, 'node_modules', 'bad-bin-pkg');
+      fs.mkdirSync(nmDir, { recursive: true });
+
+      fs.writeFileSync(
+        path.join(nmDir, 'package.json'),
+        JSON.stringify({
+          name: 'bad-bin-pkg',
+          bin: {
+            'bad-bin': 1,
+          },
+        }),
+      );
+
+      fs.writeFileSync(
+        path.join(tmpDir, 'package.json'),
+        JSON.stringify({
+          devDependencies: { 'bad-bin-pkg': '^1.0.0' },
+          scripts: { build: 'bad-bin' },
+        }),
+      );
+
+      fs.writeFileSync(path.join(tmpDir, 'index.ts'), `const x = 1;`);
+
+      const cg = Cartograph.initSync(tmpDir);
+      await cg.indexAll();
+
+      const result = analyzeUnusedDeps(cg.queries, tmpDir);
+      cg.close();
+
+      expect(result.declaredDev).toContain('bad-bin-pkg');
+      expect(result.used).not.toContain('bad-bin-pkg');
+      expect(result.unusedDev).toContain('bad-bin-pkg');
+    } finally {
+      cleanup(tmpDir);
+    }
+  });
 });

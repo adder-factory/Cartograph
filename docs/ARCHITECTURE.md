@@ -87,11 +87,26 @@ These are the current owner modules future sessions should preserve:
   runs through `check:architecture` plus the aggregate `check` script. Keep
   high-signal ownership rules there when they can be checked statically:
   adapter direction, resolver registration/language gates, discovery-policy
-  ownership, broad bucket bans, and central-file growth budgets.
+  ownership, broad bucket bans, central-file growth budgets, and the CLI
+  adapter exit-code ratchet — every `src/features/*/cli.ts` must signal
+  expected failures through `process.exitCode`, never `process.exit()`, so the
+  event loop drains and teardown runs. The gate derives the adapter set from
+  the filesystem, so new CLI slices are covered automatically.
 
 Avoid adding new "misc" or "shared" buckets unless the contract is genuinely
 cross-feature and already has multiple consumers. Prefer putting helpers next
 to the feature that owns the behavior.
+
+## Decision Records
+
+Durable architecture decisions live in `docs/decisions/` as numbered decision
+records. Use a decision record when the choice should outlive a single code
+review: default runtime/backend posture, packaging constraints, storage
+direction, architecture gates, or ownership rules with meaningful tradeoffs.
+
+Keep this file as the current standing rules. Keep decision records as the
+"why" behind specific choices. When a decision changes a standing rule, update
+both the decision record and this architecture document in the same change.
 
 ## Slice Shape
 
