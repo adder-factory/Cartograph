@@ -27,7 +27,7 @@ const NODE_BATCH_INSERT_SQL = `
     id, kind, name, qualified_name, file_path, language,
     start_line, end_line, start_column, end_column,
     docstring, signature, visibility,
-    is_exported, is_async, is_static,
+    is_exported, is_default_export, is_async, is_static,
     decorators, decorator_args, updated_at,
     centrality, betweenness, body_hash, name_subwords
   )
@@ -35,7 +35,7 @@ const NODE_BATCH_INSERT_SQL = `
     id, kind, name, qualified_name, file_path, language,
     start_line, end_line, start_column, end_column,
     docstring, signature, visibility,
-    is_exported, is_async, is_static,
+    is_exported, is_default_export, is_async, is_static,
     decorators, decorator_args, updated_at,
     centrality, betweenness, body_hash, name_subwords
   FROM jsonb_to_recordset($1::jsonb) AS r(
@@ -53,6 +53,7 @@ const NODE_BATCH_INSERT_SQL = `
     signature text,
     visibility text,
     is_exported integer,
+    is_default_export integer,
     is_async integer,
     is_static integer,
     decorators text,
@@ -77,6 +78,7 @@ const NODE_BATCH_INSERT_SQL = `
     signature = EXCLUDED.signature,
     visibility = EXCLUDED.visibility,
     is_exported = EXCLUDED.is_exported,
+    is_default_export = EXCLUDED.is_default_export,
     is_async = EXCLUDED.is_async,
     is_static = EXCLUDED.is_static,
     decorators = EXCLUDED.decorators,
@@ -288,6 +290,7 @@ async function handleNativeBatchRun(inputSql: string, paramSets: unknown[][]): P
       signature: row['signature'],
       visibility: row['visibility'],
       is_exported: row['isExported'],
+      is_default_export: row['isDefaultExport'],
       is_async: row['isAsync'],
       is_static: row['isStatic'],
       decorators: row['decorators'],

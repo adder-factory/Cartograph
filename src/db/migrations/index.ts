@@ -100,6 +100,7 @@ import { MIGRATION as MIG_071 } from './071-nodes-name-nocase-index.js';
 import { MIGRATION as MIG_072 } from './072-unresolved-from-name-index.js';
 import { MIGRATION as MIG_073 } from './073-mcp-session-client.js';
 import { MIGRATION as MIG_074 } from './074-summary-skips.js';
+import { MIGRATION as MIG_075 } from './075-nodes-is-default-export.js';
 
 interface ModuleRef {
   /**
@@ -194,6 +195,7 @@ const REGISTERED_MODULES: readonly ModuleRef[] = [
   { filename: '072-unresolved-from-name-index.ts', module: MIG_072 },
   { filename: '073-mcp-session-client.ts', module: MIG_073 },
   { filename: '074-summary-skips.ts', module: MIG_074 },
+  { filename: '075-nodes-is-default-export.ts', module: MIG_075 },
 ];
 
 /** Strict 3-digit prefix on each migration filename. */

@@ -147,6 +147,9 @@ export interface Node {
   signature?: string;
   visibility?: 'public' | 'private' | 'protected' | 'internal';
   isExported?: boolean;
+  /** True for an ES module default export (`export default …`). Only the
+   *  JS/TS extractor populates it; other languages leave it undefined. */
+  isDefaultExport?: boolean;
   isAsync?: boolean;
   isStatic?: boolean;
   decorators?: string[];

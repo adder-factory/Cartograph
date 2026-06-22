@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   signature TEXT,
   visibility TEXT,
   is_exported INTEGER DEFAULT 0,
+  is_default_export INTEGER DEFAULT 0,
   is_async INTEGER DEFAULT 0,
   is_static INTEGER DEFAULT 0,
   decorators TEXT,

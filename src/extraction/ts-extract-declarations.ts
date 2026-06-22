@@ -311,6 +311,9 @@ export function collectFunctionMetadata(
     signature: ext.extractor.getSignature?.(node, ext.source),
     visibility: ext.extractor.getVisibility?.(node),
     isExported: opts.isExported ? ext.extractor.isExported?.(node, ext.source) : undefined,
+    // Default-export-ness is only meaningful for top-level (exportable)
+    // declarations — gate it on the same `opts.isExported` flag.
+    isDefaultExport: opts.isExported ? ext.extractor.isDefaultExport?.(node, ext.source) : undefined,
     isAsync: ext.extractor.isAsync?.(node),
     isStatic: ext.extractor.isStatic?.(node),
   });
@@ -690,8 +693,16 @@ export function tsExtractClass(ext: TreeSitterExtractor, node: SyntaxNode, kind:
   const docstring = getPrecedingDocstring(node, ext.source);
   const visibility = ext.extractor.getVisibility?.(node);
   const isExported = ext.extractor.isExported?.(node, ext.source);
+  // Gate default-export-ness on exportedness, matching collectFunctionMetadata
+  // (a default export is always exported; keeps the invariant in one shape).
+  const isDefaultExport = isExported ? ext.extractor.isDefaultExport?.(node, ext.source) : undefined;
 
-  const classNode = ext.createNode({ kind, name, node, extra: compact({ docstring, visibility, isExported }) });
+  const classNode = ext.createNode({
+    kind,
+    name,
+    node,
+    extra: compact({ docstring, visibility, isExported, isDefaultExport }),
+  });
   if (!classNode) return;
 
   extractInheritance(ext, node, classNode.id);
