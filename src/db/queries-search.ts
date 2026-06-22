@@ -55,6 +55,7 @@ const NodeRowSchema = z.object({
   signature: z.string().nullable(),
   visibility: z.string().nullable(),
   is_exported: z.number(),
+  is_default_export: z.number(),
   is_async: z.number(),
   is_static: z.number(),
   decorators: z.string().nullable(),

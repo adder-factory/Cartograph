@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS nodes (
     signature TEXT,
     visibility TEXT,
     is_exported INTEGER DEFAULT 0,
+    is_default_export INTEGER DEFAULT 0, -- 1 for `export default …` (JS/TS only)
     is_async INTEGER DEFAULT 0,
     is_static INTEGER DEFAULT 0,
     decorators TEXT, -- JSON array of bare decorator names

@@ -352,12 +352,21 @@ function isTanstackRouteExport(filePath: string, name: string): boolean {
  * segment is matched anywhere in the path so monorepo / `src/app/`
  * layouts (e.g. `packages/web/app/routes/...`) are covered.
  *
- * Known limitation: the default route/root component is recognised by its
- * `component` kind, but the TS extractor only classifies PascalCase + JSX
- * *function declarations* as `component` — an arrow-function default
- * component (`const Foo = () => <JSX/>; export default Foo`) is kind
- * `function` and will not be exempted here. Revisit if/when
- * `ts-extract-declarations.ts` gains arrow-component classification.
+ * The default export of each convention file is itself a convention (the
+ * route/root component, or the entry.server request handler) but keeps an
+ * arbitrary LOCAL name in the graph, so it is recognised via the node's
+ * `isDefaultExport` flag rather than by name. Ordinary named exports
+ * (helpers, even a named sub-component) stay flaggable — only the
+ * documented convention names and the default export are exempt.
+ *
+ * Out of scope (still reported, by design): a route module mapped to a
+ * path OUTSIDE `app/routes/` via a custom `app/routes.ts` config — that
+ * needs parsing the config, which this static path predicate cannot do.
+ * Also out of scope: a component default-exported via the re-export form
+ * `export { Foo as default }` — the extractor sets `isDefaultExport` only
+ * for the `export default <decl>` form, so that node reads as non-default
+ * here. React Router route modules conventionally use `export default
+ * function`, so this is a rare gap, not a regression.
  */
 const RR_ROUTE_DIR_RE = /(?:^|\/)app\/routes\/.*\.[jt]sx?$/;
 const RR_ROOT_FILE_RE = /(?:^|\/)app\/root\.[jt]sx?$/;
@@ -393,25 +402,27 @@ const RR_ENTRY_SERVER_EXPORTS: ReadonlySet<string> = new Set([
   'streamTimeout',
 ]);
 
-function isReactRouterConventionExport(filePath: string, name: string, kind?: string): boolean {
-  // The default route/root component is recorded by its local name with
-  // kind=component (no default-export flag is persisted), so any
-  // component-kind export in a convention file is treated as conventional.
-  if (RR_ROUTE_DIR_RE.test(filePath)) return RR_ROUTE_EXPORTS.has(name) || kind === 'component';
-  if (RR_ROOT_FILE_RE.test(filePath)) return RR_ROOT_EXPORTS.has(name) || kind === 'component';
-  if (RR_ENTRY_SERVER_RE.test(filePath)) return RR_ENTRY_SERVER_EXPORTS.has(name);
+function isReactRouterConventionExport(filePath: string, name: string, isDefaultExport: boolean): boolean {
+  // The default export of a convention file is the route/root component or
+  // the entry.server handler — consumed by the framework, named arbitrarily
+  // — so exempt it via the flag. Named exports are exempt only when they
+  // match a documented convention name (so a named helper/sub-component in a
+  // route module stays flaggable).
+  if (RR_ROUTE_DIR_RE.test(filePath)) return isDefaultExport || RR_ROUTE_EXPORTS.has(name);
+  if (RR_ROOT_FILE_RE.test(filePath)) return isDefaultExport || RR_ROOT_EXPORTS.has(name);
+  if (RR_ENTRY_SERVER_RE.test(filePath)) return isDefaultExport || RR_ENTRY_SERVER_EXPORTS.has(name);
   return false;
 }
 
 /**
  * True when an exported symbol is consumed by framework convention (no
- * graph edge possible). `kind` (the node kind) is optional — it is only
- * consulted to recognise default route/root components, which carry an
- * arbitrary local name but a stable `component` kind.
+ * graph edge possible). `isDefaultExport` (the node's default-export flag)
+ * is optional — it is only consulted to recognise framework default
+ * exports, which carry an arbitrary local name (issue #50).
  */
-export function isFrameworkConventionExport(filePath: string, name: string, kind?: string): boolean {
+export function isFrameworkConventionExport(filePath: string, name: string, isDefaultExport = false): boolean {
   if (isTanstackRouteExport(filePath, name)) return true;
-  if (isReactRouterConventionExport(filePath, name, kind)) return true;
+  if (isReactRouterConventionExport(filePath, name, isDefaultExport)) return true;
   const stem = nextjsSegmentStem(filePath);
   if (stem !== null) {
     if (NEXTJS_SHARED_EXPORTS.has(name)) return true;
@@ -477,12 +488,15 @@ const UnusedExportRowSchema = z.object({
   name: z.string(),
   filePath: z.string(),
   kind: z.string(),
+  // Raw 0/1 default-export flag — used to exempt framework default exports
+  // (route/root component, entry.server handler) that keep a local name.
+  isDefaultExport: z.number(),
 });
 type UnusedExportRow = z.infer<typeof UnusedExportRowSchema>;
 
 const findUnusedExportsQuery = defineQuery({
   sql: `
-    SELECT n.id, n.name, n.file_path AS filePath, n.kind
+    SELECT n.id, n.name, n.file_path AS filePath, n.kind, n.is_default_export AS isDefaultExport
     FROM nodes n
     WHERE n.is_exported = 1
       AND n.kind NOT IN ('file', 'import', 'parameter', 'enum_member', 'field')
@@ -526,7 +540,7 @@ export function findUnusedExports(qb: QueryBuilder): UnusedExportRow[] {
   });
   // Post-filter (not SQL): the framework-convention predicate needs a real
   // regex over the path, and defineQuery requires fully static SQL.
-  return rows.filter((row) => !isFrameworkConventionExport(row.filePath, row.name, row.kind));
+  return rows.filter((row) => !isFrameworkConventionExport(row.filePath, row.name, row.isDefaultExport === 1));
 }
 
 // ─── Module augmentation: register typed entries on QueryRegistry ─────────

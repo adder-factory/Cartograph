@@ -355,6 +355,43 @@ export default function Header(): JSX.Element {
     expect(component?.signature).toBeDefined();
   });
 
+  it('flags `export default` declarations with isDefaultExport, keeping their local name (issue #50)', () => {
+    // TS: a default component (kind=component) and a default non-component
+    // function both keep their local name and are marked isDefaultExport;
+    // named exports are not. This is the signal the unused_export
+    // framework-convention filter keys on for React Router default exports.
+    const ts = `
+export async function loader() { return null; }
+export default function Dashboard() { return <main/>; }
+function localOnly() { return 1; }
+`;
+    const tsResult = extractFromSource('app/routes/dashboard.tsx', ts);
+    const byName = (n: string) => tsResult.nodes.find((x) => x.name === n);
+    expect(byName('Dashboard')?.isDefaultExport).toBe(true);
+    expect(byName('loader')?.isDefaultExport).toBeFalsy();
+    expect(byName('localOnly')?.isDefaultExport).toBeFalsy();
+
+    // A default export whose declaration is a plain (non-component) function
+    // keeps its arbitrary local name — the only marker that it is the
+    // default export is the flag.
+    const entry = `
+export const streamTimeout = 5000;
+export default function serverEntry() { return new Response('x'); }
+`;
+    const entryResult = extractFromSource('app/entry.server.tsx', entry);
+    expect(entryResult.nodes.find((n) => n.name === 'serverEntry')?.isDefaultExport).toBe(true);
+    expect(entryResult.nodes.find((n) => n.name === 'streamTimeout')?.isDefaultExport).toBeFalsy();
+
+    // JS extractor populates the flag too (route modules may be .jsx/.js).
+    const js = `
+export default function Page() { return null; }
+export function Sidebar() { return null; }
+`;
+    const jsResult = extractFromSource('app/routes/page.jsx', js);
+    expect(jsResult.nodes.find((n) => n.name === 'Page')?.isDefaultExport).toBe(true);
+    expect(jsResult.nodes.find((n) => n.name === 'Sidebar')?.isDefaultExport).toBeFalsy();
+  });
+
   it('captures Rust #[…] attributes as decorators (issue #11)', () => {
     const code = [
       '#[test]',

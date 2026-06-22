@@ -80,6 +80,7 @@ export interface NodeRow {
   signature: string | null;
   visibility: string | null;
   is_exported: number;
+  is_default_export: number;
   is_async: number;
   is_static: number;
   decorators: string | null;
@@ -162,6 +163,7 @@ const NODE_SCHEMA: Schema<Node, NodeRow> = {
   signature: { col: 'signature', nullable: true },
   visibility: { col: 'visibility', cast: (v) => (v ?? undefined) as Node['visibility'] },
   isExported: { col: 'is_exported', bool01: true },
+  isDefaultExport: { col: 'is_default_export', bool01: true },
   isAsync: { col: 'is_async', bool01: true },
   isStatic: { col: 'is_static', bool01: true },
   decorators: { col: 'decorators', json: true, schema: stringArrayJsonSchema },
@@ -361,6 +363,7 @@ const NodeRowSchema = z.object({
   signature: z.string().nullable(),
   visibility: z.string().nullable(),
   is_exported: z.number(),
+  is_default_export: z.number(),
   is_async: z.number(),
   is_static: z.number(),
   decorators: z.string().nullable(),
@@ -392,6 +395,7 @@ const NodeInsertParamsSchema = z.object({
   signature: z.string().nullable(),
   visibility: z.string().nullable(),
   isExported: z.union([z.literal(0), z.literal(1)]),
+  isDefaultExport: z.union([z.literal(0), z.literal(1)]),
   isAsync: z.union([z.literal(0), z.literal(1)]),
   isStatic: z.union([z.literal(0), z.literal(1)]),
   decorators: z.string().nullable(),

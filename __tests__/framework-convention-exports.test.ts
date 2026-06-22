@@ -97,12 +97,15 @@ describe('isFrameworkConventionExport', () => {
     expect(isFrameworkConventionExport('src/app/routes/about.jsx', 'links')).toBe(true);
   });
 
-  it('exempts default route/root components by component kind (issue #50)', () => {
-    // Default component has an arbitrary local name; recognised by kind.
-    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', 'component')).toBe(true);
-    expect(isFrameworkConventionExport('app/root.tsx', 'App', 'component')).toBe(true);
-    // Without component kind, an arbitrary name is NOT exempted.
-    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', 'function')).toBe(false);
+  it('exempts the default export of route/root/entry.server files via the flag (issue #50)', () => {
+    // The default export keeps an arbitrary local name; recognised by the flag.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', true)).toBe(true);
+    expect(isFrameworkConventionExport('app/root.tsx', 'App', true)).toBe(true);
+    // entry.server's default request handler is consumed by default, whatever
+    // its local name (not just the `handleRequest` template name) — Codex review.
+    expect(isFrameworkConventionExport('app/entry.server.tsx', 'serverEntry', true)).toBe(true);
+    // A non-default export with an arbitrary name is NOT exempted.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', false)).toBe(false);
     expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard')).toBe(false);
   });
 
@@ -129,11 +132,13 @@ describe('isFrameworkConventionExport', () => {
     expect(isFrameworkConventionExport('src/routes/index.tsx', 'loader')).toBe(false);
     // entry.server hooks don't leak into route modules / root.
     expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'streamTimeout')).toBe(false);
-    // `app/routes.ts` is the route CONFIG file, not a route module dir — its
-    // `default` config export is out of scope and stays flaggable.
+    // A NAMED (non-default) component in a route file stays flaggable — only the
+    // default route component is exempt, so genuinely-dead named components in
+    // route files still surface (Codex review of the kind-based first cut).
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'StatsCard', false)).toBe(false);
+    // `app/routes.ts` is the route CONFIG file, not a route module dir — even its
+    // default export is out of scope for this static path predicate.
     expect(isFrameworkConventionExport('app/routes.ts', 'default')).toBe(false);
-    // entry.server has no component convention: a component-kind export there
-    // is NOT exempted (unlike route/root files).
-    expect(isFrameworkConventionExport('app/entry.server.tsx', 'ServerApp', 'component')).toBe(false);
+    expect(isFrameworkConventionExport('app/routes.ts', 'routes', true)).toBe(false);
   });
 });

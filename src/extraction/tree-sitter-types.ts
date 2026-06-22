@@ -162,6 +162,10 @@ export interface LanguageExtractor {
   getVisibility?: (node: SyntaxNode) => 'public' | 'private' | 'protected' | 'internal' | undefined;
   /** Check if node is exported */
   isExported?: (node: SyntaxNode, source: string) => boolean;
+  /** Check if node is an ES module default export (`export default …`).
+   *  JS/TS-only; consumed to recognise default exports that keep their
+   *  local name in the graph (e.g. a framework-convention default export). */
+  isDefaultExport?: (node: SyntaxNode, source: string) => boolean;
   /** Check if node is async */
   isAsync?: (node: SyntaxNode) => boolean;
   /** Check if node is static */

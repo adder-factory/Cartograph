@@ -81,6 +81,21 @@ export const typescriptExtractor: LanguageExtractor = {
     }
     return false;
   },
+  isDefaultExport: (node, _source) => {
+    if (!node) return false;
+    // Same parent walk as isExported, but match the `export default …`
+    // form: the enclosing export_statement carries a `default` keyword
+    // child. (`export default function Foo()` keeps the node named `Foo`
+    // — there is no `default`-named node — so this flag is the only
+    // signal that it is the module's default export.)
+    let current = node.parent;
+    while (current) {
+      if (current.type === 'export_statement') return current.children.some((c) => c?.type === 'default');
+      if (EXPORT_SCOPE_BOUNDARY_TYPES.has(current.type)) return false;
+      current = current.parent;
+    }
+    return false;
+  },
   isAsync: (node) => {
     for (const child of node.children) {
       if (child?.type === 'async') return true;
