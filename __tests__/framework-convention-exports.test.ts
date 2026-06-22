@@ -70,4 +70,70 @@ describe('isFrameworkConventionExport', () => {
     expect(isFrameworkConventionExport('src/components/Route.tsx', 'Route')).toBe(false);
     expect(isFrameworkConventionExport('src/myroutes/index.tsx', 'Route')).toBe(false);
   });
+
+  it('exempts React Router framework route-module data/config/middleware exports (issue #50)', () => {
+    for (const name of [
+      'loader',
+      'clientLoader',
+      'action',
+      'clientAction',
+      'headers',
+      'handle',
+      'links',
+      'meta',
+      'shouldRevalidate',
+      'middleware',
+      'clientMiddleware',
+      'unstable_middleware',
+      'unstable_clientMiddleware',
+      'ErrorBoundary',
+      'HydrateFallback',
+    ]) {
+      expect(isFrameworkConventionExport('app/routes/dashboard.tsx', name)).toBe(true);
+    }
+    // Nested route modules and monorepo / src-dir app directories.
+    expect(isFrameworkConventionExport('app/routes/blog/$slug.tsx', 'loader')).toBe(true);
+    expect(isFrameworkConventionExport('packages/web/app/routes/index.tsx', 'meta')).toBe(true);
+    expect(isFrameworkConventionExport('src/app/routes/about.jsx', 'links')).toBe(true);
+  });
+
+  it('exempts default route/root components by component kind (issue #50)', () => {
+    // Default component has an arbitrary local name; recognised by kind.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', 'component')).toBe(true);
+    expect(isFrameworkConventionExport('app/root.tsx', 'App', 'component')).toBe(true);
+    // Without component kind, an arbitrary name is NOT exempted.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard', 'function')).toBe(false);
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Dashboard')).toBe(false);
+  });
+
+  it('exempts React Router root and entry.server conventions (issue #50)', () => {
+    for (const name of ['links', 'loader', 'Layout', 'ErrorBoundary', 'meta']) {
+      expect(isFrameworkConventionExport('app/root.tsx', name)).toBe(true);
+    }
+    for (const name of ['handleRequest', 'handleDataRequest', 'handleError', 'streamTimeout']) {
+      expect(isFrameworkConventionExport('app/entry.server.tsx', name)).toBe(true);
+    }
+    expect(isFrameworkConventionExport('src/app/entry.server.jsx', 'handleRequest')).toBe(true);
+  });
+
+  it('does NOT exempt ordinary helpers in React Router convention files or RR names elsewhere (issue #50)', () => {
+    // Ordinary helper exports in convention files remain flaggable.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'formatDate')).toBe(false);
+    expect(isFrameworkConventionExport('app/root.tsx', 'buildNav')).toBe(false);
+    expect(isFrameworkConventionExport('app/entry.server.tsx', 'renderShell')).toBe(false);
+    // Layout is a root-only convention; not exempt in a plain route module.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'Layout')).toBe(false);
+    // Route data names outside the app/ convention dirs stay flaggable.
+    expect(isFrameworkConventionExport('app/lib/data.ts', 'loader')).toBe(false);
+    expect(isFrameworkConventionExport('worker/routes/contact.ts', 'loader')).toBe(false);
+    expect(isFrameworkConventionExport('src/routes/index.tsx', 'loader')).toBe(false);
+    // entry.server hooks don't leak into route modules / root.
+    expect(isFrameworkConventionExport('app/routes/dashboard.tsx', 'streamTimeout')).toBe(false);
+    // `app/routes.ts` is the route CONFIG file, not a route module dir — its
+    // `default` config export is out of scope and stays flaggable.
+    expect(isFrameworkConventionExport('app/routes.ts', 'default')).toBe(false);
+    // entry.server has no component convention: a component-kind export there
+    // is NOT exempted (unlike route/root files).
+    expect(isFrameworkConventionExport('app/entry.server.tsx', 'ServerApp', 'component')).toBe(false);
+  });
 });

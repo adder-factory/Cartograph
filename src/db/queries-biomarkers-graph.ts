@@ -340,9 +340,78 @@ function isTanstackRouteExport(filePath: string, name: string): boolean {
   return name === 'Route' && TANSTACK_ROUTE_DIR_RE.test(filePath);
 }
 
-/** True when an exported symbol is consumed by framework convention (no graph edge possible). */
-export function isFrameworkConventionExport(filePath: string, name: string): boolean {
+/**
+ * React Router framework mode (v7) — route modules are consumed by the
+ * framework through the generated route manifest / `routes.ts` config by
+ * module convention, not by a source `import`, so their exports have no
+ * usage edge and read as a dead `unused_export` (issue #50).
+ *
+ * Convention files all live under the `app` directory (the default
+ * `appDirectory`): route modules under `app/routes/`, the app root at
+ * `app/root.*`, and the SSR entry at `app/entry.server.*`. The `app/`
+ * segment is matched anywhere in the path so monorepo / `src/app/`
+ * layouts (e.g. `packages/web/app/routes/...`) are covered.
+ *
+ * Known limitation: the default route/root component is recognised by its
+ * `component` kind, but the TS extractor only classifies PascalCase + JSX
+ * *function declarations* as `component` — an arrow-function default
+ * component (`const Foo = () => <JSX/>; export default Foo`) is kind
+ * `function` and will not be exempted here. Revisit if/when
+ * `ts-extract-declarations.ts` gains arrow-component classification.
+ */
+const RR_ROUTE_DIR_RE = /(?:^|\/)app\/routes\/.*\.[jt]sx?$/;
+const RR_ROOT_FILE_RE = /(?:^|\/)app\/root\.[jt]sx?$/;
+const RR_ENTRY_SERVER_RE = /(?:^|\/)app\/entry\.server\.[jt]sx?$/;
+/** Named data / config / middleware exports plus named component exports
+ *  valid in any route module (`ErrorBoundary` / `HydrateFallback`). Both
+ *  the stable and `unstable_`-prefixed middleware names are accepted. */
+const RR_ROUTE_EXPORTS: ReadonlySet<string> = new Set([
+  'loader',
+  'clientLoader',
+  'action',
+  'clientAction',
+  'headers',
+  'handle',
+  'links',
+  'meta',
+  'shouldRevalidate',
+  'middleware',
+  'clientMiddleware',
+  'unstable_middleware',
+  'unstable_clientMiddleware',
+  'ErrorBoundary',
+  'HydrateFallback',
+]);
+/** The root module shares the route export set and adds the document `Layout`. */
+const RR_ROOT_EXPORTS: ReadonlySet<string> = new Set([...RR_ROUTE_EXPORTS, 'Layout']);
+/** SSR entry — the default request handler (commonly `handleRequest`) plus
+ *  its optional sibling hooks. */
+const RR_ENTRY_SERVER_EXPORTS: ReadonlySet<string> = new Set([
+  'handleRequest',
+  'handleDataRequest',
+  'handleError',
+  'streamTimeout',
+]);
+
+function isReactRouterConventionExport(filePath: string, name: string, kind?: string): boolean {
+  // The default route/root component is recorded by its local name with
+  // kind=component (no default-export flag is persisted), so any
+  // component-kind export in a convention file is treated as conventional.
+  if (RR_ROUTE_DIR_RE.test(filePath)) return RR_ROUTE_EXPORTS.has(name) || kind === 'component';
+  if (RR_ROOT_FILE_RE.test(filePath)) return RR_ROOT_EXPORTS.has(name) || kind === 'component';
+  if (RR_ENTRY_SERVER_RE.test(filePath)) return RR_ENTRY_SERVER_EXPORTS.has(name);
+  return false;
+}
+
+/**
+ * True when an exported symbol is consumed by framework convention (no
+ * graph edge possible). `kind` (the node kind) is optional — it is only
+ * consulted to recognise default route/root components, which carry an
+ * arbitrary local name but a stable `component` kind.
+ */
+export function isFrameworkConventionExport(filePath: string, name: string, kind?: string): boolean {
   if (isTanstackRouteExport(filePath, name)) return true;
+  if (isReactRouterConventionExport(filePath, name, kind)) return true;
   const stem = nextjsSegmentStem(filePath);
   if (stem !== null) {
     if (NEXTJS_SHARED_EXPORTS.has(name)) return true;
@@ -457,7 +526,7 @@ export function findUnusedExports(qb: QueryBuilder): UnusedExportRow[] {
   });
   // Post-filter (not SQL): the framework-convention predicate needs a real
   // regex over the path, and defineQuery requires fully static SQL.
-  return rows.filter((row) => !isFrameworkConventionExport(row.filePath, row.name));
+  return rows.filter((row) => !isFrameworkConventionExport(row.filePath, row.name, row.kind));
 }
 
 // ─── Module augmentation: register typed entries on QueryRegistry ─────────
