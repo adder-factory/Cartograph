@@ -16,10 +16,12 @@ import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import { getNodesByKind } from '../src/db/queries.js';
+import { createDatabase } from '../src/db/sqlite-adapter.js';
 import {
   computeMetrics,
   evaluateRules,
   findNodeAt,
+  parseSource,
   codeHealthScore,
   _internalForTests,
 } from '../src/biomarkers/index.js';
@@ -455,10 +457,12 @@ func init0(x *int) int {
   });
 
   it('returns base metrics for an unsupported language', () => {
-    // No real AST node — pass a stub. The function should bail before
-    // touching the node when no LangMap exists.
-    const stub = { type: 'fake', childCount: 0, child: () => null } as any;
-    const m = computeMetrics({ bodyNode: stub, language: 'unknown' as any, startLine: 1, endLine: 10 });
+    // JSON has a parser but no biomarker LangMap. Use a real AST node so
+    // the regression covers the no-map branch without impossible language
+    // values or fake tree-sitter objects.
+    const tree = parseSource('{"a": 1}', 'json');
+    expect(tree).not.toBeNull();
+    const m = computeMetrics({ bodyNode: tree!.rootNode, language: 'json', startLine: 1, endLine: 10 });
     expect(m.loc).toBe(10);
     expect(m.cyclomatic).toBe(1);
     expect(m.maxNesting).toBe(0);
@@ -951,12 +955,11 @@ describe('end-to-end through Cartograph', () => {
       expect(before.total).toBeGreaterThanOrEqual(ranked.length);
       expect(before.orphaned).toBe(0);
       const victim = ranked[0]!.nodeId;
-      const { Database } = await import('bun:sqlite');
-      const raw = new Database(path.join(dir, '.cartograph', 'cartograph.db'));
+      const { db: raw } = createDatabase(path.join(dir, '.cartograph', 'cartograph.db'));
       try {
         // bun:sqlite defaults foreign_keys OFF — the delete strands
         // the victim's findings rather than cascading them.
-        raw.run('DELETE FROM nodes WHERE id = ?', [victim]);
+        raw.prepare('DELETE FROM nodes WHERE id = ?').run(victim);
       } finally {
         raw.close();
       }

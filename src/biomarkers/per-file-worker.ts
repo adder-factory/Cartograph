@@ -48,6 +48,13 @@ import { parentPort, workerData } from 'node:worker_threads';
 import type { Finding } from './types.js';
 import type { Language } from '../types.js';
 import {
+  parsePerFileWorkerInit,
+  type PerFileMetricsRow,
+  type PerFileOutcome,
+  type PerFileResult,
+  type PerFileWorkerReply,
+} from './per-file-worker-contract.js';
+import {
   ANALYSABLE_KINDS,
   ANALYSABLE_MIN_LOC,
   astBodyNodeRangeMismatch,
@@ -56,63 +63,9 @@ import {
 } from './per-file-shared.js';
 import { runSequential } from '../utils/async-iteration.js';
 
-export type PerFileOutcome = 'file-unreadable' | 'no-analysable' | 'unsupported-language' | 'parse-failed' | 'computed';
-
-export interface PerFileMetricsRow {
-  loc: number;
-  cyclomatic: number;
-  maxNesting: number;
-  maxConditionalOperands: number;
-  paramCount: number;
-  magicNumberCount: number;
-  hardcodedUrlCount: number;
-}
-
-export interface PerFileResult {
-  relPath: string;
-  /** SHA256 content hash of the file at compute time, for cache update.
-   *  Null when the upstream caller didn't supply one (no cache update). */
-  currentHash: string | null;
-  outcome: PerFileOutcome;
-  /** Populated only for outcome='computed'. Maps node id → metric row. */
-  metricsByNode?: Map<string, PerFileMetricsRow>;
-  /** Populated only for outcome='computed'. Maps node id → LOC value. */
-  locByNode?: Map<string, number>;
-  /** Populated only for outcome='computed'. Maps node id → findings list. */
-  findingsByNode?: Map<string, Finding[]>;
-  /** Stats deltas — aggregated by the main thread into the run-totals. */
-  statsDelta: {
-    symbolsAnalysed: number;
-    findingsEmitted: number;
-    unsupportedLanguages: number;
-    errors: number;
-    skippedRangeMismatch: number;
-  };
-}
-
-interface PerFileWorkerInit {
-  readonly dbPath: string;
-  readonly projectRoot: string;
-  readonly batch: ReadonlyArray<{ relPath: string; currentHash: string | null }>;
-  readonly nowMs: number;
-}
-
-interface PerFileWorkerReplyOk {
-  readonly ok: true;
-  readonly results: PerFileResult[];
-  readonly durationMs: number;
-}
-
-interface PerFileWorkerReplyError {
-  readonly ok: false;
-  readonly error: string;
-}
-
-export type PerFileWorkerReply = PerFileWorkerReplyOk | PerFileWorkerReplyError;
-
 async function main(): Promise<void> {
   if (!parentPort) throw new Error('per-file-worker must run inside a Worker');
-  const init = workerData as PerFileWorkerInit;
+  const init = parsePerFileWorkerInit(workerData);
   const start = Date.now();
   try {
     // Deliberately NOT importing from './index.js' here — that would

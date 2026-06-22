@@ -26,32 +26,11 @@
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
-import type { CrossFileBiomarkerName, Finding } from './types.js';
-
-interface BiomarkerWorkerInit {
-  readonly dbPath: string;
-  readonly projectRoot: string;
-  readonly ruleKind: CrossFileBiomarkerName;
-}
-
-interface BiomarkerWorkerReplyOk {
-  readonly ok: true;
-  readonly ruleKind: CrossFileBiomarkerName;
-  readonly findings: Finding[];
-  readonly durationMs: number;
-}
-
-interface BiomarkerWorkerReplyError {
-  readonly ok: false;
-  readonly ruleKind: CrossFileBiomarkerName;
-  readonly error: string;
-}
-
-export type BiomarkerWorkerReply = BiomarkerWorkerReplyOk | BiomarkerWorkerReplyError;
+import { parseBiomarkerWorkerInit, type BiomarkerWorkerReply } from './biomarker-worker-contract.js';
 
 async function main(): Promise<void> {
   if (!parentPort) throw new Error('biomarker-worker must run inside a Worker');
-  const init = workerData as BiomarkerWorkerInit;
+  const init = parseBiomarkerWorkerInit(workerData);
   const start = Date.now();
   try {
     // Defer heavy imports until inside main so workerData failures

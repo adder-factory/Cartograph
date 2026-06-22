@@ -4,6 +4,8 @@
  * want to read findings out of the DB.
  */
 
+import { z } from 'zod';
+
 /** Names of every biomarker the engine can emit. The DB CHECK
  *  constraint on `severity` is independent — a new biomarker only
  *  needs an entry here. */
@@ -129,7 +131,8 @@ export const BIOMARKER_NAMES = [
   'empty_function_body',
 ] as const;
 
-export type BiomarkerName = (typeof BIOMARKER_NAMES)[number];
+export const biomarkerNameSchema = z.enum(BIOMARKER_NAMES);
+export type BiomarkerName = z.infer<typeof biomarkerNameSchema>;
 
 /**
  * Cross-file biomarker kinds — those computed from global graph
@@ -145,7 +148,7 @@ export type BiomarkerName = (typeof BIOMARKER_NAMES)[number];
  * Adding a new cross-file rule? Add its name here AND in BIOMARKER_NAMES.
  * The `satisfies` clause below enforces the second half at compile time.
  */
-const CROSS_FILE_BIOMARKER_NAMES = [
+export const CROSS_FILE_BIOMARKER_NAMES = [
   'unused_export',
   'god_class',
   'feature_envy',
@@ -154,11 +157,10 @@ const CROSS_FILE_BIOMARKER_NAMES = [
   'duplicate_code',
 ] as const satisfies readonly BiomarkerName[];
 
-export type CrossFileBiomarkerName = (typeof CROSS_FILE_BIOMARKER_NAMES)[number];
+export const crossFileBiomarkerNameSchema = z.enum(CROSS_FILE_BIOMARKER_NAMES);
+export type CrossFileBiomarkerName = z.infer<typeof crossFileBiomarkerNameSchema>;
 
 export const CROSS_FILE_BIOMARKERS: ReadonlySet<BiomarkerName> = new Set(CROSS_FILE_BIOMARKER_NAMES);
-
-export type Severity = 'info' | 'warning' | 'error';
 
 /**
  * Severities ordered most-severe-first — the single source of truth
@@ -166,7 +168,9 @@ export type Severity = 'info' | 'warning' | 'error';
  * use {@link compareSeverity} for ranking comparisons. Don't
  * re-express `error > warning > info` ad hoc.
  */
-export const SEVERITY_DESC = ['error', 'warning', 'info'] as const satisfies readonly Severity[];
+export const SEVERITY_DESC = ['error', 'warning', 'info'] as const;
+export const severitySchema = z.enum(SEVERITY_DESC);
+export type Severity = z.infer<typeof severitySchema>;
 
 /** Rank map derived from {@link SEVERITY_DESC} — higher = more severe. */
 const SEVERITY_RANK: Record<Severity, number> = Object.fromEntries(
@@ -179,14 +183,16 @@ export function compareSeverity(a: Severity, b: Severity): number {
   return SEVERITY_RANK[a] - SEVERITY_RANK[b];
 }
 
-export interface Finding {
+export const findingSchema = z.strictObject({
   /** Node id from the `nodes` table the finding attaches to. */
-  nodeId: string;
-  biomarker: BiomarkerName;
-  severity: Severity;
+  nodeId: z.string().min(1),
+  biomarker: biomarkerNameSchema,
+  severity: severitySchema,
   /** Numeric metric the finding was raised on (LoC, max nesting,
-   *  cyclomatic count, …). Lets agents reason about *how* bad. */
-  metric: number;
+   *  cyclomatic count, ...). Lets agents reason about *how* bad. */
+  metric: z.number(),
   /** Free-form JSON-serialisable extra context. */
-  detail?: unknown;
-}
+  detail: z.unknown().optional(),
+});
+
+export type Finding = z.infer<typeof findingSchema>;

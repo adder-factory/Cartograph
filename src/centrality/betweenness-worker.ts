@@ -23,35 +23,13 @@
 
 import { parentPort, workerData } from 'node:worker_threads';
 import { brandesSingleSource } from './betweenness.js';
-
-interface BetweennessWorkerInit {
-  N: number;
-  /** SharedArrayBuffer carrying the CSR offsets (length N+1, Int32). */
-  outOffsetsBuf: SharedArrayBuffer;
-  /** SharedArrayBuffer carrying the CSR flat target list (length edgeCount, Int32). */
-  outFlatBuf: SharedArrayBuffer;
-  /** This worker's source slice — an array of node indices to process. */
-  sourceIndices: number[];
-}
-
-type BetweennessWorkerReply =
-  | {
-      ok: true;
-      /**
-       * The per-worker cb accumulator (Float64Array of size N) — transferred
-       * to the host via the worker postMessage transferList so no copy is
-       * paid on the boundary.
-       */
-      cbBuf: ArrayBuffer;
-      durationMs: number;
-    }
-  | { ok: false; error: string };
+import { parseBetweennessWorkerInit, type BetweennessWorkerReply } from './betweenness-worker-contract.js';
 
 async function main(): Promise<void> {
   if (!parentPort) throw new Error('betweenness-worker must run inside a Worker');
-  const init = workerData as BetweennessWorkerInit;
   const start = Date.now();
   try {
+    const init = parseBetweennessWorkerInit(workerData);
     const N = init.N;
     const outOffsets = new Int32Array(init.outOffsetsBuf);
     const outFlat = new Int32Array(init.outFlatBuf);

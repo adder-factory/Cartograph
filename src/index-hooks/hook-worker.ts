@@ -46,9 +46,8 @@ import { DatabaseConnection } from '../db/index.js';
 import { QueryBuilder } from '../db/queries.js';
 import { runAfterSync, runAfterIndexAll } from './registry.js';
 import type { IndexHookContext, IndexHookOutcome } from './types.js';
-import type { SyncResult } from '../extraction/index.js';
-import type { CartographConfig } from '../types.js';
 import { errMsg } from '../errors.js';
+import { parseHookWorkerCommand, parseHookWorkerReply, type HookWorkerWireOutcome } from './hook-worker-contract.js';
 
 // Emscripten prints `Aborted()` straight to stderr when a WASM grammar
 // aborts (the biomarker pass re-parses files). The child's stderr is
@@ -73,34 +72,7 @@ import { errMsg } from '../errors.js';
   }) as typeof process.stderr.write;
 }
 
-/** Main → child: run one hook phase against the given DB. */
-interface RunHooksMessage {
-  readonly type: 'run-hooks';
-  /** Correlates the reply with the awaiting `runPhase` call. */
-  readonly id: number;
-  readonly phase: 'sync' | 'indexAll';
-  readonly projectRoot: string;
-  /** Absolute path to `.cartograph/cartograph.db` — the child opens it. */
-  readonly dbPath: string;
-  /** Structured-cloned snapshot of the live `CartographConfig`. */
-  readonly config: CartographConfig;
-  /** Present for `phase: 'sync'`; carries `changedFilePaths`. */
-  readonly syncResult?: SyncResult;
-}
-
-/**
- * Wire form of an {@link IndexHookOutcome}. `Error` is flattened to a
- * string so the message is a plain object — the client rebuilds a
- * lightweight `Error` from `error` when present.
- */
-interface WireOutcome {
-  readonly name: string;
-  readonly phase: IndexHookOutcome['phase'];
-  readonly durationMs: number;
-  readonly error?: string;
-}
-
-function toWireOutcome(o: IndexHookOutcome): WireOutcome {
+function toWireOutcome(o: IndexHookOutcome): HookWorkerWireOutcome {
   return {
     name: o.name,
     phase: o.phase,
@@ -109,19 +81,14 @@ function toWireOutcome(o: IndexHookOutcome): WireOutcome {
   };
 }
 
-/** A zero-change `SyncResult` — defensive fallback if a `sync` phase
- *  message somehow arrives without one (the main process always sends
- *  it). `changedFilePaths` left undefined → hooks fall back to a full
- *  pass, the safe choice. */
-function emptySyncResult(): SyncResult {
-  return {
-    filesChecked: 0,
-    filesAdded: 0,
-    filesModified: 0,
-    filesRemoved: 0,
-    nodesUpdated: 0,
-    durationMs: 0,
-  };
+function rawMessageId(value: unknown): number | null {
+  if (!isRecord(value)) return null;
+  const id = value.id;
+  return Number.isInteger(id) && typeof id === 'number' && id >= 0 ? id : null;
+}
+
+function isRecord(value: unknown): value is { readonly id?: unknown } {
+  return typeof value === 'object' && value !== null;
 }
 
 const send = process.send?.bind(process);
@@ -129,8 +96,19 @@ if (!send) {
   throw new Error('hook-worker.ts must be run as a forked child process (no IPC channel).');
 }
 
-process.on('message', async (msg: RunHooksMessage) => {
-  if (msg?.type !== 'run-hooks') return;
+process.on('message', async (raw: unknown) => {
+  const msg = (() => {
+    try {
+      return parseHookWorkerCommand(raw);
+    } catch (err) {
+      const id = rawMessageId(raw);
+      if (id !== null) {
+        send(parseHookWorkerReply({ type: 'hooks-error', id, message: errMsg(err) }));
+      }
+      return null;
+    }
+  })();
+  if (msg === null) return;
   let db: DatabaseConnection | null = null;
   try {
     // `autoMigrate: false` — see the file header. A schema-behind DB
@@ -144,11 +122,10 @@ process.on('message', async (msg: RunHooksMessage) => {
       queries,
       db,
     };
-    const outcomes =
-      msg.phase === 'sync' ? await runAfterSync(ctx, msg.syncResult ?? emptySyncResult()) : await runAfterIndexAll(ctx);
-    send({ type: 'hooks-done', id: msg.id, outcomes: outcomes.map(toWireOutcome) });
+    const outcomes = msg.phase === 'sync' ? await runAfterSync(ctx, msg.syncResult) : await runAfterIndexAll(ctx);
+    send(parseHookWorkerReply({ type: 'hooks-done', id: msg.id, outcomes: outcomes.map(toWireOutcome) }));
   } catch (err) {
-    send({ type: 'hooks-error', id: msg.id, message: errMsg(err) });
+    send(parseHookWorkerReply({ type: 'hooks-error', id: msg.id, message: errMsg(err) }));
   } finally {
     try {
       db?.close();
@@ -165,4 +142,4 @@ process.on('disconnect', () => process.exit(0));
 // Handshake: the message listener is attached, the child is ready to
 // accept a `run-hooks` request. `HookWorkerClient.ensureSpawned`
 // resolves its spawn promise on this.
-send({ type: 'ready' });
+send(parseHookWorkerReply({ type: 'ready' }));

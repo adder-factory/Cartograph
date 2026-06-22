@@ -26,9 +26,10 @@ import {
   type RunPhaseArgs,
 } from '../src/index-hooks/hook-worker-client.js';
 import { HOOK_TIMEOUT_MS } from '../src/index-hooks/registry.js';
-import type { CartographConfig } from '../src/types.js';
+import { DEFAULT_CONFIG, type CartographConfig } from '../src/types.js';
 
 const HOOKS_IN_PROCESS_ENV = 'CARTOGRAPH_HOOKS_IN_PROCESS';
+const validConfig: CartographConfig = { ...DEFAULT_CONFIG, rootDir: '/tmp/does-not-exist-cartograph-hook-test' };
 
 // The `test:fast` npm script's outer wrapper sets
 // CARTOGRAPH_HOOKS_IN_PROCESS=1 for the whole suite (the bun:test
@@ -52,7 +53,7 @@ const phaseArgs: RunPhaseArgs = {
   phase: 'sync',
   projectRoot: '/tmp/does-not-exist-cartograph-hook-test',
   dbPath: '/tmp/does-not-exist-cartograph-hook-test/.cartograph/cartograph.db',
-  config: {} as CartographConfig,
+  config: validConfig,
   syncResult: {
     filesChecked: 0,
     filesAdded: 0,

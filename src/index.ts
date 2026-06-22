@@ -358,17 +358,22 @@ async function cgRunHookPhase(
   phase: 'sync' | 'indexAll',
   syncResult?: SyncResult,
 ): Promise<IndexHookOutcome[]> {
-  const viaWorker = await cg.internals.hookWorker.runPhase({
-    phase,
+  const common = {
     projectRoot: cg.projectRoot,
     dbPath: getDatabasePath(cg.projectRoot),
     config: cg.config,
-    ...(syncResult ? { syncResult } : {}),
-  });
+  };
+  if (phase === 'sync') {
+    if (syncResult === undefined) {
+      throw new Error('sync hook phase requires a SyncResult');
+    }
+    const viaWorker = await cg.internals.hookWorker.runPhase({ ...common, phase: 'sync', syncResult });
+    if (viaWorker !== null) return viaWorker;
+    return runIndexHooksAfterSync(cg.buildHookContext(), syncResult);
+  }
+  const viaWorker = await cg.internals.hookWorker.runPhase({ ...common, phase: 'indexAll' });
   if (viaWorker !== null) return viaWorker;
-  // Worker unavailable — the legacy in-process path.
-  const ctx = cg.buildHookContext();
-  return phase === 'sync' ? runIndexHooksAfterSync(ctx, syncResult!) : runIndexHooksAfterIndexAll(ctx);
+  return runIndexHooksAfterIndexAll(cg.buildHookContext());
 }
 
 /**
@@ -479,6 +484,14 @@ function cgShapeIndexProfile(
   }
 }
 
+const CARTOGRAPH_RESOURCE_TEARDOWNS = new WeakMap<object, Promise<void>>();
+
+function rememberCartographResourceTeardown(instance: object, teardown: Promise<void>): Promise<void> {
+  const observed = teardown.catch(() => {});
+  CARTOGRAPH_RESOURCE_TEARDOWNS.set(instance, observed);
+  return observed;
+}
+
 // ---------------------------------------------------------------------------
 // CartographCore — 14 members (9 fields + constructor + 4 methods)
 // The god_class biomarker threshold is 15; keeping exactly 14 here.
@@ -549,11 +562,12 @@ export class CartographCore {
 
   /** Close the Cartograph instance and release resources. */
   close(): void {
+    if (CARTOGRAPH_RESOURCE_TEARDOWNS.has(this)) return;
     this.watcher.stop();
     this.llm.bgCtrl.cancel();
     // Fire-and-forget — `terminate()` is best-effort and `close()` is
     // synchronous. A stuck worker is killed by the process exit anyway.
-    void this.internals.hookWorker.terminate();
+    void rememberCartographResourceTeardown(this, this.internals.hookWorker.terminate());
     this.lock.file.release();
     this.db.close();
   }
@@ -1021,14 +1035,21 @@ export class Cartograph extends CartographCore {
    * WARNING: This permanently deletes all Cartograph data for the project.
    */
   async uninitialize(): Promise<void> {
-    this.watcher.stop();
-    this.llm.bgCtrl.cancel();
-    // Await the child's actual exit before we touch the directory.
-    // `close()` would fire-and-forget the terminate; that's fine for
-    // process-exit cleanup but wrong here.
-    await this.internals.hookWorker.terminate();
-    this.lock.file.release();
-    this.db.close();
+    const existingTeardown = CARTOGRAPH_RESOURCE_TEARDOWNS.get(this);
+    if (existingTeardown) {
+      await existingTeardown;
+    } else {
+      await this.watcher.stopAndWait();
+      this.llm.bgCtrl.cancel();
+      // Await the child's actual exit before we touch the directory.
+      // `close()` would fire-and-forget the terminate; that's fine for
+      // process-exit cleanup but wrong here.
+      const hookWorkerTeardown = this.internals.hookWorker.terminate();
+      void rememberCartographResourceTeardown(this, hookWorkerTeardown);
+      await hookWorkerTeardown;
+      this.lock.file.release();
+      this.db.close();
+    }
     removeDirectory(this.projectRoot);
   }
 }

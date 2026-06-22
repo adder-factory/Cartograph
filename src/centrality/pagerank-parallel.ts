@@ -46,6 +46,7 @@ import { Worker } from 'node:worker_threads';
 import { fileURLToPath } from 'node:url';
 import { PR_DAMPING, PR_ITERATIONS } from './index.js';
 import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
+import { parsePageRankWorkerReply } from './pagerank-worker-contract.js';
 
 interface NodeRef {
   readonly id: string;
@@ -419,7 +420,7 @@ function runOneIteration(args: RunIterationArgs): Promise<void> {
   return new Promise((resolve) => {
     let remaining = workers.length;
     let settled = false;
-    const perHookListeners: Array<{ handle: WorkerHandle; listener: (msg: { type: string }) => void }> = [];
+    const perHookListeners: Array<{ handle: WorkerHandle; listener: (msg: unknown) => void }> = [];
     const settle = (): void => {
       if (settled) return;
       settled = true;
@@ -446,8 +447,20 @@ function runOneIteration(args: RunIterationArgs): Promise<void> {
       settle();
     }, timeoutMs);
     for (const h of workers) {
-      const listener = (msg: { type: string }): void => {
-        if (msg.type !== 'done') return;
+      const listener = (raw: unknown): void => {
+        let msg: ReturnType<typeof parsePageRankWorkerReply>;
+        try {
+          msg = parsePageRankWorkerReply(raw);
+        } catch (err) {
+          errorSink.error ??= err instanceof Error ? err : new Error(String(err));
+          settle();
+          return;
+        }
+        if (msg.type === 'error') {
+          errorSink.error ??= new Error(msg.error);
+          settle();
+          return;
+        }
         h.worker.off('message', listener);
         if (--remaining === 0) settle();
       };

@@ -41,8 +41,13 @@ import {
   PAIR_VALUE_RE,
   SUPPORTED_VALUE_REF_LANGS,
   collectValueRefMatches,
-  type ValueRefEdgeRecord,
 } from './value-ref-edge-scan.js';
+import {
+  parseValueRefWorkerInit,
+  type ValueRefEdgeRecord,
+  type ValueRefWorkerInit,
+  type ValueRefWorkerReply,
+} from './value-ref-edges-contract.js';
 
 /** Diagnostic per-file tracing. Off by default — opt in via env var
  *  `CARTOGRAPH_VALUE_REF_VERBOSE=1` (typically only when chasing the
@@ -53,27 +58,6 @@ import {
  *  worker leaves the last "enter" line in the captured log — which
  *  is enough to identify which file blocked the worker. */
 const VERBOSE = process.env['CARTOGRAPH_VALUE_REF_VERBOSE'] === '1';
-
-interface ValueRefWorkerInit {
-  readonly dbPath: string;
-  readonly projectRoot: string;
-  /** File records with path + language. Pre-filtered by the host to
-   *  JS/TS family; the worker re-checks defensively (cheap). */
-  readonly fileRecords: ReadonlyArray<{ path: string; language: string }>;
-}
-
-interface ValueRefWorkerReplyOk {
-  readonly ok: true;
-  readonly edges: ValueRefEdgeRecord[];
-  readonly durationMs: number;
-}
-
-interface ValueRefWorkerReplyError {
-  readonly ok: false;
-  readonly error: string;
-}
-
-export type ValueRefWorkerReply = ValueRefWorkerReplyOk | ValueRefWorkerReplyError;
 
 interface WorkerFileDeps {
   readonly projectRoot: string;
@@ -88,9 +72,9 @@ interface WorkerFileDeps {
 
 async function main(): Promise<void> {
   if (!parentPort) throw new Error('value-ref-edges-worker must run inside a Worker');
-  const init = workerData as ValueRefWorkerInit;
   const start = Date.now();
   try {
+    const init = parseValueRefWorkerInit(workerData);
     // Defer heavy imports until inside main so workerData failures
     // surface as the cleaner "must run inside a Worker" error above.
     // Same shape as biomarker-worker.ts's Promise.all import block.

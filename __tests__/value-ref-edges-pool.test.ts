@@ -54,6 +54,12 @@ describe('B28 v2 / B31 — value-ref-edges-pool resilience paths', () => {
     expect(reply.ok).toBe(true);
   });
 
+  it('resolves with ok:false when worker posts a malformed reply', async () => {
+    const reply = await runOneWorker(makeArgs('invalid-reply', 5_000));
+    expect(reply.ok).toBe(false);
+    if (!reply.ok) expect(reply.error).toMatch(/invalid value-ref worker reply: edges:/);
+  });
+
   it('resolves with ok:false + timeout error when worker hangs (does NOT hang Promise.all)', async () => {
     const start = Date.now();
     const reply = await runOneWorker(makeArgs('hang', 300));

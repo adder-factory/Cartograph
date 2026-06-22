@@ -40,7 +40,7 @@ import { logDebug, logWarn } from '../errors.js';
 import { getDatabasePath } from '../db/index.js';
 import { runRulesInWorkers } from './worker-pool.js';
 import { runPerFileBiomarkersInWorkers, shouldUsePerFileWorkers } from './per-file-pool.js';
-import type { PerFileResult } from './per-file-worker.js';
+import type { PerFileResult } from './per-file-worker-contract.js';
 import {
   ANALYSABLE_KINDS as SHARED_ANALYSABLE_KINDS,
   ANALYSABLE_MIN_LOC as SHARED_ANALYSABLE_MIN_LOC,

@@ -26,30 +26,13 @@
  */
 
 import { parentPort, workerData } from 'node:worker_threads';
+import {
+  parsePageRankStepMessage,
+  parsePageRankWorkerInit,
+  type PageRankWorkerReply,
+} from './pagerank-worker-contract.js';
 
-interface WorkerInit {
-  /** Target indices assigned to this worker by the LPT bin-pack. */
-  readonly targets: Int32Array;
-  readonly N: number;
-  readonly damping: number;
-  readonly prBuf: SharedArrayBuffer; // Float64Array (length N) — current rank
-  readonly nextBuf: SharedArrayBuffer; // Float64Array (length N) — next rank (this worker writes its slice)
-  readonly outDegBuf: SharedArrayBuffer; // Int32Array (length N)
-  readonly inEdgesFlatBuf: SharedArrayBuffer; // Int32Array — source indices, packed CSR
-  readonly inEdgesOffsetsBuf: SharedArrayBuffer; // Int32Array (length N+1) — CSR row offsets
-}
-
-interface StepMessage {
-  readonly type: 'step';
-  /** Precomputed by main: `(1 - damping)/N + (damping * danglingSum)/N`. */
-  readonly basePlusDangling: number;
-}
-
-interface DoneMessage {
-  readonly type: 'done';
-}
-
-const init = workerData as WorkerInit;
+const init = parsePageRankWorkerInit(workerData);
 
 // Bind typed-array views ONCE at startup; reused across all iterations.
 const pr = new Float64Array(init.prBuf);
@@ -60,21 +43,28 @@ const inEdgesOffsets = new Int32Array(init.inEdgesOffsetsBuf);
 const targets = init.targets;
 const numTargets = targets.length;
 
-parentPort!.on('message', (msg: StepMessage) => {
-  if (msg.type !== 'step') return;
-  const { basePlusDangling } = msg;
-  const damping = init.damping;
-  for (let i = 0; i < numTargets; i++) {
-    const t = targets[i]!;
-    const off0 = inEdgesOffsets[t]!;
-    const off1 = inEdgesOffsets[t + 1]!;
-    let s = 0;
-    for (let k = off0; k < off1; k++) {
-      const src = inEdgesFlat[k]!;
-      s += pr[src]! / outDeg[src]!;
+parentPort!.on('message', (raw: unknown) => {
+  try {
+    const { basePlusDangling } = parsePageRankStepMessage(raw);
+    const damping = init.damping;
+    for (let i = 0; i < numTargets; i++) {
+      const t = targets[i]!;
+      const off0 = inEdgesOffsets[t]!;
+      const off1 = inEdgesOffsets[t + 1]!;
+      let s = 0;
+      for (let k = off0; k < off1; k++) {
+        const src = inEdgesFlat[k]!;
+        s += pr[src]! / outDeg[src]!;
+      }
+      next[t] = basePlusDangling + damping * s;
     }
-    next[t] = basePlusDangling + damping * s;
+    const reply: PageRankWorkerReply = { type: 'done' };
+    parentPort!.postMessage(reply);
+  } catch (err) {
+    const reply: PageRankWorkerReply = {
+      type: 'error',
+      error: err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err),
+    };
+    parentPort!.postMessage(reply);
   }
-  const reply: DoneMessage = { type: 'done' };
-  parentPort!.postMessage(reply);
 });

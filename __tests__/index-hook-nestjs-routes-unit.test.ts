@@ -181,6 +181,26 @@ describe('nestjs-routes index hook', () => {
     expect(new Set(nodes.map((node) => node.id)).size).toBe(2);
   });
 
+  it('rejects partially corrupt decorator lists instead of silently filtering them', () => {
+    state.rows = [
+      {
+        methodId: 'method:corrupt',
+        methodName: 'corrupt',
+        methodFilePath: 'src/corrupt.controller.ts',
+        methodStartLine: 10,
+        methodDecorators: JSON.stringify(['Get', 404]),
+        methodDecoratorArgs: decoratorArgs([{ name: 'Get', argStrings: ['corrupt'] }]),
+        classDecorators: decorators(['Controller']),
+        classDecoratorArgs: decoratorArgs([{ name: 'Controller' }]),
+      },
+    ];
+
+    HOOK.afterIndexAll!(ctx());
+
+    expect(state.insertedNodes.flat()).toEqual([]);
+    expect(state.insertedEdges.flat()).toEqual([]);
+  });
+
   it('refreshes on algo mismatch, TS/JS changes, and removals during sync', () => {
     state.rows = [
       {

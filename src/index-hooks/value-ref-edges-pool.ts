@@ -43,8 +43,11 @@ import { fileURLToPath } from 'node:url';
 import { partitionRoundRobin } from '../utils.js';
 import { runWorkerSlice } from '../utils/worker-slice.js';
 import { parseStrictUnsignedDecimalInteger } from '../strict-numeric.js';
-import type { ValueRefEdgeRecord } from './value-ref-edge-scan.js';
-import type { ValueRefWorkerReply } from './value-ref-edges-worker.js';
+import {
+  parseValueRefWorkerReply,
+  type ValueRefEdgeRecord,
+  type ValueRefWorkerReply,
+} from './value-ref-edges-contract.js';
 
 /** Below this file count, the in-main sync path beats the worker-spawn
  *  overhead. Tuned for M-series; small projects should never see the
@@ -113,7 +116,7 @@ export interface RunOneWorkerArgs {
  *  @internal — exported for the resilience-path tests; production
  *  callers go through `buildValueRefEdgesInWorkers`. */
 export function runOneWorker(args: RunOneWorkerArgs): Promise<ValueRefWorkerReply> {
-  return runWorkerSlice<ValueRefWorkerReply>({
+  return runWorkerSlice<unknown>({
     workerPath: args.workerPath,
     workerData: {
       dbPath: args.dbPath,
@@ -124,6 +127,13 @@ export function runOneWorker(args: RunOneWorkerArgs): Promise<ValueRefWorkerRepl
     sliceLabel: args.sliceLabel,
     logPrefix: 'value-ref-edges:',
     makeErrorReply: (error) => ({ ok: false, error }),
+  }).then((rawReply) => {
+    try {
+      return parseValueRefWorkerReply(rawReply);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      return { ok: false, error: message };
+    }
   });
 }
 

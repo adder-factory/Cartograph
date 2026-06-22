@@ -114,8 +114,7 @@ describe('classifier worker — branch coverage', () => {
     await cg.indexAll({ summarize: false });
 
     // Seed docstrings so nodes are classifiable.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.prepare(
       `UPDATE nodes SET docstring = 'Stub docstring for classification.'
        WHERE kind IN ('function','method','interface') AND docstring IS NULL`,
@@ -148,8 +147,7 @@ describe('classifier worker — branch coverage', () => {
     // The __tests__/helpers.ts buildUser function should be classified as
     // test_helper by the structural pre-filter (TEST_PATH_RE matches
     // __tests__/) — no LLM call needed for those rows.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     const testNode = db
       .prepare(
         `SELECT id, role FROM nodes WHERE file_path LIKE '%__tests__%' AND kind IN ('function','method') LIMIT 1`,
@@ -176,8 +174,7 @@ describe('classifier worker — branch coverage', () => {
   });
 
   it('interface nodes are drained by structural pre-filter as data_model', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     const ifaceNode = db.prepare(`SELECT id FROM nodes WHERE kind = 'interface' LIMIT 1`).get() as
       | { id: string }
       | undefined;
@@ -196,8 +193,7 @@ describe('classifier worker — branch coverage', () => {
     // call throws, that batch's residue candidates count as errors and
     // the run still completes cleanly. Every candidate is accounted
     // for — structural pre-filter classifies some, the rest error.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.prepare(`UPDATE nodes SET role = NULL, role_model = NULL`).run();
 
     const client = new FakeLlmClient(() => {
@@ -218,8 +214,7 @@ describe('classifier worker — branch coverage', () => {
   });
 
   it('splits context-window failures into smaller classifier batches', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.prepare(`UPDATE nodes SET role = NULL, role_model = NULL`).run();
 
     const client = new FakeLlmClient((messages) => {
@@ -250,8 +245,7 @@ describe('classifier worker — branch coverage', () => {
   });
 
   it('abort signal causes worker to exit early without classifying all', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.prepare(`UPDATE nodes SET role = NULL, role_model = NULL`).run();
 
     const ac = new AbortController();
@@ -273,8 +267,7 @@ describe('classifier worker — branch coverage', () => {
   });
 
   it('onProgress callback is invoked as candidates are processed', async () => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const db = (cg.queries as any).db;
+    const db = cg.queries.db;
     db.prepare(`UPDATE nodes SET role = NULL, role_model = NULL`).run();
 
     const progressEvents: Array<{ done: number; total: number }> = [];

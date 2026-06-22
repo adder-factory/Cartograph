@@ -9,9 +9,15 @@ import { parentPort } from 'node:worker_threads';
 import { extractFromSource } from './tree-sitter.js';
 import { detectLanguage, loadGrammarsForLanguages, resetParser } from './grammars.js';
 import type { ExtractionResult } from './types.js';
-import type { Language } from '../types.js';
 import { errMsg } from '../errors.js';
 import { snapshotProfileDelta } from './profile.js';
+import {
+  parseParseWorkerCommand,
+  parseWorkerRawId,
+  parseWorkerRawType,
+  type ParseWorkerReply,
+} from './parse-worker-contract.js';
+import type { Language } from '../types.js';
 
 // Emscripten prints `Aborted()` (and a follow-up RuntimeError diag
 // line) directly to stderr when WASM aborts — before the JS catch
@@ -55,91 +61,95 @@ import { snapshotProfileDelta } from './profile.js';
 const PARSER_RESET_INTERVAL = 5000;
 const parseCounts = new Map<Language, number>();
 
-parentPort!.on(
-  'message',
-  async (msg: { type: string; id?: number; filePath?: string; content?: string; languages?: Language[] }) => {
-    if (msg.type === 'load-grammars') {
-      try {
-        await loadGrammarsForLanguages(msg.languages!);
-        parentPort!.postMessage({ type: 'grammars-loaded' });
-      } catch (err) {
-        parentPort!.postMessage({ type: 'grammars-load-failed', error: errMsg(err) });
-      }
-    } else if (msg.type === 'parse') {
-      const { id, filePath, content } = msg;
-      try {
-        const language = detectLanguage(filePath!, content);
-        const result: ExtractionResult = extractFromSource(filePath!, content!, language);
+function emptyParseResultError(message: string, filePath: string | undefined, code: string): ExtractionResult {
+  return {
+    nodes: [],
+    edges: [],
+    unresolvedReferences: [],
+    errors: [
+      {
+        message,
+        ...(filePath !== undefined && { filePath }),
+        severity: 'error',
+        code,
+      },
+    ],
+    durationMs: 0,
+  };
+}
 
-        // Periodic parser reset to reclaim WASM heap memory
-        const count = (parseCounts.get(language) ?? 0) + 1;
-        parseCounts.set(language, count);
-        if (count % PARSER_RESET_INTERVAL === 0) {
-          resetParser(language);
-        }
+function postProtocolError(raw: unknown, error: Error): void {
+  const type = parseWorkerRawType(raw);
+  if (type === 'load-grammars') {
+    parentPort!.postMessage({ type: 'grammars-load-failed', error: error.message } satisfies ParseWorkerReply);
+    return;
+  }
+  const id = parseWorkerRawId(raw);
+  if (id !== null) {
+    parentPort!.postMessage({
+      type: 'parse-result',
+      id,
+      result: emptyParseResultError(error.message, undefined, 'worker_protocol_error'),
+    } satisfies ParseWorkerReply);
+  }
+}
 
-        parentPort!.postMessage({ type: 'parse-result', id, result, profileDelta: snapshotProfileDelta() });
-      } catch (err) {
-        const message = errMsg(err);
+parentPort!.on('message', async (raw: unknown) => {
+  let msg: ReturnType<typeof parseParseWorkerCommand>;
+  try {
+    msg = parseParseWorkerCommand(raw);
+  } catch (err) {
+    postProtocolError(raw, err instanceof Error ? err : new Error(String(err)));
+    return;
+  }
 
-        // WASM memory errors leave the module in a corrupted state — all
-        // subsequent parses would also fail (cascading failures). Crash the
-        // worker so the main thread spawns a fresh one with a clean heap.
-        if (message.includes('memory access out of bounds') || message.includes('out of memory')) {
-          process.exit(1);
-        }
-
-        parentPort!.postMessage({
-          type: 'parse-result',
-          id,
-          result: {
-            nodes: [],
-            edges: [],
-            unresolvedReferences: [],
-            errors: [
-              {
-                message: `Parse worker error: ${message}`,
-                filePath: filePath!,
-                severity: 'error',
-                code: 'parse_error',
-              },
-            ],
-            durationMs: 0,
-          } satisfies ExtractionResult,
-          // Mirror the success path's delta so partial timings from
-          // the (possibly long-running) extract attempt aren't dropped
-          // and `lastSent` stays consistent across parse failures.
-          profileDelta: snapshotProfileDelta(),
-        });
-      }
-    } else if (msg.type === 'shutdown') {
-      parentPort!.postMessage({ type: 'shutdown-ack' });
-    } else {
-      // Unknown message types: when an `id` is present, surface a structured
-      // error so the in-flight Promise on the main thread fails fast rather
-      // than blocking until the per-file timeout. Messages without an `id`
-      // have no pending promise to unblock and are silently ignored — no
-      // harm done.
-      const id = msg.id;
-      if (typeof id === 'number') {
-        parentPort!.postMessage({
-          type: 'parse-result',
-          id,
-          result: {
-            nodes: [],
-            edges: [],
-            unresolvedReferences: [],
-            errors: [
-              {
-                message: `Parse worker received unknown message type: ${msg.type}`,
-                severity: 'error',
-                code: 'worker_protocol_error',
-              },
-            ],
-            durationMs: 0,
-          } satisfies ExtractionResult,
-        });
-      }
+  if (msg.type === 'load-grammars') {
+    try {
+      await loadGrammarsForLanguages(msg.languages);
+      parentPort!.postMessage({ type: 'grammars-loaded' } satisfies ParseWorkerReply);
+    } catch (err) {
+      parentPort!.postMessage({ type: 'grammars-load-failed', error: errMsg(err) } satisfies ParseWorkerReply);
     }
-  },
-);
+  } else if (msg.type === 'parse') {
+    const { id, filePath, content } = msg;
+    try {
+      const language = detectLanguage(filePath, content);
+      const result: ExtractionResult = extractFromSource(filePath, content, language);
+
+      // Periodic parser reset to reclaim WASM heap memory
+      const count = (parseCounts.get(language) ?? 0) + 1;
+      parseCounts.set(language, count);
+      if (count % PARSER_RESET_INTERVAL === 0) {
+        resetParser(language);
+      }
+
+      parentPort!.postMessage({
+        type: 'parse-result',
+        id,
+        result,
+        profileDelta: snapshotProfileDelta(),
+      } satisfies ParseWorkerReply);
+    } catch (err) {
+      const message = errMsg(err);
+
+      // WASM memory errors leave the module in a corrupted state — all
+      // subsequent parses would also fail (cascading failures). Crash the
+      // worker so the main thread spawns a fresh one with a clean heap.
+      if (message.includes('memory access out of bounds') || message.includes('out of memory')) {
+        process.exit(1);
+      }
+
+      parentPort!.postMessage({
+        type: 'parse-result',
+        id,
+        result: emptyParseResultError(`Parse worker error: ${message}`, filePath, 'parse_error'),
+        // Mirror the success path's delta so partial timings from
+        // the (possibly long-running) extract attempt aren't dropped
+        // and `lastSent` stays consistent across parse failures.
+        profileDelta: snapshotProfileDelta(),
+      } satisfies ParseWorkerReply);
+    }
+  } else if (msg.type === 'shutdown') {
+    parentPort!.postMessage({ type: 'shutdown-ack' } satisfies ParseWorkerReply);
+  }
+});

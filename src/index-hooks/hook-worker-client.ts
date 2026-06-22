@@ -37,6 +37,14 @@ import { HOOK_TIMEOUT_MS } from './registry.js';
 import type { IndexHookOutcome } from './types.js';
 import type { SyncResult } from '../extraction/index.js';
 import type { CartographConfig } from '../types.js';
+import {
+  parseHookWorkerReply,
+  type HookWorkerCommand,
+  type HookWorkerDoneReply,
+  type HookWorkerErrorReply,
+  type HookWorkerReply,
+  type HookWorkerWireOutcome,
+} from './hook-worker-contract.js';
 
 /** True iff we're running on the Bun runtime. */
 const IS_BUN = (globalThis as { Bun?: unknown }).Bun !== undefined;
@@ -130,40 +138,24 @@ const RECYCLE_INTERVAL = 100;
  */
 const SPAWN_TIMEOUT_MS = 20_000;
 
-/** Arguments for one {@link HookWorkerClient.runPhase} call. */
-export interface RunPhaseArgs {
-  readonly phase: 'sync' | 'indexAll';
+interface RunPhaseArgsBase {
   readonly projectRoot: string;
   /** Absolute path to `.cartograph/cartograph.db`. */
   readonly dbPath: string;
   /** The live `CartographConfig` — structured-cloned across the IPC boundary. */
   readonly config: CartographConfig;
-  /** Required for `phase: 'sync'`; carries `changedFilePaths`. */
-  readonly syncResult?: SyncResult;
 }
 
-/** Wire form of an outcome (Error flattened to a string in the child). */
-interface WireOutcome {
-  readonly name: string;
-  readonly phase: IndexHookOutcome['phase'];
-  readonly durationMs: number;
-  readonly error?: string;
-}
-
-interface ReadyMessage {
-  readonly type: 'ready';
-}
-interface DoneMessage {
-  readonly type: 'hooks-done';
-  readonly id: number;
-  readonly outcomes: WireOutcome[];
-}
-interface ErrorMessage {
-  readonly type: 'hooks-error';
-  readonly id: number;
-  readonly message: string;
-}
-type ChildMessage = ReadyMessage | DoneMessage | ErrorMessage;
+/** Arguments for one {@link HookWorkerClient.runPhase} call. */
+export type RunPhaseArgs =
+  | (RunPhaseArgsBase & {
+      readonly phase: 'sync';
+      /** Required for `phase: 'sync'`; carries `changedFilePaths`. */
+      readonly syncResult: SyncResult;
+    })
+  | (RunPhaseArgsBase & {
+      readonly phase: 'indexAll';
+    });
 
 /** One in-flight phase awaiting its child reply. */
 interface Pending {
@@ -332,13 +324,40 @@ function spawnHookChildOnBun(workerPath: string): HookChild {
   };
 }
 
-function fromWireOutcome(w: WireOutcome): IndexHookOutcome {
+function fromWireOutcome(w: HookWorkerWireOutcome): IndexHookOutcome {
   return {
     name: w.name,
     phase: w.phase,
     durationMs: w.durationMs,
     ...(w.error ? { error: new Error(w.error) } : {}),
   };
+}
+
+function buildHookWorkerCommand(id: number, args: RunPhaseArgs): HookWorkerCommand {
+  const common = {
+    type: 'run-hooks',
+    id,
+    projectRoot: args.projectRoot,
+    dbPath: args.dbPath,
+    config: args.config,
+  } satisfies Omit<HookWorkerCommand, 'phase' | 'syncResult'>;
+  if (args.phase === 'sync') {
+    return { ...common, phase: 'sync', syncResult: args.syncResult };
+  }
+  return { ...common, phase: 'indexAll' };
+}
+
+interface SendErrorRejection {
+  readonly pending: Map<number, Pending>;
+  readonly id: number;
+  readonly reject: (err: Error) => void;
+  readonly err: Error | null;
+}
+
+function rejectPendingSendError(args: SendErrorRejection): void {
+  const { pending, id, reject, err } = args;
+  if (err === null) return;
+  if (pending.delete(id)) reject(err);
 }
 
 export class HookWorkerClient {
@@ -388,22 +407,12 @@ export class HookWorkerClient {
 
     const reply = new Promise<IndexHookOutcome[]>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
-      child.send(
-        {
-          type: 'run-hooks',
-          id,
-          phase: args.phase,
-          projectRoot: args.projectRoot,
-          dbPath: args.dbPath,
-          config: args.config,
-          ...(args.syncResult ? { syncResult: args.syncResult } : {}),
-        },
-        (err) => {
-          // `send` failed (channel closed mid-dispatch) — fail this
-          // phase rather than hang on a reply that will never come.
-          if (err && this.pending.delete(id)) reject(err);
-        },
-      );
+      const command = buildHookWorkerCommand(id, args);
+      child.send(command, (err) => {
+        // `send` failed (channel closed mid-dispatch) — fail this
+        // phase rather than hang on a reply that will never come.
+        rejectPendingSendError({ pending: this.pending, id, reject, err });
+      });
     });
 
     try {
@@ -511,8 +520,16 @@ export class HookWorkerClient {
         }
       }, SPAWN_TIMEOUT_MS);
 
-      child.on('message', (msg: unknown) => {
-        const m = msg as ChildMessage;
+      child.on('message', (raw: unknown) => {
+        let m: HookWorkerReply;
+        try {
+          m = parseHookWorkerReply(raw);
+        } catch (err) {
+          const wrapped = new Error(`invalid hook worker reply: ${errMsg(err)}`);
+          finish(wrapped);
+          this.rejectAllPending(wrapped);
+          return;
+        }
         if (m.type === 'ready') finish();
         else this.onMessage(m);
       });
@@ -537,7 +554,7 @@ export class HookWorkerClient {
 
   /** Route a phase-reply message (`ready` is handled at the spawn
    *  handshake in {@link ensureSpawned}). */
-  private onMessage(msg: DoneMessage | ErrorMessage): void {
+  private onMessage(msg: HookWorkerDoneReply | HookWorkerErrorReply): void {
     const pending = this.pending.get(msg.id);
     if (!pending) return;
     this.pending.delete(msg.id);

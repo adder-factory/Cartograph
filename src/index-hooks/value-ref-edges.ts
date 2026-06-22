@@ -85,8 +85,8 @@ import {
   PAIR_VALUE_RE,
   SUPPORTED_VALUE_REF_LANGS,
   collectValueRefMatches,
-  type ValueRefEdgeRecord,
 } from './value-ref-edge-scan.js';
+import type { ValueRefEdgeRecord } from './value-ref-edges-contract.js';
 
 /** Algo-version SHA derived from this file's source. A change to the
  *  scanning regexes / keyword filter / resolution-gate behaviour
