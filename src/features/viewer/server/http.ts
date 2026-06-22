@@ -48,8 +48,7 @@ export function parseJsonObject(body: string): JsonObjectParseResult {
     return { ok: false, reason: 'not-object' };
   }
 
-  const ownOnly: Record<string, unknown> = {};
-  Object.setPrototypeOf(ownOnly, null);
+  const ownOnly: Record<string, unknown> = Object.create(null);
   for (const [key, value] of Object.entries(parsed)) {
     ownOnly[key] = value;
   }

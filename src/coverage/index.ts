@@ -315,8 +315,7 @@ function readReportPathMap(queries: QueryBuilder): Record<string, string[]> {
 }
 
 function createReportPathMap(): Record<string, string[]> {
-  const map: Record<string, string[]> = {};
-  Object.setPrototypeOf(map, null);
+  const map: Record<string, string[]> = Object.create(null);
   return map;
 }
 

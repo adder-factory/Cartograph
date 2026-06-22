@@ -227,8 +227,7 @@ type TsconfigAliasesConfig = z.infer<typeof tsconfigAliasesSchema>;
 
 function normalizeTsPathMap(value: unknown): Record<string, string[]> {
   const map = asJsonObject(value);
-  const out: Record<string, string[]> = {};
-  Object.setPrototypeOf(out, null);
+  const out: Record<string, string[]> = Object.create(null);
   if (!map) return out;
 
   for (const [pattern, substitutions] of Object.entries(map)) {
@@ -482,14 +481,12 @@ function parseTsconfigAliases(json: string): TsconfigAliasesConfig | null {
 }
 
 function createTsconfigAliasesConfig(): TsconfigAliasesConfig {
-  const config: TsconfigAliasesConfig = {};
-  Object.setPrototypeOf(config, null);
+  const config: TsconfigAliasesConfig = Object.create(null);
   return config;
 }
 
 function parseTsconfigCompilerOptions(input: JsonObject): NonNullable<TsconfigAliasesConfig['compilerOptions']> | null {
-  const compilerOptions: NonNullable<TsconfigAliasesConfig['compilerOptions']> = {};
-  Object.setPrototypeOf(compilerOptions, null);
+  const compilerOptions: NonNullable<TsconfigAliasesConfig['compilerOptions']> = Object.create(null);
   if (Object.hasOwn(input, 'baseUrl')) {
     const baseUrl = tsconfigBaseUrlSchema.safeParse(input['baseUrl']);
     if (!baseUrl.success) return null;

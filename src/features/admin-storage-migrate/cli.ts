@@ -87,6 +87,11 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
               database,
               force: options.force === true,
             });
+      // `Promise.resolve` is retained deliberately: biome's nursery
+      // `useAwaitThenable` rule cannot infer the Promise return type of these
+      // statically-imported async functions and flags a direct `await` as a
+      // non-thenable. Wrapping keeps the lint gate green; it is a no-op at
+      // runtime since `result` is already a Promise.
       const resolvedResult = await Promise.resolve(result);
       if (!resolvedResult.ok) {
         const remediation = resolvedResult.error.remediation ? ` ${resolvedResult.error.remediation}` : '';

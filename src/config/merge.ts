@@ -29,19 +29,20 @@ export function mergeConfig(defaults: CartographConfig, overrides: Partial<Carto
   // field meant remembering to update this function or the
   // override would silently no-op.
   const cleanOverrides = compact(overrides);
-  const merged: CartographConfig = { ...defaults, ...cleanOverrides };
+  // Merge onto a null-prototype object directly (cheaper than mutating the
+  // prototype of an existing literal) so a polluted Object.prototype can't
+  // shadow a missing field.
+  const merged: CartographConfig = Object.assign(Object.create(null), defaults, cleanOverrides);
   // Defense-in-depth against prototype pollution: a config loaded from
   // disk is `JSON.parse`d untrusted input, so an own `__proto__`/
-  // `constructor`/`prototype` data key could ride in through the spread.
-  // Drop any such key explicitly (none are valid CartographConfig fields)
-  // and detach the prototype so a polluted Object.prototype can't shadow
-  // a missing field. The strip makes the intent self-evident rather than
-  // relying on the null-prototype alone.
+  // `constructor`/`prototype` data key could ride in through the merge.
+  // Drop any such key explicitly (none are valid CartographConfig fields);
+  // the strip makes the intent self-evident rather than relying on the
+  // null prototype alone.
   const mergedRecord = merged as unknown as Record<string, unknown>;
   for (const unsafeKey of ['__proto__', 'constructor', 'prototype']) {
     if (Object.hasOwn(mergedRecord, unsafeKey)) delete mergedRecord[unsafeKey];
   }
-  Object.setPrototypeOf(merged, null);
   const persisted = cleanOverrides.include;
   if (Array.isArray(persisted)) {
     const seen = new Set(persisted);
