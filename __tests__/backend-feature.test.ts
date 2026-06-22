@@ -163,7 +163,10 @@ describe('backend feature CLI', () => {
       observedExitCode = process.exitCode;
     } finally {
       process.exit = originalExit;
-      process.exitCode = originalExitCode;
+      // `?? 0`: under Bun, `process.exitCode = undefined` does NOT clear a
+      // previously-set code, so restoring the (undefined) original would leak
+      // the SUT's exitCode=1 to the test process — passing tests, exit 1.
+      process.exitCode = originalExitCode ?? 0;
     }
 
     expect(exitCalled).toBe(false);
@@ -222,7 +225,10 @@ describe('backend feature CLI', () => {
       observedExitCode = process.exitCode;
     } finally {
       process.exit = originalExit;
-      process.exitCode = originalExitCode;
+      // `?? 0`: under Bun, `process.exitCode = undefined` does NOT clear a
+      // previously-set code, so restoring the (undefined) original would leak
+      // the SUT's exitCode=1 to the test process — passing tests, exit 1.
+      process.exitCode = originalExitCode ?? 0;
     }
 
     expect(exitCalled).toBe(false);
