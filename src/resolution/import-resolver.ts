@@ -249,13 +249,32 @@ function objectProperty(value: object, key: string): unknown {
 }
 
 function resolvePackageExportPatternTarget(exportsField: object, subpath: string): string | null {
+  // Node resolves the most-specific matching pattern, not the first in object
+  // order (PATTERN_KEY_COMPARE): longer base before `*` wins, then longer key.
+  // Sort matches by specificity so e.g. `./features/private/*` beats a broader
+  // `./features/*` listed earlier, instead of recording an edge to the wrong
+  // workspace file.
+  const matches: Array<{ key: string; wildcard: string }> = [];
   for (const key of Object.keys(exportsField)) {
     const wildcard = packageExportPatternWildcard(key, subpath);
-    if (wildcard === null) continue;
+    if (wildcard !== null) matches.push({ key, wildcard });
+  }
+  matches.sort((a, b) => comparePackageExportPatternKeys(a.key, b.key));
+  for (const { key, wildcard } of matches) {
     const target = packageExportEntryToString(objectProperty(exportsField, key));
     if (target !== null) return target.replaceAll('*', wildcard);
   }
   return null;
+}
+
+// Node's PATTERN_KEY_COMPARE: the pattern with the longer base (text up to and
+// including `*`) is more specific; ties break toward the longer overall key.
+// Returns a standard comparator value (negative = `a` is more specific).
+function comparePackageExportPatternKeys(a: string, b: string): number {
+  const aBase = a.indexOf('*') + 1;
+  const bBase = b.indexOf('*') + 1;
+  if (aBase !== bBase) return bBase - aBase;
+  return b.length - a.length;
 }
 
 function packageExportPatternWildcard(pattern: string, subpath: string): string | null {

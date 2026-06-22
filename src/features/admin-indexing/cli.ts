@@ -248,6 +248,12 @@ async function runInteractiveIndex(args: InteractiveIndexArgs): Promise<void> {
     clack.note(phaseTimingLines(result, deps).join('\n'), 'Phase timings');
   }
   if (!result.success) {
+    // Release the graph on the failure path. The success path closes inside
+    // reportBackgroundSummaryStatus (before it spawns the detached summary
+    // child), so a blanket finally would double-close; close here instead.
+    // Without this, the open DB handle + hook workers would leak now that this
+    // sets process.exitCode and returns instead of taking the old hard-exit path.
+    cg.close();
     process.exitCode = 1;
     return;
   }

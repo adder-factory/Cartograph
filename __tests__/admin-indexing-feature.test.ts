@@ -197,6 +197,26 @@ describe('admin indexing feature CLI', () => {
     expect(calls).toContain('close');
   });
 
+  it('closes the graph when interactive indexing fails (no DB/worker leak)', async () => {
+    const { deps, calls } = fakeDeps({
+      graphOptions: {
+        indexResult: {
+          success: false,
+          errors: [{ severity: 'error', message: 'index failed' }],
+        },
+      },
+    });
+
+    const exitCode = await withProcessExitGuard(() => runAdminIndexCommand('/repo', {}, deps));
+
+    expect(exitCode).toBe(1);
+    // The failure path must release the graph; the old process.exit(1) masked
+    // this by killing the process, but process.exitCode lets the loop drain.
+    expect(calls).toContain('close');
+    // Background summarisation (the success-only path) must be skipped.
+    expect(calls.some((call) => call.startsWith('spawnDetachedSummarize'))).toBe(false);
+  });
+
   it('reports no-LLM and ad-hoc-only summary states after closing the graph', async () => {
     const noLlm = fakeClack();
     const noLlmGraph = fakeGraph(noLlm.calls, {
