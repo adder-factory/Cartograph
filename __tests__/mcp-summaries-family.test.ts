@@ -119,6 +119,12 @@ describe('cartograph_summaries family (#7-1)', () => {
     // required key at the dispatch boundary; the formatted error names
     // the first missing key under its array path.
     expect(badItem.content[0]?.text ?? '').toMatch(/items\[0\]\.contentHash: required/);
+
+    const blankSummary = await handler.execute('cartograph_summaries', {
+      action: 'save',
+      items: [{ nodeId: 'x', contentHash: 'h', summary: ' ' }],
+    });
+    expect(blankSummary.content[0]?.text ?? '').toMatch(/items\[0\]\.summary/);
   });
 
   it("action: 'save' with an empty items array returns an empty-batch notice", async () => {

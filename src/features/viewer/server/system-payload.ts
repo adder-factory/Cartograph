@@ -17,6 +17,7 @@ import { getCurrentHeadSha } from '../../../git-utils.js';
 import type Cartograph from '../../../index.js';
 import type { LlmEndpointConfig } from '../../../llm/client.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../../llm/provider.js';
+import { packageJsonDeclaresEsm } from '../../../package-manifest.js';
 import { readOnDiskPackageVersion } from '../../../package-version.js';
 import { DEFAULT_DOC_CHAR_THRESHOLD, resolveBodyLineFloor, SUMMARIZABLE_KINDS } from '../../../llm/summarizer.js';
 import { ensureCartograph, type RequestContext } from './context.js';
@@ -144,7 +145,7 @@ function packageIsEsm(): boolean {
   if (cachedIsEsm !== undefined) return cachedIsEsm;
   try {
     const raw = fs.readFileSync(resolveAssetPath('package.json'), 'utf-8');
-    cachedIsEsm = (JSON.parse(raw) as { type?: unknown }).type === 'module';
+    cachedIsEsm = packageJsonDeclaresEsm(raw);
   } catch {
     cachedIsEsm = false;
   }

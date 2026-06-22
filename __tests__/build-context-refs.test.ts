@@ -69,13 +69,13 @@ describe('Tooling-gaps #6: build-context refs (__dirname / import.meta.*)', () =
   });
 
   it('the build_context_refs table exists', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const row = q.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name='build_context_refs'`).get();
     expect(row).toBeDefined();
   });
 
   it('captures __dirname and __filename in the CJS-style file', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const refs = q.db
       .prepare(`SELECT ref_kind, file_path FROM build_context_refs WHERE file_path LIKE '%cjs-style%'`)
       .all() as Array<{ ref_kind: string; file_path: string }>;
@@ -85,7 +85,7 @@ describe('Tooling-gaps #6: build-context refs (__dirname / import.meta.*)', () =
   });
 
   it('captures import.meta.dirname / .filename / .url in the ESM-style file', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const refs = q.db
       .prepare(`SELECT ref_kind FROM build_context_refs WHERE file_path LIKE '%esm-style%'`)
       .all() as Array<{ ref_kind: string }>;
@@ -96,7 +96,7 @@ describe('Tooling-gaps #6: build-context refs (__dirname / import.meta.*)', () =
   });
 
   it('does not mine build-context identifiers that appear only in comments', () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
     const refs = q.db
       .prepare(`SELECT ref_kind FROM build_context_refs WHERE file_path LIKE '%comments-only%'`)
       .all() as Array<{ ref_kind: string }>;
@@ -133,7 +133,7 @@ describe('build-context-refs hook self-heal on algo-version mismatch', () => {
   });
 
   it('forces a full re-mine when stored algo version is stale', async () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
 
     // Verify baseline: both files were mined after indexAll.
     const beforeRefs = q.db
@@ -145,7 +145,8 @@ describe('build-context-refs hook self-heal on algo-version mismatch', () => {
 
     // Wipe the build_context_refs table to simulate stale state after a miner fix.
     q.db.exec('DELETE FROM build_context_refs');
-    expect(q.db.prepare('SELECT COUNT(*) AS n FROM build_context_refs').get().n).toBe(0);
+    const wipedCount = q.db.prepare('SELECT COUNT(*) AS n FROM build_context_refs').get() as { n: number };
+    expect(wipedCount.n).toBe(0);
 
     // Stamp a bogus algo version to trigger the self-heal path.
     setMetadata(q, LAST_MINED_BUILD_CONTEXT_REFS_ALGO_VERSION_KEY, '0');
@@ -172,7 +173,7 @@ describe('build-context-refs hook self-heal on algo-version mismatch', () => {
   });
 
   it('stays incremental when the stored algo version matches', async () => {
-    const q = (cg as any).queries;
+    const q = cg.queries;
 
     // Stamp the current version (already done by indexAll, but be explicit).
     setMetadata(q, LAST_MINED_BUILD_CONTEXT_REFS_ALGO_VERSION_KEY, BUILD_CONTEXT_REFS_ALGO_VERSION);

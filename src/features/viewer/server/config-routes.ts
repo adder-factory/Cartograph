@@ -13,6 +13,7 @@
  * tampered client cannot reach them by un-hiding the UI.
  */
 import type * as http from 'node:http';
+import { z } from 'zod';
 import { loadConfig, saveConfig } from '../../../config.js';
 import { classifyConfigChange } from '../../../config/change-class.js';
 import { assertValidCartographConfig } from '../../../config/schema.js';
@@ -34,7 +35,7 @@ import {
 } from './constants.js';
 import type { RequestContext } from './context.js';
 import { ensureCartograph } from './context.js';
-import { readBody, sendJson, writeSseEvent } from './http.js';
+import { parseJsonObject, readBody, sendJson, writeSseEvent } from './http.js';
 import { endReindexJob, isReindexInProgress, tryBeginReindexJob } from './reindex-job.js';
 
 const CONFIG_EDIT_DISABLED_MSG =
@@ -64,6 +65,8 @@ interface CuratedConfig {
 }
 
 type FieldResult<T> = { ok: true; value: T } | { ok: false; error: string };
+
+const curatedConfigBodySchema = z.looseObject({});
 
 function curatedFrom(config: CartographConfig): CuratedConfig {
   return {
@@ -143,19 +146,22 @@ export async function handleConfigPost(
   const body = await readBodyOr400(req, res, CONFIG_BODY_BYTE_LIMIT);
   if (body === null) return;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body);
-  } catch {
+  const parsed = parseJsonObject(body);
+  if (!parsed.ok) {
+    if (parsed.reason === 'not-object') {
+      sendJson(res, HTTP_BAD_REQUEST, { error: 'body must be a JSON object' });
+      return;
+    }
     sendJson(res, HTTP_BAD_REQUEST, { error: 'invalid JSON body' });
     return;
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+  const parsedBody = curatedConfigBodySchema.safeParse(parsed.value);
+  if (!parsedBody.success) {
     sendJson(res, HTTP_BAD_REQUEST, { error: 'body must be a JSON object' });
     return;
   }
 
-  const validated = validateCuratedInput(parsed as Record<string, unknown>);
+  const validated = validateCuratedInput(parsedBody.data);
   if (!validated.ok) {
     sendJson(res, HTTP_BAD_REQUEST, { error: validated.error });
     return;
@@ -244,6 +250,10 @@ export async function handleReindex(
 
 type ReindexMode = 'index' | 'sync';
 
+const reindexModeBodySchema = z.looseObject({
+  mode: z.enum(['index', 'sync']),
+});
+
 interface ReindexJob {
   req: http.IncomingMessage;
   res: http.ServerResponse;
@@ -253,12 +263,10 @@ interface ReindexJob {
 }
 
 function parseReindexMode(body: string): ReindexMode | null {
-  try {
-    const parsed = JSON.parse(body) as { mode?: unknown };
-    return parsed.mode === 'index' || parsed.mode === 'sync' ? parsed.mode : null;
-  } catch {
-    return null;
-  }
+  const parsed = parseJsonObject(body);
+  if (!parsed.ok || !Object.hasOwn(parsed.value, 'mode')) return null;
+  const result = reindexModeBodySchema.safeParse(parsed.value);
+  return result.success ? result.data.mode : null;
 }
 
 /** Switch the response to an event stream and run the job. Once the SSE
@@ -437,7 +445,7 @@ interface PickFieldSpec<T> {
  *  null; on success calls `set` with the concretely-typed value. */
 function pickField<T>(spec: PickFieldSpec<T>): string | null {
   const { input, key, parse, set } = spec;
-  if (!(key in input)) return null;
+  if (!Object.hasOwn(input, key)) return null;
   const r = parse(input[key]);
   if (!r.ok) return r.error;
   set(r.value);

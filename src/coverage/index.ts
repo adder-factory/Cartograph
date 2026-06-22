@@ -17,6 +17,7 @@
 
 import { readFile } from 'node:fs/promises';
 import * as path from 'node:path';
+import { z } from 'zod';
 import type { QueryBuilder } from '../db/queries.js';
 import { qbTransaction } from '../db/queries.js';
 import { clearCoverageSource, upsertNodeCoverage } from '../db/queries-coverage.js';
@@ -25,6 +26,7 @@ import { appendFindings, clearFindingsByKind } from '../db/queries-findings.js';
 import { getMetadata, setMetadata } from '../db/queries-metadata.js';
 import { findLowCoverage } from '../biomarkers/low-coverage.js';
 import { logDebug } from '../errors.js';
+import { asJsonObject, type JsonObject } from '../json-object.js';
 import { parseLcov, summariseSpan } from './lcov.js';
 
 export interface IngestResult {
@@ -242,6 +244,10 @@ interface PersistReportPathArgs {
  *  so the metadata value can't grow without bound under churn. */
 const MAX_REPORTS_PER_SOURCE = 64;
 
+const coverageReportPathValueSchema = z.union([z.string(), z.array(z.unknown())]);
+
+type CoverageReportPathValue = z.infer<typeof coverageReportPathValueSchema>;
+
 /**
  * Record the absolute report path under the `coverage_report_paths`
  * metadata key — a `{ [source]: absPath[] }` JSON map keyed by source
@@ -297,22 +303,38 @@ export function getCoverageReportPaths(queries: QueryBuilder): Record<string, st
  *  single-string-per-source shape into the current list shape. */
 function readReportPathMap(queries: QueryBuilder): Record<string, string[]> {
   const raw = getMetadata(queries, 'coverage_report_paths');
-  if (!raw) return {};
+  if (!raw) return createReportPathMap();
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object') return {};
-    const out: Record<string, string[]> = {};
-    for (const [source, value] of Object.entries(parsed as Record<string, unknown>)) {
-      if (typeof value === 'string') {
-        out[source] = [value];
-      } else if (Array.isArray(value)) {
-        out[source] = value.filter((v): v is string => typeof v === 'string');
-      }
-    }
-    return out;
+    const root = asJsonObject(parsed);
+    if (!root) return createReportPathMap();
+    return normalizeReportPathMap(root);
   } catch {
-    return {};
+    return createReportPathMap();
   }
+}
+
+function createReportPathMap(): Record<string, string[]> {
+  const map: Record<string, string[]> = {};
+  Object.setPrototypeOf(map, null);
+  return map;
+}
+
+function normalizeReportPathMap(parsed: JsonObject): Record<string, string[]> {
+  const out = createReportPathMap();
+  for (const [source, value] of Object.entries(parsed)) {
+    const result = coverageReportPathValueSchema.safeParse(value);
+    if (!result.success) continue;
+    const entry = normalizeReportPathValue(result.data);
+    if (entry.length > 0) {
+      out[source] = entry;
+    }
+  }
+  return out;
+}
+
+function normalizeReportPathValue(value: CoverageReportPathValue): string[] {
+  return typeof value === 'string' ? [value] : value.filter((entry): entry is string => typeof entry === 'string');
 }
 
 /**

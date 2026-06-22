@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { z } from 'zod';
 import { errMsg } from '../../errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -86,6 +87,16 @@ const GIT_LS_REMOTE_TIMEOUT_MS = 15_000;
 const GIT_LS_REMOTE_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
 
 const STANDALONE_INSTALLER_URL = 'https://raw.githubusercontent.com/adder-factory/cartograph/main/install.sh';
+
+const npmRegistryLatestResponseSchema = z.object({
+  version: z.string(),
+});
+const githubLatestReleaseResponseSchema = z.object({
+  tag_name: z.string(),
+});
+
+type NpmRegistryLatestResponse = z.infer<typeof npmRegistryLatestResponseSchema>;
+type GithubLatestReleaseResponse = z.infer<typeof githubLatestReleaseResponseSchema>;
 
 export async function checkUpgrade(options: UpgradeCheckOptions): Promise<UpgradeCheckResult> {
   const applyRequested = options.apply === true;
@@ -220,10 +231,7 @@ export async function fetchLatestNpmVersion(packageName = '@adder-factory/cartog
     signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`npm registry returned HTTP ${response.status}`);
-  const parsed = (await response.json()) as { version?: unknown };
-  if (typeof parsed.version !== 'string' || parsed.version.trim() === '') {
-    throw new Error('npm registry response did not include a version');
-  }
+  const parsed = parseNpmRegistryLatestResponse(await response.json());
   return parsed.version.trim();
 }
 
@@ -233,10 +241,7 @@ export async function fetchLatestGithubReleaseVersion(): Promise<string> {
     signal: AbortSignal.timeout(VERSION_FETCH_TIMEOUT_MS),
   });
   if (!response.ok) throw new Error(`GitHub releases API returned HTTP ${response.status}`);
-  const parsed = (await response.json()) as { tag_name?: unknown };
-  if (typeof parsed.tag_name !== 'string' || parsed.tag_name.trim() === '') {
-    throw new Error('GitHub releases response did not include a tag name');
-  }
+  const parsed = parseGithubLatestReleaseResponse(await response.json());
   const tag = parsed.tag_name.trim();
   // Guard the shape: a non-version tag (e.g. `nightly-2026-06-12`)
   // would silently compare as 0.0.0 and report the user as current.
@@ -247,6 +252,22 @@ export async function fetchLatestGithubReleaseVersion(): Promise<string> {
     throw new Error(`GitHub release tag "${tag}" is not a version tag`);
   }
   return tag.replace(/^v/, '');
+}
+
+function parseNpmRegistryLatestResponse(value: unknown): NpmRegistryLatestResponse {
+  const parsed = npmRegistryLatestResponseSchema.safeParse(value);
+  if (!parsed.success || parsed.data.version.trim() === '') {
+    throw new Error('npm registry response did not include a version');
+  }
+  return parsed.data;
+}
+
+function parseGithubLatestReleaseResponse(value: unknown): GithubLatestReleaseResponse {
+  const parsed = githubLatestReleaseResponseSchema.safeParse(value);
+  if (!parsed.success || parsed.data.tag_name.trim() === '') {
+    throw new Error('GitHub releases response did not include a tag name');
+  }
+  return parsed.data;
 }
 
 /** Injectable `git ls-remote` runner — returns its raw stdout. Tests pass

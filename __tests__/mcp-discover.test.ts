@@ -149,6 +149,64 @@ describe("cartograph_host mode='discover'", () => {
     expect(text).not.toContain('file is not a database');
   });
 
+  it('requires the storage provider to be an own config property', async () => {
+    const sqliteProject = path.join(monorepo, 'services', 'sqlite-with-empty-config');
+    fs.mkdirSync(path.join(sqliteProject, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(sqliteProject, 'src', 'main.ts'), 'export const z = 3;\n');
+    const sqliteCg = await Cartograph.init(sqliteProject, { config: { llm: { endpoint: '' } } });
+    try {
+      await sqliteCg.indexAll({ summarize: false });
+      sqliteCg.close();
+      fs.writeFileSync(path.join(sqliteProject, '.cartograph', 'config.json'), '{}\n');
+
+      Object.defineProperty(Object.prototype, 'database', {
+        configurable: true,
+        value: { provider: 'postgres' },
+      });
+      try {
+        const result = await executeDiscover({ path: monorepo });
+        const text = result.content[0]?.text ?? '';
+
+        expect(text).toMatch(/3 cartograph contexts found/);
+        expect(text).toContain(sqliteProject);
+        expect(text).not.toContain('PostgreSQL storage; discover does not open external database connections');
+      } finally {
+        Reflect.deleteProperty(Object.prototype, 'database');
+      }
+    } finally {
+      sqliteCg.close();
+    }
+  });
+
+  it('requires the storage provider value to be an own database property', async () => {
+    const sqliteProject = path.join(monorepo, 'services', 'sqlite-with-empty-database');
+    fs.mkdirSync(path.join(sqliteProject, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(sqliteProject, 'src', 'main.ts'), 'export const nested = 4;\n');
+    const sqliteCg = await Cartograph.init(sqliteProject, { config: { llm: { endpoint: '' } } });
+    try {
+      await sqliteCg.indexAll({ summarize: false });
+      sqliteCg.close();
+      fs.writeFileSync(path.join(sqliteProject, '.cartograph', 'config.json'), '{"database":{}}\n');
+
+      Object.defineProperty(Object.prototype, 'provider', {
+        configurable: true,
+        value: 'postgres',
+      });
+      try {
+        const result = await executeDiscover({ path: monorepo });
+        const text = result.content[0]?.text ?? '';
+
+        expect(text).toMatch(/3 cartograph contexts found/);
+        expect(text).toContain(sqliteProject);
+        expect(text).not.toContain('PostgreSQL storage; discover does not open external database connections');
+      } finally {
+        Reflect.deleteProperty(Object.prototype, 'provider');
+      }
+    } finally {
+      sqliteCg.close();
+    }
+  });
+
   it('returns a helpful empty message when no contexts are under the path', async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-discover-empty-'));
     try {

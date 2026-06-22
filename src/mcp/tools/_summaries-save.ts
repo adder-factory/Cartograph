@@ -5,6 +5,7 @@
  */
 
 import { saveAgentSummaries } from '../../llm/agent-bridge.js';
+import { summarySaveItemsSchema } from '../../features/summaries/runtime.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
@@ -18,34 +19,27 @@ const SKIPPED_REASONS_RENDER_LIMIT = 20;
 
 export async function handleSaveSummaries(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const cg = ctx.getCartograph(args['projectPath'] as string | undefined);
-  const items = args['items'] as Array<{ nodeId?: unknown; contentHash?: unknown; summary?: unknown }> | undefined;
-  if (!Array.isArray(items)) {
+  const rawItems = args['items'];
+  if (!Array.isArray(rawItems)) {
     return err('items must be an array of { nodeId, contentHash, summary }');
   }
   // An empty `items` array is almost always a caller mistake — a bad
   // jq filter, an empty pipeline, or a forgotten batch. A cheerful
   // "Saved 0" hides that; surface the no-op explicitly (audit-4 #9).
-  if (items.length === 0) {
+  if (rawItems.length === 0) {
     return ok(
       textResult('No summaries to save — items array was empty. (Did the pending batch / pipeline produce no rows?)'),
     );
   }
-  const cleaned: Array<{ nodeId: string; contentHash: string; summary: string }> = [];
-  for (const it of items) {
-    if (typeof it?.nodeId !== 'string' || typeof it?.contentHash !== 'string' || typeof it?.summary !== 'string') {
-      return err('each item requires string nodeId, contentHash, and summary');
-    }
-    cleaned.push({
-      nodeId: it.nodeId,
-      contentHash: it.contentHash,
-      summary: it.summary,
-    });
+  const parsedItems = summarySaveItemsSchema.safeParse(rawItems);
+  if (!parsedItems.success) {
+    return err('each item requires non-empty string nodeId, contentHash, and summary');
   }
   const model = (args['model'] as string | undefined) ?? 'agent-mcp';
   const result = saveAgentSummaries({
     projectRoot: cg.projectRoot,
     queries: cg.queries,
-    items: cleaned,
+    items: parsedItems.data,
     modelLabel: model,
   });
   const lines: string[] = [`Saved ${result.saved} summaries (model: ${model}); skipped ${result.skipped}.`];

@@ -20,7 +20,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { StdioTransport } from '../src/mcp/transport.js';
+import { PassThrough } from 'node:stream';
+import { ErrorCodes, StdioTransport, type JsonRpcNotification, type JsonRpcRequest } from '../src/mcp/transport.js';
 
 const byNumber = (a: number, b: number): number => a - b;
 
@@ -32,6 +33,57 @@ async function settle(): Promise<void> {
 
 interface MockStdout extends EventEmitter {
   write: (chunk: string | Uint8Array, encodingOrCb?: unknown, cb?: unknown) => boolean;
+}
+
+type RpcMessage = JsonRpcRequest | JsonRpcNotification;
+type TransportHandler = (message: RpcMessage) => Promise<void>;
+
+interface LineTransportHarness {
+  chunks: string[];
+  writeLine: (line: string) => Promise<void>;
+}
+
+async function withLineTransport<T>(
+  handler: TransportHandler,
+  fn: (harness: LineTransportHarness) => Promise<T>,
+): Promise<T> {
+  const input = new PassThrough();
+  const output = new PassThrough();
+  const chunks: string[] = [];
+  const transport = new StdioTransport({
+    input,
+    output,
+    exitOnClose: false,
+  });
+  output.on('data', (chunk: string | Uint8Array) => {
+    chunks.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'));
+  });
+  transport.start(handler);
+  try {
+    return await fn({
+      chunks,
+      writeLine: async (line: string): Promise<void> => {
+        input.write(`${line}\n`);
+        await settle();
+      },
+    });
+  } finally {
+    transport.stop();
+    input.destroy();
+    output.destroy();
+  }
+}
+
+function parseTransportChunks(chunks: string[]): unknown[] {
+  return chunks.flatMap((chunk) => chunk.trim().split('\n').filter(Boolean).map(parseTransportJsonLine));
+}
+
+function parseTransportJsonLine(line: string): unknown {
+  try {
+    return JSON.parse(line) as unknown;
+  } catch (err) {
+    throw new Error(`Transport wrote invalid JSON: ${line}`, { cause: err });
+  }
 }
 
 describe('StdioTransport write queue (F#19)', () => {
@@ -178,5 +230,32 @@ describe('StdioTransport write queue (F#19)', () => {
     // The second send arrived even though the first threw.
     expect(chunks.length).toBeGreaterThanOrEqual(1);
     expect(chunks.some((c) => (JSON.parse(c.trim()) as { id: number }).id === 2)).toBe(true);
+  });
+});
+
+describe('StdioTransport inbound JSON-RPC validation', () => {
+  it('rejects non-string/non-number request ids before dispatching to the handler', async () => {
+    let calls = 0;
+
+    await withLineTransport(
+      async () => {
+        calls++;
+      },
+      async ({ chunks, writeLine }) => {
+        await writeLine(JSON.stringify({ jsonrpc: '2.0', id: { nested: 1 }, method: 'tools/list' }));
+
+        expect(calls).toBe(0);
+        expect(parseTransportChunks(chunks)).toEqual([
+          {
+            jsonrpc: '2.0',
+            id: null,
+            error: {
+              code: ErrorCodes.InvalidRequest,
+              message: 'Invalid Request: not a valid JSON-RPC 2.0 message',
+            },
+          },
+        ]);
+      },
+    );
   });
 });

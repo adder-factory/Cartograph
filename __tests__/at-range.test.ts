@@ -21,6 +21,10 @@ import * as os from 'node:os';
 import { DatabaseConnection } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { getNodesAtRange } from '../src/db/queries-rtree.js';
+import type Cartograph from '../src/index.js';
+import { CallIdCache } from '../src/mcp/tools/_call-id-cache.js';
+import { RefIdCache } from '../src/mcp/tools/_id-cache.js';
+import type { ToolCtx } from '../src/mcp/tools/types.js';
 
 function createTempDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-at-range-test-'));
@@ -74,6 +78,19 @@ function seedFile(db: DatabaseConnection, fpath: string): void {
       `INSERT OR IGNORE INTO files (path, content_hash, language, size, modified_at, indexed_at) VALUES (?, ?, ?, ?, ?, ?)`,
     )
     .run(fpath, 'h', 'typescript', 0, 0, 0);
+}
+
+function makeToolCtx(cg: Cartograph): ToolCtx {
+  return {
+    getCartograph: () => cg,
+    options: {},
+    defaultCg: cg,
+    projectCache: new Map<string, Cartograph>(),
+    closeProjectsMatching: () => {},
+    refIds: new RefIdCache(),
+    callIds: new CallIdCache(),
+    evictCachedProject: () => {},
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -243,17 +260,7 @@ describe('handleAtRange — MCP handler', () => {
     const { AT_RANGE_TOOL } = await import('../src/mcp/tools/at-range.js');
     const { Cartograph } = await import('../src/index.js');
     const cg = Cartograph.initSync(testDir);
-
-    const ctx = {
-      getCartograph: () => cg,
-      options: {},
-      defaultCg: cg,
-      projectCache: new Map(),
-      closeProjectsMatching: () => {},
-      refIds: { mint: () => 'n_0', resolve: () => null },
-      callIds: { mint: () => 'c_0', resolve: () => null },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
+    const ctx = makeToolCtx(cg);
 
     const result = await AT_RANGE_TOOL.handle(ctx, { startLine: 1, endLine: 5 });
     expect(result.isError).toBe(true);
@@ -266,17 +273,7 @@ describe('handleAtRange — MCP handler', () => {
     const { AT_RANGE_TOOL } = await import('../src/mcp/tools/at-range.js');
     const { Cartograph } = await import('../src/index.js');
     const cg = Cartograph.initSync(testDir);
-
-    const ctx = {
-      getCartograph: () => cg,
-      options: {},
-      defaultCg: cg,
-      projectCache: new Map(),
-      closeProjectsMatching: () => {},
-      refIds: { mint: () => 'n_0', resolve: () => null },
-      callIds: { mint: () => 'c_0', resolve: () => null },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
+    const ctx = makeToolCtx(cg);
 
     const result = await AT_RANGE_TOOL.handle(ctx, { file: 'src/file.ts', startLine: 10, endLine: 5 });
     expect(result.isError).toBe(true);
@@ -289,17 +286,7 @@ describe('handleAtRange — MCP handler', () => {
     const { AT_RANGE_TOOL } = await import('../src/mcp/tools/at-range.js');
     const { Cartograph } = await import('../src/index.js');
     const cg = Cartograph.initSync(testDir);
-
-    const ctx = {
-      getCartograph: () => cg,
-      options: {},
-      defaultCg: cg,
-      projectCache: new Map(),
-      closeProjectsMatching: () => {},
-      refIds: { mint: () => 'n_0', resolve: () => null },
-      callIds: { mint: () => 'c_0', resolve: () => null },
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } as any;
+    const ctx = makeToolCtx(cg);
 
     const result = await AT_RANGE_TOOL.handle(ctx, { file: 'src/no-such-file.ts', startLine: 1, endLine: 5 });
     // Task #16: a non-indexed path is almost always a typo — fail loud
@@ -803,19 +790,10 @@ describe('handleAtRange — diff-form error messages', () => {
     cleanupTempDir(testDir);
   });
 
-  async function makeCtx(): Promise<any> {
+  async function makeCtx(): Promise<{ cg: Cartograph; ctx: ToolCtx }> {
     const { Cartograph } = await import('../src/index.js');
     const cg = Cartograph.initSync(testDir);
-    const ctx = {
-      getCartograph: () => cg,
-      options: {},
-      defaultCg: cg,
-      projectCache: new Map(),
-      closeProjectsMatching: () => {},
-      refIds: { mint: () => 'n_0', resolve: () => null },
-      callIds: { mint: () => 'c_0', resolve: () => null },
-    } as any;
-    return { cg, ctx };
+    return { cg, ctx: makeToolCtx(cg) };
   }
 
   it('precise message when `@@` hunk lines exist but no file header', async () => {

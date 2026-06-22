@@ -24,6 +24,8 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { z } from 'zod';
+import { asJsonObject, type JsonObject } from './json-object.js';
 import { fileExists } from './utils.js';
 
 type ResolutionKind = 'file' | 'directory' | 'bare' | 'unresolvable';
@@ -208,6 +210,34 @@ export interface TsPathAliases {
   paths: Record<string, string[]>;
 }
 
+const tsPathSubstitutionsSchema = z.array(z.string());
+const tsPathMapSchema = z.unknown().transform(normalizeTsPathMap);
+
+const tsconfigBaseUrlSchema = z.string().optional();
+const tsconfigPathsFieldSchema = tsPathMapSchema.optional();
+const tsconfigCompilerOptionsSchema = z.looseObject({
+  baseUrl: tsconfigBaseUrlSchema,
+  paths: tsconfigPathsFieldSchema,
+});
+const tsconfigAliasesSchema = z.looseObject({
+  compilerOptions: tsconfigCompilerOptionsSchema.optional(),
+});
+
+type TsconfigAliasesConfig = z.infer<typeof tsconfigAliasesSchema>;
+
+function normalizeTsPathMap(value: unknown): Record<string, string[]> {
+  const map = asJsonObject(value);
+  const out: Record<string, string[]> = {};
+  Object.setPrototypeOf(out, null);
+  if (!map) return out;
+
+  for (const [pattern, substitutions] of Object.entries(map)) {
+    const parsed = tsPathSubstitutionsSchema.safeParse(substitutions);
+    if (parsed.success && parsed.data.length > 0) out[pattern] = parsed.data;
+  }
+  return out;
+}
+
 /**
  * Try to resolve a non-relative spec against a tsconfig paths map.
  * Returns null when no alias matches; otherwise returns the resolved
@@ -381,28 +411,38 @@ function stripJsonComments(src: string): string {
 export function readTsPathAliases(fromDirAbs: string, projectRootAbs: string): TsPathAliases | null {
   let dir = fromDirAbs;
   while (true) {
-    const tsconfigPath = path.join(dir, 'tsconfig.json');
-    if (fs.existsSync(tsconfigPath)) {
-      try {
-        const raw = fs.readFileSync(tsconfigPath, 'utf8');
-        const parsed = JSON.parse(stripJsonComments(raw)) as {
-          compilerOptions?: { baseUrl?: string; paths?: Record<string, string[]> };
-        };
-        const paths = parsed.compilerOptions?.paths;
-        if (paths && Object.keys(paths).length > 0) {
-          const baseUrl = path.resolve(dir, parsed.compilerOptions?.baseUrl ?? '.');
-          return { baseUrl, paths };
-        }
-      } catch {
-        // Unreadable / malformed tsconfig: skip and keep walking up.
-      }
-    }
+    const aliases = readTsPathAliasesInDir(dir);
+    if (aliases) return aliases;
     // Stop at the project root or filesystem root (path.dirname returns
     // the same dir for `/` on POSIX or `C:\` on Windows). One guard
     // covers both — no need for a second `parent === dir` check.
     if (dir === projectRootAbs || dir === path.dirname(dir)) return null;
     dir = path.dirname(dir);
   }
+}
+
+function readTsPathAliasesInDir(dir: string): TsPathAliases | null {
+  const tsconfigPath = path.join(dir, 'tsconfig.json');
+  if (!fs.existsSync(tsconfigPath)) return null;
+  try {
+    const raw = fs.readFileSync(tsconfigPath, 'utf8');
+    return aliasesFromTsconfig(stripJsonComments(raw), dir);
+  } catch {
+    // Unreadable / malformed tsconfig: skip and keep walking up.
+    return null;
+  }
+}
+
+function aliasesFromTsconfig(json: string, dir: string): TsPathAliases | null {
+  const parsed = parseTsconfigAliases(json);
+  if (!parsed) return null;
+  const compilerOptions = ownCompilerOptions(parsed);
+  const paths = compilerOptions ? ownPaths(compilerOptions) : undefined;
+  if (!compilerOptions || !paths || Object.keys(paths).length === 0) return null;
+  return {
+    baseUrl: path.resolve(dir, ownBaseUrl(compilerOptions) ?? '.'),
+    paths,
+  };
 }
 
 /**
@@ -420,6 +460,61 @@ export function buildTsPathAliasResolver(projectRootAbs: string): (importingFile
     cache.set(dir, aliases);
     return aliases;
   };
+}
+
+function parseTsconfigAliases(json: string): TsconfigAliasesConfig | null {
+  try {
+    const parsed: unknown = JSON.parse(json);
+    const root = asJsonObject(parsed);
+    if (!root) return null;
+    const compilerOptionsInput = asJsonObject(root['compilerOptions']);
+    if (!compilerOptionsInput) {
+      return Object.hasOwn(root, 'compilerOptions') ? null : createTsconfigAliasesConfig();
+    }
+    const compilerOptions = parseTsconfigCompilerOptions(compilerOptionsInput);
+    if (!compilerOptions) return null;
+    const config = createTsconfigAliasesConfig();
+    config.compilerOptions = compilerOptions;
+    return config;
+  } catch {
+    return null;
+  }
+}
+
+function createTsconfigAliasesConfig(): TsconfigAliasesConfig {
+  const config: TsconfigAliasesConfig = {};
+  Object.setPrototypeOf(config, null);
+  return config;
+}
+
+function parseTsconfigCompilerOptions(input: JsonObject): NonNullable<TsconfigAliasesConfig['compilerOptions']> | null {
+  const compilerOptions: NonNullable<TsconfigAliasesConfig['compilerOptions']> = {};
+  Object.setPrototypeOf(compilerOptions, null);
+  if (Object.hasOwn(input, 'baseUrl')) {
+    const baseUrl = tsconfigBaseUrlSchema.safeParse(input['baseUrl']);
+    if (!baseUrl.success) return null;
+    if (baseUrl.data !== undefined) compilerOptions.baseUrl = baseUrl.data;
+  }
+  const paths = tsconfigPathsFieldSchema.safeParse(Object.hasOwn(input, 'paths') ? input['paths'] : undefined);
+  if (!paths.success) return null;
+  if (paths.data !== undefined) compilerOptions.paths = paths.data;
+  return compilerOptions;
+}
+
+function ownCompilerOptions(
+  config: TsconfigAliasesConfig,
+): NonNullable<TsconfigAliasesConfig['compilerOptions']> | undefined {
+  return Object.hasOwn(config, 'compilerOptions') ? config.compilerOptions : undefined;
+}
+
+function ownBaseUrl(compilerOptions: NonNullable<TsconfigAliasesConfig['compilerOptions']>): string | undefined {
+  return Object.hasOwn(compilerOptions, 'baseUrl') ? compilerOptions.baseUrl : undefined;
+}
+
+function ownPaths(
+  compilerOptions: NonNullable<TsconfigAliasesConfig['compilerOptions']>,
+): Record<string, string[]> | undefined {
+  return Object.hasOwn(compilerOptions, 'paths') ? compilerOptions.paths : undefined;
 }
 
 /**

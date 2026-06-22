@@ -1,3 +1,5 @@
+import { z } from 'zod';
+
 import { errMsg } from '../../errors.js';
 
 export type SummariesAction = 'pending' | 'save';
@@ -7,6 +9,17 @@ export type SummariesMcpArgs = Record<string, unknown> & { action: SummariesActi
 export type SummariesArgResult = { ok: true; args: SummariesMcpArgs } | { ok: false; error: string };
 
 export type SummariesInputResult = { ok: true; raw: string } | { ok: false; error: string };
+
+const requiredSummarySaveString = z.string().trim().min(1);
+
+export const summarySaveItemSchema = z.object({
+  nodeId: requiredSummarySaveString,
+  contentHash: requiredSummarySaveString,
+  summary: requiredSummarySaveString.describe('One line, max 200 chars. Action verb. No "This function..." preamble.'),
+});
+export const summarySaveItemsSchema = z.array(summarySaveItemSchema);
+
+export type SummarySaveItem = z.infer<typeof summarySaveItemSchema>;
 
 export interface PendingSummariesOptions {
   limit?: number;
@@ -54,16 +67,33 @@ export async function readSummariesSaveInput(
 export function buildSaveSummariesArgs(raw: string, options: SaveSummariesOptions): SummariesArgResult {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(raw) as unknown;
+    parsed = JSON.parse(raw);
   } catch (err) {
     return { ok: false, error: `Could not parse summaries JSON: ${errMsg(err)}` };
   }
 
-  const items = Array.isArray(parsed) ? parsed : (parsed as { items?: unknown } | null)?.items;
+  let items: unknown;
+  if (Array.isArray(parsed)) {
+    items = parsed;
+  } else if (isRecord(parsed)) {
+    items = parsed['items'];
+  }
   if (!Array.isArray(items)) {
     const error = 'Expected a JSON array of {nodeId, contentHash, summary} or {"items":[...]}.';
     return { ok: false, error };
   }
+  const itemResult = summarySaveItemsSchema.safeParse(items);
+  if (!itemResult.success) {
+    return {
+      ok: false,
+      error: 'Expected each summary item to include non-empty string nodeId, contentHash, and summary.',
+    };
+  }
+  const saveItems: SummarySaveItem[] = itemResult.data;
 
-  return { ok: true, args: { action: 'save', items, model: options.model ?? 'agent-cli' } };
+  return { ok: true, args: { action: 'save', items: saveItems, model: options.model ?? 'agent-cli' } };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }

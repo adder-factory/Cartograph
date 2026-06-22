@@ -21,9 +21,9 @@
  */
 
 import { errMsg } from '../../errors.js';
-import { getEmbeddingForNode } from '../../db/queries-embeddings.js';
+import { getAllEmbeddings, getEmbeddingForNode } from '../../db/queries-embeddings.js';
 import { findSimilarViaVec } from '../../db/vec-helpers.js';
-import { bytesToVector } from '../../llm/embeddings.js';
+import { bytesToVector, topKByCosine } from '../../llm/embeddings.js';
 import { textResult, truncateOutput } from './shared.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import type { ToolCtx } from './types.js';
@@ -165,6 +165,7 @@ function aggregateNeighbors(args: AggregateNeighborsArgs): { aggregate: Map<stri
   const vecLoaded = cg.db.hasVecExtension();
   const fetchK = k + changedNodes.length;
   let embeddedCount = 0;
+  let fallbackCandidates: ReturnType<typeof getAllEmbeddings> | null = null;
 
   for (const node of changedNodes) {
     const buf = getEmbeddingForNode(cg.queries, node.id, embeddingModel);
@@ -178,13 +179,20 @@ function aggregateNeighbors(args: AggregateNeighborsArgs): { aggregate: Map<stri
       continue;
     }
 
-    const hits = findSimilarViaVec({
+    let hits = findSimilarViaVec({
       db: cg.db.getDb(),
       vecLoaded,
       queryVec: vec,
       model: embeddingModel,
       k: fetchK,
     });
+    if (hits.length === 0) {
+      fallbackCandidates ??= getAllEmbeddings(cg.queries, embeddingModel);
+      hits = topKByCosine(vec, fallbackCandidates, fetchK).map((hit) => ({
+        nodeId: hit.nodeId,
+        distance: 1 - hit.score,
+      }));
+    }
 
     for (const h of hits) {
       if (changedIds.has(h.nodeId)) continue; // exclude changed set

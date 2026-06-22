@@ -48,10 +48,18 @@ export class CartographWatcher {
 
   /** Stop watching for file changes. */
   stop(): void {
-    if (this.impl) {
-      this.impl.stop();
-      this.impl = null;
-    }
+    const impl = this.impl;
+    if (!impl) return;
+    this.impl = null;
+    impl.stop();
+  }
+
+  /** Stop watching and wait for native subscribe/unsubscribe cleanup to settle. */
+  async stopAndWait(): Promise<void> {
+    const impl = this.impl;
+    if (!impl) return;
+    this.impl = null;
+    await impl.stopAndWait();
   }
 
   /** Check if the file watcher is active. */

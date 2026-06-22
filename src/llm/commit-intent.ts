@@ -25,7 +25,9 @@
  * bug-fixes" from "this file gets lots of features".
  */
 
+import { z } from 'zod';
 import type { LlmClient, ResponseJsonSchema } from './client.js';
+import { parseJsonObjectWithOwnField } from './json-reply.js';
 
 export type CommitIntent = 'feat' | 'fix' | 'refactor' | 'perf' | 'test' | 'docs' | 'chore' | 'unknown';
 
@@ -267,6 +269,17 @@ const COMMIT_INTENT_SCHEMA: ResponseJsonSchema = {
   required: ['intent'],
 };
 
+const commitIntentReplySchema = z.looseObject({
+  intent: z.enum(CHAT_INTENT_LABELS),
+});
+
+function parseChatCommitIntent(rawText: string): CommitIntent | undefined {
+  const parsed = parseJsonObjectWithOwnField(rawText, 'intent');
+  if (parsed === null) return undefined;
+  const result = commitIntentReplySchema.safeParse(parsed);
+  return result.success ? result.data.intent : undefined;
+}
+
 const CHAT_FALLBACK_SYSTEM_PROMPT =
   'You classify a single git commit message into ONE of these labels: ' +
   CHAT_INTENT_LABELS.join(', ') +
@@ -303,13 +316,7 @@ export async function classifyCommitMessageWithFallback(
       ],
       { temperature: 0, maxTokens: 20, responseSchema: COMMIT_INTENT_SCHEMA },
     );
-    let rawIntent: unknown;
-    try {
-      rawIntent = (JSON.parse(result.text) as { intent?: unknown }).intent;
-    } catch {
-      rawIntent = undefined;
-    }
-    const intent = CHAT_INTENT_LABELS.find((l) => l === rawIntent);
+    const intent = parseChatCommitIntent(result.text);
     if (!intent) return heuristic;
     return {
       intent,

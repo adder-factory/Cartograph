@@ -19,6 +19,7 @@ import { renderMarkdownTable, type MarkdownTableSpec } from './_result-spec.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import type { ToolCtx } from './types.js';
 import { NON_SOURCE_DIR_NAMES } from '../../path-class.js';
+import { prepareBunSqliteRuntime } from '../../db/sqlite-adapter.js';
 
 // ESM-safe sync require for `bun:sqlite` — bare `require()` throws
 // `ReferenceError: require is not defined` in this module since the
@@ -66,6 +67,7 @@ function readContextStats(
 ): Pick<DiscoveredContext, 'fileCount' | 'nodeCount' | 'indexedAt' | 'failureReason'> {
   let db: BunSqliteHandle | null = null;
   try {
+    prepareBunSqliteRuntime();
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const { Database } = requireCjs('bun:sqlite') as { Database: BunSqliteCtor };
     db = new Database(dbPath, { readonly: true, create: false });
@@ -165,14 +167,26 @@ function readActiveContextStats(
   }
 }
 
+const storageProviderConfigSchema = z.looseObject({
+  database: z.looseObject({
+    provider: z.unknown(),
+  }),
+});
+
+function hasOwnObjectKey<K extends string>(value: unknown, key: K): value is Record<K, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.hasOwn(value, key);
+}
+
 function configuredStorageProvider(cartographDir: string): 'postgres' | 'sqlite' | null {
   const configPath = pathMod.join(cartographDir, 'config.json');
   if (!fsMod.existsSync(configPath)) return null;
   try {
-    const parsed = JSON.parse(fsMod.readFileSync(configPath, 'utf-8')) as {
-      database?: { provider?: unknown };
-    };
-    const provider = parsed.database?.provider;
+    const rawConfig: unknown = JSON.parse(fsMod.readFileSync(configPath, 'utf-8'));
+    if (!hasOwnObjectKey(rawConfig, 'database')) return null;
+    if (!hasOwnObjectKey(rawConfig.database, 'provider')) return null;
+    const parsed = storageProviderConfigSchema.safeParse(rawConfig);
+    if (!parsed.success) return null;
+    const provider = parsed.data.database.provider;
     if (provider === 'postgres' || provider === 'postgresql') return 'postgres';
     if (provider === 'sqlite') return 'sqlite';
   } catch {

@@ -2,8 +2,18 @@ import type { QueryBuilder } from '../db/queries.js';
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { join, extname } from 'node:path';
 import { builtinModules } from 'node:module';
+import { z } from 'zod';
 import { loadConfig } from '../config.js';
 import { stripJsComments } from '../resolution/import-resolver.js';
+
+const packageJsonObjectSchema = z.looseObject({});
+const packageBinSchema = z.union([z.string(), z.record(z.string(), z.unknown())]);
+const dependencyPackageJsonSchema = z.looseObject({
+  bin: packageBinSchema.optional(),
+});
+
+type PackageJsonObject = z.infer<typeof packageJsonObjectSchema>;
+type DependencyPackageJson = z.infer<typeof dependencyPackageJsonSchema>;
 
 export interface UnusedDepsResult {
   declaredRuntime: string[];
@@ -66,7 +76,7 @@ export interface UnusedDepsResult {
  */
 interface WorkspaceManifest {
   packageJsonPath: string;
-  packageJson: Record<string, unknown>;
+  packageJson: PackageJsonObject;
   isRoot: boolean;
 }
 
@@ -111,15 +121,15 @@ interface ComputeUnusedSetsArgs {
  * distinct "skip this manifest entirely" signal (it must not be counted
  * as a present-but-empty workspace manifest).
  */
-function parsePackageJson(raw: string): Record<string, unknown> | null {
+function parsePackageJson(raw: string): PackageJsonObject | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
     return null;
   }
-  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-  return parsed as Record<string, unknown>;
+  const result = packageJsonObjectSchema.safeParse(parsed);
+  return result.success ? result.data : {};
 }
 
 /**
@@ -128,14 +138,14 @@ function parsePackageJson(raw: string): Record<string, unknown> | null {
  * is absent or not an object collapses to `{}`, so callers can iterate
  * its keys unconditionally.
  */
-function objectField(packageJson: Record<string, unknown>, key: string): Record<string, unknown> {
+function objectField(packageJson: PackageJsonObject, key: string): PackageJsonObject {
   const value = packageJson[key];
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return {};
-  return value as Record<string, unknown>;
+  const result = packageJsonObjectSchema.safeParse(value);
+  return result.success ? result.data : {};
 }
 
 function readPackageJson(args: ReadPackageJsonArgs): {
-  packageJson: Record<string, unknown>;
+  packageJson: PackageJsonObject;
   packageJsonPath: string;
 } {
   const { projectRoot } = args;
@@ -197,11 +207,11 @@ function extractDeclaredDeps(args: ExtractDeclaredDepsArgs): {
  * overcollects rather than failing on that rare construct — the
  * trade-off favours simplicity over exclusion fidelity.
  */
-function parseWorkspacePatterns(packageJson: Record<string, unknown>): string[] {
+function parseWorkspacePatterns(packageJson: PackageJsonObject): string[] {
   const ws = packageJson['workspaces'];
   if (Array.isArray(ws)) return ws.filter((s): s is string => typeof s === 'string');
   if (ws !== null && typeof ws === 'object') {
-    const packages = (ws as { packages?: unknown }).packages;
+    const packages = objectField(packageJson, 'workspaces')['packages'];
     if (Array.isArray(packages)) return packages.filter((s): s is string => typeof s === 'string');
   }
   return [];
@@ -223,7 +233,7 @@ function parseWorkspacePatterns(packageJson: Record<string, unknown>): string[] 
  */
 function readWorkspaceManifests(
   projectRoot: string,
-  rootPackageJson: Record<string, unknown>,
+  rootPackageJson: PackageJsonObject,
   rootPackageJsonPath: string,
 ): WorkspaceManifest[] {
   const manifests: WorkspaceManifest[] = [
@@ -1064,6 +1074,17 @@ function tokenizeScript(script: string): string[] {
   return tokens.filter((t) => t.length > 0);
 }
 
+function parseDependencyPackageJson(raw: string): DependencyPackageJson | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  const result = dependencyPackageJsonSchema.safeParse(parsed);
+  return result.success ? result.data : null;
+}
+
 /** Read one dep's `bin` field from its package.json and emit
  *  bin-name → package-name pairs into `out`. Extracted to flatten the
  *  per-dep nested-conditional in `buildBinToPackageMap`. */
@@ -1071,12 +1092,14 @@ function recordBinForDep(out: Map<string, string>, nodeModulesDir: string, depNa
   const depPackageJsonPath = join(nodeModulesDir, depName, 'package.json');
   if (!existsSync(depPackageJsonPath)) return;
 
-  let depPackageJson: { bin?: string | Record<string, string> };
+  let raw: string;
   try {
-    depPackageJson = JSON.parse(readFileSync(depPackageJsonPath, 'utf-8'));
+    raw = readFileSync(depPackageJsonPath, 'utf-8');
   } catch {
-    return; // Ignore errors reading dep's package.json.
+    return;
   }
+  const depPackageJson = parseDependencyPackageJson(raw);
+  if (!depPackageJson) return;
 
   const bin = depPackageJson.bin;
   if (typeof bin === 'string') {
@@ -1086,7 +1109,9 @@ function recordBinForDep(out: Map<string, string>, nodeModulesDir: string, depNa
   }
   if (typeof bin === 'object' && bin !== null) {
     // Multi-bin map: each key is a bin name routed to this package.
-    for (const binName of Object.keys(bin)) out.set(binName, depName);
+    for (const [binName, binTarget] of Object.entries(bin)) {
+      if (typeof binTarget === 'string') out.set(binName, depName);
+    }
   }
 }
 

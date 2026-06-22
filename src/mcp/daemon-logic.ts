@@ -7,9 +7,33 @@
  * module). These take primitives (not net.Socket / fs) so they have no
  * I/O and no import cycle with daemon.ts.
  */
+import { z } from 'zod';
 
 /** The shared-daemon wire protocol version advertised in the hello frame. */
 export const DAEMON_PROTOCOL_VERSION = 1;
+
+const daemonHelloStringSchema = z.string().trim().min(1);
+
+const daemonHelloSchema = z.looseObject({
+  cartograph: daemonHelloStringSchema,
+  pid: z.number().int().positive(),
+  socketPath: daemonHelloStringSchema,
+  protocol: z.literal(DAEMON_PROTOCOL_VERSION),
+  policy: daemonHelloStringSchema,
+});
+
+export type DaemonHello = z.infer<typeof daemonHelloSchema>;
+
+const DAEMON_HELLO_KEYS = ['cartograph', 'pid', 'socketPath', 'protocol', 'policy'] as const;
+
+export function parseDaemonHello(value: unknown): DaemonHello | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  for (const key of DAEMON_HELLO_KEYS) {
+    if (!Object.hasOwn(value, key)) return null;
+  }
+  const parsed = daemonHelloSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 /**
  * Whether a daemon's hello matches our package version and protocol, so we

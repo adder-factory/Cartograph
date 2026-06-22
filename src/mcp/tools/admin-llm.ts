@@ -1,5 +1,5 @@
 import { errMsg } from '../../errors.js';
-import { copyPrivateFileSync, writePrivateFileAtomic } from '../../config.js';
+import type { LlmTierConcurrencyOverrides, LlmTuneTier } from '../../installer/llm-setup-plan.js';
 import { type ToolOutcome, err, ok } from './_outcome.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
@@ -170,16 +170,7 @@ export function formatAppliedPresetLine(result: {
  *     if a prior file existed). Cartograph reads the override next
  *     time it embeds/summarizes/etc.
  */
-type LlmTier = 'embed' | 'chat' | 'ask' | 'reranker';
 type LlmTierConfigKey = 'embeddingLlm' | 'summarizeLlm' | 'askLlm' | 'rerankerLlm';
-
-const LLM_TIERS: ReadonlySet<LlmTier> = new Set(['embed', 'chat', 'ask', 'reranker']);
-const LLM_TIER_TO_CONFIG_KEY: Record<LlmTier, LlmTierConfigKey> = {
-  embed: 'embeddingLlm',
-  chat: 'summarizeLlm',
-  ask: 'askLlm',
-  reranker: 'rerankerLlm',
-};
 
 export async function handleLlmTune(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   const projectPathResult = resolveLlmTuneProjectPath(ctx, args);
@@ -200,6 +191,13 @@ export async function handleLlmTune(ctx: ToolCtx, args: Record<string, unknown>)
 type LlmTuneProjectPathResult =
   | { readonly ok: true; readonly projectPath: string }
   | { readonly ok: false; readonly error: string };
+
+const EMPTY_LLM_TUNE_OVERRIDES: LlmTierConcurrencyOverrides = {
+  embed: null,
+  chat: null,
+  ask: null,
+  reranker: null,
+};
 
 function resolveLlmTuneProjectPath(ctx: ToolCtx, args: Record<string, unknown>): LlmTuneProjectPathResult {
   const explicitProjectPath = args['projectPath'];
@@ -230,46 +228,41 @@ interface WriteLlmTuneOverrideArgs {
 /** Write mode — apply a per-tier concurrency override to .cartograph/config.json. */
 async function writeLlmTuneOverride(args: WriteLlmTuneOverrideArgs): Promise<ToolOutcome> {
   const { projectPath, tier, concurrency } = args;
-  if (!LLM_TIERS.has(tier as LlmTier)) {
+  if (!isLlmTuneTier(tier)) {
     return err(`llm-tune: \`tier\` must be one of 'embed' / 'chat' / 'ask' / 'reranker' (got '${tier}').`);
   }
   if (concurrency === null || !Number.isInteger(concurrency) || concurrency < 1) {
     return err('llm-tune: write mode requires `concurrency: <positive int>`.');
   }
-  const configKey = LLM_TIER_TO_CONFIG_KEY[tier as LlmTier];
   try {
-    const fsp = await import('node:fs/promises');
-    const path = await import('node:path');
-    const configPath = path.join(projectPath, '.cartograph', 'config.json');
-    const exists = await fsp
-      .access(configPath)
-      .then(() => true)
-      .catch(() => false);
-    if (!exists) {
-      return err(
-        `llm-tune: no config.json at ${configPath}. Run \`cartograph_admin({action: 'llm-apply', preset: 'install-ollama', projectPath: '${projectPath}'})\` first.`,
-      );
-    }
-    const parsed = JSON.parse(await fsp.readFile(configPath, 'utf-8')) as Record<string, unknown>;
-    const llm = (parsed['llm'] as Record<string, unknown> | undefined) ?? {};
-    const tierBlock = (llm[configKey] as Record<string, unknown> | null | undefined) ?? null;
-    if (!tierBlock) {
-      return err(
-        `llm-tune: no \`llm.${configKey}\` block in ${configPath}. Configure it first via \`llm-apply\` or hand-edit.`,
-      );
-    }
-    const previous = (tierBlock['concurrency'] as number | undefined) ?? null;
-    tierBlock['concurrency'] = concurrency;
-    llm[configKey] = tierBlock;
-    parsed['llm'] = llm;
-    const backupPath = `${configPath}.bak.${Date.now()}`;
-    copyPrivateFileSync(configPath, backupPath);
-    writePrivateFileAtomic(configPath, JSON.stringify(parsed, null, 2));
+    const { writeLlmTierConcurrencyOverride } = await import('../../installer/llm-setup-plan.js');
+    const result = await writeLlmTierConcurrencyOverride({ projectRoot: projectPath, tier, concurrency });
     return ok(
-      textResult(buildOverrideAppliedReport({ tier, configKey, previous, concurrency, configPath, backupPath })),
+      textResult(
+        buildOverrideAppliedReport({
+          tier,
+          configKey: result.configKey,
+          previous: result.previous,
+          concurrency: result.concurrency,
+          configPath: result.configPath,
+          backupPath: result.backupPath,
+        }),
+      ),
     );
   } catch (error_) {
     return err(`llm-tune write failed: ${errMsg(error_)}`);
+  }
+}
+
+function isLlmTuneTier(value: string): value is LlmTuneTier {
+  switch (value) {
+    case 'embed':
+    case 'chat':
+    case 'ask':
+    case 'reranker':
+      return true;
+    default:
+      return false;
   }
 }
 
@@ -306,6 +299,7 @@ interface RenderLlmTuneReportArgs {
 /** Read mode — describe hardware + recommendation + current overrides. */
 async function renderLlmTuneReport(args: RenderLlmTuneReportArgs): Promise<ToolOutcome> {
   const currentOverrides = await readCurrentOverrides(args.projectPath);
+  const overrideValues = currentOverrides.ok ? currentOverrides.overrides : EMPTY_LLM_TUNE_OVERRIDES;
   const lines: string[] = [
     '## LLM tuning',
     '',
@@ -315,41 +309,26 @@ async function renderLlmTuneReport(args: RenderLlmTuneReportArgs): Promise<ToolO
     '',
     '| Tier | Recommended `llama-server --parallel N` | Recommended cartograph concurrency | Your override |',
     '|---|---|---|---|',
-    `| embed (jina, :8080)                | ${args.tuning.embed.llamaServerParallel} | ${args.tuning.embed.cartographConcurrency} | ${currentOverrides['embed'] ?? '(none)'} |`,
-    `| chat (Qwen 3B, :8081)              | ${args.tuning.chat.llamaServerParallel} | ${args.tuning.chat.cartographConcurrency} | ${currentOverrides['chat'] ?? '(none)'} |`,
-    `| ask (Qwen 7B, :8082)               | ${args.tuning.ask.llamaServerParallel} | ${args.tuning.ask.cartographConcurrency} | ${currentOverrides['ask'] ?? '(none)'} |`,
-    `| reranker (bge, :8083 --reranking)  | ${args.tuning.reranker.llamaServerParallel} | ${args.tuning.reranker.cartographConcurrency} | ${currentOverrides['reranker'] ?? '(none)'} |`,
+    `| embed (jina, :8080)                | ${args.tuning.embed.llamaServerParallel} | ${args.tuning.embed.cartographConcurrency} | ${overrideValues.embed ?? '(none)'} |`,
+    `| chat (Qwen 3B, :8081)              | ${args.tuning.chat.llamaServerParallel} | ${args.tuning.chat.cartographConcurrency} | ${overrideValues.chat ?? '(none)'} |`,
+    `| ask (Qwen 7B, :8082)               | ${args.tuning.ask.llamaServerParallel} | ${args.tuning.ask.cartographConcurrency} | ${overrideValues.ask ?? '(none)'} |`,
+    `| reranker (bge, :8083 --reranking)  | ${args.tuning.reranker.llamaServerParallel} | ${args.tuning.reranker.cartographConcurrency} | ${overrideValues.reranker ?? '(none)'} |`,
+  ];
+  if (!currentOverrides.ok) {
+    lines.push('', `**Current overrides unavailable:** ${currentOverrides.error}`);
+  }
+  lines.push(
     '',
     '**To apply a manual override:** call `cartograph_admin({action: "llm-tune", projectPath: "<abs>", tier: "<embed|chat|ask|reranker>", concurrency: N})`. ',
     'A `cartograph backend start`-managed llama-server picks up the override as its `--parallel N` automatically; if you launch llama-server yourself, restart it with `--parallel N`. ',
     'For memory-/context-tuning beyond parallelism (e.g. `--cache-ram`, `-c`, `-ngl`), set `llamaServerArgs` on the tier in `.cartograph/config.json`.',
-  ];
+  );
   return ok(textResult(lines.join('\n')));
 }
 
-async function readCurrentOverrides(projectPath: string): Promise<Record<string, number | null>> {
-  try {
-    const fsp = await import('node:fs/promises');
-    const path = await import('node:path');
-    const configPath = path.join(projectPath, '.cartograph', 'config.json');
-    const exists = await fsp
-      .access(configPath)
-      .then(() => true)
-      .catch(() => false);
-    if (!exists) return {};
-    const parsed = JSON.parse(await fsp.readFile(configPath, 'utf-8')) as Record<string, unknown>;
-    const llm = (parsed['llm'] as Record<string, unknown> | undefined) ?? {};
-    const readConc = (k: string): number | null => {
-      const block = llm[k] as Record<string, unknown> | null | undefined;
-      return typeof block?.['concurrency'] === 'number' ? block['concurrency'] : null;
-    };
-    return {
-      embed: readConc('embeddingLlm'),
-      chat: readConc('summarizeLlm'),
-      ask: readConc('askLlm'),
-      reranker: readConc('rerankerLlm'),
-    };
-  } catch {
-    return {};
-  }
+async function readCurrentOverrides(
+  projectPath: string,
+): Promise<Awaited<ReturnType<typeof import('../../installer/llm-setup-plan.js')['readLlmTierConcurrencyOverrides']>>> {
+  const { readLlmTierConcurrencyOverrides } = await import('../../installer/llm-setup-plan.js');
+  return readLlmTierConcurrencyOverrides(projectPath);
 }

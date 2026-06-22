@@ -1071,4 +1071,41 @@ describe('same-source-label coverage union (#18)', () => {
       cg.close();
     }
   });
+
+  it('getCoverageReportPaths ignores malformed array metadata roots', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function f(): number { return 1; }\n');
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-bad-root', version: '0.0.0' }));
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      setMetadata(cg.queries, 'coverage_report_paths', JSON.stringify(['/abs/not-a-source.info']));
+
+      expect(getCoverageReportPaths(cg.queries)).toEqual({});
+    } finally {
+      cg.close();
+    }
+  });
+
+  it('getCoverageReportPaths keeps special source labels as own keys', async () => {
+    fs.mkdirSync(path.join(dir, 'src'));
+    fs.writeFileSync(path.join(dir, 'src', 'a.ts'), 'export function f(): number { return 1; }\n');
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'cov-proto-source', version: '0.0.0' }));
+
+    const cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+      setMetadata(cg.queries, 'coverage_report_paths', '{"__proto__":["/abs/proto.info"],"lcov":"/abs/ok.info"}');
+
+      const paths = getCoverageReportPaths(cg.queries);
+
+      expect(Object.getPrototypeOf(paths)).toBe(null);
+      expect(Object.hasOwn(paths, '__proto__')).toBe(true);
+      expect(paths['__proto__']).toEqual(['/abs/proto.info']);
+      expect(paths['lcov']).toEqual(['/abs/ok.info']);
+    } finally {
+      cg.close();
+    }
+  });
 });

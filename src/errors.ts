@@ -1,3 +1,5 @@
+import type { ZodError, ZodType } from 'zod';
+
 /**
  * Cartograph Error Classes
  *
@@ -53,6 +55,34 @@
  */
 export function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Format Zod issues as stable one-line `path: message` fragments for
+ * non-interactive boundaries such as worker IPC. MCP tools use their
+ * richer argument-aware formatter; worker contracts need only the
+ * schema path and Zod's issue message.
+ */
+export function formatZodIssues(error: ZodError): string {
+  return error.issues.map((issue) => `${formatIssuePath(issue.path)}: ${issue.message}`).join('; ');
+}
+
+/**
+ * Parse a non-interactive Zod boundary and throw a stable single-line
+ * validation error. Worker IPC contracts use this so all raw process
+ * messages fail with the same issue formatting.
+ */
+export function parseZodBoundary<T>(schema: ZodType<T>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(`${label}: ${formatZodIssues(parsed.error)}`);
+  }
+  return parsed.data;
+}
+
+function formatIssuePath(path: ReadonlyArray<PropertyKey>): string {
+  if (path.length === 0) return '<root>';
+  return path.map(String).join('.');
 }
 
 /**

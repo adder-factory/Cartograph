@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type { ExtractionResult, UnresolvedReference } from './types.js';
 import type { Edge, Node } from '../types.js';
 import type { NodeIdFactory } from './tree-sitter-helpers.js';
@@ -28,6 +29,13 @@ interface LiquidState {
   idFactory: NodeIdFactory;
 }
 
+const liquidLocalizedSchemaNameSchema = z.record(z.string(), z.unknown()).refine((value) => !Array.isArray(value));
+const liquidSchemaBlockSchema = z.looseObject({
+  name: z.union([z.string(), liquidLocalizedSchemaNameSchema]).optional(),
+});
+
+type LiquidSchemaName = z.infer<typeof liquidSchemaBlockSchema>['name'];
+
 // ---------------------------------------------------------------------------
 // Pure utility helpers (no state needed)
 // ---------------------------------------------------------------------------
@@ -46,6 +54,39 @@ function liquidGetLineStart(source: string, lineNumber: number): number {
     index += lines[i]!.length + 1; // +1 for newline
   }
   return index;
+}
+
+function liquidSchemaNameFromJson(raw: string | undefined): string {
+  if (!raw) return 'schema';
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return 'schema';
+  }
+
+  const result = liquidSchemaBlockSchema.safeParse(parsed);
+  return result.success ? liquidSchemaNameFromValue(result.data.name) : 'schema';
+}
+
+function liquidSchemaNameFromValue(name: LiquidSchemaName): string {
+  const direct = nonEmptyString(name);
+  if (direct) return direct;
+  if (!name || typeof name !== 'object' || Array.isArray(name)) return 'schema';
+
+  const english = Object.hasOwn(name, 'en') ? nonEmptyString(name['en']) : null;
+  if (english) return english;
+  for (const value of Object.values(name)) {
+    const candidate = nonEmptyString(value);
+    if (candidate) return candidate;
+  }
+  return 'schema';
+}
+
+function nonEmptyString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -214,17 +255,7 @@ export class LiquidExtractor extends StandaloneExtractor {
       const startLine = liquidGetLineNumber(source, match.index);
       const endLine = liquidGetLineNumber(source, match.index + fullMatch.length);
 
-      let schemaName = 'schema';
-      try {
-        const schemaJson = JSON.parse(schemaContent!);
-        if (schemaJson.name) {
-          const rawName = schemaJson.name;
-          const fallbackName = rawName.en || (Object.values(rawName)[0] as string) || 'schema';
-          schemaName = typeof rawName === 'string' ? rawName : fallbackName;
-        }
-      } catch {
-        // Schema isn't valid JSON, use default name
-      }
+      const schemaName = liquidSchemaNameFromJson(schemaContent);
 
       const nodeId = idFactory.next('constant', `schema:${schemaName}`);
 

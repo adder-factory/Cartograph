@@ -3580,6 +3580,25 @@ import './styles.css';
       expect(names).toContain('./styles.css');
     });
 
+    it('should extract wrapped dynamic import and require string arguments', () => {
+      const code = `
+export async function loadDynamic() {
+  const a = await import('cast-dynamic-pkg' as string);
+  const b = await import(('paren-dynamic-pkg'));
+  const c = await import('satisfies-dynamic-pkg' satisfies string);
+  const d = require('cast-require-pkg' as string);
+  return { a, b, c, d };
+}
+`;
+      const result = extractFromSource('dynamic.ts', code);
+
+      const importNames = result.nodes.filter((n) => n.kind === 'import').map((n) => n.name);
+      expect(importNames).toContain('cast-dynamic-pkg');
+      expect(importNames).toContain('paren-dynamic-pkg');
+      expect(importNames).toContain('satisfies-dynamic-pkg');
+      expect(importNames).toContain('cast-require-pkg');
+    });
+
     it('should extract type imports', () => {
       const code = `import type { FC, ReactNode } from 'react';`;
       const result = extractFromSource('types.ts', code);
@@ -4788,6 +4807,31 @@ import 'package:flutter/material.dart';
       expect(names).toContain('header');
       expect(names).toContain('loading-spinner');
       expect(names).toContain('cart-drawer');
+    });
+
+    it('falls back to a string schema node name when localized schema names are malformed', () => {
+      const code = `
+{% schema %}
+{ "name": { "en": 404, "fr": false } }
+{% endschema %}
+`;
+      const result = extractFromSource('sections/product.liquid', code);
+
+      const schemaNode = result.nodes.find((n) => n.kind === 'constant' && n.qualifiedName.includes('::schema:'));
+      expect(schemaNode?.name).toBe('schema');
+      expect(typeof schemaNode?.name).toBe('string');
+    });
+
+    it('extracts localized Liquid schema names from the English string when present', () => {
+      const code = `
+{% schema %}
+{ "name": { "fr": "Produit", "en": "Product card" } }
+{% endschema %}
+`;
+      const result = extractFromSource('sections/product-card.liquid', code);
+
+      const schemaNode = result.nodes.find((n) => n.kind === 'constant' && n.qualifiedName.includes('::schema:'));
+      expect(schemaNode?.name).toBe('Product card');
     });
   });
 });
