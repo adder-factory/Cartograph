@@ -453,6 +453,12 @@ export function isFrameworkConventionExport(filePath: string, name: string, isDe
  * CANDIDATES for review, not a delete list — see
  * `feedback_cartograph_unused_export_false_positives.md` in user
  * memory for the verification workflow.
+ *
+ * Two structured FP classes are additionally suppressed inline by the
+ * query (see the clauses below): a usage stranded in `unresolved_refs`
+ * by an incomplete resolution pass (issue #13), and a TS/TSX `type_alias`
+ * whose same-name exported value companion is the real consumer target
+ * (issue #51).
  */
 // Edge kinds that DO count as "this export is being used" — anything
 // not in the NOT IN list. The exclusions:
@@ -527,6 +533,46 @@ const findUnusedExportsQuery = defineQuery({
             'calls', 'references', 'type_of', 'returns',
             'instantiates', 'extends', 'implements', 'overrides', 'decorates'
           )
+      )
+      -- Value/type same-name namespace guard (issue #51). TypeScript has
+      -- separate value and type namespaces, so a file can export a value
+      -- and a type that share a name (e.g. branded-ID parsers:
+      -- \`export const UserId = …; export type UserId = …\`). A consumer in
+      -- ANOTHER file doing \`import { UserId, type UserId }\` has its use of
+      -- the TYPE resolve to the same-name VALUE companion, leaving the
+      -- type-level export (\`type_alias\` or \`interface\`) with no incoming
+      -- edge — a false "dead" verdict even though the type is imported and
+      -- used. So: never confidently flag a TS/TSX type-level export when the
+      -- same file exports a same-name value node (anything but a type) that
+      -- has real usage FROM ANOTHER FILE.
+      --
+      -- The cross-file requirement (\`src.file_path <> v.file_path\`) is what
+      -- keeps this from over-suppressing: a same-file value-only use (e.g.
+      -- \`export const Foo = …; export type Foo = …; function local(){ Foo() }\`)
+      -- is no evidence the TYPE is consumed anywhere, so a genuinely-dead
+      -- type with only a local value twin still surfaces — as does a type
+      -- with no value twin at all (\`DeadType\`). \`src.file_path\` is valid for
+      -- both symbol-node and file-node edge sources (dynamic-import hooks emit
+      -- \`references\` edges sourced from a \`file:<path>\` node whose file_path is
+      -- the importing file), so cross-file dynamic imports pass the filter too.
+      AND NOT (
+        n.kind IN ('type_alias', 'interface')
+        AND n.language IN ('typescript', 'tsx')
+        AND EXISTS (
+          SELECT 1 FROM nodes v
+          WHERE v.name = n.name
+            AND v.file_path = n.file_path
+            AND v.id <> n.id
+            AND v.is_exported = 1
+            AND v.kind NOT IN ('type_alias', 'interface')
+            AND EXISTS (
+              SELECT 1 FROM edges e
+              JOIN nodes src ON src.id = e.source
+              WHERE e.target = v.id
+                AND e.kind NOT IN ('contains', 'exports', 'imports', 'tests')
+                AND src.file_path <> v.file_path
+            )
+        )
       )
   `,
   params: z.object({ mainEntries: z.string() }),
