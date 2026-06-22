@@ -8,6 +8,46 @@ import {
   runLlmSmoke,
   type LlmSmokeResult,
 } from '../src/features/llm-smoke/runtime.js';
+import { registerLlmSmokeCommand } from '../src/features/llm-smoke/index.js';
+import type { CliOptionCommand } from '../src/features/shared/cli-command.js';
+
+interface LlmSmokeCliOptions {
+  readonly timeoutMs?: string;
+  readonly json?: boolean;
+}
+
+type LlmSmokeCliAction = (pathArg: string | undefined, options: LlmSmokeCliOptions) => Promise<void>;
+
+function isLlmSmokeCliAction(value: unknown): value is LlmSmokeCliAction {
+  return typeof value === 'function';
+}
+
+function captureLlmSmokeAction(): { command: CliOptionCommand; action: () => LlmSmokeCliAction } {
+  let registeredAction: unknown;
+  const command: CliOptionCommand = {
+    command() {
+      return command;
+    },
+    description() {
+      return command;
+    },
+    option() {
+      return command;
+    },
+    action<Args extends unknown[]>(fn: (...args: Args) => unknown) {
+      registeredAction = fn;
+      return command;
+    },
+  };
+
+  return {
+    command,
+    action() {
+      if (!isLlmSmokeCliAction(registeredAction)) throw new Error('llm smoke CLI action was not registered');
+      return registeredAction;
+    },
+  };
+}
 
 describe('llm smoke feature runtime', () => {
   it('reports missing configured tiers without contacting a backend', async () => {
@@ -55,5 +95,55 @@ describe('llm smoke feature runtime', () => {
 
     expect(formatLlmSmokeReport(result)).toContain('openai-compat / http://localhost:8081 / qwen');
     expect(JSON.parse(formatLlmSmokeJson(result))).toMatchObject({ projectPath: '/repo', overallStatus: 'ok' });
+  });
+});
+
+describe('llm smoke feature CLI', () => {
+  it('sets exitCode instead of calling process.exit when smoke fails', async () => {
+    const failingResult: LlmSmokeResult = {
+      projectPath: '/repo',
+      overallStatus: 'fail',
+      durationMs: 4,
+      rows: [{ tier: 'embedding', status: 'fail', detail: 'embeddingLlm is not configured.' }],
+    };
+    const { command, action } = captureLlmSmokeAction();
+    const stdout: string[] = [];
+    const errors: string[] = [];
+    let smokeOptions: unknown;
+    let exitCalled = false;
+    const originalExit = process.exit;
+    process.exitCode = 0;
+    process.exit = (code?: string | number | null | undefined): never => {
+      exitCalled = true;
+      throw new Error(`unexpected process.exit(${String(code)})`);
+    };
+
+    try {
+      registerLlmSmokeCommand({
+        llmCmd: command,
+        resolveProjectPath: (pathArg) => pathArg ?? '/resolved',
+        error: (message) => errors.push(message),
+        writeStdout: (message = '') => stdout.push(message),
+        loadLlmSmoke: async () => ({
+          runLlmSmoke: async (options) => {
+            smokeOptions = options;
+            return failingResult;
+          },
+          formatLlmSmokeReport: () => 'smoke report',
+          formatLlmSmokeJson: () => '{"overallStatus":"fail"}',
+        }),
+      });
+
+      await expect(action()('/repo', { timeoutMs: '123' })).resolves.toBeUndefined();
+
+      expect(exitCalled).toBe(false);
+      expect(process.exitCode).toBe(1);
+      expect(smokeOptions).toEqual({ projectPath: '/repo', timeoutMs: 123 });
+      expect(stdout).toEqual(['smoke report']);
+      expect(errors).toEqual([]);
+    } finally {
+      process.exit = originalExit;
+      process.exitCode = 0;
+    }
   });
 });

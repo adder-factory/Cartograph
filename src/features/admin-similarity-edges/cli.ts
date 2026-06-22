@@ -61,7 +61,8 @@ export function registerAdminSimilarityEdgesCommand(deps: AdminSimilarityEdgesCo
       try {
         if (!isInitialized(projectPath)) {
           error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         const { default: Cartograph } = await loadCartograph();
         cg = await Cartograph.open(projectPath);
@@ -95,7 +96,7 @@ export function registerAdminSimilarityEdgesCommand(deps: AdminSimilarityEdgesCo
         }
       } catch (err) {
         error(`Failed to build similarity edges: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       } finally {
         cg?.close();
       }

@@ -1,8 +1,8 @@
 import { databaseConfigFromOptionInput, type DatabaseConfig, resolveDatabaseConfig } from '../../db/database-config.js';
 import { errMsg } from '../../errors.js';
 import {
-  migratePostgresProjectToSqlite,
-  migrateSqliteProjectToPostgres,
+  migratePostgresProjectToSqlite as defaultMigratePostgresProjectToSqlite,
+  migrateSqliteProjectToPostgres as defaultMigrateSqliteProjectToPostgres,
   storageMigrationSuccessMessage,
 } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
@@ -15,6 +15,8 @@ export interface AdminStorageMigrateCommandDeps {
   success: (message: string) => void;
   info: (message: string) => void;
   error: (message: string) => void;
+  migratePostgresProjectToSqlite?: typeof defaultMigratePostgresProjectToSqlite;
+  migrateSqliteProjectToPostgres?: typeof defaultMigrateSqliteProjectToPostgres;
 }
 
 interface StorageMigrateCommandOptions {
@@ -30,7 +32,15 @@ interface StorageMigrateCommandOptions {
 }
 
 export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateCommandDeps): void {
-  const { adminCmd, error, info, resolveProjectPath, success } = deps;
+  const {
+    adminCmd,
+    error,
+    info,
+    migratePostgresProjectToSqlite = defaultMigratePostgresProjectToSqlite,
+    migrateSqliteProjectToPostgres = defaultMigrateSqliteProjectToPostgres,
+    resolveProjectPath,
+    success,
+  } = deps;
   adminCmd
     .command('storage-migrate [path]')
     .description(
@@ -66,23 +76,26 @@ export function registerAdminStorageMigrateCommand(deps: AdminStorageMigrateComm
         database = resolveDatabaseConfig(databaseInput);
       } catch (err) {
         error(errMsg(err));
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       const result =
         database.provider === 'sqlite'
-          ? await migratePostgresProjectToSqlite({ projectPath })
-          : await migrateSqliteProjectToPostgres({
+          ? migratePostgresProjectToSqlite({ projectPath })
+          : migrateSqliteProjectToPostgres({
               projectPath,
               database,
               force: options.force === true,
             });
-      if (!result.ok) {
-        const remediation = result.error.remediation ? ` ${result.error.remediation}` : '';
-        error(`${result.error.message}${remediation}`);
-        process.exit(result.exitCode);
+      const resolvedResult = await Promise.resolve(result);
+      if (!resolvedResult.ok) {
+        const remediation = resolvedResult.error.remediation ? ` ${resolvedResult.error.remediation}` : '';
+        error(`${resolvedResult.error.message}${remediation}`);
+        process.exitCode = resolvedResult.exitCode;
+        return;
       }
-      success(storageMigrationSuccessMessage(result.summary));
-      info(`Updated config: ${result.summary.configPath}`);
-      info(`Restart any MCP server still attached to the old ${result.summary.sourceProvider} database.`);
+      success(storageMigrationSuccessMessage(resolvedResult.summary));
+      info(`Updated config: ${resolvedResult.summary.configPath}`);
+      info(`Restart any MCP server still attached to the old ${resolvedResult.summary.sourceProvider} database.`);
     });
 }

@@ -1,8 +1,9 @@
+type CliActionHandler<Args extends unknown[]> = (...args: Args) => unknown;
+
 export interface CliCommand {
   command(name: string): CliCommand;
   description(text: string): CliCommand;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors commander's variadic .action() handler seam — args are positional+options whose shape varies per command
-  action(fn: (...args: any[]) => unknown): CliCommand;
+  action<Args extends unknown[]>(fn: CliActionHandler<Args>): CliCommand;
 }
 
 export interface CliOptionCommand extends CliCommand {
@@ -11,8 +12,7 @@ export interface CliOptionCommand extends CliCommand {
   option(...args: unknown[]): CliOptionCommand;
   addHelpText?(position: string, text: string): CliOptionCommand;
   alias?(name: string): CliOptionCommand;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors commander's variadic .action() handler seam — args are positional+options whose shape varies per command
-  action(fn: (...args: any[]) => unknown): CliOptionCommand;
+  action<Args extends unknown[]>(fn: CliActionHandler<Args>): CliOptionCommand;
 }
 
 export interface CliArgumentOptionCommand extends CliOptionCommand {
@@ -20,8 +20,7 @@ export interface CliArgumentOptionCommand extends CliOptionCommand {
   description(text: string): CliArgumentOptionCommand;
   argument(...args: unknown[]): CliArgumentOptionCommand;
   option(...args: unknown[]): CliArgumentOptionCommand;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors commander's variadic .action() handler seam — args are positional+options whose shape varies per command
-  action(fn: (...args: any[]) => unknown): CliArgumentOptionCommand;
+  action<Args extends unknown[]>(fn: CliActionHandler<Args>): CliArgumentOptionCommand;
 }
 
 export interface CliRequiredOptionCommand extends CliOptionCommand {
@@ -29,6 +28,5 @@ export interface CliRequiredOptionCommand extends CliOptionCommand {
   description(text: string): CliRequiredOptionCommand;
   option(...args: unknown[]): CliRequiredOptionCommand;
   requiredOption(...args: unknown[]): CliRequiredOptionCommand;
-  // biome-ignore lint/suspicious/noExplicitAny: mirrors commander's variadic .action() handler seam — args are positional+options whose shape varies per command
-  action(fn: (...args: any[]) => unknown): CliRequiredOptionCommand;
+  action<Args extends unknown[]>(fn: CliActionHandler<Args>): CliRequiredOptionCommand;
 }

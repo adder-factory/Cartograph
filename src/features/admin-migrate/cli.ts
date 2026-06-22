@@ -37,7 +37,8 @@ export function registerAdminMigrateCommand(deps: AdminMigrateCommandDeps): void
       try {
         if (!isInitialized(projectPath)) {
           error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         const { default: Cartograph } = await loadCartograph();
         // Two-phase open lets us distinguish "already current" from
@@ -63,7 +64,7 @@ export function registerAdminMigrateCommand(deps: AdminMigrateCommandDeps): void
         }
       } catch (err) {
         error(`Failed to migrate: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       } finally {
         cg?.close();
       }

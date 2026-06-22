@@ -92,7 +92,8 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
   const command = validateInstallCommand(options.command);
   if (!command.ok) {
     error(command.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   if (options.printConfig) {
@@ -101,7 +102,8 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
     if (!target) {
       const known = listTargetIds().join(', ');
       error(`Unknown target "${options.printConfig}". Known: ${known}.`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
     writeStdout(target.printConfig(printConfigLocation(options.location), { command: command.command }));
     return;
@@ -110,7 +112,8 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
   const location = validateInstallLocation(options.location);
   if (!location.ok) {
     error(location.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 
   const { runInstallerWithOptions } = await loadInstaller();
@@ -118,6 +121,6 @@ async function runInstallCommand(options: InstallOptions, deps: InstallCommandDe
     await runInstallerWithOptions(installerRunOptions({ ...options, command: command.command }));
   } catch (err) {
     error(errMsg(err));
-    process.exit(1);
+    process.exitCode = 1;
   }
 }

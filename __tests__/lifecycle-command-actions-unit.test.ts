@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { registerLifecycleCommands } from '../src/bin/commands/lifecycle.js';
 
-const actions = new Map<string, (...args: any[]) => unknown>();
+const actions = new Map<string, (...args: unknown[]) => unknown>();
 const calls: string[] = [];
 const stdout: string[] = [];
 const stderr: string[] = [];
@@ -55,7 +55,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => unknown): this {
+  action(fn: (...args: unknown[]) => unknown): this {
     actions.set(this.name, fn);
     return this;
   }
@@ -147,7 +147,7 @@ function loadLifecycleCommandActions(): void {
     loadMcpLoadBudget: async () => ({
       measureMcpLoadBudget: (_cg: null, opts: unknown) => {
         calls.push(`mcp-budget:${JSON.stringify(opts)}`);
-        return { toolCount: TEST_MCP_TOOL_COUNT } as any;
+        return { toolCount: TEST_MCP_TOOL_COUNT };
       },
       formatMcpLoadBudgetReport: (report: unknown) => `budget:${JSON.stringify(report)}`,
     }),
@@ -228,6 +228,24 @@ function loadLifecycleCommandActions(): void {
   });
 }
 
+async function withProcessExitGuard(run: () => Promise<void> | void): Promise<void> {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  let exitCalled = false;
+  process.exitCode = 0;
+  process.exit = (code?: string | number | null | undefined): never => {
+    exitCalled = true;
+    throw new Error(`process.exit(${String(code)})`);
+  };
+  try {
+    await run();
+    expect(exitCalled).toBe(false);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode ?? 0;
+  }
+}
+
 describe('lifecycle command action bodies', () => {
   beforeEach(() => {
     calls.length = 0;
@@ -288,20 +306,30 @@ describe('lifecycle command action bodies', () => {
     expect(text).toContain('server.start');
   });
 
-  it('reports MCP serve startup failures through the CLI error channel', async () => {
+  it('reports MCP serve startup failures through the CLI error channel without process.exit', async () => {
     failMcpServerLoad = true;
-    const originalExit = process.exit;
-    process.exit = ((code?: string | number | null) => {
-      throw new Error(`exit:${code}`);
-    }) as typeof process.exit;
-    try {
+    await withProcessExitGuard(async () => {
       // daemon: false isolates standalone startup failure (skip the daemon path).
-      await expect(actions.get('program:serve')!({ projectPath, mcp: true, daemon: false })).rejects.toThrow('exit:1');
-    } finally {
-      process.exit = originalExit;
-    }
+      await actions.get('program:serve')!({ projectPath, mcp: true, daemon: false });
+      expect(process.exitCode).toBe(1);
+    });
 
     expect(calls.join('\n')).toContain('error:Failed to start server: mcp loader exploded');
+  });
+
+  it('reports invalid MCP serve and mcp-budget profiles without process.exit', async () => {
+    await withProcessExitGuard(async () => {
+      await actions.get('program:serve')!({ projectPath, mcp: true, profile: 'bogus' });
+      expect(process.exitCode).toBe(1);
+    });
+    expect(calls.join('\n')).toContain('error:Invalid --profile "bogus"');
+
+    calls.length = 0;
+    await withProcessExitGuard(async () => {
+      await actions.get('program:mcp-budget')!({ profile: 'also-bogus' });
+      expect(process.exitCode).toBe(1);
+    });
+    expect(calls.join('\n')).toContain('error:Invalid --profile "also-bogus"');
   });
 
   it('runs install print-config and non-interactive install paths', async () => {

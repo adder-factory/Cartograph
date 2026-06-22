@@ -86,14 +86,15 @@ export async function handleAffectedCommand(
   try {
     if (!deps.isInitialized(projectPath)) {
       deps.error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const changed = await collectChangedFilesForCli({ deps, fileArgs, options, projectPath });
     if (!changed) return;
     if (changed.changedFiles.length === 0) {
       if (!options.quiet) deps.info('No files provided. Use file arguments or --stdin.');
-      process.exit(0);
+      return;
     }
 
     const { default: Cartograph } = await deps.loadCartograph();
@@ -130,7 +131,8 @@ export async function handleAffectedCommand(
     }
   } catch (err) {
     deps.error(`Affected analysis failed: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 }
 
@@ -169,11 +171,11 @@ async function collectChangedFilesForCli({
       deps.info('No files provided and could not derive from git (git unavailable or no HEAD ref).');
       deps.info('Use file arguments or --stdin.');
     }
-    process.exit(0);
+    return null;
   }
   if (derived.length === 0) {
     writeNoDerivedChanges(deps, options);
-    process.exit(0);
+    return null;
   }
   return { changedFiles: derived, derivedFromGit: true };
 }
@@ -194,7 +196,8 @@ function buildAffectedCoreInput({ deps, cg, changed, options }: BuildAffectedCor
   });
   if (!validation.ok) {
     deps.error(validation.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return null;
   }
   if (validation.missing.length > 0 && !options.quiet) {
     deps.info(

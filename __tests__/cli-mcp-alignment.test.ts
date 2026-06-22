@@ -781,54 +781,88 @@ describe('CLI ↔ MCP list default-limit parity (#32)', () => {
 describe('CLI behaviour parity (spawned)', () => {
   const repoRoot = path.join(__dirname, '..');
   const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
-  const indexed = fs.existsSync(path.join(repoRoot, '.cartograph'));
 
-  // DISPOSABLE index copy for the DESTRUCTIVE sql tests below. They fire
-  // `DELETE FROM nodes` to prove the read-only gate rejects it — but if
-  // that gate ever regresses, running against the dev's live `.cartograph`
-  // would wipe their real index. Copy it to a throwaway dir so the blast
-  // radius is the copy, not the live index.
-  let disposableRoot: string | undefined;
-  beforeAll(() => {
-    if (!indexed) return;
+  // DISPOSABLE project for spawned CLI assertions. Do not use this checkout's
+  // live `.cartograph` as a fixture: it may be stale, mid-sync, or built by a
+  // different extraction version, and previous shard failures were real
+  // symptoms of that hidden dependency.
+  let disposableRoot: string;
+  beforeAll(async () => {
     disposableRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-parity-'));
-    fs.cpSync(path.join(repoRoot, '.cartograph'), path.join(disposableRoot, '.cartograph'), { recursive: true });
+    fs.mkdirSync(path.join(disposableRoot, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(disposableRoot, '__tests__'), { recursive: true });
+    fs.writeFileSync(
+      path.join(disposableRoot, 'package.json'),
+      `${JSON.stringify({ name: 'cli-parity-fixture', type: 'module', version: '0.0.0' }, null, 2)}\n`,
+    );
+    fs.writeFileSync(
+      path.join(disposableRoot, 'src', 'fixture.ts'),
+      [
+        'export class FixtureTraverser {',
+        '  traverseBFS(startId: string): string[] {',
+        '    return [startId];',
+        '  }',
+        '}',
+        '',
+        'export function computeMetrics(values: number[]): number {',
+        '  return values.reduce((sum, value) => sum + value, 0);',
+        '}',
+        '',
+        'export function renderDiffRangeReport(filePath: string): string {',
+        '  return `range:${filePath}`;',
+        '}',
+        '',
+      ].join('\n'),
+    );
+    fs.writeFileSync(
+      path.join(disposableRoot, '__tests__', 'fixture.test.ts'),
+      [
+        "import { computeMetrics, renderDiffRangeReport } from '../src/fixture.js';",
+        '',
+        "test('fixture helpers', () => {",
+        '  expect(computeMetrics([1, 2, 3])).toBe(6);',
+        "  expect(renderDiffRangeReport('src/fixture.ts')).toBe('range:src/fixture.ts');",
+        '});',
+        '',
+      ].join('\n'),
+    );
+
+    const { Cartograph } = await import('../src/index.js');
+    const cg = await Cartograph.init(disposableRoot, { config: { llm: { endpoint: '' } } });
+    try {
+      await cg.indexAll({ summarize: false });
+    } finally {
+      cg.close();
+    }
   });
   afterAll(() => {
     if (disposableRoot && fs.existsSync(disposableRoot)) fs.rmSync(disposableRoot, { recursive: true, force: true });
   });
 
-  it.skipIf(!indexed)(
-    'sql exits non-zero on a rejected write query',
-    () => {
-      const { code } = runCli(cliEntry, disposableRoot!, ['sql', 'DELETE FROM nodes']);
-      expect(code).not.toBe(0);
-    },
-    60_000,
-  );
+  function indexedCliRoot(): string {
+    if (!disposableRoot) throw new Error('cli parity index copy was not initialised');
+    return disposableRoot;
+  }
 
-  it.skipIf(!indexed)(
-    'sql exits non-zero on an invalid (no such table) query',
-    () => {
-      const { code } = runCli(cliEntry, disposableRoot!, ['sql', 'SELECT * FROM no_such_table_xyz']);
-      expect(code).not.toBe(0);
-    },
-    60_000,
-  );
+  it('sql exits non-zero on a rejected write query', () => {
+    const { code } = runCli(cliEntry, indexedCliRoot(), ['sql', 'DELETE FROM nodes']);
+    expect(code).not.toBe(0);
+  }, 60_000);
 
-  it.skipIf(!indexed)(
-    'find --by name exact returns the container + its members',
-    () => {
-      const { out, code } = runCli(cliEntry, repoRoot, ['find', '--by', 'name', 'GraphTraverser']);
-      expect(code).toBe(0);
-      // MCP exact mode lists the class then its member methods, not a
-      // fuzzy relevance rank with `(NN%)` scores and unrelated imports.
-      expect(out).toContain('GraphTraverser (class)');
-      expect(out).toContain('traverseBFS (method)');
-      expect(out).not.toMatch(/\(\d+%\)/);
-    },
-    60_000,
-  );
+  it('sql exits non-zero on an invalid (no such table) query', () => {
+    const { code } = runCli(cliEntry, indexedCliRoot(), ['sql', 'SELECT * FROM no_such_table_xyz']);
+    expect(code).not.toBe(0);
+  }, 60_000);
+
+  it('find --by name exact returns the container + its members', () => {
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['find', '--by', 'name', 'FixtureTraverser']);
+    expect(code).toBe(0);
+    // MCP exact mode lists the class then its member methods, not a
+    // fuzzy relevance rank with `(NN%)` scores and unrelated imports.
+    expect(out).toContain('FixtureTraverser (class)');
+    expect(out).toContain('traverseBFS (method)');
+    expect(out).not.toMatch(/\(\d+%\)/);
+  }, 60_000);
 
   // Handoff #3: `--no-include-tests` was rejected as an unknown option
   // because the CLI registered only `--include-tests`. The fix migrates
@@ -840,122 +874,94 @@ describe('CLI behaviour parity (spawned)', () => {
     expect(help.out).toContain('--no-include-tests');
   }, 60_000);
 
-  it.skipIf(!indexed)(
-    'find --by env --no-include-tests parses without error',
-    () => {
-      // The repro from handoff #3: previously this exited non-zero with
-      // "error: unknown option '--no-include-tests'". After the fix
-      // Commander accepts the negation form and the command runs to
-      // completion (the empty-state message is acceptable when no env
-      // refs match — what matters is that the option was recognized).
-      const { code } = runCli(cliEntry, repoRoot, ['find', '--by', 'env', '--no-include-tests']);
-      expect(code).toBe(0);
-    },
-    60_000,
-  );
+  it('find --by env --no-include-tests parses without error', () => {
+    // The repro from handoff #3: previously this exited non-zero with
+    // "error: unknown option '--no-include-tests'". After the fix
+    // Commander accepts the negation form and the command runs to
+    // completion (the empty-state message is acceptable when no env
+    // refs match — what matters is that the option was recognized).
+    const { code } = runCli(cliEntry, indexedCliRoot(), ['find', '--by', 'env', '--no-include-tests']);
+    expect(code).toBe(0);
+  }, 60_000);
 
-  it.skipIf(!indexed)(
-    'coverage with a bare positional symbol selects symbol mode',
-    () => {
-      const { out, code } = runCli(cliEntry, repoRoot, ['coverage', 'computeMetrics']);
-      expect(code).toBe(0);
-      expect(out).toMatch(/(?:Coverage for|No coverage data for) `computeMetrics`/);
-      expect(out).not.toContain('lowest first');
-    },
-    60_000,
-  );
+  it('coverage with a bare positional symbol selects symbol mode', () => {
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['coverage', 'computeMetrics']);
+    expect(code).toBe(0);
+    expect(out).toMatch(/(?:Coverage for|No coverage data for) `computeMetrics`/);
+    expect(out).not.toContain('lowest first');
+  }, 60_000);
 
-  it.skipIf(!indexed)(
-    'role with no args produces the project-wide distribution table',
-    () => {
-      const { out, code } = runCli(cliEntry, repoRoot, ['role']);
-      expect(code).toBe(0);
-      // Bug #12 (2026-05-22) renamed the section title to scope the
-      // denominator disclosure — the `(project-wide` prefix is the
-      // stable substring; the suffix may carry "classifier-target kinds
-      // only" or future qualifiers as the disclosure evolves.
-      expect(out).toContain('Role distribution (project-wide');
-    },
-    60_000,
-  );
+  it('role with no args produces the project-wide distribution table', () => {
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['role']);
+    expect(code).toBe(0);
+    // Bug #12 (2026-05-22) renamed the section title to scope the
+    // denominator disclosure — the `(project-wide` prefix is the
+    // stable substring; the suffix may carry "classifier-target kinds
+    // only" or future qualifiers as the disclosure evolves.
+    expect(out).toContain('Role distribution (project-wide');
+  }, 60_000);
 
   // ── CLI ↔ MCP per-flag parity ────────────────────────────────────
   // The surface-alignment test above checks command/action existence
   // only; these guard the per-flag mirrors that a tool-surface audit
   // (2026-05-18) found missing on the CLI side.
 
-  it.skipIf(!indexed)(
-    'node accepts the --include-* folds and a batched symbol list',
-    () => {
-      // cartograph_node supports includeCallers/Callees/Biomarkers/Tests
-      // + a batched `symbols` array — the CLI mirror must expose them.
-      const help = runCli(cliEntry, repoRoot, ['node', '--help']);
-      expect(help.code).toBe(0);
-      for (const flag of ['--include-callers', '--include-callees', '--include-biomarkers', '--include-tests']) {
-        expect(help.out, `node --help should list ${flag}`).toContain(flag);
-      }
-      // Batched form: two positional symbols resolve in one call.
-      const { out, code } = runCli(cliEntry, repoRoot, [
-        'node',
-        'handleAtRange',
-        'renderDiffRangeReport',
-        '--include-biomarkers',
-      ]);
-      expect(code).toBe(0);
-      expect(out).toContain('handleAtRange');
-      expect(out).toContain('renderDiffRangeReport');
-      expect(out).toContain('Biomarkers:');
-    },
-    90_000,
-  );
+  it('node accepts the --include-* folds and a batched symbol list', () => {
+    // cartograph_node supports includeCallers/Callees/Biomarkers/Tests
+    // + a batched `symbols` array — the CLI mirror must expose them.
+    const help = runCli(cliEntry, repoRoot, ['node', '--help']);
+    expect(help.code).toBe(0);
+    for (const flag of ['--include-callers', '--include-callees', '--include-biomarkers', '--include-tests']) {
+      expect(help.out, `node --help should list ${flag}`).toContain(flag);
+    }
+    // Batched form: two positional symbols resolve in one call.
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), [
+      'node',
+      'FixtureTraverser',
+      'renderDiffRangeReport',
+      '--include-biomarkers',
+    ]);
+    expect(code).toBe(0);
+    expect(out).toContain('FixtureTraverser');
+    expect(out).toContain('renderDiffRangeReport');
+    expect(out).toContain('Biomarkers:');
+  }, 90_000);
 
-  it.skipIf(!indexed)(
-    'status accepts the MCP rollup flags and renders Feature Readiness',
-    () => {
-      const help = runCli(cliEntry, repoRoot, ['status', '--help']);
-      expect(help.code).toBe(0);
-      for (const flag of ['--verbose', '--top-hotspots', '--top-biomarkers', '--summary-breakdown']) {
-        expect(help.out, `status --help should list ${flag}`).toContain(flag);
-      }
-      // --verbose renders the Feature Readiness rollup the MCP tool shows.
-      const { out, code } = runCli(cliEntry, repoRoot, ['status', '--verbose']);
-      expect(code).toBe(0);
-      expect(out).toContain('Feature Readiness');
-    },
-    90_000,
-  );
+  it('status accepts the MCP rollup flags and renders Feature Readiness', () => {
+    const help = runCli(cliEntry, repoRoot, ['status', '--help']);
+    expect(help.code).toBe(0);
+    for (const flag of ['--verbose', '--top-hotspots', '--top-biomarkers', '--summary-breakdown']) {
+      expect(help.out, `status --help should list ${flag}`).toContain(flag);
+    }
+    // --verbose renders the Feature Readiness rollup the MCP tool shows.
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['status', '--verbose']);
+    expect(code).toBe(0);
+    expect(out).toContain('Feature Readiness');
+  }, 90_000);
 
   // Handoff #4: --top-hotspots / --top-biomarkers MUST silently coerce
   // negative / 0 / non-numeric / fractional / above-cap inputs to match
   // the MCP-side parseInlineTopN contract. Previously assignIntArg{min:1}
   // wrapped these flags and rejected the same inputs the MCP silently
   // accepted, creating a documented agent-confusing drift.
-  it.skipIf(!indexed).each([
+  it.each([
     ['0', 'suppress'],
     ['-5', 'suppress'],
     ['1.5', 'floor to 1'],
     ['abc', 'non-numeric → suppress'],
     ['999', 'clamp to MAX'],
-  ])(
-    'status --top-biomarkers %s exits 0 (%s; handoff #4)',
-    (value) => {
-      const { code } = runCli(cliEntry, repoRoot, ['status', '--top-biomarkers', value]);
-      expect(code).toBe(0);
-    },
-    60_000,
-  );
+  ])('status --top-biomarkers %s exits 0 (%s; handoff #4)', (value) => {
+    const { code } = runCli(cliEntry, indexedCliRoot(), ['status', '--top-biomarkers', value]);
+    expect(code).toBe(0);
+  }, 60_000);
 
   // Both flags share `parseInlineTopN`, but a single representative
   // --top-hotspots case guards against a future refactor diverging the
   // two flag wirings (per reviewer suggestion on handoff #4).
-  it.skipIf(!indexed)(
-    'status --top-hotspots -5 exits 0 (silent suppress, parity with --top-biomarkers)',
-    () => {
-      const { code } = runCli(cliEntry, repoRoot, ['status', '--top-hotspots', '-5']);
-      expect(code).toBe(0);
-    },
-    60_000,
-  );
+  it('status --top-hotspots -5 exits 0 (silent suppress, parity with --top-biomarkers)', () => {
+    const { code } = runCli(cliEntry, indexedCliRoot(), ['status', '--top-hotspots', '-5']);
+    expect(code).toBe(0);
+  }, 60_000);
 
   it('status --help describes the coerce-on-invalid contract (handoff #4)', () => {
     const help = runCli(cliEntry, repoRoot, ['status', '--help']);
@@ -969,28 +975,20 @@ describe('CLI behaviour parity (spawned)', () => {
     expect(help.out).not.toMatch(/Clamped to \[1, \d+\]/);
   }, 60_000);
 
-  it.skipIf(!indexed)(
-    'at-range accepts the bulk --ranges mode',
-    () => {
-      const help = runCli(cliEntry, repoRoot, ['at-range', '--help']);
-      expect(help.code).toBe(0);
-      expect(help.out).toContain('--ranges');
-      const { out, code } = runCli(cliEntry, repoRoot, ['at-range', '--ranges', 'src/mcp/tools/at-range.ts:671-692']);
-      expect(code).toBe(0);
-      expect(out).toContain('renderDiffRangeReport');
-    },
-    60_000,
-  );
+  it('at-range accepts the bulk --ranges mode', () => {
+    const help = runCli(cliEntry, repoRoot, ['at-range', '--help']);
+    expect(help.code).toBe(0);
+    expect(help.out).toContain('--ranges');
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['at-range', '--ranges', 'src/fixture.ts:11-13']);
+    expect(code).toBe(0);
+    expect(out).toContain('renderDiffRangeReport');
+  }, 60_000);
 
-  it.skipIf(!indexed)(
-    'affected surfaces the traversal count on the human surface',
-    () => {
-      const { out, code } = runCli(cliEntry, repoRoot, ['affected', 'src/mcp/tools/at-range.ts']);
-      expect(code).toBe(0);
-      // The MCP tool prints "Traversed N dependents total." — the CLI
-      // direct implementation must mirror that blast-radius signal.
-      expect(out).toMatch(/Traversed \d+ dependents? total\./);
-    },
-    60_000,
-  );
+  it('affected surfaces the traversal count on the human surface', () => {
+    const { out, code } = runCli(cliEntry, indexedCliRoot(), ['affected', 'src/fixture.ts']);
+    expect(code).toBe(0);
+    // The MCP tool prints "Traversed N dependents total." — the CLI
+    // direct implementation must mirror that blast-radius signal.
+    expect(out).toMatch(/Traversed \d+ dependents? total\./);
+  }, 60_000);
 });

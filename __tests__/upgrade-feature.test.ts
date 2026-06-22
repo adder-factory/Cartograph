@@ -2,12 +2,15 @@ import { execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   checkUpgrade,
   compareVersions,
   detectVersionSkew,
+  fetchLatestGithubReleaseVersion,
   fetchLatestGitTagVersion,
+  fetchLatestNpmVersion,
   fetchLatestPublishedVersion,
   renderUpgradeCheck,
 } from '../src/features/upgrade/index.js';
@@ -162,6 +165,25 @@ describe('install method detection', () => {
   it('returns unknown for unparseable module URLs', () => {
     expect(detectInstallMethod('not-a-url')).toEqual({ kind: 'unknown' });
   });
+
+  it('requires the package name to be an own manifest field', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-upgrade-own-name-'));
+    const srcDir = path.join(dir, 'src');
+    fs.mkdirSync(srcDir, { recursive: true });
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    const moduleUrl = pathToFileURL(path.join(srcDir, 'source-update.js')).href;
+
+    Object.defineProperty(Object.prototype, 'name', {
+      configurable: true,
+      value: '@adder-factory/cartograph',
+    });
+    try {
+      expect(detectInstallMethod(moduleUrl)).toEqual({ kind: 'unknown' });
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['name'];
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('Bun-global re-pin (#1/#2 upgrade improvements)', () => {
@@ -201,6 +223,19 @@ describe('Bun-global re-pin (#1/#2 upgrade improvements)', () => {
     expect(canRepinBunGlobal(pkgRoot, dir)).toBe(false);
     fs.rmSync(path.join(dir, 'package.json'));
     expect(canRepinBunGlobal(pkgRoot, dir)).toBe(false);
+  });
+
+  it('requires the global manifest dependency spec to be an own property', () => {
+    Object.defineProperty(Object.prototype, '@adder-factory/cartograph', {
+      configurable: true,
+      value: 'github:adder-factory/cartograph#v1.0.5',
+    });
+    try {
+      fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: {} }));
+      expect(canRepinBunGlobal(pkgRoot, dir)).toBe(false);
+    } finally {
+      delete (Object.prototype as Record<string, unknown>)['@adder-factory/cartograph'];
+    }
   });
 
   it('rejects a project-LOCAL install even with a GitHub spec (reviewer R1 — no global clobber)', () => {
@@ -507,5 +542,19 @@ describe('fetchLatestPublishedVersion', () => {
     await expect(fetchLatestPublishedVersion(gitUnavailable)).rejects.toThrow(
       /git ls-remote.*GitHub releases API.*npm registry/,
     );
+  });
+
+  it('rejects malformed GitHub release JSON with a stable contract error', async () => {
+    globalThis.fetch = (async () => new Response('null', { status: 200 })) as typeof fetch;
+
+    await expect(fetchLatestGithubReleaseVersion()).rejects.toThrow(
+      'GitHub releases response did not include a tag name',
+    );
+  });
+
+  it('rejects malformed npm package JSON with a stable contract error', async () => {
+    globalThis.fetch = (async () => new Response('null', { status: 200 })) as typeof fetch;
+
+    await expect(fetchLatestNpmVersion()).rejects.toThrow('npm registry response did not include a version');
   });
 });

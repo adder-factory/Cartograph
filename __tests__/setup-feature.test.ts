@@ -1,5 +1,47 @@
 import { describe, expect, it } from 'vitest';
-import { runSetup, type SetupRuntimeDeps } from '../src/features/setup/runtime.js';
+import { registerSetupCommand, runSetup, type SetupRuntimeDeps } from '../src/features/setup/index.js';
+import type { CliOptionCommand } from '../src/features/shared/cli-command.js';
+
+interface SetupCliOptions {
+  readonly minimal?: boolean;
+  readonly models?: boolean;
+}
+
+type SetupCliAction = (pathArg: string | undefined, options: SetupCliOptions) => Promise<void>;
+
+function isSetupCliAction(value: unknown): value is SetupCliAction {
+  return typeof value === 'function';
+}
+
+function createSetupCommandHarness(): {
+  program: CliOptionCommand;
+  llmCmd: CliOptionCommand;
+  actions: Map<string, unknown>;
+} {
+  const actions = new Map<string, unknown>();
+
+  function makeCommand(name: string): CliOptionCommand {
+    let command: CliOptionCommand;
+    command = {
+      command(childName: string) {
+        return makeCommand(childName);
+      },
+      description() {
+        return command;
+      },
+      option() {
+        return command;
+      },
+      action<Args extends unknown[]>(fn: (...args: Args) => unknown) {
+        actions.set(name, fn);
+        return command;
+      },
+    };
+    return command;
+  }
+
+  return { program: makeCommand('program'), llmCmd: makeCommand('llm'), actions };
+}
 
 describe('setup feature runtime', () => {
   it('initializes the project, skips models when requested, and runs doctor', async () => {
@@ -135,3 +177,72 @@ describe('setup feature runtime', () => {
     );
   });
 });
+
+describe('setup feature CLI', () => {
+  it('reports doctor failures with exitCode instead of hard-exiting', async () => {
+    await withProcessExitGuard(async () => {
+      const { program, llmCmd, actions } = createSetupCommandHarness();
+      const calls: string[] = [];
+      const stdout: string[] = [];
+
+      registerSetupCommand({
+        program,
+        llmCmd,
+        resolveProjectPath: (pathArg) => pathArg ?? '/repo',
+        writeStdout: (message = '') => stdout.push(message),
+        writeProgress: (message) => calls.push(`progress:${message}`),
+        isInitialized: () => true,
+        info: (message) => calls.push(`info:${message}`),
+        error: (message) => calls.push(`error:${message}`),
+        loadCartograph: async () => {
+          throw new Error('init should be skipped');
+        },
+        loadDoctor: async () => ({
+          runDoctor: async (opts) => {
+            calls.push(`doctor:${JSON.stringify(opts)}`);
+            return { overallStatus: 'fail' };
+          },
+          formatDoctorReport: () => 'doctor failed report',
+        }),
+        loadInstallModels: async () => {
+          throw new Error('models should be skipped');
+        },
+        loadRecommendedModels: async () => {
+          throw new Error('models should be skipped');
+        },
+        loadRecommendedConfig: async () => {
+          throw new Error('config should not be written');
+        },
+      });
+
+      const action = actions.get('install [path]');
+      if (!isSetupCliAction(action)) throw new Error('setup install action was not registered');
+
+      await action('/repo', { models: false });
+
+      expect(process.exitCode).toBe(1);
+      expect(stdout).toEqual(['\ndoctor failed report']);
+      expect(calls).toContain('doctor:{"projectPath":"/repo"}');
+      expect(calls).not.toContain('error:doctor failed report');
+    });
+  });
+});
+
+async function withProcessExitGuard(run: () => Promise<void>): Promise<void> {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  let exitCalled = false;
+  process.exitCode = 0;
+  process.exit = (code?: string | number | null | undefined): never => {
+    exitCalled = true;
+    throw new Error(`process.exit(${String(code)})`);
+  };
+
+  try {
+    await run();
+    expect(exitCalled).toBe(false);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode ?? 0;
+  }
+}

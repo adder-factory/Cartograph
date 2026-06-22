@@ -3,11 +3,10 @@ import { databaseConfigFromOptionInput } from '../../db/database-config.js';
 import { parseMaxFileSizeValue } from '../admin-indexing/runtime.js';
 import { resolveInitProjectPath, shouldConfirmUninit } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { ClackUi, LoadClackUi } from '../shared/clack-ui.js';
 import type { IndexProgress, IndexResult } from '../../index.js';
 
 type CommandLike = CliOptionCommand;
-
-type ClackPrompts = typeof import('@clack/prompts');
 
 interface ProjectLifecycleGraph {
   indexAll: (opts: Record<string, unknown>) => Promise<IndexResult>;
@@ -31,9 +30,9 @@ export interface AdminProjectLifecycleCommandDeps {
       openSync: (projectPath: string) => ProjectLifecycleGraph;
     };
   }>;
-  loadClack: () => Promise<ClackPrompts>;
+  loadClack: LoadClackUi;
   loadReadline: () => Promise<{ createInterface: typeof import('node:readline').createInterface }>;
-  printIndexResult: (clack: ClackPrompts, result: IndexResult, projectPath: string) => void;
+  printIndexResult: (clack: ClackUi, result: IndexResult, projectPath: string) => void;
   resolveProjectPath: (pathArg?: string) => string;
   writeStdout: (message: string) => void;
   success: (message: string) => void;
@@ -99,7 +98,8 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
         if (!parsedMaxFileSize.ok) {
           clack.log.error(parsedMaxFileSize.error);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         const { default: Cartograph } = await loadCartograph();
         const database = databaseConfigFromOptionInput(options);
@@ -139,7 +139,7 @@ function registerInitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         clack.outro('Done');
       } catch (err) {
         clack.log.error(`Failed: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       } finally {
         cg?.close();
       }
@@ -209,7 +209,7 @@ function registerUninitCommand(deps: AdminProjectLifecycleCommandDeps): void {
         success(`Removed Cartograph from ${projectPath}`);
       } catch (err) {
         error(`Failed to uninitialize: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

@@ -6,12 +6,83 @@ import {
   parseFilesOutputOptions,
   renderFilesOutput,
 } from '../src/features/files/runtime.js';
+import { runFilesCommand, type FilesCommandDeps } from '../src/features/files/index.js';
 
 const files = [
   { path: 'src/a.ts', language: 'typescript', nodeCount: 2, size: 10 },
   { path: 'src/nested/b.ts', language: 'typescript', nodeCount: 3, size: 20 },
   { path: 'README.md', language: 'markdown', nodeCount: 1, size: 5 },
 ];
+
+function makeUnusedProgram(): FilesCommandDeps['program'] {
+  let command: FilesCommandDeps['program'];
+  command = {
+    command() {
+      return command;
+    },
+    description() {
+      return command;
+    },
+    option() {
+      return command;
+    },
+    action() {
+      return command;
+    },
+  };
+  return command;
+}
+
+function makeFilesCommandDeps(args: { initialized: boolean; projectPath: string }): {
+  deps: FilesCommandDeps;
+  errors: string[];
+  lines: string[];
+} {
+  const errors: string[] = [];
+  const lines: string[] = [];
+  return {
+    errors,
+    lines,
+    deps: {
+      program: makeUnusedProgram(),
+      error: (message) => errors.push(message),
+      info: (message) => lines.push(`info:${message}`),
+      resolveProjectPath: () => args.projectPath,
+      loadCartograph: async () => ({
+        default: {
+          open: async (): Promise<never> => {
+            throw new Error('open exploded');
+          },
+        },
+      }),
+      isInitialized: () => args.initialized,
+      getAllFilesWithSymbolCount: () => files,
+      getFileSummaries: () => new Map(),
+      filterFilesByDir: testFilterFilesByDir,
+      buildDirRollup: testBuildDirRollup,
+      runViaMCP: async () => undefined,
+      writeLine: (message = '') => lines.push(message),
+    },
+  };
+}
+
+async function withProcessExitGuard(run: () => Promise<void>): Promise<void> {
+  const originalExit = process.exit;
+  const originalExitCode = process.exitCode;
+  let exitCalled = false;
+  process.exitCode = 0;
+  process.exit = (code?: string | number | null | undefined): never => {
+    exitCalled = true;
+    throw new Error(`process.exit(${String(code)})`);
+  };
+  try {
+    await run();
+    expect(exitCalled).toBe(false);
+  } finally {
+    process.exit = originalExit;
+    process.exitCode = originalExitCode ?? 0;
+  }
+}
 
 describe('files feature runtime', () => {
   it('normalizes positional dir and parses output options as values', () => {
@@ -92,6 +163,32 @@ describe('files feature runtime', () => {
     }).join('\n');
     expect(summary).toContain('Subtree Summary — src/');
     expect(summary).toContain('src/');
+  });
+});
+
+describe('files feature CLI', () => {
+  it('reports an uninitialized project without calling process.exit', async () => {
+    const projectPath = '/tmp/cartograph-files-uninitialized';
+    const { deps, errors } = makeFilesCommandDeps({ initialized: false, projectPath });
+
+    await withProcessExitGuard(async () => {
+      await runFilesCommand(deps, undefined, {});
+      expect(process.exitCode).toBe(1);
+    });
+
+    expect(errors).toEqual([`Cartograph not initialized in ${projectPath}`]);
+  });
+
+  it('reports list failures without calling process.exit', async () => {
+    const projectPath = '/tmp/cartograph-files-open-fails';
+    const { deps, errors } = makeFilesCommandDeps({ initialized: true, projectPath });
+
+    await withProcessExitGuard(async () => {
+      await runFilesCommand(deps, undefined, {});
+      expect(process.exitCode).toBe(1);
+    });
+
+    expect(errors).toEqual(['Failed to list files: open exploded']);
   });
 });
 

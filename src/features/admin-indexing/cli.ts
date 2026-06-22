@@ -10,15 +10,16 @@ import {
   type SyncResult,
 } from './runtime.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { ClackUi, LoadClackUi } from '../shared/clack-ui.js';
 import type { IndexProgress } from '../../index.js';
+import type { QueryBuilder } from '../../db/queries.js';
+import type { LlmEndpointConfig } from '../../llm/client.js';
 
 type CommandLike = CliOptionCommand;
 
-type ClackPrompts = typeof import('@clack/prompts');
-
 export interface AdminIndexGraph {
-  queries: unknown;
-  config: { llm?: { summarizeEagerLimit?: number } };
+  queries: QueryBuilder | null;
+  config: { llm?: { summarizeEagerLimit?: number } | undefined };
   close: () => void;
   indexAll: (opts: object) => Promise<AdminIndexResult>;
   sync: (opts: object) => Promise<SyncResult>;
@@ -31,7 +32,12 @@ export interface AdminIndexGraph {
     } | null>;
   };
   llm: {
-    config: { getEffectiveLlmConfig: () => Promise<unknown> };
+    config: { getEffectiveLlmConfig: () => Promise<LlmEndpointConfig | null | undefined> };
+    bgCtrl: {
+      promise: Promise<unknown> | null;
+      getProgress: () => { phase: string; done: number; total: number } | null;
+      awaitCompletion: () => Promise<void>;
+    };
     embed: {
       embedAll: (opts?: Record<string, unknown>) => Promise<{
         generated: number;
@@ -53,20 +59,15 @@ export interface AdminIndexingCommandDeps {
   formatDuration: (ms: number) => string;
   createVerboseProgress: () => (progress: IndexProgress) => void;
   createShimmerProgress: () => { onProgress: (progress: IndexProgress) => void; stop: () => Promise<void> };
-  // DI seam: the real awaitSummarisationWithProgress wants the full
-  // Cartograph instance, but this command only ever opens the structural
-  // `AdminIndexGraph` subset; param-contravariance makes neither concrete
-  // type assignable here.
-  // biome-ignore lint/suspicious/noExplicitAny: DI seam — real Cartograph param is not assignable to/from the AdminIndexGraph subset under contravariance
-  awaitSummarisationWithProgress: (cg: any, clack: ClackPrompts) => Promise<void>;
-  printIndexResult: (clack: ClackPrompts, result: AdminIndexResult, projectPath: string) => void;
+  awaitSummarisationWithProgress: (cg: AdminIndexGraph, clack: ClackUi) => Promise<void>;
+  printIndexResult: (clack: ClackUi, result: AdminIndexResult, projectPath: string) => void;
   isInitialized: (projectPath: string) => boolean;
   loadCartograph: () => Promise<{
     default: {
       open: (projectPath: string, opts?: { autoMigrate?: boolean }) => Promise<AdminIndexGraph>;
     };
   }>;
-  loadClack: () => Promise<ClackPrompts>;
+  loadClack: LoadClackUi;
   loadParseCache: () => Promise<{ clearParseCache: (queries: unknown, language?: string) => number }>;
   loadDetachedSummarize: () => Promise<{
     spawnDetachedSummarize: (projectPath: string) => { spawned: boolean; pid?: number; reason?: string };
@@ -90,14 +91,14 @@ interface InteractiveIndexArgs extends RunQuietIndexArgs {
 
 interface PrepareInteractiveIndexArgs {
   cg: AdminIndexGraph;
-  clack: ClackPrompts;
+  clack: ClackUi;
   options: AdminIndexOptions;
   deps: AdminIndexingCommandDeps;
 }
 
 interface BackgroundSummaryStatusArgs {
   cg: AdminIndexGraph;
-  clack: ClackPrompts;
+  clack: ClackUi;
   projectPath: string;
   deps: Pick<AdminIndexingCommandDeps, 'loadDetachedSummarize'>;
 }
@@ -164,13 +165,15 @@ export async function runAdminIndexCommand(
   const parsed = parseParseWorkersValue(options.parseWorkers);
   if (!parsed.ok) {
     error(parsed.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   const parseWorkers = parsed.value;
   const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
   if (!parsedMaxFileSize.ok) {
     error(parsedMaxFileSize.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   const maxFileSize = parsedMaxFileSize.value;
   let cg: AdminIndexGraph | undefined;
@@ -179,7 +182,8 @@ export async function runAdminIndexCommand(
     if (!isInitialized(projectPath)) {
       error(`Cartograph not initialized in ${projectPath}`);
       info('Run "cartograph admin init" first');
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const { default: Cartograph } = await loadCartograph();
@@ -197,7 +201,8 @@ export async function runAdminIndexCommand(
   } catch (err) {
     cg?.close();
     error(`Failed to index: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 }
 
@@ -225,7 +230,8 @@ export async function runQuietIndex(args: RunQuietIndexArgs): Promise<void> {
       const location = err.filePath ? `${err.filePath}: ` : '';
       deps.writeStderr(`${location}${err.message}\n`);
     }
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 }
 
@@ -242,7 +248,10 @@ async function runInteractiveIndex(args: InteractiveIndexArgs): Promise<void> {
   if (options.profile && result.profile) {
     clack.note(phaseTimingLines(result, deps).join('\n'), 'Phase timings');
   }
-  if (!result.success) process.exit(1);
+  if (!result.success) {
+    process.exitCode = 1;
+    return;
+  }
 
   await reportBackgroundSummaryStatus({ cg, clack, projectPath, deps });
   clack.outro('Done');
@@ -366,7 +375,8 @@ async function runEmbedOnlyCommand(
   const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
   if (!parsedMaxFileSize.ok) {
     error(parsedMaxFileSize.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   const maxFileSize = parsedMaxFileSize.value;
   let cg: AdminIndexGraph | undefined;
@@ -375,7 +385,8 @@ async function runEmbedOnlyCommand(
     if (!isInitialized(projectPath)) {
       error(`Cartograph not initialized in ${projectPath}`);
       info('Run "cartograph admin init" first');
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     const { default: Cartograph } = await loadCartograph();
@@ -389,7 +400,8 @@ async function runEmbedOnlyCommand(
     await runInteractiveEmbedOnly({ cg, projectPath, options, maxFileSize, deps });
   } catch (err) {
     error(`Failed to embed-only index: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   } finally {
     cg?.close();
   }
@@ -405,12 +417,16 @@ async function runQuietEmbedOnly(
     embedOnly: true,
     ...(maxFileSize !== undefined && { maxFileSize }),
   });
-  if (!result.success) process.exit(1);
+  if (!result.success) {
+    process.exitCode = 1;
+    return;
+  }
   try {
     await cg.llm.embed.embedAll();
   } catch (err) {
     deps.error(`Embed pass failed: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
 }
 
@@ -429,6 +445,10 @@ async function runInteractiveEmbedOnly(args: InteractiveEmbedOnlyArgs): Promise<
       })
     : await runEmbedOnlyWithShimmer(cg, maxFileSize, deps);
   deps.printIndexResult(clack, result, projectPath);
+  if (!result.success) {
+    process.exitCode = 1;
+    return;
+  }
   await runEmbedOnlyEmbedPass(cg, clack);
   clack.outro('Done');
 }
@@ -452,7 +472,7 @@ async function runEmbedOnlyWithShimmer(
   }
 }
 
-async function runEmbedOnlyEmbedPass(cg: AdminIndexGraph, clack: ClackPrompts): Promise<void> {
+async function runEmbedOnlyEmbedPass(cg: AdminIndexGraph, clack: ClackUi): Promise<void> {
   try {
     clack.log.info('Running embed pass…');
     const embedResult = await cg.llm.embed.embedAll({});
@@ -492,7 +512,8 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
       const parsedMaxFileSize = parseMaxFileSizeValue(options.maxFileSize);
       if (!parsedMaxFileSize.ok) {
         error(parsedMaxFileSize.error);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       const maxFileSize = parsedMaxFileSize.value;
       let cg: AdminIndexGraph | undefined;
@@ -502,7 +523,8 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
           if (!options.quiet) {
             error(`Cartograph not initialized in ${projectPath}`);
           }
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         const { default: Cartograph } = await loadCartograph();
@@ -545,7 +567,8 @@ function registerSyncCommand(deps: AdminIndexingCommandDeps): void {
           error(`Failed to sync: ${errMsg(err)}`);
           if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
         }
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       } finally {
         cg?.close();
       }
@@ -566,7 +589,8 @@ function registerBiomarkersRefreshCommand(deps: AdminIndexingCommandDeps): void 
       try {
         if (!isInitialized(projectPath)) {
           if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         const { default: Cartograph } = await loadCartograph();
         cg = await Cartograph.open(projectPath, { autoMigrate: true });
@@ -584,7 +608,8 @@ function registerBiomarkersRefreshCommand(deps: AdminIndexingCommandDeps): void 
           error(`Failed to refresh biomarkers: ${errMsg(err)}`);
           if (process.env['CG_DEBUG']) writeStderr(`${errMsg(err)}\n`);
         }
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       } finally {
         cg?.close();
       }

@@ -53,20 +53,18 @@ describe('handler input validation', () => {
   });
 
   it('rejects non-string symbol with toString trick (was: prepared-statement crash)', async () => {
-    // Cast to any — the test deliberately violates the typed shape to
-    // simulate a misbehaving MCP client that sends a JSON object where
-    // a string is expected. The Zod schema's `safeParse` catches the
-    // type mismatch before the handler runs.
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const fakeStringy: any = { toString: () => 'fake' };
+    // The test deliberately violates the tool schema to simulate a
+    // misbehaving MCP client that sends a JSON object where a string is
+    // expected. `ToolHandler.execute` is the trust boundary, so malformed
+    // values should enter as `unknown` and be rejected by Zod.
+    const fakeStringy: unknown = { toString: () => 'fake' };
     const r = await handler.execute('cartograph_biomarkers', { mode: 'symbol', symbol: fakeStringy });
     expect(r.isError).toBe(true);
     expect(r.content[0]?.text).toMatch(/symbol: expected string, received object/);
   });
 
   it('rejects number passed where string expected', async () => {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const r = await handler.execute('cartograph_biomarkers', { mode: 'symbol', symbol: 42 as any });
+    const r = await handler.execute('cartograph_biomarkers', { mode: 'symbol', symbol: 42 });
     expect(r.isError).toBe(true);
     expect(r.content[0]?.text).toMatch(/symbol: expected string, received number/);
   });
@@ -112,8 +110,7 @@ describe('handler input validation', () => {
   });
 
   it('rejects non-string symbol on coverage symbol-mode', async () => {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const r = await handler.execute('cartograph_coverage', { mode: 'symbol', symbol: { toString: () => 'x' } as any });
+    const r = await handler.execute('cartograph_coverage', { mode: 'symbol', symbol: { toString: () => 'x' } });
     expect(r.isError).toBe(true);
     expect(r.content[0]?.text).toMatch(/`symbol` must be of type string|symbol: expected string/);
   });

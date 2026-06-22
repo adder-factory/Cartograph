@@ -1037,6 +1037,35 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(body.hint).toContain('cartograph admin llm-apply');
   });
 
+  it('rejects non-object Ask JSON bodies as client errors', async () => {
+    const res = await apiFetch(handle, 'api/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: 'null',
+    });
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: 'body must be a JSON object' });
+  });
+
+  it('does not accept inherited Ask question fields from the request body', async () => {
+    Object.defineProperty(Object.prototype, 'question', {
+      configurable: true,
+      value: 'How does compute work?',
+      writable: true,
+    });
+    try {
+      const res = await apiFetch(handle, 'api/ask', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(res.status).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: 'question is required' });
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'question');
+    }
+  });
+
   it('routes Ask requests by pathname and rejects oversized Ask bodies with JSON', async () => {
     const routed = await apiFetch(handle, 'api/ask?debug=1', {
       method: 'POST',
@@ -1099,6 +1128,24 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(after.config.exclude).toContain('**/generated/**');
   });
 
+  it('ignores inherited curated config fields in the request body', async () => {
+    const before = await getConfig();
+    Object.defineProperty(Object.prototype, 'exclude', {
+      configurable: true,
+      value: ['**/polluted-prototype/**'],
+      writable: true,
+    });
+    try {
+      const res = await postConfig({});
+      expect(res.status).toBe(200);
+      const after = await getConfig();
+      expect(after.config.exclude).toEqual(before.config.exclude);
+      expect(after.config.exclude).not.toContain('**/polluted-prototype/**');
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'exclude');
+    }
+  });
+
   it('rejects an out-of-range maxFileSize with 400 and writes nothing', async () => {
     const before = await getConfig();
     const res = await postConfig({ maxFileSize: 999 * 1024 * 1024 }); // above the 10 MB cap
@@ -1133,6 +1180,26 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       body: JSON.stringify({ mode: 'wipe' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('requires re-index mode to be an own JSON body property', async () => {
+    Object.defineProperty(Object.prototype, 'mode', {
+      configurable: true,
+      value: 'sync',
+    });
+    let res: Response | null = null;
+    try {
+      res = await apiFetch(handle, 'api/reindex', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      if (res.status === 200) await res.text();
+      expect(res.status).toBe(400);
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'mode');
+      if (res !== null && res.status !== 200) await res.body?.cancel();
+    }
   });
 
   it('streams an in-process re-index as Server-Sent Events', async () => {

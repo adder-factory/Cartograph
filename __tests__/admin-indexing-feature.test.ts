@@ -108,53 +108,45 @@ describe('admin indexing feature runtime', () => {
 });
 
 describe('admin indexing feature CLI', () => {
-  it('exits early on invalid parse-worker values before opening the graph', async () => {
+  it('sets exitCode on invalid parse-worker values before opening the graph', async () => {
     const { deps, calls } = fakeDeps();
-    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
-      throw new Error(`exit:${code}`);
-    }) as typeof process.exit);
 
-    try {
-      await expect(runAdminIndexCommand('/repo', { parseWorkers: '0' }, deps)).rejects.toThrow('exit:1');
-    } finally {
-      exit.mockRestore();
-    }
+    const exitCode = await withProcessExitGuard(() => runAdminIndexCommand('/repo', { parseWorkers: '0' }, deps));
 
+    expect(exitCode).toBe(1);
     expect(calls).toContain('error:--parse-workers must be a positive integer (got "0")');
     expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
   });
 
-  it('reports uninitialized projects before opening the graph', async () => {
+  it('sets exitCode for uninitialized projects before opening the graph', async () => {
     const { deps, calls } = fakeDeps({ initialized: false });
-    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
-      throw new Error(`exit:${code}`);
-    }) as typeof process.exit);
 
-    try {
-      await expect(runAdminIndexCommand('/repo', {}, deps)).rejects.toThrow('exit:1');
-    } finally {
-      exit.mockRestore();
-    }
+    const exitCode = await withProcessExitGuard(() => runAdminIndexCommand('/repo', {}, deps));
 
+    expect(exitCode).toBe(1);
     expect(calls).toContain('error:Cartograph not initialized in /repo');
     expect(calls).toContain('info:Run "cartograph admin init" first');
     expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
   });
 
-  it('exits early on invalid max-file-size values before opening the graph', async () => {
+  it('sets exitCode on invalid max-file-size values before opening the graph', async () => {
     const { deps, calls } = fakeDeps();
-    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
-      throw new Error(`exit:${code}`);
-    }) as typeof process.exit);
 
-    try {
-      await expect(runAdminIndexCommand('/repo', { maxFileSize: 'abc' }, deps)).rejects.toThrow('exit:1');
-    } finally {
-      exit.mockRestore();
-    }
+    const exitCode = await withProcessExitGuard(() => runAdminIndexCommand('/repo', { maxFileSize: 'abc' }, deps));
 
+    expect(exitCode).toBe(1);
     expect(calls).toContain('error:--max-file-size must be between 1 byte and 10mb (got "abc")');
     expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+  });
+
+  it('sets exitCode when index graph opening fails', async () => {
+    const { deps, calls } = fakeDeps({ openError: new Error('database locked') });
+
+    const exitCode = await withProcessExitGuard(() => runAdminIndexCommand('/repo', {}, deps));
+
+    expect(exitCode).toBe(1);
+    expect(calls).toContain('open:/repo');
+    expect(calls).toContain('error:Failed to index: database locked');
   });
 
   it('runs quiet indexing with parse-cache clearing, profile output, and graph cleanup', async () => {
@@ -177,7 +169,7 @@ describe('admin indexing feature CLI', () => {
     expect(calls).toContain('close');
   });
 
-  it('prints quiet indexing errors before exiting on failed results', async () => {
+  it('prints quiet indexing errors before setting exitCode on failed results', async () => {
     const { deps, calls } = fakeDeps();
     const graph = fakeGraph(calls, {
       indexResult: {
@@ -188,24 +180,18 @@ describe('admin indexing feature CLI', () => {
         ],
       },
     });
-    const exit = vi.spyOn(process, 'exit').mockImplementation(((code?: number | string | null) => {
-      throw new Error(`exit:${code}`);
-    }) as typeof process.exit);
 
-    try {
-      await expect(
-        runQuietIndex({
-          cg: graph,
-          options: { force: true },
-          parseWorkers: undefined,
-          maxFileSize: undefined,
-          deps,
-        }),
-      ).rejects.toThrow('exit:1');
-    } finally {
-      exit.mockRestore();
-    }
+    const exitCode = await withProcessExitGuard(() =>
+      runQuietIndex({
+        cg: graph,
+        options: { force: true },
+        parseWorkers: undefined,
+        maxFileSize: undefined,
+        deps,
+      }),
+    );
 
+    expect(exitCode).toBe(1);
     expect(calls).toContain('stderr:src/bad.ts: parse failed\n');
     expect(calls).toContain('stderr:global failure\n');
     expect(calls).toContain('close');
@@ -219,7 +205,7 @@ describe('admin indexing feature CLI', () => {
     });
     await reportBackgroundSummaryStatus({
       cg: noLlmGraph,
-      clack: noLlm.clack as any,
+      clack: noLlm.clack,
       projectPath: '/repo',
       deps: fakeDeps().deps,
     });
@@ -233,7 +219,7 @@ describe('admin indexing feature CLI', () => {
     });
     await reportBackgroundSummaryStatus({
       cg: adhocGraph,
-      clack: adhoc.clack as any,
+      clack: adhoc.clack,
       projectPath: '/repo',
       deps: fakeDeps().deps,
     });
@@ -290,6 +276,27 @@ describe('admin indexing feature CLI', () => {
     expect(text).toContain('outro:Done');
   });
 
+  it('sets exitCode and skips detached summaries when interactive indexing fails', async () => {
+    const { actions, calls } = fakeDeps({
+      graphOptions: {
+        indexResult: {
+          success: false,
+          errors: [{ severity: 'error', filePath: 'src/bad.ts', message: 'parse failed' }],
+        },
+      },
+    });
+
+    const exitCode = await withProcessExitGuard(() =>
+      getAction(actions, 'index [path]')('/repo', { quiet: false, profile: true }),
+    );
+
+    const text = calls.join('\n');
+    expect(exitCode).toBe(1);
+    expect(text).toContain('printIndexResult:/repo');
+    expect(text).not.toContain('spawnDetachedSummarize:/repo');
+    expect(text).not.toContain('outro:Done');
+  });
+
   it('runs non-quiet embed-only indexing with verbose progress and warning fallback', async () => {
     const { actions, calls } = fakeDeps({
       graphOptions: { embedError: new Error('backend offline') },
@@ -304,6 +311,133 @@ describe('admin indexing feature CLI', () => {
     expect(text).toContain('warn:Embed pass skipped: backend offline');
     expect(text).toContain('outro:Done');
     expect(text).toContain('close');
+  });
+
+  it('sets exitCode for embed-only argument, initialization, and open failures', async () => {
+    {
+      const { actions, calls } = fakeDeps();
+      const exitCode = await withProcessExitGuard(() =>
+        getAction(actions, 'embed-only [path]')('/repo', { quiet: true, maxFileSize: 'huge' }),
+      );
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('error:--max-file-size must be between 1 byte and 10mb (got "huge")');
+      expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    }
+
+    {
+      const { actions, calls } = fakeDeps({ initialized: false });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'embed-only [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('error:Cartograph not initialized in /repo');
+      expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    }
+
+    {
+      const { actions, calls } = fakeDeps({ openError: new Error('database unavailable') });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'embed-only [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('open:/repo');
+      expect(calls).toContain('error:Failed to embed-only index: database unavailable');
+    }
+  });
+
+  it('sets exitCode for quiet embed-only failed index and embed pass failures', async () => {
+    {
+      const { actions, calls } = fakeDeps({
+        graphOptions: {
+          indexResult: {
+            success: false,
+            errors: [{ severity: 'error', filePath: 'src/bad.ts', message: 'parse failed' }],
+          },
+        },
+      });
+      const exitCode = await withProcessExitGuard(() =>
+        getAction(actions, 'embed-only [path]')('/repo', { quiet: true }),
+      );
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('indexAll:{"summarize":false,"embedOnly":true}');
+      expect(calls).not.toContain('embedAll:{}');
+    }
+
+    {
+      const { actions, calls } = fakeDeps({
+        graphOptions: { embedError: new Error('embedding backend offline') },
+      });
+      const exitCode = await withProcessExitGuard(() =>
+        getAction(actions, 'embed-only [path]')('/repo', { quiet: true }),
+      );
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('embedAll:{}');
+      expect(calls).toContain('error:Embed pass failed: embedding backend offline');
+    }
+  });
+
+  it('sets exitCode and skips embed pass when interactive embed-only indexing fails', async () => {
+    const { actions, calls } = fakeDeps({
+      graphOptions: {
+        indexResult: {
+          success: false,
+          errors: [{ severity: 'error', filePath: 'src/bad.ts', message: 'parse failed' }],
+        },
+      },
+    });
+
+    const exitCode = await withProcessExitGuard(() => getAction(actions, 'embed-only [path]')('/repo', {}));
+
+    const text = calls.join('\n');
+    expect(exitCode).toBe(1);
+    expect(text).toContain('printIndexResult:/repo');
+    expect(text).not.toContain('Running embed pass');
+    expect(text).not.toContain('embedAll:{}');
+    expect(text).not.toContain('outro:Done');
+  });
+
+  it('sets exitCode for sync argument, initialization, and runtime failures', async () => {
+    {
+      const { actions, calls } = fakeDeps();
+      const exitCode = await withProcessExitGuard(() =>
+        getAction(actions, 'sync [path]')('/repo', { maxFileSize: 'huge' }),
+      );
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('error:--max-file-size must be between 1 byte and 10mb (got "huge")');
+      expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    }
+
+    {
+      const { actions, calls } = fakeDeps({ initialized: false });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'sync [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('error:Cartograph not initialized in /repo');
+      expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    }
+
+    {
+      const { actions, calls } = fakeDeps({ graphOptions: { syncError: new Error('scan failed') } });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'sync [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('sync:{}');
+      expect(calls).toContain('error:Failed to sync: scan failed');
+      expect(calls).toContain('close');
+    }
+  });
+
+  it('sets exitCode for biomarker refresh initialization and runtime failures', async () => {
+    {
+      const { actions, calls } = fakeDeps({ initialized: false });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'biomarkers-refresh [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('error:Cartograph not initialized in /repo');
+      expect(calls.some((call) => call.startsWith('open:'))).toBe(false);
+    }
+
+    {
+      const { actions, calls } = fakeDeps({ graphOptions: { biomarkersError: new Error('rule crashed') } });
+      const exitCode = await withProcessExitGuard(() => getAction(actions, 'biomarkers-refresh [path]')('/repo', {}));
+      expect(exitCode).toBe(1);
+      expect(calls).toContain('refreshBiomarkers');
+      expect(calls).toContain('error:Failed to refresh biomarkers: rule crashed');
+      expect(calls).toContain('close');
+    }
   });
 });
 
@@ -330,16 +464,21 @@ function fakeGraph(
     llmConfig?: unknown;
     summarizeEagerLimit?: number;
     indexResult?: Partial<AdminIndexResult>;
+    indexError?: Error;
+    syncError?: Error;
     embedError?: Error;
+    biomarkersError?: Error;
+    biomarkersResult?: Awaited<ReturnType<AdminIndexGraph['stats']['refreshBiomarkers']>>;
   } = {},
 ): AdminIndexGraph {
   const llmValue = Object.hasOwn(opts, 'llmConfig') ? opts.llmConfig : { summarizeLlm: { model: 'qwen' } };
   return {
-    queries: {},
+    queries: null,
     config: { llm: { summarizeEagerLimit: opts.summarizeEagerLimit } },
     close: () => calls.push('close'),
     indexAll: async (indexOpts) => {
       calls.push(`indexAll:${JSON.stringify(indexOpts)}`);
+      if (opts.indexError) throw opts.indexError;
       return {
         success: true,
         filesIndexed: TEST_FILES_INDEXED,
@@ -355,10 +494,23 @@ function fakeGraph(
     },
     sync: async (syncOpts) => {
       calls.push(`sync:${JSON.stringify(syncOpts)}`);
+      if (opts.syncError) throw opts.syncError;
       return { ...noChangeSyncResult(), filesAdded: 1, nodesUpdated: 2 };
+    },
+    stats: {
+      refreshBiomarkers: async () => {
+        calls.push('refreshBiomarkers');
+        if (opts.biomarkersError) throw opts.biomarkersError;
+        return opts.biomarkersResult ?? { filesScanned: 2, findingsEmitted: 1, errors: 0, durationMs: 5 };
+      },
     },
     llm: {
       config: { getEffectiveLlmConfig: async () => llmValue },
+      bgCtrl: {
+        promise: null,
+        getProgress: () => null,
+        awaitCompletion: async () => undefined,
+      },
       embed: {
         embedAll: async (embedOpts = {}) => {
           calls.push(`embedAll:${JSON.stringify(embedOpts)}`);
@@ -393,9 +545,10 @@ function fakeDeps(
     initialized?: boolean;
     detached?: { spawned: boolean; pid?: number; reason?: string };
     graphOptions?: Parameters<typeof fakeGraph>[1];
+    openError?: Error;
   } = {},
 ) {
-  const actions = new Map<string, (...args: any[]) => Promise<void>>();
+  const actions = new Map<string, (...args: unknown[]) => Promise<void>>();
   const calls: string[] = [];
   const clack = fakeClack(calls);
   const graph = fakeGraph(calls, opts.graphOptions);
@@ -418,11 +571,12 @@ function fakeDeps(
       default: {
         open: async (projectPath) => {
           calls.push(`open:${projectPath}`);
+          if (opts.openError) throw opts.openError;
           return graph;
         },
       },
     }),
-    loadClack: vi.fn(async () => clack.clack as any),
+    loadClack: vi.fn(async () => clack.clack),
     loadParseCache: async () => ({
       clearParseCache: (_queries, language) => {
         calls.push(`clearParseCache:${language ?? 'all'}`);
@@ -444,9 +598,33 @@ function fakeDeps(
   return { actions, calls, deps };
 }
 
+function getAction(
+  actions: Map<string, (...args: unknown[]) => Promise<void>>,
+  name: string,
+): (...args: unknown[]) => Promise<void> {
+  const action = actions.get(name);
+  if (!action) throw new Error(`missing action ${name}`);
+  return action;
+}
+
+async function withProcessExitGuard(run: () => Promise<void>): Promise<string | number | undefined> {
+  const originalExitCode = process.exitCode;
+  process.exitCode = undefined;
+  const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+    throw new Error(`process.exit(${String(code)})`);
+  });
+  try {
+    await run();
+    return process.exitCode;
+  } finally {
+    exitSpy.mockRestore();
+    process.exitCode = originalExitCode ?? 0;
+  }
+}
+
 class FakeCommand {
   constructor(
-    private readonly actions: Map<string, (...args: any[]) => Promise<void>>,
+    private readonly actions: Map<string, (...args: unknown[]) => Promise<void>>,
     private readonly name = 'admin',
   ) {}
 
@@ -462,7 +640,7 @@ class FakeCommand {
     return this;
   }
 
-  action(fn: (...args: any[]) => Promise<void>): this {
+  action(fn: (...args: unknown[]) => Promise<void>): this {
     this.actions.set(this.name, fn);
     return this;
   }

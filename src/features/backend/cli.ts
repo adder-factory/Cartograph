@@ -64,7 +64,9 @@ export function registerBackendCommand(deps: BackendCommandDeps): void {
  *  tiers at all, or a configured model file is missing. Shared by `start`
  *  and `restart`. */
 function exitIfNoUsableBackends(result: BackendStatusReport): void {
-  if (result.rows.length === 0 || result.rows.some((row) => row.state === 'missing-model')) process.exit(1);
+  if (result.rows.length === 0 || result.rows.some((row) => row.state === 'missing-model')) {
+    process.exitCode = 1;
+  }
 }
 
 function registerStatusCommand(backendCmd: CommandLike, ctx: BackendCommandContext): void {
@@ -171,7 +173,7 @@ function registerLogsCommand(backendCmd: CommandLike, ctx: BackendCommandContext
         ...(lines === undefined ? {} : { lines }),
       });
       ctx.writeStdout(options.json ? JSON.stringify(result, null, 2) : formatBackendLogsReport(result));
-      if (options.tier && result.logs.length === 0) process.exit(1);
+      if (options.tier && result.logs.length === 0) process.exitCode = 1;
     });
 }
 

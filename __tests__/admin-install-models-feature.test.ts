@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildRecommendedConfigWriteOptions,
   bytesToMiBText,
@@ -113,6 +113,54 @@ describe('admin install-models feature CLI', () => {
     expect(calls).toContain('success:Downloaded 1 model:');
     expect(calls).toContain('success:Updated /repo/.cartograph/config.json');
     expect(calls).toContain('info:Next: cartograph backend start /repo');
+  });
+
+  it('sets exitCode instead of hard-exiting when model install fails', async () => {
+    let action:
+      | ((options: { dir?: string; minimal?: boolean; writeConfig?: boolean; projectPath?: string }) => Promise<void>)
+      | undefined;
+    const calls: string[] = [];
+    const originalExitCode = process.exitCode;
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code?: string | number | null | undefined): never => {
+      throw new Error(`process.exit(${String(code)})`);
+    });
+
+    try {
+      registerAdminInstallModelsCommand({
+        adminCmd: fakeCommand((fn) => {
+          action = fn;
+        }),
+        resolveProjectPath: (pathArg) => pathArg ?? '/repo',
+        writeStderr: () => undefined,
+        success: (message) => calls.push(`success:${message}`),
+        info: (message) => calls.push(`info:${message}`),
+        error: (message) => calls.push(`error:${message}`),
+        loadInstallModels: async () => ({
+          installRecommendedModels: async () => {
+            throw new Error('download exploded');
+          },
+        }),
+        loadRecommendedModels: async () => ({
+          RECOMMENDED_MODELS: [{ filename: 'full.gguf' }],
+          MINIMAL_MODELS: [{ filename: 'minimal.gguf' }],
+        }),
+        loadRecommendedConfig: async () => ({
+          writeRecommendedLlmConfig: () => {
+            throw new Error('write config should not run after install failure');
+          },
+        }),
+      });
+
+      if (!action) throw new Error('install-models action was not registered');
+      await action({});
+
+      expect(exitSpy).not.toHaveBeenCalled();
+      expect(process.exitCode).toBe(1);
+      expect(calls).toEqual(['error:install-models failed: download exploded']);
+    } finally {
+      exitSpy.mockRestore();
+      process.exitCode = originalExitCode ?? 0;
+    }
   });
 });
 

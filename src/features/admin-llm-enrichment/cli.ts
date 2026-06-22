@@ -14,11 +14,10 @@ import {
 } from './runtime.js';
 import { chatOverrideFromOptions } from '../shared/cli-args.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
+import type { ClackUi, LoadClackUi } from '../shared/clack-ui.js';
 import type { IndexProgress } from '../../index.js';
 
 type CommandLike = CliOptionCommand;
-
-type ClackPrompts = typeof import('@clack/prompts');
 
 interface EnrichmentGraph {
   close: () => void;
@@ -47,6 +46,8 @@ interface OpenedEnrichmentGraphContext {
   concurrency: number;
 }
 
+type CliParseResult<T> = { ok: true; value: T } | { ok: false };
+
 interface RunOpenedEnrichmentGraphArgs {
   pathArg: string | undefined;
   options: EnrichmentCommandOptions;
@@ -67,7 +68,7 @@ export interface AdminLlmEnrichmentCommandDeps {
       open: (projectPath: string, opts?: { autoMigrate?: boolean }) => Promise<EnrichmentGraph>;
     };
   }>;
-  loadClack: () => Promise<ClackPrompts>;
+  loadClack: LoadClackUi;
   parseConcurrency: (raw: string | undefined) => number;
   resolveProjectPath: (pathArg?: string) => string;
 }
@@ -81,31 +82,33 @@ export function registerAdminLlmEnrichmentCommands(deps: AdminLlmEnrichmentComma
 export function parseConcurrencyOption(
   raw: string | undefined,
   deps: Pick<AdminLlmEnrichmentCommandDeps, 'error' | 'parseConcurrency'>,
-): number {
+): CliParseResult<number> {
   const parsed = parseConcurrencyOptionValue(raw, deps.parseConcurrency);
   if (!parsed.ok) {
     deps.error(parsed.error);
-    process.exit(1);
+    process.exitCode = 1;
+    return { ok: false };
   }
-  return parsed.value ?? deps.parseConcurrency(undefined);
+  return { ok: true, value: parsed.value ?? deps.parseConcurrency(undefined) };
 }
 
 export function parseEagerLimit(
   options: SummarizeOptions,
   deps: Pick<AdminLlmEnrichmentCommandDeps, 'error'>,
   onInvalid?: () => void,
-): number | undefined {
+): CliParseResult<number | undefined> {
   const parsed = parseEagerLimitValue(options);
   if (!parsed.ok) {
     if (!options.quiet) deps.error(parsed.error);
     onInvalid?.();
-    process.exit(1);
+    process.exitCode = 1;
+    return { ok: false };
   }
-  return parsed.value;
+  return { ok: true, value: parsed.value };
 }
 
 export function printSummarizeDetails(
-  clack: ClackPrompts,
+  clack: ClackUi,
   result: LlmSummarizeResult,
   deps: Pick<AdminLlmEnrichmentCommandDeps, 'formatDuration' | 'formatNumber'>,
 ): void {
@@ -113,7 +116,7 @@ export function printSummarizeDetails(
 }
 
 export function printSummarizeEmbedDetails(
-  clack: ClackPrompts,
+  clack: ClackUi,
   embed: LlmEmbedResult | null | undefined,
   deps: Pick<AdminLlmEnrichmentCommandDeps, 'formatDuration' | 'formatNumber'>,
 ): void {
@@ -156,8 +159,12 @@ async function runSummarizeCommand(args: {
   const { pathArg, options, deps } = args;
   const { error, isInitialized, loadCartograph, resolveProjectPath } = deps;
   const projectPath = resolveProjectPath(pathArg);
-  const concurrency = parseConcurrencyOption(options.concurrency, deps);
-  const eagerLimit = parseEagerLimit(options, deps);
+  const parsedConcurrency = parseConcurrencyOption(options.concurrency, deps);
+  if (!parsedConcurrency.ok) return;
+  const parsedEagerLimit = parseEagerLimit(options, deps);
+  if (!parsedEagerLimit.ok) return;
+  const concurrency = parsedConcurrency.value;
+  const eagerLimit = parsedEagerLimit.value;
   const eagerLimitOpt = eagerLimit === undefined ? {} : { eagerLimit };
   const chatOverride = chatOverrideFromOptions(options);
   const chatOverrideOpt = chatOverride === undefined ? {} : { chatOverride };
@@ -166,7 +173,8 @@ async function runSummarizeCommand(args: {
   try {
     if (!isInitialized(projectPath)) {
       if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
     const { default: Cartograph } = await loadCartograph();
     // Write path (summarize): opt in to auto-migration.
@@ -181,7 +189,8 @@ async function runSummarizeCommand(args: {
       }
       cg.close();
       cg = undefined;
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
 
     if (options.quiet) {
@@ -216,7 +225,8 @@ async function runSummarizeCommand(args: {
     cg?.close();
     cg = undefined;
     if (!options.quiet) error(`Failed to summarise: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   } finally {
     cg?.close();
   }
@@ -226,13 +236,16 @@ async function runOpenedEnrichmentGraph(args: RunOpenedEnrichmentGraphArgs): Pro
   const { pathArg, options, deps, failureVerb, action } = args;
   const { error, isInitialized, loadCartograph, resolveProjectPath } = deps;
   const projectPath = resolveProjectPath(pathArg);
-  const concurrency = parseConcurrencyOption(options.concurrency, deps);
+  const parsedConcurrency = parseConcurrencyOption(options.concurrency, deps);
+  if (!parsedConcurrency.ok) return;
+  const concurrency = parsedConcurrency.value;
   let cg: EnrichmentGraph | undefined;
 
   try {
     if (!isInitialized(projectPath)) {
       if (!options.quiet) error(`Cartograph not initialized in ${projectPath}`);
-      process.exit(1);
+      process.exitCode = 1;
+      return;
     }
     const { default: Cartograph } = await loadCartograph();
     cg = await Cartograph.open(projectPath, { autoMigrate: true });
@@ -241,7 +254,8 @@ async function runOpenedEnrichmentGraph(args: RunOpenedEnrichmentGraphArgs): Pro
     cg?.close();
     cg = undefined;
     if (!options.quiet) error(`Failed to ${failureVerb}: ${errMsg(err)}`);
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   } finally {
     cg?.close();
   }

@@ -8,7 +8,7 @@
  * before declaring there's nothing to do.
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { runSyncIfDirtyCommand, type SyncIfDirtyCommandDeps } from '../src/features/sync-if-dirty/cli.js';
 import type { FreshnessInfo } from '../src/freshness.js';
 
@@ -33,15 +33,25 @@ interface Harness {
   syncCalls: unknown[];
   closeCalls: number[];
   infoMessages: string[];
+  errorMessages: string[];
+  loadCalls: number[];
 }
 
-function makeHarness(args: { dirty: boolean; freshness: FreshnessInfo | null }): Harness {
+function makeHarness(args: {
+  dirty: boolean;
+  freshness: FreshnessInfo | null;
+  initialized?: boolean;
+  syncError?: Error;
+}): Harness {
   const syncCalls: unknown[] = [];
   const closeCalls: number[] = [];
   const infoMessages: string[] = [];
+  const errorMessages: string[] = [];
+  const loadCalls: number[] = [];
   const graph = {
     sync: async (opts: unknown) => {
       syncCalls.push(opts);
+      if (args.syncError) throw args.syncError;
       return {};
     },
     close: () => {
@@ -52,21 +62,37 @@ function makeHarness(args: { dirty: boolean; freshness: FreshnessInfo | null }):
   const deps: SyncIfDirtyCommandDeps = {
     program: undefined as never, // not used by runSyncIfDirtyCommand
     resolveProjectPath: (p) => p ?? '/fake/project',
-    isInitialized: () => true,
+    isInitialized: () => args.initialized ?? true,
     hasUncommittedChanges: () => args.dirty,
-    loadCartograph: async () => ({
-      default: { open: async () => graph },
-    }),
+    loadCartograph: async () => {
+      loadCalls.push(1);
+      return {
+        default: { open: async () => graph },
+      };
+    },
     info: (m) => {
       infoMessages.push(m);
     },
-    error: () => {},
+    error: (m) => {
+      errorMessages.push(m);
+    },
     writeStderr: () => {},
   };
-  return { deps, syncCalls, closeCalls, infoMessages };
+  return { deps, syncCalls, closeCalls, infoMessages, errorMessages, loadCalls };
+}
+
+function forbidProcessExit() {
+  return vi.spyOn(process, 'exit').mockImplementation((): never => {
+    throw new Error('process.exit should not be called');
+  });
 }
 
 describe('runSyncIfDirtyCommand gate', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    process.exitCode = 0;
+  });
+
   it('dirty working tree syncs without consulting freshness', async () => {
     const h = makeHarness({ dirty: true, freshness: null });
     await runSyncIfDirtyCommand(undefined, {}, h.deps);
@@ -104,5 +130,43 @@ describe('runSyncIfDirtyCommand gate', () => {
     const h = makeHarness({ dirty: false, freshness: null });
     await runSyncIfDirtyCommand(undefined, {}, h.deps);
     expect(h.syncCalls.length).toBe(1);
+  });
+
+  it('invalid max-file-size reports the parse error without hard-exiting or loading the graph', async () => {
+    const exitSpy = forbidProcessExit();
+    const h = makeHarness({ dirty: true, freshness: null });
+
+    await runSyncIfDirtyCommand(undefined, { maxFileSize: '11mb' }, h.deps);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(h.errorMessages).toEqual(['--max-file-size must be between 1 byte and 10mb (got "11mb")']);
+    expect(h.loadCalls).toEqual([]);
+    expect(h.syncCalls).toEqual([]);
+  });
+
+  it('uninitialized projects report the expected failure without hard-exiting or loading the graph', async () => {
+    const exitSpy = forbidProcessExit();
+    const h = makeHarness({ dirty: true, freshness: null, initialized: false });
+
+    await runSyncIfDirtyCommand('/missing/project', {}, h.deps);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(h.errorMessages).toEqual(['Cartograph not initialized in /missing/project']);
+    expect(h.loadCalls).toEqual([]);
+    expect(h.syncCalls).toEqual([]);
+  });
+
+  it('sync failures set exitCode, close the graph, and do not hard-exit', async () => {
+    const exitSpy = forbidProcessExit();
+    const h = makeHarness({ dirty: true, freshness: null, syncError: new Error('disk full') });
+
+    await runSyncIfDirtyCommand(undefined, {}, h.deps);
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
+    expect(h.errorMessages).toEqual(['Failed to sync: disk full']);
+    expect(h.closeCalls.length).toBe(1);
   });
 });

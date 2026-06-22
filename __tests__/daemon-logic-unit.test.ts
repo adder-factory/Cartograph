@@ -11,6 +11,7 @@ import {
   isAcceptableDaemonHello,
   isDaemonConnectFailure,
   isDaemonLockPastStartupGrace,
+  parseDaemonHello,
 } from '../src/mcp/daemon-logic.js';
 
 describe('isAcceptableDaemonHello', () => {
@@ -58,5 +59,55 @@ describe('isDaemonConnectFailure', () => {
   });
   it('returns false for an unrelated error', () => {
     expect(isDaemonConnectFailure(Object.assign(new Error('boom'), { code: 'EACCES' }))).toBe(false);
+  });
+});
+
+describe('parseDaemonHello', () => {
+  it('accepts a well-formed daemon hello', () => {
+    const hello = {
+      cartograph: '1.2.3',
+      pid: 12345,
+      socketPath: '/tmp/cartograph-daemon.sock',
+      protocol: DAEMON_PROTOCOL_VERSION,
+      policy: 'core|w1|s0|l0|',
+    };
+    expect(parseDaemonHello(hello)).toEqual(hello);
+  });
+
+  it('rejects incomplete daemon hello primitives', () => {
+    const hello = {
+      cartograph: '1.2.3',
+      pid: 12345,
+      socketPath: '/tmp/cartograph-daemon.sock',
+      protocol: DAEMON_PROTOCOL_VERSION,
+      policy: 'core|w1|s0|l0|',
+    };
+
+    expect(parseDaemonHello({ ...hello, cartograph: '' })).toBeNull();
+    expect(parseDaemonHello({ ...hello, pid: 0 })).toBeNull();
+    expect(parseDaemonHello({ ...hello, pid: 1.5 })).toBeNull();
+    expect(parseDaemonHello({ ...hello, socketPath: '' })).toBeNull();
+    expect(parseDaemonHello({ ...hello, policy: '' })).toBeNull();
+  });
+
+  it('requires daemon hello fields to be own properties', () => {
+    Object.defineProperties(Object.prototype, {
+      cartograph: { configurable: true, value: '1.2.3' },
+      pid: { configurable: true, value: 12345 },
+      policy: { configurable: true, value: 'core|w1|s0|l0|' },
+      protocol: { configurable: true, value: DAEMON_PROTOCOL_VERSION },
+      socketPath: { configurable: true, value: '/tmp/cartograph-daemon.sock' },
+    });
+    let parsed: unknown;
+    try {
+      parsed = parseDaemonHello({});
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'cartograph');
+      Reflect.deleteProperty(Object.prototype, 'pid');
+      Reflect.deleteProperty(Object.prototype, 'policy');
+      Reflect.deleteProperty(Object.prototype, 'protocol');
+      Reflect.deleteProperty(Object.prototype, 'socketPath');
+    }
+    expect(parsed).toBeNull();
   });
 });

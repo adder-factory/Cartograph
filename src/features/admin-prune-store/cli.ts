@@ -63,7 +63,8 @@ export function registerAdminPruneStoreCommand(deps: AdminPruneStoreCommandDeps)
       try {
         if (!isInitialized(projectPath)) {
           error(`Cartograph not initialized in ${projectPath}`);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
         const { pruneOrphanStoreRows, MS_PER_DAY, PRUNE_STORE_DEFAULT_DAYS } = await loadSummaryQueries();
         const parsed = parseMaxAgeDays(
@@ -72,7 +73,8 @@ export function registerAdminPruneStoreCommand(deps: AdminPruneStoreCommandDeps)
         );
         if (!parsed.ok) {
           error(parsed.error);
-          process.exit(1);
+          process.exitCode = 1;
+          return;
         }
 
         const { default: Cartograph } = await loadCartograph();
@@ -111,7 +113,7 @@ export function registerAdminPruneStoreCommand(deps: AdminPruneStoreCommandDeps)
         }
       } catch (err) {
         error(`Failed to prune store: ${errMsg(err)}`);
-        process.exit(1);
+        process.exitCode = 1;
       }
     });
 }

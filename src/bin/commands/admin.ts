@@ -23,6 +23,7 @@ import { registerAdminSimilarityEdgesCommand } from '../../features/admin-simila
 import { registerAdminStorageMigrateCommand } from '../../features/admin-storage-migrate/index.js';
 import { registerAdminUnlockCommand } from '../../features/admin-unlock/index.js';
 import { registerScipAdminCommands } from '../../features/scip-admin/index.js';
+import type { LoadClackUi } from '../../features/shared/clack-ui.js';
 import type { Command } from 'commander';
 import {
   adminCmd as cliAdminCmd,
@@ -52,6 +53,8 @@ interface AssignNumericArgInput {
   opts?: { min?: number; max?: number };
 }
 
+type CartographModule = Awaited<ReturnType<typeof cliLoadCartograph>>;
+
 export interface AdminCommandDeps {
   // The real commander Command — it is both the admin-family builder
   // passed to every sub-registrar and the value handed to
@@ -60,10 +63,7 @@ export interface AdminCommandDeps {
   // DI seam: this single loadCartograph is forwarded to every admin
   // sub-registrar, each of which narrows the opened graph to its own
   // structural subset (AdminIndexGraph, ProjectLifecycleGraph, ...).
-  // The real Cartograph is not assignable to those divergent subsets,
-  // so only `any` flows through to all of them.
-  // biome-ignore lint/suspicious/noExplicitAny: DI seam — real Cartograph is not assignable to the per-sub-registrar narrowed graph subsets
-  loadCartograph: () => Promise<{ default: any }>;
+  loadCartograph: () => Promise<CartographModule>;
   resolveProjectPath: (pathArg?: string) => string;
   chalk: typeof cliChalk;
   colors: typeof cliColors;
@@ -88,7 +88,7 @@ export interface AdminCommandDeps {
   writeScipImport: typeof defaultWriteScipImport;
   writeStdout: (message: string) => void;
   writeStderr: (message: string) => void;
-  loadClack: () => Promise<typeof import('@clack/prompts')>;
+  loadClack: LoadClackUi;
   loadReadline: () => Promise<{ createInterface: typeof import('node:readline').createInterface }>;
   loadParseCache: () => Promise<{ clearParseCache: (queries: unknown, language?: string) => number }>;
   loadDetachedSummarize: () => Promise<{
@@ -184,8 +184,7 @@ export interface AdminCommandDeps {
 
 const defaultAdminCommandDeps: AdminCommandDeps = {
   adminCmd: cliAdminCmd,
-  // biome-ignore lint/suspicious/noExplicitAny: matches the AdminCommandDeps.loadCartograph DI-seam type bridged onto every sub-registrar's narrowed graph subset
-  loadCartograph: cliLoadCartograph as () => Promise<{ default: any }>,
+  loadCartograph: cliLoadCartograph,
   resolveProjectPath: cliResolveProjectPath,
   chalk: cliChalk,
   colors: cliColors,
