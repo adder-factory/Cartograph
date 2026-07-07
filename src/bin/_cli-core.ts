@@ -70,6 +70,7 @@ export async function loadCartograph(): Promise<typeof import('../index.js')> {
 // `program.parse()` is still called conditionally so the no-arg path
 // can still hand off to the installer instead of dispatching the CLI.
 export const program = new Command();
+program.option('--no-color', 'Disable ANSI color output');
 
 // Family-command parents per the agentic-backlog #7 / CLI-alignment
 // pass: subcommands attach to these so nested syntax (`cartograph

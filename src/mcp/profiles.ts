@@ -11,9 +11,6 @@ export type McpServerProfile = (typeof MCP_SERVER_PROFILE_NAMES)[number];
 
 export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'core';
 
-export const MCP_SERVER_PROFILE_DESCRIPTION =
-  'MCP advertised-tool profile: core (default common coding-agent lookups, 14 tools), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
-
 const CORE_PROFILE_TOOLS = [
   'cartograph_admin',
   'cartograph_affected',
@@ -99,10 +96,6 @@ export const MCP_SERVER_PROFILE_TOOL_NAMES: Readonly<Record<McpServerProfile, re
   'read-only': READ_ONLY_PROFILE_TOOLS,
   review: REVIEW_PROFILE_TOOLS,
 };
-
-export function isMcpServerProfile(value: unknown): value is McpServerProfile {
-  return typeof value === 'string' && MCP_SERVER_PROFILE_NAMES.includes(value as McpServerProfile);
-}
 
 export function resolveMcpServerProfile(value: McpServerProfile | undefined): McpServerProfile {
   return value ?? DEFAULT_MCP_SERVER_PROFILE;

@@ -86,15 +86,23 @@ interface LowCoverageRow {
 function selectEligibleCovered(queries: QueryBuilder): LowCoverageRow[] {
   const placeholders = ELIGIBLE_KINDS.map(() => '?').join(', ');
   const sql = `
+    WITH ranked_coverage AS (
+      SELECT c.node_id,
+             CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0) AS coveragePct,
+             ROW_NUMBER() OVER (
+               PARTITION BY c.node_id
+               ORDER BY (CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) DESC, c.total_lines DESC
+             ) AS rn
+      FROM node_coverage c
+    )
     SELECT n.id           AS nodeId,
            n.centrality   AS centrality,
-           MAX(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) AS coveragePct
+           rc.coveragePct AS coveragePct
     FROM nodes n
-    JOIN node_coverage c ON c.node_id = n.id
+    JOIN ranked_coverage rc ON rc.node_id = n.id AND rc.rn = 1
     WHERE n.centrality IS NOT NULL
       AND n.kind IN (${placeholders})
-    GROUP BY n.id, n.centrality
-    HAVING coveragePct IS NOT NULL
+      AND rc.coveragePct IS NOT NULL
   `;
   return queries.db.prepare(sql).all(...ELIGIBLE_KINDS) as LowCoverageRow[];
 }

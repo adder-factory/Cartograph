@@ -65,6 +65,16 @@ export function checkEmbeddingReachability({
     };
   }
 
+  if (ownField(embedding, 'externallyManaged') === true) {
+    return {
+      id: 'embedding-endpoint',
+      name: 'Embedding endpoint',
+      status: 'warn',
+      detail: `embeddingLlm.endpoint=${endpoint} is not responding to GET /v1/models.`,
+      remediation: externalManagedEmbeddingHint(),
+    };
+  }
+
   const localStartHint =
     projectPath && renderBackendStartCommands(llm).length > 0 ? localBackendStartHint(projectPath) : null;
   let alternatives = localStartHint
@@ -93,6 +103,14 @@ function localBackendStartHint(projectPath: string): string {
     `Start the configured local stack with \`cartograph backend start ${projectPath}\`, ` +
     `then run \`cartograph llm smoke ${projectPath}\`. ` +
     `If startup fails, inspect \`cartograph backend logs ${projectPath} --tier embed\`.`
+  );
+}
+
+function externalManagedEmbeddingHint(): string {
+  return (
+    'This endpoint is marked externallyManaged, so cartograph will not suggest starting a local backend. ' +
+    'Verify the endpoint URL, configured API key or Authorization header, embedding model name, and whether the provider supports `GET /v1/models`. ' +
+    'Some OpenAI-compatible providers disable model listing even when embeddings work; in that case use `cartograph llm smoke` or the provider logs to validate inference.'
   );
 }
 

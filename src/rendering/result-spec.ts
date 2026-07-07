@@ -161,32 +161,12 @@ function alignSeparator(align: MarkdownTableColumn<unknown>['align']): string {
 }
 
 /**
- * Collect every user-facing string the spec exposes — used by the
- * structural lint test that asserts a tool's `.describe()` and the
- * spec's user-visible wording agree. Returns title, every preamble
- * line, every column header, the empty-state message, and every
- * footer line. Order matches the rendered output (title → preamble →
- * headers → emptyState → footers) so a lint that walks the array
- * doesn't have to map back to source position.
- */
-export function specStrings<TRow>(spec: MarkdownTableSpec<TRow>): string[] {
-  return [
-    spec.title,
-    ...(spec.preamble ?? []),
-    ...spec.columns.map((c) => c.header),
-    spec.emptyState,
-    ...(spec.footers ?? []),
-  ];
-}
-
-/**
  * Typed payload for a tool that renders a `### Title (N)` heading
  * followed by a bullet list — the shape `cartograph_entry_points`
  * and `cartograph_tests-for` symbol mode use for each sub-section.
  * The per-row format is owned by a `formatRow` callback so the spec
- * stays generic; the wording-lint walks {@link bulletListSpecStrings}
- * for the user-visible strings (title / preamble / emptyState /
- * emptyNote / footers).
+ * stays generic while tests can still inspect the static wording
+ * surface (title / preamble / emptyState / emptyNote / footers).
  *
  * Renderer is {@link renderMarkdownBulletList}; output shape is
  * byte-identical to the pre-migration hand-built lines arrays
@@ -292,24 +272,6 @@ export function renderMarkdownBulletList<TRow>(spec: MarkdownBulletListSpec<TRow
 }
 
 /**
- * Collect every user-facing string a {@link MarkdownBulletListSpec}
- * exposes. Mirrors {@link specStrings} for the table-spec shape so
- * the wording-alignment lint can call either form uniformly. Excludes
- * the per-row output (dynamic data) and includes only the static
- * surface: title, preamble, emptyState, emptyNote (when set), and
- * every footer.
- */
-export function bulletListSpecStrings<TRow>(spec: MarkdownBulletListSpec<TRow>): string[] {
-  return [
-    spec.title,
-    ...(spec.preamble ?? []),
-    spec.emptyState,
-    ...(spec.emptyNote != null && spec.emptyNote !== '' ? [spec.emptyNote] : []),
-    ...(spec.footers ?? []),
-  ];
-}
-
-/**
  * Typed payload for a tool that renders a `## Title` heading followed
  * by N "cards" — each card being its own H3 heading + body lines.
  * Used by tools whose per-row presentation is too rich for a bullet
@@ -328,8 +290,7 @@ export function bulletListSpecStrings<TRow>(spec: MarkdownBulletListSpec<TRow>):
  * `[VERDICT 87%] foo (function)`, etc.) is dynamic enough that
  * embedding it into a bullet's `formatRow` return blurs the contract
  * (bullets render with leading `-`; card headings don't). Splitting
- * the shape keeps each spec's contract honest, and `cardListSpecStrings`
- * stays parallel to `specStrings` / `bulletListSpecStrings`.
+ * the shape keeps each spec's contract honest.
  */
 export interface MarkdownCardListSpec<TRow> {
   /** Outer heading text — the H2 (or H3 when `headingLevel: 3`) that
@@ -431,18 +392,6 @@ export function renderMarkdownCardList<TRow>(spec: MarkdownCardListSpec<TRow>): 
     out.push(...spec.footers, '');
   }
   return out.join('\n');
-}
-
-/**
- * Collect every user-facing string a {@link MarkdownCardListSpec}
- * exposes. Mirrors {@link specStrings} / {@link bulletListSpecStrings}
- * so the wording-alignment lint can call any form uniformly. Excludes
- * the per-row output (dynamic data — `rowHeading` and `rowBody` see
- * each row's data and are NOT static wording) and includes only the
- * static surface: title, preamble, emptyState, and every footer.
- */
-export function cardListSpecStrings<TRow>(spec: MarkdownCardListSpec<TRow>): string[] {
-  return [spec.title, ...(spec.preamble ?? []), spec.emptyState, ...(spec.footers ?? [])];
 }
 
 /** One key-value row consumed by {@link MarkdownKeyValueCardSpec}.
@@ -552,24 +501,4 @@ export function renderMarkdownKeyValueCard(spec: MarkdownKeyValueCardSpec): stri
   }
   out.push('');
   return out.join('\n');
-}
-
-/**
- * Collect every user-facing string a {@link MarkdownKeyValueCardSpec}
- * exposes. Mirrors {@link specStrings} / {@link bulletListSpecStrings}
- * / {@link cardListSpecStrings} so the wording-alignment lint can
- * call any form uniformly. Includes the static surface: title,
- * preamble, each ROW LABEL (labels are user-facing wording — refactor
- * that renames "Files" to "File count" should fail the lint),
- * emptyState, and every footer. Excludes the row VALUES (dynamic
- * data — counts, lists, formatted strings).
- */
-export function keyValueCardSpecStrings(spec: MarkdownKeyValueCardSpec): string[] {
-  return [
-    spec.title,
-    ...(spec.preamble ?? []),
-    ...spec.rows.map((r) => r.label),
-    spec.emptyState,
-    ...(spec.footers ?? []),
-  ];
 }

@@ -41,7 +41,8 @@
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import * as path from 'node:path';
-import { Database } from 'bun:sqlite';
+import { loadConfig } from '../src/config.ts';
+import { DatabaseConnection } from '../src/db/index.ts';
 
 const root = process.cwd();
 const CLI = 'src/bin/cartograph.ts';
@@ -74,11 +75,16 @@ function readBiomarkerGateStateAttempt(databasePath) {
   if (!existsSync(databasePath)) {
     return { ok: false, error: new Error(`${databasePath} does not exist after indexing`) };
   }
+  const config = loadConfig(root);
+  let conn = null;
   try {
-    return { ok: true, state: readBiomarkerGateState(databasePath) };
+    conn = DatabaseConnection.open(databasePath, { database: config.database });
+    return { ok: true, state: readBiomarkerGateState(conn.getDb()) };
   } catch (error) {
     if (!isRetryableSqliteOpenError(error)) throw error;
     return { ok: false, error };
+  } finally {
+    if (conn !== null) conn.close();
   }
 }
 
@@ -94,35 +100,30 @@ function readBiomarkerGateStateAttempt(databasePath) {
 // this gate exists to hold. See src/biomarkers/low-coverage.ts.
 const GATE_EXCLUDED_BIOMARKERS = ['low_coverage'];
 
-function readBiomarkerGateState(databasePath) {
-  const db = new Database(databasePath, { readonly: true, create: false });
-  try {
-    const excludedList = GATE_EXCLUDED_BIOMARKERS.map((b) => `'${b}'`).join(', ');
-    const excludeClause = `biomarker NOT IN (${excludedList})`;
-    const counts = { error: 0, warning: 0, info: 0 };
-    for (const row of db
-      .query(`SELECT severity, COUNT(*) AS n FROM code_health_findings WHERE ${excludeClause} GROUP BY severity`)
-      .all()) {
-      counts[row.severity] = row.n;
-    }
-    const offenders =
-      counts.error + counts.warning + counts.info > 0
-        ? db
-            .query(
-              `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
-               FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
-               WHERE f.severity IN ('error', 'warning', 'info') AND f.${excludeClause}
-               ORDER BY CASE f.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
-                        n.file_path, n.start_line`,
-            )
-            .all()
-        : [];
-    const cfRaw =
-      db.query("SELECT value FROM project_metadata WHERE key = 'biomarker_cross_file_errors'").get()?.value ?? null;
-    return { counts, offenders, cfRaw };
-  } finally {
-    db.close();
+function readBiomarkerGateState(db) {
+  const excludedList = GATE_EXCLUDED_BIOMARKERS.map((b) => `'${b}'`).join(', ');
+  const excludeClause = `biomarker NOT IN (${excludedList})`;
+  const counts = { error: 0, warning: 0, info: 0 };
+  for (const row of db
+    .prepare(`SELECT severity, COUNT(*) AS n FROM code_health_findings WHERE ${excludeClause} GROUP BY severity`)
+    .all()) {
+    counts[row.severity] = row.n;
   }
+  const offenders =
+    counts.error + counts.warning + counts.info > 0
+      ? db
+          .prepare(
+            `SELECT f.biomarker AS biomarker, f.severity AS severity, n.name AS name, n.file_path AS filePath
+             FROM code_health_findings f JOIN nodes n ON n.id = f.node_id
+             WHERE f.severity IN ('error', 'warning', 'info') AND f.${excludeClause}
+             ORDER BY CASE f.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                      n.file_path, n.start_line`,
+          )
+          .all()
+      : [];
+  const cfRaw =
+    db.prepare("SELECT value FROM project_metadata WHERE key = 'biomarker_cross_file_errors'").get()?.value ?? null;
+  return { counts, offenders, cfRaw };
 }
 
 function sleepBeforeNextDbReadAttempt(attempt) {
@@ -141,12 +142,15 @@ function readBiomarkerGateStateWithRetry(databasePath) {
 }
 
 function makeWalDatabaseReadable(databasePath) {
-  const db = new Database(databasePath);
+  const config = loadConfig(root);
+  const conn = DatabaseConnection.open(databasePath, { database: config.database });
   try {
+    if (conn.getBackend() === 'postgres') return;
+    const db = conn.getDb();
     db.exec('PRAGMA busy_timeout=1000');
     db.exec('PRAGMA wal_checkpoint(PASSIVE)');
   } finally {
-    db.close();
+    conn.close();
   }
 }
 

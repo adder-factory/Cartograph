@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parsePostgresWorkerJson } from '../src/db/postgres-codec.js';
 import { PostgresAdapter } from '../src/db/postgres-adapter.js';
+import { readPostgresSchemaSizeBytes } from '../src/db/index.js';
 import { rewritePostgresAfterPlaceholders } from '../src/db/postgres-worker-sql.js';
 
 interface Harness {
@@ -178,6 +179,42 @@ describe('PostgresAdapter worker bridge', () => {
     } finally {
       failed.cleanup();
     }
+  });
+
+  it('restarts the bridge once after a closed PostgreSQL worker connection outside a transaction', () => {
+    const harness = makeHarness([
+      { ok: false, error: 'PostgreSQL connection is closed' },
+      { ok: true, rows: [{ ok: 1 }] },
+    ]);
+    let restarts = 0;
+    (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      const response = harness.adapter.call({ op: 'query', sql: 'SELECT 1', mode: 'all', params: [] });
+
+      expect(restarts).toBe(1);
+      expect(response.rows).toEqual([{ ok: 1 }]);
+      expect(harness.captured).toHaveLength(2);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('reports PostgreSQL schema size instead of whole database size', () => {
+    const capturedSql: string[] = [];
+    const fakeDb = {
+      prepare(sql: string) {
+        capturedSql.push(sql);
+        return { get: () => ({ n: '4096' }) };
+      },
+    };
+
+    expect(readPostgresSchemaSizeBytes(fakeDb as never)).toBe(4096);
+    expect(capturedSql[0]).toContain('pg_total_relation_size(c.oid)');
+    expect(capturedSql[0]).toContain('current_schema()');
+    expect(capturedSql[0]).not.toContain('pg_database_size');
   });
 });
 

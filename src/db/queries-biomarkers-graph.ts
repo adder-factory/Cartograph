@@ -55,9 +55,9 @@ const findGodClassesQuery = defineQuery({
     WHERE n.kind IN ('class', 'struct', 'interface', 'trait', 'protocol')
       AND child.kind IN ('method', 'function', 'property', 'field')
     GROUP BY n.id, n.name, n.file_path
-    HAVING memberCount >= @minMembers
+    HAVING COUNT(child.id) >= @minMembers
        AND SUM(CASE WHEN child.kind IN ('method', 'function') THEN 1 ELSE 0 END) > 0
-    ORDER BY memberCount DESC
+    ORDER BY COUNT(child.id) DESC
   `,
   params: z.object({ minMembers: z.number() }),
   row: GodClassRowSchema,
@@ -194,18 +194,23 @@ const findFeatureEnvyQuery = defineQuery({
     JOIN source_class sc       ON sc.srcId = e.source
     JOIN field_target_class ftc ON ftc.fieldId = e.target
     WHERE e.kind = 'field_access'
+  ),
+  metrics AS (
+    SELECT
+      srcId AS id, srcName AS name, srcFile AS filePath,
+      COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldId      END) AS atfd,
+      COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldClassId END) AS fdp,
+      SUM(CASE WHEN fieldClassId  = srcClassId THEN 1 ELSE 0 END) AS ownAccesses,
+      SUM(CASE WHEN fieldClassId != srcClassId THEN 1 ELSE 0 END) AS foreignAccesses,
+      CAST(SUM(CASE WHEN fieldClassId = srcClassId THEN 1 ELSE 0 END) AS REAL) /
+        NULLIF(COUNT(*), 0) AS laa
+    FROM accesses
+    GROUP BY srcId, srcName, srcFile, srcClassId
   )
   SELECT
-    srcId AS id, srcName AS name, srcFile AS filePath,
-    COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldId      END) AS atfd,
-    COUNT(DISTINCT CASE WHEN fieldClassId != srcClassId THEN fieldClassId END) AS fdp,
-    SUM(CASE WHEN fieldClassId  = srcClassId THEN 1 ELSE 0 END) AS ownAccesses,
-    SUM(CASE WHEN fieldClassId != srcClassId THEN 1 ELSE 0 END) AS foreignAccesses,
-    CAST(SUM(CASE WHEN fieldClassId = srcClassId THEN 1 ELSE 0 END) AS REAL) /
-      NULLIF(COUNT(*), 0) AS laa
-  FROM accesses
-  GROUP BY srcId, srcName, srcFile, srcClassId
-  HAVING atfd > @minATFD AND fdp <= @maxFDP AND laa < @maxLAA
+    id, name, filePath, atfd, fdp, ownAccesses, foreignAccesses, laa
+  FROM metrics
+  WHERE atfd > @minATFD AND fdp <= @maxFDP AND laa < @maxLAA
   ORDER BY atfd DESC, foreignAccesses DESC
   `,
   params: FeatureEnvyParamsSchema,

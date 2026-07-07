@@ -11,7 +11,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { execFileSync } from 'node:child_process';
 import Cartograph from '../src/index.js';
-import { compareToRef } from '../src/compare/index.js';
+import { compareToRef, _internalForTests as compareInternals } from '../src/compare/index.js';
 import { appendEdgesDelta } from '../src/mcp/tools/compare.js';
 import { initGrammars, loadAllGrammars } from '../src/extraction/grammars.js';
 import { ToolHandler } from '../src/mcp/tools.js';
@@ -388,6 +388,24 @@ describe('compareToRef', () => {
       expect(f.findingsDelta.added).toHaveLength(0);
       expect(f.findingsDelta.cleared).toHaveLength(0);
     }
+  });
+
+  it('findingsDelta reports parser diagnostics instead of throwing when biomarker parsing fails', () => {
+    const result = compareInternals.computeFindingsDelta({
+      before: { source: 'export function alpha(): number { return 1; }\n', nodes: [] },
+      after: { source: 'export function alpha(): number { return 2; }\n', nodes: [] },
+      language: 'typescript',
+      deps: {
+        parseSourceFn: () => {
+          throw new Error("Out of bounds memory access (evaluating 'C._ts_parser_enable_logger_wasm')");
+        },
+      },
+    });
+
+    expect(result.added).toHaveLength(0);
+    expect(result.cleared).toHaveLength(0);
+    expect(result.carried).toHaveLength(0);
+    expect(result.errors?.join('\n')).toContain('Out of bounds memory access');
   });
 
   it('includeEdges reports added intra-file call edges', async () => {

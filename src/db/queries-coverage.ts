@@ -83,14 +83,14 @@ const NoParams = z.object({});
 // (#18) The fold is order-independent: it converges to the row with
 // the maximum (fraction, total_lines) regardless of ingest order.
 const COVERAGE_INCOMING_BETTER =
-  'excluded.covered_lines * total_lines > covered_lines * excluded.total_lines ' +
-  'OR (excluded.covered_lines * total_lines = covered_lines * excluded.total_lines ' +
-  'AND excluded.total_lines > total_lines)';
+  'excluded.covered_lines * node_coverage.total_lines > node_coverage.covered_lines * excluded.total_lines ' +
+  'OR (excluded.covered_lines * node_coverage.total_lines = node_coverage.covered_lines * excluded.total_lines ' +
+  'AND excluded.total_lines > node_coverage.total_lines)';
 
 /** SET clause that keeps the winning row's columns coherent (lines,
  *  branches, and timestamp all come from whichever report wins). */
 const coverageConflictSet = (col: string): string =>
-  `${col} = CASE WHEN ${COVERAGE_INCOMING_BETTER} THEN excluded.${col} ELSE ${col} END`;
+  `${col} = CASE WHEN ${COVERAGE_INCOMING_BETTER} THEN excluded.${col} ELSE node_coverage.${col} END`;
 
 const upsertNodeCoverageQuery = defineQuery({
   sql: `INSERT INTO node_coverage
@@ -162,10 +162,16 @@ const coverageStatsAggAllQuery = defineQuery({
             SUM(covered_lines) AS cov,
             SUM(total_lines) AS tot
      FROM (
-       SELECT covered_lines, total_lines,
-              MAX(CAST(covered_lines AS REAL) / NULLIF(total_lines, 0)) AS pct
-       FROM node_coverage
-       GROUP BY node_id
+       SELECT covered_lines, total_lines
+       FROM (
+         SELECT covered_lines, total_lines,
+                ROW_NUMBER() OVER (
+                  PARTITION BY node_id
+                  ORDER BY (CAST(covered_lines AS REAL) / NULLIF(total_lines, 0)) DESC, total_lines DESC
+                ) AS rn
+         FROM node_coverage
+       ) ranked
+       WHERE rn = 1
      )`,
   params: NoParams,
   row: CoverageStatsAggRowSchema,
@@ -176,11 +182,17 @@ const coverageStatsAggBySourceQuery = defineQuery({
             SUM(covered_lines) AS cov,
             SUM(total_lines) AS tot
      FROM (
-       SELECT covered_lines, total_lines,
-              MAX(CAST(covered_lines AS REAL) / NULLIF(total_lines, 0)) AS pct
-       FROM node_coverage
-       WHERE source = @source
-       GROUP BY node_id
+       SELECT covered_lines, total_lines
+       FROM (
+         SELECT covered_lines, total_lines,
+                ROW_NUMBER() OVER (
+                  PARTITION BY node_id
+                  ORDER BY (CAST(covered_lines AS REAL) / NULLIF(total_lines, 0)) DESC, total_lines DESC
+                ) AS rn
+         FROM node_coverage
+         WHERE source = @source
+       ) ranked
+       WHERE rn = 1
      )`,
   params: z.object({ source: z.string() }),
   row: CoverageStatsAggRowSchema,
@@ -222,41 +234,51 @@ const getCoverageRankedQuery = defineDynamicQuery({
   params: CoverageRankedParamsSchema,
   row: CoverageRankedRowSchema,
   build: (p) => {
-    const where: string[] = [];
+    const coverageWhere: string[] = [];
+    const nodeWhere: string[] = [];
     const bindings: Record<string, unknown> = { limit: p.limit };
     if (p.source !== undefined) {
-      where.push('c.source = @source');
+      coverageWhere.push('c.source = @source');
       bindings['source'] = p.source;
     }
     if (p.maxPct !== undefined) {
-      where.push('(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) <= @maxPct');
+      coverageWhere.push('(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) <= @maxPct');
       bindings['maxPct'] = p.maxPct;
     }
     if (p.minCentrality !== undefined) {
-      where.push('n.centrality >= @minCentrality');
+      nodeWhere.push('n.centrality >= @minCentrality');
       bindings['minCentrality'] = p.minCentrality;
     }
     if (p.kinds && p.kinds.length > 0) {
-      where.push('n.kind IN (SELECT value FROM json_each(@kinds))');
+      nodeWhere.push('n.kind IN (SELECT value FROM json_each(@kinds))');
       bindings['kinds'] = JSON.stringify(p.kinds);
     }
     if (p.pathFilter !== undefined && p.pathFilter.length > 0) {
-      where.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
+      nodeWhere.push(String.raw`n.file_path LIKE @pathLike ESCAPE '\'`);
       bindings['pathLike'] = prefixLikePattern(p.pathFilter);
     }
     if (p.includeTests === false) {
-      where.push('f.is_test = 0');
+      nodeWhere.push('f.is_test = 0');
     }
+    const coverageClause = coverageWhere.length > 0 ? ' WHERE ' + coverageWhere.join(' AND ') : '';
+    const nodeClause = nodeWhere.length > 0 ? ' WHERE ' + nodeWhere.join(' AND ') : '';
     const sql =
-      `SELECT n.id AS node_id, n.name, n.kind, n.file_path,
-              c.covered_lines, c.total_lines, n.centrality,
-              MAX(CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) AS pct
+      `WITH ranked_coverage AS (
+         SELECT c.node_id, c.covered_lines, c.total_lines,
+                CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0) AS pct,
+                ROW_NUMBER() OVER (
+                  PARTITION BY c.node_id
+                  ORDER BY (CAST(c.covered_lines AS REAL) / NULLIF(c.total_lines, 0)) DESC, c.total_lines DESC
+                ) AS rn
+         FROM node_coverage c${coverageClause}
+       )
+       SELECT n.id AS node_id, n.name, n.kind, n.file_path,
+              c.covered_lines, c.total_lines, c.pct, n.centrality
          FROM nodes n
-         JOIN node_coverage c ON c.node_id = n.id` +
+         JOIN ranked_coverage c ON c.node_id = n.id AND c.rn = 1` +
       (p.includeTests === false ? ' JOIN files f ON f.path = n.file_path' : '') +
-      (where.length > 0 ? ' WHERE ' + where.join(' AND ') : '') +
-      ` GROUP BY n.id
-        ORDER BY pct ASC, n.centrality DESC NULLS LAST
+      nodeClause +
+      ` ORDER BY c.pct ASC, n.centrality DESC NULLS LAST
         LIMIT @limit`;
     return { sql, bindings };
   },

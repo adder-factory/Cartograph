@@ -43,7 +43,12 @@ function appendSymbolList(out: string[], label: string, symbols: ReadonlyArray<S
 
 function appendFindingsDelta(out: string[], fd: FileDelta['findingsDelta']): void {
   if (!fd) return;
-  if (fd.added.length === 0 && fd.cleared.length === 0 && fd.carried.length === 0) return;
+  if (fd.added.length === 0 && fd.cleared.length === 0 && fd.carried.length === 0 && (fd.errors?.length ?? 0) === 0)
+    return;
+  if (fd.errors && fd.errors.length > 0) {
+    out.push('  **findings delta diagnostics:**');
+    for (const error of fd.errors) out.push(`  - ${error}`);
+  }
   if (fd.added.length > 0) {
     out.push('  **+ findings introduced:**');
     for (const x of fd.added) {
@@ -138,7 +143,9 @@ function fmtFileSection(f: FileDelta): string[] {
   const noStructural = f.added.length === 0 && f.removed.length === 0 && f.modified.length === 0;
   const fd = f.findingsDelta;
   const ed = f.edgesDelta;
-  const noFindingsChanges = !fd || (fd.added.length === 0 && fd.cleared.length === 0 && fd.carried.length === 0);
+  const noFindingsChanges =
+    !fd ||
+    (fd.added.length === 0 && fd.cleared.length === 0 && fd.carried.length === 0 && (fd.errors?.length ?? 0) === 0);
   const noEdgeChanges = !hasRenderableEdges(ed);
   const hasLineRangeOnly = (f.lineRangeOnlyCount ?? 0) > 0;
   if (noStructural && noFindingsChanges && noEdgeChanges && !hasLineRangeOnly) {
@@ -284,7 +291,11 @@ function appendCompareBodyOnlyFiles(lines: string[], result: CompareResult): voi
 function shouldRenderCompareFile(f: CompareResult['files'][number]): boolean {
   if (f.skipReason) return false;
   const hasStructural = f.added.length > 0 || f.removed.length > 0 || f.modified.length > 0;
-  const hasFindings = !!f.findingsDelta && (f.findingsDelta.added.length > 0 || f.findingsDelta.cleared.length > 0);
+  const hasFindings =
+    !!f.findingsDelta &&
+    (f.findingsDelta.added.length > 0 ||
+      f.findingsDelta.cleared.length > 0 ||
+      (f.findingsDelta.errors?.length ?? 0) > 0);
   const hasEdges = hasRenderableEdges(f.edgesDelta);
   const hasLineRangeOnly = (f.lineRangeOnlyCount ?? 0) > 0;
   return hasStructural || hasFindings || hasEdges || hasLineRangeOnly;

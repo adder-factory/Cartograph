@@ -7,6 +7,7 @@ import * as os from 'node:os';
 const repoRoot = path.join(__dirname, '..');
 const cliEntry = path.join(repoRoot, 'src', 'bin', 'cartograph.ts');
 const SPAWNED_INDEX_TEST_TIMEOUT_MS = 15_000;
+const ANSI_ESCAPE_PREFIX = `${String.fromCharCode(27)}[`;
 
 function runCli(args: string[], stdin?: string): { out: string; code: number } {
   try {
@@ -151,6 +152,21 @@ describe('CLI command validation contracts', () => {
       const { out, code } = runCli(['doctor', dir]);
       expect(code).not.toBe(0);
       expect(out).toContain('failed runtime validation');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('suppresses ANSI color when stdout is not a TTY', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-cli-no-color-'));
+    try {
+      const init = runCli(['admin', 'init', dir]);
+      expect(init.code).toBe(0);
+
+      const { out, code } = runCli(['status', dir]);
+
+      expect(code).toBe(0);
+      expect(out).not.toContain(ANSI_ESCAPE_PREFIX);
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }

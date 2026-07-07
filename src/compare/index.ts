@@ -163,6 +163,7 @@ interface FindingsDelta {
   added: FindingDelta[];
   cleared: FindingDelta[];
   carried: FindingDelta[];
+  errors?: string[];
 }
 
 export interface EdgeDelta {
@@ -520,11 +521,11 @@ function fileDeltaForOnePath(args: FileDeltaForOnePathArgs): FileDelta {
   const afterNodes = filterKinds(afterAllNodes);
   const out: FileDelta = { ...base, ...diffNodeLists(beforeNodes, afterNodes) };
   if (withFindingsDelta) {
-    out.findingsDelta = computeFindingsDelta(
-      { source: baselineSource, nodes: beforeAllNodes },
-      { source: currentSource, nodes: afterAllNodes },
+    out.findingsDelta = computeFindingsDelta({
+      before: { source: baselineSource, nodes: beforeAllNodes },
+      after: { source: currentSource, nodes: afterAllNodes },
       language,
-    );
+    });
   }
   if (withEdgesDelta) {
     out.edgesDelta = diffEdgeLists({
@@ -555,15 +556,37 @@ function findingKey(qualifiedName: string, kind: string, biomarker: string): str
  * surface needed for the delta report. Source/nodes empty → empty map
  * (the new-file or deleted-file case).
  */
-function evaluateFileFindings(source: string | null, language: Language, nodes: Node[]): Map<string, FindingDelta> {
+interface EvaluateFileFindingsDeps {
+  parseSourceFn?: typeof parseSource;
+}
+
+interface EvaluateFileFindingsResult {
+  findings: Map<string, FindingDelta>;
+  error?: string;
+}
+
+interface EvaluateFileFindingsArgs {
+  source: string | null;
+  language: Language;
+  nodes: Node[];
+  deps?: EvaluateFileFindingsDeps;
+}
+
+function evaluateFileFindings(args: EvaluateFileFindingsArgs): EvaluateFileFindingsResult {
+  const { source, language, nodes, deps = {} } = args;
   const out = new Map<string, FindingDelta>();
-  if (!source) return out;
-  const tree = parseSource(source, language);
-  if (!tree) return out;
+  if (!source) return { findings: out };
+  let tree: ReturnType<typeof parseSource>;
+  try {
+    tree = (deps.parseSourceFn ?? parseSource)(source, language);
+  } catch (err) {
+    return { findings: out, error: `parser error: ${shortErrorMessage(err)}` };
+  }
+  if (!tree) return { findings: out };
   for (const n of nodes) {
     evaluateOneNodeFindings({ tree, n, language, out });
   }
-  return out;
+  return { findings: out };
 }
 
 /**
@@ -632,15 +655,25 @@ interface FileSnapshot {
   nodes: Node[];
 }
 
+interface ComputeFindingsDeltaArgs {
+  before: FileSnapshot;
+  after: FileSnapshot;
+  language: Language;
+  deps?: EvaluateFileFindingsDeps;
+}
+
 /**
  * Diff the two finding maps by `(qualifiedName, kind, biomarker)`.
  * Only-in-current → added (regression introduced by the edit). Only-
  * in-baseline → cleared (the edit fixed it). Both → carried, reported
  * with the CURRENT side's metric so the agent sees the live number.
  */
-function computeFindingsDelta(before: FileSnapshot, after: FileSnapshot, language: Language): FindingsDelta {
-  const beforeFindings = evaluateFileFindings(before.source, language, before.nodes);
-  const afterFindings = evaluateFileFindings(after.source, language, after.nodes);
+function computeFindingsDelta(args: ComputeFindingsDeltaArgs): FindingsDelta {
+  const { before, after, language, deps = {} } = args;
+  const beforeEval = evaluateFileFindings({ source: before.source, language, nodes: before.nodes, deps });
+  const afterEval = evaluateFileFindings({ source: after.source, language, nodes: after.nodes, deps });
+  const beforeFindings = beforeEval.findings;
+  const afterFindings = afterEval.findings;
   const added: FindingDelta[] = [];
   const cleared: FindingDelta[] = [];
   const carried: FindingDelta[] = [];
@@ -651,8 +684,21 @@ function computeFindingsDelta(before: FileSnapshot, after: FileSnapshot, languag
   for (const [key, fd] of beforeFindings) {
     if (!afterFindings.has(key)) cleared.push(fd);
   }
-  return { added, cleared, carried };
+  const errors = [
+    ...(beforeEval.error ? [`baseline ${beforeEval.error}`] : []),
+    ...(afterEval.error ? [`current ${afterEval.error}`] : []),
+  ];
+  return { added, cleared, carried, ...(errors.length > 0 ? { errors } : {}) };
 }
+
+function shortErrorMessage(err: unknown): string {
+  return (err instanceof Error ? err.message : String(err)).slice(0, 200);
+}
+
+export const _internalForTests = {
+  computeFindingsDelta,
+  evaluateFileFindings,
+};
 
 /**
  * extractFromSource needs the tree-sitter grammar for each language to
