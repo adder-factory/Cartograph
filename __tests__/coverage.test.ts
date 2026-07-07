@@ -1102,7 +1102,7 @@ describe('same-source-label coverage union (#18)', () => {
 
       expect(Object.getPrototypeOf(paths)).toBe(null);
       expect(Object.hasOwn(paths, '__proto__')).toBe(true);
-      expect(paths['__proto__']).toEqual(['/abs/proto.info']);
+      expect(Object.getOwnPropertyDescriptor(paths, '__proto__')?.value).toEqual(['/abs/proto.info']);
       expect(paths['lcov']).toEqual(['/abs/ok.info']);
     } finally {
       cg.close();
