@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { CURRENT_SCHEMA_VERSION } from '../src/db/migrations.js';
 import { createDatabase } from '../src/db/sqlite-adapter.js';
 
 const repoRoot = path.resolve(import.meta.dir, '..');
@@ -42,7 +43,18 @@ function createGateDatabase(root: string, severity: 'error' | 'warning' | 'info'
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
       );
+
+      CREATE TABLE schema_versions (
+        version INTEGER PRIMARY KEY,
+        applied_at INTEGER NOT NULL,
+        description TEXT NOT NULL
+      );
     `);
+    db.prepare('INSERT INTO schema_versions (version, applied_at, description) VALUES (?, ?, ?)').run(
+      CURRENT_SCHEMA_VERSION,
+      Date.now(),
+      'test fixture schema',
+    );
     db.prepare(`INSERT INTO project_metadata (key, value) VALUES ('biomarker_cross_file_errors', '0')`).run();
     if (severity) {
       db.prepare(`INSERT INTO nodes (id, name, file_path, start_line) VALUES ('n1', 'smokeInfo', 'src/a.ts', 1)`).run();

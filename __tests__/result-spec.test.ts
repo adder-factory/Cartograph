@@ -9,14 +9,10 @@
  */
 import { describe, it, expect } from 'vitest';
 import {
-  bulletListSpecStrings,
-  cardListSpecStrings,
-  keyValueCardSpecStrings,
   renderMarkdownBulletList,
   renderMarkdownCardList,
   renderMarkdownKeyValueCard,
   renderMarkdownTable,
-  specStrings,
   type MarkdownBulletListSpec,
   type MarkdownCardListSpec,
   type MarkdownKeyValueCardSpec,
@@ -25,6 +21,40 @@ import {
 } from '../src/rendering/result-spec.js';
 
 const byString = (a: string, b: string): number => a.localeCompare(b);
+
+function specStrings<TRow>(spec: MarkdownTableSpec<TRow>): string[] {
+  return [
+    spec.title,
+    ...(spec.preamble ?? []),
+    ...spec.columns.map((c) => c.header),
+    spec.emptyState,
+    ...(spec.footers ?? []),
+  ];
+}
+
+function bulletListSpecStrings<TRow>(spec: MarkdownBulletListSpec<TRow>): string[] {
+  return [
+    spec.title,
+    ...(spec.preamble ?? []),
+    spec.emptyState,
+    ...(spec.emptyNote != null && spec.emptyNote !== '' ? [spec.emptyNote] : []),
+    ...(spec.footers ?? []),
+  ];
+}
+
+function cardListSpecStrings<TRow>(spec: MarkdownCardListSpec<TRow>): string[] {
+  return [spec.title, ...(spec.preamble ?? []), spec.emptyState, ...(spec.footers ?? [])];
+}
+
+function keyValueCardSpecStrings(spec: MarkdownKeyValueCardSpec): string[] {
+  return [
+    spec.title,
+    ...(spec.preamble ?? []),
+    ...spec.rows.map((r) => r.label),
+    spec.emptyState,
+    ...(spec.footers ?? []),
+  ];
+}
 
 describe('renderMarkdownTable — output shape', () => {
   it('renders a minimal one-row table with H2 title + header row + separator + body row', () => {

@@ -7,9 +7,11 @@ import {
 } from './postgres-codec.js';
 import {
   SQL_IDENTIFIER_PATTERN,
+  dedupePostgresRecordsetRows,
   offsetInsideLiteral,
   rewritePlainLikeToILike,
   rewritePostgresAfterPlaceholders,
+  sanitizePostgresJsonValue,
   stringLiteralSpans,
 } from './postgres-worker-sql.js';
 
@@ -135,6 +137,7 @@ const CANONICAL_ROW_KEYS: Record<string, string> = {
   fromnodeid: 'fromNodeId',
   hitcount: 'hitCount',
   importerfilepath: 'importerFilePath',
+  isdefaultexport: 'isDefaultExport',
   issuenumber: 'issueNumber',
   lastindexedat: 'lastIndexedAt',
   lasthitat: 'lastHitAt',
@@ -275,33 +278,36 @@ async function handleNativeBatchRun(inputSql: string, paramSets: unknown[][]): P
   if (namedRows === null) return null;
 
   if (isNodeInsertBatch(inputSql)) {
-    const rows = namedRows.map((row) => ({
-      id: row['id'],
-      kind: row['kind'],
-      name: row['name'],
-      qualified_name: row['qualifiedName'],
-      file_path: row['filePath'],
-      language: row['language'],
-      start_line: row['startLine'],
-      end_line: row['endLine'],
-      start_column: row['startColumn'],
-      end_column: row['endColumn'],
-      docstring: row['docstring'],
-      signature: row['signature'],
-      visibility: row['visibility'],
-      is_exported: row['isExported'],
-      is_default_export: row['isDefaultExport'],
-      is_async: row['isAsync'],
-      is_static: row['isStatic'],
-      decorators: row['decorators'],
-      decorator_args: row['decoratorArgs'],
-      updated_at: row['updatedAt'],
-      centrality: row['centrality'],
-      betweenness: row['betweenness'],
-      body_hash: row['bodyHash'],
-      name_subwords: row['nameSubwords'],
-    }));
-    const result = await sql.unsafe(NODE_BATCH_INSERT_SQL, [rows]);
+    const rows = dedupePostgresRecordsetRows(
+      namedRows.map((row) => ({
+        id: row['id'],
+        kind: row['kind'],
+        name: row['name'],
+        qualified_name: row['qualifiedName'],
+        file_path: row['filePath'],
+        language: row['language'],
+        start_line: row['startLine'],
+        end_line: row['endLine'],
+        start_column: row['startColumn'],
+        end_column: row['endColumn'],
+        docstring: row['docstring'],
+        signature: row['signature'],
+        visibility: row['visibility'],
+        is_exported: row['isExported'],
+        is_default_export: row['isDefaultExport'],
+        is_async: row['isAsync'],
+        is_static: row['isStatic'],
+        decorators: row['decorators'],
+        decorator_args: row['decoratorArgs'],
+        updated_at: row['updatedAt'],
+        centrality: row['centrality'],
+        betweenness: row['betweenness'],
+        body_hash: row['bodyHash'],
+        name_subwords: row['nameSubwords'],
+      })),
+      'id',
+    );
+    const result = await sql.unsafe(NODE_BATCH_INSERT_SQL, [sanitizePostgresJsonValue(rows)]);
     return { ok: true, changes: numericMeta(result, 'count') ?? rows.length, lastInsertRowid: 0 };
   }
 
@@ -315,7 +321,7 @@ async function handleNativeBatchRun(inputSql: string, paramSets: unknown[][]): P
       col: row['column'],
       confidence: row['confidence'],
     }));
-    const result = await sql.unsafe(EDGE_BATCH_INSERT_SQL, [rows]);
+    const result = await sql.unsafe(EDGE_BATCH_INSERT_SQL, [sanitizePostgresJsonValue(rows)]);
     return { ok: true, changes: numericMeta(result, 'count') ?? rows.length, lastInsertRowid: 0 };
   }
 

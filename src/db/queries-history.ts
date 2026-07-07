@@ -55,7 +55,7 @@ const CO_CHANGE_DEFAULT_MIN_COUNT = 2;
 const upsertCoChangeQuery = defineQuery({
   sql:
     `INSERT INTO co_changes (file_a, file_b, count) VALUES (@fileA, @fileB, @count) ` +
-    `ON CONFLICT(file_a, file_b) DO UPDATE SET count = count + excluded.count`,
+    `ON CONFLICT(file_a, file_b) DO UPDATE SET count = co_changes.count + excluded.count`,
   params: z.object({ fileA: z.string(), fileB: z.string(), count: z.number() }),
   row: z.never(),
 });
@@ -63,7 +63,10 @@ const upsertCoChangeQuery = defineQuery({
 const applyChurnDeltaQuery = defineQuery({
   sql: `UPDATE files
        SET commit_count    = commit_count + @commitCountDelta,
-           last_touched_ts = MAX(COALESCE(last_touched_ts, 0), @lastTouchedTs),
+           last_touched_ts = CASE
+             WHEN COALESCE(last_touched_ts, 0) >= @lastTouchedTs THEN COALESCE(last_touched_ts, 0)
+             ELSE @lastTouchedTs
+           END,
            first_seen_ts   = COALESCE(first_seen_ts, @firstSeenTs)
      WHERE path = @path`,
   params: z.object({
@@ -351,7 +354,13 @@ const getNodesByCommitsQuery = defineQuery({
 
 const CO_CHANGED_FILES_ANCHOR_CLAUSE = 'OR COALESCE(anchor_ratio, 0) >= @minAnchorRatio';
 
+function sqlMax2(left: string, right: string): string {
+  return `CASE WHEN COALESCE(${left}, 0) >= COALESCE(${right}, 0) THEN COALESCE(${left}, 0) ELSE COALESCE(${right}, 0) END`;
+}
+
 function buildCoChangedFilesSqlNamed(anchorClause: string): string {
+  const anchorMax = sqlMax2('(SELECT c FROM anchor)', 'p.count');
+  const partnerMax = sqlMax2('f.commit_count', 'p.count');
   return `
     WITH partners AS (
       SELECT file_b AS path, count FROM co_changes WHERE file_a = @filePath
@@ -364,13 +373,13 @@ function buildCoChangedFilesSqlNamed(anchorClause: string): string {
         p.path AS path,
         p.count AS count,
         CAST(p.count AS REAL) / NULLIF(
-          MAX((SELECT c FROM anchor), p.count)
-          + MAX(f.commit_count, p.count)
+          ${anchorMax}
+          + ${partnerMax}
           - p.count,
           0
         ) AS jaccard,
         CAST(p.count AS REAL) / NULLIF(
-          MAX((SELECT c FROM anchor), p.count),
+          ${anchorMax},
           0
         ) AS anchor_ratio
       FROM partners p

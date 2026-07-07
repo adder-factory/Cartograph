@@ -8,9 +8,11 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  dedupePostgresRecordsetRows,
   offsetInsideLiteral,
   rewritePlainLikeToILike,
   rewritePostgresAfterPlaceholders,
+  sanitizePostgresJsonValue,
   stringLiteralSpans,
 } from '../src/db/postgres-worker-sql.js';
 
@@ -33,6 +35,24 @@ describe('rewritePlainLikeToILike', () => {
 
   it('rewrites multiple LIKEs in one statement', () => {
     expect(rewritePlainLikeToILike('a LIKE @x OR b LIKE @y')).toBe('a ILIKE @x OR b ILIKE @y');
+  });
+});
+
+describe('dedupePostgresRecordsetRows', () => {
+  it('keeps the last row for duplicate keys to match sequential SQLite upserts', () => {
+    expect(
+      dedupePostgresRecordsetRows(
+        [
+          { id: 'n:1', name: 'first' },
+          { id: 'n:2', name: 'second' },
+          { id: 'n:1', name: 'last' },
+        ],
+        'id',
+      ),
+    ).toEqual([
+      { id: 'n:2', name: 'second' },
+      { id: 'n:1', name: 'last' },
+    ]);
   });
 });
 
@@ -79,5 +99,32 @@ describe('rewritePostgresAfterPlaceholders — IS NULL cast typing', () => {
   it('casts json_each placeholders to ::jsonb', () => {
     const out = rewritePostgresAfterPlaceholders('WHERE $1 IS NULL AND json_each($1)', new Set([1]));
     expect(out).toContain('$1::jsonb IS NULL');
+  });
+
+  it('rewrites column-based json_each calls to Postgres jsonb table functions', () => {
+    const out = rewritePostgresAfterPlaceholders(
+      'SELECT value FROM nodes m, json_each(m.decorators) WHERE value = $1',
+      new Set(),
+    );
+
+    expect(out).toContain('jsonb_array_elements_text(m.decorators::jsonb) AS json_each(value)');
+    expect(out).not.toContain('json_each(m.decorators)');
+  });
+});
+
+describe('sanitizePostgresJsonValue', () => {
+  it('replaces unpaired surrogate code units while preserving valid pairs', () => {
+    const smiling = 'ok \uD83D\uDE00';
+    const sanitized = sanitizePostgresJsonValue({
+      high: 'bad \uD800',
+      low: '\uDC00 bad',
+      nested: [smiling],
+    });
+
+    expect(sanitized).toEqual({
+      high: 'bad \uFFFD',
+      low: '\uFFFD bad',
+      nested: [smiling],
+    });
   });
 });

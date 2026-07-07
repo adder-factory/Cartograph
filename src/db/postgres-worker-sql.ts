@@ -23,7 +23,74 @@ export function rewritePostgresAfterPlaceholders(sqlText: string, jsonEachPositi
     (_match, placeholder: string, keyExpression: string) =>
       `SELECT value::integer FROM jsonb_each_text(${placeholder}::jsonb) AS j(key, value) WHERE key = ${keyExpression}`,
   );
+  text = text.replaceAll(
+    new RegExp(String.raw`\bjson_each\(\s*(${SQL_IDENTIFIER_PATTERN})\s*\)`, 'gi'),
+    (_match, expression: string) => `jsonb_array_elements_text(${expression}::jsonb) AS json_each(value)`,
+  );
   return text;
+}
+
+/** PostgreSQL rejects JSONB payloads containing unpaired UTF-16 surrogate
+ * code units before row-level error handling can identify the bad record.
+ * Source text and doc metadata are user-controlled enough that these can
+ * appear in otherwise valid JS strings, so sanitize recursively just before
+ * bulk JSONB transport. Valid surrogate pairs are preserved.
+ */
+export function sanitizePostgresJsonValue(value: unknown): unknown {
+  if (typeof value === 'string') return sanitizePostgresJsonString(value);
+  if (Array.isArray(value)) return value.map(sanitizePostgresJsonValue);
+  if (!isPlainRecord(value)) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value)) {
+    out[sanitizePostgresJsonString(key)] = sanitizePostgresJsonValue(entry);
+  }
+  return out;
+}
+
+export function dedupePostgresRecordsetRows<T extends Record<string, unknown>>(rows: readonly T[], key: string): T[] {
+  const deduped = new Map<unknown, T>();
+  for (const row of rows) {
+    const value = row[key];
+    if (deduped.has(value)) deduped.delete(value);
+    deduped.set(value, row);
+  }
+  return [...deduped.values()];
+}
+
+function sanitizePostgresJsonString(input: string): string {
+  let output = '';
+  for (let index = 0; index < input.length; index++) {
+    const code = codeUnitAt(input, index);
+    if (isHighSurrogate(code)) {
+      const next = codeUnitAt(input, index + 1);
+      if (isLowSurrogate(next)) {
+        output += input[index] ?? '';
+        output += input[index + 1] ?? '';
+        index++;
+      } else {
+        output += '\uFFFD';
+      }
+      continue;
+    }
+    output += isLowSurrogate(code) ? '\uFFFD' : (input[index] ?? '');
+  }
+  return output;
+}
+
+function codeUnitAt(input: string, index: number): number {
+  return input[index]?.codePointAt(0) ?? 0;
+}
+
+function isHighSurrogate(code: number): boolean {
+  return code >= 0xd800 && code <= 0xdbff;
+}
+
+function isLowSurrogate(code: number): boolean {
+  return code >= 0xdc00 && code <= 0xdfff;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 /**

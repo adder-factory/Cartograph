@@ -18,7 +18,7 @@ export type SessionArgResult = { ok: true; args: SessionMcpArgs } | { ok: false;
 type JsonParseResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
 const macroStepsSchema = z.array(z.looseObject({}));
-export const macroStepContractSchema = z.object({
+const macroStepContractSchema = z.object({
   tool: z.string().min(1),
   args: z.record(z.string(), z.unknown()).default({}),
 });

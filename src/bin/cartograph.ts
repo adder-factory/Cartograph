@@ -44,6 +44,7 @@ import { isBunStandalonePath } from '../bun-standalone.js';
 import { errMsg } from '../errors.js';
 import { editDistance } from '../text-distance.js';
 import { program, error } from './_cli-core.js';
+import { shouldUseColor } from './cli-output.js';
 import { registerCartographCommands } from './commands/index.js';
 export { program } from './_cli-core.js';
 
@@ -68,8 +69,10 @@ function parseUnsignedDecimalInteger(raw: string): number | null {
 const nodeVersion = process.versions.node;
 const nodeMajor = parseUnsignedDecimalInteger(nodeVersion.split('.')[0] ?? '');
 if (nodeMajor !== null && nodeMajor >= 25) {
+  const yellow = shouldUseColor(process.stderr) ? '\x1b[33m' : '';
+  const reset = shouldUseColor(process.stderr) ? '\x1b[0m' : '';
   process.stderr.write(
-    `\x1b[33m⚠\x1b[0m  Cartograph may crash on Node.js ${nodeVersion} due to a V8 WASM compiler bug in Node 25+.\n`,
+    `${yellow}⚠${reset}  Cartograph may crash on Node.js ${nodeVersion} due to a V8 WASM compiler bug in Node 25+.\n`,
   );
   process.stderr.write('   Please use Node.js 22 LTS instead: https://nodejs.org/en/download\n');
   process.stderr.write('   See: https://github.com/adder-factory/cartograph/issues\n\n');

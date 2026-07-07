@@ -1,5 +1,7 @@
 // ANSI Color Helpers (avoid chalk ESM issues)
-export const colors = {
+type ColorName = 'reset' | 'bold' | 'dim' | 'red' | 'green' | 'yellow' | 'blue' | 'cyan' | 'magenta' | 'white' | 'gray';
+
+const ANSI_CODES: Readonly<Record<ColorName, string>> = {
   reset: '\x1b[0m',
   bold: '\x1b[1m',
   dim: '\x1b[2m',
@@ -11,6 +13,55 @@ export const colors = {
   magenta: '\x1b[35m',
   white: '\x1b[37m',
   gray: '\x1b[90m',
+};
+
+export function shouldUseColor(stream: NodeJS.WriteStream = process.stdout): boolean {
+  if (process.argv.includes('--no-color')) return false;
+  if (process.env['NO_COLOR'] !== undefined) return false;
+  const force = process.env['FORCE_COLOR'];
+  if (force === '0' || force === 'false') return false;
+  if (force !== undefined && force !== '') return true;
+  return stream.isTTY === true;
+}
+
+function code(name: ColorName): string {
+  return shouldUseColor() ? ANSI_CODES[name] : '';
+}
+
+export const colors = {
+  get reset(): string {
+    return code('reset');
+  },
+  get bold(): string {
+    return code('bold');
+  },
+  get dim(): string {
+    return code('dim');
+  },
+  get red(): string {
+    return code('red');
+  },
+  get green(): string {
+    return code('green');
+  },
+  get yellow(): string {
+    return code('yellow');
+  },
+  get blue(): string {
+    return code('blue');
+  },
+  get cyan(): string {
+    return code('cyan');
+  },
+  get magenta(): string {
+    return code('magenta');
+  },
+  get white(): string {
+    return code('white');
+  },
+  get gray(): string {
+    return code('gray');
+  },
 };
 
 export const chalk = {

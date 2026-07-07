@@ -31,42 +31,12 @@ const WORKER_RESPONSE = 2;
 
 export class PostgresAdapter implements SqliteDatabase {
   readonly dialect = 'postgres' as const;
-  private readonly state: PostgresAdapterState;
+  private readonly options: PostgresAdapterOptions;
+  private state: PostgresAdapterState;
 
   constructor(options: PostgresAdapterOptions) {
-    const control = new Int32Array(new SharedArrayBuffer(4));
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pg-'));
-    const requestPath = path.join(dir, 'request.json');
-    const responsePath = path.join(dir, 'response.json');
-    const here = fileURLToPath(import.meta.url);
-    const ext = here.endsWith('.ts') ? '.ts' : '.js';
-    const workerPath = fileURLToPath(new URL(`./postgres-worker${ext}`, import.meta.url));
-    const worker = new Worker(workerPath, {
-      workerData: {
-        control: control.buffer,
-        requestPath,
-        responsePath,
-        sqlOptions: postgresSqlOptions(options),
-        url: options.url,
-        schema: options.schema ?? 'public',
-      },
-    });
-    this.state = {
-      worker,
-      control,
-      dir,
-      requestPath,
-      responsePath,
-      queryTimeoutMs: options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS,
-      open: true,
-      txDepth: 0,
-    };
-    const ready = Atomics.wait(control, 0, 0, 30_000);
-    if (ready === 'timed-out' || Atomics.load(control, 0) !== WORKER_READY) {
-      terminateWorker(worker);
-      throw new Error('PostgreSQL adapter worker did not become ready within 30s');
-    }
-    Atomics.store(control, 0, 0);
+    this.options = { ...options };
+    this.state = createBridge(this.options);
   }
 
   get open(): boolean {
@@ -131,44 +101,118 @@ export class PostgresAdapter implements SqliteDatabase {
     } catch {
       /* worker is already gone */
     }
-    this.closeBridge();
+    closeBridge(this.state);
   }
 
   call(request: WorkerRequest): WorkerResponse {
-    if (!this.state.open) throw new Error('PostgreSQL connection is closed');
-    fs.writeFileSync(this.state.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
-    Atomics.store(this.state.control, 0, WORKER_REQUEST);
-    Atomics.notify(this.state.control, 0);
-    const wait = Atomics.wait(this.state.control, 0, WORKER_REQUEST, this.state.queryTimeoutMs);
-    if (wait === 'timed-out') {
-      this.closeBridge();
-      throw new Error(`PostgreSQL query timed out after ${this.state.queryTimeoutMs}ms; connection has been closed`);
+    try {
+      return callOnce(this.state, request);
+    } catch (err) {
+      if (err instanceof PostgresWorkerResponseError && shouldRetryClosedConnection(this.state, request, err.message)) {
+        this.restartBridgeForRetry();
+        return callOnce(this.state, request);
+      }
+      throw err;
     }
-    if (Atomics.load(this.state.control, 0) !== WORKER_RESPONSE) {
-      this.closeBridge();
-      throw new Error('PostgreSQL worker returned an invalid state');
-    }
-    const raw = fs.readFileSync(this.state.responsePath, 'utf-8');
-    Atomics.store(this.state.control, 0, 0);
-    const response = parseWorkerResponse(decodeValue(parsePostgresWorkerJson(raw, 'response')), 'response');
-    if (!response.ok) throw new Error(response.error ?? 'PostgreSQL query failed');
-    return response;
   }
 
-  private closeBridge(): void {
-    if (!this.state.open) return;
-    this.state.open = false;
-    terminateWorker(this.state.worker);
-    try {
-      fs.rmSync(this.state.dir, { recursive: true, force: true });
-    } catch {
-      /* temp cleanup is best effort */
-    }
+  private restartBridgeForRetry(): void {
+    closeBridge(this.state);
+    this.state = createBridge(this.options);
   }
 }
 
 function terminateWorker(worker: Worker): void {
   void worker.terminate().catch(() => undefined);
+}
+
+function createBridge(options: PostgresAdapterOptions): PostgresAdapterState {
+  const control = new Int32Array(new SharedArrayBuffer(4));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pg-'));
+  const requestPath = path.join(dir, 'request.json');
+  const responsePath = path.join(dir, 'response.json');
+  const here = fileURLToPath(import.meta.url);
+  const ext = here.endsWith('.ts') ? '.ts' : '.js';
+  const workerPath = fileURLToPath(new URL(`./postgres-worker${ext}`, import.meta.url));
+  const worker = new Worker(workerPath, {
+    workerData: {
+      control: control.buffer,
+      requestPath,
+      responsePath,
+      sqlOptions: postgresSqlOptions(options),
+      url: options.url,
+      schema: options.schema ?? 'public',
+    },
+  });
+  const state: PostgresAdapterState = {
+    worker,
+    control,
+    dir,
+    requestPath,
+    responsePath,
+    queryTimeoutMs: options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS,
+    open: true,
+    txDepth: 0,
+  };
+  const ready = Atomics.wait(control, 0, 0, 30_000);
+  if (ready === 'timed-out' || Atomics.load(control, 0) !== WORKER_READY) {
+    terminateWorker(worker);
+    try {
+      fs.rmSync(dir, { recursive: true, force: true });
+    } catch {
+      /* temp cleanup is best effort */
+    }
+    throw new Error('PostgreSQL adapter worker did not become ready within 30s');
+  }
+  Atomics.store(control, 0, 0);
+  return state;
+}
+
+function shouldRetryClosedConnection(state: PostgresAdapterState, request: WorkerRequest, error: string): boolean {
+  return request.op !== 'close' && state.txDepth === 0 && isClosedPostgresConnectionError(error);
+}
+
+class PostgresWorkerResponseError extends Error {}
+
+function callOnce(state: PostgresAdapterState, request: WorkerRequest): WorkerResponse {
+  if (!state.open) throw new Error('PostgreSQL connection is closed');
+  fs.writeFileSync(state.requestPath, JSON.stringify(encodeValue(request)), 'utf-8');
+  Atomics.store(state.control, 0, WORKER_REQUEST);
+  Atomics.notify(state.control, 0);
+  const wait = Atomics.wait(state.control, 0, WORKER_REQUEST, state.queryTimeoutMs);
+  if (wait === 'timed-out') {
+    closeBridge(state);
+    throw new Error(`PostgreSQL query timed out after ${state.queryTimeoutMs}ms; connection has been closed`);
+  }
+  if (Atomics.load(state.control, 0) !== WORKER_RESPONSE) {
+    closeBridge(state);
+    throw new Error('PostgreSQL worker returned an invalid state');
+  }
+  const raw = fs.readFileSync(state.responsePath, 'utf-8');
+  Atomics.store(state.control, 0, 0);
+  const response = parseWorkerResponse(decodeValue(parsePostgresWorkerJson(raw, 'response')), 'response');
+  if (!response.ok) throw new PostgresWorkerResponseError(response.error ?? 'PostgreSQL query failed');
+  return response;
+}
+
+function closeBridge(state: PostgresAdapterState): void {
+  if (!state.open) return;
+  state.open = false;
+  terminateWorker(state.worker);
+  try {
+    fs.rmSync(state.dir, { recursive: true, force: true });
+  } catch {
+    /* temp cleanup is best effort */
+  }
+}
+
+function isClosedPostgresConnectionError(message: string): boolean {
+  return (
+    /\bconnection\s+is\s+closed\b/i.test(message) ||
+    /\bconnection\s+terminated\b/i.test(message) ||
+    /\bserver\s+closed\s+the\s+connection\b/i.test(message) ||
+    /\bECONNRESET\b/i.test(message)
+  );
 }
 
 class PostgresStatement implements SqliteStatement {

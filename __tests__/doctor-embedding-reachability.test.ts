@@ -88,6 +88,23 @@ describe('runDoctor — embedding endpoint reachability', () => {
     expect(embCheck!.remediation).toBeDefined();
   });
 
+  it('uses external-endpoint remediation when externallyManaged is set', async () => {
+    await writeConfig({
+      provider: 'openai-compat',
+      endpoint: 'https://localhost:1/external',
+      model: 'jina',
+      externallyManaged: true,
+    });
+
+    const result = await runDoctor({ projectPath });
+    const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
+    expect(embCheck).toBeDefined();
+    expect(embCheck!.status).toBe('warn');
+    expect(embCheck!.remediation).toMatch(/externallyManaged/i);
+    expect(embCheck!.remediation).toMatch(/API key|Authorization|model name|GET \/v1\/models/i);
+    expect(embCheck!.remediation).not.toMatch(/llama-server|install-models|cartograph backend start/i);
+  });
+
   it('reports warn when openai-compat provider has no endpoint set', async () => {
     const prior = process.env.OPENAI_API_KEY;
     try {

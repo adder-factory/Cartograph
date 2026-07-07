@@ -391,10 +391,7 @@ export class DatabaseConnection {
   /** Get database file size in bytes. */
   getSize(): number {
     if (this.core.backend === 'postgres') {
-      const row = this.core.db.prepare('SELECT pg_database_size(current_database()) AS n').get() as {
-        n?: number;
-      } | null;
-      return row?.n ?? 0;
+      return readPostgresSchemaSizeBytes(this.core.db);
     }
     return fs.statSync(this.core.dbPath).size;
   }
@@ -414,6 +411,26 @@ export class DatabaseConnection {
 // Free-standing DB utility functions (extracted from DatabaseConnection to
 // keep the class below the god_class threshold)
 // ===========================================================================
+
+/** PostgreSQL storage is schema-per-project, so status should report the
+ * active schema's live relation size rather than pg_database_size(), which
+ * includes every other project sharing the same database.
+ */
+export function readPostgresSchemaSizeBytes(db: SqliteDatabase): number {
+  const row = db
+    .prepare(
+      `SELECT COALESCE(SUM(pg_total_relation_size(c.oid)), 0) AS n
+       FROM pg_class c
+       JOIN pg_namespace ns ON ns.oid = c.relnamespace
+       WHERE ns.nspname = current_schema()
+         AND c.relkind IN ('r', 'p', 'm')`,
+    )
+    .get() as { n?: number | string | bigint } | null;
+  const n = row?.n;
+  if (typeof n === 'number') return n;
+  if (typeof n === 'bigint') return Number(n);
+  return Number(n ?? 0);
+}
 
 /** Optimize database (vacuum and analyze). */
 export function dbOptimize(conn: DatabaseConnection): void {

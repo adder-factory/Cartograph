@@ -91,7 +91,7 @@ describe('package manifest JSON boundaries', () => {
     const scripts = readPackageJsonScripts(packageJson);
 
     expect(Object.hasOwn(scripts, '__proto__')).toBe(true);
-    expect(scripts['__proto__']).toBe('echo proto');
+    expect(Object.getOwnPropertyDescriptor(scripts, '__proto__')?.value).toBe('echo proto');
     expect(scripts['constructor']).toBe('echo ctor');
     expect(scripts['test']).toBe('bun test');
     expect(Object.hasOwn(scripts, 'bad')).toBe(false);

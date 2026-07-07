@@ -1,12 +1,6 @@
 import { errMsg } from '../../errors.js';
 import type { McpLoadBudgetReport, MeasureMcpLoadBudgetOptions } from '../../mcp/load-budget.js';
-import {
-  DEFAULT_MCP_SERVER_PROFILE,
-  MCP_SERVER_PROFILE_DESCRIPTION,
-  MCP_SERVER_PROFILE_NAMES,
-  isMcpServerProfile,
-  type McpServerProfile,
-} from '../../mcp/profiles.js';
+import { DEFAULT_MCP_SERVER_PROFILE, MCP_SERVER_PROFILE_NAMES, type McpServerProfile } from '../../mcp/profiles.js';
 import type { CliOptionCommand } from '../shared/cli-command.js';
 
 type CommandLike = CliOptionCommand;
@@ -50,6 +44,9 @@ interface ServeServerOptions {
   disableStartupSync: boolean;
 }
 
+const MCP_SERVER_PROFILE_DESCRIPTION =
+  'MCP advertised-tool profile: core (default common coding-agent lookups, 14 tools), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
+
 export interface McpServerCommandDeps {
   program: CommandLike;
   chalk: {
@@ -88,6 +85,10 @@ export function resolveServeProfile(
   error(`Invalid --profile "${profile}". Expected one of: ${MCP_SERVER_PROFILE_NAMES.join(', ')}`);
   process.exitCode = 1;
   return null;
+}
+
+function isMcpServerProfile(value: unknown): value is McpServerProfile {
+  return typeof value === 'string' && MCP_SERVER_PROFILE_NAMES.includes(value as McpServerProfile);
 }
 
 export function writeServeMcpGuidance(deps: Pick<McpServerCommandDeps, 'chalk' | 'writeStderr'>): void {
