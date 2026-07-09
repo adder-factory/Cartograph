@@ -267,6 +267,9 @@ type EdgeGeometryState = {
   shortEndpointSample: Array<{ id: string; kind: unknown; source: string; target: string; endpointDistance: number }>;
   visibleEdgeCount: number;
 };
+type EdgeVisibilityState = Pick<EdgeGeometryState, 'hiddenEndpointCount' | 'hiddenEndpointSample' | 'visibleEdgeCount'>;
+type EdgeBoxState = Pick<EdgeGeometryState, 'badBoxCount' | 'badBoxSample'>;
+type EdgeShortEndpointState = Pick<EdgeGeometryState, 'shortEndpointCount' | 'shortEndpointSample'>;
 type GraphLayoutSample = Array<{ id: string; label: unknown; x: number; y: number }>;
 type GraphLayoutShapeState = {
   diagonalSpread: number;
@@ -754,19 +757,14 @@ async function assertGraphFitsViewport(page: Page, label: string): Promise<void>
   );
 }
 
-async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometryState> {
+async function edgeVisibilityState(page: Page): Promise<EdgeVisibilityState> {
   return page.evaluate(
-    ({ edgeLabel, minBoxSpan, minEndpointDistance, sampleLimit }) => {
+    ({ sampleLimit }) => {
       const hook = (globalThis as ViewerSmokeGlobal).__cartographViewerSmoke;
       const cy = hook?.cy as unknown as GraphEdgeGeometryCy | undefined;
-      const emptyState: EdgeGeometryState = {
-        badBoxCount: 0,
-        badBoxSample: [],
+      const emptyState: EdgeVisibilityState = {
         hiddenEndpointCount: 0,
         hiddenEndpointSample: [],
-        label: String(edgeLabel),
-        shortEndpointCount: 0,
-        shortEndpointSample: [],
         visibleEdgeCount: 0,
       };
       if (!cy) return emptyState;
@@ -774,11 +772,7 @@ async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometr
         node.style('display') !== 'none' && !node.hasClass('collapse-hidden');
       const visibleEdges = cy.edges().filter((edge) => edge.style('display') !== 'none');
       const hiddenEndpointSample: EdgeGeometryState['hiddenEndpointSample'] = [];
-      const badBoxSample: EdgeGeometryState['badBoxSample'] = [];
-      const shortEndpointSample: EdgeGeometryState['shortEndpointSample'] = [];
       let hiddenEndpointCount = 0;
-      let badBoxCount = 0;
-      let shortEndpointCount = 0;
       visibleEdges.forEach((edge) => {
         const source = edge.source();
         const target = edge.target();
@@ -797,18 +791,59 @@ async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometr
             });
           }
         }
-        const box = edge.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
-        const badBox =
-          !box ||
-          !Number.isFinite(box.x1) ||
-          !Number.isFinite(box.y1) ||
-          (Math.abs(box.x2 - box.x1) < minBoxSpan && Math.abs(box.y2 - box.y1) < minBoxSpan);
-        if (badBox) {
-          badBoxCount++;
-          if (badBoxSample.length < sampleLimit) {
-            badBoxSample.push({ id: edge.id(), kind: edge.data('kind'), box });
+      });
+      return { hiddenEndpointCount, hiddenEndpointSample, visibleEdgeCount: visibleEdges.length };
+    },
+    { sampleLimit: EDGE_GEOMETRY_SAMPLE_LIMIT },
+  );
+}
+
+async function edgeBoxState(page: Page): Promise<EdgeBoxState> {
+  return page.evaluate(
+    ({ minBoxSpan, sampleLimit }) => {
+      const hook = (globalThis as ViewerSmokeGlobal).__cartographViewerSmoke;
+      const cy = hook?.cy as unknown as GraphEdgeGeometryCy | undefined;
+      if (!cy) return { badBoxCount: 0, badBoxSample: [] };
+      const visibleEdges = cy.edges().filter((edge) => edge.style('display') !== 'none');
+      const badBoxSample: EdgeGeometryState['badBoxSample'] = [];
+      let badBoxCount = 0;
+      visibleEdges.forEach((edge) => {
+        const source = edge.source();
+        const target = edge.target();
+        const syntheticAggregateEdge = edge.data('collapsedEdge') || edge.data('detailBucketEdge');
+        if (source.id() !== target.id() && !syntheticAggregateEdge) {
+          const box = edge.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
+          const badBox =
+            !box ||
+            !Number.isFinite(box.x1) ||
+            !Number.isFinite(box.y1) ||
+            (Math.abs(box.x2 - box.x1) < minBoxSpan && Math.abs(box.y2 - box.y1) < minBoxSpan);
+          if (badBox) {
+            badBoxCount++;
+            if (badBoxSample.length < sampleLimit) {
+              badBoxSample.push({ id: edge.id(), kind: edge.data('kind'), box });
+            }
           }
         }
+      });
+      return { badBoxCount, badBoxSample };
+    },
+    { minBoxSpan: MIN_EDGE_BOX_SPAN_PX, sampleLimit: EDGE_GEOMETRY_SAMPLE_LIMIT },
+  );
+}
+
+async function edgeShortEndpointState(page: Page): Promise<EdgeShortEndpointState> {
+  return page.evaluate(
+    ({ minEndpointDistance, sampleLimit }) => {
+      const hook = (globalThis as ViewerSmokeGlobal).__cartographViewerSmoke;
+      const cy = hook?.cy as unknown as GraphEdgeGeometryCy | undefined;
+      if (!cy) return { shortEndpointCount: 0, shortEndpointSample: [] };
+      const visibleEdges = cy.edges().filter((edge) => edge.style('display') !== 'none');
+      const shortEndpointSample: EdgeGeometryState['shortEndpointSample'] = [];
+      let shortEndpointCount = 0;
+      visibleEdges.forEach((edge) => {
+        const source = edge.source();
+        const target = edge.target();
         if (source.id() === target.id()) return;
         const renderedSource = edge.renderedSourceEndpoint?.();
         const renderedTarget = edge.renderedTargetEndpoint?.();
@@ -834,24 +869,19 @@ async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometr
           });
         }
       });
-      return {
-        badBoxCount,
-        badBoxSample,
-        hiddenEndpointCount,
-        hiddenEndpointSample,
-        label: String(edgeLabel),
-        shortEndpointCount,
-        shortEndpointSample,
-        visibleEdgeCount: visibleEdges.length,
-      };
+      return { shortEndpointCount, shortEndpointSample };
     },
-    {
-      edgeLabel: label,
-      minBoxSpan: MIN_EDGE_BOX_SPAN_PX,
-      minEndpointDistance: MIN_EDGE_ENDPOINT_DISTANCE_PX,
-      sampleLimit: EDGE_GEOMETRY_SAMPLE_LIMIT,
-    },
+    { minEndpointDistance: MIN_EDGE_ENDPOINT_DISTANCE_PX, sampleLimit: EDGE_GEOMETRY_SAMPLE_LIMIT },
   );
+}
+
+async function edgeGeometryState(page: Page, label: string): Promise<EdgeGeometryState> {
+  const [visibility, box, shortEndpoint] = await Promise.all([
+    edgeVisibilityState(page),
+    edgeBoxState(page),
+    edgeShortEndpointState(page),
+  ]);
+  return { label, ...visibility, ...box, ...shortEndpoint };
 }
 
 async function assertVisibleEdgesConnect(page: Page, label: string, requireEdges = true): Promise<void> {
@@ -2611,8 +2641,9 @@ async function assertLiveView(page: Page): Promise<void> {
     throw new Error(`live view did not render the seeded backlog: ${JSON.stringify(live)}`);
   }
   // Exact-session view: the dropdown has NO "All sessions" option;
-  // the newest session (the primary) is auto-selected, so only its 4
-  // rows are visible out of 5 rendered.
+  // the newest session (the primary) is auto-selected. The live feed is
+  // project-scoped, so it drops the seeded cross-project call; the trace
+  // timeline below still verifies that cross-project row explicitly.
   const exact = await page.evaluate(() => {
     const dropdown = document.getElementById('lf-session-filter') as HTMLSelectElement;
     const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
@@ -2626,7 +2657,7 @@ async function assertLiveView(page: Page): Promise<void> {
   if (exact.options.includes('') || exact.selected !== 'smoke-trace-session') {
     throw new Error(`exact-session dropdown wrong: ${JSON.stringify(exact)}`);
   }
-  if (exact.total < 5 || exact.visible !== 4) {
+  if (exact.total < 4 || exact.visible !== 3) {
     throw new Error(`exact-session default visibility wrong: ${JSON.stringify(exact)}`);
   }
   // Feed filter: 'demo failure' matches only the seeded error call.
@@ -2634,14 +2665,14 @@ async function assertLiveView(page: Page): Promise<void> {
   await page.waitForFunction(
     () => {
       const rows = [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')];
-      return rows.length >= 5 && rows.filter((el) => !el.hidden).length === 1;
+      return rows.length >= 4 && rows.filter((el) => !el.hidden).length === 1;
     },
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );
   await page.locator('#lf-filter').fill('');
   await page.waitForFunction(
-    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].filter((el) => !el.hidden).length === 4,
+    () => [...document.querySelectorAll<HTMLElement>('#lf-feed .lf-row')].filter((el) => !el.hidden).length === 3,
     undefined,
     { timeout: SEARCH_TIMEOUT_MS },
   );

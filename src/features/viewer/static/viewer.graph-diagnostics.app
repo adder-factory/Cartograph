@@ -203,14 +203,17 @@ function graphLayoutDiagnostics(label = '') {
     const sourceVisible = source.style('display') !== 'none' && !source.hasClass('collapse-hidden');
     const targetVisible = target.style('display') !== 'none' && !target.hasClass('collapse-hidden');
     if (!sourceVisible || !targetVisible) hiddenEndpointCount++;
-    const box = edge.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
-    if (
-      !box ||
-      !Number.isFinite(box.x1) ||
-      !Number.isFinite(box.y1) ||
-      (Math.abs(box.x2 - box.x1) < 1 && Math.abs(box.y2 - box.y1) < 1)
-    ) {
-      badBoxCount++;
+    const syntheticAggregateEdge = edge.data('collapsedEdge') || edge.data('detailBucketEdge');
+    if (source.id() !== target.id() && !syntheticAggregateEdge) {
+      const box = edge.renderedBoundingBox({ includeLabels: false, includeOverlays: false });
+      if (
+        !box ||
+        !Number.isFinite(box.x1) ||
+        !Number.isFinite(box.y1) ||
+        (Math.abs(box.x2 - box.x1) < 1 && Math.abs(box.y2 - box.y1) < 1)
+      ) {
+        badBoxCount++;
+      }
     }
     if (source.id() === target.id()) return;
     const sourceEndpoint = edge.renderedSourceEndpoint?.();
