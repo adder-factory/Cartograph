@@ -75,6 +75,71 @@ describe('runDoctor — embedding endpoint reachability', () => {
     expect(embCheck!.detail).toMatch(/1 model loaded/);
   });
 
+  it('reports ok when configured openai-compat endpoint requires bearer auth', async () => {
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        const url = new URL(req.url);
+        if (url.pathname !== '/v1/models') return new Response('not found', { status: 404 });
+        if (req.headers.get('authorization') !== 'Bearer doctor-token') {
+          return Response.json({ error: 'missing token' }, { status: 401 });
+        }
+        return Response.json({ data: [{ id: 'private-embedding-model', object: 'model' }] });
+      },
+    });
+    const mock = { url: `http://localhost:${server.port}`, stop: () => server.stop() };
+    servers.push(mock);
+    await writeConfig({
+      provider: 'openai-compat',
+      endpoint: mock.url,
+      model: 'private-embedding-model',
+      apiKey: 'doctor-token',
+      externallyManaged: true,
+    });
+
+    const result = await runDoctor({ projectPath });
+    const embCheck = result.checks.find((c) => c.name === 'Embedding endpoint');
+    expect(embCheck).toBeDefined();
+    expect(embCheck!.status).toBe('ok');
+    expect(embCheck!.detail).toContain(mock.url);
+    expect(embCheck!.detail).toMatch(/1 model loaded/);
+  });
+
+  it('passes OPENROUTER_API_KEY when scanning a configured OpenRouter chat endpoint', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    const realFetch = globalThis.fetch;
+    const seenAuth: string[] = [];
+    process.env.OPENROUTER_API_KEY = 'or-doctor-token';
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = String(input);
+      if (url !== 'https://openrouter.ai/api/v1/models') {
+        return new Response('not found', { status: 404 });
+      }
+      seenAuth.push(new Headers(init?.headers).get('authorization') ?? '');
+      return Response.json({ data: [{ id: 'openrouter-chat-model', object: 'model' }] });
+    }) as typeof fetch;
+    try {
+      await writeLlmConfig({
+        summarizeLlm: {
+          provider: 'openai-compat',
+          endpoint: 'https://openrouter.ai/api',
+          model: 'google/gemini-2.5-flash-lite',
+        },
+      });
+
+      const result = await runDoctor({ projectPath });
+
+      expect(seenAuth).toEqual(['Bearer or-doctor-token']);
+      const backendCheck = result.checks.find((c) => c.name === 'Detected LLM backends');
+      expect(backendCheck).toBeDefined();
+      expect(backendCheck!.detail).toContain('https://openrouter.ai/api');
+    } finally {
+      globalThis.fetch = realFetch;
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
   it('reports warn when configured openai-compat endpoint is unreachable', async () => {
     // Don't start a mock — point at an unbound port.
     await writeConfig({ provider: 'openai-compat', endpoint: 'http://localhost:1', model: 'jina' });

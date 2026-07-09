@@ -227,7 +227,7 @@ function isOpenRouterEndpoint(endpoint: string): boolean {
   }
 }
 
-function resolveOpenAiCompatApiKey(
+export function resolveOpenAiCompatApiKey(
   configuredApiKey: string | undefined,
   endpoint: string | undefined,
 ): string | undefined {

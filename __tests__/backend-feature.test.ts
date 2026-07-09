@@ -9,6 +9,7 @@ import {
   type BackendLogsReport,
   buildBackendProcessSpecs,
   configuredEndpointsFromLlm,
+  configuredEndpointProbesFromLlm,
   configuredModelFilesFromLlm,
   renderBackendStartCommand,
   startBackends,
@@ -273,6 +274,57 @@ describe('buildBackendProcessSpecs — per-tier llama-server tuning (issue #24)'
     });
   });
 
+  it('uses OPENROUTER_API_KEY for configured OpenRouter endpoint probes', () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'or-probe-token';
+    try {
+      expect(
+        configuredEndpointProbesFromLlm({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            endpoint: 'https://openrouter.ai/api',
+            model: 'google/gemini-2.5-flash-lite',
+          },
+        }),
+      ).toEqual([{ endpoint: 'https://openrouter.ai/api', apiKey: 'or-probe-token' }]);
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
+  it('does not use OPENROUTER_API_KEY for non-OpenRouter endpoint probes', () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'or-must-not-leak';
+    try {
+      expect(
+        configuredEndpointProbesFromLlm({
+          summarizeLlm: {
+            provider: 'openai-compat',
+            endpoint: 'https://private.example.test',
+            model: 'qwen',
+          },
+        }),
+      ).toEqual([{ endpoint: 'https://private.example.test' }]);
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
+  it('does not forward non-openai provider apiKey values to endpoint probes', () => {
+    expect(
+      configuredEndpointProbesFromLlm({
+        summarizeLlm: {
+          provider: 'anthropic-api',
+          endpoint: 'https://private.example.test',
+          model: 'claude-sonnet-4-5',
+          apiKey: 'anthropic-provider-secret',
+        },
+      }),
+    ).toEqual([{ endpoint: 'https://private.example.test' }]);
+  });
+
   it('drives --parallel from a concurrency override (lets llm-tune cut KV memory)', () => {
     const specs = buildBackendProcessSpecs(chatLlm({ concurrency: 1 }));
     expect(specs).toHaveLength(1);
@@ -518,6 +570,31 @@ describe('backend restart + drift + externallyManaged (issue #30)', () => {
   function pidFileCount(project: string): number {
     return fs.readdirSync(path.join(project, '.cartograph', 'backends')).filter((f) => f.endsWith('.json')).length;
   }
+
+  it('passes configured bearer auth into backend status reachability probes', async () => {
+    let seenProbes: readonly (string | scanBackends.ExtraBackendProbe)[] | undefined;
+    vi.spyOn(scanBackends, 'scanForLlmBackends').mockImplementation(async (extraEndpoints = []) => {
+      seenProbes = extraEndpoints;
+      return [{ kind: 'llama-server', endpoint: 'http://localhost:8080', models: ['private-embed'] }];
+    });
+    const project = makeProject();
+    const model = path.join(project, 'embed.gguf');
+    fs.writeFileSync(model, 'x');
+    writeConfig(project, {
+      embeddingLlm: {
+        provider: 'openai-compat',
+        endpoint: 'http://localhost:8080/',
+        model,
+        apiKey: 'backend-status-token',
+      },
+    });
+
+    const status = await backendStatus(project);
+
+    expect(seenProbes).toEqual([{ endpoint: 'http://localhost:8080', apiKey: 'backend-status-token' }]);
+    expect(status.rows).toHaveLength(1);
+    expect(status.rows[0]!.endpointReachable).toBe(true);
+  });
 
   it('flags config drift when a live managed backend was started with different args', async () => {
     vi.spyOn(scanBackends, 'scanForLlmBackends').mockResolvedValue([]);

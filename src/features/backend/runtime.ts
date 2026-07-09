@@ -21,6 +21,7 @@ import { LLAMA_SERVER_RERANK_FLAG } from '../../installer/llm-setup-catalog.js';
 import { recommendedTuning } from '../../installer/hardware-tuning.js';
 import { normaliseEndpoint, scanForLlmBackends } from '../../installer/scan-backends.js';
 import { asJsonObject } from '../../json-object.js';
+import { resolveOpenAiCompatApiKey } from '../../llm/provider.js';
 
 export const LLM_TIER_KEYS = [
   'summarizeLlm',
@@ -206,16 +207,45 @@ export function configuredModelFilesFromLlm(llm: Record<string, unknown> | null)
 }
 
 export function configuredEndpointsFromLlm(llm: Record<string, unknown> | null): string[] {
+  return configuredEndpointProbesFromLlm(llm).map((probe) => probe.endpoint);
+}
+
+export interface ConfiguredEndpointProbe {
+  readonly endpoint: string;
+  readonly apiKey?: string;
+}
+
+export function configuredEndpointProbesFromLlm(llm: Record<string, unknown> | null): ConfiguredEndpointProbe[] {
   const root = asJsonObject(llm);
   if (!root) return [];
-  const endpoints: string[] = [];
+  const endpoints = new Map<string, ConfiguredEndpointProbe>();
   for (const tier of LLM_TIER_KEYS) {
     const cfg = ownObjectField(root, tier);
     if (!cfg) continue;
-    const endpoint = ownField(cfg, 'endpoint');
-    if (typeof endpoint === 'string' && endpoint.length > 0) endpoints.push(endpoint);
+    const probe = configuredEndpointProbeFromTier(cfg);
+    if (!probe) continue;
+    const existing = endpoints.get(probe.endpoint);
+    if (shouldReplaceConfiguredEndpointProbe(existing, probe)) endpoints.set(probe.endpoint, probe);
   }
-  return [...new Set(endpoints)];
+  return [...endpoints.values()];
+}
+
+function configuredEndpointProbeFromTier(cfg: Record<string, unknown>): ConfiguredEndpointProbe | null {
+  const endpoint = ownField(cfg, 'endpoint');
+  if (typeof endpoint !== 'string' || endpoint.length === 0) return null;
+
+  const configuredApiKey = ownField(cfg, 'apiKey');
+  const literalApiKey = typeof configuredApiKey === 'string' ? configuredApiKey : undefined;
+  const provider = ownField(cfg, 'provider');
+  const apiKey = provider === 'openai-compat' ? resolveOpenAiCompatApiKey(literalApiKey, endpoint) : undefined;
+  return typeof apiKey === 'string' && apiKey.length > 0 ? { endpoint, apiKey } : { endpoint };
+}
+
+function shouldReplaceConfiguredEndpointProbe(
+  existing: ConfiguredEndpointProbe | undefined,
+  candidate: ConfiguredEndpointProbe,
+): boolean {
+  return !existing || (!existing.apiKey && candidate.apiKey !== undefined);
 }
 
 export function readProjectLlm(projectPath: string): Record<string, unknown> | null {
@@ -340,7 +370,8 @@ export function renderBackendStartCommands(llm: Record<string, unknown> | null):
 
 export async function backendStatus(projectPath: string, options: { bin?: string } = {}): Promise<BackendStatusReport> {
   const stateDir = backendStateDir(projectPath);
-  const configSpecs = buildBackendProcessSpecs(readProjectLlm(projectPath), options);
+  const llm = readProjectLlm(projectPath);
+  const configSpecs = buildBackendProcessSpecs(llm, options);
   const knownIds = new Set(configSpecs.map((spec) => spec.id));
   const orphanSpecs = await discoverOrphanSpecs(stateDir, knownIds);
   if (configSpecs.length === 0 && orphanSpecs.length === 0) {
@@ -354,7 +385,17 @@ export async function backendStatus(projectPath: string, options: { bin?: string
   }
 
   const allSpecs = [...configSpecs, ...orphanSpecs];
-  const detected = await scanForLlmBackends(allSpecs.map((spec) => spec.endpoint)).catch(() => []);
+  const authenticatedEndpoints = new Map(
+    configuredEndpointProbesFromLlm(llm).flatMap((probe): [string, string][] =>
+      probe.apiKey ? [[normaliseEndpoint(probe.endpoint), probe.apiKey]] : [],
+    ),
+  );
+  const configProbes = configSpecs.map((spec): string | ConfiguredEndpointProbe => {
+    const apiKey = authenticatedEndpoints.get(normaliseEndpoint(spec.endpoint));
+    return apiKey ? { endpoint: spec.endpoint, apiKey } : spec.endpoint;
+  });
+  const orphanProbes = orphanSpecs.map((spec) => spec.endpoint);
+  const detected = await scanForLlmBackends([...configProbes, ...orphanProbes]).catch(() => []);
   const reachableEndpoints = new Set(detected.map((backend) => backend.endpoint));
   const rows = await Promise.all(
     allSpecs.map((spec, index) =>

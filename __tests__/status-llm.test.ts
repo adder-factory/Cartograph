@@ -39,6 +39,67 @@ describe('status LLM rendering', () => {
     expect(text).not.toContain('partially offline');
   });
 
+  it('passes configured bearer auth when probing a protected endpoint', async () => {
+    const cfg: LlmEndpointConfig = {
+      summarizeLlm: {
+        provider: 'openai-compat',
+        endpoint: 'https://private.example.test',
+        model: 'qwen',
+        apiKey: 'status-token',
+      },
+      embeddingLlm: {
+        provider: 'openai-compat',
+        endpoint: 'https://private.example.test',
+        model: 'nomic',
+        apiKey: 'status-token',
+      },
+    };
+    const seenAuth: string[] = [];
+    const fetchImpl = async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      seenAuth.push(headers.get('authorization') ?? '');
+      return new Response('{}', { status: 200 });
+    };
+
+    const text = (await renderReachabilitySection(cfg, fetchImpl as typeof fetch)).join('\n');
+
+    expect(seenAuth).toEqual(['Bearer status-token']);
+    expect(text).toContain('✓ **embed**');
+    expect(text).toContain('✓ **chat**');
+    expect(text).not.toContain('partially offline');
+  });
+
+  it('passes OPENROUTER_API_KEY when probing a configured OpenRouter endpoint', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    process.env.OPENROUTER_API_KEY = 'or-status-token';
+    try {
+      const cfg: LlmEndpointConfig = {
+        summarizeLlm: {
+          provider: 'openai-compat',
+          endpoint: 'https://openrouter.ai/api',
+          model: 'google/gemini-2.5-flash-lite',
+        },
+      };
+      const seen: Array<{ url: string; auth: string }> = [];
+      const fetchImpl = async (input: RequestInfo | URL, init?: RequestInit) => {
+        seen.push({
+          url: String(input),
+          auth: new Headers(init?.headers).get('authorization') ?? '',
+        });
+        return new Response('{}', { status: 200 });
+      };
+
+      const text = (await renderReachabilitySection(cfg, fetchImpl as typeof fetch)).join('\n');
+
+      expect(seen).toEqual([{ url: 'https://openrouter.ai/api/v1/models', auth: 'Bearer or-status-token' }]);
+      expect(text).toContain('✓ **chat**');
+      expect(text).not.toContain('partially offline');
+    } finally {
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  });
+
   it('does not mark ask as missing when summarize can satisfy the fallback', () => {
     const text = collectMissingTierWarnings({
       summarizeWired: true,

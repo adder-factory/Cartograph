@@ -95,6 +95,17 @@ export interface DetectedBackend {
   readonly serverHeader?: string;
 }
 
+export interface ExtraBackendProbe {
+  readonly endpoint: string;
+  readonly apiKey?: string;
+}
+
+interface ProbeTarget {
+  readonly kind: DetectedBackendKind;
+  readonly endpoint: string;
+  readonly apiKey?: string;
+}
+
 /**
  * Probe all known ports in parallel for an OpenAI-compatible
  * `/v1/models` response. Returns the detected backends in arbitrary
@@ -108,18 +119,25 @@ export interface DetectedBackend {
  *   known-port list. Pass `[cfg.embeddingLlm.endpoint]` to also
  *   probe whatever the user has configured (useful for `doctor`).
  */
-export async function scanForLlmBackends(extraEndpoints: readonly string[] = []): Promise<DetectedBackend[]> {
-  const targets: Array<{ kind: DetectedBackendKind; endpoint: string }> = [
-    ...SCAN_TARGETS.map((t) => ({ kind: t.kind, endpoint: t.endpoint })),
-  ];
+export async function scanForLlmBackends(
+  extraEndpoints: readonly (string | ExtraBackendProbe)[] = [],
+): Promise<DetectedBackend[]> {
+  const targets: ProbeTarget[] = [...SCAN_TARGETS.map((t) => ({ kind: t.kind, endpoint: t.endpoint }))];
+  const targetIndexes = new Map(targets.map((target, index) => [normaliseEndpoint(target.endpoint), index]));
   // Add any extra user-configured endpoints that aren't already in the
-  // known-port list — dedup by endpoint URL.
-  const known = new Set(targets.map((t) => normaliseEndpoint(t.endpoint)));
-  for (const ep of extraEndpoints) {
-    const n = normaliseEndpoint(ep);
-    if (!known.has(n)) {
-      targets.push({ kind: 'unknown', endpoint: n });
-      known.add(n);
+  // known-port list. If a configured endpoint matches a known target,
+  // merge its bearer token into that known target rather than dropping
+  // the authenticated probe.
+  for (const extra of extraEndpoints) {
+    const endpoint = typeof extra === 'string' ? extra : extra.endpoint;
+    const n = normaliseEndpoint(endpoint);
+    const apiKey = typeof extra === 'string' ? undefined : extra.apiKey;
+    const existingIndex = targetIndexes.get(n);
+    if (existingIndex === undefined) {
+      targets.push(apiKey ? { kind: 'unknown', endpoint: n, apiKey } : { kind: 'unknown', endpoint: n });
+      targetIndexes.set(n, targets.length - 1);
+    } else if (apiKey) {
+      targets[existingIndex] = { ...targets[existingIndex]!, apiKey };
     }
   }
 
@@ -134,13 +152,19 @@ interface OpenAiModelsResponse {
 /** Probe a single endpoint. Returns null when the endpoint doesn't
  *  respond, returns non-2xx, or returns a non-JSON body. Returns a
  *  `DetectedBackend` on success. */
-async function probeOne(target: { kind: DetectedBackendKind; endpoint: string }): Promise<DetectedBackend | null> {
+async function probeOne(target: ProbeTarget): Promise<DetectedBackend | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
   try {
-    const res = await fetch(`${target.endpoint}/v1/models`, {
+    const init: RequestInit = {
       method: 'GET',
       signal: controller.signal,
+    };
+    if (target.apiKey) {
+      init.headers = { Authorization: `Bearer ${target.apiKey}` };
+    }
+    const res = await fetch(`${target.endpoint}/v1/models`, {
+      ...init,
     });
     if (!res.ok) return null;
     let body: OpenAiModelsResponse;

@@ -58,6 +58,51 @@ describe('scanForLlmBackends', () => {
     expect(match!.models).toEqual(['model-a', 'model-b']);
   });
 
+  it('passes bearer auth when an explicitly-passed extra endpoint has an apiKey', async () => {
+    const server = startMockServer((req) => {
+      if (req.headers.get('authorization') !== 'Bearer scanner-token') {
+        return Response.json({ error: 'missing token' }, { status: 401 });
+      }
+      return Response.json({ data: [{ id: 'private-model', object: 'model' }] });
+    });
+    servers.push(server);
+
+    const result = await scanForLlmBackends([{ endpoint: server.url, apiKey: 'scanner-token' }]);
+
+    const match = result.find((d) => d.endpoint === server.url);
+    expect(match).toBeDefined();
+    expect(match!.models).toEqual(['private-model']);
+  });
+
+  it('passes bearer auth when a configured extra endpoint normalizes to a built-in target', async () => {
+    const realFetch = globalThis.fetch;
+    const seenAuth: string[] = [];
+    try {
+      globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+        const url = String(input);
+        if (url !== 'http://localhost:8080/v1/models') {
+          return new Response('not found', { status: 404 });
+        }
+        const auth = new Headers(init?.headers).get('authorization') ?? '';
+        seenAuth.push(auth);
+        if (auth !== 'Bearer known-target-token') {
+          return Response.json({ error: 'missing token' }, { status: 401 });
+        }
+        return Response.json({ data: [{ id: 'private-known-target-model', object: 'model' }] });
+      }) as typeof fetch;
+
+      const result = await scanForLlmBackends([{ endpoint: 'http://localhost:8080/', apiKey: 'known-target-token' }]);
+
+      const match = result.find((d) => d.endpoint === 'http://localhost:8080');
+      expect(match).toBeDefined();
+      expect(match!.kind).toBe('llama-server');
+      expect(match!.models).toEqual(['private-known-target-model']);
+      expect(seenAuth).toEqual(['Bearer known-target-token']);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   it('identifies the backend from the Server header when port-based fallback would be "unknown"', async () => {
     const server = startMockServer(() => {
       const headers = new Headers({ Server: 'ollama-server/0.1.0' });

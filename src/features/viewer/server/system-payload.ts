@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as crypto from 'node:crypto';
 import { resolveAssetPath } from '../../../assets.js';
 import { getCoverageStats } from '../../../db/queries-coverage.js';
 import { getAllDirectorySummaries } from '../../../db/queries-directory-summaries.js';
@@ -16,7 +17,7 @@ import { safeCall } from '../../../errors.js';
 import { getCurrentHeadSha } from '../../../git-utils.js';
 import type Cartograph from '../../../index.js';
 import type { LlmEndpointConfig } from '../../../llm/client.js';
-import { getAskModel, getChatModel, getEmbeddingModel } from '../../../llm/provider.js';
+import { getAskModel, getChatModel, getEmbeddingModel, resolveOpenAiCompatApiKey } from '../../../llm/provider.js';
 import { packageJsonDeclaresEsm } from '../../../package-manifest.js';
 import { readOnDiskPackageVersion } from '../../../package-version.js';
 import { DEFAULT_DOC_CHAR_THRESHOLD, resolveBodyLineFloor, SUMMARIZABLE_KINDS } from '../../../llm/summarizer.js';
@@ -314,6 +315,12 @@ async function buildLlm(cg: Cartograph): Promise<{ configured: boolean; tiers: S
 interface TierBlock {
   provider?: string;
   endpoint?: string;
+  apiKey?: string;
+}
+
+interface ReachabilityEndpoint {
+  endpoint: string;
+  apiKey?: string;
 }
 
 interface BuildTierArgs {
@@ -349,28 +356,33 @@ function buildTier(args: BuildTierArgs): SystemLlmTier {
 let cachedReach: { key: string; map: Map<string, boolean>; atMs: number } | undefined;
 const REACHABILITY_CACHE_TTL_MS = 15_000;
 async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string, boolean>> {
-  const endpoints = collectOpenAiCompatEndpoints(llmCfg);
+  const endpoints = collectOpenAiCompatEndpointProbes(llmCfg);
   if (endpoints.length === 0) return new Map();
   // Key the cache by the exact endpoint set so a config change (or a
   // different project served by the same process) re-probes immediately
   // instead of returning a stale map; the TTL only bounds same-set reuse.
   // Sort a copy: the spread keeps the mutating `.sort()` off the array we
   // iterate below (Sonar S4043) and the comparator is deterministic (S2871).
-  const key = [...endpoints].sort((a, b) => a.localeCompare(b)).join('\n');
+  const key = endpoints
+    .map(reachabilityCacheKey)
+    .sort((a, b) => a.localeCompare(b))
+    .join('\n');
   const now = Date.now();
   if (cachedReach?.key === key && now - cachedReach.atMs < REACHABILITY_CACHE_TTL_MS) {
     return cachedReach.map;
   }
   const probes = await Promise.all(
-    endpoints.map(async (url) => {
+    endpoints.map(async ({ endpoint, apiKey }) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), REACHABILITY_TIMEOUT_MS);
       try {
-        const probeUrl = `${url.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/models`;
-        const res = await fetch(probeUrl, { signal: controller.signal });
-        return [url, res.ok] as const;
+        const probeUrl = `${endpoint.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/models`;
+        const init: RequestInit = { signal: controller.signal };
+        if (apiKey) init.headers = { Authorization: `Bearer ${apiKey}` };
+        const res = await fetch(probeUrl, init);
+        return [endpoint, res.ok] as const;
       } catch {
-        return [url, false] as const;
+        return [endpoint, false] as const;
       } finally {
         clearTimeout(timer);
       }
@@ -380,16 +392,27 @@ async function probeReachability(llmCfg: LlmEndpointConfig): Promise<Map<string,
   return cachedReach.map;
 }
 
-function collectOpenAiCompatEndpoints(llmCfg: LlmEndpointConfig): string[] {
-  const endpoints = new Set<string>();
+function collectOpenAiCompatEndpointProbes(llmCfg: LlmEndpointConfig): ReachabilityEndpoint[] {
+  const endpoints = new Map<string, ReachabilityEndpoint>();
   const collect = (block: TierBlock | null | undefined): void => {
     if (block?.provider === 'openai-compat' && typeof block.endpoint === 'string' && block.endpoint.length > 0) {
-      endpoints.add(block.endpoint);
+      const apiKey = resolveOpenAiCompatApiKey(block.apiKey, block.endpoint);
+      const candidate = apiKey ? { endpoint: block.endpoint, apiKey } : { endpoint: block.endpoint };
+      const existing = endpoints.get(block.endpoint);
+      if (!existing || (!existing.apiKey && candidate.apiKey)) endpoints.set(block.endpoint, candidate);
     }
   };
   collect(llmCfg.summarizeLlm);
   collect(llmCfg.askLlm);
   collect(llmCfg.embeddingLlm);
   collect(llmCfg.rerankerLlm);
-  return [...endpoints];
+  return [...endpoints.values()];
+}
+
+function reachabilityCacheKey(probe: ReachabilityEndpoint): string {
+  return probe.apiKey ? `${probe.endpoint}\t${secretFingerprint(probe.apiKey)}` : probe.endpoint;
+}
+
+function secretFingerprint(secret: string): string {
+  return crypto.createHash('sha256').update(secret).digest('hex').slice(0, 16);
 }

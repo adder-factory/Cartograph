@@ -8,6 +8,7 @@
  * rollup is non-empty.
  */
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -110,6 +111,78 @@ export function compute(x: number, y: number): number {
     expect(chat?.model).toBe('test-model');
     expect(chat?.reachable).toBe(false);
   }, 30_000);
+
+  it('authenticates viewer system reachability probes with configured apiKey', async () => {
+    const seenAuth: string[] = [];
+    const server = Bun.serve({
+      port: 0,
+      fetch(req) {
+        if (new URL(req.url).pathname !== '/v1/models') return new Response('not found', { status: 404 });
+        seenAuth.push(req.headers.get('authorization') ?? '');
+        if (req.headers.get('authorization') !== 'Bearer viewer-system-token') {
+          return Response.json({ error: 'missing token' }, { status: 401 });
+        }
+        return Response.json({ data: [{ id: 'private-viewer-model', object: 'model' }] });
+      },
+    });
+    const privateEndpoint = `http://localhost:${server.port}`;
+    const scoped = await startSystemViewer({
+      summarizeLlm: {
+        provider: 'openai-compat',
+        model: 'private-viewer-model',
+        endpoint: privateEndpoint,
+        apiKey: 'viewer-system-token',
+      },
+    });
+    try {
+      const body = await fetchSystemPayload(scoped.handle);
+      const chat = body.llm?.tiers.find((t) => t.tier === 'chat');
+
+      expect(seenAuth).toEqual(['Bearer viewer-system-token']);
+      expect(chat?.endpoint).toBe(privateEndpoint);
+      expect(chat?.reachable).toBe(true);
+    } finally {
+      await scoped.handle.close();
+      fs.rmSync(scoped.testDir, { recursive: true, force: true });
+      server.stop();
+    }
+  }, 30_000);
+
+  it('authenticates viewer system reachability probes with OPENROUTER_API_KEY', async () => {
+    const saved = process.env.OPENROUTER_API_KEY;
+    const realFetch = globalThis.fetch;
+    const seenAuth: string[] = [];
+    process.env.OPENROUTER_API_KEY = 'or-viewer-system-token';
+    globalThis.fetch = (async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+      const url = String(input);
+      if (url === 'https://openrouter.ai/api/v1/models') {
+        seenAuth.push(new Headers(init?.headers).get('authorization') ?? '');
+        return Response.json({ data: [{ id: 'openrouter-viewer-model', object: 'model' }] });
+      }
+      return realFetch(input, init);
+    }) as typeof fetch;
+    const scoped = await startSystemViewer({
+      summarizeLlm: {
+        provider: 'openai-compat',
+        model: 'google/gemini-2.5-flash-lite',
+        endpoint: 'https://openrouter.ai/api',
+      },
+    });
+    try {
+      const body = await fetchSystemPayload(scoped.handle);
+      const chat = body.llm?.tiers.find((t) => t.tier === 'chat');
+
+      expect(seenAuth).toEqual(['Bearer or-viewer-system-token']);
+      expect(chat?.endpoint).toBe('https://openrouter.ai/api');
+      expect(chat?.reachable).toBe(true);
+    } finally {
+      await scoped.handle.close();
+      fs.rmSync(scoped.testDir, { recursive: true, force: true });
+      globalThis.fetch = realFetch;
+      if (saved === undefined) delete process.env.OPENROUTER_API_KEY;
+      else process.env.OPENROUTER_API_KEY = saved;
+    }
+  }, 30_000);
 });
 
 function apiFetch(handle: ViewerHandle, pathOrUrl: string): Promise<Response> {
@@ -117,4 +190,36 @@ function apiFetch(handle: ViewerHandle, pathOrUrl: string): Promise<Response> {
     headers: { 'x-cartograph-viewer-token': handle.apiToken },
     signal: AbortSignal.timeout(20_000),
   });
+}
+
+async function fetchSystemPayload(handle: ViewerHandle): Promise<SystemPayload> {
+  const res = await apiFetch(handle, 'api/system');
+  expect(res.status).toBe(200);
+  return (await res.json()) as SystemPayload;
+}
+
+async function startSystemViewer(llm: Record<string, unknown>): Promise<{ handle: ViewerHandle; testDir: string }> {
+  const scopedDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'cartograph-viewer-system-auth-'));
+  await fsp.mkdir(path.join(scopedDir, 'src'), { recursive: true });
+  await fsp.writeFile(
+    path.join(scopedDir, 'src', 'lib.ts'),
+    `
+export function authFixture(value: number): number {
+  return value + 1;
+}
+`,
+  );
+  const cg = Cartograph.initSync(scopedDir, {
+    config: {
+      include: ['src/**/*.ts'],
+      exclude: [],
+      llm,
+    },
+  });
+  try {
+    await cg.indexAll();
+  } finally {
+    cg.close();
+  }
+  return { testDir: scopedDir, handle: await startViewerServer(scopedDir, { port: 0 }) };
 }

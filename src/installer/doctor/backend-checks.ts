@@ -4,6 +4,7 @@ import {
   normaliseEndpoint,
   scanForLlmBackends,
   type DetectedBackend,
+  type ExtraBackendProbe,
 } from '../scan-backends.js';
 import { LLAMA_SERVER_DEFAULT_ENDPOINT } from '../default-endpoints.js';
 import { describeHardware, recommendedTuning } from '../hardware-tuning.js';
@@ -24,7 +25,9 @@ interface EmbeddingReachabilityCheckArgs {
   readonly llm: Record<string, unknown> | null;
 }
 
-export async function detectBackends(configuredEndpoints: readonly string[] = []): Promise<DetectedBackend[]> {
+export async function detectBackends(
+  configuredEndpoints: readonly (string | ExtraBackendProbe)[] = [],
+): Promise<DetectedBackend[]> {
   try {
     return await scanForLlmBackends(configuredEndpoints);
   } catch {

@@ -1,8 +1,14 @@
-import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
+import { getAskModel, getChatModel, getEmbeddingModel, resolveOpenAiCompatApiKey } from '../../llm/provider.js';
 import type { LlmEndpointConfig } from '../../llm/client.js';
 import type Cartograph from '../../index.js';
 
 type FetchLike = typeof fetch;
+
+interface ReachabilityEndpoint {
+  readonly tier: string;
+  readonly endpoint: string;
+  readonly apiKey?: string;
+}
 
 /**
  * Surface LLM provider routing. Without this an agent has no way to
@@ -71,17 +77,21 @@ export async function renderReachabilitySection(
   const endpoints = collectReachabilityEndpoints(llmCfg);
   if (endpoints.length === 0) return [];
 
-  const distinctEndpoints = [...new Set(endpoints.map((e) => e.endpoint))];
+  const distinctEndpoints = collectDistinctEndpointProbes(endpoints);
   const probes = await Promise.all(
-    distinctEndpoints.map(async (url) => {
+    distinctEndpoints.map(async ({ endpoint, apiKey }) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 1500);
       try {
-        const probeUrl = `${url.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/models`;
-        const res = await fetchImpl(probeUrl, { signal: controller.signal });
-        return { url, ok: res.ok };
+        const probeUrl = `${endpoint.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/models`;
+        const init: RequestInit = { signal: controller.signal };
+        if (apiKey) {
+          init.headers = { Authorization: `Bearer ${apiKey}` };
+        }
+        const res = await fetchImpl(probeUrl, init);
+        return { url: endpoint, ok: res.ok };
       } catch {
-        return { url, ok: false };
+        return { url: endpoint, ok: false };
       } finally {
         clearTimeout(timer);
       }
@@ -107,11 +117,26 @@ export async function renderReachabilitySection(
   return out;
 }
 
-function collectReachabilityEndpoints(llmCfg: LlmEndpointConfig): Array<{ tier: string; endpoint: string }> {
-  const endpoints: Array<{ tier: string; endpoint: string }> = [];
-  const collect = (tier: string, block: { provider?: string; endpoint?: string } | null | undefined): void => {
+function collectDistinctEndpointProbes(endpoints: readonly ReachabilityEndpoint[]): ReachabilityEndpoint[] {
+  const probes = new Map<string, ReachabilityEndpoint>();
+  for (const endpoint of endpoints) {
+    const existing = probes.get(endpoint.endpoint);
+    if (!existing || (!existing.apiKey && endpoint.apiKey)) {
+      probes.set(endpoint.endpoint, endpoint);
+    }
+  }
+  return [...probes.values()];
+}
+
+function collectReachabilityEndpoints(llmCfg: LlmEndpointConfig): ReachabilityEndpoint[] {
+  const endpoints: ReachabilityEndpoint[] = [];
+  const collect = (
+    tier: string,
+    block: { provider?: string; endpoint?: string; apiKey?: string } | null | undefined,
+  ): void => {
     if (block?.provider === 'openai-compat' && typeof block.endpoint === 'string' && block.endpoint.length > 0) {
-      endpoints.push({ tier, endpoint: block.endpoint });
+      const apiKey = resolveOpenAiCompatApiKey(block.apiKey, block.endpoint);
+      endpoints.push(apiKey ? { tier, endpoint: block.endpoint, apiKey } : { tier, endpoint: block.endpoint });
     }
   };
   collect('embed', llmCfg.embeddingLlm);

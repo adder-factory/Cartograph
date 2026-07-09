@@ -1,5 +1,5 @@
 import * as path from 'node:path';
-import { configuredEndpointsFromLlm } from '../../features/backend/index.js';
+import { configuredEndpointProbesFromLlm } from '../../features/backend/index.js';
 import { inspectGitHooksLiveness } from '../../features/git-hooks/index.js';
 import { asJsonObject } from '../../json-object.js';
 import {
@@ -46,7 +46,7 @@ export async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorRes
 
   checks.push(await checkModels(llm));
 
-  const detected = await detectBackends(configuredEndpointsFromLlm(llm));
+  const detected = await detectBackends(configuredEndpointProbesFromLlm(llm));
   checks.push(detectedBackendsCheck(detected));
   const embeddingLlm = ownObjectField(llm, 'embeddingLlm');
   const projectPathForChecks = projectChecks.projectPathForChecks;
