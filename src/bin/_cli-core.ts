@@ -25,7 +25,7 @@ import { isInitialized } from '../directory.js';
 import { compact } from '../utils.js';
 import { errMsg } from '../errors.js';
 import { getSummaryCoverage } from '../db/queries-summaries.js';
-import { contentDriftCount } from '../freshness.js';
+import { contentDriftCount, type FreshnessInfo } from '../freshness.js';
 import { SUMMARIZABLE_KINDS } from '../llm/summarizer.js';
 import { buildGeneratedCommand, type GenerateCommandOptions } from './_command-generator.js';
 import { getToolModules } from '../mcp/tools/registry.js';
@@ -33,6 +33,7 @@ import { getToolContract } from '../mcp/tools/_tool-contract.js';
 import { chalk, error, formatDuration, formatNumber } from './cli-output.js';
 import { CARTOGRAPH_PACKAGE_VERSION } from '../package-version.js';
 import type { ClackUi } from '../features/shared/clack-ui.js';
+import type { ToolResult } from '../mcp/tool-types.js';
 import type { QueryBuilder } from '../db/queries.js';
 import type { LlmEndpointConfig } from '../llm/client.js';
 
@@ -548,6 +549,55 @@ export interface McpCallResult {
   readonly contentDriftedFiles: number | null;
 }
 
+interface CliFreshnessReader {
+  readonly stats: {
+    getFreshness(): FreshnessInfo | null;
+  };
+}
+
+export interface CaptureMcpToolResultDeps {
+  readonly execute: () => Promise<ToolResult>;
+  readonly readContentDriftedFiles: () => number | null;
+  readonly closeToolHandler: () => void;
+}
+
+export function readContentDriftedFilesForCli(cg: CliFreshnessReader): number | null {
+  try {
+    const freshness = cg.stats.getFreshness();
+    return freshness && freshness.contentDriftedFiles !== null ? contentDriftCount(freshness) : null;
+  } catch {
+    // Freshness is a CLI-side hint, not part of the delegated tool result.
+    // If the backend was unavailable/closed while reading it, preserve the
+    // tool output and omit the hint instead of replacing a successful command.
+    return null;
+  }
+}
+
+export async function captureMcpToolResult(deps: CaptureMcpToolResultDeps): Promise<McpCallResult> {
+  try {
+    const result = await deps.execute();
+    let text = result.content[0]?.text ?? '';
+    let exitCode = 0;
+    if (result.isError) {
+      exitCode = 1;
+      const invalidArgsPrefix = /^Invalid arguments for `?cartograph_[A-Za-z_]+`?:\s*/;
+      if (text.startsWith('Error: ')) text = text.slice('Error: '.length);
+      text = text.replace(invalidArgsPrefix, '');
+      text = `${chalk.red('✗')} ${text}`;
+    }
+    if (exitCode !== 0) return { text, exitCode, contentDriftedFiles: null };
+    let drifted: number | null = null;
+    try {
+      drifted = deps.readContentDriftedFiles();
+    } catch {
+      drifted = null;
+    }
+    return { text, exitCode, contentDriftedFiles: drifted };
+  } finally {
+    deps.closeToolHandler();
+  }
+}
+
 /**
  * Variant of {@link runViaMCP} that RETURNS the tool's text + the
  * project's freshness reading instead of printing the text and
@@ -579,20 +629,11 @@ export async function runViaMCPCapture(
     // `coverage` and `role` remain callable even though the MCP server
     // defaults to the compressed `core` profile.
     const handler = new ToolHandler(cg, { profile: 'full' });
-    const result = await handler.execute(toolName, args);
-    handler.closeAll();
-    let text = result.content[0]?.text ?? '';
-    let exitCode = 0;
-    if (result.isError) {
-      exitCode = 1;
-      const invalidArgsPrefix = /^Invalid arguments for `?cartograph_[A-Za-z_]+`?:\s*/;
-      if (text.startsWith('Error: ')) text = text.slice('Error: '.length);
-      text = text.replace(invalidArgsPrefix, '');
-      text = `${chalk.red('✗')} ${text}`;
-    }
-    const freshness = cg.stats.getFreshness();
-    const drifted = freshness && freshness.contentDriftedFiles !== null ? contentDriftCount(freshness) : null;
-    return { text, exitCode, contentDriftedFiles: drifted };
+    return await captureMcpToolResult({
+      execute: () => handler.execute(toolName, args),
+      readContentDriftedFiles: () => readContentDriftedFilesForCli(cg),
+      closeToolHandler: () => handler.closeAll(),
+    });
   } finally {
     cg.close();
   }
@@ -638,33 +679,36 @@ export async function runViaMCP(
     // `coverage` and `role` remain callable even though the MCP server
     // defaults to the compressed `core` profile.
     const handler = new ToolHandler(cg, { profile: 'full' });
-    const result = await handler.execute(toolName, args);
-    handler.closeAll();
-    const text = result.content[0]?.text ?? '';
-    if (result.isError) {
-      exitCode = 1;
-      // Re-style raw MCP-layer error text into the CLI's `✗ ...` form
-      // so schema-validation / validateString failures don't surface
-      // as bare `Error: ...` while CLI-guard errors use `✗`. The MCP
-      // `errorResult` helper always prefixes `Error: `; schema
-      // failures additionally carry `Invalid arguments for
-      // cartograph_<tool>: `. Strip the generic `Error: ` first, then
-      // the internal tool-name prefix, so the surfaced message is the
-      // human-meaningful tail in both cases:
-      //   `Error: Invalid arguments for cartograph_<tool>: <rest>` → `✗ <rest>`
-      //   `Error: <rest>`                                         → `✗ <rest>`
-      const invalidArgsPrefix = /^Invalid arguments for `?cartograph_[A-Za-z_]+`?:\s*/;
-      let styled = text;
-      if (styled.startsWith('Error: ')) {
-        styled = styled.slice('Error: '.length);
+    try {
+      const result = await handler.execute(toolName, args);
+      const text = result.content[0]?.text ?? '';
+      if (result.isError) {
+        exitCode = 1;
+        // Re-style raw MCP-layer error text into the CLI's `✗ ...` form
+        // so schema-validation / validateString failures don't surface
+        // as bare `Error: ...` while CLI-guard errors use `✗`. The MCP
+        // `errorResult` helper always prefixes `Error: `; schema
+        // failures additionally carry `Invalid arguments for
+        // cartograph_<tool>: `. Strip the generic `Error: ` first, then
+        // the internal tool-name prefix, so the surfaced message is the
+        // human-meaningful tail in both cases:
+        //   `Error: Invalid arguments for cartograph_<tool>: <rest>` → `✗ <rest>`
+        //   `Error: <rest>`                                         → `✗ <rest>`
+        const invalidArgsPrefix = /^Invalid arguments for `?cartograph_[A-Za-z_]+`?:\s*/;
+        let styled = text;
+        if (styled.startsWith('Error: ')) {
+          styled = styled.slice('Error: '.length);
+        }
+        styled = styled.replace(invalidArgsPrefix, '');
+        // Either way this is an error result — render it in the `✗`
+        // style (the `else` covers an errorResult whose text carried
+        // neither the `Error: ` nor the `Invalid arguments` prefix).
+        error(styled);
+      } else {
+        process.stdout.write(text + '\n');
       }
-      styled = styled.replace(invalidArgsPrefix, '');
-      // Either way this is an error result — render it in the `✗`
-      // style (the `else` covers an errorResult whose text carried
-      // neither the `Error: ` nor the `Invalid arguments` prefix).
-      error(styled);
-    } else {
-      process.stdout.write(text + '\n');
+    } finally {
+      handler.closeAll();
     }
   } finally {
     cg.close();

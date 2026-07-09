@@ -7,6 +7,7 @@ import {
   attachUnknownActionHandler,
   assignFloatArg,
   assignIntArg,
+  captureMcpToolResult,
   createVerboseProgress,
   error,
   formatDuration,
@@ -15,12 +16,14 @@ import {
   installFamilyActionAlias,
   printIndexResult,
   resolveProjectPath,
+  readContentDriftedFilesForCli,
   runViaMCPCapture,
   success,
   warn,
   writeErrorLog,
   type IndexResult,
 } from '../src/bin/_cli-core.js';
+import type { FreshnessInfo } from '../src/freshness.js';
 
 function captureStdout(fn: () => void): string {
   let out = '';
@@ -93,6 +96,22 @@ function indexResult(overrides: Partial<IndexResult>): IndexResult {
   };
 }
 
+function freshnessInfo(overrides: Partial<FreshnessInfo>): FreshnessInfo {
+  return {
+    isStale: false,
+    indexedSha: 'indexed-sha',
+    currentSha: 'current-sha',
+    indexedAt: Date.now(),
+    filesChanged: 0,
+    breakdown: null,
+    commitsAhead: 0,
+    banner: null,
+    severity: 'fresh',
+    contentDriftedFiles: 0,
+    ...overrides,
+  };
+}
+
 describe('CLI core contracts', () => {
   afterEach(() => {
     process.exitCode = 0;
@@ -155,6 +174,59 @@ describe('CLI core contracts', () => {
     } finally {
       fs.rmSync(projectRoot, { recursive: true, force: true });
     }
+  });
+
+  it('captures MCP freshness before closing the handler-owned Cartograph handle', async () => {
+    const calls: string[] = [];
+    let closed = false;
+
+    const result = await captureMcpToolResult({
+      execute: async () => ({ content: [{ type: 'text', text: 'compare output' }] }),
+      readContentDriftedFiles: () => {
+        calls.push('freshness');
+        if (closed) throw new Error('PostgreSQL connection is closed');
+        return 2;
+      },
+      closeToolHandler: () => {
+        calls.push('close');
+        closed = true;
+      },
+    });
+
+    expect(result).toEqual({ text: 'compare output', exitCode: 0, contentDriftedFiles: 2 });
+    expect(calls).toEqual(['freshness', 'close']);
+  });
+
+  it('omits the optional MCP freshness hint when PostgreSQL has already closed the connection', async () => {
+    const closeToolHandler = vi.fn();
+
+    const result = await captureMcpToolResult({
+      execute: async () => ({ content: [{ type: 'text', text: 'compare output' }] }),
+      readContentDriftedFiles: () => {
+        throw new Error('PostgreSQL connection is closed');
+      },
+      closeToolHandler,
+    });
+
+    expect(result).toEqual({ text: 'compare output', exitCode: 0, contentDriftedFiles: null });
+    expect(closeToolHandler).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats CLI freshness probe failures as unavailable instead of replacing tool output', () => {
+    const contentDriftedFiles = readContentDriftedFilesForCli({
+      stats: {
+        getFreshness: () => {
+          throw new Error('PostgreSQL connection is closed');
+        },
+      },
+    });
+
+    expect(contentDriftedFiles).toBeNull();
+    expect(
+      readContentDriftedFilesForCli({
+        stats: { getFreshness: () => freshnessInfo({ contentDriftedFiles: 3 }) },
+      }),
+    ).toBe(3);
   });
 
   it('validates integer CLI options before assigning MCP args', () => {
