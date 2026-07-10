@@ -304,8 +304,11 @@ cartograph viewer .
 # open http://localhost:8765/
 ```
 
-The viewer is local-only and reads the same graph index as the CLI and MCP
-server. Node shapes encode symbol kinds (circles for callables, diamonds for
+The viewer enforces a loopback-only HTTP bind, self-hosts its browser assets,
+and reads the same graph index as the CLI and MCP server. Configured PostgreSQL
+or LLM endpoints may still be remote; System probes those LLM endpoints and Ask
+sends its selected context to the configured chat backend. Node shapes encode
+symbol kinds (circles for callables, diamonds for
 contracts, hexagons for routes, barrels for data stores), borders encode code
 health, and centrality-scaled halos make hub symbols stand out. Rails filter
 by kind, health, edge kind, and per-project file scope; built-in tools cover

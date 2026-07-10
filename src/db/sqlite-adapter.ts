@@ -54,6 +54,12 @@ export interface SqliteStatement {
 export interface SqliteDatabase {
   readonly dialect: 'sqlite' | 'postgres';
   prepare(sql: string): SqliteStatement;
+  /**
+   * Prepare a statement whose execution is enforced read-only by the
+   * underlying database, not merely screened by a SQL string classifier.
+   * Optional on structural test doubles; production adapters implement it.
+   */
+  prepareReadOnly?(sql: string): SqliteStatement;
   exec(sql: string): void;
   pragma<T = unknown>(str: string): T;
   transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T;
@@ -344,6 +350,10 @@ export class BunSqliteAdapter implements SqliteDatabase {
     };
   }
 
+  prepareReadOnly(sql: string): SqliteStatement {
+    return wrapSqliteReadOnlyStatement(this, this.prepare(sql));
+  }
+
   exec(sql: string): void {
     this._db.exec(sql);
   }
@@ -380,6 +390,46 @@ export class BunSqliteAdapter implements SqliteDatabase {
     this._db.close();
     this._open = false;
   }
+}
+
+function wrapSqliteReadOnlyStatement(db: SqliteDatabase, statement: SqliteStatement): SqliteStatement {
+  return {
+    run: (...params: unknown[]) => withSqliteQueryOnly(db, () => statement.run(...params)),
+    get: <TRow = unknown>(...params: unknown[]) => withSqliteQueryOnly(db, () => statement.get<TRow>(...params)),
+    all: <TRow = unknown>(...params: unknown[]) => withSqliteQueryOnly(db, () => statement.all<TRow>(...params)),
+    iterate: <TRow = unknown>(...params: unknown[]) => iterateSqliteQueryOnly<TRow>(db, statement, params),
+  };
+}
+
+function withSqliteQueryOnly<T>(db: SqliteDatabase, operation: () => T): T {
+  const wasQueryOnly = sqliteQueryOnlyEnabled(db);
+  if (!wasQueryOnly) db.pragma('query_only = ON');
+  try {
+    return operation();
+  } finally {
+    if (!wasQueryOnly && db.open) db.pragma('query_only = OFF');
+  }
+}
+
+function* iterateSqliteQueryOnly<TRow>(
+  db: SqliteDatabase,
+  statement: SqliteStatement,
+  params: unknown[],
+): IterableIterator<TRow> {
+  const wasQueryOnly = sqliteQueryOnlyEnabled(db);
+  if (!wasQueryOnly) db.pragma('query_only = ON');
+  try {
+    yield* statement.iterate<TRow>(...params);
+  } finally {
+    if (!wasQueryOnly && db.open) db.pragma('query_only = OFF');
+  }
+}
+
+function sqliteQueryOnlyEnabled(db: SqliteDatabase): boolean {
+  const row = db.pragma<unknown>('query_only');
+  if (typeof row === 'number') return row !== 0;
+  if (!isPlainObject(row)) return false;
+  return row['query_only'] === 1;
 }
 
 /**

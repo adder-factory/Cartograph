@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { DatabaseConnection } from '../src/db/index.js';
+import { ToolHandler } from '../src/mcp/tools.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import { getOutgoingEdges, insertEdges } from '../src/db/queries-edges.js';
 import { upsertFile } from '../src/db/queries-files.js';
@@ -127,6 +128,43 @@ describe('database provider selection', () => {
 });
 
 describePostgres('PostgreSQL database provider', () => {
+  it('discovers the active PostgreSQL schema through cartograph_sql', async () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-sql-schema-test-'));
+    currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+    const cg = Cartograph.initSync(currentDir, { config: { database } });
+    currentConn = cg.db;
+    const handler = new ToolHandler(cg, { profile: 'full' });
+
+    const result = await handler.execute('cartograph_sql', { schema: true, tables: ['nodes'] });
+    const text = result.content[0]?.text ?? '';
+
+    expect(result.isError).not.toBe(true);
+    expect(text).toContain('`nodes` (table)');
+    expect(text).toContain('CREATE TABLE "nodes"');
+    expect(text).toContain('file_path');
+    expect(text).not.toContain('no tables in this database');
+  });
+
+  it('enforces read-only execution at the PostgreSQL database boundary', () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-read-only-test-'));
+    currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+    const cg = Cartograph.initSync(currentDir, { config: { database } });
+    currentConn = cg.db;
+
+    expect(typeof cg.db.prepareReadOnly).toBe('function');
+    expect(() =>
+      cg.db
+        .prepareReadOnly(
+          "INSERT INTO nodes (id, kind, name, file_path) VALUES ('blocked', 'function', 'blocked', 'src/a.ts')",
+        )
+        .run(),
+    ).toThrow(/read-only transaction|cannot execute insert/i);
+
+    expect(cg.queries.getNodesByIds(['blocked']).size).toBe(0);
+  });
+
   it('finishes initialization from a hand-authored PostgreSQL config', () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-partial-test-'));
     currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
@@ -673,6 +711,41 @@ function seedEmbeddingGraph(cg: Cartograph): void {
 }
 
 describePgvector('PostgreSQL pgvector acceleration', () => {
+  it('serves graph direction=similar from pgvector without persisted edges', async () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pgvector-similar-tool-test-'));
+    currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    currentPostgresUrl = PGVECTOR_URL;
+    const database = { provider: 'postgres' as const, url: PGVECTOR_URL!, schema: currentSchema, pgvector: 'require' };
+    const cg = Cartograph.initSync(currentDir, {
+      config: {
+        database,
+        llm: {
+          embeddingLlm: {
+            provider: 'openai-compat',
+            endpoint: 'http://127.0.0.1:1',
+            model: VECTOR_MODEL,
+          },
+        },
+      },
+    });
+    currentConn = cg.db;
+    seedEmbeddingGraph(cg);
+    const handler = new ToolHandler(cg);
+
+    const result = await handler.execute('cartograph_graph', {
+      direction: 'similar',
+      start: 'VectorA',
+      k: 2,
+      minScore: VECTOR_MIN_SCORE,
+    });
+    const text = result.content[0]?.text ?? '';
+
+    expect(result.isError).not.toBe(true);
+    expect(text).toContain('**VectorB**');
+    expect(text).toContain('on-demand semantic KNN');
+    expect(text).not.toContain('No similar symbols found');
+  });
+
   it('mirrors symbol embeddings and builds similar_to edges without USearch', async () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pgvector-test-'));
     currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;

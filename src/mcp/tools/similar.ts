@@ -14,10 +14,10 @@
  *   1. Read existing `similar_to` outgoing edges. When present (a
  *      prior `build-similarity-edges` pass ran), return those — fast,
  *      no recompute, edge metadata carries the score.
- *   2. Otherwise fall back to on-demand vec0 KNN using the source's
- *      embedding. Slower per call but available without a separate
- *      admin pass; matches are degraded gracefully when the project
- *      has no embeddings (returns a clear "no embeddings" message).
+ *   2. Otherwise use the shared on-demand semantic cascade (pgvector,
+ *      HNSW, vec0, then in-memory cosine). Slower per call but available
+ *      without a separate admin pass; missing embeddings degrade to an
+ *      empty result with a clear hint.
  *
  * Multi-symbol form (`symbols: [...]`) groups results per source —
  * same shape as `cartograph_node` / batched `cartograph_callers`.
@@ -27,8 +27,7 @@ import type Cartograph from '../../index.js';
 import type { Edge, Node } from '../../types.js';
 import { clamp, numArg } from '../../utils.js';
 import { getOutgoingEdges } from '../../db/queries-edges.js';
-import { getEmbeddingForNode } from '../../db/queries-embeddings.js';
-import { findSimilarViaVec } from '../../db/vec-helpers.js';
+import { llmFindSimilar } from '../../cartograph-llm-service.js';
 import { freshnessHintForEmptyResult, validateStringOutcome } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import { findAllSymbols, notFoundMessage } from './symbol-resolver.js';
@@ -45,7 +44,7 @@ const MAX_SYMBOLS = BATCHED_SYMBOLS_MAX;
 interface Hit {
   node: Node;
   score: number;
-  source: 'edge' | 'vec0';
+  source: 'edge' | 'semantic';
 }
 
 /** @internal Arguments for {@link readSimilarFromEdges}. */
@@ -75,7 +74,7 @@ function readSimilarFromEdges({ cg, nodeId, k, minScore }: ReadSimilarFromEdgesA
     // HNSW 'ip' dot product (values like 50..230) — an out-of-range
     // score would silently bypass the `minScore` filter. Such rows
     // are skipped here, so a stale index degrades to "no edge hits"
-    // (and the vec0 fallback) rather than nonsense scores.
+    // (and the semantic fallback) rather than nonsense scores.
     const score = typeof raw === 'number' && raw >= -1 && raw <= 1 ? raw : 0;
     if (score < minScore) continue;
     scored.push({ targetId: e.target, score });
@@ -93,46 +92,24 @@ function readSimilarFromEdges({ cg, nodeId, k, minScore }: ReadSimilarFromEdgesA
   return hits;
 }
 
-/** @internal Arguments for {@link readSimilarFromVec}. */
-interface ReadSimilarFromVecArgs {
+/** @internal Arguments for {@link readSimilarOnDemand}. */
+interface ReadSimilarOnDemandArgs {
   cg: Cartograph;
   node: Node;
   k: number;
   minScore: number;
+  sameLanguage: boolean;
 }
 
 /**
- * Fallback path: on-demand vec0 KNN using the source's embedding.
- * Returns [] when the project has no embeddings, vec extension isn't
- * loaded, or this node has no embedding row.
+ * Fallback path: use the shared semantic cascade (pgvector → HNSW →
+ * vec0 → in-memory) with the source symbol's stored embedding.
  */
-function readSimilarFromVec({ cg, node, k, minScore }: ReadSimilarFromVecArgs): Hit[] {
-  const cfg = cg.config?.llm?.embeddingLlm;
-  const model = typeof cfg?.model === 'string' ? cfg.model : null;
-  if (!model) return [];
-
-  const blob = getEmbeddingForNode(cg.queries, node.id, model);
-  if (!blob) return [];
-  const dim = blob.length / 4;
-  const queryVec = new Float32Array(blob.buffer, blob.byteOffset, dim);
-
-  const vecLoaded = cg.db.hasVecExtension();
-  const rawHits = findSimilarViaVec({ db: cg.db.getDb(), vecLoaded, queryVec, model, k: k + 1 });
-  if (rawHits.length === 0) return [];
-
-  const ids = rawHits.filter((h) => h.nodeId !== node.id).map((h) => h.nodeId);
-  const nodes = cg.queries.getNodesByIds(ids);
-  const out: Hit[] = [];
-  for (const h of rawHits) {
-    if (h.nodeId === node.id) continue;
-    const similarity = 1 - h.distance;
-    if (similarity < minScore) continue;
-    const n = nodes.get(h.nodeId);
-    if (!n) continue;
-    out.push({ node: n, score: similarity, source: 'vec0' });
-    if (out.length >= k) break;
-  }
-  return out;
+async function readSimilarOnDemand({ cg, node, k, minScore, sameLanguage }: ReadSimilarOnDemandArgs): Promise<Hit[]> {
+  const results = await llmFindSimilar(cg.llm, node.id, { limit: k, sameLanguage });
+  return results
+    .filter((result) => result.score >= minScore)
+    .map((result) => ({ node: result.node, score: result.score, source: 'semantic' }));
 }
 
 /** Arguments for {@link resolveHits}. */
@@ -145,21 +122,22 @@ interface ResolveHitsArgs {
 }
 
 /**
- * Resolve hits for a single source — try edges first, fall back to
- * on-demand vec0. The two sources never mix per call: edge results
- * mean a `build-similarity-edges` pass ran, in which case we trust it.
+ * Resolve hits for a single source — try edges first, then the shared
+ * on-demand semantic cascade. The two sources never mix per call: edge
+ * results mean a `build-similarity-edges` pass ran, so we trust them.
  */
-type SimilarHitSource = 'edge' | 'vec0' | 'empty';
+type SimilarHitSource = 'edge' | 'semantic' | 'empty';
 
-function resolveHits(args: ResolveHitsArgs): { hits: Hit[]; via: SimilarHitSource } {
+async function resolveHits(args: ResolveHitsArgs): Promise<{ hits: Hit[]; via: SimilarHitSource }> {
   const { cg, source, k, minScore, sameLanguage } = args;
   const edgeHits = readSimilarFromEdges({ cg, nodeId: source.id, k, minScore });
-  let hits = edgeHits.length > 0 ? edgeHits : readSimilarFromVec({ cg, node: source, k, minScore });
+  let hits =
+    edgeHits.length > 0 ? edgeHits : await readSimilarOnDemand({ cg, node: source, k, minScore, sameLanguage });
   let via: SimilarHitSource = 'empty';
   if (edgeHits.length > 0) {
     via = 'edge';
   } else if (hits.length > 0) {
-    via = 'vec0';
+    via = 'semantic';
   }
 
   if (sameLanguage) {
@@ -172,7 +150,7 @@ function resolveHits(args: ResolveHitsArgs): { hits: Hit[]; via: SimilarHitSourc
 interface RenderSourceSectionArgs {
   source: Node;
   hits: Hit[];
-  via: 'edge' | 'vec0' | 'empty';
+  via: 'edge' | 'semantic' | 'empty';
   minScore: number;
 }
 
@@ -189,7 +167,7 @@ function renderSourceSection({ source, hits, via, minScore }: RenderSourceSectio
     lines.push('');
     return lines;
   }
-  const viaLabel = via === 'edge' ? 'persisted similar_to edges' : 'on-demand vec0 KNN';
+  const viaLabel = via === 'edge' ? 'persisted similar_to edges' : 'on-demand semantic KNN';
   lines.push(`_Source: ${viaLabel}._`, '');
   for (const h of hits) {
     const loc = h.node.startLine ? `:${h.node.startLine}` : '';
@@ -285,7 +263,7 @@ export async function handleSimilar(ctx: ToolCtx, args: Record<string, unknown>)
     for (const source of matches.nodes) {
       if (seenSourceIds.has(source.id)) continue;
       seenSourceIds.add(source.id);
-      const { hits, via } = resolveHits({ cg, source, k, minScore, sameLanguage });
+      const { hits, via } = await resolveHits({ cg, source, k, minScore, sameLanguage });
       totalHits += hits.length;
       sections.push(...renderSourceSection({ source, hits, via, minScore }).join('\n').split('\n'));
     }
@@ -301,7 +279,7 @@ export async function handleSimilar(ctx: ToolCtx, args: Record<string, unknown>)
     // the freshness hint is the empty-result form (sources resolved but
     // no neighbours passed minScore — same true-negative-vs-lag signal).
     const tip =
-      "> Tip: a `cartograph_admin({action: 'build-similarity-edges'})` pass speeds up future calls and may surface neighbours below the per-call vec0 fallback. The default minScore=0.3 is permissive — drop it lower to widen the net.";
+      "> Tip: a `cartograph_admin({action: 'build-similarity-edges'})` pass speeds up future calls. The default minScore=0.3 is permissive — drop it lower to widen the net.";
     return ok(
       renderToolResponse({
         body,

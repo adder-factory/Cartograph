@@ -4,40 +4,10 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <meta name="cartograph-viewer-token" content="" />
+<meta name="cartograph-viewer-project-id" content="" />
 <title>cartograph viewer</title>
-<script src="https://unpkg.com/cytoscape@3.30.2/dist/cytoscape.min.js"></script>
-<script src="https://unpkg.com/layout-base@2.0.1/layout-base.js"></script>
-<script src="https://unpkg.com/cose-base@2.2.0/cose-base.js"></script>
-<script src="https://unpkg.com/cytoscape-fcose@2.2.0/cytoscape-fcose.js"></script>
-<!-- Prism for syntax highlighting. We bundle the languages most
-     cartograph users actually open, synchronously, so the line-
-     number gutter survives Prism's tokenization without racing
-     the autoloader. Each language plugin is ~1KB gzipped. -->
-<script src="https://unpkg.com/prismjs@1.29.0/prism.js"></script>
-<!-- Order matters: jsx extends javascript; tsx extends typescript + jsx; cpp extends c. -->
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-jsx.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-typescript.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-tsx.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-python.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-go.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-rust.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-java.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-c.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-cpp.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-csharp.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-ruby.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-bash.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-sql.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-graphql.min.js"></script>
-<!-- markup-templating is a php dependency, not a language of its own. -->
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-markup-templating.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-php.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-swift.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-kotlin.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-scala.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-dart.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-lua.min.js"></script>
-<script src="https://unpkg.com/prismjs@1.29.0/components/prism-r.min.js"></script>
+<!-- Self-hosted graph rendering, layout, and syntax-highlighting dependencies. -->
+<script src="viewer.vendor.app"></script>
 <script src="lucide.min.js"></script>
 <link rel="stylesheet" href="viewer.css" />
 </head>
@@ -685,6 +655,7 @@
 <script src="viewer.graph-core.app"></script>
 <script src="viewer.mobile-panels.app"></script>
 <script src="viewer.graph-layout.app"></script>
+<script src="viewer.minimap.app"></script>
 <script src="viewer.edge-inspection.app"></script>
 <script src="viewer.graph-diagnostics.app"></script>
 <script src="viewer.live.app"></script>

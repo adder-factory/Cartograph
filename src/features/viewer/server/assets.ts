@@ -9,6 +9,7 @@ import { sendJson } from './http.js';
 
 const STATIC_DIR = resolveAssetPath('features', 'viewer', 'static');
 const VIEWER_TOKEN_META = '<meta name="cartograph-viewer-token" content="" />';
+const VIEWER_PROJECT_ID_META = '<meta name="cartograph-viewer-project-id" content="" />';
 
 interface SendStaticAssetArgs {
   readonly req: http.IncomingMessage;
@@ -23,7 +24,7 @@ interface StaticAssetHeaderOptions {
 
 export function sendIndexHtml(res: http.ServerResponse, ctx: RequestContext): void {
   res.writeHead(HTTP_OK, { 'content-type': 'text/html; charset=utf-8' });
-  res.end(indexHtmlWithToken(ctx.indexHtml, ctx.security.apiToken));
+  res.end(indexHtmlWithSecurityContext(ctx.indexHtml, ctx.security.apiToken, viewerProjectId(ctx.projectPath)));
 }
 
 export function sendStaticAsset(args: SendStaticAssetArgs): void {
@@ -100,10 +101,19 @@ function hashAssetEtag(body: string): string {
   return `"sha256-${digest}"`;
 }
 
-function indexHtmlWithToken(html: string, token: string): string {
-  const meta = `<meta name="cartograph-viewer-token" content="${escapeHtmlAttr(token)}" />`;
-  if (html.includes(VIEWER_TOKEN_META)) return html.replace(VIEWER_TOKEN_META, meta);
-  return html.replace('</head>', `${meta}\n</head>`);
+function indexHtmlWithSecurityContext(html: string, token: string, projectId: string): string {
+  const tokenMeta = `<meta name="cartograph-viewer-token" content="${escapeHtmlAttr(token)}" />`;
+  const projectMeta = `<meta name="cartograph-viewer-project-id" content="${escapeHtmlAttr(projectId)}" />`;
+  const withToken = html.includes(VIEWER_TOKEN_META)
+    ? html.replace(VIEWER_TOKEN_META, tokenMeta)
+    : html.replace('</head>', `${tokenMeta}\n</head>`);
+  return withToken.includes(VIEWER_PROJECT_ID_META)
+    ? withToken.replace(VIEWER_PROJECT_ID_META, projectMeta)
+    : withToken.replace('</head>', `${projectMeta}\n</head>`);
+}
+
+function viewerProjectId(projectPath: string): string {
+  return createHash('sha256').update(path.resolve(projectPath)).digest('base64url').slice(0, 22);
 }
 
 function escapeHtmlAttr(value: string): string {

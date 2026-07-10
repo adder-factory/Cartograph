@@ -8,8 +8,7 @@
  *  - POST /api/reindex  — run an in-process full index or incremental
  *                         sync, streaming progress as Server-Sent Events.
  *
- * The write endpoints are gated by `ctx.allowConfigEdit` (loopback bind
- * by default, else `--allow-config-edit`) and enforced server-side, so a
+ * The write endpoints are gated by `ctx.allowConfigEdit` and enforced server-side, so a
  * tampered client cannot reach them by un-hiding the UI.
  */
 import type * as http from 'node:http';
@@ -38,8 +37,7 @@ import { ensureCartograph } from './context.js';
 import { parseJsonObject, readBody, sendJson, writeSseEvent } from './http.js';
 import { endReindexJob, isReindexInProgress, tryBeginReindexJob } from './reindex-job.js';
 
-const CONFIG_EDIT_DISABLED_MSG =
-  'config editing is disabled — the viewer is not bound to localhost (launch with --allow-config-edit to override)';
+const CONFIG_EDIT_DISABLED_MSG = 'config editing is disabled for this viewer instance';
 
 const BUSY_MESSAGE =
   'another indexer is already running (e.g. the MCP server) — the existing index was left intact. Try again shortly.';

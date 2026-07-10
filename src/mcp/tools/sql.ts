@@ -184,7 +184,7 @@ export function isReadOnlySql(sql: string): boolean {
     if (/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|CREATE|ALTER)\b/.test(upper)) return false;
     return true;
   }
-  if (/^EXPLAIN\s/.test(upper)) return true;
+  if (/^EXPLAIN\s/.test(upper)) return isReadOnlyExplain(upper);
   const pragmaMatch = /^PRAGMA\s+(\w+)/i.exec(trimmed);
   if (pragmaMatch) {
     if (!READONLY_PRAGMAS.has(pragmaMatch[1]!.toLowerCase())) return false;
@@ -198,6 +198,22 @@ export function isReadOnlySql(sql: string): boolean {
     return /^PRAGMA\s+\w+\s*(\(\s*['"\w]+\s*\))?\s*;?\s*$/i.test(trimmed);
   }
   return false;
+}
+
+function isReadOnlyExplain(maskedUpperSql: string): boolean {
+  let body = maskedUpperSql.replace(/^EXPLAIN\s+/, '');
+  if (/^QUERY\s+PLAN\s+/.test(body)) body = body.replace(/^QUERY\s+PLAN\s+/, '');
+  if (body.startsWith('(')) {
+    const optionsEnd = body.indexOf(')');
+    if (optionsEnd < 0) return false;
+    const options = body.slice(1, optionsEnd);
+    if (/\bANALY[ZS]E\b/.test(options)) return false;
+    body = body.slice(optionsEnd + 1).trimStart();
+  }
+  if (/^ANALY[ZS]E\b/.test(body)) return false;
+  if (/^SELECT(?:\s|$)/.test(body)) return true;
+  if (!/^WITH\s/.test(body)) return false;
+  return /\bSELECT\b/.test(body) && !/\b(INSERT|UPDATE|DELETE|REPLACE|DROP|CREATE|ALTER)\b/.test(body);
 }
 
 /**
@@ -493,10 +509,34 @@ function formatRows(rows: Array<Record<string, unknown>>): string {
  *  for FK + CHECK constraint prose. */
 interface FetchSchemaArgs {
   db: {
-    prepare(sql: string): { all(...args: unknown[]): unknown[] };
+    prepare(sql: string): { all<TRow = unknown>(...args: unknown[]): TRow[] };
   };
   tables?: ReadonlyArray<string> | undefined;
   compact?: boolean | undefined;
+}
+
+const SchemaListRowSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+});
+const SchemaListRowsSchema = z.array(SchemaListRowSchema);
+const SchemaDefinitionRowSchema = z.object({
+  name: z.string(),
+  sql: z.string().nullable(),
+});
+const SchemaDefinitionRowsSchema = z.array(SchemaDefinitionRowSchema);
+const SchemaColumnRowSchema = z.object({
+  name: z.string(),
+  type: z.string(),
+  notnull: z.number(),
+  pk: z.number(),
+  dflt_value: z.union([z.string(), z.number(), z.boolean(), z.bigint(), z.null()]).optional(),
+});
+const SchemaColumnRowsSchema = z.array(SchemaColumnRowSchema);
+type SchemaColumnRow = z.infer<typeof SchemaColumnRowSchema>;
+interface SchemaEntry {
+  name: string;
+  type: 'table' | 'view';
 }
 
 /** Render one column-info row from `PRAGMA table_info` in a terse
@@ -504,7 +544,7 @@ interface FetchSchemaArgs {
  *  intentionally dropped — they're often whitespace or expression
  *  prose that bloats the one-liner; agents wanting full layout pass
  *  `compact: false` (or just omit it). */
-function formatCompactColumn(row: { name: string; type: string; notnull: number; pk: number }): string {
+function formatCompactColumn(row: SchemaColumnRow): string {
   const parts = [row.name];
   if (row.type) parts.push(row.type);
   if (row.pk > 0) parts.push('PRIMARY KEY');
@@ -516,20 +556,41 @@ function formatCompactColumn(row: { name: string; type: string; notnull: number;
  *  of {@link fetchSchema} so the per-row loop body stays cheap on the
  *  cyclomatic count and the PRAGMA-name interpolation guard lives in
  *  one place. */
-function renderCompactColumns(db: FetchSchemaArgs['db'], name: string): string {
-  // Safety: name interpolation into PRAGMA. sqlite_master.name is
-  // well-formed by construction but guard anyway.
+function readSchemaColumns(db: FetchSchemaArgs['db'], name: string): SchemaColumnRow[] {
   if (!/^[A-Za-z_]\w*$/.test(name)) {
-    return '_(skipped — non-identifier name)_';
+    return [];
   }
-  const cols = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{
-    name: string;
-    type: string;
-    notnull: number;
-    pk: number;
-  }>;
+  return SchemaColumnRowsSchema.parse(db.prepare(`PRAGMA table_info(${name})`).all<unknown>());
+}
+
+function renderCompactColumns(columns: ReadonlyArray<SchemaColumnRow>): string {
+  const cols = columns;
   if (cols.length === 0) return '_(no columns)_';
   return cols.map(formatCompactColumn).join(' · ');
+}
+
+/** @internal Exported so the storage-neutral schema fallback is directly testable. */
+export function renderPortableCreateSql(name: string, type: string, columns: ReadonlyArray<SchemaColumnRow>): string {
+  const quotedName = quoteSqlIdentifier(name);
+  if (type === 'view') {
+    const names = columns.map((column) => quoteSqlIdentifier(column.name)).join(', ');
+    const columnList = names ? ` (${names})` : '';
+    return `CREATE VIEW ${quotedName}${columnList} AS\n  /* view definition unavailable through this storage adapter */`;
+  }
+  const lines = columns.map((column) => {
+    const parts = [quoteSqlIdentifier(column.name), column.type || 'TEXT'];
+    if (column.pk > 0) parts.push('PRIMARY KEY');
+    else if (column.notnull > 0) parts.push('NOT NULL');
+    if (column.dflt_value !== null && column.dflt_value !== undefined) {
+      parts.push(`DEFAULT ${String(column.dflt_value)}`);
+    }
+    return `  ${parts.join(' ')}`;
+  });
+  return [`CREATE TABLE ${quotedName} (`, lines.join(',\n'), ');'].join('\n');
+}
+
+function quoteSqlIdentifier(value: string): string {
+  return `"${value.replaceAll('"', '""')}"`;
 }
 
 /** Build the schema-dump header line — counts and filtered-vs-full
@@ -539,26 +600,32 @@ function renderSchemaHeader(selected: number, total: number, filtered: boolean):
   if (filtered) {
     return `## Schema (${selected} of ${total} entries — filtered)`;
   }
-  const tablePlural = selected === 1 ? '' : 's';
-  const viewPlural = selected === 1 ? '' : 's';
-  return `## Schema (${selected} table${tablePlural} + view${viewPlural})`;
+  return `## Schema (${selected} ${selected === 1 ? 'entry' : 'entries'})`;
 }
 
-/** Pull every CREATE TABLE statement from sqlite_master so the agent
- *  can write SELECTs without guessing column names.
+/** Discover tables and views through the adapter-neutral PRAGMA surface
+ *  so the agent can write SELECTs without guessing column names.
  *
  *  Honours the `tables` filter (case-insensitive name match) and the
  *  `compact` flag (one-line column list via `PRAGMA table_info`
- *  instead of the full CREATE block). An unknown table name in the
- *  filter renders an empty result rather than an error — saves a
- *  round-trip on typos. */
+ *  instead of the full CREATE block). SQLite definitions come from
+ *  `sqlite_master`; adapters that cannot expose one receive a portable
+ *  column-derived definition. An unknown table name in the filter
+ *  renders an empty result rather than an error. */
 function fetchSchema(args: FetchSchemaArgs): string {
   const { db, tables, compact = false } = args;
-  const rows = db
-    .prepare(
-      `SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type, name`,
-    )
-    .all() as Array<{ name: string; type: string; sql: string }>;
+  const rows = SchemaListRowsSchema.parse(db.prepare('PRAGMA table_list').all<unknown>())
+    .filter((row) => !row.name.startsWith('sqlite_'))
+    .map<SchemaEntry>((row) => ({ name: row.name, type: row.type === 'view' ? 'view' : 'table' }))
+    .sort((a, b) => a.type.localeCompare(b.type) || a.name.localeCompare(b.name));
+  const definitions = SchemaDefinitionRowsSchema.parse(
+    db
+      .prepare(
+        `SELECT name, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' AND sql IS NOT NULL ORDER BY type, name`,
+      )
+      .all<unknown>(),
+  );
+  const definitionsByName = new Map(definitions.map((row) => [row.name, row.sql]));
   const filterSet = tables && tables.length > 0 ? new Set(tables.map((t) => t.toLowerCase())) : null;
   const selected = filterSet ? rows.filter((r) => filterSet.has(r.name.toLowerCase())) : rows;
   if (selected.length === 0) {
@@ -574,11 +641,16 @@ function fetchSchema(args: FetchSchemaArgs): string {
     lines.push(`> ${PATH_NAMING_SPLIT_HINT}`, '');
   }
   for (const row of selected) {
+    const columns = readSchemaColumns(db, row.name);
     lines.push(`### \`${row.name}\` (${row.type})`);
     if (compact) {
-      lines.push(renderCompactColumns(db, row.name));
+      lines.push(renderCompactColumns(columns));
     } else {
-      lines.push('```sql', row.sql, '```');
+      lines.push(
+        '```sql',
+        definitionsByName.get(row.name) ?? renderPortableCreateSql(row.name, row.type, columns),
+        '```',
+      );
     }
     lines.push('');
   }
@@ -587,8 +659,7 @@ function fetchSchema(args: FetchSchemaArgs): string {
 
 /** @internal Arguments for {@link executeQuery}. */
 interface ExecuteQueryArgs {
-  db: { prepare(sql: string): { iterate(): IterableIterator<Record<string, unknown>> } };
-  query: string;
+  statement: { iterate(): IterableIterator<Record<string, unknown>> };
   limit: number;
   timeoutMs: number;
 }
@@ -603,8 +674,7 @@ function executeQuery(args: ExecuteQueryArgs): {
   truncated: boolean;
   timedOut: boolean;
 } {
-  const { db, query, limit, timeoutMs } = args;
-  const stmt = db.prepare(query);
+  const { statement, limit, timeoutMs } = args;
   const rows: Array<Record<string, unknown>> = [];
   let truncated = false;
   let timedOut = false;
@@ -620,7 +690,7 @@ function executeQuery(args: ExecuteQueryArgs): {
   // help on queries that block in prepare (recursive CTE that
   // materialises before yielding the first row). The cap is best-effort
   // defense-in-depth, not a hard resource fence.
-  for (const row of stmt.iterate()) {
+  for (const row of statement.iterate()) {
     if (rows.length >= limit) {
       truncated = true;
       break;
@@ -789,7 +859,8 @@ async function handleSql(ctx: ToolCtx, args: SqlArgs): Promise<ToolOutcome> {
   const timeoutMs = args.timeoutMs;
 
   try {
-    const { rows, truncated, timedOut } = executeQuery({ db, query, limit, timeoutMs });
+    const statement = cg.db.prepareReadOnly(query);
+    const { rows, truncated, timedOut } = executeQuery({ statement, limit, timeoutMs });
     const output = buildQueryOutput({ rows, truncated, limit, timedOut, timeoutMs });
     return ok(textResult(output));
   } catch (error_) {

@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-05-04T00:20:11.189Z",
+  "timestamp": "2026-07-10T04:31:17.857Z",
   "codebasePath": ".",
-  "cartographSha": "48e006d",
+  "cartographSha": "7166391",
   "summary": {
     "total": 18,
     "passed": 18,
     "failed": 0,
-    "meanRecall": 0.9777777777777777,
-    "meanMRR": 0.9090909090909091
+    "meanRecall": 0.9537037037037036,
+    "meanMRR": 0.880952380952381
   },
   "results": [
     {
@@ -17,8 +17,8 @@
       "mrr": 1,
       "foundSymbols": ["Cartograph"],
       "missedSymbols": [],
-      "latencyMs": 1.7284159999999815,
-      "payloadBytes": 2020
+      "latencyMs": 18.226666000000023,
+      "payloadBytes": 4216
     },
     {
       "caseId": "self-search-fn-searchNodes",
@@ -27,8 +27,8 @@
       "mrr": 1,
       "foundSymbols": ["searchNodes"],
       "missedSymbols": [],
-      "latencyMs": 0.6065830000000005,
-      "payloadBytes": 3554
+      "latencyMs": 4.376834000000031,
+      "payloadBytes": 6626
     },
     {
       "caseId": "self-search-fn-extractFromSource",
@@ -37,8 +37,8 @@
       "mrr": 1,
       "foundSymbols": ["extractFromSource"],
       "missedSymbols": [],
-      "latencyMs": 0.3177090000000078,
-      "payloadBytes": 1320
+      "latencyMs": 3.935375000000022,
+      "payloadBytes": 1465
     },
     {
       "caseId": "self-search-iface-ToolModule",
@@ -47,8 +47,8 @@
       "mrr": 1,
       "foundSymbols": ["ToolModule"],
       "missedSymbols": [],
-      "latencyMs": 0.1947499999999991,
-      "payloadBytes": 406
+      "latencyMs": 3.4044999999999845,
+      "payloadBytes": 2235
     },
     {
       "caseId": "self-search-fn-compareToRef",
@@ -57,8 +57,8 @@
       "mrr": 1,
       "foundSymbols": ["compareToRef"],
       "missedSymbols": [],
-      "latencyMs": 0.9565419999999847,
-      "payloadBytes": 6491
+      "latencyMs": 19.747458999999992,
+      "payloadBytes": 9827
     },
     {
       "caseId": "self-search-method-invalidateNodeCacheForFile",
@@ -67,8 +67,8 @@
       "mrr": 1,
       "foundSymbols": ["invalidateNodeCacheForFile"],
       "missedSymbols": [],
-      "latencyMs": 0.24808300000000827,
-      "payloadBytes": 508
+      "latencyMs": 3.201459,
+      "payloadBytes": 938
     },
     {
       "caseId": "self-fuzzy-extractFromSorce",
@@ -77,8 +77,8 @@
       "mrr": 1,
       "foundSymbols": ["extractFromSource"],
       "missedSymbols": [],
-      "latencyMs": 5.498417000000018,
-      "payloadBytes": 515
+      "latencyMs": 74.03250000000003,
+      "payloadBytes": 609
     },
     {
       "caseId": "self-fuzzy-compreToRef",
@@ -87,8 +87,8 @@
       "mrr": 1,
       "foundSymbols": ["compareToRef"],
       "missedSymbols": [],
-      "latencyMs": 2.383499999999998,
-      "payloadBytes": 488
+      "latencyMs": 42.53454199999999,
+      "payloadBytes": 1045
     },
     {
       "caseId": "self-fuzzy-serchNodes",
@@ -97,51 +97,48 @@
       "mrr": 1,
       "foundSymbols": ["searchNodes"],
       "missedSymbols": [],
-      "latencyMs": 1.5160419999999988,
-      "payloadBytes": 502
+      "latencyMs": 41.27999999999997,
+      "payloadBytes": 541
     },
     {
-      "caseId": "self-fuzzy-doublehit-CodGrap",
+      "caseId": "self-fuzzy-doublehit-Cortogroph",
       "pass": true,
       "recall": 1,
       "mrr": 1,
       "foundSymbols": ["Cartograph"],
       "missedSymbols": [],
-      "latencyMs": 1.2367500000000007,
-      "payloadBytes": 387
+      "latencyMs": 40.977957999999944,
+      "payloadBytes": 554
     },
     {
       "caseId": "self-semantic-concept-cache-refresh",
       "pass": true,
-      "recall": 0,
-      "mrr": 0,
-      "foundSymbols": [],
-      "missedSymbols": ["FileWatcher", "sync"],
-      "latencyMs": 0.07670799999999645,
-      "payloadBytes": 0,
-      "skipped": "no-embeddings"
+      "recall": 1,
+      "mrr": 1,
+      "foundSymbols": ["invalidateFreshness", "EMPTY_INVALIDATION_PLAN"],
+      "missedSymbols": [],
+      "latencyMs": 238.35345900000004,
+      "payloadBytes": 5740
     },
     {
       "caseId": "self-semantic-peers-of-Cartograph",
       "pass": true,
-      "recall": 0,
-      "mrr": 0,
-      "foundSymbols": [],
-      "missedSymbols": ["ExtractionOrchestrator", "ReferenceResolver"],
-      "latencyMs": 0.0021660000000167656,
-      "payloadBytes": 0,
-      "skipped": "no-embeddings"
+      "recall": 1,
+      "mrr": 0.3333333333333333,
+      "foundSymbols": ["CartographCore", "ReadCartographModule"],
+      "missedSymbols": [],
+      "latencyMs": 51.56654200000003,
+      "payloadBytes": 6357
     },
     {
       "caseId": "self-semantic-peers-of-searchNodes",
       "pass": true,
-      "recall": 0,
-      "mrr": 0,
-      "foundSymbols": [],
-      "missedSymbols": ["searchNodesFTS", "searchNodesLike"],
-      "latencyMs": 0.0005000000000165983,
-      "payloadBytes": 0,
-      "skipped": "no-embeddings"
+      "recall": 0.5,
+      "mrr": 1,
+      "foundSymbols": ["searchNodesFTS"],
+      "missedSymbols": ["searchNodesLike"],
+      "latencyMs": 19.463791000000015,
+      "payloadBytes": 5917
     },
     {
       "caseId": "self-explore-mcp-tool-registration",
@@ -150,63 +147,63 @@
       "mrr": 0,
       "foundSymbols": ["ToolModule", "getToolModule", "BIOMARKERS_TOOL"],
       "missedSymbols": [],
-      "nodeCount": 73,
-      "edgeCount": 18,
-      "edgeDensity": 0.2465753424657534,
-      "latencyMs": 25.48754100000002,
-      "payloadBytes": 41325
+      "nodeCount": 80,
+      "edgeCount": 71,
+      "edgeDensity": 0.8875,
+      "latencyMs": 789.359333,
+      "payloadBytes": 68068
     },
     {
       "caseId": "self-explore-extraction-pipeline",
       "pass": true,
-      "recall": 0.6666666666666666,
+      "recall": 1,
       "mrr": 0,
-      "foundSymbols": ["ExtractionOrchestrator", "storeExtractionResult"],
-      "missedSymbols": ["extractFromSource"],
-      "nodeCount": 63,
-      "edgeCount": 41,
-      "edgeDensity": 0.6507936507936508,
-      "latencyMs": 23.697125,
-      "payloadBytes": 42948
+      "foundSymbols": ["ExtractionOrchestrator", "ParseWorkerPool", "requestParse"],
+      "missedSymbols": [],
+      "nodeCount": 79,
+      "edgeCount": 83,
+      "edgeDensity": 1.0506329113924051,
+      "latencyMs": 741.3640829999999,
+      "payloadBytes": 73327
     },
     {
       "caseId": "self-explore-biomarker-engine",
       "pass": true,
-      "recall": 1,
+      "recall": 0.6666666666666666,
       "mrr": 0,
-      "foundSymbols": ["analyseProject", "evaluateRules", "computeMetrics"],
-      "missedSymbols": [],
-      "nodeCount": 80,
-      "edgeCount": 78,
-      "edgeDensity": 0.975,
-      "latencyMs": 18.669416000000012,
-      "payloadBytes": 62264
+      "foundSymbols": ["analyseProject", "evaluateRules"],
+      "missedSymbols": ["computeMetrics"],
+      "nodeCount": 79,
+      "edgeCount": 52,
+      "edgeDensity": 0.6582278481012658,
+      "latencyMs": 551.4724580000002,
+      "payloadBytes": 69721
     },
     {
       "caseId": "self-explore-search-cascade",
       "pass": true,
       "recall": 1,
       "mrr": 0,
-      "foundSymbols": ["searchNodes", "runRetrievalCascade", "searchNodesFTS"],
+      "foundSymbols": ["searchNodes", "runRetrievalCascade", "searchNodesFTS", "searchNodesFuzzy"],
       "missedSymbols": [],
-      "nodeCount": 80,
-      "edgeCount": 116,
-      "edgeDensity": 1.45,
-      "latencyMs": 14.239166000000012,
-      "payloadBytes": 78129
+      "nodeCount": 48,
+      "edgeCount": 49,
+      "edgeDensity": 1.0208333333333333,
+      "latencyMs": 748.9942919999999,
+      "payloadBytes": 48212
     },
     {
       "caseId": "self-explore-compare-to-ref",
       "pass": true,
       "recall": 1,
       "mrr": 0,
-      "foundSymbols": ["compareToRef", "FileDelta", "extractFromSource"],
+      "foundSymbols": ["compareToRef", "FileDelta", "SymbolDelta"],
       "missedSymbols": [],
       "nodeCount": 80,
-      "edgeCount": 103,
-      "edgeDensity": 1.2875,
-      "latencyMs": 25.759541000000013,
-      "payloadBytes": 65194
+      "edgeCount": 75,
+      "edgeDensity": 0.9375,
+      "latencyMs": 804.8429999999998,
+      "payloadBytes": 79616
     }
   ]
 }

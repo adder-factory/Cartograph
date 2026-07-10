@@ -141,7 +141,7 @@ function cfgApplyEditable(allow) {
     cfgSetBanner(
       'info',
       'Config editing is disabled because the viewer is not bound to localhost. ' +
-        'Launch with <code class="mono">--allow-config-edit</code> to enable it.',
+        'Config editing is disabled for this viewer instance.',
     );
   }
 }

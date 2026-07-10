@@ -12,6 +12,17 @@ function cloneViewerStateValue(value) {
   }
 }
 
+function viewerProjectStoragePrefix() {
+  const raw = document.querySelector('meta[name="cartograph-viewer-project-id"]')?.content || '';
+  const projectId = /^[A-Za-z0-9_-]{1,64}$/.test(raw) ? raw : 'demo';
+  return `cartograph-viewer-project:${projectId}:`;
+}
+
+function viewerProjectStorageKey(baseKey) {
+  const suffix = String(baseKey).replace(/^cartograph-viewer-/, '');
+  return `${viewerProjectStoragePrefix()}${suffix}`;
+}
+
 function viewerStorageRemove(key) {
   try {
     localStorage.removeItem(key);

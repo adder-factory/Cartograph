@@ -6,12 +6,14 @@ import { llmFindSimilar, llmFindImplementations } from '../../src/cartograph-llm
 import { searchNodes } from '../../src/db/queries-search.js';
 import { hasSymbolEmbedding } from '../../src/db/queries-embeddings.js';
 import { getEmbeddingModel } from '../../src/llm/provider.js';
+import { prepareBehaviorRetrieval } from '../../src/context/behavior-retrieval.js';
 import { scoreSearchNodes, scoreFindRelevantContext, scoreSemanticSearch } from './scoring.js';
 import { testCases } from './test-cases.js';
 import { selfTestCases } from './cases-self.js';
 import { largeTestCases } from './cases-large.js';
 import { compareReports, formatComparison } from './compare.js';
 import type { EvalReport, EvalResult, EvalTestCase } from './types.js';
+import { semanticEvalSkipDetail } from './semantic-skip.js';
 
 /**
  * Parse the runner's argv. Supports positional `<codebase>` plus
@@ -100,12 +102,20 @@ async function runEvalCase(cg: EvalCartograph, tc: EvalTestCase): Promise<EvalRe
     return runSemanticEvalCase(cg, tc, start);
   }
 
-  const subgraph = await cg.internals.contextBuilder.findRelevantContext(tc.query, {
+  const contextOptions = {
     searchLimit: 8,
     traversalDepth: 3,
     maxNodes: 80,
     minScore: 0.2,
     ...(tc.options as Record<string, unknown>),
+  };
+  const maxNodes = typeof contextOptions.maxNodes === 'number' ? contextOptions.maxNodes : 80;
+  const behaviorRetrieval = await prepareBehaviorRetrieval(cg.llm, tc.query, maxNodes);
+  const subgraph = await cg.internals.contextBuilder.findRelevantContext(tc.query, {
+    ...contextOptions,
+    // Behavior options win so the evaluation exercises the same entry-point
+    // window and bias that the production MCP handler uses.
+    ...behaviorRetrieval,
   });
   return scoreFindRelevantContext(tc.id, tc.expectedSymbols, subgraph, performance.now() - start);
 }
@@ -117,24 +127,37 @@ async function runSemanticEvalCase(cg: EvalCartograph, tc: EvalTestCase, start: 
     return scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-embeddings');
   }
 
-  if (tc.symbolName) {
-    const sourceMatches = searchNodes(cg.queries, tc.symbolName, { limit: 1 });
-    const sourceNode = sourceMatches[0]?.node;
-    if (!sourceNode || !hasSymbolEmbedding(cg.queries, sourceNode.id, embModel)) {
-      return scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-source-embedding');
+  try {
+    if (tc.symbolName) {
+      const sourceMatches = searchNodes(cg.queries, tc.symbolName, { limit: 1 });
+      const sourceNode = sourceMatches[0]?.node;
+      if (!sourceNode || !hasSymbolEmbedding(cg.queries, sourceNode.id, embModel)) {
+        return scoreSemanticSearch(tc.id, tc.expectedSymbols, [], performance.now() - start, 'no-source-embedding');
+      }
+      const peers = await llmFindSimilar(cg.llm, sourceNode.id, {
+        limit: 10,
+        ...(tc.options as Record<string, unknown>),
+      });
+      return scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start);
     }
-    const peers = await llmFindSimilar(cg.llm, sourceNode.id, {
+
+    const peers = await llmFindImplementations(cg.llm, tc.query, {
       limit: 10,
       ...(tc.options as Record<string, unknown>),
     });
     return scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start);
+  } catch (error) {
+    const skipDetail = semanticEvalSkipDetail(error);
+    if (skipDetail === null) throw error;
+    return scoreSemanticSearch(
+      tc.id,
+      tc.expectedSymbols,
+      [],
+      performance.now() - start,
+      'endpoint-unavailable',
+      skipDetail,
+    );
   }
-
-  const peers = await llmFindImplementations(cg.llm, tc.query, {
-    limit: 10,
-    ...(tc.options as Record<string, unknown>),
-  });
-  return scoreSemanticSearch(tc.id, tc.expectedSymbols, peers, performance.now() - start);
 }
 
 function resultStatus(r: EvalResult): string {
@@ -166,7 +189,7 @@ function formatResultRow(r: EvalResult, maxIdLen: number): string {
   const recall = `recall=${r.recall.toFixed(2)}`;
   const extra = r.edgeDensity === undefined ? `mrr=${r.mrr.toFixed(2)}` : `density=${r.edgeDensity.toFixed(2)}`;
   const latency = `${Math.round(r.latencyMs)}ms`;
-  const skipNote = r.skipped ? `  (${r.skipped})` : '';
+  const skipNote = r.skipped ? `  (${r.skipped}${r.skipDetail ? `: ${r.skipDetail}` : ''})` : '';
   const slowNote = latencyBudgetNote(r);
   return `  ${id}  ${status}  ${recall}  ${extra}  ${latency}${skipNote}${slowNote}`;
 }

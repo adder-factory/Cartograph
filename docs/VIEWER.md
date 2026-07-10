@@ -1,9 +1,16 @@
 # Viewer
 
-`cartograph viewer` opens a local-only web UI on top of the same graph index
-used by the CLI and MCP server. Nothing leaves your machine: the server binds
-to the loopback interface (`127.0.0.1`) and reads the existing `.cartograph`
-index.
+`cartograph viewer` opens a local web UI on top of the same graph index used by
+the CLI and MCP server. The HTTP server enforces a loopback-only bind
+(`127.0.0.1` by default), self-hosts every browser asset, and makes no
+third-party browser requests or telemetry calls.
+
+“Local UI” does not mean every configured backend is local. A PostgreSQL index
+can live on another host. The System overview probes configured LLM endpoints,
+and Ask sends the question plus selected code context to the configured chat
+endpoint. If those endpoints are cloud services, that data leaves the machine
+under the configuration you chose. See [Configuration](CONFIGURATION.md) and
+[Storage backends](STORAGE-BACKENDS.md).
 
 ```sh
 cartograph index .        # the viewer needs an index
@@ -45,7 +52,25 @@ cartograph viewer .
     severity breakdowns, risk hotspots, index coverage, and symbol-kind
     breakdown.
   - **Settings** — edit `.cartograph/config.json` and re-index from the
-    browser (enabled by default on a loopback bind; see `--allow-config-edit`).
+    browser. The viewer is loopback-only; remote binding is rejected because
+    the page token is a same-origin API control, not remote-user authentication.
+
+## Browser security and local state
+
+Each launch creates a random API token, embeds it only in the served page, and
+requires it on every `/api/` request. Host and Origin checks protect the local
+service from DNS rebinding and cross-origin requests. Responses also set a
+self-only Content Security Policy, deny framing and MIME sniffing, suppress
+referrers and browser capabilities, and mark token-bearing HTML and API data
+`Cache-Control: no-store`. Versioned static assets retain ETag revalidation.
+
+Saved views, graph snapshots, and pinned node positions can contain symbol
+names and project-relative paths. They are stored in browser `localStorage`
+under a one-way, per-project namespace so projects that reuse the same viewer
+origin cannot read or replay one another's saved graph data. Other display
+preferences remain origin-local. **Reset saved state** removes the current
+project's saved graph content, viewer preferences, and URL state without
+deleting another project's namespaced graph content.
 
 ## Sessions
 
@@ -127,8 +152,8 @@ All filters live in the left rail and start fully enabled:
   (callers, callees, or both).
 - **Path** — shortest path between two symbols, with edge-kind filtering.
 - **Compare** — highlights symbols in files changed against `HEAD`.
-- **Saved views** — name, save, and reload graph states; quick snapshots
-  capture the current payload for replay.
+- **Saved views** — name, save, and reload project-scoped graph states; quick
+  snapshots capture the current payload for replay in that project.
 - **Density and layout** — Focus / Core / All density modes, Fast / Balanced /
   Spread layout quality, collapsible directory groups, and grouped or expanded
   rendering of low-level detail nodes (variables, fields, parameters).

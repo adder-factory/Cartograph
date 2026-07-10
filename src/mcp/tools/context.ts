@@ -11,11 +11,10 @@ import { join } from 'node:path';
 import type Cartograph from '../../index.js';
 import type { TaskContext } from '../../context/types.js';
 import type { ScoreExplanation } from '../../graph/types.js';
-import type { SearchResult } from '../../search/types.js';
 import type { Node } from '../../types.js';
+import { prepareBehaviorRetrieval } from '../../context/behavior-retrieval.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
-import { logDebug } from '../../errors.js';
 import { textResult } from './shared.js';
 import { renderToolResponse } from './_response.js';
 import type { ToolCtx } from './types.js';
@@ -35,70 +34,6 @@ function markSessionConsulted(sessionId: string): void {
     writeFileSync(markerPath, new Date().toISOString(), 'utf8');
   } catch {
     // Silently fail - don't break MCP on marker write failure
-  }
-}
-
-/**
- * Behaviour-question phrasings that mean the user is asking "what is
- * the gating logic / decision / control flow for X" — not "what is the
- * shape of X". When the task matches one of these patterns the MCP
- * layer (a) pre-runs the same hybrid FTS + semantic retrieval
- * `cartograph_ask` uses and forwards the hits to `buildContext` via
- * `extraCandidates`, and (b) flips `behaviorBias` on so functions /
- * methods outrank interfaces / type aliases. Closes the friction
- * caught 2026-05-14: structural retrieval surfaced state-shape symbols
- * (WatcherStats / WatcherState) but missed the gating function
- * (watcherHandleFileEvent) for "how does the file watcher decide when
- * to trigger a sync".
- */
-const BEHAVIOR_QUESTION_PATTERNS: ReadonlyArray<RegExp> = [
-  /\bhow\s+does?\b/i,
-  /\bhow\s+do\b/i,
-  /\bwhen\s+does?\b/i,
-  /\bwhen\s+is\b/i,
-  /\bwhy\s+does?\b/i,
-  /\bwhat\s+triggers?\b/i,
-  /\bwhat\s+causes?\b/i,
-  /\bdecides?\s+(?:when|whether|if|how)\b/i,
-  /\b(?:trigger|triggers|triggered|triggering)\b/i,
-  /\bhappens?\s+(?:when|after|before|on)\b/i,
-  /\bgated\s+by\b/i,
-  /\bcontrol\s+flow\b/i,
-  /\b(?:dispatch|dispatches|dispatched)\b/i,
-];
-
-function looksLikeBehaviorQuestion(task: string): boolean {
-  return BEHAVIOR_QUESTION_PATTERNS.some((re) => re.test(task));
-}
-
-/**
- * `searchLimit` (number of entry-point seeds) used by `buildContext`
- * when the task is a behaviour question ("how/when/why does X happen").
- * The default `searchLimit` is 3 — deliberately tight for shape lookups
- * — but exploratory queries need more seeds because the gating symbol
- * often sits a few ranks below the lexical exact-match hits on other
- * query tokens. Widening to 8 lets `watcherHandleFileEvent` and similar
- * behavioural hubs clear the lexical pool that would otherwise be filled
- * by shape symbols (F-r9-1). Still bounded by `maxNodes`, so the
- * subgraph size is unchanged.
- */
-const BEHAVIOR_QUESTION_SEARCH_LIMIT = 8;
-
-/**
- * Pull hybrid FTS + semantic candidates from the LLM service so the
- * context builder can merge them into the lexical pool. Returns an
- * empty array on any failure — no embed model, backend unreachable,
- * etc. — so context retrieval never regresses below the lexical-only
- * baseline. `limit` is intentionally generous (2× maxNodes) so the
- * gating symbol clears the lexical pool even when it sits a few ranks
- * deep in the semantic channel.
- */
-async function fetchHybridCandidates(cg: Cartograph, task: string, limit: number): Promise<SearchResult[]> {
-  try {
-    return await cg.llm.searchHybrid(task, { limit });
-  } catch (err) {
-    logDebug('cartograph_context: hybrid candidate fetch failed', { error: String(err) });
-    return [];
   }
 }
 
@@ -720,8 +655,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   // model is configured — `searchHybrid` falls back to FTS-only, and
   // a fetch failure (e.g. summarise backend offline) returns `[]` so
   // context degrades to its lexical-only baseline.
-  const isBehaviorQuestion = looksLikeBehaviorQuestion(task);
-  const extraCandidates = isBehaviorQuestion ? await fetchHybridCandidates(cg, task, maxNodes * 2) : [];
+  const behaviorRetrieval = await prepareBehaviorRetrieval(cg.llm, task, maxNodes);
 
   // Use format: 'object' so buildContext returns the raw TaskContext
   // (its 'markdown' and 'json' formats serialise to a string and
@@ -731,12 +665,10 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
     maxNodes,
     includeCode,
     format: 'object',
-    extraCandidates,
-    behaviorBias: isBehaviorQuestion,
+    extraCandidates: behaviorRetrieval.extraCandidates,
+    behaviorBias: behaviorRetrieval.behaviorBias,
     explain,
-    // Behaviour questions get a wider entry-point window so the
-    // semantic answer isn't crowded out by lexical token matches.
-    ...(isBehaviorQuestion ? { searchLimit: BEHAVIOR_QUESTION_SEARCH_LIMIT } : {}),
+    ...(behaviorRetrieval.searchLimit === undefined ? {} : { searchLimit: behaviorRetrieval.searchLimit }),
   });
   // Shouldn't happen with format='object' but guard for safety.
   if (typeof context === 'string') return ok(textResult(context));

@@ -116,7 +116,7 @@ function setGraphLayoutQuality(mode, opts = {}) {
   }
 }
 
-const PINNED_LAYOUTS_KEY = 'cartograph-viewer-pinned-layouts-v1';
+const PINNED_LAYOUTS_KEY = viewerProjectStorageKey('cartograph-viewer-pinned-layouts-v1');
 const PINNED_LAYOUT_VERSION = 2;
 const PINNED_LAYOUT_LIMIT = 32;
 let currentGraphLayoutKey = null;

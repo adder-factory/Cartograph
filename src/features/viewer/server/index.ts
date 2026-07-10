@@ -21,7 +21,7 @@ import {
   createViewerApiToken,
   createViewerSecurityContext,
   formatHostForViewerUrl,
-  viewerConfigEditAllowed,
+  normalizeViewerBindHost,
 } from './security.js';
 
 export type { ViewerHandle } from './context.js';
@@ -74,6 +74,7 @@ function makeViewerClose(server: http.Server, ctx: RequestContext, conn: Databas
 }
 
 export async function startViewerServer(projectPath: string, opts: ViewerOptions = {}): Promise<ViewerHandle> {
+  const host = normalizeViewerBindHost(opts.host ?? DEFAULT_HOST);
   const dbPath = getDatabasePath(projectPath);
   const config = loadConfig(projectPath);
   const usesPostgres = config.database?.provider === 'postgres';
@@ -98,8 +99,8 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
     traverser,
     indexHtml: loadIndexHtml(),
     staticAssets: loadStaticAssets(),
-    security: createViewerSecurityContext(opts.host ?? DEFAULT_HOST, opts.port ?? DEFAULT_PORT, apiToken),
-    allowConfigEdit: viewerConfigEditAllowed(opts.host ?? DEFAULT_HOST, opts.allowConfigEdit === true),
+    security: createViewerSecurityContext(host, opts.port ?? DEFAULT_PORT, apiToken),
+    allowConfigEdit: true,
   };
 
   const server = http.createServer((req, res) => {
@@ -109,7 +110,6 @@ export async function startViewerServer(projectPath: string, opts: ViewerOptions
     });
   });
 
-  const host = opts.host ?? DEFAULT_HOST;
   const requestedPort = opts.port ?? DEFAULT_PORT;
   let port = requestedPort;
   await listenServer({

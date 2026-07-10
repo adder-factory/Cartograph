@@ -1,5 +1,7 @@
 import type { NodeKind } from '../../src/types.js';
 
+export type SemanticSkipReason = 'no-embeddings' | 'no-source-embedding' | 'endpoint-unavailable';
+
 export interface EvalTestCase {
   id: string;
   /**
@@ -48,7 +50,9 @@ export interface EvalResult {
    * not a regression. Activates automatically when embeddings are
    * loaded.
    */
-  skipped?: 'no-embeddings' | 'no-source-embedding';
+  skipped?: SemanticSkipReason;
+  /** Exact endpoint error retained when a semantic case cannot run. */
+  skipDetail?: string;
 }
 
 export interface EvalReport {

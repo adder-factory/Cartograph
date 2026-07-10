@@ -87,12 +87,12 @@ print_sonar_failure_context() {
 }
 
 run_sonar_quality_gate() {
-  require_command sonar-scanner
+  require_command sonar
   require_command curl
   require_command jq
   load_sonar_env
 
-  sonar-scanner
+  sonar scan
 
   local task_file=".scannerwork/report-task.txt"
   if [[ ! -f "$task_file" ]]; then
