@@ -1,4 +1,4 @@
-import type { EvalResult } from './types.js';
+import type { EvalResult, SemanticSkipReason } from './types.js';
 
 export const PASS_THRESHOLD = 0.5;
 
@@ -77,7 +77,8 @@ export function scoreSemanticSearch(
   expectedSymbols: string[],
   results: Array<{ node: { name: string }; score: number }>,
   latencyMs: number,
-  skipped?: 'no-embeddings' | 'no-source-embedding',
+  skipped?: SemanticSkipReason,
+  skipDetail?: string,
 ): EvalResult {
   if (skipped) {
     return {
@@ -90,6 +91,7 @@ export function scoreSemanticSearch(
       latencyMs,
       payloadBytes: 0,
       skipped,
+      ...(skipDetail === undefined ? {} : { skipDetail }),
     };
   }
   // Same scorer shape as searchNodes — semantic results have the

@@ -96,6 +96,7 @@ function regressionReason(
 ): string {
   if (!candidate) return 'case missing from candidate report';
   if (!baseline) return '';
+  if (candidate.skipped) return '';
   if (recallDelta < -RECALL_REGRESSION_THRESHOLD) {
     return `recall dropped ${recallDelta.toFixed(2)} (threshold -${RECALL_REGRESSION_THRESHOLD})`;
   }
@@ -108,12 +109,36 @@ function regressionReason(
 }
 
 function meanPayloadDeltaFor(perCase: CaseDelta[]): number {
-  const paired = perCase.filter((e) => e.baseline?.payloadBytes && e.candidate?.payloadBytes);
+  const paired = perCase.filter(
+    (entry) =>
+      !entry.baseline?.skipped &&
+      !entry.candidate?.skipped &&
+      entry.baseline?.payloadBytes &&
+      entry.candidate?.payloadBytes,
+  );
   const meanBaselinePayload =
     paired.length > 0 ? paired.reduce((s, e) => s + (e.baseline!.payloadBytes ?? 0), 0) / paired.length : 0;
   const meanCandidatePayload =
     paired.length > 0 ? paired.reduce((s, e) => s + (e.candidate!.payloadBytes ?? 0), 0) / paired.length : 0;
   return meanBaselinePayload > 0 ? (meanCandidatePayload - meanBaselinePayload) / meanBaselinePayload : 0;
+}
+
+function meanMetricDeltaFor(perCase: CaseDelta[], metric: 'recall' | 'mrr'): number {
+  let baselineTotal = 0;
+  let candidateTotal = 0;
+  let count = 0;
+  for (const entry of perCase) {
+    if (!entry.baseline || !entry.candidate || entry.baseline.skipped || entry.candidate.skipped) continue;
+    baselineTotal += entry.baseline[metric];
+    candidateTotal += entry.candidate[metric];
+    count++;
+  }
+  return count === 0 ? 0 : candidateTotal / count - baselineTotal / count;
+}
+
+function comparisonFlag(entry: CaseDelta): string {
+  if (entry.candidate?.skipped) return ` (skipped: ${entry.candidate.skipped})`;
+  return entry.regressed ? ` ⚠ ${entry.reason}` : '';
 }
 
 export function compareReports(baseline: EvalReport, candidate: EvalReport): CompareResult {
@@ -126,15 +151,16 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport): Com
   for (const id of allCaseIds) {
     const b = baselineByCase.get(id) ?? null;
     const c = candidateByCase.get(id) ?? null;
-    const recallDelta = (c?.recall ?? 0) - (b?.recall ?? 0);
-    const mrrDelta = (c?.mrr ?? 0) - (b?.mrr ?? 0);
+    const candidateSkipped = c?.skipped !== undefined;
+    const recallDelta = candidateSkipped ? 0 : (c?.recall ?? 0) - (b?.recall ?? 0);
+    const mrrDelta = candidateSkipped ? 0 : (c?.mrr ?? 0) - (b?.mrr ?? 0);
     const latencyDelta = (c?.latencyMs ?? 0) - (b?.latencyMs ?? 0);
     // Payload delta as a fraction of the baseline. Skip when either
     // side lacks payloadBytes (legacy report) — payloadDelta=0 there
     // means "no signal", not "no change". The regression check below
     // only fires when both sides report and the baseline is above
     // PAYLOAD_MIN_BYTES_FOR_CHECK to avoid noise on tiny payloads.
-    const payloadDelta = payloadDeltaFor(b, c);
+    const payloadDelta = candidateSkipped ? 0 : payloadDeltaFor(b, c);
     const reason = regressionReason(b, c, recallDelta, payloadDelta);
     const regressed = reason !== '';
     const entry: CaseDelta = {
@@ -152,8 +178,8 @@ export function compareReports(baseline: EvalReport, candidate: EvalReport): Com
     if (regressed) regressions.push(entry);
   }
 
-  const meanRecallDelta = candidate.summary.meanRecall - baseline.summary.meanRecall;
-  const meanMrrDelta = candidate.summary.meanMRR - baseline.summary.meanMRR;
+  const meanRecallDelta = meanMetricDeltaFor(perCase, 'recall');
+  const meanMrrDelta = meanMetricDeltaFor(perCase, 'mrr');
   const passDelta = candidate.summary.passed - baseline.summary.passed;
 
   // Mean payload across cases that have payloadBytes on BOTH sides.
@@ -191,7 +217,7 @@ export function formatComparison(baseline: EvalReport, candidate: EvalReport, cm
       e.baseline?.payloadBytes && e.candidate?.payloadBytes
         ? `${signed(e.payloadDelta * 100, 0)}%`.padStart(8)
         : '       —';
-    const flag = e.regressed ? ` ⚠ ${e.reason}` : '';
+    const flag = comparisonFlag(e);
     lines.push(`  ${id}  ${recall}  ${mrr}  ${lat}  ${payload}${flag}`);
   }
   lines.push(

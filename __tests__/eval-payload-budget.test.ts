@@ -9,6 +9,8 @@ import { describe, it, expect } from 'vitest';
 import { compareReports } from './evaluation/compare.js';
 import { scoreSemanticSearch } from './evaluation/scoring.js';
 import type { EvalReport, EvalResult } from './evaluation/types.js';
+import { semanticEvalSkipDetail } from './evaluation/semantic-skip.js';
+import { LlmEndpointError } from '../src/llm/client.js';
 
 function makeReport(results: Partial<EvalResult>[]): EvalReport {
   const filled: EvalResult[] = results.map((r, i) => ({
@@ -20,6 +22,8 @@ function makeReport(results: Partial<EvalResult>[]): EvalReport {
     missedSymbols: r.missedSymbols ?? [],
     latencyMs: r.latencyMs ?? 1,
     ...(r.payloadBytes === undefined ? {} : { payloadBytes: r.payloadBytes }),
+    ...(r.skipped === undefined ? {} : { skipped: r.skipped }),
+    ...(r.skipDetail === undefined ? {} : { skipDetail: r.skipDetail }),
   }));
   const total = filled.length;
   const passed = filled.filter((r) => r.pass).length;
@@ -111,9 +115,30 @@ describe('B5 — payload regression budget', () => {
     expect(cmp.regressions[0]!.reason).toMatch(/recall dropped/);
     expect(cmp.regressions[0]!.reason).not.toMatch(/payload/);
   });
+
+  it('does not compare an environmental skip as a semantic regression', () => {
+    const baseline = makeReport([{ caseId: 'semantic', recall: 1, mrr: 1, payloadBytes: 1000 }]);
+    const candidate = makeReport([
+      { caseId: 'semantic', recall: 0, mrr: 0, payloadBytes: 0, skipped: 'endpoint-unavailable' },
+    ]);
+
+    const cmp = compareReports(baseline, candidate);
+
+    expect(cmp.withinBudget).toBe(true);
+    expect(cmp.perCase[0]?.recallDelta).toBe(0);
+    expect(cmp.meanRecallDelta).toBe(0);
+  });
 });
 
 describe('B9 — semantic search SKIP semantics', () => {
+  it('skips only transient endpoint failures', () => {
+    expect(semanticEvalSkipDetail(new LlmEndpointError('embedding endpoint returned 503', 503))).toBe(
+      'embedding endpoint returned 503',
+    );
+    expect(semanticEvalSkipDetail(new LlmEndpointError('embedding response contained a malformed vector'))).toBeNull();
+    expect(semanticEvalSkipDetail(new Error('scoring bug'))).toBeNull();
+  });
+
   it("'no-embeddings' skip → pass=true, recall=0, skipped marker set", () => {
     const r = scoreSemanticSearch('test', ['Foo', 'Bar'], [], 1, 'no-embeddings');
     expect(r.pass).toBe(true);
@@ -126,6 +151,13 @@ describe('B9 — semantic search SKIP semantics', () => {
     const r = scoreSemanticSearch('test', ['Foo'], [], 1, 'no-source-embedding');
     expect(r.pass).toBe(true);
     expect(r.skipped).toBe('no-source-embedding');
+  });
+
+  it("'endpoint-unavailable' skip preserves the exact backend failure", () => {
+    const r = scoreSemanticSearch('test', ['Foo'], [], 1, 'endpoint-unavailable', 'embedding endpoint returned 503');
+    expect(r.pass).toBe(true);
+    expect(r.skipped).toBe('endpoint-unavailable');
+    expect(r.skipDetail).toBe('embedding endpoint returned 503');
   });
 
   it('non-skipped semantic case scores like a regular search (recall + mrr)', () => {

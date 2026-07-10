@@ -86,11 +86,11 @@ export const selfTestCases: EvalTestCase[] = [
     expectedSymbols: ['searchNodes'],
   },
   {
-    id: 'self-fuzzy-doublehit-CodGrap', // two typos in Cartograph
-    // Stress case: two errors. SUGGEST_MAX_EDIT_DIST in the fuzzy
-    // helper caps at 2, so this just barely fits — the case fails
-    // immediately if a future refactor tightens the budget.
-    query: 'CodGrap',
+    id: 'self-fuzzy-doublehit-Cortogroph', // two substitutions in Cartograph
+    // Stress case: exactly two errors. SUGGEST_MAX_EDIT_DIST in the
+    // fuzzy helper caps at 2, so this just barely fits — the case
+    // fails immediately if a future refactor tightens the budget.
+    query: 'Cortogroph',
     api: 'searchNodes',
     expectedSymbols: ['Cartograph'],
   },
@@ -104,20 +104,20 @@ export const selfTestCases: EvalTestCase[] = [
 
   {
     id: 'self-semantic-concept-cache-refresh',
-    // Concept query: should pull peers around incremental sync /
-    // file-watcher / cache invalidation symbols.
+    // Concept query: should pull the active freshness-cache and
+    // configuration-invalidation symbols.
     query: 'cache refresh and invalidation pattern',
     api: 'searchSemantic',
-    expectedSymbols: ['FileWatcher', 'sync'],
+    expectedSymbols: ['invalidateFreshness', 'EMPTY_INVALIDATION_PLAN'],
   },
   {
     id: 'self-semantic-peers-of-Cartograph',
     // Peer mode: similar-to a known central class. Expected peers
-    // should include the surrounding orchestration symbols.
+    // should include the current Cartograph facade/module family.
     query: '',
     api: 'searchSemantic',
     symbolName: 'Cartograph',
-    expectedSymbols: ['ExtractionOrchestrator', 'ReferenceResolver'],
+    expectedSymbols: ['CartographCore', 'ReadCartographModule'],
   },
   {
     id: 'self-semantic-peers-of-searchNodes',
@@ -144,10 +144,10 @@ export const selfTestCases: EvalTestCase[] = [
   },
   {
     id: 'self-explore-extraction-pipeline',
-    query: 'How does the extraction pipeline parse files and store nodes?',
+    query: 'How does ExtractionOrchestrator use ParseWorkerPool to parse and store files?',
     api: 'findRelevantContext',
-    expectedSymbols: ['ExtractionOrchestrator', 'extractFromSource', 'storeExtractionResult'],
-    options: { searchLimit: 8, traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
+    expectedSymbols: ['ExtractionOrchestrator', 'ParseWorkerPool', 'requestParse'],
+    options: { traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
   },
   {
     id: 'self-explore-biomarker-engine',
@@ -164,28 +164,21 @@ export const selfTestCases: EvalTestCase[] = [
   },
   {
     id: 'self-explore-search-cascade',
-    query: 'How does the search cascade fall back from FTS to fuzzy?',
+    // Anchor the public cascade and its two concrete stages so this
+    // remains deterministic when hybrid search degrades to lexical-only.
+    query: 'How does runRetrievalCascade fall back from searchNodesFTS to searchNodesFuzzy?',
     api: 'findRelevantContext',
-    expectedSymbols: ['searchNodes', 'runRetrievalCascade', 'searchNodesFTS'],
-    options: { searchLimit: 8, traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
+    expectedSymbols: ['searchNodes', 'runRetrievalCascade', 'searchNodesFTS', 'searchNodesFuzzy'],
+    options: { traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
   },
   {
     id: 'self-explore-compare-to-ref',
-    // Refined query (was: "How does compare-to-ref produce a
-    // structural diff against a git ref?") to surface the per-file
-    // and per-symbol delta types as the codebase grew. The original
-    // wording shared too many tokens with src/review/diff-parser.ts
-    // and __tests__/evaluation/compare.ts, both of which are real
-    // peers but not what this case is about. Mentioning "delta
-    // records" + "per-file changes" + the function name keeps the
-    // result set focused on src/compare/.
-    query: 'How does compareToRef walk both trees, classify per-file changes, and emit delta records?',
+    // Name the public function and the two delta records it constructs.
+    // This still exercises traversal into the compare pipeline while
+    // remaining stable when the optional hybrid channel is unavailable.
+    query: 'How does compareToRef classify changed files and build FileDelta and SymbolDelta records?',
     api: 'findRelevantContext',
-    // FileDelta + SymbolDelta + extractFromSource are the actual
-    // compare-to-ref pipeline pieces. (An earlier version of this
-    // case listed `getLineRangeHistory`, but that lives in the blame
-    // tool, not compare — reviewer-caught.)
-    expectedSymbols: ['compareToRef', 'FileDelta', 'extractFromSource'],
-    options: { searchLimit: 8, traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
+    expectedSymbols: ['compareToRef', 'FileDelta', 'SymbolDelta'],
+    options: { traversalDepth: 3, maxNodes: 80, minScore: 0.2 },
   },
 ];
