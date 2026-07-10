@@ -62,7 +62,7 @@
     "test": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 CARTOGRAPH_BIOMARKER_SERIAL=1 CARTOGRAPH_BIOMARKER_PERFILE_WORKERS=0 bash scripts/test-parallel.sh",
     "test:watch": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 CARTOGRAPH_BIOMARKER_SERIAL=1 CARTOGRAPH_BIOMARKER_PERFILE_WORKERS=0 bun test --isolate --watch --timeout 30000 __tests__/*.test.ts",
     "test:fast": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 CARTOGRAPH_BIOMARKER_SERIAL=1 CARTOGRAPH_BIOMARKER_PERFILE_WORKERS=0 bash scripts/test-parallel.sh",
-    "test:eval": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bun test --timeout 60000 __tests__/evaluation/",
+    "test:eval": "CARTOGRAPH_HOOKS_IN_PROCESS=1 CARTOGRAPH_TRACK_CONSUMED_ARGS=1 bun test --timeout 60000 __tests__/ranking-regression.test.ts __tests__/eval-payload-budget.test.ts",
     "test:leaks": "node scripts/check-test-module-leaks.mjs",
     "test:mock-hygiene": "node scripts/check-test-mock-hygiene.mjs",
     "test:postgres": "node scripts/test-postgres.mjs",
