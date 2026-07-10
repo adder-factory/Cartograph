@@ -108,7 +108,7 @@ describe('parseWorkerResponse', () => {
 
 describe('parseWorkerRequest', () => {
   it('accepts a well-formed query request', () => {
-    const request = { op: 'query', sql: 'SELECT ?', mode: 'all', params: [1] };
+    const request = { op: 'query', sql: 'SELECT ?', mode: 'all', params: [1], readOnly: true };
     expect(parseWorkerRequest(request, 'request')).toEqual(request);
   });
 

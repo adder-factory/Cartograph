@@ -47,6 +47,10 @@ export class PostgresAdapter implements SqliteDatabase {
     return new PostgresStatement(this, sql);
   }
 
+  prepareReadOnly(sql: string): SqliteStatement {
+    return new PostgresStatement(this, sql, true);
+  }
+
   exec(sql: string): void {
     if (isNoopPragmaSql(sql)) return;
     this.call({ op: 'exec', sql });
@@ -219,10 +223,11 @@ class PostgresStatement implements SqliteStatement {
   constructor(
     private readonly adapter: PostgresAdapter,
     private readonly sql: string,
+    private readonly readOnly = false,
   ) {}
 
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
-    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'run', params });
+    const response = this.adapter.call(this.queryRequest('run', params));
     return {
       changes: response.changes ?? 0,
       lastInsertRowid: response.lastInsertRowid ?? 0,
@@ -230,6 +235,7 @@ class PostgresStatement implements SqliteStatement {
   }
 
   runBatch(paramSets: unknown[][]): { changes: number; lastInsertRowid: number | bigint } {
+    if (this.readOnly) throw new Error('Read-only statements do not support batch execution.');
     if (paramSets.length === 0) return { changes: 0, lastInsertRowid: 0 };
     const response = this.adapter.call({ op: 'batch', sql: this.sql, mode: 'run', paramSets });
     return {
@@ -239,17 +245,23 @@ class PostgresStatement implements SqliteStatement {
   }
 
   get<TRow = unknown>(...params: unknown[]): TRow | null | undefined {
-    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'get', params });
+    const response = this.adapter.call(this.queryRequest('get', params));
     return (response.rows?.[0] ?? null) as TRow | null;
   }
 
   all<TRow = unknown>(...params: unknown[]): TRow[] {
-    const response = this.adapter.call({ op: 'query', sql: this.sql, mode: 'all', params });
+    const response = this.adapter.call(this.queryRequest('all', params));
     return (response.rows ?? []) as TRow[];
   }
 
   iterate<TRow = unknown>(...params: unknown[]): IterableIterator<TRow> {
     return this.all<TRow>(...params)[Symbol.iterator]();
+  }
+
+  private queryRequest(mode: 'run' | 'get' | 'all', params: unknown[]): WorkerRequest {
+    const request: WorkerRequest = { op: 'query', sql: this.sql, mode, params };
+    if (this.readOnly) request.readOnly = true;
+    return request;
   }
 }
 

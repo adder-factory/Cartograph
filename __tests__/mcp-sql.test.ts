@@ -10,6 +10,33 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import { Cartograph } from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { isReadOnlySql, renderPortableCreateSql } from '../src/mcp/tools/sql.js';
+
+describe('portable SQL schema rendering', () => {
+  it('renders table columns, constraints, defaults, and quoted identifiers', () => {
+    expect(
+      renderPortableCreateSql('odd"table', 'table', [
+        { name: 'id', type: 'INTEGER', notnull: 1, pk: 1, dflt_value: null },
+        { name: 'label', type: 'TEXT', notnull: 1, pk: 0, dflt_value: "'unknown'" },
+        { name: 'fallback', type: '', notnull: 0, pk: 0 },
+      ]),
+    ).toBe(`CREATE TABLE "odd""table" (
+  "id" INTEGER PRIMARY KEY,
+  "label" TEXT NOT NULL DEFAULT 'unknown',
+  "fallback" TEXT
+);`);
+  });
+
+  it('renders a portable view placeholder with its discovered columns', () => {
+    expect(
+      renderPortableCreateSql('active_nodes', 'view', [
+        { name: 'id', type: 'TEXT', notnull: 0, pk: 0 },
+        { name: 'name', type: 'TEXT', notnull: 0, pk: 0 },
+      ]),
+    ).toBe(`CREATE VIEW "active_nodes" ("id", "name") AS
+  /* view definition unavailable through this storage adapter */`);
+  });
+});
 
 describe('cartograph_sql', () => {
   let dir: string;
@@ -128,6 +155,29 @@ describe('cartograph_sql', () => {
     });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/read-only/i);
+  });
+
+  it('rejects EXPLAIN ANALYZE statements that execute writes', () => {
+    expect(isReadOnlySql('EXPLAIN ANALYZE UPDATE nodes SET name = name')).toBe(false);
+    expect(isReadOnlySql('EXPLAIN ANALYZE DELETE FROM nodes')).toBe(false);
+    expect(isReadOnlySql('EXPLAIN (ANALYZE TRUE, BUFFERS TRUE) INSERT INTO nodes SELECT * FROM nodes')).toBe(false);
+    expect(isReadOnlySql('EXPLAIN SELECT name FROM nodes')).toBe(true);
+    expect(isReadOnlySql('EXPLAIN QUERY PLAN SELECT name FROM nodes')).toBe(true);
+  });
+
+  it('enforces read-only execution at the SQLite database boundary', () => {
+    const before = cg.queries.getNodesByIds(['missing']).size;
+
+    expect(typeof cg.db.prepareReadOnly).toBe('function');
+    expect(() =>
+      cg.db
+        .prepareReadOnly(
+          "INSERT INTO nodes (id, kind, name, file_path) VALUES ('blocked', 'function', 'blocked', 'src/a.ts')",
+        )
+        .run(),
+    ).toThrow(/readonly|read-only|attempt to write/i);
+
+    expect(cg.queries.getNodesByIds(['blocked']).size).toBe(before);
   });
 
   it('read-only rejection message names both the MCP and CLI schema options (surface-neutral)', async () => {

@@ -6,7 +6,7 @@
  * configured adapter boundary.
  */
 
-import { type SqliteDatabase, type SqliteBackend, createDatabase } from './sqlite-adapter.js';
+import { type SqliteDatabase, type SqliteBackend, type SqliteStatement, createDatabase } from './sqlite-adapter.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { CartographConfig } from '../types.js';
@@ -347,6 +347,15 @@ export class DatabaseConnection {
   /** Get the underlying database instance. */
   getDb(): SqliteDatabase {
     return this.core.db;
+  }
+
+  /** Prepare a statement under the backend's database-enforced read-only mode. */
+  prepareReadOnly(sql: string): SqliteStatement {
+    const prepareReadOnly = this.core.db.prepareReadOnly;
+    if (!prepareReadOnly) {
+      throw new Error(`Database adapter ${this.core.db.dialect} does not implement read-only statement execution.`);
+    }
+    return prepareReadOnly.call(this.core.db, sql);
   }
 
   /**

@@ -239,7 +239,10 @@ async function handlePragmaQuery(request: QueryRequest): Promise<Record<string, 
 
 async function handleTranslatedQuery(request: QueryRequest): Promise<Record<string, unknown>> {
   const translated = translateQuery(request.sql ?? '', request.params ?? []);
-  const rows = await sql.unsafe(translated.sql, translated.params);
+  const rows =
+    request.readOnly === true
+      ? await sql.begin('read only', async (tx) => tx.unsafe(translated.sql, translated.params))
+      : await sql.unsafe(translated.sql, translated.params);
   const dataRows = Array.from(rows as unknown[]).map(normalizeRow);
   if (request.mode === 'run') {
     return {

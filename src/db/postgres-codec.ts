@@ -48,6 +48,7 @@ const WorkerRequestSchema = z.discriminatedUnion('op', [
     sql: z.string().optional(),
     mode: z.enum(['run', 'get', 'all']).optional(),
     params: z.array(z.unknown()).optional(),
+    readOnly: z.boolean().optional(),
   }),
   z.strictObject({
     op: z.literal('batch'),
@@ -81,7 +82,7 @@ const BatchModeSchema = z.literal('run');
 const UnknownArraySchema = z.array(z.unknown());
 const UnknownArrayArraySchema = z.array(UnknownArraySchema);
 
-const QUERY_REQUEST_KEYS = new Set(['op', 'sql', 'mode', 'params']);
+const QUERY_REQUEST_KEYS = new Set(['op', 'sql', 'mode', 'params', 'readOnly']);
 const BATCH_REQUEST_KEYS = new Set(['op', 'sql', 'mode', 'paramSets']);
 const EXEC_REQUEST_KEYS = new Set(['op', 'sql']);
 const PRAGMA_REQUEST_KEYS = new Set(['op', 'pragma']);
@@ -169,6 +170,8 @@ function parseQueryWorkerRequest(input: JsonObject, label: string): QueryWorkerR
   if (mode !== undefined) request.mode = mode;
   const params = parseField(UnknownArraySchema.optional(), input['params'], label);
   if (params !== undefined) request.params = params;
+  const readOnly = parseField(BooleanSchema.optional(), input['readOnly'], label);
+  if (readOnly !== undefined) request.readOnly = readOnly;
   return request;
 }
 
