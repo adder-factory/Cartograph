@@ -1342,7 +1342,10 @@ async function assertDenseGraphFixtureSpreads(page: Page, url: string): Promise<
 
 async function pinnedLayoutPositionCount(page: Page): Promise<number> {
   return page.evaluate((key) => {
-    const raw = localStorage.getItem(String(key));
+    const storageKey = (
+      globalThis as typeof globalThis & { viewerProjectStorageKey?: (baseKey: string) => string }
+    ).viewerProjectStorageKey?.(String(key));
+    const raw = localStorage.getItem(storageKey || String(key));
     if (!raw) return 0;
     try {
       const store = JSON.parse(raw) as Record<string, { positions?: Record<string, unknown> }>;
@@ -1995,12 +1998,14 @@ async function assertResetViewerLocalState(page: Page): Promise<void> {
     { timeout: SEARCH_TIMEOUT_MS },
   );
   const state = await page.evaluate(() => {
+    const projectKey =
+      (globalThis as typeof globalThis & { viewerProjectStorageKey?: (baseKey: string) => string })
+        .viewerProjectStorageKey || ((baseKey: string) => baseKey);
     let pinnedCount = 0;
     try {
-      const pinned = JSON.parse(localStorage.getItem('cartograph-viewer-pinned-layouts-v1') || '{}') as Record<
-        string,
-        unknown
-      >;
+      const pinned = JSON.parse(
+        localStorage.getItem(projectKey('cartograph-viewer-pinned-layouts-v1')) || '{}',
+      ) as Record<string, unknown>;
       pinnedCount = Object.keys(pinned).length;
     } catch {
       pinnedCount = -1;
@@ -2013,8 +2018,8 @@ async function assertResetViewerLocalState(page: Page): Promise<void> {
       layoutBalanced: document.querySelector<HTMLElement>('[data-layout-quality="balanced"]')?.dataset.active === '1',
       loadSnapshotDisabled: document.querySelector<HTMLButtonElement>('#btn-load-snapshot')?.disabled === true,
       pinnedCount,
-      savedViewsMissing: localStorage.getItem('cartograph-viewer-saved-views-v1') === null,
-      snapshotMissing: localStorage.getItem('cartograph-viewer-graph-snapshot-v1') === null,
+      savedViewsMissing: localStorage.getItem(projectKey('cartograph-viewer-saved-views-v1')) === null,
+      snapshotMissing: localStorage.getItem(projectKey('cartograph-viewer-graph-snapshot-v1')) === null,
     };
   });
   if (
@@ -2036,6 +2041,9 @@ async function assertResetViewerLocalState(page: Page): Promise<void> {
 async function assertLocalStateCorruptionRecovery(page: Page, url: string): Promise<void> {
   await page.evaluate(
     ({ densityKey, entries, layoutKey, pinnedKey, positions, savedKey, snapshotKey, splitKey }) => {
+      const projectKey =
+        (globalThis as typeof globalThis & { viewerProjectStorageKey?: (baseKey: string) => string })
+          .viewerProjectStorageKey || ((baseKey: string) => baseKey);
       const pinned: Record<
         string,
         { nodeCount: number; positions: Record<string, { x: number; y: number }>; updatedAt: number; version: number }
@@ -2052,12 +2060,12 @@ async function assertLocalStateCorruptionRecovery(page: Page, url: string): Prom
           version: 2,
         };
       }
-      localStorage.setItem(savedKey, '{bad saved views');
-      localStorage.setItem(snapshotKey, '"not a snapshot"');
+      localStorage.setItem(projectKey(savedKey), '{bad saved views');
+      localStorage.setItem(projectKey(snapshotKey), '"not a snapshot"');
       localStorage.setItem(splitKey, '{bad splitters');
       localStorage.setItem(layoutKey, 'not-a-layout');
       localStorage.setItem(densityKey, 'not-a-density');
-      localStorage.setItem(pinnedKey, JSON.stringify(pinned));
+      localStorage.setItem(projectKey(pinnedKey), JSON.stringify(pinned));
     },
     {
       densityKey: DENSITY_KEY,
@@ -2074,13 +2082,16 @@ async function assertLocalStateCorruptionRecovery(page: Page, url: string): Prom
   await waitForGraph(page);
   const state = await page.evaluate(
     ({ densityKey, pinnedKey, savedKey, snapshotKey, splitKey }) => {
+      const projectKey =
+        (globalThis as typeof globalThis & { viewerProjectStorageKey?: (baseKey: string) => string })
+          .viewerProjectStorageKey || ((baseKey: string) => baseKey);
       const activeDensity = document.querySelector<HTMLElement>('[data-density-mode="core"]')?.dataset.active === '1';
       const activeLayout =
         document.querySelector<HTMLElement>('[data-layout-quality="balanced"]')?.dataset.active === '1';
       let pinnedEntries = 0;
       let largestPinnedEntry = 0;
       try {
-        const parsed = JSON.parse(localStorage.getItem(pinnedKey) || '{}') as Record<
+        const parsed = JSON.parse(localStorage.getItem(projectKey(pinnedKey)) || '{}') as Record<
           string,
           { positions?: Record<string, unknown> }
         >;
@@ -2101,8 +2112,8 @@ async function assertLocalStateCorruptionRecovery(page: Page, url: string): Prom
             ?.invariantErrorCount || 0,
         pinnedEntries,
         largestPinnedEntry,
-        savedViewsCleared: localStorage.getItem(savedKey) === null,
-        snapshotCleared: localStorage.getItem(snapshotKey) === null,
+        savedViewsCleared: localStorage.getItem(projectKey(savedKey)) === null,
+        snapshotCleared: localStorage.getItem(projectKey(snapshotKey)) === null,
         splittersCleared: localStorage.getItem(splitKey) === null,
       };
     },

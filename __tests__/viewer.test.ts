@@ -67,10 +67,24 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     const res = await fetch(handle.url);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toMatch(/text\/html/);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toBe(
+      "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'; object-src 'none'; worker-src 'none'",
+    );
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('x-frame-options')).toBe('DENY');
+    expect(res.headers.get('cross-origin-opener-policy')).toBe('same-origin');
+    expect(res.headers.get('cross-origin-resource-policy')).toBe('same-origin');
+    expect(res.headers.get('permissions-policy')).toBe('camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+    expect(res.headers.get('x-robots-tag')).toBe('noindex, nofollow, noarchive');
     const html = await res.text();
     expect(html).toContain('<link rel="stylesheet" href="viewer.css" />');
     expect(html).toContain('<script src="lucide.min.js"></script>');
-    expect(html).not.toContain('unpkg.com/lucide');
+    expect(html).toMatch(/<meta name="cartograph-viewer-project-id" content="[A-Za-z0-9_-]{22}" \/>/);
+    expect(html).not.toContain(testDir);
+    expect(html).not.toMatch(/<script[^>]+src=["']https?:\/\//);
+    expect(html).toContain('<script src="viewer.vendor.app"></script>');
     expect(html).toContain('<script src="viewer.demo-data.app"></script>');
     expect(html).toContain('<script src="viewer.app"></script>');
     expect(html).not.toContain('<style>');
@@ -78,12 +92,14 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
       (m) => m[1],
     );
     expect(scriptSrcs).toEqual([
+      'viewer.vendor.app',
       'viewer.demo-data.app',
       'viewer.state.app',
       'viewer.api.app',
       'viewer.graph-core.app',
       'viewer.mobile-panels.app',
       'viewer.graph-layout.app',
+      'viewer.minimap.app',
       'viewer.edge-inspection.app',
       'viewer.graph-diagnostics.app',
       'viewer.live.app',
@@ -115,6 +131,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(cssRes.headers.get('content-type')).toMatch(/text\/css/);
     expect(cssRes.headers.get('cache-control')).toBe('no-cache');
     expect(cssRes.headers.get('etag')).toMatch(/^"sha256-[a-f0-9]+"$/);
+    expect(cssRes.headers.get('content-security-policy')).toContain("default-src 'none'");
     expect(lucideRes.status).toBe(200);
     expect(lucideRes.headers.get('content-type')).toMatch(/text\/javascript/);
     expect(lucideRes.headers.get('cache-control')).toBe('no-cache');
@@ -135,11 +152,20 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     expect(jsWeakNotModified.status).toBe(304);
     expect(await jsWeakNotModified.text()).toBe('');
     const scriptBodies = await Promise.all(scriptResponses.map((scriptRes) => scriptRes.text()));
+    const minimapBody = scriptBodies[scriptSrcs.indexOf('viewer.minimap.app')];
+    const featuresBody = scriptBodies[scriptSrcs.indexOf('viewer.features.app')];
+    expect(minimapBody).toContain('function drawGraphMinimap');
+    expect(minimapBody).toContain('function requestGraphMinimapDrawThrottled');
+    expect(featuresBody).not.toContain('function drawGraphMinimap');
     const body = `${html}\n${await cssRes.text()}\n${await lucideRes.text()}\n${scriptBodies.join('\n')}`;
     expect(body).toContain('cartograph viewer');
     expect(body).toContain('<title>cartograph viewer</title>');
     expect(body).toContain('lucide v0.468.0');
     expect(body).toContain('viewer.state.app');
+    expect(body).toContain('function viewerProjectStorageKey');
+    expect(body).toContain("viewerProjectStorageKey('cartograph-viewer-saved-views-v1')");
+    expect(body).toContain("viewerProjectStorageKey('cartograph-viewer-graph-snapshot-v1')");
+    expect(body).toContain("viewerProjectStorageKey('cartograph-viewer-pinned-layouts-v1')");
     expect(body).toContain('viewer.api.app');
     expect(body).toContain('function apiFetch');
     expect(body).toContain('viewer.mobile-panels.app');
@@ -313,6 +339,8 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
   it('rejects unauthorized API requests while leaving static assets readable', async () => {
     const res = await fetch(`${handle.url}api/status`);
     expect(res.status).toBe(401);
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('content-security-policy')).toContain("default-src 'none'");
     await expect(res.json()).resolves.toMatchObject({ error: 'unauthorized' });
 
     const asset = await fetch(`${handle.url}viewer.css`);
@@ -1083,8 +1111,7 @@ export function alpha(v: number): number { return beta(v) + gamma(v); }
     await expect(oversized.json()).resolves.toMatchObject({ error: 'body too large' });
   });
 
-  // ── Config editor (loopback bind → allowConfigEdit is true here; the
-  //    non-loopback 403 path is unit-tested via viewerConfigEditAllowed). ──
+  // ── Config editor (the server enforces a loopback-only bind). ──
 
   interface ConfigPayload {
     allowConfigEdit: boolean;
@@ -1293,6 +1320,12 @@ function createGitCompareFixture(dir: string): boolean {
 }
 
 describe('viewer HTTP server — startup errors', () => {
+  it('rejects non-loopback binds before opening project data', async () => {
+    await expect(startViewerServer('/project-does-not-need-to-exist', { host: '0.0.0.0', port: 0 })).rejects.toThrow(
+      'Viewer host must be a loopback address',
+    );
+  });
+
   it('rejects when the project has no cartograph DB', async () => {
     const empty = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-viewer-empty-'));
     try {

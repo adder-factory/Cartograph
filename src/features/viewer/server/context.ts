@@ -13,9 +13,9 @@ export interface ViewerHandle {
 export interface ViewerOptions {
   /** Port to bind to. Pass 0 to let the OS pick a free port. */
   port?: number;
-  /** Bind host. Default '127.0.0.1' (a concrete loopback — Bun's
-   *  'localhost' alternates ::1/127.0.0.1 across binds) with
-   *  token-protected APIs. */
+  /** Loopback bind host. Default '127.0.0.1' (a concrete loopback — Bun's
+   *  'localhost' alternates ::1/127.0.0.1 across binds). Non-loopback hosts
+   *  are rejected because the page token is not remote-user authentication. */
   host?: string;
   /**
    * Scope this viewer instance to ONE recorded MCP session, by id or
@@ -23,13 +23,6 @@ export interface ViewerOptions {
    * (enforced server-side). Lets each agent run its own viewer.
    */
   session?: string;
-  /**
-   * Enable the config editor (write + re-index endpoints) even on a
-   * non-loopback bind. Loopback binds enable it by default; this is the
-   * explicit opt-in for binds reachable from other hosts. See
-   * `viewerConfigEditAllowed`.
-   */
-  allowConfigEdit?: boolean;
 }
 
 export interface StaticAsset {
@@ -56,8 +49,7 @@ export interface RequestContext {
   indexHtml: string;
   staticAssets: Record<string, StaticAsset>;
   security: ViewerSecurityContext;
-  /** Whether the config editor's write/re-index endpoints are enabled
-   *  for this server (loopback bind by default, else --allow-config-edit). */
+  /** Whether the config editor's write/re-index endpoints are enabled. */
   allowConfigEdit: boolean;
   cg?: Cartograph;
 }

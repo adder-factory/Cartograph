@@ -44,6 +44,7 @@ import {
 } from './project-payloads.js';
 import { checkViewerRequest } from './security.js';
 import { emptySystemPayload, systemPayload } from './system-payload.js';
+import { applyViewerResponseHeaders } from './response-security.js';
 
 interface GetRoute {
   match: (path: string) => RegExpExecArray | true | null;
@@ -211,6 +212,7 @@ export async function handleRequest(
   res: http.ServerResponse,
   ctx: RequestContext,
 ): Promise<void> {
+  applyViewerResponseHeaders(res);
   const url = new URL(req.url ?? '/', URL_PARSE_BASE);
   const requestCheck = checkViewerRequest(req, url, ctx);
   if (!requestCheck.ok) {

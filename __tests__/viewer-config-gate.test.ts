@@ -1,34 +1,24 @@
-/**
- * viewerConfigEditAllowed — the gate behind the config editor's write +
- * re-index endpoints. The endpoint-level 403 can't be exercised over the
- * network (a server reachable at 127.0.0.1 is loopback, hence allowed),
- * so the non-loopback decision is pinned here.
- */
 import { describe, it, expect } from 'vitest';
 import {
   isLockContentionResult,
   redactDatabase,
   redactUrlCredentials,
 } from '../src/features/viewer/server/config-routes.js';
-import { viewerConfigEditAllowed } from '../src/features/viewer/server/security.js';
+import { normalizeViewerBindHost } from '../src/features/viewer/server/security.js';
 
-describe('viewerConfigEditAllowed', () => {
-  it('allows loopback binds by default', () => {
-    expect(viewerConfigEditAllowed('127.0.0.1', false)).toBe(true);
-    expect(viewerConfigEditAllowed('localhost', false)).toBe(true);
-    expect(viewerConfigEditAllowed('::1', false)).toBe(true);
-    expect(viewerConfigEditAllowed('[::1]', false)).toBe(true);
+describe('normalizeViewerBindHost', () => {
+  it('normalizes valid IPv4, IPv6, and named loopback binds', () => {
+    expect(normalizeViewerBindHost('127.0.0.1')).toBe('127.0.0.1');
+    expect(normalizeViewerBindHost('127.42.8.9')).toBe('127.42.8.9');
+    expect(normalizeViewerBindHost('LOCALHOST')).toBe('localhost');
+    expect(normalizeViewerBindHost('::1')).toBe('::1');
+    expect(normalizeViewerBindHost('[::1]')).toBe('::1');
   });
 
-  it('disallows non-loopback binds unless explicitly opted in', () => {
-    expect(viewerConfigEditAllowed('0.0.0.0', false)).toBe(false);
-    expect(viewerConfigEditAllowed('192.168.1.5', false)).toBe(false);
-    expect(viewerConfigEditAllowed('example.com', false)).toBe(false);
-  });
-
-  it('honors the --allow-config-edit opt-in on any bind', () => {
-    expect(viewerConfigEditAllowed('0.0.0.0', true)).toBe(true);
-    expect(viewerConfigEditAllowed('example.com', true)).toBe(true);
+  it('rejects wildcard, LAN, public, malformed, and DNS-name binds', () => {
+    for (const host of ['0.0.0.0', '192.168.1.5', '8.8.8.8', '127.999.1.1', 'example.com', '']) {
+      expect(() => normalizeViewerBindHost(host)).toThrow('Viewer host must be a loopback address');
+    }
   });
 });
 
