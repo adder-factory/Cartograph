@@ -24,6 +24,7 @@ process.stdout.write('[standalone-smoke] help ok\n');
 const tmpProject = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-standalone-smoke-'));
 try {
   run(launcher, ['admin', 'init', tmpProject]);
+  assertPackagedHnsw(tmpProject);
   const daemon = run(launcher, ['serve', '--mcp', '--daemon', '--project-path', tmpProject, '--no-startup-sync'], {
     input: '',
     env: {
@@ -43,6 +44,36 @@ try {
 } finally {
   cleanupDaemon(tmpProject);
   fs.rmSync(tmpProject, { recursive: true, force: true });
+}
+
+function assertPackagedHnsw(projectRoot) {
+  const prebuildRoot = path.join(stage, 'share', 'cartograph', 'usearch', 'prebuilds');
+  if (!containsFileNamed(prebuildRoot, 'usearch.node')) {
+    process.stdout.write('[standalone-smoke] hnsw skipped (no packaged target prebuild)\n');
+    return;
+  }
+
+  const statusOutput = run(launcher, ['status', '--json', projectRoot]).stdout;
+  let status;
+  try {
+    status = JSON.parse(statusOutput);
+  } catch {
+    throw new Error(`standalone status did not return JSON:\n${statusOutput}`);
+  }
+  if (typeof status !== 'object' || status === null || status.hnswAvailable !== true) {
+    throw new Error(`standalone packaged a usearch prebuild but HNSW is unavailable:\n${statusOutput}`);
+  }
+  process.stdout.write('[standalone-smoke] hnsw ok\n');
+}
+
+function containsFileNamed(root, expectedName) {
+  if (!fs.existsSync(root)) return false;
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    const entryPath = path.join(root, entry.name);
+    if (entry.isDirectory() && containsFileNamed(entryPath, expectedName)) return true;
+    if (entry.isFile() && entry.name === expectedName) return true;
+  }
+  return false;
 }
 
 function findStage() {

@@ -2,6 +2,13 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import {
+  assertBytesOmitBuildRoots,
+  buildRootVariants,
+  patchRe2GlueForStandalone,
+  patchUsearchForStandalone,
+  usearchPrebuildRelativePath,
+} from './standalone-build-privacy.js';
 
 const ROOT = path.resolve(import.meta.dirname, '..');
 const RELEASE_DIR = path.join(ROOT, 'release');
@@ -10,51 +17,53 @@ const isWindows = target.startsWith('windows-');
 const stageName = `cartograph-${target}`;
 const stage = path.join(RELEASE_DIR, stageName);
 const binaryName = isWindows ? 'cartograph.exe' : 'cartograph-bin';
+const compiledBinary = path.join(stage, 'lib', 'cartograph', binaryName);
 
 rm(stage);
 fs.mkdirSync(path.join(stage, 'bin'), { recursive: true });
 fs.mkdirSync(path.join(stage, 'lib', 'cartograph'), { recursive: true });
 fs.mkdirSync(path.join(stage, 'share', 'cartograph'), { recursive: true });
+const compileRoot = createNeutralCompileRoot();
 
-// re2-wasm's emscripten glue resolves re2.wasm via a baked
-// `__dirname`, which under `bun build --compile` is the BUILD
-// machine's node_modules path — the binary then fails everywhere that
-// path doesn't exist (caught by the Docker tarball smoke). Patch the
-// glue for the duration of the compile so it prefers the launcher's
-// CARTOGRAPH_ASSET_ROOT (where we ship re2.wasm), and restore the
-// original afterwards.
-const RE2_GLUE = path.join(ROOT, 'node_modules', 're2-wasm', 'build', 'wasm', 're2.js');
-const RE2_DIRNAME_LINE = `scriptDirectory = __dirname + '/';`;
-const RE2_ASSET_ROOT_LINE =
-  `scriptDirectory = (typeof process !== 'undefined' && process.env && process.env.CARTOGRAPH_ASSET_ROOT)` +
-  ` ? process.env.CARTOGRAPH_ASSET_ROOT.replace(/\\/?$/, '/') : __dirname + '/';`;
-
-const re2GlueOriginal = fs.readFileSync(RE2_GLUE, 'utf-8');
-if (!re2GlueOriginal.includes(RE2_DIRNAME_LINE)) {
-  throw new Error(
-    `re2-wasm glue no longer contains the __dirname scriptDirectory line — update the standalone patch in ${import.meta.url}`,
-  );
-}
-fs.writeFileSync(RE2_GLUE, re2GlueOriginal.replace(RE2_DIRNAME_LINE, RE2_ASSET_ROOT_LINE), 'utf-8');
+// Compile from a disposable path outside the checkout so Bun's virtual
+// filesystem can keep internally-consistent native-module paths without
+// embedding the developer or CI checkout path in the public executable.
+// Copying (rather than symlinking) is required because Bun resolves symlinks
+// back to the private source path. The mirror also lets us patch re2-wasm
+// without mutating the installed dependency used by concurrent test shards.
 try {
-  run('bun', [
-    'build',
-    '--compile',
-    // Explicit per-target compile so cross-builds embed the right bun
-    // runtime (plain `--target=bun` always compiled for the HOST, which
-    // would ship a host binary under a foreign target's archive name).
-    `--target=${bunCompileTarget(target)}`,
-    '--outfile',
-    path.join(stage, 'lib', 'cartograph', binaryName),
-    path.join(ROOT, 'src', 'bin', 'cartograph.ts'),
-  ]);
+  prepareCompileMirror();
+  const re2Glue = path.join(compileRoot, 'node_modules', 're2-wasm', 'build', 'wasm', 're2.js');
+  const re2GlueOriginal = fs.readFileSync(re2Glue, 'utf-8');
+  fs.writeFileSync(re2Glue, patchRe2GlueForStandalone(re2GlueOriginal), 'utf-8');
+  const usearchLoader = path.join(compileRoot, 'node_modules', 'usearch', 'javascript', 'dist', 'esm', 'usearch.js');
+  const usearchLoaderOriginal = fs.readFileSync(usearchLoader, 'utf-8');
+  fs.writeFileSync(usearchLoader, patchUsearchForStandalone(usearchLoaderOriginal), 'utf-8');
+  run(
+    'bun',
+    [
+      'build',
+      '--compile',
+      // Explicit per-target compile so cross-builds embed the right bun
+      // runtime (plain `--target=bun` always compiled for the HOST, which
+      // would ship a host binary under a foreign target's archive name).
+      `--target=${bunCompileTarget(target)}`,
+      '--outfile',
+      compiledBinary,
+      path.join(compileRoot, 'src', 'bin', 'cartograph.ts'),
+    ],
+    compileRoot,
+  );
 } finally {
-  fs.writeFileSync(RE2_GLUE, re2GlueOriginal, 'utf-8');
+  rm(compileRoot);
 }
+const embeddedBuildRoots = buildRootVariantsForCurrentCheckout();
+assertBytesOmitBuildRoots(fs.readFileSync(compiledBinary), embeddedBuildRoots);
 
 copyFile('src/db/schema.sql', 'share/cartograph/db/schema.sql');
 copyFile('node_modules/web-tree-sitter/web-tree-sitter.wasm', 'share/cartograph/web-tree-sitter.wasm');
 copyFile('node_modules/re2-wasm/build/wasm/re2.wasm', 'share/cartograph/re2.wasm');
+copyUsearchPrebuild();
 copyDir('src/extraction/wasm', 'share/cartograph/extraction/wasm', (name) => name.endsWith('.wasm'));
 copyDir('src/extraction/tags', 'share/cartograph/extraction/tags', (name) => name.endsWith('.scm'));
 copyDir('src/features/viewer/static', 'share/cartograph/features/viewer/static');
@@ -99,9 +108,43 @@ function currentTarget() {
   return `${os}-${arch}`;
 }
 
-function run(cmd, args) {
-  const result = spawnSync(cmd, args, { cwd: ROOT, stdio: 'inherit' });
+function run(cmd, args, cwd = ROOT) {
+  const result = spawnSync(cmd, args, { cwd, stdio: 'inherit' });
   if (result.status !== 0) throw new Error(`${cmd} ${args.join(' ')} failed with ${result.status}`);
+}
+
+function buildRootVariantsForCurrentCheckout() {
+  return buildRootVariants(ROOT, fs.realpathSync.native(ROOT), process.platform);
+}
+
+function createNeutralCompileRoot() {
+  const base = process.platform === 'win32' ? path.parse(ROOT).root : '/tmp';
+  const uniqueRoot = fs.mkdtempSync(path.join(base, `.cartograph-standalone-${target}-`));
+  if (process.platform !== 'win32') fs.chmodSync(uniqueRoot, 0o700);
+  return uniqueRoot;
+}
+
+function prepareCompileMirror() {
+  fs.mkdirSync(compileRoot, { recursive: true });
+  for (const relativePath of ['src', 'node_modules']) {
+    fs.cpSync(path.join(ROOT, relativePath), path.join(compileRoot, relativePath), {
+      recursive: true,
+      dereference: true,
+    });
+  }
+  for (const relativePath of ['package.json', 'tsconfig.json']) {
+    fs.copyFileSync(path.join(ROOT, relativePath), path.join(compileRoot, relativePath));
+  }
+}
+
+function copyUsearchPrebuild() {
+  const relativePath = usearchPrebuildRelativePath(target);
+  if (!relativePath) return;
+  const sourcePath = path.join('node_modules', 'usearch', 'prebuilds', relativePath);
+  if (!fs.existsSync(path.join(ROOT, sourcePath))) {
+    throw new Error(`usearch prebuild is missing for standalone target ${target}`);
+  }
+  copyFile(sourcePath, path.join('share', 'cartograph', 'usearch', 'prebuilds', relativePath));
 }
 
 function rm(filePath) {
