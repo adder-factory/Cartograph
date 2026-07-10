@@ -2038,7 +2038,7 @@ async function assertResetViewerLocalState(page: Page): Promise<void> {
   await waitForGraph(page);
 }
 
-async function assertLocalStateCorruptionRecovery(page: Page, url: string): Promise<void> {
+async function seedCorruptViewerLocalState(page: Page): Promise<void> {
   await page.evaluate(
     ({ densityKey, entries, layoutKey, pinnedKey, positions, savedKey, snapshotKey, splitKey }) => {
       const projectKey =
@@ -2078,6 +2078,10 @@ async function assertLocalStateCorruptionRecovery(page: Page, url: string): Prom
       splitKey: SPLITTERS_KEY,
     },
   );
+}
+
+async function assertLocalStateCorruptionRecovery(page: Page, url: string): Promise<void> {
+  await seedCorruptViewerLocalState(page);
   await page.goto(url, { waitUntil: 'domcontentloaded' });
   await waitForGraph(page);
   const state = await page.evaluate(

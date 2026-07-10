@@ -70,7 +70,12 @@ process.stdout.write(
 
 function readPackageVersion(packageName) {
   const packageJsonPath = path.join(ROOT, 'node_modules', packageName, 'package.json');
-  const parsed = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  } catch (error) {
+    throw new Error(`Invalid package manifest: ${packageJsonPath}`, { cause: error });
+  }
   if (typeof parsed.version !== 'string' || parsed.version.length === 0) {
     throw new Error(`Missing version in ${packageJsonPath}`);
   }
