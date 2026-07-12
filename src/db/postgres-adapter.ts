@@ -23,6 +23,8 @@ interface PostgresAdapterState {
   queryTimeoutMs: number;
   open: boolean;
   txDepth: number;
+  /** Set once the owning adapter is closed on purpose, so it is never auto-reopened. */
+  userClosed: boolean;
 }
 
 const WORKER_READY = 10;
@@ -99,6 +101,7 @@ export class PostgresAdapter implements SqliteDatabase {
   }
 
   close(): void {
+    this.state.userClosed = true;
     if (!this.state.open) return;
     try {
       this.call({ op: 'close' });
@@ -109,6 +112,17 @@ export class PostgresAdapter implements SqliteDatabase {
   }
 
   call(request: WorkerRequest): WorkerResponse {
+    // A prior fault — a query timeout, an invalid/dead worker, or a dropped
+    // PostgreSQL connection — tears the bridge down and leaves state.open
+    // false. Without re-establishing it here, every later call throws
+    // "PostgreSQL connection is closed" from callOnce's guard forever, so a
+    // long-lived MCP server stays permanently unusable after a transient
+    // connection loss (issue #66). Re-open on demand, unless the adapter was
+    // closed on purpose or a transaction is still unwinding (reopening a fresh
+    // bridge mid-transaction would silently discard the in-flight work).
+    if (!this.state.open && canReopenBridge(this.state, request)) {
+      this.restartBridgeForRetry();
+    }
     try {
       return callOnce(this.state, request);
     } catch (err) {
@@ -157,6 +171,7 @@ function createBridge(options: PostgresAdapterOptions): PostgresAdapterState {
     queryTimeoutMs: options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS,
     open: true,
     txDepth: 0,
+    userClosed: false,
   };
   const ready = Atomics.wait(control, 0, 0, 30_000);
   if (ready === 'timed-out' || Atomics.load(control, 0) !== WORKER_READY) {
@@ -173,7 +188,17 @@ function createBridge(options: PostgresAdapterOptions): PostgresAdapterState {
 }
 
 function shouldRetryClosedConnection(state: PostgresAdapterState, request: WorkerRequest, error: string): boolean {
-  return request.op !== 'close' && state.txDepth === 0 && isClosedPostgresConnectionError(error);
+  return !state.userClosed && request.op !== 'close' && state.txDepth === 0 && isClosedPostgresConnectionError(error);
+}
+
+/**
+ * Whether a torn-down bridge may be re-established for this request. Never
+ * reopen for an intentional `close()` or mid-transaction (a fresh bridge would
+ * silently drop the in-flight transaction) — only for a top-level request on
+ * an adapter that was not closed on purpose.
+ */
+function canReopenBridge(state: PostgresAdapterState, request: WorkerRequest): boolean {
+  return !state.userClosed && request.op !== 'close' && state.txDepth === 0;
 }
 
 class PostgresWorkerResponseError extends Error {}
