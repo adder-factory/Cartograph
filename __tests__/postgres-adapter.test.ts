@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parsePostgresWorkerJson } from '../src/db/postgres-codec.js';
+import { parsePostgresWorkerJson, type WorkerRequest } from '../src/db/postgres-codec.js';
 import { PostgresAdapter } from '../src/db/postgres-adapter.js';
 import { readPostgresSchemaSizeBytes } from '../src/db/index.js';
 import { rewritePostgresAfterPlaceholders } from '../src/db/postgres-worker-sql.js';
@@ -285,39 +285,74 @@ describe('PostgresAdapter worker bridge', () => {
     }
   });
 
-  it('never reopens a torn-down bridge to run a transaction-finalizing COMMIT', () => {
-    // A COMMIT replayed on a fresh connection is a silent no-op that would report
-    // a rolled-back transaction as committed — so it must fail, not reconnect.
-    const harness = makeHarness([]);
+  // A transaction-control statement replayed on a fresh connection is a silent
+  // no-op that would report a rolled-back transaction as committed — so it must
+  // fail, never reconnect. Cover every finalizer AND the query/exec shapes
+  // (prepare('COMMIT').run() arrives as op 'query', not 'exec').
+  const TX_CONTROL_REQUESTS: ReadonlyArray<{ label: string; request: WorkerRequest }> = [
+    { label: 'COMMIT (exec)', request: { op: 'exec', sql: 'COMMIT' } },
+    { label: 'ROLLBACK (exec)', request: { op: 'exec', sql: 'ROLLBACK' } },
+    { label: 'RELEASE SAVEPOINT (exec)', request: { op: 'exec', sql: 'RELEASE SAVEPOINT cartograph_sp_0' } },
+    { label: 'COMMIT (query shape)', request: { op: 'query', sql: 'COMMIT', mode: 'run', params: [] } },
+  ];
+
+  for (const { label, request } of TX_CONTROL_REQUESTS) {
+    it(`never reopens a torn-down bridge to replay ${label}`, () => {
+      const harness = makeHarness([]);
+      const internals = harness.adapter as unknown as {
+        state: { open: boolean };
+        restartBridgeForRetry: () => void;
+      };
+      internals.state.open = false;
+      let restarts = 0;
+      internals.restartBridgeForRetry = () => {
+        restarts++;
+      };
+
+      try {
+        expect(() => harness.adapter.call(request)).toThrow('PostgreSQL connection is closed');
+        expect(restarts).toBe(0);
+      } finally {
+        harness.cleanup();
+      }
+    });
+
+    it(`does not reconnect-and-retry ${label} on a closed-connection worker error`, () => {
+      const harness = makeHarness([{ ok: false, error: 'PostgreSQL connection is closed' }]);
+      let restarts = 0;
+      (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+        restarts++;
+      };
+
+      try {
+        expect(() => harness.adapter.call(request)).toThrow('PostgreSQL connection is closed');
+        expect(restarts).toBe(0);
+      } finally {
+        harness.cleanup();
+      }
+    });
+  }
+
+  it('does not reopen to COMMIT a transaction whose body swallowed a mid-transaction fault', () => {
+    // End-to-end through transaction(): a fault flips the bridge closed inside the
+    // callback, the callback swallows it, and the finalizing COMMIT must throw
+    // (report failure) instead of reopening a fresh connection and no-op-committing.
+    const harness = makeHarness([{ ok: true }]); // BEGIN succeeds
     const internals = harness.adapter as unknown as {
       state: { open: boolean };
       restartBridgeForRetry: () => void;
     };
-    internals.state.open = false;
     let restarts = 0;
     internals.restartBridgeForRetry = () => {
       restarts++;
     };
 
     try {
-      expect(() => harness.adapter.call({ op: 'exec', sql: 'COMMIT' })).toThrow('PostgreSQL connection is closed');
-      expect(restarts).toBe(0);
-    } finally {
-      harness.cleanup();
-    }
-  });
-
-  it('does not reconnect-and-retry a COMMIT that fails with a closed connection', () => {
-    // The worker-response retry path (issue #58) must also refuse to replay a
-    // transaction-finalizing statement on a fresh connection.
-    const harness = makeHarness([{ ok: false, error: 'PostgreSQL connection is closed' }]);
-    let restarts = 0;
-    (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
-      restarts++;
-    };
-
-    try {
-      expect(() => harness.adapter.call({ op: 'exec', sql: 'COMMIT' })).toThrow('PostgreSQL connection is closed');
+      expect(() =>
+        harness.adapter.transaction(() => {
+          internals.state.open = false; // mid-transaction fault tears the bridge down
+        })(),
+      ).toThrow('PostgreSQL connection is closed');
       expect(restarts).toBe(0);
     } finally {
       harness.cleanup();

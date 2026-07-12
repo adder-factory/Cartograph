@@ -200,10 +200,9 @@ function shouldRetryClosedConnection(state: PostgresAdapterState, request: Worke
 }
 
 /**
- * Whether a torn-down bridge may be re-established for this request. Never
- * reopen for an intentional `close()` or mid-transaction (a fresh bridge would
- * silently drop the in-flight transaction) — only for a top-level request on
- * an adapter that was not closed on purpose.
+ * Whether a torn-down bridge may be re-established for this request. Delegates to
+ * canReconnectForRequest — see its doc for the exclusions (intentional close,
+ * mid-transaction, and transaction-control statements even at txDepth 0).
  */
 function canReopenBridge(state: PostgresAdapterState, request: WorkerRequest): boolean {
   return canReconnectForRequest(state, request);
@@ -221,7 +220,10 @@ function canReconnectForRequest(state: PostgresAdapterState, request: WorkerRequ
 }
 
 function isTransactionControlRequest(request: WorkerRequest): boolean {
-  return request.op === 'exec' && /^\s*(?:COMMIT|ROLLBACK|RELEASE|SAVEPOINT|END)\b/i.test(request.sql ?? '');
+  // Match on the SQL regardless of op: exec, query and batch all carry `sql`,
+  // so `prepare('COMMIT').run()` (op 'query') must be caught too, not just exec.
+  const sql = 'sql' in request ? request.sql : undefined;
+  return typeof sql === 'string' && /^\s*(?:COMMIT|ROLLBACK|RELEASE|SAVEPOINT|END)\b/i.test(sql);
 }
 
 class PostgresWorkerResponseError extends Error {}
