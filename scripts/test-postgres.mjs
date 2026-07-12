@@ -9,6 +9,7 @@ const status = await runWithPostgresTestEnv('bun', [
   '__tests__/postgres-database.test.ts',
   '__tests__/storage-backend-parity.test.ts',
   '__tests__/postgres-clear-structural.test.ts',
+  '__tests__/postgres-reconnect.test.ts',
 ]);
 
 process.exit(status);

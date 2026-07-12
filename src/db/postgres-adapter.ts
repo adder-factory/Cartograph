@@ -23,6 +23,8 @@ interface PostgresAdapterState {
   queryTimeoutMs: number;
   open: boolean;
   txDepth: number;
+  /** Set once the owning adapter is closed on purpose, so it is never auto-reopened. */
+  userClosed: boolean;
 }
 
 const WORKER_READY = 10;
@@ -63,20 +65,28 @@ export class PostgresAdapter implements SqliteDatabase {
   transaction<Args extends unknown[], T>(fn: (...args: Args) => T): (...args: Args) => T {
     return (...args: Args) => {
       const savepoint = `cartograph_sp_${this.state.txDepth}`;
-      if (this.state.txDepth === 0) this.exec('BEGIN');
+      const topLevel = this.state.txDepth === 0;
+      if (topLevel) this.exec('BEGIN');
       else this.exec(`SAVEPOINT ${savepoint}`);
       this.state.txDepth++;
+      let result: T;
       try {
-        const result = fn(...args);
-        this.state.txDepth--;
-        if (this.state.txDepth === 0) this.exec('COMMIT');
-        else this.exec(`RELEASE SAVEPOINT ${savepoint}`);
-        return result;
+        result = fn(...args);
       } catch (err) {
         this.state.txDepth--;
         this.rollbackBestEffort(savepoint);
         throw err;
       }
+      // Finalize OUTSIDE the try so txDepth is decremented exactly once. If the
+      // COMMIT/RELEASE itself fails — e.g. the bridge died mid-transaction and
+      // the callback swallowed the error — the failure surfaces to the caller
+      // instead of being masked. call() must NOT reopen for these statements
+      // (see canReopenBridge): a COMMIT replayed on a fresh connection is a
+      // silent no-op that would hide the rolled-back writes.
+      this.state.txDepth--;
+      if (topLevel) this.exec('COMMIT');
+      else this.exec(`RELEASE SAVEPOINT ${savepoint}`);
+      return result;
     };
   }
 
@@ -99,6 +109,7 @@ export class PostgresAdapter implements SqliteDatabase {
   }
 
   close(): void {
+    this.state.userClosed = true;
     if (!this.state.open) return;
     try {
       this.call({ op: 'close' });
@@ -109,6 +120,17 @@ export class PostgresAdapter implements SqliteDatabase {
   }
 
   call(request: WorkerRequest): WorkerResponse {
+    // A prior fault — a query timeout, an invalid/dead worker, or a dropped
+    // PostgreSQL connection — tears the bridge down and leaves state.open
+    // false. Without re-establishing it here, every later call throws
+    // "PostgreSQL connection is closed" from callOnce's guard forever, so a
+    // long-lived MCP server stays permanently unusable after a transient
+    // connection loss (issue #66). Re-open on demand, unless the adapter was
+    // closed on purpose or a transaction is still unwinding (reopening a fresh
+    // bridge mid-transaction would silently discard the in-flight work).
+    if (!this.state.open && canReopenBridge(this.state, request)) {
+      this.restartBridgeForRetry();
+    }
     try {
       return callOnce(this.state, request);
     } catch (err) {
@@ -157,6 +179,7 @@ function createBridge(options: PostgresAdapterOptions): PostgresAdapterState {
     queryTimeoutMs: options.queryTimeoutMs ?? POSTGRES_DEFAULT_QUERY_TIMEOUT_MS,
     open: true,
     txDepth: 0,
+    userClosed: false,
   };
   const ready = Atomics.wait(control, 0, 0, 30_000);
   if (ready === 'timed-out' || Atomics.load(control, 0) !== WORKER_READY) {
@@ -173,7 +196,34 @@ function createBridge(options: PostgresAdapterOptions): PostgresAdapterState {
 }
 
 function shouldRetryClosedConnection(state: PostgresAdapterState, request: WorkerRequest, error: string): boolean {
-  return request.op !== 'close' && state.txDepth === 0 && isClosedPostgresConnectionError(error);
+  return canReconnectForRequest(state, request) && isClosedPostgresConnectionError(error);
+}
+
+/**
+ * Whether a torn-down bridge may be re-established for this request. Delegates to
+ * canReconnectForRequest — see its doc for the exclusions (intentional close,
+ * mid-transaction, and transaction-control statements even at txDepth 0).
+ */
+function canReopenBridge(state: PostgresAdapterState, request: WorkerRequest): boolean {
+  return canReconnectForRequest(state, request);
+}
+
+/**
+ * Shared reconnect gate for both the pre-dispatch reopen and the worker-response
+ * retry. A transaction-control statement (COMMIT/ROLLBACK/RELEASE/SAVEPOINT/END)
+ * is deliberately excluded even at txDepth 0: replaying it on a fresh connection
+ * is a silent no-op that would report a rolled-back transaction as committed. A
+ * top-level BEGIN or a plain statement is safe to reconnect for.
+ */
+function canReconnectForRequest(state: PostgresAdapterState, request: WorkerRequest): boolean {
+  return !state.userClosed && request.op !== 'close' && state.txDepth === 0 && !isTransactionControlRequest(request);
+}
+
+function isTransactionControlRequest(request: WorkerRequest): boolean {
+  // Match on the SQL regardless of op: exec, query and batch all carry `sql`,
+  // so `prepare('COMMIT').run()` (op 'query') must be caught too, not just exec.
+  const sql = 'sql' in request ? request.sql : undefined;
+  return typeof sql === 'string' && /^\s*(?:COMMIT|ROLLBACK|RELEASE|SAVEPOINT|END)\b/i.test(sql);
 }
 
 class PostgresWorkerResponseError extends Error {}
@@ -214,6 +264,10 @@ function isClosedPostgresConnectionError(message: string): boolean {
   return (
     /\bconnection\s+is\s+closed\b/i.test(message) ||
     /\bconnection\s+terminated\b/i.test(message) ||
+    // PostgreSQL's own wording on a server restart / pg_terminate_backend, e.g.
+    // "terminating connection due to administrator command" (see issue #58 logs).
+    // Word order is reversed vs "connection terminated", so it needs its own arm.
+    /\bterminating\s+connection\b/i.test(message) ||
     /\bserver\s+closed\s+the\s+connection\b/i.test(message) ||
     /\bECONNRESET\b/i.test(message)
   );

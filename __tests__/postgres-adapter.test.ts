@@ -3,7 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { parsePostgresWorkerJson } from '../src/db/postgres-codec.js';
+import { parsePostgresWorkerJson, type WorkerRequest } from '../src/db/postgres-codec.js';
 import { PostgresAdapter } from '../src/db/postgres-adapter.js';
 import { readPostgresSchemaSizeBytes } from '../src/db/index.js';
 import { rewritePostgresAfterPlaceholders } from '../src/db/postgres-worker-sql.js';
@@ -161,7 +161,6 @@ describe('PostgresAdapter worker bridge', () => {
       expect(timeout.adapter.open).toBe(false);
       expect(timeout.terminated()).toBe(1);
       expect(timeout.bridgeDirExists()).toBe(false);
-      expect(() => timeout.adapter.call({ op: 'exec', sql: 'SELECT 1' })).toThrow('PostgreSQL connection is closed');
     } finally {
       timeout.cleanup();
     }
@@ -197,6 +196,164 @@ describe('PostgresAdapter worker bridge', () => {
       expect(restarts).toBe(1);
       expect(response.rows).toEqual([{ ok: 1 }]);
       expect(harness.captured).toHaveLength(2);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('restarts the bridge once after an administrator-terminated PostgreSQL connection', () => {
+    // PostgreSQL's server-restart / pg_terminate_backend wording — word order is
+    // reversed vs "connection terminated", so this guards the dedicated regex arm.
+    const harness = makeHarness([
+      { ok: false, error: 'terminating connection due to administrator command' },
+      { ok: true, rows: [{ ok: 1 }] },
+    ]);
+    let restarts = 0;
+    (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      const response = harness.adapter.call({ op: 'query', sql: 'SELECT 1', mode: 'all', params: [] });
+
+      expect(restarts).toBe(1);
+      expect(response.rows).toEqual([{ ok: 1 }]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('reopens a torn-down bridge on the next call after a fault outside a transaction', () => {
+    const harness = makeHarness([{ ok: true, rows: [{ ok: 1 }] }]);
+    const internals = harness.adapter as unknown as {
+      state: { open: boolean };
+      restartBridgeForRetry: () => void;
+    };
+    // Simulate a prior fault (query timeout / dropped connection) that closed the bridge.
+    internals.state.open = false;
+    let restarts = 0;
+    internals.restartBridgeForRetry = () => {
+      restarts++;
+      internals.state.open = true; // a real reconnect installs a fresh, open bridge
+    };
+
+    try {
+      const response = harness.adapter.call({ op: 'query', sql: 'SELECT 1', mode: 'all', params: [] });
+
+      expect(restarts).toBe(1);
+      expect(response.rows).toEqual([{ ok: 1 }]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('stays closed and never reopens after an explicit close', () => {
+    const harness = makeHarness([{ ok: true }]);
+    const internals = harness.adapter as unknown as { restartBridgeForRetry: () => void };
+    let restarts = 0;
+    internals.restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      harness.adapter.close();
+      expect(() => harness.adapter.call({ op: 'exec', sql: 'SELECT 1' })).toThrow('PostgreSQL connection is closed');
+      expect(restarts).toBe(0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('does not reopen a torn-down bridge while a transaction is unwinding', () => {
+    const harness = makeHarness([]);
+    const internals = harness.adapter as unknown as {
+      state: { open: boolean; txDepth: number };
+      restartBridgeForRetry: () => void;
+    };
+    internals.state.open = false;
+    internals.state.txDepth = 1;
+    let restarts = 0;
+    internals.restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      expect(() => harness.adapter.call({ op: 'exec', sql: 'SELECT 1' })).toThrow('PostgreSQL connection is closed');
+      expect(restarts).toBe(0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  // A transaction-control statement replayed on a fresh connection is a silent
+  // no-op that would report a rolled-back transaction as committed — so it must
+  // fail, never reconnect. Cover every finalizer AND the query/exec shapes
+  // (prepare('COMMIT').run() arrives as op 'query', not 'exec').
+  const TX_CONTROL_REQUESTS: ReadonlyArray<{ label: string; request: WorkerRequest }> = [
+    { label: 'COMMIT (exec)', request: { op: 'exec', sql: 'COMMIT' } },
+    { label: 'ROLLBACK (exec)', request: { op: 'exec', sql: 'ROLLBACK' } },
+    { label: 'RELEASE SAVEPOINT (exec)', request: { op: 'exec', sql: 'RELEASE SAVEPOINT cartograph_sp_0' } },
+    { label: 'COMMIT (query shape)', request: { op: 'query', sql: 'COMMIT', mode: 'run', params: [] } },
+  ];
+
+  for (const { label, request } of TX_CONTROL_REQUESTS) {
+    it(`never reopens a torn-down bridge to replay ${label}`, () => {
+      const harness = makeHarness([]);
+      const internals = harness.adapter as unknown as {
+        state: { open: boolean };
+        restartBridgeForRetry: () => void;
+      };
+      internals.state.open = false;
+      let restarts = 0;
+      internals.restartBridgeForRetry = () => {
+        restarts++;
+      };
+
+      try {
+        expect(() => harness.adapter.call(request)).toThrow('PostgreSQL connection is closed');
+        expect(restarts).toBe(0);
+      } finally {
+        harness.cleanup();
+      }
+    });
+
+    it(`does not reconnect-and-retry ${label} on a closed-connection worker error`, () => {
+      const harness = makeHarness([{ ok: false, error: 'PostgreSQL connection is closed' }]);
+      let restarts = 0;
+      (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+        restarts++;
+      };
+
+      try {
+        expect(() => harness.adapter.call(request)).toThrow('PostgreSQL connection is closed');
+        expect(restarts).toBe(0);
+      } finally {
+        harness.cleanup();
+      }
+    });
+  }
+
+  it('does not reopen to COMMIT a transaction whose body swallowed a mid-transaction fault', () => {
+    // End-to-end through transaction(): a fault flips the bridge closed inside the
+    // callback, the callback swallows it, and the finalizing COMMIT must throw
+    // (report failure) instead of reopening a fresh connection and no-op-committing.
+    const harness = makeHarness([{ ok: true }]); // BEGIN succeeds
+    const internals = harness.adapter as unknown as {
+      state: { open: boolean };
+      restartBridgeForRetry: () => void;
+    };
+    let restarts = 0;
+    internals.restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      expect(() =>
+        harness.adapter.transaction(() => {
+          internals.state.open = false; // mid-transaction fault tears the bridge down
+        })(),
+      ).toThrow('PostgreSQL connection is closed');
+      expect(restarts).toBe(0);
     } finally {
       harness.cleanup();
     }
@@ -271,6 +428,7 @@ function makeHarness(responses: unknown[], waitMode: WorkerWaitMode = 'normal'):
       queryTimeoutMs: number;
       open: boolean;
       txDepth: number;
+      userClosed: boolean;
     };
   };
   internals.state = {
@@ -287,6 +445,7 @@ function makeHarness(responses: unknown[], waitMode: WorkerWaitMode = 'normal'):
     queryTimeoutMs: QUERY_TIMEOUT_MS,
     open: true,
     txDepth: 0,
+    userClosed: false,
   };
 
   vi.spyOn(Atomics, 'wait').mockImplementation((array, index, expected) => {
