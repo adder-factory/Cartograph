@@ -16,6 +16,7 @@
  * unit tests in postgres-adapter.test.ts cover.
  */
 
+import * as fs from 'node:fs';
 import { afterAll, describe, expect, it } from 'vitest';
 import { PostgresAdapter } from '../src/db/postgres-adapter.js';
 
@@ -25,7 +26,7 @@ const SCHEMA = 'cg_reconnect_test';
 
 /** Adapter internals we poke to model a fault teardown without a live DB restart. */
 interface AdapterInternals {
-  state: { open: boolean; worker: { terminate: () => Promise<number> } };
+  state: { open: boolean; dir: string; worker: { terminate: () => Promise<number> } };
 }
 
 function makeAdapter(): PostgresAdapter {
@@ -49,22 +50,51 @@ function readProbe(adapter: PostgresAdapter): string | undefined {
   return adapter.prepare('SELECT v FROM reconnect_probe WHERE id = ?').get<{ v: string }>(1)?.v;
 }
 
+/** The PID of the single backend this adapter's pooled connection is using. */
+function backendPid(adapter: PostgresAdapter): number {
+  return adapter.prepare('SELECT pg_backend_pid() AS pid').get<{ pid: number }>()?.pid ?? 0;
+}
+
+/**
+ * Terminate exactly one backend PID from a separate connection — scoped to the
+ * adapter under test so a shared server / another Cartograph client is untouched.
+ * Returns whether a backend was actually killed.
+ */
+async function terminateBackend(pid: number): Promise<boolean> {
+  const killer = new Bun.SQL(POSTGRES_URL!);
+  try {
+    const rows = await killer.unsafe('SELECT pg_terminate_backend($1) AS killed', [pid]);
+    return (Array.from(rows as unknown[])[0] as { killed?: boolean } | undefined)?.killed === true;
+  } finally {
+    await killer.close();
+  }
+}
+
 /**
  * Model the exact #66 fault: a query timeout / dead worker tears the bridge
  * down (state.open === false) via a plain Error, WITHOUT flagging an intentional
- * close(). Mirrors closeBridge(): fire-and-forget worker termination + open=false.
+ * close(). Reproduces closeBridge()'s full effect — open=false, fire-and-forget
+ * worker termination, and temp-dir removal — so no cartograph-pg-* dir leaks.
  */
 function faultTeardown(adapter: PostgresAdapter): void {
-  const internals = adapter as unknown as AdapterInternals;
-  internals.state.open = false;
-  void internals.state.worker.terminate().catch(() => undefined);
+  const { state } = adapter as unknown as AdapterInternals;
+  state.open = false;
+  void state.worker.terminate().catch(() => undefined);
+  try {
+    fs.rmSync(state.dir, { recursive: true, force: true });
+  } catch {
+    // best-effort, matching closeBridge()
+  }
 }
 
 afterAll(async () => {
   if (!POSTGRES_URL) return;
-  const sql = new Bun.SQL(POSTGRES_URL);
+  // Bound the teardown so a lingering backend can never hang the whole suite.
+  const sql = new Bun.SQL({ url: POSTGRES_URL, connection: { statement_timeout: 8000 } });
   try {
     await sql.unsafe(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).simple();
+  } catch {
+    // best-effort: the schema lives in an ephemeral test database
   } finally {
     await sql.close();
   }
@@ -95,21 +125,20 @@ describePostgres('PostgresAdapter reconnect against real PostgreSQL (issue #66)'
       seed(adapter);
       expect(readProbe(adapter)).toBe('hello');
 
-      const killer = new Bun.SQL(POSTGRES_URL!);
-      try {
-        const killSql =
-          "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name = 'cartograph' AND pid <> pg_backend_pid()";
-        await killer.unsafe(killSql).simple();
-      } finally {
-        await killer.close();
-      }
+      // Kill this adapter's own backend and confirm it was actually killed — a
+      // guard against a silent pass where nothing was disrupted and the
+      // reconnect is never exercised.
+      const killed = await terminateBackend(backendPid(adapter));
+      expect(killed).toBe(true);
 
+      // The adapter must transparently recover on the next call(s). The retry
+      // loop tolerates the killed connection surfacing before the reconnect.
       let recovered: string | undefined;
       for (let attempt = 0; attempt < 3 && recovered !== 'hello'; attempt++) {
         try {
           recovered = readProbe(adapter);
         } catch {
-          // transient closed-connection error on the first post-kill call; retry
+          // killed-connection error before the reconnect completes; retry
         }
       }
       expect(recovered).toBe('hello');
@@ -117,6 +146,13 @@ describePostgres('PostgresAdapter reconnect against real PostgreSQL (issue #66)'
       adapter.close();
     }
   });
+
+  // Note: the adapter-level P1 guarantee — a transaction-finalizing COMMIT is
+  // never replayed on a fresh connection after a mid-transaction fault — is
+  // covered deterministically in postgres-adapter.test.ts (both the reopen and
+  // the worker-response retry paths). A real-PG variant is intentionally omitted
+  // because modeling a mid-transaction fault leaves a backend idle-in-transaction
+  // holding locks that block schema teardown.
 
   it('stays closed after an intentional close() and never auto-reopens', () => {
     const adapter = makeAdapter();

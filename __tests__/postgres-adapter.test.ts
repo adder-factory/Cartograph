@@ -285,6 +285,45 @@ describe('PostgresAdapter worker bridge', () => {
     }
   });
 
+  it('never reopens a torn-down bridge to run a transaction-finalizing COMMIT', () => {
+    // A COMMIT replayed on a fresh connection is a silent no-op that would report
+    // a rolled-back transaction as committed — so it must fail, not reconnect.
+    const harness = makeHarness([]);
+    const internals = harness.adapter as unknown as {
+      state: { open: boolean };
+      restartBridgeForRetry: () => void;
+    };
+    internals.state.open = false;
+    let restarts = 0;
+    internals.restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      expect(() => harness.adapter.call({ op: 'exec', sql: 'COMMIT' })).toThrow('PostgreSQL connection is closed');
+      expect(restarts).toBe(0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
+  it('does not reconnect-and-retry a COMMIT that fails with a closed connection', () => {
+    // The worker-response retry path (issue #58) must also refuse to replay a
+    // transaction-finalizing statement on a fresh connection.
+    const harness = makeHarness([{ ok: false, error: 'PostgreSQL connection is closed' }]);
+    let restarts = 0;
+    (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      expect(() => harness.adapter.call({ op: 'exec', sql: 'COMMIT' })).toThrow('PostgreSQL connection is closed');
+      expect(restarts).toBe(0);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it('reports PostgreSQL schema size instead of whole database size', () => {
     const capturedSql: string[] = [];
     const fakeDb = {
