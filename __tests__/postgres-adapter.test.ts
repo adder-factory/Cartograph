@@ -201,6 +201,28 @@ describe('PostgresAdapter worker bridge', () => {
     }
   });
 
+  it('restarts the bridge once after an administrator-terminated PostgreSQL connection', () => {
+    // PostgreSQL's server-restart / pg_terminate_backend wording — word order is
+    // reversed vs "connection terminated", so this guards the dedicated regex arm.
+    const harness = makeHarness([
+      { ok: false, error: 'terminating connection due to administrator command' },
+      { ok: true, rows: [{ ok: 1 }] },
+    ]);
+    let restarts = 0;
+    (harness.adapter as unknown as { restartBridgeForRetry: () => void }).restartBridgeForRetry = () => {
+      restarts++;
+    };
+
+    try {
+      const response = harness.adapter.call({ op: 'query', sql: 'SELECT 1', mode: 'all', params: [] });
+
+      expect(restarts).toBe(1);
+      expect(response.rows).toEqual([{ ok: 1 }]);
+    } finally {
+      harness.cleanup();
+    }
+  });
+
   it('reopens a torn-down bridge on the next call after a fault outside a transaction', () => {
     const harness = makeHarness([{ ok: true, rows: [{ ok: 1 }] }]);
     const internals = harness.adapter as unknown as {

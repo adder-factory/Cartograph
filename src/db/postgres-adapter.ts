@@ -239,6 +239,10 @@ function isClosedPostgresConnectionError(message: string): boolean {
   return (
     /\bconnection\s+is\s+closed\b/i.test(message) ||
     /\bconnection\s+terminated\b/i.test(message) ||
+    // PostgreSQL's own wording on a server restart / pg_terminate_backend, e.g.
+    // "terminating connection due to administrator command" (see issue #58 logs).
+    // Word order is reversed vs "connection terminated", so it needs its own arm.
+    /\bterminating\s+connection\b/i.test(message) ||
     /\bserver\s+closed\s+the\s+connection\b/i.test(message) ||
     /\bECONNRESET\b/i.test(message)
   );
