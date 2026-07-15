@@ -52,10 +52,15 @@ export function checkBunGlobalLink(env: BunGlobalLinkEnv = {}): CheckResult | nu
   if (pkg.kind === 'dangling' || shim.state.kind === 'dangling') {
     const removed = removedTarget(pkgLink, pkg) ?? removedTarget(shim.path, shim.state);
     const removedNote = removed ? ` — it points to a removed directory (${tildify(removed)})` : '';
+    // `warn`, not `fail`: this is a GLOBAL-environment gap, not a failure
+    // of the cartograph now running (a dangling link cannot launch the
+    // doctor, so we are running from a healthy checkout/standalone). A
+    // `fail` would flip doctor's overallStatus and make orthogonal,
+    // project-scoped commands like `setup`/`quickstart` exit non-zero.
     return {
       id: 'bun-global-link',
       name: 'Bun global link',
-      status: 'fail',
+      status: 'warn',
       detail:
         `The global \`cartograph\` command is a broken symlink${removedNote}. ` +
         'New `cartograph` CLI and `cartograph serve --mcp` processes cannot start, so a new MCP client ' +

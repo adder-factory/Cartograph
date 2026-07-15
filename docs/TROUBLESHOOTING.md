@@ -107,8 +107,9 @@ New `cartograph` CLI and `cartograph serve --mcp` processes cannot start, so a
 new MCP client registers no Cartograph tools. An already-running daemon keeps
 serving, which makes this easy to misread as a storage or MCP transport problem.
 
-`cartograph doctor` (run from any stable checkout) reports this as a **Bun global
-link** failure. To recover, re-point the global command at a stable location:
+`cartograph doctor` (run from any stable checkout) surfaces this as a **Bun global
+link** warning (non-blocking — it does not fail the current project's checks). To
+recover, re-point the global command at a stable location:
 
 ```sh
 # From a permanent source checkout (not a disposable worktree):

@@ -62,7 +62,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
     expect(result?.status).toBe('ok');
   });
 
-  it('fails when the linked checkout (release worktree) was removed', () => {
+  it('warns (non-blocking) when the linked checkout (release worktree) was removed', () => {
     const layout = makeBunLinkLayout((fn) => cleanups.push(fn));
     // Simulate the temporary release worktree being deleted: the symlinks
     // survive but their target is gone.
@@ -70,7 +70,9 @@ describe('checkBunGlobalLink (issue #68)', () => {
 
     const result = checkBunGlobalLink({ bunInstall: layout.bunInstall });
     expect(result?.id).toBe('bun-global-link');
-    expect(result?.status).toBe('fail');
+    // `warn`, not `fail`: a global-env gap must not flip overallStatus and
+    // break orthogonal project-scoped commands (setup/quickstart exit code).
+    expect(result?.status).toBe('warn');
     expect(result?.detail).toContain('broken symlink');
     // Names the removed directory so the fault is not misread as storage/MCP.
     expect(result?.detail).toContain(layout.checkout);
@@ -78,7 +80,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
     expect(result?.remediation).toContain('temporary release worktree');
   });
 
-  it('fails naming the shim target when only the bin shim dangles', () => {
+  it('warns naming the shim target when only the bin shim dangles', () => {
     const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-shim-only-'));
     cleanups.push(() => fs.rmSync(base, { recursive: true, force: true }));
     const bunInstall = path.join(base, '.bun');
@@ -88,7 +90,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
     fs.symlinkSync(removed, path.join(binDir, 'cartograph')); // absolute target that never existed
 
     const result = checkBunGlobalLink({ bunInstall });
-    expect(result?.status).toBe('fail');
+    expect(result?.status).toBe('warn');
     expect(result?.detail).toContain(removed);
   });
 
