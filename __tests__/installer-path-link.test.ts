@@ -115,7 +115,7 @@ describe('runInstallerWithOptions PATH linking', () => {
   // makes an extra `bun pm bin -g` probe the assertions don't expect.
   // Pin PATH to a dir holding a fake `cartograph` so the check is
   // deterministic regardless of the host's global-install state.
-  let pathDir: string;
+  let pathDir: string | undefined;
   let originalPath: string | undefined;
   beforeEach(() => {
     originalPath = process.env['PATH'];
@@ -123,14 +123,17 @@ describe('runInstallerWithOptions PATH linking', () => {
     for (const name of process.platform === 'win32' ? ['cartograph.exe', 'cartograph'] : ['cartograph']) {
       fs.writeFileSync(path.join(pathDir, name), '#!/bin/sh\n', { mode: 0o755 });
     }
-    process.env['PATH'] = pathDir + path.delimiter + (originalPath ?? '');
+    // No trailing delimiter when PATH was empty — an empty PATH entry is
+    // treated as `.` (CWD) on some platforms.
+    process.env['PATH'] = originalPath ? pathDir + path.delimiter + originalPath : pathDir;
   });
 
   afterEach(() => {
     resetStores();
     if (originalPath === undefined) delete process.env['PATH'];
     else process.env['PATH'] = originalPath;
-    fs.rmSync(pathDir, { recursive: true, force: true });
+    if (pathDir) fs.rmSync(pathDir, { recursive: true, force: true });
+    pathDir = undefined;
   });
 
   it('does not prompt for linking when cartograph is already on PATH', async () => {
