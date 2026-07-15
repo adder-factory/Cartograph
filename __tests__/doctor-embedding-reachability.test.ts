@@ -17,6 +17,7 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runDoctor } from '../src/installer/doctor.js';
+import { isolateBunInstall } from './support/bun-install-isolation.js';
 
 interface MockServer {
   url: string;
@@ -38,6 +39,10 @@ function startEmbeddingMock(): MockServer {
 }
 
 describe('runDoctor — embedding endpoint reachability', () => {
+  // Full `runDoctor` runs — keep the host's real `bun link` state out of
+  // the doctor result (issue #68 global-link check).
+  isolateBunInstall();
+
   const servers: MockServer[] = [];
   let projectPath: string;
 

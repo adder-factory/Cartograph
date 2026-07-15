@@ -19,8 +19,13 @@ import * as fsp from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { runDoctor } from '../src/installer/doctor.js';
+import { isolateBunInstall } from './support/bun-install-isolation.js';
 
 describe('runDoctor({fix: true}) — cascade-aware fix loop', () => {
+  // Full `runDoctor` runs — keep the host's real `bun link` state out of
+  // the doctor result (issue #68 global-link check).
+  isolateBunInstall();
+
   let projectPath: string;
 
   beforeEach(async () => {

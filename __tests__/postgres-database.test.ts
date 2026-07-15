@@ -24,6 +24,7 @@ import {
 } from '../src/features/admin-storage-migrate/runtime.js';
 import { runDoctor } from '../src/installer/doctor.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
+import { isolateBunInstall } from './support/bun-install-isolation.js';
 
 const POSTGRES_URL = process.env['CARTOGRAPH_TEST_POSTGRES_URL'];
 const PGVECTOR_URL = process.env['CARTOGRAPH_TEST_PGVECTOR_URL'];
@@ -128,6 +129,10 @@ describe('database provider selection', () => {
 });
 
 describePostgres('PostgreSQL database provider', () => {
+  // A `runDoctor` case below reads BUN_INSTALL via the global-link check
+  // (issue #68); isolate it so the host's real `bun link` state can't leak.
+  isolateBunInstall();
+
   it('discovers the active PostgreSQL schema through cartograph_sql', async () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-sql-schema-test-'));
     currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
@@ -711,6 +716,10 @@ function seedEmbeddingGraph(cg: Cartograph): void {
 }
 
 describePgvector('PostgreSQL pgvector acceleration', () => {
+  // A `runDoctor` case below reads BUN_INSTALL via the global-link check
+  // (issue #68); isolate it so the host's real `bun link` state can't leak.
+  isolateBunInstall();
+
   it('serves graph direction=similar from pgvector without persisted edges', async () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-pgvector-similar-tool-test-'));
     currentSchema = `cg_test_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;

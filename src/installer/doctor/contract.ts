@@ -2,6 +2,7 @@ export type CheckStatus = 'ok' | 'warn' | 'fail';
 
 export type CheckId =
   | 'bun-runtime'
+  | 'bun-global-link'
   | 'llm-models'
   | 'project-init'
   | 'project-config'
