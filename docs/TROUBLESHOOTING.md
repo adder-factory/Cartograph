@@ -89,6 +89,39 @@ Common causes:
   but if a handshake keeps failing, bypass it with `--no-daemon` to run a
   standalone in-process server. See [MCP usage](MCP-USAGE.md) for the daemon model.
 
+## `cartograph: command not found` After A Release Or Update
+
+`bun link` registers the global `cartograph` command as a symlink pointing at
+the source checkout you linked from. That link inherits the lifetime of the
+checkout: if you linked from a temporary release/update worktree and then removed
+it, the command becomes a dangling symlink. Symptoms:
+
+```sh
+command -v cartograph      # no output
+cartograph --version       # command not found
+bun pm ls -g               # still lists @adder-factory/cartograph
+test -e ~/.bun/bin/cartograph  # false — the target is gone
+```
+
+New `cartograph` CLI and `cartograph serve --mcp` processes cannot start, so a
+new MCP client registers no Cartograph tools. An already-running daemon keeps
+serving, which makes this easy to misread as a storage or MCP transport problem.
+
+`cartograph doctor` (run from any stable checkout) reports this as a **Bun global
+link** failure. To recover, re-point the global command at a stable location:
+
+```sh
+# From a permanent source checkout (not a disposable worktree):
+bun link
+
+# …or install the published tag instead of a linked checkout:
+bun add -g git+https://github.com/adder-factory/cartograph.git#v<latest>
+```
+
+Never `bun link` the global CLI from a temporary release worktree. If a release
+workflow linked from a worktree, re-link (or re-pin) before deleting it, and
+verify `command -v cartograph` and `cartograph --version` still succeed.
+
 ## Gitignored Source Is Missing
 
 Cartograph uses Git-visible files as the default source set. If valuable local

@@ -13,6 +13,7 @@ import {
 } from './backend-checks.js';
 import type { CheckResult, DoctorResult, RunDoctorOptions } from './contract.js';
 import { worstStatus } from './contract.js';
+import { checkBunGlobalLink } from './global-link.js';
 import {
   checkBunRuntime,
   checkDatabaseStorage,
@@ -39,6 +40,8 @@ function ownObjectField(record: Record<string, unknown> | null, key: string): Re
 export async function runDoctorChecks(opts: RunDoctorOptions): Promise<DoctorResult> {
   const checks: CheckResult[] = [];
   checks.push(checkBunRuntime());
+  const globalLink = checkBunGlobalLink();
+  if (globalLink) checks.push(globalLink);
 
   const projectChecks = await runProjectDoctorChecks(opts);
   checks.push(...projectChecks.checks);

@@ -40,10 +40,11 @@ straight to the agent-driven wizard:
 4. **`cartograph_admin({action: "doctor", fix: true, projectPath:
    "<abs-path>"})`** — verifies the install state. With `fix: true`
    doctor auto-creates `.cartograph/`, downloads missing GGUFs, and
-   applies the planner's recommended preset for missing config. The
-   only thing doctor can NOT auto-fix is starting a backend process —
-   cartograph doesn't manage backends, so the user runs those commands
-   themselves.
+   applies the planner's recommended preset for missing config. Two
+   things doctor can NOT auto-fix: starting a backend process (cartograph
+   doesn't manage backends), and a dangling Bun global link (the user
+   re-runs `bun link` from a stable checkout, or re-pins with `bun add
+   -g`) — so the user runs those commands themselves.
 
 The rest of this file (Step 0 onward) is the slow path — the explicit
 CLI commands you'd give a user with no agent or no MCP access yet.
@@ -253,16 +254,19 @@ A clean install shows all checks `✓` with "_All checks passed.
 cartograph is ready to use._" Doctor check areas include:
 
 1. Bun runtime version
-2. Project init (`.cartograph/` exists)
-3. Project config (`config.json` parses, including storage and LLM config)
-4. Database storage — SQLite capability check or PostgreSQL 18+ connectivity,
+2. Bun global link — when installed via `bun link`, flags a dangling global
+   `cartograph` shim (e.g. linked from a release worktree that was then
+   removed) that would stop new CLI/MCP processes from starting
+3. Project init (`.cartograph/` exists)
+4. Project config (`config.json` parses, including storage and LLM config)
+5. Database storage — SQLite capability check or PostgreSQL 18+ connectivity,
    schema, write, DDL, and pgvector checks
-5. GGUF models present under `~/.cartograph/models/` when configured
-6. Detected LLM backends — informational scan of common ports
+6. GGUF models present under `~/.cartograph/models/` when configured
+7. Detected LLM backends — informational scan of common ports
    (:8080 / :11434 / :8000 / :1234 / :5000)
-7. Embedding endpoint reachability — probes the configured
+8. Embedding endpoint reachability — probes the configured
    `embeddingLlm.endpoint`; surfaces detected alternatives on failure
-8. Backend tuning, start commands, lifecycle, and active Cartograph process
+9. Backend tuning, start commands, lifecycle, and active Cartograph process
    checks when relevant
 
 ---

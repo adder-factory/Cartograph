@@ -10,6 +10,7 @@ import {
   checkProjectConfig,
   readLlmFromConfig,
 } from '../src/installer/doctor/model-checks.js';
+import { isolateBunInstall } from './support/bun-install-isolation.js';
 
 interface DoctorStateCase {
   readonly name: string;
@@ -107,6 +108,11 @@ afterEach(async () => {
 });
 
 describe('runDoctor installer state machine', () => {
+  // These cases exercise PROJECT state, not the global install, and run
+  // the full `runDoctor` — isolate BUN_INSTALL so the host machine's real
+  // `bun link` state cannot leak into overallStatus or the report text.
+  isolateBunInstall();
+
   it('emits stable check ids alongside human-readable names', async () => {
     await pointModelsDirAtGguf();
     const result = await runDoctor({
