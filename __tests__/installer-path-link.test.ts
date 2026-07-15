@@ -1,5 +1,8 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mock } from 'bun:test';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 type ExecCall = {
   command: string;
@@ -105,8 +108,29 @@ function eventMessages(kind: string): string[] {
 }
 
 describe('runInstallerWithOptions PATH linking', () => {
+  // The installer's `resolveFallbackCommand` probes the REAL `$PATH` (via
+  // `findOnPath`) to decide whether to pin an absolute command. These
+  // cases assume `cartograph` resolves on PATH; if it does not (e.g. the
+  // host has a dangling global `bun link` — issue #68), the installer
+  // makes an extra `bun pm bin -g` probe the assertions don't expect.
+  // Pin PATH to a dir holding a fake `cartograph` so the check is
+  // deterministic regardless of the host's global-install state.
+  let pathDir: string;
+  let originalPath: string | undefined;
+  beforeEach(() => {
+    originalPath = process.env['PATH'];
+    pathDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-installer-path-'));
+    for (const name of process.platform === 'win32' ? ['cartograph.exe', 'cartograph'] : ['cartograph']) {
+      fs.writeFileSync(path.join(pathDir, name), '#!/bin/sh\n', { mode: 0o755 });
+    }
+    process.env['PATH'] = pathDir + path.delimiter + (originalPath ?? '');
+  });
+
   afterEach(() => {
     resetStores();
+    if (originalPath === undefined) delete process.env['PATH'];
+    else process.env['PATH'] = originalPath;
+    fs.rmSync(pathDir, { recursive: true, force: true });
   });
 
   it('does not prompt for linking when cartograph is already on PATH', async () => {
