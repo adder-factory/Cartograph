@@ -13,8 +13,14 @@ const PKG = '@adder-factory/cartograph';
  * Returns the roots so a test can remove the checkout to simulate a
  * disposable release worktree being cleaned up.
  */
-function makeBunLinkLayout(): { bunInstall: string; checkout: string; cleanup: () => void } {
+function makeBunLinkLayout(registerCleanup: (fn: () => void) => void): {
+  bunInstall: string;
+  checkout: string;
+} {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'cg-global-link-'));
+  // Register cleanup up front so the temp dir is removed even if a later
+  // fs op below throws (e.g. symlink permission restrictions on Windows).
+  registerCleanup(() => fs.rmSync(base, { recursive: true, force: true }));
   const bunInstall = path.join(base, '.bun');
   const checkout = path.join(base, 'worktree', 'cartograph');
   fs.mkdirSync(path.join(checkout, 'src', 'bin'), { recursive: true });
@@ -32,7 +38,7 @@ function makeBunLinkLayout(): { bunInstall: string; checkout: string; cleanup: (
     path.join(binDir, 'cartograph'),
   );
 
-  return { bunInstall, checkout, cleanup: () => fs.rmSync(base, { recursive: true, force: true }) };
+  return { bunInstall, checkout };
 }
 
 describe('checkBunGlobalLink (issue #68)', () => {
@@ -49,8 +55,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
   });
 
   it('reports ok for a healthy bun link', () => {
-    const layout = makeBunLinkLayout();
-    cleanups.push(layout.cleanup);
+    const layout = makeBunLinkLayout((fn) => cleanups.push(fn));
     const result = checkBunGlobalLink({ bunInstall: layout.bunInstall });
     expect(result).not.toBeNull();
     expect(result?.id).toBe('bun-global-link');
@@ -58,8 +63,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
   });
 
   it('fails when the linked checkout (release worktree) was removed', () => {
-    const layout = makeBunLinkLayout();
-    cleanups.push(layout.cleanup);
+    const layout = makeBunLinkLayout((fn) => cleanups.push(fn));
     // Simulate the temporary release worktree being deleted: the symlinks
     // survive but their target is gone.
     fs.rmSync(path.dirname(layout.checkout), { recursive: true, force: true });
