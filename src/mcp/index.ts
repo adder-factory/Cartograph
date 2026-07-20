@@ -31,6 +31,7 @@ import { TraceLogger } from '../trace/logger.js';
 import { runStartupSync } from './startup-sync.js';
 import { checkSchemaCompat, formatSchemaMismatch } from './schema-guard.js';
 import { resolveMcpServerProfile, type McpServerProfile } from './profiles.js';
+import { CARTOGRAPH_PACKAGE_VERSION } from '../package-version.js';
 
 /**
  * Convert a file:// URI to a filesystem path.
@@ -58,7 +59,7 @@ function fileUriToPath(uri: string): string {
  */
 const SERVER_INFO = {
   name: 'cartograph',
-  version: '0.1.0',
+  version: CARTOGRAPH_PACKAGE_VERSION,
 };
 
 /**

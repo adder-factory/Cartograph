@@ -13,6 +13,7 @@ import {
 } from '../src/mcp/index.js';
 import { SERVER_INSTRUCTIONS } from '../src/mcp/server-instructions.js';
 import { ErrorCodes, type JsonRpcNotification, type JsonRpcRequest } from '../src/mcp/transport.js';
+import { CARTOGRAPH_PACKAGE_VERSION } from '../src/package-version.js';
 
 type RpcMessage = JsonRpcRequest | JsonRpcNotification;
 type TransportHandler = (message: RpcMessage) => Promise<void>;
@@ -220,6 +221,7 @@ describe('MCPServer JSON-RPC request handling', () => {
       expect(init.protocolVersion).toBe('2024-11-05');
       expect(init.capabilities).toEqual({ tools: {}, resources: {}, prompts: {} });
       expect(init.serverInfo.name).toBe('cartograph');
+      expect(init.serverInfo.version).toBe(CARTOGRAPH_PACKAGE_VERSION);
       expect(init.instructions.startsWith(SERVER_INSTRUCTIONS)).toBe(true);
       expect(init.instructions).toContain('compact startup guide');
       expect(init.instructions).toContain('cartograph_playbook');
