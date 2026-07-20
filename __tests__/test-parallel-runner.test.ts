@@ -1,4 +1,4 @@
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -20,6 +20,92 @@ function extractFailedFiles(log: string): string[] {
       .split('\n')
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+type NativeCrashMode = 'transient-shard-crash' | 'repeated-shard-crash' | 'file-fail-then-pass' | 'repeated-file-crash';
+
+interface NativeCrashRun {
+  readonly invocations: string;
+  readonly status: number | null;
+  readonly stdout: string;
+}
+
+function runNativeCrashRecovery(mode: NativeCrashMode, retry: number): NativeCrashRun {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-test-parallel-native-crash-'));
+  const binDir = path.join(dir, 'bin');
+  const fixtureDir = path.join(dir, 'fixtures');
+  const stateDir = path.join(dir, 'state');
+  const invocationLog = path.join(dir, 'invocations.log');
+  fs.mkdirSync(binDir);
+  fs.mkdirSync(fixtureDir);
+  fs.mkdirSync(stateDir);
+  for (const name of ['a.test.ts', 'b.test.ts', 'c.test.ts', 'd.test.ts']) {
+    fs.writeFileSync(path.join(fixtureDir, name), '// fake test file\n');
+  }
+  const fakeBun = path.join(binDir, 'bun');
+  fs.writeFileSync(
+    fakeBun,
+    [
+      '#!/bin/bash',
+      `printf '%s\\n' "$*" >> '${invocationLog}'`,
+      'case " $* " in',
+      '  *" --shard=1/2 "*)',
+      '    state="$FAKE_BUN_STATE/shard-1-attempted"',
+      '    if [[ "$FAKE_BUN_MODE" = "transient-shard-crash" && ! -f "$state" ]]; then',
+      '      : > "$state"',
+      '      exit 133',
+      '    fi',
+      '    if [[ "$FAKE_BUN_MODE" != "transient-shard-crash" ]]; then exit 133; fi',
+      "    printf ' 2 pass\\n 0 fail\\nRan 2 tests across 2 files. [1ms]\\n'",
+      '    exit 0',
+      '    ;;',
+      '  *" --shard=2/2 "*)',
+      "    printf ' 2 pass\\n 0 fail\\nRan 2 tests across 2 files. [1ms]\\n'",
+      '    exit 0',
+      '    ;;',
+      'esac',
+      'file="${@: -1}"',
+      'if [[ "$FAKE_BUN_MODE" = "file-fail-then-pass" && "$file" = */a.test.ts ]]; then',
+      '  state="$FAKE_BUN_STATE/a-attempted"',
+      '  if [ ! -f "$state" ]; then',
+      '    : > "$state"',
+      '    printf \'%s:\\n(fail) fixture > first attempt fails\\n\\n 0 pass\\n 1 fail\\nRan 1 test across 1 file. [1ms]\\n\' "$file"',
+      '    exit 1',
+      '  fi',
+      'fi',
+      'if [[ "$FAKE_BUN_MODE" = "repeated-file-crash" && "$file" = */a.test.ts ]]; then',
+      '  exit 139',
+      'fi',
+      'printf "%s:\\n(pass) fixture > passes\\n\\n 1 pass\\n 0 fail\\nRan 1 test across 1 file. [1ms]\\n" "$file"',
+      '',
+    ].join('\n'),
+  );
+  fs.chmodSync(fakeBun, 0o755);
+
+  try {
+    const run = spawnSync('bash', ['scripts/test-parallel.sh'], {
+      cwd: root,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FAKE_BUN_MODE: mode,
+        FAKE_BUN_STATE: stateDir,
+        PATH: `${binDir}:${process.env['PATH'] ?? ''}`,
+        N: '2',
+        RETRY: String(retry),
+        SHARD_PATTERN: `${fixtureDir}/*.test.ts`,
+        FLAKE_LOG: path.join(dir, 'flake.log'),
+        TMPDIR: path.join(dir, 'tmp'),
+      },
+    });
+    return {
+      invocations: fs.readFileSync(invocationLog, 'utf8'),
+      status: run.status,
+      stdout: run.stdout,
+    };
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
@@ -82,5 +168,46 @@ Ran 1094 tests across 66 files. [43.68s]
 `);
 
     expect(failed).toEqual(['__tests__/review-neighbors.test.ts', '__tests__/sqlite-vec.test.ts']);
+  });
+
+  it('recovers a transient process crash only after the same shard passes', () => {
+    const run = runNativeCrashRecovery('transient-shard-crash', 1);
+
+    expect(run.status).toBe(0);
+    expect(run.stdout).toContain('retrying the same shard');
+    expect(run.stdout).toContain('shard 1 passed as a whole on attempt 1');
+    expect(run.stdout).toContain('pass: 4   fail: 0');
+    expect(run.invocations.match(/--shard=1\/2/g)).toHaveLength(2);
+    expect(
+      run.invocations.split('\n').filter((invocation) => invocation.length > 0 && !invocation.includes('--shard=')),
+    ).toEqual([]);
+  });
+
+  it('keeps a repeatable shard crash red even when every file passes alone', () => {
+    const run = runNativeCrashRecovery('repeated-shard-crash', 1);
+
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('shard 1 still crashed after 1 same-shard retry');
+    expect(run.stdout).toContain('file-grain diagnosis: all 2 files passed alone');
+    expect(run.stdout).toContain('pass: 4   fail: 1');
+    expect(run.invocations.match(/--shard=1\/2/g)).toHaveLength(2);
+    expect(run.invocations).toContain('/a.test.ts');
+    expect(run.invocations).toContain('/c.test.ts');
+  });
+
+  it('counts only the final diagnostic attempt when a file fails once and then passes', () => {
+    const run = runNativeCrashRecovery('file-fail-then-pass', 2);
+
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('pass: 4   fail: 1');
+    expect(run.stdout).not.toContain('pass: 5');
+  });
+
+  it('counts a repeatedly crashing file as failed even when Bun prints no summary', () => {
+    const run = runNativeCrashRecovery('repeated-file-crash', 2);
+
+    expect(run.status).toBe(1);
+    expect(run.stdout).toContain('pass: 3   fail: 1');
+    expect(run.stdout).not.toContain('fail: 0');
   });
 });

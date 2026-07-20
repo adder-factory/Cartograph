@@ -92,9 +92,25 @@ failed_files_from_log() {
   ' "$1" | sort
 }
 
+# Print the files Bun assigns to one shard. Bun's documented shard partition
+# takes every Nth file from the shell-expanded, lexicographically ordered input
+# list; keeping the same partition here lets a native-crashed shard be verified
+# file-by-file without re-running unrelated shards or trusting a partial log.
+files_for_shard() {
+  local wanted="$1"
+  local index=0
+  local candidate
+  for candidate in $PATTERN; do
+    index=$((index + 1))
+    if [ $((((index - 1) % N) + 1)) -eq "$wanted" ]; then
+      printf '%s\n' "$candidate"
+    fi
+  done
+}
+
 retry_won_shard() {
-  # $1 = shard index. `retried` contains shards whose failed files all
-  # passed in fresh per-file processes.
+  # $1 = shard index. `retried` contains shards whose same-shard process
+  # retry passed or whose ordinary assertion failures passed at file grain.
   [[ " ${retried[*]:-} " == *" $1 "* ]]
 }
 
@@ -127,12 +143,17 @@ done
 # Retry pass — F#68 (2026-05-28). On macOS the bun:test process can
 # stall under load (the 8 parallel shards self-stress the box; under
 # this, JS timers can stall 5-30s and miss their waitFor budgets).
-# A whole-shard retry doesn't help because the cumulative state from
-# 36 sibling files reliably re-creates the same flake. Instead, when
-# a shard fails, re-run JUST THE FAILED FILE(S) in a fresh bun
-# process — that breaks the accumulation and the flake usually
-# clears. A real bug fails both runs. Set RETRY=0 to disable.
+# Assertion failures are retried at file grain so accumulated state from
+# sibling files cannot hide the individual verdict. A process-level crash is
+# first retried at the original shard grain: only a passing same-shard retry
+# proves the crash was transient. If the shard repeatedly crashes, per-file
+# runs remain useful diagnostics but cannot recover the runner to green.
+# Set RETRY=0 to disable recovery attempts.
 retried=()
+native_file_retried=()
+native_file_counts=()
+native_unreported_fail_counts=()
+native_process_fail_counts=()
 # Default empty arrays trip set -u when expanded; arm them in advance.
 if [ "$RETRY" -gt 0 ]; then
   for i in $(seq 1 "$N"); do
@@ -140,33 +161,93 @@ if [ "$RETRY" -gt 0 ]; then
     f=$(shard_fails "$log")
     status="${shard_status[$i]:-0}"
     if [ "${f:-0}" -gt 0 ] || [ "$status" -ne 0 ]; then
-      # A non-zero shard exit with zero failed tests is a process-level
-      # failure (native crash / signal / post-summary teardown), not a
-      # per-file assertion failure. Retry the whole shard so the flake log
-      # does not misclassify every file header in the shard as a flaky file.
-      if [ "$status" -ne 0 ] && { [ "${f:-0}" -eq 0 ] || ! grep -qE "^Ran " "$log"; }; then
+      # A signal-style exit, or a non-zero shard exit without a reliable failed
+      # test summary, is a process-level failure rather than an ordinary
+      # assertion failure. Retry the exact shard first to distinguish a
+      # transient Bun/native failure from a deterministic shard or cross-file
+      # crash. If the exact shard still crashes, verify every assigned file in
+      # a fresh process for diagnosis, but keep the shard-level verdict red.
+      if { [ "$status" -gt 128 ] || { [ "$status" -ne 0 ] && { [ "${f:-0}" -eq 0 ] || ! grep -qE "^Ran " "$log"; }; }; }; then
         if grep -qE "^Ran " "$log"; then
-          echo "=== shard $i exited $status after printing a summary with no failed tests; retrying the whole shard (up to $RETRY attempts) ==="
+          echo "=== shard $i exited $status after printing a summary; retrying the same shard (up to $RETRY attempts) ==="
         else
-          echo "=== shard $i exited $status before printing a summary; retrying the whole shard (up to $RETRY attempts) ==="
+          echo "=== shard $i exited $status before printing a summary; retrying the same shard (up to $RETRY attempts) ==="
         fi
         mv "$log" "$log.first"
         shard_passed=false
         attempt=0
         while [ "$attempt" -lt "$RETRY" ]; do
           attempt=$((attempt+1))
-          bun test --isolate --shard="$i/$N" --timeout 30000 $PATTERN > "$log" 2>&1
-          if [ "$?" -eq 0 ]; then
+          if run_shard "$i" "$log"; then
             shard_passed=true
             retried+=("$i")
             echo "  -> shard $i passed as a whole on attempt $attempt"
+            {
+              echo "[$(date -u +%FT%TZ)] process-crash-recovered: shard $i passed same-shard retry $attempt"
+              tail -8 "$log.first" 2>/dev/null
+            } >> "$FLAKE_LOG" 2>/dev/null || true
             break
           fi
         done
         if $shard_passed; then
           continue
         fi
-        echo "  -> shard $i still failed/crashed after whole-shard retries; treating as failed"
+
+        retry_label="retries"
+        if [ "$RETRY" -eq 1 ]; then retry_label="retry"; fi
+        echo "  -> shard $i still crashed after $RETRY same-shard $retry_label; running file-grain diagnosis"
+        mv "$log" "$log.last-shard"
+
+        crashed_shard_files=()
+        mapfile -t crashed_shard_files < <(files_for_shard "$i")
+        native_file_retried[$i]=1
+        native_file_counts[$i]="${#crashed_shard_files[@]}"
+        : > "$log"
+        if [ "${#crashed_shard_files[@]}" -eq 0 ]; then
+          native_process_fail_counts[$i]=1
+          echo "  -> shard $i file set could not be reconstructed; treating the process crash as failed"
+          continue
+        fi
+
+        retry_total_fail=0
+        unreported_file_failures=0
+        attempt_log="$log.attempt"
+        for ff in "${crashed_shard_files[@]}"; do
+          attempt=0
+          passed=false
+          while [ "$attempt" -lt "$RETRY" ]; do
+            attempt=$((attempt+1))
+            if bun test --isolate --timeout 30000 "$ff" > "$attempt_log" 2>&1; then
+              passed=true
+              break
+            fi
+          done
+          # The aggregate must describe the final verdict for each file, not
+          # every failed attempt that preceded it. Keep only that last attempt
+          # in the recovery log consumed below.
+          cat "$attempt_log" >> "$log"
+          if ! $passed; then
+            retry_total_fail=$((retry_total_fail + 1))
+            if [ "$(shard_fails "$attempt_log")" -eq 0 ]; then
+              # Native crashes and post-summary teardown failures can exit
+              # non-zero without a Bun `N fail` record. Count the failed file
+              # explicitly so a red runner can never print `fail: 0`.
+              unreported_file_failures=$((unreported_file_failures + 1))
+            fi
+            echo "  -> $ff still failed/crashed after $RETRY attempt(s)"
+          fi
+        done
+        native_unreported_fail_counts[$i]="$unreported_file_failures"
+        if [ "$retry_total_fail" -eq 0 ]; then
+          native_process_fail_counts[$i]=1
+          echo "  -> shard $i file-grain diagnosis: all ${#crashed_shard_files[@]} files passed alone; repeatable shard failure remains failed"
+          {
+            echo "[$(date -u +%FT%TZ)] process-crash-persistent: shard $i (${#crashed_shard_files[@]} files passed separately)"
+            tail -8 "$log.first" 2>/dev/null
+          } >> "$FLAKE_LOG" 2>/dev/null || true
+        else
+          echo "  -> shard $i file-grain diagnosis found $retry_total_fail failing/crashing file(s)"
+        fi
         continue
       fi
 
@@ -232,25 +313,29 @@ for i in $(seq 1 "$N"); do
   if retry_won_shard "$i"; then
     retry_won=true
   fi
-  # Whenever a retry was attempted (won or not), the ORIGINAL shard
-  # log (`$first_log`) is the source of truth for pass/fail/skip
-  # totals — the retry log concatenates multiple per-file runs and
-  # `tail -1` of that picks only the last file's summary, silently
-  # undercounting `total_fail` when multiple files fail retries.
-  # When the retry won, reclassify the originally-failed tests as
-  # passes; when the retry didn't fully clear, keep the original
-  # fail count visible.
+  # For ordinary assertion retries, the ORIGINAL shard log (`$first_log`)
+  # remains the source of truth and a winning retry reclassifies its failed
+  # tests as passes. Native-crash recovery is different: every file is run
+  # separately and `$log` contains only each file's FINAL attempt, so those
+  # final verdicts are the complete source of truth for that shard.
   if [ -f "$first_log" ]; then
-    p=$(grep -oE "^ +[0-9]+ pass" "$first_log" | grep -oE "[0-9]+" | tail -1)
-    f=$(grep -oE "^ +[0-9]+ fail" "$first_log" | grep -oE "[0-9]+" | tail -1)
-    s=$(grep -oE "^ +[0-9]+ skip" "$first_log" | grep -oE "[0-9]+" | tail -1)
-    summary=$(grep -E "^Ran " "$first_log" | tail -1)
+    if [ "${native_file_retried[$i]:-0}" -eq 1 ]; then
+      p=$(sum_count "$log" pass)
+      reported_fail=$(sum_count "$log" fail)
+      f=$((reported_fail + ${native_unreported_fail_counts[$i]:-0} + ${native_process_fail_counts[$i]:-0}))
+      s=$(sum_count "$log" skip)
+      summary="file-grain verification of ${native_file_counts[$i]} files"
+    else
+      p=$(grep -oE "^ +[0-9]+ pass" "$first_log" | grep -oE "[0-9]+" | tail -1)
+      f=$(grep -oE "^ +[0-9]+ fail" "$first_log" | grep -oE "[0-9]+" | tail -1)
+      s=$(grep -oE "^ +[0-9]+ skip" "$first_log" | grep -oE "[0-9]+" | tail -1)
+      summary=$(grep -E "^Ran " "$first_log" | tail -1)
+    fi
     if $retry_won; then
       if [ -z "${summary:-}" ]; then
-        # The shard process can crash before its final summary. When
-        # the whole shard then passes in a fresh isolated retry, count
-        # the retry summary so the aggregate is not misleadingly shown
-        # as pass=0 for the recovered shard.
+        # The shard process can crash before its final summary. When the same
+        # shard then passes on retry, count the retry summary so the aggregate
+        # is not misleadingly shown as pass=0 for the recovered shard.
         p=$(sum_count "$log" pass)
         s=$(sum_count "$log" skip)
         summary=$(grep -E "^Ran " "$log" | tail -1)
