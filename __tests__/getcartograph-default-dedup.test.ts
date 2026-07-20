@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { MCPServer } from '../src/mcp/index.js';
+import { waitForProjectCacheWatcherStops } from '../src/mcp/tools/_project-cache.js';
 import Cartograph from '../src/index.js';
 
 const dirs: string[] = [];
@@ -43,7 +44,9 @@ describe('getCartograph — default-CG vs same-root cache dedup', () => {
       // The cache stayed empty — no second instance/watcher was ever opened.
       expect(server.toolHandler.getProjectCacheSnapshot().cachedRoots).toHaveLength(0);
     } finally {
+      await server.st.cg?.watcher.stopAndWait();
       server.toolHandler.closeAll();
+      await waitForProjectCacheWatcherStops();
       server.st.cg?.close();
     }
   });
@@ -63,7 +66,9 @@ describe('getCartograph — default-CG vs same-root cache dedup', () => {
       // B is held by the cache; A (the default) is not.
       expect(server.toolHandler.getProjectCacheSnapshot().cachedRoots).toHaveLength(1);
     } finally {
+      await server.st.cg?.watcher.stopAndWait();
       server.toolHandler.closeAll();
+      await waitForProjectCacheWatcherStops();
       server.st.cg?.close();
     }
   });

@@ -12,6 +12,9 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import Cartograph from '../src/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { waitForProjectCacheWatcherStops } from '../src/mcp/tools/_project-cache.js';
+
+const openHandlers: ToolHandler[] = [];
 
 describe('ProjectCache — stale-handle detection after DB wipe + re-init', () => {
   let dir: string;
@@ -26,12 +29,15 @@ describe('ProjectCache — stale-handle detection after DB wipe + re-init', () =
     cg.close();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    for (const handler of openHandlers.splice(0)) handler.closeAll();
+    await waitForProjectCacheWatcherStops();
     if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
   });
 
   it('re-opens after the .cartograph/cartograph.db file is replaced', async () => {
     const handler = new ToolHandler(null);
+    openHandlers.push(handler);
 
     // First query → opens + caches.
     const firstResult = await handler.execute('cartograph_status', { projectPath: dir });
@@ -50,18 +56,16 @@ describe('ProjectCache — stale-handle detection after DB wipe + re-init', () =
     const secondResult = await handler.execute('cartograph_status', { projectPath: dir });
     expect(secondResult.isError).toBeFalsy();
     expect(secondResult.content[0]?.text ?? '').toContain('Cartograph Status');
-
-    handler.closeAll();
   });
 
   it('reuses the cached handle when the DB file is unchanged (no spurious reopens)', async () => {
     const handler = new ToolHandler(null);
+    openHandlers.push(handler);
     const a = await handler.execute('cartograph_status', { projectPath: dir });
     const b = await handler.execute('cartograph_status', { projectPath: dir });
     expect(a.isError).toBeFalsy();
     expect(b.isError).toBeFalsy();
     // Both calls succeed — we don't have a direct counter on reopens
     // but two clean queries against an unchanged file are the contract.
-    handler.closeAll();
   });
 });
