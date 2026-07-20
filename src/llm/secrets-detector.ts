@@ -331,6 +331,14 @@ function hasMaskIdentifier(expression: string, requireSimpleIdentifier: boolean)
   return identifiers.some(isMaskIdentifier);
 }
 
+function hasRawSensitiveIdentifier(expression: string): boolean {
+  const codeOnly = blankRanges(expression, findQuotedRanges(expression));
+  return [...codeOnly.matchAll(IDENTIFIER_RE)].some((match) => {
+    const identifier = match[0];
+    return !isMaskIdentifier(identifier) && hasSensitiveLexicalTerm(identifier);
+  });
+}
+
 type ReplacementShape =
   | { readonly kind: 'direct' }
   | {
@@ -410,9 +418,13 @@ function callbackOutputExpressions(
 
 function hasExecutableMaskOutput(replacementArgument: string, shape: ReplacementShape): boolean {
   if (shape.kind === 'direct') {
-    return hasMaskLiteral(replacementArgument) || hasMaskIdentifier(replacementArgument, true);
+    return (
+      !hasRawSensitiveIdentifier(replacementArgument) &&
+      (hasMaskLiteral(replacementArgument) || hasMaskIdentifier(replacementArgument, true))
+    );
   }
   const callbackOutputs = callbackOutputExpressions(replacementArgument, shape);
+  if (callbackOutputs.some(hasRawSensitiveIdentifier)) return false;
   return callbackOutputs.some((output) => hasMaskLiteral(output) || hasMaskIdentifier(output, false));
 }
 

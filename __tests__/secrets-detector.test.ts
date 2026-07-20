@@ -269,6 +269,21 @@ describe('detectSecretsHandling — false-positive guards', () => {
     expect(result.score).toBeGreaterThanOrEqual(0.5);
   });
 
+  it.each([
+    ['a direct replacement', 'return token.replace(pattern, password + "***");'],
+    ['a replacement callback', 'return token.replace(pattern, (password) => password + "***");'],
+  ])('does not down-weight %s that appends a mask to a raw credential', (_description, body) => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body,
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
   it('does not trust a redactor name when the function logs credentials', () => {
     const result = detectSecretsHandling(
       input({
