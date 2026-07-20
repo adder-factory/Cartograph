@@ -344,8 +344,14 @@ type ReplacementShape =
   | {
       readonly kind: 'callback';
       readonly arrowIndex: number | null;
+      readonly fullMatchParameter: string | null;
       readonly sensitiveParameters: ReadonlySet<string>;
     };
+
+interface CallbackOutput {
+  readonly expression: string;
+  readonly guardPrefix: string;
+}
 
 function findOutsideQuoted(source: string, token: string, quotedRanges: readonly SourceRange[]): number {
   let index = source.indexOf(token);
@@ -380,6 +386,12 @@ function sensitiveParameterNames(parameterSource: string): ReadonlySet<string> {
   return names;
 }
 
+function firstCallbackParameterName(parameterSource: string): string | null {
+  const firstParameter = parameterSource.split(',', 1)[0]?.trim() ?? '';
+  const match = /^(?:\.\.\.)?([A-Za-z_$][\w$]*)/.exec(firstParameter);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 function describeReplacement(replacementArgument: string): ReplacementShape {
   const quotedRanges = findQuotedRanges(replacementArgument);
   const arrowIndex = findOutsideQuoted(replacementArgument, '=>', quotedRanges);
@@ -387,18 +399,20 @@ function describeReplacement(replacementArgument: string): ReplacementShape {
   const isFunctionCallback = /^(?:async\s+)?function\b/.test(codeOnly);
   if (arrowIndex < 0 && !isFunctionCallback) return { kind: 'direct' };
   const normalizedArrowIndex = arrowIndex < 0 ? null : arrowIndex;
+  const parameterSource = callbackParameterSource(replacementArgument, normalizedArrowIndex);
   return {
     kind: 'callback',
     arrowIndex: normalizedArrowIndex,
-    sensitiveParameters: sensitiveParameterNames(callbackParameterSource(replacementArgument, normalizedArrowIndex)),
+    fullMatchParameter: firstCallbackParameterName(parameterSource),
+    sensitiveParameters: sensitiveParameterNames(parameterSource),
   };
 }
 
 function callbackOutputExpressions(
   replacementArgument: string,
   shape: Extract<ReplacementShape, { kind: 'callback' }>,
-): string[] {
-  const outputs: string[] = [];
+): CallbackOutput[] {
+  const outputs: CallbackOutput[] = [];
   const quotedRanges = findQuotedRanges(replacementArgument);
   for (const match of replacementArgument.matchAll(RETURN_STATEMENT_RE)) {
     if (isInsideRange(match.index, quotedRanges)) continue;
@@ -406,14 +420,41 @@ function callbackOutputExpressions(
     const newline = replacementArgument.indexOf('\n', match.index);
     const candidates = [semicolon, newline].filter((index) => index >= 0);
     const end = candidates.length === 0 ? replacementArgument.length : Math.min(...candidates);
-    outputs.push(replacementArgument.slice(match.index + match[0].length, end));
+    const guardStart = Math.max(
+      replacementArgument.lastIndexOf('\n', match.index - 1),
+      replacementArgument.lastIndexOf(';', match.index - 1),
+      replacementArgument.lastIndexOf('{', match.index - 1),
+      replacementArgument.lastIndexOf('}', match.index - 1),
+    );
+    outputs.push({
+      expression: replacementArgument.slice(match.index + match[0].length, end),
+      guardPrefix: replacementArgument.slice(guardStart + 1, match.index).trim(),
+    });
   }
 
   if (shape.arrowIndex !== null) {
     const conciseOutput = replacementArgument.slice(shape.arrowIndex + 2).trim();
-    if (!conciseOutput.startsWith('{')) outputs.push(conciseOutput);
+    if (!conciseOutput.startsWith('{')) outputs.push({ expression: conciseOutput, guardPrefix: '' });
   }
   return outputs;
+}
+
+function isMaskingCallbackOutput(output: CallbackOutput): boolean {
+  return (
+    !hasRawSensitiveIdentifier(output.expression) &&
+    (hasMaskLiteral(output.expression) || hasMaskIdentifier(output.expression, false))
+  );
+}
+
+function isProvenEmptySensitivePassthrough(
+  output: CallbackOutput,
+  shape: Extract<ReplacementShape, { kind: 'callback' }>,
+): boolean {
+  const expression = blankRanges(output.expression, findQuotedRanges(output.expression)).trim().toLowerCase();
+  if (shape.fullMatchParameter === null || expression !== shape.fullMatchParameter) return false;
+  const guardMatch = /^if\s*\(\s*([A-Za-z_$][\w$]*)\.length\s*===\s*0\s*\)\s*$/.exec(output.guardPrefix);
+  const guardedParameter = guardMatch?.[1];
+  return guardedParameter !== undefined && shape.sensitiveParameters.has(guardedParameter.toLowerCase());
 }
 
 function hasExecutableMaskOutput(replacementArgument: string, shape: ReplacementShape): boolean {
@@ -424,8 +465,10 @@ function hasExecutableMaskOutput(replacementArgument: string, shape: Replacement
     );
   }
   const callbackOutputs = callbackOutputExpressions(replacementArgument, shape);
-  if (callbackOutputs.some(hasRawSensitiveIdentifier)) return false;
-  return callbackOutputs.some((output) => hasMaskLiteral(output) || hasMaskIdentifier(output, false));
+  if (!callbackOutputs.some(isMaskingCallbackOutput)) return false;
+  return callbackOutputs.every(
+    (output) => isMaskingCallbackOutput(output) || isProvenEmptySensitivePassthrough(output, shape),
+  );
 }
 
 function blankSensitiveParameterUses(source: string, parameters: ReadonlySet<string>): string {
