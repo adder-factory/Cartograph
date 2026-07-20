@@ -82,7 +82,7 @@ function buildResponseFormat(
     type: 'json_schema',
     json_schema: {
       name: 'cartograph_response',
-      schema: schema as Record<string, unknown>,
+      schema,
       strict: true,
     },
   };

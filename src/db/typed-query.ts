@@ -165,7 +165,7 @@ export function defineQuery<PSchema extends ZodType, RSchema extends ZodType>(
       if (!parsed.success) {
         throw new TypedQueryRowError(sqlPreview, parsed.error);
       }
-      return parsed.data as zInfer<RSchema>;
+      return parsed.data;
     };
     pipeline = makeRowPipeline<zInfer<RSchema>>(mode, normalizeRow, parseRow);
 
@@ -398,7 +398,7 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
       if (!parsed.success) {
         throw new TypedQueryParamsError('(dynamic SQL)', parsed.error);
       }
-      return parsed.data as zInfer<PSchema>;
+      return parsed.data;
     };
 
     const parseRow = (raw: unknown, sqlPreview: string): zInfer<RSchema> => {
@@ -406,7 +406,7 @@ export function defineDynamicQuery<PSchema extends ZodType, RSchema extends ZodT
       if (!parsed.success) {
         throw new TypedQueryRowError(truncate(sqlPreview, 120), parsed.error);
       }
-      return parsed.data as zInfer<RSchema>;
+      return parsed.data;
     };
 
     return {

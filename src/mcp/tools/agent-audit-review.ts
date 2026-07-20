@@ -157,7 +157,7 @@ function collectFindingsForBiomarker(args: CollectFindingsArgs): AgentAuditRow[]
   const { cg, biomarker, minSeverity, limit } = args;
   const overFetch = limit * 3;
   const rows = getFindingsRanked(cg.queries, {
-    biomarker: biomarker as BiomarkerName,
+    biomarker,
     minSeverity,
     limit: overFetch,
   });

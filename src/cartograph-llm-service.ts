@@ -987,7 +987,7 @@ async function llmPrepareSummarizeClient(
     : LOW_LATENCY_SUMMARY_BATCH;
   const summaryBatchSize = callerBatchSize ?? resolved.summarizeLlm.summaryBatchSize ?? providerDefault;
   return {
-    resolved: resolved as ResolvedLlm & { summarizeLlm: NonNullable<ResolvedLlm['summarizeLlm']> },
+    resolved,
     client,
     summaryBatchSize,
   };

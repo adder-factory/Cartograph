@@ -67,10 +67,9 @@ async function handleCoverage(ctx: ToolCtx, args: CoverageArgs): Promise<ToolOut
   // validation. This keeps the read-mode path unchanged. The
   // `_coverage-load` / `_coverage-refresh` sub-handlers still take a
   // raw `Record<string, unknown>` (they own files outside this
-  // migration's scope); the parsed args are a superset, so the cast
-  // is safe.
-  if (args.mode === 'load') return handleCoverageLoad(ctx, args as Record<string, unknown>);
-  if (args.mode === 'refresh') return handleCoverageRefresh(ctx, args as Record<string, unknown>);
+  // migration's scope); the parsed args are structurally compatible.
+  if (args.mode === 'load') return handleCoverageLoad(ctx, args);
+  if (args.mode === 'refresh') return handleCoverageRefresh(ctx, args);
 
   const cg = ctx.getCartograph(args.projectPath);
   // Infer `symbol` mode from a bare `symbol` arg when `mode` is

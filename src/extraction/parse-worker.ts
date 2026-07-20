@@ -39,7 +39,7 @@ import type { Language } from '../types.js';
 //     in practice no real diagnostic does.
 {
   const realWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((
+  process.stderr.write = (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding | ((err?: Error | null) => void),
     cb?: (err?: Error | null) => void,
@@ -54,8 +54,9 @@ import type { Language } from '../types.js';
       else if (cb) cb();
       return true;
     }
-    return realWrite(chunk as never, encoding as never, cb as never);
-  }) as typeof process.stderr.write;
+    if (typeof encoding === 'function') return realWrite(chunk, encoding);
+    return realWrite(chunk, encoding, cb);
+  };
 }
 
 const PARSER_RESET_INTERVAL = 5000;

@@ -81,5 +81,5 @@ export function reattachToolContract<M extends ToolModule>(
     writable: false,
     configurable: true,
   });
-  return clone as M & Partial<ContractToolModule>;
+  return clone;
 }

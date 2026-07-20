@@ -49,7 +49,7 @@ import { generateNodeId } from '../extraction/tree-sitter-helpers.js';
 import { insertEdges } from '../db/queries-edges.js';
 import { parseDecoratorArgsJson } from './_decorator-args.js';
 import type { SyncResult } from '../extraction/index.js';
-import type { Edge, Node, NodeKind } from '../types.js';
+import type { Edge, Node } from '../types.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers a full re-mine. */
 export const DRUPAL_PLUGINS_ALGO_VERSION = computeAlgoHash('src/index-hooks/drupal-plugins.ts', ['./drupal-plugins']);
@@ -142,13 +142,13 @@ function buildPluginNode(p: PluginClass, now: number): Node {
   // id without colliding. Display name is the bare id — the thing you search.
   const id = generateNodeId({
     filePath: p.filePath,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: `${p.pluginType}:${p.pluginId}`,
     ordinal: 0,
   });
   return {
     id,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: p.pluginId,
     qualifiedName: `${p.filePath}::${p.pluginType}:${p.pluginId}`,
     filePath: p.filePath,

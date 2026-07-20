@@ -221,9 +221,8 @@ const defaultAdminCommandDeps: AdminCommandDeps = {
   loadSummaryQueries: (() => import('../../db/queries-summaries.js')) as AdminCommandDeps['loadSummaryQueries'],
   loadDbIndex: (() => import('../../db/index.js')) as AdminCommandDeps['loadDbIndex'],
   loadInstallModels: (() => import('../../installer/install-models.js')) as AdminCommandDeps['loadInstallModels'],
-  loadRecommendedModels: (() => import('../../llm/recommended-models.js')) as AdminCommandDeps['loadRecommendedModels'],
-  loadRecommendedConfig: (() =>
-    import('../../installer/recommended-config.js')) as unknown as AdminCommandDeps['loadRecommendedConfig'],
+  loadRecommendedModels: () => import('../../llm/recommended-models.js'),
+  loadRecommendedConfig: () => import('../../installer/recommended-config.js'),
   loadDoctor: (() => import('../../installer/doctor.js')) as AdminCommandDeps['loadDoctor'],
   loadLlmSetupPlan: (() =>
     import('../../installer/llm-setup-plan.js')) as unknown as AdminCommandDeps['loadLlmSetupPlan'],

@@ -595,7 +595,7 @@ export function prependDisambiguationBanner<R extends { content?: ReadonlyArray<
   const first = result.content[0];
   if (!first || first?.type !== 'text') return result;
   const composed = withDisambiguationBanner(note, first.text ?? '');
-  return { ...result, content: [{ ...first, text: composed }] } as R;
+  return { ...result, content: [{ ...first, text: composed }] };
 }
 
 /**

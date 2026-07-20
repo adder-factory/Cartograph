@@ -514,7 +514,7 @@ async function handleGraph(ctx: ToolCtx, args: GraphArgs): Promise<ToolOutcome> 
   args = applyGraphLowTokens(args);
   // `direction` is a required `z.enum` and `hops` carries a `.default(1)`,
   // so `safeParse` already supplied / validated both.
-  const direction = args.direction as GraphDirection;
+  const direction = args.direction;
   const hops = args.hops;
 
   const validation = validateGraphDispatchArgs(args, direction, hops);

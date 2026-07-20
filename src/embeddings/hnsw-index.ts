@@ -163,7 +163,7 @@ async function loadUsearchModule(): Promise<USearchNs | null> {
       default?: USearchNs;
     };
     if (hasUSearchExports(ns)) {
-      mod = ns as unknown as USearchNs;
+      mod = ns;
     } else if (ns.default?.Index) {
       mod = ns.default;
     } else {

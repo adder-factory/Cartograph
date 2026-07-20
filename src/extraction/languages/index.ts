@@ -44,7 +44,7 @@ function buildExtractors(): Partial<Record<Language, LanguageExtractor>> {
  * tree-sitter.ts).
  */
 export const EXTRACTORS: Partial<Record<Language, LanguageExtractor>> = new Proxy(
-  {} as Partial<Record<Language, LanguageExtractor>>,
+  {},
   {
     get(_t, key: string) {
       return buildExtractors()[key as Language];

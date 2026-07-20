@@ -242,7 +242,7 @@ function applyFindLowTokens(args: FindArgs): FindArgs {
   if (args.lowTokens !== true) return args;
 
   const out: FindArgs = { ...args };
-  out.limit ??= lowTokenLimitForAxis(out.by as FindAxis);
+  out.limit ??= lowTokenLimitForAxis(out.by);
 
   const effectiveMode = out.mode ?? 'exact';
   if (out.by === 'name' && effectiveMode === 'exact' && out.compact !== false) {
@@ -509,7 +509,7 @@ async function handleFind(ctx: ToolCtx, args: FindArgs): Promise<ToolOutcome> {
   // `by` is a required `z.enum` — `safeParse` already rejected a
   // missing / unknown value (and the `.superRefine` adds the
   // sibling-mode redirect), so the axis is a known `FindAxis` here.
-  const by = args.by as FindAxis;
+  const by = args.by;
 
   // ── Per-axis validation ──────────────────────────────────────────
   // `mode`'s enum membership is validated by the schema; only the

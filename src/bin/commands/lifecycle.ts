@@ -138,7 +138,7 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   },
   assignIntArg: cliAssignIntArg,
   runViaMCP: cliRunViaMCP,
-  loadCartograph: cliLoadCartograph as () => Promise<LifecycleCartographModule>,
+  loadCartograph: cliLoadCartograph,
   isInitialized: defaultIsInitialized,
   hasUncommittedChanges: defaultHasUncommittedChanges,
   loadMcpServer: (() => import('../../mcp/index.js')) as LifecycleCommandDeps['loadMcpServer'],
@@ -154,10 +154,8 @@ const defaultLifecycleCommandDeps: LifecycleCommandDeps = {
   loadBackendRuntime: () => import('../../features/backend/index.js'),
   loadLlmSmoke: () => import('../../features/llm-smoke/index.js'),
   loadInstallModels: (() => import('../../installer/install-models.js')) as LifecycleCommandDeps['loadInstallModels'],
-  loadRecommendedModels: (() =>
-    import('../../llm/recommended-models.js')) as LifecycleCommandDeps['loadRecommendedModels'],
-  loadRecommendedConfig: (() =>
-    import('../../installer/recommended-config.js')) as LifecycleCommandDeps['loadRecommendedConfig'],
+  loadRecommendedModels: () => import('../../llm/recommended-models.js'),
+  loadRecommendedConfig: () => import('../../installer/recommended-config.js'),
 };
 
 export function registerLifecycleCommands(deps: LifecycleCommandDeps = defaultLifecycleCommandDeps): void {

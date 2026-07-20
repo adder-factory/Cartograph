@@ -54,7 +54,7 @@ import { logDebug, errMsg } from '../errors.js';
 import { generateNodeId } from '../extraction/tree-sitter-helpers.js';
 import { insertEdges } from '../db/queries-edges.js';
 import type { SyncResult } from '../extraction/index.js';
-import type { Edge, Node, NodeKind } from '../types.js';
+import type { Edge, Node } from '../types.js';
 import { parseDecoratorArgsJson } from './_decorator-args.js';
 
 /** Algo-version SHA. Mismatch on `afterSync` triggers re-mine. */
@@ -292,13 +292,13 @@ function buildRouteNode(args: { rm: RouteMatch; displayName: string; ordinal: nu
   const { rm, displayName, ordinal, now } = args;
   const id = generateNodeId({
     filePath: rm.methodFilePath,
-    kind: 'route' as NodeKind,
+    kind: 'route',
     name: displayName,
     ordinal,
   });
   return {
     id,
-    kind: 'route' as NodeKind,
+    kind: 'route',
     name: displayName,
     qualifiedName: `${rm.methodFilePath}::${rm.label}::${rm.routePath}`,
     filePath: rm.methodFilePath,

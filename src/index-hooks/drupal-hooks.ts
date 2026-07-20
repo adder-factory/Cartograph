@@ -64,7 +64,7 @@ import { logDebug, errMsg } from '../errors.js';
 import { insertEdges } from '../db/queries-edges.js';
 import { generateNodeId } from '../extraction/tree-sitter-helpers.js';
 import type { SyncResult } from '../extraction/index.js';
-import type { Edge, Node, NodeKind } from '../types.js';
+import type { Edge, Node } from '../types.js';
 import { HOOK_FILE_EXTENSIONS } from '../resolution/frameworks/drupal.js';
 
 export const DRUPAL_HOOKS_ALGO_VERSION = computeAlgoHash('src/index-hooks/drupal-hooks.ts', ['./drupal-hooks']);
@@ -186,13 +186,13 @@ function buildHookAnchors(impls: readonly HookImpl[]): Map<string, string> {
 function buildVirtualHookNode(hookName: string, anchorFile: string, now: number): Node {
   const id = generateNodeId({
     filePath: anchorFile,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: `drupal-hook:${hookName}`,
     ordinal: 0,
   });
   return {
     id,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: hookName,
     qualifiedName: `${anchorFile}${HOOK_QNAME_MARKER}${hookName}`,
     filePath: anchorFile,

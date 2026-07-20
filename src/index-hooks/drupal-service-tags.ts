@@ -38,7 +38,7 @@ import { logDebug, errMsg } from '../errors.js';
 import { generateNodeId } from '../extraction/tree-sitter-helpers.js';
 import { insertEdges } from '../db/queries-edges.js';
 import type { SyncResult } from '../extraction/index.js';
-import type { Edge, Node, NodeKind } from '../types.js';
+import type { Edge, Node } from '../types.js';
 import { extractServiceTagFacts } from '../resolution/frameworks/drupal.js';
 import { getParser, loadGrammarsForLanguages } from '../extraction/grammars.js';
 
@@ -122,13 +122,13 @@ function buildTagGraph(tagName: string, group: TagGroup, now: number): { node: N
   const anchor = [...group.files].sort((a, b) => Number(a > b) - Number(a < b))[0]!;
   const id = generateNodeId({
     filePath: anchor,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: `service-tag:${tagName}`,
     ordinal: 0,
   });
   const node: Node = {
     id,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: tagName,
     qualifiedName: `${anchor}${TAG_QNAME_MARKER}${tagName}`,
     filePath: anchor,

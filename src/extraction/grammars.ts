@@ -70,24 +70,27 @@ function getExtensionMap(): Record<string, Language> {
  * first property access. Existing callers can keep doing
  * `EXTENSION_MAP['.ts']` without changes.
  */
-export const EXTENSION_MAP: Record<string, Language> = new Proxy({} as Record<string, Language>, {
-  get(_t, key: string) {
-    return getExtensionMap()[key];
+export const EXTENSION_MAP: Record<string, Language> = new Proxy(
+  {},
+  {
+    get(_t, key: string) {
+      return getExtensionMap()[key];
+    },
+    has(_t, key: string) {
+      return key in getExtensionMap();
+    },
+    ownKeys() {
+      return Object.keys(getExtensionMap());
+    },
+    getOwnPropertyDescriptor(_t, key: string) {
+      const map = getExtensionMap();
+      if (key in map) {
+        return { configurable: true, enumerable: true, writable: false, value: map[key] };
+      }
+      return undefined;
+    },
   },
-  has(_t, key: string) {
-    return key in getExtensionMap();
-  },
-  ownKeys() {
-    return Object.keys(getExtensionMap());
-  },
-  getOwnPropertyDescriptor(_t, key: string) {
-    const map = getExtensionMap();
-    if (key in map) {
-      return { configurable: true, enumerable: true, writable: false, value: map[key] };
-    }
-    return undefined;
-  },
-});
+);
 
 let parserInitialized = false;
 

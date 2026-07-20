@@ -584,7 +584,7 @@ function safeGetCoChangedFiles(
  */
 function safeGetTestsForFile(queries: QueryBuilder, filePath: string): string[] {
   try {
-    const incoming = getIncomingEdges(queries, `file:${filePath}`, ['tests' as never]);
+    const incoming = getIncomingEdges(queries, `file:${filePath}`, ['tests']);
     return incoming
       .map((e) => e.source)
       .filter((id) => id.startsWith('file:'))

@@ -323,5 +323,5 @@ export async function handleReviewContext(ctx: ToolCtx, args: Record<string, unk
 
   // Friction-21: render markdown like every other `cartograph_review`
   // mode (`risk`, `neighbors`) instead of a raw JSON blob.
-  return ok(textResult(truncateOutput(renderReviewContextMarkdown(context as MdReviewContext))));
+  return ok(textResult(truncateOutput(renderReviewContextMarkdown(context))));
 }

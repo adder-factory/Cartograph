@@ -56,7 +56,7 @@ import { parseHookWorkerCommand, parseHookWorkerReply, type HookWorkerWireOutcom
 // at the source — mirrors `src/extraction/parse-worker.ts`.
 {
   const realWrite = process.stderr.write.bind(process.stderr);
-  process.stderr.write = ((
+  process.stderr.write = (
     chunk: string | Uint8Array,
     encoding?: BufferEncoding | ((err?: Error | null) => void),
     cb?: (err?: Error | null) => void,
@@ -68,8 +68,9 @@ import { parseHookWorkerCommand, parseHookWorkerReply, type HookWorkerWireOutcom
       else if (cb) cb();
       return true;
     }
-    return realWrite(chunk as never, encoding as never, cb as never);
-  }) as typeof process.stderr.write;
+    if (typeof encoding === 'function') return realWrite(chunk, encoding);
+    return realWrite(chunk, encoding, cb);
+  };
 }
 
 function toWireOutcome(o: IndexHookOutcome): HookWorkerWireOutcome {

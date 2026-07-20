@@ -1141,10 +1141,9 @@ async function handleAdmin(ctx: ToolCtx, args: AdminArgs): Promise<ToolOutcome> 
   // `action` is enum-validated by Zod, so the handler is always
   // present — the lookup result is asserted, not guarded.
   const handler = ADMIN_ACTIONS[args.action]!;
-  // The per-action handlers read individual keys off a
-  // `Record<string, unknown>` view; the parsed args are structurally a
-  // superset, so the cast is safe.
-  return handler(ctx, args as Record<string, unknown>);
+  // The parsed args are structurally compatible with the per-action
+  // handlers' raw record view.
+  return handler(ctx, args);
 }
 
 export const ADMIN_TOOL = defineTool({

@@ -1,6 +1,6 @@
 import * as path from 'node:path';
 import type { ExtractionResult, UnresolvedReference } from '../../types.js';
-import type { Edge, EdgeKind, Language, Node, NodeKind } from '../../../types.js';
+import type { Edge, EdgeKind, Node, NodeKind } from '../../../types.js';
 import { createIdFactory, generateNodeId, type NodeIdFactory } from '../../tree-sitter-helpers.js';
 
 export type Bg3Language = 'bg3_anubis' | 'bg3_resource' | 'bg3_stats' | 'osiris';
@@ -204,7 +204,7 @@ export function createContext(filePath: string, source: string, language: Bg3Lan
     name: path.basename(filePath),
     qualifiedName: filePath,
     filePath,
-    language: language as Language,
+    language,
     startLine: 1,
     endLine: lines.length,
     startColumn: 0,
@@ -258,7 +258,7 @@ export function createNode(
     name: args.name,
     qualifiedName: args.qualifiedName ?? `${ctx.filePath}::${args.name}`,
     filePath: ctx.filePath,
-    language: ctx.language as Language,
+    language: ctx.language,
     startLine: args.startLine,
     endLine: args.endLine ?? args.startLine,
     startColumn: args.startColumn ?? 0,
@@ -284,7 +284,7 @@ export function addReference(ctx: Bg3Context, ref: ReferenceArgs): void {
     line: ref.line,
     column: ref.column,
     filePath: ctx.filePath,
-    language: ctx.language as Language,
+    language: ctx.language,
   });
 }
 

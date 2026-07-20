@@ -309,9 +309,9 @@ function spawnHookChildOnBun(workerPath: string): HookChild {
       }
     },
     on(event: 'message' | 'exit' | 'error', handler: never): never {
-      if (event === 'message') messageHandlers.push(handler as (msg: unknown) => void);
-      else if (event === 'exit') exitHandlers.push(handler as (code: number | null) => void);
-      else if (event === 'error') errorHandlers.push(handler as (err: Error) => void);
+      if (event === 'message') messageHandlers.push(handler);
+      else if (event === 'exit') exitHandlers.push(handler);
+      else if (event === 'error') errorHandlers.push(handler);
       return this as never;
     },
     kill() {

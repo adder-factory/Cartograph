@@ -91,9 +91,9 @@ async function handleSummaries(ctx: ToolCtx, args: SummariesArgs): Promise<ToolO
   // needed here. The sub-handlers still read the remaining args off the
   // raw record (their `Record<string, unknown>` signature is unchanged).
   if (args.action === 'pending') {
-    return handlePendingSummaries(ctx, args as Record<string, unknown>);
+    return handlePendingSummaries(ctx, args);
   }
-  return handleSaveSummaries(ctx, args as Record<string, unknown>);
+  return handleSaveSummaries(ctx, args);
 }
 
 export const SUMMARIES_TOOL = defineTool({

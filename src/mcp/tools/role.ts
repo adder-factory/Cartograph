@@ -374,7 +374,7 @@ function roleListHeading(
 
 /** Existing list-by-role behaviour. */
 function handleFindByRole(cg: import('../../index.js').default, role: string, limit: number): ToolOutcome {
-  const nodes = findNodesByRole(cg.queries, role as never, limit);
+  const nodes = findNodesByRole(cg.queries, role, limit);
   if (nodes.length === 0) {
     return ok(
       renderToolResponse({

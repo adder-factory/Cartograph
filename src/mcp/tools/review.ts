@@ -219,7 +219,7 @@ async function handleReview(ctx: ToolCtx, args: ReviewArgs): Promise<ToolOutcome
   // `ok(...)`-wrapped — its `isError` envelope survives so the CLI exit
   // code stays correct.
   if (handler) {
-    const res = await handler(ctx, args as Record<string, unknown>);
+    const res = await handler(ctx, args);
     return 'ok' in res ? res : ok(res);
   }
   const modeNames = REVIEW_MODE_NAMES.map((n) => `'${n}'`).join(', ');

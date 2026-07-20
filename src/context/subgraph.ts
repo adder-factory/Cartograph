@@ -93,7 +93,7 @@ export function resolveImportsToDefinitions(st: ContextBuilderState, results: Se
       continue;
     }
     const edgeKind = node.kind === 'import' ? 'imports' : 'exports';
-    const outgoingEdges = getOutgoingEdges(st.queries, node.id, [edgeKind as EdgeKind]);
+    const outgoingEdges = getOutgoingEdges(st.queries, node.id, [edgeKind]);
     let foundDefinition = false;
     for (const edge of outgoingEdges) {
       const targetNode = st.queries.getNodeById(edge.target);

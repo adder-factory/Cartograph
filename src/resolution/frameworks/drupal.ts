@@ -67,7 +67,7 @@
  */
 
 import type { UnresolvedReference } from '../../extraction/types.js';
-import type { Node, NodeKind } from '../../types.js';
+import type { Node } from '../../types.js';
 import type { FrameworkResolver, ResolutionContext, ResolvedRef, UnresolvedRef } from '../types.js';
 import { generateNodeId } from '../../extraction/tree-sitter-helpers.js';
 import { getParser } from '../../extraction/grammars.js';
@@ -251,7 +251,7 @@ function extractRouteFromPair(
   });
   const node: Node = {
     id: routeId,
-    kind: 'route' as NodeKind,
+    kind: 'route',
     name: displayName,
     qualifiedName: `${filePath}::${routeName}`,
     filePath,
@@ -532,7 +532,7 @@ function extractDrupalServicePair(args: {
   const serviceNodeId = generateNodeId({ filePath, kind: 'resource', name: serviceId, ordinal: 0 });
   const node: Node = {
     id: serviceNodeId,
-    kind: 'resource' as NodeKind,
+    kind: 'resource',
     name: serviceId,
     qualifiedName: `${filePath}::${serviceId}`,
     filePath,

@@ -75,7 +75,7 @@ const defaultReadCommandDeps: ReadCommandDeps = {
   error,
   info,
   resolveProjectPath,
-  loadCartograph: loadCartograph as () => Promise<ReadCartographModule>,
+  loadCartograph,
   runViaMCP,
   isInitialized,
   getAllFilesWithSymbolCount,
@@ -87,7 +87,7 @@ const defaultReadCommandDeps: ReadCommandDeps = {
   buildDirRollup,
   buildIndexedPathSets,
   findAffectedTests,
-  loadGitUtils: (() => import('../../git-utils.js')) as ReadCommandDeps['loadGitUtils'],
+  loadGitUtils: () => import('../../git-utils.js'),
 };
 
 function registerAtRangeReadCommand(deps: ReadCommandDeps): void {
