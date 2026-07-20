@@ -77,6 +77,7 @@ describe('checkBunGlobalLink (issue #68)', () => {
     // Names the removed directory so the fault is not misread as storage/MCP.
     expect(result?.detail).toContain(layout.checkout);
     expect(result?.remediation).toContain('bun link');
+    expect(result?.remediation).toContain('https://github.com/adder-factory/cartograph/releases');
     expect(result?.remediation).toContain('temporary release worktree');
   });
 

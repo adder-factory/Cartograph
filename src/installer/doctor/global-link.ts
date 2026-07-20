@@ -1,7 +1,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { CARTOGRAPH_PACKAGE_NAME, GIT_CLONE_INSTALL_REF } from '../../features/upgrade/runtime.js';
+import {
+  CARTOGRAPH_PACKAGE_NAME,
+  CARTOGRAPH_RELEASES_URL,
+  GIT_CLONE_INSTALL_REF,
+} from '../../features/upgrade/runtime.js';
 import type { CheckResult } from './contract.js';
 
 /**
@@ -67,7 +71,7 @@ export function checkBunGlobalLink(env: BunGlobalLinkEnv = {}): CheckResult | nu
         'registers no Cartograph tools; an already-running daemon keeps serving, which masks the fault.',
       remediation:
         'Re-link from a stable Cartograph checkout (run `bun link` there), or install the published tag: ' +
-        `\`bun add -g ${GIT_CLONE_INSTALL_REF}#v<latest>\` (see https://github.com/adder-factory/cartograph/releases). ` +
+        `\`bun add -g ${GIT_CLONE_INSTALL_REF}#v<latest>\` (see ${CARTOGRAPH_RELEASES_URL}). ` +
         'A `bun link` install lives only as long as the checkout it points at — never link the global CLI to a ' +
         'temporary release worktree.',
     };

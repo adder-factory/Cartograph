@@ -22,6 +22,8 @@ export const CARTOGRAPH_PACKAGE_NAME = '@adder-factory/cartograph';
  * re-pin/plan step emits.
  */
 export const GIT_CLONE_INSTALL_REF = 'git+https://github.com/adder-factory/cartograph.git';
+/** Canonical human-facing release index used by install and repair guidance. */
+export const CARTOGRAPH_RELEASES_URL = 'https://github.com/adder-factory/cartograph/releases';
 
 /**
  * Legacy `github:` shorthand. Retained ONLY so {@link
@@ -196,7 +198,7 @@ export async function checkUpgrade(options: UpgradeCheckOptions): Promise<Upgrad
  *  {@link GIT_CLONE_INSTALL_REF} for why not `github:`. */
 function bunGlobalRef(latestVersion: string | null): string {
   if (latestVersion) return `${GIT_CLONE_INSTALL_REF}#v${latestVersion}`;
-  return `${GIT_CLONE_INSTALL_REF}#<latest tag — see https://github.com/adder-factory/cartograph/releases>`;
+  return `${GIT_CLONE_INSTALL_REF}#<latest tag — see ${CARTOGRAPH_RELEASES_URL}>`;
 }
 
 /** The two-step Bun-global re-pin (remove first to dodge a Bun
