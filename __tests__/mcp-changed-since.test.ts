@@ -38,7 +38,12 @@ describe('cartograph_changed_since (#11a)', () => {
     git(dir, 'config', 'commit.gpgsign', 'false');
     git(dir, 'add', '.');
     git(dir, 'commit', '-q', '-m', 'init');
-    cg = await Cartograph.init(dir, { config: { llm: { endpoint: '' } } });
+    cg = await Cartograph.init(dir, {
+      config: {
+        llm: { endpoint: '' },
+        exclude: ['src/cartograph-excluded/**'],
+      },
+    });
     await cg.indexAll({ summarize: false });
     handler = new ToolHandler(cg, { profile: 'full' });
   });
@@ -89,6 +94,33 @@ describe('cartograph_changed_since (#11a)', () => {
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/### Added \(\d+\)/);
     expect(text).toContain('src/c.ts');
+  });
+
+  it('omits newly added files excluded by .gitignore while retaining visible source files', async () => {
+    fs.appendFileSync(path.join(dir, '.gitignore'), 'src/gitignored/\n');
+    fs.mkdirSync(path.join(dir, 'src', 'gitignored'));
+    fs.writeFileSync(path.join(dir, 'src', 'gitignored', 'hidden.ts'), 'export const hidden = true;\n');
+    fs.writeFileSync(path.join(dir, 'src', 'visible-git.ts'), 'export const visible = true;\n');
+
+    const result = await handler.execute('cartograph_changed_since', {});
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toMatch(/### Added \(1\)/);
+    expect(text).toContain('src/visible-git.ts');
+    expect(text).not.toContain('src/gitignored/hidden.ts');
+  });
+
+  it('omits newly added files matched by config.exclude while retaining visible source files', async () => {
+    fs.mkdirSync(path.join(dir, 'src', 'cartograph-excluded'));
+    fs.writeFileSync(path.join(dir, 'src', 'cartograph-excluded', 'hidden.ts'), 'export const hidden = true;\n');
+    fs.writeFileSync(path.join(dir, 'src', 'visible-config.ts'), 'export const visible = true;\n');
+
+    const result = await handler.execute('cartograph_changed_since', {});
+    const text = result.content[0]?.text ?? '';
+
+    expect(text).toMatch(/### Added \(1\)/);
+    expect(text).toContain('src/visible-config.ts');
+    expect(text).not.toContain('src/cartograph-excluded/hidden.ts');
   });
 
   it('skips noise directories (.git / .cartograph) when listing Added', async () => {

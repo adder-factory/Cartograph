@@ -13,11 +13,11 @@
  * source directly.
  *
  * Cheap, pure-read, no schema change. The `added` set requires a
- * filesystem walk (the index doesn't know about un-indexed files);
+ * filesystem discovery (the index doesn't know about un-indexed files);
  * `modified` and `deleted` come from comparing the indexed `files`
- * rows against current `fs.stat`. The walk respects the project's
- * include/exclude config so we don't surface .git/, node_modules/,
- * etc. as "newly added".
+ * rows against current `fs.stat`. Added-file discovery uses the same
+ * policy as indexing, including Git visibility and the project's
+ * include/exclude config.
  */
 
 import * as fs from 'node:fs';
@@ -28,7 +28,7 @@ import { getAllFiles } from '../../db/queries-files.js';
 import { isFileStale } from '../../freshness.js';
 import { validatePathWithinRootReal } from '../../utils.js';
 import { shortSha } from '../../git-utils.js';
-import { NON_SOURCE_DIR_NAMES } from '../../path-class.js';
+import { scanDirectory } from '../../extraction/index.js';
 import { textResult } from './shared.js';
 import type { ToolCtx } from './types.js';
 import { defineTool } from './_define-tool.js';
@@ -199,22 +199,21 @@ function classifyOneIndexedFile(args: ClassifyOneFileArgs): void {
 }
 
 interface CollectAddedFilesArgs {
-  projectRoot: string;
+  discoveredFiles: readonly string[];
   indexed: ReturnType<typeof getAllFiles>;
   indexedSet: ReadonlySet<string>;
   report: ChangedReport;
 }
 
 /**
- * Walk the project for files NOT in the index — those are "added"
- * candidates. Restricts to extensions already represented in the
- * indexed set so .gitignore / LICENSE / etc. don't surface as drift.
+ * Classify discovered files NOT in the index as "added" candidates.
+ * Discovery already applies the index's Git visibility and config policy;
+ * the extension check preserves this tool's narrower drift output.
  */
 function collectAddedFiles(args: CollectAddedFilesArgs): void {
-  const { projectRoot, indexed, indexedSet, report } = args;
+  const { discoveredFiles, indexed, indexedSet, report } = args;
   const knownExts = new Set(indexed.map((f) => path.extname(f.path)).filter(Boolean));
-  for (const fullPath of walkProjectFiles(projectRoot, MAX_PER_BUCKET * 2)) {
-    const rel = path.relative(projectRoot, fullPath).replaceAll('\\', '/');
+  for (const rel of discoveredFiles) {
     if (indexedSet.has(rel)) continue;
     if (knownExts.size > 0 && !knownExts.has(path.extname(rel))) continue;
     if (report.added.length >= MAX_PER_BUCKET) {
@@ -247,7 +246,12 @@ async function handleChangedSince(ctx: ToolCtx, args: ChangedSinceToolArgs): Pro
   const indexedSet = new Set(indexed.map((f) => f.path));
 
   scanIndexedFiles({ projectRoot: cg.projectRoot, indexed, thresholdMs, report });
-  collectAddedFiles({ projectRoot: cg.projectRoot, indexed, indexedSet, report });
+  collectAddedFiles({
+    discoveredFiles: scanDirectory(cg.projectRoot, cg.config),
+    indexed,
+    indexedSet,
+    report,
+  });
 
   // Surface the indexed-HEAD-vs-current-HEAD relationship so a caller
   // can tell when the apparently-small per-file count is hiding a
@@ -266,37 +270,6 @@ async function handleChangedSince(ctx: ToolCtx, args: ChangedSinceToolArgs): Pro
   }
 
   return ok(textResult(formatReport(report, sinceArg, freshness)));
-}
-
-/**
- * Bounded recursive walk of `root` that skips obvious non-source
- * directories ({@link NON_SOURCE_DIR_NAMES}). Stops once `cap` files
- * have been yielded so a giant monorepo doesn't make the tool hang.
- */
-function readDirSafe(dir: string): fs.Dirent[] {
-  try {
-    return fs.readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-}
-
-function* walkProjectFiles(root: string, cap: number): Generator<string> {
-  let count = 0;
-  const stack: string[] = [root];
-  while (stack.length > 0 && count < cap) {
-    const dir = stack.pop()!;
-    for (const e of readDirSafe(dir)) {
-      const full = path.join(dir, e.name);
-      if (e.isDirectory() && !NON_SOURCE_DIR_NAMES.has(e.name)) {
-        stack.push(full);
-        continue;
-      }
-      if (!e.isFile()) continue;
-      yield full;
-      if (++count >= cap) return;
-    }
-  }
 }
 
 function formatSummary(r: ChangedReport, sinceArg: unknown): string {
