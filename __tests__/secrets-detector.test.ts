@@ -272,6 +272,8 @@ describe('detectSecretsHandling — false-positive guards', () => {
   it.each([
     ['a direct replacement', 'return token.replace(pattern, password + "***");'],
     ['a replacement callback', 'return token.replace(pattern, (password) => password + "***");'],
+    ['a callback full match', 'return token.replace(pattern, (full, password) => full + "***");'],
+    ['an explicitly raw value', 'return token.replace(pattern, (password) => raw + "***");'],
   ])('does not down-weight %s that appends a mask to a raw credential', (_description, body) => {
     const result = detectSecretsHandling(
       input({

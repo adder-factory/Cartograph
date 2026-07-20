@@ -317,17 +317,18 @@ function hasMaskLiteral(expression: string): boolean {
   });
 }
 
+function hasNegatedMaskIdentifier(expression: string): boolean {
+  const codeOnly = blankRanges(expression, findQuotedRanges(expression));
+  return [...codeOnly.matchAll(IDENTIFIER_RE)].some((match) =>
+    identifierWords(match[0]).some((word) => NEGATED_MASK_IDENTIFIER_WORDS.has(word)),
+  );
+}
+
 function hasMaskIdentifier(expression: string, requireSimpleIdentifier: boolean): boolean {
   const codeOnly = blankRanges(expression, findQuotedRanges(expression)).trim();
   if (requireSimpleIdentifier) return SIMPLE_IDENTIFIER_RE.test(codeOnly) && isMaskIdentifier(codeOnly);
   const identifiers = [...codeOnly.matchAll(IDENTIFIER_RE)].map((match) => match[0]);
-  if (
-    identifiers.some((identifier) =>
-      identifierWords(identifier).some((word) => NEGATED_MASK_IDENTIFIER_WORDS.has(word)),
-    )
-  ) {
-    return false;
-  }
+  if (hasNegatedMaskIdentifier(expression)) return false;
   return identifiers.some(isMaskIdentifier);
 }
 
@@ -439,8 +440,19 @@ function callbackOutputExpressions(
   return outputs;
 }
 
-function isMaskingCallbackOutput(output: CallbackOutput): boolean {
+function expressionReferencesIdentifier(expression: string, identifier: string | null): boolean {
+  if (identifier === null) return false;
+  const codeOnly = blankRanges(expression, findQuotedRanges(expression));
+  return [...codeOnly.matchAll(IDENTIFIER_RE)].some((match) => match[0].toLowerCase() === identifier);
+}
+
+function isMaskingCallbackOutput(
+  output: CallbackOutput,
+  shape: Extract<ReplacementShape, { kind: 'callback' }>,
+): boolean {
   return (
+    !expressionReferencesIdentifier(output.expression, shape.fullMatchParameter) &&
+    !hasNegatedMaskIdentifier(output.expression) &&
     !hasRawSensitiveIdentifier(output.expression) &&
     (hasMaskLiteral(output.expression) || hasMaskIdentifier(output.expression, false))
   );
@@ -460,15 +472,15 @@ function isProvenEmptySensitivePassthrough(
 function hasExecutableMaskOutput(replacementArgument: string, shape: ReplacementShape): boolean {
   if (shape.kind === 'direct') {
     return (
+      !hasNegatedMaskIdentifier(replacementArgument) &&
       !hasRawSensitiveIdentifier(replacementArgument) &&
       (hasMaskLiteral(replacementArgument) || hasMaskIdentifier(replacementArgument, true))
     );
   }
   const callbackOutputs = callbackOutputExpressions(replacementArgument, shape);
-  if (!callbackOutputs.some(isMaskingCallbackOutput)) return false;
-  return callbackOutputs.every(
-    (output) => isMaskingCallbackOutput(output) || isProvenEmptySensitivePassthrough(output, shape),
-  );
+  const isMaskingOutput = (output: CallbackOutput): boolean => isMaskingCallbackOutput(output, shape);
+  if (!callbackOutputs.some(isMaskingOutput)) return false;
+  return callbackOutputs.every((output) => isMaskingOutput(output) || isProvenEmptySensitivePassthrough(output, shape));
 }
 
 function blankSensitiveParameterUses(source: string, parameters: ReadonlySet<string>): string {
