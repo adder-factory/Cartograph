@@ -17,6 +17,7 @@ function input(overrides: Partial<SecretsDetectionInput> & { body?: string }): S
     name: overrides.name ?? 'myFunction',
     signature: overrides.signature ?? null,
     body: overrides.body ?? '',
+    language: overrides.language,
     summary: overrides.summary,
   };
 }
@@ -222,6 +223,195 @@ describe('detectSecretsHandling — composite scoring', () => {
 // ---------------------------------------------------------------------------
 
 describe('detectSecretsHandling — false-positive guards', () => {
+  it('down-weights lexical secret terms in a defensive redactor name and body', () => {
+    // Real SynergySSH shape: `password` is the value being masked and `token`
+    // appears only in an explanatory comment. Together they used to score 0.6
+    // and emit a secrets_handling warning for the defensive helper itself.
+    const result = detectSecretsHandling(
+      input({
+        name: 'redactUserColonPassword',
+        signature: '(line: string): string',
+        body: `
+          const redactUserColonPassword = (line: string): string =>
+            line.replace(USER_COLON_PASSWORD, (full, user: string, password: string) => {
+              if (password.length === 0) return full;
+              // Only part of the token is masked so its surrounding syntax stays intact.
+              return user + SECRET_MASK;
+            });
+        `,
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBe(0.3);
+
+    for (const replacement of ['"[masked]"', '"<redacted>"', '"***"']) {
+      const sanitizer = detectSecretsHandling(
+        input({
+          name: 'sanitizePasswordToken',
+          body: `return token.replace(password, ${replacement});`,
+        }),
+      );
+      expect(sanitizer.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+      expect(sanitizer.score).toBe(0.3);
+    }
+  });
+
+  it('does not trust a sanitizer name when the function returns credentials unchanged', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: 'return { password, token };',
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not trust a redactor name when the function logs credentials', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'redactCredentials',
+        body: 'console.log(password, token);',
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not down-weight a partial mask that leaks a different raw credential', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: ['const maskedPassword = password.replace(/./g, "***");', 'console.log(token);', 'return token;'].join(
+          '\n',
+        ),
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not treat an unrelated replacement followed by a masked flag as redaction', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: [
+          'const normalized = username.replace("a", "b");',
+          'const masked = false;',
+          'console.log(password, token);',
+          'return { password, token };',
+        ].join('\n'),
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not let an unrelated username mask excuse a raw password and token sink', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: ['const maskedUsername = username.replace(/./g, "***");', 'send(password, token);'].join('\n'),
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not treat an arbitrary unmaskedValue replacement as a mask', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: 'return token.replace(password, unmaskedValue);',
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not treat mask-like replacement text inside a string literal as executable', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: 'const example = "token.replace(password, \'[masked]\')";',
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('uses Python comment syntax before accepting masking evidence', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        language: 'python',
+        body: '# token.replace(password, "***")',
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('does not down-weight when one secret is masked and another is forwarded', () => {
+    const result = detectSecretsHandling(
+      input({
+        name: 'sanitizePasswordToken',
+        body: ['return password.replace(/./g, () => {', '  forwardToService(token);', '  return "***";', '});'].join(
+          '\n',
+        ),
+      }),
+    );
+
+    expect(result.signals).toEqual(expect.arrayContaining(['api-key-name', 'password-name']));
+    expect(result.score).toBeGreaterThanOrEqual(0.5);
+  });
+
+  it('keeps substantive env, crypto, and literal signals strong in defensive helpers', () => {
+    const envAndCrypto = detectSecretsHandling(
+      input({
+        name: 'sanitizeEnvironmentSecret',
+        body: 'const secretKey = process.env.SECRET_KEY; return hmac(payload, secretKey);',
+      }),
+    );
+    expect(envAndCrypto.signals).toEqual(expect.arrayContaining(['crypto-secret', 'env-secret-read']));
+    expect(envAndCrypto.score).toBe(0.5);
+
+    const literalCases = [
+      {
+        name: 'redactAwsFixture',
+        body: 'return "AKIAIOSFODNN7EXAMPLE";',
+        signal: 'aws-access-key',
+        score: 0.6,
+      },
+      {
+        name: 'sanitizeEncodedClaim',
+        body: 'return "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abc";',
+        signal: 'jwt-pattern',
+        score: 0.5,
+      },
+      {
+        name: 'scrubOpaqueFixture',
+        body: 'return "c2VjcmV0LXRva2VuLXBheWxvYWQ9MTIzNDU2";',
+        signal: 'literal-token',
+        score: 0.2,
+      },
+    ];
+    for (const literalCase of literalCases) {
+      const result = detectSecretsHandling(input({ name: literalCase.name, body: literalCase.body }));
+      expect(result.signals).toContain(literalCase.signal);
+      expect(result.score).toBe(literalCase.score);
+    }
+  });
+
   it('test-named symbol (testApiKeyAuth) down-weights score by 0.5', () => {
     // Without down-weight: api-key-name fires on "apiKey" token → 0.3
     // With down-weight: 0.3 * 0.5 = 0.15

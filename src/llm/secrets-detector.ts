@@ -1,3 +1,6 @@
+import { stripCommentsForRegex } from '../utils.js';
+import type { Language } from '../types.js';
+
 /**
  * Heuristic-first detector for functions / symbols that handle secrets,
  * PII, or sensitive credentials. No model required — curated regex patterns
@@ -48,6 +51,8 @@ export interface SecretsDetectionInput {
   signature: string | null;
   /** Symbol body (the function source). */
   body: string;
+  /** Source language used to distinguish executable code from comments. */
+  language?: Language | null;
   /** Optional LLM summary if available. */
   summary?: string | null;
 }
@@ -167,6 +172,309 @@ const TEST_NAME_RE = /^(test[_A-Z-]|it[_A-Z-]|spec[_A-Z-]|should[_ A-Z]|describe
 
 const TEST_NAME_DOWN_WEIGHT = 0.5;
 
+/**
+ * Defensive handlers necessarily mention the sensitive values they remove.
+ * Keep those lexical signals visible, but prevent redactor/sanitizer vocabulary
+ * alone from reaching the biomarker warning floor.
+ */
+const DEFENSIVE_HANDLER_NAME_RE = /^(?:redact|sanitiz|sanitis|mask|scrub)/i;
+const DEFENSIVE_LEXICAL_DOWN_WEIGHT = 0.5;
+const DEFENSIVE_LEXICAL_SIGNALS: ReadonlySet<SecretSignal> = new Set(['api-key-name', 'password-name', 'pii-name']);
+const DEFENSIVE_REPLACEMENT_CALL_RE = /\.(?:replace|replaceAll)\s*\(/g;
+const RETURN_STATEMENT_RE = /\breturn\b/g;
+const DEFENSIVE_BRACKETED_MASK_RE = /["'`]\[(?:masked|redacted)\]["'`]/i;
+const DEFENSIVE_ANGLE_MASK_RE = /["'`]<(?:masked|redacted)>["'`]/i;
+const DEFENSIVE_STAR_MASK_RE = /["'`]\*{3,}["'`]/;
+const DEFENSIVE_MASK_LITERAL_PATTERNS: readonly RegExp[] = [
+  DEFENSIVE_BRACKETED_MASK_RE,
+  DEFENSIVE_ANGLE_MASK_RE,
+  DEFENSIVE_STAR_MASK_RE,
+];
+const IDENTIFIER_RE = /\b[A-Za-z_$][\w$]*\b/g;
+const SIMPLE_IDENTIFIER_RE = /^[A-Za-z_$][\w$]*$/;
+const MASK_IDENTIFIER_WORDS: ReadonlySet<string> = new Set([
+  'mask',
+  'masked',
+  'masking',
+  'redact',
+  'redacted',
+  'redaction',
+]);
+const NEGATED_MASK_IDENTIFIER_WORDS: ReadonlySet<string> = new Set([
+  'not',
+  'raw',
+  'unmask',
+  'unmasked',
+  'unredacted',
+  'without',
+]);
+
+interface SourceRange {
+  readonly start: number;
+  readonly end: number;
+}
+
+function skipQuoted(source: string, start: number): number {
+  const quote = source[start];
+  if (quote !== '"' && quote !== "'" && quote !== '`') return start;
+  let index = start + 1;
+  while (index < source.length) {
+    if (source[index] === '\\') {
+      index += 2;
+      continue;
+    }
+    if (source[index] === quote) return index + 1;
+    index++;
+  }
+  return source.length;
+}
+
+function findQuotedRanges(source: string): SourceRange[] {
+  const ranges: SourceRange[] = [];
+  let index = 0;
+  while (index < source.length) {
+    const quotedEnd = skipQuoted(source, index);
+    if (quotedEnd === index) {
+      index++;
+      continue;
+    }
+    ranges.push({ start: index, end: quotedEnd });
+    index = quotedEnd;
+  }
+  return ranges;
+}
+
+function isInsideRange(index: number, ranges: readonly SourceRange[]): boolean {
+  return ranges.some((range) => index >= range.start && index < range.end);
+}
+
+function findClosingParen(source: string, openIndex: number): number | null {
+  let depth = 0;
+  let index = openIndex;
+  while (index < source.length) {
+    const quotedEnd = skipQuoted(source, index);
+    if (quotedEnd !== index) {
+      index = quotedEnd;
+      continue;
+    }
+    const char = source[index];
+    if (char === '(') depth++;
+    if (char === ')') {
+      depth--;
+      if (depth === 0) return index;
+    }
+    index++;
+  }
+  return null;
+}
+
+function findFirstArgumentSeparator(source: string, openIndex: number, closeIndex: number): number | null {
+  let nestedDepth = 0;
+  let index = openIndex + 1;
+  while (index < closeIndex) {
+    const quotedEnd = skipQuoted(source, index);
+    if (quotedEnd !== index) {
+      index = quotedEnd;
+      continue;
+    }
+    const char = source[index];
+    if (char === '(' || char === '[' || char === '{') nestedDepth++;
+    if (char === ')' || char === ']' || char === '}') nestedDepth = Math.max(0, nestedDepth - 1);
+    if (char === ',' && nestedDepth === 0) return index;
+    index++;
+  }
+  return null;
+}
+
+function replacementReceiverStart(source: string, dotIndex: number): number {
+  let index = dotIndex;
+  for (;;) {
+    while (index > 0 && /\s/.test(source[index - 1]!)) index--;
+    while (index > 0 && /[\w$]/.test(source[index - 1]!)) index--;
+    if (index === 0 || source[index - 1] !== '.') return index;
+    index--;
+  }
+}
+
+function identifierWords(identifier: string): string[] {
+  return identifier
+    .replaceAll(/([a-z\d])([A-Z])/g, '$1_$2')
+    .toLowerCase()
+    .split(/[_$]+/)
+    .filter(Boolean);
+}
+
+function isMaskIdentifier(identifier: string): boolean {
+  const words = identifierWords(identifier);
+  if (words.some((word) => NEGATED_MASK_IDENTIFIER_WORDS.has(word))) return false;
+  return words.some((word) => MASK_IDENTIFIER_WORDS.has(word));
+}
+
+function hasMaskLiteral(expression: string): boolean {
+  return findQuotedRanges(expression).some((range) => {
+    const literal = expression.slice(range.start, range.end);
+    return DEFENSIVE_MASK_LITERAL_PATTERNS.some((pattern) => pattern.test(literal));
+  });
+}
+
+function hasMaskIdentifier(expression: string, requireSimpleIdentifier: boolean): boolean {
+  const codeOnly = blankRanges(expression, findQuotedRanges(expression)).trim();
+  if (requireSimpleIdentifier) return SIMPLE_IDENTIFIER_RE.test(codeOnly) && isMaskIdentifier(codeOnly);
+  const identifiers = [...codeOnly.matchAll(IDENTIFIER_RE)].map((match) => match[0]);
+  if (
+    identifiers.some((identifier) =>
+      identifierWords(identifier).some((word) => NEGATED_MASK_IDENTIFIER_WORDS.has(word)),
+    )
+  ) {
+    return false;
+  }
+  return identifiers.some(isMaskIdentifier);
+}
+
+type ReplacementShape =
+  | { readonly kind: 'direct' }
+  | {
+      readonly kind: 'callback';
+      readonly arrowIndex: number | null;
+      readonly sensitiveParameters: ReadonlySet<string>;
+    };
+
+function findOutsideQuoted(source: string, token: string, quotedRanges: readonly SourceRange[]): number {
+  let index = source.indexOf(token);
+  while (index >= 0) {
+    if (!isInsideRange(index, quotedRanges)) return index;
+    index = source.indexOf(token, index + token.length);
+  }
+  return -1;
+}
+
+function callbackParameterSource(replacementArgument: string, arrowIndex: number | null): string {
+  if (arrowIndex !== null) {
+    const prefix = replacementArgument
+      .slice(0, arrowIndex)
+      .trim()
+      .replace(/^async\s+/, '');
+    if (prefix.startsWith('(') && prefix.endsWith(')')) return prefix.slice(1, -1);
+    return prefix;
+  }
+
+  const openIndex = replacementArgument.indexOf('(');
+  if (openIndex < 0) return '';
+  const closeIndex = findClosingParen(replacementArgument, openIndex);
+  return closeIndex === null ? '' : replacementArgument.slice(openIndex + 1, closeIndex);
+}
+
+function sensitiveParameterNames(parameterSource: string): ReadonlySet<string> {
+  const names = new Set<string>();
+  for (const match of parameterSource.matchAll(IDENTIFIER_RE)) {
+    if (hasSensitiveLexicalTerm(match[0])) names.add(match[0].toLowerCase());
+  }
+  return names;
+}
+
+function describeReplacement(replacementArgument: string): ReplacementShape {
+  const quotedRanges = findQuotedRanges(replacementArgument);
+  const arrowIndex = findOutsideQuoted(replacementArgument, '=>', quotedRanges);
+  const codeOnly = blankRanges(replacementArgument, quotedRanges).trim();
+  const isFunctionCallback = /^(?:async\s+)?function\b/.test(codeOnly);
+  if (arrowIndex < 0 && !isFunctionCallback) return { kind: 'direct' };
+  const normalizedArrowIndex = arrowIndex < 0 ? null : arrowIndex;
+  return {
+    kind: 'callback',
+    arrowIndex: normalizedArrowIndex,
+    sensitiveParameters: sensitiveParameterNames(callbackParameterSource(replacementArgument, normalizedArrowIndex)),
+  };
+}
+
+function callbackOutputExpressions(
+  replacementArgument: string,
+  shape: Extract<ReplacementShape, { kind: 'callback' }>,
+): string[] {
+  const outputs: string[] = [];
+  const quotedRanges = findQuotedRanges(replacementArgument);
+  for (const match of replacementArgument.matchAll(RETURN_STATEMENT_RE)) {
+    if (isInsideRange(match.index, quotedRanges)) continue;
+    const semicolon = replacementArgument.indexOf(';', match.index);
+    const newline = replacementArgument.indexOf('\n', match.index);
+    const candidates = [semicolon, newline].filter((index) => index >= 0);
+    const end = candidates.length === 0 ? replacementArgument.length : Math.min(...candidates);
+    outputs.push(replacementArgument.slice(match.index + match[0].length, end));
+  }
+
+  if (shape.arrowIndex !== null) {
+    const conciseOutput = replacementArgument.slice(shape.arrowIndex + 2).trim();
+    if (!conciseOutput.startsWith('{')) outputs.push(conciseOutput);
+  }
+  return outputs;
+}
+
+function hasExecutableMaskOutput(replacementArgument: string, shape: ReplacementShape): boolean {
+  if (shape.kind === 'direct') {
+    return hasMaskLiteral(replacementArgument) || hasMaskIdentifier(replacementArgument, true);
+  }
+  const callbackOutputs = callbackOutputExpressions(replacementArgument, shape);
+  return callbackOutputs.some((output) => hasMaskLiteral(output) || hasMaskIdentifier(output, false));
+}
+
+function blankSensitiveParameterUses(source: string, parameters: ReadonlySet<string>): string {
+  const chars = source.split('');
+  for (const match of source.matchAll(IDENTIFIER_RE)) {
+    if (parameters.has(match[0].toLowerCase())) chars.fill(' ', match.index, match.index + match[0].length);
+  }
+  return chars.join('');
+}
+
+function hasUnboundSensitiveCallbackUse(
+  replacementArgument: string,
+  shape: Extract<ReplacementShape, { kind: 'callback' }>,
+): boolean {
+  return hasSensitiveLexicalTerm(blankSensitiveParameterUses(replacementArgument, shape.sensitiveParameters));
+}
+
+function findMaskingReplacementRanges(body: string): SourceRange[] {
+  const ranges: SourceRange[] = [];
+  const quotedRanges = findQuotedRanges(body);
+  for (const match of body.matchAll(DEFENSIVE_REPLACEMENT_CALL_RE)) {
+    const callStart = match.index;
+    if (isInsideRange(callStart, quotedRanges)) continue;
+    const openIndex = callStart + match[0].lastIndexOf('(');
+    const closeIndex = findClosingParen(body, openIndex);
+    if (closeIndex === null) continue;
+    const separator = findFirstArgumentSeparator(body, openIndex, closeIndex);
+    if (separator === null) continue;
+    const replacementArgument = body.slice(separator + 1, closeIndex);
+    const shape = describeReplacement(replacementArgument);
+    if (!hasExecutableMaskOutput(replacementArgument, shape)) continue;
+    if (shape.kind === 'callback' && hasUnboundSensitiveCallbackUse(replacementArgument, shape)) continue;
+    ranges.push({ start: replacementReceiverStart(body, callStart), end: closeIndex + 1 });
+  }
+  return ranges;
+}
+
+function blankRanges(source: string, ranges: readonly SourceRange[]): string {
+  const chars = source.split('');
+  for (const range of ranges) chars.fill(' ', range.start, range.end);
+  return chars.join('');
+}
+
+function hasSensitiveLexicalTerm(source: string): boolean {
+  return PATTERN_TABLE.some(
+    (entry) => DEFENSIVE_LEXICAL_SIGNALS.has(entry.signal) && entry.patterns.some((pattern) => pattern.test(source)),
+  );
+}
+
+/** A defensive-sounding name is not evidence by itself: require executable
+ * replacement syntax whose replacement argument contains a masking output.
+ * Blank only those masking calls, then reject the defensive discount when any
+ * sensitive executable term remains elsewhere in the body. */
+function hasDemonstratedDefensiveSemantics(body: string, language: Language | null | undefined): boolean {
+  const executableBody = stripCommentsForRegex(body, language ?? 'typescript');
+  const maskingRanges = findMaskingReplacementRanges(executableBody);
+  if (maskingRanges.length === 0) return false;
+  const outsideMaskingCalls = blankRanges(executableBody, maskingRanges);
+  return !hasSensitiveLexicalTerm(outsideMaskingCalls);
+}
+
 // ---------------------------------------------------------------------------
 // Core implementation
 // ---------------------------------------------------------------------------
@@ -198,6 +506,8 @@ export function detectSecretsHandling(input: SecretsDetectionInput): SecretsDete
 
   const firedSignals: SecretSignal[] = [];
   const reasons: string[] = [];
+  const defensiveHandler =
+    DEFENSIVE_HANDLER_NAME_RE.test(input.name) && hasDemonstratedDefensiveSemantics(input.body, input.language);
   let rawScore = 0;
 
   for (const entry of PATTERN_TABLE) {
@@ -206,7 +516,10 @@ export function detectSecretsHandling(input: SecretsDetectionInput): SecretsDete
     if (entryWeight !== null) {
       firedSignals.push(entry.signal);
       reasons.push(entry.reason);
-      rawScore += entryWeight;
+      rawScore +=
+        defensiveHandler && DEFENSIVE_LEXICAL_SIGNALS.has(entry.signal)
+          ? entryWeight * DEFENSIVE_LEXICAL_DOWN_WEIGHT
+          : entryWeight;
     }
   }
 

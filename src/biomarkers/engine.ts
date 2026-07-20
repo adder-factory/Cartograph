@@ -1785,6 +1785,7 @@ const SECRETS_METRIC_SCALE = 100;
 export function evaluateSecretsHandling(node: {
   id: string;
   name: string;
+  language?: Language | null | undefined;
   signature?: string | null | undefined;
   docstring?: string | null | undefined;
   summary?: string | null | undefined;
@@ -1792,6 +1793,7 @@ export function evaluateSecretsHandling(node: {
 }): Finding | null {
   const result = detectSecretsHandling({
     name: node.name,
+    language: node.language ?? null,
     signature: node.signature ?? null,
     body: node.body ?? '',
     summary: node.summary ?? node.docstring ?? null,

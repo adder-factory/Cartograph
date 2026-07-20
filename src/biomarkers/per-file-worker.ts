@@ -58,6 +58,7 @@ import {
   ANALYSABLE_KINDS,
   ANALYSABLE_MIN_LOC,
   astBodyNodeRangeMismatch,
+  buildSecretsEvaluationInput,
   isSecretsRuleSelfPath,
   sharedDocstringsAcrossConstants,
 } from './per-file-shared.js';
@@ -352,14 +353,7 @@ function evaluateSecretsInline(args: SecretsInlineArgs): void {
   for (const n of nodes) {
     try {
       const body = sliceBody(args.src, n.startLine, n.endLine);
-      const finding = args.evaluateSecretsHandling({
-        id: n.id,
-        name: n.name,
-        signature: n.signature ?? null,
-        docstring: n.docstring ?? null,
-        summary: null,
-        body,
-      });
+      const finding = args.evaluateSecretsHandling(buildSecretsEvaluationInput(n, body));
       if (!finding) continue;
       const existing = args.findingsByNode.get(n.id);
       if (existing) existing.push(finding);

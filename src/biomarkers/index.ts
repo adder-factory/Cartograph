@@ -45,6 +45,7 @@ import {
   ANALYSABLE_KINDS as SHARED_ANALYSABLE_KINDS,
   ANALYSABLE_MIN_LOC as SHARED_ANALYSABLE_MIN_LOC,
   astBodyNodeRangeMismatch as sharedAstBodyNodeRangeMismatch,
+  buildSecretsEvaluationInput,
   isSecretsRuleSelfPath as sharedIsSecretsRuleSelfPath,
   sharedDocstringsAcrossConstants as sharedSharedDocstringsAcrossConstants,
 } from './per-file-shared.js';
@@ -95,7 +96,8 @@ const MIN_LOC = ANALYSABLE_MIN_LOC;
  * The suffix is derived from two source hashes:
  *   - `biomarkerSourceHash`: sha256 of the files that own the biomarker
  *     rule + cache contract (this file, `engine.ts`, `types.ts`,
- *     `lang-map.ts`, and the cross-file SQL rules in
+ *     `lang-map.ts`, the secrets detector in
+ *     `../llm/secrets-detector.ts`, and the cross-file SQL rules in
  *     `../db/queries-biomarkers-graph.ts`). Any substantive edit
  *     invalidates the cache on the next sync — which, going cold, forces
  *     the full pass that recomputes the cross-file rules too.
@@ -136,6 +138,10 @@ const biomarkerSourceHash = computeAlgoHash('src/biomarkers/index.ts', [
   // rule's SQL must invalidate here, else an already-indexed project keeps the
   // stale findings through warm-cache syncs (issue #51 review — Codex).
   '../db/queries-biomarkers-graph',
+  // secrets_handling is evaluated from this separate detector. Its score is
+  // persisted as a per-file finding, so detector changes must make the cache
+  // cold just like edits to engine.ts or the biomarker orchestrator.
+  '../llm/secrets-detector',
 ]);
 export const BIOMARKER_CACHE_KEY: `biomarker_file_state_${string}_${string}` = `biomarker_file_state_${biomarkerSourceHash}_${EXTRACTION_LOGIC_VERSION}`;
 
@@ -992,15 +998,7 @@ function evaluateFileSecretsHandling(args: SecretsHandlingArgs): void {
   for (const n of nodes) {
     try {
       const body = sliceNodeBody(src, n.startLine, n.endLine);
-      const finding = evaluateSecretsHandling({
-        id: n.id,
-        name: n.name,
-        signature: n.signature ?? null,
-        docstring: n.docstring ?? null,
-        summary: null, // summaries land via the LLM pipeline; biomarker pass runs earlier
-        body, // Stage 7 #1 body inspection — catches literal AWS keys,
-        // hardcoded tokens, env-secret reads, etc.
-      });
+      const finding = evaluateSecretsHandling(buildSecretsEvaluationInput(n, body));
       if (!finding) continue;
       const existing = findingsByNode.get(n.id);
       if (existing) existing.push(finding);

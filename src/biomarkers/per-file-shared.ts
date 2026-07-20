@@ -14,6 +14,8 @@
  * constant from here so it can't drift again.
  */
 
+import type { Node } from '../types.js';
+
 /** Symbol kinds the per-file analyser walks. Skipping import / export /
  *  variable / etc. */
 export const ANALYSABLE_KINDS: ReadonlySet<string> = new Set(['function', 'method']);
@@ -23,6 +25,24 @@ export const ANALYSABLE_KINDS: ReadonlySet<string> = new Set(['function', 'metho
  *  worker path MUST share this constant or the two paths report
  *  different finding counts for the same file. */
 export const ANALYSABLE_MIN_LOC = 5;
+
+/** Build the secrets-evaluation payload shared by the in-main and worker
+ * per-file paths. Keeping language here prevents comment semantics from
+ * silently drifting when one execution path changes independently. */
+export function buildSecretsEvaluationInput(
+  node: Pick<Node, 'id' | 'name' | 'language' | 'signature' | 'docstring'>,
+  body: string,
+) {
+  return {
+    id: node.id,
+    name: node.name,
+    language: node.language,
+    signature: node.signature ?? null,
+    docstring: node.docstring ?? null,
+    summary: null,
+    body,
+  };
+}
 
 /** Files whose own source contains the secrets-detection keyword
  *  patterns (`api_key`, `password`, `AKIA…`) by necessity, so the

@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { Cartograph } from '../src/index.js';
 import { analyseProject, isBiomarkerCacheCold, BIOMARKER_CACHE_KEY } from '../src/biomarkers/index.js';
+import { computeAlgoHash } from '../src/algo-hash.js';
 import { setMetadata } from '../src/db/queries-metadata.js';
 
 function tempDir(): string {
@@ -32,6 +33,22 @@ function writeProject(dir: string): void {
 }
 
 describe('analyseProject biomarker cache', () => {
+  it('includes the secrets detector algorithm in the persisted cache version', () => {
+    const expectedRuleHash = computeAlgoHash('src/biomarkers/index.ts', [
+      './index',
+      './engine',
+      './types',
+      './lang-map',
+      '../db/queries-biomarkers-graph',
+      '../llm/secrets-detector',
+    ]);
+
+    // If the detector changes without participating in this hash, a warm
+    // per-file cache can restore its old findings immediately after a clean
+    // full refresh. Pin the dependency itself, not a hand-bumped version.
+    expect(BIOMARKER_CACHE_KEY).toContain(`_${expectedRuleHash}_`);
+  });
+
   it('persists a warm cache and skips unchanged files on the next full pass', async () => {
     const dir = tempDir();
     try {
