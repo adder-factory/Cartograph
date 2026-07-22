@@ -1,6 +1,6 @@
 {
   "name": "@adder-factory/cartograph",
-  "version": "1.1.31",
+  "version": "1.1.32",
   "description": "Local-first code intelligence for AI coding agents with CLI, MCP, SQLite, and PostgreSQL support.",
   "type": "module",
   "exports": {
