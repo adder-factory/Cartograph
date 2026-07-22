@@ -268,6 +268,27 @@ export function validateEmail(email: string): boolean {
       expect(nextActions?.[0]?.args).toMatchObject({ mode: 'coverage' });
     });
 
+    it('supports deterministic retrieval mode and reports its provenance', async () => {
+      const handler = new ToolHandler(cg);
+      const result = await handler.execute('cartograph_context', {
+        task: 'How does PaymentService process a checkout?',
+        format: 'json',
+        code: false,
+        retrievalMode: 'deterministic',
+      });
+      handler.closeAll();
+
+      expect(result.isError).not.toBe(true);
+      const parsed = JSON.parse(result.content[0]?.text ?? '{}');
+      expect(parsed.retrieval).toEqual({
+        requested: 'deterministic',
+        strategy: 'lexical-graph',
+        hybridAttempted: false,
+        hybridCandidateCount: 0,
+        reason: 'explicit-deterministic',
+      });
+    });
+
     it('should accept object input with title and description', async () => {
       const result = await cg.internals.contextBuilder.buildContext(
         {

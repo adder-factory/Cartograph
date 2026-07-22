@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import type { CartographConfig } from '../types.js';
 import type { SchemaVersion } from './types.js';
 import { runMigrations, getCurrentVersion, verifySchemaIntegrity, CURRENT_SCHEMA_VERSION } from './migrations.js';
+import { bootstrapPostgresIntentSearch } from './queries-intent-search.js';
 import { bootstrapVecTables } from './vec-helpers.js';
 import { bootstrapPgvector, bootstrapPgvectorTables } from './pgvector-helpers.js';
 import { compact } from '../utils.js';
@@ -329,6 +330,10 @@ export class DatabaseConnection {
       // Bootstrap vec0 tables when the sqlite-vec extension is loaded.
       bootstrapVecTables(db, vecLoaded);
       if (backend === 'postgres') {
+        // Additive indexes for existing PostgreSQL schemas are DDL and may
+        // take locks on large tables. Run them only on explicit write/admin
+        // opens, never as a side effect of an ordinary read-style open.
+        if (opts.autoMigrate === true) bootstrapPostgresIntentSearch(db);
         const pgvectorLoaded = bootstrapPgvector(db, resolvedDatabase);
         bootstrapPgvectorTables(db, pgvectorLoaded);
         // Schema is at CURRENT version here, so project_metadata exists.

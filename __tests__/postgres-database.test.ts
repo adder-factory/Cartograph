@@ -43,11 +43,17 @@ const VECTOR_SIMILAR_Y = 0.02;
 const VECTOR_BUILD_K = 1;
 const VECTOR_MIN_SCORE = 0.5;
 const VECTOR_MODEL = 'test-model';
+const POSTGRES_INTENT_INDEXES = [
+  'idx_nodes_docstring_intent_fts',
+  'idx_summary_store_intent_fts',
+  'idx_test_names_intent_fts',
+] as const;
 
 let currentDir: string | undefined;
 let currentSchema: string | undefined;
 let currentConn: DatabaseConnection | undefined;
 let currentPostgresUrl: string | undefined;
+let intentSchemaSequence = 0;
 
 afterEach(async () => {
   currentConn?.close();
@@ -133,6 +139,94 @@ describePostgres('PostgreSQL database provider', () => {
   // A `runDoctor` case below reads BUN_INSTALL via the global-link check
   // (issue #68); isolate it so the host's real `bun link` state can't leak.
   isolateBunInstall();
+
+  it('searches summaries, docstrings, and test descriptions in intent mode', async () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-intent-test-'));
+    fs.mkdirSync(path.join(currentDir, 'src'), { recursive: true });
+    fs.writeFileSync(
+      path.join(currentDir, 'src', 'auth.ts'),
+      [
+        'export function verifyJwt(token: string): boolean { return token.length > 0; }',
+        'export function parseCookieHeader(header: string): string { return header.trim(); }',
+      ].join('\n'),
+    );
+    currentSchema = `cg_intent_${process.pid}_${intentSchemaSequence++}`;
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+    const cg = Cartograph.initSync(currentDir, { config: { database, enableWatcher: false } });
+    currentConn = cg.db;
+    const indexed = await cg.indexAll({ summarize: false });
+    expect(indexed.success).toBe(true);
+
+    const db = cg.db.getDb();
+    const verifyJwt = db
+      .prepare("SELECT id, body_hash FROM nodes WHERE name = 'verifyJwt' AND kind = 'function'")
+      .get<{ id: string; body_hash: string }>();
+    expect(verifyJwt).toBeDefined();
+    expect(
+      upsertSymbolSummary({
+        qb: cg.queries,
+        nodeId: verifyJwt!.id,
+        contentHash: verifyJwt!.body_hash,
+        summary: 'Verifies a JWT cryptographic signature before accepting the token',
+        model: 'intent-test',
+      }),
+    ).toBe(true);
+    db.prepare("UPDATE nodes SET docstring = ? WHERE name = 'parseCookieHeader'").run(
+      'Parses the HTTP Cookie header into normalized values.',
+    );
+    db.prepare('INSERT INTO test_names (file_path, line, description) VALUES (?, ?, ?)').run(
+      'src/auth.ts',
+      20,
+      'rejects a JWT when its cryptographic signature is invalid',
+    );
+
+    const handler = new ToolHandler(cg);
+    try {
+      const summaryAndTest = await handler.execute('cartograph_find', {
+        by: 'name',
+        mode: 'intent',
+        query: 'JWT cryptographic signature',
+      });
+      const summaryText = summaryAndTest.content[0]?.text ?? '';
+      expect(summaryAndTest.isError).not.toBe(true);
+      expect(summaryText).toContain('verifyJwt');
+      expect(summaryText).toContain('Test-description matches');
+
+      const docstring = await handler.execute('cartograph_find', {
+        by: 'name',
+        mode: 'intent',
+        query: 'parse cookie header',
+      });
+      const docstringText = docstring.content[0]?.text ?? '';
+      expect(docstring.isError).not.toBe(true);
+      expect(docstringText).toContain('parseCookieHeader');
+      expect(docstringText).toContain('via docstring');
+    } finally {
+      handler.closeAll();
+    }
+  });
+
+  it('bootstraps intent indexes only on explicit write or admin opens', () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-intent-bootstrap-test-'));
+    currentSchema = `cg_intent_bootstrap_${process.pid}_${intentSchemaSequence++}`;
+    const dbPath = path.join(currentDir, 'cartograph.db');
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+
+    currentConn = DatabaseConnection.initialize(dbPath, { database });
+    expect(readIntentIndexNames(currentConn, currentSchema)).toEqual([...POSTGRES_INTENT_INDEXES]);
+    for (const indexName of POSTGRES_INTENT_INDEXES) {
+      currentConn.getDb().exec(`DROP INDEX IF EXISTS ${quoteIdent(indexName)}`);
+    }
+    expect(readIntentIndexNames(currentConn, currentSchema)).toEqual([]);
+
+    currentConn.close();
+    currentConn = DatabaseConnection.open(dbPath, { database });
+    expect(readIntentIndexNames(currentConn, currentSchema)).toEqual([]);
+
+    currentConn.close();
+    currentConn = DatabaseConnection.open(dbPath, { database, autoMigrate: true });
+    expect(readIntentIndexNames(currentConn, currentSchema)).toEqual([...POSTGRES_INTENT_INDEXES]);
+  });
 
   it('skips no-op sync maintenance and analyzes only the active schema after writes', async () => {
     const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-maintenance-a-'));
@@ -908,6 +1002,19 @@ describePgvector('PostgreSQL pgvector acceleration', () => {
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function readIntentIndexNames(connection: DatabaseConnection, schema: string): string[] {
+  const rows = connection
+    .getDb()
+    .prepare(
+      `SELECT indexname AS name
+       FROM pg_indexes
+       WHERE schemaname = ? AND indexname LIKE '%_intent_fts'
+       ORDER BY indexname`,
+    )
+    .all(schema) as Array<{ name: string }>;
+  return rows.map((row) => row.name);
 }
 
 function readAnalyzeCount(connection: DatabaseConnection, schema: string): number {

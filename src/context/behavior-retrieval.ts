@@ -1,8 +1,21 @@
 import { logDebug } from '../errors.js';
 import type { SearchResult } from '../search/types.js';
+import { z } from 'zod';
+
+export const ContextRetrievalModeSchema = z.enum(['auto', 'deterministic']);
+type ContextRetrievalMode = z.infer<typeof ContextRetrievalModeSchema>;
+
+const BehaviorRetrievalTraceSchema = z.object({
+  requested: ContextRetrievalModeSchema,
+  strategy: z.enum(['lexical-graph', 'hybrid']),
+  hybridAttempted: z.boolean(),
+  hybridCandidateCount: z.number().int().nonnegative(),
+  reason: z.enum(['explicit-deterministic', 'non-behavior-query', 'behavior-query', 'hybrid-failed']),
+});
+export type BehaviorRetrievalTrace = z.infer<typeof BehaviorRetrievalTraceSchema>;
 
 /** Minimal search surface needed to prepare behavior-question context. */
-export interface BehaviorSearchService {
+interface BehaviorSearchService {
   searchHybrid(query: string, options: { limit: number }): Promise<SearchResult[]>;
 }
 
@@ -10,6 +23,14 @@ export interface BehaviorRetrievalOptions {
   extraCandidates: SearchResult[];
   behaviorBias: boolean;
   searchLimit?: number;
+  trace: BehaviorRetrievalTrace;
+}
+
+interface PrepareBehaviorRetrievalArgs {
+  search: BehaviorSearchService;
+  task: string;
+  maxNodes: number;
+  retrievalMode?: ContextRetrievalMode;
 }
 
 /**
@@ -48,25 +69,71 @@ export function looksLikeBehaviorQuestion(task: string): boolean {
  * retrieval evaluations. Hybrid search is best-effort: an unavailable
  * embedding backend must degrade to the lexical baseline.
  */
-export async function prepareBehaviorRetrieval(
-  search: BehaviorSearchService,
-  task: string,
-  maxNodes: number,
-): Promise<BehaviorRetrievalOptions> {
-  if (!looksLikeBehaviorQuestion(task)) {
-    return { extraCandidates: [], behaviorBias: false };
+export async function prepareBehaviorRetrieval(args: PrepareBehaviorRetrievalArgs): Promise<BehaviorRetrievalOptions> {
+  const { search, task, maxNodes, retrievalMode = 'auto' } = args;
+  const behaviorQuestion = looksLikeBehaviorQuestion(task);
+  if (retrievalMode === 'deterministic') {
+    const searchLimit = behaviorQuestion ? Math.min(BEHAVIOR_QUESTION_SEARCH_LIMIT, maxNodes) : undefined;
+    return {
+      extraCandidates: [],
+      behaviorBias: behaviorQuestion,
+      ...(searchLimit === undefined ? {} : { searchLimit }),
+      trace: makeRetrievalTrace({
+        requested: retrievalMode,
+        strategy: 'lexical-graph',
+        hybridAttempted: false,
+        hybridCandidateCount: 0,
+        reason: 'explicit-deterministic',
+      }),
+    };
   }
 
-  let extraCandidates: SearchResult[] = [];
+  if (!behaviorQuestion) {
+    return {
+      extraCandidates: [],
+      behaviorBias: false,
+      trace: makeRetrievalTrace({
+        requested: retrievalMode,
+        strategy: 'lexical-graph',
+        hybridAttempted: false,
+        hybridCandidateCount: 0,
+        reason: 'non-behavior-query',
+      }),
+    };
+  }
+
+  const searchLimit = Math.min(BEHAVIOR_QUESTION_SEARCH_LIMIT, maxNodes);
   try {
-    extraCandidates = await search.searchHybrid(task, { limit: maxNodes * 2 });
+    const extraCandidates = await search.searchHybrid(task, { limit: maxNodes * 2 });
+    return {
+      extraCandidates,
+      behaviorBias: true,
+      searchLimit,
+      trace: makeRetrievalTrace({
+        requested: retrievalMode,
+        strategy: 'hybrid',
+        hybridAttempted: true,
+        hybridCandidateCount: extraCandidates.length,
+        reason: 'behavior-query',
+      }),
+    };
   } catch (error) {
     logDebug('behavior context: hybrid candidate fetch failed', { error: String(error) });
+    return {
+      extraCandidates: [],
+      behaviorBias: true,
+      searchLimit,
+      trace: makeRetrievalTrace({
+        requested: retrievalMode,
+        strategy: 'lexical-graph',
+        hybridAttempted: true,
+        hybridCandidateCount: 0,
+        reason: 'hybrid-failed',
+      }),
+    };
   }
+}
 
-  return {
-    extraCandidates,
-    behaviorBias: true,
-    searchLimit: Math.min(BEHAVIOR_QUESTION_SEARCH_LIMIT, maxNodes),
-  };
+function makeRetrievalTrace(value: BehaviorRetrievalTrace): BehaviorRetrievalTrace {
+  return BehaviorRetrievalTraceSchema.parse(value);
 }

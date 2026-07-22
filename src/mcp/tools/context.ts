@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { lowTokensField, projectPathField } from './_common-fields.js';
-import type { NextAction, ToolResult } from '../tool-types.js';
+import type { ToolResult } from '../tool-types.js';
 import { getNodeCoverage } from '../../db/queries-coverage.js';
 import { getFindingsForNode } from '../../db/queries-findings.js';
 import { compareSeverity } from '../../biomarkers/types.js';
@@ -12,7 +12,11 @@ import type Cartograph from '../../index.js';
 import type { TaskContext } from '../../context/types.js';
 import type { ScoreExplanation } from '../../graph/types.js';
 import type { Node } from '../../types.js';
-import { prepareBehaviorRetrieval } from '../../context/behavior-retrieval.js';
+import {
+  ContextRetrievalModeSchema,
+  prepareBehaviorRetrieval,
+  type BehaviorRetrievalTrace,
+} from '../../context/behavior-retrieval.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
 import { textResult } from './shared.js';
@@ -323,9 +327,11 @@ interface FormatContextResponseArgs {
   task: string;
   context: TaskContext;
   format: ContextFormat;
+  retrieval: BehaviorRetrievalTrace;
 }
 
 type ContextFormat = 'markdown' | 'json' | 'plan';
+type NextAction = NonNullable<NonNullable<ToolResult['metadata']>['nextActions']>[number];
 
 const PLAN_ACTION_NODE_LIMIT = 3;
 const PLAN_RENDER_NODE_LIMIT = 8;
@@ -451,8 +457,13 @@ function buildDependencyCoverageAction(): NextAction {
   };
 }
 
-function renderContextPlan(args: { task: string; context: TaskContext; nextActions: NextAction[] }): string {
-  const { task, context, nextActions } = args;
+function renderContextPlan(args: {
+  task: string;
+  context: TaskContext;
+  nextActions: NextAction[];
+  retrieval: BehaviorRetrievalTrace;
+}): string {
+  const { task, context, nextActions, retrieval } = args;
   const nodes = topContextNodes(context, PLAN_RENDER_NODE_LIMIT);
   const entryLines =
     nodes.length === 0
@@ -471,6 +482,7 @@ function renderContextPlan(args: { task: string; context: TaskContext; nextActio
     `## Context route plan`,
     '',
     `**Query:** ${task}`,
+    `**Retrieval:** ${describeRetrieval(retrieval)}`,
     '',
     ...entryLines,
     '### Next MCP calls',
@@ -489,7 +501,7 @@ function renderContextPlan(args: { task: string; context: TaskContext; nextActio
 
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
-  const { cg, task, context, format } = args;
+  const { cg, task, context, format, retrieval } = args;
   const nextActions = buildContextNextActions(context, task);
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
@@ -509,12 +521,13 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       codeBlocks: context.codeBlocks,
       relatedFiles: context.relatedFiles,
       stats: context.stats,
+      retrieval,
     };
     return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
   }
   const nodes = [...context.subgraph.nodes.values()];
   if (format === 'plan') {
-    return attachNextActions(textResult(renderContextPlan({ task, context, nextActions })), nextActions);
+    return attachNextActions(textResult(renderContextPlan({ task, context, nextActions, retrieval })), nextActions);
   }
   // No-match guard (audit-4 #5): a 0-node subgraph would otherwise
   // render a bare `## Code Context` + `**Query:**` stub with no
@@ -529,7 +542,9 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       renderToolResponse({
         body: '',
         empty: {
-          message: `## Code Context\n\n**Query:** ${task}\n\n` + `No relevant code found for "${task}".`,
+          message:
+            `## Code Context\n\n**Query:** ${task}\n\n_Retrieval: ${describeRetrieval(retrieval)}_\n\n` +
+            `No relevant code found for "${task}".`,
           freshness: { cg },
         },
       }),
@@ -552,12 +567,25 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
     context.subgraph.scoreTrace === undefined && nodes.length >= 3
       ? '\n\n_Top result not what you expected? Pass `explain: true` for a per-candidate score trace that names which retrieval pass elevated each row._'
       : '';
-  const body = formatContextAsMarkdown(context) + formatContextRiskSignals(cg, nodes) + reminder + trace + explainHint;
+  const body =
+    formatContextAsMarkdown(context) +
+    `\n\n_Retrieval: ${describeRetrieval(retrieval)}_` +
+    formatContextRiskSignals(cg, nodes) +
+    reminder +
+    trace +
+    explainHint;
   // The chokepoint bounds the body (the `explain` score-trace appends
   // on top of an already-large markdown body) then appends the
   // stale-files note for the result nodes — note placement is owned
   // by the chokepoint so it survives truncation.
   return attachNextActions(renderToolResponse({ body, freshness: { cg, nodes } }), nextActions);
+}
+
+function describeRetrieval(trace: BehaviorRetrievalTrace): string {
+  if (trace.reason === 'explicit-deterministic') return 'lexical + graph; hybrid disabled explicitly';
+  if (trace.reason === 'non-behavior-query') return 'lexical + graph; hybrid not needed for this query shape';
+  if (trace.reason === 'hybrid-failed') return 'lexical + graph fallback; hybrid candidate fetch failed';
+  return `hybrid candidate channel (${trace.hybridCandidateCount} candidates) + lexical + graph`;
 }
 
 /**
@@ -594,6 +622,9 @@ const contextSchema = z.object({
     .describe(
       'Append a "Score trace" section showing each candidate\'s score after every retrieval pass — use to diagnose why a symbol ranked where it did. Default false.',
     ),
+  retrievalMode: ContextRetrievalModeSchema.default('auto').describe(
+    '`auto` may use hybrid embeddings for behavior-shaped questions; `deterministic` guarantees this context call uses only lexical and graph retrieval.',
+  ),
   lowTokens: lowTokensField,
   projectPath: projectPathField,
 });
@@ -655,7 +686,12 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   // model is configured — `searchHybrid` falls back to FTS-only, and
   // a fetch failure (e.g. summarise backend offline) returns `[]` so
   // context degrades to its lexical-only baseline.
-  const behaviorRetrieval = await prepareBehaviorRetrieval(cg.llm, task, maxNodes);
+  const behaviorRetrieval = await prepareBehaviorRetrieval({
+    search: cg.llm,
+    task,
+    maxNodes,
+    retrievalMode: args.retrievalMode,
+  });
 
   // Use format: 'object' so buildContext returns the raw TaskContext
   // (its 'markdown' and 'json' formats serialise to a string and
@@ -671,11 +707,13 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
     ...(behaviorRetrieval.searchLimit === undefined ? {} : { searchLimit: behaviorRetrieval.searchLimit }),
   });
   // Shouldn't happen with format='object' but guard for safety.
-  if (typeof context === 'string') return ok(textResult(context));
+  if (typeof context === 'string') {
+    return ok(textResult(`${context}\n\n_Retrieval: ${describeRetrieval(behaviorRetrieval.trace)}_`));
+  }
 
   // Format passthrough — `markdown` (default) emits the enriched markdown
   // report; `json` returns the structured TaskContext for programmatic consumers.
-  return ok(formatContextResponse({ cg, task, context, format }));
+  return ok(formatContextResponse({ cg, task, context, format, retrieval: behaviorRetrieval.trace }));
 }
 
 export const CONTEXT_TOOL = defineTool({
@@ -683,7 +721,8 @@ export const CONTEXT_TOOL = defineTool({
   description:
     'Primary tool — natural-language `task` → entry points + related symbols + key code in one call. ' +
     'Often enough to understand a feature or bug without further calls; takes free-form text (e.g. "how does session login work"). ' +
-    'Returns CODE context by default; `lowTokens: true` suppresses code snippets and caps breadth. For new features still clarify UX/behavior with the user.',
+    'Returns CODE context by default; `retrievalMode: "deterministic"` prevents hybrid/embedding retrieval for this call; ' +
+    '`lowTokens: true` suppresses code snippets and caps breadth. For new features still clarify UX/behavior with the user.',
   schema: contextSchema,
   handle: handleContext,
 });

@@ -31,6 +31,17 @@ export const HIGH_VALUE_NODE_KINDS: readonly NodeKind[] = [
   'namespace',
 ];
 
+const DATABASE_TASK_PATTERN =
+  /\b(?:postgres(?:ql)?|sqlite|database|schema|table|column|migration|sql|constraint|foreign\s+key)\b/i;
+const CONFIG_TASK_PATTERN =
+  /\b(?:config|configuration|environment|env|resource|terraform|deployment|secret|setting)\b/i;
+const DATA_SHAPE_TASK_PATTERN =
+  /\b(?:column|field|property|parameter|argument|payload|interface|struct|record)\b|\bdata\s+model\b|\btype\s+(?:definition|alias)\b/i;
+
+const DATABASE_NODE_KINDS: readonly NodeKind[] = ['table'];
+const CONFIG_NODE_KINDS: readonly NodeKind[] = ['resource', 'property', 'field'];
+const DATA_SHAPE_NODE_KINDS: readonly NodeKind[] = ['field', 'property', 'parameter'];
+
 const DEFAULT_BUILD_OPTIONS: Required<BuildContextOptions> = {
   maxNodes: DEFAULT_MAX_NODES,
   maxCodeBlocks: 5,
@@ -101,6 +112,15 @@ export function normalizeFindOptions(options: FindRelevantContextOptions = {}): 
   };
 }
 
+/** Add task-specific edit-site kinds without globally flooding every query. */
+export function contextNodeKindsForTask(query: string): NodeKind[] {
+  const kinds = new Set<NodeKind>(HIGH_VALUE_NODE_KINDS);
+  if (DATABASE_TASK_PATTERN.test(query)) addKinds(kinds, DATABASE_NODE_KINDS);
+  if (CONFIG_TASK_PATTERN.test(query)) addKinds(kinds, CONFIG_NODE_KINDS);
+  if (DATA_SHAPE_TASK_PATTERN.test(query)) addKinds(kinds, DATA_SHAPE_NODE_KINDS);
+  return [...kinds];
+}
+
 /** Pick search kinds for the multi-term text-search pass. */
 export function pickSearchKinds(callerKinds: readonly NodeKind[] | undefined): NodeKind[] {
   if (callerKinds && callerKinds.length > 0) return [...callerKinds];
@@ -109,4 +129,8 @@ export function pickSearchKinds(callerKinds: readonly NodeKind[] | undefined): N
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(min, value), max);
+}
+
+function addKinds(target: Set<NodeKind>, additions: readonly NodeKind[]): void {
+  for (const kind of additions) target.add(kind);
 }

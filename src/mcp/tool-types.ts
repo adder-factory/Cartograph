@@ -55,7 +55,7 @@ export interface FreshnessMetadata {
   blocked?: boolean;
 }
 
-export interface NextAction {
+interface NextAction {
   /** MCP tool name to call next. */
   tool: string;
   /** Concrete argument object for the suggested call. */

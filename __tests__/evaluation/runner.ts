@@ -110,7 +110,7 @@ async function runEvalCase(cg: EvalCartograph, tc: EvalTestCase): Promise<EvalRe
     ...(tc.options as Record<string, unknown>),
   };
   const maxNodes = typeof contextOptions.maxNodes === 'number' ? contextOptions.maxNodes : 80;
-  const behaviorRetrieval = await prepareBehaviorRetrieval(cg.llm, tc.query, maxNodes);
+  const behaviorRetrieval = await prepareBehaviorRetrieval({ search: cg.llm, task: tc.query, maxNodes });
   const subgraph = await cg.internals.contextBuilder.findRelevantContext(tc.query, {
     ...contextOptions,
     // Behavior options win so the evaluation exercises the same entry-point

@@ -14,7 +14,7 @@ import { formatContextAsMarkdown, formatContextAsJson } from './formatter.js';
 import { ScoreTrace } from './score-trace.js';
 import { buildTaskContext, extractCodeBlocks } from './task-context.js';
 import type { ContextBuilderState } from './builder-state.js';
-import { normalizeBuildOptions, normalizeFindOptions } from './options.js';
+import { contextNodeKindsForTask, normalizeBuildOptions, normalizeFindOptions } from './options.js';
 import { expandTypeHierarchy, expandViaTraversal, finaliseSubgraph } from './subgraph.js';
 import { extractNodeSourceCode } from './source-code.js';
 import { collectAndScoreContextCandidates } from './candidate-search.js';
@@ -109,7 +109,9 @@ export class ContextBuilder {
    * @returns Subgraph of relevant nodes and edges
    */
   async findRelevantContext(query: string, options: FindRelevantContextOptions = {}): Promise<Subgraph> {
-    const opts = normalizeFindOptions(options);
+    const opts = normalizeFindOptions(
+      options.nodeKinds === undefined ? { ...options, nodeKinds: contextNodeKindsForTask(query) } : options,
+    );
 
     if (!query || query.trim().length === 0) {
       return { nodes: new Map<string, Node>(), edges: [], roots: [] };

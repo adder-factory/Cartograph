@@ -122,6 +122,33 @@ describe('ranking regression', () => {
     expect(roots).toContain('refundPayment');
   });
 
+  it('turns PostgreSQL issue language into the maintenance change packet', async () => {
+    const subgraph = await cg.internals.contextBuilder.findRelevantContext(
+      'fix PostgreSQL no-op sync database-wide ANALYZE starving autovacuum',
+      {
+        searchLimit: 4,
+        traversalDepth: 2,
+        maxNodes: 8,
+        minScore: 0.2,
+      },
+    );
+    const names = [...subgraph.nodes.values()].map((node) => node.name);
+    const rootNames = subgraph.roots
+      .map((id) => subgraph.nodes.get(id)?.name)
+      .filter((name): name is string => typeof name === 'string');
+
+    expect(names).toEqual(
+      expect.arrayContaining([
+        'syncPostgresGraph',
+        'cgSyncHasDatabaseWrites',
+        'dbRunMaintenance',
+        'POSTGRES_ANALYZE_CURRENT_SCHEMA_SQL',
+      ]),
+    );
+    expect(rootNames.slice(0, 2)).toContain('syncPostgresGraph');
+    expect(rootNames).not.toContain('fix');
+  });
+
   // searchNodes — symbol-name precision (no behaviorBias; this is the
   // exact-name retrieval path, not the behaviour-context path).
   it('ranks an exact function-name match first', () => {

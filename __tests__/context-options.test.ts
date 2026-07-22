@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { normalizeBuildOptions, normalizeFindOptions, pickSearchKinds } from '../src/context/options.js';
+import {
+  contextNodeKindsForTask,
+  normalizeBuildOptions,
+  normalizeFindOptions,
+  pickSearchKinds,
+} from '../src/context/options.js';
 
 describe('context option normalization', () => {
   it('uses high-value node kinds by default without import/export noise', () => {
@@ -57,5 +62,28 @@ describe('context option normalization', () => {
     const defaults = pickSearchKinds([]);
     expect(defaults).toContain('file');
     expect(defaults).toContain('export');
+  });
+
+  it('includes tables for database tasks without globally admitting field noise', () => {
+    const databaseKinds = contextNodeKindsForTask('fix PostgreSQL schema migration and SQL table writes');
+    const behaviorKinds = contextNodeKindsForTask('how does the watcher dispatch a sync');
+
+    expect(databaseKinds).toContain('table');
+    expect(databaseKinds).not.toContain('field');
+    expect(databaseKinds).not.toContain('property');
+    expect(behaviorKinds).not.toContain('table');
+    expect(behaviorKinds).not.toContain('field');
+  });
+
+  it('includes fields, properties, and parameters only for explicit data-shape tasks', () => {
+    const kinds = contextNodeKindsForTask('change the database column field mapping and payload parameter');
+
+    expect(kinds).toEqual(expect.arrayContaining(['table', 'field', 'property', 'parameter']));
+  });
+
+  it('includes resource and property nodes for configuration tasks', () => {
+    const kinds = contextNodeKindsForTask('update Cloudflare deployment configuration and environment setting');
+
+    expect(kinds).toEqual(expect.arrayContaining(['resource', 'property', 'field']));
   });
 });

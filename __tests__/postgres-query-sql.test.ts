@@ -3,11 +3,22 @@ import { findLowCoverage } from '../src/biomarkers/low-coverage.js';
 import { findFeatureEnvy, findGodClasses } from '../src/db/queries-biomarkers-graph.js';
 import { getCoverageRanked, getCoverageStats, upsertNodeCoverage } from '../src/db/queries-coverage.js';
 import { applyChurnDeltas, applyCoChangeDeltas } from '../src/db/queries-history.js';
+import {
+  bootstrapPostgresIntentSearch,
+  searchIntentSymbolRows,
+  searchIntentTestNameRows,
+} from '../src/db/queries-intent-search.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import type { SqliteDatabase, SqliteStatement } from '../src/db/sqlite-adapter.js';
 
-function makeCapturingQueryBuilder(): { qb: QueryBuilder; sqls: string[] } {
+function makeCapturingQueryBuilder(): {
+  qb: QueryBuilder;
+  db: SqliteDatabase;
+  sqls: string[];
+  execSqls: string[];
+} {
   const sqls: string[] = [];
+  const execSqls: string[] = [];
   const db: SqliteDatabase = {
     dialect: 'postgres',
     open: true,
@@ -21,12 +32,14 @@ function makeCapturingQueryBuilder(): { qb: QueryBuilder; sqls: string[] } {
         iterate: function* () {},
       };
     },
-    exec: () => undefined,
+    exec: (sql) => {
+      execSqls.push(sql);
+    },
     pragma: () => [],
     transaction: (fn) => fn,
     close: () => undefined,
   };
-  return { qb: new QueryBuilder(db), sqls };
+  return { qb: new QueryBuilder(db), db, sqls, execSqls };
 }
 
 describe('PostgreSQL query SQL portability', () => {
@@ -77,5 +90,43 @@ describe('PostgreSQL query SQL portability', () => {
     expect(joined).not.toContain('HAVING atfd');
     expect(joined).toContain('ranked_coverage');
     expect(joined).not.toContain('HAVING coveragePct');
+  });
+
+  it('uses native PostgreSQL intent queries and bootstraps all corpus indexes', () => {
+    const { db, sqls, execSqls } = makeCapturingQueryBuilder();
+
+    bootstrapPostgresIntentSearch(db);
+    searchIntentSymbolRows({
+      db,
+      corpus: 'summary',
+      expression: 'database OR maintenance',
+      filters: { kind: 'function', pathPrefix: 'src/' },
+      limit: 10,
+      rowCount: 1,
+    });
+    searchIntentSymbolRows({
+      db,
+      corpus: 'docstring',
+      expression: 'database maintenance',
+      filters: {},
+      limit: 10,
+      rowCount: 1,
+    });
+    searchIntentTestNameRows({
+      db,
+      expression: 'database OR maintenance',
+      limit: 10,
+      rowCount: 1,
+    });
+
+    const queries = sqls.join('\n');
+    expect(queries).toContain("websearch_to_tsquery('simple', ?)");
+    expect(queries).toContain('ts_rank_cd');
+    expect(queries).not.toContain(' MATCH ');
+    expect(queries).not.toContain('bm25(');
+    const bootstrap = execSqls.join('\n');
+    expect(bootstrap).toContain('idx_summary_store_intent_fts');
+    expect(bootstrap).toContain('idx_nodes_docstring_intent_fts');
+    expect(bootstrap).toContain('idx_test_names_intent_fts');
   });
 });

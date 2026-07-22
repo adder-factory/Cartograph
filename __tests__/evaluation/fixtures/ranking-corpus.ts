@@ -127,6 +127,36 @@ export function queryDatabase(conn: DbConnection, sql: string): unknown[] {
 }
 `,
 
+  'src/postgres-maintenance.ts': `/** Refresh only the active PostgreSQL schema's planner statistics. */
+export const POSTGRES_ANALYZE_CURRENT_SCHEMA_SQL = 'ANALYZE';
+
+export interface SyncWriteResult { filesModified: number; hookWrites: number; }
+export interface MaintenanceDb { exec(sql: string): void; }
+
+/** Decide whether a sync wrote anything that makes PostgreSQL ANALYZE useful. */
+export function cgSyncHasDatabaseWrites(result: SyncWriteResult): boolean {
+  return result.filesModified > 0 || result.hookWrites > 0;
+}
+
+/** Run schema-scoped PostgreSQL maintenance without starving autovacuum. */
+export function dbRunMaintenance(db: MaintenanceDb): void {
+  db.exec(POSTGRES_ANALYZE_CURRENT_SCHEMA_SQL);
+}
+
+/** Finish an incremental sync and avoid database-wide ANALYZE on no-op passes. */
+export function syncPostgresGraph(result: SyncWriteResult, db: MaintenanceDb): void {
+  if (cgSyncHasDatabaseWrites(result)) dbRunMaintenance(db);
+}
+`,
+
+  'src/maintenance-request.ts': `/** Shape-only request fields that must not displace executable PostgreSQL maintenance roots. */
+export interface MaintenanceRequest {
+  fix: boolean;
+  index: string;
+  request: string;
+}
+`,
+
   'src/server.ts': `import { authenticateUser } from './auth.js';
 import { processPayment } from './payment.js';
 

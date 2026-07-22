@@ -85,6 +85,9 @@ CREATE INDEX IF NOT EXISTS idx_nodes_search_fts ON nodes USING GIN (
     COALESCE(docstring, '')
   )
 );
+CREATE INDEX IF NOT EXISTS idx_nodes_docstring_intent_fts ON nodes USING GIN (
+  to_tsvector('simple', COALESCE(docstring, ''))
+);
 CREATE INDEX IF NOT EXISTS idx_nodes_signature_fts ON nodes USING GIN (
   to_tsvector('simple', COALESCE(signature, ''))
 );
@@ -236,6 +239,9 @@ CREATE TABLE IF NOT EXISTS summary_refs (
   model TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_summary_refs_body_hash ON summary_refs(body_hash, model);
+CREATE INDEX IF NOT EXISTS idx_summary_store_intent_fts ON summary_store USING GIN (
+  to_tsvector('simple', COALESCE(summary, ''))
+);
 
 CREATE OR REPLACE VIEW symbol_summaries AS
 SELECT
@@ -254,6 +260,9 @@ CREATE TABLE IF NOT EXISTS test_names (
   description TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_test_names_file ON test_names(file_path);
+CREATE INDEX IF NOT EXISTS idx_test_names_intent_fts ON test_names USING GIN (
+  to_tsvector('simple', COALESCE(description, ''))
+);
 
 CREATE TABLE IF NOT EXISTS nested_function_names (
   id SERIAL PRIMARY KEY,

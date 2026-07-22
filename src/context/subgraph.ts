@@ -57,13 +57,9 @@ const MIN_PER_FILE_CAP = 5;
 const NON_PROD_CAP_FRACTION = 0.15;
 /** Floor on the non-prod cap. */
 const MIN_NON_PROD_CAP = 3;
-/** Sort weight added to entry-point (root) nodes when picking eviction order. */
-const ROOT_PRIORITY_BONUS = 10;
-
 /**
- * Per-kind sort weight inside the per-file cap (3 for entry types,
- * 1 for methods/functions, 0 for fields/properties). Defaults to 0
- * for any kind not listed, dropping it to the bottom.
+ * Per-kind sort weight used as a late tie-breaker during graph trimming.
+ * Defaults to 0 for any kind not listed.
  */
 const KIND_PRIORITY: Readonly<Record<string, number>> = {
   class: 3,
@@ -78,6 +74,36 @@ const KIND_PRIORITY: Readonly<Record<string, number>> = {
   field: 0,
   variable: 0,
 };
+
+/** Actionability weight for a direct root edge during context trimming. */
+const EDGE_PRIORITY: Readonly<Record<EdgeKind, number>> = {
+  calls: 100,
+  instantiates: 95,
+  returns: 90,
+  field_access: 85,
+  def_use: 85,
+  references: 80,
+  tests: 75,
+  overrides: 70,
+  implements: 70,
+  extends: 70,
+  decorates: 65,
+  imports: 55,
+  exports: 55,
+  type_of: 50,
+  contains: 10,
+  similar_to: 5,
+};
+
+interface TrimRank {
+  id: string;
+  insertion: number;
+  rootOrder: number | null;
+  distance: number;
+  directEdgePriority: number;
+  centrality: number;
+  kindPriority: number;
+}
 
 /**
  * Resolve import/export nodes to their actual definitions where possible.
@@ -208,42 +234,106 @@ export function finaliseSubgraph(st: ContextBuilderState, args: FinaliseSubgraph
 }
 
 /**
- * When the working subgraph exceeds `maxNodes`, build a priority set of
- * entry points + their direct neighbours and keep those first; backfill
- * the remaining budget with arbitrary other nodes.
+ * When the working subgraph exceeds `maxNodes`, preserve roots, then rank
+ * direct neighbours ahead of transitive nodes. Within one hop, concrete
+ * behavioral edges outrank containment-only edges; remaining ties use graph
+ * distance, centrality, kind value, and stable insertion order.
  */
 function trimToMaxNodes(ws: SubgraphWorkspace, maxNodes: number): { nodes: Map<string, Node>; edges: Edge[] } {
-  const { nodes, edges, roots } = ws;
-  if (nodes.size <= maxNodes) return { nodes, edges };
-  const priorityIds = expandPriorityFromRoots(roots, edges);
-  const finalNodes = pickTopNodes(nodes, priorityIds, maxNodes);
+  const { nodes, edges } = ws;
+  // Materialize graph rank even when every node fits the global budget.
+  // The downstream per-file cap relies on Map order when choosing which
+  // same-file nodes to evict.
+  const rankedIds = rankNodeIdsForTrim(ws);
+  const finalNodes = pickTopNodes(nodes, rankedIds, maxNodes);
+  if (nodes.size <= maxNodes) return { nodes: finalNodes, edges };
   const finalEdges = edges.filter((e) => finalNodes.has(e.source) && finalNodes.has(e.target));
   return { nodes: finalNodes, edges: finalEdges };
 }
 
-/**
- * One-hop expansion of root ids along all edges (both directions). Used by
- * `trimToMaxNodes` to keep edge endpoints together when culling.
- */
-function expandPriorityFromRoots(roots: readonly string[], edges: readonly Edge[]): Set<string> {
-  const priorityIds = new Set(roots);
-  for (const edge of edges) {
-    if (priorityIds.has(edge.source)) priorityIds.add(edge.target);
-    if (priorityIds.has(edge.target)) priorityIds.add(edge.source);
-  }
-  return priorityIds;
+function rankNodeIdsForTrim(ws: SubgraphWorkspace): string[] {
+  const rootOrder = new Map(ws.roots.map((id, index) => [id, index]));
+  const rootSet = new Set(ws.roots);
+  const distances = computeRootDistances(rootSet, ws.edges);
+  const directPriorities = computeDirectEdgePriorities(rootSet, ws.edges);
+  const ranked: TrimRank[] = [...ws.nodes.entries()].map(([id, node], insertion) => ({
+    id,
+    insertion,
+    rootOrder: rootOrder.get(id) ?? null,
+    distance: distances.get(id) ?? Number.POSITIVE_INFINITY,
+    directEdgePriority: directPriorities.get(id) ?? 0,
+    centrality: node.centrality ?? 0,
+    kindPriority: KIND_PRIORITY[node.kind] ?? 0,
+  }));
+  ranked.sort(compareTrimRanks);
+  return ranked.map((entry) => entry.id);
 }
 
-/** Keep priority ids first, then fill up to `maxNodes` from the rest. */
-function pickTopNodes(nodes: Map<string, Node>, priorityIds: Set<string>, maxNodes: number): Map<string, Node> {
+function compareTrimRanks(a: TrimRank, b: TrimRank): number {
+  const aIsRoot = a.rootOrder !== null;
+  const bIsRoot = b.rootOrder !== null;
+  if (aIsRoot !== bIsRoot) return aIsRoot ? -1 : 1;
+  if (aIsRoot && bIsRoot && a.rootOrder !== b.rootOrder) return (a.rootOrder ?? 0) - (b.rootOrder ?? 0);
+  if (a.distance !== b.distance) return a.distance - b.distance;
+  if (a.directEdgePriority !== b.directEdgePriority) return b.directEdgePriority - a.directEdgePriority;
+  if (a.centrality !== b.centrality) return b.centrality - a.centrality;
+  if (a.kindPriority !== b.kindPriority) return b.kindPriority - a.kindPriority;
+  return a.insertion - b.insertion;
+}
+
+function computeRootDistances(rootSet: ReadonlySet<string>, edges: readonly Edge[]): Map<string, number> {
+  const adjacency = new Map<string, string[]>();
+  for (const edge of edges) {
+    appendNeighbor(adjacency, edge.source, edge.target);
+    appendNeighbor(adjacency, edge.target, edge.source);
+  }
+  const distances = new Map<string, number>();
+  const queue = [...rootSet];
+  for (const root of queue) distances.set(root, 0);
+  for (const id of queue) {
+    const nextDistance = (distances.get(id) ?? 0) + 1;
+    for (const neighbor of adjacency.get(id) ?? []) {
+      if (distances.has(neighbor)) continue;
+      distances.set(neighbor, nextDistance);
+      queue.push(neighbor);
+    }
+  }
+  return distances;
+}
+
+function appendNeighbor(adjacency: Map<string, string[]>, source: string, target: string): void {
+  const neighbors = adjacency.get(source);
+  if (neighbors) neighbors.push(target);
+  else adjacency.set(source, [target]);
+}
+
+function computeDirectEdgePriorities(rootSet: ReadonlySet<string>, edges: readonly Edge[]): Map<string, number> {
+  const priorities = new Map<string, number>();
+  for (const edge of edges) {
+    const sourceIsRoot = rootSet.has(edge.source);
+    const targetIsRoot = rootSet.has(edge.target);
+    if (sourceIsRoot === targetIsRoot) continue;
+    const neighborId = sourceIsRoot ? edge.target : edge.source;
+    const directionBonus = sourceIsRoot ? 2 : 0;
+    const confidenceBonus = confidencePriority(edge);
+    const priority = (EDGE_PRIORITY[edge.kind] ?? 0) + directionBonus + confidenceBonus;
+    priorities.set(neighborId, Math.max(priorities.get(neighborId) ?? 0, priority));
+  }
+  return priorities;
+}
+
+function confidencePriority(edge: Edge): number {
+  if (edge.confidence === 'EXTRACTED') return 3;
+  if (edge.confidence === 'INFERRED') return 1;
+  return 0;
+}
+
+/** Keep ranked ids in order up to `maxNodes`. */
+function pickTopNodes(nodes: Map<string, Node>, rankedIds: readonly string[], maxNodes: number): Map<string, Node> {
   const finalNodes = new Map<string, Node>();
-  for (const id of priorityIds) {
+  for (const id of rankedIds) {
     const node = nodes.get(id);
     if (node && finalNodes.size < maxNodes) finalNodes.set(id, node);
-  }
-  for (const [id, node] of nodes) {
-    if (finalNodes.size >= maxNodes) break;
-    if (!finalNodes.has(id)) finalNodes.set(id, node);
   }
   return finalNodes;
 }
@@ -263,14 +353,13 @@ function applyPerFileDiversityCap(finalNodes: Map<string, Node>, roots: string[]
   const rootSet = new Set(roots);
   for (const [, nodeIds] of fileCounts) {
     if (nodeIds.length <= maxPerFile) continue;
-    nodeIds.sort((a, b) => {
-      const aRoot = rootSet.has(a) ? ROOT_PRIORITY_BONUS : 0;
-      const bRoot = rootSet.has(b) ? ROOT_PRIORITY_BONUS : 0;
-      const aKind = KIND_PRIORITY[finalNodes.get(a)!.kind] ?? 0;
-      const bKind = KIND_PRIORITY[finalNodes.get(b)!.kind] ?? 0;
-      return bRoot + bKind - (aRoot + aKind);
-    });
-    for (const id of nodeIds.slice(maxPerFile)) finalNodes.delete(id);
+    const rootIds = nodeIds.filter((id) => rootSet.has(id));
+    const nonRootIds = nodeIds.filter((id) => !rootSet.has(id));
+    const nonRootBudget = Math.max(0, maxPerFile - rootIds.length);
+    // Map iteration preserves the graph-aware rank established by
+    // trimToMaxNodes. Never re-sort by node kind here: doing so lets a
+    // same-file class reached only through `contains` evict a direct callee.
+    for (const id of nonRootIds.slice(nonRootBudget)) finalNodes.delete(id);
   }
 }
 

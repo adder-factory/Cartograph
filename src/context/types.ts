@@ -109,16 +109,16 @@ export interface TaskContext {
  * Options for finding relevant context.
  */
 export interface FindRelevantContextOptions {
-  /** Number of semantic search results (default: 5) */
+  /** Number of ranked entry-point candidates (default: 3) */
   searchLimit?: number;
 
-  /** Graph traversal depth (default: 2) */
+  /** Graph traversal depth (default: 1) */
   traversalDepth?: number;
 
-  /** Maximum nodes in result (default: 50) */
+  /** Maximum nodes in result (default: 20) */
   maxNodes?: number;
 
-  /** Minimum semantic similarity score (default: 0.3) */
+  /** Minimum candidate score after lexical/structural ranking (default: 0.3) */
   minScore?: number;
 
   /** Edge types to follow in traversal */

@@ -18,9 +18,17 @@ import { type ToolOutcome, ok, err } from './_outcome.js';
 import type { ToolCtx } from './types.js';
 import type Cartograph from '../../index.js';
 import type { SqliteDatabase } from '../../db/sqlite-adapter.js';
+import {
+  searchIntentSymbolRows,
+  searchIntentTestNameRows,
+  type IntentSearchFilters,
+  type IntentSymbolHitRow as SymbolIntentRow,
+  type IntentTestNameHitRow as TestNameIntentRow,
+} from '../../db/queries-intent-search.js';
 import { enqueueForPrioritySummary } from '../../db/queries-summary-priority.js';
 import { getSummaryCoverage } from '../../db/queries-summaries.js';
 import { SUMMARIZABLE_KINDS } from '../../llm/summarizer.js';
+export { escapeLike } from '../../db/sql-like.js';
 
 // ============ Constants ============
 
@@ -79,24 +87,6 @@ function sanitizeQueryForFts5(query: string): [string, boolean] {
     .trim();
 
   return [sanitized, original !== sanitized];
-}
-
-interface SymbolIntentRow {
-  id: string;
-  name: string;
-  kind: string;
-  file_path: string;
-  start_line: number | null;
-  rank: number;
-  text: string;
-  source: 'summary' | 'docstring';
-}
-
-interface TestNameIntentRow {
-  file_path: string;
-  line: number;
-  description: string;
-  rank: number;
 }
 
 interface IndexCoverageMetrics {
@@ -162,141 +152,6 @@ function checkIndexCoverage(db: SqliteDatabase): IndexCoverageMetrics | ToolOutc
   }
 }
 
-/**
- * Helper to escape LIKE special characters.
- */
-export function escapeLike(s: string): string {
-  const backslash = String.fromCodePoint(92);
-  return s
-    .replaceAll(backslash, backslash + backslash)
-    .replaceAll('_', backslash + '_')
-    .replaceAll('%', backslash + '%');
-}
-
-/**
- * Build the three FTS5 SQL queries for intent search.
- */
-interface QueryDefs {
-  summarySql: string;
-  docstringSql: string;
-  testNameSql: string;
-  symFilterParams: unknown[];
-  testNameFilterParams: unknown[];
-}
-
-/**
- * Build the WHERE-clause fragment and bound parameters for symbol-anchored
- * filters (kind, language, path).  Used by both the summary and docstring
- * SQL queries.
- *
- * Returns [clause, params] where clause is either empty string or
- * " AND cond1 AND cond2 …" (leading space included for direct concatenation).
- */
-function buildSymbolFilterClause(
-  kind: string | undefined,
-  languageFilter: string | undefined,
-  pathFilter: string | undefined,
-): [string, unknown[]] {
-  const conds: string[] = [];
-  const params: unknown[] = [];
-  if (kind) {
-    conds.push('n.kind = ?');
-    params.push(kind);
-  }
-  if (languageFilter) {
-    conds.push('n.language = ?');
-    params.push(languageFilter);
-  }
-  if (pathFilter) {
-    conds.push(String.raw`n.file_path LIKE ? ESCAPE '\'`);
-    params.push(`${escapeLike(pathFilter)}%`);
-  }
-  const clause = conds.length > 0 ? ` AND ${conds.join(' AND ')}` : '';
-  return [clause, params];
-}
-
-/**
- * Build the WHERE-clause fragment and bound parameters for the test-names
- * query.  Only pathFilter applies (test names are not symbol-anchored).
- *
- * Returns [clause, params] in the same shape as {@link buildSymbolFilterClause}.
- */
-function buildTestNameFilterClause(pathFilter: string | undefined): [string, unknown[]] {
-  if (!pathFilter) return ['', []];
-  const clause = String.raw` AND tn.file_path LIKE ? ESCAPE '\'`;
-  const params: unknown[] = [`${escapeLike(pathFilter)}%`];
-  return [clause, params];
-}
-
-/**
- * Produce the FTS5 SQL for the summary corpus.
- */
-function buildSummarySql(symFilterClause: string): string {
-  // Design C: summary_fts is `content=summary_store` (migration 049),
-  // so the JOIN goes summary_fts.rowid -> summary_store.ROWID, then
-  // summary_refs maps the (body_hash, model) row back to its node(s).
-  // Note: a single store row can have many refs (rename / clone), so
-  // this query may return one row per (summary-text, node) pair —
-  // which is the intent semantic the caller already handles.
-  return `
-    SELECT n.id, n.name, n.kind, n.file_path, n.start_line,
-           bm25(summary_fts) AS rank, ss.summary AS text, 'summary' AS source
-      FROM summary_fts
-      JOIN summary_store ss ON ss.ROWID = summary_fts.rowid
-      JOIN summary_refs sr ON sr.body_hash = ss.body_hash AND sr.model = ss.model
-      JOIN nodes n ON n.id = sr.node_id
-     WHERE summary_fts MATCH ?${symFilterClause}
-     ORDER BY rank
-     LIMIT ?
-  `;
-}
-
-/**
- * Produce the FTS5 SQL for the docstring corpus.
- */
-function buildDocstringSql(symFilterClause: string): string {
-  return `
-    SELECT n.id, n.name, n.kind, n.file_path, n.start_line,
-           bm25(docstring_fts) AS rank, n.docstring AS text, 'docstring' AS source
-      FROM docstring_fts
-      JOIN nodes n ON n.ROWID = docstring_fts.rowid
-     WHERE docstring_fts MATCH ?${symFilterClause}
-     ORDER BY rank
-     LIMIT ?
-  `;
-}
-
-/**
- * Produce the FTS5 SQL for the test-names corpus.
- */
-function buildTestNameSql(testNameFilterClause: string): string {
-  return `
-    SELECT tn.file_path, tn.line, tn.description, bm25(test_names_fts) AS rank
-      FROM test_names_fts
-      JOIN test_names tn ON tn.id = test_names_fts.rowid
-     WHERE test_names_fts MATCH ?${testNameFilterClause}
-     ORDER BY rank
-     LIMIT ?
-  `;
-}
-
-function buildIntentSearchQueries(
-  kind: string | undefined,
-  languageFilter: string | undefined,
-  pathFilter: string | undefined,
-): QueryDefs {
-  const [symFilterClause, symFilterParams] = buildSymbolFilterClause(kind, languageFilter, pathFilter);
-  const [testNameFilterClause, testNameFilterParams] = buildTestNameFilterClause(pathFilter);
-
-  return {
-    summarySql: buildSummarySql(symFilterClause),
-    docstringSql: buildDocstringSql(symFilterClause),
-    testNameSql: buildTestNameSql(testNameFilterClause),
-    symFilterParams,
-    testNameFilterParams,
-  };
-}
-
 interface SearchResults {
   summaryHits: SymbolIntentRow[];
   docstringHits: SymbolIntentRow[];
@@ -309,11 +164,8 @@ interface ExecuteIntentSearchesArgs {
   db: SqliteDatabase;
   query: string;
   coverage: IndexCoverageMetrics;
-  queryDefs: QueryDefs;
   limit: number;
-  symFilterParams: unknown[];
-  languageFilter: string | undefined;
-  kind: string | undefined;
+  filters: IntentSearchFilters;
 }
 
 /**
@@ -346,7 +198,7 @@ function buildMatchExpressions(query: string): [string, string | null] {
 }
 
 /**
- * Execute FTS5 searches against the three corpora.
+ * Execute backend-native full-text searches against the three corpora.
  *
  * When there are ≥2 tokens, runs a second AND query (implicit FTS5 AND —
  * every token must be present) alongside the primary OR query. Node IDs
@@ -356,7 +208,7 @@ function buildMatchExpressions(query: string): [string, string | null] {
  * partial-token matches regardless of document length penalties from BM25.
  */
 function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults | ToolOutcome {
-  const { db, query, coverage, queryDefs, limit, symFilterParams, languageFilter, kind } = args;
+  const { db, query, coverage, limit, filters } = args;
   const overFetch = Math.min(limit * INTENT_OVERFETCH_MULTIPLIER, INTENT_OVERFETCH_MAX);
   let summaryHits: SymbolIntentRow[] = [];
   let docstringHits: SymbolIntentRow[] = [];
@@ -366,89 +218,66 @@ function executeIntentSearches(args: ExecuteIntentSearchesArgs): SearchResults |
   const [orExpr, andExpr] = buildMatchExpressions(query);
 
   try {
-    summaryHits = runSymbolIntentQuery({
+    summaryHits = searchIntentSymbolRows({
       db,
-      sql: queryDefs.summarySql,
-      expr: orExpr,
-      params: symFilterParams,
+      corpus: 'summary',
+      expression: orExpr,
+      filters,
       limit: overFetch,
       rowCount: coverage.summaryRows,
     });
-    docstringHits = runSymbolIntentQuery({
+    docstringHits = searchIntentSymbolRows({
       db,
-      sql: queryDefs.docstringSql,
-      expr: orExpr,
-      params: symFilterParams,
+      corpus: 'docstring',
+      expression: orExpr,
+      filters,
       limit: overFetch,
       rowCount: coverage.docstringRows,
     });
-    testNameHits = runTestNameIntentQuery({ db, queryDefs, orExpr, limit, coverage, languageFilter, kind });
-    collectAndConfirmedIds({ db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out: andConfirmedIds });
+    if (!filters.kind && !filters.language) {
+      testNameHits = searchIntentTestNameRows({
+        db,
+        expression: orExpr,
+        limit,
+        rowCount: coverage.testNameRows,
+        ...(filters.pathPrefix === undefined ? {} : { pathPrefix: filters.pathPrefix }),
+      });
+    }
+    collectAndConfirmedIds({ db, andExpr, filters, overFetch, coverage, out: andConfirmedIds });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    return err(
-      `mode=intent: invalid FTS5 query syntax (${msg}). FTS5 reserves quotes and operators — try escaping or simplifying the query.`,
-    );
+    const engine = db.dialect === 'postgres' ? 'PostgreSQL full-text' : 'FTS5';
+    return err(`mode=intent: ${engine} search failed (${msg}). Try escaping or simplifying the query.`);
   }
 
   return { summaryHits, docstringHits, testNameHits, andConfirmedIds };
 }
 
-interface SymbolIntentQueryArgs {
-  db: SqliteDatabase;
-  sql: string;
-  expr: string;
-  params: ReadonlyArray<unknown>;
-  limit: number;
-  rowCount: number;
-}
-
-function runSymbolIntentQuery(args: SymbolIntentQueryArgs): SymbolIntentRow[] {
-  const { db, sql, expr, params, limit, rowCount } = args;
-  if (rowCount <= 0) return [];
-  return db.prepare(sql).all(expr, ...params, limit) as SymbolIntentRow[];
-}
-
-function runTestNameIntentQuery(args: {
-  db: SqliteDatabase;
-  queryDefs: QueryDefs;
-  orExpr: string;
-  limit: number;
-  coverage: IndexCoverageMetrics;
-  languageFilter: string | undefined;
-  kind: string | undefined;
-}): TestNameIntentRow[] {
-  const { db, queryDefs, orExpr, limit, coverage, languageFilter, kind } = args;
-  if (coverage.testNameRows <= 0 || kind || languageFilter) return [];
-  return db.prepare(queryDefs.testNameSql).all(orExpr, ...queryDefs.testNameFilterParams, limit) as TestNameIntentRow[];
-}
-
 function collectAndConfirmedIds(args: {
   db: SqliteDatabase;
-  queryDefs: QueryDefs;
   andExpr: string | null;
-  symFilterParams: ReadonlyArray<unknown>;
+  filters: IntentSearchFilters;
   overFetch: number;
   coverage: IndexCoverageMetrics;
   out: Set<string>;
 }): void {
-  const { db, queryDefs, andExpr, symFilterParams, overFetch, coverage, out } = args;
+  const { db, andExpr, filters, overFetch, coverage, out } = args;
   if (andExpr === null || (coverage.summaryRows <= 0 && coverage.docstringRows <= 0)) return;
-  for (const row of runSymbolIntentQuery({
+  for (const row of searchIntentSymbolRows({
     db,
-    sql: queryDefs.summarySql,
-    expr: andExpr,
-    params: symFilterParams,
+    corpus: 'summary',
+    expression: andExpr,
+    filters,
     limit: overFetch,
     rowCount: coverage.summaryRows,
   })) {
     out.add(row.id);
   }
-  for (const row of runSymbolIntentQuery({
+  for (const row of searchIntentSymbolRows({
     db,
-    sql: queryDefs.docstringSql,
-    expr: andExpr,
-    params: symFilterParams,
+    corpus: 'docstring',
+    expression: andExpr,
+    filters,
     limit: overFetch,
     rowCount: coverage.docstringRows,
   })) {
@@ -693,16 +522,16 @@ function runIntentSearchPipeline(
   coverageMetrics: IndexCoverageMetrics,
 ): ToolOutcome {
   const { query, limit, kind, languageFilter, pathFilter, wasSanitized, originalQuery } = parsed;
-  const queryDefs = buildIntentSearchQueries(kind, languageFilter, pathFilter);
+  const filters: IntentSearchFilters = {};
+  if (kind !== undefined) filters.kind = kind;
+  if (languageFilter !== undefined) filters.language = languageFilter;
+  if (pathFilter !== undefined) filters.pathPrefix = pathFilter;
   const searchResults = executeIntentSearches({
     db: cg.db.getDb(),
     query,
     coverage: coverageMetrics,
-    queryDefs,
     limit,
-    symFilterParams: queryDefs.symFilterParams,
-    languageFilter,
-    kind,
+    filters,
   });
   if ('ok' in searchResults) return searchResults;
   const symbolMerged = mergeSymbolResults({
