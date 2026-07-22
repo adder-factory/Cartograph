@@ -200,8 +200,19 @@ Doctor verifies PostgreSQL 18+, connectivity, schema version, DML writes, DDL
 privileges for init/rebuild workflows, and pgvector availability when enabled.
 Status reports the active backend; PostgreSQL storage uses native GIN indexes
 and pgvector when available instead of SQLite-only sqlite-vec/RTree paths.
-Maintenance runs PostgreSQL `ANALYZE` after bulk writes so the PG18 planner can
-use fresh statistics for its newer index and scan paths.
+After a write-bearing index or sync, maintenance runs PostgreSQL `ANALYZE
+(SKIP_LOCKED)` only on relations in the active project schema so the PG18
+planner can use fresh statistics without touching other Cartograph projects in
+the shared database. `SKIP_LOCKED` avoids waiting when the initial relation lock
+is already held and reduces conflict risk, but PostgreSQL may still wait later
+on indexes or partitions. No-change PostgreSQL syncs skip manual analysis;
+PostgreSQL autovacuum remains responsible for routine tuple cleanup.
+
+`cartograph admin prune-store` is separate, operator-triggered logical cleanup:
+it evicts cold, unreferenced summary and embedding cache rows after the chosen
+retention window. Cartograph does not schedule it automatically, and it does
+not replace PostgreSQL vacuum/reindex maintenance when an installation already
+has physically bloated tables or HNSW indexes.
 
 ## Production Notes
 

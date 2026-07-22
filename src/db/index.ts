@@ -23,9 +23,14 @@ import {
   resolveDatabaseConfig,
   type DatabaseConfig,
 } from './database-config.js';
-import { PostgresAdapter } from './postgres-adapter.js';
+import { PostgresAdapter, readPostgresMutationEpoch } from './postgres-adapter.js';
 
 export type { SqliteDatabase, SqliteBackend } from './sqlite-adapter.js';
+
+/** Read the backend's affected-row epoch when it supports one. */
+export function readDatabaseMutationEpoch(db: SqliteDatabase): number | null {
+  return readPostgresMutationEpoch(db);
+}
 
 interface DatabaseOpenOptions {
   database?: CartographConfig['database'];
@@ -441,8 +446,19 @@ export function readPostgresSchemaSizeBytes(db: SqliteDatabase): number {
   return Number(n ?? 0);
 }
 
-/** Optimize database (vacuum and analyze). */
-export function dbOptimize(conn: DatabaseConnection): void {
+type DatabaseMaintenanceActivity = 'after-write' | 'idle';
+
+interface DatabaseMaintenanceConnection {
+  getBackend(): SqliteBackend;
+  getDb(): Pick<SqliteDatabase, 'exec' | 'pragma'>;
+}
+
+/** Optimize SQLite storage; PostgreSQL performs a schema-scoped statistics refresh. */
+export function dbOptimize(conn: DatabaseMaintenanceConnection): void {
+  if (conn.getBackend() === 'postgres') {
+    dbRunMaintenance(conn);
+    return;
+  }
   conn.getDb().exec('VACUUM');
   conn.getDb().exec('ANALYZE');
 }
@@ -457,7 +473,7 @@ const RECLAIM_FREELIST_RATIO = 0.25;
  *  SQLite returns one row object for read pragmas through the Bun
  *  adapter, while PostgreSQL compatibility pragmas return the same
  *  shape with zero values for SQLite-only settings. */
-function readPragmaInt(db: SqliteDatabase, name: string): number {
+function readPragmaInt(db: Pick<SqliteDatabase, 'pragma'>, name: string): number {
   const raw = db.pragma(name);
   const row = (Array.isArray(raw) ? raw[0] : raw) as Record<string, unknown> | undefined;
   const v = row ? Object.values(row)[0] : 0;
@@ -478,7 +494,7 @@ function readPragmaInt(db: SqliteDatabase, name: string): number {
  * file to INCREMENTAL, so this branch fires at most once per legacy DB
  * — afterwards it takes the cheap incremental path.
  */
-function dbReclaimFreePages(conn: DatabaseConnection): void {
+function dbReclaimFreePages(conn: DatabaseMaintenanceConnection): void {
   const db = conn.getDb();
   if (readPragmaInt(db, 'auto_vacuum') === 2 /* INCREMENTAL */) {
     db.exec('PRAGMA incremental_vacuum');
@@ -501,8 +517,38 @@ function dbReclaimFreePages(conn: DatabaseConnection): void {
  */
 const WAL_TRUNCATE_BUSY_TIMEOUT_MS = 250;
 
+/**
+ * PostgreSQL `ANALYZE` without a relation list walks every eligible table in
+ * the database, including unrelated Cartograph project schemas. Run one
+ * skip-locked statement per relation in only the active schema instead. This
+ * avoids waiting when the initial relation lock is already held and reduces
+ * conflict risk; PostgreSQL may still wait later on indexes or partitions.
+ */
+const POSTGRES_ANALYZE_CURRENT_SCHEMA_SQL = `
+DO $cartograph$
+DECLARE
+  relation_name text;
+BEGIN
+  FOR relation_name IN
+    SELECT c.relname
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = current_schema()
+      AND c.relkind IN ('r', 'p', 'm')
+    ORDER BY c.relname
+  LOOP
+    EXECUTE format(
+      'ANALYZE (SKIP_LOCKED) %I.%I',
+      current_schema(),
+      relation_name
+    );
+  END LOOP;
+END
+$cartograph$;
+`;
+
 function dbCheckpointWal(
-  conn: DatabaseConnection,
+  conn: DatabaseMaintenanceConnection,
   mode: 'PASSIVE' | 'TRUNCATE',
   opts: { busyTimeoutMs?: number } = {},
 ): void {
@@ -536,11 +582,21 @@ function dbCheckpointWal(
  * from staying large after post-hook write storms. It is attempted with
  * a short busy timeout so a long-lived reader cannot make routine sync
  * or index completion hang.
+ *
+ * PostgreSQL differs in two important ways: an idle sync does nothing, and a
+ * write-bearing pass analyzes only the active project schema with
+ * `SKIP_LOCKED` relation acquisition to reduce lock conflicts. A database-wide
+ * `ANALYZE` from every no-op watcher sync can otherwise cancel autovacuum across
+ * all project schemas and create unbounded dead-tuple growth.
  */
-export function dbRunMaintenance(conn: DatabaseConnection): void {
+export function dbRunMaintenance(
+  conn: DatabaseMaintenanceConnection,
+  activity: DatabaseMaintenanceActivity = 'after-write',
+): void {
   if (conn.getBackend() === 'postgres') {
+    if (activity === 'idle') return;
     try {
-      conn.getDb().exec('ANALYZE');
+      conn.getDb().exec(POSTGRES_ANALYZE_CURRENT_SCHEMA_SQL);
     } catch {
       /* ignore */
     }

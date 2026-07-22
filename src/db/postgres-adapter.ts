@@ -14,6 +14,8 @@ import { POSTGRES_DEFAULT_QUERY_TIMEOUT_MS, postgresSqlOptions, type DatabaseCon
 
 type PostgresAdapterOptions = DatabaseConfig & { provider: 'postgres' };
 
+const POSTGRES_MUTATION_EPOCHS = new WeakMap<PostgresAdapter, number>();
+
 interface PostgresAdapterState {
   worker: Worker;
   control: Int32Array;
@@ -146,6 +148,16 @@ export class PostgresAdapter implements SqliteDatabase {
     closeBridge(this.state);
     this.state = createBridge(this.options);
   }
+}
+
+/** Monotonic affected-row epoch used to propagate hook-worker writes. */
+export function readPostgresMutationEpoch(db: SqliteDatabase): number | null {
+  return db instanceof PostgresAdapter ? (POSTGRES_MUTATION_EPOCHS.get(db) ?? 0) : null;
+}
+
+function notePostgresChanges(adapter: PostgresAdapter, changes: number): void {
+  if (changes <= 0) return;
+  POSTGRES_MUTATION_EPOCHS.set(adapter, (POSTGRES_MUTATION_EPOCHS.get(adapter) ?? 0) + 1);
 }
 
 function terminateWorker(worker: Worker): void {
@@ -282,6 +294,7 @@ class PostgresStatement implements SqliteStatement {
 
   run(...params: unknown[]): { changes: number; lastInsertRowid: number | bigint } {
     const response = this.adapter.call(this.queryRequest('run', params));
+    notePostgresChanges(this.adapter, response.changes ?? 0);
     return {
       changes: response.changes ?? 0,
       lastInsertRowid: response.lastInsertRowid ?? 0,
@@ -292,6 +305,7 @@ class PostgresStatement implements SqliteStatement {
     if (this.readOnly) throw new Error('Read-only statements do not support batch execution.');
     if (paramSets.length === 0) return { changes: 0, lastInsertRowid: 0 };
     const response = this.adapter.call({ op: 'batch', sql: this.sql, mode: 'run', paramSets });
+    notePostgresChanges(this.adapter, response.changes ?? 0);
     return {
       changes: response.changes ?? 0,
       lastInsertRowid: response.lastInsertRowid ?? 0,

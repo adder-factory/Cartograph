@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { Cartograph } from '../src/index.js';
 import { DatabaseConnection } from '../src/db/index.js';
 import { ToolHandler } from '../src/mcp/tools.js';
@@ -132,6 +133,107 @@ describePostgres('PostgreSQL database provider', () => {
   // A `runDoctor` case below reads BUN_INSTALL via the global-link check
   // (issue #68); isolate it so the host's real `bun link` state can't leak.
   isolateBunInstall();
+
+  it('skips no-op sync maintenance and analyzes only the active schema after writes', async () => {
+    const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-maintenance-a-'));
+    const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-maintenance-b-'));
+    const nonce = `${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const schemaA = `cg_maintenance_a_${nonce}`;
+    const schemaB = `cg_maintenance_b_${nonce}`;
+    const admin = new Bun.SQL(POSTGRES_URL!);
+    let cgA: Cartograph | undefined;
+    let cgB: Cartograph | undefined;
+
+    try {
+      fs.mkdirSync(path.join(projectA, 'src'), { recursive: true });
+      fs.mkdirSync(path.join(projectB, 'src'), { recursive: true });
+      fs.writeFileSync(
+        path.join(projectA, 'src', 'index.ts'),
+        `export function helper(): number { return 42; }
+export function caller(): number { return helper(); }
+`,
+      );
+      fs.writeFileSync(path.join(projectB, 'src', 'index.ts'), 'export const unrelatedProbe = 1;\n');
+      initializeStableGitHistory(projectA);
+
+      cgA = Cartograph.initSync(projectA, {
+        config: {
+          database: { provider: 'postgres', url: POSTGRES_URL!, schema: schemaA },
+          enableWatcher: false,
+          include: ['src/**/*.ts'],
+        },
+      });
+      cgB = Cartograph.initSync(projectB, {
+        config: {
+          database: { provider: 'postgres', url: POSTGRES_URL!, schema: schemaB },
+          enableWatcher: false,
+          include: ['src/**/*.ts'],
+        },
+      });
+
+      const indexed = await cgA.indexAll({ summarize: false });
+      expect(indexed.success).toBe(true);
+
+      const beforeIdleA = readAnalyzeCount(cgA.db, schemaA);
+      const beforeIdleB = readAnalyzeCount(cgA.db, schemaB);
+      const idle = await cgA.sync({ summarize: false });
+
+      expect(idle).toMatchObject({ filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0 });
+      expect(readAnalyzeCount(cgA.db, schemaA)).toBe(beforeIdleA);
+      expect(readAnalyzeCount(cgA.db, schemaB)).toBe(beforeIdleB);
+
+      const helper = cgA.db
+        .getDb()
+        .prepare("SELECT id, body_hash FROM nodes WHERE name = 'helper' AND kind = 'function'")
+        .get<{ id: string; body_hash: string }>();
+      expect(helper?.body_hash).not.toBe('');
+      const assignmentWrite = cgA.db
+        .getDb()
+        .prepare(
+          `INSERT INTO role_assignments (node_id, role, role_model, body_hash, generated_at)
+           VALUES (?, 'business_logic', 'maintenance-test', ?, 0)
+           ON CONFLICT(node_id) DO UPDATE SET
+             role = excluded.role,
+             role_model = excluded.role_model,
+             body_hash = excluded.body_hash`,
+        )
+        .run(helper!.id, helper!.body_hash);
+      const roleClearWrite = cgA.db.getDb().prepare('UPDATE nodes SET role = NULL WHERE id = ?').run(helper!.id);
+      expect(assignmentWrite.changes).toBe(1);
+      expect(roleClearWrite.changes).toBe(1);
+      const beforeHookOnlyA = readAnalyzeCount(cgA.db, schemaA);
+      const beforeHookOnlyB = readAnalyzeCount(cgA.db, schemaB);
+
+      const hookOnly = await cgA.sync({ summarize: false });
+
+      expect(hookOnly).toMatchObject({ filesAdded: 0, filesModified: 0, filesRemoved: 0, nodesUpdated: 0 });
+      const restored = cgA.db
+        .getDb()
+        .prepare('SELECT role FROM nodes WHERE id = ?')
+        .get<{ role: string | null }>(helper!.id);
+      expect(restored?.role).toBe('business_logic');
+      expect(readAnalyzeCount(cgA.db, schemaA)).toBeGreaterThan(beforeHookOnlyA);
+      expect(readAnalyzeCount(cgA.db, schemaB)).toBe(beforeHookOnlyB);
+
+      fs.writeFileSync(path.join(projectA, 'src', 'index.ts'), 'export const maintenanceProbe = 2;\n');
+      const writeBearing = await cgA.sync({ summarize: false });
+
+      expect(writeBearing.filesModified).toBe(1);
+      expect(readAnalyzeCount(cgA.db, schemaA)).toBeGreaterThan(beforeIdleA);
+      expect(readAnalyzeCount(cgA.db, schemaB)).toBe(beforeIdleB);
+    } finally {
+      cgA?.close();
+      cgB?.close();
+      try {
+        await admin.unsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schemaA)} CASCADE`).simple();
+        await admin.unsafe(`DROP SCHEMA IF EXISTS ${quoteIdent(schemaB)} CASCADE`).simple();
+      } finally {
+        await admin.close();
+        fs.rmSync(projectA, { recursive: true, force: true });
+        fs.rmSync(projectB, { recursive: true, force: true });
+      }
+    }
+  });
 
   it('discovers the active PostgreSQL schema through cartograph_sql', async () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-sql-schema-test-'));
@@ -806,6 +908,36 @@ describePgvector('PostgreSQL pgvector acceleration', () => {
 
 function quoteIdent(value: string): string {
   return `"${value.replace(/"/g, '""')}"`;
+}
+
+function readAnalyzeCount(connection: DatabaseConnection, schema: string): number {
+  connection.getDb().prepare('SELECT pg_stat_clear_snapshot()').get();
+  const row = connection
+    .getDb()
+    .prepare(
+      `SELECT COALESCE(SUM(analyze_count), 0)::bigint AS analyze_count
+       FROM pg_stat_user_tables
+       WHERE schemaname = ?`,
+    )
+    .get<{ analyze_count: bigint | number | string }>(schema);
+  if (!row) throw new Error(`PostgreSQL did not return analyze counters for schema ${schema}`);
+  return Number(row.analyze_count);
+}
+
+function initializeStableGitHistory(projectRoot: string): void {
+  const git = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: projectRoot, stdio: ['ignore', 'ignore', 'pipe'] });
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'cartograph-test@example.com');
+  git('config', 'user.name', 'Cartograph Test');
+  git('config', 'commit.gpgsign', 'false');
+  fs.writeFileSync(path.join(projectRoot, 'history.txt'), 'first\n');
+  git('add', '.');
+  git('commit', '-q', '-m', 'initial');
+  fs.writeFileSync(path.join(projectRoot, 'history.txt'), 'second\n');
+  git('add', 'history.txt');
+  git('commit', '-q', '-m', 'second');
 }
 
 function restoreEnv(name: string, value: string | undefined): void {

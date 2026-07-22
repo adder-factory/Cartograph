@@ -22,6 +22,7 @@
 import type { IndexHook, IndexHookContext, IndexHookOutcome } from './types.js';
 import type { SyncResult } from '../extraction/index.js';
 import { logDebug, logWarn } from '../errors.js';
+import { readDatabaseMutationEpoch } from '../db/index.js';
 import { clearMinerFileTextCache } from './file-text-cache.js';
 
 /**
@@ -287,18 +288,23 @@ function toError(err: unknown): Error {
  * handler for this phase. Factored out of {@link runHookPhase} so
  * concurrent and sequential hook groups share one invocation path.
  */
-async function invokeOneHook(
-  hook: IndexHook,
-  phase: IndexHookOutcome['phase'],
-  getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
-): Promise<IndexHookOutcome | null> {
+interface HookPhaseRunner {
+  readonly phase: IndexHookOutcome['phase'];
+  readonly getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined;
+  readonly getMutationEpoch: () => number | null;
+}
+
+async function invokeOneHook(hook: IndexHook, runner: HookPhaseRunner): Promise<IndexHookOutcome | null> {
+  const { phase, getInvoker, getMutationEpoch } = runner;
   const invoker = getInvoker(hook);
   if (invoker === undefined) return null;
   const start = Date.now();
+  const mutationEpochBefore = getMutationEpoch();
   logDebug(`index-hook "${hook.name}" ${phase}: starting`);
   try {
     await runWithTimeout(invoker, HOOK_TIMEOUT_MS, `index-hook "${hook.name}" ${phase}`);
     const durationMs = Date.now() - start;
+    const mutated = hookRequestsMaintenance(hook, mutationEpochBefore, getMutationEpoch());
     logDebug(`index-hook "${hook.name}" ${phase}: done in ${durationMs}ms`);
     // B9 (2026-05-24) — surface non-trivial hooks at info level so
     // the long-running postHook isn't a silent wall. Threshold at
@@ -310,12 +316,23 @@ async function invokeOneHook(
       // stdout clean while still surfacing long-running hooks.
       writePostHookLog(`[postHook] ${hook.name} ${phase}: ${durationMs}ms`);
     }
-    return { name: hook.name, phase, durationMs };
+    return { name: hook.name, phase, durationMs, ...(mutated ? { mutated: true } : {}) };
   } catch (err) {
     const e = toError(err);
+    const mutated = hookRequestsMaintenance(hook, mutationEpochBefore, getMutationEpoch());
     logWarn(`index-hook "${hook.name}" ${phase} failed: ${e.message}`);
-    return { name: hook.name, phase, durationMs: Date.now() - start, error: e };
+    return {
+      name: hook.name,
+      phase,
+      durationMs: Date.now() - start,
+      ...(mutated ? { mutated: true } : {}),
+      error: e,
+    };
   }
+}
+
+function hookRequestsMaintenance(hook: IndexHook, before: number | null, after: number | null): boolean {
+  return hook.requestPostgresMaintenanceAfterWrites !== false && before !== null && after !== null && before !== after;
 }
 
 /** Threshold (ms) above which a per-hook completion surfaces at info
@@ -346,12 +363,18 @@ function writePostHookLog(message: string): void {
  * site and every test that references them by name.
  */
 async function runHookPhase(
+  ctx: IndexHookContext,
   phase: IndexHookOutcome['phase'],
   getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
 ): Promise<IndexHookOutcome[]> {
   const out: IndexHookOutcome[] = [];
+  const runner: HookPhaseRunner = {
+    phase,
+    getInvoker,
+    getMutationEpoch: () => readDatabaseMutationEpoch(ctx.db.getDb()),
+  };
   try {
-    return await runHookGroups(out, phase, getInvoker);
+    return await runHookGroups(out, runner);
   } finally {
     // The miner file-text cache is phase-scoped: release the corpus
     // text immediately, whether the phase completed or threw.
@@ -359,11 +382,8 @@ async function runHookPhase(
   }
 }
 
-async function runHookGroups(
-  out: IndexHookOutcome[],
-  phase: IndexHookOutcome['phase'],
-  getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
-): Promise<IndexHookOutcome[]> {
+async function runHookGroups(out: IndexHookOutcome[], runner: HookPhaseRunner): Promise<IndexHookOutcome[]> {
+  const { phase } = runner;
   for (const { group, hooks, concurrent } of HOOK_GROUPS) {
     const groupStart = Date.now();
     // B9 (2026-05-24) — group start marker so the per-group progress
@@ -375,8 +395,8 @@ async function runHookGroups(
     // bodies all "finished" at the group's end.
     writePostHookLog(`[postHook] group ${group} ${phase}: starting (${hooks.length} hooks)`);
     const groupResults = concurrent
-      ? await Promise.all(hooks.map((hook) => invokeOneHook(hook, phase, getInvoker)))
-      : await runHooksSequentially(hooks, phase, getInvoker);
+      ? await Promise.all(hooks.map((hook) => invokeOneHook(hook, runner)))
+      : await runHooksSequentially(hooks, runner);
     for (const r of groupResults) {
       if (r !== null) out.push(r);
     }
@@ -392,12 +412,11 @@ async function runHookGroups(
  *  attributable. Do not "parallelize" this back. */
 function runHooksSequentially(
   hooks: readonly IndexHook[],
-  phase: IndexHookOutcome['phase'],
-  getInvoker: (hook: IndexHook) => (() => Promise<void> | void) | undefined,
+  runner: HookPhaseRunner,
 ): Promise<Array<IndexHookOutcome | null>> {
   return hooks.reduce<Promise<Array<IndexHookOutcome | null>>>(async (chain, hook) => {
     const results = await chain;
-    results.push(await invokeOneHook(hook, phase, getInvoker));
+    results.push(await invokeOneHook(hook, runner));
     return results;
   }, Promise.resolve([]));
 }
@@ -408,12 +427,12 @@ function runHooksSequentially(
  * index. Returns per-hook outcomes for diagnostics.
  */
 export function runAfterIndexAll(ctx: IndexHookContext): Promise<IndexHookOutcome[]> {
-  return runHookPhase('indexAll', (hook) => (hook.afterIndexAll ? () => hook.afterIndexAll!(ctx) : undefined));
+  return runHookPhase(ctx, 'indexAll', (hook) => (hook.afterIndexAll ? () => hook.afterIndexAll!(ctx) : undefined));
 }
 
 /** Same shape, for `afterSync`. */
 export function runAfterSync(ctx: IndexHookContext, result: SyncResult): Promise<IndexHookOutcome[]> {
-  return runHookPhase('sync', (hook) => (hook.afterSync ? () => hook.afterSync!(ctx, result) : undefined));
+  return runHookPhase(ctx, 'sync', (hook) => (hook.afterSync ? () => hook.afterSync!(ctx, result) : undefined));
 }
 
 /** Read access for tests + diagnostic tools. */

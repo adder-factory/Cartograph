@@ -63,10 +63,11 @@ describe('hook worker IPC contract', () => {
     const done = parseHookWorkerReply({
       type: 'hooks-done',
       id: 9,
-      outcomes: [{ name: 'centrality', phase: 'sync', durationMs: 12 }],
+      outcomes: [{ name: 'centrality', phase: 'sync', durationMs: 12, mutated: true }],
     });
     expect(done.type).toBe('hooks-done');
     expect(done.outcomes[0]?.name).toBe('centrality');
+    expect(done.outcomes[0]?.mutated).toBe(true);
 
     expect(() =>
       parseHookWorkerReply({

@@ -329,6 +329,7 @@ function fromWireOutcome(w: HookWorkerWireOutcome): IndexHookOutcome {
     name: w.name,
     phase: w.phase,
     durationMs: w.durationMs,
+    ...(w.mutated ? { mutated: true } : {}),
     ...(w.error ? { error: new Error(w.error) } : {}),
   };
 }

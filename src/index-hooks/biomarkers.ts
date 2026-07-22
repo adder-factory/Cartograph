@@ -30,6 +30,11 @@ export function biomarkerSyncFilePaths(result: SyncResult, coldCache: boolean): 
 
 export const HOOK: IndexHook = {
   name: 'biomarkers',
+  // Cross-file rules intentionally clear and re-append their rows on every
+  // pass, even when the source tree is clean. Treating that reconciliation as
+  // a reason to run manual ANALYZE would recreate the no-op sync maintenance
+  // storm; PostgreSQL autovacuum owns statistics for this routine churn.
+  requestPostgresMaintenanceAfterWrites: false,
   async afterIndexAll(ctx) {
     if (ctx.config.enableBiomarkers === false) return;
     const result = await analyseProject(ctx.queries, ctx.projectRoot);

@@ -77,7 +77,12 @@ const getMetadataQuery = defineQuery({
 });
 
 const setMetadataQuery = defineQuery({
-  sql: 'INSERT INTO project_metadata (key, value, updated_at) VALUES (@key, @value, @updatedAt) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+  sql: `INSERT INTO project_metadata (key, value, updated_at)
+        VALUES (@key, @value, @updatedAt)
+        ON CONFLICT(key) DO UPDATE SET
+          value = excluded.value,
+          updated_at = excluded.updated_at
+        WHERE project_metadata.value <> excluded.value`,
   params: z.object({ key: z.string(), value: z.string(), updatedAt: z.number() }),
   row: z.never(),
 });
@@ -131,7 +136,7 @@ export function getMetadata(qb: QueryBuilder, key: MetadataKey): string | null {
   return row?.value ?? null;
 }
 
-/** Upsert a metadata key/value pair, stamping `updated_at = now`. */
+/** Upsert a metadata value, stamping `updated_at` only when the value changes. */
 export function setMetadata(qb: QueryBuilder, key: MetadataKey, value: string): void {
   qb.queries.setMetadata ??= setMetadataQuery(qb.db);
   qb.queries.setMetadata.run({ key, value, updatedAt: Date.now() });

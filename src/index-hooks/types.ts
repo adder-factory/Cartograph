@@ -41,6 +41,14 @@ export interface IndexHook {
   readonly name: string;
 
   /**
+   * Whether affected PostgreSQL rows from this hook should request the
+   * post-sync statistics refresh. Defaults to true. Set false only for a hook
+   * whose normal no-op reconciliation intentionally rewrites rows and should
+   * leave statistics maintenance to autovacuum.
+   */
+  readonly requestPostgresMaintenanceAfterWrites?: boolean;
+
+  /**
    * Run after a full `indexAll` completes successfully. Treat
    * this as a clean-slate signal — clear any cached state your
    * pass owns and re-derive from scratch.
@@ -60,6 +68,8 @@ export interface IndexHookOutcome {
   readonly name: string;
   readonly phase: 'indexAll' | 'sync';
   readonly durationMs: number;
+  /** True when this hook reported maintenance-relevant PostgreSQL DML rows. */
+  readonly mutated?: boolean;
   /** Defined when the hook threw; the runner caught it. */
   readonly error?: Error;
 }

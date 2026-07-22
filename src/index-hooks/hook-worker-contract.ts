@@ -65,6 +65,7 @@ const hookWorkerWireOutcomeSchema = z.strictObject({
   name: z.string().min(1),
   phase: z.enum(['sync', 'indexAll']),
   durationMs: z.number().nonnegative(),
+  mutated: z.boolean().optional(),
   error: z.string().optional(),
 });
 

@@ -610,8 +610,8 @@ function inferLastInsertRowid(rows: unknown[]): number {
 }
 
 function numericMeta(rows: unknown, key: string): number | undefined {
-  if (!isPlainObject(rows)) return undefined;
-  const value = rows[key];
+  if ((typeof rows !== 'object' && typeof rows !== 'function') || rows === null) return undefined;
+  const value = Reflect.get(rows, key);
   if (typeof value === 'number') return value;
   if (typeof value === 'string' && /^-?\d+$/.test(value)) return Number(value);
   return undefined;

@@ -13,7 +13,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { DatabaseConnection, dbRunMaintenance } from '../src/db/index.js';
+import { DatabaseConnection, dbOptimize, dbRunMaintenance } from '../src/db/index.js';
 import { QueryBuilder } from '../src/db/queries.js';
 import type { Node } from '../src/types.js';
 
@@ -188,6 +188,54 @@ describe('runMaintenance', () => {
     // exec(). runMaintenance must still not propagate.
     db.close();
     expect(() => dbRunMaintenance(db)).not.toThrow();
+  });
+
+  function postgresMaintenanceConnection(statements: string[]) {
+    return {
+      getBackend(): 'postgres' {
+        return 'postgres';
+      },
+      getDb() {
+        return {
+          exec(sql: string): void {
+            statements.push(sql);
+          },
+          pragma<T = unknown>(): T {
+            throw new Error('PostgreSQL maintenance must not read SQLite pragmas');
+          },
+        };
+      },
+    };
+  }
+
+  it('does not analyze PostgreSQL after an idle sync', () => {
+    const statements: string[] = [];
+
+    dbRunMaintenance(postgresMaintenanceConnection(statements), 'idle');
+
+    expect(statements).toEqual([]);
+  });
+
+  it('analyzes only the current PostgreSQL schema after writes with skip-locked relation acquisition', () => {
+    const statements: string[] = [];
+
+    dbRunMaintenance(postgresMaintenanceConnection(statements), 'after-write');
+
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain('n.nspname = current_schema()');
+    expect(statements[0]).toContain("c.relkind IN ('r', 'p', 'm')");
+    expect(statements[0]).toContain('ANALYZE (SKIP_LOCKED)');
+    expect(statements[0]?.trim()).not.toBe('ANALYZE');
+  });
+
+  it('routes explicit PostgreSQL optimization through scoped maintenance', () => {
+    const statements: string[] = [];
+
+    dbOptimize(postgresMaintenanceConnection(statements));
+
+    expect(statements).toHaveLength(1);
+    expect(statements[0]).toContain('n.nspname = current_schema()');
+    expect(statements[0]).toContain('ANALYZE (SKIP_LOCKED)');
   });
 });
 

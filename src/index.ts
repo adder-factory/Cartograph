@@ -914,17 +914,17 @@ export class Cartograph extends CartographCore {
           // Friction #66 self-heal — see indexAll's call site.
           applyExtractionLogicVersionHeal(this.queries);
           const syncResult = await this.internals.orchestrator.sync(options.onProgress);
-          await cgSyncResolveReferences(this, syncResult, options.onProgress);
-          await cgRunHookPhase(this, 'sync', syncResult);
-          // Run maintenance on every sync, including no-op syncs. It is
-          // cheap in steady state (PRAGMA optimize / incremental_vacuum
-          // over a small freelist / short-timeout WAL truncate), and the
-          // one-time legacy-DB full VACUUM in dbReclaimFreePages is
-          // self-gated on the freelist ratio. Gating this behind a
-          // changed-files check meant a clean-tree (no-op) sync never
-          // reclaimed pages, so a bloated legacy auto_vacuum=0 DB could
-          // never self-heal on a repo with no pending edits.
-          dbRunMaintenance(this.db);
+          const resolverMutated = await cgSyncResolveReferences(this, syncResult, options.onProgress);
+          const hookOutcomes = await cgRunHookPhase(this, 'sync', syncResult);
+          // SQLite still runs cheap reclaim maintenance on a no-op sync so a
+          // clean-tree legacy DB can self-heal. PostgreSQL receives the
+          // activity signal and skips idle maintenance; after writes it
+          // analyzes only the active schema with skip-locked relation
+          // acquisition to reduce conflicts with autovacuum.
+          dbRunMaintenance(
+            this.db,
+            cgSyncHasDatabaseWrites(syncResult, resolverMutated, hookOutcomes) ? 'after-write' : 'idle',
+          );
           return syncResult;
         } finally {
           restoreConfig();
@@ -1075,6 +1075,17 @@ function cgApplySyncSideEffects(cg: Cartograph, result: SyncResult, options: Ind
   }
 }
 
+function cgSyncHasDatabaseWrites(
+  result: SyncResult,
+  resolverMutated: boolean,
+  hookOutcomes: readonly IndexHookOutcome[],
+): boolean {
+  const structural =
+    result.filesAdded > 0 || result.filesModified > 0 || result.filesRemoved > 0 || result.nodesUpdated > 0;
+  const observedHookMutation = hookOutcomes.some((outcome) => outcome.mutated === true);
+  return structural || resolverMutated || observedHookMutation;
+}
+
 /**
  * Resolve unresolved references after a sync. Three modes, in priority order:
  *
@@ -1105,14 +1116,16 @@ async function cgSyncResolveReferences(
   self: Cartograph,
   result: SyncResult,
   onProgress?: (info: IndexProgress) => void,
-): Promise<void> {
+): Promise<boolean> {
   const noFileMovement = result.filesAdded === 0 && result.filesModified === 0 && result.filesRemoved === 0;
   const willDrainStranded = noFileMovement && cgEdgesAppearDegenerate(self);
   // Skip work entirely when nothing moved AND the index isn't in the
   // known-degenerate state — preserves the steady-state "0 work, 0
   // churn" perf optimization (every cache hit on a long-lived server
   // would otherwise force a `warmCaches` repopulate next call).
-  if (noFileMovement && !willDrainStranded) return;
+  if (noFileMovement && !willDrainStranded) return false;
+
+  let resolverMutated = false;
 
   // Resolver caches `knownNames` / `knownFiles` at first warm and reuses
   // them across calls. ANY mutation invalidates them: adds/modifies bring
@@ -1123,33 +1136,7 @@ async function cgSyncResolveReferences(
   // next resolve.
   self.internals.resolver.clearCaches();
 
-  if (result.filesAdded > 0 || result.filesModified > 0) {
-    if (result.changedFilePaths) {
-      // Pass A: re-resolve refs LIVING IN the changed files (the
-      // canonical case — file edited, its own unresolved refs may now
-      // resolve against newly-stable targets).
-      const fromChangedFiles = getUnresolvedReferencesByFiles(self.queries, result.changedFilePaths);
-      // Pass B: re-resolve refs in OTHER files whose name matches a
-      // symbol DEFINED in the changed files. Catches the rename and
-      // new-export cases — `embedAllSummaries` → `embedAllNodes` had
-      // call sites in 4 files unmodified by the rename commit; without
-      // this pass their refs sat stale in `unresolved_refs` until a
-      // human ran `admin index --force`. SQL filters out the file_path
-      // overlap so a ref isn't reprocessed twice.
-      const fromDefiningFiles = getUnresolvedReferencesByDefiningFiles(self.queries, result.changedFilePaths);
-      const merged = [...fromChangedFiles, ...fromDefiningFiles];
-      onProgress?.({ phase: 'resolving', current: 0, total: merged.length });
-      self.internals.resolver.resolveAndPersist(merged, (current, total) => {
-        onProgress?.({ phase: 'resolving', current, total });
-      });
-    } else {
-      const unresolvedCount = getUnresolvedReferencesCount(self.queries);
-      onProgress?.({ phase: 'resolving', current: 0, total: unresolvedCount });
-      await self.internals.resolver.resolveAndPersistBatched((current, total) => {
-        onProgress?.({ phase: 'resolving', current, total });
-      });
-    }
-  }
+  resolverMutated = await cgResolveReferencesAfterFileChanges(self, result, onProgress);
 
   // Degraded-edges safety net. Pass A/B is scoped to changedFilePaths,
   // so refs reconstructed during a prior file deletion / partial sync
@@ -1169,8 +1156,39 @@ async function cgSyncResolveReferences(
       await self.internals.resolver.resolveAndPersistBatched((current, total) => {
         onProgress?.({ phase: 'resolving', current, total });
       });
+      resolverMutated = true;
     }
   }
+  return resolverMutated;
+}
+
+async function cgResolveReferencesAfterFileChanges(
+  self: Cartograph,
+  result: SyncResult,
+  onProgress?: (info: IndexProgress) => void,
+): Promise<boolean> {
+  if (result.filesAdded === 0 && result.filesModified === 0) return false;
+  if (result.changedFilePaths) {
+    // Pass A: refs living in changed files. Pass B: refs in other files
+    // whose name matches a symbol defined in a changed file.
+    const fromChangedFiles = getUnresolvedReferencesByFiles(self.queries, result.changedFilePaths);
+    const fromDefiningFiles = getUnresolvedReferencesByDefiningFiles(self.queries, result.changedFilePaths);
+    const merged = [...fromChangedFiles, ...fromDefiningFiles];
+    onProgress?.({ phase: 'resolving', current: 0, total: merged.length });
+    if (merged.length === 0) return false;
+    self.internals.resolver.resolveAndPersist(merged, (current, total) => {
+      onProgress?.({ phase: 'resolving', current, total });
+    });
+    return true;
+  }
+
+  const unresolvedCount = getUnresolvedReferencesCount(self.queries);
+  onProgress?.({ phase: 'resolving', current: 0, total: unresolvedCount });
+  if (unresolvedCount === 0) return false;
+  await self.internals.resolver.resolveAndPersistBatched((current, total) => {
+    onProgress?.({ phase: 'resolving', current, total });
+  });
+  return true;
 }
 
 /**

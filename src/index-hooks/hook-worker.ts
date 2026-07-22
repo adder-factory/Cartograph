@@ -78,6 +78,7 @@ function toWireOutcome(o: IndexHookOutcome): HookWorkerWireOutcome {
     name: o.name,
     phase: o.phase,
     durationMs: o.durationMs,
+    ...(o.mutated ? { mutated: true } : {}),
     ...(o.error ? { error: o.error.message } : {}),
   };
 }
