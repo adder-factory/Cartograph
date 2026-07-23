@@ -1,11 +1,16 @@
 //! PostgreSQL-only persistence and capability checks for Cartograph v2.
 
 mod capabilities;
+mod managed;
 
 use std::str::FromStr;
 
 pub use capabilities::{CapabilityCheck, CapabilityReport, CheckStatus, probe_capabilities};
 use cartograph_config::DatabaseSettings;
+pub use managed::{
+    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedContainerState, ManagedDatabase,
+    ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,
+};
 use secrecy::ExposeSecret;
 use sqlx_core::pool::PoolOptions;
 use sqlx_postgres::{PgConnectOptions, PgPool, Postgres};

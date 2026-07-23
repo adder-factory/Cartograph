@@ -271,6 +271,36 @@ The checked-in Compose file is a development harness only. The production CLI
 lifecycle will use the Docker/Podman command API directly so users do not need a
 Compose plugin.
 
+The M1 preview now implements the Docker CLI path in Rust for
+`cartograph-v2 db start|status|logs|stop`. It derives project-private resource
+names from a BLAKE3 hash of the canonical root, labels and verifies container
+and volume ownership, refuses foreign name collisions, generates a private
+password-only file, publishes only to loopback, waits under a deadline, creates
+both required extensions, and runs the live capability doctor. The password is
+copied into the stopped container and referenced by `POSTGRES_PASSWORD_FILE`;
+it is never stored directly in container environment metadata. The lifecycle
+pins a Docker endpoint after proving it local, serializes same-project mutations
+with an OS file lock, distinguishes paused/restarting states, and surfaces any
+rollback failure. Start and stop remain idempotent.
+
+Owned container labels are necessary but not sufficient: every existing
+container must mount the exact project-owned named volume read/write at
+`/var/lib/postgresql`, and the volume labels are revalidated before reuse. An
+orphaned initialized volume without its original password file fails closed;
+Cartograph never generates a replacement password for old PGDATA.
+
+On Unix, secret state uses a mode-0700 directory and mode-0600 bounded regular
+files opened with no-follow/nonblocking semantics. Group/world-writable
+ancestors, state symlinks, and macOS extended ACLs are rejected. Cold image
+pulls have a separate longer bound; the readiness deadline covers TCP health,
+extension creation, driver connection, and every capability query.
+
+This is not the complete lifecycle yet. Removal, backup/restore, extension/image
+upgrade, lease/owner metadata, and Podman support remain M1 work. Credential
+creation currently fails closed on non-Unix hosts until a tested Windows ACL
+implementation can prove equivalent privacy; v2 must not silently write a
+less-protected secret file.
+
 ## ParadeDB durability and licensing boundary
 
 As of the verification date, ParadeDB warns that its Community BM25 index lacks

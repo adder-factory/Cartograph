@@ -22,6 +22,13 @@ const MAX_CONNECTIONS_LIMIT: u32 = 64;
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 5_000;
 const MAX_ACQUIRE_TIMEOUT_MS: u64 = 120_000;
 
+struct BoundedIntegerInput<'a, T> {
+    key: &'static str,
+    raw: Option<&'a str>,
+    default: T,
+    maximum: T,
+}
+
 /// Validated Postgres-only database settings.
 #[derive(Clone)]
 pub struct DatabaseSettings {
@@ -63,18 +70,18 @@ impl DatabaseSettings {
         acquire_timeout_ms: Option<&str>,
     ) -> Result<Self, ConfigError> {
         validate_database_url(database_url)?;
-        let max_connections = parse_bounded_nonzero_u32(
-            DATABASE_MAX_CONNECTIONS_ENV,
-            max_connections,
-            DEFAULT_MAX_CONNECTIONS,
-            MAX_CONNECTIONS_LIMIT,
-        )?;
-        let acquire_timeout_ms = parse_bounded_nonzero_u64(
-            DATABASE_ACQUIRE_TIMEOUT_MS_ENV,
-            acquire_timeout_ms,
-            DEFAULT_ACQUIRE_TIMEOUT_MS,
-            MAX_ACQUIRE_TIMEOUT_MS,
-        )?;
+        let max_connections = parse_bounded_nonzero_u32(BoundedIntegerInput {
+            key: DATABASE_MAX_CONNECTIONS_ENV,
+            raw: max_connections,
+            default: DEFAULT_MAX_CONNECTIONS,
+            maximum: MAX_CONNECTIONS_LIMIT,
+        })?;
+        let acquire_timeout_ms = parse_bounded_nonzero_u64(BoundedIntegerInput {
+            key: DATABASE_ACQUIRE_TIMEOUT_MS_ENV,
+            raw: acquire_timeout_ms,
+            default: DEFAULT_ACQUIRE_TIMEOUT_MS,
+            maximum: MAX_ACQUIRE_TIMEOUT_MS,
+        })?;
 
         Ok(Self {
             url: SecretString::from(database_url.to_owned()),
@@ -141,40 +148,32 @@ fn validate_database_url(database_url: &str) -> Result<(), ConfigError> {
 }
 
 fn parse_bounded_nonzero_u32(
-    key: &'static str,
-    raw: Option<&str>,
-    default: u32,
-    maximum: u32,
+    input: BoundedIntegerInput<'_, u32>,
 ) -> Result<NonZeroU32, ConfigError> {
-    let value = match raw {
+    let value = match input.raw {
         Some(raw) => raw.parse::<u32>().ok(),
-        None => Some(default),
+        None => Some(input.default),
     }
-    .filter(|value| *value <= maximum)
+    .filter(|value| *value <= input.maximum)
     .and_then(NonZeroU32::new)
     .ok_or(ConfigError::InvalidBoundedInteger {
-        key,
+        key: input.key,
         minimum: 1,
-        maximum: u64::from(maximum),
+        maximum: u64::from(input.maximum),
     })?;
     Ok(value)
 }
 
-fn parse_bounded_nonzero_u64(
-    key: &'static str,
-    raw: Option<&str>,
-    default: u64,
-    maximum: u64,
-) -> Result<u64, ConfigError> {
-    match raw {
+fn parse_bounded_nonzero_u64(input: BoundedIntegerInput<'_, u64>) -> Result<u64, ConfigError> {
+    match input.raw {
         Some(raw) => raw.parse::<u64>().ok(),
-        None => Some(default),
+        None => Some(input.default),
     }
-    .filter(|value| (1..=maximum).contains(value))
+    .filter(|value| (1..=input.maximum).contains(value))
     .ok_or(ConfigError::InvalidBoundedInteger {
-        key,
+        key: input.key,
         minimum: 1,
-        maximum,
+        maximum: input.maximum,
     })
 }
 

@@ -66,6 +66,8 @@ This is the durable continuation point for the v2 rewrite. Read
 - Hardened ParadeDB development harness: `9d9119e`
 - The architecture and this handoff are checkpointed immediately after those
   commits on the same branch.
+- Rust/ParadeDB CI workflow: `e3158cb`; [run 29979753392](https://github.com/adder-factory/cartograph/actions/runs/29979753392)
+  passed both the quality/no-SQLite job and the digest-pinned live database job.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
 ## Initial Rust slice
@@ -131,6 +133,64 @@ docker-compose -f deploy/paradedb/docker-compose.yml stop
 ```
 
 Never run `down -v` unless intentionally destroying the v2 development data.
+
+## M1 managed lifecycle slice
+
+M1 adds the first user-facing Rust lifecycle:
+
+```sh
+cargo run -p cartograph-cli -- db status --format json
+cargo run -p cartograph-cli -- db start --wait-seconds 90
+cargo run -p cartograph-cli -- db logs --tail 50
+cargo run -p cartograph-cli -- db stop
+```
+
+Implemented invariants:
+
+- deterministic per-project container and volume names reveal no project path;
+- both resources carry and verify managed/project ownership labels;
+- existing containers must mount the exact owned named volume read/write at
+  `/var/lib/postgresql`, and existing volume labels are revalidated;
+- foreign same-name containers/volumes are refused without mutating the foreign
+  Docker resource;
+- a per-project OS file lock serializes lifecycle mutations across agents and
+  processes;
+- a 256-bit random credential is written atomically and reused;
+- the password file is a bounded regular file opened no-follow/nonblocking,
+  mode 0600 inside a mode-0700 state directory; writable ancestors, symlinks,
+  and macOS extended ACLs are rejected;
+- non-Unix creation fails closed pending tested Windows ACL support;
+- Docker receives the password through `container cp`; container metadata has
+  only `POSTGRES_PASSWORD_FILE=/tmp/cartograph-postgres-password`, not the
+  password value or a secret-bearing env-file argument;
+- non-UTF-8 Unix project paths are preserved as OS strings through `docker cp`;
+- an existing volume without its original password file is refused instead of
+  generating a password that cannot unlock the initialized PostgreSQL data;
+- the active Docker endpoint is proven local once and pinned with explicit
+  `--host` arguments for every later command, preventing context-switch races;
+- ports are checked before creation/restart and published only on loopback;
+- cold digest pulls have a separate 15-minute bound, ordinary Docker commands
+  have a 30-second bound, and the requested readiness deadline covers TCP
+  health, extension setup, connection, and capability queries;
+- normal stop has a 45-second command budget around Docker's 30-second
+  PostgreSQL grace period;
+- health probes TCP explicitly so PostgreSQL's temporary initialization socket
+  cannot produce a false healthy result;
+- a start-created/restarted/unpaused container is restored to a safe prior
+  state if readiness fails, and rollback failure is surfaced;
+- paused and restart-looping containers have explicit status/stop behavior;
+- successful start creates `pg_search`/`vector` and runs all six live doctor
+  checks;
+- status is read-only, logs are bounded, and start/stop are idempotent.
+
+Local live evidence passed for create, healthy status, second start reuse,
+bounded non-empty logs, password-free container metadata, mode 0600/0700,
+same-project lock refusal, stop, stopped status, foreign container/volume
+refusal, paused resume/stop, restart-loop stop, occupied-port classification
+with no residual container, wrong/missing data mount refusal, orphaned-volume
+credential refusal, zero-deadline rollback, and test cleanup. The
+ignored Docker lifecycle tests complete in about ten seconds with the image
+already pulled.
 
 ## Execution plan
 
@@ -264,14 +324,14 @@ Only then:
 
 ## Immediate next actions
 
-1. Push the branch and verify the new Rust CI workflow on GitHub: formatting,
-   clippy, unit tests, no-SQLite graph/lock checks, and the digest-pinned
-   ParadeDB integration test must all pass.
-2. Start M1 with failing tests for idempotent managed database state, loopback
-   port publication, generated secret-file mode, occupied ports, and deadline
-   handling.
-3. Implement `cartograph-v2 db start|stop|status|logs` in Rust so the checked-in
-   Compose harness is no longer part of the user-facing setup path.
+1. Independently review and checkpoint the M1 managed lifecycle slice, push it,
+   and verify CI including the new real lifecycle tests.
+2. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+   ownership checks and recovery tests.
+3. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
+   there; never weaken credential privacy to make the platform pass.
+4. Begin the generation-safe schema/migration ledger and first BM25 search
+   document migration after the lifecycle checkpoint is green.
 
 ## Risks and decisions still requiring evidence
 

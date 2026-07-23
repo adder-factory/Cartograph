@@ -60,6 +60,13 @@ struct ProbeFacts {
     source_code_tokens: Result<Vec<String>, ()>,
 }
 
+struct CheckInput {
+    id: &'static str,
+    passed: bool,
+    message: String,
+    remediation: &'static str,
+}
+
 /// Probe PostgreSQL, ParadeDB, and pgvector without mutating the database.
 pub async fn probe_capabilities(pool: &PgPool) -> Result<CapabilityReport, DatabaseError> {
     let version_row = query("SELECT current_setting('server_version_num'), version()")
@@ -153,57 +160,57 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
         .any(|library| library == "pg_search");
 
     let checks = vec![
-        check(
-            "postgres-18",
-            facts.postgres_version_num >= MINIMUM_POSTGRES_VERSION_NUM,
-            format!(
+        check(CheckInput {
+            id: "postgres-18",
+            passed: facts.postgres_version_num >= MINIMUM_POSTGRES_VERSION_NUM,
+            message: format!(
                 "PostgreSQL server reports version number {}",
                 facts.postgres_version_num
             ),
-            "Run Cartograph's pinned PostgreSQL 18 + ParadeDB image or upgrade the configured server.",
-        ),
-        check(
-            "pg-search-extension",
-            pg_search_version.is_some(),
-            extension_message("pg_search", pg_search_version.as_deref()),
-            "Install pg_search, add it to shared_preload_libraries, restart PostgreSQL, and run CREATE EXTENSION pg_search.",
-        ),
-        check(
-            "pgvector-extension",
-            pgvector_version.is_some(),
-            extension_message("vector", pgvector_version.as_deref()),
-            "Install pgvector and run CREATE EXTENSION vector in the Cartograph database.",
-        ),
-        check(
-            "pg-search-preload",
-            pg_search_preloaded,
-            if pg_search_preloaded {
+            remediation: "Run Cartograph's pinned PostgreSQL 18 + ParadeDB image or upgrade the configured server.",
+        }),
+        check(CheckInput {
+            id: "pg-search-extension",
+            passed: pg_search_version.is_some(),
+            message: extension_message("pg_search", pg_search_version.as_deref()),
+            remediation: "Install pg_search, add it to shared_preload_libraries, restart PostgreSQL, and run CREATE EXTENSION pg_search.",
+        }),
+        check(CheckInput {
+            id: "pgvector-extension",
+            passed: pgvector_version.is_some(),
+            message: extension_message("vector", pgvector_version.as_deref()),
+            remediation: "Install pgvector and run CREATE EXTENSION vector in the Cartograph database.",
+        }),
+        check(CheckInput {
+            id: "pg-search-preload",
+            passed: pg_search_preloaded,
+            message: if pg_search_preloaded {
                 "pg_search is present in shared_preload_libraries".to_owned()
             } else {
                 "pg_search is absent from shared_preload_libraries".to_owned()
             },
-            "Add pg_search to shared_preload_libraries and restart PostgreSQL.",
-        ),
-        check(
-            "bm25-access-method",
-            facts.has_bm25_access_method,
-            if facts.has_bm25_access_method {
+            remediation: "Add pg_search to shared_preload_libraries and restart PostgreSQL.",
+        }),
+        check(CheckInput {
+            id: "bm25-access-method",
+            passed: facts.has_bm25_access_method,
+            message: if facts.has_bm25_access_method {
                 "BM25 index access method is registered".to_owned()
             } else {
                 "BM25 index access method is unavailable".to_owned()
             },
-            "Verify the pg_search extension installation and server restart.",
-        ),
-        check(
-            "source-code-tokenizer",
-            source_code_tokenizer_ready,
-            if source_code_tokenizer_ready {
+            remediation: "Verify the pg_search extension installation and server restart.",
+        }),
+        check(CheckInput {
+            id: "source-code-tokenizer",
+            passed: source_code_tokenizer_ready,
+            message: if source_code_tokenizer_ready {
                 "pdb.source_code splits camelCase and snake_case as required".to_owned()
             } else {
                 "pdb.source_code is unavailable or returned an incompatible token stream".to_owned()
             },
-            "Upgrade pg_search to the pinned Cartograph-supported version and recreate affected BM25 indexes.",
-        ),
+            remediation: "Upgrade pg_search to the pinned Cartograph-supported version and recreate affected BM25 indexes.",
+        }),
     ];
     let ready = checks.iter().all(|check| check.status == CheckStatus::Pass);
 
@@ -217,21 +224,16 @@ fn build_report(facts: ProbeFacts) -> CapabilityReport {
     }
 }
 
-fn check(
-    id: &'static str,
-    passed: bool,
-    message: String,
-    remediation: &'static str,
-) -> CapabilityCheck {
+fn check(input: CheckInput) -> CapabilityCheck {
     CapabilityCheck {
-        id,
-        status: if passed {
+        id: input.id,
+        status: if input.passed {
             CheckStatus::Pass
         } else {
             CheckStatus::Fail
         },
-        message,
-        remediation: (!passed).then_some(remediation),
+        message: input.message,
+        remediation: (!input.passed).then_some(input.remediation),
     }
 }
 
