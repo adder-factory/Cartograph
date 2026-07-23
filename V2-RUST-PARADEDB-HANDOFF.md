@@ -75,11 +75,16 @@ This is the durable continuation point for the v2 rewrite. Read
   passed format, clippy, unit, no-SQLite, capability doctor, live migration and
   BM25 publication/recovery tests, and the full managed lifecycle suite on
   GitHub's amd64 runner.
+- Observable project operation leases: `f43831c`; [run 29992907823](https://github.com/adder-factory/cartograph/actions/runs/29992907823)
+  passed the quality/no-SQLite job in 1m03s and the PostgreSQL 18 + pinned
+  ParadeDB + pgvector job in 1m44s. The latter includes the capability doctor,
+  generation/BM25 test, lease upgrade/concurrency/takeover test, and full
+  managed Docker lifecycle on GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the generation-safe schema/BM25
-slice. Continue with project operation leases, COPY loaders, and deterministic
-generation digests; do not reopen the PostgreSQL-only or Rust-first decisions.
+The branch and origin are checkpointed through the observable project-operation
+lease slice. Continue with COPY loaders and deterministic generation digests;
+do not reopen the PostgreSQL-only or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -261,6 +266,51 @@ no-SQLite dependency checks, a forced 0/0/0 biomarker floor, fresh coverage and
 Sonar quality gate, and a Cartograph diff analysis with zero introduced
 findings.
 
+## Observable project operation lease slice
+
+Implemented in Rust and migration 2:
+
+- `LeaseId` is a branded non-nil UUID and `ProjectOperation` has stable values
+  for `index`, `sync`, `hook`, `migration`, and derived-index `rebuild` work.
+- `project_operation_leases` stores one row per project/operation with a fresh
+  ownership token, owner PID, boot/session-qualified process-start marker,
+  optional generation, acquisition/heartbeat timestamps, and expiry. Composite
+  foreign keys preserve project/generation isolation.
+- The append-only migration runner now applies ordered versions 1 and 2,
+  refuses a missing predecessor, rejects newer schemas, and verifies every
+  recorded name/checksum. Golden tests freeze the exact BLAKE3 checksum of both
+  committed migrations so an accidental edit to shipped SQL fails locally
+  before an existing database reports ledger conflict.
+- Acquisition validates owner metadata and a bounded 1-second-to-5-minute
+  duration, then takes a non-blocking transaction advisory lock scoped to the
+  configured schema, project, and operation. A conditional upsert returns
+  `Busy` for a live owner or atomically replaces an expired row with a new
+  token.
+- Heartbeat and release require the exact unexpired token. PostgreSQL's clock,
+  not a process clock, decides expiry; a stale token cannot mutate a row after
+  takeover. Read-only status exposes owner/generation/timestamps and whether
+  the database considers the row expired.
+- Public errors omit driver/query/credential details. The opaque mutation token
+  is distinct from serializable diagnostic status.
+
+The live pinned-ParadeDB test proves a fresh `[1, 2]` migration, an existing-v1
+to-v2 upgrade, idempotent reuse, ledger-gap refusal, active-owner exclusion,
+database-side heartbeat renewal by the exact configured duration, observable
+expiry, deterministic stale-owner takeover, stale-token rejection, release,
+and exactly one winner under simultaneous acquisition. It uses direct
+database-clock fixture updates instead of sleeps or client wall time.
+
+Independent review first returned `REQUEST_CHANGES` because the tests did not
+freeze committed migration checksums or prove that heartbeat advanced expiry.
+Both proofs were added; the same reviewer then returned `APPROVE` with no
+findings. Final local evidence includes Rust format/clippy/workspace tests,
+live capability/generation/lease tests, the full managed Docker lifecycle,
+7,139 v1 tests with zero failures, 29 v1 PostgreSQL tests, strict TypeScript and
+architecture/Biome gates, actionlint, a SQLite-free Cargo graph/lockfile, forced
+biomarkers at 0/0/0, and Sonar `OK` with 86.0% overall coverage, 91.5% new-code
+coverage, and zero new violations. GitHub run 29992907823 repeats the Rust and
+real-database proof on amd64.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -393,11 +443,12 @@ Only then:
 
 ## Immediate next actions
 
-1. Add project operation lease metadata with owner/process-start identity,
-   heartbeat, bounded acquisition, and tested stale-owner takeover rules.
-2. Add PostgreSQL COPY loaders for files, symbols, edges, references, and search
+1. Add PostgreSQL COPY loaders for files, symbols, edges, references, and search
    documents, plus a deterministic logical-generation digest independent of
    worker count and insertion order.
+2. Integrate the lease API with the bounded indexer/supervisor once the COPY
+   stage exists: schedule renewal, expose progress, cancel on lost ownership,
+   and prove kill/restart cleanup without PID-liveness guessing.
 3. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
 4. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
