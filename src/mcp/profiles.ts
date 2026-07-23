@@ -105,3 +105,8 @@ export function mcpServerProfileToolSet(profile: McpServerProfile): ReadonlySet<
   const names = MCP_SERVER_PROFILE_TOOL_NAMES[profile];
   return names ? new Set(names) : null;
 }
+
+export function mcpServerProfileIncludesTool(profile: McpServerProfile, toolName: string): boolean {
+  const names = MCP_SERVER_PROFILE_TOOL_NAMES[profile];
+  return names === null || names.includes(toolName);
+}

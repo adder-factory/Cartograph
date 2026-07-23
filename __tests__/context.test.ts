@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import Cartograph from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { ToolHandler } from '../src/mcp/tools.js';
+import { collectContextIntentSeeds } from '../src/features/context-route/index.js';
 
 describe('Context Builder', () => {
   let testDir: string;
@@ -252,7 +253,7 @@ export function validateEmail(email: string): boolean {
     });
 
     it('routes broad cross-cutting plan queries through coverage and intent search first', async () => {
-      const handler = new ToolHandler(cg);
+      const handler = new ToolHandler(cg, { profile: 'full' });
       const result = await handler.execute('cartograph_context', {
         task: 'review whole codebase coverage and quality across tools',
         format: 'plan',
@@ -266,6 +267,58 @@ export function validateEmail(email: string): boolean {
       expect(text).toContain('"mode": "intent"');
       expect(nextActions?.[0]?.tool).toBe('cartograph_deps');
       expect(nextActions?.[0]?.args).toMatchObject({ mode: 'coverage' });
+    });
+
+    it('never recommends a tool hidden by the active MCP profile', async () => {
+      const handler = new ToolHandler(cg, { profile: 'core' });
+      const advertised = new Set(handler.getTools().map((tool) => tool.name));
+      const result = await handler.execute('cartograph_context', {
+        task: 'review whole codebase coverage and quality across tools',
+        format: 'plan',
+        code: false,
+      });
+      handler.closeAll();
+      const text = result.content[0]?.text ?? '';
+      const nextActions = result.metadata?.nextActions ?? [];
+
+      expect(text).not.toContain('"tool": "cartograph_deps"');
+      expect(nextActions.length).toBeGreaterThan(0);
+      expect(nextActions.every((action) => advertised.has(action.tool))).toBe(true);
+    });
+
+    it('uses deterministic docstring intent as evidence for broad plan routing', async () => {
+      const classes = getNodesByKind(cg.queries, 'class');
+      const payment = classes.find((node) => node.name === 'PaymentService');
+      const checkout = classes.find((node) => node.name === 'CheckoutController');
+      expect(payment).toBeDefined();
+      expect(checkout).toBeDefined();
+      if (!payment || !checkout) throw new Error('expected payment and checkout fixtures');
+      cg.queries.updateNode({ ...payment, docstring: 'Owns payment processing and payment retry behavior.' });
+      cg.queries.updateNode({ ...checkout, docstring: 'Coordinates checkout flow and payment submission.' });
+      const seeds = collectContextIntentSeeds({
+        clauses: ['fix payment processing and checkout flow'],
+        queries: cg.queries,
+        limit: 10,
+      });
+      expect(seeds.metadata.nodeIds).toEqual(expect.arrayContaining([payment.id, checkout.id]));
+
+      const handler = new ToolHandler(cg, { profile: 'core' });
+      const result = await handler.execute('cartograph_context', {
+        task: 'fix payment processing and checkout flow',
+        format: 'plan',
+        code: false,
+        retrievalMode: 'deterministic',
+      });
+      handler.closeAll();
+      const text = result.content[0]?.text ?? '';
+
+      expect(text).toContain(
+        '**Router:** deterministic task clauses + intent/documentation evidence + graph candidates',
+      );
+      expect(text).toContain('`PaymentService`');
+      expect(text).toContain('`CheckoutController`');
+      expect(text).toContain('docstring matched');
+      expect(text).not.toContain('Router abstained');
     });
 
     it('supports deterministic retrieval mode and reports its provenance', async () => {

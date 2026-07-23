@@ -12,11 +12,19 @@ import type Cartograph from '../../index.js';
 import type { TaskContext } from '../../context/types.js';
 import type { ScoreExplanation } from '../../graph/types.js';
 import type { Node } from '../../types.js';
+import type { SearchResult } from '../../search/types.js';
 import {
   ContextRetrievalModeSchema,
   prepareBehaviorRetrieval,
   type BehaviorRetrievalTrace,
 } from '../../context/behavior-retrieval.js';
+import {
+  analyzeCodingTask,
+  buildContextRoute,
+  collectContextIntentSeeds,
+  type ContextRoute,
+} from '../../features/context-route/index.js';
+import { mcpServerProfileIncludesTool, resolveMcpServerProfile } from '../profiles.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
 import { textResult } from './shared.js';
@@ -328,6 +336,8 @@ interface FormatContextResponseArgs {
   context: TaskContext;
   format: ContextFormat;
   retrieval: BehaviorRetrievalTrace;
+  route: ContextRoute;
+  toolAvailable: (toolName: string) => boolean;
 }
 
 type ContextFormat = 'markdown' | 'json' | 'plan';
@@ -359,10 +369,26 @@ function topContextNodes(context: TaskContext, limit: number): Node[] {
   return Array.from(context.subgraph.nodes.values()).slice(0, limit);
 }
 
-function buildContextNextActions(context: TaskContext, task: string): NextAction[] {
-  const nodes = topContextNodes(context, PLAN_ACTION_NODE_LIMIT);
+function buildContextNextActions(
+  context: TaskContext,
+  task: string,
+  route: ContextRoute,
+  toolAvailable: (toolName: string) => boolean,
+): NextAction[] {
+  const routeNodeIds = route.candidates
+    .filter((candidate) => candidate.bucket === 'edit-site' && candidate.confidence !== 'low')
+    .map((candidate) => candidate.nodeId);
+  const nodesById = context.subgraph.nodes;
+  const routedNodes = routeNodeIds.flatMap((nodeId) => {
+    const node = nodesById.get(nodeId);
+    return node ? [node] : [];
+  });
+  const nodes = (routedNodes.length > 0 ? routedNodes : topContextNodes(context, PLAN_ACTION_NODE_LIMIT)).slice(
+    0,
+    PLAN_ACTION_NODE_LIMIT,
+  );
   const crossCutting = looksLikeCrossCuttingTask(task);
-  if (nodes.length === 0) {
+  if (nodes.length === 0 || route.status === 'abstained') {
     const searchMode = crossCutting ? 'intent' : 'semantic';
     const fallback: NextAction[] = [
       {
@@ -380,23 +406,33 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
         priority: PLAN_PRIORITY_IMPACT,
       },
     ];
-    if (crossCutting) fallback.unshift(buildDependencyCoverageAction());
-    return fallback;
+    if (crossCutting && toolAvailable('cartograph_deps')) fallback.unshift(buildDependencyCoverageAction());
+    return fallback.filter((action) => toolAvailable(action.tool));
   }
 
   const primary = nodes[0]!;
   const rest = nodes.slice(1);
-  const actions: NextAction[] = crossCutting
-    ? [
-        buildDependencyCoverageAction(),
-        {
-          tool: 'cartograph_find',
-          args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
-          reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
-          priority: PLAN_PRIORITY_PRIMARY,
-        },
-      ]
-    : [];
+  const actions: NextAction[] =
+    crossCutting && toolAvailable('cartograph_deps')
+      ? [
+          buildDependencyCoverageAction(),
+          {
+            tool: 'cartograph_find',
+            args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+            reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
+            priority: PLAN_PRIORITY_PRIMARY,
+          },
+        ]
+      : crossCutting
+        ? [
+            {
+              tool: 'cartograph_find',
+              args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+              reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
+              priority: PLAN_PRIORITY_PRIMARY,
+            },
+          ]
+        : [];
   actions.push(
     {
       tool: 'cartograph_node',
@@ -445,7 +481,7 @@ function buildContextNextActions(context: TaskContext, task: string): NextAction
     reason: 'Run this before reporting done after code edits.',
     priority: PLAN_PRIORITY_FINAL_CHECK,
   });
-  return actions;
+  return actions.filter((action) => toolAvailable(action.tool));
 }
 
 function buildDependencyCoverageAction(): NextAction {
@@ -462,28 +498,35 @@ function renderContextPlan(args: {
   context: TaskContext;
   nextActions: NextAction[];
   retrieval: BehaviorRetrievalTrace;
+  route: ContextRoute;
 }): string {
-  const { task, context, nextActions, retrieval } = args;
-  const nodes = topContextNodes(context, PLAN_RENDER_NODE_LIMIT);
-  const entryLines =
-    nodes.length === 0
-      ? ['_No relevant symbols were found. Start with the fallback calls below._', '']
-      : [
-          '### Entry symbols',
+  const { task, nextActions, retrieval, route } = args;
+  const entryLines = renderRouteCandidateGroups(route);
+  const anchorParts = [
+    ...route.anchors.identifiers.map((anchor) => `\`${anchor}\``),
+    ...route.anchors.paths.map((anchor) => `\`${anchor}\``),
+  ];
+  const decisionLines =
+    route.status === 'abstained'
+      ? [
           '',
-          ...nodes.map((n) => {
-            const loc = n.startLine ? `:${n.startLine}` : '';
-            return `- \`${n.name}\` (${n.kind}) — ${n.filePath}${loc}`;
-          }),
+          `> **Router abstained:** ${route.reason}`,
+          '> Use the fallback calls below to narrow the task before editing.',
           '',
-        ];
+        ]
+      : [];
 
   return [
     `## Context route plan`,
     '',
     `**Query:** ${task}`,
     `**Retrieval:** ${describeRetrieval(retrieval)}`,
+    '**Router:** deterministic task clauses + intent/documentation evidence + graph candidates',
+    `**Task kind:** ${route.taskKind}`,
+    `**Clauses:** ${route.clauses.join(' | ')}`,
+    `**Explicit anchors:** ${anchorParts.length > 0 ? anchorParts.join(', ') : 'none detected'}`,
     '',
+    ...decisionLines,
     ...entryLines,
     '### Next MCP calls',
     '',
@@ -499,10 +542,40 @@ function renderContextPlan(args: {
   ].join('\n');
 }
 
+function renderRouteCandidateGroups(route: ContextRoute): string[] {
+  if (route.candidates.length === 0)
+    return ['_No relevant symbols were found. Start with the fallback calls below._', ''];
+  const groups: ReadonlyArray<readonly [ContextRoute['candidates'][number]['bucket'], string]> = [
+    ['edit-site', 'Likely edit sites'],
+    ['supporting', 'Supporting context'],
+    ['test', 'Tests'],
+    ['configuration', 'Configuration'],
+  ];
+  const lines: string[] = [];
+  let rendered = 0;
+  for (const [bucket, heading] of groups) {
+    const candidates = route.candidates.filter((candidate) => candidate.bucket === bucket);
+    if (candidates.length === 0) continue;
+    lines.push(`### ${heading}`, '');
+    for (const candidate of candidates) {
+      if (rendered >= PLAN_RENDER_NODE_LIMIT) break;
+      const location = candidate.line > 0 ? `:${candidate.line}` : '';
+      lines.push(
+        `- **${candidate.confidence}** \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}${location}`,
+        `  Why: ${candidate.evidence.join('; ')}`,
+      );
+      rendered++;
+    }
+    lines.push('');
+    if (rendered >= PLAN_RENDER_NODE_LIMIT) break;
+  }
+  return lines;
+}
+
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
-  const { cg, task, context, format, retrieval } = args;
-  const nextActions = buildContextNextActions(context, task);
+  const { cg, task, context, format, retrieval, route, toolAvailable } = args;
+  const nextActions = buildContextNextActions(context, task, route, toolAvailable);
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
   // so programmatic consumers can iterate nodes. The score trace is included
@@ -522,12 +595,16 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       relatedFiles: context.relatedFiles,
       stats: context.stats,
       retrieval,
+      route,
     };
     return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
   }
   const nodes = [...context.subgraph.nodes.values()];
   if (format === 'plan') {
-    return attachNextActions(textResult(renderContextPlan({ task, context, nextActions, retrieval })), nextActions);
+    return attachNextActions(
+      textResult(renderContextPlan({ task, context, nextActions, retrieval, route })),
+      nextActions,
+    );
   }
   // No-match guard (audit-4 #5): a 0-node subgraph would otherwise
   // render a bare `## Code Context` + `**Query:**` stub with no
@@ -652,6 +729,24 @@ function shouldContextIncludeCode(args: {
   return args.codePreference !== false;
 }
 
+function contextToolAvailable(ctx: ToolCtx, toolName: string): boolean {
+  if (ctx.options.disabledTools?.has(toolName)) return false;
+  return mcpServerProfileIncludesTool(resolveMcpServerProfile(ctx.options.profile), toolName);
+}
+
+function mergeCandidateChannels(...channels: ReadonlyArray<readonly SearchResult[]>): SearchResult[] {
+  const merged: SearchResult[] = [];
+  const seen = new Set<string>();
+  for (const channel of channels) {
+    for (const candidate of channel) {
+      if (seen.has(candidate.node.id)) continue;
+      seen.add(candidate.node.id);
+      merged.push(candidate);
+    }
+  }
+  return merged;
+}
+
 async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutcome> {
   const task = resolveContextTask(args);
   if (!task) {
@@ -692,6 +787,16 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
     maxNodes,
     retrievalMode: args.retrievalMode,
   });
+  const taskAnalysis = analyzeCodingTask(task);
+  const intentSeeds =
+    format === 'plan'
+      ? collectContextIntentSeeds({
+          clauses: taskAnalysis.clauses,
+          queries: cg.queries,
+          limit: Math.min(maxNodes, PLAN_SEMANTIC_FIND_LIMIT),
+        })
+      : null;
+  const extraCandidates = mergeCandidateChannels(intentSeeds?.candidates ?? [], behaviorRetrieval.extraCandidates);
 
   // Use format: 'object' so buildContext returns the raw TaskContext
   // (its 'markdown' and 'json' formats serialise to a string and
@@ -701,7 +806,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
     maxNodes,
     includeCode,
     format: 'object',
-    extraCandidates: behaviorRetrieval.extraCandidates,
+    extraCandidates,
     behaviorBias: behaviorRetrieval.behaviorBias,
     explain,
     ...(behaviorRetrieval.searchLimit === undefined ? {} : { searchLimit: behaviorRetrieval.searchLimit }),
@@ -711,9 +816,25 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
     return ok(textResult(`${context}\n\n_Retrieval: ${describeRetrieval(behaviorRetrieval.trace)}_`));
   }
 
+  const route = buildContextRoute({
+    task,
+    nodes: [...context.subgraph.nodes.values()],
+    ...(intentSeeds === null ? {} : { intentEvidenceByNodeId: intentSeeds.evidenceByNodeId }),
+  });
+
   // Format passthrough — `markdown` (default) emits the enriched markdown
   // report; `json` returns the structured TaskContext for programmatic consumers.
-  return ok(formatContextResponse({ cg, task, context, format, retrieval: behaviorRetrieval.trace }));
+  return ok(
+    formatContextResponse({
+      cg,
+      task,
+      context,
+      format,
+      retrieval: behaviorRetrieval.trace,
+      route,
+      toolAvailable: (toolName) => contextToolAvailable(ctx, toolName),
+    }),
+  );
 }
 
 export const CONTEXT_TOOL = defineTool({
