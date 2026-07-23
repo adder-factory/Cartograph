@@ -87,7 +87,9 @@ const COPY_CANCEL_GRACE: Duration = Duration::from_millis(20);
 const COPY_CANCEL_TIMEOUT: Duration = Duration::from_millis(200);
 const LONG_COPY_OPERATION_TIMEOUT: Duration = Duration::from_secs(3);
 const LONG_COPY_TIMEOUT: Duration = Duration::from_millis(500);
-const LONG_COPY_TRIGGER_DELAY_SECONDS: &str = "0.15";
+const LARGE_COPY_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
+const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_millis(500);
+const LONG_COPY_TRIGGER_DELAY_SECONDS: &str = "0.20";
 const LONG_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -158,7 +160,7 @@ async fn large_payload_copy_uses_its_own_stage_deadline() {
     let staged = begin_generation(&fixture).await;
     let generation_id = staged.generation_id().clone();
     let target = target(&fixture.project, &generation_id);
-    let supervisor = IndexerSupervisor::new(fixture.database.clone(), long_copy_config());
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), large_payload_copy_config());
     let current = supervisor
         .run(request(target.clone()), move |context| async move {
             context
@@ -1456,6 +1458,15 @@ fn long_copy_config() -> SupervisorConfig {
         .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
         .with_heartbeat_timeout(ABORT_HEARTBEAT_TIMEOUT)
         .with_progress_timeout(RECONCILE_PROGRESS_TIMEOUT)
+        .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
+        .with_copy_timeout(LONG_COPY_TIMEOUT)
+}
+
+fn large_payload_copy_config() -> SupervisorConfig {
+    SupervisorConfig::new(LONG_COPY_OPERATION_TIMEOUT)
+        .with_heartbeat_interval(ABORT_HEARTBEAT_INTERVAL)
+        .with_heartbeat_timeout(LARGE_COPY_HEARTBEAT_TIMEOUT)
+        .with_progress_timeout(LARGE_COPY_PROGRESS_TIMEOUT)
         .with_cancellation_grace(ABORT_CANCELLATION_GRACE)
         .with_copy_timeout(LONG_COPY_TIMEOUT)
 }
