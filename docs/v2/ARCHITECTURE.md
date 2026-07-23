@@ -51,9 +51,11 @@ PostgreSQL 18+
 ```
 
 The default development deployment references the upstream multi-architecture
-`paradedb/paradedb:0.23.5` image. Cartograph does not copy or redistribute that
-image. A release engineering gate will pin the image manifest digest after the
-supported-version matrix is proven on both amd64 and arm64.
+`paradedb/paradedb:0.23.5` image at OCI manifest digest
+`sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d`.
+Cartograph does not copy or redistribute that image. The digest resolves to the
+verified linux/amd64 and linux/arm64 manifests and changes only through an
+explicit supported-version update.
 
 ## Rust workspace boundaries
 
@@ -361,4 +363,3 @@ raw report. No benchmark baseline may silently accept a changed corpus.
 - [Deployment and Community durability warning](https://docs.paradedb.com/deploy/overview)
 - [Upgrade procedure](https://docs.paradedb.com/deploy/upgrading)
 - [ParadeDB repository and license](https://github.com/paradedb/paradedb)
-

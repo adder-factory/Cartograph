@@ -102,7 +102,8 @@ though they were not compiled. `cargo tree` and `Cargo.lock` must remain free of
 cargo fmt --all --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-cargo tree --workspace -e normal | rg 'sqlite|libsqlite'  # expect no output
+cargo tree --locked --workspace --all-features -e normal | rg 'sqlite|libsqlite'  # expect no output
+rg '^name = "(sqlx-sqlite|libsqlite3-sys|rusqlite)"$' Cargo.lock  # expect no output
 
 export CARTOGRAPH_POSTGRES_PASSWORD="$(openssl rand -hex 24)"
 docker-compose -f deploy/paradedb/docker-compose.yml up -d
@@ -263,8 +264,9 @@ Only then:
 
 ## Immediate next actions
 
-1. Add a Rust CI workflow that enforces formatting, clippy, unit tests,
-   no-SQLite dependencies, and the pinned ParadeDB integration test.
+1. Push the branch and verify the new Rust CI workflow on GitHub: formatting,
+   clippy, unit tests, no-SQLite graph/lock checks, and the digest-pinned
+   ParadeDB integration test must all pass.
 2. Start M1 with failing tests for idempotent managed database state, loopback
    port publication, generated secret-file mode, occupied ports, and deadline
    handling.
@@ -273,7 +275,10 @@ Only then:
 
 ## Risks and decisions still requiring evidence
 
-- Pin the ParadeDB image manifest digest only after both architectures pass.
+- Keep ParadeDB pinned to manifest digest
+  `sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d`;
+  the manifest contains amd64 and arm64, local arm64 passed, and CI must prove
+  amd64 before M0 closes.
 - Measure Community crash/reindex behavior before declaring it acceptable for
   the local product. Shared production needs a durability decision.
 - Complete AGPL/commercial licensing review before distributing an image or

@@ -1,0 +1,154 @@
+name: v2 Rust
+
+on:
+  push:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - 'crates/**'
+      - 'deploy/paradedb/**'
+      - '.github/workflows/v2-rust.yml'
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
+      - 'crates/**'
+      - 'deploy/paradedb/**'
+      - '.github/workflows/v2-rust.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: v2-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: format + clippy + unit + no SQLite
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Fetch locked dependencies
+        run: cargo fetch --locked
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+
+      - name: Unit tests
+        run: cargo test --locked --workspace
+
+      - name: No SQLite production dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          tree="$(cargo tree --locked --workspace --all-features -e normal)"
+          if grep -Eiq 'sqlite|libsqlite' <<<"$tree"; then
+            echo 'Cartograph v2 must not contain a SQLite runtime dependency.' >&2
+            grep -Ei 'sqlite|libsqlite' <<<"$tree" >&2
+            exit 1
+          fi
+          if grep -Eq '^name = "(sqlx-sqlite|libsqlite3-sys|rusqlite)"$' Cargo.lock; then
+            echo 'Cargo.lock contains a forbidden SQLite package.' >&2
+            grep -E '^name = "(sqlx-sqlite|libsqlite3-sys|rusqlite)"$' Cargo.lock >&2
+            exit 1
+          fi
+          echo 'No SQLite production dependency found.'
+
+  paradedb:
+    name: PostgreSQL 18 + ParadeDB + pgvector
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CARTOGRAPH_POSTGRES_PASSWORD: cartograph-v2-ci-only
+      CARTOGRAPH_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
+      CARTOGRAPH_TEST_DATABASE_URL: postgresql://cartograph:cartograph-v2-ci-only@127.0.0.1:55432/cartograph
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Resolve pinned Rust toolchain
+        run: rustup show active-toolchain
+
+      - name: Start pinned ParadeDB service on loopback
+        id: start_paradedb
+        run: >-
+          docker run --detach
+          --name cartograph-v2-ci-postgres
+          --env POSTGRES_USER=cartograph
+          --env POSTGRES_PASSWORD="$CARTOGRAPH_POSTGRES_PASSWORD"
+          --env POSTGRES_DB=cartograph
+          --publish 127.0.0.1:55432:5432
+          --health-cmd 'pg_isready -U cartograph -d cartograph'
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+          paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d
+
+      - name: Wait for PostgreSQL health
+        shell: bash
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 45); do
+            status="$(docker inspect --format '{{.State.Health.Status}}' cartograph-v2-ci-postgres)"
+            if [[ "$status" == healthy ]]; then
+              exit 0
+            fi
+            if [[ "$status" == unhealthy ]]; then
+              docker logs --tail 200 cartograph-v2-ci-postgres >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs --tail 200 cartograph-v2-ci-postgres >&2
+          echo 'Timed out waiting for ParadeDB health.' >&2
+          exit 1
+
+      - name: Initialize required extensions
+        run: >-
+          docker exec cartograph-v2-ci-postgres
+          psql --username cartograph --dbname cartograph --set ON_ERROR_STOP=1
+          --command 'CREATE EXTENSION IF NOT EXISTS pg_search;'
+          --command 'CREATE EXTENSION IF NOT EXISTS vector;'
+
+      - name: Verify loopback-only publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          published="$(docker port cartograph-v2-ci-postgres 5432/tcp)"
+          if [[ "$published" != '127.0.0.1:55432' ]]; then
+            echo "Expected loopback-only PostgreSQL, got: $published" >&2
+            exit 1
+          fi
+
+      - name: Rust database doctor
+        run: |
+          cargo run --locked --quiet -p cartograph-cli -- doctor
+          cargo run --locked --quiet -p cartograph-cli -- doctor --format json
+
+      - name: Live capability integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_capabilities -- --ignored --nocapture
+
+      - name: ParadeDB logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          if docker inspect cartograph-v2-ci-postgres >/dev/null 2>&1; then
+            docker logs --tail 200 cartograph-v2-ci-postgres
+          fi
+
+      - name: Stop ParadeDB service
+        if: always()
+        run: docker rm --force --volumes cartograph-v2-ci-postgres 2>/dev/null || true
