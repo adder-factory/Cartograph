@@ -3,6 +3,7 @@
 mod config;
 mod prepare_scope;
 mod progress;
+mod stage;
 mod supervisor;
 mod task_scope;
 
@@ -11,6 +12,11 @@ pub use prepare_scope::SupervisedPrepareError;
 pub use progress::{
     CancellationReason, CancellationSignal, PipelineStage, ProgressError, ProgressReporter,
     SupervisorContext, SupervisorState, SupervisorStatus,
+};
+pub use stage::{
+    StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution, StageFailureKind, StageFold,
+    StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageRunError,
+    StageRunner, StageSequence, StageWorkItem, StageWorkload,
 };
 pub use supervisor::{IndexerSupervisor, PipelineFailure, SupervisorError, SupervisorRequest};
 pub use task_scope::{ScopedTask, ScopedTaskError};

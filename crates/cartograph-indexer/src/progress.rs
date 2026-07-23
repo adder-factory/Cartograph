@@ -257,7 +257,7 @@ impl SharedProgress {
         Ok(())
     }
 
-    async fn advance(&self, items: u64, bytes: u64) -> Result<(), ProgressError> {
+    pub(crate) async fn advance(&self, items: u64, bytes: u64) -> Result<(), ProgressError> {
         if items == 0 && bytes == 0 {
             return Err(ProgressError::EmptyIncrement);
         }
@@ -368,6 +368,16 @@ impl SupervisorContext {
         self.cancellation.clone()
     }
 
+    /// Build a bounded deterministic stage runner bound to this supervisor.
+    #[must_use]
+    pub fn stages(&self) -> crate::StageRunner {
+        crate::StageRunner::new(
+            self.progress.shared.clone(),
+            self.cancellation.receiver.clone(),
+            self.tasks.clone(),
+        )
+    }
+
     /// Run the operation's one retained, server-bounded prepare/COPY task.
     ///
     /// Publication and cleanup authority are deliberately absent from this
@@ -420,6 +430,21 @@ pub enum ProgressError {
 
 fn millis(duration: Duration) -> u64 {
     u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+pub(crate) async fn hold_progress_write_for_test(
+    shared: SharedProgress,
+    entered: tokio::sync::oneshot::Sender<()>,
+    mut release: watch::Receiver<bool>,
+) {
+    let _guard = shared.record.write().await;
+    let _ = entered.send(());
+    while !*release.borrow_and_update() {
+        if release.changed().await.is_err() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]

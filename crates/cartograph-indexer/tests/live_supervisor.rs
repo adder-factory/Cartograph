@@ -20,8 +20,10 @@ use cartograph_domain::{
     ProjectOperation,
 };
 use cartograph_indexer::{
-    CancellationReason, IndexerSupervisor, PipelineFailure, PipelineStage, SupervisorConfig,
-    SupervisorError, SupervisorRequest, SupervisorState,
+    CancellationReason, IndexerSupervisor, PipelineFailure, PipelineStage, StageCapacity,
+    StageDeadlinePolicy, StageEnvelope, StageExecution, StageFold, StageItemBudget,
+    StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageSequence, StageWorkItem,
+    StageWorkload, SupervisorConfig, SupervisorError, SupervisorRequest, SupervisorState,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use tokio::sync::oneshot;
@@ -91,6 +93,9 @@ const LARGE_COPY_HEARTBEAT_TIMEOUT: Duration = Duration::from_millis(300);
 const LARGE_COPY_PROGRESS_TIMEOUT: Duration = Duration::from_millis(500);
 const LONG_COPY_TRIGGER_DELAY_SECONDS: &str = "0.20";
 const LONG_COPY_CODE_BYTES: usize = 2 * 1_024 * 1_024;
+const ORDERED_STAGE_ITEMS: u64 = 8;
+const ORDERED_STAGE_WORKERS: usize = 4;
+const ORDERED_STAGE_ITEM_BYTES: u64 = 16;
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -144,6 +149,91 @@ async fn successful_supervision_renews_releases_and_requires_publication() {
     );
     assert!(!supervisor.cancel());
     assert!(supervisor.status().await.heartbeat_count() >= EXPECTED_MINIMUM_HEARTBEATS);
+    assert!(matches!(
+        fixture.database.lease_status(&target).await,
+        Ok(None)
+    ));
+
+    fixture.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn bounded_parallel_stage_reduces_before_supervised_publication() {
+    let fixture = open_fixture().await;
+    let staged = begin_generation(&fixture).await;
+    let generation_id = staged.generation_id().clone();
+    let target = target(&fixture.project, &generation_id);
+    let supervisor = IndexerSupervisor::new(fixture.database.clone(), standard_config());
+    let current = supervisor
+        .run(request(target.clone()), move |context| async move {
+            let deadline = tokio::time::Instant::now() + STANDARD_OPERATION_TIMEOUT;
+            let inputs = (0..ORDERED_STAGE_ITEMS).map(|sequence| {
+                StageEnvelope::new(
+                    StageItemMeta::new(
+                        StageSequence::new(sequence),
+                        format!("src/ordered_{sequence}.rs"),
+                        StageItemBudget::new(
+                            ORDERED_STAGE_ITEM_BYTES,
+                            ORDERED_STAGE_ITEM_BYTES,
+                            deadline,
+                        ),
+                    ),
+                    sequence,
+                )
+            });
+            let execution = StageExecution::new(
+                StageRunConfig::new(
+                    PipelineStage::Parse,
+                    StageCapacity::new(ORDERED_STAGE_WORKERS, ORDERED_STAGE_WORKERS),
+                    StageDeadlinePolicy::new(deadline, STANDARD_CANCELLATION_GRACE),
+                ),
+                StageWorkload::new(inputs, |item: StageWorkItem<String, u64>| async move {
+                    let (_, _, payload) = item.into_parts();
+                    tokio::time::sleep(Duration::from_millis(
+                        ORDERED_STAGE_ITEMS.saturating_sub(payload),
+                    ))
+                    .await;
+                    Ok::<_, StageItemFailure>(payload)
+                }),
+                StageFold::new(
+                    Vec::new(),
+                    |ordered: &mut Vec<u64>, output: StageOutput<String, u64>| {
+                        let (_, payload) = output.into_parts();
+                        ordered.push(payload);
+                        Ok(())
+                    },
+                ),
+            );
+            let ordered = context
+                .stages()
+                .execute(execution)
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Parse))?;
+            assert_eq!(ordered, (0..ORDERED_STAGE_ITEMS).collect::<Vec<_>>());
+            context
+                .progress()
+                .begin_stage(PipelineStage::Copy)
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))?;
+            context
+                .prepare_generation(GenerationContents::new(staged, GenerationFacts::default()))
+                .await
+                .map_err(|_| PipelineFailure::new(PipelineStage::Copy))
+        })
+        .await;
+    let current = match current {
+        Ok(current) => current,
+        Err(error) => panic!("bounded ordered stage failed before publication: {error}"),
+    };
+    assert_eq!(current.generation_id(), &generation_id);
+    let status = supervisor.status().await;
+    assert_eq!(status.state(), SupervisorState::Completed);
+    assert_eq!(status.completed_items(), ORDERED_STAGE_ITEMS);
+    assert_eq!(
+        status.completed_bytes(),
+        ORDERED_STAGE_ITEMS * ORDERED_STAGE_ITEM_BYTES
+    );
     assert!(matches!(
         fixture.database.lease_status(&target).await,
         Ok(None)

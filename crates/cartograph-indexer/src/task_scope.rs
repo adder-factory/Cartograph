@@ -19,6 +19,21 @@ use crate::{PipelineFailure, PipelineStage};
 pub struct ScopedTask<T> {
     receiver: oneshot::Receiver<Result<T, ScopedTaskError>>,
     observed: Arc<AtomicBool>,
+    abort: AbortHandle,
+}
+
+pub(crate) struct TaskReservationGuard {
+    observed: Arc<AtomicBool>,
+}
+
+impl TaskReservationGuard {
+    pub(crate) fn acknowledge(self) {
+        self.observed.store(true, Ordering::Release);
+    }
+
+    pub(crate) fn cancel(self) {
+        self.acknowledge();
+    }
 }
 
 impl<T> ScopedTask<T> {
@@ -31,6 +46,28 @@ impl<T> ScopedTask<T> {
             }
             Err(_) => Err(ScopedTaskError::Cancelled),
         }
+    }
+
+    pub(crate) async fn join_retaining_reservation(
+        self,
+    ) -> Result<(T, TaskReservationGuard), ScopedTaskError> {
+        match self.receiver.await {
+            Ok(Ok(output)) => Ok((
+                output,
+                TaskReservationGuard {
+                    observed: self.observed,
+                },
+            )),
+            Ok(Err(error)) => {
+                self.observed.store(true, Ordering::Release);
+                Err(error)
+            }
+            Err(_) => Err(ScopedTaskError::Cancelled),
+        }
+    }
+
+    pub(crate) fn abort_handle(&self) -> AbortHandle {
+        self.abort.clone()
     }
 }
 
@@ -98,6 +135,7 @@ struct WorkerCompletion {
 enum WorkerOutcome {
     Succeeded,
     Failed,
+    Cancelled,
 }
 
 struct AbortOnDrop(AbortHandle);
@@ -145,29 +183,16 @@ impl TaskScope {
             .lock()
             .map_err(|_| ScopedTaskError::RegistryUnavailable)?;
         registry.reap_finished();
-        if registry.closed {
-            return Err(ScopedTaskError::ScopeClosed);
-        }
-        if reserved_bytes == 0 || reserved_bytes > registry.max_bytes {
-            return Err(ScopedTaskError::InvalidByteReservation);
-        }
-        if registry.tracked_tasks() >= registry.max_tasks {
-            return Err(ScopedTaskError::TaskCapacityExceeded);
-        }
-        let next_reserved = registry
-            .reserved_bytes
-            .checked_add(reserved_bytes)
-            .ok_or(ScopedTaskError::ByteCapacityExceeded)?;
-        if next_reserved > registry.max_bytes {
-            return Err(ScopedTaskError::ByteCapacityExceeded);
-        }
+        let next_reserved = registry.next_reservation(reserved_bytes)?;
 
         let (sender, receiver) = oneshot::channel();
         let observed = Arc::new(AtomicBool::new(false));
         let worker_observed = observed.clone();
+        let worker = tokio::spawn(work);
+        let abort = worker.abort_handle();
+        let worker_abort = abort.clone();
         registry.workers.spawn(async move {
-            let worker = tokio::spawn(work);
-            let abort_on_drop = AbortOnDrop(worker.abort_handle());
+            let abort_on_drop = AbortOnDrop(worker_abort);
             let joined = worker.await;
             drop(abort_on_drop);
             let (outcome, result) = match joined {
@@ -178,6 +203,9 @@ impl TaskScope {
                         stage: failure.stage(),
                     }),
                 ),
+                Err(error) if error.is_cancelled() => {
+                    (WorkerOutcome::Cancelled, Err(ScopedTaskError::Cancelled))
+                }
                 Err(_) => (WorkerOutcome::Failed, Err(ScopedTaskError::WorkerPanicked)),
             };
             let delivered = sender.send(result).is_ok();
@@ -189,7 +217,36 @@ impl TaskScope {
             }
         });
         registry.reserved_bytes = next_reserved;
-        Ok(ScopedTask { receiver, observed })
+        Ok(ScopedTask {
+            receiver,
+            observed,
+            abort,
+        })
+    }
+
+    pub(crate) fn record_stage_failure(&self) -> Result<(), ScopedTaskError> {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| ScopedTaskError::RegistryUnavailable)?;
+        registry.worker_failed = true;
+        Ok(())
+    }
+
+    pub(crate) fn probe_admission(&self, reserved_bytes: u64) -> Result<(), ScopedTaskError> {
+        let mut registry = self
+            .registry
+            .lock()
+            .map_err(|_| ScopedTaskError::RegistryUnavailable)?;
+        registry.reap_finished();
+        registry.next_reservation(reserved_bytes).map(|_| ())
+    }
+
+    pub(crate) fn max_tasks(&self) -> Result<usize, ScopedTaskError> {
+        self.registry
+            .lock()
+            .map_err(|_| ScopedTaskError::RegistryUnavailable)
+            .map(|registry| registry.max_tasks)
     }
 
     pub(crate) async fn close_abort_and_reap(&self, deadline: Instant) -> ReapReport {
@@ -237,6 +294,27 @@ impl TaskScope {
 }
 
 impl TaskRegistry {
+    fn next_reservation(&self, reserved_bytes: u64) -> Result<u64, ScopedTaskError> {
+        if self.closed {
+            return Err(ScopedTaskError::ScopeClosed);
+        }
+        if reserved_bytes == 0 || reserved_bytes > self.max_bytes {
+            return Err(ScopedTaskError::InvalidByteReservation);
+        }
+        if self.tracked_tasks() >= self.max_tasks {
+            return Err(ScopedTaskError::TaskCapacityExceeded);
+        }
+        let next_reserved = self
+            .reserved_bytes
+            .checked_add(reserved_bytes)
+            .ok_or(ScopedTaskError::ByteCapacityExceeded)?;
+        if next_reserved > self.max_bytes {
+            Err(ScopedTaskError::ByteCapacityExceeded)
+        } else {
+            Ok(next_reserved)
+        }
+    }
+
     fn tracked_tasks(&self) -> usize {
         self.workers.len() + self.pending_observations.len()
     }
@@ -253,19 +331,25 @@ impl TaskRegistry {
     }
 
     fn record_completion(&mut self, completion: WorkerCompletion) {
-        if completion.outcome == WorkerOutcome::Failed {
-            self.worker_failed = true;
-            self.release_bytes(completion.reserved_bytes);
-        } else if !completion.delivered {
-            self.unobserved_results = true;
-            self.release_bytes(completion.reserved_bytes);
-        } else if completion.observed.load(Ordering::Acquire) {
-            self.release_bytes(completion.reserved_bytes);
-        } else {
-            self.pending_observations.push(PendingObservation {
-                observed: completion.observed,
-                reserved_bytes: completion.reserved_bytes,
-            });
+        match completion.outcome {
+            WorkerOutcome::Failed => {
+                self.worker_failed = true;
+                self.release_bytes(completion.reserved_bytes);
+            }
+            WorkerOutcome::Cancelled => self.release_bytes(completion.reserved_bytes),
+            WorkerOutcome::Succeeded if !completion.delivered => {
+                self.unobserved_results = true;
+                self.release_bytes(completion.reserved_bytes);
+            }
+            WorkerOutcome::Succeeded if completion.observed.load(Ordering::Acquire) => {
+                self.release_bytes(completion.reserved_bytes);
+            }
+            WorkerOutcome::Succeeded => {
+                self.pending_observations.push(PendingObservation {
+                    observed: completion.observed,
+                    reserved_bytes: completion.reserved_bytes,
+                });
+            }
         }
     }
 
@@ -301,13 +385,16 @@ struct CompletionSummary {
 impl CompletionSummary {
     fn record_joined(&mut self, joined: Result<WorkerCompletion, tokio::task::JoinError>) {
         match joined {
-            Ok(completion) => {
-                if completion.outcome == WorkerOutcome::Failed {
-                    self.worker_failed = true;
-                } else if !completion.delivered || !completion.observed.load(Ordering::Acquire) {
+            Ok(completion) => match completion.outcome {
+                WorkerOutcome::Failed => self.worker_failed = true,
+                WorkerOutcome::Cancelled => {}
+                WorkerOutcome::Succeeded
+                    if !completion.delivered || !completion.observed.load(Ordering::Acquire) =>
+                {
                     self.unobserved_results = true;
                 }
-            }
+                WorkerOutcome::Succeeded => {}
+            },
             Err(error) if error.is_cancelled() => {}
             Err(_) => self.worker_failed = true,
         }

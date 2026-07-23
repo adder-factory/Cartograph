@@ -261,6 +261,41 @@ Each stage has:
 - retry rules limited to explicitly transient failures;
 - deterministic output ordering before persistence.
 
+The first reusable M4 stage executor is now implemented in
+`cartograph-indexer`. `SupervisorContext::stages()` produces a supervisor-bound
+`StageRunner`; callers provide typed envelopes containing a contiguous
+stage-local sequence, stable key, payload, reserved/progress byte counts, and
+an absolute item deadline. A run also supplies explicit worker and queue caps,
+a whole-stage deadline, a separate bounded cleanup grace, a parallel transform,
+and one in-order reducer.
+
+The executor admits at most `workers + queued_items` envelopes. Tasks waiting
+for a worker permit are the explicit bounded queue and remain registered with
+the supervisor's global task/byte scope. A completed out-of-order output keeps
+its reservation until the deterministic reducer consumes it, so fast later
+files cannot release memory capacity around a blocked earlier file. The input
+iterator advances only while a bounded window slot exists; byte pressure can
+retain one not-yet-admitted envelope while admitted tasks drain, never an
+unbounded producer queue.
+
+Each item deadline covers both queue wait and worker execution and is capped by
+the stage deadline. The driver also checks the stage deadline around input,
+reduction, and progress, and never reports success after it expires. Iterator
+`next` and the per-item reducer are trusted bounded/nonblocking callbacks;
+blocking I/O and expensive CPU work must run in the abortable worker future or
+a separate supervised stage. Results may complete in any order, but reduction
+and observable item/byte progress occur only in exact input-sequence order.
+Non-contiguous input, invalid capacity, admission failure, worker failure,
+deadline, panic/unexpected exit, reducer failure, progress failure, and parent
+cancellation have stable structured outcomes without embedding project paths
+or credentials. Failure/cancellation aborts work and reaps it within the
+separate cleanup grace; incomplete reaping is a distinct fatal outcome. A
+dropped execution future synchronously aborts its retained workers and poisons
+the supervisor scope. Completed results are acknowledged only after ordered
+reduction and progress, so discarding an incomplete stage cannot permit
+publication. Handled parent cancellation remains a cancellation rather than a
+worker failure.
+
 Workers emit normalized facts keyed by stable path/span/symbol identities. A
 single deterministic reducer sorts and deduplicates facts before computing the
 generation digest. Running with 1, 2, 4, 8, or 16 workers over the same snapshot
@@ -348,14 +383,17 @@ row-locking fence check immediately before the ready transition. Acquisition,
 publication, cleanup, and uncertain timeouts reconcile durable state before
 retrying or reporting an ambiguous outcome.
 
-The current live pinned-ParadeDB suite has 22 supervisor cases. It covers
+The current live pinned-ParadeDB suite has 23 supervisor cases. It covers
 success, heartbeats, progress stalls, whole-operation deadlines, lost leases,
 takeover, bounded acquisition/publication/cleanup reconciliation, dropped child
 failures, long COPY payloads, blocked COPY/publication/cleanup, simultaneous
 heartbeat and COPY uncertainty, caller task abort, and dropping a polled public
-future outside the runtime. Lock-injection cases prove zero active schema work,
-free operation/generation advisories, correct generation state, and exact lease
-disposition before the external blocker is released.
+future outside the runtime. The added stage integration case forces reverse
+parallel completion, proves exact ordered reduction/progress, then reaches
+supervised COPY and publication on PostgreSQL/ParadeDB. Lock-injection cases
+prove zero active schema work, free operation/generation advisories, correct
+generation state, and exact lease disposition before the external blocker is
+released.
 
 The remaining M4 fault matrix must exercise each real discover/read/parse/
 resolve/merge/BM25/vector stage after those stages exist; the supervisor
