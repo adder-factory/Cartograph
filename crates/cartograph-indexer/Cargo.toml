@@ -1,0 +1,25 @@
+[package]
+name = "cartograph-indexer"
+description = "Bounded, lease-owned indexing supervision for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cartograph-db = { path = "../cartograph-db" }
+cartograph-domain = { path = "../cartograph-domain" }
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+cartograph-config = { path = "../cartograph-config" }
+serde_json.workspace = true
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
+
+[lints]
+workspace = true

@@ -1,17 +1,18 @@
 use std::{
     env, process,
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, EdgeInput, FileInput, GenerationContents, GenerationFacts, NewGeneration,
-    NewProject, ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput,
-    StorageError, SymbolInput,
+    CartographDatabase, EdgeInput, FileInput, GenerationContents, GenerationFacts, LeaseOwner,
+    LeaseRequest, LeaseTarget, NewGeneration, NewProject, ProjectLease, ReadyGeneration,
+    RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError, SymbolInput,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
-    ProjectId, SymbolId,
+    ProjectId, ProjectOperation, SymbolId,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -54,6 +55,7 @@ const INDIVIDUAL_COPY_CODE_BYTES: usize = 1_024 * 1_024 + 128;
 const CHUNK_DOCUMENT_COUNT: i64 = 3;
 const CUMULATIVE_COPY_ROW_COUNT: i64 = 2;
 const INDIVIDUAL_COPY_ROW_COUNT: i64 = 1;
+const TEST_LEASE_DURATION: Duration = Duration::from_secs(30);
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -253,11 +255,13 @@ async fn prepare_generation(
         Ok(staged) => staged,
         Err(error) => panic!("ingest test generation did not begin: {error}"),
     };
-    match fixture
+    let lease = acquire_generation_lease(fixture, staged.generation_id()).await;
+    let result = fixture
         .database
-        .prepare_generation(GenerationContents::new(staged, facts))
-        .await
-    {
+        .prepare_generation(GenerationContents::new(staged, facts), &lease.fence())
+        .await;
+    assert!(fixture.database.release_lease(&lease).await.is_ok());
+    match result {
         Ok(ready) => ready,
         Err(error) => panic!("COPY generation preparation failed: {error}"),
     }
@@ -527,9 +531,11 @@ async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
         Err(error) => panic!("rollback fixture generation did not begin: {error}"),
     };
     let generation_id = staged.generation_id().clone();
+    let lease = acquire_generation_lease(fixture, &generation_id).await;
+    let fence = lease.fence();
     let failed = fixture
         .database
-        .prepare_generation(GenerationContents::new(staged, rejected_facts()))
+        .prepare_generation(GenerationContents::new(staged, rejected_facts()), &fence)
         .await;
     let staged = match failed {
         Err(error) => {
@@ -547,10 +553,34 @@ async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
     assert!(
         fixture
             .database
-            .fail_generation(RecoverableGeneration::Staged(staged))
+            .fail_generation(RecoverableGeneration::Staged(staged), &fence)
             .await
             .is_ok()
     );
+    assert!(fixture.database.release_lease(&lease).await.is_ok());
+}
+
+async fn acquire_generation_lease(
+    fixture: &DatabaseFixture,
+    generation_id: &GenerationId,
+) -> ProjectLease {
+    let target = LeaseTarget::new(
+        fixture.project.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    match fixture
+        .database
+        .acquire_lease(LeaseRequest::new(
+            target,
+            LeaseOwner::new(process::id(), format!("ingest-test-{generation_id}")),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => panic!("ingest test lease acquisition failed: {error}"),
+    }
 }
 
 fn rejected_facts() -> GenerationFacts {

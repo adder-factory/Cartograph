@@ -5,6 +5,7 @@ members = [
   "crates/cartograph-config",
   "crates/cartograph-db",
   "crates/cartograph-domain",
+  "crates/cartograph-indexer",
 ]
 
 [workspace.package]
@@ -30,7 +31,7 @@ sqlx-core = { version = "=0.9.0", default-features = false, features = [
 sqlx-postgres = { version = "=0.9.0", default-features = false }
 thiserror = "2.0.19"
 tempfile = "3.23.0"
-tokio = { version = "1.53.1", features = ["macros", "process", "rt-multi-thread", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "process", "rt-multi-thread", "sync", "time"] }
 url = "2.5.8"
 
 [workspace.lints.rust]

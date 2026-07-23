@@ -1,5 +1,8 @@
+use std::time::Duration;
+
 use cartograph_config::DatabaseSchema;
-use sqlx_postgres::PgPool;
+use sqlx_core::query::query;
+use sqlx_postgres::{PgConnection, PgPool};
 use thiserror::Error;
 
 /// PostgreSQL-backed v2 data plane bound to one validated Cartograph schema.
@@ -67,10 +70,29 @@ pub enum StorageError {
         /// Sequence already published for the project.
         current_sequence: i64,
     },
+    /// A generation mutation did not hold the current unexpired exact lease token.
+    #[error("Cartograph generation mutation lost its exact PostgreSQL lease fence")]
+    LeaseFenceLost,
 }
 
 pub(crate) fn quoted_schema(schema: &DatabaseSchema) -> String {
     // DatabaseSchema accepts ASCII identifier characters only and enforces the
     // PostgreSQL 63-byte limit. Quoting still prevents keyword/case ambiguity.
     format!("\"{}\"", schema.as_str())
+}
+
+pub(crate) async fn set_local_statement_timeout(
+    connection: &mut PgConnection,
+    timeout: Duration,
+) -> Result<(), ()> {
+    let millis = i64::try_from(timeout.as_millis()).map_err(|_| ())?;
+    if millis == 0 {
+        return Err(());
+    }
+    query("SELECT set_config('statement_timeout', $1, true)")
+        .bind(format!("{millis}ms"))
+        .execute(connection)
+        .await
+        .map(|_| ())
+        .map_err(|_| ())
 }

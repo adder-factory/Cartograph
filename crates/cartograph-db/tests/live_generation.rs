@@ -1,18 +1,21 @@
 use std::{
     env, process,
     sync::atomic::{AtomicU32, Ordering},
+    time::Duration,
 };
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, CurrentGeneration, GenerationContents, GenerationFacts, MigrationError,
-    NewGeneration, NewProject, ReadyGeneration, RecoverableGeneration, SearchDocumentInput,
-    SearchQuery, StorageError,
+    CartographDatabase, CurrentGeneration, FailGenerationError, FailedGeneration,
+    GenerationContents, GenerationFacts, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
+    NewGeneration, NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError,
+    ReadyGeneration, RecoverableGeneration, SearchDocumentInput, SearchQuery, StorageError,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, GenerationId, GenerationState, ProjectId,
+    ProjectOperation,
 };
-use sqlx_core::{query::query, sql_str::AssertSqlSafe};
+use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const REVISION_ONE: &str = "1111111111111111111111111111111111111111";
@@ -32,6 +35,10 @@ const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
 const RECOVERY_WORKERS: u16 = 2;
 const SEARCH_LIMIT: u16 = 10;
+const TEST_LEASE_DURATION: Duration = Duration::from_secs(30);
+const LOCK_ORDER_TIMEOUT: Duration = Duration::from_secs(5);
+const LOCK_OBSERVATION_ATTEMPTS: usize = 100;
+const LOCK_OBSERVATION_INTERVAL: Duration = Duration::from_millis(20);
 
 static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 
@@ -88,6 +95,272 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
     drop(database);
     drop_schema(&pool, &schema).await;
     pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn stale_fences_cannot_prepare_or_publish_after_exact_token_takeover() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let target = LeaseTarget::new(
+        project.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    let stale_prepare_lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    expire_generation_lease(&pool, &schema, &target).await;
+    let prepare_lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    install_copy_rejection_sentinel(&pool, &schema).await;
+    let stale_prepare = database
+        .prepare_generation(
+            GenerationContents::new(
+                staged,
+                GenerationFacts {
+                    documents: vec![document(DocumentFixture {
+                        id: DOCUMENT_ONE,
+                        path: "src/stale_copy.rs",
+                        qualified_name: "stale_copy_probe",
+                        code: "fn stale_copy_probe() {}",
+                    })],
+                    ..GenerationFacts::default()
+                },
+            ),
+            &stale_prepare_lease.fence(),
+        )
+        .await;
+    remove_copy_rejection_sentinel(&pool, &schema).await;
+    let staged = match stale_prepare {
+        Err(error) if *error.error() == StorageError::LeaseFenceLost => error.into_parts().0,
+        Err(error) => panic!("stale prepare fence returned wrong error: {error}"),
+        Ok(_) => panic!("stale prepare fence committed after takeover"),
+    };
+    let ready = match database
+        .prepare_generation(
+            GenerationContents::new(staged, GenerationFacts::default()),
+            &prepare_lease.fence(),
+        )
+        .await
+    {
+        Ok(ready) => ready,
+        Err(error) => panic!("current prepare fence failed: {error}"),
+    };
+    expire_generation_lease(&pool, &schema, &target).await;
+    let publish_lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    let ready = match database
+        .publish_generation(ready, &prepare_lease.fence())
+        .await
+    {
+        Err(error) if *error.error() == StorageError::LeaseFenceLost => error.into_parts().0,
+        Err(error) => panic!("stale publish fence returned wrong error: {error}"),
+        Ok(_) => panic!("stale publish fence committed after takeover"),
+    };
+    let current = match database
+        .publish_generation(ready, &publish_lease.fence())
+        .await
+    {
+        Ok(current) => current,
+        Err(error) => panic!("current publish fence failed: {error}"),
+    };
+    assert_eq!(current.generation_id(), &generation_id);
+    assert!(matches!(database.lease_status(&target).await, Ok(None)));
+
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+#[tokio::test]
+#[ignore = "requires an explicit PostgreSQL 18 + pinned ParadeDB test database"]
+async fn concurrent_prepare_and_cleanup_share_one_pre_copy_lock_order() {
+    let (database, pool, schema) = open_isolated_database().await;
+    assert_migration_ledger(&database).await;
+    let project = register_project(&database).await;
+    let staged = begin(
+        &database,
+        GenerationFixture {
+            project: &project,
+            revision: REVISION_ONE,
+            workers: INITIAL_WORKERS,
+        },
+    )
+    .await;
+    let generation_id = staged.generation_id().clone();
+    let target = LeaseTarget::new(
+        project.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    let lease = acquire_generation_lease(&database, &project, &generation_id).await;
+    let fence = lease.fence();
+    let barrier_key = format!("cartograph-test-copy-barrier:{schema}");
+    install_copy_barrier(&pool, &schema, &barrier_key).await;
+    let mut barrier = match pool.acquire().await {
+        Ok(connection) => connection,
+        Err(error) => panic!("could not acquire COPY barrier connection: {error}"),
+    };
+    if let Err(error) = query("SELECT pg_advisory_lock(hashtextextended($1, 0))")
+        .bind(&barrier_key)
+        .execute(&mut *barrier)
+        .await
+    {
+        panic!("could not establish COPY barrier: {error}");
+    }
+
+    let prepare_fence = fence.clone();
+    let prepare_database = database.clone();
+    let prepare = prepare_database.prepare_generation(
+        GenerationContents::new(
+            staged,
+            GenerationFacts {
+                documents: vec![document(DocumentFixture {
+                    id: DOCUMENT_ONE,
+                    path: "src/lock_order.rs",
+                    qualified_name: "lock_order_probe",
+                    code: "fn lock_order_probe() {}",
+                })],
+                ..GenerationFacts::default()
+            },
+        ),
+        &prepare_fence,
+    );
+    tokio::pin!(prepare);
+    let cleanup_fence = fence.clone();
+    let cleanup_database = database.clone();
+    let concurrent_cleanup = async {
+        wait_for_copy_barrier(&pool, &schema).await;
+        let cleanup = cleanup_database.fail_generation_and_release(&cleanup_fence);
+        tokio::pin!(cleanup);
+        assert!(
+            tokio::time::timeout(LOCK_OBSERVATION_INTERVAL, &mut cleanup)
+                .await
+                .is_err()
+        );
+        if let Err(error) = query("SELECT pg_advisory_unlock(hashtextextended($1, 0))")
+            .bind(&barrier_key)
+            .execute(&mut *barrier)
+            .await
+        {
+            panic!("could not release COPY barrier: {error}");
+        }
+        cleanup.await
+    };
+    let joined = tokio::time::timeout(LOCK_ORDER_TIMEOUT, async {
+        tokio::join!(&mut prepare, concurrent_cleanup)
+    })
+    .await;
+    let (prepare, cleanup) = match joined {
+        Ok(joined) => joined,
+        Err(_) => panic!("prepare and cleanup deadlocked across COPY foreign-key locks"),
+    };
+    assert!(prepare.is_ok());
+    assert!(cleanup.is_ok());
+    assert!(matches!(
+        database.generation_state(&project, &generation_id).await,
+        Ok(Some(GenerationState::Failed))
+    ));
+    assert!(matches!(database.lease_status(&target).await, Ok(None)));
+
+    drop(barrier);
+    drop(database);
+    drop_schema(&pool, &schema).await;
+    pool.close().await;
+}
+
+async fn install_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str, barrier_key: &str) {
+    let function = format!(
+        r#"CREATE FUNCTION "{schema}"."block_search_document_copy"()
+            RETURNS trigger LANGUAGE plpgsql AS $body$
+            BEGIN
+                PERFORM pg_advisory_xact_lock(hashtextextended('{barrier_key}', 0));
+                RETURN NULL;
+            END
+            $body$"#
+    );
+    if let Err(error) = query(AssertSqlSafe(function)).execute(pool).await {
+        panic!("could not install COPY barrier function: {error}");
+    }
+    let trigger = format!(
+        r#"CREATE TRIGGER "block_search_document_copy"
+            AFTER INSERT ON "{schema}"."search_documents"
+            FOR EACH STATEMENT
+            EXECUTE FUNCTION "{schema}"."block_search_document_copy"()"#
+    );
+    if let Err(error) = query(AssertSqlSafe(trigger)).execute(pool).await {
+        panic!("could not install COPY barrier trigger: {error}");
+    }
+}
+
+async fn install_copy_rejection_sentinel(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let function = format!(
+        r#"CREATE FUNCTION "{schema}"."reject_stale_search_document_copy"()
+            RETURNS trigger LANGUAGE plpgsql AS $body$
+            BEGIN
+                RAISE EXCEPTION 'stale lease reached COPY';
+            END
+            $body$"#
+    );
+    if let Err(error) = query(AssertSqlSafe(function)).execute(pool).await {
+        panic!("could not install stale-COPY sentinel function: {error}");
+    }
+    let trigger = format!(
+        r#"CREATE TRIGGER "reject_stale_search_document_copy"
+            BEFORE INSERT ON "{schema}"."search_documents"
+            FOR EACH STATEMENT
+            EXECUTE FUNCTION "{schema}"."reject_stale_search_document_copy"()"#
+    );
+    if let Err(error) = query(AssertSqlSafe(trigger)).execute(pool).await {
+        panic!("could not install stale-COPY sentinel trigger: {error}");
+    }
+}
+
+async fn remove_copy_rejection_sentinel(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let trigger = format!(
+        r#"DROP TRIGGER "reject_stale_search_document_copy"
+            ON "{schema}"."search_documents""#
+    );
+    if let Err(error) = query(AssertSqlSafe(trigger)).execute(pool).await {
+        panic!("could not remove stale-COPY sentinel trigger: {error}");
+    }
+    let function = format!(r#"DROP FUNCTION "{schema}"."reject_stale_search_document_copy"()"#);
+    if let Err(error) = query(AssertSqlSafe(function)).execute(pool).await {
+        panic!("could not remove stale-COPY sentinel function: {error}");
+    }
+}
+
+async fn wait_for_copy_barrier(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let query_pattern = format!("%{schema}%search_documents%");
+    for _ in 0..LOCK_OBSERVATION_ATTEMPTS {
+        let row = query(
+            r#"SELECT EXISTS (
+                    SELECT 1 FROM pg_stat_activity
+                    WHERE application_name = 'cartograph-v2'
+                      AND wait_event_type = 'Lock'
+                      AND query LIKE $1
+                ) AS waiting"#,
+        )
+        .bind(&query_pattern)
+        .fetch_one(pool)
+        .await;
+        if matches!(
+            row.and_then(|row| row.try_get::<bool, _>("waiting")),
+            Ok(true)
+        ) {
+            return;
+        }
+        tokio::time::sleep(LOCK_OBSERVATION_INTERVAL).await;
+    }
+    panic!("prepare COPY did not reach the deterministic advisory barrier");
 }
 
 struct DocumentFixture<'a> {
@@ -212,7 +485,7 @@ async fn publish_initial_generation(
     )
     .await;
     assert_search(database, SearchExpectation::empty(project, "http response")).await;
-    let current = match database.publish_generation(ready).await {
+    let current = match publish_fenced(database, ready).await {
         Ok(generation) => generation,
         Err(error) => panic!("first generation did not publish: {error}"),
     };
@@ -254,15 +527,15 @@ async fn prepare_rollback_retry(
     });
     let mut conflicting = duplicate.clone();
     conflicting.code = "fn decode_json_payload() { unreachable!() }".to_owned();
-    let failed = database
-        .prepare_generation(GenerationContents::new(
-            staged,
-            GenerationFacts {
-                documents: vec![duplicate.clone(), conflicting],
-                ..GenerationFacts::default()
-            },
-        ))
-        .await;
+    let failed = prepare_fenced(
+        database,
+        staged,
+        GenerationFacts {
+            documents: vec![duplicate.clone(), conflicting],
+            ..GenerationFacts::default()
+        },
+    )
+    .await;
     let staged = match failed {
         Err(error) => {
             assert!(matches!(
@@ -330,14 +603,14 @@ async fn publish_newer_generation(
         },
     )
     .await;
-    match database.publish_generation(ready).await {
+    match publish_fenced(database, ready).await {
         Ok(generation) => generation,
         Err(error) => panic!("newer generation did not publish: {error}"),
     }
 }
 
 async fn reject_stale_publication(database: &CartographDatabase, ready: ReadyGeneration) {
-    let ready = match database.publish_generation(ready).await {
+    let ready = match publish_fenced(database, ready).await {
         Err(error) => {
             assert!(matches!(
                 error.error(),
@@ -348,8 +621,7 @@ async fn reject_stale_publication(database: &CartographDatabase, ready: ReadyGen
         Ok(_) => panic!("older ready generation replaced a newer current generation"),
     };
     assert!(
-        database
-            .fail_generation(RecoverableGeneration::Ready(ready))
+        fail_fenced(database, RecoverableGeneration::Ready(ready))
             .await
             .is_ok()
     );
@@ -373,8 +645,7 @@ async fn assert_restart_recovery(database: &CartographDatabase, project: &Projec
         Err(error) => panic!("generation recovery failed: {error}"),
     };
     assert!(
-        database
-            .fail_generation(RecoverableGeneration::Staged(recovered))
+        fail_fenced(database, RecoverableGeneration::Staged(recovered))
             .await
             .is_ok()
     );
@@ -402,15 +673,15 @@ async fn assert_validation_token_return(database: &CartographDatabase, project: 
         code: "",
     });
     invalid.natural_text.clear();
-    let staged = match database
-        .prepare_generation(GenerationContents::new(
-            staged,
-            GenerationFacts {
-                documents: vec![invalid],
-                ..GenerationFacts::default()
-            },
-        ))
-        .await
+    let staged = match prepare_fenced(
+        database,
+        staged,
+        GenerationFacts {
+            documents: vec![invalid],
+            ..GenerationFacts::default()
+        },
+    )
+    .await
     {
         Err(error) => {
             assert!(matches!(
@@ -424,8 +695,7 @@ async fn assert_validation_token_return(database: &CartographDatabase, project: 
         Ok(_) => panic!("empty search document unexpectedly became ready"),
     };
     assert!(
-        database
-            .fail_generation(RecoverableGeneration::Staged(staged))
+        fail_fenced(database, RecoverableGeneration::Staged(staged))
             .await
             .is_ok()
     );
@@ -480,18 +750,105 @@ async fn begin(
 }
 
 async fn prepare(database: &CartographDatabase, fixture: PrepareFixture) -> ReadyGeneration {
-    match database
-        .prepare_generation(GenerationContents::new(
-            fixture.staged,
-            GenerationFacts {
-                documents: vec![fixture.document],
-                ..GenerationFacts::default()
-            },
-        ))
-        .await
+    match prepare_fenced(
+        database,
+        fixture.staged,
+        GenerationFacts {
+            documents: vec![fixture.document],
+            ..GenerationFacts::default()
+        },
+    )
+    .await
     {
         Ok(generation) => generation,
         Err(error) => panic!("generation did not become ready: {error}"),
+    }
+}
+
+async fn prepare_fenced(
+    database: &CartographDatabase,
+    staged: cartograph_db::StagedGeneration,
+    facts: GenerationFacts,
+) -> Result<ReadyGeneration, PrepareGenerationError> {
+    let lease =
+        acquire_generation_lease(database, staged.project_id(), staged.generation_id()).await;
+    let fence = lease.fence();
+    let result = database
+        .prepare_generation(GenerationContents::new(staged, facts), &fence)
+        .await;
+    assert!(database.release_lease(&lease).await.is_ok());
+    result
+}
+
+async fn publish_fenced(
+    database: &CartographDatabase,
+    ready: ReadyGeneration,
+) -> Result<CurrentGeneration, PublishGenerationError> {
+    let lease = acquire_generation_lease(database, ready.project_id(), ready.generation_id()).await;
+    let fence = lease.fence();
+    let result = database.publish_generation(ready, &fence).await;
+    if result.is_err() {
+        assert!(database.release_lease(&lease).await.is_ok());
+    }
+    result
+}
+
+async fn fail_fenced(
+    database: &CartographDatabase,
+    generation: RecoverableGeneration,
+) -> Result<FailedGeneration, FailGenerationError> {
+    let (project_id, generation_id) = match &generation {
+        RecoverableGeneration::Staged(generation) => {
+            (generation.project_id(), generation.generation_id())
+        }
+        RecoverableGeneration::Ready(generation) => {
+            (generation.project_id(), generation.generation_id())
+        }
+    };
+    let lease = acquire_generation_lease(database, project_id, generation_id).await;
+    let result = database.fail_generation(generation, &lease.fence()).await;
+    assert!(database.release_lease(&lease).await.is_ok());
+    result
+}
+
+async fn acquire_generation_lease(
+    database: &CartographDatabase,
+    project_id: &ProjectId,
+    generation_id: &GenerationId,
+) -> ProjectLease {
+    let target = LeaseTarget::new(
+        project_id.clone(),
+        ProjectOperation::Index,
+        Some(generation_id.clone()),
+    );
+    match database
+        .acquire_lease(LeaseRequest::new(
+            target,
+            LeaseOwner::new(process::id(), format!("generation-test-{generation_id}")),
+            TEST_LEASE_DURATION,
+        ))
+        .await
+    {
+        Ok(lease) => lease,
+        Err(error) => panic!("generation test lease acquisition failed: {error}"),
+    }
+}
+
+async fn expire_generation_lease(pool: &sqlx_postgres::PgPool, schema: &str, target: &LeaseTarget) {
+    let statement = format!(
+        r#"UPDATE "{schema}"."project_operation_leases"
+            SET acquired_at = clock_timestamp() - interval '3 seconds',
+                heartbeat_at = clock_timestamp() - interval '2 seconds',
+                expires_at = clock_timestamp() - interval '1 second'
+            WHERE project_id = CAST($1 AS uuid) AND operation = $2"#
+    );
+    if let Err(error) = query(AssertSqlSafe(statement))
+        .bind(target.project_id().as_str())
+        .bind(target.operation().as_str())
+        .execute(pool)
+        .await
+    {
+        panic!("could not expire generation fence fixture: {error}");
     }
 }
 

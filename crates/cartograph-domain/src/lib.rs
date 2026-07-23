@@ -15,6 +15,7 @@ const BLAKE3_HEX_LENGTH: usize = 64;
 const BLAKE3_BYTE_LENGTH: usize = BLAKE3_HEX_LENGTH / 2;
 const UPPER_NIBBLE_SHIFT: u8 = 4;
 const NIBBLE_MASK: u8 = 0x0f;
+const HEX_DIGITS: &[u8] = b"0123456789abcdef";
 
 /// A supplied branded identifier was not a canonicalizable, non-nil UUID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -98,12 +99,12 @@ impl ContentDigest {
     /// Render an exact 32-byte digest without a fallible text round trip.
     #[must_use]
     pub fn from_bytes(bytes: [u8; BLAKE3_BYTE_LENGTH]) -> Self {
-        const HEX: &[u8] = b"0123456789abcdef";
-
         let mut encoded = String::with_capacity(BLAKE3_HEX_LENGTH);
         for byte in bytes {
-            encoded.push(char::from(HEX[usize::from(byte >> UPPER_NIBBLE_SHIFT)]));
-            encoded.push(char::from(HEX[usize::from(byte & NIBBLE_MASK)]));
+            encoded.push(char::from(
+                HEX_DIGITS[usize::from(byte >> UPPER_NIBBLE_SHIFT)],
+            ));
+            encoded.push(char::from(HEX_DIGITS[usize::from(byte & NIBBLE_MASK)]));
         }
         Self(encoded)
     }

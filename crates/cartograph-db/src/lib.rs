@@ -16,13 +16,17 @@ use cartograph_config::DatabaseSettings;
 pub use database::{CartographDatabase, StorageError};
 pub use generation::{
     CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents, NewGeneration,
-    NewProject, PrepareGenerationError, PublishGenerationError, ReadyGeneration,
-    RecoverableGeneration, StagedGeneration,
+    NewProject, ObservedGeneration, ObservedLease, OperationReconciliation, PrepareGenerationError,
+    PrepareGenerationMutation, PublishGenerationError, ReadyGeneration, RecoverableGeneration,
+    StagedGeneration, TerminalGenerationMutation,
 };
 pub use ingest::{
     EdgeInput, FileInput, GenerationFacts, ReferenceInput, SearchDocumentInput, SymbolInput,
 };
-pub use leases::{LeaseError, LeaseOwner, LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease};
+pub use leases::{
+    LeaseAcquisitionAttempt, LeaseAcquisitionProbe, LeaseError, LeaseFence, LeaseOwner,
+    LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease,
+};
 pub use managed::{
     DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedContainerState, ManagedDatabase,
     ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,

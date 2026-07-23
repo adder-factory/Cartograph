@@ -1,19 +1,30 @@
+use std::time::Duration;
+
 use cartograph_domain::{ContentDigest, GenerationId, GenerationState, ProjectId};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
-use sqlx_postgres::PgConnection;
+use sqlx_postgres::{PgConnection, PgRow};
 use thiserror::Error;
 
 use crate::{
-    CartographDatabase, StorageError,
+    CartographDatabase, LeaseFence, StorageError,
     ingest::{
         CopyGenerationContext, GenerationFacts, ValidatedGenerationFacts, copy_generation_facts,
         validate_and_reduce,
     },
+    leases::operation_lock_key,
 };
 
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
 const MAX_SOURCE_REVISION_BYTES: usize = 1_024;
 const MAX_WORKERS: u16 = 256;
+const RECONCILE_STATE_COLUMN: usize = 0;
+const RECONCILE_SEQUENCE_COLUMN: usize = 1;
+const RECONCILE_DIGEST_COLUMN: usize = 2;
+const RECONCILE_CURRENT_COLUMN: usize = 3;
+const RECONCILE_LEASE_ID_COLUMN: usize = 4;
+const RECONCILE_LEASE_UNEXPIRED_COLUMN: usize = 5;
+const RECONCILE_LEASE_GENERATION_COLUMN: usize = 6;
+const GENERATION_LOCK_NAMESPACE: &str = "cartograph-v2-generation";
 
 /// Validated-at-write project registration input.
 pub struct NewProject {
@@ -126,6 +137,104 @@ pub struct CurrentGeneration {
     generation_id: GenerationId,
     sequence: i64,
     content_digest: ContentDigest,
+}
+
+/// Durable generation state observed while reconciling a timed-out mutation.
+#[derive(Debug)]
+pub enum ObservedGeneration {
+    /// The exact generation remains writable under a valid fence.
+    Staged(StagedGeneration),
+    /// COPY committed and the exact generation remains publishable.
+    Ready(ReadyGeneration),
+    /// Publication committed and the project pointer names this generation.
+    Current(CurrentGeneration),
+    /// Cleanup committed and the generation is terminally failed.
+    Failed,
+    /// A newer generation superseded this generation.
+    Superseded,
+}
+
+/// Exact lease disposition observed in the same reconciliation query.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ObservedLease {
+    /// The same exact token is current and unexpired according to PostgreSQL.
+    Owned,
+    /// No operation-lease row currently exists.
+    Released,
+    /// The row expired or belongs to a different takeover token.
+    Lost,
+}
+
+/// Single-query durable snapshot used after a client-side timeout or commit error.
+#[derive(Debug)]
+pub struct OperationReconciliation {
+    generation: ObservedGeneration,
+    lease: ObservedLease,
+}
+
+impl OperationReconciliation {
+    /// Rehydrated exact generation state.
+    #[must_use]
+    pub const fn generation(&self) -> &ObservedGeneration {
+        &self.generation
+    }
+
+    /// Consume the snapshot and recover the generation type-state token.
+    #[must_use]
+    pub fn into_generation(self) -> ObservedGeneration {
+        self.generation
+    }
+
+    /// Exact-token lease disposition from the same database statement.
+    #[must_use]
+    pub const fn lease(&self) -> ObservedLease {
+        self.lease
+    }
+}
+
+/// Exact prepare/COPY fence paired with its PostgreSQL-side statement deadline.
+///
+/// Prepare authority is not terminal authority:
+///
+/// ```compile_fail
+/// async fn work_cannot_publish(
+///     database: &cartograph_db::CartographDatabase,
+///     ready: cartograph_db::ReadyGeneration,
+///     prepare: cartograph_db::PrepareGenerationMutation<'_>,
+/// ) {
+///     let _ = database.publish_generation_bounded(ready, prepare).await;
+/// }
+/// ```
+///
+/// ```compile_fail
+/// async fn work_cannot_cleanup(
+///     database: &cartograph_db::CartographDatabase,
+///     prepare: cartograph_db::PrepareGenerationMutation<'_>,
+/// ) {
+///     let _ = database
+///         .fail_generation_and_release_bounded(prepare)
+///         .await;
+/// }
+/// ```
+pub struct PrepareGenerationMutation<'a>(LeaseMutationOptions<'a>);
+
+impl<'a> PrepareGenerationMutation<'a> {
+    /// Bind an exact lease fence to one prepare/COPY statement deadline.
+    #[must_use]
+    pub const fn new(fence: &'a LeaseFence, statement_timeout: Duration) -> Self {
+        Self(LeaseMutationOptions::bounded(fence, statement_timeout))
+    }
+}
+
+/// Exact terminal-transition fence paired with a short database deadline.
+pub struct TerminalGenerationMutation<'a>(LeaseMutationOptions<'a>);
+
+impl<'a> TerminalGenerationMutation<'a> {
+    /// Bind an exact lease fence to one publish or cleanup deadline.
+    #[must_use]
+    pub const fn new(fence: &'a LeaseFence, statement_timeout: Duration) -> Self {
+        Self(LeaseMutationOptions::bounded(fence, statement_timeout))
+    }
 }
 
 impl CurrentGeneration {
@@ -270,7 +379,8 @@ pub struct GenerationContents {
 struct PrepareTransactionInput<'a> {
     schema: &'a cartograph_config::DatabaseSchema,
     generation: &'a StagedGeneration,
-    facts: &'a ValidatedGenerationFacts,
+    facts: ValidatedGenerationFacts,
+    fence: &'a LeaseFence,
 }
 
 struct GenerationStateRequirement<'a> {
@@ -279,6 +389,54 @@ struct GenerationStateRequirement<'a> {
     generation_id: &'a GenerationId,
     sequence: i64,
     required: GenerationState,
+}
+
+struct PublishTransactionInput<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    generation: &'a ReadyGeneration,
+    fence: &'a LeaseFence,
+}
+
+struct FailTransactionInput<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    fence: &'a LeaseFence,
+    project_id: &'a ProjectId,
+    generation_id: &'a GenerationId,
+    sequence: i64,
+    expected_state: GenerationState,
+}
+
+struct LeaseMutationOptions<'a> {
+    fence: &'a LeaseFence,
+    statement_timeout: Option<Duration>,
+}
+
+impl<'a> LeaseMutationOptions<'a> {
+    const fn unbounded(fence: &'a LeaseFence) -> Self {
+        Self {
+            fence,
+            statement_timeout: None,
+        }
+    }
+
+    const fn bounded(fence: &'a LeaseFence, statement_timeout: Duration) -> Self {
+        Self {
+            fence,
+            statement_timeout: Some(statement_timeout),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FenceCheck {
+    Observe,
+    Lock,
+}
+
+struct FenceValidation<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    fence: &'a LeaseFence,
+    check: FenceCheck,
 }
 
 impl GenerationContents {
@@ -370,14 +528,41 @@ impl CartographDatabase {
     pub async fn prepare_generation(
         &self,
         contents: GenerationContents,
+        fence: &LeaseFence,
     ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        self.prepare_generation_inner(contents, LeaseMutationOptions::unbounded(fence))
+            .await
+    }
+
+    /// Validate, COPY, and mark ready under a PostgreSQL-side statement deadline.
+    pub async fn prepare_generation_bounded(
+        &self,
+        contents: GenerationContents,
+        mutation: PrepareGenerationMutation<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        self.prepare_generation_inner(contents, mutation.0).await
+    }
+
+    async fn prepare_generation_inner(
+        &self,
+        contents: GenerationContents,
+        mutation: LeaseMutationOptions<'_>,
+    ) -> Result<ReadyGeneration, PrepareGenerationError> {
+        let fence = mutation.fence;
         let GenerationContents { generation, facts } = contents;
+        if !fence_matches_generation(fence, generation.project_id(), generation.generation_id()) {
+            return Err(PrepareGenerationError {
+                generation,
+                error: StorageError::LeaseFenceLost,
+            });
+        }
         let facts = match validate_and_reduce(facts) {
             Ok(facts) => facts,
             Err(error) => {
                 return Err(PrepareGenerationError { generation, error });
             }
         };
+        let content_digest = facts.digest.clone();
         let mut transaction = match self.pool.begin().await {
             Ok(transaction) => transaction,
             Err(_) => {
@@ -387,12 +572,24 @@ impl CartographDatabase {
                 });
             }
         };
+        if let Some(statement_timeout) = mutation.statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            let error = match transaction.rollback().await {
+                Ok(()) => database_error("prepare-statement-timeout"),
+                Err(_) => database_error("prepare-rollback"),
+            };
+            return Err(PrepareGenerationError { generation, error });
+        }
         let result = prepare_transaction(
             &mut transaction,
             PrepareTransactionInput {
                 schema: &self.schema,
                 generation: &generation,
-                facts: &facts,
+                facts,
+                fence,
             },
         )
         .await;
@@ -413,7 +610,7 @@ impl CartographDatabase {
             project_id: generation.project_id,
             generation_id: generation.generation_id,
             sequence: generation.sequence,
-            content_digest: facts.digest,
+            content_digest,
         })
     }
 
@@ -422,6 +619,26 @@ impl CartographDatabase {
     pub async fn publish_generation(
         &self,
         generation: ReadyGeneration,
+        fence: &LeaseFence,
+    ) -> Result<CurrentGeneration, PublishGenerationError> {
+        self.publish_generation_inner(generation, LeaseMutationOptions::unbounded(fence))
+            .await
+    }
+
+    /// Publish under a PostgreSQL-side statement deadline so a dropped client
+    /// future cannot leave a lock-waiting backend statement behind.
+    pub async fn publish_generation_bounded(
+        &self,
+        generation: ReadyGeneration,
+        mutation: TerminalGenerationMutation<'_>,
+    ) -> Result<CurrentGeneration, PublishGenerationError> {
+        self.publish_generation_inner(generation, mutation.0).await
+    }
+
+    async fn publish_generation_inner(
+        &self,
+        generation: ReadyGeneration,
+        mutation: LeaseMutationOptions<'_>,
     ) -> Result<CurrentGeneration, PublishGenerationError> {
         let mut transaction = match self.pool.begin().await {
             Ok(transaction) => transaction,
@@ -432,7 +649,26 @@ impl CartographDatabase {
                 });
             }
         };
-        let result = publish_transaction(&mut transaction, &self.schema, &generation).await;
+        if let Some(statement_timeout) = mutation.statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            let error = match transaction.rollback().await {
+                Ok(()) => database_error("publish-statement-timeout"),
+                Err(_) => database_error("publish-rollback"),
+            };
+            return Err(PublishGenerationError { generation, error });
+        }
+        let result = publish_transaction(
+            &mut transaction,
+            PublishTransactionInput {
+                schema: &self.schema,
+                generation: &generation,
+                fence: mutation.fence,
+            },
+        )
+        .await;
         if let Err(error) = result {
             let error = match transaction.rollback().await {
                 Ok(()) => error,
@@ -527,40 +763,47 @@ impl CartographDatabase {
     pub async fn fail_generation(
         &self,
         generation: RecoverableGeneration,
+        fence: &LeaseFence,
     ) -> Result<FailedGeneration, FailGenerationError> {
         let (project_id, generation_id, sequence, expected_state) = recoverable_parts(&generation);
-        let schema = crate::database::quoted_schema(&self.schema);
-        let sql = format!(
-            r#"UPDATE {schema}."index_generations"
-                SET state = 'failed'
-                WHERE project_id = CAST($1 AS uuid)
-                  AND generation_id = CAST($2 AS uuid)
-                  AND generation_sequence = $3
-                  AND state = $4"#
-        );
-        let result = audited_query(sql)
-            .bind(project_id.as_str())
-            .bind(generation_id.as_str())
-            .bind(sequence)
-            .bind(expected_state.as_str())
-            .execute(&self.pool)
-            .await;
-        let result = match result {
-            Ok(result) => result,
+        if !fence_matches_generation(fence, project_id, generation_id) {
+            return Err(FailGenerationError {
+                generation,
+                error: StorageError::LeaseFenceLost,
+            });
+        }
+        let mut transaction = match self.pool.begin().await {
+            Ok(transaction) => transaction,
             Err(_) => {
                 return Err(FailGenerationError {
                     generation,
-                    error: database_error("fail-generation"),
+                    error: database_error("fail-begin"),
                 });
             }
         };
-        if result.rows_affected() != 1 {
+        let result = fail_transaction(
+            &mut transaction,
+            FailTransactionInput {
+                schema: &self.schema,
+                fence,
+                project_id,
+                generation_id,
+                sequence,
+                expected_state,
+            },
+        )
+        .await;
+        if let Err(error) = result {
+            let error = match transaction.rollback().await {
+                Ok(()) => error,
+                Err(_) => database_error("fail-rollback"),
+            };
+            return Err(FailGenerationError { generation, error });
+        }
+        if transaction.commit().await.is_err() {
             return Err(FailGenerationError {
                 generation,
-                error: StorageError::InvalidGenerationTransition {
-                    actual: "changed concurrently".to_owned(),
-                    requested: GenerationState::Failed.as_str(),
-                },
+                error: database_error("fail-commit"),
             });
         }
         let (project_id, generation_id, sequence, _) = into_recoverable_parts(generation);
@@ -569,6 +812,114 @@ impl CartographDatabase {
             generation_id,
             sequence,
         })
+    }
+
+    /// Atomically fail a staging/ready generation and release its exact lease.
+    ///
+    /// This operation is idempotent for an already-failed generation that still
+    /// carries the same live token, which permits bounded timeout reconciliation.
+    pub async fn fail_generation_and_release(
+        &self,
+        fence: &LeaseFence,
+    ) -> Result<(), StorageError> {
+        self.fail_generation_and_release_inner(LeaseMutationOptions::unbounded(fence))
+            .await
+    }
+
+    /// Fail and release under a PostgreSQL-side statement deadline.
+    pub async fn fail_generation_and_release_bounded(
+        &self,
+        mutation: TerminalGenerationMutation<'_>,
+    ) -> Result<(), StorageError> {
+        self.fail_generation_and_release_inner(mutation.0).await
+    }
+
+    async fn fail_generation_and_release_inner(
+        &self,
+        mutation: LeaseMutationOptions<'_>,
+    ) -> Result<(), StorageError> {
+        let fence = mutation.fence;
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("cleanup-begin"))?;
+        if let Some(statement_timeout) = mutation.statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("cleanup-statement-timeout")),
+                Err(_) => Err(database_error("cleanup-rollback")),
+            };
+        }
+        let result = cleanup_transaction(&mut transaction, &self.schema, fence).await;
+        if let Err(error) = result {
+            return match transaction.rollback().await {
+                Ok(()) => Err(error),
+                Err(_) => Err(database_error("cleanup-rollback")),
+            };
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("cleanup-commit"))
+    }
+
+    /// Reconcile generation and exact-token lease state in one PostgreSQL statement.
+    pub async fn reconcile_operation(
+        &self,
+        fence: &LeaseFence,
+    ) -> Result<OperationReconciliation, StorageError> {
+        self.reconcile_operation_inner(fence, None).await
+    }
+
+    /// Reconcile generation and lease state under a PostgreSQL statement deadline.
+    pub async fn reconcile_operation_bounded(
+        &self,
+        fence: &LeaseFence,
+        statement_timeout: Duration,
+    ) -> Result<OperationReconciliation, StorageError> {
+        self.reconcile_operation_inner(fence, Some(statement_timeout))
+            .await
+    }
+
+    async fn reconcile_operation_inner(
+        &self,
+        fence: &LeaseFence,
+        statement_timeout: Option<Duration>,
+    ) -> Result<OperationReconciliation, StorageError> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| database_error("reconcile-operation-begin"))?;
+        if let Some(statement_timeout) = statement_timeout
+            && crate::database::set_local_statement_timeout(&mut transaction, statement_timeout)
+                .await
+                .is_err()
+        {
+            return match transaction.rollback().await {
+                Ok(()) => Err(database_error("reconcile-operation-statement-timeout")),
+                Err(_) => Err(database_error("reconcile-operation-rollback")),
+            };
+        }
+        let result = reconcile_operation_query(&mut transaction, &self.schema, fence).await;
+        let reconciliation = match result {
+            Ok(reconciliation) => reconciliation,
+            Err(error) => {
+                return match transaction.rollback().await {
+                    Ok(()) => Err(error),
+                    Err(_) => Err(database_error("reconcile-operation-rollback")),
+                };
+            }
+        };
+        transaction
+            .commit()
+            .await
+            .map_err(|_| database_error("reconcile-operation-commit"))?;
+        Ok(reconciliation)
     }
 
     /// Read the durable state for diagnostics and invariant tests.
@@ -592,12 +943,147 @@ impl CartographDatabase {
     }
 }
 
+async fn reconcile_operation_query(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+) -> Result<OperationReconciliation, StorageError> {
+    let generation_id = fence
+        .target()
+        .generation_id()
+        .ok_or(StorageError::InvalidInput {
+            field: "generation_id",
+        })?;
+    let schema = crate::database::quoted_schema(schema);
+    let sql = format!(
+        r#"WITH database_clock AS (SELECT clock_timestamp() AS now)
+                SELECT generations.state,
+                       generations.generation_sequence,
+                       generations.content_digest,
+                       projects.current_generation_id::text,
+                       leases.lease_id::text,
+                       leases.expires_at > database_clock.now,
+                       leases.generation_id::text
+                FROM {schema}."index_generations" AS generations
+                JOIN {schema}."projects" AS projects
+                  ON projects.project_id = generations.project_id
+                CROSS JOIN database_clock
+                LEFT JOIN {schema}."project_operation_leases" AS leases
+                  ON leases.project_id = generations.project_id
+                 AND leases.operation = $3
+                WHERE generations.project_id = CAST($1 AS uuid)
+                  AND generations.generation_id = CAST($2 AS uuid)"#
+    );
+    let row = audited_query(sql)
+        .bind(fence.target().project_id().as_str())
+        .bind(generation_id.as_str())
+        .bind(fence.target().operation().as_str())
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| database_error("reconcile-operation"))?
+        .ok_or(StorageError::GenerationNotFound)?;
+    decode_reconciliation(&row, fence)
+}
+
+async fn cleanup_transaction(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+) -> Result<(), StorageError> {
+    let generation_id = fence
+        .target()
+        .generation_id()
+        .ok_or(StorageError::InvalidInput {
+            field: "generation_id",
+        })?;
+    lock_generation_fence(connection, schema, fence).await?;
+    let quoted_schema = crate::database::quoted_schema(schema);
+    let state_sql = format!(
+        r#"SELECT state FROM {quoted_schema}."index_generations"
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+            FOR UPDATE"#
+    );
+    let row = audited_query(state_sql)
+        .bind(fence.target().project_id().as_str())
+        .bind(generation_id.as_str())
+        .fetch_optional(&mut *connection)
+        .await
+        .map_err(|_| database_error("cleanup-generation-state"))?
+        .ok_or(StorageError::GenerationNotFound)?;
+    let state = parse_generation_state(&row, 0)?;
+    match state {
+        GenerationState::Staging | GenerationState::Ready => {
+            let update_sql = format!(
+                r#"UPDATE {quoted_schema}."index_generations"
+                    SET state = 'failed'
+                    WHERE project_id = CAST($1 AS uuid)
+                      AND generation_id = CAST($2 AS uuid)
+                      AND state IN ('staging', 'ready')"#
+            );
+            let updated = audited_query(update_sql)
+                .bind(fence.target().project_id().as_str())
+                .bind(generation_id.as_str())
+                .execute(&mut *connection)
+                .await
+                .map_err(|_| database_error("cleanup-fail-generation"))?;
+            if updated.rows_affected() != 1 {
+                return Err(StorageError::InvalidGenerationTransition {
+                    actual: "changed concurrently".to_owned(),
+                    requested: GenerationState::Failed.as_str(),
+                });
+            }
+        }
+        GenerationState::Failed => {}
+        GenerationState::Current | GenerationState::Superseded => {
+            return Err(StorageError::InvalidGenerationTransition {
+                actual: state.as_str().to_owned(),
+                requested: GenerationState::Failed.as_str(),
+            });
+        }
+    }
+    delete_generation_fence(connection, &quoted_schema, fence).await
+}
+
+async fn fail_transaction(
+    connection: &mut PgConnection,
+    input: FailTransactionInput<'_>,
+) -> Result<(), StorageError> {
+    lock_generation_fence(connection, input.schema, input.fence).await?;
+    let quoted_schema = crate::database::quoted_schema(input.schema);
+    let sql = format!(
+        r#"UPDATE {quoted_schema}."index_generations"
+            SET state = 'failed'
+            WHERE project_id = CAST($1 AS uuid)
+              AND generation_id = CAST($2 AS uuid)
+              AND generation_sequence = $3
+              AND state = $4"#
+    );
+    let result = audited_query(sql)
+        .bind(input.project_id.as_str())
+        .bind(input.generation_id.as_str())
+        .bind(input.sequence)
+        .bind(input.expected_state.as_str())
+        .execute(connection)
+        .await
+        .map_err(|_| database_error("fail-generation"))?;
+    if result.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::InvalidGenerationTransition {
+            actual: "changed concurrently".to_owned(),
+            requested: GenerationState::Failed.as_str(),
+        })
+    }
+}
+
 async fn prepare_transaction(
     connection: &mut PgConnection,
     input: PrepareTransactionInput<'_>,
 ) -> Result<(), StorageError> {
     let quoted_schema = crate::database::quoted_schema(input.schema);
-    require_generation_state(
+    let content_digest = input.facts.digest.clone();
+    validate_generation_state(
         connection,
         GenerationStateRequirement {
             quoted_schema: &quoted_schema,
@@ -606,16 +1092,51 @@ async fn prepare_transaction(
             sequence: input.generation.sequence(),
             required: GenerationState::Staging,
         },
+        FenceCheck::Observe,
+    )
+    .await?;
+    // Establish the same operation -> generation advisory order used by
+    // cleanup and publication before COPY can acquire foreign-key row locks.
+    // The exact lease row remains unlocked during the bulk stream so
+    // heartbeats can renew it. The non-locking check below is stable against
+    // takeover because acquisition shares the operation advisory lock, and a
+    // final row-locking check still runs immediately before the ready
+    // transition.
+    lock_generation_mutation(connection, input.schema, input.fence).await?;
+    check_generation_fence(connection, input.schema, input.fence).await?;
+    validate_generation_state(
+        connection,
+        GenerationStateRequirement {
+            quoted_schema: &quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            sequence: input.generation.sequence(),
+            required: GenerationState::Staging,
+        },
+        FenceCheck::Observe,
     )
     .await?;
     copy_generation_facts(
         connection,
         CopyGenerationContext {
-            schema: input.schema,
-            project_id: input.generation.project_id(),
-            generation_id: input.generation.generation_id(),
+            schema: input.schema.clone(),
+            project_id: input.generation.project_id().clone(),
+            generation_id: input.generation.generation_id().clone(),
         },
         input.facts,
+    )
+    .await?;
+    lock_generation_fence(connection, input.schema, input.fence).await?;
+    validate_generation_state(
+        connection,
+        GenerationStateRequirement {
+            quoted_schema: &quoted_schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            sequence: input.generation.sequence(),
+            required: GenerationState::Staging,
+        },
+        FenceCheck::Lock,
     )
     .await?;
     let ready_sql = format!(
@@ -628,8 +1149,8 @@ async fn prepare_transaction(
     let result = audited_query(ready_sql)
         .bind(input.generation.project_id().as_str())
         .bind(input.generation.generation_id().as_str())
-        .bind(input.facts.digest.as_str())
-        .execute(connection)
+        .bind(content_digest.as_str())
+        .execute(&mut *connection)
         .await
         .map_err(|_| database_error("mark-generation-ready"))?;
     if result.rows_affected() != 1 {
@@ -643,20 +1164,25 @@ async fn prepare_transaction(
 
 async fn publish_transaction(
     connection: &mut PgConnection,
-    schema: &cartograph_config::DatabaseSchema,
-    generation: &ReadyGeneration,
+    input: PublishTransactionInput<'_>,
 ) -> Result<(), StorageError> {
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
         .bind(format!(
             "cartograph-v2-publish:{}:{}",
-            schema.as_str(),
-            generation.project_id()
+            input.schema.as_str(),
+            input.generation.project_id()
         ))
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("publish-lock"))?;
-    let quoted_schema = crate::database::quoted_schema(schema);
-    require_generation_state(
+    let quoted_schema = crate::database::quoted_schema(input.schema);
+    let generation = input.generation;
+    let fence = input.fence;
+    if !fence_matches_generation(fence, generation.project_id(), generation.generation_id()) {
+        return Err(StorageError::LeaseFenceLost);
+    }
+    lock_generation_fence(connection, input.schema, fence).await?;
+    validate_generation_state(
         connection,
         GenerationStateRequirement {
             quoted_schema: &quoted_schema,
@@ -665,6 +1191,7 @@ async fn publish_transaction(
             sequence: generation.sequence(),
             required: GenerationState::Ready,
         },
+        FenceCheck::Lock,
     )
     .await?;
 
@@ -719,13 +1246,231 @@ async fn publish_transaction(
     let project = audited_query(project_sql)
         .bind(generation.project_id().as_str())
         .bind(generation.generation_id().as_str())
-        .execute(connection)
+        .execute(&mut *connection)
         .await
         .map_err(|_| database_error("publish-project-pointer"))?;
     if project.rows_affected() != 1 {
         return Err(StorageError::GenerationNotFound);
     }
+    delete_generation_fence(connection, &quoted_schema, fence).await?;
     Ok(())
+}
+
+async fn lock_generation_fence(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+) -> Result<(), StorageError> {
+    lock_generation_mutation(connection, schema, fence).await?;
+    require_generation_fence(
+        connection,
+        FenceValidation {
+            schema,
+            fence,
+            check: FenceCheck::Lock,
+        },
+    )
+    .await
+}
+
+async fn check_generation_fence(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+) -> Result<(), StorageError> {
+    require_generation_fence(
+        connection,
+        FenceValidation {
+            schema,
+            fence,
+            check: FenceCheck::Observe,
+        },
+    )
+    .await
+}
+
+async fn require_generation_fence(
+    connection: &mut PgConnection,
+    input: FenceValidation<'_>,
+) -> Result<(), StorageError> {
+    let generation_id = input
+        .fence
+        .target()
+        .generation_id()
+        .ok_or(StorageError::LeaseFenceLost)?;
+    let quoted_schema = crate::database::quoted_schema(input.schema);
+    let row_lock = match input.check {
+        FenceCheck::Observe => "",
+        FenceCheck::Lock => " FOR UPDATE",
+    };
+    let sql = format!(
+        r#"SELECT 1 FROM {quoted_schema}."project_operation_leases"
+            WHERE project_id = CAST($1 AS uuid)
+              AND operation = $2
+              AND lease_id = CAST($3 AS uuid)
+              AND generation_id = CAST($4 AS uuid)
+              AND expires_at > clock_timestamp(){row_lock}"#
+    );
+    let row = audited_query(sql)
+        .bind(input.fence.target().project_id().as_str())
+        .bind(input.fence.target().operation().as_str())
+        .bind(input.fence.lease_id().as_str())
+        .bind(generation_id.as_str())
+        .fetch_optional(connection)
+        .await
+        .map_err(|_| {
+            database_error(match input.check {
+                FenceCheck::Observe => "check-generation-fence",
+                FenceCheck::Lock => "lock-generation-fence",
+            })
+        })?;
+    if row.is_some() {
+        Ok(())
+    } else {
+        Err(StorageError::LeaseFenceLost)
+    }
+}
+
+async fn lock_generation_mutation(
+    connection: &mut PgConnection,
+    schema: &cartograph_config::DatabaseSchema,
+    fence: &LeaseFence,
+) -> Result<(), StorageError> {
+    let generation_id = fence
+        .target()
+        .generation_id()
+        .ok_or(StorageError::LeaseFenceLost)?;
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(operation_lock_key(schema, fence.target()))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("lock-generation-operation"))?;
+    query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!(
+            "{GENERATION_LOCK_NAMESPACE}:{}:{}:{}",
+            schema.as_str(),
+            fence.target().project_id(),
+            generation_id
+        ))
+        .execute(&mut *connection)
+        .await
+        .map_err(|_| database_error("lock-generation-identity"))?;
+    Ok(())
+}
+
+async fn delete_generation_fence(
+    connection: &mut PgConnection,
+    quoted_schema: &str,
+    fence: &LeaseFence,
+) -> Result<(), StorageError> {
+    let sql = format!(
+        r#"DELETE FROM {quoted_schema}."project_operation_leases"
+            WHERE project_id = CAST($1 AS uuid)
+              AND operation = $2
+              AND lease_id = CAST($3 AS uuid)"#
+    );
+    let deleted = audited_query(sql)
+        .bind(fence.target().project_id().as_str())
+        .bind(fence.target().operation().as_str())
+        .bind(fence.lease_id().as_str())
+        .execute(connection)
+        .await
+        .map_err(|_| database_error("delete-generation-fence"))?;
+    if deleted.rows_affected() == 1 {
+        Ok(())
+    } else {
+        Err(StorageError::LeaseFenceLost)
+    }
+}
+
+fn fence_matches_generation(
+    fence: &LeaseFence,
+    project_id: &ProjectId,
+    generation_id: &GenerationId,
+) -> bool {
+    fence.target().project_id() == project_id
+        && fence.target().generation_id() == Some(generation_id)
+}
+
+fn decode_reconciliation(
+    row: &PgRow,
+    fence: &LeaseFence,
+) -> Result<OperationReconciliation, StorageError> {
+    let project_id = fence.target().project_id().clone();
+    let generation_id = fence
+        .target()
+        .generation_id()
+        .ok_or(StorageError::LeaseFenceLost)?
+        .clone();
+    let expected_generation_id = generation_id.as_str().to_owned();
+    let state = parse_generation_state(row, RECONCILE_STATE_COLUMN)?;
+    let sequence = parse_generation_sequence(row, RECONCILE_SEQUENCE_COLUMN)?;
+    let raw_digest = row
+        .try_get::<Option<String>, _>(RECONCILE_DIGEST_COLUMN)
+        .map_err(|_| corrupt("content_digest"))?;
+    let content_digest = raw_digest
+        .map(|raw| ContentDigest::parse(&raw).map_err(|_| corrupt("content_digest")))
+        .transpose()?;
+    let generation = match state {
+        GenerationState::Staging => {
+            if content_digest.is_some() {
+                return Err(corrupt("content_digest"));
+            }
+            ObservedGeneration::Staged(StagedGeneration {
+                project_id,
+                generation_id,
+                sequence,
+            })
+        }
+        GenerationState::Ready => ObservedGeneration::Ready(ReadyGeneration {
+            project_id,
+            generation_id,
+            sequence,
+            content_digest: content_digest.ok_or_else(|| corrupt("content_digest"))?,
+        }),
+        GenerationState::Current => {
+            let current = row
+                .try_get::<Option<String>, _>(RECONCILE_CURRENT_COLUMN)
+                .map_err(|_| corrupt("current_generation_id"))?;
+            if current.as_deref() != Some(generation_id.as_str()) {
+                return Err(corrupt("current_generation_id"));
+            }
+            ObservedGeneration::Current(CurrentGeneration {
+                project_id,
+                generation_id,
+                sequence,
+                content_digest: content_digest.ok_or_else(|| corrupt("content_digest"))?,
+            })
+        }
+        GenerationState::Failed => ObservedGeneration::Failed,
+        GenerationState::Superseded => ObservedGeneration::Superseded,
+    };
+    let raw_lease_id = row
+        .try_get::<Option<String>, _>(RECONCILE_LEASE_ID_COLUMN)
+        .map_err(|_| corrupt("lease_id"))?;
+    let lease = match raw_lease_id {
+        None => ObservedLease::Released,
+        Some(raw_lease_id) => {
+            let lease_id = cartograph_domain::LeaseId::parse(&raw_lease_id)
+                .map_err(|_| corrupt("lease_id"))?;
+            let unexpired = row
+                .try_get::<Option<bool>, _>(RECONCILE_LEASE_UNEXPIRED_COLUMN)
+                .map_err(|_| corrupt("lease_expiry"))?
+                .unwrap_or(false);
+            let lease_generation = row
+                .try_get::<Option<String>, _>(RECONCILE_LEASE_GENERATION_COLUMN)
+                .map_err(|_| corrupt("lease_generation_id"))?;
+            if lease_id == *fence.lease_id()
+                && unexpired
+                && lease_generation.as_deref() == Some(expected_generation_id.as_str())
+            {
+                ObservedLease::Owned
+            } else {
+                ObservedLease::Lost
+            }
+        }
+    };
+    Ok(OperationReconciliation { generation, lease })
 }
 
 async fn lock_current_generation_sequence(
@@ -754,14 +1499,18 @@ async fn lock_current_generation_sequence(
         })
 }
 
-async fn require_generation_state(
+async fn validate_generation_state(
     connection: &mut PgConnection,
     requirement: GenerationStateRequirement<'_>,
+    check: FenceCheck,
 ) -> Result<(), StorageError> {
+    let (lock_clause, operation) = match check {
+        FenceCheck::Observe => ("", "check-generation"),
+        FenceCheck::Lock => (" FOR UPDATE", "lock-generation"),
+    };
     let sql = format!(
         r#"SELECT state, generation_sequence FROM {schema}."index_generations"
-            WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)
-            FOR UPDATE"#,
+            WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid){lock_clause}"#,
         schema = requirement.quoted_schema,
     );
     let row = audited_query(sql)
@@ -769,12 +1518,19 @@ async fn require_generation_state(
         .bind(requirement.generation_id.as_str())
         .fetch_optional(connection)
         .await
-        .map_err(|_| database_error("lock-generation"))?
+        .map_err(|_| database_error(operation))?
         .ok_or(StorageError::GenerationNotFound)?;
+    validate_generation_state_row(&row, requirement)
+}
+
+fn validate_generation_state_row(
+    row: &PgRow,
+    requirement: GenerationStateRequirement<'_>,
+) -> Result<(), StorageError> {
     let actual = row
         .try_get::<String, _>(0)
         .map_err(|_| StorageError::CorruptStoredValue { field: "state" })?;
-    let sequence = parse_generation_sequence(&row, 1)?;
+    let sequence = parse_generation_sequence(row, 1)?;
     if sequence != requirement.sequence {
         return Err(StorageError::CorruptStoredValue {
             field: "generation_sequence",
@@ -907,4 +1663,8 @@ fn audited_query(
 
 const fn database_error(operation: &'static str) -> StorageError {
     StorageError::DatabaseOperation { operation }
+}
+
+const fn corrupt(field: &'static str) -> StorageError {
+    StorageError::CorruptStoredValue { field }
 }

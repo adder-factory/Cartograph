@@ -156,6 +156,11 @@ jobs:
           cargo test --locked --quiet -p cartograph-db
           --test live_leases -- --ignored --nocapture
 
+      - name: Lease-owned indexer supervisor integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-indexer
+          --test live_supervisor -- --ignored --nocapture
+
       - name: Managed database lifecycle integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib

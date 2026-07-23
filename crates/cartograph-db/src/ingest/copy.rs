@@ -8,8 +8,8 @@ use sqlx_postgres::{PgConnection, PgCopyIn};
 use crate::{StorageError, database::quoted_schema};
 
 use super::model::{
-    EdgeInput, FileInput, ReferenceInput, SymbolInput, ValidatedGenerationFacts,
-    ValidatedSearchDocument,
+    EdgeInput, FileInput, ReferenceInput, SymbolInput, ValidatedFactTables,
+    ValidatedGenerationFacts, ValidatedSearchDocument,
 };
 
 const COPY_CHUNK_BYTES: usize = 1024 * 1024;
@@ -19,11 +19,11 @@ const ASCII_VERTICAL_TAB: u8 = 0x0b;
 const ASCII_FORM_FEED: u8 = 0x0c;
 
 /// Validated schema and generation identity repeated in every copied row.
-#[derive(Clone, Copy)]
-pub(crate) struct CopyGenerationContext<'a> {
-    pub(crate) schema: &'a DatabaseSchema,
-    pub(crate) project_id: &'a ProjectId,
-    pub(crate) generation_id: &'a GenerationId,
+#[derive(Clone)]
+pub(crate) struct CopyGenerationContext {
+    pub(crate) schema: DatabaseSchema,
+    pub(crate) project_id: ProjectId,
+    pub(crate) generation_id: GenerationId,
 }
 
 struct CopyTableSpec {
@@ -32,97 +32,155 @@ struct CopyTableSpec {
     operation: &'static str,
 }
 
+#[derive(Clone, Copy)]
+struct CopyTableLayout {
+    table: &'static str,
+    columns: &'static str,
+    operation: &'static str,
+}
+
+const FILES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    table: "files",
+    columns: "project_id, generation_id, file_id, normalized_path, language, content_hash, byte_size, parse_status",
+    operation: "copy-files",
+};
+const SYMBOLS_LAYOUT: CopyTableLayout = CopyTableLayout {
+    table: "symbols",
+    columns: "project_id, generation_id, symbol_id, file_id, symbol_kind, qualified_name, signature, start_byte, end_byte, start_line, end_line, structural_digest",
+    operation: "copy-symbols",
+};
+const EDGES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    table: "edges",
+    columns: "project_id, generation_id, source_symbol_id, target_symbol_id, edge_kind, confidence, provenance",
+    operation: "copy-edges",
+};
+const REFERENCES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    table: "references",
+    columns: "project_id, generation_id, file_id, target_symbol_id, reference_kind, start_byte, end_byte, confidence",
+    operation: "copy-references",
+};
+const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
+    table: "search_documents",
+    columns: "project_id, generation_id, document_id, file_id, symbol_id, path, language, document_kind, qualified_name, code, natural_text, metadata",
+    operation: "copy-search-documents",
+};
+
+struct CopyBatch<T> {
+    context: CopyGenerationContext,
+    rows: Vec<T>,
+}
+
+struct CopyTablePlan<T, Encode> {
+    batch: CopyBatch<T>,
+    layout: CopyTableLayout,
+    encode: Encode,
+}
+
 pub(crate) async fn copy_generation_facts(
     connection: &mut PgConnection,
-    context: CopyGenerationContext<'_>,
-    facts: &ValidatedGenerationFacts,
+    context: CopyGenerationContext,
+    facts: ValidatedGenerationFacts,
 ) -> Result<(), StorageError> {
-    let schema = quoted_schema(context.schema);
-    let tables = &facts.tables;
-    copy_text_rows(
+    let ValidatedFactTables {
+        files,
+        symbols,
+        edges,
+        references,
+        documents,
+    } = facts.tables;
+    copy_table(
         connection,
-        CopyTableSpec {
-            statement: format!(
-                r#"COPY {schema}."files" (
-                    project_id, generation_id, file_id, normalized_path, language,
-                    content_hash, byte_size, parse_status
-                ) FROM STDIN WITH (FORMAT text)"#
-            ),
-            expected_rows: tables.files.len(),
-            operation: "copy-files",
+        CopyTablePlan {
+            batch: CopyBatch {
+                context: context.clone(),
+                rows: files,
+            },
+            layout: FILES_LAYOUT,
+            encode: encode_file,
         },
-        tables.files.iter().map(|file| encode_file(context, file)),
     )
     .await?;
-    copy_text_rows(
+    copy_table(
         connection,
-        CopyTableSpec {
-            statement: format!(
-                r#"COPY {schema}."symbols" (
-                    project_id, generation_id, symbol_id, file_id, symbol_kind,
-                    qualified_name, signature, start_byte, end_byte, start_line,
-                    end_line, structural_digest
-                ) FROM STDIN WITH (FORMAT text)"#
-            ),
-            expected_rows: tables.symbols.len(),
-            operation: "copy-symbols",
+        CopyTablePlan {
+            batch: CopyBatch {
+                context: context.clone(),
+                rows: symbols,
+            },
+            layout: SYMBOLS_LAYOUT,
+            encode: encode_symbol,
         },
-        tables
-            .symbols
-            .iter()
-            .map(|symbol| encode_symbol(context, symbol)),
     )
     .await?;
-    copy_text_rows(
+    copy_table(
         connection,
-        CopyTableSpec {
-            statement: format!(
-                r#"COPY {schema}."edges" (
-                    project_id, generation_id, source_symbol_id, target_symbol_id,
-                    edge_kind, confidence, provenance
-                ) FROM STDIN WITH (FORMAT text)"#
-            ),
-            expected_rows: tables.edges.len(),
-            operation: "copy-edges",
+        CopyTablePlan {
+            batch: CopyBatch {
+                context: context.clone(),
+                rows: edges,
+            },
+            layout: EDGES_LAYOUT,
+            encode: encode_edge,
         },
-        tables.edges.iter().map(|edge| encode_edge(context, edge)),
     )
     .await?;
-    copy_text_rows(
+    copy_table(
         connection,
-        CopyTableSpec {
-            statement: format!(
-                r#"COPY {schema}."references" (
-                    project_id, generation_id, file_id, target_symbol_id,
-                    reference_kind, start_byte, end_byte, confidence
-                ) FROM STDIN WITH (FORMAT text)"#
-            ),
-            expected_rows: tables.references.len(),
-            operation: "copy-references",
+        CopyTablePlan {
+            batch: CopyBatch {
+                context: context.clone(),
+                rows: references,
+            },
+            layout: REFERENCES_LAYOUT,
+            encode: encode_reference,
         },
-        tables
-            .references
-            .iter()
-            .map(|reference| encode_reference(context, reference)),
     )
     .await?;
+    copy_table(
+        connection,
+        CopyTablePlan {
+            batch: CopyBatch {
+                context,
+                rows: documents,
+            },
+            layout: DOCUMENTS_LAYOUT,
+            encode: encode_document,
+        },
+    )
+    .await
+}
+
+async fn copy_table<T, Encode>(
+    connection: &mut PgConnection,
+    plan: CopyTablePlan<T, Encode>,
+) -> Result<(), StorageError>
+where
+    T: Send,
+    Encode: Fn(&CopyGenerationContext, &T) -> Vec<u8> + Copy + Send,
+{
+    let CopyTablePlan {
+        batch,
+        layout,
+        encode,
+    } = plan;
+    let schema = quoted_schema(&batch.context.schema);
+    let expected_rows = batch.rows.len();
+    let context = batch.context;
+    let table = layout.table;
+    let columns = layout.columns;
     copy_text_rows(
         connection,
         CopyTableSpec {
             statement: format!(
-                r#"COPY {schema}."search_documents" (
-                    project_id, generation_id, document_id, file_id, symbol_id,
-                    path, language, document_kind, qualified_name, code,
-                    natural_text, metadata
-                ) FROM STDIN WITH (FORMAT text)"#
+                r#"COPY {schema}."{table}" ({columns}) FROM STDIN WITH (FORMAT text)"#
             ),
-            expected_rows: tables.documents.len(),
-            operation: "copy-search-documents",
+            expected_rows,
+            operation: layout.operation,
         },
-        tables
-            .documents
-            .iter()
-            .map(|document| encode_document(context, document)),
+        batch
+            .rows
+            .into_iter()
+            .map(move |row| encode(&context, &row)),
     )
     .await
 }
@@ -133,7 +191,8 @@ async fn copy_text_rows<I>(
     rows: I,
 ) -> Result<(), StorageError>
 where
-    I: IntoIterator<Item = Vec<u8>>,
+    I: IntoIterator<Item = Vec<u8>> + Send,
+    I::IntoIter: Send,
 {
     if spec.expected_rows == 0 {
         return Ok(());
@@ -162,7 +221,8 @@ where
 
 async fn stream_rows<I>(copy: &mut PgCopyIn<&mut PgConnection>, rows: I) -> Result<(), SqlxError>
 where
-    I: IntoIterator<Item = Vec<u8>>,
+    I: IntoIterator<Item = Vec<u8>> + Send,
+    I::IntoIter: Send,
 {
     let mut chunk = Vec::with_capacity(COPY_CHUNK_BYTES);
     for row in rows {
@@ -182,7 +242,7 @@ where
     Ok(())
 }
 
-fn encode_file(context: CopyGenerationContext<'_>, file: &FileInput) -> Vec<u8> {
+fn encode_file(context: &CopyGenerationContext, file: &FileInput) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());
@@ -195,7 +255,7 @@ fn encode_file(context: CopyGenerationContext<'_>, file: &FileInput) -> Vec<u8> 
     row.finish()
 }
 
-fn encode_symbol(context: CopyGenerationContext<'_>, symbol: &SymbolInput) -> Vec<u8> {
+fn encode_symbol(context: &CopyGenerationContext, symbol: &SymbolInput) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());
@@ -212,7 +272,7 @@ fn encode_symbol(context: CopyGenerationContext<'_>, symbol: &SymbolInput) -> Ve
     row.finish()
 }
 
-fn encode_edge(context: CopyGenerationContext<'_>, edge: &EdgeInput) -> Vec<u8> {
+fn encode_edge(context: &CopyGenerationContext, edge: &EdgeInput) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());
@@ -224,7 +284,7 @@ fn encode_edge(context: CopyGenerationContext<'_>, edge: &EdgeInput) -> Vec<u8> 
     row.finish()
 }
 
-fn encode_reference(context: CopyGenerationContext<'_>, reference: &ReferenceInput) -> Vec<u8> {
+fn encode_reference(context: &CopyGenerationContext, reference: &ReferenceInput) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());
@@ -242,10 +302,7 @@ fn encode_reference(context: CopyGenerationContext<'_>, reference: &ReferenceInp
     row.finish()
 }
 
-fn encode_document(
-    context: CopyGenerationContext<'_>,
-    document: &ValidatedSearchDocument,
-) -> Vec<u8> {
+fn encode_document(context: &CopyGenerationContext, document: &ValidatedSearchDocument) -> Vec<u8> {
     let mut row = TextRow::new();
     row.text(context.project_id.as_str());
     row.text(context.generation_id.as_str());

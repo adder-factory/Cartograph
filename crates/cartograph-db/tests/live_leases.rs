@@ -79,13 +79,12 @@ async fn assert_stale_takeover(fixture: &LeaseFixture<'_>) {
         Ok(None) => panic!("active lease was not observable"),
         Err(error) => panic!("lease status failed: {error}"),
     };
-    assert_eq!(status.owner_pid, 101);
-    assert_eq!(status.owner_process_start, OWNER_ONE_START);
-    assert_eq!(status.lease_id, first.lease_id().clone());
+    assert_eq!(status.owner_pid(), 101);
+    assert_eq!(status.owner_process_start(), OWNER_ONE_START);
     if let Err(error) = fixture.database.heartbeat_lease(&mut first).await {
         panic!("active owner could not heartbeat: {error}");
     }
-    assert_heartbeat_renewed(fixture, &target, &status.expires_at).await;
+    assert_heartbeat_renewed(fixture, &target, status.expires_at()).await;
 
     expire_lease(fixture.pool, fixture.schema, &target).await;
     let expired = match fixture.database.lease_status(&target).await {
@@ -93,7 +92,7 @@ async fn assert_stale_takeover(fixture: &LeaseFixture<'_>) {
         Ok(None) => panic!("expired lease disappeared before takeover"),
         Err(error) => panic!("expired lease status failed: {error}"),
     };
-    assert!(expired.expired);
+    assert!(expired.expired());
     assert!(matches!(
         fixture.database.heartbeat_lease(&mut first).await,
         Err(LeaseError::Lost)
