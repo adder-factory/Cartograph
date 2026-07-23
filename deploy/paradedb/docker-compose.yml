@@ -1,0 +1,30 @@
+services:
+  postgres:
+    # Cartograph does not redistribute ParadeDB. Development pulls the pinned
+    # upstream multi-architecture image so extension upgrades are explicit.
+    image: paradedb/paradedb:0.23.5
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${CARTOGRAPH_POSTGRES_USER:-cartograph}
+      POSTGRES_PASSWORD: "${CARTOGRAPH_POSTGRES_PASSWORD:?set CARTOGRAPH_POSTGRES_PASSWORD}"
+      POSTGRES_DB: ${CARTOGRAPH_POSTGRES_DB:-cartograph}
+    ports:
+      # 55432 intentionally coexists with a v1 PostgreSQL instance commonly
+      # bound on 5433 during side-by-side migration and parity testing.
+      # Loopback is mandatory: PostgreSQL must not be exposed to the LAN.
+      - "127.0.0.1:${CARTOGRAPH_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/
+      - ./init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+    stop_grace_period: 30s
+
+volumes:
+  postgres-data:
