@@ -73,6 +73,7 @@ answer without loading whole files into context.
 | "Is this risky?" | Biomarkers and Code Health findings, hotspots, churn, coverage joins, dependency audit, and trust checks |
 | "What should I read first?" | A route plan from `cartograph context --format plan`, then exact source only where it is needed |
 | "What did my change touch?" | A structural and finding delta from `cartograph compare-to-ref` before handoff |
+| "How does another agent resume safely?" | A live working-tree packet from `cartograph context --format handoff` with edit evidence, preserved files, next calls, and verification guidance |
 
 The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,
@@ -258,6 +259,7 @@ profile is the lean task-to-verification surface. `full` exposes everything, and
 ```text
 cartograph_context({ task: "<task>", format: "plan" })
   → follow the suggested next action
+  → during active edits, use workingTree: "live" or format: "handoff"
   → cartograph_verify
 ```
 

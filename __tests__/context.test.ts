@@ -342,6 +342,53 @@ export function validateEmail(email: string): boolean {
       });
     });
 
+    it('uses current unsynced symbols and source through the live working-tree overlay', async () => {
+      const paymentPath = path.join(testDir, 'src', 'payment.ts');
+      fs.appendFileSync(paymentPath, '\nexport function liveRetryPolicy(): number { return 3; }\n');
+      const future = Math.floor(Date.now() / 1000) + 60;
+      fs.utimesSync(paymentPath, future, future);
+      const handler = new ToolHandler(cg, { profile: 'coding' });
+
+      const result = await handler.execute('cartograph_context', {
+        task: 'fix liveRetryPolicy behavior',
+        workingTree: 'live',
+        allowStale: true,
+        retrievalMode: 'deterministic',
+      });
+      const text = result.content[0]?.text ?? '';
+
+      expect(text).toContain('liveRetryPolicy');
+      expect(text).toContain('Working-tree overlay');
+      expect(text).toContain('source read from disk without persisting an index sync');
+      expect(getNodesByKind(cg.queries, 'function').some((node) => node.name === 'liveRetryPolicy')).toBe(false);
+      handler.closeAll();
+    });
+
+    it('emits a resumable handoff packet that preserves live changes and verification guidance', async () => {
+      const paymentPath = path.join(testDir, 'src', 'payment.ts');
+      fs.appendFileSync(paymentPath, '\nexport function handoffRetryPolicy(): number { return 4; }\n');
+      const future = Math.floor(Date.now() / 1000) + 60;
+      fs.utimesSync(paymentPath, future, future);
+      const handler = new ToolHandler(cg, { profile: 'coding' });
+
+      const result = await handler.execute('cartograph_context', {
+        task: 'finish handoffRetryPolicy and verify it',
+        format: 'handoff',
+        retrievalMode: 'deterministic',
+      });
+      handler.closeAll();
+      const text = result.content[0]?.text ?? '';
+
+      expect(text).toContain('## Coding task handoff');
+      expect(text).toContain('**Indexed graph:**');
+      expect(text).toContain('handoffRetryPolicy');
+      expect(text).toContain('src/payment.ts');
+      expect(text).toContain('Preserve the existing working-tree changes');
+      expect(text).toContain('cartograph_verify');
+      expect(text).not.toContain('```typescript');
+      expect(result.metadata?.nextActions?.some((action) => action.tool === 'cartograph_verify')).toBe(true);
+    });
+
     it('should accept object input with title and description', async () => {
       const result = await cg.internals.contextBuilder.buildContext(
         {
@@ -604,6 +651,22 @@ export class FileWatcher {
       // The seed candidate must survive the minScore filter — it is
       // seeded with a rank-aware score inside the builder.
       expect(nodeNames).toContain('watcherHandleFileEvent');
+    });
+
+    it('lets an extra candidate replace stale persisted metadata for the same stable node id', async () => {
+      const persisted = getNodesByKind(bCg.queries, 'function').find((node) => node.name === 'watcherHandleFileEvent');
+      expect(persisted).toBeDefined();
+      if (!persisted) throw new Error('missing watcherHandleFileEvent fixture');
+      const liveEndLine = persisted.endLine + 7;
+      const result = await bCg.internals.contextBuilder.buildContext('watcherHandleFileEvent', {
+        format: 'json',
+        maxNodes: 8,
+        extraCandidates: [{ node: { ...persisted, endLine: liveEndLine }, score: 1 }],
+      });
+      const parsed = JSON.parse(result as string);
+      const returned = parsed.nodes.find((node: { id: string }) => node.id === persisted.id);
+
+      expect(returned?.endLine).toBe(liveEndLine);
     });
 
     it('guarantees a top semantic extra-candidate an entry-point slot (F-r9-1)', async () => {

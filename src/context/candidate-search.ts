@@ -113,6 +113,11 @@ function cbMergeExtraCandidates(
     const existing = byId.get(extra.node.id);
     if (existing) {
       existing.score = Math.max(existing.score, seed);
+      // Extra candidates may come from the ephemeral working-tree overlay.
+      // Their ids intentionally match persisted symbols, but their source
+      // ranges and metadata reflect the current disk buffer. Keep the live
+      // node while preserving the strongest score from either channel.
+      existing.node = extra.node;
       continue;
     }
     const seeded: SearchResult = { node: extra.node, score: seed };

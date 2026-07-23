@@ -24,6 +24,17 @@ import {
   collectContextIntentSeeds,
   type ContextRoute,
 } from '../../features/context-route/index.js';
+import {
+  buildWorkingTreeOverlay,
+  WorkingTreeOverlayModeSchema,
+  type WorkingTreeOverlayReport,
+} from '../../features/working-tree-overlay/index.js';
+import {
+  buildTaskHandoffPacket,
+  renderTaskHandoffPacket,
+  type TaskHandoffAction,
+  type TaskHandoffIndexFreshness,
+} from '../../features/task-handoff/index.js';
 import { mcpServerProfileIncludesTool, resolveMcpServerProfile } from '../profiles.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
@@ -337,11 +348,12 @@ interface FormatContextResponseArgs {
   format: ContextFormat;
   retrieval: BehaviorRetrievalTrace;
   route: ContextRoute;
+  workingTree: WorkingTreeOverlayReport;
   toolAvailable: (toolName: string) => boolean;
 }
 
-type ContextFormat = 'markdown' | 'json' | 'plan';
-type NextAction = NonNullable<NonNullable<ToolResult['metadata']>['nextActions']>[number];
+type ContextFormat = 'markdown' | 'json' | 'plan' | 'handoff';
+type NextAction = TaskHandoffAction;
 
 const PLAN_ACTION_NODE_LIMIT = 3;
 const PLAN_RENDER_NODE_LIMIT = 8;
@@ -508,8 +520,9 @@ function renderContextPlan(args: {
   nextActions: NextAction[];
   retrieval: BehaviorRetrievalTrace;
   route: ContextRoute;
+  workingTree: WorkingTreeOverlayReport;
 }): string {
-  const { task, nextActions, retrieval, route } = args;
+  const { task, nextActions, retrieval, route, workingTree } = args;
   const entryLines = renderRouteCandidateGroups(route);
   const anchorParts = [
     ...route.anchors.identifiers.map((anchor) => `\`${anchor}\``),
@@ -534,6 +547,7 @@ function renderContextPlan(args: {
     `**Task kind:** ${route.taskKind}`,
     `**Clauses:** ${route.clauses.join(' | ')}`,
     `**Explicit anchors:** ${anchorParts.length > 0 ? anchorParts.join(', ') : 'none detected'}`,
+    `**Working tree:** ${describeWorkingTreeOverlay(workingTree)}`,
     '',
     ...decisionLines,
     ...entryLines,
@@ -583,7 +597,7 @@ function renderRouteCandidateGroups(route: ContextRoute): string[] {
 
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
-  const { cg, task, context, format, retrieval, route, toolAvailable } = args;
+  const { cg, task, context, format, retrieval, route, workingTree, toolAvailable } = args;
   const nextActions = buildContextNextActions(context, task, route, toolAvailable);
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
@@ -605,15 +619,27 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       stats: context.stats,
       retrieval,
       route,
+      workingTree,
     };
     return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
   }
   const nodes = [...context.subgraph.nodes.values()];
   if (format === 'plan') {
     return attachNextActions(
-      textResult(renderContextPlan({ task, context, nextActions, retrieval, route })),
+      textResult(renderContextPlan({ task, context, nextActions, retrieval, route, workingTree })),
       nextActions,
     );
+  }
+  if (format === 'handoff') {
+    const packet = buildTaskHandoffPacket({
+      task,
+      route,
+      contextFiles: context.relatedFiles,
+      indexFreshness: taskHandoffIndexFreshness(cg),
+      workingTree,
+      nextActions,
+    });
+    return attachNextActions(textResult(renderTaskHandoffPacket(packet)), nextActions);
   }
   // No-match guard (audit-4 #5): a 0-node subgraph would otherwise
   // render a bare `## Code Context` + `**Query:**` stub with no
@@ -630,7 +656,8 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
         empty: {
           message:
             `## Code Context\n\n**Query:** ${task}\n\n_Retrieval: ${describeRetrieval(retrieval)}_\n\n` +
-            `No relevant code found for "${task}".`,
+            `No relevant code found for "${task}".` +
+            formatWorkingTreeOverlay(workingTree),
           freshness: { cg },
         },
       }),
@@ -656,6 +683,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   const body =
     formatContextAsMarkdown(context) +
     `\n\n_Retrieval: ${describeRetrieval(retrieval)}_` +
+    formatWorkingTreeOverlay(workingTree) +
     formatContextRiskSignals(cg, nodes) +
     reminder +
     trace +
@@ -665,6 +693,45 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   // stale-files note for the result nodes — note placement is owned
   // by the chokepoint so it survives truncation.
   return attachNextActions(renderToolResponse({ body, freshness: { cg, nodes } }), nextActions);
+}
+
+function taskHandoffIndexFreshness(cg: Cartograph): TaskHandoffIndexFreshness {
+  const freshness = cg.stats.getFreshness();
+  if (!freshness) return { available: false, reason: 'index has no freshness metadata' };
+  return {
+    available: true,
+    severity: freshness.severity,
+    isStale: freshness.isStale,
+    filesChanged: freshness.filesChanged,
+    contentDriftedFiles: freshness.contentDriftedFiles,
+  };
+}
+
+function describeWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
+  if (report.status === 'off') return 'overlay disabled';
+  if (report.status === 'clean') return 'no changed source files detected';
+  return `${report.status}; ${report.extractedFiles.length}/${report.changedFiles.length} changed files parsed from live disk, ${report.candidates.length} task-matched symbols`;
+}
+
+function formatWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
+  if (report.status === 'off' || report.status === 'clean') return '';
+  const lines = [
+    '',
+    '### Working-tree overlay',
+    '',
+    `_Working-tree source read from disk without persisting an index sync. Graph relationships outside these roots still come from the stored index._`,
+    '',
+    `- Status: ${describeWorkingTreeOverlay(report)}`,
+    `- Changed files: ${report.changedFiles.map((file) => `\`${file}\``).join(', ')}`,
+  ];
+  for (const candidate of report.candidates) {
+    lines.push(
+      `- Live candidate: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} [${candidate.confidence}]`,
+    );
+  }
+  for (const skipped of report.skipped) lines.push(`- Caveat: ${skipped.filePath} — ${skipped.reason}`);
+  lines.push('');
+  return lines.join('\n');
 }
 
 function describeRetrieval(trace: BehaviorRetrievalTrace): string {
@@ -697,10 +764,10 @@ const contextSchema = z.object({
   code: z.boolean().optional().describe('Include code snippets for key symbols (default: true)'),
   includeCode: z.boolean().optional().describe('Deprecated alias for `code`.'),
   format: z
-    .enum(['markdown', 'json', 'plan'])
+    .enum(['markdown', 'json', 'plan', 'handoff'])
     .optional()
     .describe(
-      'Output format: `markdown` (default) human-readable report with risk signals, `json` raw TaskContext, or `plan` for a low-token route plan with suggested next MCP calls.',
+      'Output format: `markdown` (default) human-readable report, `json` raw TaskContext, `plan` for a low-token route, or `handoff` for a resumable coding-task packet with live changes and verification guidance.',
     ),
   explain: z
     .boolean()
@@ -710,6 +777,9 @@ const contextSchema = z.object({
     ),
   retrievalMode: ContextRetrievalModeSchema.default('auto').describe(
     '`auto` may use hybrid embeddings for behavior-shaped questions; `deterministic` guarantees this context call uses only lexical and graph retrieval.',
+  ),
+  workingTree: WorkingTreeOverlayModeSchema.default('auto').describe(
+    '`auto` follows the normal freshness policy then overlays any remaining changed source; `live` skips context auto-sync and parses current changed files ephemerally; `off` disables the overlay.',
   ),
   lowTokens: lowTokensField,
   projectPath: projectPathField,
@@ -733,7 +803,7 @@ function shouldContextIncludeCode(args: {
   codePreference: boolean | undefined;
   lowTokens: boolean;
 }): boolean {
-  if (args.format === 'plan') return false;
+  if (args.format === 'plan' || args.format === 'handoff') return false;
   if (args.codePreference === undefined) return !args.lowTokens;
   return args.codePreference !== false;
 }
@@ -751,6 +821,18 @@ function mergeCandidateChannels(...channels: ReadonlyArray<readonly SearchResult
       if (seen.has(candidate.node.id)) continue;
       seen.add(candidate.node.id);
       merged.push(candidate);
+    }
+  }
+  return merged;
+}
+
+function mergeEvidenceMaps(
+  ...maps: ReadonlyArray<ReadonlyMap<string, readonly string[]>>
+): Map<string, readonly string[]> {
+  const merged = new Map<string, readonly string[]>();
+  for (const evidenceMap of maps) {
+    for (const [nodeId, evidence] of evidenceMap) {
+      merged.set(nodeId, [...new Set([...(merged.get(nodeId) ?? []), ...evidence])]);
     }
   }
   return merged;
@@ -782,6 +864,11 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   const includeCode = shouldContextIncludeCode({ format, codePreference, lowTokens });
   // `explain` opts into the per-candidate score-trace section.
   const explain = args.explain;
+  const workingTree = await buildWorkingTreeOverlay(cg, {
+    task,
+    mode: args.workingTree,
+    maxFiles: Math.min(maxNodes, 20),
+  });
 
   // Approach (a): when the task is a behaviour question ("how does X
   // happen / when is X triggered"), share `cartograph_ask`'s hybrid
@@ -798,14 +885,18 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   });
   const taskAnalysis = analyzeCodingTask(task);
   const intentSeeds =
-    format === 'plan'
+    format === 'plan' || format === 'handoff'
       ? collectContextIntentSeeds({
           clauses: taskAnalysis.clauses,
           queries: cg.queries,
           limit: Math.min(maxNodes, PLAN_SEMANTIC_FIND_LIMIT),
         })
       : null;
-  const extraCandidates = mergeCandidateChannels(intentSeeds?.candidates ?? [], behaviorRetrieval.extraCandidates);
+  const extraCandidates = mergeCandidateChannels(
+    workingTree.extraCandidates,
+    intentSeeds?.candidates ?? [],
+    behaviorRetrieval.extraCandidates,
+  );
 
   // Use format: 'object' so buildContext returns the raw TaskContext
   // (its 'markdown' and 'json' formats serialise to a string and
@@ -828,7 +919,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   const route = buildContextRoute({
     task,
     nodes: [...context.subgraph.nodes.values()],
-    ...(intentSeeds === null ? {} : { intentEvidenceByNodeId: intentSeeds.evidenceByNodeId }),
+    intentEvidenceByNodeId: mergeEvidenceMaps(workingTree.evidenceByNodeId, intentSeeds?.evidenceByNodeId ?? new Map()),
   });
 
   // Format passthrough — `markdown` (default) emits the enriched markdown
@@ -841,6 +932,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
       format,
       retrieval: behaviorRetrieval.trace,
       route,
+      workingTree: workingTree.report,
       toolAvailable: (toolName) => contextToolAvailable(ctx, toolName),
     }),
   );
@@ -852,7 +944,9 @@ export const CONTEXT_TOOL = defineTool({
     'Primary tool — natural-language `task` → entry points + related symbols + key code in one call. ' +
     'Often enough to understand a feature or bug without further calls; takes free-form text (e.g. "how does session login work"). ' +
     'Returns CODE context by default; `retrievalMode: "deterministic"` prevents hybrid/embedding retrieval for this call; ' +
+    '`workingTree: "live"` parses unsynced source without writing the graph; `format: "handoff"` packages live state for another agent; ' +
     '`lowTokens: true` suppresses code snippets and caps breadth. For new features still clarify UX/behavior with the user.',
   schema: contextSchema,
   handle: handleContext,
+  bypassFreshnessGate: (args) => args['workingTree'] === 'live' || args['format'] === 'handoff',
 });

@@ -30,7 +30,7 @@ Cartograph builds a semantic knowledge graph of codebases for faster, smarter co
 
 The dividing line for WHERE to call a tool is **output source-volume** — does the call return full source bodies into your context?
 
-**Source-dumping modes — \`cartograph_context\` and \`cartograph_node({code: true})\` — can return large source sections. Don't call source-heavy modes directly in the main session when your host supports sub-agents; spawn an Explore agent** for broad exploration questions (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns. Servers launched with \`--profile full\` also expose \`cartograph_explore\` for broader source surveys.
+**Source-dumping modes — default/markdown \`cartograph_context\` and \`cartograph_node({code: true})\` — can return large source sections. \`cartograph_context({format: 'plan'|'handoff'})\` is metadata-only. Don't call source-heavy modes directly in the main session when your host supports sub-agents; spawn an Explore agent** for broad exploration questions (e.g., "how does X work?", "explain the Y system", "where is Z implemented?") so the source lands in a disposable sub-agent context and only the distilled answer returns. Servers launched with \`--profile full\` also expose \`cartograph_explore\` for broader source surveys.
 
 **When spawning Explore agents**, include this instruction in the prompt:
 
@@ -45,7 +45,7 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_at_range\`, \`cartograph_node\`, and \`cartograph_files\` (plus \`cartograph_explore\` / \`cartograph_imports\` under \`--profile full\`). This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 
-Use \`cartograph_context({task: "<task>", format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_verify\` for changed files, tiered tests, package commands, and structural/finding deltas before reporting done. It plans commands but never executes them. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
+Use \`cartograph_context({task: "<task>", format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. During active development, pass \`workingTree: "live"\` to parse modified/untracked source ephemerally without writing the graph; use \`format: "handoff"\` to package those live changes, preservation warnings, and next calls for another agent. After edits, use \`cartograph_verify\` for changed files, tiered tests, package commands, and structural/finding deltas before reporting done. It plans commands but never executes them. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
 
 Storage defaults to SQLite. If the user asks for PostgreSQL/shared storage, use PostgreSQL 18+ and initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\` before indexing, or use \`cartograph_admin({action: "storage-migrate", ...})\` to move an existing SQLite graph to PostgreSQL. To move back to local SQLite, use \`cartograph_admin({action: "storage-migrate", databaseProvider: "sqlite", projectPath})\`. After changing storage, run \`cartograph_admin({action: "doctor"})\` and restart any MCP server attached to the old database.
 
@@ -57,6 +57,7 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 | \`cartograph_graph({direction: 'callers'\\|'callees'})\` | Trace call flow |
 | \`cartograph_graph({direction: 'impact'})\` | Check what's affected before editing |
 | \`cartograph_context({task: "<task>", format: "plan"})\` | Plan the route and next MCP calls before source-heavy exploration |
+| \`cartograph_context({task: "<task>", format: "handoff"})\` | Package live working-tree state and a safe resume sequence for another agent |
 | \`cartograph_node\` | A single symbol's details (omit \`code: true\` to stay metadata-only; use \`liveSource: true\` for stale live slices) |
 | \`cartograph_at_range\` | Symbols overlapping a file:line span (PR-review hunks) |
 | \`cartograph_verify\` | Changed files, tiered tests, commands, and structural/finding deltas after edits |

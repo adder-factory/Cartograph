@@ -129,6 +129,9 @@ cartograph graph AuthService --direction impact --hops 2
 cartograph export --format mermaid --kind class,method --edge-kind calls --out graph.mmd
 cartograph node AuthService --include-callers --include-tests
 cartograph context "fix login timeout" --format plan
+cartograph context "finish login timeout" --format handoff
+cartograph context "debug current edits" --working-tree live
+cartograph verify --ref HEAD
 cartograph explore billing routes
 cartograph files src --format tree
 cartograph files src/billing/service.ts --format deps

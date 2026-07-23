@@ -36,6 +36,7 @@ export function registerGeneratedCommands(): void {
 
 function registerCoreGeneratedCommands(): void {
   registerGeneratedCommand('cartograph_changed_since');
+  registerGeneratedCommand('cartograph_verify', { shortFlags: { ref: '-r', depth: '-d', format: '-f' } });
   // `--action <name>` aliases the discriminator positional so the MCP
   // shape `cartograph note --action list` parses (mirrors the MCP arg
   // name without changing the canonical `cartograph note list` form).

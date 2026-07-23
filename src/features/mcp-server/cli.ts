@@ -117,7 +117,7 @@ export function writeServeMcpGuidance(deps: Pick<McpServerCommandDeps, 'chalk' |
     chalk.cyan('  cartograph_find') + '      - Find symbols / regex / env / sql in one tool (by=name|content|env|sql)',
   );
   writeStderr(
-    chalk.cyan('  cartograph_context') + '   - Build context for a task; use format=plan for route-first guidance',
+    chalk.cyan('  cartograph_context') + '   - Build context; format=plan routes and format=handoff packages live work',
   );
   writeStderr(chalk.cyan('  cartograph_graph') + '     - Navigate the graph (callers / callees / impact / walk)');
   writeStderr(

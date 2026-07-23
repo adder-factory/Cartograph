@@ -102,6 +102,7 @@ cartograph_node without code
 After edits:
 
 ```text
+cartograph_context({task: "<task>", format: "handoff"})
 cartograph_verify
 ```
 
@@ -111,6 +112,12 @@ hotspots, sessions, or `cartograph_host`.
 For `cartograph_context`, send `task` as the canonical prompt parameter;
 `query` is accepted as an alias for MCP clients that already model search-like
 calls around a `query` field.
+During active development, `workingTree: "live"` skips context's inline
+auto-sync and ephemerally parses up to 20 modified/untracked source files. It
+does not write the graph; live roots are combined with stored graph edges and
+their provenance is explicit. `format: "handoff"` enables this behavior
+automatically and emits a resumable packet that tells the next agent which
+working-tree files to preserve and which verification call to make.
 For file-focused lookups, use `cartograph_files`: `format: "symbols"` for a
 one-file outline, `format: "deps"` for local dependencies/dependents, and
 `format: "module"` for directory summaries.

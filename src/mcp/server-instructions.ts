@@ -21,6 +21,7 @@ Lean, Groovy, Solidity, SQL, GraphQL, Svelte, Vue, and more.
 Default path:
 - \`cartograph_status\` when project readiness, freshness, active server profile, or LLM setup is uncertain.
 - \`cartograph_context({task: "<task>", format: "plan"})\` to route an unfamiliar task before reading source.
+- \`cartograph_context({task: "<task>", format: "handoff"})\` to package live unsynced edits, preservation warnings, and the next verification calls for another agent.
 - \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
 - \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
 - \`cartograph_files\` for project tree, one-file symbol outlines (\`format: "symbols"\`), file deps, and module summaries.
@@ -32,12 +33,13 @@ Review / close-out:
 - \`cartograph_playbook\` for the full tool map when the default core set does not fit.
 
 Token discipline:
-- Metadata tools are cheap. Source-heavy modes are \`cartograph_context\` and \`cartograph_node({code: true})\`; delegate those to disposable sub-agents when your host supports it.
+- Metadata tools are cheap, including \`cartograph_context\` plan/handoff formats. Default markdown context and \`cartograph_node({code: true})\` are source-heavy; delegate those to disposable sub-agents when your host supports it.
 - Pass \`lowTokens: true\` on supported high-volume tools, or rely on server \`--low-tokens-default\`; pass \`lowTokens: false\` for one regular response.
 - The default server profile is \`core\` (15 common tools). Use \`--profile coding\` for the lean 9-tool task-to-verification surface; use \`--profile full\` for advanced tools, or \`--profile read-only|review\` and the narrowing flags. Call \`cartograph_status\` to confirm the active shape.
 
 Freshness:
 - The graph can lag recent edits. If a tool warns about stale data, call \`cartograph_admin({action: "sync"})\` or pass \`allowStale: true\` when cached results are intentional. For \`cartograph_node({code: true})\`, pass \`liveSource: true\` to explicitly read a stale file's current disk slice using indexed line ranges.
+- During active development, \`cartograph_context({workingTree: "live"})\` skips context auto-sync and ephemerally parses changed source; \`format: "handoff"\` enables that mode automatically.
 - End edit-touching turns with \`cartograph_verify\` before reporting done.
 
 Storage:
@@ -68,8 +70,8 @@ index lags disk writes by about a second through the file watcher.
 
 The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies into your context?
 
-- **Metadata-only tools** — core tools such as \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_files\` (including \`format: 'deps'|'symbols'|'module'\`), \`cartograph_node\` (without \`code: true\`), \`cartograph_at_range\`, \`cartograph_biomarkers\`, \`cartograph_status\`, \`cartograph_tests_for\`, \`cartograph_affected\`, and \`cartograph_verify\` return compact structured data. Advanced profiles add metadata tools such as \`cartograph_coverage\`, \`cartograph_hotspots\`, \`cartograph_digest\`, and \`cartograph_entry_points\`. **Answer with these directly in the main session.**
-- **Source-dumping tools** — \`cartograph_explore\`, \`cartograph_context\`, and \`cartograph_node({code: true})\` — return full source sections. If you are an orchestrator that can spawn sub-agents, **delegate these to an Explore sub-agent** whose context is disposable, and keep only its distilled answer. If you ARE that sub-agent (or a host with no spawn affordance), use them directly — they are then your primary tools.
+- **Metadata-only tools** — core tools such as \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_files\` (including \`format: 'deps'|'symbols'|'module'\`), \`cartograph_context({format: 'plan'|'handoff'})\`, \`cartograph_node\` (without \`code: true\`), \`cartograph_at_range\`, \`cartograph_biomarkers\`, \`cartograph_status\`, \`cartograph_tests_for\`, \`cartograph_affected\`, and \`cartograph_verify\` return compact structured data. Advanced profiles add metadata tools such as \`cartograph_coverage\`, \`cartograph_hotspots\`, \`cartograph_digest\`, and \`cartograph_entry_points\`. **Answer with these directly in the main session.**
+- **Source-dumping tools** — \`cartograph_explore\`, default/markdown \`cartograph_context\`, and \`cartograph_node({code: true})\` — return full source sections. If you are an orchestrator that can spawn sub-agents, **delegate these to an Explore sub-agent** whose context is disposable, and keep only its distilled answer. If you ARE that sub-agent (or a host with no spawn affordance), use them directly — they are then your primary tools.
 - **Maximum token savings** — pass \`lowTokens: true\` on supported high-volume tools (\`find\`, \`graph\`, \`context\`, \`at_range\`, \`node\`, \`files\`, \`biomarkers\`; plus \`explore\`/\`imports\` under \`--profile full\`) to apply compact rows, field projection, lower caps, or source suppression in one switch. Servers launched with \`--low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 - **Route before reading source** — \`cartograph_context({task: "<task>", format: "plan"})\` returns entry symbols plus concrete next MCP calls in text and \`metadata.nextActions\`. Use it in the main session before escalating to source-heavy context/explore/node calls.
 - **MCP load context** — the advertised tool list itself costs context before any call runs. Operators can measure it with \`cartograph mcp-budget\` or \`bun run measure:mcp-load\`. The default profile is \`core\`; use \`--profile coding\` for the lean day-to-day surface, \`--profile full\` for the complete toolbox, or \`--profile read-only|review\` plus the narrowing flags. Read-only/write-disabled servers keep safe mixed-tool branches visible and reject mutating branches. \`--low-tokens-default\` reduces per-call output after connection but not \`tools/list\`.
@@ -77,6 +79,7 @@ The dividing line is OUTPUT SOURCE-VOLUME — does the call dump source bodies i
 ## When to use which tool (question → tool)
 
 - **"What's the route for this task / feature / bug?"** → \`cartograph_context({task: "<task>", format: "plan"})\` (low-token route plan with suggested next MCP calls and \`metadata.nextActions\`).
+- **"Resume or hand off active coding work"** → \`cartograph_context({task: "<task>", format: "handoff"})\` (ephemerally parses current changed files, preserves the stored graph, and records live symbols, files not to discard, next calls, and verification guidance). Use \`workingTree: 'live'\` with other context formats when you need current unsynced source without an inline sync.
 - **"What's the deal with this task / feature / bug?"** → \`cartograph_context\` (source-heavy by default — use \`lowTokens: true\` for no-code outline mode; orchestrators delegate; composes 5+ queries into one answer; \`explain: true\` appends a per-candidate score trace).
 - **"Find a thing by name / regex / env-var / SQL table"** → \`cartograph_find({by})\` — \`by: 'name'\` (\`mode\`: exact/fuzzy/semantic/intent; \`compact\`/\`fields\` or \`lowTokens\` cut tokens), \`by: 'content'\` (regex + enclosing-symbol attribution), \`by: 'env'|'sql'\` (string-literal refs in non-AST domains). Replaced \`cartograph_search\`/\`_grep\`/\`_string_refs\` (2026-05-11).
 - **"What calls this / what does it call / blast radius / multi-hop walk?"** → \`cartograph_graph({start, direction})\` — \`direction\`: callers/callees/impact/both/similar; \`hops > 1\` switches to BFS. \`compact\`/\`fields\`/\`since\`/\`lowTokens\` cut output tokens 40-80%. Replaced \`cartograph_callers\`/\`_callees\`/\`_impact\`/\`_walk\`/\`_similar\`.
@@ -115,12 +118,13 @@ Default traversals (\`callers\`/\`callees\`/\`impact\`) EXCLUDE \`similar_to\`, 
 ## Common chains
 
 - **End-of-task self-report** (after ANY edit-touching turn): \`cartograph_verify\` — changed files, graph-selected tests, bounded commands, and the +/-/~ symbol plus findings delta before you report "done".
+- **Agent handoff during active development**: \`cartograph_context({task: "<task>", format: "handoff"})\` → give the packet to the next agent → preserve its listed working-tree files → finish with \`cartograph_verify\`.
 - **Route a task cheaply**: \`cartograph_context({task: "<task>", format: "plan"})\` → follow the top \`metadata.nextActions\` call → escalate to source only when the target is clear.
 - **Onboard to a topic**: \`cartograph_context({task: "<task>", format: "plan"})\` first; still unclear under \`--profile full\`? \`cartograph_explore\` for breadth, then \`cartograph_node\` on specific symbols.
 - **Onboard to a new repo**: core path: \`cartograph_status({verbose: true})\` → \`cartograph_context({task: "project entry points", format: "plan"})\`; full-profile path: \`cartograph_digest\` → \`cartograph_entry_points\`.
 - **Initialize with PostgreSQL**: use PostgreSQL 18+, then \`cartograph_admin({action: 'init', projectPath, databaseProvider: 'postgres', databaseUrl, databaseSchema: 'cartograph', databasePgvector: 'auto'})\` → \`cartograph_admin({action: 'doctor', projectPath})\`; for an existing SQLite graph, use \`action: 'storage-migrate'\` and restart attached MCP servers. To return to SQLite, use \`cartograph_admin({action: 'storage-migrate', projectPath, databaseProvider: 'sqlite'})\`.
 - **Bring up local LLMs**: \`cartograph admin llm-plan\` / \`cartograph admin llm-apply --preset <id>\` or \`cartograph llm setup\` → \`cartograph backend status\` / \`cartograph backend start\` for managed local llama-server tiers → \`cartograph llm smoke\` → \`cartograph doctor\`. MCP can diagnose with \`cartograph_admin({action: 'doctor'})\`, but process spawning and log tailing are CLI/operator actions.
-- **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'trust'})\` before relying on broad graph answers; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
+- **PR review**: \`cartograph_review({mode: 'context'})\` for affected symbols + callers + impact + co-change; \`cartograph_at_range\` per hunk; \`cartograph_review({mode: 'neighbors'})\` for sister implementations that may need the same change; \`cartograph_review({mode: 'trust', deep: true})\` when endpoint execution and semantic usefulness must be proven; \`cartograph_review({mode: 'agent-audit'})\` when introduced findings include agent-prone biomarkers.
 - **Refactor planning**: \`cartograph_find\` → \`cartograph_biomarkers\` (Code Health) → \`cartograph_coverage\` (tests) → \`cartograph_graph({direction: 'impact'})\` (blast radius) → \`cartograph_propose_rename\`.
 - **Debug a regression**: \`cartograph_graph({direction: 'callers'})\` of the suspect + \`cartograph_hotspots\` + \`cartograph_biomarkers\`; with a trace, \`cartograph_trace_to_culprits\`.
 
