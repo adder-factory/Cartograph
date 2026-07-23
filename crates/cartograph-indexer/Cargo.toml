@@ -11,6 +11,7 @@ repository.workspace = true
 [dependencies]
 cartograph-db = { path = "../cartograph-db" }
 cartograph-domain = { path = "../cartograph-domain" }
+cartograph-extract = { path = "../cartograph-extract" }
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -134,6 +134,7 @@ pub struct StageWorkItem<Key, Payload> {
     sequence: StageSequence,
     key: Key,
     payload: Payload,
+    cancellation: StageCancellation,
 }
 
 impl<Key, Payload> StageWorkItem<Key, Payload> {
@@ -149,10 +150,44 @@ impl<Key, Payload> StageWorkItem<Key, Payload> {
         &self.key
     }
 
+    /// Cooperative parent/stage/deadline probe for CPU work that cannot yield.
+    #[must_use]
+    pub fn cancellation(&self) -> StageCancellation {
+        self.cancellation.clone()
+    }
+
     /// Consume the work item without exposing mutable metadata.
     #[must_use]
     pub fn into_parts(self) -> (StageSequence, Key, Payload) {
         (self.sequence, self.key, self.payload)
+    }
+}
+
+/// Cloneable cooperative cancellation probe carried into each stage worker.
+#[derive(Clone)]
+pub struct StageCancellation {
+    parent: watch::Receiver<bool>,
+    stage: watch::Receiver<bool>,
+    deadline: Instant,
+}
+
+impl StageCancellation {
+    fn new(parent: watch::Receiver<bool>, stage: watch::Receiver<bool>, deadline: Instant) -> Self {
+        Self {
+            parent,
+            stage,
+            deadline,
+        }
+    }
+
+    /// True after parent cancellation, sibling/stage failure, or the item deadline.
+    #[must_use]
+    pub fn is_cancelled(&self) -> bool {
+        *self.parent.borrow() || *self.stage.borrow() || self.deadline_elapsed()
+    }
+
+    fn deadline_elapsed(&self) -> bool {
+        Instant::now() >= self.deadline
     }
 }
 
@@ -192,6 +227,18 @@ impl StageCapacity {
             queued_items,
         }
     }
+
+    /// Maximum number of actively executing worker futures.
+    #[must_use]
+    pub const fn workers(self) -> usize {
+        self.workers
+    }
+
+    /// Additional admitted items allowed to wait behind active workers.
+    #[must_use]
+    pub const fn queued_items(self) -> usize {
+        self.queued_items
+    }
 }
 
 /// Run and post-abort time bounds for one ordered parallel stage.
@@ -209,6 +256,18 @@ impl StageDeadlinePolicy {
             deadline,
             cleanup_grace,
         }
+    }
+
+    /// Absolute whole-stage deadline.
+    #[must_use]
+    pub const fn deadline(self) -> Instant {
+        self.deadline
+    }
+
+    /// Separate post-abort worker-reaping grace.
+    #[must_use]
+    pub const fn cleanup_grace(self) -> Duration {
+        self.cleanup_grace
     }
 }
 
@@ -592,6 +651,23 @@ pub struct StageRunner {
     tasks: TaskScope,
 }
 
+#[cfg(test)]
+pub(crate) async fn test_stage_runner(
+    max_tasks: usize,
+    max_bytes: u64,
+) -> (StageRunner, TaskScope, watch::Sender<bool>) {
+    let progress = SharedProgress::new();
+    assert!(progress.reserve().await);
+    progress.mark_active().await;
+    let tasks = TaskScope::new(max_tasks, max_bytes);
+    let (cancellation, receiver) = watch::channel(false);
+    (
+        StageRunner::new(progress, receiver, tasks.clone()),
+        tasks,
+        cancellation,
+    )
+}
+
 #[derive(Clone, Copy)]
 struct ValidatedStage {
     stage: PipelineStage,
@@ -711,14 +787,22 @@ struct StageSchedule<Key, Output> {
     joins: JoinSet<StageJoin<Key, Output>>,
     aborts: BTreeMap<StageSequence, AbortHandle>,
     ready: BTreeMap<StageSequence, RetainedStageOutput<Key, Output>>,
+    cancellation: watch::Sender<bool>,
     lifecycle: StageLifecycle,
 }
 
 impl<Key, Output> Drop for StageSchedule<Key, Output> {
     fn drop(&mut self) {
+        self.cancel_workers();
         for abort in self.aborts.values() {
             abort.abort();
         }
+    }
+}
+
+impl<Key, Output> StageSchedule<Key, Output> {
+    fn cancel_workers(&self) {
+        let _ = self.cancellation.send(true);
     }
 }
 
@@ -826,6 +910,7 @@ impl StageRunner {
             accumulator,
             reduce,
         } = fold;
+        let (stage_cancellation, _) = watch::channel(false);
         StageDriver {
             control: StageControl {
                 runner: self,
@@ -842,6 +927,7 @@ impl StageRunner {
                 joins: JoinSet::new(),
                 aborts: BTreeMap::new(),
                 ready: BTreeMap::new(),
+                cancellation: stage_cancellation,
                 lifecycle,
             },
             fold: StageOrderedFold {
@@ -1008,7 +1094,13 @@ where
             sequence,
             key: meta.key().clone(),
             payload,
+            cancellation: StageCancellation::new(
+                self.control.cancellation.clone(),
+                self.schedule.cancellation.subscribe(),
+                deadline,
+            ),
         };
+        let work_cancellation = item.cancellation();
         let gate = self.workers.gate.clone();
         let work = self.workers.work.clone();
         let task = self
@@ -1025,6 +1117,12 @@ where
                 .await;
                 let outcome = match result {
                     Ok(Ok(output)) => StageTaskOutcome::Ready(output),
+                    Ok(Err(_)) if work_cancellation.deadline_elapsed() && stage_deadline_wins => {
+                        StageTaskOutcome::StageDeadline
+                    }
+                    Ok(Err(_)) if work_cancellation.deadline_elapsed() => {
+                        StageTaskOutcome::Failed(StageFailureKind::Deadline)
+                    }
                     Ok(Err(_)) => StageTaskOutcome::Failed(StageFailureKind::Worker),
                     Err(_) if stage_deadline_wins => StageTaskOutcome::StageDeadline,
                     Err(_) => StageTaskOutcome::Failed(StageFailureKind::Deadline),
@@ -1198,6 +1296,7 @@ where
 
     async fn stop(mut self, error: StageRunError) -> Result<Accumulator, StageRunError> {
         let cancelled = matches!(error, StageRunError::Cancelled { .. });
+        self.schedule.cancel_workers();
         cancel_ready_outputs(&mut self.schedule.ready);
         let all_joined = abort_and_reap(
             &self.schedule.aborts,
@@ -1345,6 +1444,7 @@ mod tests {
 
     use tokio::time::{sleep, timeout};
 
+    use super::test_stage_runner as runner;
     use super::*;
 
     const TEST_WORKERS: usize = 2;
@@ -1356,22 +1456,6 @@ mod tests {
     const ITEM_TIMEOUT: Duration = Duration::from_secs(1);
     const DEADLINE_TIMEOUT: Duration = Duration::from_millis(30);
     const CLEANUP_GRACE: Duration = Duration::from_millis(250);
-
-    async fn runner(
-        max_tasks: usize,
-        max_bytes: u64,
-    ) -> (StageRunner, TaskScope, watch::Sender<bool>) {
-        let progress = SharedProgress::new();
-        assert!(progress.reserve().await);
-        progress.mark_active().await;
-        let tasks = TaskScope::new(max_tasks, max_bytes);
-        let (cancellation, receiver) = watch::channel(false);
-        (
-            StageRunner::new(progress, receiver, tasks.clone()),
-            tasks,
-            cancellation,
-        )
-    }
 
     fn meta(sequence: usize, deadline: Instant) -> StageItemMeta<usize> {
         let key = sequence;
@@ -2067,6 +2151,77 @@ mod tests {
                 ..
             }) if sequence == StageSequence::new(0)
         ));
+        drop(cancellation);
+        let report = tasks.close_abort_and_reap(deadline).await;
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cooperative_cpu_worker_observes_its_item_deadline_without_yielding() {
+        let (runner, tasks, cancellation) = runner(1, TEST_SCOPE_BYTES).await;
+        let stage_deadline = Instant::now() + TEST_TIMEOUT;
+        let item_deadline = Instant::now() + DEADLINE_TIMEOUT;
+        let inputs = [StageEnvelope::new(meta(0, item_deadline), ())];
+        let execution = StageExecution::new(
+            config(1, 0, stage_deadline),
+            StageWorkload::new(inputs, |item: StageWorkItem<usize, ()>| async move {
+                let cancellation = item.cancellation();
+                while !cancellation.is_cancelled() {
+                    std::hint::spin_loop();
+                }
+                Err::<(), _>(StageItemFailure)
+            }),
+            StageFold::new((), |_: &mut (), _| Ok(())),
+        );
+        assert!(matches!(
+            runner.execute(execution).await,
+            Err(StageRunError::Item {
+                sequence,
+                kind: StageFailureKind::Deadline,
+                ..
+            }) if sequence == StageSequence::new(0)
+        ));
+        drop(cancellation);
+        let report = tasks.close_abort_and_reap(stage_deadline).await;
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn sibling_failure_signals_cooperative_cpu_work_before_abort_reaping() {
+        let (runner, tasks, cancellation) = runner(2, TEST_SCOPE_BYTES).await;
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let saw_stage_cancellation = Arc::new(AtomicBool::new(false));
+        let inputs = (0..2).map(move |sequence| StageEnvelope::new(meta(sequence, deadline), ()));
+        let observed = saw_stage_cancellation.clone();
+        let execution = StageExecution::new(
+            config(2, 0, deadline),
+            StageWorkload::new(inputs, move |item: StageWorkItem<usize, ()>| {
+                let observed = observed.clone();
+                async move {
+                    if item.sequence() == StageSequence::new(0) {
+                        return Err::<(), _>(StageItemFailure);
+                    }
+                    let cancellation = item.cancellation();
+                    while !cancellation.is_cancelled() {
+                        std::hint::spin_loop();
+                    }
+                    observed.store(true, Ordering::Release);
+                    Err(StageItemFailure)
+                }
+            }),
+            StageFold::new((), |_: &mut (), _| Ok(())),
+        );
+        assert!(matches!(
+            runner.execute(execution).await,
+            Err(StageRunError::Item {
+                sequence,
+                kind: StageFailureKind::Worker,
+                ..
+            }) if sequence == StageSequence::new(0)
+        ));
+        assert!(saw_stage_cancellation.load(Ordering::Acquire));
         drop(cancellation);
         let report = tasks.close_abort_and_reap(deadline).await;
         assert!(report.all_joined);

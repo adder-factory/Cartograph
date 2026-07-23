@@ -84,7 +84,9 @@ The foundation began with `cartograph-config`, `cartograph-db`, and
 `cartograph-cli`, proving that the Rust runtime can reject an unsupported
 database before any schema mutation. The generation-safe storage slice adds
 `cartograph-domain` without adding any non-Serde production dependency to that
-crate.
+crate. The first native language slice adds `cartograph-extract` behind that
+domain boundary; its exact contracts and current limitations are recorded in
+[`EXTRACTION.md`](EXTRACTION.md).
 
 ## Storage model
 
@@ -303,6 +305,30 @@ accounting follows the same reservation lifetime as the supervisor task scope,
 including out-of-order outputs and every failure/cancellation path. A poisoned
 or inconsistent observer is a structured fatal stage error; an already
 registered task is still aborted and reaped before that error returns.
+
+CPU stages receive a cloneable `StageCancellation` probe combining parent
+cancellation, sibling/stage failure, and the item's effective deadline. Native
+Tree-sitter parsing polls it from the parser progress callback; source reading,
+AST walking, diagnostic collection, and structural hashing poll it between
+bounded units of work. A stage signals cooperative cancellation before it
+aborts and reaps tasks, so safe native work can unwind promptly while the task
+scope still fails closed if work does not cooperate.
+
+The first real parse/extract adapter now lazily admits validated TypeScript,
+TSX, JavaScript, and JSX snapshots through this executor. File and symbol IDs,
+exact content hashes, syntax-stable structural digests, declarations,
+containment, and unresolved references are deterministic; a complete canonical
+digest of every output field is identical at one and four workers. The adapter
+uses a trusted fixed-state validation observer and drops each output before its
+in-flight reservation is released, so it does not hide a corpus-sized result
+vector. This observer is not the persistence handoff: discovery/read admission,
+owned output plus transferable reservation/backpressure, project-wide
+resolution, canonical `GenerationFacts`, and PostgreSQL COPY wiring remain the
+next gate. The iterator contract forbids retaining the full corpus outside the
+stage window until those producer/consumer stages are connected. Declared
+reservations and modeled Rust-output caps are enforced; a real-corpus RSS gate
+must still measure Tree-sitter's allocator before claiming a process memory
+hard limit.
 
 `GenerationContents` can independently attach `PrepareGenerationMetrics`. That
 observer measures only the five-table PostgreSQL COPY stream, including bounded

@@ -116,12 +116,13 @@ This is the durable continuation point for the v2 rewrite. Read
   generation/BM25, COPY/digest, lease, all 23 supervisor cases, the complete
   1/2/4/8/16-worker benchmark in 1m25s, and managed Docker lifecycle on
   GitHub's amd64 runner.
+- Frozen benchmark handoff checkpoint: `09bf269`.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the assertion-bearing scaling
-benchmark at `b814932`, with both v2 GitHub jobs green. Continue with real
-TypeScript/JavaScript extraction stages and re-run the same matrix on the real
-corpus; do not reopen the PostgreSQL-only, no-SQLite, or Rust-first decisions.
+The branch and origin were checkpointed through the benchmark handoff at
+`09bf269`, with both v2 GitHub jobs green, before the native extraction slice
+described below began. Do not reopen the PostgreSQL-only, no-SQLite, or
+Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -651,6 +652,60 @@ Cartograph biomarkers at 0/0/0 with zero cross-file errors, and Sonar `OK` at
 91.5% new-code coverage, 86.0% overall coverage, zero bugs, zero
 vulnerabilities, zero new violations, and 100% reviewed security hotspots.
 
+## Native TypeScript/JavaScript extraction slice
+
+The current branch adds the first production-Rust extraction family without
+calling the v1 TypeScript runtime:
+
+- `cartograph-domain` now owns validated normalized source paths, typed
+  start/end positions and spans, source languages, declaration/reference
+  kinds, visibility, and deterministic RFC 9562 UUIDv8 constructors.
+- `cartograph-extract` classifies TypeScript/TSX/JavaScript/JSX extensions,
+  validates UTF-8 and bounded exact bytes, computes BLAKE3 hashes, performs
+  symlink-aware bounded reads, loads statically linked native Tree-sitter
+  grammars, and emits normalized declarations, lexical containment, unresolved
+  imports/types/heritage/calls/construction/JSX/field references, and bounded
+  syntax diagnostics.
+- Stable file IDs use canonical paths. Stable symbol IDs use path, kind,
+  scope-qualified name, and same-scope ordinal, so formatting/line changes and
+  inserting the same local name in another class do not churn existing IDs.
+  Symbol structural digests ignore comments and formatting while retaining
+  semantic syntax.
+- Tree-sitter's progress callback, the Rust walker, diagnostics, structural
+  hashing, and the file reader all poll cooperative cancellation. The shared
+  stage runner now carries parent, sibling/stage, and effective-deadline state
+  into CPU work before abort/reap fallback.
+- `run_native_extraction_stage` lazily admits snapshots with conservative byte
+  reservations, per-envelope deadlines beginning at admission, one bounded
+  queue, ordered reduction, and exact in-flight reservation metrics. It no
+  longer accumulates a corpus-sized `Vec<ExtractedFile>`: a trusted fixed-state
+  validation observer sees each ordered output while its reservation is held,
+  then the output is dropped. A complete field digest is identical at one and
+  four workers, and a 256-file regression keeps peak declared bytes under the
+  scope. The observer is explicitly not the owned/backpressured persistence
+  handoff; that remains in the next slice.
+- Four locked v1.1.33 fixtures provide the initial declaration/reference
+  projection. A temporary Zod-parsed TypeScript test independently reruns the
+  v1.1.33 extractor against all four expected cases before Rust consumes the
+  oracle. Rust-owned regressions cover exact BLAKE3, path/language/size/UTF-8
+  rejection, recoverable parse damage, cancellation across flat and large-leaf
+  trees, syntax-stable identity/digests, semantic template/JSX whitespace,
+  duplicate ordinals, cross-scope identity stability, validated Serde spans/
+  language values, alias/component type references, enum-member isolation,
+  bounded adversarial output, outside-root symlinks/FIFOs, split UTF-8, redacted
+  debug output, and oversized files.
+
+The exact contract and limitation ledger is
+[`docs/v2/EXTRACTION.md`](docs/v2/EXTRACTION.md). This slice deliberately stops
+before claiming end-to-end M3/M4 completion: project discovery and ignore
+policy, supervised read/hash admission, project-wide resolution, canonical
+`GenerationFacts`, PostgreSQL COPY wiring, and the real-corpus 1/2/4/8/16
+benchmark are not implemented yet. In particular, the current stage accepts a
+lazy iterator of prebuilt snapshots; callers must not retain an entire corpus
+behind that iterator. The 32x parse reservation is conservative accounting,
+not an OS-level Tree-sitter RSS cap; owned output transfer and a real-corpus
+memory gate are required before M3/M4 completion.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -710,6 +765,11 @@ Port by language families rather than file-for-file translation:
 
 Each port uses v1.1.33 fixture output as an oracle, then adopts a Rust-owned
 golden contract. Do not call TypeScript from production Rust.
+
+The first TypeScript/JavaScript/TSX/JSX parser and normalized-fact slice is now
+implemented and matches its locked v1.1.33 projection. M3 remains open until
+discovery, richer Rust-owned golden coverage, resolution, remaining language
+families, and framework/cross-language hooks meet their exit gates.
 
 ### M4 — bounded parallel indexer
 
@@ -790,17 +850,18 @@ Only then:
 
 ## Immediate next actions
 
-1. Port TypeScript/JavaScript discovery and extraction into the implemented
-   discover -> read/hash -> parse/extract -> resolve -> reduce stages using
-   v1.1.33 fixture output as an oracle, then replace that oracle with Rust-owned
-   golden contracts. Keep extraction out of `cartograph-db`.
-2. Re-run the committed 1/2/4/8/16 matrix on that frozen real extractor corpus.
+1. Add Gitignore-aware discovery and feed paths through supervised bounded
+   read/hash -> native parse/extract -> project-wide resolve -> deterministic
+   reduce stages. Produce one canonical `GenerationFacts` value for the
+   existing supervised `prepare_generation`; workers never publish, clean up,
+   or hold a lease fence. Keep extraction out of `cartograph-db`.
+2. Freeze a Rust-owned real extractor corpus, then re-run the committed
+   1/2/4/8/16 matrix on it.
    Preserve the current digest/row/BM25/task/lease gates, compare throughput and
    memory against the synthetic baseline, and confirm or revise the initial
    `min(available_parallelism, 16)` parse/extract cap.
-3. Add stage-level fault injection for each real extraction stage, then feed
-   one canonical `GenerationFacts` value into the existing supervised
-   `prepare_generation`; workers never publish, clean up, or hold a lease fence.
+3. Add stage-level cancellation/deadline/failure/backpressure injection for
+   discovery, read/hash, parse/extract, resolution, reduction, and COPY.
 4. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
 5. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported

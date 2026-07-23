@@ -8,13 +8,28 @@ use std::{fmt, str::FromStr};
 
 use serde::{Deserialize, Serialize};
 
+mod source;
+
+pub use source::{
+    FileParseStatus, InvalidNormalizedPath, InvalidSourceSpan, NormalizedPath, ReferenceKind,
+    SourceLanguage, SourcePosition, SourceSpan, SymbolKind, Visibility,
+};
+
 const UUID_TEXT_LENGTH: usize = 36;
+const UUID_BYTE_LENGTH: usize = 16;
 const UUID_HYPHEN_OFFSETS: [usize; 4] = [8, 13, 18, 23];
+const UUID_BYTE_HYPHEN_OFFSETS: [usize; 4] = [4, 6, 8, 10];
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 const BLAKE3_HEX_LENGTH: usize = 64;
 const BLAKE3_BYTE_LENGTH: usize = BLAKE3_HEX_LENGTH / 2;
 const UPPER_NIBBLE_SHIFT: u8 = 4;
 const NIBBLE_MASK: u8 = 0x0f;
+const UUID_VERSION_INDEX: usize = 6;
+const UUID_VARIANT_INDEX: usize = 8;
+const UUID_V8_PREFIX: u8 = 0x80;
+const UUID_RFC_VARIANT_PREFIX: u8 = 0x80;
+const UUID_VERSION_MASK: u8 = 0x0f;
+const UUID_VARIANT_MASK: u8 = 0x3f;
 const HEX_DIGITS: &[u8] = b"0123456789abcdef";
 
 /// A supplied branded identifier was not a canonicalizable, non-nil UUID.
@@ -46,6 +61,12 @@ macro_rules! define_id {
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+
+            /// Build a deterministic RFC 9562 UUIDv8 from caller-owned hash bytes.
+            #[must_use]
+            pub fn from_uuid_v8(bytes: [u8; UUID_BYTE_LENGTH]) -> Self {
+                Self(format_uuid_v8(bytes))
             }
         }
 
@@ -234,33 +255,6 @@ impl GenerationState {
     }
 }
 
-/// Parser outcome recorded for one source file in an immutable generation.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileParseStatus {
-    /// The complete file was parsed and extracted.
-    Parsed,
-    /// Useful facts were extracted despite recoverable parse gaps.
-    Partial,
-    /// Parsing failed and no structural facts are trusted.
-    Failed,
-    /// Project policy deliberately excluded the file from parsing.
-    Skipped,
-}
-
-impl FileParseStatus {
-    /// Stable PostgreSQL representation.
-    #[must_use]
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Parsed => "parsed",
-            Self::Partial => "partial",
-            Self::Failed => "failed",
-            Self::Skipped => "skipped",
-        }
-    }
-}
-
 /// Search-document category used for intent routing and field boosts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -327,6 +321,23 @@ impl EdgeKind {
     }
 }
 
+fn format_uuid_v8(mut bytes: [u8; UUID_BYTE_LENGTH]) -> String {
+    bytes[UUID_VERSION_INDEX] = (bytes[UUID_VERSION_INDEX] & UUID_VERSION_MASK) | UUID_V8_PREFIX;
+    bytes[UUID_VARIANT_INDEX] =
+        (bytes[UUID_VARIANT_INDEX] & UUID_VARIANT_MASK) | UUID_RFC_VARIANT_PREFIX;
+    let mut encoded = String::with_capacity(UUID_TEXT_LENGTH);
+    for (index, byte) in bytes.into_iter().enumerate() {
+        if UUID_BYTE_HYPHEN_OFFSETS.contains(&index) {
+            encoded.push('-');
+        }
+        encoded.push(char::from(
+            HEX_DIGITS[usize::from(byte >> UPPER_NIBBLE_SHIFT)],
+        ));
+        encoded.push(char::from(HEX_DIGITS[usize::from(byte & NIBBLE_MASK)]));
+    }
+    encoded
+}
+
 fn normalize_uuid(raw: &str) -> Result<String, InvalidId> {
     if raw.len() != UUID_TEXT_LENGTH || !raw.is_ascii() {
         return Err(InvalidId);
@@ -347,13 +358,16 @@ fn normalize_uuid(raw: &str) -> Result<String, InvalidId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, FileParseStatus,
-        GenerationId, GenerationState, LeaseId, ProjectId, ProjectOperation,
+        BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, FileId,
+        FileParseStatus, GenerationId, GenerationState, LeaseId, ProjectId, ProjectOperation,
+        SymbolId, UUID_BYTE_LENGTH,
     };
 
     const UPPERCASE_UUID: &str = "4EACCC79-2ED5-4E22-8D77-A8E66D13C345";
     const CANONICAL_UUID: &str = "4eaccc79-2ed5-4e22-8d77-a8e66d13c345";
     const TEST_DIGEST_BYTE: u8 = 0xab;
+    const TEST_UUID_V8_BYTE: u8 = 0x11;
+    const EXPECTED_TEST_UUID_V8: &str = "11111111-1111-8111-9111-111111111111";
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -401,5 +415,13 @@ mod tests {
         assert_eq!(ProjectOperation::Hook.as_str(), "hook");
         assert_eq!(ProjectOperation::Rebuild.as_str(), "rebuild");
         assert!(LeaseId::parse(CANONICAL_UUID).is_ok());
+    }
+
+    #[test]
+    fn deterministic_uuid_bytes_preserve_identifier_brands() {
+        let file = FileId::from_uuid_v8([TEST_UUID_V8_BYTE; UUID_BYTE_LENGTH]);
+        let symbol = SymbolId::from_uuid_v8([TEST_UUID_V8_BYTE; UUID_BYTE_LENGTH]);
+        assert_eq!(file.as_str(), EXPECTED_TEST_UUID_V8);
+        assert_eq!(symbol.as_str(), file.as_str());
     }
 }

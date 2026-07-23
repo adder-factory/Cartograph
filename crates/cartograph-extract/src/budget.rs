@@ -1,0 +1,222 @@
+use std::mem::size_of;
+
+use crate::{
+    Containment, ExtractError, ExtractedFile, ExtractedReference, ExtractedSymbol,
+    ExtractionDiagnostic, SourceSnapshot,
+};
+
+const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
+const MINIMUM_PARSER_RESERVATION_BYTES: u64 = 1024 * 1024;
+const OUTPUT_LIMIT_MULTIPLIER: u64 = 8;
+const MINIMUM_OUTPUT_LIMIT_BYTES: u64 = 256 * 1024;
+const MINIMUM_FACT_LIMIT: u64 = 1024;
+const MINIMUM_STRING_LIMIT_BYTES: u64 = 4096;
+const MAXIMUM_FACT_STRING_BYTES: u64 = 256 * 1024;
+const MAXIMUM_QUALIFIER_SEPARATOR_BYTES: u64 = 512;
+const VECTOR_GROWTH_ALLOWANCE: u64 = 2;
+
+/// Conservative in-flight reservation for source, Tree-sitter, and bounded Rust facts.
+#[must_use]
+pub fn native_extraction_reservation(source_bytes: u64) -> Option<u64> {
+    source_bytes
+        .checked_mul(PARSER_RESERVATION_MULTIPLIER)
+        .and_then(|bytes| bytes.checked_add(MINIMUM_PARSER_RESERVATION_BYTES))
+}
+
+/// Hard per-file limit for modeled Rust-owned extraction output.
+#[must_use]
+pub fn native_output_limit(source_bytes: u64) -> Option<u64> {
+    source_bytes
+        .checked_mul(OUTPUT_LIMIT_MULTIPLIER)
+        .and_then(|bytes| bytes.checked_add(MINIMUM_OUTPUT_LIMIT_BYTES))
+}
+
+pub(crate) struct ExtractionBudget {
+    output_limit: u64,
+    string_limit: u64,
+    fact_limit: u64,
+    retained_bytes: u64,
+    facts: u64,
+}
+
+impl ExtractionBudget {
+    pub(crate) fn new(snapshot: &SourceSnapshot) -> Result<Self, ExtractError> {
+        let source_bytes = snapshot.byte_size();
+        let output_limit = native_output_limit(source_bytes).ok_or(ExtractError::OutputLimit)?;
+        let string_limit = source_bytes
+            .checked_add(MAXIMUM_QUALIFIER_SEPARATOR_BYTES)
+            .ok_or(ExtractError::OutputLimit)?
+            .clamp(MINIMUM_STRING_LIMIT_BYTES, MAXIMUM_FACT_STRING_BYTES);
+        let fact_limit = source_bytes
+            .checked_add(MINIMUM_FACT_LIMIT)
+            .ok_or(ExtractError::OutputLimit)?;
+        let retained_bytes = snapshot_header_bytes(snapshot).ok_or(ExtractError::OutputLimit)?;
+        if retained_bytes > output_limit {
+            return Err(ExtractError::OutputLimit);
+        }
+        Ok(Self {
+            output_limit,
+            string_limit,
+            fact_limit,
+            retained_bytes,
+            facts: 0,
+        })
+    }
+
+    pub(crate) fn reserve_fact<'value>(
+        &mut self,
+        retained_bytes: u64,
+        strings: impl IntoIterator<Item = &'value str>,
+    ) -> Result<(), ExtractError> {
+        if strings
+            .into_iter()
+            .any(|value| usize_to_u64(value.len()) > self.string_limit)
+        {
+            return Err(ExtractError::OutputLimit);
+        }
+        let facts = self.facts.checked_add(1).ok_or(ExtractError::OutputLimit)?;
+        let next = self
+            .retained_bytes
+            .checked_add(retained_bytes)
+            .ok_or(ExtractError::OutputLimit)?;
+        if facts > self.fact_limit || next > self.output_limit {
+            return Err(ExtractError::OutputLimit);
+        }
+        self.facts = facts;
+        self.retained_bytes = next;
+        Ok(())
+    }
+
+    pub(crate) const fn output_limit(&self) -> u64 {
+        self.output_limit
+    }
+
+    pub(crate) fn ensure_string_length(&self, length: usize) -> Result<(), ExtractError> {
+        let length = usize_to_u64(length);
+        if length > self.string_limit || length > MAXIMUM_FACT_STRING_BYTES {
+            Err(ExtractError::OutputLimit)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+pub(crate) fn ensure_fact_string_length(length: usize) -> Result<(), ExtractError> {
+    if usize_to_u64(length) > MAXIMUM_FACT_STRING_BYTES {
+        Err(ExtractError::OutputLimit)
+    } else {
+        Ok(())
+    }
+}
+
+impl ExtractedFile {
+    /// Modeled Rust-owned bytes retained by this output, including vector/string capacity.
+    #[must_use]
+    pub fn modeled_retained_bytes(&self) -> u64 {
+        file_header_bytes(self)
+            .and_then(|base| {
+                base.checked_add(vector_bytes::<ExtractedSymbol>(self.symbols.capacity()))
+            })
+            .and_then(|bytes| {
+                self.symbols.iter().try_fold(bytes, |total, symbol| {
+                    total.checked_add(symbol_string_bytes(symbol))
+                })
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(vector_bytes::<Containment>(self.containments.capacity()))
+            })
+            .and_then(|bytes| {
+                self.containments.iter().try_fold(bytes, |total, edge| {
+                    total.checked_add(containment_string_bytes(edge))
+                })
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(vector_bytes::<ExtractedReference>(
+                    self.references.capacity(),
+                ))
+            })
+            .and_then(|bytes| {
+                self.references.iter().try_fold(bytes, |total, reference| {
+                    total.checked_add(reference_string_bytes(reference))
+                })
+            })
+            .and_then(|bytes| {
+                bytes.checked_add(vector_bytes::<ExtractionDiagnostic>(
+                    self.diagnostics.capacity(),
+                ))
+            })
+            .unwrap_or(u64::MAX)
+    }
+}
+
+pub(crate) fn symbol_budget_bytes(symbol: &ExtractedSymbol) -> u64 {
+    vector_growth_bytes::<ExtractedSymbol>().saturating_add(symbol_string_bytes(symbol))
+}
+
+pub(crate) fn containment_budget_bytes(edge: &Containment) -> u64 {
+    vector_growth_bytes::<Containment>().saturating_add(containment_string_bytes(edge))
+}
+
+pub(crate) fn reference_budget_bytes(reference: &ExtractedReference) -> u64 {
+    vector_growth_bytes::<ExtractedReference>().saturating_add(reference_string_bytes(reference))
+}
+
+pub(crate) fn diagnostic_budget_bytes() -> u64 {
+    vector_growth_bytes::<ExtractionDiagnostic>()
+}
+
+fn file_header_bytes(file: &ExtractedFile) -> Option<u64> {
+    usize_to_u64(size_of::<ExtractedFile>())
+        .checked_add(usize_to_u64(file.file_id.as_str().len()))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(file.path.as_str().len())))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(file.content_hash.as_str().len())))
+}
+
+fn snapshot_header_bytes(snapshot: &SourceSnapshot) -> Option<u64> {
+    usize_to_u64(size_of::<ExtractedFile>())
+        .checked_add(usize_to_u64(snapshot.file_id().as_str().len()))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(snapshot.path().as_str().len())))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(snapshot.content_hash().as_str().len())))
+}
+
+fn symbol_string_bytes(symbol: &ExtractedSymbol) -> u64 {
+    usize_to_u64(symbol.id.as_str().len())
+        .checked_add(usize_to_u64(symbol.name.capacity()))
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.qualified_name.capacity())))
+        .and_then(|bytes| {
+            bytes.checked_add(usize_to_u64(
+                symbol.signature.as_ref().map_or(0, String::capacity),
+            ))
+        })
+        .and_then(|bytes| {
+            bytes.checked_add(usize_to_u64(
+                symbol.docstring.as_ref().map_or(0, String::capacity),
+            ))
+        })
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.structural_digest.as_str().len())))
+        .unwrap_or(u64::MAX)
+}
+
+fn containment_string_bytes(edge: &Containment) -> u64 {
+    usize_to_u64(edge.parent.as_str().len()).saturating_add(usize_to_u64(edge.child.as_str().len()))
+}
+
+fn reference_string_bytes(reference: &ExtractedReference) -> u64 {
+    let owner = reference
+        .owner
+        .as_ref()
+        .map_or(0, |owner| owner.as_str().len());
+    usize_to_u64(owner).saturating_add(usize_to_u64(reference.name.capacity()))
+}
+
+fn vector_growth_bytes<T>() -> u64 {
+    usize_to_u64(size_of::<T>()).saturating_mul(VECTOR_GROWTH_ALLOWANCE)
+}
+
+fn vector_bytes<T>(capacity: usize) -> u64 {
+    usize_to_u64(size_of::<T>()).saturating_mul(usize_to_u64(capacity))
+}
+
+fn usize_to_u64(value: usize) -> u64 {
+    u64::try_from(value).unwrap_or(u64::MAX)
+}
