@@ -103,11 +103,19 @@ This is the durable continuation point for the v2 rewrite. Read
   quality/no-SQLite job and the 1m57s PostgreSQL 18 + pinned ParadeDB job,
   including doctor, capability, generation/BM25, COPY/digest, leases, all 22
   supervisor cases, and the managed Docker lifecycle.
+- Bounded deterministic stage runner: `8e06435`; [run 30028908774](https://github.com/adder-factory/cartograph/actions/runs/30028908774)
+  passed the Rust quality/no-SQLite job in 1m12s and the PostgreSQL 18 + pinned
+  ParadeDB job in 2m04s. This adds typed stage
+  envelopes, hard worker/queue/task/byte admission, ordered reduction, retained
+  output reservations, stage/item/cleanup deadlines, drop-safe poisoning, and
+  a 23rd live supervisor case that reaches PostgreSQL/ParadeDB publication only
+  after reverse-completing parallel work is reduced in exact input order.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the cancellation-safe supervisor
-foundation. Continue with real bounded stage queues and extraction work; do not
-reopen the PostgreSQL-only, no-SQLite, or Rust-first decisions.
+The branch and origin are checkpointed through the reusable bounded stage
+executor at `8e06435`, with both v2 GitHub jobs green. Continue with the frozen
+1/2/4/8/16-worker benchmark and real extraction stages; do not reopen the
+PostgreSQL-only, no-SQLite, or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -493,6 +501,78 @@ graph and lockfile, TypeScript strict/architecture/Biome gates, 7,139 v1 tests
 with zero failures, a 0/0/0 biomarker floor, Sonar quality-gate `PASSED`, and
 zero active test schemas or Cartograph v2 PostgreSQL statements afterward.
 
+## Bounded deterministic stage-executor slice
+
+Implemented in Rust at `8e06435`:
+
+- `SupervisorContext::stages()` creates a supervisor-bound `StageRunner`.
+  Callers provide contiguous `StageSequence` values, stable keys, payloads,
+  reserved/progress bytes, absolute item deadlines, explicit worker/queue
+  capacity, a stage deadline, and a separate cleanup grace.
+- The active-plus-queued window is exactly bounded. Tasks waiting for a Tokio
+  semaphore are the explicit queue and every admitted task remains registered
+  with the existing global `TaskScope`; there is no second hidden channel.
+- A completed out-of-order result retains its task and byte reservation until
+  ordered reduction and progress acknowledgement. Later fast files therefore
+  cannot route around an earlier blocked file or exceed global admission.
+- Work can complete in any order, but reduction and progress are contiguous
+  from sequence zero. Non-contiguous input fails closed. The iterator advances
+  only while a bounded slot exists and may retain at most one unadmitted
+  lookahead envelope under byte pressure.
+- Item time covers semaphore wait plus worker execution and is capped by the
+  whole-stage deadline. The driver checks that stage deadline before/after
+  bounded input and reducer callbacks, while waiting for results, and around
+  asynchronous progress. Slow item, slow final exhaustion, and slow reducer
+  regressions prove an expired stage cannot report success.
+- Iterator `next` and the per-item reducer are explicitly trusted bounded,
+  nonblocking callbacks. Blocking I/O and expensive CPU work belongs in the
+  abortable worker future or another supervised stage; unsafe/crashy parser
+  process isolation remains a later evidence-based decision.
+- Worker failure, item deadline, stage deadline, panic/unexpected exit, reducer
+  failure, progress failure, cancellation, local join failure, and incomplete
+  cleanup have credential/path-safe structured provenance. A distinct cleanup
+  grace remains usable after the stage deadline has already expired.
+- Dropping a started `execute` future aborts retained workers and poisons the
+  publication scope. Reservations are acknowledged only after reduction plus
+  progress, or deliberately cancelled after accepted parent cancellation.
+  Thus selecting away from a stage cannot silently permit publication, while
+  supervisor-driven cancellation is not mislabeled as a worker failure.
+
+The focused Rust suite now has 23 `cartograph-indexer` unit tests. New tests
+cover reverse completion, exact reduction, worker/queue caps, byte
+backpressure, retained out-of-order capacity, empty input, non-contiguous
+input, item/stage deadlines, slow exhaustion, cancellation before/while work,
+worker/reducer failure, panic, execute-future drop after delivery, cancellation
+aware drop, cooperative deadline reaping, and surfaced uncooperative cleanup
+timeout. The pinned live suite is 23/23 and the new case proves ordered stage
+work, progress counters, supervised COPY, generation publication, and exact
+lease release on PostgreSQL 18 + ParadeDB 0.23.5 + pgvector 0.8.1.
+
+Independent review required two correction rounds. It first found that the
+stage deadline did not cover producer/reducer time, a delivered result could be
+discarded by dropping `execute`, and cleanup reused an expired stage deadline.
+After those fixes, it found the slow final `next() -> None` path could still
+report success. Each finding received a direct regression; final review is
+`APPROVE` with no findings.
+
+Local proof after the final review includes Rust format/check/strict Clippy,
+all workspace unit and compile-fail doc tests, the SQLite-free Cargo graph and
+lockfile, 23/23 live supervisor tests, TypeScript strict/architecture/Biome and
+actionlint, a forced full Cartograph biomarker pass at 0/0/0 with zero
+cross-file errors, and Sonar `OK` at 91.5% new-code coverage, 86.0% overall
+coverage, zero bugs/vulnerabilities/new violations, and 100% reviewed security
+hotspots.
+
+The legacy Bun suite remains an explicitly recorded infrastructure caveat, not
+a hidden green check. One full `N=16` run during this slice passed
+7,139/0/41. Later identical runs repeatedly ended with Bun 1.3.14 native
+`Trace/BPT trap` exits in shard 15 (and occasionally an initially retried shard
+3); all 34 shard-15 files passed alone, every product assertion passed, and the
+harness correctly stayed failed after its three whole-shard retries. No v2
+Rust file is imported by that v1 suite. Do not weaken the harness or relabel
+the failed process run; v2 removes this failure class when Bun/TypeScript is no
+longer the shipped runtime or release gate.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -557,9 +637,11 @@ golden contract. Do not call TypeScript from production Rust.
 
 The one-shot lease-owned supervisor, cancellation/reaping model, hard worker
 task/byte admission, progress/status contract, retained COPY task, and exact
-terminal cleanup are implemented at `bcafdc6`. Next, connect real staged work
-through bounded queues and commit benchmarks for 1/2/4/8/16 workers. The
-logical digest and retrieval baseline must be identical for every worker count.
+terminal cleanup are implemented at `bcafdc6`. The reusable typed bounded
+stage executor is implemented at `8e06435`. Next, freeze the benchmark fixture,
+measure 1/2/4/8/16 workers, then connect TypeScript/JavaScript discovery,
+read/hash, parse/extract, resolve, and reduce through that executor. The logical
+digest and retrieval baseline must be identical for every worker count.
 
 Required fault injection:
 
@@ -628,24 +710,20 @@ Only then:
 
 ## Immediate next actions
 
-1. Add real bounded stage queues for discover -> read/hash -> parse/extract ->
-   resolve -> reduce. Use the existing `TaskScope` task/byte admission and
-   cancellation signal; do not create another unbounded channel or bypass the
-   supervisor with direct database writes.
-2. Define a typed stage envelope with stable sequence/path identity, byte
-   reservation, deadline, and failure provenance. Feed one deterministic
-   reducer, then call the existing supervised `prepare_generation`; workers
-   never publish or clean up directly.
-3. Build a frozen fixture benchmark matrix at 1/2/4/8/16 workers. Require the
+1. Build a frozen fixture benchmark matrix at 1/2/4/8/16 workers. Require the
    same BLAKE3 logical digest, row counts, BM25 fixture results, and zero leaked
    tasks/leases for every worker count. Record throughput, peak reserved bytes,
    stage P50/P95, and PostgreSQL COPY time before choosing defaults.
-4. Port TypeScript/JavaScript discovery and extraction into those stages using
+2. Port TypeScript/JavaScript discovery and extraction into the implemented
+   discover -> read/hash -> parse/extract -> resolve -> reduce stages using
    v1.1.33 fixture output as an oracle, then replace that oracle with Rust-owned
    golden contracts. Keep extraction out of `cartograph-db`.
-5. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+3. Add stage-level fault injection for each real extraction stage, then feed
+   one canonical `GenerationFacts` value into the existing supervised
+   `prepare_generation`; workers never publish, clean up, or hold a lease fence.
+4. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
-6. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
+5. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
    there; never weaken credential privacy to make the platform pass.
 
 ## Risks and decisions still requiring evidence
