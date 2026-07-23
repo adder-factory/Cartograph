@@ -3,6 +3,7 @@
 mod capabilities;
 mod database;
 mod generation;
+mod leases;
 mod managed;
 mod migrations;
 mod search;
@@ -17,6 +18,7 @@ pub use generation::{
     NewProject, PrepareGenerationError, PublishGenerationError, ReadyGeneration,
     RecoverableGeneration, SearchDocumentInput, StagedGeneration,
 };
+pub use leases::{LeaseError, LeaseOwner, LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease};
 pub use managed::{
     DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedContainerState, ManagedDatabase,
     ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,

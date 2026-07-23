@@ -9,6 +9,8 @@ use thiserror::Error;
 use crate::{CartographDatabase, CheckStatus, probe_capabilities};
 
 const INITIAL_SCHEMA_VERSION: i64 = 1;
+const OPERATION_LEASES_SCHEMA_VERSION: i64 = 2;
+const LATEST_SCHEMA_VERSION: i64 = OPERATION_LEASES_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 struct Migration {
@@ -199,6 +201,35 @@ const INITIAL_SCHEMA: Migration = Migration {
     ],
 };
 
+const OPERATION_LEASES_SCHEMA: Migration = Migration {
+    version: OPERATION_LEASES_SCHEMA_VERSION,
+    name: "observable_project_operation_leases",
+    statements: &[
+        r#"CREATE TABLE {schema}."project_operation_leases" (
+            project_id uuid NOT NULL REFERENCES {schema}."projects"(project_id) ON DELETE CASCADE,
+            operation text NOT NULL
+                CHECK (operation IN ('index', 'sync', 'hook', 'migration', 'rebuild')),
+            lease_id uuid NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+            owner_pid bigint NOT NULL CHECK (owner_pid BETWEEN 1 AND 4294967295),
+            owner_process_start text NOT NULL
+                CHECK (length(owner_process_start) BETWEEN 1 AND 256),
+            generation_id uuid,
+            acquired_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            heartbeat_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+            expires_at timestamptz NOT NULL,
+            PRIMARY KEY (project_id, operation),
+            FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE,
+            CHECK (acquired_at <= heartbeat_at AND heartbeat_at < expires_at)
+        )"#,
+        r#"CREATE INDEX project_operation_leases_expiry_idx
+            ON {schema}."project_operation_leases" (expires_at, project_id, operation)"#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 2] = [&INITIAL_SCHEMA, &OPERATION_LEASES_SCHEMA];
+
 /// Result of applying the append-only schema migration ledger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MigrationReport {
@@ -228,6 +259,16 @@ pub enum MigrationError {
     LedgerConflict {
         /// Conflicting migration version.
         version: i64,
+    },
+    /// The append-only ledger contains a later version but omits a predecessor.
+    #[error(
+        "migration ledger records version {recorded_version} but is missing version {missing_version}"
+    )]
+    LedgerGap {
+        /// Required predecessor that is absent.
+        missing_version: i64,
+        /// Highest version already present.
+        recorded_version: i64,
     },
     /// The database was created by a newer Cartograph binary.
     #[error("database schema version {version} is newer than this Cartograph binary")]
@@ -324,37 +365,46 @@ async fn migrate_transaction(
     if let Some(version) = ledger
         .keys()
         .copied()
-        .find(|version| *version > INITIAL_SCHEMA_VERSION)
+        .find(|version| *version > LATEST_SCHEMA_VERSION)
     {
         return Err(MigrationError::SchemaVersionAhead { version });
     }
 
-    let checksum = migration_checksum(&INITIAL_SCHEMA);
+    let recorded_version = ledger.keys().next_back().copied().unwrap_or_default();
     let mut applied_versions = Vec::new();
-    match ledger.get(&INITIAL_SCHEMA.version) {
-        Some(record) if record.name != INITIAL_SCHEMA.name || record.checksum != checksum => {
-            return Err(MigrationError::LedgerConflict {
-                version: INITIAL_SCHEMA.version,
-            });
-        }
-        Some(_) => {}
-        None => {
-            apply_migration(
-                connection,
-                ApplyMigrationInput {
-                    quoted_schema: &quoted_schema,
-                    migration: &INITIAL_SCHEMA,
-                    checksum: &checksum,
-                },
-            )
-            .await?;
-            applied_versions.push(INITIAL_SCHEMA.version);
+    for migration in MIGRATIONS {
+        let checksum = migration_checksum(migration);
+        match ledger.get(&migration.version) {
+            Some(record) if record.name != migration.name || record.checksum != checksum => {
+                return Err(MigrationError::LedgerConflict {
+                    version: migration.version,
+                });
+            }
+            Some(_) => {}
+            None if migration.version <= recorded_version => {
+                return Err(MigrationError::LedgerGap {
+                    missing_version: migration.version,
+                    recorded_version,
+                });
+            }
+            None => {
+                apply_migration(
+                    connection,
+                    ApplyMigrationInput {
+                        quoted_schema: &quoted_schema,
+                        migration,
+                        checksum: &checksum,
+                    },
+                )
+                .await?;
+                applied_versions.push(migration.version);
+            }
         }
     }
 
     Ok(MigrationReport {
         applied_versions,
-        current_version: INITIAL_SCHEMA_VERSION,
+        current_version: LATEST_SCHEMA_VERSION,
     })
 }
 
@@ -452,6 +502,17 @@ fn migration_checksum(migration: &Migration) -> String {
 mod tests {
     use super::*;
 
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 2] = [
+        (
+            1,
+            "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
+        ),
+        (
+            2,
+            "083e31b8263939c8c1c63a9d5898a51a1ff09f28a849d9b77cb09963e89ea7ef",
+        ),
+    ];
+
     #[test]
     fn migration_checksum_changes_with_schema_contract_content() {
         let changed = Migration {
@@ -465,5 +526,37 @@ mod tests {
             migration_checksum(&changed)
         );
         assert_eq!(migration_checksum(&INITIAL_SCHEMA).len(), 64);
+    }
+
+    #[test]
+    fn append_only_migration_catalog_is_contiguous_and_checksum_distinct() {
+        let versions = MIGRATIONS
+            .iter()
+            .map(|migration| migration.version)
+            .collect::<Vec<_>>();
+        let checksums = MIGRATIONS
+            .iter()
+            .map(|migration| migration_checksum(migration))
+            .collect::<Vec<_>>();
+
+        assert_eq!(versions, vec![1, 2]);
+        assert_eq!(checksums.len(), 2);
+        assert!(checksums.iter().all(|checksum| checksum.len() == 64));
+        assert_ne!(checksums[0], checksums[1]);
+        assert_eq!(LATEST_SCHEMA_VERSION, 2);
+    }
+
+    #[test]
+    fn committed_migrations_match_frozen_checksums() {
+        let actual = MIGRATIONS
+            .iter()
+            .map(|migration| (migration.version, migration_checksum(migration)))
+            .collect::<Vec<_>>();
+        let expected = EXPECTED_MIGRATION_CHECKSUMS
+            .iter()
+            .map(|(version, checksum)| (*version, (*checksum).to_owned()))
+            .collect::<Vec<_>>();
+
+        assert_eq!(actual, expected);
     }
 }

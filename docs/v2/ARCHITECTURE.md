@@ -104,6 +104,7 @@ Core relations:
 | `edges` | project, source symbol, target symbol, typed edge, confidence, provenance, generation |
 | `references` | project, source span, resolved target, reference kind, confidence |
 | `search_documents` | unique bigint key, project/file/symbol, code fields, prose fields, indexed metadata |
+| `project_operation_leases` | project/operation key, owner PID/process-start marker, generation, token, heartbeat, expiry |
 | `embedding_models` | provider/model fingerprint, dimension, normalization, active/retired state |
 | `document_embeddings` | document/model key, unconstrained vector value, source digest, generation |
 | `task_traces` | redacted intent, candidate/rank provenance, selected evidence, outcome link |
@@ -133,6 +134,18 @@ publication transaction. Database constraints remain the second line of
 defense against forged or stale process state. Failed operations return the
 consumed token, and checked recovery can rehydrate durable `staging`/`ready`
 state after process loss or mark it terminally failed.
+
+Migration 2 adds one observable lease row per project and mutating operation.
+Each acquisition records a non-nil token, owner PID, boot/session-qualified
+process-start marker, optional generation, and PostgreSQL-clock timestamps.
+Acquisition uses a non-blocking transaction-scoped advisory lock plus a
+conditional upsert: an unexpired row returns `Busy`, while an expired row is
+atomically replaced with a new token. Heartbeat and release require the exact
+unexpired token, so an old process cannot regain authority after takeover.
+Durations are bounded to 1 second through 5 minutes and status exposes expired
+rows for diagnosis without granting a mutation token. The append-only runner
+applies migration 2 to an existing version-1 schema, rejects ledger gaps, and
+still verifies every previously recorded name and checksum.
 
 ### BM25 document index
 
@@ -256,6 +269,16 @@ independent destructive maintenance. Advisory locks are scoped by project and
 operation, carry observable owner metadata, and have supervisor-enforced
 deadlines.
 
+The database lease substrate is implemented for `index`, `sync`, `hook`,
+`migration`, and derived-index `rebuild` operations. Its database-wide advisory
+key includes the configured schema, project, and operation. It uses
+PostgreSQL's clock for expiry and heartbeat rather than process wall time,
+returns immediately on contention, and permits deterministic stale-owner
+takeover.
+Pipeline ownership and heartbeat scheduling remain responsibilities of the M4
+supervisor; the persistence layer deliberately does not infer process liveness
+from PID reuse alone.
+
 ## Process supervision requirement
 
 V1.1.33 exposed a concrete failure mode during release work: a hook worker
@@ -327,11 +350,11 @@ external connections. Its report identifies that schema and distinguishes
 newly applied migration versions from an idempotent reuse; a migration failure
 is part of startup failure rather than a partially reported success.
 
-This is not the complete lifecycle yet. Removal, backup/restore, extension/image
-upgrade, lease/owner metadata, and Podman support remain M1 work. Credential
-creation currently fails closed on non-Unix hosts until a tested Windows ACL
-implementation can prove equivalent privacy; v2 must not silently write a
-less-protected secret file.
+This is not the complete lifecycle yet. Removal, backup/restore,
+extension/image upgrade, supervisor integration for lease renewal, and Podman
+support remain work. Credential creation currently fails closed on non-Unix
+hosts until a tested Windows ACL implementation can prove equivalent privacy;
+v2 must not silently write a less-protected secret file.
 
 ## ParadeDB durability and licensing boundary
 

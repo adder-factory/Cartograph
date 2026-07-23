@@ -146,6 +146,11 @@ jobs:
           cargo test --locked --quiet -p cartograph-db
           --test live_generation -- --ignored --nocapture
 
+      - name: Project operation lease integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_leases -- --ignored --nocapture
+
       - name: Managed database lifecycle integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib

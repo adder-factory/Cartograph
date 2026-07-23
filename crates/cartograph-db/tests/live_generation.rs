@@ -28,6 +28,8 @@ const DOCUMENT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const DOCUMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const DOCUMENT_FOUR: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const INITIAL_MIGRATION_VERSION: i64 = 1;
+const LATEST_MIGRATION_VERSION: i64 = 2;
+const EXPECTED_MIGRATIONS: [i64; 2] = [INITIAL_MIGRATION_VERSION, LATEST_MIGRATION_VERSION];
 const INITIAL_WORKERS: u16 = 4;
 const REPLACEMENT_WORKERS: u16 = 8;
 const RECOVERY_WORKERS: u16 = 2;
@@ -166,13 +168,13 @@ async fn assert_migration_ledger(database: &CartographDatabase) {
         Ok(report) => report,
         Err(error) => panic!("initial migration failed: {error}"),
     };
-    assert_eq!(first.applied_versions, vec![INITIAL_MIGRATION_VERSION]);
-    assert_eq!(first.current_version, INITIAL_MIGRATION_VERSION);
+    assert_eq!(first.applied_versions, EXPECTED_MIGRATIONS);
+    assert_eq!(first.current_version, LATEST_MIGRATION_VERSION);
     assert!(matches!(
         database.migrate().await,
         Ok(report)
             if report.applied_versions.is_empty()
-                && report.current_version == INITIAL_MIGRATION_VERSION
+                && report.current_version == LATEST_MIGRATION_VERSION
     ));
 }
 

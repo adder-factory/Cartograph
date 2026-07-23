@@ -76,6 +76,7 @@ define_id!(GenerationId, "An immutable index-generation identity.");
 define_id!(DocumentId, "A stable logical search-document identity.");
 define_id!(ModelId, "A registered embedding-model identity.");
 define_id!(TaskId, "A persisted coding-task identity.");
+define_id!(LeaseId, "An observable project-operation lease identity.");
 
 /// A deterministic BLAKE3 digest used to compare complete logical generations.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -131,6 +132,60 @@ impl fmt::Display for InvalidDigest {
 }
 
 impl std::error::Error for InvalidDigest {}
+
+/// Mutating project operation serialized by an observable database lease.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectOperation {
+    /// Full or incremental code indexing.
+    Index,
+    /// Explicit synchronization of changed project state.
+    Sync,
+    /// Hook-triggered indexing or synchronization.
+    Hook,
+    /// Schema or storage migration.
+    Migration,
+    /// Derived BM25/vector index rebuild.
+    Rebuild,
+}
+
+impl ProjectOperation {
+    /// Parse the stable PostgreSQL representation.
+    pub fn parse(raw: &str) -> Result<Self, InvalidProjectOperation> {
+        match raw {
+            "index" => Ok(Self::Index),
+            "sync" => Ok(Self::Sync),
+            "hook" => Ok(Self::Hook),
+            "migration" => Ok(Self::Migration),
+            "rebuild" => Ok(Self::Rebuild),
+            _ => Err(InvalidProjectOperation),
+        }
+    }
+
+    /// Stable PostgreSQL representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Index => "index",
+            Self::Sync => "sync",
+            Self::Hook => "hook",
+            Self::Migration => "migration",
+            Self::Rebuild => "rebuild",
+        }
+    }
+}
+
+/// An unknown durable project-operation value was encountered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InvalidProjectOperation;
+
+impl fmt::Display for InvalidProjectOperation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("project operation is not recognized")
+    }
+}
+
+impl std::error::Error for InvalidProjectOperation {}
 
 /// Durable lifecycle state for one immutable index generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -248,7 +303,8 @@ fn normalize_uuid(raw: &str) -> Result<String, InvalidId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, GenerationId, GenerationState, ProjectId,
+        BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, GenerationId, GenerationState, LeaseId,
+        ProjectId, ProjectOperation,
     };
 
     const UPPERCASE_UUID: &str = "4EACCC79-2ED5-4E22-8D77-A8E66D13C345";
@@ -286,5 +342,13 @@ mod tests {
         assert!(matches!(digest, Ok(value) if value.as_str() == "a".repeat(BLAKE3_HEX_LENGTH)));
         assert!(ContentDigest::parse("abc").is_err());
         assert!(ContentDigest::parse(&"z".repeat(BLAKE3_HEX_LENGTH)).is_err());
+    }
+
+    #[test]
+    fn operation_and_lease_contracts_have_stable_storage_values() {
+        assert_eq!(ProjectOperation::Index.as_str(), "index");
+        assert_eq!(ProjectOperation::Hook.as_str(), "hook");
+        assert_eq!(ProjectOperation::Rebuild.as_str(), "rebuild");
+        assert!(LeaseId::parse(CANONICAL_UUID).is_ok());
     }
 }

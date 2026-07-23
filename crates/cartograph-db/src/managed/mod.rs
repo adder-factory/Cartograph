@@ -1130,7 +1130,7 @@ mod tests {
         assert!(first.credentials_created);
         assert!(first.container_created);
         assert!(first.capabilities.ready);
-        assert_eq!(first.migrations.applied_versions, vec![1]);
+        assert_eq!(first.migrations.applied_versions, vec![1, 2]);
         assert_eq!(first.schema, TEST_DATABASE_SCHEMA);
 
         let status = match database.status().await {
