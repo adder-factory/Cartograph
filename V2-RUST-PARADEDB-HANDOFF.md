@@ -117,12 +117,17 @@ This is the durable continuation point for the v2 rewrite. Read
   1/2/4/8/16-worker benchmark in 1m25s, and managed Docker lifecycle on
   GitHub's amd64 runner.
 - Frozen benchmark handoff checkpoint: `09bf269`.
+- Bounded native TypeScript/JavaScript extraction: `00fbfe9`;
+  [run 30048359888](https://github.com/adder-factory/cartograph/actions/runs/30048359888)
+  passed the Rust format/Clippy/unit/no-SQLite job in 1m28s and the full
+  PostgreSQL 18 + pinned ParadeDB + pgvector job in 3m41s. The live job passed
+  doctor, capability, generation/BM25, COPY/digest, lease, all 23 supervisor
+  cases, the frozen 1/2/4/8/16-worker benchmark, and managed lifecycle.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin were checkpointed through the benchmark handoff at
-`09bf269`, with both v2 GitHub jobs green, before the native extraction slice
-described below began. Do not reopen the PostgreSQL-only, no-SQLite, or
-Rust-first decisions.
+The branch and origin are checkpointed through the native extraction
+implementation at `00fbfe9`, with both v2 GitHub jobs green. Do not reopen the
+PostgreSQL-only, no-SQLite, or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -705,6 +710,44 @@ lazy iterator of prebuilt snapshots; callers must not retain an entire corpus
 behind that iterator. The 32x parse reservation is conservative accounting,
 not an OS-level Tree-sitter RSS cap; owned output transfer and a real-corpus
 memory gate are required before M3/M4 completion.
+
+### Native extraction verification and exact continuation state
+
+Independent review of the exact staged diff against `09bf269` returned
+`APPROVE` with no findings. The final local proof on `00fbfe9` includes:
+
+- Rust format, strict workspace Clippy, all offline workspace unit/integration
+  tests plus three compile-fail doc tests, and no SQLite crate in the
+  production tree or lockfile;
+- PostgreSQL 18.4, `pg_search` 0.23.5, pgvector 0.8.1, source-code tokenizer,
+  generation/BM25, COPY/digest, lease, all 23 live supervisor tests, and both
+  managed lifecycle tests;
+- the assertion-bearing 30-sample frozen 1/2/4/8/16-worker benchmark with the
+  committed digest/row/BM25/task/lease/cleanup invariants;
+- TypeScript typecheck, architecture/Biome, actionlint, the independent
+  v1.1.33 oracle test, a forced full Cartograph biomarker rebuild at
+  0 error / 0 warning / 0 info with zero cross-file errors, and Sonar quality
+  gate `OK`;
+- the full TypeScript harness reached 7,140 passing assertions and 41 skips.
+  Bun 1.3.14 repeatedly terminated shard 7 with `Trace/BPT trap` after all
+  three same-shard retries; the fail-closed harness then ran every one of that
+  shard's 69 files alone and all passed. Treat this as the known Bun runtime
+  instability, not a green aggregate harness exit and not a test assertion
+  failure.
+
+On this machine, `.cartograph/v2/postgres.env` remains private but its password
+did not match the already-running ParadeDB container. Local live gates used the
+container's current credential in-process without printing it and did not edit
+the secret file. A continuation that restarts/recreates the service should
+reconcile the private env through the managed lifecycle rather than copying a
+credential into source or logs.
+
+The next code slice should make the current validation-only observer obsolete:
+discover files under ignore policy, create snapshots inside supervised read/hash
+admission, and transfer each owned `ExtractedFile` with bounded backpressure and
+reservation lifetime into resolution/reduction/PostgreSQL COPY. Do not turn the
+observer into a corpus accumulator or claim the 32x accounting reservation is
+an allocator-enforced RSS limit.
 
 ## Execution plan
 
