@@ -1,0 +1,24 @@
+[package]
+name = "cartograph-cli"
+description = "Rust CLI and future MCP entry point for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cartograph-v2"
+path = "src/main.rs"
+
+[dependencies]
+cartograph-config = { path = "../cartograph-config" }
+cartograph-db = { path = "../cartograph-db" }
+clap.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
+

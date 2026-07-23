@@ -1,0 +1,23 @@
+[package]
+name = "cartograph-db"
+description = "PostgreSQL 18, ParadeDB, and pgvector runtime for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cartograph-config = { path = "../cartograph-config" }
+secrecy.workspace = true
+serde.workspace = true
+sqlx-core.workspace = true
+sqlx-postgres.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
+
+[lints]
+workspace = true
