@@ -9,7 +9,5 @@ export const AffectedTestCandidateSchema = z.object({
   reason: z.enum(['changed-test', 'direct-dependent', 'transitive-dependent']),
 });
 
-export const AffectedTestCandidatesSchema = z.array(AffectedTestCandidateSchema);
-
 export type AffectedTestTier = z.infer<typeof AffectedTestTierSchema>;
 export type AffectedTestCandidate = z.infer<typeof AffectedTestCandidateSchema>;

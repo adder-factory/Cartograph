@@ -14,7 +14,6 @@ export {
   EmbeddingStorageBucketSchema,
   EmbeddingMixedDimensionsSchema,
   EmbeddingArtifactSchema,
-  EmbeddingAuditTotalsSchema,
   EmbeddingAuditReportSchema,
   EmbeddingArtifactRemovalSchema,
   EmbeddingCleanupResultSchema,

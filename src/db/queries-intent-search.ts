@@ -27,6 +27,17 @@ const IntentSymbolHitRowSchema = RawIntentSymbolHitRowSchema.extend({
 
 export type IntentSymbolHitRow = z.infer<typeof IntentSymbolHitRowSchema>;
 
+const IntentAnchorHitRowSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  kind: z.string(),
+  file_path: z.string(),
+  docstring: z.string().nullable(),
+  anchor_score: z.number().int().positive(),
+});
+
+export type IntentAnchorHitRow = z.infer<typeof IntentAnchorHitRowSchema>;
+
 export const IntentTestNameHitRowSchema = z.object({
   file_path: z.string(),
   line: z.number(),
@@ -57,6 +68,12 @@ interface IntentTestNameSearchArgs {
   pathPrefix?: string;
   limit: number;
   rowCount: number;
+}
+
+interface IntentAnchorSearchArgs {
+  db: SqliteDatabase;
+  terms: readonly string[];
+  limit: number;
 }
 
 interface SqlWithParams {
@@ -96,6 +113,36 @@ export function searchIntentSymbolRows(args: IntentSymbolSearchArgs): IntentSymb
     .array(RawIntentSymbolHitRowSchema)
     .parse(rows)
     .filter((row): row is IntentSymbolHitRow => typeof row.text === 'string' && row.text.length > 0);
+}
+
+/**
+ * Find deterministic task anchors in symbol names and paths in one bounded
+ * query. Keeping this separate from FTS matters for compound identifiers:
+ * `buildVerificationPlan` is one FTS token, while an agent task normally says
+ * "verification plan". The score counts distinct task concepts whose literal
+ * or stemmed form occurs in either stable anchor.
+ */
+export function searchIntentAnchorRows(args: IntentAnchorSearchArgs): IntentAnchorHitRow[] {
+  const terms = [...new Set(args.terms.map((term) => term.toLowerCase()).filter(Boolean))];
+  if (terms.length === 0 || args.limit <= 0) return [];
+  const nameMatch = String.raw`LOWER(n.name) LIKE ? ESCAPE '\'`;
+  const pathMatch = String.raw`LOWER(n.file_path) LIKE ? ESCAPE '\'`;
+  const scoreExpression = terms
+    .map(() => `(CASE WHEN ${nameMatch} THEN 3 ELSE 0 END + CASE WHEN ${pathMatch} THEN 1 ELSE 0 END)`)
+    .join(' + ');
+  const sql = `
+    WITH anchor_matches AS (
+      SELECT n.id, n.name, n.kind, n.file_path, n.docstring, (${scoreExpression}) AS anchor_score
+        FROM nodes n
+    )
+    SELECT id, name, kind, file_path, docstring, anchor_score
+      FROM anchor_matches
+     WHERE anchor_score > 0
+     ORDER BY anchor_score DESC, LENGTH(name) ASC, file_path ASC, id ASC
+     LIMIT ?
+  `;
+  const patterns = terms.flatMap((term) => [`%${term}%`, `%${term}%`]);
+  return z.array(IntentAnchorHitRowSchema).parse(args.db.prepare(sql).all(...patterns, args.limit));
 }
 
 export function searchIntentTestNameRows(args: IntentTestNameSearchArgs): IntentTestNameHitRow[] {

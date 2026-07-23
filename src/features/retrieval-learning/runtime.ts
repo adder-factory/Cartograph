@@ -24,6 +24,12 @@ interface CandidateSignal {
   tools: Set<string>;
 }
 
+interface LearningAccumulator {
+  signals: Map<string, CandidateSignal>;
+  contextMatches: number;
+  outcomeSignals: number;
+}
+
 const ContextArgsSchema = z.looseObject({
   task: z.string().optional(),
   query: z.string().optional(),
@@ -79,6 +85,16 @@ export function collectProjectLearningSeeds(
   const mode = options.mode ?? 'auto';
   if (mode === 'off') return emptyLearning(mode, 'off');
 
+  const sessions = loadProjectSessions(cg);
+  const learning = collectLearningSignals(cg, sessions, meaningfulTaskTokens(options.task));
+  const ranked = rankLearningSignals(learning.signals);
+  if (ranked.length === 0) {
+    return emptyScannedLearningResult(mode, sessions.size, learning);
+  }
+  return readyLearningResult({ mode, sessionsScanned: sessions.size, learning, ranked });
+}
+
+function loadProjectSessions(cg: Cartograph): Map<string, ToolCallRow[]> {
   // `recentSessions` deliberately returns legacy NULL-project rows for the
   // viewer, but learning must be strictly project-local. Keep only sessions
   // stamped with this exact root before consuming their calls.
@@ -90,48 +106,83 @@ export function collectProjectLearningSeeds(
   const calls = latestToolCalls(cg.queries, { limit: TRACE_CALL_LIMIT, projectRoot: cg.projectRoot }).filter((call) =>
     allowedSessionIds.has(call.sessionId),
   );
-  const sessions = groupCallsBySession(calls);
-  const taskTokens = meaningfulTaskTokens(options.task);
-  const signals = new Map<string, CandidateSignal>();
-  let contextMatches = 0;
-  let outcomeSignals = 0;
+  return groupCallsBySession(calls);
+}
 
+function collectLearningSignals(
+  cg: Cartograph,
+  sessions: ReadonlyMap<string, readonly ToolCallRow[]>,
+  taskTokens: ReadonlySet<string>,
+): LearningAccumulator {
+  const accumulator: LearningAccumulator = { signals: new Map(), contextMatches: 0, outcomeSignals: 0 };
   for (const [sessionId, sessionCalls] of sessions) {
     for (let index = 0; index < sessionCalls.length; index++) {
-      const contextCall = sessionCalls[index]!;
-      if (contextCall.toolName !== 'cartograph_context' || !callSucceeded(contextCall)) continue;
-      const priorTask = contextTask(contextCall);
-      if (!priorTask) continue;
-      const similarity = taskSimilarity(taskTokens, meaningfulTaskTokens(priorTask));
-      if (similarity === 0) continue;
-      contextMatches++;
-
-      const window = collectFollowUpWindow(sessionCalls, index + 1);
-      const verifiedClosure = window.some((call) => call.toolName === 'cartograph_verify' && callSucceeded(call));
-      const contextKey = `${sessionId}:${contextCall.step}`;
-      for (const call of window) {
-        if (!callSucceeded(call)) continue;
-        const weight = TOOL_WEIGHTS[call.toolName];
-        if (weight === undefined) continue;
-        const nodes = resolveFollowUpNodes(cg, call);
-        for (const node of nodes) {
-          outcomeSignals++;
-          const signal = signals.get(node.id) ?? {
-            node,
-            score: 0,
-            contexts: new Set<string>(),
-            tools: new Set<string>(),
-          };
-          signal.score += weight * similarity + (verifiedClosure ? VERIFIED_CLOSURE_BONUS : 0);
-          signal.contexts.add(contextKey);
-          signal.tools.add(call.toolName);
-          signals.set(node.id, signal);
-        }
-      }
+      collectContextCallSignals({ cg, sessionId, sessionCalls, index, taskTokens, accumulator });
     }
   }
+  return accumulator;
+}
 
-  const ranked = [...signals.values()]
+interface CollectContextCallSignalsArgs {
+  cg: Cartograph;
+  sessionId: string;
+  sessionCalls: readonly ToolCallRow[];
+  index: number;
+  taskTokens: ReadonlySet<string>;
+  accumulator: LearningAccumulator;
+}
+
+function collectContextCallSignals(args: CollectContextCallSignalsArgs): void {
+  const contextCall = args.sessionCalls[args.index]!;
+  if (contextCall.toolName !== 'cartograph_context' || !callSucceeded(contextCall)) return;
+  const priorTask = contextTask(contextCall);
+  if (!priorTask) return;
+  const similarity = taskSimilarity(args.taskTokens, meaningfulTaskTokens(priorTask));
+  if (similarity === 0) return;
+  args.accumulator.contextMatches++;
+  const window = collectFollowUpWindow(args.sessionCalls, args.index + 1);
+  const verifiedClosure = window.some((call) => call.toolName === 'cartograph_verify' && callSucceeded(call));
+  collectFollowUpSignals({
+    cg: args.cg,
+    window,
+    similarity,
+    verifiedClosure,
+    contextKey: `${args.sessionId}:${contextCall.step}`,
+    accumulator: args.accumulator,
+  });
+}
+
+interface CollectFollowUpSignalsArgs {
+  cg: Cartograph;
+  window: readonly ToolCallRow[];
+  similarity: number;
+  verifiedClosure: boolean;
+  contextKey: string;
+  accumulator: LearningAccumulator;
+}
+
+function collectFollowUpSignals(args: CollectFollowUpSignalsArgs): void {
+  for (const call of args.window) {
+    if (!callSucceeded(call)) continue;
+    const weight = TOOL_WEIGHTS[call.toolName];
+    if (weight === undefined) continue;
+    for (const node of resolveFollowUpNodes(args.cg, call)) {
+      args.accumulator.outcomeSignals++;
+      const signal = args.accumulator.signals.get(node.id) ?? newCandidateSignal(node);
+      signal.score += weight * args.similarity + (args.verifiedClosure ? VERIFIED_CLOSURE_BONUS : 0);
+      signal.contexts.add(args.contextKey);
+      signal.tools.add(call.toolName);
+      args.accumulator.signals.set(node.id, signal);
+    }
+  }
+}
+
+function newCandidateSignal(node: Node): CandidateSignal {
+  return { node, score: 0, contexts: new Set(), tools: new Set() };
+}
+
+function rankLearningSignals(signals: ReadonlyMap<string, CandidateSignal>): CandidateSignal[] {
+  return [...signals.values()]
     .sort(
       (a, b) =>
         b.score - a.score ||
@@ -140,19 +191,35 @@ export function collectProjectLearningSeeds(
         a.node.startLine - b.node.startLine,
     )
     .slice(0, CANDIDATE_LIMIT);
-  if (ranked.length === 0) {
-    return {
-      ...emptyLearning(mode, 'empty'),
-      report: ProjectLearningReportSchema.parse({
-        mode,
-        status: 'empty',
-        sessionsScanned: sessions.size,
-        contextMatches,
-        outcomeSignals,
-        candidates: [],
-      }),
-    };
-  }
+}
+
+function emptyScannedLearningResult(
+  mode: ProjectLearningMode,
+  sessionsScanned: number,
+  learning: LearningAccumulator,
+): ProjectLearningResult {
+  return {
+    ...emptyLearning(mode, 'empty'),
+    report: ProjectLearningReportSchema.parse({
+      mode,
+      status: 'empty',
+      sessionsScanned,
+      contextMatches: learning.contextMatches,
+      outcomeSignals: learning.outcomeSignals,
+      candidates: [],
+    }),
+  };
+}
+
+interface ReadyLearningResultArgs {
+  mode: ProjectLearningMode;
+  sessionsScanned: number;
+  learning: LearningAccumulator;
+  ranked: readonly CandidateSignal[];
+}
+
+function readyLearningResult(args: ReadyLearningResultArgs): ProjectLearningResult {
+  const { mode, sessionsScanned, learning, ranked } = args;
 
   const evidenceByNodeId = new Map<string, readonly string[]>();
   const candidates = ranked.map((signal) => {
@@ -175,9 +242,9 @@ export function collectProjectLearningSeeds(
   const report = ProjectLearningReportSchema.parse({
     mode,
     status: 'ready',
-    sessionsScanned: sessions.size,
-    contextMatches,
-    outcomeSignals,
+    sessionsScanned,
+    contextMatches: learning.contextMatches,
+    outcomeSignals: learning.outcomeSignals,
     candidates,
   });
   return {
@@ -218,16 +285,29 @@ function collectFollowUpWindow(calls: readonly ToolCallRow[], start: number): To
 function resolveFollowUpNodes(cg: Cartograph, call: ToolCallRow): Node[] {
   const args = parseTraceArgs(call.argsJson, FollowUpArgsSchema);
   if (!args) return [];
+  const refs = collectFollowUpRefs(args);
+  const paths = collectFollowUpPaths(args);
+  return resolveLearningNodes(cg, refs, paths);
+}
+
+function collectFollowUpRefs(args: z.infer<typeof FollowUpArgsSchema>): Set<string> {
   const refs = new Set<string>();
   if (args.symbol) refs.add(args.symbol);
   for (const symbol of args.symbols ?? []) refs.add(symbol);
   if (args.start) refs.add(args.start);
+  return refs;
+}
+
+function collectFollowUpPaths(args: z.infer<typeof FollowUpArgsSchema>): Set<string> {
   const paths = new Set<string>();
   if (args.file) paths.add(args.file);
   if (args.path) paths.add(args.path);
   for (const file of args.files ?? []) paths.add(file);
   for (const range of args.ranges ?? []) if (range.file) paths.add(range.file);
+  return paths;
+}
 
+function resolveLearningNodes(cg: Cartograph, refs: ReadonlySet<string>, paths: ReadonlySet<string>): Node[] {
   const nodes = new Map<string, Node>();
   for (const ref of refs) {
     const resolved = resolveNodeRef(cg, ref);

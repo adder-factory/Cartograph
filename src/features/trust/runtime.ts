@@ -1,3 +1,4 @@
+import { z } from 'zod';
 import type Cartograph from '../../index.js';
 import { areBiomarkersPending } from '../../biomarkers/pending.js';
 import { getCoverageStats, listCoverageSources } from '../../db/queries-coverage.js';
@@ -12,14 +13,40 @@ import { findGraphCandidates } from '../../llm/dead-code.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
 import { llmFindImplementations } from '../../cartograph-llm-service.js';
 import type { Node } from '../../types.js';
-import {
-  SemanticGoldenProbeSchema,
-  TrustReportSchema,
-  type SemanticGoldenProbe,
-  type TrustCheck,
-  type TrustCheckState,
-  type TrustReport,
-} from './contract.js';
+import { TrustCheckSchema, TrustCheckStateSchema, type TrustCheck } from './contract.js';
+
+const TrustReportSchema = z.object({
+  deep: z.boolean(),
+  overall: TrustCheckStateSchema,
+  checks: z.array(TrustCheckSchema),
+});
+
+const SemanticGoldenProbeSchema = z.discriminatedUnion('status', [
+  z.object({
+    status: z.literal('ok'),
+    sourceNodeId: z.string().min(1),
+    sourceName: z.string().min(1),
+    sourcePath: z.string().min(1),
+    rank: z.number().int().positive(),
+    candidatesReturned: z.number().int().nonnegative(),
+  }),
+  z.object({
+    status: z.literal('fail'),
+    sourceNodeId: z.string().min(1).optional(),
+    sourceName: z.string().min(1).optional(),
+    sourcePath: z.string().min(1).optional(),
+    candidatesReturned: z.number().int().nonnegative().optional(),
+    reason: z.string().min(1),
+  }),
+  z.object({
+    status: z.literal('skip'),
+    reason: z.string().min(1),
+  }),
+]);
+
+type TrustCheckState = z.infer<typeof TrustCheckStateSchema>;
+type TrustReport = z.infer<typeof TrustReportSchema>;
+export type SemanticGoldenProbe = z.infer<typeof SemanticGoldenProbeSchema>;
 
 export interface BuildTrustReportOptions {
   deep?: boolean;
@@ -78,8 +105,7 @@ export async function buildTrustReport(
   if (deep) {
     const timeoutMs = options.timeoutMs ?? DEFAULT_DEEP_TIMEOUT_MS;
     const smoke = await safeRunSmoke(cg.projectRoot, timeoutMs, deps);
-    checks.push(smokeCheck(smoke));
-    checks.push(await semanticGoldenCheck(cg, embeddingModel, smoke, timeoutMs, deps));
+    checks.push(smokeCheck(smoke), await semanticGoldenCheck({ cg, embeddingModel, smoke, timeoutMs, deps }));
   }
 
   return TrustReportSchema.parse({ deep, overall: overallState(checks), checks });
@@ -344,9 +370,9 @@ function smokeCheck(smoke: LlmSmokeResult | Error): TrustCheck {
   const failed = smoke.rows.filter((row) => row.status === 'fail').map((row) => row.tier);
   const skipped = smoke.rows.filter((row) => row.status === 'skip').map((row) => row.tier);
   const detail = [
-    `${passed.length} tier(s) passed${passed.length > 0 ? ` (${passed.join(', ')})` : ''}`,
-    `${failed.length} failed${failed.length > 0 ? ` (${failed.join(', ')})` : ''}`,
-    `${skipped.length} unavailable/skipped${skipped.length > 0 ? ` (${skipped.join(', ')})` : ''}`,
+    formatSmokeTierCount(passed, 'tier(s) passed'),
+    formatSmokeTierCount(failed, 'failed'),
+    formatSmokeTierCount(skipped, 'unavailable/skipped'),
   ].join('; ');
   return {
     state: smoke.overallStatus === 'ok' ? 'ok' : 'warn',
@@ -356,13 +382,21 @@ function smokeCheck(smoke: LlmSmokeResult | Error): TrustCheck {
   };
 }
 
-async function semanticGoldenCheck(
-  cg: Cartograph,
-  embeddingModel: string | undefined,
-  smoke: LlmSmokeResult | Error,
-  timeoutMs: number,
-  deps: TrustRuntimeDeps,
-): Promise<TrustCheck> {
+function formatSmokeTierCount(tiers: readonly string[], label: string): string {
+  const tierList = tiers.length > 0 ? ` (${tiers.join(', ')})` : '';
+  return `${tiers.length} ${label}${tierList}`;
+}
+
+interface SemanticGoldenCheckArgs {
+  cg: Cartograph;
+  embeddingModel: string | undefined;
+  smoke: LlmSmokeResult | Error;
+  timeoutMs: number;
+  deps: TrustRuntimeDeps;
+}
+
+async function semanticGoldenCheck(args: SemanticGoldenCheckArgs): Promise<TrustCheck> {
+  const { cg, embeddingModel, smoke, timeoutMs, deps } = args;
   if (!embeddingModel) return semanticProbeCheck({ status: 'skip', reason: 'embedding model is not configured' });
   if (smoke instanceof Error) {
     return semanticProbeCheck({ status: 'skip', reason: 'live LLM smoke did not complete' });

@@ -26,6 +26,12 @@ export async function handleTrustReview(ctx: ToolCtx, args: Record<string, unkno
 }
 
 function formatCheck(check: TrustCheck): string {
-  const icon = check.state === 'ok' ? 'OK' : check.state === 'warn' ? 'WARN' : 'BLOCKED';
+  const icon = trustCheckIcon(check);
   return `- **${icon} ${check.label}:** ${check.detail} Action: ${check.action}`;
+}
+
+function trustCheckIcon(check: TrustCheck): string {
+  if (check.state === 'ok') return 'OK';
+  if (check.state === 'warn') return 'WARN';
+  return 'BLOCKED';
 }

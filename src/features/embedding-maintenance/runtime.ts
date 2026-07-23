@@ -313,10 +313,19 @@ function collectArtifacts(
 ): EmbeddingArtifact[] {
   const canonical = new Set(canonicalDimensions);
   const symbols = new Set(symbolDimensions);
+  const artifacts = [...collectDatabaseVectorArtifacts(options, canonical), ...collectHnswArtifacts(options, symbols)];
+  return artifacts.sort(
+    (a, b) => a.dimension - b.dimension || a.kind.localeCompare(b.kind) || a.grain.localeCompare(b.grain),
+  );
+}
+
+function collectDatabaseVectorArtifacts(
+  options: AuditEmbeddingStorageOptions,
+  canonical: ReadonlySet<number>,
+): EmbeddingArtifact[] {
   const artifacts: EmbeddingArtifact[] = [];
   try {
-    const tableRows = embeddingArtifactTablesQuery(options.db).all({});
-    for (const row of tableRows) {
+    for (const row of embeddingArtifactTablesQuery(options.db).all({})) {
       const vec = /^vec_symbol_embeddings_(\d+)$/.exec(row.name);
       const pgvector = /^pgvector_symbol_embeddings_(\d+)$/.exec(row.name);
       const match = vec ?? pgvector;
@@ -335,6 +344,14 @@ function collectArtifacts(
   } catch {
     // Pre-migration databases can lack the compatibility metadata view.
   }
+  return artifacts;
+}
+
+function collectHnswArtifacts(
+  options: AuditEmbeddingStorageOptions,
+  symbols: ReadonlySet<number>,
+): EmbeddingArtifact[] {
+  const artifacts: EmbeddingArtifact[] = [];
   try {
     for (const row of hnswMetaQuery(options.db).all({})) {
       if (!validDimension(row.dim)) continue;
@@ -352,9 +369,7 @@ function collectArtifacts(
   } catch {
     // Pre-HNSW schemas simply have no artifacts to report.
   }
-  return artifacts.sort(
-    (a, b) => a.dimension - b.dimension || a.kind.localeCompare(b.kind) || a.grain.localeCompare(b.grain),
-  );
+  return artifacts;
 }
 
 function validDimension(dimension: number): boolean {
@@ -558,7 +573,23 @@ function removeStaleHnswArtifacts(
   affectedDimensions: readonly number[],
 ): EmbeddingArtifactRemoval[] {
   const affected = new Set(affectedDimensions);
-  const liveSymbolDimensions = new Set(
+  const liveSymbolDimensions = collectLiveSymbolDimensions(options);
+  const metaDimensions = collectHnswMetaDimensions(options);
+  const metaSet = new Set(metaDimensions);
+  const dimensions = [...new Set([...metaDimensions, ...affectedDimensions])]
+    .filter((dimension) => affected.has(dimension) || !liveSymbolDimensions.has(dimension))
+    .filter(validDimension)
+    .sort((a, b) => a - b);
+  const removed: EmbeddingArtifactRemoval[] = [];
+  for (const dimension of dimensions) {
+    const removal = removeHnswArtifact({ options, dimension, hadMetadata: metaSet.has(dimension) });
+    if (removal) removed.push(formatHnswRemoval(removal, liveSymbolDimensions.has(dimension)));
+  }
+  return removed;
+}
+
+function collectLiveSymbolDimensions(options: CleanupObsoleteEmbeddingsOptions): Set<number> {
+  return new Set(
     embeddingBucketsQuery(options.db)
       .all({})
       .filter((row) => row.grain === 'symbol')
@@ -567,49 +598,56 @@ function removeStaleHnswArtifacts(
         return dimension === null ? [] : [dimension];
       }),
   );
-  const metaDimensions = (() => {
-    try {
-      return hnswMetaQuery(options.db)
-        .all({})
-        .map((row) => row.dim);
-    } catch {
-      return [];
-    }
-  })();
-  const metaSet = new Set(metaDimensions);
-  const dimensions = [...new Set([...metaDimensions, ...affectedDimensions])]
-    .filter((dimension) => affected.has(dimension) || !liveSymbolDimensions.has(dimension))
-    .filter(validDimension)
-    .sort((a, b) => a - b);
-  const removed: EmbeddingArtifactRemoval[] = [];
-  for (const dimension of dimensions) {
-    const expectedPath = hnswPath(options.projectRoot, dimension);
-    const hadMetadata = metaSet.has(dimension);
-    const hadFile = fs.existsSync(expectedPath);
-    if (!hadMetadata && !hadFile) continue;
-    let fileRemoved = false;
-    try {
-      if (hadFile) {
-        fs.unlinkSync(expectedPath);
-        fileRemoved = true;
-      }
-    } catch {
-      // Metadata is still cleared so query-time loading cannot trust a stale index.
-    }
-    try {
-      deleteHnswMetaQuery(options.db).run({ dimension });
-    } catch {
-      // A pre-HNSW schema has nothing to invalidate.
-    }
-    removed.push({
-      kind: 'hnsw',
-      dimension,
-      detail: liveSymbolDimensions.has(dimension)
-        ? `Invalidated stale HNSW metadata${fileRemoved ? ' and file' : ''}; canonical rows at this dimension remain.`
-        : `Removed obsolete HNSW metadata${fileRemoved ? ' and file' : ''}; no canonical symbol rows remain.`,
-    });
+}
+
+function collectHnswMetaDimensions(options: CleanupObsoleteEmbeddingsOptions): number[] {
+  try {
+    return hnswMetaQuery(options.db)
+      .all({})
+      .map((row) => row.dim);
+  } catch {
+    return [];
   }
-  return removed;
+}
+
+interface RemoveHnswArtifactArgs {
+  options: CleanupObsoleteEmbeddingsOptions;
+  dimension: number;
+  hadMetadata: boolean;
+}
+
+interface HnswArtifactRemovalState {
+  dimension: number;
+  fileRemoved: boolean;
+}
+
+function removeHnswArtifact(args: RemoveHnswArtifactArgs): HnswArtifactRemovalState | null {
+  const expectedPath = hnswPath(args.options.projectRoot, args.dimension);
+  const hadFile = fs.existsSync(expectedPath);
+  if (!args.hadMetadata && !hadFile) return null;
+  let fileRemoved = false;
+  try {
+    if (hadFile) {
+      fs.unlinkSync(expectedPath);
+      fileRemoved = true;
+    }
+  } catch {
+    // Metadata is still cleared so query-time loading cannot trust a stale index.
+  }
+  try {
+    deleteHnswMetaQuery(args.options.db).run({ dimension: args.dimension });
+  } catch {
+    // A pre-HNSW schema has nothing to invalidate.
+  }
+  return { dimension: args.dimension, fileRemoved };
+}
+
+function formatHnswRemoval(state: HnswArtifactRemovalState, liveRowsRemain: boolean): EmbeddingArtifactRemoval {
+  const fileDetail = state.fileRemoved ? ' and file' : '';
+  const detail = liveRowsRemain
+    ? `Invalidated stale HNSW metadata${fileDetail}; canonical rows at this dimension remain.`
+    : `Removed obsolete HNSW metadata${fileDetail}; no canonical symbol rows remain.`;
+  return { kind: 'hnsw', dimension: state.dimension, detail };
 }
 
 function hnswPath(projectRoot: string, dimension: number): string {
@@ -677,8 +715,11 @@ export function formatEmbeddingCleanup(result: EmbeddingCleanupResult): string {
   return lines.join('\n');
 }
 
+const BYTES_PER_KIBIBYTE = 1_024;
+const BYTES_PER_MEBIBYTE = BYTES_PER_KIBIBYTE * BYTES_PER_KIBIBYTE;
+
 function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes < BYTES_PER_KIBIBYTE) return `${bytes} B`;
+  if (bytes < BYTES_PER_MEBIBYTE) return `${(bytes / BYTES_PER_KIBIBYTE).toFixed(1)} KiB`;
+  return `${(bytes / BYTES_PER_MEBIBYTE).toFixed(1)} MiB`;
 }

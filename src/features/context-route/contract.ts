@@ -39,15 +39,4 @@ export const ContextRouteSchema = z.discriminatedUnion('status', [
   }),
 ]);
 
-export const ContextRouteIntentSeedsSchema = z.object({
-  queries: z.array(z.string().min(1)),
-  nodeIds: z.array(z.string().min(1)),
-  evidenceByNodeId: z.record(z.string(), z.array(z.string().min(1)).min(1)),
-});
-
-export type CodingTaskKind = z.infer<typeof CodingTaskKindSchema>;
-export type ContextRouteBucket = z.infer<typeof ContextRouteBucketSchema>;
-export type ContextRouteConfidence = z.infer<typeof ContextRouteConfidenceSchema>;
-export type ContextRouteCandidate = z.infer<typeof ContextRouteCandidateSchema>;
 export type ContextRoute = z.infer<typeof ContextRouteSchema>;
-export type ContextRouteIntentSeeds = z.infer<typeof ContextRouteIntentSeedsSchema>;

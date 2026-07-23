@@ -4,6 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { __readCommandInternals as read } from '../src/bin/commands/read.js';
 import {
+  type AffectedOutputArgs,
   buildAffectedFilter,
   collectExplicitChangedFiles,
   parseAffectedDepth,
@@ -235,11 +236,19 @@ describe('read command internals', () => {
     const base = {
       changedFiles: ['src/a.ts'],
       sortedTests: ['__tests__/a.test.ts'],
+      candidates: [
+        {
+          path: '__tests__/a.test.ts',
+          tier: 'direct',
+          distance: 1,
+          reason: 'direct-dependent',
+        },
+      ],
       totalDependents: 3,
       barrelsReached: ['src/index.ts'],
       derivedFromGit: true,
       projectPath: '/repo',
-    };
+    } satisfies Omit<AffectedOutputArgs, 'options'>;
 
     const json = stripAnsi(renderAffectedOutput({ ...base, options: { json: true } }).join('\n'));
     expect(JSON.parse(json)).toMatchObject({ changedFiles: ['src/a.ts'], affectedTests: ['__tests__/a.test.ts'] });

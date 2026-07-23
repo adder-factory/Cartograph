@@ -69,6 +69,32 @@ describe('behavior retrieval preparation', () => {
     });
   });
 
+  it('allows an explicit hybrid mode for patch tasks that are not phrased as behavior questions', async () => {
+    const searchHybrid = vi.fn(async () => []);
+
+    const options = await prepareBehaviorRetrieval({
+      search: { searchHybrid },
+      task: 'Fix stale pgvector dimension cleanup in embedding maintenance',
+      maxNodes: 20,
+      retrievalMode: 'hybrid',
+    });
+
+    expect(searchHybrid).toHaveBeenCalledWith('Fix stale pgvector dimension cleanup in embedding maintenance', {
+      limit: 40,
+    });
+    expect(options).toEqual({
+      extraCandidates: [],
+      behaviorBias: false,
+      trace: {
+        requested: 'hybrid',
+        strategy: 'hybrid',
+        hybridAttempted: true,
+        hybridCandidateCount: 0,
+        reason: 'explicit-hybrid',
+      },
+    });
+  });
+
   it('honors explicit deterministic mode for behavior questions', async () => {
     const searchHybrid = vi.fn(async () => []);
 

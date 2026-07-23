@@ -1,12 +1,19 @@
+import type { z } from 'zod';
+import { extractSearchTerms, getStemVariants } from '../../search/query-utils.js';
 import type { Node, NodeKind } from '../../types.js';
 import {
+  type CodingTaskKindSchema,
+  type ContextRouteBucketSchema,
+  type ContextRouteCandidateSchema,
+  type ContextRouteConfidenceSchema,
   ContextRouteSchema,
-  type CodingTaskKind,
   type ContextRoute,
-  type ContextRouteBucket,
-  type ContextRouteCandidate,
-  type ContextRouteConfidence,
 } from './contract.js';
+
+type CodingTaskKind = z.infer<typeof CodingTaskKindSchema>;
+type ContextRouteBucket = z.infer<typeof ContextRouteBucketSchema>;
+type ContextRouteCandidate = z.infer<typeof ContextRouteCandidateSchema>;
+type ContextRouteConfidence = z.infer<typeof ContextRouteConfidenceSchema>;
 
 export interface CodingTaskAnalysis {
   taskKind: CodingTaskKind;
@@ -21,6 +28,7 @@ export interface BuildContextRouteArgs {
   task: string;
   nodes: readonly Node[];
   intentEvidenceByNodeId?: ReadonlyMap<string, readonly string[]>;
+  intentSpecificityByNodeId?: ReadonlyMap<string, number>;
 }
 
 const TASK_KIND_PATTERNS: ReadonlyArray<readonly [CodingTaskKind, readonly RegExp[]]> = [
@@ -64,15 +72,35 @@ const EDIT_SITE_KINDS: ReadonlySet<NodeKind> = new Set([
   'variable',
   'route',
   'component',
+  'constant',
 ]);
 
-const CONFIG_FILE_PATTERN = /(?:^|\/)(?:config|configs|configuration)(?:\/|\.|$)|\.(?:json|jsonc|ya?ml|toml|ini|env)$/i;
-const TEST_FILE_PATTERN = /(?:^|\/)(?:__tests__|tests?|specs?)(?:\/|\.)|\.(?:test|spec)\.[^/]+$/i;
+const CONFIG_FILE_PATTERN =
+  /(?:(?:^|\/)(?:config|configs|configuration)(?:\/|\.|$)|\.(?:json|jsonc|ya?ml|toml|ini|env)$)/i;
+const TEST_FILE_PATTERN = /(?:(?:^|\/)(?:__tests__|tests?|specs?)[/.]|\.(?:test|spec)\.[^/]+$)/i;
 const SOURCE_PATH_PATTERN =
   /(?:^|[\s('"`])((?:\.{0,2}\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.[A-Za-z0-9]+)(?=$|[\s)'"`,;:])/g;
-const IDENTIFIER_PATTERN =
-  /\b(?:[A-Za-z_$][A-Za-z0-9_$]*[A-Z][A-Za-z0-9_$]*|[A-Z][A-Za-z0-9_$]{2,}|[A-Za-z_$][A-Za-z0-9_$]*_[A-Za-z0-9_$]+|[A-Za-z_$][A-Za-z0-9_$]*(?:\.[A-Za-z_$][A-Za-z0-9_$]*)+)\b/g;
 const ROUTE_TOKEN_PATTERN = /[\p{L}\p{N}_]+/gu;
+const SOURCE_TOKEN_EXTENSIONS = new Set([
+  'cjs',
+  'cjsx',
+  'cts',
+  'ctsx',
+  'js',
+  'json',
+  'jsonc',
+  'jsx',
+  'md',
+  'mjs',
+  'mjsx',
+  'mts',
+  'mtsx',
+  'toml',
+  'ts',
+  'tsx',
+  'yaml',
+  'yml',
+]);
 
 const ROUTE_STOP_WORDS = new Set([
   'a',
@@ -154,19 +182,23 @@ export function analyzeCodingTask(task: string): CodingTaskAnalysis {
 export function buildContextRoute(args: BuildContextRouteArgs): ContextRoute {
   const analysis = analyzeCodingTask(args.task);
   const taskTokens = meaningfulTokens(args.task);
-  const candidates = args.nodes
+  const anchorFrequency = buildAnchorFrequency(args.nodes, taskTokens);
+  const ranked = args.nodes
     .map((candidate) =>
       routeCandidate({
         node: candidate,
         analysis,
         taskTokens,
+        anchorFrequency,
         intentEvidence: args.intentEvidenceByNodeId?.get(candidate.id) ?? [],
+        intentSpecificity: args.intentSpecificityByNodeId?.get(candidate.id) ?? 0,
       }),
     )
-    .sort(compareRouteCandidates)
+    .sort(compareRankedRouteCandidates)
     .slice(0, 12);
+  const candidates = ranked.map((entry) => entry.candidate);
 
-  const hasActionableCandidate = candidates.some((candidate) => isActionableCandidate(candidate, analysis.taskKind));
+  const hasActionableCandidate = ranked.some((entry) => isActionableCandidate(entry, analysis.taskKind));
   if (!hasActionableCandidate) {
     return ContextRouteSchema.parse({
       ...analysis,
@@ -190,11 +222,34 @@ function classifyTaskKind(task: string): CodingTaskKind {
 }
 
 function splitTaskClauses(task: string): string[] {
-  const clauses = task
-    .split(/\s*(?:;|\n+|\band\s+then\b|\balso\b)\s*/i)
-    .map((clause) => clause.replace(/^(?:and|then)\s+/i, '').trim())
-    .filter((clause) => clause.length > 0);
+  let clauses = task.split(';');
+  for (const connector of [' and then ', ' also ']) {
+    clauses = clauses.flatMap((clause) => splitCaseInsensitive(clause, connector));
+  }
+  clauses = clauses.map(trimClausePrefix).filter((clause) => clause.length > 0);
   return clauses.length > 0 ? clauses : [task || 'unspecified coding task'];
+}
+
+function splitCaseInsensitive(value: string, delimiter: string): string[] {
+  const parts: string[] = [];
+  const lowerValue = value.toLowerCase();
+  let start = 0;
+  let match = lowerValue.indexOf(delimiter, start);
+  while (match !== -1) {
+    parts.push(value.slice(start, match));
+    start = match + delimiter.length;
+    match = lowerValue.indexOf(delimiter, start);
+  }
+  parts.push(value.slice(start));
+  return parts;
+}
+
+function trimClausePrefix(value: string): string {
+  const clause = value.trim();
+  const lower = clause.toLowerCase();
+  if (lower.startsWith('and ')) return clause.slice('and '.length).trim();
+  if (lower.startsWith('then ')) return clause.slice('then '.length).trim();
+  return clause;
 }
 
 function extractPaths(task: string): string[] {
@@ -209,80 +264,265 @@ function extractPaths(task: string): string[] {
 function extractIdentifiers(task: string, paths: readonly string[]): string[] {
   const identifiers = new Set<string>();
   const pathSuffixes = new Set(paths.flatMap((path) => path.split('/')));
-  for (const match of task.matchAll(IDENTIFIER_PATTERN)) {
-    const value = match[0];
-    if (pathSuffixes.has(value) || /\.(?:[cm]?[jt]sx?|jsonc?|ya?ml|toml|md)$/i.test(value)) continue;
+  for (const candidate of scanIdentifierCandidates(task)) {
+    const value = candidate.value;
+    if (!candidate.quoted && !looksLikeCodeIdentifier(value)) continue;
+    if (pathSuffixes.has(value) || looksLikeSourceToken(value)) continue;
     if (IDENTIFIER_STOP_WORDS.has(value.toLowerCase())) continue;
     identifiers.add(value);
-  }
-  for (const match of task.matchAll(/[`'"]([A-Za-z_$][A-Za-z0-9_$]*(?:[._][A-Za-z0-9_$]+)*)[`'"]/g)) {
-    const value = match[1];
-    if (value && !pathSuffixes.has(value)) identifiers.add(value);
   }
   return [...identifiers];
 }
 
+interface IdentifierCandidate {
+  value: string;
+  quoted: boolean;
+}
+
+function scanIdentifierCandidates(value: string): IdentifierCandidate[] {
+  const candidates: IdentifierCandidate[] = [];
+  let start = -1;
+  for (let index = 0; index <= value.length; index++) {
+    const char = value[index];
+    if (start === -1) {
+      if (char && isIdentifierStartChar(char)) start = index;
+      continue;
+    }
+    if (char && isIdentifierBodyChar(char)) continue;
+    const candidate = value.slice(start, index);
+    candidates.push({ value: candidate, quoted: isQuotedIdentifier(value, start, index) });
+    start = -1;
+  }
+  return candidates;
+}
+
+function isIdentifierStartChar(char: string): boolean {
+  return isAsciiLetter(char) || char === '_' || char === '$';
+}
+
+function isIdentifierBodyChar(char: string): boolean {
+  return isIdentifierStartChar(char) || isAsciiDigit(char) || char === '.';
+}
+
+function isAsciiLetter(char: string): boolean {
+  const code = char.codePointAt(0) ?? -1;
+  return (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+}
+
+function isAsciiDigit(char: string): boolean {
+  const code = char.codePointAt(0) ?? -1;
+  return code >= 48 && code <= 57;
+}
+
+function isQuotedIdentifier(value: string, start: number, end: number): boolean {
+  const before = value[start - 1];
+  return before === value[end] && (before === '`' || before === "'" || before === '"');
+}
+
+function looksLikeCodeIdentifier(value: string): boolean {
+  if (value.includes('_')) return true;
+  if (isDottedIdentifier(value)) return true;
+  if (value.length >= 3 && isUpperAscii(value[0]!)) return true;
+  for (let index = 1; index < value.length; index++) {
+    if (isLowerAscii(value[index - 1]!) && isUpperAscii(value[index]!)) return true;
+  }
+  return false;
+}
+
+function isDottedIdentifier(value: string): boolean {
+  const segments = value.split('.');
+  return segments.length > 1 && segments.every(isIdentifierSegment);
+}
+
+function isIdentifierSegment(value: string): boolean {
+  if (!value || !isIdentifierStartChar(value[0]!)) return false;
+  return [...value].every((char) => isIdentifierStartChar(char) || isAsciiDigit(char));
+}
+
+function isUpperAscii(char: string): boolean {
+  const code = char.codePointAt(0) ?? -1;
+  return code >= 65 && code <= 90;
+}
+
+function isLowerAscii(char: string): boolean {
+  const code = char.codePointAt(0) ?? -1;
+  return code >= 97 && code <= 122;
+}
+
+function looksLikeSourceToken(value: string): boolean {
+  const dot = value.lastIndexOf('.');
+  return dot !== -1 && SOURCE_TOKEN_EXTENSIONS.has(value.slice(dot + 1).toLowerCase());
+}
+
 function meaningfulTokens(value: string): Set<string> {
   const tokens = value.toLowerCase().match(ROUTE_TOKEN_PATTERN) ?? [];
-  return new Set(tokens.filter((token) => token.length >= 3 && !ROUTE_STOP_WORDS.has(token)));
+  const meaningful = new Set(tokens.filter((token) => token.length >= 3 && !ROUTE_STOP_WORDS.has(token)));
+  for (const token of extractSearchTerms(value, { stems: false })) {
+    if (!ROUTE_STOP_WORDS.has(token)) meaningful.add(token);
+  }
+  return meaningful;
 }
 
 interface RouteCandidateArgs {
   node: Node;
   analysis: CodingTaskAnalysis;
   taskTokens: ReadonlySet<string>;
+  anchorFrequency: ReadonlyMap<string, number>;
   intentEvidence: readonly string[];
+  intentSpecificity: number;
 }
 
-function routeCandidate(args: RouteCandidateArgs): ContextRouteCandidate {
+interface RankedRouteCandidate {
+  candidate: ContextRouteCandidate;
+  reliablyGrounded: boolean;
+  score: number;
+  anchorSpecificity: number;
+  intentSpecificity: number;
+}
+
+interface ExplicitRouteEvidence {
+  evidence: string[];
+  matchedIdentifiers: string[];
+  matchedPaths: string[];
+  score: number;
+}
+
+interface TokenRouteEvidence {
+  anchorOverlap: number;
+  anchorSpecificity: number;
+  evidence: string[];
+  score: number;
+}
+
+const EDIT_SITE_BASE_SCORE = 2;
+const SUPPORTING_BASE_SCORE = 1;
+const EXPLICIT_ANCHOR_SCORE = 4;
+const INTENT_EVIDENCE_SCORE = 4;
+const MAX_TOKEN_OVERLAP_SCORE = 3;
+const GENERIC_NODE_NAME_PENALTY = 5;
+const LONG_TASK_TOKEN_THRESHOLD = 4;
+const LONG_TASK_REQUIRED_ANCHORS = 2;
+const SHORT_TASK_REQUIRED_ANCHORS = 1;
+const UNGROUNDED_MUTATION_SCORE_CAP = 2;
+const MUTATION_TASK_KINDS: ReadonlySet<CodingTaskKind> = new Set(['debug', 'refactor', 'feature', 'test']);
+
+function routeCandidate(args: RouteCandidateArgs): RankedRouteCandidate {
   const bucket = classifyBucket(args.node);
-  const evidence: string[] = [];
-  let score = bucket === 'edit-site' ? 2 : bucket === 'supporting' ? 1 : 0;
-
-  const matchedIdentifiers = args.analysis.anchors.identifiers.filter((anchor) =>
-    nodeMatchesIdentifier(args.node, anchor),
-  );
-  if (matchedIdentifiers.length > 0) {
-    score += 4;
-    evidence.push(`explicit identifier ${matchedIdentifiers.map((anchor) => `\`${anchor}\``).join(', ')} matched`);
-  }
-
-  const matchedPaths = args.analysis.anchors.paths.filter((path) => pathMatchesNode(path, args.node.filePath));
-  if (matchedPaths.length > 0) {
-    score += 4;
-    evidence.push(`explicit path \`${matchedPaths[0]}\` matched`);
-  }
-
-  if (args.intentEvidence.length > 0) {
-    score += 4;
-    evidence.push(...args.intentEvidence);
-  }
-
-  const overlap = countTokenOverlap(args.node, args.taskTokens);
-  if (overlap > 0) {
-    score += Math.min(overlap, 3);
-    evidence.push(`${overlap} task term${overlap === 1 ? '' : 's'} matched symbol context`);
-  }
+  const explicit = collectExplicitRouteEvidence(args);
+  const token = collectTokenRouteEvidence(args);
+  const evidence = [...explicit.evidence, ...token.evidence];
+  let score = bucketBaseScore(bucket) + explicit.score + token.score;
 
   if (GENERIC_NODE_NAMES.has(args.node.name.toLowerCase())) {
-    score -= 5;
+    score -= GENERIC_NODE_NAME_PENALTY;
     evidence.push('generic symbol name lowers routing precision');
   }
 
-  if (bucket === 'test') evidence.push('test-path evidence');
-  if (bucket === 'configuration') evidence.push('configuration-path evidence');
+  appendBucketEvidence(bucket, evidence);
+  const reliablyGrounded = hasReliableGrounding(args, explicit, token.anchorOverlap);
+  if (!reliablyGrounded && MUTATION_TASK_KINDS.has(args.analysis.taskKind)) {
+    score = Math.min(score, UNGROUNDED_MUTATION_SCORE_CAP);
+    evidence.push('no distinguishing task anchor matched the symbol name or path');
+  }
   if (evidence.length === 0) evidence.push('retrieved by lexical or graph proximity only');
 
   return {
-    nodeId: args.node.id,
-    name: args.node.name,
-    kind: args.node.kind,
-    filePath: args.node.filePath,
-    line: args.node.startLine,
-    bucket,
-    confidence: confidenceForScore(score),
-    evidence: dedupe(evidence),
+    candidate: {
+      nodeId: args.node.id,
+      name: args.node.name,
+      kind: args.node.kind,
+      filePath: args.node.filePath,
+      line: args.node.startLine,
+      bucket,
+      confidence: confidenceForScore(score),
+      evidence: dedupe(evidence),
+    },
+    reliablyGrounded,
+    score,
+    anchorSpecificity: token.anchorSpecificity,
+    intentSpecificity: args.intentSpecificity,
   };
+}
+
+function bucketBaseScore(bucket: ContextRouteBucket): number {
+  if (bucket === 'edit-site') return EDIT_SITE_BASE_SCORE;
+  if (bucket === 'supporting') return SUPPORTING_BASE_SCORE;
+  return 0;
+}
+
+function collectExplicitRouteEvidence(args: RouteCandidateArgs): ExplicitRouteEvidence {
+  const evidence: string[] = [];
+  const matchedIdentifiers = args.analysis.anchors.identifiers.filter((anchor) =>
+    nodeMatchesIdentifier(args.node, anchor),
+  );
+  const matchedPaths = args.analysis.anchors.paths.filter((path) => pathMatchesNode(path, args.node.filePath));
+  let score = 0;
+  if (matchedIdentifiers.length > 0) {
+    score += EXPLICIT_ANCHOR_SCORE;
+    const quotedIdentifiers = matchedIdentifiers.map(formatCodeSpan).join(', ');
+    evidence.push(`explicit identifier ${quotedIdentifiers} matched`);
+  }
+  if (matchedPaths.length > 0) {
+    score += EXPLICIT_ANCHOR_SCORE;
+    evidence.push(`explicit path \`${matchedPaths[0]}\` matched`);
+  }
+  if (args.intentEvidence.length > 0) {
+    score += INTENT_EVIDENCE_SCORE;
+    evidence.push(...args.intentEvidence);
+  }
+  return { evidence, matchedIdentifiers, matchedPaths, score };
+}
+
+function formatCodeSpan(value: string): string {
+  return `\`${value}\``;
+}
+
+function collectTokenRouteEvidence(args: RouteCandidateArgs): TokenRouteEvidence {
+  const evidence: string[] = [];
+  const matchedAnchorTerms = matchingValueTokens(
+    `${args.node.name} ${args.node.qualifiedName} ${args.node.filePath}`,
+    args.taskTokens,
+  );
+  const anchorOverlap = matchedAnchorTerms.length;
+  const anchorSpecificity = matchedAnchorTerms.reduce(
+    (total, term) => total + 1 / (args.anchorFrequency.get(term) ?? 1),
+    0,
+  );
+  const documentationOverlap = matchingValueTokens(args.node.docstring ?? '', args.taskTokens).length;
+  if (anchorOverlap > 0) {
+    evidence.push(`${anchorOverlap} task term${anchorOverlap === 1 ? '' : 's'} matched symbol name/path`);
+  }
+  if (documentationOverlap > 0) {
+    evidence.push(
+      `${documentationOverlap} task term${documentationOverlap === 1 ? '' : 's'} matched symbol documentation`,
+    );
+  }
+  return {
+    anchorOverlap,
+    anchorSpecificity,
+    evidence,
+    score: Math.min(anchorOverlap, MAX_TOKEN_OVERLAP_SCORE) + Math.min(documentationOverlap, MAX_TOKEN_OVERLAP_SCORE),
+  };
+}
+
+function hasReliableGrounding(
+  args: RouteCandidateArgs,
+  explicit: ExplicitRouteEvidence,
+  anchorOverlap: number,
+): boolean {
+  const requiredAnchorOverlap =
+    args.taskTokens.size >= LONG_TASK_TOKEN_THRESHOLD ? LONG_TASK_REQUIRED_ANCHORS : SHORT_TASK_REQUIRED_ANCHORS;
+  return (
+    explicit.matchedIdentifiers.length > 0 ||
+    explicit.matchedPaths.length > 0 ||
+    args.intentEvidence.length > 0 ||
+    anchorOverlap >= requiredAnchorOverlap
+  );
+}
+
+function appendBucketEvidence(bucket: ContextRouteBucket, evidence: string[]): void {
+  if (bucket === 'test') evidence.push('test-path evidence');
+  if (bucket === 'configuration') evidence.push('configuration-path evidence');
 }
 
 function classifyBucket(node: Node): ContextRouteBucket {
@@ -307,13 +547,26 @@ function pathMatchesNode(anchor: string, filePath: string): boolean {
   return normalizedPath === normalizedAnchor || normalizedPath.endsWith(`/${normalizedAnchor}`);
 }
 
-function countTokenOverlap(node: Node, taskTokens: ReadonlySet<string>): number {
-  const nodeTokens = meaningfulTokens(`${node.name} ${node.qualifiedName} ${node.filePath} ${node.docstring ?? ''}`);
-  let count = 0;
+function matchingValueTokens(value: string, taskTokens: ReadonlySet<string>): string[] {
+  const nodeTokens = meaningfulTokens(value);
+  const nodeVariants = new Set<string>();
   for (const token of nodeTokens) {
-    if (taskTokens.has(token)) count++;
+    for (const variant of routeTokenVariants(token)) nodeVariants.add(variant);
   }
-  return count;
+  return [...taskTokens].filter((token) => routeTokenVariants(token).some((variant) => nodeVariants.has(variant)));
+}
+
+function routeTokenVariants(term: string): string[] {
+  return [term, ...getStemVariants(term).filter((variant) => term.length - variant.length <= 3)];
+}
+
+function buildAnchorFrequency(nodes: readonly Node[], taskTokens: ReadonlySet<string>): Map<string, number> {
+  const frequency = new Map<string, number>();
+  for (const node of nodes) {
+    const matches = matchingValueTokens(`${node.name} ${node.qualifiedName} ${node.filePath}`, taskTokens);
+    for (const term of matches) frequency.set(term, (frequency.get(term) ?? 0) + 1);
+  }
+  return frequency;
 }
 
 function confidenceForScore(score: number): ContextRouteConfidence {
@@ -322,21 +575,27 @@ function confidenceForScore(score: number): ContextRouteConfidence {
   return 'low';
 }
 
-function isActionableCandidate(candidate: ContextRouteCandidate, taskKind: CodingTaskKind): boolean {
-  if (candidate.confidence === 'low') return false;
-  if (candidate.bucket === 'edit-site') return true;
-  return ['locate', 'explain', 'review'].includes(taskKind) && candidate.bucket === 'supporting';
+function isActionableCandidate(entry: RankedRouteCandidate, taskKind: CodingTaskKind): boolean {
+  if (entry.candidate.confidence === 'low' || !entry.reliablyGrounded) return false;
+  if (entry.candidate.bucket === 'edit-site') return true;
+  return ['locate', 'explain', 'review'].includes(taskKind) && entry.candidate.bucket === 'supporting';
 }
 
-function compareRouteCandidates(a: ContextRouteCandidate, b: ContextRouteCandidate): number {
-  const bucketDiff = BUCKET_ORDER[a.bucket] - BUCKET_ORDER[b.bucket];
+function compareRankedRouteCandidates(a: RankedRouteCandidate, b: RankedRouteCandidate): number {
+  const bucketDiff = BUCKET_ORDER[a.candidate.bucket] - BUCKET_ORDER[b.candidate.bucket];
   if (bucketDiff !== 0) return bucketDiff;
-  const confidenceDiff = CONFIDENCE_ORDER[a.confidence] - CONFIDENCE_ORDER[b.confidence];
+  const confidenceDiff = CONFIDENCE_ORDER[a.candidate.confidence] - CONFIDENCE_ORDER[b.candidate.confidence];
   if (confidenceDiff !== 0) return confidenceDiff;
-  const pathDiff = a.filePath.localeCompare(b.filePath);
+  const intentSpecificityDiff = b.intentSpecificity - a.intentSpecificity;
+  if (Math.abs(intentSpecificityDiff) > Number.EPSILON) return intentSpecificityDiff;
+  const specificityDiff = b.anchorSpecificity - a.anchorSpecificity;
+  if (Math.abs(specificityDiff) > Number.EPSILON) return specificityDiff;
+  const scoreDiff = b.score - a.score;
+  if (scoreDiff !== 0) return scoreDiff;
+  const pathDiff = a.candidate.filePath.localeCompare(b.candidate.filePath);
   if (pathDiff !== 0) return pathDiff;
-  if (a.line !== b.line) return a.line - b.line;
-  return a.name.localeCompare(b.name);
+  if (a.candidate.line !== b.candidate.line) return a.candidate.line - b.candidate.line;
+  return a.candidate.name.localeCompare(b.candidate.name);
 }
 
 function dedupe(values: readonly string[]): string[] {

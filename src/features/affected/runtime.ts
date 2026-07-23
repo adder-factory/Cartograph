@@ -214,9 +214,8 @@ export function renderAffectedCandidateList(
     lines.push(style.bold(`${TIER_TITLES[tier]}:`));
     for (const candidate of rows) {
       const hopLabel = candidate.distance === 1 ? 'hop' : 'hops';
-      lines.push(
-        `  ${style.cyan(candidate.path)} ${style.dim(`— ${candidate.reason.replaceAll('-', ' ')}, ${candidate.distance} ${hopLabel}`)}`,
-      );
+      const detail = `— ${candidate.reason.replaceAll('-', ' ')}, ${candidate.distance} ${hopLabel}`;
+      lines.push(`  ${style.cyan(candidate.path)} ${style.dim(detail)}`);
     }
   }
   if (candidates.length > AFFECTED_ROW_LIMIT) {

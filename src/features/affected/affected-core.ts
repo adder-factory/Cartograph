@@ -14,7 +14,9 @@ import type { QueryBuilder } from '../../db/queries.js';
 import { getAllFiles } from '../../db/queries-files.js';
 import { getFilesWithTestNames } from '../../db/queries-test-names.js';
 import { isTestPath } from '../../utils.js';
-import { AffectedTestCandidatesSchema, type AffectedTestCandidate, type AffectedTestTier } from './contract.js';
+import { AffectedTestCandidateSchema, type AffectedTestCandidate, type AffectedTestTier } from './contract.js';
+
+const AffectedTestCandidatesSchema = AffectedTestCandidateSchema.array();
 
 /** Default BFS depth through the dependents graph. */
 export const DEFAULT_DEPTH = 5;
@@ -234,13 +236,18 @@ function recordDependent(args: RecordDependentArgs): void {
 }
 
 function candidateForDistance(path: string, distance: number): AffectedTestCandidate {
-  const tier: AffectedTestTier = distance <= 1 ? 'direct' : distance === 2 ? 'likely' : 'broad';
   return {
     path,
-    tier,
+    tier: affectedTierForDistance(distance),
     distance,
     reason: distance <= 1 ? 'direct-dependent' : 'transitive-dependent',
   };
+}
+
+function affectedTierForDistance(distance: number): AffectedTestTier {
+  if (distance <= 1) return 'direct';
+  if (distance === 2) return 'likely';
+  return 'broad';
 }
 
 function recordTestCandidate(

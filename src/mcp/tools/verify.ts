@@ -87,8 +87,12 @@ function appendTestCandidates(lines: string[], plan: VerificationPlan): void {
 }
 
 function appendCommands(lines: string[], plan: VerificationPlan): void {
-  lines.push('', `### Commands to run (${plan.commands.length})`, '');
-  lines.push('_Commands were planned only; Cartograph did not execute them._');
+  lines.push(
+    '',
+    `### Commands to run (${plan.commands.length})`,
+    '',
+    '_Commands were planned only; Cartograph did not execute them._',
+  );
   if (plan.commands.length === 0) return;
   lines.push('', '```sh', ...plan.commands.map((command) => command.command), '```', '');
   for (const command of plan.commands) lines.push(`- **${command.kind}:** ${command.reason}`);

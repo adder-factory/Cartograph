@@ -104,4 +104,22 @@ describe('deterministic coding-task router', () => {
       'docstring matched clause "improve how agents choose verification commands"',
     );
   });
+
+  it('abstains when a long unrelated task only overlaps generic docstring language', () => {
+    const route = buildContextRoute({
+      task: 'Change mobile push-notification APNS retry backoff and delivery receipts',
+      nodes: [
+        node({
+          id: 'git-push',
+          name: 'spawnHookChildOnBun',
+          kind: 'function',
+          filePath: 'src/git/push-hook.ts',
+          docstring: 'Change push delivery behavior and retry a failed child process.',
+        }),
+      ],
+    });
+
+    expect(route.status).toBe('abstained');
+    expect(route.candidates[0]).toMatchObject({ bucket: 'edit-site' });
+  });
 });

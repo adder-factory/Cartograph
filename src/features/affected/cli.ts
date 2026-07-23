@@ -126,12 +126,12 @@ export async function handleAffectedCommand(
           ...outputArgs,
           ...(options.includeCommands
             ? {
-                verificationCommands: buildAffectedVerificationCommands(
-                  deps.packageDeps,
+                verificationCommands: buildAffectedVerificationCommands({
+                  deps: deps.packageDeps,
                   projectPath,
                   candidates,
-                  barrelsReached.length > 0,
-                ),
+                  suiteRisk: barrelsReached.length > 0,
+                }),
               }
             : {}),
           ...(deps.style ? { style: deps.style } : {}),
@@ -224,12 +224,15 @@ function buildAffectedCoreInput({ deps, cg, changed, options }: BuildAffectedCor
   };
 }
 
-function buildAffectedVerificationCommands(
-  deps: AffectedPackageDeps,
-  projectPath: string,
-  candidates: readonly AffectedTestCandidate[],
-  suiteRisk: boolean,
-): string[] {
+interface BuildAffectedVerificationCommandsArgs {
+  deps: AffectedPackageDeps;
+  projectPath: string;
+  candidates: readonly AffectedTestCandidate[];
+  suiteRisk: boolean;
+}
+
+function buildAffectedVerificationCommands(args: BuildAffectedVerificationCommandsArgs): string[] {
+  const { deps, projectPath, candidates, suiteRisk } = args;
   const manager = deps.detectPackageManager(projectPath);
   const scripts = deps.readPackageScripts(projectPath);
   const commands: string[] = [];

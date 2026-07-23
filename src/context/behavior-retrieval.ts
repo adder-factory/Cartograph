@@ -2,7 +2,7 @@ import { logDebug } from '../errors.js';
 import type { SearchResult } from '../search/types.js';
 import { z } from 'zod';
 
-export const ContextRetrievalModeSchema = z.enum(['auto', 'deterministic']);
+export const ContextRetrievalModeSchema = z.enum(['auto', 'deterministic', 'hybrid']);
 type ContextRetrievalMode = z.infer<typeof ContextRetrievalModeSchema>;
 
 const BehaviorRetrievalTraceSchema = z.object({
@@ -10,7 +10,13 @@ const BehaviorRetrievalTraceSchema = z.object({
   strategy: z.enum(['lexical-graph', 'hybrid']),
   hybridAttempted: z.boolean(),
   hybridCandidateCount: z.number().int().nonnegative(),
-  reason: z.enum(['explicit-deterministic', 'non-behavior-query', 'behavior-query', 'hybrid-failed']),
+  reason: z.enum([
+    'explicit-deterministic',
+    'explicit-hybrid',
+    'non-behavior-query',
+    'behavior-query',
+    'hybrid-failed',
+  ]),
 });
 export type BehaviorRetrievalTrace = z.infer<typeof BehaviorRetrievalTraceSchema>;
 
@@ -88,7 +94,7 @@ export async function prepareBehaviorRetrieval(args: PrepareBehaviorRetrievalArg
     };
   }
 
-  if (!behaviorQuestion) {
+  if (!behaviorQuestion && retrievalMode === 'auto') {
     return {
       extraCandidates: [],
       behaviorBias: false,
@@ -102,27 +108,27 @@ export async function prepareBehaviorRetrieval(args: PrepareBehaviorRetrievalArg
     };
   }
 
-  const searchLimit = Math.min(BEHAVIOR_QUESTION_SEARCH_LIMIT, maxNodes);
+  const searchLimit = behaviorQuestion ? Math.min(BEHAVIOR_QUESTION_SEARCH_LIMIT, maxNodes) : undefined;
   try {
     const extraCandidates = await search.searchHybrid(task, { limit: maxNodes * 2 });
     return {
       extraCandidates,
-      behaviorBias: true,
-      searchLimit,
+      behaviorBias: behaviorQuestion,
+      ...(searchLimit === undefined ? {} : { searchLimit }),
       trace: makeRetrievalTrace({
         requested: retrievalMode,
         strategy: 'hybrid',
         hybridAttempted: true,
         hybridCandidateCount: extraCandidates.length,
-        reason: 'behavior-query',
+        reason: retrievalMode === 'hybrid' ? 'explicit-hybrid' : 'behavior-query',
       }),
     };
   } catch (error) {
     logDebug('behavior context: hybrid candidate fetch failed', { error: String(error) });
     return {
       extraCandidates: [],
-      behaviorBias: true,
-      searchLimit,
+      behaviorBias: behaviorQuestion,
+      ...(searchLimit === undefined ? {} : { searchLimit }),
       trace: makeRetrievalTrace({
         requested: retrievalMode,
         strategy: 'lexical-graph',

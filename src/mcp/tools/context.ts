@@ -387,12 +387,25 @@ function topContextNodes(context: TaskContext, limit: number): Node[] {
   return Array.from(context.subgraph.nodes.values()).slice(0, limit);
 }
 
-function buildContextNextActions(
-  context: TaskContext,
-  task: string,
-  route: ContextRoute,
-  toolAvailable: (toolName: string) => boolean,
-): NextAction[] {
+interface BuildContextNextActionsArgs {
+  context: TaskContext;
+  task: string;
+  route: ContextRoute;
+  toolAvailable: (toolName: string) => boolean;
+}
+
+function buildContextNextActions(args: BuildContextNextActionsArgs): NextAction[] {
+  const { context, task, route, toolAvailable } = args;
+  const nodes = contextActionNodes(context, route);
+  const crossCutting = looksLikeCrossCuttingTask(task);
+  const actions =
+    nodes.length === 0 || route.status === 'abstained'
+      ? buildFallbackContextActions({ task, crossCutting, toolAvailable })
+      : buildRoutedContextActions({ task, nodes, crossCutting, toolAvailable });
+  return actions.filter((action) => toolAvailable(action.tool));
+}
+
+function contextActionNodes(context: TaskContext, route: ContextRoute): Node[] {
   const routeNodeIds = route.candidates
     .filter((candidate) => candidate.bucket === 'edit-site' && candidate.confidence !== 'low')
     .map((candidate) => candidate.nodeId);
@@ -401,57 +414,76 @@ function buildContextNextActions(
     const node = nodesById.get(nodeId);
     return node ? [node] : [];
   });
-  const nodes = (routedNodes.length > 0 ? routedNodes : topContextNodes(context, PLAN_ACTION_NODE_LIMIT)).slice(
-    0,
-    PLAN_ACTION_NODE_LIMIT,
-  );
-  const crossCutting = looksLikeCrossCuttingTask(task);
-  if (nodes.length === 0 || route.status === 'abstained') {
-    const searchMode = crossCutting ? 'intent' : 'semantic';
-    const fallback: NextAction[] = [
-      {
-        tool: 'cartograph_find',
-        args: { by: 'name', mode: searchMode, query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
-        reason: crossCutting
-          ? 'Try concept-oriented retrieval because broad cross-cutting wording found no entry symbols.'
-          : 'Try a broader semantic symbol search because context found no entry symbols.',
-        priority: PLAN_PRIORITY_PRIMARY,
-      },
-      {
-        tool: 'cartograph_files',
-        args: { format: 'summary', lowTokens: true },
-        reason: 'Re-orient around indexed directory structure before trying content search.',
-        priority: PLAN_PRIORITY_IMPACT,
-      },
-    ];
-    if (crossCutting && toolAvailable('cartograph_deps')) fallback.unshift(buildDependencyCoverageAction());
-    return fallback.filter((action) => toolAvailable(action.tool));
-  }
+  const candidates = routedNodes.length > 0 ? routedNodes : topContextNodes(context, PLAN_ACTION_NODE_LIMIT);
+  return candidates.slice(0, PLAN_ACTION_NODE_LIMIT);
+}
 
-  const primary = nodes[0]!;
-  const rest = nodes.slice(1);
-  const actions: NextAction[] =
-    crossCutting && toolAvailable('cartograph_deps')
-      ? [
-          buildDependencyCoverageAction(),
-          {
-            tool: 'cartograph_find',
-            args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
-            reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
-            priority: PLAN_PRIORITY_PRIMARY,
-          },
-        ]
-      : crossCutting
-        ? [
-            {
-              tool: 'cartograph_find',
-              args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
-              reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
-              priority: PLAN_PRIORITY_PRIMARY,
-            },
-          ]
-        : [];
-  actions.push(
+interface BuildFallbackContextActionsArgs {
+  task: string;
+  crossCutting: boolean;
+  toolAvailable: (toolName: string) => boolean;
+}
+
+function buildFallbackContextActions(args: BuildFallbackContextActionsArgs): NextAction[] {
+  const searchMode = args.crossCutting ? 'intent' : 'semantic';
+  const fallback: NextAction[] = [
+    {
+      tool: 'cartograph_find',
+      args: { by: 'name', mode: searchMode, query: args.task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+      reason: args.crossCutting
+        ? 'Try concept-oriented retrieval because broad cross-cutting wording found no entry symbols.'
+        : 'Try a broader semantic symbol search because context found no entry symbols.',
+      priority: PLAN_PRIORITY_PRIMARY,
+    },
+    {
+      tool: 'cartograph_files',
+      args: { format: 'summary', lowTokens: true },
+      reason: 'Re-orient around indexed directory structure before trying content search.',
+      priority: PLAN_PRIORITY_IMPACT,
+    },
+  ];
+  if (args.crossCutting && args.toolAvailable('cartograph_deps')) {
+    fallback.unshift(buildDependencyCoverageAction());
+  }
+  return fallback;
+}
+
+interface BuildRoutedContextActionsArgs {
+  task: string;
+  nodes: readonly Node[];
+  crossCutting: boolean;
+  toolAvailable: (toolName: string) => boolean;
+}
+
+function buildRoutedContextActions(args: BuildRoutedContextActionsArgs): NextAction[] {
+  const primary = args.nodes[0]!;
+  const actions = buildCrossCuttingContextActions(args.task, args.crossCutting, args.toolAvailable);
+  actions.push(...buildPrimaryContextActions(primary, args.crossCutting));
+  appendAdjacentContextAction(actions, args.nodes.slice(1));
+  actions.push(buildFinalVerificationAction(args.toolAvailable));
+  return actions;
+}
+
+function buildCrossCuttingContextActions(
+  task: string,
+  crossCutting: boolean,
+  toolAvailable: (toolName: string) => boolean,
+): NextAction[] {
+  if (!crossCutting) return [];
+  const actions: NextAction[] = [];
+  if (toolAvailable('cartograph_deps')) actions.push(buildDependencyCoverageAction());
+  actions.push({
+    tool: 'cartograph_find',
+    args: { by: 'name', mode: 'intent', query: task, limit: PLAN_SEMANTIC_FIND_LIMIT, lowTokens: true },
+    reason: 'Cross-cutting wording benefits from concept search before committing to one symbol route.',
+    priority: PLAN_PRIORITY_PRIMARY,
+  });
+  return actions;
+}
+
+function buildPrimaryContextActions(primary: Node, crossCutting: boolean): NextAction[] {
+  const priority = crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_PRIMARY;
+  return [
     {
       tool: 'cartograph_node',
       args: {
@@ -462,7 +494,7 @@ function buildContextNextActions(
         includeTests: true,
       },
       reason: `Inspect the leading candidate \`${primary.name}\` with local risk and test signals.`,
-      priority: crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_PRIMARY,
+      priority,
     },
     {
       tool: 'cartograph_graph',
@@ -483,8 +515,10 @@ function buildContextNextActions(
       reason: `Find tests that directly or transitively cover \`${primary.name}\`.`,
       priority: crossCutting ? PLAN_PRIORITY_SKIM : PLAN_PRIORITY_TESTS,
     },
-  );
+  ];
+}
 
+function appendAdjacentContextAction(actions: NextAction[], rest: readonly Node[]): void {
   if (rest.length > 0) {
     actions.push({
       tool: 'cartograph_node',
@@ -493,22 +527,23 @@ function buildContextNextActions(
       priority: PLAN_PRIORITY_SKIM,
     });
   }
+}
+
+function buildFinalVerificationAction(toolAvailable: (toolName: string) => boolean): NextAction {
   if (toolAvailable('cartograph_verify')) {
-    actions.push({
+    return {
       tool: 'cartograph_verify',
       args: {},
       reason: 'After edits, select tests and compute the structural/finding delta in one verification packet.',
       priority: PLAN_PRIORITY_FINAL_CHECK,
-    });
-  } else {
-    actions.push({
-      tool: 'cartograph_compare_to_ref',
-      args: { findingsDelta: true },
-      reason: 'Run this before reporting done after code edits.',
-      priority: PLAN_PRIORITY_FINAL_CHECK,
-    });
+    };
   }
-  return actions.filter((action) => toolAvailable(action.tool));
+  return {
+    tool: 'cartograph_compare_to_ref',
+    args: { findingsDelta: true },
+    reason: 'Run this before reporting done after code edits.',
+    priority: PLAN_PRIORITY_FINAL_CHECK,
+  };
 }
 
 function buildDependencyCoverageAction(): NextAction {
@@ -605,80 +640,104 @@ function renderRouteCandidateGroups(route: ContextRoute): string[] {
 
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
-  const { cg, task, context, format, retrieval, route, workingTree, projectLearning, toolAvailable } = args;
-  const nextActions = buildContextNextActions(context, task, route, toolAvailable);
+  const nextActions = buildContextNextActions({
+    context: args.context,
+    task: args.task,
+    route: args.route,
+    toolAvailable: args.toolAvailable,
+  });
+  if (args.format === 'json') return formatJsonContextResponse(args, nextActions);
+  if (args.format === 'plan') return formatPlanContextResponse(args, nextActions);
+  if (args.format === 'handoff') return formatHandoffContextResponse(args, nextActions);
+  return formatMarkdownContextResponse(args, nextActions);
+}
+
+function formatJsonContextResponse(args: FormatContextResponseArgs, nextActions: NextAction[]): ToolResult {
+  const { context, retrieval, route, workingTree, projectLearning } = args;
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
   // so programmatic consumers can iterate nodes. The score trace is included
   // when `explain: true` was requested.
-  if (format === 'json') {
-    const serializable = {
-      query: context.query,
-      summary: context.summary,
-      entryPoints: context.entryPoints,
-      subgraph: {
-        nodes: Array.from(context.subgraph.nodes.values()),
-        edges: context.subgraph.edges,
-        roots: context.subgraph.roots,
-        ...(context.subgraph.scoreTrace === undefined ? {} : { scoreTrace: context.subgraph.scoreTrace }),
-      },
-      codeBlocks: context.codeBlocks,
-      relatedFiles: context.relatedFiles,
-      stats: context.stats,
-      retrieval,
-      route,
-      workingTree,
-      projectLearning,
-    };
-    return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
-  }
-  const nodes = [...context.subgraph.nodes.values()];
-  if (format === 'plan') {
-    return attachNextActions(
-      textResult(renderContextPlan({ task, context, nextActions, retrieval, route, workingTree, projectLearning })),
-      nextActions,
-    );
-  }
-  if (format === 'handoff') {
-    const packet = buildTaskHandoffPacket({
-      task,
-      route,
-      contextFiles: context.relatedFiles,
-      indexFreshness: taskHandoffIndexFreshness(cg),
-      workingTree,
-      projectLearning,
-      nextActions,
-    });
-    return attachNextActions(textResult(renderTaskHandoffPacket(packet)), nextActions);
-  }
+  const serializable = {
+    query: context.query,
+    summary: context.summary,
+    entryPoints: context.entryPoints,
+    subgraph: {
+      nodes: Array.from(context.subgraph.nodes.values()),
+      edges: context.subgraph.edges,
+      roots: context.subgraph.roots,
+      ...(context.subgraph.scoreTrace === undefined ? {} : { scoreTrace: context.subgraph.scoreTrace }),
+    },
+    codeBlocks: context.codeBlocks,
+    relatedFiles: context.relatedFiles,
+    stats: context.stats,
+    retrieval,
+    route,
+    workingTree,
+    projectLearning,
+  };
+  return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
+}
+
+function formatPlanContextResponse(args: FormatContextResponseArgs, nextActions: NextAction[]): ToolResult {
+  const { task, context, retrieval, route, workingTree, projectLearning } = args;
+  return attachNextActions(
+    textResult(renderContextPlan({ task, context, nextActions, retrieval, route, workingTree, projectLearning })),
+    nextActions,
+  );
+}
+
+function formatHandoffContextResponse(args: FormatContextResponseArgs, nextActions: NextAction[]): ToolResult {
+  const packet = buildTaskHandoffPacket({
+    task: args.task,
+    route: args.route,
+    contextFiles: args.context.relatedFiles,
+    indexFreshness: taskHandoffIndexFreshness(args.cg),
+    workingTree: args.workingTree,
+    projectLearning: args.projectLearning,
+    nextActions,
+  });
+  return attachNextActions(textResult(renderTaskHandoffPacket(packet)), nextActions);
+}
+
+function formatMarkdownContextResponse(args: FormatContextResponseArgs, nextActions: NextAction[]): ToolResult {
+  const nodes = [...args.context.subgraph.nodes.values()];
+  if (nodes.length === 0) return formatEmptyMarkdownContextResponse(args, nextActions);
+  return formatPopulatedMarkdownContextResponse(args, nodes, nextActions);
+}
+
+function formatEmptyMarkdownContextResponse(args: FormatContextResponseArgs, nextActions: NextAction[]): ToolResult {
   // No-match guard (audit-4 #5): a 0-node subgraph would otherwise
   // render a bare `## Code Context` + `**Query:**` stub with no
   // "nothing found" line and no freshness hint — leaving the agent
   // unable to tell a stale index from a genuine empty result. Mirror
   // explore's empty path.
-  if (nodes.length === 0) {
-    // Empty-result branch: the `## Code Context` stub is the message;
-    // the chokepoint appends the index-freshness hint so the agent
-    // can tell a stale index from a genuine miss (audit-4 #5).
-    return attachNextActions(
-      renderToolResponse({
-        body: '',
-        empty: {
-          message:
-            `## Code Context\n\n**Query:** ${task}\n\n_Retrieval: ${describeRetrieval(retrieval)}_\n\n` +
-            `No relevant code found for "${task}".` +
-            formatWorkingTreeOverlay(workingTree) +
-            formatProjectLearning(projectLearning),
-          freshness: { cg },
-        },
-      }),
-      nextActions,
-    );
-  }
-  const isFeatureQuery = looksLikeFeatureRequest(task);
+  // Empty-result branch: the `## Code Context` stub is the message;
+  // the chokepoint appends the index-freshness hint so the agent
+  // can tell a stale index from a genuine miss (audit-4 #5).
+  const message =
+    `## Code Context\n\n**Query:** ${args.task}\n\n_Retrieval: ${describeRetrieval(args.retrieval)}_\n\n` +
+    `No relevant code found for "${args.task}".` +
+    formatWorkingTreeOverlay(args.workingTree) +
+    formatProjectLearning(args.projectLearning);
+  return attachNextActions(
+    renderToolResponse({ body: '', empty: { message, freshness: { cg: args.cg } } }),
+    nextActions,
+  );
+}
+
+function formatPopulatedMarkdownContextResponse(
+  args: FormatContextResponseArgs,
+  nodes: Node[],
+  nextActions: NextAction[],
+): ToolResult {
+  const isFeatureQuery = looksLikeFeatureRequest(args.task);
   const reminder = isFeatureQuery ? '\n\n⚠️ **Ask user:** UX preferences, edge cases, acceptance criteria' : '';
-  const trace = context.subgraph.scoreTrace
-    ? annotateScoreTraceEntryMarkers(renderScoreExplanation(context.subgraph.scoreTrace), context.subgraph.scoreTrace)
+  const trace = args.context.subgraph.scoreTrace
+    ? annotateScoreTraceEntryMarkers(
+        renderScoreExplanation(args.context.subgraph.scoreTrace),
+        args.context.subgraph.scoreTrace,
+      )
     : '';
   // Passive `explain:true` nudge. Off-target ranking (a result that
   // shares a lexeme with the query but isn't structurally relevant) is
@@ -688,15 +747,15 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   // responses never have a ranking question and an explain-requested
   // call already renders the trace below.
   const explainHint =
-    context.subgraph.scoreTrace === undefined && nodes.length >= 3
+    args.context.subgraph.scoreTrace === undefined && nodes.length >= 3
       ? '\n\n_Top result not what you expected? Pass `explain: true` for a per-candidate score trace that names which retrieval pass elevated each row._'
       : '';
   const body =
-    formatContextAsMarkdown(context) +
-    `\n\n_Retrieval: ${describeRetrieval(retrieval)}_` +
-    formatWorkingTreeOverlay(workingTree) +
-    formatProjectLearning(projectLearning) +
-    formatContextRiskSignals(cg, nodes) +
+    formatContextAsMarkdown(args.context) +
+    `\n\n_Retrieval: ${describeRetrieval(args.retrieval)}_` +
+    formatWorkingTreeOverlay(args.workingTree) +
+    formatProjectLearning(args.projectLearning) +
+    formatContextRiskSignals(args.cg, nodes) +
     reminder +
     trace +
     explainHint;
@@ -704,7 +763,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
   // on top of an already-large markdown body) then appends the
   // stale-files note for the result nodes — note placement is owned
   // by the chokepoint so it survives truncation.
-  return attachNextActions(renderToolResponse({ body, freshness: { cg, nodes } }), nextActions);
+  return attachNextActions(renderToolResponse({ body, freshness: { cg: args.cg, nodes } }), nextActions);
 }
 
 function taskHandoffIndexFreshness(cg: Cartograph): TaskHandoffIndexFreshness {
@@ -727,6 +786,7 @@ function describeWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
 
 function formatWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
   if (report.status === 'off' || report.status === 'clean') return '';
+  const changedFiles = report.changedFiles.map((file) => `\`${file}\``).join(', ');
   const lines = [
     '',
     '### Working-tree overlay',
@@ -734,7 +794,7 @@ function formatWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
     `_Working-tree source read from disk without persisting an index sync. Graph relationships outside these roots still come from the stored index._`,
     '',
     `- Status: ${describeWorkingTreeOverlay(report)}`,
-    `- Changed files: ${report.changedFiles.map((file) => `\`${file}\``).join(', ')}`,
+    `- Changed files: ${changedFiles}`,
   ];
   for (const candidate of report.candidates) {
     lines.push(
@@ -814,7 +874,7 @@ const contextSchema = z.object({
       'Append a "Score trace" section showing each candidate\'s score after every retrieval pass — use to diagnose why a symbol ranked where it did. Default false.',
     ),
   retrievalMode: ContextRetrievalModeSchema.default('auto').describe(
-    '`auto` may use hybrid embeddings for behavior-shaped questions; `deterministic` guarantees this context call uses only lexical and graph retrieval.',
+    '`auto` may use hybrid embeddings for behavior-shaped questions; `deterministic` guarantees lexical + graph only; `hybrid` explicitly attempts the semantic candidate channel for any task and falls back safely if unavailable.',
   ),
   workingTree: WorkingTreeOverlayModeSchema.default('auto').describe(
     '`auto` follows the normal freshness policy then overlays any remaining changed source; `live` skips context auto-sync and parses current changed files ephemerally; `off` disables the overlay.',
@@ -879,6 +939,124 @@ function mergeEvidenceMaps(
   return merged;
 }
 
+interface ContextExecutionOptions {
+  format: ContextFormat;
+  maxNodes: number;
+  includeCode: boolean;
+  explain: boolean;
+}
+
+function resolveContextExecutionOptions(args: ContextArgs): ContextExecutionOptions {
+  const format: ContextFormat = args.format ?? 'markdown';
+  // `maxNodes` is already a positive integer — Zod's `.int().min(1)`
+  // rejected anything else at the dispatch boundary. No `numArg` needed.
+  const lowTokens = args.lowTokens === true;
+  const maxNodes = lowTokens ? Math.min(args.maxNodes, LOW_TOKEN_CONTEXT_MAX_NODES) : args.maxNodes;
+  // `code` is the canonical key; the legacy `includeCode` alias is
+  // consulted only when `code` was not sent.
+  const codePreference = args.code ?? args.includeCode;
+  return {
+    format,
+    maxNodes,
+    includeCode: shouldContextIncludeCode({ format, codePreference, lowTokens }),
+    explain: args.explain,
+  };
+}
+
+interface PreparedContextChannels {
+  projectLearning: ReturnType<typeof collectProjectLearningSeeds>;
+  workingTree: Awaited<ReturnType<typeof buildWorkingTreeOverlay>>;
+  behaviorRetrieval: Awaited<ReturnType<typeof prepareBehaviorRetrieval>>;
+  intentSeeds: ReturnType<typeof collectContextIntentSeeds> | null;
+  extraCandidates: SearchResult[];
+}
+
+interface PrepareContextChannelsArgs {
+  cg: Cartograph;
+  args: ContextArgs;
+  task: string;
+  execution: ContextExecutionOptions;
+}
+
+async function prepareContextChannels(args: PrepareContextChannelsArgs): Promise<PreparedContextChannels> {
+  const { cg, task, execution } = args;
+  // Disk overlay extraction and optional semantic retrieval are independent.
+  // Start both before the synchronous project-local trace scan and intent
+  // routing so wall time is bounded by the slowest channel, not their sum.
+  const workingTreePromise = buildWorkingTreeOverlay(cg, {
+    task,
+    mode: args.args.workingTree,
+    maxFiles: Math.min(execution.maxNodes, 20),
+  });
+  const behaviorRetrievalPromise = prepareBehaviorRetrieval({
+    search: cg.llm,
+    task,
+    maxNodes: execution.maxNodes,
+    retrievalMode: args.args.retrievalMode,
+  });
+  const projectLearning = collectProjectLearningSeeds(cg, { task, mode: args.args.localLearning });
+  const taskAnalysis = analyzeCodingTask(task);
+  const intentSeeds = prepareIntentSeeds(cg, execution, taskAnalysis.clauses);
+  const [workingTree, behaviorRetrieval] = await Promise.all([workingTreePromise, behaviorRetrievalPromise]);
+  const extraCandidates = mergeCandidateChannels(
+    workingTree.extraCandidates,
+    projectLearning.extraCandidates,
+    intentSeeds?.candidates ?? [],
+    behaviorRetrieval.extraCandidates,
+  );
+  return { projectLearning, workingTree, behaviorRetrieval, intentSeeds, extraCandidates };
+}
+
+function prepareIntentSeeds(
+  cg: Cartograph,
+  execution: ContextExecutionOptions,
+  clauses: readonly string[],
+): ReturnType<typeof collectContextIntentSeeds> | null {
+  if (execution.format !== 'plan' && execution.format !== 'handoff') return null;
+  return collectContextIntentSeeds({
+    clauses,
+    queries: cg.queries,
+    limit: Math.min(execution.maxNodes, PLAN_SEMANTIC_FIND_LIMIT),
+  });
+}
+
+interface BuildRawTaskContextArgs {
+  cg: Cartograph;
+  task: string;
+  execution: ContextExecutionOptions;
+  channels: PreparedContextChannels;
+}
+
+async function buildRawTaskContext(args: BuildRawTaskContextArgs): Promise<TaskContext | string> {
+  const { cg, task, execution, channels } = args;
+  // Use format: 'object' so buildContext returns the raw TaskContext and
+  // preserves nodes for freshness checks and route construction.
+  return cg.internals.contextBuilder.buildContext(task, {
+    maxNodes: execution.maxNodes,
+    includeCode: execution.includeCode,
+    format: 'object',
+    extraCandidates: channels.extraCandidates,
+    behaviorBias: channels.behaviorRetrieval.behaviorBias,
+    explain: execution.explain,
+    ...(channels.behaviorRetrieval.searchLimit === undefined
+      ? {}
+      : { searchLimit: channels.behaviorRetrieval.searchLimit }),
+  });
+}
+
+function routeBuiltContext(task: string, context: TaskContext, channels: PreparedContextChannels): ContextRoute {
+  return buildContextRoute({
+    task,
+    nodes: [...context.subgraph.nodes.values()],
+    ...(channels.intentSeeds ? { intentSpecificityByNodeId: channels.intentSeeds.specificityByNodeId } : {}),
+    intentEvidenceByNodeId: mergeEvidenceMaps(
+      channels.workingTree.evidenceByNodeId,
+      channels.projectLearning.evidenceByNodeId,
+      channels.intentSeeds?.evidenceByNodeId ?? new Map(),
+    ),
+  });
+}
+
 async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutcome> {
   const task = resolveContextTask(args);
   if (!task) {
@@ -892,95 +1070,25 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   if (sessionId) markSessionConsulted(sessionId);
 
   const cg = ctx.getCartograph(args.projectPath);
-  const format: ContextFormat = args.format ?? 'markdown';
-  // `maxNodes` is already a positive integer — Zod's `.int().min(1)`
-  // rejected anything else at the dispatch boundary. No `numArg` needed.
-  const lowTokens = args.lowTokens === true;
-  const maxNodes = lowTokens ? Math.min(args.maxNodes, LOW_TOKEN_CONTEXT_MAX_NODES) : args.maxNodes;
-  // `code` is the canonical key (defaults to true via the `!== false`
-  // fallthrough); the legacy `includeCode` alias is consulted only when
-  // `code` was not sent. `code` carries no Zod `.default` precisely so
-  // "omitted" stays distinguishable from an explicit `code: true`.
-  const codePreference = args.code ?? args.includeCode;
-  const includeCode = shouldContextIncludeCode({ format, codePreference, lowTokens });
-  // `explain` opts into the per-candidate score-trace section.
-  const explain = args.explain;
-  const projectLearning = collectProjectLearningSeeds(cg, { task, mode: args.localLearning });
-  const workingTree = await buildWorkingTreeOverlay(cg, {
-    task,
-    mode: args.workingTree,
-    maxFiles: Math.min(maxNodes, 20),
-  });
-
-  // Approach (a): when the task is a behaviour question ("how does X
-  // happen / when is X triggered"), share `cartograph_ask`'s hybrid
-  // retrieval substrate by pre-running it and forwarding the hits
-  // to the context builder via `extraCandidates`. Cheap when no embed
-  // model is configured — `searchHybrid` falls back to FTS-only, and
-  // a fetch failure (e.g. summarise backend offline) returns `[]` so
-  // context degrades to its lexical-only baseline.
-  const behaviorRetrieval = await prepareBehaviorRetrieval({
-    search: cg.llm,
-    task,
-    maxNodes,
-    retrievalMode: args.retrievalMode,
-  });
-  const taskAnalysis = analyzeCodingTask(task);
-  const intentSeeds =
-    format === 'plan' || format === 'handoff'
-      ? collectContextIntentSeeds({
-          clauses: taskAnalysis.clauses,
-          queries: cg.queries,
-          limit: Math.min(maxNodes, PLAN_SEMANTIC_FIND_LIMIT),
-        })
-      : null;
-  const extraCandidates = mergeCandidateChannels(
-    workingTree.extraCandidates,
-    projectLearning.extraCandidates,
-    intentSeeds?.candidates ?? [],
-    behaviorRetrieval.extraCandidates,
-  );
-
-  // Use format: 'object' so buildContext returns the raw TaskContext
-  // (its 'markdown' and 'json' formats serialise to a string and
-  // discard the underlying subgraph). We render markdown ourselves
-  // and keep the nodes available for the per-file stale check.
-  const context = await cg.internals.contextBuilder.buildContext(task, {
-    maxNodes,
-    includeCode,
-    format: 'object',
-    extraCandidates,
-    behaviorBias: behaviorRetrieval.behaviorBias,
-    explain,
-    ...(behaviorRetrieval.searchLimit === undefined ? {} : { searchLimit: behaviorRetrieval.searchLimit }),
-  });
+  const execution = resolveContextExecutionOptions(args);
+  const channels = await prepareContextChannels({ cg, args, task, execution });
+  const context = await buildRawTaskContext({ cg, task, execution, channels });
   // Shouldn't happen with format='object' but guard for safety.
   if (typeof context === 'string') {
-    return ok(textResult(`${context}\n\n_Retrieval: ${describeRetrieval(behaviorRetrieval.trace)}_`));
+    return ok(textResult(`${context}\n\n_Retrieval: ${describeRetrieval(channels.behaviorRetrieval.trace)}_`));
   }
 
-  const route = buildContextRoute({
-    task,
-    nodes: [...context.subgraph.nodes.values()],
-    intentEvidenceByNodeId: mergeEvidenceMaps(
-      workingTree.evidenceByNodeId,
-      projectLearning.evidenceByNodeId,
-      intentSeeds?.evidenceByNodeId ?? new Map(),
-    ),
-  });
-
-  // Format passthrough — `markdown` (default) emits the enriched markdown
-  // report; `json` returns the structured TaskContext for programmatic consumers.
+  const route = routeBuiltContext(task, context, channels);
   return ok(
     formatContextResponse({
       cg,
       task,
       context,
-      format,
-      retrieval: behaviorRetrieval.trace,
+      format: execution.format,
+      retrieval: channels.behaviorRetrieval.trace,
       route,
-      workingTree: workingTree.report,
-      projectLearning: projectLearning.report,
+      workingTree: channels.workingTree.report,
+      projectLearning: channels.projectLearning.report,
       toolAvailable: (toolName) => contextToolAvailable(ctx, toolName),
     }),
   );

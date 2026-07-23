@@ -30,7 +30,7 @@ export const EmbeddingArtifactSchema = z.object({
   detail: z.string().min(1),
 });
 
-export const EmbeddingAuditTotalsSchema = z.object({
+const EmbeddingAuditTotalsSchema = z.object({
   storeRows: z.number().int().nonnegative(),
   referencedRows: z.number().int().nonnegative(),
   orphanRows: z.number().int().nonnegative(),

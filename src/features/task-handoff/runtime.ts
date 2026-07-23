@@ -1,12 +1,32 @@
+import { z } from 'zod';
+import { ContextRouteCandidateSchema, ContextRouteSchema } from '../context-route/contract.js';
 import type { ContextRoute } from '../context-route/index.js';
+import { WorkingTreeOverlayReportSchema } from '../working-tree-overlay/contract.js';
 import type { WorkingTreeOverlayReport } from '../working-tree-overlay/index.js';
+import { ProjectLearningReportSchema } from '../retrieval-learning/contract.js';
 import type { ProjectLearningReport } from '../retrieval-learning/index.js';
 import {
-  TaskHandoffPacketSchema,
-  type TaskHandoffAction,
+  TaskHandoffActionSchema,
+  TaskHandoffIndexFreshnessSchema,
   type TaskHandoffIndexFreshness,
-  type TaskHandoffPacket,
 } from './contract.js';
+
+const TaskHandoffPacketSchema = z.object({
+  version: z.literal(1),
+  status: z.enum(['ready', 'needs-narrowing']),
+  task: z.string().min(1),
+  route: ContextRouteSchema,
+  editSites: z.array(ContextRouteCandidateSchema),
+  contextFiles: z.array(z.string().min(1)),
+  indexFreshness: TaskHandoffIndexFreshnessSchema,
+  workingTree: WorkingTreeOverlayReportSchema,
+  projectLearning: ProjectLearningReportSchema,
+  nextActions: z.array(TaskHandoffActionSchema),
+  resumeGuidance: z.array(z.string().min(1)).min(1),
+});
+
+export type TaskHandoffAction = z.infer<typeof TaskHandoffActionSchema>;
+type TaskHandoffPacket = z.infer<typeof TaskHandoffPacketSchema>;
 
 export interface BuildTaskHandoffPacketArgs {
   task: string;
@@ -56,7 +76,7 @@ export function buildTaskHandoffPacket(args: BuildTaskHandoffPacketArgs): TaskHa
 }
 
 export function renderTaskHandoffPacket(packet: TaskHandoffPacket): string {
-  const lines = [
+  return [
     '## Coding task handoff',
     '',
     `**Packet version:** ${packet.version}`,
@@ -70,7 +90,35 @@ export function renderTaskHandoffPacket(packet: TaskHandoffPacket): string {
     '',
     '### Routing decision',
     '',
-  ];
+    ...renderRoutingDecision(packet),
+    '',
+    '### Working tree',
+    '',
+    ...renderWorkingTree(packet),
+    ...packet.workingTree.skipped.map((skipped) => `- Overlay caveat: ${skipped.filePath} — ${skipped.reason}`),
+    '',
+    '### Project-local retrieval learning',
+    '',
+    ...renderProjectLearning(packet),
+    '',
+    '### Context files',
+    '',
+    ...renderContextFiles(packet),
+    '',
+    '### Suggested MCP sequence',
+    '',
+    '```json',
+    JSON.stringify(packet.nextActions, null, 2),
+    '```',
+    '',
+    '### Resume guidance',
+    '',
+    ...packet.resumeGuidance.map((guidance) => `- ${guidance}`),
+  ].join('\n');
+}
+
+function renderRoutingDecision(packet: TaskHandoffPacket): string[] {
+  const lines: string[] = [];
   if (packet.route.status === 'abstained') {
     lines.push(`- Router abstained: ${packet.route.reason}`);
   }
@@ -84,47 +132,52 @@ export function renderTaskHandoffPacket(packet: TaskHandoffPacket): string {
       );
     }
   }
-  lines.push('', '### Working tree', '');
+  return lines;
+}
+
+function renderWorkingTree(packet: TaskHandoffPacket): string[] {
   if (packet.workingTree.changedFiles.length === 0) {
-    lines.push(`- Overlay status: ${packet.workingTree.status}; no changed source files detected.`);
-  } else {
-    lines.push(
-      `- Overlay status: ${packet.workingTree.status} (${packet.workingTree.extractedFiles.length}/${packet.workingTree.changedFiles.length} changed files parsed from live disk).`,
-      `- Changed files: ${packet.workingTree.changedFiles.map((file) => `\`${file}\``).join(', ')}`,
-      '- Preserve the existing working-tree changes; this packet does not authorize discarding or rewriting unrelated work.',
-    );
-    for (const candidate of packet.workingTree.candidates.slice(0, HANDOFF_EDIT_SITE_LIMIT)) {
-      lines.push(
+    return [`- Overlay status: ${packet.workingTree.status}; no changed source files detected.`];
+  }
+  const changedFiles = packet.workingTree.changedFiles.map(formatCodeSpan).join(', ');
+  const candidates = packet.workingTree.candidates
+    .slice(0, HANDOFF_EDIT_SITE_LIMIT)
+    .map(
+      (candidate) =>
         `- Live symbol: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} [${candidate.facets.join(' + ')}]`,
-      );
-    }
-  }
-  for (const skipped of packet.workingTree.skipped) {
-    lines.push(`- Overlay caveat: ${skipped.filePath} — ${skipped.reason}`);
-  }
-  lines.push('', '### Project-local retrieval learning', '');
-  if (packet.projectLearning.status !== 'ready') {
-    lines.push(
-      `- ${packet.projectLearning.status === 'off' ? 'Disabled for this call.' : 'No similar successful prior route was found.'}`,
     );
-  } else {
-    lines.push(
+  return [
+    `- Overlay status: ${packet.workingTree.status} (${packet.workingTree.extractedFiles.length}/${packet.workingTree.changedFiles.length} changed files parsed from live disk).`,
+    `- Changed files: ${changedFiles}`,
+    '- Preserve the existing working-tree changes; this packet does not authorize discarding or rewriting unrelated work.',
+    ...candidates,
+  ];
+}
+
+function renderProjectLearning(packet: TaskHandoffPacket): string[] {
+  if (packet.projectLearning.status === 'ready') {
+    return [
       `- ${packet.projectLearning.contextMatches} similar prior context(s) produced ${packet.projectLearning.outcomeSignals} successful follow-up signal(s).`,
-    );
-    for (const candidate of packet.projectLearning.candidates) {
-      lines.push(
-        `- Learned candidate: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} via ${candidate.tools.join(', ')}`,
-      );
-    }
+      ...packet.projectLearning.candidates.map(
+        (candidate) =>
+          `- Learned candidate: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} via ${candidate.tools.join(', ')}`,
+      ),
+    ];
   }
-  lines.push('', '### Context files', '');
-  lines.push(
-    packet.contextFiles.length > 0 ? packet.contextFiles.map((file) => `- \`${file}\``).join('\n') : '- None yet.',
-  );
-  lines.push('', '### Suggested MCP sequence', '', '```json', JSON.stringify(packet.nextActions, null, 2), '```');
-  lines.push('', '### Resume guidance', '');
-  for (const guidance of packet.resumeGuidance) lines.push(`- ${guidance}`);
-  return lines.join('\n');
+  const message =
+    packet.projectLearning.status === 'off'
+      ? 'Disabled for this call.'
+      : 'No similar successful prior route was found.';
+  return [`- ${message}`];
+}
+
+function renderContextFiles(packet: TaskHandoffPacket): string[] {
+  if (packet.contextFiles.length === 0) return ['- None yet.'];
+  return packet.contextFiles.map((file) => `- ${formatCodeSpan(file)}`);
+}
+
+function formatCodeSpan(value: string): string {
+  return `\`${value}\``;
 }
 
 function formatIndexFreshness(freshness: TaskHandoffIndexFreshness): string {

@@ -76,6 +76,7 @@ answer without loading whole files into context.
 | "How does another agent resume safely?" | A live working-tree packet from `cartograph context --format handoff` with edit evidence, preserved files, next calls, and verification guidance |
 | "Has this project taught us a better route?" | Deterministic, project-local seeds from similar prior context → successful follow-up sequences; provenance is shown and `--local-learning off` disables it |
 | "Can I trust semantic search after a model change?" | Active-model coverage plus a model/grain/dimension audit; cleanup previews protect active rows and legacy refs without a replacement before obsolete cache is removed |
+| "Did hybrid retrieval actually help coding tasks?" | A patch-task benchmark comparing deterministic, auto, and forced-hybrid routes on edit sites, affected tests, abstention, latency, and token payload |
 
 The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,

@@ -12,7 +12,7 @@ import {
 import { errMsg } from '../../errors.js';
 import type { Language, Node } from '../../types.js';
 import type { SearchResult } from '../../search/types.js';
-import { validatePathWithinRootReal } from '../../utils.js';
+import { processInBatches, validatePathWithinRootReal } from '../../utils.js';
 import { buildContextRoute } from '../context-route/index.js';
 import {
   WorkingTreeOverlayReportSchema,
@@ -42,6 +42,7 @@ interface OverlaySource {
 
 const DEFAULT_OVERLAY_FILE_LIMIT = 20;
 const MAX_OVERLAY_FILE_LIMIT = 100;
+const OVERLAY_READ_CONCURRENCY = 8;
 const OVERLAY_HIGH_SCORE = 30;
 const OVERLAY_MEDIUM_SCORE = 24;
 
@@ -68,7 +69,13 @@ export async function buildWorkingTreeOverlay(
     skipped.push({ filePath, reason: `working-tree overlay file cap (${maxFiles})` });
   }
 
-  const sources = await readOverlaySources(cg, selected, facetsByPath, snapshot.vanished, skipped);
+  const sources = await readOverlaySources({
+    cg,
+    files: selected,
+    facetsByPath,
+    vanished: snapshot.vanished,
+    skipped,
+  });
   await loadGrammarsForLanguages([...new Set(sources.map((source) => source.language))]);
   const liveNodes: Node[] = [];
   const facetsByNodeId = new Map<string, WorkingTreeOverlayFacet[]>();
@@ -122,11 +129,12 @@ export async function buildWorkingTreeOverlay(
     });
 
   const status = skipped.length > 0 || extractedFiles.length < changedFiles.length ? 'partial' : 'ready';
+  const sortedExtractedFiles = [...extractedFiles].sort((a, b) => a.localeCompare(b));
   const report = WorkingTreeOverlayReportSchema.parse({
     mode,
     status,
     changedFiles,
-    extractedFiles: extractedFiles.sort((a, b) => a.localeCompare(b)),
+    extractedFiles: sortedExtractedFiles,
     candidates,
     skipped,
   });
@@ -159,56 +167,69 @@ function pathTaskScore(filePath: string, taskTokens: ReadonlySet<string>): numbe
   return pathTokens.reduce((score, token) => score + (taskTokens.has(token) ? 1 : 0), 0);
 }
 
-async function readOverlaySources(
-  cg: Cartograph,
-  files: readonly string[],
-  facetsByPath: ReadonlyMap<string, WorkingTreeOverlayFacet[]>,
-  vanished: ReadonlySet<string>,
-  skipped: Array<{ filePath: string; reason: string }>,
-): Promise<OverlaySource[]> {
+interface ReadOverlaySourcesArgs {
+  cg: Cartograph;
+  files: readonly string[];
+  facetsByPath: ReadonlyMap<string, WorkingTreeOverlayFacet[]>;
+  vanished: ReadonlySet<string>;
+  skipped: Array<{ filePath: string; reason: string }>;
+}
+
+async function readOverlaySources(args: ReadOverlaySourcesArgs): Promise<OverlaySource[]> {
   const out: OverlaySource[] = [];
-  for (const filePath of files) {
-    if (vanished.has(filePath)) {
-      skipped.push({ filePath, reason: 'file was deleted from the working tree' });
-      continue;
-    }
-    if (!shouldIncludeFile(filePath, cg.config)) {
-      skipped.push({ filePath, reason: 'file is outside configured include/exclude policy' });
-      continue;
-    }
-    const absolutePath = validatePathWithinRootReal(cg.projectRoot, filePath);
-    if (!absolutePath) {
-      skipped.push({ filePath, reason: 'path is missing or resolves outside the project root' });
-      continue;
-    }
-    try {
-      const stat = await fsp.stat(absolutePath);
-      if (!stat.isFile()) {
-        skipped.push({ filePath, reason: 'path is not a regular file' });
-        continue;
-      }
-      if (stat.size > cg.config.maxFileSize) {
-        skipped.push({ filePath, reason: `file exceeds maxFileSize (${cg.config.maxFileSize} bytes)` });
-        continue;
-      }
-      const source = await fsp.readFile(absolutePath, 'utf8');
-      if (Buffer.byteLength(source, 'utf8') > cg.config.maxFileSize) {
-        skipped.push({ filePath, reason: `decoded source exceeds maxFileSize (${cg.config.maxFileSize} bytes)` });
-        continue;
-      }
-      const language = detectLanguage(filePath, source);
-      if (!isLanguageSupported(language)) {
-        skipped.push({ filePath, reason: `unsupported language (${language})` });
-        continue;
-      }
-      const facets = facetsByPath.get(filePath);
-      if (!facets || facets.length === 0) continue;
-      out.push({ filePath, source, language, facets });
-    } catch (error) {
-      skipped.push({ filePath, reason: `read failed: ${errMsg(error)}` });
-    }
+  const results = await processInBatches({
+    items: [...args.files],
+    batchSize: OVERLAY_READ_CONCURRENCY,
+    processor: async (filePath) => ({ filePath, result: await readOverlaySource({ ...args, filePath }) }),
+  });
+  for (const { filePath, result } of results) {
+    if (result.status === 'ready') out.push(result.source);
+    else args.skipped.push({ filePath, reason: result.reason });
   }
   return out;
+}
+
+type OverlaySourceReadResult = { status: 'ready'; source: OverlaySource } | { status: 'skipped'; reason: string };
+
+interface ReadOverlaySourceArgs extends ReadOverlaySourcesArgs {
+  filePath: string;
+}
+
+async function readOverlaySource(args: ReadOverlaySourceArgs): Promise<OverlaySourceReadResult> {
+  const prepared = prepareOverlaySource(args);
+  if (prepared.status === 'skipped') return prepared;
+  try {
+    const stat = await fsp.stat(prepared.absolutePath);
+    if (!stat.isFile()) return { status: 'skipped', reason: 'path is not a regular file' };
+    if (stat.size > args.cg.config.maxFileSize) {
+      return { status: 'skipped', reason: `file exceeds maxFileSize (${args.cg.config.maxFileSize} bytes)` };
+    }
+    const source = await fsp.readFile(prepared.absolutePath, 'utf8');
+    if (Buffer.byteLength(source, 'utf8') > args.cg.config.maxFileSize) {
+      return { status: 'skipped', reason: `decoded source exceeds maxFileSize (${args.cg.config.maxFileSize} bytes)` };
+    }
+    const language = detectLanguage(args.filePath, source);
+    if (!isLanguageSupported(language)) return { status: 'skipped', reason: `unsupported language (${language})` };
+    return { status: 'ready', source: { filePath: args.filePath, source, language, facets: prepared.facets } };
+  } catch (error) {
+    return { status: 'skipped', reason: `read failed: ${errMsg(error)}` };
+  }
+}
+
+type PreparedOverlaySource =
+  | { status: 'ready'; absolutePath: string; facets: WorkingTreeOverlayFacet[] }
+  | { status: 'skipped'; reason: string };
+
+function prepareOverlaySource(args: ReadOverlaySourceArgs): PreparedOverlaySource {
+  if (args.vanished.has(args.filePath)) return { status: 'skipped', reason: 'file was deleted from the working tree' };
+  if (!shouldIncludeFile(args.filePath, args.cg.config)) {
+    return { status: 'skipped', reason: 'file is outside configured include/exclude policy' };
+  }
+  const absolutePath = validatePathWithinRootReal(args.cg.projectRoot, args.filePath);
+  if (!absolutePath) return { status: 'skipped', reason: 'path is missing or resolves outside the project root' };
+  const facets = args.facetsByPath.get(args.filePath);
+  if (!facets || facets.length === 0) return { status: 'skipped', reason: 'no changed-file facet was recorded' };
+  return { status: 'ready', absolutePath, facets };
 }
 
 function emptyOverlay(mode: WorkingTreeOverlayMode, status: 'off' | 'clean'): WorkingTreeOverlayResult {

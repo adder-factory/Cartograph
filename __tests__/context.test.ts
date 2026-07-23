@@ -322,6 +322,29 @@ export function validateEmail(email: string): boolean {
       expect(text).not.toContain('Router abstained');
     });
 
+    it('promotes a compound symbol-name anchor even when the symbol has no docstring', () => {
+      const classes = getNodesByKind(cg.queries, 'class');
+      const payment = classes.find((node) => node.name === 'PaymentService');
+      const checkout = classes.find((node) => node.name === 'CheckoutController');
+      expect(payment).toBeDefined();
+      expect(checkout).toBeDefined();
+      if (!payment || !checkout) throw new Error('expected payment and checkout fixtures');
+      cg.queries.updateNode({
+        ...payment,
+        docstring: 'Coordinates checkout controller payment flow retry policy and lifecycle behavior.',
+      });
+      cg.queries.updateNode({ ...checkout, docstring: undefined });
+
+      const seeds = collectContextIntentSeeds({
+        clauses: ['fix checkout controller lifecycle behavior'],
+        queries: cg.queries,
+        limit: 10,
+      });
+
+      expect(seeds.metadata.nodeIds[0]).toBe(checkout.id);
+      expect(seeds.evidenceByNodeId.get(checkout.id)?.join(' ')).toContain('symbol anchor matched');
+    });
+
     it('surfaces project-local successful follow-up history as explicit route evidence', async () => {
       const payment = getNodesByKind(cg.queries, 'class').find((node) => node.name === 'PaymentService');
       expect(payment).toBeDefined();

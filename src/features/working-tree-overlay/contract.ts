@@ -32,7 +32,5 @@ export const WorkingTreeOverlayReportSchema = z.object({
 });
 
 export type WorkingTreeOverlayMode = z.infer<typeof WorkingTreeOverlayModeSchema>;
-export type WorkingTreeOverlayStatus = z.infer<typeof WorkingTreeOverlayStatusSchema>;
 export type WorkingTreeOverlayFacet = z.infer<typeof WorkingTreeOverlayFacetSchema>;
-export type WorkingTreeOverlayCandidate = z.infer<typeof WorkingTreeOverlayCandidateSchema>;
 export type WorkingTreeOverlayReport = z.infer<typeof WorkingTreeOverlayReportSchema>;

@@ -3,7 +3,7 @@ import { AffectedTestCandidateSchema } from '../affected/contract.js';
 
 export const VerificationCommandKindSchema = z.enum(['targeted-tests', 'full-suite', 'project-gate']);
 
-export const VerificationCommandSchema = z.object({
+const VerificationCommandSchema = z.object({
   kind: VerificationCommandKindSchema,
   command: z.string().min(1),
   reason: z.string().min(1),
@@ -49,7 +49,6 @@ export const VerificationPlanSchema = z.discriminatedUnion('status', [
   }),
 ]);
 
-export type VerificationCommandKind = z.infer<typeof VerificationCommandKindSchema>;
 export type VerificationCommand = z.infer<typeof VerificationCommandSchema>;
 export type VerificationStructuralSummary = z.infer<typeof VerificationStructuralSummarySchema>;
 export type VerificationPlan = z.infer<typeof VerificationPlanSchema>;

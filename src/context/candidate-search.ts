@@ -127,8 +127,19 @@ function cbMergeExtraCandidates(
   return searchResults;
 }
 
-/** Number of top semantic extra-candidates guaranteed an entry-point slot. */
+/** Number of top semantic/overlay extra-candidates guaranteed an entry-point slot. */
 const GUARANTEED_EXTRA_ROOTS = 3;
+/**
+ * Deterministic clause anchors are substantially higher-trust than semantic
+ * candidates. Preserve enough of them for multi-concept patch tasks while
+ * keeping model/learning overlays on the tighter budget above.
+ */
+const GUARANTEED_INTENT_ROOTS = 8;
+type ExtraRootChannel = 'intent' | 'other';
+const EXTRA_ROOT_LIMITS: Readonly<Record<ExtraRootChannel, number>> = {
+  intent: GUARANTEED_INTENT_ROOTS,
+  other: GUARANTEED_EXTRA_ROOTS,
+};
 
 /**
  * Guarantee the top few semantic `extraCandidates` appear in the
@@ -152,17 +163,40 @@ function cbEnsureTopExtraRoots(
   if (!extras || extras.length === 0) return filteredResults;
   const present = new Set(filteredResults.map((r) => r.node.id));
   const guaranteed: SearchResult[] = [];
+  const counts: Record<ExtraRootChannel, number> = { intent: 0, other: 0 };
   for (const e of extras) {
-    if (guaranteed.length >= GUARANTEED_EXTRA_ROOTS) break;
-    if (!HIGH_VALUE_NODE_KINDS.includes(e.node.kind)) continue;
-    if (isDiagnosticPath(e.node.filePath)) continue;
-    if (present.has(e.node.id)) continue;
+    const channel = extraRootChannel(e);
+    if (counts[channel] >= EXTRA_ROOT_LIMITS[channel]) continue;
+    if (!isEligibleExtraRoot(e, present)) continue;
     guaranteed.push({ node: e.node, score: EXTRA_CANDIDATE_TOP });
+    counts[channel]++;
+    if (extraRootBudgetsFilled(counts)) break;
   }
   if (guaranteed.length === 0) return filteredResults;
   // Prepend the guaranteed roots; the lowest-scored lexical tail is
   // trimmed so the root count still respects `searchLimit`.
   return [...guaranteed, ...filteredResults].slice(0, Math.max(searchLimit, guaranteed.length));
+}
+
+function extraRootChannel(candidate: SearchResult): ExtraRootChannel {
+  return isDeterministicIntentExtra(candidate) ? 'intent' : 'other';
+}
+
+function isEligibleExtraRoot(candidate: SearchResult, present: ReadonlySet<string>): boolean {
+  if (!HIGH_VALUE_NODE_KINDS.includes(candidate.node.kind)) return false;
+  if (isDiagnosticPath(candidate.node.filePath)) return false;
+  return !present.has(candidate.node.id);
+}
+
+function extraRootBudgetsFilled(counts: Readonly<Record<ExtraRootChannel, number>>): boolean {
+  return counts.intent >= EXTRA_ROOT_LIMITS.intent && counts.other >= EXTRA_ROOT_LIMITS.other;
+}
+
+function isDeterministicIntentExtra(candidate: SearchResult): boolean {
+  return (
+    candidate.highlights?.some((highlight) => highlight.includes('matched') && highlight.includes('clause term')) ??
+    false
+  );
 }
 
 /** Inputs for the multi-term text-search pass (`cbCollectTermResultsAcross`). */
