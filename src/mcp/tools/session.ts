@@ -233,7 +233,7 @@ function sourceHeavyFinding(call: SessionCall): AuditFinding | null {
   const args = parseArgsJson(call.argsJson);
   if (call.toolName === 'cartograph_context') {
     const askedForCode = args['code'] !== false && args['includeCode'] !== false;
-    if (askedForCode && args['lowTokens'] !== true && args['format'] !== 'plan') {
+    if (askedForCode && args['lowTokens'] !== true && !['plan', 'handoff'].includes(String(args['format']))) {
       return {
         severity: 'warning',
         text:
@@ -333,7 +333,13 @@ function suggestedAuditActions(calls: ReadonlyArray<SessionCall>): string[] {
   ) {
     actions.push('`cartograph_verify` after edits, or `cartograph_tests_for({symbol})` for one target.');
   }
-  if (calls.some((c) => c.toolName === 'cartograph_context' && parseArgsJson(c.argsJson)['format'] !== 'plan')) {
+  if (
+    calls.some((c) => {
+      if (c.toolName !== 'cartograph_context') return false;
+      const format = parseArgsJson(c.argsJson)['format'];
+      return format !== 'plan' && format !== 'handoff';
+    })
+  ) {
     actions.push('`cartograph_context({task, format: "plan"})` for the next broad route decision.');
   }
   return actions;

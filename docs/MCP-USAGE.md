@@ -118,6 +118,13 @@ does not write the graph; live roots are combined with stored graph edges and
 their provenance is explicit. `format: "handoff"` enables this behavior
 automatically and emits a resumable packet that tells the next agent which
 working-tree files to preserve and which verification call to make.
+With `localLearning: "auto"` (the default), context can also reuse a bounded
+signal from this project's redacted MCP trace: a similar prior context call
+followed by successful `node`, `graph`, `tests_for`, file/range inspection, or
+verification. This is deterministic, stays inside the project database, never
+echoes the prior task text, and reports its provenance. Pass
+`localLearning: "off"` for a history-independent call. Legacy trace sessions
+without an exact project-root stamp are never used.
 For file-focused lookups, use `cartograph_files`: `format: "symbols"` for a
 one-file outline, `format: "deps"` for local dependencies/dependents, and
 `format: "module"` for directory summaries.

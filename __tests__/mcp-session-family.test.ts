@@ -138,6 +138,29 @@ describe('cartograph_session family (#13)', () => {
       expect(text).toContain('No test-selection call recorded');
     });
 
+    it('audit treats plan and handoff context formats as metadata-only', async () => {
+      const sessionId = 'metadata-context-session';
+      const ts = Date.now();
+      insertSession({ qb: cg.queries, id: sessionId, startedTs: ts, label: 'metadata-context' });
+      for (const [index, format] of ['plan', 'handoff'].entries()) {
+        appendToolCall(cg.queries, {
+          sessionId,
+          step: index + 1,
+          ts: ts + index + 1,
+          toolName: 'cartograph_context',
+          argsJson: JSON.stringify({ task: 'alpha', format }),
+          resultSummary: format === 'plan' ? '## Context route plan' : '## Coding task handoff',
+          durationMs: 1,
+        });
+      }
+
+      const text = textOf(
+        await handler.runHandler('cartograph_session', { action: 'audit', label: 'metadata-context' }),
+      );
+      expect(text).not.toContain('Source-heavy context call');
+      expect(text).not.toContain('for the next broad route decision');
+    });
+
     it('usage renders aggregate tool counts without args or result bodies', async () => {
       const sessionId = 'usage-session';
       const ts = Date.now();

@@ -22,6 +22,7 @@ Default path:
 - \`cartograph_status\` when project readiness, freshness, active server profile, or LLM setup is uncertain.
 - \`cartograph_context({task: "<task>", format: "plan"})\` to route an unfamiliar task before reading source.
 - \`cartograph_context({task: "<task>", format: "handoff"})\` to package live unsynced edits, preservation warnings, and the next verification calls for another agent.
+- Context may use deterministic project-local learning from similar prior context → successful follow-up sequences; provenance is explicit and \`localLearning: "off"\` disables it.
 - \`cartograph_find\` for symbols, regex content, env vars, or SQL refs.
 - \`cartograph_graph\` for callers, callees, impact, multi-hop walks, and shortest paths.
 - \`cartograph_files\` for project tree, one-file symbol outlines (\`format: "symbols"\`), file deps, and module summaries.

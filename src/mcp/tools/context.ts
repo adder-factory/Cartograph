@@ -35,6 +35,11 @@ import {
   type TaskHandoffAction,
   type TaskHandoffIndexFreshness,
 } from '../../features/task-handoff/index.js';
+import {
+  collectProjectLearningSeeds,
+  ProjectLearningModeSchema,
+  type ProjectLearningReport,
+} from '../../features/retrieval-learning/index.js';
 import { mcpServerProfileIncludesTool, resolveMcpServerProfile } from '../profiles.js';
 import { formatContextAsMarkdown } from '../../context/formatter.js';
 import { renderScoreExplanation } from '../../context/score-trace.js';
@@ -349,6 +354,7 @@ interface FormatContextResponseArgs {
   retrieval: BehaviorRetrievalTrace;
   route: ContextRoute;
   workingTree: WorkingTreeOverlayReport;
+  projectLearning: ProjectLearningReport;
   toolAvailable: (toolName: string) => boolean;
 }
 
@@ -521,8 +527,9 @@ function renderContextPlan(args: {
   retrieval: BehaviorRetrievalTrace;
   route: ContextRoute;
   workingTree: WorkingTreeOverlayReport;
+  projectLearning: ProjectLearningReport;
 }): string {
-  const { task, nextActions, retrieval, route, workingTree } = args;
+  const { task, nextActions, retrieval, route, workingTree, projectLearning } = args;
   const entryLines = renderRouteCandidateGroups(route);
   const anchorParts = [
     ...route.anchors.identifiers.map((anchor) => `\`${anchor}\``),
@@ -548,6 +555,7 @@ function renderContextPlan(args: {
     `**Clauses:** ${route.clauses.join(' | ')}`,
     `**Explicit anchors:** ${anchorParts.length > 0 ? anchorParts.join(', ') : 'none detected'}`,
     `**Working tree:** ${describeWorkingTreeOverlay(workingTree)}`,
+    `**Project-local learning:** ${describeProjectLearning(projectLearning)}`,
     '',
     ...decisionLines,
     ...entryLines,
@@ -597,7 +605,7 @@ function renderRouteCandidateGroups(route: ContextRoute): string[] {
 
 /** Render the context object into a tool result. Extracted from {@link handleContext}. */
 function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
-  const { cg, task, context, format, retrieval, route, workingTree, toolAvailable } = args;
+  const { cg, task, context, format, retrieval, route, workingTree, projectLearning, toolAvailable } = args;
   const nextActions = buildContextNextActions(context, task, route, toolAvailable);
   // JSON consumers get a properly serialized TaskContext. `subgraph.nodes`
   // is a Map which `JSON.stringify` renders as `{}` — serialize it to an array
@@ -620,13 +628,14 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       retrieval,
       route,
       workingTree,
+      projectLearning,
     };
     return attachNextActions(textResult(JSON.stringify(serializable, null, 2)), nextActions);
   }
   const nodes = [...context.subgraph.nodes.values()];
   if (format === 'plan') {
     return attachNextActions(
-      textResult(renderContextPlan({ task, context, nextActions, retrieval, route, workingTree })),
+      textResult(renderContextPlan({ task, context, nextActions, retrieval, route, workingTree, projectLearning })),
       nextActions,
     );
   }
@@ -637,6 +646,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
       contextFiles: context.relatedFiles,
       indexFreshness: taskHandoffIndexFreshness(cg),
       workingTree,
+      projectLearning,
       nextActions,
     });
     return attachNextActions(textResult(renderTaskHandoffPacket(packet)), nextActions);
@@ -657,7 +667,8 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
           message:
             `## Code Context\n\n**Query:** ${task}\n\n_Retrieval: ${describeRetrieval(retrieval)}_\n\n` +
             `No relevant code found for "${task}".` +
-            formatWorkingTreeOverlay(workingTree),
+            formatWorkingTreeOverlay(workingTree) +
+            formatProjectLearning(projectLearning),
           freshness: { cg },
         },
       }),
@@ -684,6 +695,7 @@ function formatContextResponse(args: FormatContextResponseArgs): ToolResult {
     formatContextAsMarkdown(context) +
     `\n\n_Retrieval: ${describeRetrieval(retrieval)}_` +
     formatWorkingTreeOverlay(workingTree) +
+    formatProjectLearning(projectLearning) +
     formatContextRiskSignals(cg, nodes) +
     reminder +
     trace +
@@ -734,6 +746,32 @@ function formatWorkingTreeOverlay(report: WorkingTreeOverlayReport): string {
   return lines.join('\n');
 }
 
+function describeProjectLearning(report: ProjectLearningReport): string {
+  if (report.status === 'off') return 'disabled';
+  if (report.status === 'empty') return 'no similar successful prior context';
+  const contexts = `${report.contextMatches} similar prior context${report.contextMatches === 1 ? '' : 's'}`;
+  return `${contexts}; ${report.outcomeSignals} successful follow-up signal${report.outcomeSignals === 1 ? '' : 's'}; ${report.candidates.length} learned candidate${report.candidates.length === 1 ? '' : 's'}`;
+}
+
+function formatProjectLearning(report: ProjectLearningReport): string {
+  if (report.status !== 'ready') return '';
+  const lines = [
+    '',
+    '### Project-local retrieval learning',
+    '',
+    `_Derived only from this project's prior Cartograph context → successful follow-up call sequences; no code or feedback leaves the local index._`,
+    '',
+    `- ${describeProjectLearning(report)}`,
+  ];
+  for (const candidate of report.candidates) {
+    lines.push(
+      `- Learned candidate: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} via ${candidate.tools.join(', ')}`,
+    );
+  }
+  lines.push('');
+  return lines.join('\n');
+}
+
 function describeRetrieval(trace: BehaviorRetrievalTrace): string {
   if (trace.reason === 'explicit-deterministic') return 'lexical + graph; hybrid disabled explicitly';
   if (trace.reason === 'non-behavior-query') return 'lexical + graph; hybrid not needed for this query shape';
@@ -780,6 +818,9 @@ const contextSchema = z.object({
   ),
   workingTree: WorkingTreeOverlayModeSchema.default('auto').describe(
     '`auto` follows the normal freshness policy then overlays any remaining changed source; `live` skips context auto-sync and parses current changed files ephemerally; `off` disables the overlay.',
+  ),
+  localLearning: ProjectLearningModeSchema.default('auto').describe(
+    '`auto` may seed routing from similar prior context calls followed by successful node/graph/test inspection in this project; `off` disables this deterministic local signal.',
   ),
   lowTokens: lowTokensField,
   projectPath: projectPathField,
@@ -864,6 +905,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   const includeCode = shouldContextIncludeCode({ format, codePreference, lowTokens });
   // `explain` opts into the per-candidate score-trace section.
   const explain = args.explain;
+  const projectLearning = collectProjectLearningSeeds(cg, { task, mode: args.localLearning });
   const workingTree = await buildWorkingTreeOverlay(cg, {
     task,
     mode: args.workingTree,
@@ -894,6 +936,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
       : null;
   const extraCandidates = mergeCandidateChannels(
     workingTree.extraCandidates,
+    projectLearning.extraCandidates,
     intentSeeds?.candidates ?? [],
     behaviorRetrieval.extraCandidates,
   );
@@ -919,7 +962,11 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
   const route = buildContextRoute({
     task,
     nodes: [...context.subgraph.nodes.values()],
-    intentEvidenceByNodeId: mergeEvidenceMaps(workingTree.evidenceByNodeId, intentSeeds?.evidenceByNodeId ?? new Map()),
+    intentEvidenceByNodeId: mergeEvidenceMaps(
+      workingTree.evidenceByNodeId,
+      projectLearning.evidenceByNodeId,
+      intentSeeds?.evidenceByNodeId ?? new Map(),
+    ),
   });
 
   // Format passthrough — `markdown` (default) emits the enriched markdown
@@ -933,6 +980,7 @@ async function handleContext(ctx: ToolCtx, args: ContextArgs): Promise<ToolOutco
       retrieval: behaviorRetrieval.trace,
       route,
       workingTree: workingTree.report,
+      projectLearning: projectLearning.report,
       toolAvailable: (toolName) => contextToolAvailable(ctx, toolName),
     }),
   );
@@ -945,6 +993,7 @@ export const CONTEXT_TOOL = defineTool({
     'Often enough to understand a feature or bug without further calls; takes free-form text (e.g. "how does session login work"). ' +
     'Returns CODE context by default; `retrievalMode: "deterministic"` prevents hybrid/embedding retrieval for this call; ' +
     '`workingTree: "live"` parses unsynced source without writing the graph; `format: "handoff"` packages live state for another agent; ' +
+    '`localLearning: "auto"` can reuse successful follow-up choices from prior local sessions; ' +
     '`lowTokens: true` suppresses code snippets and caps breadth. For new features still clarify UX/behavior with the user.',
   schema: contextSchema,
   handle: handleContext,

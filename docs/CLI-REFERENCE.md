@@ -131,6 +131,7 @@ cartograph node AuthService --include-callers --include-tests
 cartograph context "fix login timeout" --format plan
 cartograph context "finish login timeout" --format handoff
 cartograph context "debug current edits" --working-tree live
+cartograph context "debug without history" --local-learning off
 cartograph verify --ref HEAD
 cartograph explore billing routes
 cartograph files src --format tree

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { ContextRouteSchema, ContextRouteCandidateSchema } from '../context-route/contract.js';
 import { WorkingTreeOverlayReportSchema } from '../working-tree-overlay/contract.js';
+import { ProjectLearningReportSchema } from '../retrieval-learning/contract.js';
 
 export const TaskHandoffActionSchema = z.object({
   tool: z.string().min(1),
@@ -29,6 +30,7 @@ export const TaskHandoffPacketSchema = z.object({
   contextFiles: z.array(z.string().min(1)),
   indexFreshness: TaskHandoffIndexFreshnessSchema,
   workingTree: WorkingTreeOverlayReportSchema,
+  projectLearning: ProjectLearningReportSchema,
   nextActions: z.array(TaskHandoffActionSchema),
   resumeGuidance: z.array(z.string().min(1)).min(1),
 });

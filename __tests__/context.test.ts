@@ -12,6 +12,7 @@ import Cartograph from '../src/index.js';
 import { getNodesByKind } from '../src/db/queries.js';
 import { ToolHandler } from '../src/mcp/tools.js';
 import { collectContextIntentSeeds } from '../src/features/context-route/index.js';
+import { appendToolCall, insertSession } from '../src/db/queries-trace.js';
 
 describe('Context Builder', () => {
   let testDir: string;
@@ -319,6 +320,47 @@ export function validateEmail(email: string): boolean {
       expect(text).toContain('`CheckoutController`');
       expect(text).toContain('docstring matched');
       expect(text).not.toContain('Router abstained');
+    });
+
+    it('surfaces project-local successful follow-up history as explicit route evidence', async () => {
+      const payment = getNodesByKind(cg.queries, 'class').find((node) => node.name === 'PaymentService');
+      expect(payment).toBeDefined();
+      if (!payment) throw new Error('expected PaymentService fixture');
+      const sessionId = 'context-learning-fixture';
+      const startedTs = Date.now() - 100;
+      insertSession({ qb: cg.queries, id: sessionId, startedTs, projectRoot: cg.projectRoot });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 1,
+        ts: startedTs + 1,
+        toolName: 'cartograph_context',
+        argsJson: JSON.stringify({ task: 'fix payment retry handling', format: 'plan' }),
+        resultSummary: '## Context route plan',
+        durationMs: 1,
+      });
+      appendToolCall(cg.queries, {
+        sessionId,
+        step: 2,
+        ts: startedTs + 2,
+        toolName: 'cartograph_node',
+        argsJson: JSON.stringify({ symbol: payment.id }),
+        resultSummary: '## PaymentService',
+        durationMs: 1,
+      });
+
+      const handler = new ToolHandler(cg, { profile: 'coding' });
+      const result = await handler.execute('cartograph_context', {
+        task: 'debug payment retry behavior',
+        format: 'plan',
+        retrievalMode: 'deterministic',
+        localLearning: 'auto',
+      });
+      handler.closeAll();
+      const text = result.content[0]?.text ?? '';
+
+      expect(text).toContain('**Project-local learning:** 1 similar prior context');
+      expect(text).toContain('project-local follow-up');
+      expect(text).toContain('`PaymentService`');
     });
 
     it('supports deterministic retrieval mode and reports its provenance', async () => {

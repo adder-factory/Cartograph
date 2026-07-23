@@ -74,6 +74,7 @@ answer without loading whole files into context.
 | "What should I read first?" | A route plan from `cartograph context --format plan`, then exact source only where it is needed |
 | "What did my change touch?" | A structural and finding delta from `cartograph compare-to-ref` before handoff |
 | "How does another agent resume safely?" | A live working-tree packet from `cartograph context --format handoff` with edit evidence, preserved files, next calls, and verification guidance |
+| "Has this project taught us a better route?" | Deterministic, project-local seeds from similar prior context → successful follow-up sequences; provenance is shown and `--local-learning off` disables it |
 
 The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,

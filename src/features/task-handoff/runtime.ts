@@ -1,5 +1,6 @@
 import type { ContextRoute } from '../context-route/index.js';
 import type { WorkingTreeOverlayReport } from '../working-tree-overlay/index.js';
+import type { ProjectLearningReport } from '../retrieval-learning/index.js';
 import {
   TaskHandoffPacketSchema,
   type TaskHandoffAction,
@@ -13,6 +14,7 @@ export interface BuildTaskHandoffPacketArgs {
   contextFiles: readonly string[];
   indexFreshness: TaskHandoffIndexFreshness;
   workingTree: WorkingTreeOverlayReport;
+  projectLearning: ProjectLearningReport;
   nextActions: readonly TaskHandoffAction[];
 }
 
@@ -47,6 +49,7 @@ export function buildTaskHandoffPacket(args: BuildTaskHandoffPacketArgs): TaskHa
     contextFiles: [...new Set(args.contextFiles)].sort((a, b) => a.localeCompare(b)).slice(0, HANDOFF_FILE_LIMIT),
     indexFreshness: args.indexFreshness,
     workingTree: args.workingTree,
+    projectLearning: args.projectLearning,
     nextActions: args.nextActions,
     resumeGuidance,
   });
@@ -98,6 +101,21 @@ export function renderTaskHandoffPacket(packet: TaskHandoffPacket): string {
   }
   for (const skipped of packet.workingTree.skipped) {
     lines.push(`- Overlay caveat: ${skipped.filePath} — ${skipped.reason}`);
+  }
+  lines.push('', '### Project-local retrieval learning', '');
+  if (packet.projectLearning.status !== 'ready') {
+    lines.push(
+      `- ${packet.projectLearning.status === 'off' ? 'Disabled for this call.' : 'No similar successful prior route was found.'}`,
+    );
+  } else {
+    lines.push(
+      `- ${packet.projectLearning.contextMatches} similar prior context(s) produced ${packet.projectLearning.outcomeSignals} successful follow-up signal(s).`,
+    );
+    for (const candidate of packet.projectLearning.candidates) {
+      lines.push(
+        `- Learned candidate: \`${candidate.name}\` (${candidate.kind}) — ${candidate.filePath}:${candidate.line} via ${candidate.tools.join(', ')}`,
+      );
+    }
   }
   lines.push('', '### Context files', '');
   lines.push(
