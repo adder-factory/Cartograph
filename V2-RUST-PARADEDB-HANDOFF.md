@@ -80,11 +80,16 @@ This is the durable continuation point for the v2 rewrite. Read
   ParadeDB + pgvector job in 1m44s. The latter includes the capability doctor,
   generation/BM25 test, lease upgrade/concurrency/takeover test, and full
   managed Docker lifecycle on GitHub's amd64 runner.
+- Deterministic COPY ingestion and logical digest: `95530d2`; [run 29999242349](https://github.com/adder-factory/cartograph/actions/runs/29999242349)
+  passed the quality/no-SQLite job in 1m01s and the PostgreSQL 18 + pinned
+  ParadeDB + pgvector job in 1m44s. The database job passed the capability,
+  generation/BM25, COPY/digest/chunk/NULL/rollback, lease, and managed Docker
+  lifecycle tests on GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the observable project-operation
-lease slice. Continue with COPY loaders and deterministic generation digests;
-do not reopen the PostgreSQL-only or Rust-first decisions.
+The branch and origin are checkpointed through the deterministic COPY/digest
+slice. Continue with lease-owned bounded supervision; do not reopen the
+PostgreSQL-only or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -311,6 +316,73 @@ biomarkers at 0/0/0, and Sonar `OK` with 86.0% overall coverage, 91.5% new-code
 coverage, and zero new violations. GitHub run 29992907823 repeats the Rust and
 real-database proof on amd64.
 
+## Deterministic COPY ingestion and logical digest slice
+
+Implemented in Rust:
+
+- `GenerationFacts` is the unordered typed boundary for files, symbols, edges,
+  references, and ParadeDB search documents. The generation API no longer
+  accepts a caller-provided digest: readiness can only carry the digest computed
+  from the complete validated fact set.
+- The reducer validates normalized relative paths, language and text bounds,
+  finite confidence, database numeric bounds, source spans, branded
+  relationships, and document ownership. Symbols/references cannot extend past
+  their owning file or belong to `failed`/`skipped` files; file- and
+  symbol-bound documents must agree with the owning path and language.
+- Stable logical keys drive `BTreeMap` ordering and exact deduplication.
+  Conflicting repeated identities fail closed. JSON object keys are recursively
+  sorted, and canonical encoding streams through a hard 64 KiB writer budget
+  so oversized/wide metadata cannot first allocate an unbounded second copy.
+- A domain-separated BLAKE3 digest covers every reduced logical fact. It
+  deliberately excludes project ID, generation UUID/sequence, worker count,
+  database surrogate identity, and arrival order. Fixed-width numeric encoding,
+  explicit optional markers, length-delimited text, canonical JSON, and
+  normalized negative zero make the representation deterministic.
+- PostgreSQL text COPY coalesces ordinary encoded rows in an at-most-1 MiB
+  aggregation buffer and loads files, symbols, edges, references, then search
+  documents in foreign-key order. Tabs, newlines, carriage returns,
+  backslashes, COPY control escapes, and the difference between SQL NULL and
+  literal `\\N` are encoded explicitly. An individually validated row larger
+  than 1 MiB is sent directly rather than copied again.
+- All five COPY streams, exact completion-count checks, the computed digest,
+  and the transition to `ready` share one transaction under a locked generation
+  row. A failure in the final search-document COPY rolls back every earlier
+  table and returns the original opaque staging token.
+- Ready/current tokens expose the computed content digest. Recovery validates
+  and restores a durable ready digest after process loss. The publication lock
+  key now includes both configured schema and project identity.
+- CI has a dedicated live COPY integration step. Its frozen fixture proves the
+  same golden digest when generation metadata records worker counts of 1 and 16
+  with reversed input, canonical JSON, and duplicate
+  edges/references/documents. It also proves actual PostgreSQL round trips
+  across cumulative and individual 1 MiB chunk boundaries, SQL NULL optional
+  foreign keys, COPY escaping, all five table counts, ready recovery, and
+  late-trigger transaction rollback.
+
+Independent review first returned `REQUEST_CHANGES` for missing file-size and
+document-owner consistency, parse-status semantics, post-allocation metadata
+bounds, and live COPY chunk/NULL proof. Every finding received a focused
+regression and fix. The same reviewer returned `APPROVE` with no findings, then
+separately approved the named-count-only cleanup requested by the live
+Cartograph findings delta.
+
+Final local proof on commit `95530d2` includes Rust format, strict workspace
+Clippy, all workspace unit/doc tests, all four live pinned-ParadeDB tests, a
+SQLite-free Cargo graph/lockfile, TypeScript typecheck and architecture/Biome,
+7,139 v1 tests with zero failures under the supported `N=16` shard layout, 29
+v1 PostgreSQL tests, two forced biomarker passes at 0/0/0 with zero cross-file
+errors, a live Cartograph delta with zero introduced findings, and Sonar `OK`
+at 86.0% overall coverage, 91.5% new-code coverage, and zero new violations.
+
+One infrastructure caveat is intentionally not hidden: the default `N=8`
+`npm test` layout repeatedly made Bun 1.3.14 terminate shard 7 natively with
+`Trace/BPT trap`/segfault near `stress-test-roundtwo-fixes.test.ts`, including
+three harness retries and a direct isolated-shard retry. The run had no product
+assertion failure, but the harness correctly remained failed. Running the same
+555 files at the documented `N=16` layout completed 7,139/0/41 in 61 seconds.
+Do not weaken or skip tests to mask the Bun runtime failure; retain `N=16` as
+the full-suite gate while investigating the runtime separately.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -443,12 +515,16 @@ Only then:
 
 ## Immediate next actions
 
-1. Add PostgreSQL COPY loaders for files, symbols, edges, references, and search
-   documents, plus a deterministic logical-generation digest independent of
-   worker count and insertion order.
-2. Integrate the lease API with the bounded indexer/supervisor once the COPY
-   stage exists: schedule renewal, expose progress, cancel on lost ownership,
-   and prove kill/restart cleanup without PID-liveness guessing.
+1. Create a focused `cartograph-indexer` Rust crate and integrate the lease API
+   with a bounded supervisor around the staged pipeline. Start red: prove lease
+   renewal, progress/status transitions, cancellation on lost ownership,
+   deadline escalation, deterministic stage shutdown, generation failure, and
+   exact release without PID-liveness guessing. Do not add extraction logic to
+   `cartograph-db`.
+2. Add bounded queues, byte budgets, cancellation tokens, per-item/stage
+   deadlines, and deterministic reducer handoff for placeholder discover/read/
+   parse/resolve stages. Then benchmark identical fixture digests at
+   1/2/4/8/16 workers before porting language extractors into the pipeline.
 3. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
 4. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
