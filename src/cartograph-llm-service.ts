@@ -1461,16 +1461,23 @@ export async function llmSummarizeChange(
 export async function llmFindImplementations(
   svc: CartographLlmService,
   text: string,
-  options: { limit?: number; languageFilter?: string } = {},
+  options: {
+    limit?: number;
+    languageFilter?: string;
+    signal?: AbortSignal;
+    skipReachabilityProbe?: boolean;
+  } = {},
 ): Promise<SearchResult[]> {
   const limit = options.limit ?? 10;
   const resolved = await svc.config.resolveLlmConfig();
   if (!resolved?.embeddingLlm) return [];
 
   const client = createEmbeddingClient(resolved.embeddingLlm);
-  const reachable = await client.isReachable();
-  if (!reachable) return [];
-  const vecs = await client.embed([text]);
+  if (!options.skipReachabilityProbe) {
+    const reachable = await client.isReachable();
+    if (!reachable) return [];
+  }
+  const vecs = await client.embed([text], options.signal ? { signal: options.signal } : undefined);
   const queryVec = vecs[0];
   if (!queryVec) return [];
 

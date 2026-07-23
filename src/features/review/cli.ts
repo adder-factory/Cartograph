@@ -313,15 +313,27 @@ function registerReviewAgentAuditCommand(deps: ReviewCommandDeps): void {
 }
 
 function registerReviewTrustCommand(deps: ReviewCommandDeps): void {
-  const { reviewCmd, runViaMCP } = deps;
+  const { reviewCmd, assignIntArg, runViaMCP } = deps;
   reviewCmd
     .command('trust')
-    .description(
-      "Readiness self-check for freshness, coverage, biomarkers, and LLMs (mirrors cartograph_review({mode: 'trust'}))",
-    )
+    .description("Readiness self-check for graph, embeddings, and LLMs (mirrors cartograph_review({mode: 'trust'}))")
     .option('-p, --project-path <path>', 'Project path')
-    .action(async (options: { projectPath?: string }) => {
-      await runViaMCP('cartograph_review', { mode: 'trust' }, options.projectPath);
+    .option('--deep', 'Execute live LLM requests and a semantic self-retrieval probe')
+    .option('--timeout-ms <n>', 'Deep-probe timeout in milliseconds (default 60000)')
+    .action(async (options: { projectPath?: string; deep?: boolean; timeoutMs?: string }) => {
+      const args: Record<string, unknown> = { mode: 'trust' };
+      if (options.deep === true) args['deep'] = true;
+      if (
+        !assignIntArg({
+          args,
+          key: 'timeoutMs',
+          raw: options.timeoutMs,
+          optionName: '--timeout-ms',
+          opts: { min: 100, max: 300_000 },
+        })
+      )
+        return;
+      await runViaMCP('cartograph_review', args, options.projectPath);
     });
 }
 

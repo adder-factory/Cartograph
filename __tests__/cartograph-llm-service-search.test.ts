@@ -11,6 +11,8 @@ const state = {
   ftsResults: [] as SearchResult[],
   embedVectors: [] as Float32Array[],
   embedReachable: true,
+  embedReachabilityCalls: 0,
+  embedSignal: undefined as AbortSignal | undefined,
   vecHits: [] as Array<{ nodeId: string; distance: number }>,
   nodeEmbedding: null as Buffer | null,
   nodes: new Map<string, Node>(),
@@ -29,10 +31,16 @@ vi.spyOn(queriesSearch, 'searchNodes').mockImplementation((() => state.ftsResult
 
 vi.spyOn(embeddingClient, 'createEmbeddingClient').mockImplementation((() => ({
   isConfigured: true,
-  isReachable: vi.fn(async () => state.embedReachable),
+  isReachable: vi.fn(async () => {
+    state.embedReachabilityCalls += 1;
+    return state.embedReachable;
+  }),
   reachabilityError: vi.fn(() => null),
   listModels: vi.fn(async () => []),
-  embed: vi.fn(async () => state.embedVectors),
+  embed: vi.fn(async (_inputs: string[], options?: { signal?: AbortSignal }) => {
+    state.embedSignal = options?.signal;
+    return state.embedVectors;
+  }),
 })) as never);
 
 vi.spyOn(queriesEmbeddings, 'getEmbeddingForNode').mockImplementation((() => state.nodeEmbedding) as never);
@@ -118,6 +126,8 @@ describe('CartographLlmService searchHybridWithOutcome', () => {
     state.ftsResults = [];
     state.embedVectors = [];
     state.embedReachable = true;
+    state.embedReachabilityCalls = 0;
+    state.embedSignal = undefined;
     state.vecHits = [];
     state.nodeEmbedding = null;
     state.nodes.clear();
@@ -231,6 +241,8 @@ describe('CartographLlmService semantic helper functions', () => {
     state.ftsResults = [];
     state.embedVectors = [];
     state.embedReachable = true;
+    state.embedReachabilityCalls = 0;
+    state.embedSignal = undefined;
     state.vecHits = [];
     state.nodeEmbedding = null;
     state.nodes.clear();
@@ -271,6 +283,23 @@ describe('CartographLlmService semantic helper functions', () => {
     state.embedReachable = true;
     state.embedVectors = [];
     await expect(llmFindImplementations(service(resolved()), 'anything')).resolves.toEqual([]);
+  });
+
+  it('can reuse a preceding smoke result and forwards cancellation to the query embedding request', async () => {
+    state.embedVectors = [new Float32Array([1, 0])];
+    state.vecHits = [{ nodeId: 'impl:ts', distance: 0.1 }];
+    state.nodes.set('impl:ts', node('impl:ts', 'parseThing', 'src/parser.ts'));
+    const controller = new AbortController();
+
+    const out = await llmFindImplementations(service(resolved()), 'parse thing', {
+      limit: 2,
+      signal: controller.signal,
+      skipReachabilityProbe: true,
+    });
+
+    expect(out.map((result) => result.node.id)).toEqual(['impl:ts']);
+    expect(state.embedReachabilityCalls).toBe(0);
+    expect(state.embedSignal).toBe(controller.signal);
   });
 
   it('finds similar symbols from a source node embedding and filters by language relationship', async () => {

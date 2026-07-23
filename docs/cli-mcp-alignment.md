@@ -307,6 +307,9 @@ tool, the CLI must follow with the parallel family pattern:
   trust-readiness pass (`7d2a58b`) added `cartograph review trust`
   alongside `cartograph_review({mode: 'trust'})`, keeping every
   `cartograph_review` mode and exposed argument mirrored on the CLI.
+  `review trust --deep [--timeout-ms N]` executes real per-tier requests
+  and a semantic self-retrieval probe; shallow mode reports configuration
+  without claiming that an endpoint or retrieval quality was verified.
 
 - **2026-05-11** Graph + find mega-merge. `cartograph_callers` /
   `_callees` / `_impact` / `_walk` collapsed into

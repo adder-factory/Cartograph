@@ -149,6 +149,7 @@ Cytoscape artifact contracts.
 cartograph review context --diff "$(git diff)"
 cartograph review risk --top-n 10
 cartograph review trust
+cartograph review trust --deep --timeout-ms 60000  # real tier requests + semantic self-retrieval
 cartograph review agent-audit
 cartograph biomarkers --min-severity warning
 cartograph biomarkers --format json   # machine-readable: detail payloads + honesty counts

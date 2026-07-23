@@ -87,7 +87,7 @@ const reviewSchema = z.object({
     .enum(REVIEW_MODE_NAMES)
     .optional()
     .describe(
-      'Pick by input: `context` (default) for a diff, `neighbors` for changed files/symbols, `risk` for a no-input project-wide triage digest, `agent-audit` for the 16 agent-prone biomarkers grouped per-detector, `trust` for freshness/coverage/LLM readiness.',
+      'Pick by input: `context` (default) for a diff, `neighbors` for changed files/symbols, `risk` for a no-input project-wide triage digest, `agent-audit` for the 16 agent-prone biomarkers grouped per-detector, `trust` for graph/embedding/LLM readiness.',
     ),
   // ─── mode='context' fields ───
   diff: z.string().optional().describe('(mode=context) Unified-diff text (e.g. `git diff` output).'),
@@ -182,6 +182,20 @@ const reviewSchema = z.object({
     .enum(['info', 'warning', 'error'])
     .optional()
     .describe('(mode=agent-audit) Minimum severity to include: `info` (default, all), `warning`, or `error`.'),
+  // ─── mode='trust' fields ───
+  deep: z
+    .boolean()
+    .optional()
+    .describe(
+      '(mode=trust) Execute tiny real requests against configured LLM tiers plus a semantic self-retrieval probe. Default false (configuration-only).',
+    ),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(100)
+    .max(300_000)
+    .optional()
+    .describe('(mode=trust, deep=true) Per-request timeout in milliseconds. Default 60000; range 100-300000.'),
   projectPath: projectPathField,
 });
 
@@ -234,7 +248,7 @@ export const REVIEW_TOOL = defineTool({
     "`'neighbors'`: pass `files` or `symbols` → top-K lookalikes. " +
     "`'risk'`: no input → top biomarkers + hotspots + coverage gaps + dead-code. " +
     "`'agent-audit'`: no input → the 16 agent-prone biomarkers. " +
-    "`'trust'`: no input → freshness + coverage + biomarker + LLM readiness self-check.",
+    "`'trust'`: no input → freshness + graph + embedding + LLM readiness self-check; pass `deep: true` to execute live requests and semantic self-retrieval.",
   schema: reviewSchema,
   handle: handleReview,
 });

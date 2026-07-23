@@ -105,7 +105,7 @@ describe('cartograph_risk_review MCP tool', () => {
     expect(text).toMatch(/min-severity: `error`/);
   });
 
-  it('mode=trust renders freshness, coverage, biomarker, dead-code, and LLM checks', async () => {
+  it('mode=trust renders graph, embedding, and explicitly configuration-only LLM checks', async () => {
     const r = await handler.execute('cartograph_review', { mode: 'trust' });
     const text = r.content[0]?.text ?? '';
     expect(text).toMatch(/# Trust self-check/);
@@ -113,7 +113,21 @@ describe('cartograph_risk_review MCP tool', () => {
     expect(text).toMatch(/Coverage/);
     expect(text).toMatch(/Cross-file biomarkers/);
     expect(text).toMatch(/Dead-code signal/);
+    expect(text).toMatch(/Dependency graph/);
+    expect(text).toMatch(/Active-model embeddings/);
     expect(text).toMatch(/Ask\/dead-code LLM/);
+    expect(text).toMatch(/configuration only/i);
+    expect(text).toMatch(/deep: true/);
+    expect(text).not.toMatch(/Live LLM requests/);
+  });
+
+  it('mode=trust deep runs request and semantic-usefulness checks without claiming unavailable tiers passed', async () => {
+    const r = await handler.execute('cartograph_review', { mode: 'trust', deep: true, timeoutMs: 100 });
+    const text = r.content[0]?.text ?? '';
+    expect(text).toMatch(/# Trust self-check/);
+    expect(text).toMatch(/Live LLM requests/);
+    expect(text).toMatch(/Semantic golden probe/);
+    expect(text).toMatch(/not configured|unavailable/i);
   });
 
   it('degrades gracefully when coverage data is missing', async () => {

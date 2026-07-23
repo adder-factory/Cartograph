@@ -87,6 +87,8 @@ describe('review command action bodies', () => {
       projectPath: '/repo',
     });
     await actions.get('trust')!({
+      deep: true,
+      timeoutMs: '2500',
       projectPath: '/repo',
     });
     await actions.get('similar <symbol>')!('alpha', {
@@ -141,7 +143,7 @@ describe('review command action bodies', () => {
       {
         tool: 'cartograph_review',
         projectPath: '/repo',
-        args: { mode: 'trust' },
+        args: { mode: 'trust', deep: true, timeoutMs: 2500 },
       },
       {
         tool: 'cartograph_graph',

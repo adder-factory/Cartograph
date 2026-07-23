@@ -35,6 +35,8 @@ const NodeIdEmbeddingRowSchema = z.object({
   embedding: BlobBinding,
 });
 
+const NodeIdRowSchema = z.object({ node_id: z.string() });
+
 const EmbeddingRowSchema = z.object({ embedding: BlobBinding });
 
 const CountRowSchema = z.object({ c: z.number() });
@@ -76,6 +78,17 @@ const getAllEmbeddingsQuery = defineQuery({
        WHERE embedding_model = @embeddingModel AND grain = 'symbol'`,
   params: z.object({ embeddingModel: z.string() }),
   row: NodeIdEmbeddingRowSchema,
+});
+
+const getEmbeddedNodeIdsQuery = defineQuery({
+  sql: `SELECT se.node_id
+        FROM symbol_embeddings se
+        JOIN nodes n ON n.id = se.node_id
+        WHERE se.embedding_model = @embeddingModel AND se.grain = 'symbol'
+        ORDER BY se.node_id
+        LIMIT @limit`,
+  params: z.object({ embeddingModel: z.string(), limit: z.number().int().positive() }),
+  row: NodeIdRowSchema,
 });
 
 const getEmbeddingForNodeQuery = defineQuery({
@@ -215,6 +228,7 @@ const upsertEmbeddingRefQuery = defineQuery({
 declare module './queries.js' {
   interface QueryRegistry {
     getAllEmbeddings?: TypedQuery<{ embeddingModel: string }, { node_id: string; embedding: Buffer | Uint8Array }>;
+    getEmbeddedNodeIds?: TypedQuery<{ embeddingModel: string; limit: number }, { node_id: string }>;
     getEmbeddingForNode?: TypedQuery<{ nodeId: string; embeddingModel: string }, { embedding: Buffer | Uint8Array }>;
     getEmbeddingsCount?: TypedQuery<{ embeddingModel: string }, { c: number }>;
     getEmbeddingsSignature?: TypedQuery<
@@ -300,6 +314,15 @@ export function getAllEmbeddings(
     nodeId: r.node_id,
     embedding: Buffer.isBuffer(r.embedding) ? r.embedding : Buffer.from(r.embedding),
   }));
+}
+
+/**
+ * Deterministic, bounded sample of node ids with symbol embeddings for one
+ * model. Readiness probes use this instead of hydrating every vector BLOB.
+ */
+export function getEmbeddedNodeIds(qb: QueryBuilder, embeddingModel: string, limit: number): string[] {
+  qb.queries.getEmbeddedNodeIds ??= getEmbeddedNodeIdsQuery(qb.db);
+  return qb.queries.getEmbeddedNodeIds.all({ embeddingModel, limit }).map((row) => row.node_id);
 }
 
 /**
