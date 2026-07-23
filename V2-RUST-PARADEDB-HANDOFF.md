@@ -1,0 +1,294 @@
+# Cartograph v2 Rust/PostgreSQL/ParadeDB handoff
+
+This is the durable continuation point for the v2 rewrite. Read
+`docs/v2/ARCHITECTURE.md` completely before changing the implementation.
+
+## User decisions that must not be reopened
+
+- Ship v1.1.33 as the final v1 checkpoint, then build v2 from that exact tag.
+- Remove SQLite. Do not preserve a SQLite runtime, fallback, config branch, or
+  dual-backend abstraction.
+- Require PostgreSQL 18+, ParadeDB `pg_search`, and pgvector.
+- Write as much of the shipped product in Rust as possible. The final v2 CLI,
+  MCP server, indexer, extraction pipeline, graph/search engine, database
+  lifecycle, and diagnostics are Rust.
+- Make ingestion highly parallel but bounded, cancellable, deterministic, and
+  observable.
+- Optimize first for usefulness to AI coding agents: intent-aware retrieval,
+  graph constraints, compact evidence, affected tests, trust, and abstention.
+- Use TypeScript v1.1.33 only as a temporary behavior oracle and migration
+  source. Do not embed Bun/TypeScript as the v2 runtime.
+- Release work must come from `main`; v2 work continues on a feature branch
+  until the objective gates justify merging.
+
+## Release baseline
+
+- v1.1.33 release commit: `041e1859a25e27e867277a2b813ff0786ac2d0eb`
+- Signed annotated tag: `v1.1.33`
+- [Published release](https://github.com/adder-factory/cartograph/releases/tag/v1.1.33)
+- Tag target and package version were verified before push; GitHub reports the
+  SSH tag signature as valid and the tag resolves to `041e1859`.
+- The tag-triggered [release workflow](https://github.com/adder-factory/cartograph/actions/runs/29978568421)
+  completed successfully.
+- Before the version-only commit, the exact code passed 7,139 tests with zero
+  failures, 29 PostgreSQL integration tests, forced biomarkers at 0/0/0, the
+  Sonar quality gate, retrieval baseline checks, and independent review.
+- After the version bump, typecheck, architecture/format checks, version smoke,
+  standalone build/smoke, and tracked/staged privacy inspection passed.
+- All five native build/smoke jobs and the publish/provenance job passed. The
+  immutable assets are Darwin arm64/x64, Linux arm64/x64, Windows x64, and
+  `SHA256SUMS`. The five published asset digests exactly match the checksum
+  file. Curated notes passed the privacy scan and are published on the release.
+
+## Live runtime state at handoff creation
+
+- The global `cartograph` command is installed from the signed
+  `github:adder-factory/cartograph#v1.1.33` tag, is no longer linked to the v2
+  working checkout, and reports 1.1.33. This keeps continued branch work from
+  changing the machine-wide v1 tool underneath other projects.
+- The old v1.1.32 shared daemon and a stuck hook worker were terminated cleanly.
+- This already-open Codex session's MCP transport closed with the daemon and did
+  not hot-register a replacement. Continue through the 1.1.33 CLI in this
+  session. A fresh agent session should load Cartograph MCP 1.1.33 normally.
+- A fresh standalone MCP initialize handshake was executed from the pinned
+  global command and returned `serverInfo.version: "1.1.33"`. The server itself
+  is healthy; only dynamic re-registration in the already-open host is absent.
+- Do not delete a daemon lock while its recorded owner is alive. V1 exposed a
+  repeatable long-lived hook-worker problem; the v2 supervisor requirements in
+  the architecture doc are mandatory.
+- At the time checked, the GitHub repository had no open issues.
+
+## Git state
+
+- Base: `v1.1.33` / `041e1859`
+- Working branch: `feat/v2-rust-paradedb`
+- Rust capability foundation: `fd0d663`
+- Hardened ParadeDB development harness: `9d9119e`
+- The architecture and this handoff are checkpointed immediately after those
+  commits on the same branch.
+- Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
+
+## Initial Rust slice
+
+Implemented or in progress:
+
+- Root Cargo workspace pinned to Rust 1.96.1 and v2.0.0-alpha.1.
+- `cartograph-config`: secret-wrapped database URL, PostgreSQL-only URL
+  validation, bounded pool/timeouts, errors that do not echo credentials.
+- `cartograph-db`: Postgres-only driver dependency and read-only capability
+  report for PostgreSQL 18, `pg_search`, pgvector, preload state, BM25 access
+  method, and live `pdb.source_code` behavior.
+- `cartograph-cli`: `cartograph-v2 doctor --format text|json` with nonzero exit
+  status when a hard capability is absent.
+- `deploy/paradedb`: pinned upstream ParadeDB 0.23.5 development service,
+  persistent volume, health check, and idempotent extension initialization.
+- Unit tests proving SQLite rejection, credential redaction, bounds checking,
+  complete diagnostics when extensions are absent, PostgreSQL 17 rejection,
+  and source-code tokenizer incompatibility rejection.
+- The live arm64 development service reports PostgreSQL 18.4, `pg_search`
+  0.23.5, pgvector 0.8.1, `pg_search` preload, BM25 access method, and the
+  expected `{cartograph,search,snake,case,42}` tokenizer output. Both doctor
+  formats return `ready: true`.
+
+The Cargo dependency graph deliberately uses `sqlx-core` + `sqlx-postgres`
+directly with exact versions. Do not replace them with default `sqlx` features:
+the initial meta-crate resolution placed SQLite packages in `Cargo.lock` even
+though they were not compiled. `cargo tree` and `Cargo.lock` must remain free of
+`sqlx-sqlite` and `libsqlite3-sys`.
+
+## Reproduce the current slice
+
+```sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --workspace
+cargo tree --workspace -e normal | rg 'sqlite|libsqlite'  # expect no output
+
+export CARTOGRAPH_POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+docker-compose -f deploy/paradedb/docker-compose.yml up -d
+docker-compose -f deploy/paradedb/docker-compose.yml ps
+
+export CARTOGRAPH_DATABASE_URL="postgresql://cartograph:${CARTOGRAPH_POSTGRES_PASSWORD}@127.0.0.1:55432/cartograph"
+cargo run -p cartograph-cli -- doctor
+cargo run -p cartograph-cli -- doctor --format json
+export CARTOGRAPH_TEST_DATABASE_URL="$CARTOGRAPH_DATABASE_URL"
+cargo test -p cartograph-db --test live_capabilities -- --ignored --nocapture
+```
+
+If the local machine has `docker compose`, it is equivalent. This machine has
+the standalone `docker-compose` binary, not the Docker Compose CLI plugin.
+The v2 harness defaults to host port 55432 so it can run beside the v1
+PostgreSQL test/index instance on 5433. It binds only to `127.0.0.1` and refuses
+to start without an explicit password. Compose scopes the container and volume
+to its project. Set a unique `COMPOSE_PROJECT_NAME` and host port when running
+multiple worktrees simultaneously.
+
+Stop the development database without deleting its volume:
+
+```sh
+docker-compose -f deploy/paradedb/docker-compose.yml stop
+```
+
+Never run `down -v` unless intentionally destroying the v2 development data.
+
+## Execution plan
+
+### M0 — final v1 release and v2 foundation
+
+Exit criteria:
+
+- v1.1.33 GitHub release is published from its signed tag with five native
+  archives, `SHA256SUMS`, attestations, sanitized notes, and correct target SHA.
+- A fresh MCP session reports/behaves as v1.1.33.
+- Rust format, clippy, unit tests, no-SQLite dependency check, and live ParadeDB
+  doctor all pass.
+- Architecture and this handoff are committed.
+
+### M1 — managed database lifecycle and migrations
+
+Build in Rust:
+
+1. `cartograph db start|stop|status|logs` without requiring Compose.
+2. Private credential generation and mode-0600 local state.
+3. Health wait with deadline, actionable image/runtime errors, idempotency.
+4. Extension creation and strict version/capability checks.
+5. Migration ledger and initial relational schema under a configurable,
+   safely-quoted Cartograph schema.
+6. `db backup|restore|upgrade` with verified output and extension version checks.
+7. Integration tests on amd64 and arm64.
+
+Red tests first: missing Docker, occupied port, unhealthy container, PG17,
+missing preload, missing extensions, wrong source-code token stream, restart,
+repeated start, cancellation, and secret leakage in logs/errors.
+
+### M2 — domain contracts and generation-safe storage
+
+Create `cartograph-domain` before schema implementation. Brand project, file,
+symbol, generation, document, model, and task IDs. Use enums for lifecycle
+states and edge/document kinds. Make incomplete generations impossible to
+publish through the type/API design.
+
+Implement:
+
+- core relations from the architecture doc;
+- project-scoped foreign keys and ordinary indexes;
+- staged generation writes and atomic current-generation swap;
+- advisory lock ownership metadata and stale-owner rules;
+- COPY-based bulk loaders;
+- deterministic database digest for cross-worker verification.
+
+### M3 — Rust extraction parity
+
+Port by language families rather than file-for-file translation:
+
+1. Shared discovery/ignore/path normalization and content hashing.
+2. Tree-sitter runtime and grammar asset loading.
+3. TypeScript/JavaScript first because they exercise the richest v1 fixtures.
+4. Python, Rust, Go, Java/Kotlin, C/C++, C#, then remaining supported modes.
+5. Framework resolvers and cross-language bridges only after structural facts
+   are stable.
+
+Each port uses v1.1.33 fixture output as an oracle, then adopts a Rust-owned
+golden contract. Do not call TypeScript from production Rust.
+
+### M4 — bounded parallel indexer
+
+Implement the staged pipeline and supervisor from the architecture doc. Commit
+benchmarks for 1/2/4/8/16 workers. The logical digest and retrieval baseline
+must be identical for every worker count.
+
+Required fault injection:
+
+- cancel/kill during read, parse, resolve, COPY, merge, BM25 build, and vector
+  stages;
+- slow/hung worker;
+- database disconnect/restart;
+- out-of-memory/backpressure simulation;
+- parent exit and child reaping;
+- competing hook and interactive sync.
+
+### M5 — BM25, vector, graph, and hybrid retrieval
+
+Implement schema and queries in measured increments:
+
+1. Covering BM25 index with `pdb.source_code` on code/name fields.
+2. Exact name/path/reference lookup and field boosts.
+3. Graph traversal and affected-test queries.
+4. Model-scoped pgvector storage/index management.
+5. Concurrent candidate generation and deterministic RRF.
+6. Working-tree overlay and freshness/trust flags.
+7. Intent-specific evidence budgets and abstention.
+
+Every result exposes provenance and component ranks. Evaluate deterministic,
+BM25-only, vector-only, and hybrid modes separately; a missing semantic backend
+must produce an explicit skip/readiness result, never silently relabel lexical
+search as hybrid.
+
+### M6 — Rust MCP/CLI and agent ergonomics
+
+Freeze public JSON schemas before handlers. Port the smallest useful coding
+profile first:
+
+- status/doctor;
+- context for a coding task;
+- symbol/file lookup;
+- graph callers/callees/impact;
+- affected tests;
+- review/compare-to-ref verification packet;
+- admin sync/index.
+
+Add request deadlines, cancellation, bounded response bytes/tokens, low-token
+mode, profile gating, redaction, and stable error codes. Golden-test MCP
+initialize/tools-list payloads and representative tool responses against the
+approved v2 contracts.
+
+### M7 — migration, evaluation, and cutover
+
+Implement a v1.1.33 PostgreSQL importer first. Add a quarantined one-shot legacy
+SQLite importer only if real user data requires it; never expose SQLite as v2
+storage.
+
+Lock the patch-task corpus fingerprint and compare v1.1.33 vs v2 on hit@5, MRR,
+edit precision, test recall, abstention, token budget, and latency. Run migration,
+backup/restore, crash recovery, extension upgrade, determinism, and native
+packaging gates.
+
+Only then:
+
+- rename the preview binary from `cartograph-v2` to `cartograph`;
+- remove Bun/TypeScript runtime packaging and all dual-backend code;
+- update public install/agent docs for the PostgreSQL-only contract;
+- merge through reviewed commits to `main`;
+- cut a signed v2.0.0 release from `main`.
+
+## Immediate next actions
+
+1. Add a Rust CI workflow that enforces formatting, clippy, unit tests,
+   no-SQLite dependencies, and the pinned ParadeDB integration test.
+2. Start M1 with failing tests for idempotent managed database state, loopback
+   port publication, generated secret-file mode, occupied ports, and deadline
+   handling.
+3. Implement `cartograph-v2 db start|stop|status|logs` in Rust so the checked-in
+   Compose harness is no longer part of the user-facing setup path.
+
+## Risks and decisions still requiring evidence
+
+- Pin the ParadeDB image manifest digest only after both architectures pass.
+- Measure Community crash/reindex behavior before declaring it acceptable for
+  the local product. Shared production needs a durability decision.
+- Complete AGPL/commercial licensing review before distributing an image or
+  offering a hosted service.
+- Benchmark one shared `search_documents` table against project partitioning;
+  preserve the same logical API until measured data selects the layout.
+- Benchmark HNSW vs IVFFlat and model-scoped partial expression indexes on real
+  code corpora.
+- Decide whether specialized parsers need sandboxed worker processes after
+  fault and memory measurements. Prefer Rust threads/tasks for safe parsers,
+  isolated processes only where a crash boundary is justified.
+
+## Definition of done for any continuation
+
+Do not report a milestone complete from code inspection. Record objective
+compiler/test/integration/benchmark output, run the repository's independent
+reviewer step, keep the worktree/commit scope explicit, and update this handoff
+with the exact next failing gate or actionable slice.
