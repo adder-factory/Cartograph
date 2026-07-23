@@ -141,6 +141,11 @@ jobs:
           cargo test --locked --quiet -p cartograph-db
           --test live_capabilities -- --ignored --nocapture
 
+      - name: Generation-safe schema and BM25 integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_generation -- --ignored --nocapture
+
       - name: Managed database lifecycle integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib

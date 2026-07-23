@@ -16,11 +16,15 @@ pub const DATABASE_URL_ENV: &str = "CARTOGRAPH_DATABASE_URL";
 pub const DATABASE_MAX_CONNECTIONS_ENV: &str = "CARTOGRAPH_DATABASE_MAX_CONNECTIONS";
 /// Environment variable controlling pool acquisition timeout in milliseconds.
 pub const DATABASE_ACQUIRE_TIMEOUT_MS_ENV: &str = "CARTOGRAPH_DATABASE_ACQUIRE_TIMEOUT_MS";
+/// Environment variable selecting the isolated PostgreSQL schema.
+pub const DATABASE_SCHEMA_ENV: &str = "CARTOGRAPH_DATABASE_SCHEMA";
 
 const DEFAULT_MAX_CONNECTIONS: u32 = 8;
 const MAX_CONNECTIONS_LIMIT: u32 = 64;
 const DEFAULT_ACQUIRE_TIMEOUT_MS: u64 = 5_000;
 const MAX_ACQUIRE_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_DATABASE_SCHEMA: &str = "cartograph";
+const POSTGRES_IDENTIFIER_LENGTH_LIMIT: usize = 63;
 
 struct BoundedIntegerInput<'a, T> {
     key: &'static str,
@@ -35,6 +39,7 @@ pub struct DatabaseSettings {
     url: SecretString,
     max_connections: NonZeroU32,
     acquire_timeout: Duration,
+    schema: DatabaseSchema,
 }
 
 impl std::fmt::Debug for DatabaseSettings {
@@ -44,7 +49,49 @@ impl std::fmt::Debug for DatabaseSettings {
             .field("url", &"[REDACTED]")
             .field("max_connections", &self.max_connections)
             .field("acquire_timeout", &self.acquire_timeout)
+            .field("schema", &self.schema)
             .finish()
+    }
+}
+
+/// Validated, canonical PostgreSQL identifier used as Cartograph's schema.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct DatabaseSchema(String);
+
+impl DatabaseSchema {
+    /// Load the optional process setting, falling back to Cartograph's default
+    /// schema while applying the same identifier validation as config files.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        match env::var(DATABASE_SCHEMA_ENV) {
+            Ok(schema) => Self::parse(&schema),
+            Err(env::VarError::NotPresent) => Ok(Self(DEFAULT_DATABASE_SCHEMA.to_owned())),
+            Err(env::VarError::NotUnicode(_)) => Err(ConfigError::InvalidDatabaseSchema),
+        }
+    }
+
+    /// Parse a conservative unquoted PostgreSQL identifier and normalize it to
+    /// lowercase before the database layer quotes it.
+    pub fn parse(raw: &str) -> Result<Self, ConfigError> {
+        let mut bytes = raw.bytes();
+        let valid_first = bytes
+            .next()
+            .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic());
+        let valid_rest = bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric());
+        if raw.len() > POSTGRES_IDENTIFIER_LENGTH_LIMIT
+            || !raw.is_ascii()
+            || !valid_first
+            || !valid_rest
+        {
+            return Err(ConfigError::InvalidDatabaseSchema);
+        }
+        Ok(Self(raw.to_ascii_lowercase()))
+    }
+
+    /// Canonical identifier text. Database code must still quote it as an SQL
+    /// identifier rather than interpolating it as a bare name.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -55,11 +102,13 @@ impl DatabaseSettings {
             env::var(DATABASE_URL_ENV).map_err(|_| ConfigError::MissingDatabaseUrl)?;
         let max_connections = env::var(DATABASE_MAX_CONNECTIONS_ENV).ok();
         let acquire_timeout_ms = env::var(DATABASE_ACQUIRE_TIMEOUT_MS_ENV).ok();
+        let schema = DatabaseSchema::from_env()?;
         Self::parse(
             &database_url,
             max_connections.as_deref(),
             acquire_timeout_ms.as_deref(),
-        )
+        )?
+        .with_schema(schema.as_str())
     }
 
     /// Validate settings supplied by a non-environment boundary, such as a
@@ -87,7 +136,14 @@ impl DatabaseSettings {
             url: SecretString::from(database_url.to_owned()),
             max_connections,
             acquire_timeout: Duration::from_millis(acquire_timeout_ms),
+            schema: DatabaseSchema(DEFAULT_DATABASE_SCHEMA.to_owned()),
         })
+    }
+
+    /// Replace the default schema with a validated project/deployment schema.
+    pub fn with_schema(mut self, raw: &str) -> Result<Self, ConfigError> {
+        self.schema = DatabaseSchema::parse(raw)?;
+        Ok(self)
     }
 
     /// The validated secret-bearing connection URL.
@@ -106,6 +162,12 @@ impl DatabaseSettings {
     #[must_use]
     pub const fn acquire_timeout(&self) -> Duration {
         self.acquire_timeout
+    }
+
+    /// Isolated PostgreSQL schema used by Cartograph.
+    #[must_use]
+    pub const fn schema(&self) -> &DatabaseSchema {
+        &self.schema
     }
 }
 
@@ -134,6 +196,11 @@ pub enum ConfigError {
         /// Largest accepted value.
         maximum: u64,
     },
+    /// The schema could alter SQL structure or exceed PostgreSQL's identifier limit.
+    #[error(
+        "{DATABASE_SCHEMA_ENV} must be a 1..=63 byte ASCII identifier beginning with a letter or underscore"
+    )]
+    InvalidDatabaseSchema,
 }
 
 fn validate_database_url(database_url: &str) -> Result<(), ConfigError> {
@@ -249,5 +316,39 @@ mod tests {
             DatabaseSettings::parse("postgresql:///cartograph", None, None).err(),
             Some(ConfigError::MissingDatabaseHost)
         );
+    }
+
+    #[test]
+    fn schema_names_are_canonical_and_cannot_change_sql_structure() {
+        let schema = DatabaseSchema::parse("Team_Cartograph");
+        assert!(matches!(schema, Ok(value) if value.as_str() == "team_cartograph"));
+
+        for invalid in [
+            "",
+            "2cartograph",
+            "cartograph-dev",
+            "cartograph.public",
+            "cartograph\";DROP SCHEMA public;--",
+            "café",
+        ] {
+            assert!(
+                DatabaseSchema::parse(invalid).is_err(),
+                "accepted {invalid:?}"
+            );
+        }
+        assert!(DatabaseSchema::parse(&"a".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn database_settings_default_to_the_cartograph_schema() {
+        let settings = DatabaseSettings::parse(VALID_URL, None, None);
+        let settings = match settings {
+            Ok(settings) => settings,
+            Err(error) => panic!("valid settings unexpectedly failed: {error}"),
+        };
+        assert_eq!(settings.schema().as_str(), "cartograph");
+
+        let configured = settings.with_schema("Review_Worktree");
+        assert!(matches!(configured, Ok(value) if value.schema().as_str() == "review_worktree"));
     }
 }

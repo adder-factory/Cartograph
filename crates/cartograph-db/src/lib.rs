@@ -1,16 +1,28 @@
 //! PostgreSQL-only persistence and capability checks for Cartograph v2.
 
 mod capabilities;
+mod database;
+mod generation;
 mod managed;
+mod migrations;
+mod search;
 
 use std::str::FromStr;
 
 pub use capabilities::{CapabilityCheck, CapabilityReport, CheckStatus, probe_capabilities};
 use cartograph_config::DatabaseSettings;
+pub use database::{CartographDatabase, StorageError};
+pub use generation::{
+    CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents, NewGeneration,
+    NewProject, PrepareGenerationError, PublishGenerationError, ReadyGeneration,
+    RecoverableGeneration, SearchDocumentInput, StagedGeneration,
+};
 pub use managed::{
     DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedContainerState, ManagedDatabase,
     ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,
 };
+pub use migrations::{MigrationError, MigrationReport};
+pub use search::{SearchHit, SearchQuery};
 use secrecy::ExposeSecret;
 use sqlx_core::pool::PoolOptions;
 use sqlx_postgres::{PgConnectOptions, PgPool, Postgres};

@@ -158,6 +158,7 @@ version = "2.0.0-alpha.1"
 dependencies = [
  "blake3",
  "cartograph-config",
+ "cartograph-domain",
  "getrandom 0.4.3",
  "libc",
  "secrecy",
@@ -169,6 +170,14 @@ dependencies = [
  "thiserror",
  "tokio",
  "url",
+]
+
+[[package]]
+name = "cartograph-domain"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

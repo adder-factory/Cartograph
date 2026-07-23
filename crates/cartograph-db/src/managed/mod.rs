@@ -3,7 +3,7 @@ mod docker;
 
 use std::{path::Path, time::Duration};
 
-use cartograph_config::DatabaseSettings;
+use cartograph_config::{DatabaseSchema, DatabaseSettings};
 use credentials::{CredentialStore, DatabaseCredentials};
 use docker::{
     ContainerCreateSpec, ContainerInspection, DockerCli, has_expected_data_mount,
@@ -14,7 +14,7 @@ use serde::Serialize;
 use thiserror::Error;
 use tokio::time::{sleep, timeout};
 
-use crate::{CapabilityReport, connect, probe_capabilities};
+use crate::{CapabilityReport, CartographDatabase, MigrationReport, connect, probe_capabilities};
 
 /// Exact upstream multi-architecture image accepted by the v2 preview.
 pub const MANAGED_DATABASE_IMAGE: &str = concat!(
@@ -31,6 +31,7 @@ pub struct ManagedDatabase {
     identity: ManagedResourceIdentity,
     credentials: CredentialStore,
     docker: DockerCli,
+    schema: DatabaseSchema,
     port: u16,
     startup_timeout: Duration,
 }
@@ -53,6 +54,11 @@ struct PreparedStart {
     credentials_created: bool,
     container_created: bool,
     transition: StartTransition,
+}
+
+struct ManagedInitialization {
+    capabilities: CapabilityReport,
+    migrations: MigrationReport,
 }
 
 /// Stable state surfaced by `cartograph-v2 db status`.
@@ -101,33 +107,18 @@ pub struct ManagedStartReport {
     pub container_created: bool,
     /// Live Postgres/ParadeDB/pgvector readiness evidence.
     pub capabilities: CapabilityReport,
+    /// Append-only schema versions applied by this start invocation.
+    pub migrations: MigrationReport,
+    /// Validated PostgreSQL schema migrated by this start invocation.
+    pub schema: String,
 }
 
 impl ManagedDatabase {
     /// Build a lifecycle manager for one existing project root and loopback port.
     pub fn new(project_root: impl AsRef<Path>, port: u16) -> Result<Self, ManagedDatabaseError> {
-        if port == 0 {
-            return Err(ManagedDatabaseError::InvalidPort);
-        }
-        let project_root = project_root
-            .as_ref()
-            .canonicalize()
-            .map_err(|_| ManagedDatabaseError::ProjectRoot)?;
-        let project_hash = project_hash(&project_root);
-        let identity = ManagedResourceIdentity {
-            container_name: format!("cartograph-v2-{project_hash}"),
-            volume_name: format!("cartograph-v2-{project_hash}-data"),
-            project_hash,
-        };
-        let credentials =
-            CredentialStore::new(project_root.join(".cartograph/v2/postgres.password"));
-        Ok(Self {
-            identity,
-            credentials,
-            docker: DockerCli::new(),
-            port,
-            startup_timeout: DEFAULT_STARTUP_TIMEOUT,
-        })
+        let schema =
+            DatabaseSchema::from_env().map_err(|_| ManagedDatabaseError::DatabaseSchema)?;
+        managed_database_with_schema(project_root, port, schema)
     }
 
     /// Override the bounded startup wait, primarily for integration tests and
@@ -152,14 +143,14 @@ impl ManagedDatabase {
             None => self.prepare_new_start().await?,
         };
 
-        let capabilities = match self
+        let initialized = match self
             .finish_start(
                 &prepared.credentials,
                 prepared.transition == StartTransition::Pause,
             )
             .await
         {
-            Ok(capabilities) => capabilities,
+            Ok(initialized) => initialized,
             Err(error) => {
                 self.rollback_or_fail(prepared.transition).await?;
                 return Err(error);
@@ -169,7 +160,9 @@ impl ManagedDatabase {
         Ok(ManagedStartReport {
             credentials_created: prepared.credentials_created,
             container_created: prepared.container_created,
-            capabilities,
+            capabilities: initialized.capabilities,
+            migrations: initialized.migrations,
+            schema: self.schema.as_str().to_owned(),
         })
     }
 
@@ -479,22 +472,47 @@ impl ManagedDatabase {
         &self,
         credentials: &DatabaseCredentials,
         allow_unhealthy_recovery: bool,
-    ) -> Result<CapabilityReport, ManagedDatabaseError> {
+    ) -> Result<ManagedInitialization, ManagedDatabaseError> {
         timeout(self.startup_timeout, async {
             self.wait_until_healthy(allow_unhealthy_recovery).await?;
             self.docker
                 .verify_loopback_port(&self.identity.container_name, self.port)
                 .await?;
             initialize_extensions(&self.docker, &self.identity.container_name).await?;
-            let capabilities = probe_managed_capabilities(credentials, self.port).await?;
-            if !capabilities.ready {
-                return Err(ManagedDatabaseError::CapabilitiesNotReady);
-            }
-            Ok(capabilities)
+            initialize_managed_database(credentials, self.port, &self.schema).await
         })
         .await
         .map_err(|_| ManagedDatabaseError::DatabaseStartupTimeout)?
     }
+}
+
+fn managed_database_with_schema(
+    project_root: impl AsRef<Path>,
+    port: u16,
+    schema: DatabaseSchema,
+) -> Result<ManagedDatabase, ManagedDatabaseError> {
+    if port == 0 {
+        return Err(ManagedDatabaseError::InvalidPort);
+    }
+    let project_root = project_root
+        .as_ref()
+        .canonicalize()
+        .map_err(|_| ManagedDatabaseError::ProjectRoot)?;
+    let project_hash = project_hash(&project_root);
+    let identity = ManagedResourceIdentity {
+        container_name: format!("cartograph-v2-{project_hash}"),
+        volume_name: format!("cartograph-v2-{project_hash}-data"),
+        project_hash,
+    };
+    let credentials = CredentialStore::new(project_root.join(".cartograph/v2/postgres.password"));
+    Ok(ManagedDatabase {
+        identity,
+        credentials,
+        docker: DockerCli::new(),
+        schema,
+        port,
+        startup_timeout: DEFAULT_STARTUP_TIMEOUT,
+    })
 }
 
 fn validate_owned_container(
@@ -538,12 +556,14 @@ fn validate_published_port(inspection: &ContainerInspection) -> Result<u16, Mana
         .map_err(|_| ManagedDatabaseError::UnsafePortPublication)
 }
 
-async fn probe_managed_capabilities(
+async fn initialize_managed_database(
     credentials: &DatabaseCredentials,
     port: u16,
-) -> Result<CapabilityReport, ManagedDatabaseError> {
+    schema: &DatabaseSchema,
+) -> Result<ManagedInitialization, ManagedDatabaseError> {
     let url = credentials.database_url(port)?;
     let settings = DatabaseSettings::parse(url.expose_secret(), Some("4"), Some("10000"))
+        .and_then(|settings| settings.with_schema(schema.as_str()))
         .map_err(|_| ManagedDatabaseError::CredentialFormat)?;
     let pool = connect(&settings)
         .await
@@ -551,8 +571,17 @@ async fn probe_managed_capabilities(
     let report = probe_capabilities(&pool)
         .await
         .map_err(|_| ManagedDatabaseError::DatabaseCapabilityProbe)?;
+    if !report.ready {
+        pool.close().await;
+        return Err(ManagedDatabaseError::CapabilitiesNotReady);
+    }
+    let database = CartographDatabase::new(pool.clone(), settings.schema().clone());
+    let migrations = database.migrate().await;
     pool.close().await;
-    Ok(report)
+    Ok(ManagedInitialization {
+        capabilities: report,
+        migrations: migrations.map_err(|_| ManagedDatabaseError::SchemaMigration)?,
+    })
 }
 
 /// Safe lifecycle failures. No variant stores a database password or command
@@ -603,6 +632,9 @@ pub enum ManagedDatabaseError {
         "managed database credential ACL hardening is not implemented on this operating system"
     )]
     CredentialAclUnsupported,
+    /// The configured PostgreSQL schema is not a safe identifier.
+    #[error("managed database schema configuration is invalid")]
+    DatabaseSchema,
     /// Another process owns the project mutation lease.
     #[error("another managed database lifecycle operation is already running for this project")]
     LifecycleBusy,
@@ -700,6 +732,9 @@ pub enum ManagedDatabaseError {
     /// One or more hard capabilities failed.
     #[error("managed database is missing a required PostgreSQL, ParadeDB, or pgvector capability")]
     CapabilitiesNotReady,
+    /// The append-only Cartograph schema migration did not commit.
+    #[error("managed database Cartograph schema migration failed")]
+    SchemaMigration,
 }
 
 fn project_hash(project_root: &Path) -> String {
@@ -744,6 +779,7 @@ mod tests {
     const RESTART_POLL_INTERVAL: Duration = Duration::from_millis(50);
     const RESTARTING_FIXTURE_COMMAND: &str = "exit 17";
     const LOG_TAIL_LINES: u16 = 5;
+    const TEST_DATABASE_SCHEMA: &str = "cartograph_managed_test";
     #[cfg(unix)]
     const OTHER_ACCESS_MODE_MASK: u32 = 0o077;
 
@@ -873,10 +909,15 @@ mod tests {
             Ok(directory) => directory,
             Err(error) => panic!("could not create test directory: {error}"),
         };
-        let database = match ManagedDatabase::new(directory.path(), TEST_DATABASE_PORT) {
-            Ok(database) => database.with_startup_timeout(TEST_STARTUP_TIMEOUT),
-            Err(error) => panic!("could not build manager: {error}"),
+        let schema = match DatabaseSchema::parse(TEST_DATABASE_SCHEMA) {
+            Ok(schema) => schema,
+            Err(error) => panic!("managed test schema is invalid: {error}"),
         };
+        let database =
+            match managed_database_with_schema(directory.path(), TEST_DATABASE_PORT, schema) {
+                Ok(database) => database.with_startup_timeout(TEST_STARTUP_TIMEOUT),
+                Err(error) => panic!("could not build manager: {error}"),
+            };
         let _cleanup = DockerCleanup {
             container_name: database.identity.container_name.clone(),
             volume_name: database.identity.volume_name.clone(),
@@ -1089,6 +1130,8 @@ mod tests {
         assert!(first.credentials_created);
         assert!(first.container_created);
         assert!(first.capabilities.ready);
+        assert_eq!(first.migrations.applied_versions, vec![1]);
+        assert_eq!(first.schema, TEST_DATABASE_SCHEMA);
 
         let status = match database.status().await {
             Ok(status) => status,
@@ -1106,6 +1149,8 @@ mod tests {
         assert!(!second.credentials_created);
         assert!(!second.container_created);
         assert!(second.capabilities.ready);
+        assert!(second.migrations.applied_versions.is_empty());
+        assert_eq!(second.schema, TEST_DATABASE_SCHEMA);
     }
 
     async fn assert_pause_logs_and_stop(database: &ManagedDatabase) {
@@ -1123,6 +1168,7 @@ mod tests {
             Err(error) => panic!("paused managed start failed: {error}"),
         };
         assert!(resumed.capabilities.ready);
+        assert!(resumed.migrations.applied_versions.is_empty());
 
         let paused = std::process::Command::new("docker")
             .args(["container", "pause", &database.identity.container_name])

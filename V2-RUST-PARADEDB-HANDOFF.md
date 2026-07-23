@@ -73,6 +73,11 @@ This is the durable continuation point for the v2 rewrite. Read
   Docker lifecycle fault suite on GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
+The generation-safe schema/BM25 slice is implemented in the current working
+tree and awaiting its reviewed checkpoint commit. Record that commit and its CI
+run here after the gates below pass; do not describe the slice as complete
+until then.
+
 ## Initial Rust slice
 
 Implemented or in progress:
@@ -199,6 +204,50 @@ The final independent review verdict is `APPROVE` with no findings. The local
 proof stack also passed 7,139 v1 TypeScript tests, the forced Cartograph
 biomarker floor at 0 error / 0 warning / 0 info, coverage generation, and the
 Sonar quality gate.
+
+## Generation-safe schema and first BM25 slice
+
+Implemented in Rust:
+
+- `cartograph-domain` brands project, file, symbol, generation, document, model,
+  and task UUIDs; deserialization validates and canonicalizes them, and nil IDs
+  are rejected. The crate also owns stable generation/document/edge enums and
+  BLAKE3 content-digest text.
+- `CARTOGRAPH_DATABASE_SCHEMA` selects a conservative, canonicalized
+  PostgreSQL schema identifier. Dynamic SQL accepts only that validated value
+  and still quotes it explicitly.
+- An append-only `schema_migrations` ledger records immutable version, name,
+  and BLAKE3 checksum under a transaction-scoped advisory lock. Re-running is
+  idempotent; checksum drift and newer schema versions fail closed.
+- Migration 1 creates generation-safe projects, generations, files, symbols,
+  edges, references, and search documents with project/generation composite
+  foreign keys. A partial unique index enforces one current generation per
+  project.
+- The single `search_documents` BM25 covering index includes its unique bigint
+  key, project/generation/document filters, path/language/kind, JSONB metadata,
+  and code-aware casts for qualified names and code.
+- Opaque `StagedGeneration`, `ReadyGeneration`, and `CurrentGeneration` tokens
+  encode legal publication flow. Document insertion and readiness are one
+  transaction; publication serializes per project, supersedes the old current
+  row, changes the new row, and swaps the project pointer atomically. A
+  monotonic project-local sequence rejects delayed older publishers.
+- Prepare/publish failures return their consumed tokens. Checked recovery can
+  reconstruct durable staging/ready state after a process restart and can mark
+  abandoned work terminally failed without changing the visible generation.
+- Current-generation BM25 search joins through the durable project pointer,
+  binds all user text, orders by ParadeDB score and bigint key, and returns
+  branded document/generation provenance.
+- Managed `db start` now applies this migration after capability proof using
+  the validated configured schema, then reports its name and whether a version
+  was applied or reused.
+
+Live tests against the pinned ParadeDB 0.23.5 image prove migration
+idempotency, camelCase/snake_case code search, invisibility of ready/staging
+generations, failed-batch rollback, atomic replacement, superseded/current
+states, reverse-order stale-publication refusal, token retry/recovery/failure
+marking, and checksum-tamper refusal. The full managed Docker lifecycle test
+also passes with first-start migration and idempotent reuse of a non-default
+schema.
 
 ## Execution plan
 
@@ -332,14 +381,15 @@ Only then:
 
 ## Immediate next actions
 
-1. Begin the generation-safe migration ledger/schema and first ParadeDB BM25
-   search-document index, with live PostgreSQL integration tests.
-2. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+1. Add project operation lease metadata with owner/process-start identity,
+   heartbeat, bounded acquisition, and tested stale-owner takeover rules.
+2. Add PostgreSQL COPY loaders for files, symbols, edges, references, and search
+   documents, plus a deterministic logical-generation digest independent of
+   worker count and insertion order.
+3. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
-3. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
+4. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
    there; never weaken credential privacy to make the platform pass.
-4. Begin the generation-safe schema/migration ledger and first BM25 search
-   document migration after the lifecycle checkpoint is green.
 
 ## Risks and decisions still requiring evidence
 

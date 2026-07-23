@@ -178,6 +178,22 @@ fn print_managed_start(report: &ManagedStartReport, format: OutputFormat) -> Res
                     "reused"
                 }
             );
+            println!(
+                "Cartograph schema: {} at version {} (applied now: {})",
+                report.schema,
+                report.migrations.current_version,
+                if report.migrations.applied_versions.is_empty() {
+                    "none".to_owned()
+                } else {
+                    report
+                        .migrations
+                        .applied_versions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            );
             print!("{}", render_text_report(&report.capabilities));
         }
     }

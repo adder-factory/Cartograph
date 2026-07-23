@@ -4,6 +4,7 @@ members = [
   "crates/cartograph-cli",
   "crates/cartograph-config",
   "crates/cartograph-db",
+  "crates/cartograph-domain",
 ]
 
 [workspace.package]

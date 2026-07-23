@@ -80,9 +80,11 @@ binary:
 Cross-slice reach-through is forbidden. Each crate exposes a narrow public
 surface and keeps SQL, transport, or parser internals private.
 
-The first committed slice contains `cartograph-config`, `cartograph-db`, and
-`cartograph-cli`. It proves that the Rust runtime can reject an unsupported
-database before any schema mutation.
+The foundation began with `cartograph-config`, `cartograph-db`, and
+`cartograph-cli`, proving that the Rust runtime can reject an unsupported
+database before any schema mutation. The generation-safe storage slice adds
+`cartograph-domain` without adding any non-Serde production dependency to that
+crate.
 
 ## Storage model
 
@@ -91,7 +93,7 @@ project IDs. Per-project isolation is enforced in every primary/foreign key and
 query; deployment-level schema selection remains configurable. A project can be
 removed or rebuilt without affecting another project.
 
-Planned core relations:
+Core relations:
 
 | Relation | Key data |
 | --- | --- |
@@ -112,12 +114,32 @@ transaction atomically marks the generation current only after every required
 stage succeeds. Readers always see one complete generation; cancellation or a
 worker failure leaves the previous generation current.
 
+The first generation-safe migration implements `projects`,
+`index_generations`, `files`, `symbols`, `edges`, `references`, and
+`search_documents`. It uses an append-only, checksummed migration ledger in the
+configured schema, a transaction-scoped advisory migration lock, project-scoped
+foreign keys, and a partial unique index that permits only one `current`
+generation per project. Each generation reserves a monotonic project-local
+sequence; publication refuses a ready token whose sequence is not newer than
+the visible generation, so delayed workers cannot regress the project index.
+Schema names are restricted to PostgreSQL's 63-byte ASCII identifier shape,
+canonicalized, and still double-quoted wherever SQL must interpolate them.
+
+The Rust write API returns opaque `StagedGeneration`, `ReadyGeneration`, and
+`CurrentGeneration` tokens. The only way to obtain `ReadyGeneration` is to
+commit the complete document batch and digest in one transaction; the only way
+to obtain `CurrentGeneration` is to consume that ready token in the atomic
+publication transaction. Database constraints remain the second line of
+defense against forged or stale process state. Failed operations return the
+consumed token, and checked recovery can rehydrate durable `staging`/`ready`
+state after process loss or mark it terminally failed.
+
 ### BM25 document index
 
 ParadeDB allows one BM25 index per table, so every field used for text matching,
 filtering, sorting, or aggregation belongs in the `search_documents` covering
-index. The migration will be validated against the pinned extension before it
-is accepted. Its intended shape is:
+index. The first migration was validated against the pinned extension before
+acceptance. Its index shape is:
 
 ```sql
 CREATE INDEX search_documents_bm25_idx
@@ -125,6 +147,10 @@ ON cartograph.search_documents
 USING bm25 (
   id,
   project_id,
+  generation_id,
+  document_id,
+  file_id,
+  symbol_id,
   path,
   language,
   document_kind,
@@ -294,6 +320,12 @@ files opened with no-follow/nonblocking semantics. Group/world-writable
 ancestors, state symlinks, and macOS extended ACLs are rejected. Cold image
 pulls have a separate longer bound; the readiness deadline covers TCP health,
 extension creation, driver connection, and every capability query.
+
+Successful managed start also applies the append-only Cartograph schema ledger
+inside that readiness deadline, using the same validated configured schema as
+external connections. Its report identifies that schema and distinguishes
+newly applied migration versions from an idempotent reuse; a migration failure
+is part of startup failure rather than a partially reported success.
 
 This is not the complete lifecycle yet. Removal, backup/restore, extension/image
 upgrade, lease/owner metadata, and Podman support remain M1 work. Credential
