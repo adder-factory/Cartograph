@@ -68,6 +68,9 @@ This is the durable continuation point for the v2 rewrite. Read
   commits on the same branch.
 - Rust/ParadeDB CI workflow: `e3158cb`; [run 29979753392](https://github.com/adder-factory/cartograph/actions/runs/29979753392)
   passed both the quality/no-SQLite job and the digest-pinned live database job.
+- Managed lifecycle: `aa5b8f3`; [run 29983784952](https://github.com/adder-factory/cartograph/actions/runs/29983784952)
+  passed format, clippy, unit, no-SQLite, live capability, and the full real
+  Docker lifecycle fault suite on GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
 ## Initial Rust slice
@@ -191,6 +194,11 @@ with no residual container, wrong/missing data mount refusal, orphaned-volume
 credential refusal, zero-deadline rollback, and test cleanup. The
 ignored Docker lifecycle tests complete in about ten seconds with the image
 already pulled.
+
+The final independent review verdict is `APPROVE` with no findings. The local
+proof stack also passed 7,139 v1 TypeScript tests, the forced Cartograph
+biomarker floor at 0 error / 0 warning / 0 info, coverage generation, and the
+Sonar quality gate.
 
 ## Execution plan
 
@@ -324,8 +332,8 @@ Only then:
 
 ## Immediate next actions
 
-1. Independently review and checkpoint the M1 managed lifecycle slice, push it,
-   and verify CI including the new real lifecycle tests.
+1. Begin the generation-safe migration ledger/schema and first ParadeDB BM25
+   search-document index, with live PostgreSQL integration tests.
 2. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
 3. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
