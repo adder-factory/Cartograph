@@ -110,12 +110,18 @@ This is the durable continuation point for the v2 rewrite. Read
   output reservations, stage/item/cleanup deadlines, drop-safe poisoning, and
   a 23rd live supervisor case that reaches PostgreSQL/ParadeDB publication only
   after reverse-completing parallel work is reduced in exact input order.
+- Frozen parallel-index benchmark and COPY observability: `b814932`; [run 30036702684](https://github.com/adder-factory/cartograph/actions/runs/30036702684)
+  passed the Rust quality/no-SQLite job in 1m16s and the PostgreSQL 18 + pinned
+  ParadeDB job in 3m25s. The live job passed doctor, capability,
+  generation/BM25, COPY/digest, lease, all 23 supervisor cases, the complete
+  1/2/4/8/16-worker benchmark in 1m25s, and managed Docker lifecycle on
+  GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the reusable bounded stage
-executor at `8e06435`, with both v2 GitHub jobs green. Continue with the frozen
-1/2/4/8/16-worker benchmark and real extraction stages; do not reopen the
-PostgreSQL-only, no-SQLite, or Rust-first decisions.
+The branch and origin are checkpointed through the assertion-bearing scaling
+benchmark at `b814932`, with both v2 GitHub jobs green. Continue with real
+TypeScript/JavaScript extraction stages and re-run the same matrix on the real
+corpus; do not reopen the PostgreSQL-only, no-SQLite, or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -537,14 +543,19 @@ Implemented in Rust at `8e06435`:
   progress, or deliberately cancelled after accepted parent cancellation.
   Thus selecting away from a stage cannot silently permit publication, while
   supervisor-driven cancellation is not mislabeled as a worker failure.
+- `StageMetrics` follows the exact reservation lifetime and reports admitted,
+  reduced, current, and peak item/byte counts. A failed observer is a structured
+  stage failure; even the task registered immediately before that failure is
+  aborted and reaped before `execute` returns.
 
-The focused Rust suite now has 23 `cartograph-indexer` unit tests. New tests
+The focused Rust suite now has 24 `cartograph-indexer` unit tests. New tests
 cover reverse completion, exact reduction, worker/queue caps, byte
 backpressure, retained out-of-order capacity, empty input, non-contiguous
 input, item/stage deadlines, slow exhaustion, cancellation before/while work,
 worker/reducer failure, panic, execute-future drop after delivery, cancellation
-aware drop, cooperative deadline reaping, and surfaced uncooperative cleanup
-timeout. The pinned live suite is 23/23 and the new case proves ordered stage
+aware drop, cooperative deadline reaping, surfaced uncooperative cleanup
+timeout, exact successful metrics, failed-reservation release, and poisoned
+observer cleanup. The pinned live suite is 23/23 and the new case proves ordered stage
 work, progress counters, supervised COPY, generation publication, and exact
 lease release on PostgreSQL 18 + ParadeDB 0.23.5 + pgvector 0.8.1.
 
@@ -572,6 +583,73 @@ harness correctly stayed failed after its three whole-shard retries. No v2
 Rust file is imported by that v1 suite. Do not weaken the harness or relabel
 the failed process run; v2 removes this failure class when Bun/TypeScript is no
 longer the shipped runtime or release gate.
+
+## Frozen scaling benchmark and COPY observability slice
+
+This slice adds two observers without changing scheduling or persistence:
+
+- `StageMetrics` remains cloneable outside a moved stage execution and exposes
+  exact admission, successful reduction, current reservation, and high-water
+  counters. Failed/cancelled work releases current capacity without being
+  mislabeled as completed.
+- `PrepareGenerationMetrics` is attached to `GenerationContents` and times
+  exactly the five PostgreSQL COPY streams. It includes bounded row encoding
+  and excludes Rust validation, lease/generation fencing, the ready transition,
+  publication, and benchmark verification queries.
+
+`crates/cartograph-indexer/benches/index_scaling.rs` is an optimized,
+machine-readable, assertion-bearing benchmark rather than a timing-only demo.
+For each worker count 1/2/4/8/16 it runs one warmup and five measured samples,
+each in a fresh schema. Every sample executes the real bounded stage runner,
+deterministic reduction, supervisor-owned prepare/COPY, atomic publication,
+ParadeDB BM25 lookup, row-count checks, task-publication gate, exact lease
+release, and schema cleanup. GitHub's live ParadeDB job now runs the same matrix
+as a cross-architecture invariant gate without a flaky wall-clock threshold.
+The harness pins a length-delimited fixture/config fingerprint, source digest,
+logical digest, literal row counts, and ordered BM25 IDs; the first run cannot
+silently adopt drift as a new baseline. A preflight intentionally fails project
+registration after migration and proves setup cleanup leaves no schema.
+
+The committed fixture metadata and raw report are in
+`docs/v2/benchmarks/INDEX-SCALING.md` and
+`docs/v2/benchmarks/index-scaling-aarch64-2026-07-22.json`. The measured host
+was Apple arm64 with 14 logical CPUs, Rust 1.96.1, PostgreSQL 18.4,
+`pg_search` 0.23.5, and pgvector 0.8.1. The fixture contains 256
+TypeScript-shaped items, 6,145,536 source bytes, and 32 deterministic BLAKE3
+analysis rounds per item.
+
+All 30 warmup/measured runs produced logical digest
+`647c61f7eb0a697a31774f9d025ea896e35fb6cb54ade6477b47dadaaac04cbf`,
+row counts 256 files / 256 symbols / 255 edges / 255 references / 256 search
+documents, and BM25 first hit
+`30000000-0000-4000-8000-000000000001`. Every successful run had zero retained
+stage reservations, zero active tasks before publication, no lease afterward,
+and no residual benchmark schema.
+
+Median stage throughput increased from 1,969 items/s at one worker to 9,015 at
+16 workers. Median end-to-end time fell from 220.24 ms to 108.98 ms; COPY stayed
+near 55-67 ms and became the dominant floor. Eight workers reached 120.60 ms,
+so 16 workers added a final 9.6% end-to-end improvement while doubling the
+bounded window from 16 to 32 items. The initial policy is therefore up to 16
+parse/extract workers, capped by available parallelism, one queued envelope per
+active worker, and the independent byte budget as the hard memory authority.
+COPY remains one retained database task. Re-measure this choice on the real
+TypeScript/JavaScript extractor corpus before locking production defaults.
+
+Independent review first rejected self-adoption of the benchmark's first run
+as its baseline and incomplete schema ownership after post-migration setup
+failure. The final implementation pins committed fixture and logical-output
+oracles, injects that failure before timing, proves the schema is absent through
+a new connection, preserves primary plus cleanup errors, and always closes the
+pool. The fresh re-review returned `APPROVE` with no remaining or new findings.
+
+Final local proof on the exact code commit includes Rust format, strict Clippy,
+all workspace unit and compile-fail doc tests, all live PostgreSQL/ParadeDB
+suites, the optimized 30-run matrix, TypeScript typecheck and
+architecture/Biome, actionlint, a SQLite-free Cargo graph and lockfile, forced
+Cartograph biomarkers at 0/0/0 with zero cross-file errors, and Sonar `OK` at
+91.5% new-code coverage, 86.0% overall coverage, zero bugs, zero
+vulnerabilities, zero new violations, and 100% reviewed security hotspots.
 
 ## Execution plan
 
@@ -638,10 +716,12 @@ golden contract. Do not call TypeScript from production Rust.
 The one-shot lease-owned supervisor, cancellation/reaping model, hard worker
 task/byte admission, progress/status contract, retained COPY task, and exact
 terminal cleanup are implemented at `bcafdc6`. The reusable typed bounded
-stage executor is implemented at `8e06435`. Next, freeze the benchmark fixture,
-measure 1/2/4/8/16 workers, then connect TypeScript/JavaScript discovery,
-read/hash, parse/extract, resolve, and reduce through that executor. The logical
-digest and retrieval baseline must be identical for every worker count.
+stage executor is implemented at `8e06435`. The frozen synthetic benchmark now
+passes at 1/2/4/8/16 workers with one identical logical digest, row-count set,
+and ParadeDB BM25 result. Next connect TypeScript/JavaScript discovery,
+read/hash, parse/extract, resolve, and reduce through that executor, then replace
+the synthetic timing baseline with a Rust-owned real extractor corpus while
+preserving the same determinism gate.
 
 Required fault injection:
 
@@ -710,14 +790,14 @@ Only then:
 
 ## Immediate next actions
 
-1. Build a frozen fixture benchmark matrix at 1/2/4/8/16 workers. Require the
-   same BLAKE3 logical digest, row counts, BM25 fixture results, and zero leaked
-   tasks/leases for every worker count. Record throughput, peak reserved bytes,
-   stage P50/P95, and PostgreSQL COPY time before choosing defaults.
-2. Port TypeScript/JavaScript discovery and extraction into the implemented
+1. Port TypeScript/JavaScript discovery and extraction into the implemented
    discover -> read/hash -> parse/extract -> resolve -> reduce stages using
    v1.1.33 fixture output as an oracle, then replace that oracle with Rust-owned
    golden contracts. Keep extraction out of `cartograph-db`.
+2. Re-run the committed 1/2/4/8/16 matrix on that frozen real extractor corpus.
+   Preserve the current digest/row/BM25/task/lease gates, compare throughput and
+   memory against the synthetic baseline, and confirm or revise the initial
+   `min(available_parallelism, 16)` parse/extract cap.
 3. Add stage-level fault injection for each real extraction stage, then feed
    one canonical `GenerationFacts` value into the existing supervised
    `prepare_generation`; workers never publish, clean up, or hold a lease fence.
