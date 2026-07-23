@@ -300,29 +300,66 @@ key includes the configured schema, project, and operation. It uses
 PostgreSQL's clock for expiry and heartbeat rather than process wall time,
 returns immediately on contention, and permits deterministic stale-owner
 takeover.
-Pipeline ownership and heartbeat scheduling remain responsibilities of the M4
-supervisor; the persistence layer deliberately does not infer process liveness
-from PID reuse alone.
 
-## Process supervision requirement
+The first M4 supervisor foundation now owns lease acquisition, renewal,
+reconciliation, cancellation, terminal generation transitions, and exact
+release. The persistence layer still deliberately does not infer process
+liveness from PID reuse alone.
+
+## Process supervision
 
 V1.1.33 exposed a concrete failure mode during release work: a hook worker
 could outlive useful progress for many minutes while holding the project lock.
 V2 cannot inherit that process model.
 
-The Rust supervisor must provide:
+The Rust `cartograph-indexer` foundation provides:
 
 - parent-to-child cancellation propagation;
-- kill escalation after a bounded grace period;
-- child reaping on every exit path;
+- abort escalation after a bounded grace period, followed by an awaited join;
+- child and PostgreSQL-task reaping on every normal, error, timeout, explicit
+  cancellation, caller-abort, and caller-future-drop path;
 - stage heartbeat and progress timestamps;
 - lock owner PID/process-start identity plus operation and generation;
 - lease renewal and safe stale-owner recovery;
 - a maximum runtime for hook-triggered work;
 - status output that distinguishes queued, active, cancelling, and wedged work.
 
-A failure-injection integration test must kill each pipeline stage and prove no
-orphan process, live lock, or partial generation remains.
+The public `run` future immediately transfers the operation to one owned Tokio
+task. Its guard retains the exact spawning runtime handle, so dropping a
+previously-polled future from a non-runtime thread still schedules bounded
+cleanup on the correct runtime. Cancellation is linearized with publication:
+once publication begins, a late cancellation cannot turn a committed
+generation into a reported cancellation; before that gate, cancellation closes
+the worker and prepare scopes, reaps all retained tasks, fails the owned
+generation, and releases the exact lease.
+
+Worker admission has both task and byte caps and no hidden queue. Every worker
+result must be joined and observed before publication. Prepare/COPY authority
+is a distinct capability from terminal publication/cleanup authority, and the
+pipeline context never exposes the lease fence. The one prepare operation is a
+retained task with its own server-side COPY deadline, independent of the short
+heartbeat request deadline.
+
+Durable PostgreSQL operations run in retained tasks with server-bounded
+transactions and explicit rollback. After the operation then generation
+advisory locks are acquired, prepare performs a non-row-locking exact-token,
+generation, and database-clock expiry check before entering COPY. It repeats a
+row-locking fence check immediately before the ready transition. Acquisition,
+publication, cleanup, and uncertain timeouts reconcile durable state before
+retrying or reporting an ambiguous outcome.
+
+The current live pinned-ParadeDB suite has 22 supervisor cases. It covers
+success, heartbeats, progress stalls, whole-operation deadlines, lost leases,
+takeover, bounded acquisition/publication/cleanup reconciliation, dropped child
+failures, long COPY payloads, blocked COPY/publication/cleanup, simultaneous
+heartbeat and COPY uncertainty, caller task abort, and dropping a polled public
+future outside the runtime. Lock-injection cases prove zero active schema work,
+free operation/generation advisories, correct generation state, and exact lease
+disposition before the external blocker is released.
+
+The remaining M4 fault matrix must exercise each real discover/read/parse/
+resolve/merge/BM25/vector stage after those stages exist; the supervisor
+substrate itself is implemented rather than deferred.
 
 ## Database lifecycle
 
@@ -408,13 +445,15 @@ No code should try to route around these obligations.
 
 ## Migration and cutover
 
-V2 has no SQLite runtime, but migration tooling may read old state once and
-write v2 PostgreSQL. That importer is a quarantined command/tool, not a storage
-backend:
+V2 has no SQLite runtime and no SQLite importer. No v2 binary, migration tool,
+test utility, or optional feature may link a SQLite driver or read a SQLite
+database. Supported cutover paths are deliberately narrower:
 
-- The preferred path imports directly from a v1.1.33 PostgreSQL schema.
-- An optional one-shot legacy SQLite importer may be shipped separately if user
-  data needs it. It cannot be linked into the v2 server or selected at runtime.
+- Import directly from a v1.1.33 PostgreSQL schema.
+- Rebuild v2 PostgreSQL state from the source checkout when no v1 PostgreSQL
+  state exists.
+- A user who needs to preserve a v1 SQLite index must use v1.1.33 to migrate it
+  to PostgreSQL before starting the v2 cutover; v2 never opens the old file.
 - Structural state is validated with counts, stable identities, referential
   invariants, and sampled content hashes.
 - Embeddings migrate only when model fingerprint and dimension match; otherwise
@@ -433,8 +472,8 @@ The TypeScript runtime can be deleted only after:
    tests pass on amd64 and arm64.
 5. Determinism and scaling gates pass at 1/2/4/8/16 workers.
 6. No production Rust dependency graph contains a SQLite crate or native
-   library, and repository search finds no selectable SQLite path outside the
-   quarantined importer/history.
+   library, and no v2 runtime, importer, optional feature, or test helper can
+   select or open SQLite.
 7. A signed v2 release is built from `main` with provenance and smoke-tested
    native artifacts.
 

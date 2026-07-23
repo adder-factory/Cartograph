@@ -6,8 +6,8 @@ This is the durable continuation point for the v2 rewrite. Read
 ## User decisions that must not be reopened
 
 - Ship v1.1.33 as the final v1 checkpoint, then build v2 from that exact tag.
-- Remove SQLite. Do not preserve a SQLite runtime, fallback, config branch, or
-  dual-backend abstraction.
+- Remove SQLite. Do not preserve a SQLite runtime, fallback, config branch,
+  importer, test utility, optional feature, or dual-backend abstraction.
 - Require PostgreSQL 18+, ParadeDB `pg_search`, and pgvector.
 - Write as much of the shipped product in Rust as possible. The final v2 CLI,
   MCP server, indexer, extraction pipeline, graph/search engine, database
@@ -85,11 +85,29 @@ This is the durable continuation point for the v2 rewrite. Read
   ParadeDB + pgvector job in 1m44s. The database job passed the capability,
   generation/BM25, COPY/digest/chunk/NULL/rollback, lease, and managed Docker
   lifecycle tests on GitHub's amd64 runner.
+- Deterministic COPY handoff checkpoint: `172a5af`.
+- Cancellation-safe bounded index supervisor: `bcafdc6`; [run 30020453887](https://github.com/adder-factory/cartograph/actions/runs/30020453887)
+  passed the Rust quality/no-SQLite job. Its live job passed 21/22 supervisor
+  cases but exposed a shared-runner-only 50 ms heartbeat SQL deadline in the
+  otherwise-correct large-COPY test envelope.
+- Large-COPY test isolation: `65caa64`; [run 30021281266](https://github.com/adder-factory/cartograph/actions/runs/30021281266)
+  keeps the injected COPY duration above the heartbeat SQL deadline and below
+  its independent COPY deadline, while leaving the aggressive heartbeat-
+  uncertainty configuration unchanged. Its live job then failed two different
+  tight-deadline cases at 20/22, proving unrelated parallel fault cases were
+  contending on the shared GitHub ParadeDB service.
+- Deterministic supervisor fault harness: `d12bf23`; [run 30021933926](https://github.com/adder-factory/cartograph/actions/runs/30021933926)
+  runs the 22-case supervisor binary with `--test-threads=1`. Concurrency inside
+  each case remains intact; only unrelated lock/deadline cases stop stealing
+  one another's scheduler and database budgets. The run passed the 1m09s Rust
+  quality/no-SQLite job and the 1m57s PostgreSQL 18 + pinned ParadeDB job,
+  including doctor, capability, generation/BM25, COPY/digest, leases, all 22
+  supervisor cases, and the managed Docker lifecycle.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The branch and origin are checkpointed through the deterministic COPY/digest
-slice. Continue with lease-owned bounded supervision; do not reopen the
-PostgreSQL-only or Rust-first decisions.
+The branch and origin are checkpointed through the cancellation-safe supervisor
+foundation. Continue with real bounded stage queues and extraction work; do not
+reopen the PostgreSQL-only, no-SQLite, or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -383,6 +401,98 @@ assertion failure, but the harness correctly remained failed. Running the same
 Do not weaken or skip tests to mask the Bun runtime failure; retain `N=16` as
 the full-suite gate while investigating the runtime separately.
 
+## Cancellation-safe bounded supervisor slice
+
+Implemented in Rust at `bcafdc6`:
+
+- New `cartograph-indexer` crate owns one supervised, generation-bound project
+  operation. The request binds the project/operation/generation target, an
+  observable PID/process-start owner, and a bounded lease duration.
+- `SupervisorConfig` validates every deadline relationship before lease
+  acquisition. Whole-operation, progress, cancellation-grace, heartbeat
+  interval/request, and PostgreSQL COPY deadlines are distinct. COPY defaults
+  to one quarter of the operation budget and is never shortened to the lease
+  heartbeat request timeout. Worker admission has hard task and byte limits.
+- Status is structured and observable: queued, active, cancelling, wedged,
+  completed, failed, or cancelled; current stage, item/byte progress, heartbeat
+  count, idle duration, cancellation reason, and grace-exceeded state are
+  exposed without the lease mutation token.
+- Cancellation and publication share one synchronous lifecycle gate. A
+  cancellation accepted before publication guarantees publication cannot
+  start. Once publication has begun, a late cancellation is rejected and the
+  supervisor reports the durable publication result rather than lying about a
+  cancelled commit.
+- Public `IndexerSupervisor::run` immediately moves the operation into one
+  owned Tokio task. `SupervisorRunGuard` retains both that task and the exact
+  spawning runtime handle. If the caller aborts its task, applies an outer
+  timeout, or moves a polled future to a plain thread and drops it there, the
+  guard still signals cancellation and schedules one bounded reaper on the
+  correct runtime. The reaper awaits graceful shutdown, then aborts and awaits
+  only at its absolute bound.
+- `TaskScope` has no hidden queue. Every admitted child reserves task/byte
+  capacity, every completion/failure remains visible until joined, and
+  publication fails when a worker result is unobserved, panicked, or still
+  active. Scope shutdown aborts and joins all registered children by the
+  operation deadline.
+- `PrepareScope` permits exactly one retained prepare/COPY task. The work
+  context exposes only `prepare_generation(contents)`, progress, cancellation,
+  and bounded child spawning; it never exposes a lease fence or a terminal
+  mutation capability. Separate prepare and terminal newtypes have compile-fail
+  proof that pipeline work cannot publish or clean up a generation.
+- Lease acquisition uses a fresh opaque UUID-v4 token for each attempt. A
+  single acquisition attempt is recoverable after a client timeout but cannot
+  be replayed with the same token. Read-only lease status deliberately excludes
+  that token. Takeover uses PostgreSQL time and rejects a live owner or a stale
+  worker trying to mutate after replacement.
+- The database mutation order is operation advisory, generation advisory, then
+  exact lease validation. Prepare checks token, generation, and database-clock
+  expiry after both advisories and before entering COPY, while leaving the
+  lease row unlocked so heartbeats can run. A final `FOR UPDATE` fence check
+  immediately precedes the ready transition.
+- Heartbeats, acquisition, reconciliation, COPY, publication, and cleanup all
+  run as retained tasks with server-side statement bounds. Every transaction
+  rolls back explicitly on its body error. Timeout/commit uncertainty is
+  reconciled from generation and exact-token lease state in one bounded query;
+  retries are permitted only when that durable snapshot proves them safe.
+- Terminal cleanup atomically fails the exact staging/ready generation and
+  releases the exact lease. Authority-uncertain lost-heartbeat/lost-lease paths
+  do not mutate a possible new owner's generation.
+- COPY table mechanics are one typed static plan per table, preserving the
+  deterministic files -> symbols -> edges -> references -> search-documents
+  order, exact encoders, bounded chunks, completion counts, and transactional
+  rollback.
+
+The pinned-ParadeDB live supervisor suite now has 22 cases. Beyond normal
+success, it proves progress-stall and operation-deadline cancellation,
+cooperative and noncooperative work, dropped child failures, ownership loss,
+stale takeover, long 2 MiB COPY payloads, bounded acquisition/publication/
+cleanup reconciliation, blocked COPY/publication/cleanup reaping, concurrent
+heartbeat uncertainty plus blocked COPY, caller task abort, and cross-thread
+drop of an already-polled public run future. Lock-injection cases assert zero
+active schema queries and free operation/generation advisories before releasing
+the external blocker, then verify the exact durable generation and lease state.
+
+Independent review went through multiple strict `REQUEST_CHANGES` rounds: it
+caught reusable authority tokens, lock ordering, pre-COPY stale-fence work,
+unbounded/dropped durable futures, heartbeat-scaled COPY timeouts, incomplete
+rollback, already-expired reaping, caller-future cancellation, and finally the
+non-runtime-thread Drop path. Each finding received a focused implementation
+change and live regression. The final reviewer verdict on `bcafdc6` is
+`APPROVE` with no findings. The same reviewer separately approved `65caa64` as
+a test-isolation correction: its 200 ms injected COPY remains above the 150 ms
+heartbeat SQL deadline and below the independent 500 ms COPY deadline, so it
+would still fail if production accidentally reused the heartbeat bound. The
+reviewer also approved `d12bf23`: serializing the fault-injection binary removes
+unmodelled cross-case server contention without serializing the Tokio tasks,
+locks, takeovers, or reconciliation races exercised inside each case.
+
+Final local proof for this slice includes Rust format/check/strict Clippy, all
+workspace unit and compile-fail doc tests, 22/22 live supervisor tests, 6/6
+live capability/generation/COPY/lease tests, actionlint, a SQLite-free Cargo
+graph and lockfile, TypeScript strict/architecture/Biome gates, 7,139 v1 tests
+with zero failures, a 0/0/0 biomarker floor, Sonar quality-gate `PASSED`, and
+zero active test schemas or Cartograph v2 PostgreSQL statements afterward.
+
 ## Execution plan
 
 ### M0 — final v1 release and v2 foundation
@@ -445,9 +555,11 @@ golden contract. Do not call TypeScript from production Rust.
 
 ### M4 — bounded parallel indexer
 
-Implement the staged pipeline and supervisor from the architecture doc. Commit
-benchmarks for 1/2/4/8/16 workers. The logical digest and retrieval baseline
-must be identical for every worker count.
+The one-shot lease-owned supervisor, cancellation/reaping model, hard worker
+task/byte admission, progress/status contract, retained COPY task, and exact
+terminal cleanup are implemented at `bcafdc6`. Next, connect real staged work
+through bounded queues and commit benchmarks for 1/2/4/8/16 workers. The
+logical digest and retrieval baseline must be identical for every worker count.
 
 Required fault injection:
 
@@ -496,9 +608,10 @@ approved v2 contracts.
 
 ### M7 — migration, evaluation, and cutover
 
-Implement a v1.1.33 PostgreSQL importer first. Add a quarantined one-shot legacy
-SQLite importer only if real user data requires it; never expose SQLite as v2
-storage.
+Implement a v1.1.33 PostgreSQL importer first. There will be no SQLite importer,
+runtime, optional feature, or test utility in v2. Users preserving a v1 SQLite
+index must migrate it to PostgreSQL with v1.1.33 before cutover; otherwise v2
+rebuilds PostgreSQL state from the source checkout.
 
 Lock the patch-task corpus fingerprint and compare v1.1.33 vs v2 on hit@5, MRR,
 edit precision, test recall, abstention, token budget, and latency. Run migration,
@@ -515,19 +628,24 @@ Only then:
 
 ## Immediate next actions
 
-1. Create a focused `cartograph-indexer` Rust crate and integrate the lease API
-   with a bounded supervisor around the staged pipeline. Start red: prove lease
-   renewal, progress/status transitions, cancellation on lost ownership,
-   deadline escalation, deterministic stage shutdown, generation failure, and
-   exact release without PID-liveness guessing. Do not add extraction logic to
-   `cartograph-db`.
-2. Add bounded queues, byte budgets, cancellation tokens, per-item/stage
-   deadlines, and deterministic reducer handoff for placeholder discover/read/
-   parse/resolve stages. Then benchmark identical fixture digests at
-   1/2/4/8/16 workers before porting language extractors into the pipeline.
-3. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+1. Add real bounded stage queues for discover -> read/hash -> parse/extract ->
+   resolve -> reduce. Use the existing `TaskScope` task/byte admission and
+   cancellation signal; do not create another unbounded channel or bypass the
+   supervisor with direct database writes.
+2. Define a typed stage envelope with stable sequence/path identity, byte
+   reservation, deadline, and failure provenance. Feed one deterministic
+   reducer, then call the existing supervised `prepare_generation`; workers
+   never publish or clean up directly.
+3. Build a frozen fixture benchmark matrix at 1/2/4/8/16 workers. Require the
+   same BLAKE3 logical digest, row counts, BM25 fixture results, and zero leaked
+   tasks/leases for every worker count. Record throughput, peak reserved bytes,
+   stage P50/P95, and PostgreSQL COPY time before choosing defaults.
+4. Port TypeScript/JavaScript discovery and extraction into those stages using
+   v1.1.33 fixture output as an oracle, then replace that oracle with Rust-owned
+   golden contracts. Keep extraction out of `cartograph-db`.
+5. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
-4. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
+6. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
    there; never weaken credential privacy to make the platform pass.
 
 ## Risks and decisions still requiring evidence
