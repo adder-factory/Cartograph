@@ -23,6 +23,7 @@ import {
   migratePostgresProjectToSqlite,
   migrateSqliteProjectToPostgres,
 } from '../src/features/admin-storage-migrate/runtime.js';
+import { auditEmbeddingStorage, cleanupObsoleteEmbeddings } from '../src/features/embedding-maintenance/index.js';
 import { runDoctor } from '../src/installer/doctor.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
 import { isolateBunInstall } from './support/bun-install-isolation.js';
@@ -139,6 +140,70 @@ describePostgres('PostgreSQL database provider', () => {
   // A `runDoctor` case below reads BUN_INSTALL via the global-link check
   // (issue #68); isolate it so the host's real `bun link` state can't leak.
   isolateBunInstall();
+
+  it('audits and safely cleans a superseded embedding model without dropping uncovered legacy refs', () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-embedding-cleanup-'));
+    currentSchema = `cg_embed_cleanup_${Date.now()}_${Math.floor(Math.random() * 1_000_000)}`;
+    const activeModel = 'active-test-model';
+    const database = {
+      provider: 'postgres' as const,
+      url: POSTGRES_URL!,
+      schema: currentSchema,
+      pgvector: 'off' as const,
+    };
+    const cg = Cartograph.initSync(currentDir, {
+      config: {
+        database,
+        llm: {
+          embeddingLlm: {
+            provider: 'openai-compat',
+            endpoint: 'http://127.0.0.1:1',
+            model: activeModel,
+          },
+        },
+      },
+    });
+    currentConn = cg.db;
+    seedEmbeddingGraph(cg);
+    upsertSymbolEmbedding({
+      qb: cg.queries,
+      nodeId: 'n:vec-a',
+      model: activeModel,
+      embedding: vectorToBytes(Float32Array.from([1, 0])),
+      summaryHashAtEmbed: '',
+    });
+    upsertSymbolEmbedding({
+      qb: cg.queries,
+      nodeId: 'n:vec-b',
+      model: activeModel,
+      embedding: vectorToBytes(Float32Array.from([VECTOR_SIMILAR_X, VECTOR_SIMILAR_Y])),
+      summaryHashAtEmbed: '',
+    });
+
+    const before = auditEmbeddingStorage({ db: cg.db.getDb(), projectRoot: currentDir, activeModel });
+    expect(before.totals).toMatchObject({ safeCleanupRows: 2, supersededRefs: 2, protectedReferencedRows: 1 });
+
+    const dryRun = cleanupObsoleteEmbeddings({
+      db: cg.db.getDb(),
+      projectRoot: currentDir,
+      activeModel,
+      vecLoaded: false,
+      confirm: false,
+    });
+    expect(dryRun).toMatchObject({ dryRun: true, candidateRows: 2, candidateRefs: 2, deletedRows: 0 });
+
+    const applied = cleanupObsoleteEmbeddings({
+      db: cg.db.getDb(),
+      projectRoot: currentDir,
+      activeModel,
+      vecLoaded: false,
+      confirm: true,
+    });
+    expect(applied).toMatchObject({ dryRun: false, deletedRows: 2, deletedRefs: 2 });
+    expect(
+      cg.db.getDb().prepare('SELECT node_id FROM embedding_refs WHERE model = ? ORDER BY node_id').all(VECTOR_MODEL),
+    ).toEqual([{ node_id: 'n:vec-c' }]);
+  });
 
   it('searches summaries, docstrings, and test descriptions in intent mode', async () => {
     currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-intent-test-'));

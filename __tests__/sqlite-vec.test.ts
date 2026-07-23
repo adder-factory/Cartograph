@@ -30,6 +30,7 @@ import {
   ensureVecTable,
   findSimilarViaVec,
   mirrorEmbeddingToVec,
+  reconcileVecSymbolTables,
   vecTableNameForDim,
 } from '../src/db/vec-helpers.js';
 import { vectorToBytes } from '../src/llm/embeddings.js';
@@ -389,6 +390,36 @@ describeVec('vec-helpers — bootstrap + mirror + KNN', () => {
 
   it('compactVecTables is a no-op when vecLoaded=false (no throw)', () => {
     expect(() => compactVecTables(db, false)).not.toThrow();
+  });
+
+  it('reconcileVecSymbolTables rebuilds live dimensions and drops dimensions with no canonical rows', () => {
+    upsertSymbolEmbedding({
+      qb: queries,
+      nodeId: 'n1',
+      embedding: vectorToBytes(unitVec(1)),
+      model: 'active-model',
+      summaryHashAtEmbed: '',
+    });
+    db.prepare(
+      `INSERT INTO embedding_store (body_hash, model, grain, embedding)
+       VALUES ('obsolete-body', 'old-model', 'symbol', ?)`,
+    ).run(Buffer.alloc(4 * Float32Array.BYTES_PER_ELEMENT));
+    bootstrapVecTables(db, true);
+
+    const liveName = vecTableNameForDim(DIM);
+    const obsoleteName = vecTableNameForDim(4);
+    mirrorEmbeddingToVec({
+      db,
+      vecLoaded: true,
+      rowid: 9000n,
+      embedding: vectorToBytes(unitVec(99)),
+      dim: DIM,
+    });
+    db.prepare(`DELETE FROM embedding_store WHERE body_hash = 'obsolete-body'`).run();
+
+    expect(reconcileVecSymbolTables(db, true)).toEqual({ rebuiltDimensions: [DIM], droppedDimensions: [4] });
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM ${liveName}`).get() as { c: number }).c).toBe(1);
+    expect(db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`).get(obsoleteName)).toBeFalsy();
   });
 
   it('ensureVecTable rejects invalid dims silently (no throw, no table)', () => {

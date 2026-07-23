@@ -125,6 +125,14 @@ verification. This is deterministic, stays inside the project database, never
 echoes the prior task text, and reports its provenance. Pass
 `localLearning: "off"` for a history-independent call. Legacy trace sessions
 without an exact project-root stamp are never used.
+Before relying on embeddings after changing models, call
+`cartograph_admin({action: "embedding-audit"})`. The matching cleanup action is
+a dry run unless `confirm: true` is present. It protects active-model rows and
+legacy refs without an active replacement; superseded legacy refs can be
+detached before their now-orphaned rows are removed. `cartograph_review({mode: "trust"})`
+also surfaces mixed dimensions, protected legacy refs, cleanup candidates, and
+obsolete acceleration artifacts; `deep: true` separately executes the live
+endpoint and semantic golden probe.
 For file-focused lookups, use `cartograph_files`: `format: "symbols"` for a
 one-file outline, `format: "deps"` for local dependencies/dependents, and
 `format: "module"` for directory summaries.

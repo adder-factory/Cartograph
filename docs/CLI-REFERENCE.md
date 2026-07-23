@@ -91,6 +91,9 @@ cartograph admin biomarkers-refresh [path]  # full findings pass, no re-extract
 cartograph admin storage-migrate   # SQLite <-> PostgreSQL
 cartograph admin unlock            # clear stale lock
 cartograph admin prune-store       # clean old orphaned LLM store rows
+cartograph admin embedding-audit   # model/dimension/ref/artifact report (read-only)
+cartograph admin embedding-cleanup # dry run: unreferenced non-active rows only
+cartograph admin embedding-cleanup --confirm  # apply the protected-row policy
 ```
 
 PostgreSQL 18+ storage flags are available on `llm install` and `admin init`:

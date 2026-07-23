@@ -12,6 +12,7 @@ import {
 } from '../../scip/index.js';
 import { parseConcurrency as defaultParseConcurrency } from '../../llm/concurrency.js';
 import { registerAdminDoctorCommand } from '../../features/admin-doctor/index.js';
+import { registerAdminEmbeddingMaintenanceCommands } from '../../features/embedding-maintenance/index.js';
 import { registerAdminIndexingCommands } from '../../features/admin-indexing/index.js';
 import { registerAdminLlmEnrichmentCommands } from '../../features/admin-llm-enrichment/index.js';
 import { registerAdminInstallModelsCommand } from '../../features/admin-install-models/index.js';
@@ -245,6 +246,7 @@ export function registerAdminCommands(deps: AdminCommandDeps = defaultAdminComma
   registerAdminStorageMigrateCommand(deps);
   registerAdminSimilarityEdgesCommand(deps);
   registerAdminPruneStoreCommand(deps);
+  registerAdminEmbeddingMaintenanceCommands(deps);
   registerScipAdminCommands({
     adminCmd: deps.adminCmd,
     resolveProjectPath: deps.resolveProjectPath,

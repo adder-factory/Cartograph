@@ -30,6 +30,7 @@ import { defineTool } from './_define-tool.js';
 import { type ToolOutcome, ok, err } from './_outcome.js';
 import { DEFAULT_SIMILAR_K, DEFAULT_SIMILAR_MIN_SCORE } from '../../embeddings/similarity-defaults.js';
 import { LLM_CONCURRENCY_BOUNDS, parseConcurrency } from '../../llm/concurrency.js';
+import { getEmbeddingModel } from '../../llm/provider.js';
 import { databaseConfigFromOptionInput, resolveDatabaseConfig } from '../../db/database-config.js';
 import {
   appendCloudChatAvailability,
@@ -566,6 +567,61 @@ async function handlePruneStore(ctx: ToolCtx, args: Record<string, unknown>): Pr
   }
 }
 
+async function handleEmbeddingAudit(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
+  try {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : undefined;
+    const cg = ctx.getCartograph(projectPath);
+    const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
+    const activeModel = getEmbeddingModel(llmConfig);
+    const { auditEmbeddingStorage, formatEmbeddingAudit } = await import(
+      '../../features/embedding-maintenance/index.js'
+    );
+    return ok(
+      textResult(
+        formatEmbeddingAudit(
+          auditEmbeddingStorage({
+            db: cg.db.getDb(),
+            projectRoot: cg.projectRoot,
+            activeModel,
+          }),
+        ),
+      ),
+    );
+  } catch (error_) {
+    return err(`Embedding audit failed: ${errMsg(error_)}`);
+  }
+}
+
+async function handleEmbeddingCleanup(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
+  try {
+    const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : undefined;
+    const cg = ctx.getCartograph(projectPath);
+    const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
+    const activeModel = getEmbeddingModel(llmConfig);
+    const { cleanupObsoleteEmbeddings, formatEmbeddingCleanup } = await import(
+      '../../features/embedding-maintenance/index.js'
+    );
+    const result = cleanupObsoleteEmbeddings({
+      db: cg.db.getDb(),
+      projectRoot: cg.projectRoot,
+      activeModel,
+      vecLoaded: cg.db.hasVecExtension(),
+      confirm: args['confirm'] === true,
+    });
+    if (!result.dryRun && (result.deletedRows > 0 || result.deletedRefs > 0)) {
+      cg.llm.embed.embeddingCache.invalidate();
+      cg.llm.embed.hnswByDim.clear();
+    }
+    if (!result.dryRun && result.deletedRows > 0) {
+      const { dbReclaimAfterBulkDelete } = await import('../../db/index.js');
+      dbReclaimAfterBulkDelete(cg.db);
+    }
+    return ok(textResult(formatEmbeddingCleanup(result)));
+  } catch (error_) {
+    return err(`Embedding cleanup failed: ${errMsg(error_)}`);
+  }
+}
+
 async function handleScipExport(ctx: ToolCtx, args: Record<string, unknown>): Promise<ToolOutcome> {
   try {
     const projectPath = typeof args['projectPath'] === 'string' ? args['projectPath'] : undefined;
@@ -940,6 +996,8 @@ const ADMIN_ACTIONS: Record<string, AdminAction> = {
   'storage-migrate': handleStorageMigrate,
   'build-similarity-edges': handleBuildSimilarityEdges,
   'prune-store': handlePruneStore,
+  'embedding-audit': handleEmbeddingAudit,
+  'embedding-cleanup': handleEmbeddingCleanup,
   'scip-export': handleScipExport,
   'scip-import': handleScipImport,
   summarize: handleSummarizePhase,
@@ -973,7 +1031,7 @@ const adminSchema = z.object({
     // shape `z.enum` requires. The dispatch table is the sole source.
     .enum(ADMIN_ACTION_NAMES as [string, ...string[]])
     .describe(
-      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed) | `biomarkers-refresh` (full findings pass, no re-extract). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move storage between SQLite and PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
+      "Action to perform. Diagnostic: `doctor` (check install state + print next steps per gap) | `embedding-audit` (model/dimension/ref/artifact report, read-only). LLM setup: `llm-plan` (scan for backends + list setup presets) | `llm-apply` with `preset: '<id>'` (writes config.json + next-step commands) | `llm-tune` (inspect/override per-tier concurrency). Refresh: `sync` (incremental, everyday default) | `index` (full; `force=true` if extractor changed) | `biomarkers-refresh` (full findings pass, no re-extract). Setup: `init` | `uninit` | `install-models` (download the curated GGUF set) | `storage-migrate` (move storage between SQLite and PostgreSQL). Pipeline phases (idempotent): `summarize` | `embed` | `classify`. Fix-loops: `embed-only` (semantic-only fast lane) | `migrate` (after schema error) | `unlock` (stale lock) | `build-similarity-edges` | `prune-store` (cold-orphan GC, bounded by `maxAgeDays`) | `embedding-cleanup` (dry run; detaches superseded legacy refs and removes safe non-active orphans; `confirm=true` applies). Interop: `scip-export` (write a Sourcegraph-compatible SCIP protobuf index; path via `out`) | `scip-import` (per-file replace of nodes+edges from a SCIP protobuf; path via `in`).",
     ),
   path: z.string().optional().describe('(action=init / action=uninit) Absolute path to the project directory.'),
   databaseProvider: z
@@ -1027,7 +1085,9 @@ const adminSchema = z.object({
   confirm: z
     .boolean()
     .optional()
-    .describe('(action=uninit) Must be `true` to actually delete the directory. Guard against accidental destruction.'),
+    .describe(
+      '(action=uninit) Must be `true` to actually delete the directory. (action=embedding-cleanup) Omit/false for a dry run; true detaches non-active refs only where that node/grain has an active-model replacement, deletes non-active rows left unreferenced, and reconciles dimension artifacts.',
+    ),
   force: z
     .boolean()
     .default(false)
@@ -1151,7 +1211,7 @@ export const ADMIN_TOOL = defineTool({
   description:
     'Index lifecycle + LLM-pipeline ops, dispatched by `action` (all bypass the freshness gate). ' +
     'Refresh: `sync` / `index` / `biomarkers-refresh`. Setup: `init` / `uninit`. Phases: `summarize` / `embed` / `classify` / `embed-only`. ' +
-    'Fix-loops: `migrate` / `unlock` / `build-similarity-edges` / `prune-store`. Interop: `scip-export` / `scip-import`. ' +
+    'Diagnostics/maintenance: `embedding-audit` / `embedding-cleanup`. Fix-loops: `migrate` / `unlock` / `build-similarity-edges` / `prune-store`. Interop: `scip-export` / `scip-import`. ' +
     'See the `action` field for per-action detail.',
   schema: adminSchema,
   handle: handleAdmin,

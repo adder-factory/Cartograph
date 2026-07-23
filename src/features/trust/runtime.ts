@@ -6,6 +6,7 @@ import { getSymbolDescriptions, type SymbolDescription } from '../../db/queries-
 import { errMsg } from '../../errors.js';
 import { contentDriftCount, hasFreshnessRisk } from '../../freshness.js';
 import { collectDependencyCoverage, MAX_DEPENDENCY_COVERAGE_LIMIT } from '../dependency-coverage/index.js';
+import { auditEmbeddingStorage, type EmbeddingAuditReport } from '../embedding-maintenance/index.js';
 import { runLlmSmoke, type LlmSmokeResult } from '../llm-smoke/index.js';
 import { findGraphCandidates } from '../../llm/dead-code.js';
 import { getAskModel, getChatModel, getEmbeddingModel } from '../../llm/provider.js';
@@ -53,6 +54,11 @@ export async function buildTrustReport(
 ): Promise<TrustReport> {
   const llmConfig = await cg.llm.config.getEffectiveLlmConfig();
   const embeddingModel = getEmbeddingModel(llmConfig);
+  const embeddingAudit = auditEmbeddingStorage({
+    db: cg.db.getDb(),
+    projectRoot: cg.projectRoot,
+    activeModel: embeddingModel,
+  });
   const checks: TrustCheck[] = [
     freshnessCheck(cg),
     coverageCheck(cg),
@@ -60,6 +66,7 @@ export async function buildTrustReport(
     deadCodeCheck(cg, options.isFixturePath),
     dependencyGraphCheck(cg),
     embeddingCoverageCheck(cg, embeddingModel),
+    embeddingStorageCheck(embeddingAudit),
     ...llmConfigurationChecks({
       askModel: getAskModel(llmConfig),
       chatModel: getChatModel(llmConfig),
@@ -76,6 +83,42 @@ export async function buildTrustReport(
   }
 
   return TrustReportSchema.parse({ deep, overall: overallState(checks), checks });
+}
+
+function embeddingStorageCheck(report: EmbeddingAuditReport): TrustCheck {
+  const invalidRows = report.buckets.reduce(
+    (total, bucket) => total + (bucket.dimension === null ? bucket.storeRows : 0),
+    0,
+  );
+  const activeMixed = report.activeModel
+    ? report.mixedDimensions.find((group) => group.model === report.activeModel)
+    : undefined;
+  const obsoleteArtifacts = report.artifacts.filter((artifact) => artifact.state === 'obsolete').length;
+  const concerns = [
+    ...(invalidRows > 0 ? [`${invalidRows} invalid-dimension row(s)`] : []),
+    ...(activeMixed ? [`active model spans dimensions ${activeMixed.dimensions.join(', ')}`] : []),
+    ...(report.totals.protectedReferencedRows > 0
+      ? [`${report.totals.protectedReferencedRows} referenced non-active row(s)`]
+      : []),
+    ...(report.totals.supersededRefs > 0 ? [`${report.totals.supersededRefs} superseded non-active ref(s)`] : []),
+    ...(report.totals.safeCleanupRows > 0 ? [`${report.totals.safeCleanupRows} safe cleanup candidate(s)`] : []),
+    ...(obsoleteArtifacts > 0 ? [`${obsoleteArtifacts} obsolete dimension artifact(s)`] : []),
+  ];
+  if (concerns.length === 0) {
+    return {
+      state: 'ok',
+      label: 'Embedding storage integrity',
+      detail: `${report.totals.storeRows} canonical row(s) across dimension(s) ${report.canonicalDimensions.join(', ') || '(none)'}; no mixed active dimensions or obsolete artifacts detected.`,
+      action: 'None.',
+    };
+  }
+  return {
+    state: 'warn',
+    label: 'Embedding storage integrity',
+    detail: concerns.join('; '),
+    action:
+      'Run `cartograph_admin({action: "embedding-audit"})`; preview cleanup with `action: "embedding-cleanup"`, then explicitly confirm it if the protected-row policy is correct.',
+  };
 }
 
 async function safeRunSmoke(

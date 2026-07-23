@@ -75,6 +75,7 @@ answer without loading whole files into context.
 | "What did my change touch?" | A structural and finding delta from `cartograph compare-to-ref` before handoff |
 | "How does another agent resume safely?" | A live working-tree packet from `cartograph context --format handoff` with edit evidence, preserved files, next calls, and verification guidance |
 | "Has this project taught us a better route?" | Deterministic, project-local seeds from similar prior context → successful follow-up sequences; provenance is shown and `--local-learning off` disables it |
+| "Can I trust semantic search after a model change?" | Active-model coverage plus a model/grain/dimension audit; cleanup previews protect active rows and legacy refs without a replacement before obsolete cache is removed |
 
 The core graph features require no LLM and work offline once dependencies are
 installed. Optional OpenAI-compatible LLM tiers add summaries, embeddings,
@@ -283,6 +284,8 @@ cartograph files --format symbols --file src/auth/service.ts
 cartograph review context --diff "$(git diff)"
 cartograph affected --include-commands
 cartograph compare-to-ref --findings-delta
+cartograph review trust --deep
+cartograph admin embedding-audit
 ```
 
 The CLI mirrors the MCP tool surface command-for-command. See the

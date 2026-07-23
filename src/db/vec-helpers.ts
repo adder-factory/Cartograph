@@ -575,6 +575,52 @@ export function compactVecTables(db: SqliteDatabase, vecLoaded: boolean): void {
 }
 
 /**
+ * Reconcile only the content-addressed symbol vec0 mirrors after a
+ * canonical embedding-store cleanup.
+ *
+ * Tables whose dimension still exists are rebuilt so deleted store rowids
+ * cannot survive as vec0 ghost rows. Tables whose dimension has no canonical
+ * rows are dropped outright instead of being recreated empty. Chunk mirrors
+ * are intentionally untouched: their canonical table and lifecycle are
+ * independent from `embedding_store`.
+ */
+export function reconcileVecSymbolTables(
+  db: SqliteDatabase,
+  vecLoaded: boolean,
+): { rebuiltDimensions: number[]; droppedDimensions: number[] } {
+  const result = { rebuiltDimensions: [] as number[], droppedDimensions: [] as number[] };
+  if (!vecLoaded || db.dialect !== 'sqlite') return result;
+  const liveDimensions = new Set(discoverEmbeddingDims(db));
+  let names: Array<{ name: string }>;
+  try {
+    names = getListVecTablesQuery(db).all({});
+  } catch {
+    return result;
+  }
+  for (const { name } of names) {
+    const match = /^vec_symbol_embeddings_(\d+)$/.exec(name);
+    if (!match) continue;
+    const dim = Number(match[1]);
+    if (!isValidDim(dim)) continue;
+    try {
+      if (!liveDimensions.has(dim)) {
+        db.exec(`DROP TABLE IF EXISTS ${name}`);
+        result.droppedDimensions.push(dim);
+        continue;
+      }
+      rebuildVecTable(db, { name, sourceTable: 'embedding_store', dim });
+      result.rebuiltDimensions.push(dim);
+    } catch {
+      // Best-effort mirror repair. Canonical storage remains authoritative,
+      // and connection bootstrap retries any missing/stale mirror later.
+    }
+  }
+  result.rebuiltDimensions.sort((a, b) => a - b);
+  result.droppedDimensions.sort((a, b) => a - b);
+  return result;
+}
+
+/**
  * Result row from the indexed KNN query. `distance` is cosine
  * distance ([0, 2] for general vectors; ~[0, 1] for our normalised
  * positive-correlated embeddings). Convert to similarity score with

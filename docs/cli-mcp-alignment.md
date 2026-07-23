@@ -44,7 +44,8 @@ family subcommand under `admin <action>` / `summaries <action>` /
 
 ```
 admin (init / uninit / index / sync / unlock / migrate / storage-migrate /
-       build-similarity-edges / embed-only / prune-store /
+       build-similarity-edges / embed-only / prune-store / embedding-audit /
+       embedding-cleanup /
        summarize / embed / classify / scip-export / scip-import /
        install-models / doctor / llm-plan / llm-apply / llm-tune)
 affected, ask, at-range, biomarkers, blame, changed-since,
@@ -117,7 +118,7 @@ splits into discrete actions. Adding a new subcommand goes under
 the existing parent — **don't add a top-level shortcut**.
 
 ```
-admin     <init|uninit|index|sync|unlock|migrate|storage-migrate|build-similarity-edges|embed-only|prune-store|summarize|embed|classify|scip-export|scip-import|install-models|doctor|llm-plan|llm-apply|llm-tune>
+admin     <init|uninit|index|sync|unlock|migrate|storage-migrate|build-similarity-edges|embed-only|prune-store|embedding-audit|embedding-cleanup|summarize|embed|classify|scip-export|scip-import|install-models|doctor|llm-plan|llm-apply|llm-tune>
 summaries <pending|save>
 review    <context|neighbors|risk|agent-audit|trust>
 note      <add|list|delete>

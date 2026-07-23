@@ -214,6 +214,19 @@ retention window. Cartograph does not schedule it automatically, and it does
 not replace PostgreSQL vacuum/reindex maintenance when an installation already
 has physically bloated tables or HNSW indexes.
 
+For embedding-model transitions, use `cartograph admin embedding-audit` first.
+It groups canonical rows by model, grain, and vector dimension; distinguishes
+referenced rows from cache orphans; detects mixed dimensions for one model; and
+reports sqlite-vec, pgvector, and HNSW artifacts. `cartograph admin
+embedding-cleanup` is a dry run. Adding `--confirm` first detaches an older-model
+ref only when the same node and grain have a stored active-model replacement,
+then deletes non-active rows left unreferenced. Active-model rows and older-model
+refs without an active replacement are always protected. A dimension table/file
+is dropped only when no canonical rows remain at that dimension; live mirrors
+are reconciled and stale HNSW state is invalidated. MCP agents use the matching
+`cartograph_admin` actions `embedding-audit` and `embedding-cleanup` with
+`confirm: true` for the apply step.
+
 ## Production Notes
 
 Create the database and role outside Cartograph, then grant ownership or

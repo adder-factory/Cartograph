@@ -662,3 +662,38 @@ export function clearPgvectorTables(db: SqliteDatabase): void {
     }
   }
 }
+
+/**
+ * Drop PostgreSQL store-mirror tables whose dimension no longer exists in
+ * canonical `embedding_store`. Live tables need no rebuild: their
+ * `store_rowid` foreign key uses `ON DELETE CASCADE`, so canonical cleanup
+ * removes mirror rows atomically. Chunk mirrors are deliberately independent.
+ */
+export function reconcilePgvectorStoreTables(db: SqliteDatabase): { droppedDimensions: number[] } {
+  const result = { droppedDimensions: [] as number[] };
+  if (db.dialect !== 'postgres' || !isPgvectorAvailable(db)) return result;
+  const liveDimensions = new Set(discoverDims(storeDimsQuery(db)));
+  let names: Array<{ name: string }>;
+  try {
+    names = pgvectorTableNamesQuery(db).all({});
+  } catch {
+    return result;
+  }
+  for (const { name } of names) {
+    const match = /^pgvector_symbol_embeddings_(\d+)$/.exec(name);
+    if (!match) continue;
+    const dim = Number(match[1]);
+    if (!isValidDim(dim) || liveDimensions.has(dim)) continue;
+    try {
+      db.exec(`DROP TABLE IF EXISTS ${name} CASCADE`);
+      ensuredStoreTablesByDb.get(db)?.delete(dim);
+      pgvectorTableExistsCache(db).set(name, false);
+      result.droppedDimensions.push(dim);
+    } catch {
+      // Canonical rows are already safe; a later maintenance run can retry
+      // dropping the optional empty acceleration table.
+    }
+  }
+  result.droppedDimensions.sort((a, b) => a - b);
+  return result;
+}

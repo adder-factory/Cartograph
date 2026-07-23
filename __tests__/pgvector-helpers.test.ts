@@ -11,6 +11,7 @@ import {
   mirrorEmbeddingToPgvector,
   pgvectorChunkTableNameForDim,
   pgvectorStoreTableNameForDim,
+  reconcilePgvectorStoreTables,
 } from '../src/db/pgvector-helpers.js';
 import type { SqliteDatabase, SqliteStatement } from '../src/db/sqlite-adapter.js';
 
@@ -153,6 +154,15 @@ describe('pgvector helper fallbacks', () => {
     clearPgvectorTables(failingList.db);
     expect(failingList.execs.filter((sql) => sql.startsWith('DELETE FROM'))).toEqual([]);
   });
+
+  it('drops only store mirrors whose canonical dimension is gone', () => {
+    const fake = new FakePgvectorDb({ storeDims: [] });
+    expect(bootstrapPgvector(fake.db, POSTGRES_DATABASE)).toBe(true);
+
+    expect(reconcilePgvectorStoreTables(fake.db)).toEqual({ droppedDimensions: [VECTOR_DIM] });
+    expect(fake.execs).toContain('DROP TABLE IF EXISTS pgvector_symbol_embeddings_2 CASCADE');
+    expect(fake.execs).not.toContain('DROP TABLE IF EXISTS pgvector_chunk_embeddings_2 CASCADE');
+  });
 });
 
 function fakeSqliteDb(): SqliteDatabase {
@@ -172,6 +182,7 @@ interface FakePgvectorOptions {
   throwExtension?: boolean;
   throwHnsw?: boolean;
   tableNameQueryThrows?: boolean;
+  storeDims?: number[];
 }
 
 class FakePgvectorDb {
@@ -215,6 +226,7 @@ class FakePgvectorDb {
   private rowsFor(sql: string): unknown[] {
     this.alls.push(sql);
     if (sql.includes('SELECT DISTINCT LENGTH(embedding) AS len FROM embedding_store')) {
+      if (this.options.storeDims) return this.options.storeDims.map((dimension) => ({ len: dimension * 4 }));
       return [{ len: VECTOR_BYTES }, { len: INVALID_VECTOR_BYTES }, { len: TOO_LARGE_VECTOR_BYTES }];
     }
     if (sql.includes('SELECT DISTINCT LENGTH(embedding) AS len FROM symbol_chunk_embeddings')) {

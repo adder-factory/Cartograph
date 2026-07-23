@@ -88,7 +88,7 @@ export const adminCmd = program
   .command('admin')
   .summary('Project lifecycle, indexing, setup, doctor, and LLM admin commands')
   .description(
-    'Project lifecycle / index maintenance. Subcommands: init / uninit / sync / index / embed-only / summarize / embed / classify / unlock / migrate / storage-migrate / build-similarity-edges / prune-store / scip-export / scip-import / install-models / doctor / llm-plan / llm-apply / llm-tune.',
+    'Project lifecycle / index maintenance. Subcommands: init / uninit / sync / index / embed-only / summarize / embed / classify / unlock / migrate / storage-migrate / build-similarity-edges / prune-store / embedding-audit / embedding-cleanup / scip-export / scip-import / install-models / doctor / llm-plan / llm-apply / llm-tune.',
   );
 export const summariesCmd = program
   .command('summaries')

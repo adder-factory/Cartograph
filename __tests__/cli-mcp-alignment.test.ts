@@ -325,12 +325,11 @@ const ARG_SHAPE_EXCEPTIONS: Record<string, Set<string> | '*'> = {
   // now catches a NEW unmirrored field even on a hand-written tool.
 
   // `cartograph admin` is a multi-subcommand surface. `action` is the
-  // subcommand axis itself (not a flag); `confirm` is `uninit`-
-  // specific; `clearParseCacheLanguage` and `summarizeLimit` are
+  // subcommand axis itself (not a flag); `clearParseCacheLanguage` and `summarizeLimit` are
   // advanced operator knobs deliberately kept off the headline CLI
   // surface. Other admin fields must be mirrored by a subcommand flag
   // or positional.
-  admin: new Set(['action', 'confirm', 'clearParseCacheLanguage', 'summarizeLimit']),
+  admin: new Set(['action', 'clearParseCacheLanguage', 'summarizeLimit']),
 
   // `cartograph files` carries hand-rendered tree / flat / grouped /
   // summary layouts plus folded one-file and module-summary modes. The
