@@ -5,9 +5,9 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CartographDatabase, CurrentGeneration, GenerationContents, MigrationError, NewGeneration,
-    NewProject, ReadyGeneration, RecoverableGeneration, SearchDocumentInput, SearchQuery,
-    StorageError,
+    CartographDatabase, CurrentGeneration, GenerationContents, GenerationFacts, MigrationError,
+    NewGeneration, NewProject, ReadyGeneration, RecoverableGeneration, SearchDocumentInput,
+    SearchQuery, StorageError,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, GenerationId, GenerationState, ProjectId,
@@ -21,8 +21,6 @@ const REVISION_THREE: &str = "3333333333333333333333333333333333333333";
 const REVISION_FOUR: &str = "4444444444444444444444444444444444444444";
 const REVISION_FIVE: &str = "5555555555555555555555555555555555555555";
 const DIGEST_ONE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-const DIGEST_TWO: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-const DIGEST_THREE: &str = "3333333333333333333333333333333333333333333333333333333333333333";
 const DOCUMENT_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DOCUMENT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const DOCUMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
@@ -111,9 +109,8 @@ struct GenerationFixture<'a> {
     workers: u16,
 }
 
-struct PrepareFixture<'a> {
+struct PrepareFixture {
     staged: cartograph_db::StagedGeneration,
-    content_digest: &'a str,
     document: SearchDocumentInput,
 }
 
@@ -205,7 +202,6 @@ async fn publish_initial_generation(
         database,
         PrepareFixture {
             staged,
-            content_digest: DIGEST_ONE,
             document: document(DocumentFixture {
                 id: DOCUMENT_ONE,
                 path: "src/http_parser.rs",
@@ -256,15 +252,27 @@ async fn prepare_rollback_retry(
         qualified_name: "decodeJSONPayload",
         code: "fn decode_json_payload() {}",
     });
+    let mut conflicting = duplicate.clone();
+    conflicting.code = "fn decode_json_payload() { unreachable!() }".to_owned();
     let failed = database
         .prepare_generation(GenerationContents::new(
             staged,
-            digest(DIGEST_TWO),
-            vec![duplicate.clone(), duplicate.clone()],
+            GenerationFacts {
+                documents: vec![duplicate.clone(), conflicting],
+                ..GenerationFacts::default()
+            },
         ))
         .await;
     let staged = match failed {
-        Err(error) => error.into_parts().0,
+        Err(error) => {
+            assert!(matches!(
+                error.error(),
+                StorageError::InvalidInput {
+                    field: "duplicate_document_id"
+                }
+            ));
+            error.into_parts().0
+        }
         Ok(_) => panic!("duplicate search-document IDs unexpectedly committed"),
     };
     assert_state(
@@ -288,7 +296,6 @@ async fn prepare_rollback_retry(
         database,
         PrepareFixture {
             staged,
-            content_digest: DIGEST_TWO,
             document: duplicate,
         },
     )
@@ -314,7 +321,6 @@ async fn publish_newer_generation(
         database,
         PrepareFixture {
             staged,
-            content_digest: DIGEST_THREE,
             document: document(DocumentFixture {
                 id: DOCUMENT_THREE,
                 path: "src/json_decoder.rs",
@@ -399,8 +405,10 @@ async fn assert_validation_token_return(database: &CartographDatabase, project: 
     let staged = match database
         .prepare_generation(GenerationContents::new(
             staged,
-            digest(DIGEST_THREE),
-            vec![invalid],
+            GenerationFacts {
+                documents: vec![invalid],
+                ..GenerationFacts::default()
+            },
         ))
         .await
     {
@@ -471,12 +479,14 @@ async fn begin(
     }
 }
 
-async fn prepare(database: &CartographDatabase, fixture: PrepareFixture<'_>) -> ReadyGeneration {
+async fn prepare(database: &CartographDatabase, fixture: PrepareFixture) -> ReadyGeneration {
     match database
         .prepare_generation(GenerationContents::new(
             fixture.staged,
-            digest(fixture.content_digest),
-            vec![fixture.document],
+            GenerationFacts {
+                documents: vec![fixture.document],
+                ..GenerationFacts::default()
+            },
         ))
         .await
     {

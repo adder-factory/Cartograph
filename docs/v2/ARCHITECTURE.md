@@ -128,12 +128,14 @@ canonicalized, and still double-quoted wherever SQL must interpolate them.
 
 The Rust write API returns opaque `StagedGeneration`, `ReadyGeneration`, and
 `CurrentGeneration` tokens. The only way to obtain `ReadyGeneration` is to
-commit the complete document batch and digest in one transaction; the only way
-to obtain `CurrentGeneration` is to consume that ready token in the atomic
-publication transaction. Database constraints remain the second line of
-defense against forged or stale process state. Failed operations return the
-consumed token, and checked recovery can rehydrate durable `staging`/`ready`
-state after process loss or mark it terminally failed.
+validate, deterministically reduce, digest, and commit the complete file,
+symbol, edge, reference, and search-document fact set in one transaction; the
+only way to obtain `CurrentGeneration` is to consume that ready token in the
+atomic publication transaction. Ready/current tokens carry the computed
+logical digest. Database constraints remain the second line of defense against
+forged or stale process state. Failed operations return the consumed token,
+and checked recovery can rehydrate durable `staging`/`ready` state plus its
+digest after process loss or mark it terminally failed.
 
 Migration 2 adds one observable lease row per project and mutating operation.
 Each acquisition records a non-nil token, owner PID, boot/session-qualified
@@ -268,6 +270,29 @@ PostgreSQL `COPY` is used for bulk staging. Parallel workers never issue
 independent destructive maintenance. Advisory locks are scoped by project and
 operation, carry observable owner metadata, and have supervisor-enforced
 deadlines.
+
+The first COPY implementation accepts typed file, symbol, edge, reference, and
+search-document facts. Before opening a transaction it validates database
+bounds, normalized project paths, finite confidence values, branded
+relationships, and document-to-symbol/file consistency. A deterministic
+reducer sorts by stable logical keys, removes canonically equivalent facts, and
+rejects conflicting facts that reuse an identity. JSON metadata is encoded
+with recursively sorted object keys.
+
+The reducer computes a versioned BLAKE3 logical-generation digest from typed,
+length-delimited canonical fields. The digest deliberately excludes project
+ID, generation UUID/sequence, worker count, PostgreSQL identity keys, and input
+order; those are execution/deployment details rather than source facts. It
+includes normalized source/file hashes, structural spans and digests, graph and
+reference confidence/provenance, search text, and canonical metadata.
+
+Persistence then streams PostgreSQL text COPY in bounded chunks, with explicit
+escaping for tabs, newlines, carriage returns, backslashes, control bytes, and
+the `\N` null marker. Tables load in foreign-key order: files, symbols, edges,
+references, then the ParadeDB-indexed search documents. Every COPY completion
+count must equal the reduced row count. All five loads and the transition to
+`ready` share one transaction; a late COPY/trigger failure rolls back earlier
+tables and returns the original staging token.
 
 The database lease substrate is implemented for `index`, `sync`, `hook`,
 `migration`, and derived-index `rebuild` operations. Its database-wide advisory

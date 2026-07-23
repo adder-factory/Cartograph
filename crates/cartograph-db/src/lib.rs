@@ -3,6 +3,7 @@
 mod capabilities;
 mod database;
 mod generation;
+mod ingest;
 mod leases;
 mod managed;
 mod migrations;
@@ -16,7 +17,10 @@ pub use database::{CartographDatabase, StorageError};
 pub use generation::{
     CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents, NewGeneration,
     NewProject, PrepareGenerationError, PublishGenerationError, ReadyGeneration,
-    RecoverableGeneration, SearchDocumentInput, StagedGeneration,
+    RecoverableGeneration, StagedGeneration,
+};
+pub use ingest::{
+    EdgeInput, FileInput, GenerationFacts, ReferenceInput, SearchDocumentInput, SymbolInput,
 };
 pub use leases::{LeaseError, LeaseOwner, LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease};
 pub use managed::{

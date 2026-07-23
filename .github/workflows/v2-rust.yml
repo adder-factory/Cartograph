@@ -146,6 +146,11 @@ jobs:
           cargo test --locked --quiet -p cartograph-db
           --test live_generation -- --ignored --nocapture
 
+      - name: COPY ingestion and deterministic digest integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db
+          --test live_ingest -- --ignored --nocapture
+
       - name: Project operation lease integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db

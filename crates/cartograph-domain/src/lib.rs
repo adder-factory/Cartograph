@@ -12,6 +12,9 @@ const UUID_TEXT_LENGTH: usize = 36;
 const UUID_HYPHEN_OFFSETS: [usize; 4] = [8, 13, 18, 23];
 const NIL_UUID: &str = "00000000-0000-0000-0000-000000000000";
 const BLAKE3_HEX_LENGTH: usize = 64;
+const BLAKE3_BYTE_LENGTH: usize = BLAKE3_HEX_LENGTH / 2;
+const UPPER_NIBBLE_SHIFT: u8 = 4;
+const NIBBLE_MASK: u8 = 0x0f;
 
 /// A supplied branded identifier was not a canonicalizable, non-nil UUID.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,6 +93,19 @@ impl ContentDigest {
         let valid = canonical.len() == BLAKE3_HEX_LENGTH
             && canonical.bytes().all(|byte| byte.is_ascii_hexdigit());
         valid.then_some(Self(canonical)).ok_or(InvalidDigest)
+    }
+
+    /// Render an exact 32-byte digest without a fallible text round trip.
+    #[must_use]
+    pub fn from_bytes(bytes: [u8; BLAKE3_BYTE_LENGTH]) -> Self {
+        const HEX: &[u8] = b"0123456789abcdef";
+
+        let mut encoded = String::with_capacity(BLAKE3_HEX_LENGTH);
+        for byte in bytes {
+            encoded.push(char::from(HEX[usize::from(byte >> UPPER_NIBBLE_SHIFT)]));
+            encoded.push(char::from(HEX[usize::from(byte & NIBBLE_MASK)]));
+        }
+        Self(encoded)
     }
 
     /// Return the canonical lowercase hexadecimal digest.
@@ -217,6 +233,33 @@ impl GenerationState {
     }
 }
 
+/// Parser outcome recorded for one source file in an immutable generation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileParseStatus {
+    /// The complete file was parsed and extracted.
+    Parsed,
+    /// Useful facts were extracted despite recoverable parse gaps.
+    Partial,
+    /// Parsing failed and no structural facts are trusted.
+    Failed,
+    /// Project policy deliberately excluded the file from parsing.
+    Skipped,
+}
+
+impl FileParseStatus {
+    /// Stable PostgreSQL representation.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Parsed => "parsed",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
 /// Search-document category used for intent routing and field boosts.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -303,12 +346,13 @@ fn normalize_uuid(raw: &str) -> Result<String, InvalidId> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, GenerationId, GenerationState, LeaseId,
-        ProjectId, ProjectOperation,
+        BLAKE3_BYTE_LENGTH, BLAKE3_HEX_LENGTH, ContentDigest, DocumentKind, FileParseStatus,
+        GenerationId, GenerationState, LeaseId, ProjectId, ProjectOperation,
     };
 
     const UPPERCASE_UUID: &str = "4EACCC79-2ED5-4E22-8D77-A8E66D13C345";
     const CANONICAL_UUID: &str = "4eaccc79-2ed5-4e22-8d77-a8e66d13c345";
+    const TEST_DIGEST_BYTE: u8 = 0xab;
 
     #[test]
     fn branded_ids_canonicalize_and_validate_deserialized_values() {
@@ -333,6 +377,8 @@ mod tests {
         assert_eq!(GenerationState::Current.as_str(), "current");
         assert_eq!(DocumentKind::Symbol.as_str(), "symbol");
         assert_eq!(DocumentKind::Documentation.as_str(), "documentation");
+        assert_eq!(FileParseStatus::Parsed.as_str(), "parsed");
+        assert_eq!(FileParseStatus::Skipped.as_str(), "skipped");
     }
 
     #[test]
@@ -342,6 +388,10 @@ mod tests {
         assert!(matches!(digest, Ok(value) if value.as_str() == "a".repeat(BLAKE3_HEX_LENGTH)));
         assert!(ContentDigest::parse("abc").is_err());
         assert!(ContentDigest::parse(&"z".repeat(BLAKE3_HEX_LENGTH)).is_err());
+        assert_eq!(
+            ContentDigest::from_bytes([TEST_DIGEST_BYTE; BLAKE3_BYTE_LENGTH]).as_str(),
+            "ab".repeat(BLAKE3_BYTE_LENGTH)
+        );
     }
 
     #[test]

@@ -1,22 +1,18 @@
-use cartograph_domain::{
-    ContentDigest, DocumentId, DocumentKind, FileId, GenerationId, GenerationState, ProjectId,
-    SymbolId,
-};
-use serde_json::Value;
+use cartograph_domain::{ContentDigest, GenerationId, GenerationState, ProjectId};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use sqlx_postgres::PgConnection;
 use thiserror::Error;
 
-use crate::{CartographDatabase, StorageError};
+use crate::{
+    CartographDatabase, StorageError,
+    ingest::{
+        CopyGenerationContext, GenerationFacts, ValidatedGenerationFacts, copy_generation_facts,
+        validate_and_reduce,
+    },
+};
 
 const MAX_ROOT_IDENTITY_BYTES: usize = 4_096;
 const MAX_SOURCE_REVISION_BYTES: usize = 1_024;
-const MAX_PATH_BYTES: usize = 4_096;
-const MAX_LANGUAGE_BYTES: usize = 64;
-const MAX_QUALIFIED_NAME_BYTES: usize = 2_048;
-const MAX_CODE_BYTES: usize = 8 * 1_024 * 1_024;
-const MAX_NATURAL_TEXT_BYTES: usize = 1_024 * 1_024;
-const MAX_METADATA_BYTES: usize = 64 * 1_024;
 const MAX_WORKERS: u16 = 256;
 
 /// Validated-at-write project registration input.
@@ -60,31 +56,6 @@ impl NewGeneration {
     }
 }
 
-/// Search document staged as part of one immutable generation.
-#[derive(Clone, Debug)]
-pub struct SearchDocumentInput {
-    /// Stable logical identity, independent of ParadeDB's bigint key field.
-    pub document_id: DocumentId,
-    /// Owning file when the structural file row is available.
-    pub file_id: Option<FileId>,
-    /// Owning symbol for symbol-level evidence.
-    pub symbol_id: Option<SymbolId>,
-    /// Project-normalized source path.
-    pub path: String,
-    /// Normalized language identifier.
-    pub language: String,
-    /// Intent-routing document category.
-    pub kind: DocumentKind,
-    /// Code-aware symbol or declaration name.
-    pub qualified_name: String,
-    /// Source text indexed with `pdb.source_code`.
-    pub code: String,
-    /// Documentation and summaries indexed as natural language.
-    pub natural_text: String,
-    /// Bounded structured ranking/filter metadata.
-    pub metadata: Value,
-}
-
 /// Opaque token proving a durable generation exists in `staging` state.
 #[derive(Debug)]
 pub struct StagedGeneration {
@@ -119,6 +90,7 @@ pub struct ReadyGeneration {
     project_id: ProjectId,
     generation_id: GenerationId,
     sequence: i64,
+    content_digest: ContentDigest,
 }
 
 impl ReadyGeneration {
@@ -139,6 +111,12 @@ impl ReadyGeneration {
     pub const fn sequence(&self) -> i64 {
         self.sequence
     }
+
+    /// Deterministic digest of the complete reduced logical fact set.
+    #[must_use]
+    pub const fn content_digest(&self) -> &ContentDigest {
+        &self.content_digest
+    }
 }
 
 /// Opaque token proving the atomic publication transaction committed.
@@ -147,6 +125,7 @@ pub struct CurrentGeneration {
     project_id: ProjectId,
     generation_id: GenerationId,
     sequence: i64,
+    content_digest: ContentDigest,
 }
 
 impl CurrentGeneration {
@@ -166,6 +145,12 @@ impl CurrentGeneration {
     #[must_use]
     pub const fn sequence(&self) -> i64 {
         self.sequence
+    }
+
+    /// Deterministic digest of the published logical fact set.
+    #[must_use]
+    pub const fn content_digest(&self) -> &ContentDigest {
+        &self.content_digest
     }
 }
 
@@ -276,17 +261,16 @@ impl FailGenerationError {
     }
 }
 
-/// Complete first-slice contents required before a generation can become ready.
+/// Complete unordered worker output required before a generation can become ready.
 pub struct GenerationContents {
     generation: StagedGeneration,
-    content_digest: ContentDigest,
-    documents: Vec<SearchDocumentInput>,
+    facts: GenerationFacts,
 }
 
 struct PrepareTransactionInput<'a> {
     schema: &'a cartograph_config::DatabaseSchema,
-    contents: &'a GenerationContents,
-    metadata: &'a [String],
+    generation: &'a StagedGeneration,
+    facts: &'a ValidatedGenerationFacts,
 }
 
 struct GenerationStateRequirement<'a> {
@@ -298,19 +282,10 @@ struct GenerationStateRequirement<'a> {
 }
 
 impl GenerationContents {
-    /// Consume a staging token and attach the deterministic logical digest and
-    /// complete search-document batch.
+    /// Consume a staging token and attach complete unordered worker facts.
     #[must_use]
-    pub fn new(
-        generation: StagedGeneration,
-        content_digest: ContentDigest,
-        documents: Vec<SearchDocumentInput>,
-    ) -> Self {
-        Self {
-            generation,
-            content_digest,
-            documents,
-        }
+    pub const fn new(generation: StagedGeneration, facts: GenerationFacts) -> Self {
+        Self { generation, facts }
     }
 }
 
@@ -390,31 +365,24 @@ impl CartographDatabase {
         })
     }
 
-    /// Atomically stage all search documents and move the consumed generation
-    /// token to `ready`. Any insert failure rolls back the entire batch.
+    /// Deterministically reduce and atomically COPY all fact tables before
+    /// moving the consumed generation token to `ready`.
     pub async fn prepare_generation(
         &self,
         contents: GenerationContents,
     ) -> Result<ReadyGeneration, PrepareGenerationError> {
-        let metadata = match contents
-            .documents
-            .iter()
-            .map(validate_search_document)
-            .collect::<Result<Vec<_>, _>>()
-        {
-            Ok(metadata) => metadata,
+        let GenerationContents { generation, facts } = contents;
+        let facts = match validate_and_reduce(facts) {
+            Ok(facts) => facts,
             Err(error) => {
-                return Err(PrepareGenerationError {
-                    generation: contents.generation,
-                    error,
-                });
+                return Err(PrepareGenerationError { generation, error });
             }
         };
         let mut transaction = match self.pool.begin().await {
             Ok(transaction) => transaction,
             Err(_) => {
                 return Err(PrepareGenerationError {
-                    generation: contents.generation,
+                    generation,
                     error: database_error("prepare-begin"),
                 });
             }
@@ -423,8 +391,8 @@ impl CartographDatabase {
             &mut transaction,
             PrepareTransactionInput {
                 schema: &self.schema,
-                contents: &contents,
-                metadata: &metadata,
+                generation: &generation,
+                facts: &facts,
             },
         )
         .await;
@@ -433,21 +401,19 @@ impl CartographDatabase {
                 Ok(()) => error,
                 Err(_) => database_error("prepare-rollback"),
             };
-            return Err(PrepareGenerationError {
-                generation: contents.generation,
-                error,
-            });
+            return Err(PrepareGenerationError { generation, error });
         }
         if transaction.commit().await.is_err() {
             return Err(PrepareGenerationError {
-                generation: contents.generation,
+                generation,
                 error: database_error("prepare-commit"),
             });
         }
         Ok(ReadyGeneration {
-            project_id: contents.generation.project_id,
-            generation_id: contents.generation.generation_id,
-            sequence: contents.generation.sequence,
+            project_id: generation.project_id,
+            generation_id: generation.generation_id,
+            sequence: generation.sequence,
+            content_digest: facts.digest,
         })
     }
 
@@ -484,6 +450,7 @@ impl CartographDatabase {
             project_id: generation.project_id,
             generation_id: generation.generation_id,
             sequence: generation.sequence,
+            content_digest: generation.content_digest,
         })
     }
 
@@ -497,7 +464,8 @@ impl CartographDatabase {
     ) -> Result<Option<RecoverableGeneration>, StorageError> {
         let schema = crate::database::quoted_schema(&self.schema);
         let sql = format!(
-            r#"SELECT state, generation_sequence FROM {schema}."index_generations"
+            r#"SELECT state, generation_sequence, content_digest
+                FROM {schema}."index_generations"
                 WHERE project_id = CAST($1 AS uuid) AND generation_id = CAST($2 AS uuid)"#
         );
         let row = audited_query(sql)
@@ -511,17 +479,43 @@ impl CartographDatabase {
         };
         let state = parse_generation_state(&row, 0)?;
         let sequence = parse_generation_sequence(&row, 1)?;
+        let content_digest =
+            row.try_get::<Option<String>, _>(2)
+                .map_err(|_| StorageError::CorruptStoredValue {
+                    field: "content_digest",
+                })?;
         Ok(match state {
-            GenerationState::Staging => Some(RecoverableGeneration::Staged(StagedGeneration {
-                project_id: project_id.clone(),
-                generation_id: generation_id.clone(),
-                sequence,
-            })),
-            GenerationState::Ready => Some(RecoverableGeneration::Ready(ReadyGeneration {
-                project_id: project_id.clone(),
-                generation_id: generation_id.clone(),
-                sequence,
-            })),
+            GenerationState::Staging if content_digest.is_none() => {
+                Some(RecoverableGeneration::Staged(StagedGeneration {
+                    project_id: project_id.clone(),
+                    generation_id: generation_id.clone(),
+                    sequence,
+                }))
+            }
+            GenerationState::Ready => {
+                let content_digest = content_digest
+                    .ok_or(StorageError::CorruptStoredValue {
+                        field: "content_digest",
+                    })
+                    .and_then(|digest| {
+                        ContentDigest::parse(&digest).map_err(|_| {
+                            StorageError::CorruptStoredValue {
+                                field: "content_digest",
+                            }
+                        })
+                    })?;
+                Some(RecoverableGeneration::Ready(ReadyGeneration {
+                    project_id: project_id.clone(),
+                    generation_id: generation_id.clone(),
+                    sequence,
+                    content_digest,
+                }))
+            }
+            GenerationState::Staging => {
+                return Err(StorageError::CorruptStoredValue {
+                    field: "content_digest",
+                });
+            }
             GenerationState::Current | GenerationState::Superseded | GenerationState::Failed => {
                 None
             }
@@ -607,40 +601,23 @@ async fn prepare_transaction(
         connection,
         GenerationStateRequirement {
             quoted_schema: &quoted_schema,
-            project_id: input.contents.generation.project_id(),
-            generation_id: input.contents.generation.generation_id(),
-            sequence: input.contents.generation.sequence(),
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+            sequence: input.generation.sequence(),
             required: GenerationState::Staging,
         },
     )
     .await?;
-    let insert_sql = format!(
-        r#"INSERT INTO {quoted_schema}."search_documents" (
-            project_id, generation_id, document_id, file_id, symbol_id, path, language,
-            document_kind, qualified_name, code, natural_text, metadata
-        ) VALUES (
-            CAST($1 AS uuid), CAST($2 AS uuid), CAST($3 AS uuid), CAST($4 AS uuid),
-            CAST($5 AS uuid), $6, $7, $8, $9, $10, $11, CAST($12 AS jsonb)
-        )"#
-    );
-    for (document, encoded_metadata) in input.contents.documents.iter().zip(input.metadata) {
-        audited_query(insert_sql.clone())
-            .bind(input.contents.generation.project_id().as_str())
-            .bind(input.contents.generation.generation_id().as_str())
-            .bind(document.document_id.as_str())
-            .bind(document.file_id.as_ref().map(FileId::as_str))
-            .bind(document.symbol_id.as_ref().map(SymbolId::as_str))
-            .bind(&document.path)
-            .bind(&document.language)
-            .bind(document.kind.as_str())
-            .bind(&document.qualified_name)
-            .bind(&document.code)
-            .bind(&document.natural_text)
-            .bind(encoded_metadata)
-            .execute(&mut *connection)
-            .await
-            .map_err(|_| database_error("stage-search-document"))?;
-    }
+    copy_generation_facts(
+        connection,
+        CopyGenerationContext {
+            schema: input.schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+        },
+        input.facts,
+    )
+    .await?;
     let ready_sql = format!(
         r#"UPDATE {quoted_schema}."index_generations"
             SET state = 'ready', content_digest = $3, ready_at = clock_timestamp()
@@ -649,9 +626,9 @@ async fn prepare_transaction(
               AND state = 'staging'"#
     );
     let result = audited_query(ready_sql)
-        .bind(input.contents.generation.project_id().as_str())
-        .bind(input.contents.generation.generation_id().as_str())
-        .bind(input.contents.content_digest.as_str())
+        .bind(input.generation.project_id().as_str())
+        .bind(input.generation.generation_id().as_str())
+        .bind(input.facts.digest.as_str())
         .execute(connection)
         .await
         .map_err(|_| database_error("mark-generation-ready"))?;
@@ -670,7 +647,11 @@ async fn publish_transaction(
     generation: &ReadyGeneration,
 ) -> Result<(), StorageError> {
     query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("cartograph-v2-publish:{}", generation.project_id()))
+        .bind(format!(
+            "cartograph-v2-publish:{}:{}",
+            schema.as_str(),
+            generation.project_id()
+        ))
         .execute(&mut *connection)
         .await
         .map_err(|_| database_error("publish-lock"))?;
@@ -808,39 +789,6 @@ async fn require_generation_state(
     Ok(())
 }
 
-fn validate_search_document(document: &SearchDocumentInput) -> Result<String, StorageError> {
-    validate_bounded_text(&document.path, "path", MAX_PATH_BYTES)?;
-    validate_bounded_text(&document.language, "language", MAX_LANGUAGE_BYTES)?;
-    validate_optional_text(
-        &document.qualified_name,
-        "qualified_name",
-        MAX_QUALIFIED_NAME_BYTES,
-    )?;
-    validate_optional_text(&document.code, "code", MAX_CODE_BYTES)?;
-    validate_optional_text(
-        &document.natural_text,
-        "natural_text",
-        MAX_NATURAL_TEXT_BYTES,
-    )?;
-    if document.qualified_name.is_empty()
-        && document.code.is_empty()
-        && document.natural_text.is_empty()
-    {
-        return Err(StorageError::InvalidInput {
-            field: "searchable_text",
-        });
-    }
-    if !document.metadata.is_object() {
-        return Err(StorageError::InvalidInput { field: "metadata" });
-    }
-    let encoded = serde_json::to_string(&document.metadata)
-        .map_err(|_| StorageError::InvalidInput { field: "metadata" })?;
-    if encoded.len() > MAX_METADATA_BYTES || encoded.contains('\0') {
-        return Err(StorageError::InvalidInput { field: "metadata" });
-    }
-    Ok(encoded)
-}
-
 fn recoverable_parts(
     generation: &RecoverableGeneration,
 ) -> (&ProjectId, &GenerationId, i64, GenerationState) {
@@ -885,17 +833,6 @@ fn validate_bounded_text(
     maximum: usize,
 ) -> Result<(), StorageError> {
     if value.is_empty() || value.len() > maximum || value.contains('\0') {
-        return Err(StorageError::InvalidInput { field });
-    }
-    Ok(())
-}
-
-fn validate_optional_text(
-    value: &str,
-    field: &'static str,
-    maximum: usize,
-) -> Result<(), StorageError> {
-    if value.len() > maximum || value.contains('\0') {
         return Err(StorageError::InvalidInput { field });
     }
     Ok(())
@@ -970,59 +907,4 @@ fn audited_query(
 
 const fn database_error(operation: &'static str) -> StorageError {
     StorageError::DatabaseOperation { operation }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn document() -> SearchDocumentInput {
-        let document_id = match DocumentId::parse("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") {
-            Ok(id) => id,
-            Err(error) => panic!("fixture UUID is invalid: {error}"),
-        };
-        SearchDocumentInput {
-            document_id,
-            file_id: None,
-            symbol_id: None,
-            path: "src/lib.rs".to_owned(),
-            language: "rust".to_owned(),
-            kind: DocumentKind::Symbol,
-            qualified_name: "parseRequest".to_owned(),
-            code: "fn parse_request() {}".to_owned(),
-            natural_text: String::new(),
-            metadata: serde_json::json!({}),
-        }
-    }
-
-    #[test]
-    fn search_document_validation_blocks_unbounded_and_non_object_payloads() {
-        let mut input = document();
-        input.metadata = serde_json::json!(["not", "an", "object"]);
-        assert_eq!(
-            validate_search_document(&input),
-            Err(StorageError::InvalidInput { field: "metadata" })
-        );
-
-        let mut input = document();
-        input.code = "x".repeat(MAX_CODE_BYTES + 1);
-        assert_eq!(
-            validate_search_document(&input),
-            Err(StorageError::InvalidInput { field: "code" })
-        );
-    }
-
-    #[test]
-    fn empty_search_documents_are_rejected_before_postgres() {
-        let mut input = document();
-        input.qualified_name.clear();
-        input.code.clear();
-        input.natural_text.clear();
-        assert_eq!(
-            validate_search_document(&input),
-            Err(StorageError::InvalidInput {
-                field: "searchable_text"
-            })
-        );
-    }
 }
