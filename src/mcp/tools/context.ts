@@ -475,12 +475,21 @@ function buildContextNextActions(
       priority: PLAN_PRIORITY_SKIM,
     });
   }
-  actions.push({
-    tool: 'cartograph_compare_to_ref',
-    args: { findingsDelta: true },
-    reason: 'Run this before reporting done after code edits.',
-    priority: PLAN_PRIORITY_FINAL_CHECK,
-  });
+  if (toolAvailable('cartograph_verify')) {
+    actions.push({
+      tool: 'cartograph_verify',
+      args: {},
+      reason: 'After edits, select tests and compute the structural/finding delta in one verification packet.',
+      priority: PLAN_PRIORITY_FINAL_CHECK,
+    });
+  } else {
+    actions.push({
+      tool: 'cartograph_compare_to_ref',
+      args: { findingsDelta: true },
+      reason: 'Run this before reporting done after code edits.',
+      priority: PLAN_PRIORITY_FINAL_CHECK,
+    });
+  }
   return actions.filter((action) => toolAvailable(action.tool));
 }
 
@@ -538,7 +547,7 @@ function renderContextPlan(args: {
     '',
     '- Start with the priority-1 call, then widen only if the caller/callee map shows real blast radius.',
     '- Use preview or low-token calls until you know the edit target.',
-    '- After edits, choose tests with `cartograph_affected({includeCommands: true})` or `cartograph_tests_for`.',
+    '- After edits, call `cartograph_verify` for tiered tests, commands, and structural/finding deltas.',
   ].join('\n');
 }
 

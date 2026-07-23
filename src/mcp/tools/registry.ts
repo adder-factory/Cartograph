@@ -81,6 +81,7 @@ import { STATUS_TOOL } from './status.js';
 import { SUMMARIES_TOOL } from './summaries.js';
 import { TESTS_FOR_TOOL } from './tests-for.js';
 import { TRACE_TO_CULPRITS_TOOL } from './trace-to-culprits.js';
+import { VERIFY_TOOL } from './verify.js';
 
 /**
  * Inject `allowStale` into every tool's inputSchema EXCEPT tools
@@ -150,6 +151,7 @@ const ENTRIES: ToolModule[] = [
   SUMMARIES_TOOL,
   TESTS_FOR_TOOL,
   TRACE_TO_CULPRITS_TOOL,
+  VERIFY_TOOL,
 ].map(withAllowStale);
 
 // Populate the leaf name→module lookup. Family tools read it via

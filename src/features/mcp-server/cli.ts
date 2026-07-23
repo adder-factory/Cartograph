@@ -45,7 +45,7 @@ interface ServeServerOptions {
 }
 
 const MCP_SERVER_PROFILE_DESCRIPTION =
-  'MCP advertised-tool profile: core (default common coding-agent lookups, 14 tools), full (complete surface), read-only (read-capable tools only; write branches blocked), or review (diff/risk/test/change-impact tools). Default core.';
+  'MCP advertised-tool profile: core (default common surface, 15 tools), coding (lean task-to-verification surface, 9 tools), full (complete), read-only, or review. Default core.';
 
 export interface McpServerCommandDeps {
   program: CommandLike;
@@ -124,8 +124,10 @@ export function writeServeMcpGuidance(deps: Pick<McpServerCommandDeps, 'chalk' |
     chalk.cyan('  cartograph_node') + '      - Get symbol details; liveSource handles intentional stale slices',
   );
   writeStderr(chalk.cyan('  cartograph_affected') + '  - Find affected tests; includeCommands suggests verification');
+  writeStderr(chalk.cyan('  cartograph_verify') + '    - Plan tests/gates and compute structural/finding deltas');
   writeStderr(chalk.cyan('  cartograph_files') + '     - Get project file structure');
   writeStderr(chalk.cyan('  cartograph_status') + '    - Get index status');
+  writeStderr(chalk.cyan('  --profile coding') + '    - Lean nine-tool day-to-day coding-agent surface');
   writeStderr(
     chalk.cyan('  --profile full') + '      - Add advanced tools such as explore, imports, sessions, and diagnostics',
   );

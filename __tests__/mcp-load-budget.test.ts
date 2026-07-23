@@ -33,6 +33,8 @@ describe('MCP load-budget measurement', () => {
 
   it('measures narrowed advertised surfaces', () => {
     const full = measureMcpLoadBudget(null, { handlerOptions: { profile: 'full' } });
+    const core = measureMcpLoadBudget(null, { handlerOptions: { profile: 'core' } });
+    const coding = measureMcpLoadBudget(null, { handlerOptions: { profile: 'coding' } });
     const narrowed = measureMcpLoadBudget(null, {
       handlerOptions: {
         profile: 'review',
@@ -48,6 +50,8 @@ describe('MCP load-budget measurement', () => {
     expect(narrowed.toolCount).toBeLessThan(full.toolCount);
     expect(narrowed.toolsList.chars).toBeLessThan(full.toolsList.chars);
     expect(narrowed.topSchemaContributors).toEqual([]);
+    expect(coding.toolCount).toBe(9);
+    expect(coding.combinedStartup.chars).toBeLessThan(core.combinedStartup.chars);
   });
 
   it('formats pass/fail reports for CI budget checks', () => {

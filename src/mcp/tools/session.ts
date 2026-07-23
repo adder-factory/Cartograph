@@ -281,21 +281,27 @@ function buildAuditFindings(calls: ReadonlyArray<SessionCall>): AuditFinding[] {
   }
   findings.push(...findRepeatedCalls(calls));
 
-  if (calls.length > 0 && !calls.some((c) => c.toolName === 'cartograph_compare_to_ref')) {
+  if (
+    calls.length > 0 &&
+    !calls.some((c) => c.toolName === 'cartograph_verify' || c.toolName === 'cartograph_compare_to_ref')
+  ) {
     findings.push({
       severity: 'info',
-      text:
-        'No end-of-task self-check recorded. Before reporting done after edits, call ' +
-        '`cartograph_compare_to_ref({findingsDelta: true})`.',
+      text: 'No end-of-task self-check recorded. Before reporting done after edits, call ' + '`cartograph_verify`.',
     });
   }
   if (
     calls.length > 0 &&
-    !calls.some((c) => c.toolName === 'cartograph_affected' || c.toolName === 'cartograph_tests_for')
+    !calls.some(
+      (c) =>
+        c.toolName === 'cartograph_verify' ||
+        c.toolName === 'cartograph_affected' ||
+        c.toolName === 'cartograph_tests_for',
+    )
   ) {
     findings.push({
       severity: 'info',
-      text: 'No test-selection call recorded. For code edits, use `cartograph_affected` or `cartograph_tests_for` before choosing verification.',
+      text: 'No test-selection call recorded. For code edits, use `cartograph_verify`; use `cartograph_tests_for` for one symbol.',
     });
   }
 
@@ -314,13 +320,18 @@ function formatToolCounts(calls: ReadonlyArray<SessionCall>): string {
 
 function suggestedAuditActions(calls: ReadonlyArray<SessionCall>): string[] {
   const actions: string[] = [];
-  if (!calls.some((c) => c.toolName === 'cartograph_compare_to_ref')) {
-    actions.push('`cartograph_compare_to_ref({findingsDelta: true})`');
+  if (!calls.some((c) => c.toolName === 'cartograph_verify' || c.toolName === 'cartograph_compare_to_ref')) {
+    actions.push('`cartograph_verify`');
   }
-  if (!calls.some((c) => c.toolName === 'cartograph_affected' || c.toolName === 'cartograph_tests_for')) {
-    actions.push(
-      '`cartograph_affected({includeCommands: true})` after edits, or `cartograph_tests_for({symbol})` for one target.',
-    );
+  if (
+    !calls.some(
+      (c) =>
+        c.toolName === 'cartograph_verify' ||
+        c.toolName === 'cartograph_affected' ||
+        c.toolName === 'cartograph_tests_for',
+    )
+  ) {
+    actions.push('`cartograph_verify` after edits, or `cartograph_tests_for({symbol})` for one target.');
   }
   if (calls.some((c) => c.toolName === 'cartograph_context' && parseArgsJson(c.argsJson)['format'] !== 'plan')) {
     actions.push('`cartograph_context({task, format: "plan"})` for the next broad route decision.');

@@ -47,12 +47,13 @@ describe('MCP server-level options', () => {
       const names = handler.getTools().map((t) => t.name);
       const explicitCoreNames = explicitCoreHandler.getTools().map((t) => t.name);
       expect(names.sort()).toEqual(explicitCoreNames.sort());
-      expect(names).toHaveLength(14);
+      expect(names).toHaveLength(15);
       expect(names).toContain('cartograph_find');
       expect(names).toContain('cartograph_graph');
       expect(names).toContain('cartograph_context');
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
+      expect(names).toContain('cartograph_verify');
       expect(names).not.toContain('cartograph_explore');
       expect(names).not.toContain('cartograph_host');
       expect(names).not.toContain('cartograph_session');
@@ -60,6 +61,28 @@ describe('MCP server-level options', () => {
       expect(names).not.toContain('cartograph_note');
       handler.closeAll();
       explicitCoreHandler.closeAll();
+    });
+
+    it('coding exposes the nine-tool task-to-verification surface', () => {
+      const handler = new ToolHandler(cg, { profile: 'coding' });
+      const names = handler
+        .getTools()
+        .map((tool) => tool.name)
+        .sort();
+      expect(names).toEqual(
+        [
+          'cartograph_at_range',
+          'cartograph_context',
+          'cartograph_files',
+          'cartograph_find',
+          'cartograph_graph',
+          'cartograph_node',
+          'cartograph_status',
+          'cartograph_tests_for',
+          'cartograph_verify',
+        ].sort(),
+      );
+      handler.closeAll();
     });
 
     it('full profile exposes the complete registered tool surface', () => {
@@ -78,6 +101,7 @@ describe('MCP server-level options', () => {
       expect(names).toContain('cartograph_context');
       expect(names).toContain('cartograph_compare_to_ref');
       expect(names).toContain('cartograph_admin');
+      expect(names).toContain('cartograph_verify');
       expect(names).not.toContain('cartograph_explore');
       expect(names).not.toContain('cartograph_host');
       expect(names).not.toContain('cartograph_session');

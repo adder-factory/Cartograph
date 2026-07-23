@@ -45,11 +45,11 @@ The dividing line for WHERE to call a tool is **output source-volume** — does 
 
 For the smallest useful output, pass \`lowTokens: true\` to supported high-volume tools: \`cartograph_find\`, \`cartograph_graph\`, \`cartograph_context\`, \`cartograph_at_range\`, \`cartograph_node\`, and \`cartograph_files\` (plus \`cartograph_explore\` / \`cartograph_imports\` under \`--profile full\`). This applies compact rows, narrower fields, lower caps, or source suppression depending on the tool. Servers launched with \`cartograph serve --mcp --low-tokens-default\` apply this by default on supported tools; pass \`lowTokens: false\` for one regular response.
 
-Use \`cartograph_context({task: "<task>", format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_affected({includeCommands: true})\` for affected tests plus package-script verification commands, then \`cartograph_compare_to_ref({findingsDelta: true})\` before reporting done. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
+Use \`cartograph_context({task: "<task>", format: "plan"})\` first for broad tasks when you need a low-token route plan and concrete next MCP calls before reading source. After edits, use \`cartograph_verify\` for changed files, tiered tests, package commands, and structural/finding deltas before reporting done. It plans commands but never executes them. If a stale \`cartograph_node({code: true})\` result is intentional, pass \`liveSource: true\` to read the current file from disk using indexed line ranges.
 
 Storage defaults to SQLite. If the user asks for PostgreSQL/shared storage, use PostgreSQL 18+ and initialize with \`cartograph_admin({action: "init", databaseProvider: "postgres", databaseUrl, databaseSchema, databasePgvector: "auto"})\` before indexing, or use \`cartograph_admin({action: "storage-migrate", ...})\` to move an existing SQLite graph to PostgreSQL. To move back to local SQLite, use \`cartograph_admin({action: "storage-migrate", databaseProvider: "sqlite", projectPath})\`. After changing storage, run \`cartograph_admin({action: "doctor"})\` and restart any MCP server attached to the old database.
 
-If you control the MCP server launch, run \`cartograph mcp-budget\` to measure startup load. The default MCP profile is \`core\`; use \`--profile full\` for the complete toolbox, or \`--profile read-only\`, \`--profile review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` for narrower surfaces.
+If you control the MCP server launch, run \`cartograph mcp-budget\` to measure startup load. The default MCP profile is \`core\`; use \`--profile coding\` for the lean nine-tool day-to-day surface, \`--profile full\` for the complete toolbox, or \`--profile read-only\`, \`--profile review\`, \`--no-write-tools\`, and repeated \`--disable-tool <name>\` for narrower surfaces.
 
 | Tool | Use For |
 |------|---------|
@@ -59,7 +59,7 @@ If you control the MCP server launch, run \`cartograph mcp-budget\` to measure s
 | \`cartograph_context({task: "<task>", format: "plan"})\` | Plan the route and next MCP calls before source-heavy exploration |
 | \`cartograph_node\` | A single symbol's details (omit \`code: true\` to stay metadata-only; use \`liveSource: true\` for stale live slices) |
 | \`cartograph_at_range\` | Symbols overlapping a file:line span (PR-review hunks) |
-| \`cartograph_affected({includeCommands: true})\` | Affected tests plus verification commands after edits |
+| \`cartograph_verify\` | Changed files, tiered tests, commands, and structural/finding deltas after edits |
 | \`cartograph_playbook\` | Full tool-selection guide when the default core tools do not fit |
 | \`cartograph_biomarkers\` / \`cartograph_status\` | Risk findings per symbol / index health |
 

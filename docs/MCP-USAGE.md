@@ -53,6 +53,7 @@ The full copy-paste task for users is in
 
 ```sh
 cartograph serve --mcp --profile core       # default
+cartograph serve --mcp --profile coding     # lean task-to-verification surface
 cartograph serve --mcp --profile full       # all registered tools
 cartograph serve --mcp --profile read-only
 cartograph serve --mcp --profile review
@@ -61,8 +62,9 @@ cartograph serve --mcp --low-tokens-default
 cartograph serve --mcp --no-daemon          # standalone; opt out of the shared daemon
 ```
 
-Profiles filter the advertised tool list. `core` is the 14-tool common
-coding-agent surface. `full` exposes every registered tool. `review` focuses
+Profiles filter the advertised tool list. `core` is the 15-tool common
+coding-agent surface. `coding` is the lean 9-tool task-to-verification surface.
+`full` exposes every registered tool. `review` focuses
 diff/risk/test workflows. `read-only` advertises read-capable tools and blocks
 mutating branches of mixed tools.
 
@@ -100,8 +102,7 @@ cartograph_node without code
 After edits:
 
 ```text
-cartograph_affected({includeCommands: true})
-cartograph_compare_to_ref({findingsDelta: true})
+cartograph_verify
 ```
 
 Use `cartograph_playbook` for the full tool-selection guide. Start with
@@ -124,21 +125,23 @@ cartograph mcp-budget
 bun run check:mcp-load
 ```
 
-On this repository's default `core` profile, the current measured startup load
+On this repository's profiles, the current measured startup load
 is:
 
 | Payload | Chars | Est. tokens |
 |---|---:|---:|
-| tools/list, 14 tools | 33,739 | ~8,435 |
-| initialize instructions | 3,346 | ~837 |
-| combined startup load | 37,085 | ~9,272 |
-| full playbook, on demand | 16,282 | ~4,071 |
+| coding tools/list, 9 tools | 20,646 | ~5,162 |
+| core tools/list, 15 tools | 35,326 | ~8,832 |
+| initialize instructions | 3,158 | ~790 |
+| coding combined startup load | 23,804 | ~5,951 |
+| core combined startup load | 38,484 | ~9,621 |
+| full playbook, on demand | 16,845 | ~4,212 |
 
-The full 34-tool profile is 60,422 `tools/list` chars and 63,768 combined
+The full 35-tool profile is 62,052 `tools/list` chars and 65,210 combined
 startup chars. `--profile full --no-write-tools` and `--profile read-only`
-reduce the full list to 33 tools, 55,471 `tools/list` chars, and 58,817
-combined startup chars. The review profile advertises 23 tools, 45,729
-`tools/list` chars, and 49,075 combined startup chars.
+reduce the full list to 34 tools, 57,067 `tools/list` chars, and 60,225
+combined startup chars. The review profile advertises 24 tools, 47,127
+`tools/list` chars, and 50,285 combined startup chars.
 
 `lowTokens: true` and `--low-tokens-default` reduce per-call output, not the
 advertised startup schema.

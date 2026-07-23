@@ -35,6 +35,7 @@ export function renderGuide(): string {
     '',
     '```sh',
     'cartograph install --yes --location=local',
+    'cartograph serve --mcp --profile coding --project-path .',
     'cartograph serve --mcp --profile core --project-path .',
     'cartograph serve --mcp --profile full --project-path .',
     '```',

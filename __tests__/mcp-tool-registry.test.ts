@@ -106,6 +106,7 @@ describe('MCP tool registry — single source of truth', () => {
       'cartograph_summaries',
       'cartograph_tests_for',
       'cartograph_trace_to_culprits',
+      'cartograph_verify',
     ];
     const actual = getToolModules()
       .map((m) => m.definition.name)

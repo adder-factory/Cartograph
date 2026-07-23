@@ -6,7 +6,7 @@
  * registered tool preserves current default behaviour.
  */
 
-export const MCP_SERVER_PROFILE_NAMES = ['full', 'core', 'read-only', 'review'] as const;
+export const MCP_SERVER_PROFILE_NAMES = ['full', 'core', 'coding', 'read-only', 'review'] as const;
 export type McpServerProfile = (typeof MCP_SERVER_PROFILE_NAMES)[number];
 
 export const DEFAULT_MCP_SERVER_PROFILE: McpServerProfile = 'core';
@@ -26,6 +26,19 @@ const CORE_PROFILE_TOOLS = [
   'cartograph_review',
   'cartograph_status',
   'cartograph_tests_for',
+  'cartograph_verify',
+] as const;
+
+const CODING_PROFILE_TOOLS = [
+  'cartograph_at_range',
+  'cartograph_context',
+  'cartograph_files',
+  'cartograph_find',
+  'cartograph_graph',
+  'cartograph_node',
+  'cartograph_status',
+  'cartograph_tests_for',
+  'cartograph_verify',
 ] as const;
 
 const READ_ONLY_PROFILE_TOOLS = [
@@ -62,6 +75,7 @@ const READ_ONLY_PROFILE_TOOLS = [
   'cartograph_summaries',
   'cartograph_tests_for',
   'cartograph_trace_to_culprits',
+  'cartograph_verify',
 ] as const;
 
 const REVIEW_PROFILE_TOOLS = [
@@ -88,11 +102,13 @@ const REVIEW_PROFILE_TOOLS = [
   'cartograph_status',
   'cartograph_tests_for',
   'cartograph_trace_to_culprits',
+  'cartograph_verify',
 ] as const;
 
 export const MCP_SERVER_PROFILE_TOOL_NAMES: Readonly<Record<McpServerProfile, readonly string[] | null>> = {
   full: null,
   core: CORE_PROFILE_TOOLS,
+  coding: CODING_PROFILE_TOOLS,
   'read-only': READ_ONLY_PROFILE_TOOLS,
   review: REVIEW_PROFILE_TOOLS,
 };
