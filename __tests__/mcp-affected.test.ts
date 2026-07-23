@@ -59,6 +59,8 @@ describe('cartograph_affected', () => {
     });
     const text = result.content[0]?.text ?? '';
     expect(text).toMatch(/Affected test files/);
+    expect(text).toContain('### Direct tests');
+    expect(text).toContain('direct dependent, 1 hop');
     expect(text).toMatch(/src\/a\.test\.ts/);
   });
 
@@ -481,7 +483,7 @@ describe('cartograph_affected — barrel-dump cap + hint', () => {
     // The header counts the full affected set...
     expect(text).toMatch(new RegExp(String.raw`Affected test files \(${TEST_COUNT}\)`));
     // ...but the body is capped at the default 40 rows.
-    const renderedRows = (text.match(/^- `src\/t\d+\.test\.ts`$/gm) ?? []).length;
+    const renderedRows = (text.match(/^- `src\/t\d+\.test\.ts` — /gm) ?? []).length;
     expect(renderedRows).toBe(40);
     // ...and a cap footer explains the trim.
     expect(text).toMatch(new RegExp(`Showing first 40 of ${TEST_COUNT} affected test files`));

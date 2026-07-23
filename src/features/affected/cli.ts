@@ -1,4 +1,10 @@
-import { DEFAULT_DEPTH, type AffectedCoreInput, type IndexedPathSets } from './affected-core.js';
+import {
+  DEFAULT_DEPTH,
+  type AffectedCoreInput,
+  type AffectedTestsResult,
+  type IndexedPathSets,
+} from './affected-core.js';
+import type { AffectedTestCandidate } from './contract.js';
 import type { PackageManager } from '../../package-scripts.js';
 import { errMsg } from '../../errors.js';
 import {
@@ -41,10 +47,7 @@ export interface AffectedCommandDeps {
   runViaMCP?: unknown;
   isInitialized: (projectPath: string) => boolean;
   buildIndexedPathSets: (queries: QueryBuilder) => IndexedPathSets;
-  findAffectedTests: (
-    graphManager: GraphQueryManager,
-    input: AffectedCoreInput,
-  ) => { affectedTests: Set<string>; totalDependents: number; barrelsReached: string[] };
+  findAffectedTests: (graphManager: GraphQueryManager, input: AffectedCoreInput) => AffectedTestsResult;
   loadGitUtils: () => Promise<{ listChangedFilesSince: (projectPath: string, ref: string) => string[] | null }>;
   readStdin: () => string;
   packageDeps: AffectedPackageDeps;
@@ -102,7 +105,7 @@ export async function handleAffectedCommand(
     try {
       const coreInput = buildAffectedCoreInput({ deps, cg, changed, options });
       if (!coreInput) return;
-      const { affectedTests, totalDependents, barrelsReached } = deps.findAffectedTests(
+      const { affectedTests, candidates, totalDependents, barrelsReached } = deps.findAffectedTests(
         cg.internals.graphManager,
         coreInput,
       );
@@ -110,6 +113,7 @@ export async function handleAffectedCommand(
       const outputArgs = {
         changedFiles: changed.changedFiles,
         sortedTests,
+        candidates,
         totalDependents,
         barrelsReached,
         derivedFromGit: changed.derivedFromGit,
@@ -121,7 +125,14 @@ export async function handleAffectedCommand(
         renderAffectedOutput({
           ...outputArgs,
           ...(options.includeCommands
-            ? { verificationCommands: buildAffectedVerificationCommands(deps.packageDeps, projectPath, sortedTests) }
+            ? {
+                verificationCommands: buildAffectedVerificationCommands(
+                  deps.packageDeps,
+                  projectPath,
+                  candidates,
+                  barrelsReached.length > 0,
+                ),
+              }
             : {}),
           ...(deps.style ? { style: deps.style } : {}),
         }),
@@ -216,12 +227,22 @@ function buildAffectedCoreInput({ deps, cg, changed, options }: BuildAffectedCor
 function buildAffectedVerificationCommands(
   deps: AffectedPackageDeps,
   projectPath: string,
-  sortedTests: string[],
+  candidates: readonly AffectedTestCandidate[],
+  suiteRisk: boolean,
 ): string[] {
   const manager = deps.detectPackageManager(projectPath);
   const scripts = deps.readPackageScripts(projectPath);
   const commands: string[] = [];
-  if (sortedTests.length > 0 && scripts['test']) commands.push(deps.packageScriptCommand(manager, 'test', sortedTests));
+  const targetedTests = candidates
+    .filter((candidate) => candidate.tier !== 'broad')
+    .slice(0, 20)
+    .map((candidate) => candidate.path);
+  if (targetedTests.length > 0 && scripts['test']) {
+    commands.push(deps.packageScriptCommand(manager, 'test', targetedTests));
+  }
+  if ((suiteRisk || candidates.some((candidate) => candidate.tier === 'broad')) && scripts['test']) {
+    commands.push(deps.packageScriptCommand(manager, 'test'));
+  }
   for (const script of ['typecheck', 'lint']) {
     if (scripts[script]) commands.push(deps.packageScriptCommand(manager, script));
   }

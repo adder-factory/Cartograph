@@ -37,6 +37,7 @@ import {
   buildIndexedPathSets,
   findAffectedTests,
 } from '../../features/affected/affected-core.js';
+import type { AffectedTestCandidate, AffectedTestTier } from '../../features/affected/contract.js';
 
 /**
  * Hard ceiling on the BFS `depth` arg. The CLI `--depth` uses
@@ -99,6 +100,7 @@ type AffectedToolArgs = z.infer<typeof affectedSchema>;
  * M" footer so the agent knows the list was trimmed.
  */
 const DEFAULT_ROW_LIMIT = 40;
+const TARGETED_COMMAND_TEST_LIMIT = 20;
 
 interface AffectedArgs extends AffectedCoreInput {
   /**
@@ -402,16 +404,28 @@ function directTestCommand(manager: PackageManager, tests: string[]): string | n
   return null;
 }
 
-function buildVerificationCommands(projectRoot: string, affectedTests: string[]): string | null {
+function buildVerificationCommands(
+  projectRoot: string,
+  candidates: readonly AffectedTestCandidate[],
+  suiteRisk: boolean,
+): string | null {
   const pkg = readPackageScriptInfo(projectRoot);
   const commands: string[] = [];
-  if (affectedTests.length > 0) {
+  const targetedTests = candidates
+    .filter((candidate) => candidate.tier !== 'broad')
+    .slice(0, TARGETED_COMMAND_TEST_LIMIT)
+    .map((candidate) => candidate.path);
+  if (targetedTests.length > 0) {
     if (pkg.scripts['test']) {
-      commands.push(packageScriptCommand(pkg.manager, 'test', affectedTests));
+      commands.push(packageScriptCommand(pkg.manager, 'test', targetedTests));
     } else {
-      const direct = directTestCommand(pkg.manager, affectedTests);
+      const direct = directTestCommand(pkg.manager, targetedTests);
       if (direct) commands.push(direct);
     }
+  }
+  const hasBroadCandidates = candidates.some((candidate) => candidate.tier === 'broad');
+  if ((suiteRisk || hasBroadCandidates) && pkg.scripts['test']) {
+    commands.push('# Full-suite fallback for broad dependency fan-out', packageScriptCommand(pkg.manager, 'test'));
   }
   for (const script of ['typecheck', 'lint']) {
     if (pkg.scripts[script]) commands.push(packageScriptCommand(pkg.manager, script));
@@ -433,8 +447,18 @@ function appendDerivedChangedFiles(lines: string[], files: string[], derivedFrom
   lines.push('');
 }
 
-function appendAffectedTestRows(lines: string[], footers: string[], sorted: string[]): void {
-  if (sorted.length === 0) {
+const TIER_LABELS: Readonly<Record<AffectedTestTier, string>> = {
+  direct: 'Direct tests',
+  likely: 'Likely tests',
+  broad: 'Broad fallback tests',
+};
+
+function appendAffectedTestRows(
+  lines: string[],
+  footers: string[],
+  candidates: readonly AffectedTestCandidate[],
+): void {
+  if (candidates.length === 0) {
     lines.push('_No test files affected by the input set._');
     return;
   }
@@ -442,11 +466,21 @@ function appendAffectedTestRows(lines: string[], footers: string[], sorted: stri
   // Cap the rendered rows. An edited leaf module re-exported through
   // a barrel can pull in ~half the suite — dumping every row uncapped
   // buries the signal. Show the first N (sorted) with a count footer.
-  const shown = sorted.slice(0, DEFAULT_ROW_LIMIT);
-  for (const t of shown) lines.push(`- \`${t}\``);
-  if (sorted.length <= DEFAULT_ROW_LIMIT) return;
+  const shown = candidates.slice(0, DEFAULT_ROW_LIMIT);
+  for (const tier of ['direct', 'likely', 'broad'] as const) {
+    const tierRows = shown.filter((candidate) => candidate.tier === tier);
+    if (tierRows.length === 0) continue;
+    lines.push(`### ${TIER_LABELS[tier]}`, '');
+    for (const candidate of tierRows) {
+      const hopLabel = candidate.distance === 1 ? 'hop' : 'hops';
+      const reason = candidate.reason.replaceAll('-', ' ');
+      lines.push(`- \`${candidate.path}\` — ${reason}, ${candidate.distance} ${hopLabel}`);
+    }
+    lines.push('');
+  }
+  if (candidates.length <= DEFAULT_ROW_LIMIT) return;
   footers.push(
-    `_Showing first ${shown.length} of ${sorted.length} affected test files (sorted). Pass a custom \`filter\` glob or narrow your input set to see fewer._`,
+    `_Showing first ${shown.length} of ${candidates.length} affected test files (ranked). Pass a custom \`filter\` glob or narrow your input set to see fewer._`,
   );
 }
 
@@ -457,10 +491,15 @@ function appendMissingInputFooters(footers: string[], missingInputs: string[]): 
 
 function appendVerificationFooter(
   footers: string[],
-  args: { includeCommands: boolean; projectRoot: string; affectedTests: string[] },
+  args: {
+    includeCommands: boolean;
+    projectRoot: string;
+    candidates: readonly AffectedTestCandidate[];
+    suiteRisk: boolean;
+  },
 ): void {
   if (!args.includeCommands) return;
-  const verification = buildVerificationCommands(args.projectRoot, args.affectedTests);
+  const verification = buildVerificationCommands(args.projectRoot, args.candidates, args.suiteRisk);
   if (verification) footers.push(verification);
 }
 
@@ -469,7 +508,7 @@ function appendBarrelFooter(footers: string[], barrelsReached: string[]): void {
   const barrelList = barrelsReached.map((b) => `\`${b}\``).join(', ');
   footers.push(
     `> ⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-      `Narrow with \`cartograph_tests_for\` for symbol-level test discovery.`,
+      `Traversal stopped at that barrel to avoid suite-wide noise. Narrow with \`cartograph_tests_for\` for symbol-level test discovery.`,
   );
 }
 
@@ -485,11 +524,11 @@ function appendBarrelFooter(footers: string[], barrelsReached: string[]): void {
  */
 function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: string[] } {
   const { files, result, missingInputs, derivedFromGit, includeCommands, projectRoot } = fmtArgs;
-  const sorted = Array.from(result.affectedTests).sort((a, b) => Number(a > b) - Number(a < b));
+  const candidates = result.candidates;
   const lines: string[] = [];
   const sourceLabel = derivedFromGit ? ' (from `git diff HEAD`)' : '';
   lines.push(
-    `## Affected test files (${sorted.length}) — ${files.length} input file${files.length === 1 ? '' : 's'}${sourceLabel}`,
+    `## Affected test files (${candidates.length}) — ${files.length} input file${files.length === 1 ? '' : 's'}${sourceLabel}`,
     '',
   );
   // Friction-Y: when the set came from git, show the agent which
@@ -497,13 +536,18 @@ function buildResultSpec(fmtArgs: FormatResultArgs): { body: string; footers: st
   // "what I think I edited" and "what git sees as changed."
   appendDerivedChangedFiles(lines, files, derivedFromGit);
   const footers: string[] = [];
-  appendAffectedTestRows(lines, footers, sorted);
+  appendAffectedTestRows(lines, footers, candidates);
   // F-H: surface unindexed inputs before the traversal stats so the
   // agent sees them BEFORE the "we found nothing" footer. Each missing
   // input gets its own line — three typos in a 10-file input set is a
   // helpful signal, not noise.
   appendMissingInputFooters(footers, missingInputs);
-  appendVerificationFooter(footers, { includeCommands, projectRoot, affectedTests: sorted });
+  appendVerificationFooter(footers, {
+    includeCommands,
+    projectRoot,
+    candidates,
+    suiteRisk: result.barrelsReached.length > 0,
+  });
   footers.push(`_Traversed ${result.totalDependents} dependents total._`);
   // Barrel hint: when the BFS passed through a public-API barrel the
   // blast radius is the project's whole public surface and a file-level

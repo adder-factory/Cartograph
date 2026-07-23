@@ -12,6 +12,7 @@ import { getAllFiles, getAllFilePaths } from '../db/queries-files.js';
 import { GraphTraverser } from './traversal.js';
 import { globToSafeRegex } from '../utils.js';
 import * as path from 'node:path';
+import { z } from 'zod';
 
 /**
  * Extensions an extension-less relative import spec may resolve to on
@@ -185,11 +186,17 @@ export interface ResolvedFileImportDependent {
   line?: number;
 }
 
-interface ResolvedImportRow {
-  importerFilePath: string;
-  spec: string;
-  line: number | null;
-}
+const ResolvedImportRowSchema = z.object({
+  importer_file_path: z.string(),
+  spec: z.string(),
+  line: z.number().nullable(),
+});
+type ResolvedImportRow = z.infer<typeof ResolvedImportRowSchema>;
+
+const FileDependentRowSchema = z.object({
+  target_file_path: z.string(),
+  source_file_path: z.string(),
+});
 
 /**
  * Resolve every file→import-node edge in reverse and return files whose
@@ -207,32 +214,86 @@ function gqmCollectResolvedFileImportDependents(args: {
   indexedFiles: ReadonlySet<string>;
 }): ResolvedFileImportDependent[] {
   const { queries, targetFilePath, indexedFiles } = args;
+  const rows = readResolvedImportRows(queries);
+
+  const out = new Map<string, ResolvedFileImportDependent>();
+  for (const row of rows) {
+    if (row.importer_file_path === targetFilePath) continue;
+    const resolved = resolveRelativeSpec(row.importer_file_path, row.spec, indexedFiles);
+    if (resolved !== targetFilePath) continue;
+    const existing = out.get(row.importer_file_path);
+    const line = typeof row.line === 'number' && row.line > 0 ? row.line : undefined;
+    if (!existing || (line !== undefined && (existing.line === undefined || line < existing.line))) {
+      const dependent: ResolvedFileImportDependent = { filePath: row.importer_file_path };
+      if (line !== undefined) dependent.line = line;
+      out.set(row.importer_file_path, dependent);
+    }
+  }
+  return Array.from(out.values());
+}
+
+function readResolvedImportRows(queries: QueryBuilder): ResolvedImportRow[] {
   const rows = queries.db
     .prepare(
       `
-      SELECT src.file_path AS importerFilePath, imp.name AS spec, imp.start_line AS line
+        SELECT src.file_path AS importer_file_path, imp.name AS spec, imp.start_line AS line
       FROM edges e
       JOIN nodes src ON src.id = e.source AND src.kind = 'file'
       JOIN nodes imp ON imp.id = e.target AND imp.kind = 'import'
       WHERE e.kind = 'imports'
     `,
     )
-    .all() as ResolvedImportRow[];
+    .all<unknown>();
+  return z.array(ResolvedImportRowSchema).parse(rows);
+}
 
-  const out = new Map<string, ResolvedFileImportDependent>();
+function addFileDependent(index: Map<string, Set<string>>, target: string, source: string): void {
+  if (target === source) return;
+  const dependents = index.get(target);
+  if (dependents) dependents.add(source);
+  else index.set(target, new Set([source]));
+}
+
+function collectResolvedImportIndex(
+  queries: QueryBuilder,
+  indexedFiles: ReadonlySet<string>,
+  index: Map<string, Set<string>>,
+): void {
+  const rows = readResolvedImportRows(queries);
   for (const row of rows) {
-    if (row.importerFilePath === targetFilePath) continue;
-    const resolved = resolveRelativeSpec(row.importerFilePath, row.spec, indexedFiles);
-    if (resolved !== targetFilePath) continue;
-    const existing = out.get(row.importerFilePath);
-    const line = typeof row.line === 'number' && row.line > 0 ? row.line : undefined;
-    if (!existing || (line !== undefined && (existing.line === undefined || line < existing.line))) {
-      const dependent: ResolvedFileImportDependent = { filePath: row.importerFilePath };
-      if (line !== undefined) dependent.line = line;
-      out.set(row.importerFilePath, dependent);
-    }
+    const resolved = resolveRelativeSpec(row.importer_file_path, row.spec, indexedFiles);
+    if (resolved) addFileDependent(index, resolved, row.importer_file_path);
   }
-  return Array.from(out.values());
+}
+
+function collectStructuralDependentIndex(queries: QueryBuilder, index: Map<string, Set<string>>): void {
+  const rows = queries.db
+    .prepare(
+      `
+      SELECT DISTINCT target.file_path AS target_file_path, source.file_path AS source_file_path
+      FROM edges e
+      JOIN nodes target ON target.id = e.target
+      JOIN nodes source ON source.id = e.source
+      WHERE e.kind IN ('imports', 'references', 'calls', 'type_of', 'tests')
+        AND (target.kind = 'file' OR target.is_exported = 1)
+        AND source.file_path <> target.file_path
+    `,
+    )
+    .all<unknown>();
+  for (const row of z.array(FileDependentRowSchema).parse(rows)) {
+    addFileDependent(index, row.target_file_path, row.source_file_path);
+  }
+}
+
+function freezeFileDependentIndex(index: Map<string, Set<string>>): ReadonlyMap<string, readonly string[]> {
+  const frozen = new Map<string, readonly string[]>();
+  for (const [target, dependents] of index) {
+    frozen.set(
+      target,
+      [...dependents].sort((a, b) => a.localeCompare(b)),
+    );
+  }
+  return frozen;
 }
 
 interface GqmAppendInternalOutgoingEdgesIntoArgs {
@@ -308,6 +369,19 @@ class GraphDependencyQueries {
     }
 
     return Array.from(dependents);
+  }
+
+  /**
+   * Build the whole reverse file-dependency adjacency in two set-based reads.
+   * Affected-test traversal consumes this once per request instead of issuing
+   * a node/import/file-path query for every visited file.
+   */
+  getFileDependentIndex(): ReadonlyMap<string, readonly string[]> {
+    const indexedFiles = new Set(getAllFilePaths(this.queries));
+    const index = new Map<string, Set<string>>();
+    collectResolvedImportIndex(this.queries, indexedFiles, index);
+    collectStructuralDependentIndex(this.queries, index);
+    return freezeFileDependentIndex(index);
   }
 
   getResolvedFileImportDependents(filePath: string, indexedFiles?: ReadonlySet<string>): ResolvedFileImportDependent[] {

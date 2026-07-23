@@ -131,7 +131,8 @@ describe('graph invariants across MCP surfaces', () => {
     const testsFor = textOf(await handler.execute('cartograph_tests_for', { symbol: 'targetFn' }));
 
     expect(affected).toContain('Traversal reached the public-API barrel');
-    expect(affected).toContain('src/barrel-other-0.test.ts');
+    expect(affected).not.toContain('src/barrel-other-0.test.ts');
+    expect(affected).toContain('src/consumer.test.ts');
     expect(testsFor).not.toContain('barrel-other-0.test.ts');
     expect(testsFor).not.toContain('barrel-other-1.test.ts');
     expect(testsFor).not.toContain('barrel-other-2.test.ts');

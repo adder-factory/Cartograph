@@ -14,6 +14,7 @@ import type { QueryBuilder } from '../../db/queries.js';
 import { getAllFiles } from '../../db/queries-files.js';
 import { getFilesWithTestNames } from '../../db/queries-test-names.js';
 import { isTestPath } from '../../utils.js';
+import { AffectedTestCandidatesSchema, type AffectedTestCandidate, type AffectedTestTier } from './contract.js';
 
 /** Default BFS depth through the dependents graph. */
 export const DEFAULT_DEPTH = 5;
@@ -125,6 +126,8 @@ export function isTestFile(filePath: string, input: AffectedCoreInput): boolean 
 /** Result of the affected-tests BFS. */
 export interface AffectedTestsResult {
   affectedTests: Set<string>;
+  /** Ranked, explained test recommendations for agent-facing renderers. */
+  candidates: AffectedTestCandidate[];
   totalDependents: number;
   /**
    * Sorted public-API barrel files the traversal passed through. A
@@ -136,7 +139,7 @@ export interface AffectedTestsResult {
 
 /** Minimal graph surface the BFS needs — the file-dependents query. */
 export interface FileDependentsSource {
-  getFileDependents(filePath: string): string[];
+  getFileDependentIndex(): ReadonlyMap<string, readonly string[]>;
 }
 
 /**
@@ -145,41 +148,58 @@ export interface FileDependentsSource {
  * that are themselves tests pass through unchanged.
  */
 export function findAffectedTests(graph: FileDependentsSource, input: AffectedCoreInput): AffectedTestsResult {
-  const affectedTests = new Set<string>();
+  const candidateByPath = new Map<string, AffectedTestCandidate>();
   const allDependents = new Set<string>();
   const barrelsReached = new Set<string>();
+  const dependentIndex = graph.getFileDependentIndex();
 
   for (const file of input.files) {
     if (isTestFile(file, input)) {
-      affectedTests.add(file);
+      recordTestCandidate(candidateByPath, {
+        path: file,
+        tier: 'direct',
+        distance: 0,
+        reason: 'changed-test',
+      });
       continue;
     }
-    collectAffectedDependents({ graph, input, file, out: { affectedTests, allDependents, barrelsReached } });
+    if (isBarrelFile(file)) {
+      barrelsReached.add(file);
+      continue;
+    }
+    collectAffectedDependents({
+      dependentIndex,
+      input,
+      file,
+      out: { candidateByPath, allDependents, barrelsReached },
+    });
   }
+  const candidates = AffectedTestCandidatesSchema.parse([...candidateByPath.values()].sort(compareCandidates));
   return {
-    affectedTests,
+    affectedTests: new Set(candidates.map((candidate) => candidate.path)),
+    candidates,
     totalDependents: allDependents.size,
     barrelsReached: Array.from(barrelsReached).sort((a, b) => Number(a > b) - Number(a < b)),
   };
 }
 
 function collectAffectedDependents(args: {
-  graph: FileDependentsSource;
+  dependentIndex: ReadonlyMap<string, readonly string[]>;
   input: AffectedCoreInput;
   file: string;
   out: {
-    affectedTests: Set<string>;
+    candidateByPath: Map<string, AffectedTestCandidate>;
     allDependents: Set<string>;
     barrelsReached: Set<string>;
   };
 }): void {
-  const { graph, input, file, out } = args;
+  const { dependentIndex, input, file, out } = args;
   const queue: Array<{ file: string; depth: number }> = [{ file, depth: 0 }];
   const visited = new Set<string>([file]);
   while (queue.length > 0) {
     const current = queue.shift()!;
     if (current.depth >= input.depth) continue;
-    for (const dep of graph.getFileDependents(current.file)) {
+    for (const dep of dependentIndex.get(current.file) ?? []) {
       if (visited.has(dep)) continue;
       visited.add(dep);
       recordDependent({ input, dep, nextDepth: current.depth + 1, queue, out });
@@ -193,7 +213,7 @@ interface RecordDependentArgs {
   nextDepth: number;
   queue: Array<{ file: string; depth: number }>;
   out: {
-    affectedTests: Set<string>;
+    candidateByPath: Map<string, AffectedTestCandidate>;
     allDependents: Set<string>;
     barrelsReached: Set<string>;
   };
@@ -202,7 +222,36 @@ interface RecordDependentArgs {
 function recordDependent(args: RecordDependentArgs): void {
   const { input, dep, nextDepth, queue, out } = args;
   out.allDependents.add(dep);
-  if (isBarrelFile(dep)) out.barrelsReached.add(dep);
-  if (isTestFile(dep, input)) out.affectedTests.add(dep);
-  else queue.push({ file: dep, depth: nextDepth });
+  if (isBarrelFile(dep)) {
+    out.barrelsReached.add(dep);
+    return;
+  }
+  if (isTestFile(dep, input)) {
+    recordTestCandidate(out.candidateByPath, candidateForDistance(dep, nextDepth));
+    return;
+  }
+  queue.push({ file: dep, depth: nextDepth });
+}
+
+function candidateForDistance(path: string, distance: number): AffectedTestCandidate {
+  const tier: AffectedTestTier = distance <= 1 ? 'direct' : distance === 2 ? 'likely' : 'broad';
+  return {
+    path,
+    tier,
+    distance,
+    reason: distance <= 1 ? 'direct-dependent' : 'transitive-dependent',
+  };
+}
+
+function recordTestCandidate(
+  candidateByPath: Map<string, AffectedTestCandidate>,
+  candidate: AffectedTestCandidate,
+): void {
+  const existing = candidateByPath.get(candidate.path);
+  if (!existing || candidate.distance < existing.distance) candidateByPath.set(candidate.path, candidate);
+}
+
+function compareCandidates(a: AffectedTestCandidate, b: AffectedTestCandidate): number {
+  if (a.distance !== b.distance) return a.distance - b.distance;
+  return a.path.localeCompare(b.path);
 }

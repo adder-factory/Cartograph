@@ -228,6 +228,28 @@ describePostgres('PostgreSQL database provider', () => {
     expect(readIntentIndexNames(currentConn, currentSchema)).toEqual([...POSTGRES_INTENT_INDEXES]);
   });
 
+  it('builds the batched reverse file-dependency index with PostgreSQL-safe row aliases', async () => {
+    currentDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-file-dependents-test-'));
+    fs.mkdirSync(path.join(currentDir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(currentDir, 'src', 'subject.ts'), 'export function subject(): number { return 1; }\n');
+    fs.writeFileSync(
+      path.join(currentDir, 'src', 'subject.test.ts'),
+      [
+        "import { describe, expect, it } from 'vitest';",
+        "import { subject } from './subject.js';",
+        "describe('subject', () => { it('works', () => { expect(subject()).toBe(1); }); });",
+      ].join('\n'),
+    );
+    currentSchema = `cg_file_dependents_${process.pid}_${intentSchemaSequence++}`;
+    const database = { provider: 'postgres' as const, url: POSTGRES_URL!, schema: currentSchema };
+    const cg = Cartograph.initSync(currentDir, { config: { database, enableWatcher: false } });
+    currentConn = cg.db;
+    expect((await cg.indexAll({ summarize: false })).success).toBe(true);
+
+    const dependentIndex = cg.internals.graphManager.getFileDependentIndex();
+    expect(dependentIndex.get('src/subject.ts')).toContain('src/subject.test.ts');
+  });
+
   it('skips no-op sync maintenance and analyzes only the active schema after writes', async () => {
     const projectA = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-maintenance-a-'));
     const projectB = fs.mkdtempSync(path.join(os.tmpdir(), 'cartograph-postgres-maintenance-b-'));

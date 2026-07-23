@@ -1,5 +1,6 @@
 import { DEFAULT_DEPTH } from './affected-core.js';
 import { globToSafeRegex } from '../../utils.js';
+import type { AffectedTestCandidate, AffectedTestTier } from './contract.js';
 
 export interface AffectedOptions {
   projectPath?: string;
@@ -21,6 +22,7 @@ export interface ChangedFilesResult {
 export interface AffectedOutputArgs {
   changedFiles: string[];
   sortedTests: string[];
+  candidates: AffectedTestCandidate[];
   totalDependents: number;
   barrelsReached: string[];
   derivedFromGit: boolean;
@@ -132,6 +134,7 @@ export function renderAffectedJson(args: AffectedOutputArgs): string {
     {
       changedFiles: args.changedFiles,
       affectedTests: args.sortedTests,
+      testCandidates: args.candidates,
       totalDependentsTraversed: args.totalDependents,
       barrelsReached: args.barrelsReached,
       derivedFromGit: args.derivedFromGit,
@@ -146,7 +149,7 @@ export function renderAffectedHuman(args: AffectedOutputArgs): string[] {
   const style = args.style ?? identityStyle;
   return [
     ...(args.derivedFromGit ? renderDerivedChangedFiles(args.changedFiles, style) : []),
-    ...renderAffectedTestList(args.sortedTests, style),
+    ...renderAffectedCandidateList(args.candidates, style),
     ...(args.options.includeCommands ? renderAffectedVerificationCommands(args.verificationCommands ?? [], style) : []),
     style.dim(`Traversed ${args.totalDependents} dependent${args.totalDependents === 1 ? '' : 's'} total.`),
     ...renderBarrelWarning(args.barrelsReached, style),
@@ -192,6 +195,41 @@ export function renderAffectedTestList(
   return lines;
 }
 
+const TIER_TITLES: Readonly<Record<AffectedTestTier, string>> = {
+  direct: 'Direct tests',
+  likely: 'Likely tests',
+  broad: 'Broad fallback tests',
+};
+
+export function renderAffectedCandidateList(
+  candidates: readonly AffectedTestCandidate[],
+  style: Pick<AffectedRenderStyle, 'bold' | 'cyan' | 'dim'> = identityStyle,
+): string[] {
+  if (candidates.length === 0) return ['No test files affected by the changed files.'];
+  const shown = candidates.slice(0, AFFECTED_ROW_LIMIT);
+  const lines = [style.bold(`\nAffected test files (${candidates.length}):\n`)];
+  for (const tier of ['direct', 'likely', 'broad'] as const) {
+    const rows = shown.filter((candidate) => candidate.tier === tier);
+    if (rows.length === 0) continue;
+    lines.push(style.bold(`${TIER_TITLES[tier]}:`));
+    for (const candidate of rows) {
+      const hopLabel = candidate.distance === 1 ? 'hop' : 'hops';
+      lines.push(
+        `  ${style.cyan(candidate.path)} ${style.dim(`— ${candidate.reason.replaceAll('-', ' ')}, ${candidate.distance} ${hopLabel}`)}`,
+      );
+    }
+  }
+  if (candidates.length > AFFECTED_ROW_LIMIT) {
+    lines.push(
+      style.dim(
+        `\n  … showing first ${shown.length} of ${candidates.length} (ranked). Pass --filter <glob> or narrow the input set to see fewer.`,
+      ),
+    );
+  }
+  lines.push('');
+  return lines;
+}
+
 export function renderBarrelWarning(
   barrelsReached: string[],
   style: Pick<AffectedRenderStyle, 'yellow'> = identityStyle,
@@ -202,7 +240,7 @@ export function renderBarrelWarning(
     '',
     style.yellow(
       `⚠ Traversal reached the public-API barrel (${barrelList}) — the blast radius is most of the suite. ` +
-        `Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
+        `Traversal stopped there to avoid suite-wide noise. Narrow with \`cartograph tests-for\` for symbol-level test discovery.`,
     ),
   ];
 }

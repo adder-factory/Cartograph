@@ -54,6 +54,14 @@ describe('affected feature runtime', () => {
     const output = renderAffectedOutput({
       changedFiles: ['src/a.ts'],
       sortedTests: ['__tests__/a.test.ts'],
+      candidates: [
+        {
+          path: '__tests__/a.test.ts',
+          tier: 'direct',
+          distance: 1,
+          reason: 'direct-dependent',
+        },
+      ],
       totalDependents: 1,
       barrelsReached: ['src/index.ts'],
       derivedFromGit: true,
@@ -192,6 +200,12 @@ function makeAffectedCommandDeps(options: MakeAffectedCommandDepsOptions = {}): 
   const calls: string[] = [];
   const indexedPaths = options.indexedPaths ?? new Set(['src/a.ts', '__tests__/a.test.ts']);
   const affectedTests = options.affectedTests ?? new Set(['__tests__/a.test.ts']);
+  const candidates = [...affectedTests].map((testPath) => ({
+    path: testPath,
+    tier: 'direct' as const,
+    distance: 1,
+    reason: 'direct-dependent' as const,
+  }));
   const fakeGraph = {
     queries: {},
     internals: { graphManager: {} },
@@ -225,6 +239,7 @@ function makeAffectedCommandDeps(options: MakeAffectedCommandDepsOptions = {}): 
       }),
       findAffectedTests: () => ({
         affectedTests,
+        candidates,
         totalDependents: affectedTests.size,
         barrelsReached: [],
       }),
