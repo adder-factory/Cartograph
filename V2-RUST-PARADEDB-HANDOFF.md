@@ -71,12 +71,15 @@ This is the durable continuation point for the v2 rewrite. Read
 - Managed lifecycle: `aa5b8f3`; [run 29983784952](https://github.com/adder-factory/cartograph/actions/runs/29983784952)
   passed format, clippy, unit, no-SQLite, live capability, and the full real
   Docker lifecycle fault suite on GitHub's amd64 runner.
+- Generation-safe schema and first BM25 path: `8b60c79`; [run 29988967003](https://github.com/adder-factory/cartograph/actions/runs/29988967003)
+  passed format, clippy, unit, no-SQLite, capability doctor, live migration and
+  BM25 publication/recovery tests, and the full managed lifecycle suite on
+  GitHub's amd64 runner.
 - Do not amend the v1.1.33 tag or release. Fix v2 work with new commits.
 
-The generation-safe schema/BM25 slice is implemented in the current working
-tree and awaiting its reviewed checkpoint commit. Record that commit and its CI
-run here after the gates below pass; do not describe the slice as complete
-until then.
+The branch and origin are checkpointed through the generation-safe schema/BM25
+slice. Continue with project operation leases, COPY loaders, and deterministic
+generation digests; do not reopen the PostgreSQL-only or Rust-first decisions.
 
 ## Initial Rust slice
 
@@ -248,6 +251,15 @@ states, reverse-order stale-publication refusal, token retry/recovery/failure
 marking, and checksum-tamper refusal. The full managed Docker lifecycle test
 also passes with first-start migration and idempotent reuse of a non-default
 schema.
+
+Independent review initially found and then verified fixes for stale
+reverse-order publication, consumed error tokens with no recovery path, and
+managed startup ignoring the configured schema. The final verdict is `APPROVE`
+with no findings. Final local evidence includes Rust format/clippy/unit, live
+capability/generation/managed-Docker tests, v1 TypeScript gates, actionlint,
+no-SQLite dependency checks, a forced 0/0/0 biomarker floor, fresh coverage and
+Sonar quality gate, and a Cartograph diff analysis with zero introduced
+findings.
 
 ## Execution plan
 
