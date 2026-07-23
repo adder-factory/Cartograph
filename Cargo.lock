@@ -184,6 +184,7 @@ dependencies = [
 name = "cartograph-indexer"
 version = "2.0.0-alpha.1"
 dependencies = [
+ "blake3",
  "cartograph-config",
  "cartograph-db",
  "cartograph-domain",

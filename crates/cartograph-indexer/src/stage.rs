@@ -1,4 +1,10 @@
-use std::{collections::BTreeMap, future::Future, marker::PhantomData, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    future::Future,
+    marker::PhantomData,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use thiserror::Error;
 use tokio::{
@@ -272,6 +278,7 @@ pub struct StageExecution<Inputs, Work, Accumulator, Reduce> {
     config: StageRunConfig,
     workload: StageWorkload<Inputs, Work>,
     fold: StageFold<Accumulator, Reduce>,
+    metrics: Option<StageMetrics>,
 }
 
 impl<Inputs, Work, Accumulator, Reduce> StageExecution<Inputs, Work, Accumulator, Reduce> {
@@ -286,8 +293,192 @@ impl<Inputs, Work, Accumulator, Reduce> StageExecution<Inputs, Work, Accumulator
             config,
             workload,
             fold,
+            metrics: None,
         }
     }
+
+    /// Attach an observable bounded-metric sink for this run.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: StageMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
+    }
+}
+
+/// Cloneable observer for exact stage admission and reservation high-water marks.
+#[derive(Clone, Default)]
+pub struct StageMetrics {
+    state: Arc<Mutex<StageMetricsSnapshot>>,
+}
+
+/// Point-in-time exact stage metrics. A successful run has zero current usage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StageMetricsSnapshot {
+    admitted_items: u64,
+    completed_items: u64,
+    current_items: usize,
+    current_reserved_bytes: u64,
+    peak_items: usize,
+    peak_reserved_bytes: u64,
+}
+
+impl StageMetrics {
+    /// Create an empty metric sink that can be retained after execution moves.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read an internally consistent metric snapshot.
+    pub fn snapshot(&self) -> Result<StageMetricsSnapshot, StageMetricsError> {
+        let state = self
+            .state
+            .lock()
+            .map_err(|_| StageMetricsError::Unavailable)?;
+        Ok(*state)
+    }
+
+    fn admit(&self, reserved_bytes: u64) -> Result<StageMetricReservation, StageMetricsError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StageMetricsError::Unavailable)?;
+        state.admit(reserved_bytes)?;
+        drop(state);
+        Ok(StageMetricReservation {
+            metrics: Some(self.clone()),
+            reserved_bytes,
+        })
+    }
+
+    fn release(&self, reserved_bytes: u64, completed: bool) -> Result<(), StageMetricsError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| StageMetricsError::Unavailable)?;
+        state.release(reserved_bytes, completed)
+    }
+}
+
+impl StageMetricsSnapshot {
+    fn admit(&mut self, reserved_bytes: u64) -> Result<(), StageMetricsError> {
+        let admitted_items = self
+            .admitted_items
+            .checked_add(1)
+            .ok_or(StageMetricsError::Overflow)?;
+        let current_items = self
+            .current_items
+            .checked_add(1)
+            .ok_or(StageMetricsError::Overflow)?;
+        let current_reserved_bytes = self
+            .current_reserved_bytes
+            .checked_add(reserved_bytes)
+            .ok_or(StageMetricsError::Overflow)?;
+        self.admitted_items = admitted_items;
+        self.current_items = current_items;
+        self.current_reserved_bytes = current_reserved_bytes;
+        self.peak_items = self.peak_items.max(current_items);
+        self.peak_reserved_bytes = self.peak_reserved_bytes.max(current_reserved_bytes);
+        Ok(())
+    }
+
+    fn release(&mut self, reserved_bytes: u64, completed: bool) -> Result<(), StageMetricsError> {
+        let completed_items = if completed {
+            self.completed_items
+                .checked_add(1)
+                .ok_or(StageMetricsError::Overflow)?
+        } else {
+            self.completed_items
+        };
+        let current_items = self
+            .current_items
+            .checked_sub(1)
+            .ok_or(StageMetricsError::Underflow)?;
+        let current_reserved_bytes = self
+            .current_reserved_bytes
+            .checked_sub(reserved_bytes)
+            .ok_or(StageMetricsError::Underflow)?;
+        self.completed_items = completed_items;
+        self.current_items = current_items;
+        self.current_reserved_bytes = current_reserved_bytes;
+        Ok(())
+    }
+}
+
+struct StageMetricReservation {
+    metrics: Option<StageMetrics>,
+    reserved_bytes: u64,
+}
+
+impl StageMetricReservation {
+    fn complete(mut self) -> Result<(), StageMetricsError> {
+        self.release(true)
+    }
+
+    fn release(&mut self, completed: bool) -> Result<(), StageMetricsError> {
+        let Some(metrics) = self.metrics.take() else {
+            return Ok(());
+        };
+        metrics.release(self.reserved_bytes, completed)
+    }
+}
+
+impl Drop for StageMetricReservation {
+    fn drop(&mut self) {
+        let _ = self.release(false);
+    }
+}
+
+impl StageMetricsSnapshot {
+    /// Total envelopes admitted during the run.
+    #[must_use]
+    pub const fn admitted_items(self) -> u64 {
+        self.admitted_items
+    }
+
+    /// Outputs reduced and acknowledged through progress.
+    #[must_use]
+    pub const fn completed_items(self) -> u64 {
+        self.completed_items
+    }
+
+    /// Currently retained task/output reservations.
+    #[must_use]
+    pub const fn current_items(self) -> usize {
+        self.current_items
+    }
+
+    /// Currently retained bytes.
+    #[must_use]
+    pub const fn current_reserved_bytes(self) -> u64 {
+        self.current_reserved_bytes
+    }
+
+    /// Maximum simultaneously retained envelopes.
+    #[must_use]
+    pub const fn peak_items(self) -> usize {
+        self.peak_items
+    }
+
+    /// Maximum simultaneously retained declared bytes.
+    #[must_use]
+    pub const fn peak_reserved_bytes(self) -> u64 {
+        self.peak_reserved_bytes
+    }
+}
+
+/// Stage metric counters could not be updated or read safely.
+#[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
+pub enum StageMetricsError {
+    /// Metric state was poisoned by an unexpected panic.
+    #[error("Cartograph stage metrics are unavailable")]
+    Unavailable,
+    /// A bounded metric counter exceeded its representation.
+    #[error("Cartograph stage metrics overflowed")]
+    Overflow,
+    /// Internal reservation accounting was inconsistent.
+    #[error("Cartograph stage metrics underflowed")]
+    Underflow,
 }
 
 /// Credential-safe fatal item failure returned by a stage worker or reducer.
@@ -364,6 +555,14 @@ pub enum StageRunError {
         stage: PipelineStage,
         /// Monotonic progress failure.
         source: ProgressError,
+    },
+    /// Observable bounded accounting could not be updated safely.
+    #[error("Cartograph stage metrics failed during {stage:?}")]
+    Metrics {
+        /// Stage whose accounting failed.
+        stage: PipelineStage,
+        /// Stable metric-accounting failure.
+        source: StageMetricsError,
     },
     /// Parent supervision requested cancellation.
     #[error("Cartograph stage was cancelled during {stage:?}")]
@@ -455,20 +654,30 @@ struct RetainedStageOutput<Key, Output> {
 
 struct StageReservation {
     task: Option<TaskReservationGuard>,
+    metric: Option<StageMetricReservation>,
     cancellation: watch::Receiver<bool>,
 }
 
 impl StageReservation {
-    fn new(task: TaskReservationGuard, cancellation: watch::Receiver<bool>) -> Self {
+    fn new(
+        task: TaskReservationGuard,
+        metric: Option<StageMetricReservation>,
+        cancellation: watch::Receiver<bool>,
+    ) -> Self {
         Self {
             task: Some(task),
+            metric,
             cancellation,
         }
     }
 
-    fn acknowledge(mut self) {
+    fn acknowledge(mut self) -> Result<(), StageMetricsError> {
         if let Some(task) = self.task.take() {
             task.acknowledge();
+        }
+        match self.metric.take() {
+            Some(metric) => metric.complete(),
+            None => Ok(()),
         }
     }
 
@@ -476,6 +685,7 @@ impl StageReservation {
         if let Some(task) = self.task.take() {
             task.cancel();
         }
+        self.metric.take();
     }
 }
 
@@ -486,6 +696,7 @@ impl Drop for StageReservation {
         {
             task.cancel();
         }
+        self.metric.take();
     }
 }
 
@@ -535,6 +746,7 @@ struct StageDriver<'a, Key, Input, Output, Inputs, Work, WorkFuture, Accumulator
     schedule: StageSchedule<Key, Output>,
     fold: StageOrderedFold<Accumulator, Reduce>,
     workers: StageWorkers<Work, WorkFuture>,
+    metrics: StageMetrics,
 }
 
 impl StageRunner {
@@ -574,6 +786,7 @@ impl StageRunner {
             config,
             workload,
             fold,
+            metrics,
         } = execution;
         let max_tasks = match self.tasks.max_tasks() {
             Ok(max_tasks) => max_tasks,
@@ -641,6 +854,7 @@ impl StageRunner {
                 gate: Arc::new(Semaphore::new(policy.workers)),
                 future: PhantomData,
             },
+            metrics: metrics.unwrap_or_default(),
         }
         .run()
         .await
@@ -821,6 +1035,32 @@ where
                 stage: self.policy.stage,
                 source,
             })?;
+        let metric = match self.metrics.admit(budget.reserved_bytes()) {
+            Ok(metric) => metric,
+            Err(source) => {
+                let abort = task.abort_handle();
+                self.schedule.aborts.insert(sequence, abort.clone());
+                let cancellation = self.control.cancellation.clone();
+                self.schedule.joins.spawn(async move {
+                    StageJoin {
+                        meta,
+                        result: task.join_retaining_reservation().await.map(
+                            |(outcome, reservation)| {
+                                (
+                                    outcome,
+                                    StageReservation::new(reservation, None, cancellation),
+                                )
+                            },
+                        ),
+                    }
+                });
+                abort.abort();
+                return Err(StageRunError::Metrics {
+                    stage: self.policy.stage,
+                    source,
+                });
+            }
+        };
         self.schedule.aborts.insert(sequence, task.abort_handle());
         let cancellation = self.control.cancellation.clone();
         self.schedule.joins.spawn(async move {
@@ -830,7 +1070,10 @@ where
                     .join_retaining_reservation()
                     .await
                     .map(|(outcome, reservation)| {
-                        (outcome, StageReservation::new(reservation, cancellation))
+                        (
+                            outcome,
+                            StageReservation::new(reservation, Some(metric), cancellation),
+                        )
                     }),
             }
         });
@@ -941,7 +1184,13 @@ where
                     });
                 }
             }
-            retained.reservation.acknowledge();
+            retained
+                .reservation
+                .acknowledge()
+                .map_err(|source| StageRunError::Metrics {
+                    stage: self.policy.stage,
+                    source,
+                })?;
             self.fold.next_output = sequence.value().checked_add(1);
         }
         Ok(())
@@ -1635,6 +1884,7 @@ mod tests {
             .map(move |sequence| StageEnvelope::new(meta(sequence, deadline), sequence));
         let worker_started = started.clone();
         let worker_release = first_release.clone();
+        let metrics = StageMetrics::new();
         let execution = StageExecution::new(
             config(TEST_WORKERS, TEST_QUEUE, deadline),
             StageWorkload::new(inputs, move |item: StageWorkItem<usize, usize>| {
@@ -1655,7 +1905,8 @@ mod tests {
                 *count += 1;
                 Ok(())
             }),
-        );
+        )
+        .with_metrics(metrics.clone());
         let handle = tokio::spawn(async move { runner.execute(execution).await });
         wait_until(|| started.load(Ordering::Acquire) == TEST_WORKERS).await;
         for _ in 0..100 {
@@ -1669,6 +1920,15 @@ mod tests {
         assert!(report.all_joined);
         assert!(!report.worker_failed);
         assert!(!report.unobserved_results);
+        let Ok(snapshot) = metrics.snapshot() else {
+            panic!("stage metrics became unavailable");
+        };
+        assert_eq!(snapshot.admitted_items(), TEST_ITEMS as u64);
+        assert_eq!(snapshot.completed_items(), TEST_ITEMS as u64);
+        assert_eq!(snapshot.current_items(), 0);
+        assert_eq!(snapshot.current_reserved_bytes(), 0);
+        assert_eq!(snapshot.peak_items(), 2);
+        assert_eq!(snapshot.peak_reserved_bytes(), ITEM_BYTES * 2);
     }
 
     #[tokio::test]
@@ -1676,11 +1936,13 @@ mod tests {
         let (runner, tasks, cancellation) = runner(1, TEST_SCOPE_BYTES).await;
         let deadline = Instant::now() + TEST_TIMEOUT;
         let inputs = [StageEnvelope::new(meta(0, deadline), ())];
+        let metrics = StageMetrics::new();
         let execution = StageExecution::new(
             config(1, 0, deadline),
             StageWorkload::new(inputs, |_| async { Err::<(), _>(StageItemFailure) }),
             StageFold::new((), |_: &mut (), _| Ok(())),
-        );
+        )
+        .with_metrics(metrics.clone());
         assert!(matches!(
             runner.execute(execution).await,
             Err(StageRunError::Item {
@@ -1693,6 +1955,49 @@ mod tests {
         let report = tasks.close_abort_and_reap(deadline).await;
         assert!(report.all_joined);
         assert!(report.worker_failed);
+        let Ok(snapshot) = metrics.snapshot() else {
+            panic!("failed stage metrics became unavailable");
+        };
+        assert_eq!(snapshot.admitted_items(), 1);
+        assert_eq!(snapshot.completed_items(), 0);
+        assert_eq!(snapshot.current_items(), 0);
+        assert_eq!(snapshot.current_reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn unavailable_metrics_abort_and_reap_the_already_registered_task() {
+        let (runner, tasks, cancellation) = runner(1, TEST_SCOPE_BYTES).await;
+        let deadline = Instant::now() + TEST_TIMEOUT;
+        let metrics = StageMetrics::new();
+        let poison_target = metrics.clone();
+        let poison = std::thread::spawn(move || {
+            let _guard = match poison_target.state.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            panic!("intentional metric-lock poison");
+        });
+        assert!(poison.join().is_err());
+        let inputs = [StageEnvelope::new(meta(0, deadline), ())];
+        let execution = StageExecution::new(
+            config(1, 0, deadline),
+            StageWorkload::new(inputs, |_| async { Ok::<_, StageItemFailure>(()) }),
+            StageFold::new((), |_: &mut (), _| Ok(())),
+        )
+        .with_metrics(metrics);
+        assert!(matches!(
+            runner.execute(execution).await,
+            Err(StageRunError::Metrics {
+                source: StageMetricsError::Unavailable,
+                ..
+            })
+        ));
+        drop(cancellation);
+        let report = tasks.close_abort_and_reap(deadline).await;
+        assert_eq!(report.active_tasks, 0);
+        assert!(report.all_joined);
+        assert!(report.worker_failed);
+        assert!(!report.unobserved_results);
     }
 
     #[tokio::test]

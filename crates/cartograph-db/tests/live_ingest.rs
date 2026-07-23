@@ -7,8 +7,9 @@ use std::{
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
     CartographDatabase, EdgeInput, FileInput, GenerationContents, GenerationFacts, LeaseOwner,
-    LeaseRequest, LeaseTarget, NewGeneration, NewProject, ProjectLease, ReadyGeneration,
-    RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError, SymbolInput,
+    LeaseRequest, LeaseTarget, NewGeneration, NewProject, PrepareGenerationMetrics, ProjectLease,
+    ReadyGeneration, RecoverableGeneration, ReferenceInput, SearchDocumentInput, StorageError,
+    SymbolInput,
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
@@ -243,6 +244,7 @@ async fn prepare_generation(
     workers: u16,
     facts: GenerationFacts,
 ) -> ReadyGeneration {
+    let metrics = PrepareGenerationMetrics::new();
     let staged = match fixture
         .database
         .begin_generation(NewGeneration::new(
@@ -258,11 +260,17 @@ async fn prepare_generation(
     let lease = acquire_generation_lease(fixture, staged.generation_id()).await;
     let result = fixture
         .database
-        .prepare_generation(GenerationContents::new(staged, facts), &lease.fence())
+        .prepare_generation(
+            GenerationContents::new(staged, facts).with_metrics(metrics.clone()),
+            &lease.fence(),
+        )
         .await;
     assert!(fixture.database.release_lease(&lease).await.is_ok());
     match result {
-        Ok(ready) => ready,
+        Ok(ready) => {
+            assert!(!metrics.snapshot().copy_duration().is_zero());
+            ready
+        }
         Err(error) => panic!("COPY generation preparation failed: {error}"),
     }
 }

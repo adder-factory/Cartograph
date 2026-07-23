@@ -17,8 +17,9 @@ pub use database::{CartographDatabase, StorageError};
 pub use generation::{
     CurrentGeneration, FailGenerationError, FailedGeneration, GenerationContents, NewGeneration,
     NewProject, ObservedGeneration, ObservedLease, OperationReconciliation, PrepareGenerationError,
-    PrepareGenerationMutation, PublishGenerationError, ReadyGeneration, RecoverableGeneration,
-    StagedGeneration, TerminalGenerationMutation,
+    PrepareGenerationMetrics, PrepareGenerationMetricsSnapshot, PrepareGenerationMutation,
+    PublishGenerationError, ReadyGeneration, RecoverableGeneration, StagedGeneration,
+    TerminalGenerationMutation,
 };
 pub use ingest::{
     EdgeInput, FileInput, GenerationFacts, ReferenceInput, SearchDocumentInput, SymbolInput,

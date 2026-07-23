@@ -161,6 +161,9 @@ jobs:
           cargo test --locked --quiet -p cartograph-indexer
           --test live_supervisor -- --ignored --nocapture --test-threads=1
 
+      - name: Frozen 1/2/4/8/16-worker determinism and scaling benchmark
+        run: cargo bench --locked -p cartograph-indexer --bench index_scaling
+
       - name: Managed database lifecycle integration test
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib

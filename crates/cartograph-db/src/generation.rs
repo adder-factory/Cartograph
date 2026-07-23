@@ -1,4 +1,10 @@
-use std::time::Duration;
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{Duration, Instant},
+};
 
 use cartograph_domain::{ContentDigest, GenerationId, GenerationState, ProjectId};
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
@@ -374,6 +380,7 @@ impl FailGenerationError {
 pub struct GenerationContents {
     generation: StagedGeneration,
     facts: GenerationFacts,
+    metrics: Option<PrepareGenerationMetrics>,
 }
 
 struct PrepareTransactionInput<'a> {
@@ -381,6 +388,48 @@ struct PrepareTransactionInput<'a> {
     generation: &'a StagedGeneration,
     facts: ValidatedGenerationFacts,
     fence: &'a LeaseFence,
+    metrics: Option<&'a PrepareGenerationMetrics>,
+}
+
+/// Cloneable observer for the exact PostgreSQL COPY-stream duration.
+#[derive(Clone, Default)]
+pub struct PrepareGenerationMetrics {
+    copy_nanos: Arc<AtomicU64>,
+}
+
+/// Point-in-time prepare metrics retained after the generation contents move.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PrepareGenerationMetricsSnapshot {
+    copy_duration: Duration,
+}
+
+impl PrepareGenerationMetrics {
+    /// Create an empty observer for one generation preparation attempt.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Read the most recently observed five-table PostgreSQL COPY duration.
+    #[must_use]
+    pub fn snapshot(&self) -> PrepareGenerationMetricsSnapshot {
+        PrepareGenerationMetricsSnapshot {
+            copy_duration: Duration::from_nanos(self.copy_nanos.load(Ordering::Relaxed)),
+        }
+    }
+
+    fn record_copy(&self, duration: Duration) {
+        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+        self.copy_nanos.store(nanos, Ordering::Relaxed);
+    }
+}
+
+impl PrepareGenerationMetricsSnapshot {
+    /// Wall-clock duration spent streaming files, symbols, edges, references, and documents.
+    #[must_use]
+    pub const fn copy_duration(self) -> Duration {
+        self.copy_duration
+    }
 }
 
 struct GenerationStateRequirement<'a> {
@@ -443,7 +492,18 @@ impl GenerationContents {
     /// Consume a staging token and attach complete unordered worker facts.
     #[must_use]
     pub const fn new(generation: StagedGeneration, facts: GenerationFacts) -> Self {
-        Self { generation, facts }
+        Self {
+            generation,
+            facts,
+            metrics: None,
+        }
+    }
+
+    /// Attach an observer without changing validation or persistence behavior.
+    #[must_use]
+    pub fn with_metrics(mut self, metrics: PrepareGenerationMetrics) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 }
 
@@ -549,7 +609,11 @@ impl CartographDatabase {
         mutation: LeaseMutationOptions<'_>,
     ) -> Result<ReadyGeneration, PrepareGenerationError> {
         let fence = mutation.fence;
-        let GenerationContents { generation, facts } = contents;
+        let GenerationContents {
+            generation,
+            facts,
+            metrics,
+        } = contents;
         if !fence_matches_generation(fence, generation.project_id(), generation.generation_id()) {
             return Err(PrepareGenerationError {
                 generation,
@@ -590,6 +654,7 @@ impl CartographDatabase {
                 generation: &generation,
                 facts,
                 fence,
+                metrics: metrics.as_ref(),
             },
         )
         .await;
@@ -1116,7 +1181,8 @@ async fn prepare_transaction(
         FenceCheck::Observe,
     )
     .await?;
-    copy_generation_facts(
+    let copy_started = Instant::now();
+    let copy_result = copy_generation_facts(
         connection,
         CopyGenerationContext {
             schema: input.schema.clone(),
@@ -1125,7 +1191,11 @@ async fn prepare_transaction(
         },
         input.facts,
     )
-    .await?;
+    .await;
+    if let Some(metrics) = input.metrics {
+        metrics.record_copy(copy_started.elapsed());
+    }
+    copy_result?;
     lock_generation_fence(connection, input.schema, input.fence).await?;
     validate_generation_state(
         connection,

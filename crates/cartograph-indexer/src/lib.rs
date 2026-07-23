@@ -15,8 +15,9 @@ pub use progress::{
 };
 pub use stage::{
     StageCapacity, StageDeadlinePolicy, StageEnvelope, StageExecution, StageFailureKind, StageFold,
-    StageItemBudget, StageItemFailure, StageItemMeta, StageOutput, StageRunConfig, StageRunError,
-    StageRunner, StageSequence, StageWorkItem, StageWorkload,
+    StageItemBudget, StageItemFailure, StageItemMeta, StageMetrics, StageMetricsError,
+    StageMetricsSnapshot, StageOutput, StageRunConfig, StageRunError, StageRunner, StageSequence,
+    StageWorkItem, StageWorkload,
 };
 pub use supervisor::{IndexerSupervisor, PipelineFailure, SupervisorError, SupervisorRequest};
 pub use task_scope::{ScopedTask, ScopedTaskError};

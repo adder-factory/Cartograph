@@ -296,10 +296,34 @@ reduction and progress, so discarding an incomplete stage cannot permit
 publication. Handled parent cancellation remains a cancellation rather than a
 worker failure.
 
+Each run can attach a `StageMetrics` observer. Its internally consistent
+snapshot distinguishes admitted envelopes, successfully reduced envelopes,
+current retained items/bytes, and exact high-water marks. Admission and release
+accounting follows the same reservation lifetime as the supervisor task scope,
+including out-of-order outputs and every failure/cancellation path. A poisoned
+or inconsistent observer is a structured fatal stage error; an already
+registered task is still aborted and reaped before that error returns.
+
+`GenerationContents` can independently attach `PrepareGenerationMetrics`. That
+observer measures only the five-table PostgreSQL COPY stream, including bounded
+row encoding, and deliberately excludes validation, fencing, ready/publication
+transitions, and verification queries. Benchmark code therefore does not
+mislabel the broader prepare transaction as COPY time.
+
 Workers emit normalized facts keyed by stable path/span/symbol identities. A
 single deterministic reducer sorts and deduplicates facts before computing the
 generation digest. Running with 1, 2, 4, 8, or 16 workers over the same snapshot
 must produce the same logical database digest and retrieval fixture results.
+
+The first committed [1/2/4/8/16-worker baseline](benchmarks/INDEX-SCALING.md)
+proves that invariant through real COPY, publication, and ParadeDB BM25 on 30
+runs. On the measured 14-logical-CPU arm64 host, parse-stage throughput rose
+from 1,969 to 9,015 items/s while end-to-end median time fell from 220.24 ms to
+108.98 ms. COPY remained near 55-67 ms and became the dominant floor. Until the
+real extractor corpus supersedes this synthetic baseline, parse/extract uses an
+initial cap of `min(available_parallelism, 16)`, one queued envelope per worker,
+and the independent supervisor byte budget as the final admission authority.
+COPY remains one retained database task.
 
 PostgreSQL `COPY` is used for bulk staging. Parallel workers never issue
 independent destructive maintenance. Advisory locks are scoped by project and

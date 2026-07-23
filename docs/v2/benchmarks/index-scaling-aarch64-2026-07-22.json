@@ -1,0 +1,346 @@
+{
+  "environment": {
+    "architecture": "aarch64",
+    "logical_cpus": 14,
+    "rust_toolchain": "1.96.1",
+    "postgres_version_num": 180004,
+    "postgres_version": "PostgreSQL 18.4 (Debian 18.4-1.pgdg13+1) on aarch64-unknown-linux-gnu, compiled by gcc (Debian 14.2.0-19) 14.2.0, 64-bit",
+    "pg_search_version": "0.23.5",
+    "pgvector_version": "0.8.1",
+    "database_image": "paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d"
+  },
+  "fixture": {
+    "name": "synthetic-typescript-stage-v1",
+    "items": 256,
+    "source_bytes": 6145536,
+    "source_digest": "b23964be1dfad94c41d158358db1f60187729c399ed623d107c6b4cc0f46d6d1",
+    "fixture_fingerprint": "8a15ec2d169886dfe10671dd3d794ad92760cafdbe3478fcb9acc2d4deee52a3",
+    "source_repetitions": 192,
+    "hash_rounds": 32,
+    "warmup_samples": 1,
+    "measured_samples": 5,
+    "expected_rows": {
+      "files": 256,
+      "symbols": 256,
+      "edges": 255,
+      "references": 255,
+      "documents": 256
+    },
+    "bm25_query": "needle cartograph benchmark"
+  },
+  "invariant": {
+    "logical_digest": "647c61f7eb0a697a31774f9d025ea896e35fb6cb54ade6477b47dadaaac04cbf",
+    "row_counts": {
+      "files": 256,
+      "symbols": 256,
+      "edges": 255,
+      "references": 255,
+      "documents": 256
+    },
+    "bm25_document_ids": [
+      "30000000-0000-4000-8000-000000000001"
+    ],
+    "identical_at_workers": [
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "supervisor_requires_zero_active_tasks_before_publication": true,
+    "exact_lease_release_verified_each_sample": true,
+    "setup_failure_cleanup_verified": true
+  },
+  "workers": [
+    {
+      "workers": 1,
+      "queue_items": 1,
+      "bounded_window_items": 2,
+      "maximum_reserved_bytes": 51072,
+      "stage_p50_ms": 130.001041,
+      "stage_p95_ms": 145.165667,
+      "copy_p50_ms": 67.00775,
+      "copy_p95_ms": 71.298916,
+      "end_to_end_p50_ms": 220.241625,
+      "end_to_end_p95_ms": 238.570708,
+      "stage_p50_items_per_second": 1969.2150003629586,
+      "end_to_end_p50_items_per_second": 1162.3597492072627,
+      "observed_peak_items": 2,
+      "observed_peak_reserved_bytes": 49536,
+      "samples": [
+        {
+          "sample": 0,
+          "stage_ms": 145.165667,
+          "copy_ms": 70.08675,
+          "end_to_end_ms": 238.570708,
+          "peak_items": 2,
+          "peak_reserved_bytes": 49536
+        },
+        {
+          "sample": 1,
+          "stage_ms": 123.251542,
+          "copy_ms": 54.736125,
+          "end_to_end_ms": 201.350875,
+          "peak_items": 2,
+          "peak_reserved_bytes": 49536
+        },
+        {
+          "sample": 2,
+          "stage_ms": 136.334792,
+          "copy_ms": 64.330458,
+          "end_to_end_ms": 222.929083,
+          "peak_items": 2,
+          "peak_reserved_bytes": 49536
+        },
+        {
+          "sample": 3,
+          "stage_ms": 130.001041,
+          "copy_ms": 67.00775,
+          "end_to_end_ms": 220.241625,
+          "peak_items": 2,
+          "peak_reserved_bytes": 49536
+        },
+        {
+          "sample": 4,
+          "stage_ms": 107.903792,
+          "copy_ms": 71.298916,
+          "end_to_end_ms": 200.998709,
+          "peak_items": 2,
+          "peak_reserved_bytes": 49536
+        }
+      ]
+    },
+    {
+      "workers": 2,
+      "queue_items": 2,
+      "bounded_window_items": 4,
+      "maximum_reserved_bytes": 102144,
+      "stage_p50_ms": 92.602708,
+      "stage_p95_ms": 93.103416,
+      "copy_p50_ms": 59.094,
+      "copy_p95_ms": 60.172,
+      "end_to_end_p50_ms": 174.533417,
+      "end_to_end_p95_ms": 175.241542,
+      "stage_p50_items_per_second": 2764.497988546944,
+      "end_to_end_p50_items_per_second": 1466.7678224623312,
+      "observed_peak_items": 4,
+      "observed_peak_reserved_bytes": 97536,
+      "samples": [
+        {
+          "sample": 0,
+          "stage_ms": 92.7185,
+          "copy_ms": 59.094,
+          "end_to_end_ms": 174.141542,
+          "peak_items": 4,
+          "peak_reserved_bytes": 97536
+        },
+        {
+          "sample": 1,
+          "stage_ms": 90.447917,
+          "copy_ms": 57.854542,
+          "end_to_end_ms": 170.156125,
+          "peak_items": 4,
+          "peak_reserved_bytes": 97536
+        },
+        {
+          "sample": 2,
+          "stage_ms": 92.399083,
+          "copy_ms": 60.172,
+          "end_to_end_ms": 175.241542,
+          "peak_items": 4,
+          "peak_reserved_bytes": 97536
+        },
+        {
+          "sample": 3,
+          "stage_ms": 93.103416,
+          "copy_ms": 59.89475,
+          "end_to_end_ms": 175.160333,
+          "peak_items": 4,
+          "peak_reserved_bytes": 97536
+        },
+        {
+          "sample": 4,
+          "stage_ms": 92.602708,
+          "copy_ms": 58.660916,
+          "end_to_end_ms": 174.533417,
+          "peak_items": 4,
+          "peak_reserved_bytes": 97536
+        }
+      ]
+    },
+    {
+      "workers": 4,
+      "queue_items": 4,
+      "bounded_window_items": 8,
+      "maximum_reserved_bytes": 204288,
+      "stage_p50_ms": 61.130417,
+      "stage_p95_ms": 63.38025,
+      "copy_p50_ms": 56.713041,
+      "copy_p95_ms": 66.17825,
+      "end_to_end_p50_ms": 143.873958,
+      "end_to_end_p95_ms": 152.311208,
+      "stage_p50_items_per_second": 4187.767932288111,
+      "end_to_end_p50_items_per_second": 1779.3352150637295,
+      "observed_peak_items": 8,
+      "observed_peak_reserved_bytes": 193536,
+      "samples": [
+        {
+          "sample": 0,
+          "stage_ms": 63.38025,
+          "copy_ms": 55.851959,
+          "end_to_end_ms": 143.785,
+          "peak_items": 8,
+          "peak_reserved_bytes": 193536
+        },
+        {
+          "sample": 1,
+          "stage_ms": 61.186334,
+          "copy_ms": 56.246208,
+          "end_to_end_ms": 142.353125,
+          "peak_items": 8,
+          "peak_reserved_bytes": 193536
+        },
+        {
+          "sample": 2,
+          "stage_ms": 57.719083,
+          "copy_ms": 64.866,
+          "end_to_end_ms": 146.65775,
+          "peak_items": 8,
+          "peak_reserved_bytes": 193536
+        },
+        {
+          "sample": 3,
+          "stage_ms": 61.034375,
+          "copy_ms": 56.713041,
+          "end_to_end_ms": 143.873958,
+          "peak_items": 8,
+          "peak_reserved_bytes": 193536
+        },
+        {
+          "sample": 4,
+          "stage_ms": 61.130417,
+          "copy_ms": 66.17825,
+          "end_to_end_ms": 152.311208,
+          "peak_items": 8,
+          "peak_reserved_bytes": 193536
+        }
+      ]
+    },
+    {
+      "workers": 8,
+      "queue_items": 8,
+      "bounded_window_items": 16,
+      "maximum_reserved_bytes": 408576,
+      "stage_p50_ms": 39.343541,
+      "stage_p95_ms": 45.476125,
+      "copy_p50_ms": 54.366708,
+      "copy_p95_ms": 56.1665,
+      "end_to_end_p50_ms": 120.600792,
+      "end_to_end_p95_ms": 124.781208,
+      "stage_p50_items_per_second": 6506.785955031348,
+      "end_to_end_p50_items_per_second": 2122.7057945025767,
+      "observed_peak_items": 16,
+      "observed_peak_reserved_bytes": 385536,
+      "samples": [
+        {
+          "sample": 0,
+          "stage_ms": 38.118417,
+          "copy_ms": 56.1665,
+          "end_to_end_ms": 120.600792,
+          "peak_items": 16,
+          "peak_reserved_bytes": 385536
+        },
+        {
+          "sample": 1,
+          "stage_ms": 45.476125,
+          "copy_ms": 53.530917,
+          "end_to_end_ms": 124.781208,
+          "peak_items": 16,
+          "peak_reserved_bytes": 385536
+        },
+        {
+          "sample": 2,
+          "stage_ms": 39.343541,
+          "copy_ms": 53.22875,
+          "end_to_end_ms": 117.57875,
+          "peak_items": 16,
+          "peak_reserved_bytes": 385536
+        },
+        {
+          "sample": 3,
+          "stage_ms": 36.513958,
+          "copy_ms": 54.366708,
+          "end_to_end_ms": 118.084875,
+          "peak_items": 16,
+          "peak_reserved_bytes": 385536
+        },
+        {
+          "sample": 4,
+          "stage_ms": 39.635917,
+          "copy_ms": 55.981375,
+          "end_to_end_ms": 120.9865,
+          "peak_items": 16,
+          "peak_reserved_bytes": 385536
+        }
+      ]
+    },
+    {
+      "workers": 16,
+      "queue_items": 16,
+      "bounded_window_items": 32,
+      "maximum_reserved_bytes": 817152,
+      "stage_p50_ms": 28.396959,
+      "stage_p95_ms": 32.555792,
+      "copy_p50_ms": 54.704167,
+      "copy_p95_ms": 65.79575,
+      "end_to_end_p50_ms": 108.977459,
+      "end_to_end_p95_ms": 115.620041,
+      "stage_p50_items_per_second": 9015.049815721464,
+      "end_to_end_p50_items_per_second": 2349.1096447752557,
+      "observed_peak_items": 32,
+      "observed_peak_reserved_bytes": 769536,
+      "samples": [
+        {
+          "sample": 0,
+          "stage_ms": 32.555792,
+          "copy_ms": 53.770542,
+          "end_to_end_ms": 115.620041,
+          "peak_items": 32,
+          "peak_reserved_bytes": 769536
+        },
+        {
+          "sample": 1,
+          "stage_ms": 28.599375,
+          "copy_ms": 51.990458,
+          "end_to_end_ms": 108.417291,
+          "peak_items": 32,
+          "peak_reserved_bytes": 769536
+        },
+        {
+          "sample": 2,
+          "stage_ms": 24.982625,
+          "copy_ms": 65.79575,
+          "end_to_end_ms": 114.528,
+          "peak_items": 32,
+          "peak_reserved_bytes": 769536
+        },
+        {
+          "sample": 3,
+          "stage_ms": 25.341375,
+          "copy_ms": 55.248459,
+          "end_to_end_ms": 104.853167,
+          "peak_items": 32,
+          "peak_reserved_bytes": 769536
+        },
+        {
+          "sample": 4,
+          "stage_ms": 28.396959,
+          "copy_ms": 54.704167,
+          "end_to_end_ms": 108.977459,
+          "peak_items": 32,
+          "peak_reserved_bytes": 769536
+        }
+      ]
+    }
+  ]
+}
