@@ -159,7 +159,7 @@ jobs:
       - name: Lease-owned indexer supervisor integration test
         run: >-
           cargo test --locked --quiet -p cartograph-indexer
-          --test live_supervisor -- --ignored --nocapture
+          --test live_supervisor -- --ignored --nocapture --test-threads=1
 
       - name: Managed database lifecycle integration test
         run: >-
