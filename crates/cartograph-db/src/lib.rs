@@ -7,6 +7,7 @@ mod ingest;
 mod leases;
 mod managed;
 mod migrations;
+mod retrieval;
 mod search;
 
 use std::str::FromStr;
@@ -36,7 +37,11 @@ pub use managed::{
     ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
-pub use search::{SearchHit, SearchQuery};
+pub use retrieval::{
+    CurrentFileRecord, CurrentGenerationRecord, CurrentGraphEdge, CurrentReferenceRecord,
+    CurrentSymbolRecord, GraphDirection,
+};
+pub use search::{SearchComponent, SearchHit, SearchQuery};
 use secrecy::ExposeSecret;
 use sqlx_core::pool::PoolOptions;
 use sqlx_postgres::{PgConnectOptions, PgPool, Postgres};

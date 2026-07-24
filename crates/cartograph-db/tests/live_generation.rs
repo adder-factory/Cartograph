@@ -6,16 +6,16 @@ use std::{
 
 use cartograph_config::DatabaseSettings;
 use cartograph_db::{
-    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, FailGenerationError,
-    FailedGeneration, GenerationContents, GenerationFacts, GenerationValidationError,
-    GenerationValidationLimits, LeaseOwner, LeaseRequest, LeaseTarget, MigrationError,
-    NewGeneration, NewProject, PrepareGenerationError, ProjectLease, PublishGenerationError,
-    ReadyGeneration, RecoverableGeneration, SearchDocumentInput, SearchQuery, StorageError,
-    validate_generation_facts,
+    CanonicalGenerationFacts, CartographDatabase, CurrentGeneration, EdgeInput,
+    FailGenerationError, FailedGeneration, FileInput, GenerationContents, GenerationFacts,
+    GenerationValidationError, GenerationValidationLimits, GraphDirection, LeaseOwner,
+    LeaseRequest, LeaseTarget, MigrationError, NewGeneration, NewProject, PrepareGenerationError,
+    ProjectLease, PublishGenerationError, ReadyGeneration, RecoverableGeneration, ReferenceInput,
+    SearchDocumentInput, SearchQuery, StorageError, SymbolInput, validate_generation_facts,
 };
 use cartograph_domain::{
-    ContentDigest, DocumentId, DocumentKind, GenerationId, GenerationState, ProjectId,
-    ProjectOperation,
+    ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, FileParseStatus, GenerationId,
+    GenerationState, NormalizedPath, ProjectId, ProjectOperation, SymbolId,
 };
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 
@@ -30,6 +30,9 @@ const DOCUMENT_ONE: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DOCUMENT_TWO: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const DOCUMENT_THREE: &str = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
 const DOCUMENT_FOUR: &str = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+const RETRIEVAL_FILE: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const RETRIEVAL_TARGET: &str = "11111111-1111-4111-8111-111111111111";
+const RETRIEVAL_CALLER: &str = "22222222-2222-4222-8222-222222222222";
 const INITIAL_MIGRATION_VERSION: i64 = 1;
 const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
@@ -67,6 +70,7 @@ async fn migrations_are_idempotent_and_only_published_generations_are_searchable
     let ready_older =
         prepare_rollback_retry(&database, &project, current_one.generation_id()).await;
     let current_two = publish_newer_generation(&database, &project, &ready_older).await;
+    assert_deterministic_retrieval(&database, &project, current_two.generation_id()).await;
     reject_stale_publication(&database, ready_older).await;
     assert_state(
         &database,
@@ -596,23 +600,145 @@ async fn publish_newer_generation(
     )
     .await;
     assert!(staged.sequence() > ready_older.sequence());
-    let ready = prepare(
-        database,
-        PrepareFixture {
-            staged,
-            document: document(DocumentFixture {
-                id: DOCUMENT_THREE,
-                path: "src/json_decoder.rs",
-                qualified_name: "decodeJSONPayload",
-                code: "fn decode_json_payload() {}",
-            }),
-        },
-    )
-    .await;
+    let file_id = parse_file_id(RETRIEVAL_FILE);
+    let target_id = parse_symbol_id(RETRIEVAL_TARGET);
+    let caller_id = parse_symbol_id(RETRIEVAL_CALLER);
+    let mut search_document = document(DocumentFixture {
+        id: DOCUMENT_THREE,
+        path: "src/json_decoder.rs",
+        qualified_name: "decoder::decodeJSONPayload",
+        code: "fn decode_json_payload() {}",
+    });
+    search_document.file_id = Some(file_id.clone());
+    search_document.symbol_id = Some(target_id.clone());
+    let facts = GenerationFacts {
+        files: vec![FileInput {
+            file_id: file_id.clone(),
+            normalized_path: "src/json_decoder.rs".to_owned(),
+            language: "rust".to_owned(),
+            content_hash: digest(DIGEST_ONE),
+            byte_size: 256,
+            parse_status: FileParseStatus::Parsed,
+        }],
+        symbols: vec![
+            SymbolInput {
+                symbol_id: target_id.clone(),
+                file_id: file_id.clone(),
+                symbol_kind: "function".to_owned(),
+                qualified_name: "decoder::decodeJSONPayload".to_owned(),
+                signature: "fn decode_json_payload()".to_owned(),
+                start_byte: 0,
+                end_byte: 24,
+                start_line: 1,
+                end_line: 1,
+                structural_digest: digest(DIGEST_ONE),
+            },
+            SymbolInput {
+                symbol_id: caller_id.clone(),
+                file_id: file_id.clone(),
+                symbol_kind: "function".to_owned(),
+                qualified_name: "decoder::decode_request".to_owned(),
+                signature: "fn decode_request()".to_owned(),
+                start_byte: 25,
+                end_byte: 80,
+                start_line: 2,
+                end_line: 4,
+                structural_digest: digest(DIGEST_ONE),
+            },
+        ],
+        edges: vec![EdgeInput {
+            source_symbol_id: caller_id.clone(),
+            target_symbol_id: target_id.clone(),
+            kind: EdgeKind::Calls,
+            confidence: 1.0,
+            provenance: "live-retrieval-fixture".to_owned(),
+        }],
+        references: vec![ReferenceInput {
+            file_id,
+            owner_symbol_id: Some(caller_id),
+            target_symbol_id: Some(target_id),
+            reference_name: "decodeJSONPayload".to_owned(),
+            reference_kind: "calls".to_owned(),
+            start_byte: 40,
+            end_byte: 57,
+            confidence: 1.0,
+            resolution_provenance: "live-retrieval-fixture".to_owned(),
+        }],
+        documents: vec![search_document],
+    };
+    let ready = match prepare_fenced(database, staged, facts).await {
+        Ok(ready) => ready,
+        Err(error) => panic!("retrieval generation did not become ready: {error}"),
+    };
     match publish_fenced(database, ready).await {
         Ok(generation) => generation,
         Err(error) => panic!("newer generation did not publish: {error}"),
     }
+}
+
+async fn assert_deterministic_retrieval(
+    database: &CartographDatabase,
+    project: &ProjectId,
+    generation_id: &GenerationId,
+) {
+    let generation = database.current_generation_record(project).await;
+    assert!(matches!(
+        generation,
+        Ok(Some(generation)) if generation.generation_id() == generation_id
+    ));
+
+    let path = match NormalizedPath::parse("src/json_decoder.rs") {
+        Ok(path) => path,
+        Err(error) => panic!("retrieval path fixture is invalid: {error}"),
+    };
+    let file = database.exact_current_file_by_path(project, &path).await;
+    assert!(matches!(
+        file,
+        Ok(Some(file)) if file.file_id().as_str() == RETRIEVAL_FILE
+    ));
+
+    let named = database
+        .exact_current_symbols_by_name(project, "decodeJSONPayload", SEARCH_LIMIT)
+        .await;
+    assert!(matches!(
+        named,
+        Ok(symbols)
+            if symbols.len() == 1
+                && symbols[0].symbol_id().as_str() == RETRIEVAL_TARGET
+    ));
+
+    let references = database
+        .exact_current_references_by_name(project, "decodeJSONPayload", SEARCH_LIMIT)
+        .await;
+    assert!(matches!(
+        references,
+        Ok(references)
+            if references.len() == 1
+                && references[0].target_symbol_id().map(SymbolId::as_str)
+                    == Some(RETRIEVAL_TARGET)
+    ));
+
+    let target_id = parse_symbol_id(RETRIEVAL_TARGET);
+    let caller_id = parse_symbol_id(RETRIEVAL_CALLER);
+    let incoming = database
+        .current_graph_edges(
+            project,
+            std::slice::from_ref(&target_id),
+            GraphDirection::Incoming,
+            SEARCH_LIMIT,
+        )
+        .await;
+    assert!(matches!(
+        incoming,
+        Ok(edges)
+            if edges.len() == 1
+                && edges[0].source_symbol_id() == &caller_id
+                && edges[0].target_symbol_id() == &target_id
+    ));
+    let hydrated = database
+        .current_symbols_by_ids(project, &[caller_id, target_id])
+        .await;
+    assert!(matches!(hydrated, Ok(symbols) if symbols.len() == 2));
 }
 
 async fn reject_stale_publication(database: &CartographDatabase, ready: ReadyGeneration) {
@@ -724,6 +850,7 @@ async fn assert_search(database: &CartographDatabase, expected: SearchExpectatio
             assert_eq!(hits[0].document_id().as_str(), document_id);
             assert_eq!(hits[0].generation_id(), generation_id);
             assert!(hits[0].score().is_finite() && hits[0].score().is_sign_positive());
+            assert!(!hits[0].components().is_empty());
         }
         _ => panic!("search expectation must contain both document and generation IDs"),
     }
@@ -921,6 +1048,20 @@ fn parse_document_id(raw: &str) -> DocumentId {
     match DocumentId::parse(raw) {
         Ok(id) => id,
         Err(error) => panic!("test document UUID is invalid: {error}"),
+    }
+}
+
+fn parse_file_id(raw: &str) -> FileId {
+    match FileId::parse(raw) {
+        Ok(id) => id,
+        Err(error) => panic!("test file UUID is invalid: {error}"),
+    }
+}
+
+fn parse_symbol_id(raw: &str) -> SymbolId {
+    match SymbolId::parse(raw) {
+        Ok(id) => id,
+        Err(error) => panic!("test symbol UUID is invalid: {error}"),
     }
 }
 

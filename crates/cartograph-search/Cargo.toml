@@ -1,0 +1,22 @@
+[package]
+name = "cartograph-search"
+description = "Deterministic PostgreSQL retrieval and evidence assembly for Cartograph v2"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+cartograph-db = { path = "../cartograph-db" }
+cartograph-domain = { path = "../cartograph-domain" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
