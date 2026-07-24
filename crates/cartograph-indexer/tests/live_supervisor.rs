@@ -33,6 +33,9 @@ use cartograph_indexer::{
 use sqlx_core::{query::query, row::Row, sql_str::AssertSqlSafe};
 use tokio::sync::oneshot;
 
+#[path = "live_supervisor/native_corpus.rs"]
+mod native_corpus;
+
 const TEST_DATABASE_URL_ENV: &str = "CARTOGRAPH_TEST_DATABASE_URL";
 const PROJECT_FINGERPRINT: &str =
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -1818,17 +1821,21 @@ impl DatabaseFixture {
 }
 
 async fn open_fixture() -> DatabaseFixture {
-    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
-        Ok(database_url) => database_url,
-        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
-    };
     let schema = format!(
         "cartograph_supervisor_it_{}_{}",
         process::id(),
         SCHEMA_COUNTER.fetch_add(1, Ordering::Relaxed)
     );
+    open_fixture_with_schema(&schema).await
+}
+
+async fn open_fixture_with_schema(schema: &str) -> DatabaseFixture {
+    let database_url = match env::var(TEST_DATABASE_URL_ENV) {
+        Ok(database_url) => database_url,
+        Err(_) => panic!("{TEST_DATABASE_URL_ENV} must be set for the ignored integration test"),
+    };
     let settings = DatabaseSettings::parse(&database_url, Some("8"), Some("10000"))
-        .and_then(|settings| settings.with_schema(&schema));
+        .and_then(|settings| settings.with_schema(schema));
     let settings = match settings {
         Ok(settings) => settings,
         Err(error) => panic!("supervisor test settings failed validation: {error}"),
@@ -1854,7 +1861,7 @@ async fn open_fixture() -> DatabaseFixture {
     DatabaseFixture {
         database,
         pool,
-        schema,
+        schema: schema.to_owned(),
         project,
     }
 }

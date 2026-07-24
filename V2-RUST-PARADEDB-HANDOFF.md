@@ -805,12 +805,66 @@ the secret file. A continuation that restarts/recreates the service should
 reconcile the private env through the managed lifecycle rather than copying a
 credential into source or logs.
 
-The next code slice should freeze a Rust-owned real extractor corpus and run the
-complete pipeline at 1/2/4/8/16 workers with identical database digest, rows,
-edge kinds, BM25 hits, task cleanup, and lease release while recording peak
-modeled bytes plus process RSS. Then add module/import resolution and bounded
-symbol-body search documents. Do not claim the 32x accounting reservation is an
-allocator-enforced RSS limit.
+### Native real-corpus scaling slice
+
+The Rust-owned real corpus gate is now implemented in
+`tests/live_supervisor/native_corpus.rs`. It compiles 24 representative
+Cartograph TypeScript files plus the four TS/JS/TSX/JSX v1.1.33 oracle sources
+into the test binary, materializes them into an isolated checkout, and locks the
+length-delimited 28-file / 1,052,338-byte fingerprint
+`5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20`.
+
+Each 1/2/4/8/16-worker row runs in a separate child process with one warmup,
+three measured fresh-schema samples, a 180-second kill-and-reap deadline, and
+fail-closed 25 ms current-RSS sampling. The report identifies macOS/aarch64 and
+records each child's successful RSS sample count. Parent-known schema names are
+removed after an abnormal child exit; a dedicated live regression hangs a child
+and proves kill, reap, and cleanup. All 20 runs produced digest-v2
+`c51f87287539116a4f60149f65241053821046f4045fa7e0dc1e5a92343f0059`,
+28 files / 3,840 symbols / 4,473 edges / 12,651 references / 3,868 documents,
+the same eight edge kinds and ordered BM25 IDs, completed publication, exact
+lease release, and schema cleanup. Canonical payload accounting was 8,074,529
+bytes retained, 56,600,216 bytes resolve high-water, and 46,054,906 bytes
+validation high-water.
+
+Four workers are the real-corpus scheduling knee: native p50 falls from
+1,108.77 ms at one worker to 573.75 ms, supervised pipeline time falls from
+6,585.26 to 6,117.48 ms, and peak RSS is 71.30 MiB. Eight workers buy only 0.4%
+lower native p50 for 5.89 MiB more peak RSS; 16 regress to 763.17 ms and 87.08
+MiB. COPY is 5,519.16 ms at four workers, 90.2% of median supervised pipeline
+time. Keep 16 only as the upper cap for large queues; the future selector should
+use at most four for projects around this size. The selector is not implemented
+yet. The raw evidence and measurement contract are in
+`docs/v2/benchmarks/NATIVE-CORPUS-SCALING.md` and
+`native-corpus-scaling-aarch64-2026-07-23.json`.
+
+The next code slice is module/import resolution and bounded symbol-body search
+documents, plus focused measurement of the dominant PostgreSQL/ParadeDB
+COPY/index-maintenance floor. The RSS sampler measures the process; it does not
+turn the 32x Tree-sitter accounting reservation into an allocator-enforced cap.
+
+Exact closeout for this slice on 2026-07-23:
+
+- Rust formatting, strict workspace Clippy, all workspace unit/integration/doc
+  tests, and the SQLite-free dependency/lockfile checks pass.
+- PostgreSQL 18.4 / `pg_search` 0.23.5 / pgvector 0.8.1 doctor and live
+  capability, generation, COPY/digest, lease, all 26 supervisor cases, both
+  worker matrices, and both managed lifecycle tests pass. The final 26-case run
+  generated the committed native-corpus JSON and included the forced timeout
+  cleanup regression.
+- TypeScript typecheck, architecture, Biome, actionlint, and the v1.1.33 oracle
+  pass. The complete v1 harness reports 7,140 passes, zero failures, and 41
+  skips; Bun's known shard-7 `Trace/BPT trap` occurred twice before the exact
+  shard passed on its third fail-closed retry.
+- The forced Cartograph biomarker rebuild reports 0 error / 0 warning / 0 info,
+  zero cross-file errors, and the structural delta reports zero introduced
+  findings. Sonar reports quality gate `OK`, 91.5% new coverage, 86.0% overall
+  coverage, 0.0% new duplication, 0.9% overall duplication, zero bugs/new
+  violations/vulnerabilities, and 100% reviewed security hotspots.
+- Independent read-only review requested changes for timing semantics, RSS
+  failure handling, scheduler wording, child timeout/reaping, provenance, and
+  timeout schema cleanup. Every finding was fixed and regression-tested; the
+  final verdict is `APPROVE` with no findings.
 
 ## Execution plan
 
@@ -959,19 +1013,19 @@ Only then:
 
 ## Immediate next actions
 
-1. Freeze a Rust-owned real extractor corpus, then re-run the committed
-   1/2/4/8/16 matrix on it.
-   Preserve the current digest/row/BM25/task/lease gates, compare throughput and
-   modeled memory plus process RSS against the synthetic baseline, and confirm
-   or revise the initial `min(available_parallelism, 16)` parse/extract cap.
-2. Add module/import alias resolution, lexical shadowing and overload rules,
+1. Add module/import alias resolution, lexical shadowing and overload rules,
    tracked-ignored-file plus embedded-repository parity, and bounded
    implementation-body search documents.
-3. Add stage-level cancellation/deadline/failure/cap injection for
+2. Measure and optimize the 3,868-document COPY/ParadeDB indexing floor while
+   preserving atomic publication and current-generation-only BM25 semantics.
+3. Implement and test a deterministic corpus-aware worker selector, using at
+   most four workers for small queues while retaining 16 as the measured upper
+   cap for sufficiently large queues; re-run both committed matrices.
+4. Add stage-level cancellation/deadline/failure/cap injection for
    discovery, read/hash, parse/extract, resolution, reduction, and COPY.
-4. Add `db remove`, backup/restore, and explicit image/extension upgrade with
+5. Add `db remove`, backup/restore, and explicit image/extension upgrade with
    ownership checks and recovery tests.
-5. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
+6. Add Windows ACL hardening or keep managed lifecycle explicitly unsupported
    there; never weaken credential privacy to make the platform pass.
 
 ## Risks and decisions still requiring evidence

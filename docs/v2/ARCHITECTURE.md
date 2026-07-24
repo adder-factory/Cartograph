@@ -364,11 +364,14 @@ canonical validation iteratively and cooperatively measures actual outer-vector
 and JSON-array capacities, then polls each fact, map conversion, and relation
 build under a four-times working-set envelope. Input/output byte measurements
 are carried in the stage report so Tokio workers never rescan the corpus.
-Exceeding either fails the generation. A measured
-real-corpus gate must decide whether v2 needs
-partitioned/spilled resolution or streaming database reduction. Tree-sitter's
-C allocator is still not constrained by Rust accounting, so process RSS remains
-a release measurement. Git tracked files newly covered by ignore rules,
+Exceeding either fails the generation. The first measured real-corpus gate
+retained an 8.1 MiB canonical generation, charged 56.6 MiB during resolve and
+46.1 MiB during validation, and peaked at 71.30 MiB process RSS at its
+four-worker scheduling knee. That corpus does not justify partitioned/spilled
+resolution yet;
+larger-project evidence remains required. Tree-sitter's C allocator is not
+constrained by Rust accounting, so process RSS remains a release measurement.
+Git tracked files newly covered by ignore rules,
 module/import aliases, symbol-body search text, and embedded-repository parity
 also remain explicit follow-ups.
 
@@ -391,11 +394,19 @@ from 240.11 ms to 116.38 ms. COPY p50 remained near 57-67 ms and became the
 dominant floor. The
 reported stage and reservation high-water include both supervised Parse and
 one-item canonical Reduce; its explicit 256 MiB ceiling is the peak reservation
-at every worker count. Until the
-real extractor corpus supersedes this synthetic baseline, parse/extract uses an
-initial cap of `min(available_parallelism, 16)`, one queued envelope per worker,
-and the independent supervisor byte budget as the final admission authority.
-COPY remains one retained database task.
+at every worker count.
+
+The follow-up [native real-corpus matrix](benchmarks/NATIVE-CORPUS-SCALING.md)
+kept identical logical output across the same worker counts but reached its
+scheduling knee at four workers for 28 files / 1.05 MiB: native p50 was 573.75
+ms at four, 571.45 ms at eight, and 763.17 ms at 16, while peak RSS rose from
+71.30 to 87.08 MiB.
+The evidence supports a proposed corpus-aware selector: small projects should
+use at most four workers, 16 remains the upper bound for large queues, one
+queued envelope per worker is retained, and the supervisor byte budget remains
+final admission authority. The selector is not implemented yet and remains a
+handoff action. COPY remains one retained database task and the dominant
+measured floor.
 
 PostgreSQL `COPY` is used for bulk staging. Parallel workers never issue
 independent destructive maintenance. Advisory locks are scoped by project and
@@ -483,17 +494,18 @@ row-locking fence check immediately before the ready transition. Acquisition,
 publication, cleanup, and uncertain timeouts reconcile durable state before
 retrying or reporting an ambiguous outcome.
 
-The current live pinned-ParadeDB suite has 23 supervisor cases. It covers
+The current live pinned-ParadeDB suite has 26 supervisor cases. It covers
 success, heartbeats, progress stalls, whole-operation deadlines, lost leases,
 takeover, bounded acquisition/publication/cleanup reconciliation, dropped child
 failures, long COPY payloads, blocked COPY/publication/cleanup, simultaneous
 heartbeat and COPY uncertainty, caller task abort, and dropping a polled public
 future outside the runtime. The added stage integration case forces reverse
 parallel completion, proves exact ordered reduction/progress, then reaches
-supervised COPY and publication on PostgreSQL/ParadeDB. Lock-injection cases
-prove zero active schema work, free operation/generation advisories, correct
-generation state, and exact lease disposition before the external blocker is
-released.
+supervised COPY and publication on PostgreSQL/ParadeDB. The real-corpus cases
+also prove worker determinism and timed-out child kill/reap plus parent-side
+schema cleanup. Lock-injection cases prove zero active schema work, free
+operation/generation advisories, correct generation state, and exact lease
+disposition before the external blocker is released.
 
 The remaining M4 fault matrix must exercise each real discover/read/parse/
 resolve/merge/BM25/vector stage after those stages exist; the supervisor

@@ -78,26 +78,28 @@ and the verification queries.
 The supervised Parse-plus-Reduce stage scaled by 3.98 times from 1 to 16 workers. End-to-end throughput
 scaled by 2.06 times because canonical validation, COPY, and publication become
 the fixed floor. The 16-worker row improved median end-to-end time by 11.0% over
-8 workers while doubling the bounded reservation window. The real-corpus run
-still determines the production default.
+8 workers while doubling the bounded reservation window. The separate
+[native real-corpus matrix](NATIVE-CORPUS-SCALING.md) now supplies the
+production workload counterpoint.
 
-## Initial scheduler decision
+## Proposed scheduler decision
 
-Use up to 16 parse/extract workers, capped by available parallelism, with one
-queued envelope per active worker. Keep the supervisor's byte budget as the
-hard admission authority. The synthetic harness reserves the full 256 MiB
-canonical-validation working ceiling during its supervised Reduce item, while
-larger real AST/fact payloads backpressure in Parse before the item window fills.
-COPY remains one retained database task; independently
+Keep 16 as the upper bound for sufficiently large parse/extract queues, capped
+by available parallelism, with one queued envelope per active worker. A future
+selector should use at most four workers for small projects: the measured
+28-file native corpus reaches its scheduling knee at four; eight buys only 0.4%
+lower native p50 for 5.89 MiB more peak RSS, while 16 regresses. Keep the
+supervisor's byte budget as the hard admission authority. The synthetic harness
+reserves the full 256 MiB canonical-validation working ceiling during its
+supervised Reduce item, while larger real AST/fact payloads backpressure in
+Parse before the item window fills. COPY remains one retained database task; independently
 streaming destructive/terminal work from workers is still forbidden.
 
-This is an initial scheduler cap, not a universal performance promise. The
-fixture deliberately exercises the executor and persistence path before the
-real Rust TypeScript extractor exists. Re-run this same matrix on the frozen
-real extractor corpus before locking production defaults, and do not add a
-wall-clock threshold to shared CI. CI runs the matrix as a determinism,
-publication, BM25, bound, and cleanup gate; machine-local reports carry the
-performance interpretation.
+This is an upper scheduler cap, not a universal worker count. Re-run this
+matrix and the frozen native corpus together when implementing or changing the
+future adaptive sizing policy, and do not add a wall-clock threshold to shared
+CI. CI runs the matrix as a determinism, publication, BM25, bound, and cleanup
+gate; machine-local reports carry the performance interpretation.
 
 ## Reproduce
 

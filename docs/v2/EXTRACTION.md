@@ -1,7 +1,8 @@
 # Cartograph v2 native extraction
 
-Status: first TypeScript/JavaScript structural slice implemented; project-wide
-discovery, resolution, persistence, and real-corpus scaling are still pending.
+Status: TypeScript/JavaScript structural extraction, project-wide discovery,
+bounded resolution, PostgreSQL persistence, and real-corpus scaling implemented;
+module-aware resolution and body-bearing search documents remain pending.
 
 This document fixes the boundary of `cartograph-extract` so later language and
 framework work does not leak parser details into storage or parallel indexing.
@@ -240,15 +241,13 @@ The following work remains outside this slice:
    duplicated.
 6. Spill/partitioned resolution and streaming database reduction if measured
    real projects exceed the configured retained-generation cap.
-7. A frozen real-corpus 1/2/4/8/16-worker benchmark with peak memory, digest,
-   row, BM25, task, generation, and lease assertions.
-8. Framework resolvers and cross-language bridges, followed by the remaining
+7. Framework resolvers and cross-language bridges, followed by the remaining
    language families in the v2 plan.
-9. Per-worker parser reuse and a real-corpus pass to decide whether repeated
+8. Per-worker parser reuse and additional large-corpus evidence to decide whether repeated
    component/digest/type traversals need fused language-specific walks.
 
-The next implementation slice is a Rust-owned real extractor corpus and frozen
-1/2/4/8/16-worker pipeline benchmark, followed by module/import resolution and
-bounded symbol-body search documents. Preserve the current PostgreSQL digest,
-row, edge-kind, BM25, task, generation, and lease gates while replacing the
-synthetic baseline.
+The frozen [native corpus matrix](benchmarks/NATIVE-CORPUS-SCALING.md) now proves
+identical digest/rows/edge kinds/BM25/lifecycle behavior at 1/2/4/8/16 workers
+and records isolated process RSS. The next implementation slice is module/import
+resolution and bounded symbol-body search documents, followed by measurement
+and optimization of the dominant PostgreSQL/ParadeDB COPY/indexing floor.
