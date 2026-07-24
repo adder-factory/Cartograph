@@ -1,6 +1,7 @@
 name: v2 Rust
 
 on:
+  workflow_call:
   push:
     paths:
       - Cargo.toml
@@ -8,6 +9,8 @@ on:
       - rust-toolchain.toml
       - 'crates/**'
       - 'deploy/paradedb/**'
+      - 'deny.toml'
+      - 'scripts/*rust-release*'
       - '.github/workflows/v2-rust.yml'
   pull_request:
     paths:
@@ -16,6 +19,8 @@ on:
       - rust-toolchain.toml
       - 'crates/**'
       - 'deploy/paradedb/**'
+      - 'deny.toml'
+      - 'scripts/*rust-release*'
       - '.github/workflows/v2-rust.yml'
 
 permissions:
@@ -29,7 +34,7 @@ jobs:
   quality:
     name: format + clippy + unit + no SQLite
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
@@ -47,6 +52,13 @@ jobs:
 
       - name: Unit tests
         run: cargo test --locked --workspace
+
+      - name: Dependency advisories, licenses, bans, and sources
+        uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          rust-version: '1.96.1'
+          command: check
+          arguments: --all-features
 
       - name: No SQLite production dependencies
         shell: bash
@@ -161,6 +173,11 @@ jobs:
           cargo test --locked --quiet -p cartograph-indexer
           --test live_supervisor -- --ignored --nocapture --test-threads=1
 
+      - name: Agent runtime index, no-op, freshness, and retrieval integration test
+        run: >-
+          cargo test --locked --quiet -p cartograph-agent
+          --test live_project -- --ignored --nocapture --test-threads=1
+
       - name: Frozen 1/2/4/8/16-worker determinism and scaling benchmark
         run: cargo bench --locked -p cartograph-indexer --bench index_scaling
 
@@ -168,6 +185,11 @@ jobs:
         run: >-
           cargo test --locked --quiet -p cartograph-db --lib
           managed::tests:: -- --ignored --nocapture
+
+      - name: Managed backup, restore, upgrade, rollback, and derived-index test
+        run: >-
+          cargo test --locked --quiet -p cartograph-db --lib
+          managed::maintenance::tests:: -- --ignored --nocapture --test-threads=1
 
       - name: ParadeDB logs on failure
         if: failure()
