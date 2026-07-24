@@ -738,18 +738,16 @@ PostgreSQL engine without invoking TypeScript in production:
   and relation validation are cancellation-polled under a 4x working envelope.
   The input/output measurements travel in the validation report, so Tokio workers
   do not rescan the corpus.
-- Resolution first selects one exact same-file symbol, then one unique project
-  symbol. Qualified members stay unresolved until receiver/type/import evidence
-  exists; ambiguous/missing targets retain name, lexical owner, span,
-  confidence, and provenance. This is intentionally not yet import-alias,
-  module-path, lexical-shadowing, or overload resolution.
+- At this historical checkpoint, resolution selected one exact same-file symbol,
+  then one unique project symbol. The later resolver checkpoint supersedes this
+  limitation with import aliases, module paths, lexical shadowing, overload
+  policy, and exported-only project fallback.
 - Deterministic reduction produces an opaque five-table
   `CanonicalGenerationFacts` capability after field/relation validation,
   deduplication, canonical JSON, and a complete digest. Async prepare/COPY no
-  longer runs a synchronous cloning reducer. Search documents carry paths,
-  qualified names, safe callable declaration signatures, and JSDoc; non-callable
-  initializer RHS values, callable signatures containing default/literal
-  expressions, and complete implementation bodies are excluded.
+  longer runs a synchronous cloning reducer. At this checkpoint search documents
+  carried paths, qualified names, safe callable declaration signatures, and
+  JSDoc; the later resolver checkpoint adds literal-safe bounded body text.
 - Append-only migration 3 expands the `edges` constraint for all native
   relationship kinds, including `type_of`, `returns`, `instantiates`,
   `overrides`, `decorates`, `field_access`, `def_use`, and `exports`.
@@ -838,10 +836,11 @@ yet. The raw evidence and measurement contract are in
 `docs/v2/benchmarks/NATIVE-CORPUS-SCALING.md` and
 `native-corpus-scaling-aarch64-2026-07-23.json`.
 
-The next code slice is module/import resolution and bounded symbol-body search
-documents, plus focused measurement of the dominant PostgreSQL/ParadeDB
-COPY/index-maintenance floor. The RSS sampler measures the process; it does not
-turn the 32x Tree-sitter accounting reservation into an allocator-enforced cap.
+That checkpoint handed off module/import resolution and bounded symbol-body
+search documents; the following checkpoint completes them. Focus now moves to
+the dominant PostgreSQL/ParadeDB COPY/index-maintenance floor. The RSS sampler
+measures the process; it does not turn the 32x Tree-sitter accounting
+reservation into an allocator-enforced cap.
 
 Exact closeout for this slice on 2026-07-23:
 
@@ -865,6 +864,94 @@ Exact closeout for this slice on 2026-07-23:
   failure handling, scheduler wording, child timeout/reaping, provenance, and
   timeout schema cleanup. Every finding was fixed and regression-tested; the
   final verdict is `APPROVE` with no findings.
+
+## Module-aware resolver and safe body-search checkpoint
+
+The next Rust-owned contract is implemented on `feat/v2-rust-paradedb`:
+
+- extraction retains default, named/aliased, and namespace ES-module bindings
+  separately from generic import references;
+- function and interface/class method overload signatures are explicit
+  declaration-only symbols, while resolution chooses one unique implementation
+  and refuses an ambiguous declaration group;
+- nearest eligible containment wins before imports, so a nested declaration
+  shadows an imported alias without leaking into sibling scopes. Bare calls
+  exclude class/interface methods, properties, fields, and enum members, while
+  explicit field-access references remain member-eligible;
+- relative imports normalize inside the project and support source extensions,
+  declaration-file extensions, directory `index` modules, and `.js` specifiers
+  backed by TypeScript source. Default/named/namespace targets must be exported
+  from one exact module. Missing, unique, and ambiguous path matches are
+  distinct states, so an ambiguous exact path or stem cannot fall through to a
+  directory `index`;
+- bare packages, missing/ambiguous modules, and ambiguous imports use the stable
+  `native-unresolved-import` provenance and never fall through to an unrelated
+  project symbol. Final project-wide fallback requires one exported candidate;
+- named-import declaration references are matched to the exact binding span
+  before lexical lookup, preventing a same-name local/project declaration from
+  intercepting an aliased import. Runtime aliases still allow inner lexical
+  shadowing;
+- symbol search documents now include at most 16 KiB of implementation
+  identifiers/control-flow keywords. A stable prefix plus rolling tail avoids
+  starving the end of large functions; comments and literal values are never
+  copied, and metadata records truncation plus declaration-only state.
+- resolver cancellation is threaded through each reference, containment-
+  ancestry step, import-binding loop, and candidate scan. Oversized work can be
+  interrupted within one reference and propagates the stage failure instead of
+  waiting for the next file.
+
+The v1.1.33 oracle remains unchanged: declaration-only additions are excluded
+only from the compatibility projection, while Rust-owned tests freeze the new
+binding, overload, shadowing, package-abstention, project-path, and literal-safe
+body contracts. The prior native benchmark JSON remains immutable. The new
+resolver-v2 evidence is
+`docs/v2/benchmarks/native-corpus-scaling-aarch64-2026-07-23-resolver-v2.json`.
+All 20 fresh-schema runs at 1/2/4/8/16 workers produced digest-v2
+`dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3`,
+28 files / 3,843 symbols / 3,699 edges / 12,660 references / 3,871 documents,
+the same eight edge kinds and ordered BM25 Top-5, exact publication/lease
+cleanup, and zero diagnostics. The lower 1,852 resolved-reference count is
+intentional: the old unique-name fallback linked private declarations in
+unrelated modules and bare imported-helper calls to same-name class methods;
+resolver v2 retains those as explicit unresolved evidence. Exact binding spans
+also keep aliased import declaration references on their selected module rather
+than allowing same-name lexical/project candidates to intercept them.
+
+Four workers remain the scheduling knee. The recorded final matrix measured native
+p50 at 690.00 ms with four workers versus 713.99 ms at eight and 919.55 ms at
+16. Four-worker COPY is 4,809.56 ms, 87.0% of the 5,525.37 ms supervised
+pipeline median, and peak RSS is 73.80 MiB. The retained generation is
+8,473,292 bytes; resolve and
+validation high-water charges are 61,210,798 and 47,754,838 bytes.
+
+Independent read-only review requested four correctness/gate changes across
+three passes: ambiguous module stems had to stop before directory-index
+fallback; bare calls had to exclude sibling class/interface members; inner
+resolver scans needed cooperative cancellation; and aliased import declaration
+references needed exact binding-span priority. Each finding has an adversarial
+regression. After the final 20-run artifact refresh, the reviewer returned
+`APPROVE` with no correctness, security, scope, or gate findings.
+
+Resolver/body-search closeout on 2026-07-23:
+
+- Rust format, strict workspace Clippy, every workspace unit/integration/doc
+  test, and the Cargo graph/lockfile no-SQLite checks pass.
+- PostgreSQL 18.4 / `pg_search` 0.23.5 / pgvector 0.8.1 passed both managed
+  lifecycle cases, live capabilities, generation/fencing, COPY/digest, leases,
+  all 26 supervisor cases, the timeout/reap/schema-cleanup regression, and the
+  20-sample native worker matrix. The final audit found zero leftover native or
+  supervisor schemas, active statements, or advisory locks.
+- TypeScript typecheck, architecture, Biome, and actionlint pass. The locked
+  v1.1.33 Rust oracle remains unchanged; the earlier full v1 harness in this
+  checkpoint remains 7,140 pass / 0 fail / 41 skip.
+- The final forced Cartograph biomarker rebuild reports 0 error / 0 warning / 0
+  info and zero cross-file errors. `compare-to-ref --findings-delta
+  --include-biomarkers` reports zero introduced per-file findings.
+- The final Sonar scan and API quality gate are `OK`: 91.5% new coverage, 86.0%
+  overall coverage, 0.0% new duplication, 0.9% overall duplication, zero bugs,
+  new violations, and vulnerabilities, plus 100% reviewed security hotspots.
+- Independent review is `APPROVE` after the final maintainability-only request
+  object refactor; no correctness, security, scope, or gate findings remain.
 
 ## Execution plan
 
@@ -928,10 +1015,11 @@ golden contract. Do not call TypeScript from production Rust.
 
 The first TypeScript/JavaScript/TSX/JSX parser and normalized-fact slice is now
 implemented and matches its locked v1.1.33 projection. Its bounded discovery,
-read/hash, exact-resolution, canonical-fact, COPY, publication, and BM25 path is
-also implemented. M3 remains open until the Rust-owned real corpus, richer
-module/import resolution, remaining language families, and framework/
-cross-language hooks meet their exit gates.
+read/hash, module-aware exact resolution, safe body-search documents,
+canonical-fact, COPY, publication, BM25 path, and Rust-owned real-corpus matrix
+are implemented. M3 remains open for explicit exports/re-exports, path/package/
+CommonJS and receiver/type resolution, remaining language families, and
+framework/cross-language hooks.
 
 ### M4 — bounded parallel indexer
 
@@ -1013,14 +1101,14 @@ Only then:
 
 ## Immediate next actions
 
-1. Add module/import alias resolution, lexical shadowing and overload rules,
-   tracked-ignored-file plus embedded-repository parity, and bounded
-   implementation-body search documents.
-2. Measure and optimize the 3,868-document COPY/ParadeDB indexing floor while
+1. Measure and optimize the 3,871-document COPY/ParadeDB indexing floor while
    preserving atomic publication and current-generation-only BM25 semantics.
-3. Implement and test a deterministic corpus-aware worker selector, using at
+2. Implement and test a deterministic corpus-aware worker selector, using at
    most four workers for small queues while retaining 16 as the measured upper
    cap for sufficiently large queues; re-run both committed matrices.
+3. Add tracked-ignored-file and embedded-repository parity, then explicit
+   export/re-export lists, TypeScript path aliases, package/CommonJS resolution,
+   and receiver/type-directed qualified members under locked fixtures.
 4. Add stage-level cancellation/deadline/failure/cap injection for
    discovery, read/hash, parse/extract, resolution, reduction, and COPY.
 5. Add `db remove`, backup/restore, and explicit image/extension upgrade with

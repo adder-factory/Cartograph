@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use cartograph_domain::{ContentDigest, SourcePosition, SourceSpan, Visibility};
 use tree_sitter::{Node, TreeCursor};
 
@@ -6,6 +8,8 @@ use crate::{
 };
 
 const MAX_DIAGNOSTICS: usize = 32;
+const MAX_BODY_SEARCH_BYTES: usize = 16 * 1024;
+const BODY_SEARCH_PREFIX_BYTES: usize = MAX_BODY_SEARCH_BYTES / 2;
 const HASH_CHUNK_BYTES: usize = 64 * 1024;
 const TEXT_POLL_STRIDE: usize = 4096;
 
@@ -115,6 +119,139 @@ pub(super) fn starts_uppercase(name: &str) -> bool {
     name.chars().next().is_some_and(char::is_uppercase)
 }
 
+#[derive(Default)]
+pub(super) struct BodySearchText {
+    pub(super) text: String,
+    pub(super) truncated: bool,
+}
+
+pub(super) fn body_search_text(
+    root: Node<'_>,
+    source: &str,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<BodySearchText, ExtractError> {
+    let mut prefix = String::new();
+    let mut tail: VecDeque<&str> = VecDeque::new();
+    let mut tail_bytes = 0_usize;
+    let mut using_tail = false;
+    let mut truncated = false;
+    for node in descendants_including_root(root) {
+        if cancelled() {
+            return Err(ExtractError::Cancelled);
+        }
+        let token = if is_search_identifier(node.kind()) {
+            text_for(source, node)
+        } else if is_search_keyword(node.kind()) {
+            node.kind()
+        } else {
+            continue;
+        };
+        if token.is_empty() {
+            continue;
+        }
+
+        let prefix_separator = usize::from(!prefix.is_empty());
+        let fits_prefix = !using_tail
+            && prefix
+                .len()
+                .checked_add(prefix_separator)
+                .and_then(|length| length.checked_add(token.len()))
+                .is_some_and(|required| required <= BODY_SEARCH_PREFIX_BYTES);
+        if fits_prefix {
+            prefix
+                .try_reserve(prefix_separator.saturating_add(token.len()))
+                .map_err(|_| ExtractError::OutputLimit)?;
+            if prefix_separator != 0 {
+                prefix.push(' ');
+            }
+            prefix.push_str(token);
+            continue;
+        }
+        using_tail = true;
+
+        let prefix_tail_separator = usize::from(!prefix.is_empty());
+        let tail_capacity = MAX_BODY_SEARCH_BYTES
+            .saturating_sub(prefix.len())
+            .saturating_sub(prefix_tail_separator);
+        if token.len() > tail_capacity {
+            truncated = true;
+            continue;
+        }
+        while tail_bytes.saturating_add(
+            token
+                .len()
+                .checked_add(usize::from(!tail.is_empty()))
+                .ok_or(ExtractError::OutputLimit)?,
+        ) > tail_capacity
+        {
+            let Some(removed) = tail.pop_front() else {
+                return Err(ExtractError::OutputLimit);
+            };
+            tail_bytes = tail_bytes
+                .saturating_sub(removed.len())
+                .saturating_sub(usize::from(!tail.is_empty()));
+            truncated = true;
+        }
+        let token_bytes = token
+            .len()
+            .checked_add(usize::from(!tail.is_empty()))
+            .ok_or(ExtractError::OutputLimit)?;
+        tail.try_reserve(1).map_err(|_| ExtractError::OutputLimit)?;
+        tail.push_back(token);
+        tail_bytes = tail_bytes
+            .checked_add(token_bytes)
+            .ok_or(ExtractError::OutputLimit)?;
+    }
+
+    let mut text = prefix;
+    text.try_reserve(usize::from(!text.is_empty() && !tail.is_empty()).saturating_add(tail_bytes))
+        .map_err(|_| ExtractError::OutputLimit)?;
+    for token in tail {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(token);
+    }
+    Ok(BodySearchText { text, truncated })
+}
+
+fn is_search_identifier(kind: &str) -> bool {
+    matches!(
+        kind,
+        "identifier"
+            | "jsx_identifier"
+            | "private_property_identifier"
+            | "property_identifier"
+            | "shorthand_property_identifier"
+            | "shorthand_property_identifier_pattern"
+            | "statement_identifier"
+            | "type_identifier"
+    )
+}
+
+fn is_search_keyword(kind: &str) -> bool {
+    matches!(
+        kind,
+        "async"
+            | "await"
+            | "break"
+            | "case"
+            | "catch"
+            | "continue"
+            | "else"
+            | "finally"
+            | "for"
+            | "if"
+            | "new"
+            | "return"
+            | "switch"
+            | "throw"
+            | "try"
+            | "while"
+            | "yield"
+    )
+}
+
 pub(super) fn contains_jsx(
     root: Node<'_>,
     cancelled: &mut dyn FnMut() -> bool,
@@ -165,9 +302,14 @@ fn is_export_scope_boundary(kind: &str) -> bool {
     matches!(
         kind,
         "arrow_function"
+            | "abstract_method_signature"
             | "function_expression"
             | "function_declaration"
+            | "function_signature"
+            | "interface_body"
+            | "interface_declaration"
             | "method_definition"
+            | "method_signature"
             | "class_declaration"
             | "class_body"
     )

@@ -2,11 +2,11 @@ use cartograph_domain::{FileParseStatus, ReferenceKind, SymbolId, SymbolKind, Vi
 use tree_sitter::Node;
 
 use crate::{
-    Containment, DiagnosticCode, ExtractError, ExtractedFile, ExtractedReference, ExtractedSymbol,
-    ExtractionDiagnostic, SourceSnapshot,
+    Containment, DiagnosticCode, ExtractError, ExtractedFile, ExtractedImportBinding,
+    ExtractedReference, ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
     budget::{
         ExtractionBudget, containment_budget_bytes, diagnostic_budget_bytes,
-        reference_budget_bytes, symbol_budget_bytes,
+        import_binding_budget_bytes, reference_budget_bytes, symbol_budget_bytes,
     },
     identity::SymbolIdentity,
 };
@@ -16,8 +16,9 @@ mod references;
 mod syntax;
 
 use syntax::{
-    callable_signature, collect_diagnostics, contains_jsx, export_flags, has_child_kind, jsdoc,
-    named_children, span_for, starts_uppercase, structural_digest, visibility,
+    body_search_text, callable_signature, collect_diagnostics, contains_jsx, export_flags,
+    has_child_kind, jsdoc, named_children, span_for, starts_uppercase, structural_digest,
+    visibility,
 };
 
 const MAX_AST_DEPTH: usize = 256;
@@ -70,6 +71,7 @@ pub(crate) fn extract(
         symbols: builder.facts.symbols,
         containments: builder.facts.containments,
         references: builder.facts.references,
+        import_bindings: builder.facts.import_bindings,
         diagnostics,
     };
     if file.modeled_retained_bytes() > output_limit {
@@ -97,6 +99,7 @@ struct ExtractionFacts {
     symbols: Vec<ExtractedSymbol>,
     containments: Vec<Containment>,
     references: Vec<ExtractedReference>,
+    import_bindings: Vec<ExtractedImportBinding>,
 }
 
 struct PendingSymbol<'tree> {
@@ -105,6 +108,8 @@ struct PendingSymbol<'tree> {
     span_node: Node<'tree>,
     structural_node: Node<'tree>,
     doc_anchor: Node<'tree>,
+    body_node: Option<Node<'tree>>,
+    declaration_only: bool,
     signature: Option<String>,
     exported: bool,
     default_export: bool,
@@ -150,7 +155,12 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             "interface_declaration" | "class_declaration" | "abstract_class_declaration" => {
                 self.visit_container(node, depth)?;
             }
-            "function_declaration" | "generator_function_declaration" | "method_definition" => {
+            "function_declaration"
+            | "generator_function_declaration"
+            | "function_signature"
+            | "method_definition"
+            | "method_signature"
+            | "abstract_method_signature" => {
                 self.visit_callable(node, depth)?;
             }
             "lexical_declaration" | "variable_declaration" => {
@@ -207,6 +217,8 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             span_node: node,
             structural_node: node,
             doc_anchor: node,
+            body_node: None,
+            declaration_only: false,
             signature: None,
             exported,
             default_export,
@@ -234,7 +246,10 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             return self.visit_named_children(node, depth);
         };
         let name = self.context.owned_text(name_node)?;
-        let declared_kind = if node.kind() == "method_definition" {
+        let declared_kind = if matches!(
+            node.kind(),
+            "method_definition" | "method_signature" | "abstract_method_signature"
+        ) {
             SymbolKind::Method
         } else {
             SymbolKind::Function
@@ -248,12 +263,15 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             declared_kind
         };
         let (exported, default_export) = export_flags(node);
+        let body = node.child_by_field_name("body");
         let pending = PendingSymbol {
             kind,
             name: name.clone(),
             span_node: node,
             structural_node: node,
             doc_anchor: node,
+            body_node: body,
+            declaration_only: body.is_none(),
             signature: self.context.callable_signature(node)?,
             exported,
             default_export,
@@ -265,7 +283,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         references::capture_callable_types(self, node, &id)?;
         self.owners.push(id);
         self.qualifiers.push(name);
-        if let Some(body) = node.child_by_field_name("body") {
+        if let Some(body) = body {
             self.visit(body, depth.saturating_add(1))?;
         }
         self.qualifiers.pop();
@@ -317,6 +335,8 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
                 span_node: symbol_node,
                 structural_node: symbol_node,
                 doc_anchor: declaration,
+                body_node: value,
+                declaration_only: false,
                 signature,
                 exported,
                 default_export,
@@ -361,6 +381,12 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
         }
         let span = span_for(pending.span_node)?;
         let docstring = self.context.jsdoc(pending.doc_anchor)?;
+        let body_search = match pending.body_node {
+            Some(body) => {
+                body_search_text(body, self.context.snapshot.source(), self.context.cancelled)?
+            }
+            None => syntax::BodySearchText::default(),
+        };
         let structural_digest = structural_digest(
             pending.structural_node,
             self.context.snapshot.source(),
@@ -374,6 +400,9 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             span,
             signature: pending.signature,
             docstring,
+            body_search_text: body_search.text,
+            body_search_truncated: body_search.truncated,
+            declaration_only: pending.declaration_only,
             exported: pending.exported,
             default_export: pending.default_export,
             async_symbol: pending.async_symbol,
@@ -389,6 +418,7 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
                 symbol.qualified_name.as_str(),
                 symbol.signature.as_deref().unwrap_or_default(),
                 symbol.docstring.as_deref().unwrap_or_default(),
+                symbol.body_search_text.as_str(),
                 symbol.structural_digest.as_str(),
             ],
         )?;
@@ -408,6 +438,19 @@ impl<'source, 'cancel> ExtractionBuilder<'source, 'cancel> {
             ],
         )?;
         self.facts.references.push(reference);
+        Ok(())
+    }
+
+    fn emit_import_binding(&mut self, binding: ExtractedImportBinding) -> Result<(), ExtractError> {
+        self.context.budget.reserve_fact(
+            import_binding_budget_bytes(&binding),
+            [
+                binding.module_specifier.as_str(),
+                binding.imported_name.as_str(),
+                binding.local_name.as_str(),
+            ],
+        )?;
+        self.facts.import_bindings.push(binding);
         Ok(())
     }
 

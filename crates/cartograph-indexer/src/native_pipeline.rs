@@ -7,12 +7,13 @@ use cartograph_db::{
 };
 use cartograph_domain::{
     ContentDigest, DocumentId, DocumentKind, EdgeKind, FileId, NormalizedPath, ReferenceKind,
-    SourceLanguage, SymbolId, SymbolKind, Visibility,
+    SourceLanguage, SourceSpan, SymbolId, SymbolKind, Visibility,
 };
 use cartograph_extract::{
-    Containment, DiscoveredSource, DiscoveryLimits, ExtractedFile, ExtractedReference,
-    NativeExtractor, SourceDiscoveryOptions, SourceLimits, SourceReadOptions, SourceRoot,
-    is_test_source_path, native_extraction_reservation, native_read_reservation,
+    Containment, DiscoveredSource, DiscoveryLimits, ExtractedFile, ExtractedImportBinding,
+    ExtractedReference, ImportBindingKind, NativeExtractor, SourceDiscoveryOptions, SourceLimits,
+    SourceReadOptions, SourceRoot, is_test_source_path, native_extraction_reservation,
+    native_read_reservation,
 };
 use serde_json::json;
 use thiserror::Error;
@@ -33,9 +34,14 @@ const MAX_STAGE_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
 const MAX_CLEANUP_GRACE: Duration = Duration::from_secs(60);
 const DOCUMENT_ID_DOMAIN: &[u8] = b"cartograph-v2-native-document-v1";
 const CONTAINMENT_PROVENANCE: &str = "native-tree-sitter-containment";
+const EXACT_LEXICAL_PROVENANCE: &str = "native-exact-lexical";
+const IMPORT_BINDING_PROVENANCE: &str = "native-import-binding";
 const EXACT_SAME_FILE_PROVENANCE: &str = "native-exact-same-file";
 const EXACT_PROJECT_PROVENANCE: &str = "native-exact-project";
+const UNRESOLVED_IMPORT_PROVENANCE: &str = "native-unresolved-import";
 const UNRESOLVED_PROVENANCE: &str = "native-unresolved";
+const EXACT_LEXICAL_CONFIDENCE: f32 = 1.0;
+const IMPORT_BINDING_CONFIDENCE: f32 = 1.0;
 const EXACT_SAME_FILE_CONFIDENCE: f32 = 1.0;
 const EXACT_PROJECT_CONFIDENCE: f32 = 0.95;
 const EXTRACTED_EDGE_CONFIDENCE: f32 = 1.0;
@@ -43,8 +49,12 @@ const UNRESOLVED_CONFIDENCE: f32 = 0.0;
 const DOCUMENT_METADATA_FIXED_ALLOWANCE: u64 = 2 * 1024;
 const DOCUMENT_UUID_BYTES: usize = 16;
 const UUID_TEXT_BYTES: u64 = 36;
+const MAX_RESOLUTION_PROVENANCE_BYTES: u64 = 64;
 const VALIDATION_WORKING_MULTIPLIER: u64 = 4;
 const RESOLUTION_MAP_NODE_ALLOWANCE: u64 = 128;
+const MODULE_EXTENSIONS: [&str; 11] = [
+    ".d.ts", ".d.mts", ".d.cts", ".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs",
+];
 const REFERENCE_EDGE_KINDS: [EdgeKind; ReferenceKind::DefUse as usize + 1] = [
     EdgeKind::Calls,
     EdgeKind::Imports,
@@ -900,6 +910,7 @@ struct NativeFileFacts {
     symbols: Vec<NativeSymbolFacts>,
     containments: Vec<Containment>,
     references: Vec<ExtractedReference>,
+    import_bindings: Vec<ExtractedImportBinding>,
 }
 
 impl NativeFileFacts {
@@ -914,6 +925,7 @@ impl NativeFileFacts {
             symbols,
             containments,
             references,
+            import_bindings,
             diagnostics: _,
         } = extracted;
         let mut normalized_symbols = Vec::new();
@@ -929,6 +941,9 @@ impl NativeFileFacts {
                 span,
                 signature,
                 docstring,
+                body_search_text,
+                body_search_truncated,
+                declaration_only,
                 exported,
                 default_export,
                 async_symbol,
@@ -949,8 +964,12 @@ impl NativeFileFacts {
                     end_line: span.end_line(),
                     structural_digest,
                 },
+                kind,
                 name,
                 docstring,
+                body_search_text,
+                body_search_truncated,
+                declaration_only,
                 exported,
                 default_export,
                 async_symbol,
@@ -970,6 +989,7 @@ impl NativeFileFacts {
             symbols: normalized_symbols,
             containments,
             references,
+            import_bindings,
         })
     }
 
@@ -978,7 +998,8 @@ impl NativeFileFacts {
             .saturating_add(modeled_file_input_bytes(&self.file))
             .saturating_add(vector_capacity_bytes(&self.symbols))
             .saturating_add(vector_capacity_bytes(&self.containments))
-            .saturating_add(vector_capacity_bytes(&self.references));
+            .saturating_add(vector_capacity_bytes(&self.references))
+            .saturating_add(vector_capacity_bytes(&self.import_bindings));
         for symbol in &self.symbols {
             bytes = bytes.saturating_add(symbol.modeled_retained_bytes());
         }
@@ -996,6 +1017,12 @@ impl NativeFileFacts {
                         .map_or(0, |owner| usize_to_u64(owner.as_str().len())),
                 )
                 .saturating_add(usize_to_u64(reference.name.capacity()));
+        }
+        for binding in &self.import_bindings {
+            bytes = bytes
+                .saturating_add(usize_to_u64(binding.module_specifier.capacity()))
+                .saturating_add(usize_to_u64(binding.imported_name.capacity()))
+                .saturating_add(usize_to_u64(binding.local_name.capacity()));
         }
         bytes.saturating_add(self.anticipated_output_bytes())
     }
@@ -1021,8 +1048,7 @@ impl NativeFileFacts {
                 .saturating_add(UUID_TEXT_BYTES.saturating_mul(3))
                 .saturating_add(usize_to_u64(reference.name.len()))
                 .saturating_add(usize_to_u64(reference.kind.as_str().len()))
-                .saturating_add(usize_to_u64(EXACT_PROJECT_PROVENANCE.len()))
-                .saturating_add(usize_to_u64(EXACT_PROJECT_PROVENANCE.len()));
+                .saturating_add(MAX_RESOLUTION_PROVENANCE_BYTES.saturating_mul(2));
         }
         for symbol in &self.symbols {
             bytes = bytes.saturating_add(anticipated_document_bytes(
@@ -1054,8 +1080,12 @@ fn persisted_signature(kind: SymbolKind, signature: Option<String>) -> String {
 
 struct NativeSymbolFacts {
     input: SymbolInput,
+    kind: SymbolKind,
     name: String,
     docstring: Option<String>,
+    body_search_text: String,
+    body_search_truncated: bool,
+    declaration_only: bool,
     exported: bool,
     default_export: bool,
     async_symbol: bool,
@@ -1068,6 +1098,7 @@ impl NativeSymbolFacts {
         usize_to_u64(size_of::<Self>())
             .saturating_add(modeled_symbol_input_bytes(&self.input))
             .saturating_add(usize_to_u64(self.name.capacity()))
+            .saturating_add(usize_to_u64(self.body_search_text.capacity()))
             .saturating_add(
                 self.docstring
                     .as_ref()
@@ -1080,9 +1111,31 @@ impl NativeSymbolFacts {
 struct ResolutionCandidate {
     file_id: FileId,
     symbol_id: SymbolId,
+    parent_symbol_id: Option<SymbolId>,
+    kind: SymbolKind,
+    exported: bool,
+    declaration_only: bool,
 }
 
-type ResolutionCandidates = BTreeMap<String, Vec<ResolutionCandidate>>;
+type CandidateMap = BTreeMap<String, Vec<ResolutionCandidate>>;
+type DefaultExportMap = BTreeMap<FileId, Vec<ResolutionCandidate>>;
+type ParentMap = BTreeMap<SymbolId, SymbolId>;
+type ModulePathMap = BTreeMap<String, Vec<FileId>>;
+
+#[derive(Default)]
+struct ModulePathIndex {
+    exact: ModulePathMap,
+    stem: ModulePathMap,
+    directory_index: ModulePathMap,
+}
+
+#[derive(Default)]
+struct ResolutionIndex {
+    candidates: CandidateMap,
+    default_exports: DefaultExportMap,
+    parents: ParentMap,
+    modules: ModulePathIndex,
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ResolutionReport {
@@ -1128,6 +1181,27 @@ struct ResolvedTarget {
     provenance: &'static str,
 }
 
+struct ReferenceResolution {
+    target: Option<ResolvedTarget>,
+    unresolved_provenance: &'static str,
+}
+
+impl ReferenceResolution {
+    fn resolved(target: ResolvedTarget) -> Self {
+        Self {
+            target: Some(target),
+            unresolved_provenance: UNRESOLVED_PROVENANCE,
+        }
+    }
+
+    const fn unresolved(provenance: &'static str) -> Self {
+        Self {
+            target: None,
+            unresolved_provenance: provenance,
+        }
+    }
+}
+
 fn resolve_generation<Cancel>(
     extracted: NativeFactAccumulator,
     maximum_bytes: u64,
@@ -1141,7 +1215,7 @@ where
     }
     let working_limit = maximum_bytes.checked_mul(3).ok_or(StageItemFailure)?;
     let mut budget = ResolveBudget::new(extracted.retained_bytes, working_limit)?;
-    let candidates = build_resolution_candidates(&extracted, &mut budget, &mut cancelled)?;
+    let index = build_resolution_index(&extracted, &mut budget, &mut cancelled)?;
     let diagnostics = extracted.diagnostics;
     let mut report = ResolutionReport {
         diagnostics,
@@ -1151,7 +1225,7 @@ where
     reserve_generation_vectors(&mut facts, &extracted, &mut budget)?;
     {
         let mut output = ResolutionOutput {
-            candidates: &candidates,
+            index: &index,
             facts: &mut facts,
             report: &mut report,
             budget: &mut budget,
@@ -1169,15 +1243,27 @@ where
     Ok((facts, report))
 }
 
-fn build_resolution_candidates<Cancel>(
+fn build_resolution_index<Cancel>(
     extracted: &NativeFactAccumulator,
     budget: &mut ResolveBudget,
     cancelled: &mut Cancel,
-) -> Result<ResolutionCandidates, StageItemFailure>
+) -> Result<ResolutionIndex, StageItemFailure>
 where
     Cancel: FnMut() -> bool,
 {
-    let mut candidates = ResolutionCandidates::new();
+    let mut index = ResolutionIndex::default();
+    for file in &extracted.files {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        index_module_path(&mut index.modules, &file.file, budget)?;
+        for containment in &file.containments {
+            if cancelled() {
+                return Err(StageItemFailure);
+            }
+            insert_parent(&mut index.parents, containment, budget)?;
+        }
+    }
     for file in &extracted.files {
         if cancelled() {
             return Err(StageItemFailure);
@@ -1187,20 +1273,33 @@ where
                 return Err(StageItemFailure);
             }
             if symbol.input.symbol_kind != "import" {
+                let parent_symbol_id = index.parents.get(&symbol.input.symbol_id).cloned();
                 push_candidate(
-                    &mut candidates,
+                    &mut index.candidates,
                     ResolutionCandidateInsertion {
                         key: &symbol.name,
                         symbol,
+                        parent_symbol_id: parent_symbol_id.as_ref(),
                     },
                     budget,
                 )?;
                 if symbol.input.qualified_name != symbol.name {
                     push_candidate(
-                        &mut candidates,
+                        &mut index.candidates,
                         ResolutionCandidateInsertion {
                             key: &symbol.input.qualified_name,
                             symbol,
+                            parent_symbol_id: parent_symbol_id.as_ref(),
+                        },
+                        budget,
+                    )?;
+                }
+                if symbol.default_export {
+                    push_default_export(
+                        &mut index.default_exports,
+                        DefaultExportInsertion {
+                            symbol,
+                            parent_symbol_id: parent_symbol_id.as_ref(),
                         },
                         budget,
                     )?;
@@ -1208,11 +1307,11 @@ where
             }
         }
     }
-    Ok(candidates)
+    Ok(index)
 }
 
 struct ResolutionOutput<'a> {
-    candidates: &'a ResolutionCandidates,
+    index: &'a ResolutionIndex,
     facts: &'a mut GenerationFacts,
     report: &'a mut ResolutionReport,
     budget: &'a mut ResolveBudget,
@@ -1222,6 +1321,16 @@ struct FileDocumentIdentity {
     file_id: FileId,
     path: String,
     language: String,
+}
+
+struct FileResolutionContext<'a> {
+    identity: &'a FileDocumentIdentity,
+    import_bindings: &'a [ExtractedImportBinding],
+}
+
+struct ReferenceAppendRequest<'a, 'b> {
+    context: &'a FileResolutionContext<'b>,
+    reference: ExtractedReference,
 }
 
 impl<'a> ResolutionOutput<'a> {
@@ -1242,6 +1351,7 @@ impl<'a> ResolutionOutput<'a> {
             symbols,
             containments,
             references,
+            import_bindings,
         } = file;
         let identity = FileDocumentIdentity {
             file_id: file.file_id.clone(),
@@ -1279,7 +1389,16 @@ impl<'a> ResolutionOutput<'a> {
             if cancelled() {
                 return Err(StageItemFailure);
             }
-            self.append_reference(&identity.file_id, reference)?;
+            self.append_reference(
+                ReferenceAppendRequest {
+                    context: &FileResolutionContext {
+                        identity: &identity,
+                        import_bindings: &import_bindings,
+                    },
+                    reference,
+                },
+                cancelled,
+            )?;
         }
         for symbol in symbols {
             if cancelled() {
@@ -1291,13 +1410,29 @@ impl<'a> ResolutionOutput<'a> {
         Ok(())
     }
 
-    fn append_reference(
+    fn append_reference<Cancel>(
         &mut self,
-        file_id: &FileId,
-        reference: ExtractedReference,
-    ) -> Result<(), StageItemFailure> {
-        let target = resolve_reference(self.candidates, file_id, &reference.name);
-        if target.is_some() {
+        request: ReferenceAppendRequest<'_, '_>,
+        cancelled: &mut Cancel,
+    ) -> Result<(), StageItemFailure>
+    where
+        Cancel: FnMut() -> bool,
+    {
+        let ReferenceAppendRequest { context, reference } = request;
+        let resolution = resolve_reference(
+            self.index,
+            &ResolutionRequest {
+                file_id: &context.identity.file_id,
+                file_path: &context.identity.path,
+                import_bindings: context.import_bindings,
+                owner: reference.owner.as_ref(),
+                name: &reference.name,
+                kind: reference.kind,
+                span: reference.span,
+            },
+            cancelled,
+        )?;
+        if resolution.target.is_some() {
             self.report.resolved = self
                 .report
                 .resolved
@@ -1310,7 +1445,7 @@ impl<'a> ResolutionOutput<'a> {
                 .checked_add(1)
                 .ok_or(StageItemFailure)?;
         }
-        if let Some(target) = target.as_ref()
+        if let Some(target) = resolution.target.as_ref()
             && let Some(owner) = reference.owner.clone()
             && owner != target.symbol_id
         {
@@ -1322,9 +1457,11 @@ impl<'a> ResolutionOutput<'a> {
                 provenance: target.provenance.to_owned(),
             });
         }
-        self.facts
-            .references
-            .push(reference_input(file_id, reference, target));
+        self.facts.references.push(reference_input(
+            &context.identity.file_id,
+            reference,
+            resolution,
+        ));
         Ok(())
     }
 
@@ -1335,11 +1472,7 @@ impl<'a> ResolutionOutput<'a> {
     ) -> Result<(), StageItemFailure> {
         let document_id = native_document_id("symbol", symbol.input.symbol_id.as_str());
         let symbol_id = symbol.input.symbol_id.clone();
-        let code = if symbol.input.signature.is_empty() {
-            try_clone_text(&symbol.input.qualified_name)?
-        } else {
-            try_clone_text(&symbol.input.signature)?
-        };
+        let code = symbol_document_code(&symbol)?;
         self.facts.documents.push(SearchDocumentInput {
             document_id,
             file_id: Some(identity.file_id.clone()),
@@ -1352,6 +1485,8 @@ impl<'a> ResolutionOutput<'a> {
             natural_text: symbol.docstring.unwrap_or_default(),
             metadata: json!({
                 "async": symbol.async_symbol,
+                "body_search_truncated": symbol.body_search_truncated,
+                "declaration_only": symbol.declaration_only,
                 "default_export": symbol.default_export,
                 "exported": symbol.exported,
                 "name": symbol.name,
@@ -1426,14 +1561,122 @@ fn sum_lengths(
 struct ResolutionCandidateInsertion<'a> {
     key: &'a str,
     symbol: &'a NativeSymbolFacts,
+    parent_symbol_id: Option<&'a SymbolId>,
+}
+
+struct ModulePathInsertion<'a> {
+    key: &'a str,
+    file_id: &'a FileId,
+}
+
+struct DefaultExportInsertion<'a> {
+    symbol: &'a NativeSymbolFacts,
+    parent_symbol_id: Option<&'a SymbolId>,
+}
+
+fn insert_parent(
+    parents: &mut ParentMap,
+    containment: &Containment,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    if let Some(existing) = parents.get(&containment.child) {
+        return if existing == &containment.parent {
+            Ok(())
+        } else {
+            Err(StageItemFailure)
+        };
+    }
+    budget.charge(
+        RESOLUTION_MAP_NODE_ALLOWANCE
+            .saturating_add(usize_to_u64(size_of::<(SymbolId, SymbolId)>()))
+            .saturating_add(usize_to_u64(containment.child.as_str().len()))
+            .saturating_add(usize_to_u64(containment.parent.as_str().len())),
+    )?;
+    parents.insert(containment.child.clone(), containment.parent.clone());
+    Ok(())
+}
+
+fn index_module_path(
+    modules: &mut ModulePathIndex,
+    file: &FileInput,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    push_module_path(
+        &mut modules.exact,
+        ModulePathInsertion {
+            key: &file.normalized_path,
+            file_id: &file.file_id,
+        },
+        budget,
+    )?;
+    let Some(stem) = strip_module_extension(&file.normalized_path) else {
+        return Ok(());
+    };
+    push_module_path(
+        &mut modules.stem,
+        ModulePathInsertion {
+            key: stem,
+            file_id: &file.file_id,
+        },
+        budget,
+    )?;
+    if let Some(directory) = stem.strip_suffix("/index")
+        && !directory.is_empty()
+    {
+        push_module_path(
+            &mut modules.directory_index,
+            ModulePathInsertion {
+                key: directory,
+                file_id: &file.file_id,
+            },
+            budget,
+        )?;
+    }
+    Ok(())
+}
+
+fn strip_module_extension(path: &str) -> Option<&str> {
+    MODULE_EXTENSIONS
+        .iter()
+        .find_map(|extension| path.strip_suffix(extension))
+}
+
+fn push_module_path(
+    paths: &mut ModulePathMap,
+    insertion: ModulePathInsertion<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    let ModulePathInsertion { key, file_id } = insertion;
+    if !paths.contains_key(key) {
+        budget.charge(
+            RESOLUTION_MAP_NODE_ALLOWANCE
+                .saturating_add(usize_to_u64(size_of::<(String, Vec<FileId>)>()))
+                .saturating_add(usize_to_u64(key.len())),
+        )?;
+        paths.insert(try_clone_text(key)?, Vec::new());
+    }
+    let entries = paths.get_mut(key).ok_or(StageItemFailure)?;
+    if entries.iter().any(|candidate| candidate == file_id) {
+        return Ok(());
+    }
+    budget.charge(
+        usize_to_u64(size_of::<FileId>()).saturating_add(usize_to_u64(file_id.as_str().len())),
+    )?;
+    entries.try_reserve_exact(1).map_err(|_| StageItemFailure)?;
+    entries.push(file_id.clone());
+    Ok(())
 }
 
 fn push_candidate(
-    candidates: &mut ResolutionCandidates,
+    candidates: &mut CandidateMap,
     insertion: ResolutionCandidateInsertion<'_>,
     budget: &mut ResolveBudget,
 ) -> Result<(), StageItemFailure> {
-    let ResolutionCandidateInsertion { key, symbol } = insertion;
+    let ResolutionCandidateInsertion {
+        key,
+        symbol,
+        parent_symbol_id,
+    } = insertion;
     if !candidates.contains_key(key) {
         budget.charge(
             RESOLUTION_MAP_NODE_ALLOWANCE
@@ -1446,55 +1689,456 @@ fn push_candidate(
     budget.charge(
         usize_to_u64(size_of::<ResolutionCandidate>())
             .saturating_add(usize_to_u64(symbol.input.file_id.as_str().len()))
-            .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len())),
+            .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len()))
+            .saturating_add(
+                parent_symbol_id.map_or(0, |parent| usize_to_u64(parent.as_str().len())),
+            ),
     )?;
     entries.try_reserve_exact(1).map_err(|_| StageItemFailure)?;
     entries.push(ResolutionCandidate {
         file_id: symbol.input.file_id.clone(),
         symbol_id: symbol.input.symbol_id.clone(),
+        parent_symbol_id: parent_symbol_id.cloned(),
+        kind: symbol.kind,
+        exported: symbol.exported,
+        declaration_only: symbol.declaration_only,
     });
     Ok(())
 }
 
-fn resolve_reference(
-    candidates: &ResolutionCandidates,
-    file_id: &FileId,
-    name: &str,
-) -> Option<ResolvedTarget> {
-    choose_candidate(candidates.get(name).map_or(&[], Vec::as_slice), file_id)
+fn push_default_export(
+    exports: &mut DefaultExportMap,
+    insertion: DefaultExportInsertion<'_>,
+    budget: &mut ResolveBudget,
+) -> Result<(), StageItemFailure> {
+    let DefaultExportInsertion {
+        symbol,
+        parent_symbol_id,
+    } = insertion;
+    if !exports.contains_key(&symbol.input.file_id) {
+        budget.charge(
+            RESOLUTION_MAP_NODE_ALLOWANCE
+                .saturating_add(usize_to_u64(size_of::<(FileId, Vec<ResolutionCandidate>)>()))
+                .saturating_add(usize_to_u64(symbol.input.file_id.as_str().len())),
+        )?;
+        exports.insert(symbol.input.file_id.clone(), Vec::new());
+    }
+    let entries = exports
+        .get_mut(&symbol.input.file_id)
+        .ok_or(StageItemFailure)?;
+    budget.charge(
+        usize_to_u64(size_of::<ResolutionCandidate>())
+            .saturating_add(usize_to_u64(symbol.input.file_id.as_str().len()))
+            .saturating_add(usize_to_u64(symbol.input.symbol_id.as_str().len()))
+            .saturating_add(
+                parent_symbol_id.map_or(0, |parent| usize_to_u64(parent.as_str().len())),
+            ),
+    )?;
+    entries.try_reserve_exact(1).map_err(|_| StageItemFailure)?;
+    entries.push(ResolutionCandidate {
+        file_id: symbol.input.file_id.clone(),
+        symbol_id: symbol.input.symbol_id.clone(),
+        parent_symbol_id: parent_symbol_id.cloned(),
+        kind: symbol.kind,
+        exported: symbol.exported,
+        declaration_only: symbol.declaration_only,
+    });
+    Ok(())
 }
 
-fn choose_candidate(
-    candidates: &[ResolutionCandidate],
-    file_id: &FileId,
-) -> Option<ResolvedTarget> {
-    let mut same_file = candidates
-        .iter()
-        .filter(|candidate| &candidate.file_id == file_id);
-    if let Some(candidate) = same_file.next()
-        && same_file.next().is_none()
+struct ResolutionRequest<'a> {
+    file_id: &'a FileId,
+    file_path: &'a str,
+    import_bindings: &'a [ExtractedImportBinding],
+    owner: Option<&'a SymbolId>,
+    name: &'a str,
+    kind: ReferenceKind,
+    span: SourceSpan,
+}
+
+#[derive(Clone, Copy)]
+enum ImportReferenceSite {
+    Declaration,
+    Usage,
+}
+
+struct ImportResolutionRequest<'a, 'b> {
+    reference: &'a ResolutionRequest<'b>,
+    site: ImportReferenceSite,
+}
+
+fn resolve_reference<Cancel>(
+    index: &ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<ReferenceResolution, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    if request.owner.is_none() && request.kind == ReferenceKind::References {
+        match resolve_import(
+            index,
+            ImportResolutionRequest {
+                reference: request,
+                site: ImportReferenceSite::Declaration,
+            },
+            cancelled,
+        )? {
+            ImportResolution::NotBound => {}
+            ImportResolution::Resolved(target) => {
+                return Ok(ReferenceResolution::resolved(target));
+            }
+            ImportResolution::Unresolved => {
+                return Ok(ReferenceResolution::unresolved(
+                    UNRESOLVED_IMPORT_PROVENANCE,
+                ));
+            }
+        }
+    }
+    if let Some(target) = resolve_lexical(index, request, cancelled)? {
+        return Ok(ReferenceResolution::resolved(target));
+    }
+    match resolve_import(
+        index,
+        ImportResolutionRequest {
+            reference: request,
+            site: ImportReferenceSite::Usage,
+        },
+        cancelled,
+    )? {
+        ImportResolution::NotBound => {}
+        ImportResolution::Resolved(target) => {
+            return Ok(ReferenceResolution::resolved(target));
+        }
+        ImportResolution::Unresolved => {
+            return Ok(ReferenceResolution::unresolved(
+                UNRESOLVED_IMPORT_PROVENANCE,
+            ));
+        }
+    }
+    if let Some(target) = resolve_project(index, request, cancelled)? {
+        return Ok(ReferenceResolution::resolved(target));
+    }
+    Ok(ReferenceResolution::unresolved(UNRESOLVED_PROVENANCE))
+}
+
+fn resolve_lexical<Cancel>(
+    index: &ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let candidates = index
+        .candidates
+        .get(request.name)
+        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let mut scope = request.owner;
+    for _ in 0..=index.parents.len() {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if let Some(candidate) = select_candidate(
+            candidates,
+            |candidate| {
+                is_lexical_candidate(request.kind, candidate)
+                    && &candidate.file_id == request.file_id
+                    && candidate.parent_symbol_id.as_ref() == scope
+            },
+            cancelled,
+        )? {
+            let (confidence, provenance) = if candidate.parent_symbol_id.is_some() {
+                (EXACT_LEXICAL_CONFIDENCE, EXACT_LEXICAL_PROVENANCE)
+            } else {
+                (EXACT_SAME_FILE_CONFIDENCE, EXACT_SAME_FILE_PROVENANCE)
+            };
+            return Ok(Some(ResolvedTarget {
+                symbol_id: candidate.symbol_id.clone(),
+                confidence,
+                provenance,
+            }));
+        }
+        let Some(symbol_id) = scope else {
+            return Ok(None);
+        };
+        scope = index.parents.get(symbol_id);
+    }
+    Ok(None)
+}
+
+fn is_lexical_candidate(reference_kind: ReferenceKind, candidate: &ResolutionCandidate) -> bool {
+    reference_kind == ReferenceKind::FieldAccess
+        || !matches!(
+            candidate.kind,
+            SymbolKind::Method | SymbolKind::Property | SymbolKind::Field | SymbolKind::EnumMember
+        )
+}
+
+enum ImportResolution {
+    NotBound,
+    Resolved(ResolvedTarget),
+    Unresolved,
+}
+
+fn resolve_import<Cancel>(
+    index: &ResolutionIndex,
+    input: ImportResolutionRequest<'_, '_>,
+    cancelled: &mut Cancel,
+) -> Result<ImportResolution, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let ImportResolutionRequest { reference, site } = input;
+    let mut matched: Option<(&ExtractedImportBinding, &str)> = None;
+    for binding in reference.import_bindings {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        let imported_name = match site {
+            ImportReferenceSite::Declaration => {
+                binding_matches_declaration_site(binding, reference)
+                    .then_some(binding.imported_name.as_str())
+            }
+            ImportReferenceSite::Usage => runtime_binding_target_name(binding, reference.name),
+        };
+        let Some(imported_name) = imported_name else {
+            continue;
+        };
+        if matched.is_some() {
+            return Ok(ImportResolution::Unresolved);
+        }
+        matched = Some((binding, imported_name));
+    }
+    let Some((binding, imported_name)) = matched else {
+        return Ok(ImportResolution::NotBound);
+    };
+    if imported_name.is_empty() {
+        return Ok(ImportResolution::Unresolved);
+    }
+    let Some(module_file_id) = resolve_module_file(
+        &index.modules,
+        reference.file_path,
+        &binding.module_specifier,
+    ) else {
+        return Ok(ImportResolution::Unresolved);
+    };
+    let candidates = if binding.kind == ImportBindingKind::Default || imported_name == "default" {
+        index
+            .default_exports
+            .get(module_file_id)
+            .map_or(&[] as &[ResolutionCandidate], Vec::as_slice)
+    } else {
+        index
+            .candidates
+            .get(imported_name)
+            .map_or(&[] as &[ResolutionCandidate], Vec::as_slice)
+    };
+    let Some(candidate) = select_candidate(
+        candidates,
+        |candidate| &candidate.file_id == module_file_id && candidate.exported,
+        cancelled,
+    )?
+    else {
+        return Ok(ImportResolution::Unresolved);
+    };
+    Ok(ImportResolution::Resolved(ResolvedTarget {
+        symbol_id: candidate.symbol_id.clone(),
+        confidence: IMPORT_BINDING_CONFIDENCE,
+        provenance: IMPORT_BINDING_PROVENANCE,
+    }))
+}
+
+fn binding_matches_declaration_site(
+    binding: &ExtractedImportBinding,
+    request: &ResolutionRequest<'_>,
+) -> bool {
+    binding.kind == ImportBindingKind::Named
+        && binding.span == request.span
+        && binding.imported_name == request.name
+}
+
+fn runtime_binding_target_name<'a>(
+    binding: &'a ExtractedImportBinding,
+    reference_name: &'a str,
+) -> Option<&'a str> {
+    match binding.kind {
+        ImportBindingKind::Default | ImportBindingKind::Named => {
+            (binding.local_name == reference_name).then_some(binding.imported_name.as_str())
+        }
+        ImportBindingKind::Namespace => {
+            if binding.local_name == reference_name {
+                return Some("");
+            }
+            reference_name
+                .strip_prefix(&binding.local_name)
+                .and_then(|suffix| suffix.strip_prefix('.'))
+        }
+    }
+}
+
+fn resolve_module_file<'a>(
+    modules: &'a ModulePathIndex,
+    importing_path: &str,
+    specifier: &str,
+) -> Option<&'a FileId> {
+    let normalized = normalize_relative_module_path(importing_path, specifier)?;
+    match module_file_match(modules.exact.get(&normalized)) {
+        ModuleFileMatch::Unique(file_id) => return Some(file_id),
+        ModuleFileMatch::Ambiguous => return None,
+        ModuleFileMatch::Missing => {}
+    }
+    let stem = strip_module_extension(&normalized).unwrap_or(&normalized);
+    match module_file_match(modules.stem.get(stem)) {
+        ModuleFileMatch::Unique(file_id) => Some(file_id),
+        ModuleFileMatch::Ambiguous => None,
+        ModuleFileMatch::Missing => {
+            match module_file_match(modules.directory_index.get(&normalized)) {
+                ModuleFileMatch::Unique(file_id) => Some(file_id),
+                ModuleFileMatch::Missing | ModuleFileMatch::Ambiguous => None,
+            }
+        }
+    }
+}
+
+enum ModuleFileMatch<'a> {
+    Missing,
+    Unique(&'a FileId),
+    Ambiguous,
+}
+
+fn module_file_match(candidates: Option<&Vec<FileId>>) -> ModuleFileMatch<'_> {
+    match candidates.map(Vec::as_slice).unwrap_or_default() {
+        [] => ModuleFileMatch::Missing,
+        [file_id] => ModuleFileMatch::Unique(file_id),
+        [_, _, ..] => ModuleFileMatch::Ambiguous,
+    }
+}
+
+fn normalize_relative_module_path(importing_path: &str, specifier: &str) -> Option<String> {
+    if !(matches!(specifier, "." | "..")
+        || specifier.starts_with("./")
+        || specifier.starts_with("../"))
+        || specifier.contains(['\\', '\0'])
     {
-        return Some(ResolvedTarget {
-            symbol_id: candidate.symbol_id.clone(),
-            confidence: EXACT_SAME_FILE_CONFIDENCE,
-            provenance: EXACT_SAME_FILE_PROVENANCE,
-        });
+        return None;
     }
-    if candidates.len() == 1 {
-        return Some(ResolvedTarget {
-            symbol_id: candidates[0].symbol_id.clone(),
-            confidence: EXACT_PROJECT_CONFIDENCE,
-            provenance: EXACT_PROJECT_PROVENANCE,
-        });
+    let directory = importing_path
+        .rsplit_once('/')
+        .map_or("", |(directory, _)| directory);
+    let component_capacity = directory
+        .bytes()
+        .filter(|byte| *byte == b'/')
+        .count()
+        .checked_add(specifier.bytes().filter(|byte| *byte == b'/').count())?
+        .checked_add(2)?;
+    let mut components = Vec::new();
+    components.try_reserve(component_capacity).ok()?;
+    components.extend(
+        directory
+            .split('/')
+            .filter(|component| !component.is_empty()),
+    );
+    for component in specifier.split('/') {
+        match component {
+            "" | "." => {}
+            ".." => {
+                components.pop()?;
+            }
+            value => components.push(value),
+        }
     }
-    None
+    if components.is_empty() {
+        return None;
+    }
+    let output_bytes = components
+        .iter()
+        .try_fold(components.len().saturating_sub(1), |total, component| {
+            total.checked_add(component.len())
+        })?;
+    let mut normalized = String::new();
+    normalized.try_reserve(output_bytes).ok()?;
+    for (index, component) in components.into_iter().enumerate() {
+        if index != 0 {
+            normalized.push('/');
+        }
+        normalized.push_str(component);
+    }
+    Some(normalized)
+}
+
+fn resolve_project<Cancel>(
+    index: &ResolutionIndex,
+    request: &ResolutionRequest<'_>,
+    cancelled: &mut Cancel,
+) -> Result<Option<ResolvedTarget>, StageItemFailure>
+where
+    Cancel: FnMut() -> bool,
+{
+    let candidates = index
+        .candidates
+        .get(request.name)
+        .map_or(&[] as &[ResolutionCandidate], Vec::as_slice);
+    let Some(candidate) = select_candidate(
+        candidates,
+        |candidate| &candidate.file_id != request.file_id && candidate.exported,
+        cancelled,
+    )?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(ResolvedTarget {
+        symbol_id: candidate.symbol_id.clone(),
+        confidence: EXACT_PROJECT_CONFIDENCE,
+        provenance: EXACT_PROJECT_PROVENANCE,
+    }))
+}
+
+fn select_candidate<'a, Eligible, Cancel>(
+    candidates: &'a [ResolutionCandidate],
+    mut eligible: Eligible,
+    cancelled: &mut Cancel,
+) -> Result<Option<&'a ResolutionCandidate>, StageItemFailure>
+where
+    Eligible: FnMut(&ResolutionCandidate) -> bool,
+    Cancel: FnMut() -> bool,
+{
+    let mut sole = None;
+    let mut total = 0_usize;
+    let mut implementation = None;
+    let mut implementations = 0_usize;
+    for candidate in candidates {
+        if cancelled() {
+            return Err(StageItemFailure);
+        }
+        if !eligible(candidate) {
+            continue;
+        }
+        total = total.saturating_add(1);
+        sole = Some(candidate);
+        if !candidate.declaration_only {
+            implementations = implementations.saturating_add(1);
+            implementation = Some(candidate);
+        }
+    }
+    if implementations == 1 {
+        Ok(implementation)
+    } else if implementations == 0 && total == 1 {
+        Ok(sole)
+    } else {
+        Ok(None)
+    }
 }
 
 fn reference_input(
     file_id: &FileId,
     reference: ExtractedReference,
-    target: Option<ResolvedTarget>,
+    resolution: ReferenceResolution,
 ) -> ReferenceInput {
+    let ReferenceResolution {
+        target,
+        unresolved_provenance,
+    } = resolution;
     let (target_symbol_id, confidence, resolution_provenance) = match target {
         Some(target) => (
             Some(target.symbol_id),
@@ -1504,7 +2148,7 @@ fn reference_input(
         None => (
             None,
             UNRESOLVED_CONFIDENCE,
-            UNRESOLVED_PROVENANCE.to_owned(),
+            unresolved_provenance.to_owned(),
         ),
     };
     ReferenceInput {
@@ -1579,11 +2223,14 @@ fn anticipated_document_bytes(
     path_bytes: u64,
     language_bytes: u64,
 ) -> u64 {
-    let code_bytes = if symbol.input.signature.is_empty() {
+    let base_code_bytes = if symbol.input.signature.is_empty() {
         usize_to_u64(symbol.input.qualified_name.len())
     } else {
         usize_to_u64(symbol.input.signature.len())
     };
+    let code_bytes = base_code_bytes
+        .saturating_add(usize_to_u64(symbol.body_search_text.len()))
+        .saturating_add(u64::from(!symbol.body_search_text.is_empty()));
     usize_to_u64(size_of::<SearchDocumentInput>())
         .saturating_add(UUID_TEXT_BYTES.saturating_mul(3))
         .saturating_add(path_bytes)
@@ -1598,6 +2245,28 @@ fn anticipated_document_bytes(
         )
         .saturating_add(usize_to_u64(symbol.name.capacity()))
         .saturating_add(DOCUMENT_METADATA_FIXED_ALLOWANCE)
+}
+
+fn symbol_document_code(symbol: &NativeSymbolFacts) -> Result<String, StageItemFailure> {
+    let base = if symbol.input.signature.is_empty() {
+        &symbol.input.qualified_name
+    } else {
+        &symbol.input.signature
+    };
+    let separator = usize::from(!base.is_empty() && !symbol.body_search_text.is_empty());
+    let capacity = base
+        .len()
+        .checked_add(separator)
+        .and_then(|length| length.checked_add(symbol.body_search_text.len()))
+        .ok_or(StageItemFailure)?;
+    let mut code = String::new();
+    code.try_reserve(capacity).map_err(|_| StageItemFailure)?;
+    code.push_str(base);
+    if separator != 0 {
+        code.push(' ');
+    }
+    code.push_str(&symbol.body_search_text);
+    Ok(code)
 }
 
 fn try_clone_text(value: &str) -> Result<String, StageItemFailure> {
@@ -1713,6 +2382,101 @@ mod tests {
     const MANY_SYMBOL_COUNT: usize = 256;
     const CANCELLATION_SYMBOL_COUNT: usize = 512;
     const CANCEL_AFTER_POLLS: u64 = 16;
+    const INNER_CANCELLATION_CANDIDATE_COUNT: u8 = 64;
+    const INNER_CANCEL_AFTER_POLLS: u64 = 8;
+    const TEST_FILE_ID_BYTE: u8 = 0x21;
+    const TEST_SYMBOL_ID_BYTE: u8 = 0x42;
+
+    struct ModuleResolverFacts<'a> {
+        facts: &'a CanonicalGenerationFacts,
+    }
+
+    impl ModuleResolverFacts<'_> {
+        fn symbol(&self, path: &str, qualified_name: &str) -> SymbolId {
+            let file_id = self
+                .facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == path)
+                .map(|file| &file.file_id)
+                .unwrap_or_else(|| panic!("missing module resolver file {path}"));
+            let mut symbols = self.facts.symbols().iter().filter(|symbol| {
+                &symbol.file_id == file_id && symbol.qualified_name == qualified_name
+            });
+            let symbol = symbols
+                .next()
+                .unwrap_or_else(|| panic!("missing module symbol {path}:{qualified_name}"));
+            assert!(symbols.next().is_none(), "{path}:{qualified_name}");
+            symbol.symbol_id.clone()
+        }
+
+        fn parse_implementation(&self) -> SymbolId {
+            self.facts
+                .documents()
+                .iter()
+                .find(|document| {
+                    document.path() == "src/api.ts"
+                        && document.qualified_name() == "parse"
+                        && document
+                            .metadata_json()
+                            .contains("\"declaration_only\":false")
+                })
+                .and_then(|document| document.symbol_id().cloned())
+                .unwrap_or_else(|| panic!("parse implementation document was missing"))
+        }
+
+        fn reference(&self, owner: &SymbolId, name: &str) -> &ReferenceInput {
+            self.facts
+                .references()
+                .iter()
+                .find(|reference| {
+                    reference.owner_symbol_id.as_ref() == Some(owner)
+                        && reference.reference_name == name
+                })
+                .unwrap_or_else(|| panic!("missing reference {name}"))
+        }
+
+        fn import_declaration_reference(&self, path: &str, name: &str) -> &ReferenceInput {
+            let file_id = self
+                .facts
+                .files()
+                .iter()
+                .find(|file| file.normalized_path == path)
+                .map(|file| &file.file_id)
+                .unwrap_or_else(|| panic!("missing import declaration file {path}"));
+            let mut references = self.facts.references().iter().filter(|reference| {
+                &reference.file_id == file_id
+                    && reference.owner_symbol_id.is_none()
+                    && reference.reference_name == name
+                    && reference.reference_kind == ReferenceKind::References.as_str()
+            });
+            let reference = references
+                .next()
+                .unwrap_or_else(|| panic!("missing import declaration reference {path}:{name}"));
+            assert!(references.next().is_none(), "{path}:{name}");
+            reference
+        }
+
+        fn assert_use_document_terms(&self, owner: &SymbolId) {
+            let document = self
+                .facts
+                .documents()
+                .iter()
+                .find(|document| document.symbol_id() == Some(owner))
+                .unwrap_or_else(|| panic!("use search document was missing"));
+            for term in [
+                "DefaultClient",
+                "RemoteService",
+                "parse",
+                "api",
+                "make",
+                "external",
+            ] {
+                assert!(document.code().contains(term), "{term}");
+            }
+            assert!(!document.code().contains("'value'"));
+        }
+    }
 
     fn config(workers: usize) -> NativePipelineConfig {
         config_with_generation_limit(workers, TEST_GENERATION_BYTES)
@@ -1770,6 +2534,74 @@ mod tests {
             fs::write(
                 root.join("src/view.test.tsx"),
                 "export function View(): JSX.Element { return <Service />; }\n",
+            )
+            .is_ok()
+        );
+    }
+
+    fn write_module_project(root: &std::path::Path) {
+        assert!(fs::create_dir(root.join(".git")).is_ok());
+        assert!(fs::create_dir_all(root.join("src/foo")).is_ok());
+        assert!(
+            fs::write(
+                root.join("src/api.ts"),
+                "export default class DefaultClient {}\n\
+                 export function Service(): void {}\n\
+                 export function parse(value: string): string;\n\
+                 export function parse(value: number): string;\n\
+                 export function parse(value: unknown): string { return String(value); }\n\
+                 export function make(): void {}\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join("src/other.ts"),
+                "export function external(): void {}\n\
+                 export function Service(): void {}\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join("src/consumer.ts"),
+                "import DefaultClient, { Service as RemoteService, parse } from './api';\n\
+                 import * as api from './api';\n\
+                 import { external } from 'package';\n\
+                 function Service(): void {}\n\
+                 export function use(): void {\n\
+                   new DefaultClient();\n\
+                   RemoteService();\n\
+                   parse('value');\n\
+                   api.make();\n\
+                   external();\n\
+                 }\n\
+                 export function shadow(): void {\n\
+                   const RemoteService = (): void => {};\n\
+                   RemoteService();\n\
+                 }\n",
+            )
+            .is_ok()
+        );
+        assert!(
+            fs::write(
+                root.join("src/members.ts"),
+                "export function run(): void {}\n\
+                 export class Worker {\n\
+                   run(): void {}\n\
+                   execute(): void { run(); }\n\
+                 }\n",
+            )
+            .is_ok()
+        );
+        for path in ["src/foo.ts", "src/foo.js", "src/foo/index.ts"] {
+            assert!(fs::write(root.join(path), "export function choose(): void {}\n",).is_ok());
+        }
+        assert!(
+            fs::write(
+                root.join("src/ambiguous.ts"),
+                "import { choose } from './foo';\n\
+                 export function useAmbiguous(): void { choose(); }\n",
             )
             .is_ok()
         );
@@ -1886,6 +2718,118 @@ mod tests {
         let debug = format!("{serial:?}");
         assert!(!debug.contains("Service"));
         assert!(!debug.contains("src/service.ts"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn module_aliases_lexical_shadowing_and_overloads_resolve_deterministically() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create module resolver fixture: {error}"));
+        write_module_project(directory.path());
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let facts = ModuleResolverFacts {
+            facts: generation.facts(),
+        };
+        let use_id = facts.symbol("src/consumer.ts", "use");
+        let shadow_id = facts.symbol("src/consumer.ts", "shadow");
+        let default_id = facts.symbol("src/api.ts", "DefaultClient");
+        let service_id = facts.symbol("src/api.ts", "Service");
+        let make_id = facts.symbol("src/api.ts", "make");
+        let shadow_service_id = facts.symbol("src/consumer.ts", "shadow::RemoteService");
+        let parse_implementation = facts.parse_implementation();
+        let import_service = facts.import_declaration_reference("src/consumer.ts", "Service");
+
+        assert_eq!(import_service.target_symbol_id.as_ref(), Some(&service_id));
+        assert_eq!(
+            import_service.resolution_provenance,
+            IMPORT_BINDING_PROVENANCE
+        );
+
+        for (name, target) in [
+            ("DefaultClient", default_id),
+            ("RemoteService", service_id),
+            ("parse", parse_implementation),
+            ("api.make", make_id),
+        ] {
+            let reference = facts.reference(&use_id, name);
+            assert_eq!(reference.target_symbol_id.as_ref(), Some(&target));
+            assert_eq!(reference.resolution_provenance, IMPORT_BINDING_PROVENANCE);
+        }
+        let package_reference = facts.reference(&use_id, "external");
+        assert!(package_reference.target_symbol_id.is_none());
+        assert_eq!(
+            package_reference.resolution_provenance,
+            UNRESOLVED_IMPORT_PROVENANCE
+        );
+        let shadow_reference = facts.reference(&shadow_id, "RemoteService");
+        assert_eq!(
+            shadow_reference.target_symbol_id.as_ref(),
+            Some(&shadow_service_id)
+        );
+        assert_eq!(
+            shadow_reference.resolution_provenance,
+            EXACT_LEXICAL_PROVENANCE
+        );
+        facts.assert_use_document_terms(&use_id);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ambiguous_module_stems_do_not_fall_through_to_directory_indexes() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create module resolver fixture: {error}"));
+        write_module_project(directory.path());
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let facts = ModuleResolverFacts {
+            facts: generation.facts(),
+        };
+        let owner = facts.symbol("src/ambiguous.ts", "useAmbiguous");
+        let reference = facts.reference(&owner, "choose");
+        assert!(reference.target_symbol_id.is_none());
+        assert_eq!(
+            reference.resolution_provenance,
+            UNRESOLVED_IMPORT_PROVENANCE
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn bare_calls_do_not_resolve_to_sibling_class_methods() {
+        let directory = tempdir()
+            .unwrap_or_else(|error| panic!("could not create module resolver fixture: {error}"));
+        write_module_project(directory.path());
+        let generation = build(directory.path(), PARALLEL_WORKERS).await;
+        let facts = ModuleResolverFacts {
+            facts: generation.facts(),
+        };
+        let execute = facts.symbol("src/members.ts", "Worker::execute");
+        let outer_run = facts.symbol("src/members.ts", "run");
+        let reference = facts.reference(&execute, "run");
+        assert_eq!(reference.target_symbol_id.as_ref(), Some(&outer_run));
+        assert_eq!(reference.resolution_provenance, EXACT_SAME_FILE_PROVENANCE);
+    }
+
+    #[test]
+    fn relative_module_paths_are_project_bounded_and_declaration_extensions_are_atomic() {
+        assert_eq!(
+            normalize_relative_module_path("src/nested/consumer.ts", "../api"),
+            Some("src/api".to_owned())
+        );
+        assert_eq!(
+            normalize_relative_module_path("consumer.ts", "./api"),
+            Some("api".to_owned())
+        );
+        assert_eq!(
+            normalize_relative_module_path("consumer.ts", "../api"),
+            None
+        );
+        assert_eq!(
+            normalize_relative_module_path("src/nested/consumer.ts", ".."),
+            Some("src".to_owned())
+        );
+        assert_eq!(
+            normalize_relative_module_path("src/consumer.ts", "package"),
+            None
+        );
+        assert_eq!(strip_module_extension("src/api.d.ts"), Some("src/api"));
+        assert_eq!(strip_module_extension("src/api.d.mts"), Some("src/api"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2045,6 +2989,33 @@ mod tests {
         });
         assert!(matches!(result, Err(StageItemFailure)));
         assert_eq!(polls.get(), CANCEL_AFTER_POLLS);
+    }
+
+    #[test]
+    fn candidate_selection_polls_cancellation_within_one_reference() {
+        let file_id = FileId::from_uuid_v8([TEST_FILE_ID_BYTE; DOCUMENT_UUID_BYTES]);
+        let candidates = (0..INNER_CANCELLATION_CANDIDATE_COUNT)
+            .map(|index| {
+                let mut symbol_bytes = [TEST_SYMBOL_ID_BYTE; DOCUMENT_UUID_BYTES];
+                symbol_bytes[DOCUMENT_UUID_BYTES - 1] = index;
+                ResolutionCandidate {
+                    file_id: file_id.clone(),
+                    symbol_id: SymbolId::from_uuid_v8(symbol_bytes),
+                    parent_symbol_id: None,
+                    kind: SymbolKind::Function,
+                    exported: true,
+                    declaration_only: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let polls = Cell::new(0_u64);
+        let result = select_candidate(&candidates, |_| true, &mut || {
+            let next = polls.get().saturating_add(1);
+            polls.set(next);
+            next >= INNER_CANCEL_AFTER_POLLS
+        });
+        assert!(matches!(result, Err(StageItemFailure)));
+        assert_eq!(polls.get(), INNER_CANCEL_AFTER_POLLS);
     }
 
     #[test]

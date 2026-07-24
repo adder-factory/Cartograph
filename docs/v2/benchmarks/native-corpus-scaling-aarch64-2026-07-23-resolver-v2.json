@@ -1,0 +1,382 @@
+{
+  "architecture": "aarch64",
+  "operating_system": "macos",
+  "logical_cpus": 14,
+  "rust_toolchain": "1.96.1",
+  "database_image": "paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d",
+  "corpus_name": "cartograph-v1-real-typescript-v1",
+  "corpus_files": 28,
+  "corpus_source_bytes": 1052338,
+  "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+  "bm25_query": "detectSecretsHandling",
+  "rss_sample_interval_millis": 25,
+  "warmup_samples": 1,
+  "measured_samples": 3,
+  "workers": [
+    {
+      "workers": 1,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10747904,
+      "peak_rss_bytes": 71598080,
+      "peak_rss_delta_bytes": 60850176,
+      "rss_successful_samples": 722,
+      "native_p50_nanos": 1275567375,
+      "native_p95_nanos": 1282880584,
+      "supervised_pipeline_p50_nanos": 6107168458,
+      "supervised_pipeline_p95_nanos": 6182937583,
+      "copy_p50_nanos": 4807407750,
+      "copy_p95_nanos": 4883688750,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 1282880584,
+          "supervised_pipeline_nanos": 6086913875,
+          "copy_nanos": 4778971792
+        },
+        {
+          "sample": 1,
+          "native_nanos": 1275567375,
+          "supervised_pipeline_nanos": 6107168458,
+          "copy_nanos": 4807407750
+        },
+        {
+          "sample": 2,
+          "native_nanos": 1274949750,
+          "supervised_pipeline_nanos": 6182937583,
+          "copy_nanos": 4883688750
+        }
+      ]
+    },
+    {
+      "workers": 2,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10649600,
+      "peak_rss_bytes": 74203136,
+      "peak_rss_delta_bytes": 63553536,
+      "rss_successful_samples": 683,
+      "native_p50_nanos": 870543958,
+      "native_p95_nanos": 880800375,
+      "supervised_pipeline_p50_nanos": 5723640959,
+      "supervised_pipeline_p95_nanos": 5750470791,
+      "copy_p50_nanos": 4827240000,
+      "copy_p95_nanos": 4857997500,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 870543958,
+          "supervised_pipeline_nanos": 5723640959,
+          "copy_nanos": 4827240000
+        },
+        {
+          "sample": 1,
+          "native_nanos": 880800375,
+          "supervised_pipeline_nanos": 5667050042,
+          "copy_nanos": 4767088250
+        },
+        {
+          "sample": 2,
+          "native_nanos": 866919125,
+          "supervised_pipeline_nanos": 5750470791,
+          "copy_nanos": 4857997500
+        }
+      ]
+    },
+    {
+      "workers": 4,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10698752,
+      "peak_rss_bytes": 77381632,
+      "peak_rss_delta_bytes": 66682880,
+      "rss_successful_samples": 652,
+      "native_p50_nanos": 690002458,
+      "native_p95_nanos": 693073666,
+      "supervised_pipeline_p50_nanos": 5525365917,
+      "supervised_pipeline_p95_nanos": 5532003084,
+      "copy_p50_nanos": 4809561875,
+      "copy_p95_nanos": 4814942500,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 690002458,
+          "supervised_pipeline_nanos": 5514117125,
+          "copy_nanos": 4798520125
+        },
+        {
+          "sample": 1,
+          "native_nanos": 687160875,
+          "supervised_pipeline_nanos": 5525365917,
+          "copy_nanos": 4809561875
+        },
+        {
+          "sample": 2,
+          "native_nanos": 693073666,
+          "supervised_pipeline_nanos": 5532003084,
+          "copy_nanos": 4814942500
+        }
+      ]
+    },
+    {
+      "workers": 8,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10682368,
+      "peak_rss_bytes": 81362944,
+      "peak_rss_delta_bytes": 70680576,
+      "rss_successful_samples": 659,
+      "native_p50_nanos": 713991875,
+      "native_p95_nanos": 725513541,
+      "supervised_pipeline_p50_nanos": 5555959291,
+      "supervised_pipeline_p95_nanos": 5567613958,
+      "copy_p50_nanos": 4828163167,
+      "copy_p95_nanos": 4828848166,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 703823167,
+          "supervised_pipeline_nanos": 5555959291,
+          "copy_nanos": 4828163167
+        },
+        {
+          "sample": 1,
+          "native_nanos": 725513541,
+          "supervised_pipeline_nanos": 5537827750,
+          "copy_nanos": 4792224833
+        },
+        {
+          "sample": 2,
+          "native_nanos": 713991875,
+          "supervised_pipeline_nanos": 5567613958,
+          "copy_nanos": 4828848166
+        }
+      ]
+    },
+    {
+      "workers": 16,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10665984,
+      "peak_rss_bytes": 95092736,
+      "peak_rss_delta_bytes": 84426752,
+      "rss_successful_samples": 658,
+      "native_p50_nanos": 919548000,
+      "native_p95_nanos": 956641459,
+      "supervised_pipeline_p50_nanos": 5772218291,
+      "supervised_pipeline_p95_nanos": 5813022125,
+      "copy_p50_nanos": 4832573084,
+      "copy_p95_nanos": 4835983125,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 911294000,
+          "supervised_pipeline_nanos": 5772218291,
+          "copy_nanos": 4835983125
+        },
+        {
+          "sample": 1,
+          "native_nanos": 919548000,
+          "supervised_pipeline_nanos": 5768959292,
+          "copy_nanos": 4825479458
+        },
+        {
+          "sample": 2,
+          "native_nanos": 956641459,
+          "supervised_pipeline_nanos": 5813022125,
+          "copy_nanos": 4832573084
+        }
+      ]
+    }
+  ]
+}

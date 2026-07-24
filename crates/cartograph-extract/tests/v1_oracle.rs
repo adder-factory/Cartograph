@@ -1,8 +1,9 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cartograph_domain::{FileParseStatus, ReferenceKind, SourceLanguage, SymbolKind};
 use cartograph_extract::{
-    ExtractError, ExtractedFile, NativeExtractor, SnapshotError, SourceLimits, SourceSnapshot,
+    ExtractError, ExtractedFile, ImportBindingKind, NativeExtractor, SnapshotError, SourceLimits,
+    SourceSnapshot,
 };
 use serde::Deserialize;
 
@@ -11,6 +12,8 @@ const JAVASCRIPT_SOURCE: &str = include_str!("fixtures/v1_1_33/worker.js");
 const TSX_SOURCE: &str = include_str!("fixtures/v1_1_33/view.tsx");
 const JSX_SOURCE: &str = include_str!("fixtures/v1_1_33/card.jsx");
 const EXPECTED: &str = include_str!("fixtures/v1_1_33/expected.json");
+const BODY_SEARCH_CALL_COUNT: usize = 1_200;
+const BODY_SEARCH_MAX_BYTES: usize = 16 * 1024;
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct Oracle {
@@ -240,6 +243,99 @@ fn typed_function_and_arrow_components_keep_parameter_and_return_types() {
 }
 
 #[test]
+fn import_bindings_preserve_module_imported_and_local_names() {
+    let file = extract(
+        "src/consumer.ts",
+        "import DefaultThing, { Service as S, other } from './service';\n\
+         import * as tools from './tools';\n\
+         import './side-effect';\n",
+    );
+    let bindings = file
+        .import_bindings
+        .iter()
+        .map(|binding| {
+            (
+                binding.kind,
+                binding.module_specifier.as_str(),
+                binding.imported_name.as_str(),
+                binding.local_name.as_str(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        bindings,
+        vec![
+            (
+                ImportBindingKind::Default,
+                "./service",
+                "default",
+                "DefaultThing",
+            ),
+            (ImportBindingKind::Named, "./service", "Service", "S",),
+            (ImportBindingKind::Named, "./service", "other", "other",),
+            (ImportBindingKind::Namespace, "./tools", "*", "tools",),
+        ]
+    );
+}
+
+#[test]
+fn body_search_text_is_bounded_identifier_only_and_literal_safe() {
+    const SECRET: &str = "sk-live-body-secret-should-never-be-indexed";
+    let calls = (0..BODY_SEARCH_CALL_COUNT)
+        .map(|index| format!("client.operation_{index}(value);"))
+        .collect::<String>();
+    let source = format!(
+        "export function execute(client: Client, value: Value): void {{ {calls} throw new Error('{SECRET}'); }}\n"
+    );
+    let file = extract("src/body.ts", &source);
+    let execute = symbol(&file, "execute");
+
+    assert!(execute.body_search_text.contains("client"));
+    assert!(execute.body_search_text.contains("operation_0"));
+    assert!(execute.body_search_text.contains("Error"));
+    assert!(!execute.body_search_text.contains(SECRET));
+    assert!(execute.body_search_text.len() <= BODY_SEARCH_MAX_BYTES);
+    assert!(execute.body_search_truncated);
+}
+
+#[test]
+fn declaration_only_overloads_are_explicit_and_keep_one_implementation() {
+    let file = extract(
+        "src/overloads.ts",
+        "export function parse(value: string): string;\n\
+         export function parse(value: number): string;\n\
+         export function parse(value: unknown): string { return String(value); }\n\
+         export interface Runner { run(value: string): void; }\n",
+    );
+    let parse = file
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.name == "parse")
+        .collect::<Vec<_>>();
+
+    assert_eq!(parse.len(), 3);
+    assert_eq!(
+        parse
+            .iter()
+            .filter(|symbol| symbol.declaration_only)
+            .count(),
+        2
+    );
+    let implementations = parse
+        .iter()
+        .filter(|symbol| !symbol.declaration_only)
+        .collect::<Vec<_>>();
+    assert_eq!(implementations.len(), 1);
+    assert!(implementations[0].body_search_text.contains("String"));
+    assert!(
+        file.symbols
+            .iter()
+            .any(|symbol| symbol.qualified_name == "Runner::run" && symbol.declaration_only)
+    );
+}
+
+#[test]
 fn structural_digest_preserves_semantic_template_and_jsx_whitespace() {
     let template_compact = extract("src/template.ts", "const label = `hello`;\n");
     let template_spaced = extract("src/template.ts", "const label = ` hello `;\n");
@@ -336,6 +432,12 @@ fn cancellation_and_recoverable_syntax_damage_are_explicit() {
 }
 
 fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
+    let projected_ids = file
+        .symbols
+        .iter()
+        .filter(|symbol| !symbol.declaration_only)
+        .map(|symbol| symbol.id.as_str())
+        .collect::<BTreeSet<_>>();
     let names = file
         .symbols
         .iter()
@@ -352,6 +454,7 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
         symbols: file
             .symbols
             .iter()
+            .filter(|symbol| projected_ids.contains(symbol.id.as_str()))
             .map(|symbol| OracleSymbol {
                 kind: symbol.kind.as_str().to_owned(),
                 name: symbol.name.clone(),
@@ -372,6 +475,10 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
         containments: file
             .containments
             .iter()
+            .filter(|edge| {
+                projected_ids.contains(edge.parent.as_str())
+                    && projected_ids.contains(edge.child.as_str())
+            })
             .map(|edge| OracleContainment {
                 parent: name_for(&names, edge.parent.as_str()),
                 child: name_for(&names, edge.child.as_str()),
@@ -381,6 +488,13 @@ fn project_v1_compatible(file: &ExtractedFile) -> OracleCase {
             .references
             .iter()
             .filter(|reference| {
+                if reference
+                    .owner
+                    .as_ref()
+                    .is_some_and(|owner| !projected_ids.contains(owner.as_str()))
+                {
+                    return false;
+                }
                 let owner_kind = reference
                     .owner
                     .as_ref()

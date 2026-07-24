@@ -344,36 +344,57 @@ Tree-sitter runs. Ordered extraction output is converted into separately
 budgeted project facts before the parse reservation is acknowledged; neither
 snapshots nor raw extracted files are retained for the corpus.
 
-The initial resolver chooses only unambiguous exact evidence: a unique
-same-file target or a unique project target. Qualified members remain
-unresolved until receiver/type/import evidence exists, so `console.log` cannot
-silently bind to an unrelated local `log`. Every reference row retains its
-name, lexical owner, span, confidence, and resolution provenance. The canonical
-payload contains file and symbol rows, containment plus every current
-structural edge kind, resolved/unresolved references, and initial BM25
-documents built from paths, names, safe callable declaration signatures, and JSDoc.
-Non-callable initializer values and callable signatures containing default or
-literal expressions are removed before persistence. A live test
+The current resolver chooses only unambiguous structural evidence. It walks the
+reference owner's containment ancestry so the nearest eligible declaration
+wins. Class/interface methods, properties, fields, and enum members are not
+eligible for a bare lexical lookup; an explicit field-access reference can
+still select a member. The resolver selects the sole implementation from an
+overload group and then evaluates explicit ES-module bindings. Relative default, named/aliased, and namespace
+imports resolve only to an exported declaration in the exact normalized target
+module; file stems, directory `index` modules, declaration-file extensions, and
+TypeScript source behind a `.js` specifier are handled fail-closed. An ambiguous
+exact path or stem stops resolution at that precedence level instead of falling
+through to a directory `index`. A named import's declaration-site reference is
+recognized by its exact binding span before lexical lookup, while runtime uses
+still allow an inner lexical declaration to shadow the imported local name. A binding to
+a bare package or ambiguous/missing module remains explicitly unresolved and
+cannot fall through to an unrelated same-name project symbol. Final cross-file
+fallback requires one exported candidate. Receiver/type-directed member
+inference is not attempted; qualified names do not receive project-wide
+final-name fallback, and namespace imports provide the current exact module
+evidence.
+
+Every reference row retains its name, lexical owner, span, confidence, and
+resolution provenance. The canonical payload contains file and symbol rows,
+containment plus every current structural edge kind, resolved/unresolved
+references, and BM25 documents built from paths, names, safe callable
+declaration signatures, JSDoc, and bounded implementation search text. Each
+symbol body contributes at most 16 KiB of identifiers and control-flow keywords;
+the bounded representation preserves a prefix and rolling tail, records
+truncation, and never copies comments or literal values. Callable signatures
+containing defaults/literals still fall back to the qualified name. A live test
 executes this path through supervised five-table COPY, publication, and
 ParadeDB search.
 
 This is a bounded in-memory generation, not streaming resolution: a separate
 hard cap accounts retained project facts and anticipated documents. Resolve
 charges candidate/index/output allocation against a three-times envelope;
+file loops, containment ancestry, import bindings, and each candidate scan poll
+the supervisor cancellation probe and fail the stage immediately when it fires.
 canonical validation iteratively and cooperatively measures actual outer-vector
 and JSON-array capacities, then polls each fact, map conversion, and relation
 build under a four-times working-set envelope. Input/output byte measurements
 are carried in the stage report so Tokio workers never rescan the corpus.
-Exceeding either fails the generation. The first measured real-corpus gate
-retained an 8.1 MiB canonical generation, charged 56.6 MiB during resolve and
-46.1 MiB during validation, and peaked at 71.30 MiB process RSS at its
-four-worker scheduling knee. That corpus does not justify partitioned/spilled
+Exceeding either fails the generation. The resolver-v2 real-corpus gate retained
+8,473,292 bytes in the canonical generation, charged 61,210,798 bytes during
+resolve and 47,754,838 bytes during validation, and peaked at 73.80 MiB process
+RSS at its four-worker scheduling knee. That corpus does not justify partitioned/spilled
 resolution yet;
 larger-project evidence remains required. Tree-sitter's C allocator is not
 constrained by Rust accounting, so process RSS remains a release measurement.
-Git tracked files newly covered by ignore rules,
-module/import aliases, symbol-body search text, and embedded-repository parity
-also remain explicit follow-ups.
+Git tracked files newly covered by ignore rules, re-exports/path aliases,
+receiver/type-directed members, CommonJS packages, and embedded-repository
+parity remain explicit follow-ups.
 
 `GenerationContents` can independently attach `PrepareGenerationMetrics`. That
 observer measures only the five-table PostgreSQL COPY stream, including bounded
@@ -399,8 +420,9 @@ at every worker count.
 The follow-up [native real-corpus matrix](benchmarks/NATIVE-CORPUS-SCALING.md)
 kept identical logical output across the same worker counts but reached its
 scheduling knee at four workers for 28 files / 1.05 MiB: native p50 was 573.75
-ms at four, 571.45 ms at eight, and 763.17 ms at 16, while peak RSS rose from
-71.30 to 87.08 MiB.
+ms at four in the original baseline. The resolver-v2 contract measures 690.00
+ms at four, 713.99 ms at eight, and 919.55 ms at 16, while peak RSS rises from
+73.80 to 90.69 MiB.
 The evidence supports a proposed corpus-aware selector: small projects should
 use at most four workers, 16 remains the upper bound for large queues, one
 queued envelope per worker is retained, and the supervisor byte budget remains

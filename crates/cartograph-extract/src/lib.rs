@@ -15,8 +15,8 @@ pub use discovery::{
     SourceDiscoveryOptions,
 };
 pub use model::{
-    Containment, DiagnosticCode, ExtractedFile, ExtractedReference, ExtractedSymbol,
-    ExtractionDiagnostic,
+    Containment, DiagnosticCode, ExtractedFile, ExtractedImportBinding, ExtractedReference,
+    ExtractedSymbol, ExtractionDiagnostic, ImportBindingKind,
 };
 pub use native::{ExtractError, NativeExtractor};
 pub use reader::{SourceReadError, SourceReadOptions, SourceRoot};

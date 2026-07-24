@@ -1,11 +1,11 @@
 use cartograph_domain::{ReferenceKind, SymbolKind};
 use tree_sitter::Node;
 
-use crate::ExtractError;
+use crate::{ExtractError, ExtractedImportBinding, ImportBindingKind};
 
 use super::{
     ExtractionBuilder, PendingReference, PendingSymbol, references,
-    syntax::{descendants, export_flags, named_children, visibility},
+    syntax::{descendants, export_flags, named_children, span_for, visibility},
 };
 
 pub(super) fn visit_import(
@@ -22,6 +22,8 @@ pub(super) fn visit_import(
         span_node: node,
         structural_node: node,
         doc_anchor: node,
+        body_node: None,
+        declaration_only: false,
         signature: Some(builder.context.owned_text(node)?),
         exported: false,
         default_export: false,
@@ -34,11 +36,43 @@ pub(super) fn visit_import(
         builder,
         PendingReference {
             owner: None,
-            name: module_name,
+            name: module_name.clone(),
             kind: ReferenceKind::Imports,
             node,
         },
     )?;
+
+    let import_clause = named_children(node).find(|child| child.kind() == "import_clause");
+    if let Some(clause) = import_clause {
+        for child in named_children(clause) {
+            builder.context.ensure_active()?;
+            match child.kind() {
+                "identifier" => {
+                    let local_name = builder.context.owned_text(child)?;
+                    builder.emit_import_binding(ExtractedImportBinding {
+                        kind: ImportBindingKind::Default,
+                        module_specifier: module_name.clone(),
+                        imported_name: "default".to_owned(),
+                        local_name,
+                        span: span_for(child)?,
+                    })?;
+                }
+                "namespace_import" => {
+                    if let Some(local) = child.named_child(0) {
+                        let local_name = builder.context.owned_text(local)?;
+                        builder.emit_import_binding(ExtractedImportBinding {
+                            kind: ImportBindingKind::Namespace,
+                            module_specifier: module_name.clone(),
+                            imported_name: "*".to_owned(),
+                            local_name,
+                            span: span_for(local)?,
+                        })?;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
 
     for specifier in descendants(node) {
         builder.context.ensure_active()?;
@@ -46,7 +80,18 @@ pub(super) fn visit_import(
             continue;
         }
         if let Some(name_node) = specifier.child_by_field_name("name") {
-            let name = builder.context.owned_text(name_node)?;
+            let name = builder.context.owned_unquoted_text(name_node)?;
+            let local_node = specifier.child_by_field_name("alias").unwrap_or(name_node);
+            if local_node.kind() == "identifier" {
+                let local_name = builder.context.owned_text(local_node)?;
+                builder.emit_import_binding(ExtractedImportBinding {
+                    kind: ImportBindingKind::Named,
+                    module_specifier: module_name.clone(),
+                    imported_name: name.clone(),
+                    local_name,
+                    span: span_for(name_node)?,
+                })?;
+            }
             references::push_reference(
                 builder,
                 PendingReference {
@@ -75,6 +120,8 @@ pub(super) fn visit_type_alias(
         span_node: node,
         structural_node: node,
         doc_anchor: node,
+        body_node: None,
+        declaration_only: false,
         signature: None,
         exported,
         default_export,
@@ -104,6 +151,8 @@ pub(super) fn visit_enum(
         span_node: node,
         structural_node: node,
         doc_anchor: node,
+        body_node: None,
+        declaration_only: false,
         signature: None,
         exported,
         default_export,
@@ -137,6 +186,8 @@ pub(super) fn visit_enum(
                 span_node: child,
                 structural_node: child,
                 doc_anchor: child,
+                body_node: None,
+                declaration_only: false,
                 signature: None,
                 exported: false,
                 default_export: false,

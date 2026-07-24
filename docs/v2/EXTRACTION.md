@@ -1,8 +1,8 @@
 # Cartograph v2 native extraction
 
 Status: TypeScript/JavaScript structural extraction, project-wide discovery,
-bounded resolution, PostgreSQL persistence, and real-corpus scaling implemented;
-module-aware resolution and body-bearing search documents remain pending.
+module-aware bounded resolution, safe implementation search text, PostgreSQL
+persistence, and real-corpus scaling implemented.
 
 This document fixes the boundary of `cartograph-extract` so later language and
 framework work does not leak parser details into storage or parallel indexing.
@@ -71,7 +71,8 @@ The TypeScript/JavaScript walker currently emits:
   one-based lines, zero-based byte columns, signatures, adjacent JSDoc, export/default/async/
   static flags, and explicit visibility;
 - lexical containment;
-- module imports and named imported symbols;
+- module imports plus default, named/aliased, and namespace binding semantics;
+- declaration-only function/method signatures and overload groups;
 - extends, implements, parameter/type, and return-type references;
 - calls, construction, PascalCase JSX references, and non-call field access;
 - bounded syntax diagnostics while retaining useful declarations from a
@@ -88,6 +89,14 @@ resolution provenance, confidence, and optional exact target. Project-wide
 resolution decides whether exact evidence creates an edge, but missing,
 ambiguous, and qualified-member references remain explicit rows; they are not
 discarded and are not guessed from a final member name.
+
+Callable and binding implementations also emit an identifier-only search
+projection. It includes identifiers and selected control-flow keywords but
+omits comments and every literal token. Each symbol is capped at 16 KiB; a
+stable prefix plus rolling tail prevents a large repetitive middle from hiding
+important code near the end, and a truncation bit is carried into search
+document metadata. The original source body is never retained or copied to
+PostgreSQL.
 
 ## Cancellation, bounds, and parallel execution
 
@@ -154,11 +163,20 @@ strictly ordered supervisor stages:
    capacities, every per-symbol path/language/ID clone, metadata allowance, and
    anticipated search documents. The pipeline never accumulates
    `SourceSnapshot` or raw `ExtractedFile` values for the corpus.
-5. Resolve performs deterministic exact-name selection: one same-file target
-   wins first, otherwise one unique project target wins. Qualified members such
-   as `console.log` remain unresolved until receiver/container/import evidence
-   exists. A cancellation-polled ordered map avoids a monolithic candidate
-   sort. Reduce first performs a cancellation-polled, capacity-aware retained
+5. Resolve walks containment ancestry first, excluding class/interface members
+   from bare lexical lookup while preserving explicit field-access resolution,
+   applies overload policy, then uses exact relative ES-module bindings. Default, named/aliased, and namespace
+   imports require an exported target in one normalized module; bare packages,
+   missing/ambiguous modules, and ambiguous overloads remain explicit unresolved
+   evidence. An ambiguous exact path or stem cannot fall through to a directory
+   `index`. Named import declaration references use the exact binding span
+   before lexical lookup; runtime aliases still permit inner lexical shadowing.
+   Only one exported cross-file candidate may be used as a final fallback.
+   Receiver/type-directed members are not inferred, and namespace imports
+   supply the current exact module evidence. Cancellation-polled ordered
+   maps avoid a monolithic candidate sort; every import-binding, containment-
+   ancestry, and candidate scan observes cancellation internally. Reduce first performs a
+   cancellation-polled, capacity-aware retained
    model inside the supervised blocking stage. It counts actual outer-vector and
    JSON-array capacities with type-correct raw/canonical roots, validates storage
    field caps and relations, deduplicates every table, canonicalizes JSON and
@@ -202,12 +220,19 @@ cooperative cancellation, formatting-stable identity/digests, duplicate
 ordinals, cross-scope identity stability, validated serialized spans/languages,
 enum-member isolation from comments/initializer expressions, bare and nested
 type-alias references, typed component references, semantic template/JSX
-whitespace, bounded adversarial names, FIFO rejection, split UTF-8, and redacted
-debug output. The owned pipeline additionally covers all supported test-path
+whitespace, default/named/namespace import bindings, declaration-only overloads,
+literal-safe prefix/tail-bounded implementation text, bounded adversarial names,
+FIFO rejection, split UTF-8, and redacted debug output. The owned pipeline
+additionally covers all supported test-path
 extensions/directories, full-payload one-versus-four-worker digests, long-path
 many-symbol accounting, spare-capacity admission, cancellation during retained
 modeling/map conversion/relation-map construction, storage-cap rejection, false
-qualified-member resolution, unresolved evidence round trips, and
+qualified-member resolution, module aliases, lexical shadowing, overload
+implementation selection, package-import abstention, ambiguous-stem
+abstention before directory-index fallback, sibling-member exclusion from bare
+calls, exact aliased-import declaration spans, in-reference candidate-scan
+cancellation, project-bounded relative paths,
+unresolved evidence round trips, and
 credential-shaped non-callable plus scalar/destructured/arrow/method/component
 default initializer exclusion from search. Component type
 references are an explicit additive v2 improvement and are filtered only from
@@ -226,19 +251,16 @@ The following work remains outside this slice:
    tracked source is later covered by an ignore rule; the first Rust walker
    applies ignore rules uniformly. Embedded-repository/submodule parity also
    needs a locked corpus.
-2. Import/export alias modelling, module-path and qualified-member resolution,
-   receiver/type evidence, lexical shadowing, overload policy, and richer
-   confidence calibration beyond exact unique-name resolution.
+2. Explicit export lists/re-exports, TypeScript `paths` aliases, package exports,
+   CommonJS `require`, and receiver/type-directed qualified-member resolution.
+   These need richer provenance/confidence rather than name-only fallback.
 3. Separate exact reference-target spans from v1-compatible expression/site
    spans; imports and constructions currently retain the v1.1.33 site range.
-4. Richer TypeScript declarations such as interface method signatures,
-   properties, fields, parameters, decorators, overrides, and explicit exports.
-5. Search documents containing bounded implementation-body code. The first
-   native payload indexes paths, symbol qualified names, safe callable
-   declaration-only signatures, and JSDoc. Non-callable initializer RHS text is
-   cleared before storage; callable signatures containing defaults or string
-   literals fall back to the qualified name, and complete source bodies are not
-   duplicated.
+4. Richer TypeScript declarations such as properties, fields, parameters,
+   decorators, overrides, anonymous default exports, and explicit export lists.
+5. Retrieval evaluation for identifier/keyword body text, including field
+   boosts and whether deterministic token deduplication improves BM25 without
+   reintroducing literals or complete source bodies.
 6. Spill/partitioned resolution and streaming database reduction if measured
    real projects exceed the configured retained-generation cap.
 7. Framework resolvers and cross-language bridges, followed by the remaining
@@ -248,6 +270,6 @@ The following work remains outside this slice:
 
 The frozen [native corpus matrix](benchmarks/NATIVE-CORPUS-SCALING.md) now proves
 identical digest/rows/edge kinds/BM25/lifecycle behavior at 1/2/4/8/16 workers
-and records isolated process RSS. The next implementation slice is module/import
-resolution and bounded symbol-body search documents, followed by measurement
-and optimization of the dominant PostgreSQL/ParadeDB COPY/indexing floor.
+and records isolated process RSS. The next implementation slice is measurement
+and optimization of the dominant PostgreSQL/ParadeDB COPY/indexing floor,
+followed by the remaining resolver/export cases above.

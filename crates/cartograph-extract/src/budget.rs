@@ -1,8 +1,8 @@
 use std::mem::size_of;
 
 use crate::{
-    Containment, ExtractError, ExtractedFile, ExtractedReference, ExtractedSymbol,
-    ExtractionDiagnostic, SourceSnapshot,
+    Containment, ExtractError, ExtractedFile, ExtractedImportBinding, ExtractedReference,
+    ExtractedSymbol, ExtractionDiagnostic, SourceSnapshot,
 };
 
 const PARSER_RESERVATION_MULTIPLIER: u64 = 32;
@@ -151,6 +151,18 @@ impl ExtractedFile {
                 })
             })
             .and_then(|bytes| {
+                bytes.checked_add(vector_bytes::<ExtractedImportBinding>(
+                    self.import_bindings.capacity(),
+                ))
+            })
+            .and_then(|bytes| {
+                self.import_bindings
+                    .iter()
+                    .try_fold(bytes, |total, binding| {
+                        total.checked_add(import_binding_string_bytes(binding))
+                    })
+            })
+            .and_then(|bytes| {
                 bytes.checked_add(vector_bytes::<ExtractionDiagnostic>(
                     self.diagnostics.capacity(),
                 ))
@@ -169,6 +181,11 @@ pub(crate) fn containment_budget_bytes(edge: &Containment) -> u64 {
 
 pub(crate) fn reference_budget_bytes(reference: &ExtractedReference) -> u64 {
     vector_growth_bytes::<ExtractedReference>().saturating_add(reference_string_bytes(reference))
+}
+
+pub(crate) fn import_binding_budget_bytes(binding: &ExtractedImportBinding) -> u64 {
+    vector_growth_bytes::<ExtractedImportBinding>()
+        .saturating_add(import_binding_string_bytes(binding))
 }
 
 pub(crate) fn diagnostic_budget_bytes() -> u64 {
@@ -203,6 +220,7 @@ fn symbol_string_bytes(symbol: &ExtractedSymbol) -> u64 {
                 symbol.docstring.as_ref().map_or(0, String::capacity),
             ))
         })
+        .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.body_search_text.capacity())))
         .and_then(|bytes| bytes.checked_add(usize_to_u64(symbol.structural_digest.as_str().len())))
         .unwrap_or(u64::MAX)
 }
@@ -217,6 +235,12 @@ fn reference_string_bytes(reference: &ExtractedReference) -> u64 {
         .as_ref()
         .map_or(0, |owner| owner.as_str().len());
     usize_to_u64(owner).saturating_add(usize_to_u64(reference.name.capacity()))
+}
+
+fn import_binding_string_bytes(binding: &ExtractedImportBinding) -> u64 {
+    usize_to_u64(binding.module_specifier.capacity())
+        .saturating_add(usize_to_u64(binding.imported_name.capacity()))
+        .saturating_add(usize_to_u64(binding.local_name.capacity()))
 }
 
 fn vector_growth_bytes<T>() -> u64 {

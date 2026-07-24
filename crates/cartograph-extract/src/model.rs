@@ -24,6 +24,8 @@ pub struct ExtractedFile {
     pub containments: Vec<Containment>,
     /// Source-ordered unresolved structural references.
     pub references: Vec<ExtractedReference>,
+    /// Source-ordered ES module bindings used by project-wide resolution.
+    pub import_bindings: Vec<ExtractedImportBinding>,
     /// Bounded, credential-safe parse diagnostics.
     pub diagnostics: Vec<ExtractionDiagnostic>,
 }
@@ -45,6 +47,12 @@ pub struct ExtractedSymbol {
     pub signature: Option<String>,
     /// Human-authored JSDoc immediately preceding the declaration.
     pub docstring: Option<String>,
+    /// Bounded identifier/keyword text from the implementation with literals omitted.
+    pub body_search_text: String,
+    /// Whether implementation search text stopped at its per-symbol byte ceiling.
+    pub body_search_truncated: bool,
+    /// Whether this declaration has no implementation body, such as an overload signature.
+    pub declaration_only: bool,
     /// Explicit module export state.
     pub exported: bool,
     /// Explicit default-export state.
@@ -78,6 +86,32 @@ pub struct ExtractedReference {
     /// Structural relationship requested from resolution.
     pub kind: ReferenceKind,
     /// Exact source range recorded for the reference expression.
+    pub span: SourceSpan,
+}
+
+/// ES module binding category with explicit target and local-name semantics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImportBindingKind {
+    /// `import Name from './module'`.
+    Default,
+    /// `import { Name as Local } from './module'`.
+    Named,
+    /// `import * as Local from './module'`.
+    Namespace,
+}
+
+/// One source-level ES module binding retained for exact project resolution.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExtractedImportBinding {
+    /// Default, named, or namespace binding semantics.
+    pub kind: ImportBindingKind,
+    /// Original bounded module specifier without quotes.
+    pub module_specifier: String,
+    /// Exported name, `default`, or `*` for a namespace binding.
+    pub imported_name: String,
+    /// Identifier visible in the importing file.
+    pub local_name: String,
+    /// Span of the imported name for named imports, otherwise the local identifier.
     pub span: SourceSpan,
 }
 
