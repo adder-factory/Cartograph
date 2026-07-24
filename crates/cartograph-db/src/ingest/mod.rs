@@ -13,4 +13,6 @@ pub use validate::{
     validate_generation_facts,
 };
 
-pub(crate) use copy::{CopyGenerationContext, copy_generation_facts};
+pub(crate) use copy::{
+    CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations, copy_generation_facts,
+};

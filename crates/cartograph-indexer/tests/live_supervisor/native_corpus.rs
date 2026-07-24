@@ -243,12 +243,51 @@ struct CorpusInvariant {
     native: NativeReport,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+struct CopyTableNanos {
+    files: u64,
+    symbols: u64,
+    edges: u64,
+    references: u64,
+    documents: u64,
+}
+
+impl CopyTableNanos {
+    fn from_snapshot(snapshot: cartograph_db::PrepareGenerationMetricsSnapshot) -> Self {
+        Self {
+            files: duration_nanos(snapshot.files_copy_duration()),
+            symbols: duration_nanos(snapshot.symbols_copy_duration()),
+            edges: duration_nanos(snapshot.edges_copy_duration()),
+            references: duration_nanos(snapshot.references_copy_duration()),
+            documents: duration_nanos(snapshot.documents_copy_duration()),
+        }
+    }
+
+    const fn complete(self) -> bool {
+        self.files != 0
+            && self.symbols != 0
+            && self.edges != 0
+            && self.references != 0
+            && self.documents != 0
+    }
+
+    const fn total(self) -> u64 {
+        self.files
+            .saturating_add(self.symbols)
+            .saturating_add(self.edges)
+            .saturating_add(self.references)
+            .saturating_add(self.documents)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct SampleReport {
     sample: usize,
     native_nanos: u64,
     supervised_pipeline_nanos: u64,
     copy_nanos: u64,
+    copy_tables_nanos: CopyTableNanos,
+    relation_validation_nanos: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -265,6 +304,10 @@ struct WorkerReport {
     supervised_pipeline_p95_nanos: u64,
     copy_p50_nanos: u64,
     copy_p95_nanos: u64,
+    copy_tables_p50_nanos: CopyTableNanos,
+    copy_tables_p95_nanos: CopyTableNanos,
+    relation_validation_p50_nanos: u64,
+    relation_validation_p95_nanos: u64,
     samples: Vec<SampleReport>,
 }
 
@@ -291,6 +334,8 @@ struct SampleObservation {
     native_nanos: u64,
     supervised_pipeline_nanos: u64,
     copy_nanos: u64,
+    copy_tables_nanos: CopyTableNanos,
+    relation_validation_nanos: u64,
 }
 
 struct NativeExecutionRequest<'a> {
@@ -307,6 +352,8 @@ struct CompletedSample {
     native_nanos: u64,
     supervised_pipeline_nanos: u64,
     copy_nanos: u64,
+    copy_tables_nanos: CopyTableNanos,
+    relation_validation_nanos: u64,
 }
 
 struct SampleInspection<'a> {
@@ -801,8 +848,15 @@ async fn execute_native_pipeline(
     let (native, native_nanos) = report_receiver
         .await
         .map_err(|_| error("native-report-missing"))?;
-    let copy_nanos = duration_nanos(observed_prepare_metrics.snapshot().copy_duration());
-    if copy_nanos == 0 {
+    let metrics = observed_prepare_metrics.snapshot();
+    let copy_nanos = duration_nanos(metrics.copy_duration());
+    let copy_tables_nanos = CopyTableNanos::from_snapshot(metrics);
+    let relation_validation_nanos = duration_nanos(metrics.relation_validation_duration());
+    if copy_nanos == 0
+        || !copy_tables_nanos.complete()
+        || copy_tables_nanos.total() > copy_nanos
+        || relation_validation_nanos == 0
+    {
         return Err(error("copy-duration-missing"));
     }
     Ok(CompletedSample {
@@ -811,6 +865,8 @@ async fn execute_native_pipeline(
         native_nanos,
         supervised_pipeline_nanos,
         copy_nanos,
+        copy_tables_nanos,
+        relation_validation_nanos,
     })
 }
 
@@ -864,6 +920,8 @@ async fn inspect_sample(request: SampleInspection<'_>) -> CorpusResult<SampleObs
         native_nanos: completed.native_nanos,
         supervised_pipeline_nanos: completed.supervised_pipeline_nanos,
         copy_nanos: completed.copy_nanos,
+        copy_tables_nanos: completed.copy_tables_nanos,
+        relation_validation_nanos: completed.relation_validation_nanos,
     })
 }
 
@@ -1058,6 +1116,12 @@ fn summarize_worker(input: WorkerSummaryInput) -> CorpusResult<WorkerReport> {
         .iter()
         .map(|observation| observation.copy_nanos)
         .collect::<Vec<_>>();
+    let relation_validation = observations
+        .iter()
+        .map(|observation| observation.relation_validation_nanos)
+        .collect::<Vec<_>>();
+    let copy_tables_p50_nanos = copy_table_percentile(&observations, MEDIAN_PERCENTILE)?;
+    let copy_tables_p95_nanos = copy_table_percentile(&observations, TAIL_PERCENTILE)?;
     Ok(WorkerReport {
         workers,
         invariant,
@@ -1071,6 +1135,10 @@ fn summarize_worker(input: WorkerSummaryInput) -> CorpusResult<WorkerReport> {
         supervised_pipeline_p95_nanos: percentile(&supervised_pipeline, TAIL_PERCENTILE)?,
         copy_p50_nanos: percentile(&copy, MEDIAN_PERCENTILE)?,
         copy_p95_nanos: percentile(&copy, TAIL_PERCENTILE)?,
+        copy_tables_p50_nanos,
+        copy_tables_p95_nanos,
+        relation_validation_p50_nanos: percentile(&relation_validation, MEDIAN_PERCENTILE)?,
+        relation_validation_p95_nanos: percentile(&relation_validation, TAIL_PERCENTILE)?,
         samples: observations
             .into_iter()
             .enumerate()
@@ -1079,8 +1147,29 @@ fn summarize_worker(input: WorkerSummaryInput) -> CorpusResult<WorkerReport> {
                 native_nanos: observation.native_nanos,
                 supervised_pipeline_nanos: observation.supervised_pipeline_nanos,
                 copy_nanos: observation.copy_nanos,
+                copy_tables_nanos: observation.copy_tables_nanos,
+                relation_validation_nanos: observation.relation_validation_nanos,
             })
             .collect(),
+    })
+}
+
+fn copy_table_percentile(
+    observations: &[SampleObservation],
+    requested: usize,
+) -> CorpusResult<CopyTableNanos> {
+    let values = |select: fn(&CopyTableNanos) -> u64| {
+        observations
+            .iter()
+            .map(|observation| select(&observation.copy_tables_nanos))
+            .collect::<Vec<_>>()
+    };
+    Ok(CopyTableNanos {
+        files: percentile(&values(|tables| tables.files), requested)?,
+        symbols: percentile(&values(|tables| tables.symbols), requested)?,
+        edges: percentile(&values(|tables| tables.edges), requested)?,
+        references: percentile(&values(|tables| tables.references), requested)?,
+        documents: percentile(&values(|tables| tables.documents), requested)?,
     })
 }
 

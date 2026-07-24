@@ -1,0 +1,582 @@
+{
+  "architecture": "aarch64",
+  "operating_system": "macos",
+  "logical_cpus": 14,
+  "rust_toolchain": "1.96.1",
+  "database_image": "paradedb/paradedb:0.23.5@sha256:c3efc689b6ebd2fb396d7f50d68735b2dcff3e03f3bf51a926258d942201da2d",
+  "corpus_name": "cartograph-v1-real-typescript-v1",
+  "corpus_files": 28,
+  "corpus_source_bytes": 1052338,
+  "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+  "bm25_query": "detectSecretsHandling",
+  "rss_sample_interval_millis": 25,
+  "warmup_samples": 1,
+  "measured_samples": 3,
+  "workers": [
+    {
+      "workers": 1,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10682368,
+      "peak_rss_bytes": 70189056,
+      "peak_rss_delta_bytes": 59506688,
+      "rss_successful_samples": 208,
+      "native_p50_nanos": 1261969250,
+      "native_p95_nanos": 1281042083,
+      "supervised_pipeline_p50_nanos": 1582430500,
+      "supervised_pipeline_p95_nanos": 1584185458,
+      "copy_p50_nanos": 284382833,
+      "copy_p95_nanos": 286789583,
+      "copy_tables_p50_nanos": {
+        "files": 3589666,
+        "symbols": 89409250,
+        "edges": 27621459,
+        "references": 81356667,
+        "documents": 82626041
+      },
+      "copy_tables_p95_nanos": {
+        "files": 4723167,
+        "symbols": 90785834,
+        "edges": 27875583,
+        "references": 83024458,
+        "documents": 85314416
+      },
+      "relation_validation_p50_nanos": 8377792,
+      "relation_validation_p95_nanos": 8611208,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 1281042083,
+          "supervised_pipeline_nanos": 1581899459,
+          "copy_nanos": 264123750,
+          "copy_tables_nanos": {
+            "files": 1589708,
+            "symbols": 70882250,
+            "edges": 25995542,
+            "references": 83024458,
+            "documents": 82626041
+          },
+          "relation_validation_nanos": 8611208
+        },
+        {
+          "sample": 1,
+          "native_nanos": 1259738834,
+          "supervised_pipeline_nanos": 1584185458,
+          "copy_nanos": 286789583,
+          "copy_tables_nanos": {
+            "files": 4723167,
+            "symbols": 90785834,
+            "edges": 27875583,
+            "references": 78082208,
+            "documents": 85314416
+          },
+          "relation_validation_nanos": 8312833
+        },
+        {
+          "sample": 2,
+          "native_nanos": 1261969250,
+          "supervised_pipeline_nanos": 1582430500,
+          "copy_nanos": 284382833,
+          "copy_tables_nanos": {
+            "files": 3589666,
+            "symbols": 89409250,
+            "edges": 27621459,
+            "references": 81356667,
+            "documents": 82399375
+          },
+          "relation_validation_nanos": 8377792
+        }
+      ]
+    },
+    {
+      "workers": 2,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10665984,
+      "peak_rss_bytes": 72368128,
+      "peak_rss_delta_bytes": 61702144,
+      "rss_successful_samples": 159,
+      "native_p50_nanos": 861053833,
+      "native_p95_nanos": 862874958,
+      "supervised_pipeline_p50_nanos": 1173742250,
+      "supervised_pipeline_p95_nanos": 1180693541,
+      "copy_p50_nanos": 279571125,
+      "copy_p95_nanos": 280686917,
+      "copy_tables_p50_nanos": {
+        "files": 3815625,
+        "symbols": 85696833,
+        "edges": 27460000,
+        "references": 83181542,
+        "documents": 79365750
+      },
+      "copy_tables_p95_nanos": {
+        "files": 4052041,
+        "symbols": 88354208,
+        "edges": 27798375,
+        "references": 83997625,
+        "documents": 81838709
+      },
+      "relation_validation_p50_nanos": 8162667,
+      "relation_validation_p95_nanos": 8413083,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 862874958,
+          "supervised_pipeline_nanos": 1180693541,
+          "copy_nanos": 280686917,
+          "copy_tables_nanos": {
+            "files": 4052041,
+            "symbols": 88354208,
+            "edges": 25726833,
+            "references": 83181542,
+            "documents": 79365750
+          },
+          "relation_validation_nanos": 8413083
+        },
+        {
+          "sample": 1,
+          "native_nanos": 861053833,
+          "supervised_pipeline_nanos": 1165786750,
+          "copy_nanos": 268980125,
+          "copy_tables_nanos": {
+            "files": 3815625,
+            "symbols": 73549250,
+            "edges": 27798375,
+            "references": 81969167,
+            "documents": 81838709
+          },
+          "relation_validation_nanos": 8162667
+        },
+        {
+          "sample": 2,
+          "native_nanos": 857581667,
+          "supervised_pipeline_nanos": 1173742250,
+          "copy_nanos": 279571125,
+          "copy_tables_nanos": {
+            "files": 3148583,
+            "symbols": 85696833,
+            "edges": 27460000,
+            "references": 83997625,
+            "documents": 79261000
+          },
+          "relation_validation_nanos": 7961583
+        }
+      ]
+    },
+    {
+      "workers": 4,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10698752,
+      "peak_rss_bytes": 74940416,
+      "peak_rss_delta_bytes": 64241664,
+      "rss_successful_samples": 139,
+      "native_p50_nanos": 681516167,
+      "native_p95_nanos": 683744167,
+      "supervised_pipeline_p50_nanos": 1007445459,
+      "supervised_pipeline_p95_nanos": 1008132667,
+      "copy_p50_nanos": 285680375,
+      "copy_p95_nanos": 295554041,
+      "copy_tables_p50_nanos": {
+        "files": 3415500,
+        "symbols": 90744000,
+        "edges": 26987458,
+        "references": 83013209,
+        "documents": 81630458
+      },
+      "copy_tables_p95_nanos": {
+        "files": 4010875,
+        "symbols": 91318083,
+        "edges": 27847959,
+        "references": 84689875,
+        "documents": 91663875
+      },
+      "relation_validation_p50_nanos": 8067125,
+      "relation_validation_p95_nanos": 8210959,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 683744167,
+          "supervised_pipeline_nanos": 1008132667,
+          "copy_nanos": 282136792,
+          "copy_tables_nanos": {
+            "files": 3415500,
+            "symbols": 91318083,
+            "edges": 26422666,
+            "references": 79342375,
+            "documents": 81630458
+          },
+          "relation_validation_nanos": 8210959
+        },
+        {
+          "sample": 1,
+          "native_nanos": 681516167,
+          "supervised_pipeline_nanos": 1004967833,
+          "copy_nanos": 285680375,
+          "copy_tables_nanos": {
+            "files": 4010875,
+            "symbols": 90744000,
+            "edges": 26987458,
+            "references": 84689875,
+            "documents": 79240667
+          },
+          "relation_validation_nanos": 8054792
+        },
+        {
+          "sample": 2,
+          "native_nanos": 679347625,
+          "supervised_pipeline_nanos": 1007445459,
+          "copy_nanos": 295554041,
+          "copy_tables_nanos": {
+            "files": 3268291,
+            "symbols": 89752666,
+            "edges": 27847959,
+            "references": 83013209,
+            "documents": 91663875
+          },
+          "relation_validation_nanos": 8067125
+        }
+      ]
+    },
+    {
+      "workers": 8,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10682368,
+      "peak_rss_bytes": 82575360,
+      "peak_rss_delta_bytes": 71892992,
+      "rss_successful_samples": 139,
+      "native_p50_nanos": 711698583,
+      "native_p95_nanos": 721556166,
+      "supervised_pipeline_p50_nanos": 1029696625,
+      "supervised_pipeline_p95_nanos": 1046117000,
+      "copy_p50_nanos": 287118958,
+      "copy_p95_nanos": 291303458,
+      "copy_tables_p50_nanos": {
+        "files": 3427000,
+        "symbols": 88332083,
+        "edges": 27585208,
+        "references": 81310583,
+        "documents": 86005542
+      },
+      "copy_tables_p95_nanos": {
+        "files": 3876500,
+        "symbols": 90049583,
+        "edges": 27629250,
+        "references": 81688000,
+        "documents": 88661583
+      },
+      "relation_validation_p50_nanos": 8560792,
+      "relation_validation_p95_nanos": 9139083,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 721556166,
+          "supervised_pipeline_nanos": 1046117000,
+          "copy_nanos": 291303458,
+          "copy_tables_nanos": {
+            "files": 3427000,
+            "symbols": 90049583,
+            "edges": 27467625,
+            "references": 81688000,
+            "documents": 88661583
+          },
+          "relation_validation_nanos": 8214458
+        },
+        {
+          "sample": 1,
+          "native_nanos": 702576167,
+          "supervised_pipeline_nanos": 1017476958,
+          "copy_nanos": 277266209,
+          "copy_tables_nanos": {
+            "files": 3338959,
+            "symbols": 83753541,
+            "edges": 27629250,
+            "references": 79154250,
+            "documents": 83381500
+          },
+          "relation_validation_nanos": 8560792
+        },
+        {
+          "sample": 2,
+          "native_nanos": 711698583,
+          "supervised_pipeline_nanos": 1029696625,
+          "copy_nanos": 287118958,
+          "copy_tables_nanos": {
+            "files": 3876500,
+            "symbols": 88332083,
+            "edges": 27585208,
+            "references": 81310583,
+            "documents": 86005542
+          },
+          "relation_validation_nanos": 9139083
+        }
+      ]
+    },
+    {
+      "workers": 16,
+      "invariant": {
+        "corpus_fingerprint": "5be02b94045f978010d7c8ffeba1a8568a16aaad1ff15f884609524aa61f4d20",
+        "logical_digest": "dee0d3a02dfb43ce9d024fd37a7fb851343c5dad0138db827ab35a3e04e42cb3",
+        "logical_digest_version": 2,
+        "rows": {
+          "files": 28,
+          "symbols": 3843,
+          "edges": 3699,
+          "references": 12660,
+          "documents": 3871
+        },
+        "edge_kinds": [
+          "calls",
+          "contains",
+          "extends",
+          "field_access",
+          "implements",
+          "instantiates",
+          "returns",
+          "type_of"
+        ],
+        "bm25_document_ids": [
+          "5471dbfc-3ba3-87dd-8861-1ce1dd51ed32",
+          "29f064c9-f931-89d3-8eb8-d05e7906749f",
+          "a5008cb5-184d-819e-a6bf-54c4f6207da0",
+          "b7c9628b-c28f-80cd-9bf6-3cfbce849c70",
+          "fc1a31af-afc0-827c-b3bc-acb5e56736d1"
+        ],
+        "native": {
+          "discovered_files": 28,
+          "source_bytes": 1052338,
+          "symbols": 3843,
+          "resolved_references": 1852,
+          "unresolved_references": 10808,
+          "diagnostics": 0,
+          "modeled_generation_bytes": 8473292,
+          "resolve_high_water_bytes": 61210798,
+          "validation_high_water_bytes": 47754838
+        }
+      },
+      "baseline_rss_bytes": 10715136,
+      "peak_rss_bytes": 97452032,
+      "peak_rss_delta_bytes": 86736896,
+      "rss_successful_samples": 152,
+      "native_p50_nanos": 945401750,
+      "native_p95_nanos": 957234833,
+      "supervised_pipeline_p50_nanos": 1263445291,
+      "supervised_pipeline_p95_nanos": 1274071958,
+      "copy_p50_nanos": 281141833,
+      "copy_p95_nanos": 281708125,
+      "copy_tables_p50_nanos": {
+        "files": 3451959,
+        "symbols": 87377917,
+        "edges": 28263375,
+        "references": 81509333,
+        "documents": 80844625
+      },
+      "copy_tables_p95_nanos": {
+        "files": 3560000,
+        "symbols": 89843083,
+        "edges": 28369958,
+        "references": 84600375,
+        "documents": 81541167
+      },
+      "relation_validation_p50_nanos": 8183583,
+      "relation_validation_p95_nanos": 8235792,
+      "samples": [
+        {
+          "sample": 0,
+          "native_nanos": 957234833,
+          "supervised_pipeline_nanos": 1274071958,
+          "copy_nanos": 278917250,
+          "copy_tables_nanos": {
+            "files": 3195333,
+            "symbols": 89843083,
+            "edges": 28263375,
+            "references": 79509959,
+            "documents": 78097000
+          },
+          "relation_validation_nanos": 8098458
+        },
+        {
+          "sample": 1,
+          "native_nanos": 945401750,
+          "supervised_pipeline_nanos": 1262703417,
+          "copy_nanos": 281708125,
+          "copy_tables_nanos": {
+            "files": 3451959,
+            "symbols": 87377917,
+            "edges": 27818917,
+            "references": 81509333,
+            "documents": 81541167
+          },
+          "relation_validation_nanos": 8235792
+        },
+        {
+          "sample": 2,
+          "native_nanos": 942765334,
+          "supervised_pipeline_nanos": 1263445291,
+          "copy_nanos": 281141833,
+          "copy_tables_nanos": {
+            "files": 3560000,
+            "symbols": 83758916,
+            "edges": 28369958,
+            "references": 84600375,
+            "documents": 80844625
+          },
+          "relation_validation_nanos": 8183583
+        }
+      ]
+    }
+  ]
+}

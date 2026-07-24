@@ -1,4 +1,7 @@
-use std::fmt::Display;
+use std::{
+    fmt::Display,
+    time::{Duration, Instant},
+};
 
 use cartograph_config::DatabaseSchema;
 use cartograph_domain::{GenerationId, ProjectId};
@@ -26,6 +29,111 @@ pub(crate) struct CopyGenerationContext {
     pub(crate) generation_id: GenerationId,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CopyTableDurations {
+    pub(crate) files: Duration,
+    pub(crate) symbols: Duration,
+    pub(crate) edges: Duration,
+    pub(crate) references: Duration,
+    pub(crate) documents: Duration,
+}
+
+pub(crate) struct CopyGenerationAttempt {
+    pub(crate) durations: CopyTableDurations,
+    pub(crate) result: Result<(), StorageError>,
+}
+
+#[derive(Clone, Copy)]
+enum CopiedTable {
+    Files,
+    Symbols,
+    Edges,
+    References,
+    Documents,
+}
+
+struct CopyGenerationProgress<'a> {
+    connection: &'a mut PgConnection,
+    context: CopyGenerationContext,
+    durations: CopyTableDurations,
+    result: Result<(), StorageError>,
+}
+
+struct CopyTableRequest<T, Encode> {
+    rows: Vec<T>,
+    layout: CopyTableLayout,
+    encode: Encode,
+}
+
+impl<T, Encode> CopyTableRequest<T, Encode> {
+    fn new(rows: Vec<T>, layout: CopyTableLayout, encode: Encode) -> Self {
+        Self {
+            rows,
+            layout,
+            encode,
+        }
+    }
+}
+
+impl CopyTableDurations {
+    fn record(&mut self, table: CopiedTable, duration: Duration) {
+        match table {
+            CopiedTable::Files => self.files = duration,
+            CopiedTable::Symbols => self.symbols = duration,
+            CopiedTable::Edges => self.edges = duration,
+            CopiedTable::References => self.references = duration,
+            CopiedTable::Documents => self.documents = duration,
+        }
+    }
+}
+
+impl<'a> CopyGenerationProgress<'a> {
+    fn new(connection: &'a mut PgConnection, context: CopyGenerationContext) -> Self {
+        Self {
+            connection,
+            context,
+            durations: CopyTableDurations::default(),
+            result: Ok(()),
+        }
+    }
+
+    async fn copy<T, Encode>(&mut self, request: CopyTableRequest<T, Encode>)
+    where
+        T: Send,
+        Encode: Fn(&CopyGenerationContext, &T) -> Vec<u8> + Copy + Send,
+    {
+        if self.result.is_err() {
+            return;
+        }
+        let CopyTableRequest {
+            rows,
+            layout,
+            encode,
+        } = request;
+        let table = layout.copied_table;
+        let plan = CopyTablePlan {
+            batch: CopyBatch {
+                context: self.context.clone(),
+                rows,
+            },
+            layout,
+            encode,
+        };
+        let (duration, result) = timed_copy_table(self.connection, plan).await;
+        self.durations.record(table, duration);
+        if let Err(error) = result {
+            self.result = Err(error);
+        }
+    }
+
+    fn finish(self) -> CopyGenerationAttempt {
+        CopyGenerationAttempt {
+            durations: self.durations,
+            result: self.result,
+        }
+    }
+}
+
 struct CopyTableSpec {
     statement: String,
     expected_rows: usize,
@@ -34,32 +142,38 @@ struct CopyTableSpec {
 
 #[derive(Clone, Copy)]
 struct CopyTableLayout {
+    copied_table: CopiedTable,
     table: &'static str,
     columns: &'static str,
     operation: &'static str,
 }
 
 const FILES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::Files,
     table: "files",
     columns: "project_id, generation_id, file_id, normalized_path, language, content_hash, byte_size, parse_status",
     operation: "copy-files",
 };
 const SYMBOLS_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::Symbols,
     table: "symbols",
     columns: "project_id, generation_id, symbol_id, file_id, symbol_kind, qualified_name, signature, start_byte, end_byte, start_line, end_line, structural_digest",
     operation: "copy-symbols",
 };
 const EDGES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::Edges,
     table: "edges",
     columns: "project_id, generation_id, source_symbol_id, target_symbol_id, edge_kind, confidence, provenance",
     operation: "copy-edges",
 };
 const REFERENCES_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::References,
     table: "references",
     columns: "project_id, generation_id, file_id, owner_symbol_id, target_symbol_id, reference_name, reference_kind, start_byte, end_byte, confidence, resolution_provenance",
     operation: "copy-references",
 };
 const DOCUMENTS_LAYOUT: CopyTableLayout = CopyTableLayout {
+    copied_table: CopiedTable::Documents,
     table: "search_documents",
     columns: "project_id, generation_id, document_id, file_id, symbol_id, path, language, document_kind, qualified_name, code, natural_text, metadata",
     operation: "copy-search-documents",
@@ -80,7 +194,7 @@ pub(crate) async fn copy_generation_facts(
     connection: &mut PgConnection,
     context: CopyGenerationContext,
     facts: CanonicalGenerationFacts,
-) -> Result<(), StorageError> {
+) -> CopyGenerationAttempt {
     let ValidatedFactTables {
         files,
         symbols,
@@ -88,66 +202,48 @@ pub(crate) async fn copy_generation_facts(
         references,
         documents,
     } = facts.tables;
-    copy_table(
-        connection,
-        CopyTablePlan {
-            batch: CopyBatch {
-                context: context.clone(),
-                rows: files,
-            },
-            layout: FILES_LAYOUT,
-            encode: encode_file,
-        },
-    )
-    .await?;
-    copy_table(
-        connection,
-        CopyTablePlan {
-            batch: CopyBatch {
-                context: context.clone(),
-                rows: symbols,
-            },
-            layout: SYMBOLS_LAYOUT,
-            encode: encode_symbol,
-        },
-    )
-    .await?;
-    copy_table(
-        connection,
-        CopyTablePlan {
-            batch: CopyBatch {
-                context: context.clone(),
-                rows: edges,
-            },
-            layout: EDGES_LAYOUT,
-            encode: encode_edge,
-        },
-    )
-    .await?;
-    copy_table(
-        connection,
-        CopyTablePlan {
-            batch: CopyBatch {
-                context: context.clone(),
-                rows: references,
-            },
-            layout: REFERENCES_LAYOUT,
-            encode: encode_reference,
-        },
-    )
-    .await?;
-    copy_table(
-        connection,
-        CopyTablePlan {
-            batch: CopyBatch {
-                context,
-                rows: documents,
-            },
-            layout: DOCUMENTS_LAYOUT,
-            encode: encode_document,
-        },
-    )
-    .await
+    let mut progress = CopyGenerationProgress::new(connection, context);
+    progress
+        .copy(CopyTableRequest::new(files, FILES_LAYOUT, encode_file))
+        .await;
+    progress
+        .copy(CopyTableRequest::new(
+            symbols,
+            SYMBOLS_LAYOUT,
+            encode_symbol,
+        ))
+        .await;
+    progress
+        .copy(CopyTableRequest::new(edges, EDGES_LAYOUT, encode_edge))
+        .await;
+    progress
+        .copy(CopyTableRequest::new(
+            references,
+            REFERENCES_LAYOUT,
+            encode_reference,
+        ))
+        .await;
+    progress
+        .copy(CopyTableRequest::new(
+            documents,
+            DOCUMENTS_LAYOUT,
+            encode_document,
+        ))
+        .await;
+    progress.finish()
+}
+
+async fn timed_copy_table<T, Encode>(
+    connection: &mut PgConnection,
+    plan: CopyTablePlan<T, Encode>,
+) -> (Duration, Result<(), StorageError>)
+where
+    T: Send,
+    Encode: Fn(&CopyGenerationContext, &T) -> Vec<u8> + Copy + Send,
+{
+    let started = Instant::now();
+    let result = copy_table(connection, plan).await;
+    (started.elapsed(), result)
 }
 
 async fn copy_table<T, Encode>(

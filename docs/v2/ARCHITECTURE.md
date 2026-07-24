@@ -135,10 +135,13 @@ capability, then commit its complete file, symbol, edge, reference, and
 search-document set in one transaction. The only way to obtain
 `CurrentGeneration` is to consume that ready token in the atomic publication
 transaction. Ready/current tokens carry the computed logical digest and its
-validated contract version. Database constraints remain the second line of defense against
-forged or stale process state. Failed operations return the consumed token,
-and checked recovery can rehydrate durable `staging`/`ready` state plus its
-digest/version pair after process loss or mark it terminally failed.
+validated contract version. Database constraints enforce field domains,
+generation ownership, lifecycle cascades, and stale-state rejection. A
+transactional set check separately verifies every copied file/symbol relation
+before `ready`; this is the database-side defense against a corrupted wire,
+trigger, or forged in-process capability. Failed operations return the consumed
+token, and checked recovery can rehydrate durable `staging`/`ready` state plus
+its digest/version pair after process loss or mark it terminally failed.
 
 Migration 2 adds one observable lease row per project and mutating operation.
 Each acquisition records a non-nil token, owner PID, boot/session-qualified
@@ -156,10 +159,34 @@ Migration 3 completes the structural `edge_kind` constraint for all native
 relationships. Migration 4 retains unresolved-reference names, lexical owner,
 and resolution provenance with an owner index. Migration 5 adds the persisted
 logical-digest contract version: historical non-null digests are explicitly v1,
-while newly prepared complete-reference generations are v2. The
-version-1-to-current live upgrade fixture carries a populated ready generation,
-symbol, and reference through versions 2 through 5, proves its digest remains
-unchanged and marked v1, then verifies a second migration run is empty.
+while newly prepared complete-reference generations are v2.
+
+Migration 6 replaces seven per-row relation foreign keys with generation-scoped
+bulk integrity. `edges` and `references` each retain a direct
+`(project_id, generation_id)` cascade to `index_generations`;
+`search_documents` keeps its existing generation cascade. The two edge-symbol,
+three reference-file/symbol, and two document-file/symbol foreign keys are
+removed. The richer Rust validation still runs before database I/O, and one
+set-difference query inside the same prepare transaction verifies that every
+referenced file and symbol exists before the generation can become `ready`.
+Any missing relation produces the stable `verify-copied-relations` failure and
+rolls back all five COPY streams. Generation facts are append-only: v2 exposes
+no post-prepare row mutation. A failed prepare rolls back every copied fact
+while retaining its generation row for terminal failure marking; if an already
+committed `ready` generation is later marked failed, its facts remain. Current
+cleanup marks the generation `failed` and removes its exact lease rather than
+deleting the generation row. The three generation foreign keys define cascade
+behavior for a future explicit project/generation deletion path, but that path
+is not implemented yet. A future incremental or post-ready mutation path must
+add an equivalent checked mutation boundary; it cannot assume the prepare-time
+proof covers later writes.
+
+The version-1-to-current live upgrade fixture carries a populated ready
+generation, symbol, and reference through versions 2 through 6, proves its
+digest remains unchanged and marked v1, then proves a second migration run is
+empty. Migration success proves the named replacement constraints can be
+installed over that populated fixture; deletion/cascade behavior remains a
+separate future-path test obligation.
 
 ### BM25 document index
 
@@ -456,11 +483,16 @@ version 1 beside historical rows rather than reinterpreting or recomputing them.
 
 Persistence then streams PostgreSQL text COPY in bounded chunks, with explicit
 escaping for tabs, newlines, carriage returns, backslashes, control bytes, and
-the `\N` null marker. Tables load in foreign-key order: files, symbols, edges,
+the `\N` null marker. Tables load in dependency order: files, symbols, edges,
 references, then the ParadeDB-indexed search documents. Every COPY completion
-count must equal the reduced row count. All five loads and the transition to
-`ready` share one transaction; a late COPY/trigger failure rolls back earlier
-tables and returns the original staging token.
+count must equal the reduced row count. The five streams are observed both as
+one COPY duration and as per-table durations; a failed attempt preserves each
+completed and failing-table duration, resets unattempted tables to zero, and
+does not retain a stale relation-check duration from an earlier use of the
+observer. The set-based copied-relation check is timed separately from COPY.
+All five loads, relation validation, and the transition to `ready` share one
+transaction; a late COPY/trigger or relation failure rolls back earlier tables
+and returns the original staging token.
 
 The database lease substrate is implemented for `index`, `sync`, `hook`,
 `migration`, and derived-index `rebuild` operations. Its database-wide advisory

@@ -31,19 +31,22 @@ const INITIAL_MIGRATION_VERSION: i64 = 1;
 const OPERATION_LEASES_MIGRATION_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_MIGRATION_VERSION: i64 = 3;
 const REFERENCE_EVIDENCE_MIGRATION_VERSION: i64 = 4;
-const LATEST_MIGRATION_VERSION: i64 = 5;
-const LATER_MIGRATION_COUNT: u64 = 4;
-const EXPECTED_MIGRATIONS: [i64; 5] = [
+const DIGEST_VERSION_MIGRATION_VERSION: i64 = 5;
+const LATEST_MIGRATION_VERSION: i64 = 6;
+const LATER_MIGRATION_COUNT: u64 = 5;
+const EXPECTED_MIGRATIONS: [i64; 6] = [
     INITIAL_MIGRATION_VERSION,
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
+    DIGEST_VERSION_MIGRATION_VERSION,
     LATEST_MIGRATION_VERSION,
 ];
-const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 4] = [
+const EXPECTED_V1_UPGRADE_MIGRATIONS: [i64; 5] = [
     OPERATION_LEASES_MIGRATION_VERSION,
     COMPLETE_EDGE_KINDS_MIGRATION_VERSION,
     REFERENCE_EVIDENCE_MIGRATION_VERSION,
+    DIGEST_VERSION_MIGRATION_VERSION,
     LATEST_MIGRATION_VERSION,
 ];
 
@@ -180,6 +183,7 @@ async fn assert_v1_to_latest_upgrade(
     pool: &sqlx_postgres::PgPool,
     schema: &str,
 ) {
+    restore_pre_v6_relation_constraints(pool, schema).await;
     let drop_leases = format!(r#"DROP TABLE "{schema}"."project_operation_leases""#);
     if let Err(error) = query(AssertSqlSafe(drop_leases)).execute(pool).await {
         panic!("could not create the v1 upgrade fixture: {error}");
@@ -227,6 +231,55 @@ async fn assert_v1_to_latest_upgrade(
             if report.applied_versions.is_empty()
                 && report.current_version == LATEST_MIGRATION_VERSION
     ));
+}
+
+async fn restore_pre_v6_relation_constraints(pool: &sqlx_postgres::PgPool, schema: &str) {
+    let statements = [
+        format!(
+            r#"ALTER TABLE "{schema}"."edges"
+                DROP CONSTRAINT edges_generation_fk,
+                ADD CONSTRAINT edges_project_id_generation_id_source_symbol_id_fkey
+                    FOREIGN KEY (project_id, generation_id, source_symbol_id)
+                    REFERENCES "{schema}"."symbols"(project_id, generation_id, symbol_id)
+                    ON DELETE CASCADE,
+                ADD CONSTRAINT edges_project_id_generation_id_target_symbol_id_fkey
+                    FOREIGN KEY (project_id, generation_id, target_symbol_id)
+                    REFERENCES "{schema}"."symbols"(project_id, generation_id, symbol_id)
+                    ON DELETE CASCADE"#,
+        ),
+        format!(
+            r#"ALTER TABLE "{schema}"."references"
+                DROP CONSTRAINT references_generation_fk,
+                ADD CONSTRAINT references_project_id_generation_id_file_id_fkey
+                    FOREIGN KEY (project_id, generation_id, file_id)
+                    REFERENCES "{schema}"."files"(project_id, generation_id, file_id)
+                    ON DELETE CASCADE,
+                ADD CONSTRAINT references_project_id_generation_id_target_symbol_id_fkey
+                    FOREIGN KEY (project_id, generation_id, target_symbol_id)
+                    REFERENCES "{schema}"."symbols"(project_id, generation_id, symbol_id)
+                    ON DELETE CASCADE,
+                ADD CONSTRAINT references_owner_symbol_fk
+                    FOREIGN KEY (project_id, generation_id, owner_symbol_id)
+                    REFERENCES "{schema}"."symbols"(project_id, generation_id, symbol_id)
+                    ON DELETE CASCADE"#,
+        ),
+        format!(
+            r#"ALTER TABLE "{schema}"."search_documents"
+                ADD CONSTRAINT search_documents_project_id_generation_id_file_id_fkey
+                    FOREIGN KEY (project_id, generation_id, file_id)
+                    REFERENCES "{schema}"."files"(project_id, generation_id, file_id)
+                    ON DELETE CASCADE,
+                ADD CONSTRAINT search_documents_project_id_generation_id_symbol_id_fkey
+                    FOREIGN KEY (project_id, generation_id, symbol_id)
+                    REFERENCES "{schema}"."symbols"(project_id, generation_id, symbol_id)
+                    ON DELETE CASCADE"#,
+        ),
+    ];
+    for statement in statements {
+        if let Err(error) = query(AssertSqlSafe(statement)).execute(pool).await {
+            panic!("could not restore the pre-v6 relation fixture: {error}");
+        }
+    }
 }
 
 async fn insert_v1_reference_fixture(pool: &sqlx_postgres::PgPool, schema: &str) {

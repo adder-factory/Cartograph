@@ -15,7 +15,10 @@ use thiserror::Error;
 
 use crate::{
     CartographDatabase, LeaseFence, StorageError,
-    ingest::{CanonicalGenerationFacts, CopyGenerationContext, copy_generation_facts},
+    ingest::{
+        CanonicalGenerationFacts, CopyGenerationAttempt, CopyGenerationContext, CopyTableDurations,
+        copy_generation_facts,
+    },
     leases::operation_lock_key,
 };
 
@@ -405,16 +408,47 @@ struct PrepareTransactionInput<'a> {
     metrics: Option<&'a PrepareGenerationMetrics>,
 }
 
+struct CopiedRelationCheck<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    project_id: &'a ProjectId,
+    generation_id: &'a GenerationId,
+}
+
+struct CopyAndValidateInput<'a> {
+    schema: &'a cartograph_config::DatabaseSchema,
+    generation: &'a StagedGeneration,
+    facts: CanonicalGenerationFacts,
+    metrics: Option<&'a PrepareGenerationMetrics>,
+}
+
 /// Cloneable observer for the exact PostgreSQL COPY-stream duration.
+#[derive(Default)]
+struct PrepareGenerationMetricsInner {
+    copy_nanos: AtomicU64,
+    files_copy_nanos: AtomicU64,
+    symbols_copy_nanos: AtomicU64,
+    edges_copy_nanos: AtomicU64,
+    references_copy_nanos: AtomicU64,
+    documents_copy_nanos: AtomicU64,
+    relation_validation_nanos: AtomicU64,
+}
+
+/// Shareable observer for one generation's COPY and relation-validation durations.
 #[derive(Clone, Default)]
 pub struct PrepareGenerationMetrics {
-    copy_nanos: Arc<AtomicU64>,
+    inner: Arc<PrepareGenerationMetricsInner>,
 }
 
 /// Point-in-time prepare metrics retained after the generation contents move.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PrepareGenerationMetricsSnapshot {
     copy_duration: Duration,
+    files_copy_duration: Duration,
+    symbols_copy_duration: Duration,
+    edges_copy_duration: Duration,
+    references_copy_duration: Duration,
+    documents_copy_duration: Duration,
+    relation_validation_duration: Duration,
 }
 
 impl PrepareGenerationMetrics {
@@ -428,14 +462,38 @@ impl PrepareGenerationMetrics {
     #[must_use]
     pub fn snapshot(&self) -> PrepareGenerationMetricsSnapshot {
         PrepareGenerationMetricsSnapshot {
-            copy_duration: Duration::from_nanos(self.copy_nanos.load(Ordering::Relaxed)),
+            copy_duration: observed_duration(&self.inner.copy_nanos),
+            files_copy_duration: observed_duration(&self.inner.files_copy_nanos),
+            symbols_copy_duration: observed_duration(&self.inner.symbols_copy_nanos),
+            edges_copy_duration: observed_duration(&self.inner.edges_copy_nanos),
+            references_copy_duration: observed_duration(&self.inner.references_copy_nanos),
+            documents_copy_duration: observed_duration(&self.inner.documents_copy_nanos),
+            relation_validation_duration: observed_duration(&self.inner.relation_validation_nanos),
         }
     }
 
-    fn record_copy(&self, duration: Duration) {
-        let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
-        self.copy_nanos.store(nanos, Ordering::Relaxed);
+    fn record_copy(&self, duration: Duration, tables: CopyTableDurations) {
+        store_duration(&self.inner.copy_nanos, duration);
+        store_duration(&self.inner.files_copy_nanos, tables.files);
+        store_duration(&self.inner.symbols_copy_nanos, tables.symbols);
+        store_duration(&self.inner.edges_copy_nanos, tables.edges);
+        store_duration(&self.inner.references_copy_nanos, tables.references);
+        store_duration(&self.inner.documents_copy_nanos, tables.documents);
+        store_duration(&self.inner.relation_validation_nanos, Duration::ZERO);
     }
+
+    fn record_relation_validation(&self, duration: Duration) {
+        store_duration(&self.inner.relation_validation_nanos, duration);
+    }
+}
+
+fn observed_duration(value: &AtomicU64) -> Duration {
+    Duration::from_nanos(value.load(Ordering::Relaxed))
+}
+
+fn store_duration(target: &AtomicU64, duration: Duration) {
+    let nanos = u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX);
+    target.store(nanos, Ordering::Relaxed);
 }
 
 impl PrepareGenerationMetricsSnapshot {
@@ -443,6 +501,42 @@ impl PrepareGenerationMetricsSnapshot {
     #[must_use]
     pub const fn copy_duration(self) -> Duration {
         self.copy_duration
+    }
+
+    /// Wall-clock duration of the files COPY statement.
+    #[must_use]
+    pub const fn files_copy_duration(self) -> Duration {
+        self.files_copy_duration
+    }
+
+    /// Wall-clock duration of the symbols COPY statement.
+    #[must_use]
+    pub const fn symbols_copy_duration(self) -> Duration {
+        self.symbols_copy_duration
+    }
+
+    /// Wall-clock duration of the edges COPY statement.
+    #[must_use]
+    pub const fn edges_copy_duration(self) -> Duration {
+        self.edges_copy_duration
+    }
+
+    /// Wall-clock duration of the references COPY statement.
+    #[must_use]
+    pub const fn references_copy_duration(self) -> Duration {
+        self.references_copy_duration
+    }
+
+    /// Wall-clock duration of the search-documents COPY statement, including BM25 maintenance.
+    #[must_use]
+    pub const fn documents_copy_duration(self) -> Duration {
+        self.documents_copy_duration
+    }
+
+    /// Wall-clock duration of the set-based PostgreSQL relation-integrity check.
+    #[must_use]
+    pub const fn relation_validation_duration(self) -> Duration {
+        self.relation_validation_duration
     }
 }
 
@@ -1213,21 +1307,16 @@ async fn prepare_transaction(
         FenceCheck::Observe,
     )
     .await?;
-    let copy_started = Instant::now();
-    let copy_result = copy_generation_facts(
+    copy_and_validate_generation(
         connection,
-        CopyGenerationContext {
-            schema: input.schema.clone(),
-            project_id: input.generation.project_id().clone(),
-            generation_id: input.generation.generation_id().clone(),
+        CopyAndValidateInput {
+            schema: input.schema,
+            generation: input.generation,
+            facts: input.facts,
+            metrics: input.metrics,
         },
-        input.facts,
     )
-    .await;
-    if let Some(metrics) = input.metrics {
-        metrics.record_copy(copy_started.elapsed());
-    }
-    copy_result?;
+    .await?;
     lock_generation_fence(connection, input.schema, input.fence).await?;
     validate_generation_state(
         connection,
@@ -1264,6 +1353,130 @@ async fn prepare_transaction(
         });
     }
     Ok(())
+}
+
+async fn copy_and_validate_generation(
+    connection: &mut PgConnection,
+    input: CopyAndValidateInput<'_>,
+) -> Result<(), StorageError> {
+    let copy_started = Instant::now();
+    let CopyGenerationAttempt {
+        durations,
+        result: copy_result,
+    } = copy_generation_facts(
+        connection,
+        CopyGenerationContext {
+            schema: input.schema.clone(),
+            project_id: input.generation.project_id().clone(),
+            generation_id: input.generation.generation_id().clone(),
+        },
+        input.facts,
+    )
+    .await;
+    if let Some(metrics) = input.metrics {
+        metrics.record_copy(copy_started.elapsed(), durations);
+    }
+    copy_result?;
+
+    let validation_started = Instant::now();
+    let validation_result = validate_copied_relations(
+        connection,
+        CopiedRelationCheck {
+            schema: input.schema,
+            project_id: input.generation.project_id(),
+            generation_id: input.generation.generation_id(),
+        },
+    )
+    .await;
+    if let Some(metrics) = input.metrics {
+        metrics.record_relation_validation(validation_started.elapsed());
+    }
+    validation_result
+}
+
+async fn validate_copied_relations(
+    connection: &mut PgConnection,
+    input: CopiedRelationCheck<'_>,
+) -> Result<(), StorageError> {
+    let quoted_schema = crate::database::quoted_schema(input.schema);
+    // Fresh COPY targets do not have useful planner statistics yet. Set
+    // difference keeps this check to bounded generation scans; equivalent
+    // anti-joins can degrade into a nested-loop pass per relation row.
+    let sql = format!(
+        r#"WITH required_symbols(symbol_id) AS (
+                SELECT source_symbol_id
+                FROM {quoted_schema}."edges"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT target_symbol_id
+                FROM {quoted_schema}."edges"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT owner_symbol_id
+                FROM {quoted_schema}."references"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND owner_symbol_id IS NOT NULL
+                UNION ALL
+                SELECT target_symbol_id
+                FROM {quoted_schema}."references"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND target_symbol_id IS NOT NULL
+                UNION ALL
+                SELECT symbol_id
+                FROM {quoted_schema}."search_documents"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND symbol_id IS NOT NULL
+            ), missing_symbols AS (
+                SELECT symbol_id FROM required_symbols
+                EXCEPT
+                SELECT symbol_id
+                FROM {quoted_schema}."symbols"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+            ), required_files(file_id) AS (
+                SELECT file_id
+                FROM {quoted_schema}."references"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                UNION ALL
+                SELECT file_id
+                FROM {quoted_schema}."search_documents"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+                  AND file_id IS NOT NULL
+            ), missing_files AS (
+                SELECT file_id FROM required_files
+                EXCEPT
+                SELECT file_id
+                FROM {quoted_schema}."files"
+                WHERE project_id = CAST($1 AS uuid)
+                  AND generation_id = CAST($2 AS uuid)
+            )
+            SELECT EXISTS (
+                SELECT 1 FROM missing_symbols
+                UNION ALL
+                SELECT 1 FROM missing_files
+            ) AS has_invalid_relations"#,
+    );
+    let row = audited_query(sql)
+        .bind(input.project_id.as_str())
+        .bind(input.generation_id.as_str())
+        .fetch_one(&mut *connection)
+        .await
+        .map_err(|_| database_error("verify-copied-relations"))?;
+    let has_invalid_relations = row
+        .try_get::<bool, _>("has_invalid_relations")
+        .map_err(|_| database_error("verify-copied-relations"))?;
+    if has_invalid_relations {
+        Err(database_error("verify-copied-relations"))
+    } else {
+        Ok(())
+    }
 }
 
 async fn publish_transaction(

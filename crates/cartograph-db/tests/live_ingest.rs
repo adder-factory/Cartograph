@@ -33,6 +33,8 @@ const DOCUMENT_REJECTED: &str = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
 const DOCUMENT_CHUNK_ONE: &str = "11111111-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DOCUMENT_CHUNK_TWO: &str = "22222222-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const DOCUMENT_OVERSIZED_ROW: &str = "33333333-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CORRUPT_SOURCE_SYMBOL: &str = "44444444-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+const CORRUPT_TARGET_SYMBOL: &str = "55555555-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const CONTENT_HASH_ONE: &str = "1111111111111111111111111111111111111111111111111111111111111111";
 const CONTENT_HASH_TWO: &str = "2222222222222222222222222222222222222222222222222222222222222222";
 const CONTENT_HASH_REJECTED: &str =
@@ -68,7 +70,16 @@ static SCHEMA_COUNTER: AtomicU32 = AtomicU32::new(0);
 async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     let fixture = open_fixture().await;
 
-    let first = prepare_generation(&fixture, SINGLE_WORKER, generation_facts(false)).await;
+    let reused_metrics = PrepareGenerationMetrics::new();
+    let first = prepare_generation_with_metrics(
+        &fixture,
+        ObservedGenerationInput {
+            workers: SINGLE_WORKER,
+            facts: generation_facts(false),
+            metrics: reused_metrics.clone(),
+        },
+    )
+    .await;
     let second = prepare_generation(&fixture, PARALLEL_WORKERS, generation_facts(true)).await;
     assert_eq!(first.content_digest(), second.content_digest());
     assert_eq!(first.digest_version(), GenerationDigestVersion::V2);
@@ -81,8 +92,12 @@ async fn copy_ingestion_is_atomic_and_logically_deterministic() {
     assert_ready_digest_recovery(&fixture, &first).await;
     assert_copy_chunk_and_null_boundaries(&fixture).await;
 
+    install_relation_corruption_trigger(&fixture).await;
+    assert_relation_validation_rolls_back(&fixture).await;
+    remove_relation_corruption_trigger(&fixture).await;
+
     install_rejecting_trigger(&fixture).await;
-    assert_copy_failure_rolls_back(&fixture).await;
+    assert_copy_failure_rolls_back(&fixture, reused_metrics).await;
 
     drop(fixture.database);
     drop_schema(&fixture.pool, &fixture.schema).await;
@@ -283,7 +298,32 @@ async fn prepare_generation(
     workers: u16,
     facts: GenerationFacts,
 ) -> ReadyGeneration {
-    let metrics = PrepareGenerationMetrics::new();
+    prepare_generation_with_metrics(
+        fixture,
+        ObservedGenerationInput {
+            workers,
+            facts,
+            metrics: PrepareGenerationMetrics::new(),
+        },
+    )
+    .await
+}
+
+struct ObservedGenerationInput {
+    workers: u16,
+    facts: GenerationFacts,
+    metrics: PrepareGenerationMetrics,
+}
+
+async fn prepare_generation_with_metrics(
+    fixture: &DatabaseFixture,
+    input: ObservedGenerationInput,
+) -> ReadyGeneration {
+    let ObservedGenerationInput {
+        workers,
+        facts,
+        metrics,
+    } = input;
     let staged = match fixture
         .database
         .begin_generation(NewGeneration::new(
@@ -307,11 +347,119 @@ async fn prepare_generation(
     assert!(fixture.database.release_lease(&lease).await.is_ok());
     match result {
         Ok(ready) => {
-            assert!(!metrics.snapshot().copy_duration().is_zero());
+            let snapshot = metrics.snapshot();
+            assert!(!snapshot.copy_duration().is_zero());
+            let table_durations = [
+                snapshot.files_copy_duration(),
+                snapshot.symbols_copy_duration(),
+                snapshot.edges_copy_duration(),
+                snapshot.references_copy_duration(),
+                snapshot.documents_copy_duration(),
+            ];
+            assert!(table_durations.iter().all(|duration| !duration.is_zero()));
+            assert!(table_durations.into_iter().sum::<Duration>() <= snapshot.copy_duration());
+            assert!(!snapshot.relation_validation_duration().is_zero());
             ready
         }
         Err(error) => panic!("COPY generation preparation failed: {error}"),
     }
+}
+
+async fn install_relation_corruption_trigger(fixture: &DatabaseFixture) {
+    let function = format!(
+        r#"CREATE FUNCTION "{schema}".inject_invalid_edge_fixture() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                INSERT INTO "{schema}"."edges" (
+                    project_id, generation_id, source_symbol_id, target_symbol_id,
+                    edge_kind, confidence, provenance
+                ) VALUES (
+                    NEW.project_id, NEW.generation_id,
+                    '{source_symbol}'::uuid, '{target_symbol}'::uuid,
+                    'calls', 1.0, 'relation-validation-fixture'
+                ) ON CONFLICT DO NOTHING;
+                RETURN NEW;
+            END
+            $$"#,
+        schema = fixture.schema,
+        source_symbol = CORRUPT_SOURCE_SYMBOL,
+        target_symbol = CORRUPT_TARGET_SYMBOL,
+    );
+    let trigger = format!(
+        r#"CREATE TRIGGER inject_invalid_edge_fixture
+            AFTER INSERT ON "{schema}"."search_documents"
+            FOR EACH ROW EXECUTE FUNCTION "{schema}".inject_invalid_edge_fixture()"#,
+        schema = fixture.schema,
+    );
+    if let Err(error) = query(AssertSqlSafe(function)).execute(&fixture.pool).await {
+        panic!("could not create relation-corruption function: {error}");
+    }
+    if let Err(error) = query(AssertSqlSafe(trigger)).execute(&fixture.pool).await {
+        panic!("could not create relation-corruption trigger: {error}");
+    }
+}
+
+async fn remove_relation_corruption_trigger(fixture: &DatabaseFixture) {
+    let trigger = format!(
+        r#"DROP TRIGGER inject_invalid_edge_fixture ON "{schema}"."search_documents""#,
+        schema = fixture.schema,
+    );
+    let function = format!(
+        r#"DROP FUNCTION "{schema}".inject_invalid_edge_fixture()"#,
+        schema = fixture.schema,
+    );
+    if let Err(error) = query(AssertSqlSafe(trigger)).execute(&fixture.pool).await {
+        panic!("could not remove relation-corruption trigger: {error}");
+    }
+    if let Err(error) = query(AssertSqlSafe(function)).execute(&fixture.pool).await {
+        panic!("could not remove relation-corruption trigger: {error}");
+    }
+}
+
+async fn assert_relation_validation_rolls_back(fixture: &DatabaseFixture) {
+    let staged = match fixture
+        .database
+        .begin_generation(NewGeneration::new(
+            fixture.project.clone(),
+            REVISION,
+            PARALLEL_WORKERS,
+        ))
+        .await
+    {
+        Ok(staged) => staged,
+        Err(error) => panic!("relation fixture generation did not begin: {error}"),
+    };
+    let generation_id = staged.generation_id().clone();
+    let lease = acquire_generation_lease(fixture, &generation_id).await;
+    let fence = lease.fence();
+    let failed = fixture
+        .database
+        .prepare_generation(
+            GenerationContents::new(staged, canonical(generation_facts(false))),
+            &fence,
+        )
+        .await;
+    let staged = match failed {
+        Err(error) => {
+            assert!(matches!(
+                error.error(),
+                StorageError::DatabaseOperation {
+                    operation: "verify-copied-relations"
+                }
+            ));
+            error.into_parts().0
+        }
+        Ok(_) => panic!("relation-corrupted COPY unexpectedly became ready"),
+    };
+    assert_generation_is_empty(fixture, &generation_id).await;
+    assert!(
+        fixture
+            .database
+            .fail_generation(RecoverableGeneration::Staged(staged), &fence)
+            .await
+            .is_ok()
+    );
+    assert!(fixture.database.release_lease(&lease).await.is_ok());
 }
 
 fn generation_facts(reversed: bool) -> GenerationFacts {
@@ -584,7 +732,10 @@ async fn install_rejecting_trigger(fixture: &DatabaseFixture) {
     }
 }
 
-async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
+async fn assert_copy_failure_rolls_back(
+    fixture: &DatabaseFixture,
+    metrics: PrepareGenerationMetrics,
+) {
     let staged = match fixture
         .database
         .begin_generation(NewGeneration::new(
@@ -603,7 +754,8 @@ async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
     let failed = fixture
         .database
         .prepare_generation(
-            GenerationContents::new(staged, canonical(rejected_facts())),
+            GenerationContents::new(staged, canonical(rejected_facts()))
+                .with_metrics(metrics.clone()),
             &fence,
         )
         .await;
@@ -619,6 +771,18 @@ async fn assert_copy_failure_rolls_back(fixture: &DatabaseFixture) {
         }
         Ok(_) => panic!("trigger-rejected COPY unexpectedly became ready"),
     };
+    let snapshot = metrics.snapshot();
+    assert!(!snapshot.copy_duration().is_zero());
+    let attempted_tables = [
+        snapshot.files_copy_duration(),
+        snapshot.symbols_copy_duration(),
+        snapshot.edges_copy_duration(),
+        snapshot.references_copy_duration(),
+        snapshot.documents_copy_duration(),
+    ];
+    assert!(attempted_tables.iter().all(|duration| !duration.is_zero()));
+    assert!(attempted_tables.into_iter().sum::<Duration>() <= snapshot.copy_duration());
+    assert!(snapshot.relation_validation_duration().is_zero());
     assert_generation_is_empty(fixture, &generation_id).await;
     assert!(
         fixture

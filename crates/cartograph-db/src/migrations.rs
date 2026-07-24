@@ -13,7 +13,8 @@ const OPERATION_LEASES_SCHEMA_VERSION: i64 = 2;
 const COMPLETE_EDGE_KINDS_SCHEMA_VERSION: i64 = 3;
 const REFERENCE_EVIDENCE_SCHEMA_VERSION: i64 = 4;
 const DIGEST_VERSION_SCHEMA_VERSION: i64 = 5;
-const LATEST_SCHEMA_VERSION: i64 = DIGEST_VERSION_SCHEMA_VERSION;
+const BULK_RELATION_VALIDATION_SCHEMA_VERSION: i64 = 6;
+const LATEST_SCHEMA_VERSION: i64 = BULK_RELATION_VALIDATION_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
 
 struct Migration {
@@ -284,12 +285,38 @@ const DIGEST_VERSION_SCHEMA: Migration = Migration {
     ],
 };
 
-const MIGRATIONS: [&Migration; 5] = [
+const BULK_RELATION_VALIDATION_SCHEMA: Migration = Migration {
+    version: BULK_RELATION_VALIDATION_SCHEMA_VERSION,
+    name: "generation_scoped_bulk_relation_integrity",
+    statements: &[
+        r#"ALTER TABLE {schema}."edges"
+            DROP CONSTRAINT "edges_project_id_generation_id_source_symbol_id_fkey",
+            DROP CONSTRAINT "edges_project_id_generation_id_target_symbol_id_fkey",
+            ADD CONSTRAINT edges_generation_fk
+                FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE"#,
+        r#"ALTER TABLE {schema}."references"
+            DROP CONSTRAINT "references_project_id_generation_id_file_id_fkey",
+            DROP CONSTRAINT "references_project_id_generation_id_target_symbol_id_fkey",
+            DROP CONSTRAINT references_owner_symbol_fk,
+            ADD CONSTRAINT references_generation_fk
+                FOREIGN KEY (project_id, generation_id)
+                REFERENCES {schema}."index_generations"(project_id, generation_id)
+                ON DELETE CASCADE"#,
+        r#"ALTER TABLE {schema}."search_documents"
+            DROP CONSTRAINT "search_documents_project_id_generation_id_file_id_fkey",
+            DROP CONSTRAINT "search_documents_project_id_generation_id_symbol_id_fkey""#,
+    ],
+};
+
+const MIGRATIONS: [&Migration; 6] = [
     &INITIAL_SCHEMA,
     &OPERATION_LEASES_SCHEMA,
     &COMPLETE_EDGE_KINDS_SCHEMA,
     &REFERENCE_EVIDENCE_SCHEMA,
     &DIGEST_VERSION_SCHEMA,
+    &BULK_RELATION_VALIDATION_SCHEMA,
 ];
 
 #[cfg(test)]
@@ -574,15 +601,16 @@ mod tests {
 
     const MIGRATION_CHECKSUM_HEX_LENGTH: usize = 64;
     const CHECKSUM_COMPARISON_WINDOW: usize = 2;
-    const EXPECTED_MIGRATION_VERSIONS: [i64; 5] = [
+    const EXPECTED_MIGRATION_VERSIONS: [i64; 6] = [
         INITIAL_SCHEMA_VERSION,
         OPERATION_LEASES_SCHEMA_VERSION,
         COMPLETE_EDGE_KINDS_SCHEMA_VERSION,
         REFERENCE_EVIDENCE_SCHEMA_VERSION,
         DIGEST_VERSION_SCHEMA_VERSION,
+        BULK_RELATION_VALIDATION_SCHEMA_VERSION,
     ];
 
-    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 5] = [
+    const EXPECTED_MIGRATION_CHECKSUMS: [(i64, &str); 6] = [
         (
             1,
             "47651685dfea852db86d644f0e777bd479a3926cfce9e7750887a61cfe4ddc8e",
@@ -602,6 +630,10 @@ mod tests {
         (
             5,
             "30c3544a771e12864cc4cc12d9ab4600237b1262f3cd3f50e499e8aac9084ae2",
+        ),
+        (
+            6,
+            "75d236412c6c083510b6d7e7a2536ea81f93c79e106f3977661403ee9898e533",
         ),
     ];
 
@@ -646,7 +678,10 @@ mod tests {
                 .windows(CHECKSUM_COMPARISON_WINDOW)
                 .all(|pair| pair[0] != pair[1])
         );
-        assert_eq!(LATEST_SCHEMA_VERSION, DIGEST_VERSION_SCHEMA_VERSION);
+        assert_eq!(
+            LATEST_SCHEMA_VERSION,
+            BULK_RELATION_VALIDATION_SCHEMA_VERSION
+        );
     }
 
     #[test]
