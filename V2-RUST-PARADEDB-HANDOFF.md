@@ -952,6 +952,12 @@ Resolver/body-search closeout on 2026-07-23:
   new violations, and vulnerabilities, plus 100% reviewed security hotspots.
 - Independent review is `APPROVE` after the final maintainability-only request
   object refactor; no correctness, security, scope, or gate findings remain.
+- Code checkpoint `1d90220642d999c20615935194dafca3c37c38b4` is pushed to
+  `origin/feat/v2-rust-paradedb`. GitHub Actions run
+  `30069750052` is `success`: format/Clippy/unit/no-SQLite completed in 1m35s,
+  and the Linux PostgreSQL 18 + ParadeDB + pgvector job completed every doctor,
+  live integration, supervisor, frozen matrix, managed-lifecycle, and cleanup
+  step in 8m08s.
 
 ## Execution plan
 
