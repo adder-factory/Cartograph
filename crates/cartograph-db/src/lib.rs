@@ -33,8 +33,10 @@ pub use leases::{
     LeaseRequest, LeaseStatus, LeaseTarget, ProjectLease,
 };
 pub use managed::{
-    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedContainerState, ManagedDatabase,
-    ManagedDatabaseError, ManagedDatabaseStatus, ManagedStartReport,
+    DEFAULT_MANAGED_DATABASE_PORT, MANAGED_DATABASE_IMAGE, ManagedBackupReport,
+    ManagedContainerState, ManagedDatabase, ManagedDatabaseError, ManagedDatabaseStatus,
+    ManagedDerivedIndexHealth, ManagedDestructiveConfirmation, ManagedDestructiveOperation,
+    ManagedRemoveReport, ManagedRestoreReport, ManagedStartReport, ManagedUpgradeReport,
 };
 pub use migrations::{MigrationError, MigrationReport};
 pub use retrieval::{

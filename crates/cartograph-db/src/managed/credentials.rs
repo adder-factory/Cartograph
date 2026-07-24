@@ -124,6 +124,25 @@ impl CredentialStore {
         }
     }
 
+    pub(super) fn validate_for_removal(&self) -> Result<bool, ManagedDatabaseError> {
+        self.prepare_private_parent()?;
+        reject_symlink(&self.path)?;
+        if !self.path.exists() {
+            return Ok(false);
+        }
+        let file = open_private_regular_file(&self.path, false)?;
+        validate_private_permissions(&file, &self.path)?;
+        Ok(true)
+    }
+
+    pub(super) fn remove(&self) -> Result<bool, ManagedDatabaseError> {
+        if !self.validate_for_removal()? {
+            return Ok(false);
+        }
+        fs::remove_file(&self.path).map_err(|_| ManagedDatabaseError::CredentialRemove)?;
+        Ok(true)
+    }
+
     fn prepare_private_parent(&self) -> Result<(), ManagedDatabaseError> {
         let parent = self
             .path
@@ -390,6 +409,19 @@ mod tests {
         assert!(!format!("{first_url:?}").contains("cartograph@"));
         assert!(!format!("{first_url:?}").contains("55432"));
         assert_private_store_modes(&store);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn credential_removal_is_private_validated_and_idempotent() {
+        let directory = test_directory();
+        let store = credential_store(directory.path());
+        let _credentials = load_test_credentials(&store);
+
+        assert!(matches!(store.validate_for_removal(), Ok(true)));
+        assert!(matches!(store.remove(), Ok(true)));
+        assert!(!store.path().exists());
+        assert!(matches!(store.remove(), Ok(false)));
     }
 
     fn test_directory() -> tempfile::TempDir {

@@ -9,6 +9,9 @@ use super::{ManagedDatabaseError, ManagedResourceIdentity};
 
 const DOCKER_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 const DOCKER_IMAGE_PULL_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const DOCKER_ARCHIVE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+const CONTAINER_ARCHIVE_TIMEOUT: &str = "14m";
+const CONTAINER_ARCHIVE_KILL_AFTER: &str = "10s";
 const NORMAL_STOP_POLICY: StopPolicy = StopPolicy {
     grace_seconds: "30",
     command_timeout: Duration::from_secs(45),
@@ -297,6 +300,155 @@ impl DockerCli {
         }
         Ok(join_output_streams(&output.stdout, &output.stderr))
     }
+
+    pub(super) async fn volume_exists_owned(
+        &self,
+        identity: &ManagedResourceIdentity,
+    ) -> Result<bool, ManagedDatabaseError> {
+        let Some(labels) = inspect_volume_labels(self, identity).await? else {
+            return Ok(false);
+        };
+        validate_volume_ownership(&labels, identity)?;
+        Ok(true)
+    }
+
+    pub(super) async fn create_database_archive(
+        &self,
+        name: &str,
+        container_path: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked_os_with_timeout(
+                "create managed database archive",
+                database_backup_arguments(name, container_path),
+                DOCKER_ARCHIVE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::BackupFailed)
+    }
+
+    pub(super) async fn verify_database_archive(
+        &self,
+        name: &str,
+        container_path: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked_os_with_timeout(
+                "verify managed database archive",
+                database_archive_list_arguments(name, container_path),
+                DOCKER_ARCHIVE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::RestoreArchiveInvalid)
+    }
+
+    pub(super) async fn restore_database_archive(
+        &self,
+        name: &str,
+        container_path: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked_os_with_timeout(
+                "restore managed database archive",
+                database_restore_arguments(name, container_path),
+                DOCKER_ARCHIVE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::RestoreFailed)
+    }
+
+    pub(super) async fn copy_from_container(
+        &self,
+        name: &str,
+        container_path: &str,
+        host_path: &Path,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked_os_with_timeout(
+                "copy managed database archive",
+                vec![
+                    OsString::from("container"),
+                    OsString::from("cp"),
+                    OsString::from(format!("{name}:{container_path}")),
+                    host_path.as_os_str().to_os_string(),
+                ],
+                DOCKER_ARCHIVE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::BackupFailed)
+    }
+
+    pub(super) async fn copy_to_container(
+        &self,
+        name: &str,
+        host_path: &Path,
+        container_path: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked_os_with_timeout(
+                "copy managed restore archive",
+                vec![
+                    OsString::from("container"),
+                    OsString::from("cp"),
+                    host_path.as_os_str().to_os_string(),
+                    OsString::from(format!("{name}:{container_path}")),
+                ],
+                DOCKER_ARCHIVE_TIMEOUT,
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::RestoreArchiveInvalid)
+    }
+
+    pub(super) async fn remove_container_archive(
+        &self,
+        name: &str,
+        container_path: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked(
+                "remove managed temporary archive",
+                ["exec", name, "rm", "--force", "--", container_path],
+            )
+            .await
+            .map(|_| ())
+            .map_err(|_| ManagedDatabaseError::ArchiveCleanupFailed)
+    }
+
+    pub(super) async fn rename_container(
+        &self,
+        current: &str,
+        replacement: &str,
+    ) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked(
+                "rename managed container",
+                ["container", "rename", current, replacement],
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn remove_container(&self, name: &str) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked(
+                "remove managed container",
+                ["container", "rm", "--force", name],
+            )
+            .await
+            .map(|_| ())
+    }
+
+    pub(super) async fn remove_volume(&self, name: &str) -> Result<(), ManagedDatabaseError> {
+        self.runner
+            .checked("remove managed volume", ["volume", "rm", name])
+            .await
+            .map(|_| ())
+    }
 }
 
 async fn stop_container_with_grace(
@@ -332,6 +484,76 @@ fn password_copy_arguments(name: &str, password_file: &Path) -> Vec<OsString> {
         password_file.as_os_str().to_os_string(),
         OsString::from(format!("{name}:{CONTAINER_PASSWORD_PATH}")),
     ]
+}
+
+fn database_backup_arguments(name: &str, container_path: &str) -> Vec<OsString> {
+    [
+        "exec",
+        name,
+        "timeout",
+        "--signal=TERM",
+        "--kill-after",
+        CONTAINER_ARCHIVE_KILL_AFTER,
+        CONTAINER_ARCHIVE_TIMEOUT,
+        "pg_dump",
+        "--username",
+        DATABASE_USER,
+        "--dbname",
+        DATABASE_NAME,
+        "--format=custom",
+        "--no-owner",
+        "--no-privileges",
+        "--file",
+        container_path,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
+fn database_archive_list_arguments(name: &str, container_path: &str) -> Vec<OsString> {
+    [
+        "exec",
+        name,
+        "timeout",
+        "--signal=TERM",
+        "--kill-after",
+        CONTAINER_ARCHIVE_KILL_AFTER,
+        CONTAINER_ARCHIVE_TIMEOUT,
+        "pg_restore",
+        "--list",
+        container_path,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
+}
+
+fn database_restore_arguments(name: &str, container_path: &str) -> Vec<OsString> {
+    [
+        "exec",
+        name,
+        "timeout",
+        "--signal=TERM",
+        "--kill-after",
+        CONTAINER_ARCHIVE_KILL_AFTER,
+        CONTAINER_ARCHIVE_TIMEOUT,
+        "pg_restore",
+        "--username",
+        DATABASE_USER,
+        "--dbname",
+        DATABASE_NAME,
+        "--clean",
+        "--if-exists",
+        "--exit-on-error",
+        "--single-transaction",
+        "--no-owner",
+        "--no-privileges",
+        container_path,
+    ]
+    .into_iter()
+    .map(OsString::from)
+    .collect()
 }
 
 pub(super) async fn initialize_extensions(
@@ -445,6 +667,19 @@ impl DockerCommandRunner {
         args: Vec<OsString>,
     ) -> Result<String, ManagedDatabaseError> {
         let output = self.execute_os(args).await?;
+        if !output.status.success() {
+            return Err(ManagedDatabaseError::DockerOperation { operation });
+        }
+        Ok(output.stdout)
+    }
+
+    async fn checked_os_with_timeout(
+        &self,
+        operation: &'static str,
+        args: Vec<OsString>,
+        command_timeout: Duration,
+    ) -> Result<String, ManagedDatabaseError> {
+        let output = self.execute_os_with_timeout(args, command_timeout).await?;
         if !output.status.success() {
             return Err(ManagedDatabaseError::DockerOperation { operation });
         }
@@ -815,6 +1050,58 @@ mod tests {
             ["container", "stop", "--time", "30", "cartograph-v2-test"]
         );
         assert!(NORMAL_STOP_POLICY.command_timeout > Duration::from_secs(30));
+    }
+
+    #[test]
+    fn archive_commands_use_fixed_database_identity_without_secret_arguments() {
+        let backup = database_backup_arguments("cartograph-v2-test", "/tmp/managed.dump");
+        let restore = database_restore_arguments("cartograph-v2-test", "/tmp/managed.dump");
+        let rendered_backup: Vec<_> = backup
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+        let rendered_restore: Vec<_> = restore
+            .iter()
+            .map(|argument| argument.to_string_lossy())
+            .collect();
+
+        assert!(rendered_backup.iter().any(|argument| argument == "pg_dump"));
+        assert!(rendered_backup.iter().any(|argument| argument == "timeout"));
+        assert!(
+            rendered_backup
+                .iter()
+                .any(|argument| argument == CONTAINER_ARCHIVE_TIMEOUT)
+        );
+        assert!(
+            rendered_backup
+                .iter()
+                .any(|argument| argument == "--format=custom")
+        );
+        assert!(
+            rendered_restore
+                .iter()
+                .any(|argument| argument == "pg_restore")
+        );
+        assert!(
+            rendered_restore
+                .iter()
+                .any(|argument| argument == "--single-transaction")
+        );
+        assert!(
+            rendered_restore
+                .iter()
+                .any(|argument| argument == "--exit-on-error")
+        );
+        assert!(
+            !rendered_backup
+                .iter()
+                .any(|argument| argument.contains("password"))
+        );
+        assert!(
+            !rendered_restore
+                .iter()
+                .any(|argument| argument.contains("password"))
+        );
     }
 
     #[test]

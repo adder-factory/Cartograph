@@ -1,5 +1,6 @@
 mod credentials;
 mod docker;
+mod maintenance;
 
 use std::{path::Path, time::Duration};
 
@@ -24,6 +25,7 @@ pub const MANAGED_DATABASE_IMAGE: &str = concat!(
 /// Default loopback port for the first managed Cartograph database.
 pub const DEFAULT_MANAGED_DATABASE_PORT: u16 = 55_432;
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+const DEFAULT_MAINTENANCE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Owned Cartograph PostgreSQL lifecycle manager.
@@ -34,6 +36,7 @@ pub struct ManagedDatabase {
     schema: DatabaseSchema,
     port: u16,
     startup_timeout: Duration,
+    maintenance_timeout: Duration,
 }
 
 struct ManagedResourceIdentity {
@@ -113,6 +116,113 @@ pub struct ManagedStartReport {
     pub schema: String,
 }
 
+/// Destructive managed operations that require an explicit, project-bound capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManagedDestructiveOperation {
+    /// Replace the live database contents from a verified custom-format archive.
+    Restore,
+    /// Permanently remove the owned container, volume, and credential file.
+    Remove,
+    /// Replace an owned container with the exact supported image digest.
+    Upgrade,
+    /// Drop and transactionally recreate the derived ParadeDB BM25 index.
+    RebuildDerivedIndexes,
+}
+
+impl ManagedDestructiveOperation {
+    /// Exact acknowledgement text required to mint this operation's capability.
+    #[must_use]
+    pub const fn confirmation_phrase(self) -> &'static str {
+        match self {
+            Self::Restore => "restore-managed-database",
+            Self::Remove => "remove-managed-database",
+            Self::Upgrade => "upgrade-managed-database",
+            Self::RebuildDerivedIndexes => "rebuild-managed-derived-indexes",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Restore => "restore",
+            Self::Remove => "remove",
+            Self::Upgrade => "upgrade",
+            Self::RebuildDerivedIndexes => "rebuild-derived-indexes",
+        }
+    }
+}
+
+/// Single-use proof that a caller explicitly acknowledged one destructive operation.
+///
+/// The capability is bound to the canonical project's private resource identity and
+/// cannot authorize another [`ManagedDatabase`] or another operation.
+pub struct ManagedDestructiveConfirmation {
+    project_hash: String,
+    operation: ManagedDestructiveOperation,
+}
+
+/// Verified custom-format PostgreSQL backup metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ManagedBackupReport {
+    /// Exact bytes atomically persisted at the caller-selected destination.
+    pub bytes: u64,
+}
+
+/// Result of a verified restore followed by capability and migration proof.
+#[derive(Clone, Debug, Serialize)]
+pub struct ManagedRestoreReport {
+    /// Live Postgres/ParadeDB/pgvector readiness evidence after restoration.
+    pub capabilities: CapabilityReport,
+    /// Append-only migrations applied after the restored archive was loaded.
+    pub migrations: MigrationReport,
+    /// Validated PostgreSQL schema restored and migrated.
+    pub schema: String,
+}
+
+/// Result of explicitly removing project-owned managed database state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ManagedRemoveReport {
+    /// Whether an owned container existed and was removed.
+    pub container_removed: bool,
+    /// Whether an owned named volume existed and was removed.
+    pub volume_removed: bool,
+    /// Whether the private project credential file existed and was removed.
+    pub credentials_removed: bool,
+}
+
+/// Result of an idempotent pinned-image upgrade.
+#[derive(Clone, Debug, Serialize)]
+pub struct ManagedUpgradeReport {
+    /// Whether this invocation replaced an older owned container image.
+    pub upgraded: bool,
+    /// Live Postgres/ParadeDB/pgvector readiness evidence after upgrade.
+    pub capabilities: CapabilityReport,
+    /// Append-only migrations applied after the upgraded container started.
+    pub migrations: MigrationReport,
+    /// Validated PostgreSQL schema used by the upgraded container.
+    pub schema: String,
+}
+
+/// Durable catalog health for the derived ParadeDB BM25 index.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct ManagedDerivedIndexHealth {
+    /// Whether the expected schema-qualified index exists.
+    pub present: bool,
+    /// PostgreSQL considers the index valid for queries.
+    pub valid: bool,
+    /// PostgreSQL considers the index ready for writes.
+    pub ready: bool,
+    /// The catalog reports ParadeDB's `bm25` access method.
+    pub bm25_access_method: bool,
+}
+
+impl ManagedDerivedIndexHealth {
+    /// Whether all catalog invariants required for BM25 queries hold.
+    #[must_use]
+    pub const fn healthy(self) -> bool {
+        self.present && self.valid && self.ready && self.bm25_access_method
+    }
+}
+
 impl ManagedDatabase {
     /// Build a lifecycle manager for one existing project root and loopback port.
     pub fn new(project_root: impl AsRef<Path>, port: u16) -> Result<Self, ManagedDatabaseError> {
@@ -127,6 +237,44 @@ impl ManagedDatabase {
     pub fn with_startup_timeout(mut self, startup_timeout: Duration) -> Self {
         self.startup_timeout = startup_timeout;
         self
+    }
+
+    /// Override the bounded post-restore and derived-index query wait.
+    #[must_use]
+    pub fn with_maintenance_timeout(mut self, maintenance_timeout: Duration) -> Self {
+        self.maintenance_timeout = maintenance_timeout;
+        self
+    }
+
+    /// Mint a single-use destructive capability only for the exact acknowledgement.
+    pub fn confirm_destructive_operation(
+        &self,
+        operation: ManagedDestructiveOperation,
+        acknowledgement: &str,
+    ) -> Result<ManagedDestructiveConfirmation, ManagedDatabaseError> {
+        if acknowledgement != operation.confirmation_phrase() {
+            return Err(ManagedDatabaseError::DestructiveConfirmationRequired {
+                operation: operation.label(),
+            });
+        }
+        Ok(ManagedDestructiveConfirmation {
+            project_hash: self.identity.project_hash.clone(),
+            operation,
+        })
+    }
+
+    fn validate_destructive_confirmation(
+        &self,
+        confirmation: &ManagedDestructiveConfirmation,
+        expected: ManagedDestructiveOperation,
+    ) -> Result<(), ManagedDatabaseError> {
+        if confirmation.operation != expected
+            || confirmation.project_hash != self.identity.project_hash
+        {
+            Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
+        } else {
+            Ok(())
+        }
     }
 
     /// Start or reuse the owned database, initialize extensions, and prove all
@@ -512,6 +660,7 @@ fn managed_database_with_schema(
         schema,
         port,
         startup_timeout: DEFAULT_STARTUP_TIMEOUT,
+        maintenance_timeout: DEFAULT_MAINTENANCE_TIMEOUT,
     })
 }
 
@@ -638,6 +787,15 @@ pub enum ManagedDatabaseError {
     /// Another process owns the project mutation lease.
     #[error("another managed database lifecycle operation is already running for this project")]
     LifecycleBusy,
+    /// A destructive operation needs its exact acknowledgement before effects begin.
+    #[error("explicit confirmation is required before managed database {operation}")]
+    DestructiveConfirmationRequired {
+        /// Stable operation name without caller-controlled data.
+        operation: &'static str,
+    },
+    /// A capability was minted for another project or destructive operation.
+    #[error("managed database destructive confirmation does not match this operation")]
+    DestructiveConfirmationMismatch,
     /// Existing container without its matching credential file cannot be used.
     #[error("managed database container exists but its credential file is missing")]
     CredentialsMissingForContainer,
@@ -723,6 +881,12 @@ pub enum ManagedDatabaseError {
     /// Readiness, extension initialization, or capability proof exceeded the deadline.
     #[error("timed out proving managed database readiness")]
     DatabaseStartupTimeout,
+    /// A maintenance query or derived-index rebuild exceeded its bounded deadline.
+    #[error("managed database maintenance operation timed out")]
+    MaintenanceTimeout,
+    /// Backup, restore, or maintenance requires the owned container to be healthy.
+    #[error("managed database must be healthy before maintenance")]
+    DatabaseNotHealthyForMaintenance,
     /// Rust driver could not connect after Docker health passed.
     #[error("managed database health passed but PostgreSQL connection failed")]
     DatabaseConnection,
@@ -735,6 +899,36 @@ pub enum ManagedDatabaseError {
     /// The append-only Cartograph schema migration did not commit.
     #[error("managed database Cartograph schema migration failed")]
     SchemaMigration,
+    /// Backup destination exists, is not a regular file target, or cannot be persisted atomically.
+    #[error("managed database backup destination is not a new writable regular file")]
+    BackupDestination,
+    /// The source is not a nonempty custom-format PostgreSQL archive in a regular file.
+    #[error("managed database restore archive is invalid")]
+    RestoreArchiveInvalid,
+    /// PostgreSQL could not create a verified custom-format archive.
+    #[error("managed database backup failed")]
+    BackupFailed,
+    /// PostgreSQL refused the requested archive without committing a partial restore.
+    #[error("managed database restore failed")]
+    RestoreFailed,
+    /// Restored data failed the live capability or migration proof.
+    #[error("managed database restore did not pass post-restore verification")]
+    RestoreVerificationFailed,
+    /// Restore verification failed and the pre-restore archive could not be recovered.
+    #[error("managed database restore rollback could not be verified")]
+    RestoreRollbackFailed,
+    /// Temporary archive material could not be removed from the owned container.
+    #[error("managed database temporary archive cleanup failed")]
+    ArchiveCleanupFailed,
+    /// The old owned container could not be restored after a pinned-image upgrade failed.
+    #[error("managed database image upgrade rollback could not be verified")]
+    UpgradeRollbackFailed,
+    /// Removal could not safely delete the private credential file.
+    #[error("managed database credential removal failed")]
+    CredentialRemove,
+    /// The derived BM25 catalog entry is absent or invalid.
+    #[error("managed database derived BM25 index is not healthy")]
+    DerivedIndexUnhealthy,
 }
 
 fn project_hash(project_root: &Path) -> String {
@@ -900,6 +1094,56 @@ mod tests {
         assert!(matches!(
             ManagedDatabase::new(directory.path(), 0),
             Err(ManagedDatabaseError::InvalidPort)
+        ));
+    }
+
+    #[test]
+    fn destructive_confirmations_are_explicit_operation_and_project_capabilities() {
+        let first = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create first confirmation root: {error}"));
+        let second = tempfile::tempdir()
+            .unwrap_or_else(|error| panic!("could not create second confirmation root: {error}"));
+        let first_database = ManagedDatabase::new(first.path(), IDENTITY_TEST_PORT)
+            .unwrap_or_else(|error| panic!("could not build first confirmation manager: {error}"));
+        let second_database = ManagedDatabase::new(second.path(), IDENTITY_TEST_PORT)
+            .unwrap_or_else(|error| panic!("could not build second confirmation manager: {error}"));
+
+        assert!(matches!(
+            first_database.confirm_destructive_operation(
+                ManagedDestructiveOperation::Remove,
+                "remove-something-else",
+            ),
+            Err(ManagedDatabaseError::DestructiveConfirmationRequired {
+                operation: "remove"
+            })
+        ));
+        let confirmation = first_database
+            .confirm_destructive_operation(
+                ManagedDestructiveOperation::Remove,
+                ManagedDestructiveOperation::Remove.confirmation_phrase(),
+            )
+            .unwrap_or_else(|error| panic!("valid removal confirmation failed: {error}"));
+        assert!(
+            first_database
+                .validate_destructive_confirmation(
+                    &confirmation,
+                    ManagedDestructiveOperation::Remove,
+                )
+                .is_ok()
+        );
+        assert!(matches!(
+            second_database.validate_destructive_confirmation(
+                &confirmation,
+                ManagedDestructiveOperation::Remove,
+            ),
+            Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
+        ));
+        assert!(matches!(
+            first_database.validate_destructive_confirmation(
+                &confirmation,
+                ManagedDestructiveOperation::Restore,
+            ),
+            Err(ManagedDatabaseError::DestructiveConfirmationMismatch)
         ));
     }
 

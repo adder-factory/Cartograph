@@ -16,6 +16,24 @@ const DIGEST_VERSION_SCHEMA_VERSION: i64 = 5;
 const BULK_RELATION_VALIDATION_SCHEMA_VERSION: i64 = 6;
 const LATEST_SCHEMA_VERSION: i64 = BULK_RELATION_VALIDATION_SCHEMA_VERSION;
 const MIGRATION_LOCK_NAMESPACE: &str = "cartograph-v2-schema-migration";
+pub(crate) const SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE: &str = r#"CREATE INDEX search_documents_bm25_idx
+            ON {schema}."search_documents"
+            USING bm25 (
+                id,
+                project_id,
+                generation_id,
+                document_id,
+                file_id,
+                symbol_id,
+                path,
+                language,
+                document_kind,
+                (qualified_name::pdb.source_code),
+                (code::pdb.source_code),
+                natural_text,
+                metadata
+            )
+            WITH (key_field = 'id')"#;
 
 struct Migration {
     version: i64,
@@ -184,24 +202,7 @@ const INITIAL_SCHEMA: Migration = Migration {
             ON {schema}."search_documents" (project_id, generation_id, id)"#,
         r#"CREATE INDEX search_documents_path_idx
             ON {schema}."search_documents" (project_id, generation_id, path)"#,
-        r#"CREATE INDEX search_documents_bm25_idx
-            ON {schema}."search_documents"
-            USING bm25 (
-                id,
-                project_id,
-                generation_id,
-                document_id,
-                file_id,
-                symbol_id,
-                path,
-                language,
-                document_kind,
-                (qualified_name::pdb.source_code),
-                (code::pdb.source_code),
-                natural_text,
-                metadata
-            )
-            WITH (key_field = 'id')"#,
+        SEARCH_DOCUMENTS_BM25_INDEX_SQL_TEMPLATE,
     ],
 };
 
