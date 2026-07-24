@@ -1,0 +1,240 @@
+use std::{collections::BTreeMap, future::Future, pin::Pin};
+
+use serde::Serialize;
+use serde_json::{Map, Value};
+use tokio::time::Instant;
+
+use crate::{CancellationToken, ToolContractError, ToolError, ToolProfile, ToolProfiles};
+
+const MAX_TOOL_NAME_BYTES: usize = 128;
+const MAX_TOOL_DESCRIPTION_BYTES: usize = 4_096;
+
+/// Boxed async tool call returned by [`ToolHandler`].
+pub type BoxToolFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<ToolResult, ToolError>> + Send + 'a>>;
+
+/// Generic product adapter boundary consumed by the MCP server.
+pub trait ToolHandler: Send + Sync + 'static {
+    /// Return the immutable tool contracts to validate and advertise.
+    fn tools(&self) -> Vec<ToolDefinition>;
+
+    /// Execute one already envelope-validated call.
+    fn call<'a>(&'a self, call: ToolCall, context: ToolCallContext) -> BoxToolFuture<'a>;
+}
+
+/// One validated MCP tool contract plus internal profile membership.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolDefinition {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    description: String,
+    input_schema: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    annotations: Option<ToolAnnotations>,
+    #[serde(skip)]
+    profiles: ToolProfiles,
+}
+
+impl ToolDefinition {
+    /// Validate and construct a tool contract.
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Value,
+        profiles: ToolProfiles,
+    ) -> Result<Self, ToolContractError> {
+        let name = name.into();
+        let description = description.into();
+        validate_name(&name)?;
+        if description.is_empty() || description.len() > MAX_TOOL_DESCRIPTION_BYTES {
+            return Err(ToolContractError::InvalidDescription);
+        }
+        validate_input_schema(&input_schema)?;
+        if profiles.is_empty() {
+            return Err(ToolContractError::EmptyProfiles);
+        }
+        Ok(Self {
+            name,
+            title: None,
+            description,
+            input_schema,
+            annotations: None,
+            profiles,
+        })
+    }
+
+    /// Attach a compact human-facing title.
+    pub fn with_title(mut self, title: impl Into<String>) -> Result<Self, ToolContractError> {
+        let title = title.into();
+        if title.is_empty() || title.len() > 256 {
+            return Err(ToolContractError::InvalidDescription);
+        }
+        self.title = Some(title);
+        Ok(self)
+    }
+
+    /// Attach standard MCP behavior hints.
+    #[must_use]
+    pub fn with_annotations(mut self, annotations: ToolAnnotations) -> Self {
+        self.annotations = Some(annotations);
+        self
+    }
+
+    /// Canonical programmatic tool name.
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub(crate) const fn included_in(&self, profile: ToolProfile) -> bool {
+        self.profiles.includes(profile)
+    }
+}
+
+/// Standard MCP tool behavior hints.
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolAnnotations {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_only_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destructive_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idempotent_hint: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_world_hint: Option<bool>,
+}
+
+/// Envelope-validated call delivered to the product adapter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ToolCall {
+    /// Advertised canonical tool name.
+    pub name: String,
+    /// JSON object supplied as MCP `arguments`.
+    pub arguments: Map<String, Value>,
+}
+
+/// Deadline and cooperative cancellation visible to a tool adapter.
+#[derive(Clone, Debug)]
+pub struct ToolCallContext {
+    cancellation: CancellationToken,
+    deadline: Instant,
+}
+
+impl ToolCallContext {
+    pub(crate) const fn new(cancellation: CancellationToken, deadline: Instant) -> Self {
+        Self {
+            cancellation,
+            deadline,
+        }
+    }
+
+    /// Cooperative cancellation probe.
+    #[must_use]
+    pub fn cancellation(&self) -> &CancellationToken {
+        &self.cancellation
+    }
+
+    /// Absolute hard request deadline.
+    #[must_use]
+    pub const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
+    /// Return whether cancellation or the hard deadline has elapsed.
+    #[must_use]
+    pub fn should_stop(&self) -> bool {
+        self.cancellation.is_cancelled() || Instant::now() >= self.deadline
+    }
+}
+
+/// MCP text content block used by Cartograph v2's initial tool surface.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TextContent {
+    #[serde(rename = "type")]
+    kind: &'static str,
+    text: String,
+}
+
+impl TextContent {
+    /// Construct one text block.
+    #[must_use]
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            kind: "text",
+            text: text.into(),
+        }
+    }
+}
+
+/// MCP call result with optional structured output and stable error metadata.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolResult {
+    content: Vec<TextContent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    structured_content: Option<Map<String, Value>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    is_error: bool,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    metadata: Option<BTreeMap<String, String>>,
+}
+
+impl ToolResult {
+    /// Construct a successful text result.
+    #[must_use]
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            content: vec![TextContent::new(text)],
+            structured_content: None,
+            is_error: false,
+            metadata: None,
+        }
+    }
+
+    /// Attach structured JSON output matching a tool's future output schema.
+    #[must_use]
+    pub fn with_structured_content(mut self, content: Map<String, Value>) -> Self {
+        self.structured_content = Some(content);
+        self
+    }
+
+    pub(crate) fn from_error(error: ToolError) -> Self {
+        let mut metadata = BTreeMap::new();
+        metadata.insert("code".to_owned(), error.code().as_str().to_owned());
+        Self {
+            content: vec![TextContent::new(error.wire_message())],
+            structured_content: None,
+            is_error: true,
+            metadata: Some(metadata),
+        }
+    }
+}
+
+fn validate_name(name: &str) -> Result<(), ToolContractError> {
+    let valid = !name.is_empty()
+        && name.len() <= MAX_TOOL_NAME_BYTES
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'));
+    valid.then_some(()).ok_or(ToolContractError::InvalidName)
+}
+
+fn validate_input_schema(schema: &Value) -> Result<(), ToolContractError> {
+    let Some(object) = schema.as_object() else {
+        return Err(ToolContractError::InvalidInputSchema);
+    };
+    let valid_type = object.get("type").and_then(Value::as_str) == Some("object");
+    let valid_properties = object.get("properties").is_none_or(Value::is_object);
+    let valid_required = object.get("required").is_none_or(|required| {
+        required
+            .as_array()
+            .is_some_and(|items| items.iter().all(Value::is_string))
+    });
+    let valid = valid_type && valid_properties && valid_required;
+    valid
+        .then_some(())
+        .ok_or(ToolContractError::InvalidInputSchema)
+}
